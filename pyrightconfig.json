@@ -1,0 +1,19 @@
+{
+  "typeCheckingMode": "strict",
+  "include": [
+    "main.py",
+    "hf_model_check.py",
+    "train_finetune.py",
+    "train_finetune_remaining.py",
+    "train_finetune_dinov2_only.py",
+    "train_sequence_aware_all.py",
+    "phoenixguard",
+    "scripts",
+    "tests"
+  ],
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "warning",
+  "pythonVersion": "3.11",
+  "venvPath": ".",
+  "venv": ".venv"
+}

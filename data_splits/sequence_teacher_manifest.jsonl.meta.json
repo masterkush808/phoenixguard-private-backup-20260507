@@ -1,0 +1,39 @@
+{
+  "allow_errors": false,
+  "error_count": 0,
+  "expected_rows": 330,
+  "limit": null,
+  "normalized_adjusted_record_count": 156,
+  "normalized_adjusted_target_count": 312,
+  "normalized_directional_targets": true,
+  "normalized_directional_tasks": [
+    "projection_direction",
+    "next_box_direction"
+  ],
+  "normalized_record_count": 330,
+  "overlay_mode": "history-plus-projection",
+  "schema_version": 3,
+  "side_effect_free": true,
+  "source_total_rows": 330,
+  "split_manifest_mtime_ns": 1773846776101135700,
+  "split_manifest_path": "C:\\Users\\thaba\\OneDrive\\Documents\\The 808 Vision 2026\\phoenixguard\\data_splits\\split_manifest.csv",
+  "split_manifest_size": 120694,
+  "teacher_task_label_summary": {
+    "label_quality": {
+      "ambiguous": 174,
+      "contradictory": 50,
+      "review_required": 106
+    },
+    "review_bucket": {
+      "ambiguous_wait": 174,
+      "projection_conflict": 156
+    },
+    "review_required": {
+      "true": 330
+    },
+    "timing_label": {
+      "wait": 330
+    }
+  },
+  "written_rows": 330
+}

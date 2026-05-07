@@ -1,0 +1,305 @@
+{
+  "image_path": "C:\\Users\\thaba\\OneDrive\\Documents\\The 808 Vision 2026\\phoenixguard\\808 Memory\\BUYS-20260224T225615Z-1-001\\BUYS\\700pips profit.png",
+  "timestamp": "2026-03-25T00:23:49.000305+00:00",
+  "context": {
+    "action": "SELL",
+    "confidence": 0.4396008927267337,
+    "chart_direction": "HOLD",
+    "macro_trend": "BULL",
+    "local_phase": "continuation_base",
+    "structure_setup": "none",
+    "projection_bias_direction": "SELL",
+    "projection_bias_confidence": 0.46628394140144896,
+    "latest_parse_quality": 0.0,
+    "latest_candle_confidence": 0.0,
+    "memory_similarity": 0.1794532835483551,
+    "memory_direction": "SELL",
+    "ensemble_direction": "HOLD",
+    "ensemble_confidence": 0.5
+  },
+  "core_gates": {
+    "summary": {
+      "passing": 5,
+      "total": 12,
+      "failing": [
+        "prob_stats",
+        "algo_heap",
+        "ml_stacking",
+        "regression_est",
+        "knowledge_rep",
+        "formal_automata",
+        "predictive_analytics"
+      ]
+    },
+    "scores": {
+      "prob_stats": 0.10793921354090139,
+      "discrete_fsm": 0.1941900650660197,
+      "algo_heap": 0.0,
+      "ml_stacking": 0.19419006795967717,
+      "db_context": 0.020388859690942698,
+      "ops_stability": 0.509384036064148,
+      "ui_analytics": 0.7310585975646973,
+      "meta_constraints": 0.7310585975646973,
+      "regression_est": 0.4798723753974998,
+      "knowledge_rep": 0.37181908369064326,
+      "formal_automata": 0.1815694562699397,
+      "predictive_analytics": 0.19856058876149765
+    },
+    "details": [
+      {
+        "name": "prob_stats",
+        "score": 0.10793921354090139,
+        "pass_fail": false,
+        "detail": {
+          "interval": 1.0734334780788648,
+          "calibrated": 0.1966122667889561,
+          "moe_weight": 0.08647798001766205
+        }
+      },
+      {
+        "name": "discrete_fsm",
+        "score": 0.1941900650660197,
+        "pass_fail": true,
+        "detail": {
+          "state": "Bull",
+          "moe_weight": 0.08276653289794922
+        }
+      },
+      {
+        "name": "algo_heap",
+        "score": 0.0,
+        "pass_fail": false,
+        "detail": {
+          "top": [],
+          "moe_weight": 0.09934594482183456
+        }
+      },
+      {
+        "name": "ml_stacking",
+        "score": 0.19419006795967717,
+        "pass_fail": false,
+        "detail": {
+          "mean": 0.3333333383003871,
+          "moe_weight": 0.06819166243076324
+        }
+      },
+      {
+        "name": "db_context",
+        "score": 0.020388859690942698,
+        "pass_fail": true,
+        "detail": {
+          "feedback_count": 2,
+          "moe_weight": 0.09040004014968872
+        }
+      },
+      {
+        "name": "ops_stability",
+        "score": 0.509384036064148,
+        "pass_fail": true,
+        "detail": {
+          "queue_depth": 0,
+          "moe_weight": 0.08048215508460999
+        }
+      },
+      {
+        "name": "ui_analytics",
+        "score": 0.7310585975646973,
+        "pass_fail": true,
+        "detail": {
+          "dashboard": true,
+          "moe_weight": 0.08121233433485031
+        }
+      },
+      {
+        "name": "meta_constraints",
+        "score": 0.7310585975646973,
+        "pass_fail": true,
+        "detail": {
+          "guardrail": true,
+          "moe_weight": 0.07655558735132217
+        }
+      },
+      {
+        "name": "regression_est",
+        "score": 0.4798723753974998,
+        "pass_fail": false,
+        "detail": {
+          "r2": 0.8578233864763514,
+          "moe_weight": 0.09540074318647385
+        }
+      },
+      {
+        "name": "knowledge_rep",
+        "score": 0.37181908369064326,
+        "pass_fail": false,
+        "detail": {
+          "entry_type": "continuation",
+          "reversal_signal": "none",
+          "continuation_signal": "breakout",
+          "coherent": false,
+          "matched_buy": true,
+          "matched_sell": true,
+          "moe_weight": 0.07414209842681885
+        }
+      },
+      {
+        "name": "formal_automata",
+        "score": 0.1815694562699397,
+        "pass_fail": false,
+        "detail": {
+          "fa_state": "Idle",
+          "consol": 1,
+          "consol_type": "none",
+          "consol_score": 0.1773108698356577,
+          "moe_weight": 0.07168199867010117
+        }
+      },
+      {
+        "name": "predictive_analytics",
+        "score": 0.19856058876149765,
+        "pass_fail": false,
+        "detail": {
+          "base_max": 0.4243888854980469,
+          "mcts_best": 0.4243888854980469,
+          "latest_factor": 0.0,
+          "memory_sim": 0.1794532835483551,
+          "geometry_conflict": false,
+          "consolidation_score": 0.1773108698356577,
+          "path_clarity": 0.4826131677793575,
+          "structure_trade_ready": 0.0,
+          "moe_weight": 0.09334293007850647
+        }
+      }
+    ]
+  },
+  "support_gates": {
+    "summary": {
+      "passing": 3,
+      "total": 9,
+      "failing": [
+        "continuation_strength",
+        "memory_regime_agreement",
+        "opposition_strength",
+        "execution_permission",
+        "forecast_calibration",
+        "interval_efficiency"
+      ]
+    },
+    "scores": {
+      "continuation_strength": 0.35,
+      "memory_regime_agreement": 0.0,
+      "opposition_strength": 0.0825,
+      "macro_local_alignment": 0.78,
+      "execution_permission": 0.0,
+      "forecast_calibration": 0.33316380898969283,
+      "interval_efficiency": 0.18897407128270866,
+      "regime_stability": 0.8178445187787935,
+      "transition_alignment": 0.7351905947361775
+    },
+    "details": [
+      {
+        "name": "continuation_strength",
+        "score": 0.35,
+        "pass_fail": false,
+        "detail": {
+          "macro_trend": "BULL",
+          "local_phase": "continuation_base",
+          "control_strength_delta": 0.0
+        }
+      },
+      {
+        "name": "memory_regime_agreement",
+        "score": 0.0,
+        "pass_fail": false,
+        "detail": {
+          "macro_trend": "BULL",
+          "memory_label": "SELL",
+          "memory_similarity": 0.1794532835483551
+        }
+      },
+      {
+        "name": "opposition_strength",
+        "score": 0.0825,
+        "pass_fail": false,
+        "detail": {
+          "macro_trend": "BULL",
+          "local_phase": "continuation_base",
+          "geometry_conflict": 0.0
+        }
+      },
+      {
+        "name": "macro_local_alignment",
+        "score": 0.78,
+        "pass_fail": true,
+        "detail": {
+          "macro_trend": "BULL",
+          "local_phase": "continuation_base"
+        }
+      },
+      {
+        "name": "execution_permission",
+        "score": 0.0,
+        "pass_fail": false,
+        "detail": {
+          "latest_candle_confidence": 0.0,
+          "phase_risk": "breakout_risk",
+          "reliability": 0.316445187787935
+        }
+      },
+      {
+        "name": "forecast_calibration",
+        "score": 0.33316380898969283,
+        "pass_fail": false,
+        "detail": {
+          "ordered": true,
+          "interval": 1.0734334780788648,
+          "hold_threshold_used": 0.4,
+          "path_confidence": 0.48705840580748877,
+          "execution_readiness": 0.4480631322055763,
+          "contradiction_score": 0.085
+        }
+      },
+      {
+        "name": "interval_efficiency",
+        "score": 0.18897407128270866,
+        "pass_fail": false,
+        "detail": {
+          "interval": 1.0734334780788648,
+          "hold_threshold_used": 0.4,
+          "interval_ratio": 2.6835836951971617,
+          "path_confidence": 0.48705840580748877,
+          "execution_readiness": 0.4480631322055763
+        }
+      },
+      {
+        "name": "regime_stability",
+        "score": 0.8178445187787935,
+        "pass_fail": true,
+        "detail": {
+          "contradiction_score": 0.085,
+          "fakeout_prob": 0.25,
+          "reversal_attempt_prob": 0.25,
+          "memory_ambiguity": 0.0,
+          "style_novelty": 1.0,
+          "geometry_conflict": false,
+          "local_phase": "continuation_base"
+        }
+      },
+      {
+        "name": "transition_alignment",
+        "score": 0.7351905947361775,
+        "pass_fail": true,
+        "detail": {
+          "entry_type": "continuation",
+          "structure_setup": "none",
+          "continue_prob": 0.4529554655870445,
+          "pullback_prob": 0.11035087719298245,
+          "reversal_attempt_prob": 0.39125506072874494,
+          "fakeout_prob": 0.04543859649122807,
+          "favorable": 0.4529554655870445,
+          "hazard": 0.3325668016194332
+        }
+      }
+    ]
+  }
+}

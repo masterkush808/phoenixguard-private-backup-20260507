@@ -1,0 +1,60 @@
+{
+  "timestamp": "2026-05-01 16:54:04",
+  "hwnd": 853668,
+  "window_title": "The Most Innovative Trading Platform and 30 more pages - Personal - Microsoft\u200b Edge",
+  "window_class": "Chrome_WidgetWin_1",
+  "window_rect": {
+    "left": 1,
+    "top": 1,
+    "right": 1925,
+    "bottom": 1025
+  },
+  "calibration_points": {
+    "time_box": {
+      "x": 0.8944906444906445,
+      "y": 0.2587890625
+    },
+    "time_adjustment_minus": {
+      "x": 0.8056133056133056,
+      "y": 0.31640625
+    },
+    "time_adjustment_plus": {
+      "x": 0.7988565488565489,
+      "y": 0.2763671875
+    },
+    "time_preset_30": {
+      "x": 0.8404365904365905,
+      "y": 0.3623046875
+    },
+    "time_preset_60": {
+      "x": 0.775987525987526,
+      "y": 0.400390625
+    },
+    "time_preset_120": {
+      "x": 0.8128898128898129,
+      "y": 0.4033203125
+    },
+    "time_preset_300": {
+      "x": 0.8383575883575883,
+      "y": 0.40234375
+    },
+    "capabilities": {
+      "plus_step_seconds": 300,
+      "minus_step_seconds": 300,
+      "supports_direct_input": true,
+      "max_adjust_clicks": 10
+    },
+    "time_input": {
+      "x": 0.8066528066528067,
+      "y": 0.294921875
+    },
+    "buy_button": {
+      "x": 0.9007276507276507,
+      "y": 0.4443359375
+    },
+    "sell_button": {
+      "x": 0.9038461538461539,
+      "y": 0.4970703125
+    }
+  }
+}
