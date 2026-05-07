@@ -696,7 +696,7 @@ Stop the free Quick Tunnel with:
 
 ```
 
-- See `WORLDWIDE_SHARE.md` for the secure quick-share path and the Cloudflare
+- See `docs/share/WORLDWIDE_SHARE.md` for the secure quick-share path and the Cloudflare
 
 Tunnel setup.
 

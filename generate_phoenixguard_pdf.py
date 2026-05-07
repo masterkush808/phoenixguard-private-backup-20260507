@@ -6,7 +6,7 @@ from reportlab.lib import colors
 from typing import Any
 
 # Set up document
-pdf_path = "PhoenixGuard_Architecture.pdf"
+pdf_path = "docs/architecture/PhoenixGuard_Architecture.pdf"
 doc = SimpleDocTemplate(pdf_path, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
 
 styles = getSampleStyleSheet()

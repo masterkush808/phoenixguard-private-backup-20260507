@@ -1,0 +1,56 @@
+# PhoenixGuard source-control boundary.
+# Keep code, tests, docs, scripts, assets, and lightweight fixtures in git.
+# Keep local environments, live sessions, model caches, logs, and secrets out.
+
+# Python/test artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+env/
+ENV/
+
+# Runtime/capture/debug output
+.codex_runtime/
+.codex_logs/
+.gradio/
+.tmp_obs/
+.tmp_obs2/
+.tmp_tracker/
+.tmp_tracker2/
+logs/
+*.log
+*.tmp
+linter_output.txt
+scan_results.txt
+
+# Model/runtime artifacts
+.hf_cache/
+.hf_offload/
+models/
+memory_bank/
+adapters/
+fine_tuning/
+808 Memory/
+
+# Data is mostly local runtime state. Keep only small shared fixtures.
+data/**
+!data/
+!data/adapter_bank.json
+!data/skill_gate_smoke.json
+!data/skill_gate_isolated_smoke.json
+
+# Local secrets and profiles
+deploy/windows/phoenixguard.vm-share.env.ps1
+data/preferences.enc.sqlite
+data/kdf_salt.bin
+data/voice_profiles/
+data/personalization_profiles.json
+data/voice_runtime_state.json

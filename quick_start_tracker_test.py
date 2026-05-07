@@ -152,8 +152,8 @@ def main():
      service.stop_session('quick-test')
 
   3. For more info, read:
-     - TRACKER_USER_GUIDE.md (step-by-step guide)
-     - TRACKER_DEBUG_SUMMARY.md (technical details)
+     - docs/tracker/TRACKER_USER_GUIDE.md (step-by-step guide)
+     - docs/tracker/TRACKER_DEBUG_SUMMARY.md (technical details)
 
 ✨ Your tracker is fully operational and ready to use!
 """)

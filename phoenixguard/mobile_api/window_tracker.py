@@ -158,6 +158,7 @@ _EXECUTION_FAILED_ATTEMPT_BACKOFF_SEC = 60.0
 _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC = 3.0
 _EXECUTION_DEFAULT_MIN_CAPTURE_INTERVAL_SEC = 0.5
 _EXECUTION_DEFAULT_MAX_CAPTURE_INTERVAL_SEC = 10.0
+_TRACKER_ARTIFACT_RETENTION_FRAMES = 360
 
 
 def _now_iso() -> str:
@@ -10916,6 +10917,47 @@ class ContinuousWindowTrackerService:
         except Exception:
             LOGGER.debug("Unable to append tracker event log for %s.", session_id, exc_info=True)
 
+    def _prune_session_artifacts(self, artifact_dir: Path) -> None:
+        keep_frames = max(24, int(_TRACKER_ARTIFACT_RETENTION_FRAMES))
+        try:
+            if not artifact_dir.exists():
+                return
+            frame_groups: dict[str, list[Path]] = {}
+            for path in artifact_dir.iterdir():
+                if not path.is_file():
+                    continue
+                parts = path.name.split("_", 2)
+                if len(parts) < 3 or not parts[0].isdigit():
+                    continue
+                frame_groups.setdefault(f"{parts[0]}_{parts[1]}", []).append(path)
+            if len(frame_groups) <= keep_frames:
+                return
+            ordered = sorted(
+                frame_groups.items(),
+                key=lambda item: int(item[0].split("_", 1)[0]),
+                reverse=True,
+            )
+            stale_groups = ordered[keep_frames:]
+            removed = 0
+            for _, paths in stale_groups:
+                for path in paths:
+                    try:
+                        path.unlink(missing_ok=True)
+                        removed += 1
+                    except FileNotFoundError:
+                        continue
+                    except Exception:
+                        LOGGER.debug("Unable to prune tracker artifact %s.", path, exc_info=True)
+            if removed:
+                LOGGER.info(
+                    "Pruned %s stale tracker artifacts from %s; retained %s frame groups.",
+                    removed,
+                    artifact_dir,
+                    keep_frames,
+                )
+        except Exception:
+            LOGGER.debug("Tracker artifact pruning failed for %s.", artifact_dir, exc_info=True)
+
     def _start_emergency_hotkey_listener(self) -> None:
         try:
             import os
@@ -13367,6 +13409,7 @@ class ContinuousWindowTrackerService:
                 last_result_status=str(execution_last_result.get("status", "") or ""),
                 last_result_message=str(execution_last_result.get("message", "") or ""),
             )
+        self._prune_session_artifacts(artifact_dir)
 
     def _resolve_window_descriptor(self, payload: Mapping[str, Any]) -> dict[str, Any] | None:
         locked = _mapping_to_dict(payload.get("locked_window", {}))

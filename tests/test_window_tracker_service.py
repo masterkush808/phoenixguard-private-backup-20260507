@@ -1475,6 +1475,32 @@ def test_tracker_capture_once_writes_window_chart_overlay_and_decision_artifacts
         assert full_overlay_image.size == (1280, 720)
 
 
+def test_tracker_prunes_stale_artifact_groups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(window_tracker_module, "_TRACKER_ARTIFACT_RETENTION_FRAMES", 2)
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend([_surface(width=1280, height=720)]),
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+    artifact_dir = tmp_path / "sessions" / "prune-test" / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    for index in range(1, 31):
+        stem = f"{index:06d}_abcdef12"
+        for suffix in ("window.png", "chart.png", "overlay.png", "full_overlay.png", "decision.json"):
+            (artifact_dir / f"{stem}_{suffix}").write_text("x", encoding="utf-8")
+
+    tracker._prune_session_artifacts(artifact_dir)
+
+    remaining_groups = {
+        "_".join(path.name.split("_", 2)[:2])
+        for path in artifact_dir.iterdir()
+        if path.is_file()
+    }
+    assert len(remaining_groups) == 24
+    assert "000001_abcdef12" not in remaining_groups
+    assert "000030_abcdef12" in remaining_groups
+
+
 def test_tracker_capture_rate_limiter_skips_immediate_duplicate_capture(tmp_path: Path, monkeypatch: Any) -> None:
     backend = _FakeCaptureBackend([
         _surface(width=1280, height=720),
