@@ -1,0 +1,50 @@
+# Source-control this project as code and documentation only.
+# Local environments, caches, models, logs, and runtime data stay out of git.
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Editors and OS files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Local logs and databases
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# PhoenixGuard local runtime state
+phoenixguard/.hf_cache/
+phoenixguard/.hf_offload/
+phoenixguard/logs/
+phoenixguard/memory_bank/
+phoenixguard/models/
+phoenixguard/adapters/
+phoenixguard/fine_tuning/
+phoenixguard/808 Memory/
+phoenixguard/data_splits/
+
+# Keep only the small smoke-test fixtures from data
+phoenixguard/data/**
+!phoenixguard/data/
+!phoenixguard/data/skill_gate_smoke.json
+!phoenixguard/data/skill_gate_isolated_smoke.json
+
+# Sensitive local artifacts
+phoenixguard/data/preferences.enc.sqlite
+phoenixguard/data/kdf_salt.bin

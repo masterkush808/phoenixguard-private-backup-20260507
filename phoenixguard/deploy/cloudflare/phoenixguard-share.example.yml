@@ -1,0 +1,11 @@
+# Example Cloudflare Tunnel config for PhoenixGuard Share.
+# Replace the placeholder values with your own tunnel UUID, credentials file,
+# and hostname before running `cloudflared tunnel run`.
+
+tunnel: YOUR_TUNNEL_UUID
+credentials-file: C:\Users\YOUR_USERNAME\.cloudflared\YOUR_TUNNEL_UUID.json
+
+ingress:
+  - hostname: phoenixguard.example.com
+    service: http://127.0.0.1:7861
+  - service: http_status:404

@@ -1,0 +1,32 @@
+**Windows 11 shortcuts related to refreshing the display and improving system responsiveness**
+
+### 1. Refresh the Display / Desktop
+
+| Shortcut                   | Action                                                                                                                                                                                                   |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **F5**                     | Refresh the current window or desktop (reloads file explorer view or desktop icons).                                                                                                                     |
+| **Ctrl + R**               | Refresh the current window (same function as F5 in many applications).                                                                                                                                   |
+| **Win + Ctrl + Shift + B** | **Restart the graphics driver**. This refreshes the display subsystem and can fix screen lag, freezes, or black screens without restarting the PC. The screen will flicker briefly and a beep may occur. |
+
+### 2. Speed Up the PC by Managing Processes
+
+| Shortcut                               | Action                                                                                              |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| **Ctrl + Shift + Esc**                 | Open **Task Manager** directly. Allows you to end high-CPU or high-memory processes slowing the PC. |
+| **Ctrl + Alt + Delete → Task Manager** | Alternative way to access Task Manager if the system is slow or frozen.                             |
+| **Alt + F4**                           | Close the active application immediately (useful for closing programs consuming resources).         |
+| **Win + X → U → R**                    | Restart the computer quickly from the power menu (clears memory and resets processes).              |
+
+### 3. Quick System Reset When Frozen
+
+| Shortcut                | Action                                                                                                        |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------- |
+| **Ctrl + Alt + Delete** | Opens security screen when the system becomes unresponsive; from there you can open Task Manager or sign out. |
+
+**Most useful for performance recovery:**
+
+* `Ctrl + Shift + Esc` → end heavy processes
+* `Win + Ctrl + Shift + B` → reset graphics driver
+* `F5` → refresh file explorer/desktop view
+* `Alt + F4` → close heavy applications
+* `Restart (Win + X → U → R)` when memory is overloaded.
