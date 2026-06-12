@@ -13,6 +13,155 @@ def _clip01(value: Any, default: float = 0.0) -> float:
         return float(np.clip(default, 0.0, 1.0))
 
 
+def derive_entry_progression_profile(
+    chart_state: Mapping[str, Any],
+    *,
+    sequence_state: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    chart_sequence_state = chart_state.get("sequence_state", {})
+    if not isinstance(chart_sequence_state, Mapping):
+        chart_sequence_state = {}
+    seq = cast(Mapping[str, Any], sequence_state or chart_sequence_state)
+
+    progression = chart_state.get("entry_progression", {})
+    if not isinstance(progression, Mapping):
+        progression = {}
+
+    sequence_model = chart_state.get("sequence_model", seq.get("sequence_model", {}))
+    if not isinstance(sequence_model, Mapping):
+        sequence_model = {}
+
+    projected_box = chart_state.get("projected_next_box", {})
+    if not isinstance(projected_box, Mapping):
+        projected_box = {}
+
+    regression = chart_state.get("memory_candle_regression", progression.get("candle_regression", {}))
+    if not isinstance(regression, Mapping):
+        regression = {}
+
+    continuation_probability = _clip01(
+        chart_state.get("continuation_probability", seq.get("continuation_probability", 0.25)),
+        0.25,
+    )
+    reversal_probability = _clip01(chart_state.get("reversal_probability", seq.get("reversal_probability", 0.25)), 0.25)
+    fakeout_probability = _clip01(chart_state.get("fakeout_probability", seq.get("fakeout_probability", 0.25)), 0.25)
+    path_clarity = _clip01(chart_state.get("path_clarity", seq.get("path_clarity", 0.0)), 0.0)
+    box_sequence_agreement = _clip01(
+        chart_state.get("box_sequence_agreement", seq.get("box_sequence_agreement", 0.0)),
+        0.0,
+    )
+    history_coherence = _clip01(
+        chart_state.get(
+            "history_coherence",
+            cast(Mapping[str, Any], sequence_model).get("history_coherence", 0.0),
+        ),
+        0.0,
+    )
+    sequence_uncertainty = _clip01(
+        chart_state.get(
+            "sequence_uncertainty",
+            cast(Mapping[str, Any], sequence_model).get("uncertainty", 0.0),
+        ),
+        0.0,
+    )
+    color_flip_rate = _clip01(chart_state.get("color_flip_rate", 0.0), 0.0)
+    compression_score = _clip01(progression.get("compression_score", seq.get("recent_box_consolidation", 0.0)), 0.0)
+    pullback_depth = _clip01(progression.get("pullback_depth", 0.0), 0.0)
+    rejection_score = _clip01(progression.get("rejection_score", 0.0), 0.0)
+    follow_through_score = _clip01(progression.get("follow_through_score", 0.0), 0.0)
+    aggressive_sniper_score = _clip01(progression.get("aggressive_sniper_score", 0.0), 0.0)
+    regression_confidence = _clip01(progression.get("regression_confidence", regression.get("confidence", 0.0)), 0.0)
+    regression_alignment = _clip01(progression.get("regression_alignment", regression.get("alignment_to_label", 0.0)), 0.0)
+
+    continuation_strength = _clip01(
+        0.36 * continuation_probability
+        + 0.18 * path_clarity
+        + 0.16 * box_sequence_agreement
+        + 0.14 * history_coherence
+        + 0.08 * (1.0 - fakeout_probability)
+        + 0.08 * (1.0 - sequence_uncertainty),
+        0.0,
+    )
+    exhaustion_risk = _clip01(
+        0.30 * reversal_probability
+        + 0.18 * fakeout_probability
+        + 0.16 * sequence_uncertainty
+        + 0.14 * color_flip_rate
+        + 0.12 * max(0.0, 1.0 - continuation_probability)
+        + 0.10 * pullback_depth,
+        0.0,
+    )
+    maturity_score = _clip01(
+        0.40 * continuation_strength
+        + 0.20 * box_sequence_agreement
+        + 0.16 * history_coherence
+        + 0.12 * follow_through_score
+        + 0.12 * regression_confidence,
+        0.0,
+    )
+    progression_velocity = _clip01(
+        0.42 * (continuation_strength - exhaustion_risk)
+        + 0.22 * (follow_through_score - rejection_score)
+        + 0.18 * (0.50 - pullback_depth)
+        + 0.12 * (regression_alignment - 0.50)
+        + 0.06 * aggressive_sniper_score,
+        0.0,
+    )
+
+    if exhaustion_risk >= 0.58 or reversal_probability >= continuation_probability + 0.08 or sequence_uncertainty >= 0.60:
+        progression_stage = "exhaustion_risk"
+    elif continuation_strength >= 0.70 and progression_velocity >= 0.04:
+        progression_stage = "late_continuation" if box_sequence_agreement >= 0.72 else "developing_continuation"
+    elif reversal_probability >= continuation_probability and box_sequence_agreement < 0.52:
+        progression_stage = "reversal_watch"
+    elif box_sequence_agreement <= 0.15 and path_clarity <= 0.25:
+        progression_stage = "setup_progression"
+    else:
+        progression_stage = str(progression.get("progression_stage", "progression") or "progression")
+
+    if progression_stage == "exhaustion_risk":
+        progression_phase = "tapering"
+    elif progression_stage == "late_continuation":
+        progression_phase = "extended"
+    elif progression_stage == "developing_continuation":
+        progression_phase = "building"
+    elif progression_stage == "reversal_watch":
+        progression_phase = "turning"
+    else:
+        progression_phase = "setup" if progression_stage == "setup_progression" else "building"
+
+    projected_direction = str(projected_box.get("direction", chart_state.get("direction", "HOLD"))).upper()
+    if progression_stage == "exhaustion_risk":
+        stage_reason = "reversal pressure and uncertainty are outrunning continuation"
+    elif progression_stage == "late_continuation":
+        stage_reason = "continuation is still present but the move looks extended"
+    elif progression_stage == "developing_continuation":
+        stage_reason = "continuation is building with improving structure"
+    elif progression_stage == "reversal_watch":
+        stage_reason = "opposing flow is starting to dominate the current direction"
+    else:
+        stage_reason = "the move is still forming and has not yet resolved"
+
+    return {
+        "progression_stage": progression_stage,
+        "progression_phase": progression_phase,
+        "progression_velocity": round(float(progression_velocity), 4),
+        "maturity_score": round(float(maturity_score), 4),
+        "continuation_strength": round(float(continuation_strength), 4),
+        "exhaustion_risk": round(float(exhaustion_risk), 4),
+        "compression_score": round(float(compression_score), 4),
+        "pullback_depth": round(float(pullback_depth), 4),
+        "rejection_score": round(float(rejection_score), 4),
+        "follow_through_score": round(float(follow_through_score), 4),
+        "aggressive_sniper_score": round(float(aggressive_sniper_score), 4),
+        "regression_confidence": round(float(regression_confidence), 4),
+        "regression_alignment": round(float(regression_alignment), 4),
+        "projected_direction": projected_direction,
+        "stage_reason": stage_reason,
+        "entry_type": str(chart_state.get("entry_type", "none") or "none"),
+    }
+
+
 def _unit_vector(values: Sequence[float], dim: int) -> list[float]:
     arr = np.asarray(list(values), dtype=np.float32).reshape(-1)
     if arr.size < dim:
@@ -73,6 +222,9 @@ def build_trajectory_signature(
     entry_candle = chart_state.get("entry_candle", {})
     if not isinstance(entry_candle, Mapping):
         entry_candle = {}
+    progression = chart_state.get("entry_progression", {})
+    if not isinstance(progression, Mapping):
+        progression = {}
     direction = str(chart_state.get("direction", "HOLD")).upper()
     projected_direction = str(projected_box.get("direction", direction)).upper()
     direction_code = 1.0 if direction == "BUY" else (-1.0 if direction == "SELL" else 0.0)
@@ -88,6 +240,9 @@ def build_trajectory_signature(
         _clip01(chart_state.get("path_clarity", seq.get("path_clarity", 0.0)), 0.0),
         _clip01(chart_state.get("consolidation_score", seq.get("recent_box_consolidation", 0.0)), 0.0),
         _clip01(chart_state.get("box_sequence_agreement", seq.get("box_sequence_agreement", 0.0)), 0.0),
+        _clip01(progression.get("maturity_score", 0.0), 0.0),
+        _clip01(progression.get("progression_velocity", 0.0), 0.0),
+        _clip01(progression.get("exhaustion_risk", 0.0), 0.0),
         _clip01(entry_candle.get("body_pct", 0.0) or 0.0, 0.0),
         _clip01(projected_box.get("confidence", 0.0) or 0.0, 0.0),
         float(np.clip(sequence_index / 12.0, 0.0, 1.0)),
@@ -112,8 +267,26 @@ def build_metric_profile(
     projected_box = chart_state.get("projected_next_box", {})
     if not isinstance(projected_box, Mapping):
         projected_box = {}
+    teaching = chart_state.get("memory_teaching", {})
+    if not isinstance(teaching, Mapping):
+        teaching = {}
+    progression = chart_state.get("entry_progression", {})
+    if not isinstance(progression, Mapping):
+        progression = derive_entry_progression_profile(chart_state, sequence_state=seq)
+    sniper_profile = chart_state.get("sniper_profile", {})
+    if not isinstance(sniper_profile, Mapping):
+        sniper_profile = {}
+    regression = chart_state.get("memory_candle_regression", progression.get("candle_regression", {}))
+    if not isinstance(regression, Mapping):
+        regression = {}
+    lesson_role = str(teaching.get("lesson_role", progression.get("progression_stage", "")) or "").lower()
     direction = str(chart_state.get("direction", "HOLD")).upper()
     projected_direction = str(projected_box.get("direction", chart_state.get("projection_bias_direction", direction))).upper()
+    regression_direction = str(regression.get("direction", progression.get("candle_regression_direction", "HOLD")) or "HOLD").upper()
+    try:
+        regression_slope_abs = abs(float(regression.get("slope", progression.get("candle_regression_slope", 0.0)) or 0.0))
+    except (TypeError, ValueError):
+        regression_slope_abs = 0.0
     return {
         "direction_buy": 1.0 if direction == "BUY" else 0.0,
         "direction_sell": 1.0 if direction == "SELL" else 0.0,
@@ -220,6 +393,28 @@ def build_metric_profile(
             1.0 - float(cast(Mapping[str, Any], grounded.get("artifact_summary", {})).get("artifact_score", chart_state.get("artifact_score", 0.0)) or 0.0),
             0.0,
         ),
+        "lesson_actual_entry": 1.0 if lesson_role in {"actual_entry", "entry", "sniper_entry"} else 0.0,
+        "lesson_win_resolution": 1.0 if lesson_role in {"win_resolution", "profit_resolution", "after_win"} else 0.0,
+        "lesson_progression": _clip01(teaching.get("progression_score", 0.0), 0.0),
+        "lesson_teaching_weight": _clip01(teaching.get("teaching_weight", 0.0), 0.0),
+        "entry_compression": _clip01(progression.get("compression_score", 0.0), 0.0),
+        "entry_pullback_depth": _clip01(progression.get("pullback_depth", 0.0), 0.0),
+        "entry_rejection": _clip01(progression.get("rejection_score", 0.0), 0.0),
+        "entry_follow_through": _clip01(progression.get("follow_through_score", 0.0), 0.0),
+        "entry_progression_maturity": _clip01(progression.get("maturity_score", 0.0), 0.0),
+        "entry_progression_velocity": _clip01(progression.get("progression_velocity", 0.0), 0.0),
+        "entry_progression_exhaustion": _clip01(progression.get("exhaustion_risk", 0.0), 0.0),
+        "entry_progression_continuation": _clip01(progression.get("continuation_strength", 0.0), 0.0),
+        "entry_progression_regression": _clip01(progression.get("regression_confidence", 0.0), 0.0),
+        "regression_buy": 1.0 if regression_direction == "BUY" else 0.0,
+        "regression_sell": 1.0 if regression_direction == "SELL" else 0.0,
+        "regression_slope_strength": _clip01(regression_slope_abs * 7.0, 0.0),
+        "regression_confidence": _clip01(regression.get("confidence", progression.get("regression_confidence", 0.0)), 0.0),
+        "regression_alignment": _clip01(regression.get("alignment_to_label", 0.0), 0.0),
+        "aggressive_sniper_score": _clip01(
+            sniper_profile.get("aggressive_entry_score", progression.get("aggressive_sniper_score", 0.0)),
+            0.0,
+        ),
     }
 
 
@@ -245,6 +440,9 @@ def build_late_interaction_tokens(
                         str(chart_state.get("reversal_signal", "none")),
                         str(chart_state.get("continuation_signal", "none")),
                         str(chart_state.get("timeframe", "M5")),
+                        str(chart_state.get("memory_teaching", {})),
+                        str(chart_state.get("sniper_profile", {})),
+                        str(chart_state.get("memory_candle_regression", {})),
                     ]
                 ),
                 dim=32,
@@ -255,6 +453,18 @@ def build_late_interaction_tokens(
     projected_box = chart_state.get("projected_next_box", {})
     if not isinstance(projected_box, Mapping):
         projected_box = {}
+    teaching = chart_state.get("memory_teaching", {})
+    if not isinstance(teaching, Mapping):
+        teaching = {}
+    progression = chart_state.get("entry_progression", {})
+    if not isinstance(progression, Mapping):
+        progression = derive_entry_progression_profile(chart_state, sequence_state=seq)
+    sniper_profile = chart_state.get("sniper_profile", {})
+    if not isinstance(sniper_profile, Mapping):
+        sniper_profile = {}
+    regression = chart_state.get("memory_candle_regression", progression.get("candle_regression", {}))
+    if not isinstance(regression, Mapping):
+        regression = {}
 
     token_global = _unit_vector(combined[:32].tolist(), dim=32)
     token_state = _unit_vector(
@@ -267,10 +477,18 @@ def build_late_interaction_tokens(
             _clip01(chart_state.get("path_clarity", seq.get("path_clarity", 0.0)), 0.0),
             _clip01(chart_state.get("consolidation_score", seq.get("recent_box_consolidation", 0.0)), 0.0),
             _clip01(chart_state.get("box_sequence_agreement", seq.get("box_sequence_agreement", 0.0)), 0.0),
+            _clip01(progression.get("maturity_score", 0.0), 0.0),
+            _clip01(progression.get("progression_velocity", 0.0), 0.0),
+            _clip01(progression.get("exhaustion_risk", 0.0), 0.0),
             _clip01(projected_box.get("confidence", 0.0) or 0.0, 0.0),
             _clip01(style.get("geometry_confidence", 0.0), 0.0),
             _clip01(style.get("spacing_consistency", 0.0), 0.0),
             _clip01(style.get("candle_density", 0.0), 0.0),
+            _clip01(teaching.get("teaching_weight", 0.0), 0.0),
+            _clip01(progression.get("compression_score", 0.0), 0.0),
+            _clip01(sniper_profile.get("aggressive_entry_score", 0.0), 0.0),
+            _clip01(regression.get("confidence", progression.get("regression_confidence", 0.0)), 0.0),
+            _clip01(regression.get("alignment_to_label", 0.0), 0.0),
         ],
         dim=32,
     )
@@ -297,6 +515,8 @@ def build_late_interaction_tokens(
                     str(chart_state.get("continuation_signal", "none")),
                     str(projected_box.get("box_type", "none")),
                     str(projected_box.get("direction", chart_state.get("direction", "HOLD"))),
+                    str(teaching.get("lesson_role", "")),
+                    str(teaching.get("tags", [])),
                 ]
             ),
             dim=32,
@@ -321,6 +541,17 @@ def build_late_interaction_tokens(
             _clip01(metrics.get("sequence_uncertainty", 0.0), 0.0),
             _clip01(metrics.get("grounded_confidence", 0.0), 0.0),
             _clip01(metrics.get("artifact_penalty", 0.0), 0.0),
+            _clip01(metrics.get("lesson_actual_entry", 0.0), 0.0),
+            _clip01(metrics.get("lesson_win_resolution", 0.0), 0.0),
+            _clip01(metrics.get("entry_compression", 0.0), 0.0),
+            _clip01(metrics.get("entry_pullback_depth", 0.0), 0.0),
+            _clip01(metrics.get("entry_rejection", 0.0), 0.0),
+            _clip01(metrics.get("entry_follow_through", 0.0), 0.0),
+            _clip01(metrics.get("regression_buy", 0.0), 0.0),
+            _clip01(metrics.get("regression_sell", 0.0), 0.0),
+            _clip01(metrics.get("regression_confidence", 0.0), 0.0),
+            _clip01(metrics.get("regression_alignment", 0.0), 0.0),
+            _clip01(metrics.get("aggressive_sniper_score", 0.0), 0.0),
         ],
         dim=32,
     )
@@ -407,6 +638,20 @@ def metric_profile_alignment(
         "structure_bias_confidence": 0.8,
         "history_coherence": 0.8,
         "sequence_uncertainty": 0.7,
+        "lesson_actual_entry": 1.3,
+        "lesson_win_resolution": 1.1,
+        "lesson_progression": 1.0,
+        "lesson_teaching_weight": 1.0,
+        "entry_compression": 0.9,
+        "entry_pullback_depth": 0.8,
+        "entry_rejection": 1.1,
+        "entry_follow_through": 1.0,
+        "regression_buy": 1.0,
+        "regression_sell": 1.0,
+        "regression_slope_strength": 0.8,
+        "regression_confidence": 1.0,
+        "regression_alignment": 1.1,
+        "aggressive_sniper_score": 1.4,
     }
     numer = 0.0
     denom = 0.0

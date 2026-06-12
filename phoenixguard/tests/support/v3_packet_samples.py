@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+from typing import Any
+
+
+def complete_sequence_context_v3(
+    *,
+    sequence_id: str = "seq-test-complete",
+    session_id: str = "pocket-live-8788",
+    side: str = "BUY",
+    frame_start: int = 1,
+    frame_end: int = 64,
+    sequence_length: int = 64,
+    timeframe: str = "M5",
+) -> dict[str, Any]:
+    normalized_side = side.upper() if side.upper() in {"BUY", "SELL"} else "BUY"
+    return {
+        "schema_version": "PG_SEQUENCE_CONTEXT_V3",
+        "sequence_id": sequence_id,
+        "session_id": session_id,
+        "sequence_index": 1,
+        "frame_start": frame_start,
+        "frame_end": frame_end,
+        "sequence_length": sequence_length,
+        "frames_received": sequence_length,
+        "frames_used": sequence_length,
+        "candle_count": sequence_length,
+        "timeframe": timeframe.upper(),
+        "sequence_signature": f"sig-{sequence_id}",
+        "sequence_confidence": 0.92,
+        "global_direction": normalized_side,
+        "local_direction": normalized_side,
+        "current_phase": "PULLBACK_RETEST",
+        "progression_score": 0.9,
+        "progression": [{"stage": "context_confirmed", "direction": normalized_side, "confidence": 0.9}],
+        "motifs": ["impulse", "pullback", "retest"],
+        "box_history": [{"label": f"H1 {normalized_side}", "bbox": [10, 10, 40, 40], "direction": normalized_side}],
+        "angle_vectors": [[1.0, 0.0]],
+        "sniper_zones": [{"label": "sniper", "bbox": [12, 12, 32, 32]}],
+        "target_zones": [{"label": "target", "bbox": [42, 8, 58, 24]}],
+        "invalidation_zones": [{"label": "invalidation", "bbox": [6, 42, 18, 56]}],
+        "sequence_status": "COMPLETE",
+        "status": "COMPLETE",
+        "frame_range": [frame_start, frame_end],
+        "candle_range": [1, sequence_length],
+        "frames_dropped": 0,
+        "sequence_age_ms": 50,
+        "packet_age_ms": 100,
+        "decision_age_ms": 80,
+        "model_vote_age_ms": 60,
+        "entry_progression": {
+            "progression_stage": "SNIPER_READY",
+            "maturity_score": 0.88,
+            "progression_velocity": 0.34,
+            "continuation_strength": 0.84,
+            "exhaustion_risk": 0.12,
+        },
+        "tracking_summary": {"global_direction": normalized_side, "local_direction": normalized_side},
+        "sequence_history": [{"label": f"H1 {normalized_side}", "bbox": [10, 10, 40, 40]}],
+    }

@@ -26,6 +26,7 @@ def test_build_locked_tracker_controls_uses_safe_tracking_defaults() -> None:
     assert controls["adaptive_timer_enabled"] is True
     assert controls["trade_profile"] == "HIGH_FREQUENCY"
     assert controls["high_frequency_expiry_seconds"] == 600
+    assert controls["scenario_generation_enabled"] is False
     assert controls["max_executions_per_window"] == 1
     assert controls["execution_window_sec"] == 600.0
     assert controls["cooldown_sec"] == 600.0

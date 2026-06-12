@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 from dataclasses import dataclass
+import os
 from pathlib import Path
+from threading import RLock
+import tempfile
 from typing import Any, Mapping, Sequence, cast
 
 import numpy as np
@@ -36,8 +40,39 @@ def _read_json(path: Path, default: Any) -> Any:
 
 
 def _write_json(path: Path, payload: Any) -> None:
+    _atomic_write_bytes(
+        path,
+        json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True).encode("utf-8"),
+    )
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            delete=False,
+            dir=str(path.parent),
+            prefix=f"{path.name}.",
+            suffix=".tmp",
+        ) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+            tmp_path = Path(handle.name)
+        tmp_path.replace(path)
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
+def _write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    payload = "".join(json.dumps(dict(row), ensure_ascii=True) + "\n" for row in rows)
+    _atomic_write_bytes(path, payload.encode("utf-8"))
 
 
 def _get_grounded_parser(logger: Any | None = None) -> Any | None:
@@ -218,6 +253,21 @@ def _build_heuristic_grounded_chart(
     }
 
 
+def build_heuristic_grounded_chart(
+    image_rgb: Image.Image,
+    *,
+    detections: Sequence[Mapping[str, Any]],
+    chart_geometry: Mapping[str, Any],
+    sequence_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    return _build_heuristic_grounded_chart(
+        image_rgb,
+        detections=detections,
+        chart_geometry=chart_geometry,
+        sequence_state=sequence_state,
+    )
+
+
 def build_grounded_chart(
     image_rgb: Image.Image,
     *,
@@ -232,7 +282,7 @@ def build_grounded_chart(
         chart_geometry=chart_geometry,
         sequence_state=sequence_state,
     )
-    if not bool(getattr(RUNTIME, "prefer_foundation_grounding", True)):
+    if backend_parser is None and not bool(getattr(RUNTIME, "prefer_foundation_grounding", True)):
         return base
     parser = backend_parser if backend_parser is not None else _get_grounded_parser()
     if parser is None:
@@ -375,15 +425,25 @@ def _summarize_grounded_structure(
         counts[bucket] += 1
         strengths[bucket] += confidence
         direction = str(zone.get("direction", "")).strip().upper()
-        if bucket in {"support", "breakout"}:
+        if bucket == "support":
             buy_pressure += confidence
-        elif bucket in {"resistance", "reversal"}:
+        elif bucket == "resistance":
             sell_pressure += confidence
+        elif bucket == "breakout":
+            if direction == "BUY":
+                buy_pressure += confidence
+            elif direction == "SELL":
+                sell_pressure += confidence
         elif bucket == "pullback":
             if direction == "BUY":
                 buy_pressure += confidence * 0.60
             elif direction == "SELL":
                 sell_pressure += confidence * 0.60
+        elif bucket == "reversal":
+            if direction == "BUY":
+                buy_pressure += confidence
+            elif direction == "SELL":
+                sell_pressure += confidence
         elif bucket == "directional_box":
             if direction == "BUY":
                 buy_pressure += confidence * 0.50
@@ -687,6 +747,7 @@ class ContinualLearningManager:
     ) -> None:
         self.data_dir = Path(data_dir)
         self.logger = logger
+        self._lock = RLock()
         self.replay_buffer_size = int(max(replay_buffer_size, 50))
         self.ewc_lambda = float(max(ewc_lambda, 0.0))
         self.lwf_temperature = float(max(lwf_temperature, 1.0))
@@ -717,10 +778,20 @@ class ContinualLearningManager:
                 chart_state.get("entry_type", chart_state.get("continuation_signal", "unknown")),
             )
         ).lower()
-        return "|".join([theme, width_bucket, density, timeframe, structure])
+        pair_identity = ""
+        for key in ("pair_key", "pair_name", "symbol", "instrument", "asset", "ticker", "source_image_hash"):
+            value = chart_state.get(key)
+            if value:
+                pair_identity = str(value).strip().lower()
+                break
+        context_parts = [theme, width_bucket, density, timeframe, structure]
+        if pair_identity:
+            context_parts.append(pair_identity)
+        return "|".join(context_parts)
 
     def adapter_profile_for_context(self, context_key: str) -> dict[str, Any]:
-        profile = dict(self.adapter_bank.get(context_key, {}))
+        with self._lock:
+            profile = dict(self.adapter_bank.get(context_key, {}))
         return {
             "context_key": context_key,
             "confidence_scale": float(np.clip(_safe_float(profile.get("confidence_scale", 1.0), 1.0), 0.75, 1.25)),
@@ -738,7 +809,9 @@ class ContinualLearningManager:
         try:
             self.replay_snapshot_dir.mkdir(parents=True, exist_ok=True)
             snapshot_path = self.replay_snapshot_dir / f"{str(image_hash)}.png"
-            image_rgb.save(snapshot_path, format="PNG")
+            buffer = io.BytesIO()
+            image_rgb.save(buffer, format="PNG")
+            _atomic_write_bytes(snapshot_path, buffer.getvalue())
             return str(snapshot_path)
         except Exception:
             return ""
@@ -747,6 +820,7 @@ class ContinualLearningManager:
         self,
         *,
         image_hash: str,
+        context_id: str = "",
         context_key: str,
         context_descriptor: str,
         local_ensemble: Mapping[str, Any],
@@ -758,25 +832,31 @@ class ContinualLearningManager:
         selected_view: str = "",
         snapshot_image: Image.Image | None = None,
     ) -> None:
+        pending_key = str(context_id or image_hash).strip()
+        if not pending_key:
+            pending_key = str(image_hash)
         ensemble_view = cast(dict[str, Any], local_ensemble.get("ensemble", {}))
         snapshot_path = self._persist_replay_snapshot(image_hash, snapshot_image)
-        self.pending_contexts[str(image_hash)] = {
-            "context_key": str(context_key),
-            "context_descriptor": str(context_descriptor),
-            "predicted_action": str(predicted_action).upper(),
-            "confidence": float(np.clip(confidence, 0.0, 1.0)),
-            "champion_model": str(ensemble_view.get("champion_model", "")),
-            "confirmer_model": str(ensemble_view.get("confirmer_model", "")),
-            "style_signature": dict(style_signature),
-            "ood_summary": dict(ood_summary or {}),
-            "source_path": str(source_path),
-            "selected_view": str(selected_view),
-            "snapshot_path": snapshot_path,
-        }
-        if len(self.pending_contexts) > 512:
-            keys = list(self.pending_contexts.keys())[-512:]
-            self.pending_contexts = {key: self.pending_contexts[key] for key in keys}
-        _write_json(self.pending_context_path, self.pending_contexts)
+        with self._lock:
+            self.pending_contexts[pending_key] = {
+                "context_id": pending_key,
+                "image_hash": str(image_hash),
+                "context_key": str(context_key),
+                "context_descriptor": str(context_descriptor),
+                "predicted_action": str(predicted_action).upper(),
+                "confidence": float(np.clip(confidence, 0.0, 1.0)),
+                "champion_model": str(ensemble_view.get("champion_model", "")),
+                "confirmer_model": str(ensemble_view.get("confirmer_model", "")),
+                "style_signature": dict(style_signature),
+                "ood_summary": dict(ood_summary or {}),
+                "source_path": str(source_path),
+                "selected_view": str(selected_view),
+                "snapshot_path": snapshot_path,
+            }
+            if len(self.pending_contexts) > 512:
+                keys = list(self.pending_contexts.keys())[-512:]
+                self.pending_contexts = {key: self.pending_contexts[key] for key in keys}
+            _write_json(self.pending_context_path, self.pending_contexts)
 
     def register_context_adapter(
         self,
@@ -785,12 +865,13 @@ class ContinualLearningManager:
         *,
         adapter_file: str = "",
     ) -> None:
-        profile = dict(self.adapter_bank.get(str(context_key), {}))
-        profile["lora_adapter_name"] = str(adapter_name)
-        if adapter_file:
-            profile["lora_adapter_file"] = str(adapter_file)
-        self.adapter_bank[str(context_key)] = profile
-        _write_json(self.adapter_bank_path, self.adapter_bank)
+        with self._lock:
+            profile = dict(self.adapter_bank.get(str(context_key), {}))
+            profile["lora_adapter_name"] = str(adapter_name)
+            if adapter_file:
+                profile["lora_adapter_file"] = str(adapter_file)
+            self.adapter_bank[str(context_key)] = profile
+            _write_json(self.adapter_bank_path, self.adapter_bank)
 
     def record_feedback(
         self,
@@ -798,95 +879,124 @@ class ContinualLearningManager:
         verdict: str,
         reason: str,
         *,
+        context_id: str = "",
+        submission_id: str = "",
+        operator_confidence: float = 1.0,
+        feedback_meta: Mapping[str, Any] | None = None,
         feedback_image_path: str = "",
         feedback_image_sha256: str = "",
         feedback_image_meta: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         image_key = str(image_hash)
-        context = dict(self.pending_contexts.get(image_key, {}))
-        if not context:
-            return {}
-        context_key = str(context.get("context_key", "default"))
-        predicted_action = str(context.get("predicted_action", "HOLD")).upper()
-        verdict_upper = str(verdict).upper()
-        success = predicted_action == verdict_upper
-        profile = dict(self.adapter_bank.get(context_key, {}))
-        count = int(profile.get("count", 0) or 0) + 1
-        old_success = float(profile.get("success_rate", 0.5) or 0.5)
-        success_rate = 0.85 * old_success + 0.15 * float(1.0 if success else 0.0)
-        confidence_scale = float(profile.get("confidence_scale", 1.0) or 1.0)
-        confidence_scale = float(np.clip(confidence_scale * (1.02 if success else 0.97), 0.75, 1.25))
-        direction_bias = dict(profile.get("direction_bias", {"BUY": 0.0, "SELL": 0.0}))
-        if verdict_upper in {"BUY", "SELL"}:
-            direction_bias.setdefault("BUY", 0.0)
-            direction_bias.setdefault("SELL", 0.0)
-            direction_bias[verdict_upper] = float(np.clip(_safe_float(direction_bias.get(verdict_upper, 0.0), 0.0) + 0.02, -0.25, 0.25))
-            other = "SELL" if verdict_upper == "BUY" else "BUY"
-            direction_bias[other] = float(np.clip(_safe_float(direction_bias.get(other, 0.0), 0.0) - 0.01, -0.25, 0.25))
-        if predicted_action in {"BUY", "SELL"} and not success:
-            direction_bias[predicted_action] = float(np.clip(_safe_float(direction_bias.get(predicted_action, 0.0), 0.0) - 0.03, -0.25, 0.25))
-        model_weight_biases = dict(profile.get("model_weight_biases", {}))
-        for field_name, delta in (("champion_model", 0.05 if success else -0.06), ("confirmer_model", 0.02 if success else -0.03)):
-            model_name = str(context.get(field_name, "")).strip()
-            if not model_name:
-                continue
-            current = _safe_float(model_weight_biases.get(model_name, 0.0), 0.0)
-            model_weight_biases[model_name] = float(np.clip(current + delta, -0.25, 0.25))
-        self.adapter_bank[context_key] = {
-            "count": count,
-            "success_rate": success_rate,
-            "confidence_scale": confidence_scale,
-            "direction_bias": direction_bias,
-            "model_weight_biases": model_weight_biases,
-            "last_reason": str(reason),
-            "lora_adapter_name": str(profile.get("lora_adapter_name", "")),
-            "lora_adapter_file": str(profile.get("lora_adapter_file", "")),
-        }
-        _write_json(self.adapter_bank_path, self.adapter_bank)
-        inference_snapshot_path = str(context.get("snapshot_path", ""))
-        saved_feedback_image_path = str(feedback_image_path or "").strip()
-        learning_snapshot_path = saved_feedback_image_path or inference_snapshot_path
-        replay_item = {
-            "image_hash": image_key,
-            "context_key": context_key,
-            "context_descriptor": str(context.get("context_descriptor", "")),
-            "predicted_action": predicted_action,
-            "verdict": verdict_upper,
-            "reason": str(reason),
-            "success": bool(success),
-            "confidence": float(np.clip(_safe_float(context.get("confidence", 0.0), 0.0), 0.0, 1.0)),
-            "champion_model": str(context.get("champion_model", "")),
-            "confirmer_model": str(context.get("confirmer_model", "")),
-            "style_signature": dict(context.get("style_signature", {})),
-            "ood_summary": dict(context.get("ood_summary", {})),
-            "source_path": str(context.get("source_path", "")),
-            "selected_view": str(context.get("selected_view", "")),
-            "snapshot_path": learning_snapshot_path,
-            "inference_snapshot_path": inference_snapshot_path,
-            "feedback_image_path": saved_feedback_image_path,
-            "feedback_image_sha256": str(feedback_image_sha256 or "").strip(),
-            "feedback_image_meta": dict(feedback_image_meta or {}),
-            "lora_adapter_name": str(profile.get("lora_adapter_name", "")),
-            "lora_adapter_file": str(profile.get("lora_adapter_file", "")),
-            "ewc_lambda": self.ewc_lambda,
-            "lwf_temperature": self.lwf_temperature,
-        }
-        rows = []
-        if self.replay_buffer_path.exists():
-            with self.replay_buffer_path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if line:
-                        try:
-                            rows.append(cast(dict[str, Any], json.loads(line)))
-                        except Exception:
-                            continue
-        rows.append(replay_item)
-        rows = rows[-self.replay_buffer_size :]
-        self.replay_buffer_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.replay_buffer_path.open("w", encoding="utf-8") as handle:
-            for row in rows:
-                handle.write(json.dumps(row, ensure_ascii=True) + "\n")
-        self.pending_contexts.pop(image_key, None)
-        _write_json(self.pending_context_path, self.pending_contexts)
-        return replay_item
+        pending_key = str(context_id or image_key).strip() or image_key
+        with self._lock:
+            submission_key = str(submission_id or "").strip()
+            if submission_key and self.replay_buffer_path.exists():
+                try:
+                    with self.replay_buffer_path.open("r", encoding="utf-8") as handle:
+                        for line in handle:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                existing = cast(dict[str, Any], json.loads(line))
+                            except Exception:
+                                continue
+                            if str(existing.get("submission_id", "")).strip() == submission_key:
+                                return existing
+                except Exception:
+                    pass
+            context = dict(self.pending_contexts.get(pending_key, {}))
+            if not context and pending_key != image_key:
+                context = dict(self.pending_contexts.get(image_key, {}))
+            if not context:
+                return {}
+            context_key = str(context.get("context_key", "default"))
+            predicted_action = str(context.get("predicted_action", "HOLD")).upper()
+            verdict_upper = str(verdict).upper()
+            success = predicted_action == verdict_upper
+            profile = dict(self.adapter_bank.get(context_key, {}))
+            count = int(profile.get("count", 0) or 0) + 1
+            old_success = float(profile.get("success_rate", 0.5) or 0.5)
+            success_rate = 0.85 * old_success + 0.15 * float(1.0 if success else 0.0)
+            confidence_scale = float(profile.get("confidence_scale", 1.0) or 1.0)
+            confidence_scale = float(np.clip(confidence_scale * (1.02 if success else 0.97), 0.75, 1.25))
+            direction_bias = dict(profile.get("direction_bias", {"BUY": 0.0, "SELL": 0.0}))
+            if verdict_upper in {"BUY", "SELL"}:
+                direction_bias.setdefault("BUY", 0.0)
+                direction_bias.setdefault("SELL", 0.0)
+                direction_bias[verdict_upper] = float(np.clip(_safe_float(direction_bias.get(verdict_upper, 0.0), 0.0) + 0.02, -0.25, 0.25))
+                other = "SELL" if verdict_upper == "BUY" else "BUY"
+                direction_bias[other] = float(np.clip(_safe_float(direction_bias.get(other, 0.0), 0.0) - 0.01, -0.25, 0.25))
+            if predicted_action in {"BUY", "SELL"} and not success:
+                direction_bias[predicted_action] = float(np.clip(_safe_float(direction_bias.get(predicted_action, 0.0), 0.0) - 0.03, -0.25, 0.25))
+            model_weight_biases = dict(profile.get("model_weight_biases", {}))
+            for field_name, delta in (("champion_model", 0.05 if success else -0.06), ("confirmer_model", 0.02 if success else -0.03)):
+                model_name = str(context.get(field_name, "")).strip()
+                if not model_name:
+                    continue
+                current = _safe_float(model_weight_biases.get(model_name, 0.0), 0.0)
+                model_weight_biases[model_name] = float(np.clip(current + delta, -0.25, 0.25))
+            self.adapter_bank[context_key] = {
+                "count": count,
+                "success_rate": success_rate,
+                "confidence_scale": confidence_scale,
+                "direction_bias": direction_bias,
+                "model_weight_biases": model_weight_biases,
+                "last_reason": str(reason),
+                "lora_adapter_name": str(profile.get("lora_adapter_name", "")),
+                "lora_adapter_file": str(profile.get("lora_adapter_file", "")),
+            }
+            _write_json(self.adapter_bank_path, self.adapter_bank)
+            inference_snapshot_path = str(context.get("snapshot_path", ""))
+            saved_feedback_image_path = str(feedback_image_path or "").strip()
+            learning_snapshot_path = saved_feedback_image_path or inference_snapshot_path
+            replay_item = {
+                "submission_id": submission_key,
+                "image_hash": image_key,
+                "context_id": str(context.get("context_id", pending_key or image_key)),
+                "context_key": context_key,
+                "context_descriptor": str(context.get("context_descriptor", "")),
+                "predicted_action": predicted_action,
+                "verdict": verdict_upper,
+                "reason": str(reason),
+                "success": bool(success),
+                "operator_confidence": float(np.clip(operator_confidence, 0.05, 1.0)),
+                "feedback_meta": dict(feedback_meta or {}),
+                "confidence": float(np.clip(_safe_float(context.get("confidence", 0.0), 0.0), 0.0, 1.0)),
+                "champion_model": str(context.get("champion_model", "")),
+                "confirmer_model": str(context.get("confirmer_model", "")),
+                "style_signature": dict(context.get("style_signature", {})),
+                "ood_summary": dict(context.get("ood_summary", {})),
+                "source_path": str(context.get("source_path", "")),
+                "selected_view": str(context.get("selected_view", "")),
+                "snapshot_path": learning_snapshot_path,
+                "inference_snapshot_path": inference_snapshot_path,
+                "feedback_image_path": saved_feedback_image_path,
+                "feedback_image_sha256": str(feedback_image_sha256 or "").strip(),
+                "feedback_image_meta": dict(feedback_image_meta or {}),
+                "lora_adapter_name": str(profile.get("lora_adapter_name", "")),
+                "lora_adapter_file": str(profile.get("lora_adapter_file", "")),
+                "ewc_lambda": self.ewc_lambda,
+                "lwf_temperature": self.lwf_temperature,
+            }
+            rows: list[dict[str, Any]] = []
+            if self.replay_buffer_path.exists():
+                with self.replay_buffer_path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if line:
+                            try:
+                                rows.append(cast(dict[str, Any], json.loads(line)))
+                            except Exception:
+                                continue
+            rows.append(replay_item)
+            rows = rows[-self.replay_buffer_size :]
+            _write_jsonl(self.replay_buffer_path, rows)
+            self.pending_contexts.pop(pending_key, None)
+            if pending_key != image_key:
+                legacy_context = self.pending_contexts.get(image_key)
+                if isinstance(legacy_context, dict) and str(legacy_context.get("context_id", "")).strip() == pending_key:
+                    self.pending_contexts.pop(image_key, None)
+            _write_json(self.pending_context_path, self.pending_contexts)
+            return replay_item

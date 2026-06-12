@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Overlay Demo</title>
+    <style>
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #0b0f14;
+        color: #e8edf2;
+        font-family: Arial, sans-serif;
+      }
+      #overlayShell {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        grid-template-rows: auto 1fr;
+      }
+      #overlayStage {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: auto;
+        padding: 8px;
+      }
+      #overlayHeader {
+        padding: 10px 14px;
+        border-bottom: 1px solid rgba(255,255,255,0.14);
+        background: rgba(12, 16, 22, 0.92);
+        font-size: 14px;
+        letter-spacing: 0.02em;
+      }
+      #brokerFrame {
+        display: block;
+        background: #0b0f14;
+        max-width: 100%;
+        max-height: 100%;
+        width: auto;
+        height: auto;
+        object-fit: contain;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="overlayShell">
+      <div id="overlayHeader">Overlay Demo - pocket-live-8788</div>
+      <div id="overlayStage">
+        <img id="brokerFrame" alt="Broker window capture">
+      </div>
+    </div>
+    <script>
+      const frame = document.getElementById('brokerFrame');
+      const sessionId = 'pocket-live-8788';
+      const apiBase = (location.protocol === 'file:') ? 'http://127.0.0.1:8793' : '';
+      const localFrameUrl = 'file:///C:/Users/thaba/AppData/Local/Temp/phoenixguard_latest_frame.png';
+
+      function frameValue(value) {
+        const number = Number(value);
+        return Number.isFinite(number) && number > 0 ? Math.round(number) : 0;
+      }
+
+      function sessionArtifactVersion(kind, payload = {}) {
+        const pathKey = kind === 'full-overlay'
+          ? payload.last_full_overlay_path
+          : kind === 'overlay'
+            ? payload.last_overlay_path
+            : kind === 'window'
+              ? (payload.last_window_path || payload.last_frame_path)
+              : payload.last_chart_path;
+        const frameKey = kind === 'window'
+          ? Math.max(frameValue(payload.display_frame_id), frameValue(payload.frame_index), frameValue(payload.capture_count))
+          : Math.max(frameValue(payload.overlay_frame_id), frameValue(payload.model_vote_frame_id), frameValue(payload.chart_frame_id));
+        return [kind, frameKey, payload.source_capture_id || '', pathKey || ''].filter(Boolean).join('|') || String(Date.now());
+      }
+
+      async function latestSession() {
+        const response = await fetch(`${apiBase}/v1/mobile/window-tracker/sessions/${sessionId}`, {cache: 'no-store'});
+        if (!response.ok) {
+          throw new Error(`Session fetch failed: ${response.status}`);
+        }
+        return response.json();
+      }
+
+      async function refreshFrame(kind = 'full-overlay') {
+        if (location.protocol === 'file:') {
+          frame.src = `${localFrameUrl}?v=${Date.now()}`;
+          return;
+        }
+        const payload = await latestSession();
+        const version = encodeURIComponent(sessionArtifactVersion(kind, payload));
+        frame.src = `${apiBase}/v1/mobile/window-tracker/sessions/${sessionId}/artifacts/latest-${kind}?v=${version}`;
+      }
+      frame.addEventListener('error', () => {
+        refreshFrame('window').catch(() => {
+          frame.src = `${localFrameUrl}?v=${Date.now()}`;
+        });
+      });
+      refreshFrame().catch(() => refreshFrame('window'));
+      setInterval(() => {
+        refreshFrame().catch(() => refreshFrame('window'));
+      }, 1000);
+    </script>
+  </body>
+</html>

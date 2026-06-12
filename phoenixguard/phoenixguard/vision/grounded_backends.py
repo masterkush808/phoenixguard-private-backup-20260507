@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import importlib
+import os
 from threading import Lock
 from typing import Any, cast
 
@@ -30,6 +31,17 @@ def _to_device_inputs(payload: dict[str, Any], device: torch.device) -> dict[str
                 pass
         moved[key] = value
     return moved
+
+
+def _pillow_bilinear() -> Any:
+    resampling = getattr(Image, "Resampling", None)
+    if resampling is not None:
+        return getattr(resampling, "BILINEAR", getattr(Image, "BILINEAR", 2))
+    return getattr(Image, "BILINEAR", 2)
+
+
+def _remote_bootstrap_enabled(env_name: str) -> bool:
+    return str(os.getenv(env_name, "") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(slots=True)
@@ -63,6 +75,11 @@ class OptionalGroundedParser:
         self._sam_model: Any | None = None
         self._errors: dict[str, str] = {}
 
+    def _local_files_only(self) -> bool:
+        if bool(RUNTIME.allow_offline_only):
+            return True
+        return not _remote_bootstrap_enabled("PHOENIXGUARD_GROUNDED_ALLOW_REMOTE_BOOTSTRAP")
+
     def _load_transformers(self) -> Any | None:
         if self._transformers is not None:
             return self._transformers
@@ -87,14 +104,15 @@ class OptionalGroundedParser:
             try:
                 auto_processor = getattr(transformers, "AutoProcessor")
                 auto_causal = getattr(transformers, "AutoModelForCausalLM")
+                local_files_only = self._local_files_only()
                 self._florence_processor = auto_processor.from_pretrained(
                     MODELS.florence2_model,
-                    local_files_only=bool(RUNTIME.allow_offline_only),
+                    local_files_only=local_files_only,
                     trust_remote_code=True,
                 )
                 self._florence_model = auto_causal.from_pretrained(
                     MODELS.florence2_model,
-                    local_files_only=bool(RUNTIME.allow_offline_only),
+                    local_files_only=local_files_only,
                     trust_remote_code=True,
                 ).to(self.device)
                 self._florence_model.eval()
@@ -104,13 +122,14 @@ class OptionalGroundedParser:
             try:
                 auto_processor = getattr(transformers, "AutoProcessor")
                 auto_grounding = getattr(transformers, "AutoModelForZeroShotObjectDetection")
+                local_files_only = self._local_files_only()
                 self._grounding_processor = auto_processor.from_pretrained(
                     MODELS.grounding_dino_model,
-                    local_files_only=bool(RUNTIME.allow_offline_only),
+                    local_files_only=local_files_only,
                 )
                 self._grounding_model = auto_grounding.from_pretrained(
                     MODELS.grounding_dino_model,
-                    local_files_only=bool(RUNTIME.allow_offline_only),
+                    local_files_only=local_files_only,
                 ).to(self.device)
                 self._grounding_model.eval()
             except Exception as exc:
@@ -119,13 +138,14 @@ class OptionalGroundedParser:
             try:
                 sam_processor = getattr(transformers, "SamProcessor")
                 sam_model_cls = getattr(transformers, "SamModel")
+                local_files_only = self._local_files_only()
                 self._sam_processor = sam_processor.from_pretrained(
                     MODELS.sam2_model,
-                    local_files_only=bool(RUNTIME.allow_offline_only),
+                    local_files_only=local_files_only,
                 )
                 self._sam_model = sam_model_cls.from_pretrained(
                     MODELS.sam2_model,
-                    local_files_only=bool(RUNTIME.allow_offline_only),
+                    local_files_only=local_files_only,
                 ).to(self.device)
                 self._sam_model.eval()
             except Exception as exc:
@@ -251,11 +271,37 @@ class OptionalGroundedParser:
                 else:
                     first_mask = mask_group
                 mask_array = np.asarray(first_mask, dtype=np.float32)
+                if mask_array.ndim > 2:
+                    mask_array = np.squeeze(mask_array)
+                mask_array = np.asarray(mask_array, dtype=np.float32)
+                binary_mask = mask_array >= 0.5
+                if binary_mask.ndim != 2 or not np.any(binary_mask):
+                    continue
+                ys, xs = np.where(binary_mask)
+                y1 = int(np.min(ys))
+                y2 = int(np.max(ys)) + 1
+                x1 = int(np.min(xs))
+                x2 = int(np.max(xs)) + 1
+                mask_crop = binary_mask[y1:y2, x1:x2]
+                if mask_crop.size == 0:
+                    continue
+                mask_image = Image.fromarray(np.uint8(mask_crop) * 255, mode="L")
+                mask_grid_size = 18
+                mask_grid = np.asarray(
+                    mask_image.resize((mask_grid_size, mask_grid_size), resample=_pillow_bilinear()),
+                    dtype=np.uint8,
+                )
+                coverage_bbox_ratio = float(np.clip(mask_crop.mean(), 0.0, 1.0))
                 summaries.append(
                     {
                         "label": str(detection.get("label", "")),
                         "source": "sam2",
+                        "score": _clip01(detection.get("score", 0.0)),
+                        "bbox": [float(x1), float(y1), float(x2), float(y2)],
                         "mask_area_ratio": float(np.clip(mask_array.mean(), 0.0, 1.0)),
+                        "coverage_bbox_ratio": coverage_bbox_ratio,
+                        "grid_size": mask_grid_size,
+                        "mask_grid": mask_grid.tolist(),
                     }
                 )
             return summaries

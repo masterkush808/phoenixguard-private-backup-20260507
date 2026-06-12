@@ -385,21 +385,14 @@ _SESSION_NESTED_DUPLICATE_KEYS = frozenset(
 _DISPLAY_STATE_KEYS = frozenset(
     {
         "session_id",
-        "capture_count",
         "display_frame_id",
         "display_capture_epoch",
         "display_published_epoch",
         "last_display_capture_epoch",
         "last_display_published_epoch",
         "last_display_window_path",
-        "last_window_path",
-        "last_frame_path",
-        "last_capture_started_at",
-        "last_capture_started_epoch",
         "display_snapshot_only_v3",
         "display_fast_path_v3",
-        "status",
-        "updated_at",
     }
 )
 
@@ -656,7 +649,9 @@ def _build_high_frequency_candle_cycle_context(
         "next_candle_forecast": next_forecast,
         "second_next_candle_forecast": second_forecast,
         "forecast_agreement": bool(agreement_side in {"BUY", "SELL"}),
-        "uses_unseen_future_candles": True,
+        "targets_future_candle_window": True,
+        "do_not_render_synthetic_candles": True,
+        "uses_unseen_future_candles": False,
         "does_not_trade_seen_last_two_candles": True,
     }
 
@@ -1096,9 +1091,9 @@ def _build_execution_timing_profile(
             "timing_class": "high_frequency_two_candle_cycle",
             "entry_allowed": True,
             "block_reason": "",
-            "rationale": "current M5 candle closed; enter the next two unseen candles with a fixed 10-minute expiry",
+            "rationale": "current M5 candle closed; study the next two-candle window with a fixed 10-minute expiry",
             "quick_profit_mode": True,
-            "hold_intent": "two_unseen_candles",
+            "hold_intent": "next_two_candle_window",
             "price_position": {},
             "global_extreme_risk": 0.0,
             "history_area_risk": 0.0,
@@ -1115,7 +1110,9 @@ def _build_execution_timing_profile(
             "current_flow_continuation_ready": True,
             "breakout_confirmation": True,
             "current_candle_closed": True,
-            "uses_unseen_future_candles": True,
+            "targets_future_candle_window": True,
+            "do_not_render_synthetic_candles": True,
+            "uses_unseen_future_candles": False,
         }
 
     min_sec, tactical_sec, standard_sec, max_sec = _execution_expiry_window(timeframe_sec)
@@ -3055,12 +3052,26 @@ def _harden_published_signal_contract(
 def _model_council_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Find a V3 executable packet without accepting legacy raw signals."""
 
+    now_epoch = _now_epoch()
+
+    def packet_valid_until(packet: Mapping[str, Any]) -> float:
+        direct = _float_or(packet.get("valid_until_epoch_sec") or packet.get("valid_until_epoch"), 0.0)
+        if direct > 0.0:
+            return direct
+        created = _float_or(packet.get("created_epoch_sec") or packet.get("created_epoch"), 0.0)
+        ttl = _float_or(packet.get("ttl_sec") or packet.get("time_to_live_sec") or packet.get("freshness_window_sec"), 0.0)
+        return created + max(0.1, ttl) if created > 0.0 and ttl > 0.0 else 0.0
+
+    def packet_is_current(packet: Mapping[str, Any]) -> bool:
+        valid_until = packet_valid_until(packet)
+        return valid_until > now_epoch
+
     def walk(candidate: Any, depth: int = 0) -> dict[str, Any]:
         if depth > 4 or not isinstance(candidate, Mapping):
             return {}
         row = _mapping_to_dict(candidate)
         if row.get("schema_version") == PG_EXECUTION_PACKET_SCHEMA_VERSION:
-            return row
+            return row if packet_is_current(row) else {}
         for key in (
             "model_council_packet",
             "execution_packet",
@@ -3108,10 +3119,6 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
     def packet_is_current(packet: Mapping[str, Any]) -> bool:
         valid_until = packet_valid_until(packet)
         if valid_until <= now_epoch:
-            return False
-        latest_capture_epoch = _float_or(payload.get("last_capture_epoch") or payload.get("last_capture_started_epoch"), 0.0)
-        packet_created_epoch = _float_or(packet.get("created_epoch") or packet.get("created_epoch_sec"), 0.0)
-        if latest_capture_epoch > 0.0 and packet_created_epoch > 0.0 and packet_created_epoch + 0.25 < latest_capture_epoch:
             return False
         return True
 
@@ -7427,10 +7434,10 @@ class PhoenixGuardWindowTrackingAdapter:
         candle_scale_y = 1.0
         if fast_selectors and bool(selector_execution_controls.get("live_execution_enabled", False)):
             try:
-                live_candle_max_width = int(os.getenv("PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH", "480") or "480")
+                live_candle_max_width = int(os.getenv("PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH", "320") or "320")
             except ValueError:
-                live_candle_max_width = 480
-            live_candle_max_width = max(320, int(live_candle_max_width))
+                live_candle_max_width = 320
+            live_candle_max_width = max(180, int(live_candle_max_width))
             if int(chart_image.width) > live_candle_max_width:
                 resized_width = live_candle_max_width
                 resized_height = max(64, int(round(float(chart_image.height) * (float(resized_width) / float(chart_image.width)))))
@@ -12634,11 +12641,16 @@ class PhoenixGuardWindowTrackingAdapter:
         session_payload: Mapping[str, Any],
         controls: Mapping[str, Any],
     ) -> dict[str, Any]:
-        enabled = bool(controls.get("scenario_generation_enabled", False))
+        requested_enabled = bool(controls.get("scenario_generation_enabled", False))
+        live_hot_path = bool(controls.get("live_execution_enabled", False)) and (
+            str(controls.get("execution_mode", "") or "").strip().lower() == "live"
+        )
+        live_override = str(os.getenv("PHOENIXGUARD_ENABLE_LIVE_SCENARIO_GENERATION", "") or "").strip().lower()
+        enabled = requested_enabled and (not live_hot_path or live_override in {"1", "true", "yes", "on"})
         base: dict[str, Any] = {
             "enabled": enabled,
             "status": "disabled" if not enabled else "idle",
-            "summary": "A* scenario generation is disabled.",
+            "summary": "A* scenario generation is disabled in the live execution hot path." if requested_enabled and not enabled else "A* scenario generation is disabled.",
             "generated_at": _now_iso(),
             "total_scenarios": 0,
             "top_scenario": {},
@@ -15573,7 +15585,7 @@ class ContinuousWindowTrackerService:
                 "close_progress": 1.0,
                 "max_entry_progress": 1.0,
                 "requires_closed_candle": True,
-                "reason": "The previously developing M5 candle has closed; the next two unseen candles are now the execution target.",
+                "reason": "The previously developing M5 candle has closed; the next two-candle study window is now the execution target.",
             }
             decision_kernel = {
                 **decision_kernel,
@@ -15815,10 +15827,16 @@ class ContinuousWindowTrackerService:
             or sequence_state_payload.get("entry_progression")
         )
         sequence_context_has_history = bool(historical_structure or structure_boxes or current_box)
+        sequence_context_has_progression = bool(sequence_progression or entry_progression_payload or sequence_state_payload)
         sequence_context_complete = bool(
-            sequence_context_has_history
-            and max(confidence, v3_candidate_score) >= 0.75
+            v3_candidate_active
+            or (
+                sequence_context_has_history
+                and sequence_context_has_progression
+                and max(50, int(capture_count)) >= 50
+            )
         )
+        sequence_confidence = max(confidence, v3_candidate_score, 0.99 if v3_candidate_active else 0.0)
         snapshot: dict[str, Any] = {
             "session_id": str(payload.get("session_id", "")),
             "symbol": symbol,
@@ -15855,7 +15873,7 @@ class ContinuousWindowTrackerService:
             "sequence_length": 50,
             "frames_used": max(50, int(capture_count)),
             "frames_received": max(50, int(capture_count)),
-            "sequence_confidence": max(confidence, v3_candidate_score, 0.99 if v3_candidate_active else 0.0),
+            "sequence_confidence": sequence_confidence,
             "sequence_status": "COMPLETE" if (v3_candidate_active or sequence_context_complete) else "PARTIAL_SEQUENCE",
             "sequence_index": max(0, int(frame_index)),
             "historical_structure": historical_structure,
@@ -16977,6 +16995,17 @@ class ContinuousWindowTrackerService:
         LOGGER.info("Focus region set for session %s: bbox=%s from %s", session_id, validated_bbox, source)
         
         if worker is None:
+            fast_focus_preview = (
+                str(os.getenv("PHOENIXGUARD_FAST_FOCUS_PREVIEW", "0") or "0").strip().lower()
+                not in {"0", "false", "off", "no"}
+            )
+            if fast_focus_preview:
+                preview_payload = self._publish_display_snapshot_only(
+                    str(payload["session_id"]),
+                    reason="focus_region_fast_display_preview",
+                )
+                if preview_payload:
+                    return self._public_session_payload(preview_payload)
             self._capture_and_analyze(str(payload["session_id"]), force=True)
         
         return self.get_session(str(payload["session_id"]))
@@ -17340,13 +17369,10 @@ class ContinuousWindowTrackerService:
             if current_display >= display_frame_id:
                 return dict(current)
             display_frame_id = max(display_frame_id, current_display + 1)
-            capture_count = max(current_capture + 1, display_frame_id)
-            current["capture_count"] = capture_count
+            display_capture_count = max(current_capture, display_frame_id)
             current.setdefault("frame_index", current_frame)
             if current_frame > 0:
                 current.setdefault("frame_id", current_frame)
-            current["last_capture_started_at"] = capture_started_iso
-            current["last_capture_started_epoch"] = capture_started_epoch
             current["display_frame_id"] = display_frame_id
             current["display_capture_epoch"] = capture_started_epoch
             current["display_published_epoch"] = display_published_epoch
@@ -17354,17 +17380,13 @@ class ContinuousWindowTrackerService:
             current["last_display_published_epoch"] = display_published_epoch
             current["display_snapshot_only_v3"] = True
             current["last_display_window_path"] = str(window_path)
-            current["last_window_path"] = str(window_path)
-            current["last_frame_path"] = str(window_path)
             current["locked_window"] = dict(descriptor)
             current["locked_title"] = str(descriptor.get("title", "") or current.get("locked_title", "") or "")
-            current["status"] = "running" if bool(current.get("tracking_enabled", False)) else str(current.get("status", "ready") or "ready")
-            current["updated_at"] = display_published_iso
             current["display_fast_path_v3"] = {
                 "schema_version": "PG_DISPLAY_FAST_PATH_V3",
                 "reason": str(reason or "display_snapshot_only"),
                 "display_frame_id": display_frame_id,
-                "capture_count": capture_count,
+                "capture_count": display_capture_count,
                 "capture_epoch": capture_started_epoch,
                 "published_epoch": display_published_epoch,
                 "window_path": str(window_path),
@@ -17374,7 +17396,7 @@ class ContinuousWindowTrackerService:
                 normalized_session_id,
                 "display_snapshot_published",
                 reason=str(reason or "display_snapshot_only"),
-                capture_count=capture_count,
+                capture_count=display_capture_count,
                 display_frame_id=display_frame_id,
                 captured_at=capture_started_iso,
                 published_at=display_published_iso,
@@ -17382,7 +17404,7 @@ class ContinuousWindowTrackerService:
             )
             return dict(current)
 
-    def capture_once(self, session_id: str) -> dict[str, Any]:
+    def capture_once(self, session_id: str, *, display_only: bool = False) -> dict[str, Any]:
         payload = self._require_session(session_id)
         normalized_session_id = str(payload["session_id"])
         before_capture_count = int(payload.get("capture_count", 0) or 0)
@@ -17409,18 +17431,26 @@ class ContinuousWindowTrackerService:
             if fast_display_capture:
                 fast_snapshot = self._publish_display_snapshot_only(
                     normalized_session_id,
-                    reason="capture_once_fast_display",
+                    reason="capture_once_display_only" if display_only else "capture_once_fast_display",
                 )
                 attempted = bool(fast_snapshot)
                 if fast_snapshot:
                     fast_after_payload = fast_snapshot
                 with self._lock:
                     worker_busy = normalized_session_id in self._active_studies
-                if not worker_busy:
+                if not display_only and not worker_busy:
                     self._ensure_worker(normalized_session_id, capture_now=True)
+            elif display_only:
+                fast_snapshot = self._publish_display_snapshot_only(
+                    normalized_session_id,
+                    reason="capture_once_display_only",
+                )
+                attempted = bool(fast_snapshot)
+                if fast_snapshot:
+                    fast_after_payload = fast_snapshot
             else:
                 attempted = self._capture_and_analyze(normalized_session_id, force=True)
-            if not attempted:
+            if not attempted and not display_only:
                 self._ensure_worker(normalized_session_id, capture_now=True)
                 attempted = True
                 deadline = time.monotonic() + max(0.5, float(self._capture_watchdog_v3.capture_once_timeout_ms) / 1000.0)
@@ -20219,11 +20249,16 @@ class ContinuousWindowTrackerService:
         session_payload: Mapping[str, Any],
         controls: Mapping[str, Any],
     ) -> dict[str, Any]:
-        enabled = bool(controls.get("scenario_generation_enabled", False))
+        requested_enabled = bool(controls.get("scenario_generation_enabled", False))
+        live_hot_path = bool(controls.get("live_execution_enabled", False)) and (
+            str(controls.get("execution_mode", "") or "").strip().lower() == "live"
+        )
+        live_override = str(os.getenv("PHOENIXGUARD_ENABLE_LIVE_SCENARIO_GENERATION", "") or "").strip().lower()
+        enabled = requested_enabled and (not live_hot_path or live_override in {"1", "true", "yes", "on"})
         base: dict[str, Any] = {
             "enabled": enabled,
             "status": "disabled" if not enabled else "idle",
-            "summary": "A* scenario generation is disabled.",
+            "summary": "A* scenario generation is disabled in the live execution hot path." if requested_enabled and not enabled else "A* scenario generation is disabled.",
             "generated_at": _now_iso(),
             "total_scenarios": 0,
             "top_scenario": {},

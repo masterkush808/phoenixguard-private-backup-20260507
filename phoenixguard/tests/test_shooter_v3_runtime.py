@@ -29,6 +29,15 @@ def _boxes() -> dict[str, dict[str, float]]:
     }
 
 
+def _rect(module: Any, *, width: int = 1000, height: int = 800) -> Any:
+    rect = module.RECT()
+    rect.left = 0
+    rect.top = 0
+    rect.right = width
+    rect.bottom = height
+    return rect
+
+
 def _packet(
     *,
     packet_id: str = "pgpkt_1",
@@ -62,9 +71,9 @@ def _packet(
         "local_direction": side,
         "current_phase": "progression",
         "progression_score": 0.99,
-        "progression": [],
-        "motifs": [],
-        "box_history": [],
+        "progression": [{"stage": "context_confirmed", "direction": side, "confidence": 0.92}],
+        "motifs": ["impulse", "pullback"],
+        "box_history": [{"label": f"H1 {side}", "bbox": [10, 10, 40, 40], "direction": side}],
         "angle_vectors": [],
         "sniper_zones": [],
         "target_zones": [],
@@ -73,6 +82,14 @@ def _packet(
         "frame_range": [max(1, frame_id - 49), frame_id],
         "candle_range": [1, 50],
         "frames_dropped": 0,
+        "entry_progression": {
+            "progression_stage": "SNIPER_READY",
+            "maturity_score": 0.9,
+            "progression_velocity": 0.34,
+            "continuation_strength": 0.84,
+            "exhaustion_risk": 0.12,
+        },
+        "sequence_history": [{"label": f"H1 {side}", "bbox": [10, 10, 40, 40]}],
     }
     return {
         "schema_version": "PG_EXECUTION_PACKET_V3",
@@ -85,6 +102,17 @@ def _packet(
         "state_version": state_version,
         "created_epoch": now - 0.1,
         "valid_until_epoch": now + 2.0,
+        "provenance": {
+            "frame_id": frame_id,
+            "capture_count": capture_count,
+            "state_version": state_version,
+            "sequence_id": sequence_context["sequence_id"],
+            "source_lock_id": f"source_lock_{frame_id}",
+            "model_health_id": f"mh_{frame_id}",
+            "chart_transform_id": f"ct_{frame_id}",
+            "created_epoch_ms": int(round((now - 0.1) * 1000.0)),
+            "valid_until_epoch_ms": int(round((now + 2.0) * 1000.0)),
+        },
         "sequence_id": sequence_context["sequence_id"],
         "sequence_signature": sequence_context["sequence_signature"],
         "sequence_length": sequence_context["sequence_length"],
@@ -163,6 +191,122 @@ def _prime_second_read(shooter: Any, state: dict[str, Any], now: float = 1000.0)
         now=now,
     )
     assert decision["reason"] == "WAITING_SECOND_LIVE_READ"
+
+
+def test_load_boxes_prefers_authoritative_user_calibration_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    shooter = _load_shooter()
+    boxes_path = tmp_path / "808_shooter_boxes.json"
+    manifest_path = tmp_path / "user_calibration_manifest.json"
+    boxes_path.write_text(
+        __import__("json").dumps(
+            {
+                "buy_icon": {"x": 0.10, "y": 0.10},
+                "sell_icon": {"x": 0.11, "y": 0.11},
+                "time_button": {"x": 0.12, "y": 0.12},
+                "hourly_input": {"x": 0.13, "y": 0.13},
+                "minute_input": {"x": 0.14, "y": 0.14},
+                "time_300": {"x": 0.15, "y": 0.15},
+                "final_screen": {"x": 0.16, "y": 0.16},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_path.write_text(
+        __import__("json").dumps(
+            {
+                "authoritative_execution_source": True,
+                "profiles": {
+                    "default": {
+                        "layouts": {
+                            "default": {
+                                "required_targets": {
+                                    "buy_button": {
+                                        "marked": True,
+                                        "status": "USER_CALIBRATED",
+                                        "source_key": "buy_icon",
+                                        "point": {"x": 0.91, "y": 0.44},
+                                    },
+                                    "sell_button": {
+                                        "marked": True,
+                                        "status": "USER_CALIBRATED",
+                                        "source_key": "sell_icon",
+                                        "point": {"x": 0.90, "y": 0.49},
+                                    },
+                                    "expiry_time_field": {
+                                        "marked": True,
+                                        "status": "USER_CALIBRATED",
+                                        "source_key": "time_button",
+                                        "point": {"x": 0.89, "y": 0.26},
+                                    },
+                                    "expiry_plus": {
+                                        "marked": True,
+                                        "status": "USER_CALIBRATED",
+                                        "source_key": "hourly_plus",
+                                        "point": {"x": 0.77, "y": 0.26},
+                                    },
+                                    "expiry_minus": {
+                                        "marked": True,
+                                        "status": "USER_CALIBRATED",
+                                        "source_key": "hourly_minus",
+                                        "point": {"x": 0.78, "y": 0.32},
+                                    },
+                                    "broker_focus_area": {
+                                        "marked": True,
+                                        "status": "USER_CALIBRATED",
+                                        "source_key": "broker_screen",
+                                        "point": {"x": 0.75, "y": 0.29},
+                                    },
+                                },
+                                "optional_targets": {},
+                            }
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(shooter, "BOXES_FILE", boxes_path)
+    monkeypatch.setattr(shooter, "CALIBRATION_MANIFEST_FILE", manifest_path)
+
+    boxes = shooter.load_boxes()
+
+    assert boxes["capabilities"]["authoritative_manifest"] is True
+    assert boxes["buy_icon"]["x"] == pytest.approx(0.91)
+    assert boxes["sell_icon"]["y"] == pytest.approx(0.49)
+    assert boxes["time_button"]["x"] == pytest.approx(0.89)
+    assert boxes["time_input"]["x"] == pytest.approx(0.89)
+    assert "hourly_input" not in boxes
+    assert "minute_input" not in boxes
+    assert "time_300" not in boxes
+    assert "final_screen" not in boxes
+    assert shooter.validate_calibration(boxes, _rect(shooter)) is True
+
+
+def test_validate_calibration_rejects_non_alias_duplicate_points() -> None:
+    shooter = _load_shooter()
+    boxes = {
+        "buy_icon": {"x": 0.80, "y": 0.40},
+        "sell_icon": {"x": 0.80, "y": 0.40},
+        "time_button": {"x": 0.70, "y": 0.20},
+    }
+
+    assert shooter.validate_calibration(boxes, _rect(shooter)) is False
+
+
+def test_validate_calibration_allows_time_button_alias_overlap() -> None:
+    shooter = _load_shooter()
+    boxes = {
+        "buy_icon": {"x": 0.80, "y": 0.40},
+        "sell_icon": {"x": 0.80, "y": 0.50},
+        "time_button": {"x": 0.70, "y": 0.20},
+        "time_input": {"x": 0.70, "y": 0.20},
+    }
+
+    assert shooter.validate_calibration(boxes, _rect(shooter)) is True
 
 
 def test_shooter_refuses_non_v3_packet() -> None:
@@ -288,6 +432,50 @@ def test_shooter_synthesizes_study_packet_from_legacy_council_result() -> None:
     assert decision["side"] == "SELL"
 
 
+def test_synthesized_study_packet_never_inherits_executable_authority() -> None:
+    shooter = _load_shooter()
+    tracker_payload = {
+        "session_id": "pocket-live-8788",
+        "state_version": 1002000,
+        "last_capture_epoch": 1002.0,
+        "decision_valid_until_epoch": 1010.0,
+        "model_council_result": {
+            "execution": {"enabled": True, "state": "EXECUTABLE", "side": "BUY"},
+            "model_council": {
+                "final_state": "EXECUTABLE",
+                "final_side": "BUY",
+                "final_execution_score": 0.91,
+                "execution_threshold": 0.70,
+            },
+            "promotion_trace": {
+                "candidate_id": "buy_candidate_001",
+                "candidate_side": "BUY",
+                "promotion_result": "EXECUTABLE",
+                "selected_lane": "MOMENTUM_ACCEPTANCE_ENTRY",
+                "lane_accepted": True,
+            },
+        },
+    }
+
+    study_packet = shooter._current_or_synthesized_model_council_study_packet(
+        tracker_payload,
+        now=1002.0,
+        max_packet_age_seconds=8.0,
+    )
+    assert study_packet is not None
+    assert study_packet["packet_type"] == "STUDY_PACKET"
+    assert study_packet["execution"]["enabled"] is False
+    assert study_packet["execution"]["state"] == "WATCHING"
+    assert study_packet["model_council"]["final_state"] == "WATCHING"
+    assert study_packet["promotion_trace"]["true_blocker"] == "EXECUTION_PACKET_NOT_PUBLISHED"
+    assert "PG_EXECUTION_PACKET_V3" in study_packet["promotion_trace"]["next_required"]
+
+    decision = shooter._v3_study_wait_decision(study_packet, now=1002.0)
+    assert decision["execution_state"] == "WATCHING"
+    assert decision["runtime_integrity"] == "WAITING_STUDY_PACKET"
+    assert decision["will_click"] is False
+
+
 def test_shooter_rejects_stale_study_packet_for_current_display() -> None:
     shooter = _load_shooter()
     stale_packet = {
@@ -381,6 +569,8 @@ def test_shooter_writes_handshake_for_study_packet(monkeypatch: pytest.MonkeyPat
         decision=decision,
         packet=study_packet,
         tracker_snapshot={"state_version": 7, "decision_version": 7, "status": "running"},
+        selected_window_hwnd=132820,
+        preferred_window_hwnd=132820,
     )
 
     payload = __import__("json").loads(handshake_path.read_text(encoding="utf-8"))
@@ -391,6 +581,24 @@ def test_shooter_writes_handshake_for_study_packet(monkeypatch: pytest.MonkeyPat
     assert payload["gate_1_second_read"] == "NOT_CHECKED"
     assert payload["selected_execution_lane"] == "MOMENTUM_ACCEPTANCE_ENTRY"
     assert payload["lane_accepted"] is False
+    assert payload["selected_window_hwnd"] == 132820
+    assert payload["preferred_window_hwnd"] == 132820
+    assert payload["window_matches_preferred"] is True
+
+
+def test_extract_model_council_packet_ignores_expired_snapshot_execution_packet() -> None:
+    shooter = _load_shooter()
+    expired_packet = _packet(packet_id="expired_snapshot_exec", now=1000.0)
+    expired_packet["valid_until_epoch"] = 999.0
+    expired_packet["valid_until_epoch_sec"] = 999.0
+
+    payload = {
+        "session_id": "pocket-live-8788",
+        "execution_packet": expired_packet,
+        "model_council_packet": expired_packet,
+    }
+
+    assert shooter._extract_model_council_packet(payload, now=1000.0) is None
 
 
 def test_study_handshake_does_not_carry_previous_action_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -555,7 +763,7 @@ def test_startup_test_entry_rejects_non_calibration_modes(monkeypatch: pytest.Mo
     assert clicked is False
 
 
-def test_startup_test_entry_clicks_once_only_in_calibration_test(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_startup_test_entry_runs_time_only_in_calibration_test(monkeypatch: pytest.MonkeyPatch) -> None:
     shooter = _load_shooter()
     args = shooter.build_parser().parse_args(
         [
@@ -622,8 +830,9 @@ def test_startup_test_entry_clicks_once_only_in_calibration_test(monkeypatch: py
     assert kwargs["behavior_report_mode"] == "CALIBRATION_TEST"
     assert kwargs["session_id"] == "pocket-live-8788"
     assert kwargs["time_button_wait_override_ms"] is None
-    assert state["v3_trade_count"] == 1
-    assert len(state["v3_executed_packet_keys"]) == 1
+    assert kwargs["skip_side_click"] is True
+    assert "v3_trade_count" not in state
+    assert "v3_executed_packet_keys" not in state
 
 
 def test_startup_calibration_test_can_force_1h45m_typed_sequence_wait(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -680,10 +889,11 @@ def test_startup_calibration_test_can_force_1h45m_typed_sequence_wait(monkeypatc
     assert packet["execution"]["time_sequence"]["target_text"] == "01:45:00"
     assert kwargs["time_button_wait_override_ms"] == 5000
     assert kwargs["record_action_evidence"] is True
-    assert state["v3_trade_count"] == 1
+    assert kwargs["skip_side_click"] is True
+    assert "v3_trade_count" not in state
 
 
-def test_startup_calibration_test_respects_trade_discipline_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_startup_calibration_test_runs_time_only_when_trade_discipline_locked(monkeypatch: pytest.MonkeyPatch) -> None:
     shooter = _load_shooter()
     args = shooter.build_parser().parse_args(
         [
@@ -706,11 +916,8 @@ def test_startup_calibration_test_respects_trade_discipline_lock(monkeypatch: py
             "expiry_seconds": 300,
         },
     )
-    monkeypatch.setattr(
-        shooter,
-        "execute_v3_packet_trade",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not click while discipline locked")),
-    )
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(shooter, "execute_v3_packet_trade", lambda *_args, **kwargs: calls.append(kwargs) or True)
     state = {"v3_locked_until": shooter.time.time() + 1200}
 
     clicked = shooter._run_startup_test_entry(
@@ -721,7 +928,9 @@ def test_startup_calibration_test_respects_trade_discipline_lock(monkeypatch: py
         state=state,
     )
 
-    assert clicked is False
+    assert clicked is True
+    assert calls[0]["skip_side_click"] is True
+    assert state["v3_locked_until"] > shooter.time.time()
 
 
 def test_startup_test_entry_waits_for_fresh_bias_before_calibration_click(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -793,7 +1002,7 @@ def test_startup_test_entry_waits_for_fresh_bias_before_calibration_click(monkey
     assert clicked is True
     assert sleeps == [0.05]
     assert clicks == [("SELL", 60)]
-    assert state["v3_trade_count"] == 1
+    assert "v3_trade_count" not in state
 
 
 def test_paper_execution_records_without_click(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1000,6 +1209,24 @@ def test_live_ready_clicks_only_when_env_identity_and_rehearsal_pass(tmp_path: P
     assert result.reason == "LIVE_READY_CLICK_SENT"
     assert clicked == ["live-ready-click"]
     assert shooter._v3_already_executed(state, packet) is True
+
+
+def test_find_pocket_option_window_prefers_locked_hwnd(monkeypatch: pytest.MonkeyPatch) -> None:
+    shooter = _load_shooter()
+    windows = [
+        (1182268, "The Most Innovative Trading Platform and 30 more pages - Personal - Microsoft Edge", "Chrome_WidgetWin_1"),
+        (132820, "The Most Innovative Trading Platform and 30 more pages - Personal - Microsoft Edge", "Chrome_WidgetWin_1"),
+    ]
+
+    def fake_list_visible_windows(query: str | None = None) -> list[tuple[int, str, str]]:
+        if not query:
+            return list(windows)
+        lowered = query.lower()
+        return [row for row in windows if lowered in row[1].lower()]
+
+    monkeypatch.setattr(shooter, "list_visible_windows", fake_list_visible_windows)
+
+    assert shooter.find_pocket_option_window("The Most Innovative Trading Platform", preferred_hwnd=132820) == 132820
 
 
 def test_calibration_test_highlights_coordinates_without_click(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1349,3 +1576,57 @@ def test_pre_click_age_check_blocks_click() -> None:
     )
     assert ok is False
     assert reason == "PRE_CLICK_PACKET_STALE"
+
+
+def test_pre_click_same_side_expiry_change_blocks_click() -> None:
+    shooter = _load_shooter()
+    original = _packet(packet_id="ready", frame_id=2, capture_count=2, state_version=2, packet_age_ms=100)
+    latest = _packet(packet_id="ready", frame_id=2, capture_count=2, state_version=2, packet_age_ms=100)
+    latest["execution"]["expiry_seconds"] = 600
+    latest["execution"]["time_sequence"]["target_seconds"] = 600
+    latest["execution"]["time_sequence"]["target_text"] = "00:10:00"
+
+    ok, reason = shooter._v3_pre_click_confirmation(
+        original,
+        latest,
+        expected_session_id="pocket-live-8788",
+        now=1000.5,
+    )
+
+    assert ok is False
+    assert reason == "PRE_CLICK_PACKET_STALE_OR_MISMATCHED"
+
+
+def test_runtime_integrity_accepts_canonical_epoch_sec_fields() -> None:
+    shooter = _load_shooter()
+    packet = _packet(packet_id="sec_only", now=1000.0)
+    packet["created_epoch_sec"] = packet.pop("created_epoch")
+    packet["valid_until_epoch_sec"] = packet.pop("valid_until_epoch")
+
+    ok, reason = shooter._v3_runtime_integrity_check(
+        packet,
+        expected_session_id="pocket-live-8788",
+        now=1000.0,
+    )
+
+    assert ok is True
+    assert reason == "RUNTIME_INTEGRITY: PASS"
+
+
+def test_manual_live_click_requires_env_and_explicit_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    shooter = _load_shooter()
+    monkeypatch.delenv(shooter.LIVE_BROKER_CLICK_ENV, raising=False)
+    monkeypatch.setattr(
+        shooter,
+        "find_pocket_option_window",
+        lambda _query: pytest.fail("manual mode should not touch the broker window unless explicitly armed"),
+    )
+    args = __import__("types").SimpleNamespace(
+        allow_live_click=False,
+        window_query="Pocket Option",
+        side="sell",
+        expiry=300,
+        amount=5,
+    )
+
+    assert shooter.run_manual(args) == 2

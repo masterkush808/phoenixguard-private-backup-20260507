@@ -1,0 +1,432 @@
+/* PhoenixGuard Theme System - Light/Dark Mode + Accent Colors */
+
+/* ============================================================================
+   DEFAULT DARK THEME WITH BLUE ACCENT
+   ============================================================================ */
+
+:root {
+  /* Light/Dark toggle (data-theme attribute) */
+  --pg-is-light: 0;
+
+  /* Base Colors (Dark) */
+  --pg-bg: #0a0a0a;
+  --pg-surface: #1a1a1a;
+  --pg-surface-variant: #2a2a2a;
+  --pg-on-bg: #f0f0f0;
+  --pg-on-surface: #e8e8e8;
+  --pg-border: #3a3a3a;
+
+  /* Primary Accent (Blue) */
+  --pg-primary: #3b82f6;
+  --pg-secondary: #1d4ed8;
+  --pg-accent: #60a5fa;
+  --pg-accent-light: #dbeafe;
+
+  /* Status Colors */
+  --pg-success: #10b981;
+  --pg-warning: #f59e0b;
+  --pg-error: #ef4444;
+  --pg-info: #3b82f6;
+
+  /* Shadow */
+  --pg-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --pg-shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --pg-shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.2);
+  --pg-shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.3);
+
+  /* Transitions */
+  --pg-transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  --pg-transition-fast: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  --pg-transition-slow: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ============================================================================
+   LIGHT THEME
+   ============================================================================ */
+
+:root[data-theme="light"] {
+  --pg-is-light: 1;
+
+  /* Light Mode Base Colors */
+  --pg-bg: #f5f5f5;
+  --pg-surface: #ffffff;
+  --pg-surface-variant: #f0f0f0;
+  --pg-on-bg: #1a1a1a;
+  --pg-on-surface: #222222;
+  --pg-border: #e0e0e0;
+
+  /* Light Mode Primary Accent (Blue) */
+  --pg-primary: #0066cc;
+  --pg-secondary: #003d99;
+  --pg-accent: #1a8cff;
+  --pg-accent-light: #e6f2ff;
+
+  /* Light Mode Status Colors */
+  --pg-success: #059669;
+  --pg-warning: #d97706;
+  --pg-error: #dc2626;
+  --pg-info: #0066cc;
+
+  /* Light Mode Shadows (lighter) */
+  --pg-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.02);
+  --pg-shadow-md: 0 4px 6px rgba(0, 0, 0, 0.05);
+  --pg-shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+  --pg-shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.15);
+}
+
+/* ============================================================================
+   ACCENT COLOR VARIANTS - PURPLE
+   ============================================================================ */
+
+:root[data-accent="purple"] {
+  --pg-primary: #a78bfa;
+  --pg-secondary: #7c3aed;
+  --pg-accent: #d8b4fe;
+  --pg-accent-light: #f3e8ff;
+}
+
+:root[data-theme="light"][data-accent="purple"] {
+  --pg-primary: #7c3aed;
+  --pg-secondary: #5b21b6;
+  --pg-accent: #a78bfa;
+  --pg-accent-light: #f3e8ff;
+}
+
+/* ============================================================================
+   ACCENT COLOR VARIANTS - EMERALD
+   ============================================================================ */
+
+:root[data-accent="emerald"] {
+  --pg-primary: #10b981;
+  --pg-secondary: #059669;
+  --pg-accent: #6ee7b7;
+  --pg-accent-light: #a7f3d0;
+}
+
+:root[data-theme="light"][data-accent="emerald"] {
+  --pg-primary: #10b981;
+  --pg-secondary: #059669;
+  --pg-accent: #34d399;
+  --pg-accent-light: #d1fae5;
+}
+
+/* ============================================================================
+   ACCENT COLOR VARIANTS - AMBER
+   ============================================================================ */
+
+:root[data-accent="amber"] {
+  --pg-primary: #f59e0b;
+  --pg-secondary: #d97706;
+  --pg-accent: #fcd34d;
+  --pg-accent-light: #fef08a;
+}
+
+:root[data-theme="light"][data-accent="amber"] {
+  --pg-primary: #d97706;
+  --pg-secondary: #b45309;
+  --pg-accent: #fbbf24;
+  --pg-accent-light: #fef3c7;
+}
+
+/* ============================================================================
+   ACCENT COLOR VARIANTS - ROSE
+   ============================================================================ */
+
+:root[data-accent="rose"] {
+  --pg-primary: #f43f5e;
+  --pg-secondary: #e11d48;
+  --pg-accent: #fb7185;
+  --pg-accent-light: #ffe4e6;
+}
+
+:root[data-theme="light"][data-accent="rose"] {
+  --pg-primary: #e11d48;
+  --pg-secondary: #9f1239;
+  --pg-accent: #fb7185;
+  --pg-accent-light: #ffe4e6;
+}
+
+/* ============================================================================
+   ACCENT COLOR VARIANTS - CYAN
+   ============================================================================ */
+
+:root[data-accent="cyan"] {
+  --pg-primary: #06b6d4;
+  --pg-secondary: #0891b2;
+  --pg-accent: #67e8f9;
+  --pg-accent-light: #cffafe;
+}
+
+:root[data-theme="light"][data-accent="cyan"] {
+  --pg-primary: #0891b2;
+  --pg-secondary: #164e63;
+  --pg-accent: #22d3ee;
+  --pg-accent-light: #cffafe;
+}
+
+/* ============================================================================
+   BODY & GLOBAL TRANSITIONS
+   ============================================================================ */
+
+body {
+  background-color: var(--pg-bg);
+  color: var(--pg-on-bg);
+  transition: background-color var(--pg-transition), color var(--pg-transition);
+}
+
+* {
+  transition: background-color var(--pg-transition), color var(--pg-transition),
+              border-color var(--pg-transition), box-shadow var(--pg-transition);
+}
+
+/* Respect user's motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ============================================================================
+   THEMED COMPONENTS
+   ============================================================================ */
+
+/* Gradio panels */
+.pg-panel {
+  background-color: var(--pg-surface);
+  border: 1px solid var(--pg-border);
+  color: var(--pg-on-surface);
+  box-shadow: var(--pg-shadow-md);
+  transition: var(--pg-transition);
+}
+
+.pg-panel:hover {
+  box-shadow: var(--pg-shadow-lg);
+  border-color: var(--pg-accent);
+}
+
+/* Control board */
+.pg-control-board,
+.pg-controls {
+  background-color: var(--pg-surface-variant);
+  border: 1px solid var(--pg-border);
+  color: var(--pg-on-surface);
+}
+
+/* Gradio buttons */
+.gradio-button,
+button[type="button"],
+button[type="submit"] {
+  background-color: var(--pg-primary);
+  color: white;
+  border: 1px solid var(--pg-primary);
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--pg-transition);
+}
+
+.gradio-button:hover,
+button[type="button"]:hover,
+button[type="submit"]:hover {
+  background-color: var(--pg-secondary);
+  border-color: var(--pg-secondary);
+  transform: translateY(-2px);
+  box-shadow: var(--pg-shadow-lg);
+}
+
+.gradio-button:active,
+button[type="button"]:active,
+button[type="submit"]:active {
+  transform: translateY(0);
+  box-shadow: var(--pg-shadow-md);
+}
+
+/* Gradio sliders */
+.gradio-slider input[type="range"] {
+  accent-color: var(--pg-primary);
+}
+
+/* Gradio textbox */
+.gradio-textbox input,
+.gradio-textbox textarea {
+  background-color: var(--pg-surface-variant);
+  color: var(--pg-on-surface);
+  border: 1px solid var(--pg-border);
+  transition: var(--pg-transition);
+}
+
+.gradio-textbox input:focus,
+.gradio-textbox textarea:focus {
+  border-color: var(--pg-accent);
+  box-shadow: 0 0 0 3px var(--pg-accent-light);
+  outline: none;
+}
+
+/* Gradio dropdown */
+.gradio-dropdown select {
+  background-color: var(--pg-surface-variant);
+  color: var(--pg-on-surface);
+  border: 1px solid var(--pg-border);
+  transition: var(--pg-transition);
+}
+
+.gradio-dropdown select:focus {
+  border-color: var(--pg-accent);
+  box-shadow: 0 0 0 3px var(--pg-accent-light);
+  outline: none;
+}
+
+/* Gradio checkboxes */
+.gradio-checkbox input[type="checkbox"] {
+  accent-color: var(--pg-primary);
+}
+
+/* Gradio accordion */
+.gradio-accordion {
+  background-color: var(--pg-surface);
+  border: 1px solid var(--pg-border);
+}
+
+.gradio-accordion > label {
+  color: var(--pg-on-surface);
+}
+
+.gradio-accordion > label:hover {
+  background-color: var(--pg-surface-variant);
+}
+
+/* Tabs */
+.gradio-tabs {
+  border-bottom: 2px solid var(--pg-border);
+}
+
+.gradio-tabs > button {
+  background-color: transparent;
+  color: var(--pg-on-surface);
+  border: none;
+  border-bottom: 3px solid transparent;
+  transition: var(--pg-transition);
+}
+
+.gradio-tabs > button.selected {
+  color: var(--pg-primary);
+  border-bottom-color: var(--pg-primary);
+}
+
+.gradio-tabs > button:hover {
+  color: var(--pg-accent);
+}
+
+/* ============================================================================
+   STATUS COLORS
+   ============================================================================ */
+
+.pg-success {
+  color: var(--pg-success);
+}
+
+.pg-warning {
+  color: var(--pg-warning);
+}
+
+.pg-error {
+  color: var(--pg-error);
+}
+
+.pg-info {
+  color: var(--pg-info);
+}
+
+/* ============================================================================
+   TOAST NOTIFICATIONS
+   ============================================================================ */
+
+.pg-toast {
+  background-color: var(--pg-surface);
+  color: var(--pg-on-surface);
+  border: 1px solid var(--pg-border);
+  border-left: 4px solid var(--pg-primary);
+  box-shadow: var(--pg-shadow-lg);
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin: 12px;
+  animation: slideInRight 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.pg-toast.success {
+  border-left-color: var(--pg-success);
+}
+
+.pg-toast.warning {
+  border-left-color: var(--pg-warning);
+}
+
+.pg-toast.error {
+  border-left-color: var(--pg-error);
+}
+
+/* ============================================================================
+   MODAL/DIALOG
+   ============================================================================ */
+
+.pg-modal {
+  background-color: var(--pg-surface);
+  color: var(--pg-on-surface);
+  border: 1px solid var(--pg-border);
+  box-shadow: var(--pg-shadow-xl);
+  border-radius: 8px;
+}
+
+.pg-modal-overlay {
+  background-color: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+}
+
+/* ============================================================================
+   CODE BLOCKS
+   ============================================================================ */
+
+code,
+pre {
+  background-color: var(--pg-surface-variant);
+  color: var(--pg-on-surface);
+  border: 1px solid var(--pg-border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+pre {
+  padding: 12px;
+  overflow-x: auto;
+}
+
+/* ============================================================================
+   SCROLLBAR THEMING
+   ============================================================================ */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background-color: var(--pg-surface-variant);
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--pg-border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--pg-accent);
+}
+
+/* Firefox */
+* {
+  scrollbar-color: var(--pg-border) var(--pg-surface-variant);
+  scrollbar-width: thin;
+}

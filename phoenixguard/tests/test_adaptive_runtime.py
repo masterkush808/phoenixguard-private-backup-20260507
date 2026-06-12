@@ -15,6 +15,7 @@ if str(_REPO) not in sys.path:
 from phoenixguard.runtime.adaptive_runtime import (
     ContinualLearningManager,
     OpenSetDetector,
+    _summarize_grounded_structure,
     build_artifact_summary,
     build_grounded_chart,
 )
@@ -150,6 +151,24 @@ def test_continual_learning_feedback_updates_adapter_bank() -> None:
         assert str(replay["snapshot_path"]) == str(feedback_path)
         assert str(replay["inference_snapshot_path"]).endswith(".png")
         assert str(replay["feedback_image_path"]) == str(feedback_path)
+        assert not list(Path(td).rglob("*.tmp"))
+
+
+def test_derive_context_key_includes_pair_identity_when_available() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        manager = ContinualLearningManager(Path(td), _NullLogger(), replay_buffer_size=10)
+
+        legacy_key = manager.derive_context_key(
+            {"dark_theme": 1.0, "aspect_ratio": 1.7, "candle_density": 0.5},
+            chart_state={"timeframe": "m15", "structure_setup": "reversal"},
+        )
+        paired_key = manager.derive_context_key(
+            {"dark_theme": 1.0, "aspect_ratio": 1.7, "candle_density": 0.5},
+            chart_state={"timeframe": "m15", "structure_setup": "reversal", "symbol": "EURUSD"},
+        )
+
+        assert legacy_key == "dark|wide|mid|M15|reversal"
+        assert paired_key == "dark|wide|mid|M15|reversal|eurusd"
 
 
 def test_grounded_chart_merges_optional_backend_regions() -> None:
@@ -288,3 +307,32 @@ def test_grounded_chart_structure_summary_tracks_directional_bias() -> None:
     assert float(structure["support_strength"]) > 0.0
     assert float(structure["breakout_strength"]) > 0.0
     assert str(structure["structure_bias_direction"]) == "BUY"
+
+
+def test_grounded_structure_respects_bearish_breakout_direction() -> None:
+    structure = _summarize_grounded_structure(
+        objects=[],
+        zones=[
+            {
+                "kind": "sequence_box",
+                "box_type": "impulse",
+                "direction": "SELL",
+                "confidence": 0.86,
+            }
+        ],
+        current_box={"box_type": "impulse", "direction": "SELL", "confidence": 0.82, "consolidation_score": 0.14},
+        next_boxes=[{"box_type": "impulse", "direction": "SELL", "confidence": 0.79}],
+        sequence_state={
+            "spacing_consistency": 0.72,
+            "box_sequence_agreement": 0.78,
+            "path_clarity": 0.81,
+            "continuation_probability": 0.69,
+            "reversal_probability": 0.18,
+            "fakeout_probability": 0.11,
+        },
+        chart_geometry={"geometry_confidence": 0.74},
+    )
+
+    assert float(structure["breakout_strength"]) > 0.0
+    assert float(structure["sell_pressure"]) > float(structure["buy_pressure"])
+    assert str(structure["structure_bias_direction"]) == "SELL"

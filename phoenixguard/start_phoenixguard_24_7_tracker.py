@@ -78,6 +78,48 @@ def _health_recovers(base_url: str, *, attempts: int = 6, delay_sec: float = 5.0
     return False
 
 
+def _live_fast_display_heartbeat(
+    base_url: str,
+    session_id: str,
+    session: dict[str, Any],
+    *,
+    last_heartbeat_epoch: float,
+) -> float:
+    """Keep the broker display buffer fresh while the study worker is busy."""
+    controls = session.get("execution_controls", {})
+    if not isinstance(controls, dict):
+        controls = {}
+    live_mode = bool(controls.get("live_execution_enabled", False)) or str(
+        controls.get("execution_mode", "shadow") or "shadow"
+    ).strip().lower() == "live"
+    if not live_mode or not bool(session.get("tracking_enabled", False)):
+        return last_heartbeat_epoch
+    enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", "1") or "1").strip().lower()
+    if enabled in {"0", "false", "off", "no"}:
+        return last_heartbeat_epoch
+    try:
+        interval_sec = max(0.2, float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC", "0.5") or "0.5"))
+    except ValueError:
+        interval_sec = 1.0
+    now = time.time()
+    if now - float(last_heartbeat_epoch or 0.0) < interval_sec:
+        return last_heartbeat_epoch
+    try:
+        timeout_sec = max(1, int(float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC", "3") or "3")))
+    except ValueError:
+        timeout_sec = 3
+    try:
+        _request_json(
+            base_url,
+            f"/v1/mobile/window-tracker/sessions/{session_id}/capture-once?display_only=1",
+            method="POST",
+            timeout=timeout_sec,
+        )
+        return now
+    except Exception:
+        return now
+
+
 def _parse_focus_region(raw: str | None) -> list[float] | None:
     text = str(raw or "").strip()
     if not text:
@@ -474,16 +516,17 @@ def main() -> int:
     os.environ.setdefault("PHOENIXGUARD_LIVE_STATE_CACHE_TTL_SEC", "0.25")
     os.environ.setdefault("PHOENIXGUARD_FRONTEND_HEARTBEAT_STALE_SEC", "8.0")
     os.environ.setdefault("PHOENIXGUARD_CAPTURE_ONCE_FAST_DISPLAY", "1")
-    os.environ.setdefault("PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL", "1")
+    os.environ.setdefault("PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL", "0")
     os.environ.setdefault("PHOENIXGUARD_LIVE_WINDOW_JPEG", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_WINDOW_JPEG_QUALITY", "78")
-    os.environ.setdefault("PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS", "0")
-    os.environ.setdefault("PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N", "1")
+    os.environ.setdefault("PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS", "1")
+    os.environ.setdefault("PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N", "300")
     os.environ.setdefault("PHOENIXGUARD_TRUST_LOCKED_WINDOW_DESCRIPTOR", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_MIN_CAPTURE_INTERVAL_SEC", "0.5")
     base_url = f"http://{args.host}:{args.port}"
     dashboard_url = f"{base_url}/v1/mobile/window-tracker/dashboard/{args.session_id}"
+    configured_focus_region = _parse_focus_region(args.focus_region)
     status_path = Path(args.status_file)
     consecutive_restart_count = 0
     consecutive_session_read_failures = 0
@@ -518,7 +561,7 @@ def main() -> int:
                     args.capture_interval,
                     args.wait_for_lock,
                     args.window_query,
-                    _parse_focus_region(args.focus_region),
+                    configured_focus_region,
                 )
             except Exception as exc:
                 _stop_process(api_proc)
@@ -582,6 +625,31 @@ def main() -> int:
                             consecutive_restart_count += 1
                             break
                         continue
+                    if configured_focus_region is not None and not tracker_focus_is_locked(session):
+                        try:
+                            session = _request_json(
+                                base_url,
+                                f"/v1/mobile/window-tracker/sessions/{args.session_id}/focus-region",
+                                method="PUT",
+                                payload={
+                                    "normalized_bbox": configured_focus_region,
+                                    "source": "launcher_auto_chart_region_relock",
+                                },
+                                timeout=30,
+                            )
+                            consecutive_session_read_failures = 0
+                        except Exception as exc:
+                            consecutive_session_read_failures += 1
+                            print(
+                                f"Tracker focus relock failed while waiting for lock "
+                                f"({consecutive_session_read_failures}/{args.session_read_failures}): {exc}",
+                                flush=True,
+                            )
+                            if consecutive_session_read_failures >= max(1, args.session_read_failures):
+                                _stop_process(api_proc)
+                                consecutive_restart_count += 1
+                                break
+                            continue
                     if tracker_focus_is_locked(session):
                         session = _ensure_session(
                             base_url,
@@ -589,7 +657,7 @@ def main() -> int:
                             args.capture_interval,
                             False,
                             args.window_query,
-                            _parse_focus_region(args.focus_region),
+                            configured_focus_region,
                         )
                         consecutive_session_read_failures = 0
                         break
@@ -622,8 +690,18 @@ def main() -> int:
                 "decision_valid_until_epoch": session.get("decision_valid_until_epoch", 0.0),
             }, indent=2, ensure_ascii=True))
 
+            last_fast_display_heartbeat_epoch = 0.0
             while True:
-                time.sleep(10.0)
+                for _ in range(10):
+                    time.sleep(1.0)
+                    if api_proc.poll() is not None:
+                        break
+                    last_fast_display_heartbeat_epoch = _live_fast_display_heartbeat(
+                        base_url,
+                        args.session_id,
+                        session,
+                        last_heartbeat_epoch=last_fast_display_heartbeat_epoch,
+                    )
                 if api_proc.poll() is not None:
                     consecutive_restart_count += 1
                     print(f"Mobile API exited with code {api_proc.returncode}; restarting.")
@@ -663,6 +741,32 @@ def main() -> int:
                         f"(attempt {consecutive_restart_count})."
                     )
                     break
+                if configured_focus_region is not None and not tracker_focus_is_locked(session):
+                    print(
+                        "Tracker focus lock is missing; reapplying configured broker focus region.",
+                        flush=True,
+                    )
+                    try:
+                        session = _request_json(
+                            base_url,
+                            f"/v1/mobile/window-tracker/sessions/{args.session_id}/focus-region",
+                            method="PUT",
+                            payload={
+                                "normalized_bbox": configured_focus_region,
+                                "source": "launcher_auto_chart_region_relock",
+                            },
+                            timeout=30,
+                        )
+                        consecutive_session_read_failures = 0
+                    except Exception as exc:
+                        consecutive_restart_count += 1
+                        print(
+                            f"Tracker focus relock failed; restarting mobile API "
+                            f"(attempt {consecutive_restart_count}): {exc}",
+                            flush=True,
+                        )
+                        _stop_process(api_proc)
+                        break
                 runtime_state = _runtime_state_for_session(session, args.capture_interval)
                 if not tracker_session_is_running(session):
                     print(

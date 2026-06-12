@@ -13,6 +13,8 @@ INTERPRETER_SCHEMA = [
     "forecast_range",
     "decision_state",
     "execution_permission",
+    "active_trade_state",
+    "directional_intent",
     "confidence_level",
     "confidence_band",
     "action_bias",
@@ -27,6 +29,13 @@ INTERPRETER_SCHEMA = [
 ]
 
 _VALID_ACTIONS = {"BUY", "SELL", "HOLD"}
+_VALID_ACTIVE_TRADE_STATES = {
+    "BUY_NOW",
+    "BUY_ON_CONFIRMATION",
+    "SELL_NOW",
+    "SELL_ON_CONFIRMATION",
+    "HOLD_TRUE",
+}
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
@@ -62,6 +71,23 @@ def _confidence_band(confidence: float) -> str:
     if confidence >= 0.45:
         return "guarded"
     return "low"
+
+
+def _safe_active_trade_state(value: Any, default: str = "HOLD_TRUE") -> str:
+    state = str(value or "").strip().upper()
+    return state if state in _VALID_ACTIVE_TRADE_STATES else default
+
+
+def _active_trade_plan(state: str, confidence_band: str) -> str:
+    if state == "BUY_NOW":
+        return f"Buy now with {confidence_band} conviction"
+    if state == "SELL_NOW":
+        return f"Sell now with {confidence_band} conviction"
+    if state == "BUY_ON_CONFIRMATION":
+        return "Long bias is active; enter only on structural confirmation"
+    if state == "SELL_ON_CONFIRMATION":
+        return "Short bias is active; enter only on structural confirmation"
+    return "Hold until the projection, gates, and execution checks tighten up"
 
 
 def _memory_quality_label(memory: Mapping[str, Any]) -> str:
@@ -112,7 +138,7 @@ def interpret(fusion: Mapping[str, Any]) -> dict[str, Any]:
     structure_summary = str(cv.get("structure", cv.get("notes", "Structure unavailable")) or "Structure unavailable").strip()
     memory_match_quality = str(memory.get("match_quality", "") or "").strip().lower() or _memory_quality_label(memory)
     forecast_direction = _safe_action(
-        forecast.get("direction", ensemble.get("trade_bias", ensemble.get("action", rl.get("action", "HOLD")))),
+        forecast.get("direction", ensemble.get("trade_bias", ensemble.get("execution_action", ensemble.get("action", rl.get("action", "HOLD"))))),
         default="HOLD",
     )
     forecast_magnitude = _finite_float(forecast.get("magnitude", forecast.get("q50", 0.0)), 0.0)
@@ -123,14 +149,22 @@ def interpret(fusion: Mapping[str, Any]) -> dict[str, Any]:
     confidence_level = _clip01(ensemble.get("confidence", 0.0), 0.0)
     confidence_band = _confidence_band(confidence_level)
     action_bias = _safe_action(
-        ensemble.get("trade_bias", rl.get("action", ensemble.get("action", "HOLD"))),
+        ensemble.get("trade_bias", ensemble.get("execution_action", rl.get("action", ensemble.get("action", "HOLD")))),
         default="HOLD",
     )
+    directional_intent = _safe_action(ensemble.get("directional_intent", action_bias), default=action_bias)
     final_action = _safe_action(ensemble.get("action", action_bias), default=action_bias)
     decision_state = str(ensemble.get("decision_state", "UNCERTAIN") or "UNCERTAIN").strip().upper()
     execution_permission = str(
         ensemble.get("execution_permission", "WAIT_FOR_CONFIRMATION") or "WAIT_FOR_CONFIRMATION"
     ).strip().upper()
+    raw_active_trade_state = str(ensemble.get("active_trade_state", "") or "").strip().upper()
+    if raw_active_trade_state:
+        active_trade_state = _safe_active_trade_state(raw_active_trade_state)
+    elif final_action in {"BUY", "SELL"}:
+        active_trade_state = f"{final_action}_{'NOW' if execution_permission == 'EXECUTE' else 'ON_CONFIRMATION'}"
+    else:
+        active_trade_state = "HOLD_TRUE"
 
     gates_passing = int(_finite_float(gates.get("passing", 0), 0.0))
     gates_total = max(int(_finite_float(gates.get("total", 0), 0.0)), gates_passing, 0)
@@ -159,6 +193,8 @@ def interpret(fusion: Mapping[str, Any]) -> dict[str, Any]:
     projection_direction = _safe_action(context.get("projection_direction", forecast_direction), default=forecast_direction)
     rationale_parts = [
         f"bias={action_bias}",
+        f"intent={directional_intent}",
+        f"active={active_trade_state}",
         f"projection={projection_direction}",
         f"memory={memory_direction}",
         f"gates={gate_alignment}",
@@ -167,16 +203,12 @@ def interpret(fusion: Mapping[str, Any]) -> dict[str, Any]:
         rationale_parts.append(f"support={support_alignment}")
     rationale = "; ".join(rationale_parts)
 
-    trade_plan = (
-        f"{final_action} with {confidence_band} conviction"
-        if final_action in {"BUY", "SELL"}
-        else "Hold until the projection, gates, and execution checks tighten up"
-    )
-    if execution_permission != "EXECUTE":
+    trade_plan = _active_trade_plan(active_trade_state, confidence_band)
+    if execution_permission != "EXECUTE" and active_trade_state in {"BUY_NOW", "SELL_NOW", "HOLD_TRUE"}:
         trade_plan += f"; execution={execution_permission.lower().replace('_', ' ')}"
 
     human_lines = [
-        f"Action: {final_action} | Bias: {action_bias} | State: {decision_state} | Execution: {execution_permission}",
+        f"Action: {final_action} | Bias: {action_bias} | Intent: {directional_intent} | Active: {active_trade_state} | State: {decision_state} | Execution: {execution_permission}",
         f"Setup: {setup_type}",
         f"Structure: {structure_summary}",
         (
@@ -204,6 +236,8 @@ def interpret(fusion: Mapping[str, Any]) -> dict[str, Any]:
         "forecast_range": forecast_range,
         "decision_state": decision_state,
         "execution_permission": execution_permission,
+        "active_trade_state": active_trade_state,
+        "directional_intent": directional_intent,
         "confidence_level": confidence_level,
         "confidence_band": confidence_band,
         "action_bias": action_bias,
@@ -223,4 +257,3 @@ def interpret(fusion: Mapping[str, Any]) -> dict[str, Any]:
         "human": "\n".join(human_lines),
         "schema": list(INTERPRETER_SCHEMA),
     }
-

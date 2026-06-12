@@ -984,7 +984,7 @@ def _resolve_execution_lane(
             and hf_side == side
             and _upper(snapshot.get("timeframe")) == "M5"
             and _bool(hf_cycle.get("forecast_agreement"))
-            and _bool(hf_cycle.get("uses_unseen_future_candles"))
+            and _bool(hf_cycle.get("targets_future_candle_window"))
         )
         hf_blockers: list[str] = []
         if side not in {"BUY", "SELL"}:
@@ -1017,7 +1017,7 @@ def _resolve_execution_lane(
             "accepted": hf_accepted,
             "side": side if side in {"BUY", "SELL"} else "HOLD",
             "reason": (
-                f"{side} accepted from the closed M5 candle boundary for the next two unseen candles."
+                f"{side} accepted from the closed M5 candle boundary for the next two-candle study window."
                 if hf_accepted
                 else str(hf_cycle.get("reason") or "; ".join(hf_blockers) or "High-frequency two-candle cycle is waiting.")
             ),
@@ -2461,7 +2461,7 @@ def evaluate_model_council_v3(
     council["frames_used"] = sequence_context_payload["frames_used"]
     council["sequence_status"] = sequence_context_payload["sequence_status"]
     council["sequence_confidence"] = sequence_context_payload["sequence_confidence"]
-    if sequence_context.sequence_status != "COMPLETE":
+    if not bool(sequence_readiness.get("ready")):
         executable = False
         block_reason = "SEQUENCE_CONTEXT"
         blocked_by = block_reason

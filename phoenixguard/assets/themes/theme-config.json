@@ -1,0 +1,107 @@
+{
+  "themes": {
+    "light": {
+      "name": "Light",
+      "icon": "☀️",
+      "baseColors": {
+        "background": "#f5f5f5",
+        "surface": "#ffffff",
+        "surfaceVariant": "#f0f0f0",
+        "onBackground": "#1a1a1a",
+        "onSurface": "#222222",
+        "border": "#e0e0e0"
+      },
+      "accents": {
+        "blue": {
+          "primary": "#0066cc",
+          "secondary": "#003d99",
+          "accent": "#1a8cff",
+          "light": "#e6f2ff"
+        },
+        "purple": {
+          "primary": "#7c3aed",
+          "secondary": "#5b21b6",
+          "accent": "#a78bfa",
+          "light": "#f3e8ff"
+        },
+        "emerald": {
+          "primary": "#10b981",
+          "secondary": "#059669",
+          "accent": "#34d399",
+          "light": "#d1fae5"
+        },
+        "amber": {
+          "primary": "#d97706",
+          "secondary": "#b45309",
+          "accent": "#fbbf24",
+          "light": "#fef3c7"
+        },
+        "rose": {
+          "primary": "#e11d48",
+          "secondary": "#9f1239",
+          "accent": "#fb7185",
+          "light": "#ffe4e6"
+        },
+        "cyan": {
+          "primary": "#0891b2",
+          "secondary": "#164e63",
+          "accent": "#22d3ee",
+          "light": "#cffafe"
+        }
+      }
+    },
+    "dark": {
+      "name": "Dark",
+      "icon": "🌙",
+      "baseColors": {
+        "background": "#0a0a0a",
+        "surface": "#1a1a1a",
+        "surfaceVariant": "#2a2a2a",
+        "onBackground": "#f0f0f0",
+        "onSurface": "#e8e8e8",
+        "border": "#3a3a3a"
+      },
+      "accents": {
+        "blue": {
+          "primary": "#3b82f6",
+          "secondary": "#1d4ed8",
+          "accent": "#60a5fa",
+          "light": "#dbeafe"
+        },
+        "purple": {
+          "primary": "#a78bfa",
+          "secondary": "#7c3aed",
+          "accent": "#d8b4fe",
+          "light": "#f3e8ff"
+        },
+        "emerald": {
+          "primary": "#10b981",
+          "secondary": "#059669",
+          "accent": "#6ee7b7",
+          "light": "#a7f3d0"
+        },
+        "amber": {
+          "primary": "#f59e0b",
+          "secondary": "#d97706",
+          "accent": "#fcd34d",
+          "light": "#fef08a"
+        },
+        "rose": {
+          "primary": "#f43f5e",
+          "secondary": "#e11d48",
+          "accent": "#fb7185",
+          "light": "#ffe4e6"
+        },
+        "cyan": {
+          "primary": "#06b6d4",
+          "secondary": "#0891b2",
+          "accent": "#67e8f9",
+          "light": "#cffafe"
+        }
+      }
+    }
+  },
+  "defaultTheme": "dark",
+  "defaultAccent": "blue",
+  "accents": ["blue", "purple", "emerald", "amber", "rose", "cyan"]
+}

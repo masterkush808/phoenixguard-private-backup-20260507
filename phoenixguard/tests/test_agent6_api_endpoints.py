@@ -1,0 +1,26 @@
+from fastapi.testclient import TestClient
+from phoenixguard.mobile_api.app import create_app
+from phoenixguard.vision.market_registry import merge_market_objects
+
+
+client = TestClient(create_app())
+
+
+def test_registry_active_endpoint(tmp_path):
+    session = "test-api-session-1"
+    o = {"id": "api_o1", "bbox": [0, 0, 10, 10], "confidence": 0.9}
+    merge_market_objects(session, [o])
+    resp = client.get(f"/v1/mobile/registry/sessions/{session}/active")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload.get("session_id") == session
+    assert payload.get("count", 0) >= 1
+
+
+def test_visual_health_endpoint(tmp_path):
+    session = "test-api-session-1"
+    resp = client.get(f"/v1/mobile/visual/health/v3?session_id={session}")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload.get("schema_version") == "PG_VISUAL_HEALTH_V3"
+    assert "registry" in payload

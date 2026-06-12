@@ -1,0 +1,317 @@
+// Minimal overlay skeleton: polls active overlays and draws on canvas
+(function(){
+  // Attempt to dynamically import the placement module for better behavior; fall back to window global
+  let OverlayPlacementModule = null;
+  const API_BASE = (typeof window !== 'undefined' && window.__overlaySkeletonBase)
+    ? window.__overlaySkeletonBase
+    : ((typeof location !== 'undefined' && location.protocol === 'file:') ? 'http://127.0.0.1:8793' : '');
+  function apiPath(path){
+    return `${API_BASE}${path}`;
+  }
+  function resolveUrl(url){
+    if(!url) return url;
+    if(/^https?:\/\//i.test(url) || /^file:/i.test(url)) return url;
+    if(url.startsWith('/')) return apiPath(url);
+    return `${API_BASE}/${url}`;
+  }
+  (async ()=>{
+    try{
+      OverlayPlacementModule = await import(apiPath('/v1/mobile/window-tracker/assets/js/overlay_placement.esm.js'));
+      // also expose globally for legacy consumers
+      if (typeof window !== 'undefined') window.OverlayPlacement = OverlayPlacementModule;
+    }catch(e){ /* ignore - fallback will use window.OverlayPlacement if present */ }
+  })();
+
+  async function fetchActive(sessionId){
+    const resp = await fetch(apiPath(`/v1/mobile/registry/sessions/${sessionId}/active`));
+    if(!resp.ok) return null;
+    return await resp.json();
+  }
+  async function fetchFrame(sessionId){
+    try{
+      const candidates = [
+        apiPath(`/v1/mobile/window-tracker/sessions/${sessionId}/artifacts/latest-window`),
+        apiPath(`/v1/mobile/window-tracker/sessions/${sessionId}/artifacts/latest-full-overlay`),
+        apiPath(`/v1/mobile/frame/latest.png?session_id=${sessionId}`),
+      ];
+      for(const candidate of candidates){
+        const imgResp = await fetch(candidate);
+        if(!imgResp.ok) continue;
+        const blob = await imgResp.blob();
+        return URL.createObjectURL(blob);
+      }
+    }catch(e){return null}
+    return null;
+  }
+  function draw(overlays, canvas, chartTransform, backgroundImage){
+    if(!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const chartBounds = chartTransform && Array.isArray(chartTransform.chart_image_bounds) ? chartTransform.chart_image_bounds : null;
+    const targetWidth = backgroundImage && backgroundImage.naturalWidth
+      ? backgroundImage.naturalWidth
+      : (chartBounds && Number(chartBounds[2]) > 0 ? Math.round(Number(chartBounds[2])) : canvas.width);
+    const targetHeight = backgroundImage && backgroundImage.naturalHeight
+      ? backgroundImage.naturalHeight
+      : (chartBounds && Number(chartBounds[3]) > 0 ? Math.round(Number(chartBounds[3])) : canvas.height);
+    if(canvas.width !== targetWidth || canvas.height !== targetHeight){
+      canvas.width = Math.max(1, targetWidth);
+      canvas.height = Math.max(1, targetHeight);
+    }
+    ctx.clearRect(0,0,canvas.width, canvas.height);
+    if(backgroundImage && backgroundImage.complete && backgroundImage.naturalWidth > 0){
+      ctx.drawImage(backgroundImage, 0, 0, canvas.width, canvas.height);
+    }
+    const opts = (window.__overlaySkeleton && window.__overlaySkeleton.options) || { tighten: true, labelMode: 'semantic' };
+    // Prepare geometries for deterministic label placement using priority and nudging
+    const objs = Array.isArray(overlays) ? overlays.slice(0) : [];
+    const layerWeights = (OverlayPlacementModule && OverlayPlacementModule.layerWeights) || (window && window.OverlayPlacement && window.OverlayPlacement.layerWeights) || {
+      broker_controls: 5, active_council_decision: 4, trigger_zones: 3, target_level: 3, major_swings: 2.5,
+      supply_demand: 2, local_swings: 2, recent_candles: 1.5, historical_replay: 1, diagnostics: 0.5
+    };
+
+    const entries = [];
+    for(const obj of objs){
+      try{
+        let bbox = obj.bbox || obj.normalized_bbox || obj.normalized || [0,0,0,0];
+        const isNormalized = Array.isArray(bbox) && bbox.every(v=>typeof v==='number' && v>=0 && v<=1);
+        let x1,y1,x2,y2;
+        if(isNormalized){
+          if(chartTransform && chartTransform.chart_image_bounds){
+            const cib = chartTransform.chart_image_bounds;
+            const c_w = (cib[2] - (cib[0]||0)) || cib[2] || canvas.width;
+            const c_h = (cib[3] - (cib[1]||0)) || cib[3] || canvas.height;
+            const cx0 = cib[0] || 0;
+            const cy0 = cib[1] || 0;
+            const px0 = Math.floor((cx0 + bbox[0] * c_w) * (canvas.width / Math.max(1, c_w)));
+            const py0 = Math.floor((cy0 + bbox[1] * c_h) * (canvas.height / Math.max(1, c_h)));
+            const px1 = Math.ceil((cx0 + bbox[2] * c_w) * (canvas.width / Math.max(1, c_w)));
+            const py1 = Math.ceil((cy0 + bbox[3] * c_h) * (canvas.height / Math.max(1, c_h)));
+            x1 = px0; y1 = py0; x2 = px1; y2 = py1;
+          }else{
+            x1 = Math.floor(bbox[0]*canvas.width);
+            y1 = Math.floor(bbox[1]*canvas.height);
+            x2 = Math.ceil(bbox[2]*canvas.width);
+            y2 = Math.ceil(bbox[3]*canvas.height);
+          }
+        }else{
+          // bbox is provided in chart-image pixel coordinates. Scale to canvas using chartTransform if available.
+          if(chartTransform && chartTransform.chart_image_bounds){
+            const cib = chartTransform.chart_image_bounds;
+            const c_w = (cib[2] - (cib[0]||0)) || cib[2] || canvas.width;
+            const c_h = (cib[3] - (cib[1]||0)) || cib[3] || canvas.height;
+            const cx0 = cib[0] || 0;
+            const cy0 = cib[1] || 0;
+            const scaleX = canvas.width / Math.max(1, c_w);
+            const scaleY = canvas.height / Math.max(1, c_h);
+            x1 = Math.floor(( (bbox[0]||0) - cx0) * scaleX);
+            y1 = Math.floor(( (bbox[1]||0) - cy0) * scaleY);
+            x2 = Math.ceil(( (bbox[2]||0) - cx0) * scaleX);
+            y2 = Math.ceil(( (bbox[3]||0) - cy0) * scaleY);
+          }else{
+            x1 = Math.floor(bbox[0]||0);
+            y1 = Math.floor(bbox[1]||0);
+            x2 = Math.ceil(bbox[2]||0);
+            y2 = Math.ceil(bbox[3]||0);
+          }
+        }
+        // compute a tighter bbox when requested and available
+        function applyTightness(x1,y1,x2,y2){
+          try{
+            // prefer explicit tight bbox fields if provided
+            const t = obj.tight_bbox || obj.tight_normalized;
+            if(t && Array.isArray(t) && t.length===4){
+              // if normalized (0..1), map to canvas via chart_transform if available
+              const isNorm = t.every(v=>typeof v==='number' && v>=0 && v<=1);
+              if(isNorm){
+                if(chartTransform && chartTransform.chart_image_bounds){
+                  const cib = chartTransform.chart_image_bounds;
+                  const c_w = (cib[2] - (cib[0]||0)) || cib[2] || canvas.width;
+                  const c_h = (cib[3] - (cib[1]||0)) || cib[3] || canvas.height;
+                  const cx0 = cib[0] || 0;
+                  const cy0 = cib[1] || 0;
+                  const scaleX = canvas.width / Math.max(1, c_w);
+                  const scaleY = canvas.height / Math.max(1, c_h);
+                  const nx1 = Math.floor((cx0 + t[0]*c_w - cx0) * scaleX);
+                  const ny1 = Math.floor((cy0 + t[1]*c_h - cy0) * scaleY);
+                  const nx2 = Math.ceil((cx0 + t[2]*c_w - cx0) * scaleX);
+                  const ny2 = Math.ceil((cy0 + t[3]*c_h - cy0) * scaleY);
+                  return [nx1,ny1,nx2,ny2];
+                }
+                return [Math.floor(t[0]*canvas.width), Math.floor(t[1]*canvas.height), Math.ceil(t[2]*canvas.width), Math.ceil(t[3]*canvas.height)];
+              }
+              // t provided in absolute chart image pixels; scale if chartTransform present
+              if(chartTransform && chartTransform.chart_image_bounds){
+                const cib = chartTransform.chart_image_bounds;
+                const c_w = (cib[2] - (cib[0]||0)) || cib[2] || canvas.width;
+                const c_h = (cib[3] - (cib[1]||0)) || cib[3] || canvas.height;
+                const cx0 = cib[0] || 0;
+                const cy0 = cib[1] || 0;
+                const scaleX = canvas.width / Math.max(1, c_w);
+                const scaleY = canvas.height / Math.max(1, c_h);
+                const nx1 = Math.floor(((t[0]||0) - cx0) * scaleX);
+                const ny1 = Math.floor(((t[1]||0) - cy0) * scaleY);
+                const nx2 = Math.ceil(((t[2]||0) - cx0) * scaleX);
+                const ny2 = Math.ceil(((t[3]||0) - cy0) * scaleY);
+                return [nx1,ny1,nx2,ny2];
+              }
+              return [Math.floor(t[0]||0), Math.floor(t[1]||0), Math.ceil(t[2]||0), Math.ceil(t[3]||0)];
+            }
+            if(!opts.tighten) return [x1,y1,x2,y2];
+            // shrink the box slightly to make it tighter
+            const w = Math.max(1, x2-x1);
+            const h = Math.max(1, y2-y1);
+            const padX = Math.max(1, Math.floor(w*0.04));
+            const padY = Math.max(1, Math.floor(h*0.04));
+            return [x1+padX, y1+padY, x2-padX, y2-padY];
+          }catch(e){ return [x1,y1,x2,y2]; }
+        }
+        [x1,y1,x2,y2] = applyTightness(x1,y1,x2,y2);
+
+        // map overlay object to a human-friendly semantic label when requested
+        function semanticLabel(o){
+          if(!opts.labelMode || opts.labelMode!=='semantic') return null;
+          const s = (o.semantic || o.label || o.role || o.type || '').toString().toLowerCase();
+          const classHint = (o.cls || o.class || o.category || '').toString().toLowerCase();
+          if(/pullback|pull back|pull-back/.test(s) || /pullback|pull back|pull-back/.test(classHint)) return 'Pullback';
+          if(/continuation|continue/.test(s) || /continuation/.test(classHint)) return 'Continuation';
+          if(/rest|resting|pause|consolidat/.test(s) || /rest|pause|consolidat/.test(classHint)) return 'Resting';
+          if(/buy|long/.test(s) || /buy|long/.test(classHint)) return 'Buy';
+          if(/sell|short/.test(s) || /sell|short/.test(classHint)) return 'Sell';
+          if(/support/.test(s) || /support/.test(classHint)) return 'Support';
+          if(/resistance/.test(s) || /resist/.test(classHint)) return 'Resistance';
+          if(/target|takeprofit|tp/.test(s)) return 'Target';
+          if(/trigger|entry|reclaim|cancel|invalidate/.test(s)){
+            if(/reclaim/.test(s)) return 'Reclaim Trigger';
+            if(/cancel|invalidate/.test(s)) return 'Cancel/Invalidate';
+            return 'Trigger';
+          }
+          // fallback to id/overlay_id with capitalization
+          const id = (o.id || o.overlay_id || o.label || '').toString();
+          return id ? id.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase()) : 'Overlay';
+        }
+        try{
+          if (OverlayPlacementModule && typeof OverlayPlacementModule.computePriority === 'function'){
+            priority = OverlayPlacementModule.computePriority(obj);
+          } else if (window && window.OverlayPlacement && typeof window.OverlayPlacement.computePriority === 'function'){
+            priority = window.OverlayPlacement.computePriority(obj);
+          } else {
+            const conf = Number(obj.confidence || obj.score || 0) || 0;
+            const visDef = obj.visible_default === true ? 1 : 0;
+            const lay = obj.layer || obj.type || 'default';
+            const lw = Number(layerWeights[lay] || 0);
+            priority = conf * 100 + visDef * 50 + lw * 10;
+          }
+        }catch(e){ priority = 0; }
+        const label = (obj.label && !opts.labelMode) ? String(obj.label) : semanticLabel(obj) || String(obj.id || obj.overlay_id || 'obj');
+        entries.push({obj, x1,y1,x2,y2, priority, label});
+      }catch(e){/* ignore entry */}
+    }
+
+    // Draw all boxes first (consistent visual baseline), style by layer/type
+    for(const e of entries){
+      try{
+        // color palette per layer priority or type
+        const layer = (e.obj.layer || e.obj.type || '').toString().toLowerCase();
+        let color = 'rgba(255,0,0,0.9)';
+        if(/trigger|target/.test(layer)) color = 'rgba(0,200,0,0.95)';
+        else if(/supply|demand|support|resist/.test(layer)) color = 'rgba(255,165,0,0.95)';
+        else if(/broker_controls|chart_bounds/.test(layer)) color = 'rgba(0,150,255,0.95)';
+        else if(/major_swings|local_swings/.test(layer)) color = 'rgba(120,255,120,0.95)';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = Math.max(2, Math.min(4, Math.floor((e.x2-e.x1 + e.y2-e.y1)/150)));
+        ctx.strokeRect(e.x1,e.y1,Math.max(1,e.x2-e.x1),Math.max(1,e.y2-e.y1));
+      }catch(err){}
+    }
+
+    // Then draw labels using priority and nudging heuristics to avoid collisions
+    ctx.fillStyle = 'white';
+    ctx.font = '13px Inter, Arial, sans-serif';
+    const keptRects = [];
+    function rectsIntersect(a,b){ return !(a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom); }
+    // Sort descending by priority so we keep higher-priority labels first
+    entries.sort((a,b)=>Number(b.priority||0)-Number(a.priority||0));
+    for(const e of entries){
+      try{
+        const text = e.label;
+        const metrics = ctx.measureText(text);
+        const tw = Math.ceil(metrics.width) + 6; // padding
+        const th = 14; // approx text height
+        // candidate anchors relative to bbox
+        const baseX = e.x1 + 4;
+        const baseY = e.y1 + 12;
+          const attempts = (OverlayPlacementModule && Array.isArray(OverlayPlacementModule.attempts)) ? OverlayPlacementModule.attempts : ((window && window.OverlayPlacement && Array.isArray(window.OverlayPlacement.attempts)) ? window.OverlayPlacement.attempts : [ [0,0], [10,0], [-10,0], [0,-(th+2)], [0,th+2], [20,0], [-20,0], [30,0], [-30,0] ]);
+        let placed = false;
+        for(const off of attempts){
+          const lx = baseX + off[0];
+          const ly = baseY + off[1];
+          const rect = { left: lx, top: ly-th+2, right: lx+tw, bottom: ly+2 };
+          // clamp to canvas
+          rect.left = Math.max(0, rect.left);
+          rect.top = Math.max(0, rect.top);
+          rect.right = Math.min(canvas.width, rect.right);
+          rect.bottom = Math.min(canvas.height, rect.bottom);
+          let conflict = false;
+          for(const k of keptRects){ if(rectsIntersect(rect, k)){ conflict = true; break; } }
+          if(!conflict){
+              // draw label background for readability and small confidence tag
+              ctx.fillStyle = 'rgba(0,0,0,0.65)';
+              ctx.fillRect(rect.left-4, rect.top-3, rect.right-rect.left+8, rect.bottom-rect.top+6);
+              ctx.fillStyle = 'white';
+              ctx.fillText(text, lx, ly);
+              if(e.obj.confidence || e.obj.score){
+                const conf = (Number(e.obj.confidence || e.obj.score) || 0).toFixed(2);
+                ctx.fillStyle = 'rgba(255,255,255,0.75)';
+                ctx.font = '10px Inter, Arial, sans-serif';
+                ctx.fillText(conf, rect.right - 26, ly);
+                ctx.font = '13px Inter, Arial, sans-serif';
+                ctx.fillStyle = 'white';
+              }
+            keptRects.push(rect);
+            placed = true;
+            break;
+          }
+        }
+        // if not placed, skip label to avoid clutter
+      }catch(e){}
+    }
+  }
+  window.__overlaySkeleton = {
+    start: async function(sessionId, canvasId){
+      const canvas = document.getElementById(canvasId);
+      if(!canvas) return;
+      let backgroundImage = null;
+      fetchFrame(sessionId).then((bgUrl)=>{
+        if(!bgUrl) return;
+        backgroundImage = new Image();
+        backgroundImage.onload = ()=>{
+          if(backgroundImage.naturalWidth > 0 && backgroundImage.naturalHeight > 0){
+            canvas.width = backgroundImage.naturalWidth;
+            canvas.height = backgroundImage.naturalHeight;
+          }
+          const data = window.__overlaySkeleton && window.__overlaySkeleton._lastData;
+          if(data && data.active_overlays){
+            draw(data.active_overlays, canvas, data.chart_transform || null, backgroundImage);
+          }
+        };
+        backgroundImage.src = bgUrl;
+      }).catch(()=>{});
+      // initial draw with chart_transform if available
+      (async ()=>{
+        const data = await fetchActive(sessionId);
+        const ct = data && data.chart_transform ? data.chart_transform : null;
+        if(data && data.active_overlays){
+          window.__overlaySkeleton._lastData = data;
+          draw(data.active_overlays, canvas, ct, backgroundImage);
+        }
+      })();
+      setInterval(async ()=>{
+        const data = await fetchActive(sessionId);
+        const ct = data && data.chart_transform ? data.chart_transform : null;
+        if(data && data.active_overlays){
+          window.__overlaySkeleton._lastData = data;
+          draw(data.active_overlays, canvas, ct, backgroundImage);
+        }
+      }, 1000);
+    }
+  };
+})();

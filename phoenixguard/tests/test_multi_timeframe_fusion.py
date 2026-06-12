@@ -37,7 +37,13 @@ def _make_result(
     position_size_pct: float = 1.6,
     expected_move_pct: float = 0.08,
     explanation: str = "base explanation",
+    execution_permission: str | None = None,
 ) -> dict[str, object]:
+    resolved_execution_permission = (
+        execution_permission
+        if execution_permission is not None
+        else ("EXECUTE" if consensus_ok and action in {"BUY", "SELL"} else "WAIT_FOR_CONFIRMATION")
+    )
     return {
         "action": action,
         "confidence": confidence,
@@ -55,6 +61,9 @@ def _make_result(
         "consensus_ok": consensus_ok,
         "memory_direction": memory_direction,
         "memory_similarity": memory_similarity,
+        "trade_bias": action,
+        "decision_state": "CONFIRMED" if resolved_execution_permission == "EXECUTE" else "UNCERTAIN",
+        "execution_permission": resolved_execution_permission,
         "execution_guard_ok": True,
         "support_gates_ok": True,
         "opposition_alert": False,
@@ -86,6 +95,20 @@ def _make_bundle(higher: dict[str, object], lower: dict[str, object]) -> list[di
     return [
         {"result": higher, "compare_entry": {"label": "Higher TF"}},
         {"result": lower, "compare_entry": {"label": "Lower TF"}},
+    ]
+
+
+def _make_quartet_bundle(
+    higher_out: dict[str, object],
+    higher_in: dict[str, object],
+    lower_out: dict[str, object],
+    lower_in: dict[str, object],
+) -> list[dict[str, object]]:
+    return [
+        {"result": higher_out, "compare_entry": {"label": "Higher TF / Zoomed Out"}},
+        {"result": higher_in, "compare_entry": {"label": "Higher TF / Zoomed In"}},
+        {"result": lower_out, "compare_entry": {"label": "Lower TF / Zoomed Out"}},
+        {"result": lower_in, "compare_entry": {"label": "Lower TF / Zoomed In"}},
     ]
 
 
@@ -145,6 +168,118 @@ def test_multi_timeframe_fusion_confirms_aligned_trigger() -> None:
     assert mtf["entry_allowed"] is True
     assert fused["position_size_pct"] > lower["position_size_pct"]
     assert "confirms the BUY trigger" in fused["explanation"]
+
+
+def test_multi_timeframe_fusion_combines_four_frame_groups() -> None:
+    higher_out = _make_result(
+        action="BUY",
+        confidence=0.84,
+        projection_direction="BUY",
+        projection_confidence=0.80,
+        probabilities={"BUY": 0.79, "SELL": 0.08, "HOLD": 0.13},
+        direction="BUY",
+        structure_setup="impulse_chain",
+        structure_trade_ready=True,
+        momentum_bias="bullish",
+        memory_direction="BUY",
+        memory_similarity=0.45,
+        gates_passing=10,
+        consensus_ok=True,
+        path_clarity=0.81,
+        structure_bias_direction="BUY",
+        structure_bias_confidence=0.74,
+        sequence_bias_direction="BUY",
+        sequence_bias_confidence=0.71,
+        continuation_probability=0.73,
+        reversal_probability=0.15,
+        position_size_pct=2.2,
+        execution_permission="EXECUTE",
+    )
+    higher_in = _make_result(
+        action="BUY",
+        confidence=0.79,
+        projection_direction="BUY",
+        projection_confidence=0.77,
+        probabilities={"BUY": 0.76, "SELL": 0.09, "HOLD": 0.15},
+        direction="BUY",
+        structure_setup="impulse_chain",
+        structure_trade_ready=True,
+        momentum_bias="bullish",
+        memory_direction="BUY",
+        memory_similarity=0.41,
+        gates_passing=9,
+        consensus_ok=True,
+        path_clarity=0.78,
+        structure_bias_direction="BUY",
+        structure_bias_confidence=0.72,
+        sequence_bias_direction="BUY",
+        sequence_bias_confidence=0.66,
+        continuation_probability=0.69,
+        reversal_probability=0.17,
+        position_size_pct=2.0,
+        execution_permission="EXECUTE",
+    )
+    lower_out = _make_result(
+        action="BUY",
+        confidence=0.71,
+        projection_direction="BUY",
+        projection_confidence=0.69,
+        probabilities={"BUY": 0.68, "SELL": 0.12, "HOLD": 0.20},
+        direction="BUY",
+        structure_setup="impulse_chain",
+        structure_trade_ready=True,
+        momentum_bias="bullish",
+        memory_direction="BUY",
+        memory_similarity=0.33,
+        gates_passing=8,
+        consensus_ok=True,
+        path_clarity=0.74,
+        structure_bias_direction="BUY",
+        structure_bias_confidence=0.61,
+        sequence_bias_direction="BUY",
+        sequence_bias_confidence=0.58,
+        continuation_probability=0.63,
+        reversal_probability=0.21,
+        position_size_pct=1.8,
+        execution_permission="EXECUTE",
+    )
+    lower_in = _make_result(
+        action="BUY",
+        confidence=0.68,
+        projection_direction="BUY",
+        projection_confidence=0.66,
+        probabilities={"BUY": 0.66, "SELL": 0.11, "HOLD": 0.23},
+        direction="BUY",
+        structure_setup="impulse_chain",
+        structure_trade_ready=True,
+        momentum_bias="bullish",
+        memory_direction="BUY",
+        memory_similarity=0.29,
+        gates_passing=8,
+        consensus_ok=True,
+        path_clarity=0.72,
+        structure_bias_direction="BUY",
+        structure_bias_confidence=0.59,
+        sequence_bias_direction="BUY",
+        sequence_bias_confidence=0.55,
+        continuation_probability=0.61,
+        reversal_probability=0.23,
+        position_size_pct=1.6,
+        execution_permission="EXECUTE",
+    )
+
+    fused = main._build_multi_timeframe_result(_make_quartet_bundle(higher_out, higher_in, lower_out, lower_in))
+    mtf = fused["multi_timeframe"]
+
+    assert fused["action"] == "BUY"
+    assert mtf["frame_count"] == 4
+    assert mtf["higher_frame_count"] == 2
+    assert mtf["lower_frame_count"] == 2
+    assert "Higher TF / Zoomed Out" in mtf["higher_summary"]
+    assert "Higher TF / Zoomed In" in mtf["higher_summary"]
+    assert "Lower TF / Zoomed Out" in mtf["lower_summary"]
+    assert "Lower TF / Zoomed In" in mtf["lower_summary"]
+    assert mtf["gate_state"] == "confirmed"
 
 
 def test_multi_timeframe_fusion_blocks_counter_bias_trigger() -> None:
@@ -261,3 +396,121 @@ def test_multi_timeframe_fusion_marks_weak_higher_timeframe_as_watch() -> None:
     assert mtf["gate_state"] == "watch"
     assert mtf["entry_allowed"] is True
     assert "mixed on the BUY trigger" in mtf["gate_explanation"]
+
+
+def test_multi_timeframe_fusion_watch_state_does_not_inherit_buy_bias() -> None:
+    higher = _make_result(
+        action="HOLD",
+        confidence=0.33,
+        projection_direction="HOLD",
+        projection_confidence=0.20,
+        probabilities={"BUY": 0.30, "SELL": 0.28, "HOLD": 0.42},
+        direction="HOLD",
+        structure_setup="none",
+        structure_trade_ready=False,
+        momentum_bias="neutral",
+        memory_direction="HOLD",
+        memory_similarity=0.03,
+        gates_passing=4,
+        consensus_ok=False,
+        path_clarity=0.20,
+        structure_bias_direction="HOLD",
+        structure_bias_confidence=0.08,
+        sequence_bias_direction="HOLD",
+        sequence_bias_confidence=0.10,
+        continuation_probability=0.31,
+        reversal_probability=0.29,
+        position_size_pct=0.7,
+    )
+    lower = _make_result(
+        action="SELL",
+        confidence=0.37,
+        projection_direction="SELL",
+        projection_confidence=0.24,
+        probabilities={"BUY": 0.29, "SELL": 0.33, "HOLD": 0.38},
+        direction="SELL",
+        structure_setup="pullback",
+        structure_trade_ready=False,
+        momentum_bias="bearish",
+        memory_direction="SELL",
+        memory_similarity=0.18,
+        gates_passing=5,
+        consensus_ok=False,
+        path_clarity=0.26,
+        structure_bias_direction="SELL",
+        structure_bias_confidence=0.22,
+        sequence_bias_direction="SELL",
+        sequence_bias_confidence=0.19,
+        continuation_probability=0.28,
+        reversal_probability=0.35,
+        position_size_pct=0.9,
+    )
+
+    fused = main._build_multi_timeframe_result(_make_bundle(higher, lower))
+    mtf = fused["multi_timeframe"]
+
+    assert fused["action"] in {"SELL", "HOLD"}
+    assert mtf["gate_state"] == "watch"
+    assert mtf["entry_allowed"] is True
+    assert fused["action"] != "BUY"
+    assert fused["probabilities"]["BUY"] <= max(fused["probabilities"]["SELL"], fused["probabilities"]["HOLD"])
+
+
+def test_multi_timeframe_fusion_exposes_headline_vs_execution_actions() -> None:
+    higher = _make_result(
+        action="BUY",
+        confidence=0.81,
+        projection_direction="BUY",
+        projection_confidence=0.78,
+        probabilities={"BUY": 0.75, "SELL": 0.09, "HOLD": 0.16},
+        direction="BUY",
+        structure_setup="impulse_chain",
+        structure_trade_ready=True,
+        momentum_bias="bullish",
+        memory_direction="BUY",
+        memory_similarity=0.36,
+        gates_passing=9,
+        consensus_ok=True,
+        path_clarity=0.77,
+        structure_bias_direction="BUY",
+        structure_bias_confidence=0.74,
+        sequence_bias_direction="BUY",
+        sequence_bias_confidence=0.68,
+        continuation_probability=0.70,
+        reversal_probability=0.18,
+        execution_permission="EXECUTE",
+    )
+    lower = _make_result(
+        action="BUY",
+        confidence=0.67,
+        projection_direction="BUY",
+        projection_confidence=0.65,
+        probabilities={"BUY": 0.65, "SELL": 0.12, "HOLD": 0.23},
+        direction="BUY",
+        structure_setup="impulse_chain",
+        structure_trade_ready=True,
+        momentum_bias="bullish",
+        memory_direction="BUY",
+        memory_similarity=0.26,
+        gates_passing=8,
+        consensus_ok=False,
+        path_clarity=0.71,
+        structure_bias_direction="BUY",
+        structure_bias_confidence=0.60,
+        sequence_bias_direction="BUY",
+        sequence_bias_confidence=0.56,
+        continuation_probability=0.61,
+        reversal_probability=0.24,
+        execution_permission="WAIT_FOR_CONFIRMATION",
+    )
+
+    fused = main._build_multi_timeframe_result(_make_bundle(higher, lower))
+
+    assert fused["headline_action"] == "BUY"
+    assert fused["action"] == "BUY"
+    assert fused["trade_bias"] == "BUY"
+    assert fused["directional_intent"] == "BUY"
+    assert fused["active_trade_state"] == "BUY_ON_CONFIRMATION"
+    assert fused["execution_action"] == "HOLD"
+    assert fused["execution_permission"] == "WAIT_FOR_CONFIRMATION"
+    assert fused["decision_state"] == "PROJECTED"

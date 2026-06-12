@@ -39,23 +39,96 @@ from pathlib import Path
 from typing import Any, Final, cast
 
 from PIL import Image
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+
+
+def _patch_torchvision_register_fake() -> None:
+    register_fake = getattr(torch.library, "register_fake", None)
+    if register_fake is None or bool(getattr(register_fake, "_phoenixguard_safe", False)):
+        return
+
+    def _safe_register_fake(op_name: str, *args: Any, **kwargs: Any) -> Any:
+        decorator = register_fake(op_name, *args, **kwargs)
+
+        def _wrapper(fn: Any) -> Any:
+            try:
+                return decorator(fn)
+            except RuntimeError as exc:
+                if "torchvision::nms" in str(exc):
+                    return fn
+                raise
+
+        return _wrapper
+
+    setattr(_safe_register_fake, "_phoenixguard_safe", True)
+    torch.library.register_fake = _safe_register_fake
+
+
+_patch_torchvision_register_fake()
+
 try:
     import clip  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - optional dependency
     clip = None  # type: ignore[assignment]
 import timm
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
 import torchvision.transforms as T
-from lightly.models.modules import (  # type: ignore[import-not-found]
-    BYOLPredictionHead,
-    BYOLProjectionHead,
-    SimCLRProjectionHead,
-    SwaVProjectionHead,
-    SwaVPrototypes,
-)
+try:
+    from lightly.models.modules import (  # type: ignore[import-not-found]
+        BYOLPredictionHead,
+        BYOLProjectionHead,
+        SimCLRProjectionHead,
+        SwaVProjectionHead,
+        SwaVPrototypes,
+    )
+except Exception:  # pragma: no cover - optional dependency fallback
+    class SimCLRProjectionHead(nn.Module):
+        def __init__(self, in_features: int, hidden_features: int, out_features: int) -> None:
+            super().__init__()
+            self.layers = nn.Sequential(
+                nn.Linear(in_features, hidden_features, bias=False),
+                nn.BatchNorm1d(hidden_features),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_features, out_features, bias=False),
+                nn.BatchNorm1d(out_features),
+            )
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.layers(x)
+
+
+    class BYOLProjectionHead(nn.Module):
+        def __init__(self, in_features: int, hidden_features: int, out_features: int) -> None:
+            super().__init__()
+            self.layers = nn.Sequential(
+                nn.Linear(in_features, hidden_features, bias=False),
+                nn.BatchNorm1d(hidden_features),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_features, out_features, bias=True),
+            )
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.layers(x)
+
+
+    class BYOLPredictionHead(BYOLProjectionHead):
+        pass
+
+
+    class SwaVProjectionHead(BYOLProjectionHead):
+        pass
+
+
+    class SwaVPrototypes(nn.Module):
+        def __init__(self, in_features: int, n_prototypes: int = 512) -> None:
+            super().__init__()
+            self.heads = nn.ModuleList([nn.Linear(in_features, n_prototypes)])
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.heads[0](x)
+
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from phoenixguard.core.config import RUNTIME, TRAIN
@@ -69,6 +142,7 @@ from phoenixguard.runtime.continual_adapters import (
     set_active_adapter,
     set_adapter_trainable,
 )
+from scripts.build_sequence_teacher_manifest import validate_directional_teacher_consistency
 
 
 IMAGENET_MEAN: Final[tuple[float, float, float]] = (0.485, 0.456, 0.406)
@@ -108,6 +182,14 @@ _UPPERCASE_SEQUENCE_TASKS: Final[frozenset[str]] = frozenset(
         "macro_trend",
     }
 )
+_SEQUENCE_MANIFEST_QUALITY_MODES: Final[frozenset[str]] = frozenset(
+    {
+        "all",
+        "exclude_contradictory",
+        "exclude_review_required",
+        "clean_only",
+    }
+)
 
 
 def _normalize_path_key(path: str) -> str:
@@ -138,6 +220,15 @@ def _path_key_aliases(path: str) -> set[str]:
     return aliases
 
 
+def _binary_label_from_dir_name(dir_name: str, fallback: int) -> int:
+    normalized = str(dir_name).strip().upper()
+    if normalized in {"BUY", "BUYS"}:
+        return 0
+    if normalized in {"SELL", "SELLS"}:
+        return 1
+    return int(fallback)
+
+
 def _normalize_sequence_value(task_name: str, value: Any) -> str | None:
     text = str(value).strip()
     if not text:
@@ -145,6 +236,49 @@ def _normalize_sequence_value(task_name: str, value: Any) -> str | None:
     if task_name in _UPPERCASE_SEQUENCE_TASKS:
         return text.upper()
     return text.lower()
+
+
+def _normalize_sequence_manifest_quality(value: Any) -> str:
+    normalized = str(value).strip().lower()
+    if normalized not in _SEQUENCE_MANIFEST_QUALITY_MODES:
+        raise ValueError(
+            "Unsupported sequence manifest quality mode "
+            f"{value!r}. Expected one of {sorted(_SEQUENCE_MANIFEST_QUALITY_MODES)}."
+        )
+    return normalized
+
+
+def _sequence_record_filter_decision(
+    record: Mapping[str, Any],
+    *,
+    quality_mode: str,
+) -> tuple[bool, str]:
+    normalized_mode = _normalize_sequence_manifest_quality(quality_mode)
+    if normalized_mode == "all":
+        return True, "included"
+
+    task_labels_obj = record.get("teacher_task_labels", {})
+    task_labels = task_labels_obj if isinstance(task_labels_obj, Mapping) else {}
+    label_quality = str(task_labels.get("label_quality", "")).strip().lower()
+    review_bucket = str(task_labels.get("review_bucket", "")).strip().lower()
+    review_required = bool(task_labels.get("review_required", False))
+
+    if normalized_mode == "exclude_contradictory":
+        if label_quality == "contradictory" or review_bucket == "hard_negative":
+            return False, "contradictory"
+        return True, "included"
+
+    if normalized_mode == "exclude_review_required":
+        if review_required:
+            return False, "review_required"
+        return True, "included"
+
+    if normalized_mode == "clean_only":
+        if label_quality == "clean":
+            return True, "included"
+        return False, label_quality or "non_clean"
+
+    return True, "included"
 
 
 def cleanup_torch_memory() -> None:
@@ -545,10 +679,11 @@ class ChartImageDataset(Dataset[tuple[torch.Tensor, torch.Tensor, dict[str, torc
         self.sequence_label_indices: list[dict[str, int]] = []
 
         print(f"[DATASET INIT] Initializing ChartImageDataset with dirs: {image_dirs}")
-        for label, dir_path in enumerate(image_dirs):
+        for fallback_label, dir_path in enumerate(image_dirs):
             if not os.path.isdir(dir_path):
                 print(f"[DATASET WARNING] Directory not found: {dir_path}")
                 continue
+            label = _binary_label_from_dir_name(Path(dir_path).name, fallback_label)
             found = 0
             for fname in sorted(os.listdir(dir_path)):
                 if fname.lower().endswith(_VALID_IMAGE_SUFFIXES):
@@ -663,9 +798,9 @@ class MergedChartDataset(Dataset[tuple[torch.Tensor, torch.Tensor, dict[str, tor
 
 
 class TimmBackbone(nn.Module):
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, *, pretrained: bool = True) -> None:
         super().__init__()
-        self.model = timm.create_model(model_name, pretrained=True, num_classes=0)
+        self.model = timm.create_model(model_name, pretrained=bool(pretrained), num_classes=0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return get_pooled_features(self.model, x)
@@ -1167,12 +1302,17 @@ class EnsembleCVModels:
         target_models: list[str],
         sequence_manifest_path: str | None = None,
         sequence_aux_loss_weight: float = 0.30,
+        sequence_manifest_quality: str = "exclude_contradictory",
         random_seed: int = 1337,
+        pretrained_backbones: bool = True,
+        enable_continual_learning: bool = True,
     ):
         self.image_dirs: list[str] = image_dirs
         self.device: torch.device = device
         self.target_models: list[str] = target_models
         self.random_seed: int = int(random_seed)
+        self.pretrained_backbones: bool = bool(pretrained_backbones)
+        self.enable_continual_learning: bool = bool(enable_continual_learning)
         self.feature_dims: dict[str, int] = {}
         self.best_val_accuracy: dict[str, float] = {}
         self.train_transforms: dict[str, TransformFn] = {}
@@ -1186,6 +1326,7 @@ class EnsembleCVModels:
         self.decision_thresholds: dict[str, float] = {}
         self.sequence_manifest_path: str | None = None
         self.sequence_aux_loss_weight: float = float(max(sequence_aux_loss_weight, 0.0))
+        self.sequence_manifest_quality: str = _normalize_sequence_manifest_quality(sequence_manifest_quality)
         self.sequence_targets_by_path: dict[str, dict[str, int]] = {}
         self.sequence_task_values: dict[str, list[str]] = {}
         self.sequence_task_spaces: dict[str, dict[str, int]] = {}
@@ -1193,6 +1334,7 @@ class EnsembleCVModels:
         self.sequence_aux_metrics: dict[str, dict[str, Any]] = {}
         self.sequence_manifest_record_count: int = 0
         self.sequence_manifest_alias_key_count: int = 0
+        self.sequence_manifest_filter_stats: dict[str, Any] = {}
         self.clip_preprocess: TransformFn | None = None
         self.continual_states: dict[str, ContinualTrainingState] = {}
         _set_global_seed(self.random_seed)
@@ -1272,12 +1414,30 @@ class EnsembleCVModels:
         task_values: dict[str, set[str]] = defaultdict(set)
 
         manifest_records = self._read_sequence_manifest_records(manifest)
+        validate_directional_teacher_consistency(manifest_records)
         self.sequence_manifest_record_count = len(manifest_records)
+        filter_stats: dict[str, Any] = {
+            "mode": self.sequence_manifest_quality,
+            "record_count": int(self.sequence_manifest_record_count),
+            "retained_records": 0,
+            "skipped_records": 0,
+            "skip_reasons": {},
+        }
 
         for record in manifest_records:
             image_path_obj = record.get("image_path", record.get("destination_path", record.get("path")))
             if not isinstance(image_path_obj, str) or not image_path_obj.strip():
                 continue
+            include_record, filter_reason = _sequence_record_filter_decision(
+                record,
+                quality_mode=self.sequence_manifest_quality,
+            )
+            if not include_record:
+                filter_stats["skipped_records"] = int(filter_stats["skipped_records"]) + 1
+                skip_reasons = cast(dict[str, int], filter_stats["skip_reasons"])
+                skip_reasons[str(filter_reason)] = int(skip_reasons.get(str(filter_reason), 0)) + 1
+                continue
+
             sequence_targets_obj = record.get("sequence_targets", {})
             if not isinstance(sequence_targets_obj, Mapping):
                 continue
@@ -1294,6 +1454,7 @@ class EnsembleCVModels:
                 task_values[task_name].add(normalized_value)
 
             if normalized_targets:
+                filter_stats["retained_records"] = int(filter_stats["retained_records"]) + 1
                 for normalized_path in _path_key_aliases(image_path_obj):
                     raw_targets_by_path[normalized_path] = dict(normalized_targets)
 
@@ -1321,12 +1482,22 @@ class EnsembleCVModels:
         self.sequence_manifest_alias_key_count = len(self.sequence_targets_by_path)
 
         self.sequence_manifest_path = str(manifest)
+        self.sequence_manifest_filter_stats = filter_stats
         if self.sequence_task_values:
+            filter_suffix = ""
+            skipped_records = int(filter_stats.get("skipped_records", 0))
+            if skipped_records > 0:
+                filter_suffix = (
+                    f" | retained={int(filter_stats.get('retained_records', 0))}"
+                    f" skipped={skipped_records}"
+                    f" mode={self.sequence_manifest_quality}"
+                )
             print(
                 "[SEQUENCE TEACHER] Loaded "
                 f"{self.sequence_manifest_record_count} manifest rows mapped to "
                 f"{self.sequence_manifest_alias_key_count} path keys across "
                 f"{len(self.sequence_task_values)} tasks from {manifest}"
+                f"{filter_suffix}"
             )
         else:
             print(
@@ -1351,12 +1522,12 @@ class EnsembleCVModels:
         try:
             backbone = timm.create_model(
                 model_name,
-                pretrained=True,
+                pretrained=self.pretrained_backbones,
                 num_classes=0,
                 dynamic_img_size=dynamic_img_size,
             )
         except TypeError:
-            backbone = timm.create_model(model_name, pretrained=True, num_classes=0)
+            backbone = timm.create_model(model_name, pretrained=self.pretrained_backbones, num_classes=0)
         return backbone.to(self.device)
 
     def _init_models(self) -> None:
@@ -1470,7 +1641,10 @@ class EnsembleCVModels:
         if "byol" in self.target_models:
             try:
                 print("[INIT] byol")
-                byol_backbone = TimmBackbone("resnet50").to(self.device)
+                byol_backbone = TimmBackbone(
+                    "resnet50",
+                    pretrained=self.pretrained_backbones,
+                ).to(self.device)
                 byol_backbone.eval()
                 byol_cfg = TRAIN_CONFIGS["byol"]
                 byol_mean, byol_std = safe_pretrained_stats(byol_backbone.model)
@@ -1494,7 +1668,10 @@ class EnsembleCVModels:
         if "swav" in self.target_models:
             try:
                 print("[INIT] swav")
-                swav_backbone = TimmBackbone("resnet50").to(self.device)
+                swav_backbone = TimmBackbone(
+                    "resnet50",
+                    pretrained=self.pretrained_backbones,
+                ).to(self.device)
                 swav_backbone.eval()
                 swav_cfg = TRAIN_CONFIGS["swav"]
                 swav_mean, swav_std = safe_pretrained_stats(swav_backbone.model)
@@ -1811,6 +1988,9 @@ class EnsembleCVModels:
         model_dir: Path,
     ) -> ContinualTrainingState:
         state = ContinualTrainingState()
+        if not self.enable_continual_learning:
+            self.continual_states[name] = state
+            return state
         bundle_path = model_dir / self.MODEL_SPECS[name]["save_name"]
         replay_samples = self._load_replay_samples()
         state.replay_samples = replay_samples
@@ -2240,35 +2420,51 @@ class EnsembleCVModels:
                 f"({100.0 * float(val_stats['full_ratio']):.1f}%)"
             )
 
+        strict_full_coverage = self.sequence_manifest_quality == "all"
+
         if int(train_stats["matched_samples"]) == 0:
             raise RuntimeError(
                 "Sequence teacher labels did not attach to any training samples. "
                 "This usually means the manifest paths and training directories do not match."
             )
-        if int(train_stats["matched_samples"]) != int(train_stats["total_samples"]):
+        if strict_full_coverage and int(train_stats["matched_samples"]) != int(train_stats["total_samples"]):
             raise RuntimeError(
                 "Sequence teacher labels attached to only part of the training set. "
                 "Rebuild the teacher manifest before training."
             )
-        if int(train_stats["fully_labeled_samples"]) != int(train_stats["total_samples"]):
+        if strict_full_coverage and int(train_stats["fully_labeled_samples"]) != int(train_stats["total_samples"]):
             raise RuntimeError(
                 "Sequence teacher manifest is missing one or more auxiliary targets on training samples. "
                 "Rebuild the teacher manifest before training."
+            )
+        if (not strict_full_coverage) and int(train_stats["fully_labeled_samples"]) != int(train_stats["matched_samples"]):
+            raise RuntimeError(
+                "Filtered sequence teacher supervision attached partial auxiliary targets on retained "
+                "training samples. Rebuild the teacher manifest or relax the filter mode."
             )
         if val_stats is not None and int(val_stats["matched_samples"]) == 0:
             raise RuntimeError(
                 "Sequence teacher labels did not attach to any validation samples. "
                 "This usually means the manifest paths and validation directories do not match."
             )
-        if val_stats is not None and int(val_stats["matched_samples"]) != int(val_stats["total_samples"]):
+        if strict_full_coverage and val_stats is not None and int(val_stats["matched_samples"]) != int(val_stats["total_samples"]):
             raise RuntimeError(
                 "Sequence teacher labels attached to only part of the validation set. "
                 "Rebuild the teacher manifest before training."
             )
-        if val_stats is not None and int(val_stats["fully_labeled_samples"]) != int(val_stats["total_samples"]):
+        if strict_full_coverage and val_stats is not None and int(val_stats["fully_labeled_samples"]) != int(val_stats["total_samples"]):
             raise RuntimeError(
                 "Sequence teacher manifest is missing one or more auxiliary targets on validation samples. "
                 "Rebuild the teacher manifest before training."
+            )
+        if (
+            (not strict_full_coverage)
+            and val_stats is not None
+            and int(val_stats["fully_labeled_samples"]) != int(val_stats["matched_samples"])
+        ):
+            raise RuntimeError(
+                "Filtered sequence teacher supervision attached partial auxiliary targets on retained "
+                "validation samples. Rebuild the teacher manifest or relax the filter mode."
             )
 
     def _backbone_param_list(self, model: nn.Module) -> list[nn.Parameter]:
@@ -2816,9 +3012,12 @@ class EnsembleCVModels:
             "train_embeddings_file": f"{name}_train_embeddings.pt",
             "val_embeddings_file": f"{name}_val_embeddings.pt",
             "sequence_manifest_path": self.sequence_manifest_path,
+            "sequence_manifest_quality": self.sequence_manifest_quality,
+            "sequence_manifest_filter": self.sequence_manifest_filter_stats,
             "sequence_aux_loss_weight": float(self.sequence_aux_loss_weight),
             "sequence_task_values": self.sequence_task_values,
             "sequence_aux_metrics": self.sequence_aux_metrics.get(name, {}),
+            "runtime_calibration": {},
             "lora": collect_lora_summary(self._resolve_backbone_module(model)),
             "continual_learning": {
                 "replay_buffer_path": str(RUNTIME.replay_buffer_path),
@@ -2834,6 +3033,15 @@ class EnsembleCVModels:
         }
 
         metadata_path = model_dir / f"{name}_metadata.json"
+        if metadata_path.exists():
+            try:
+                existing_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if isinstance(existing_metadata, dict):
+                    metadata_payload["runtime_calibration"] = dict(
+                        cast(Mapping[str, Any], existing_metadata.get("runtime_calibration", {}))
+                    )
+            except Exception:
+                metadata_payload["runtime_calibration"] = {}
         with metadata_path.open("w", encoding="utf-8") as metadata_file:
             json.dump(metadata_payload, metadata_file, indent=2)
 
@@ -3485,6 +3693,17 @@ class EnsembleCVModels:
         aux_head = self.sequence_aux_heads.get(name)
         continual_state = self.continual_states.get(name, ContinualTrainingState())
         lora_summary = collect_lora_summary(self._resolve_backbone_module(model))
+        existing_runtime_calibration: dict[str, Any] = {}
+        existing_metadata_path = model_dir / f"{name}_metadata.json"
+        if existing_metadata_path.exists():
+            try:
+                existing_metadata = json.loads(existing_metadata_path.read_text(encoding="utf-8"))
+                if isinstance(existing_metadata, dict):
+                    existing_runtime_calibration = dict(
+                        cast(Mapping[str, Any], existing_metadata.get("runtime_calibration", {}))
+                    )
+            except Exception:
+                existing_runtime_calibration = {}
         payload: dict[str, Any] = {
             "model_name": name,
             "backbone_state_dict": model.state_dict(),
@@ -3503,6 +3722,7 @@ class EnsembleCVModels:
             "sequence_aux_loss_weight": float(self.sequence_aux_loss_weight),
             "sequence_task_values": self.sequence_task_values,
             "sequence_aux_metrics": self.sequence_aux_metrics.get(name, {}),
+            "runtime_calibration": existing_runtime_calibration,
             "lora": lora_summary,
             "continual_learning": {
                 "enabled": bool(continual_state.enabled),

@@ -124,7 +124,7 @@ class TestGateStability(unittest.TestCase):
                 latest_candle_confidence=self._mixed_number(),
                 geometry_conflict=bool(int(self.rng.integers(0, 2))),
             )
-            self.assertEqual(len(core_outputs), 12)
+            self.assertEqual(len(core_outputs), 13)
             self._assert_gate_outputs_are_stable(core_outputs)
 
             support_outputs = self.gates.run_support_gates(
@@ -141,7 +141,7 @@ class TestGateStability(unittest.TestCase):
                 geometry_conflict=bool(int(self.rng.integers(0, 2))),
                 reliability=self._mixed_number(),
             )
-            self.assertEqual(len(support_outputs), 5)
+            self.assertEqual(len(support_outputs), 6)
             self._assert_gate_outputs_are_stable(support_outputs)
 
             decision = self.ensemble.infer(
@@ -241,7 +241,10 @@ class TestGateStability(unittest.TestCase):
             use_macro_local_alignment=False,
             use_opposition_strength=False,
         )
-        self.assertEqual([gate.name for gate in outputs], ["continuation_strength", "memory_regime_agreement"])
+        self.assertEqual(
+            [gate.name for gate in outputs],
+            ["continuation_strength", "memory_regime_agreement", "candle_group_context"],
+        )
 
 
 class _NullLogger:

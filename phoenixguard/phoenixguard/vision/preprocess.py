@@ -184,7 +184,49 @@ def apply_clahe(img: Image.Image, clip_limit: int = 3) -> Image.Image:
 
 
 # ── Hough-line price-area crop ────────────────────────────────────────────────
-def auto_crop_price_area(img: Image.Image) -> Image.Image:
+def _full_image_crop_meta(img: Image.Image, *, reason: str, method: str) -> dict[str, Any]:
+    return {
+        "applied": False,
+        "reason": str(reason),
+        "method": str(method),
+        "pixel_bbox": [0, 0, int(img.width), int(img.height)],
+        "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+        "width": int(img.width),
+        "height": int(img.height),
+        "source_width": int(img.width),
+        "source_height": int(img.height),
+    }
+
+
+def _crop_meta_from_bbox(
+    img: Image.Image,
+    *,
+    bbox: tuple[int, int, int, int],
+    method: str,
+    reason: str,
+) -> dict[str, Any]:
+    x0, y0, x1, y1 = bbox
+    width = max(1, int(x1 - x0))
+    height = max(1, int(y1 - y0))
+    return {
+        "applied": bool(x0 > 0 or y0 > 0 or x1 < img.width or y1 < img.height),
+        "reason": str(reason),
+        "method": str(method),
+        "pixel_bbox": [int(x0), int(y0), int(x1), int(y1)],
+        "normalized_bbox": [
+            float(max(0.0, min(1.0, x0 / max(img.width, 1)))),
+            float(max(0.0, min(1.0, y0 / max(img.height, 1)))),
+            float(max(0.0, min(1.0, x1 / max(img.width, 1)))),
+            float(max(0.0, min(1.0, y1 / max(img.height, 1)))),
+        ],
+        "width": width,
+        "height": height,
+        "source_width": int(img.width),
+        "source_height": int(img.height),
+    }
+
+
+def auto_crop_price_area_with_meta(img: Image.Image) -> tuple[Image.Image, dict[str, Any]]:
     """
     Computer Vision — Hough line detection to isolate the price chart area.
     Strategy:
@@ -211,8 +253,8 @@ def auto_crop_price_area(img: Image.Image) -> Image.Image:
             minLineLength=max(w // 4, 80),
             maxLineGap=20
         )
-        if len(lines) == 0:
-            return img
+        if lines is None or len(lines) == 0:
+            return img, _full_image_crop_meta(img, reason="no_hough_lines", method="cv2_hough")
 
         # Collect Y-coordinates of near-horizontal lines
         y_coords: list[int] = []
@@ -223,14 +265,14 @@ def auto_crop_price_area(img: Image.Image) -> Image.Image:
                 y_coords.append((y1 + y2) // 2)
 
         if len(y_coords) < 2:
-            return img
+            return img, _full_image_crop_meta(img, reason="insufficient_horizontal_lines", method="cv2_hough")
 
         y_coords_sorted: list[int] = sorted(set(y_coords))
 
         # Find the largest gap between consecutive horizontal lines
         # — this is typically the main price panel
         if len(y_coords_sorted) < 2:
-            return img
+            return img, _full_image_crop_meta(img, reason="insufficient_line_gaps", method="cv2_hough")
 
         gaps: list[tuple[int, int]] = [
             (y_coords_sorted[i + 1] - y_coords_sorted[i], i)
@@ -245,19 +287,30 @@ def auto_crop_price_area(img: Image.Image) -> Image.Image:
 
         # Only crop if the resulting region is at least 30% of original height
         if (y_bot - y_top) < 0.30 * h:
-            return img
+            return img, _full_image_crop_meta(img, reason="gap_too_small", method="cv2_hough")
 
-        cropped = img.crop((0, y_top, w, y_bot))
-        return cropped
+        bbox = (0, int(y_top), int(w), int(y_bot))
+        cropped = img.crop(bbox)
+        return cropped, _crop_meta_from_bbox(img, bbox=bbox, method="cv2_hough", reason="largest_horizontal_gap")
 
     except ImportError:
         # cv2 not available — pure numpy edge-based crop approximation
-        return _numpy_crop_price_area(img)
+        return _numpy_crop_price_area_with_meta(img)
     except Exception:
-        return img
+        return img, _full_image_crop_meta(img, reason="crop_exception", method="safe_fallback")
+
+
+def auto_crop_price_area(img: Image.Image) -> Image.Image:
+    cropped, _ = auto_crop_price_area_with_meta(img)
+    return cropped
 
 
 def _numpy_crop_price_area(img: Image.Image) -> Image.Image:
+    cropped, _ = _numpy_crop_price_area_with_meta(img)
+    return cropped
+
+
+def _numpy_crop_price_area_with_meta(img: Image.Image) -> tuple[Image.Image, dict[str, Any]]:
     """
     Fallback price-area crop using numpy only.
     Detects horizontal regions of high gradient variance (candle activity).
@@ -270,12 +323,16 @@ def _numpy_crop_price_area(img: Image.Image) -> Image.Image:
     median_var = float(np.median(row_var))
     active_rows = np.where(row_var > median_var * 1.2)[0]
     if len(active_rows) < 10:
-        return img
+        return img, _full_image_crop_meta(img, reason="insufficient_active_rows", method="numpy_variance")
     y_top = max(0, int(active_rows[0]) - 5)
     y_bot = min(h, int(active_rows[-1]) + 5)
     if (y_bot - y_top) < 0.25 * h:
-        return img
-    return img.crop((0, y_top, img.width, y_bot))
+        return img, _full_image_crop_meta(img, reason="variance_band_too_small", method="numpy_variance")
+    bbox = (0, int(y_top), int(img.width), int(y_bot))
+    return (
+        img.crop(bbox),
+        _crop_meta_from_bbox(img, bbox=bbox, method="numpy_variance", reason="active_variance_band"),
+    )
 
 
 # ── Main normalization pipeline ───────────────────────────────────────────────

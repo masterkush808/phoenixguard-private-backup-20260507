@@ -1,8 +1,5 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('FAST', 'BALANCED', 'FULL', 'HEAVY_LAZY')]
-    [string]$LaunchMode = $(if ($env:PHOENIXGUARD_PROFILE) { $env:PHOENIXGUARD_PROFILE.ToUpperInvariant() } else { 'FAST' }),
-
     [string]$BindAddress = $(if ($env:PHOENIXGUARD_SHARE_HOST) { $env:PHOENIXGUARD_SHARE_HOST } else { '127.0.0.1' }),
 
     [int]$ListenPort = $(if ($env:PHOENIXGUARD_SHARE_PORT) { [int]$env:PHOENIXGUARD_SHARE_PORT } else { 7861 }),
@@ -65,7 +62,7 @@ if ($Bootstrap) {
 }
 
 if (-not $env:PHOENIXGUARD_SHARE_PASSWORD -and -not $env:PHOENIXGUARD_SHARE_CREDENTIALS) {
-    Write-Output "Set PHOENIXGUARD_SHARE_PASSWORD and optionally PHOENIXGUARD_SHARE_USERNAME before launching share mode."
+    Write-Output "Set PHOENIXGUARD_SHARE_PASSWORD and optionally PHOENIXGUARD_SHARE_USERNAME before launching 808Fx Standard System share mode."
     Write-Output "Example:"
     Write-Output "  `$env:PHOENIXGUARD_SHARE_USERNAME='operator'"
     Write-Output "  `$env:PHOENIXGUARD_SHARE_PASSWORD='ChangeMe2026!'"
@@ -103,11 +100,18 @@ switch ($ResolvedAccessMode) {
     }
 }
 
-$env:PHOENIXGUARD_PROFILE = $LaunchMode.ToUpperInvariant()
+$env:PHOENIXGUARD_PROFILE = 'FINAL_LIVE'
 $env:PHOENIXGUARD_SHARE_MODE = '1'
 $env:PHOENIXGUARD_SHARE_HOST = $BindAddress
 $env:PHOENIXGUARD_SHARE_PORT = [string]$ListenPort
 $env:PHOENIXGUARD_SHARE_ACCESS_MODE = $ResolvedAccessMode
+$env:PHOENIXGUARD_UI_HOST = $BindAddress
+$env:PHOENIXGUARD_UI_PORT = [string]$ListenPort
+$env:PHOENIXGUARD_UI_SHARE = $(if ($ResolvedAccessMode -eq 'TUNNEL') { '1' } else { '0' })
+$env:PHOENIXGUARD_UI_REQUIRE_AUTH = '1'
+$env:PHOENIXGUARD_UI_STRICT_PASSWORDS = $(if ($ResolvedAccessMode -in @('TUNNEL', 'PUBLIC')) { '1' } else { '0' })
+$env:PHOENIXGUARD_UI_OPEN_BROWSER = '0'
+$env:PHOENIXGUARD_UI_SHOW_ERROR = '0'
 
 if (-not (Test-Path -LiteralPath $ShareRunnerPath)) {
     throw "share_phoenixguard.py was not found at '$ShareRunnerPath'."
@@ -115,21 +119,21 @@ if (-not (Test-Path -LiteralPath $ShareRunnerPath)) {
 
 switch ($ResolvedAccessMode) {
     'LAN' {
-        Write-Output "Access mode: LAN. PhoenixGuard stays local unless you add your own reverse proxy or tunnel."
+        Write-Output "Access mode: LAN. The canonical 808Fx Standard System stays on the host unless you add your own reverse proxy or tunnel."
     }
     'TUNNEL' {
-        Write-Output "Access mode: TUNNEL. PhoenixGuard stays on 127.0.0.1 and Gradio will generate a temporary public HTTPS link."
-        Write-Output "Send the share URL plus the PhoenixGuard credentials only to people you trust."
+        Write-Output "Access mode: TUNNEL. The canonical 808Fx Standard System stays on 127.0.0.1 and Gradio will generate a temporary public HTTPS link."
+        Write-Output "Send the share URL plus the 808Fx Standard System credentials only to people you trust."
     }
     'PUBLIC' {
-        Write-Output "Access mode: PUBLIC. PhoenixGuard will listen on 0.0.0.0 for LAN or reverse-proxy use."
+        Write-Output "Access mode: PUBLIC. The canonical 808Fx Standard System will listen on 0.0.0.0 for LAN or reverse-proxy use."
         Write-Output "This does not make the app worldwide by itself. You still need router port forwarding or a tunnel such as Cloudflare."
     }
 }
 
-Write-Output "Launching PhoenixGuard share mode on $($env:PHOENIXGUARD_SHARE_HOST):$($env:PHOENIXGUARD_SHARE_PORT) with access mode $ResolvedAccessMode"
+Write-Output "Launching 808Fx Standard System premium share surface on $($env:PHOENIXGUARD_UI_HOST):$($env:PHOENIXGUARD_UI_PORT) with access mode $ResolvedAccessMode"
 python $ShareRunnerPath
 
 if ($LASTEXITCODE -ne 0) {
-    throw "PhoenixGuard share process exited with code $LASTEXITCODE."
+    throw "808Fx Standard System exited with code $LASTEXITCODE."
 }

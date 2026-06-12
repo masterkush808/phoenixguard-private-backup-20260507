@@ -338,18 +338,24 @@ class CVPatternDetector:
         self.intent_scaler = None
         self.memory_clf_meta = {}
         self.taxonomy_label_maps = {}
-
-        # Locked mode:
-        # 1) Always pull/update weights from the configured HF repo.
-        # 2) Run local YOLO inference in-app.
-        # 3) No endpoint fallback, no heuristic fallback.
-        if not self._try_load_hf_yolo_weights(primary_model):
-            self.model = None
-            self.logger.error("Locked CV mode failed to load HF weights for %s", primary_model)
-            return
-        self.logger.info("Locked CV mode active: local inference from HF weights (%s)", primary_model)
-        self._load_or_train_memory_classifier()
         self.ensemble_cv = None  # Will be set externally
+
+        loaded_local_model = self._try_load_hf_yolo_weights(primary_model)
+        if not loaded_local_model:
+            fallback_ref = str(fallback_model or "").strip()
+            primary_ref = str(primary_model or "").strip()
+            if fallback_ref and fallback_ref != primary_ref:
+                loaded_local_model = self._try_load_hf_yolo_weights(fallback_ref)
+        if loaded_local_model:
+            self.logger.info("CV local YOLO backend ready (%s)", self.model_name)
+            self._load_or_train_memory_classifier()
+            return
+
+        self.strict_model_only = False
+        self.logger.warning(
+            "CV YOLO backend unavailable for %s; continuing with degraded chart parsing until weights are available.",
+            primary_model,
+        )
 
     @staticmethod
     def _as_float32_array(value: object) -> NDArray[np.float32]:
@@ -1407,7 +1413,7 @@ class CVPatternDetector:
     def _try_load_hf_yolo_weights(self, model_ref: str) -> bool:
         """
         Preferred path for hf:// YOLO references:
-        download remote .pt weights and run real local YOLO inference.
+        load cached .pt weights first and only touch the network when explicitly enabled.
         """
         if not model_ref.startswith("hf://"):
             return False
@@ -1425,23 +1431,55 @@ class CVPatternDetector:
         token = os.getenv("HF_TOKEN", "").strip() or None
         weight_file = os.getenv("PHOENIXGUARD_CV_HF_WEIGHT_FILE", "model.pt").strip() or "model.pt"
         force_dl = os.getenv("PHOENIXGUARD_CV_FORCE_DOWNLOAD", "0").strip() == "1"
+        allow_remote_bootstrap = force_dl or (
+            str(os.getenv("PHOENIXGUARD_CV_ALLOW_REMOTE_BOOTSTRAP", "") or "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         try:
-            download_fn = hf_hub_download
+            etag_timeout = float(
+                str(os.getenv("PHOENIXGUARD_CV_HF_ETAG_TIMEOUT_SEC", "2.0") or "2.0").strip()
+            )
+        except Exception:
+            etag_timeout = 2.0
+        download_fn = hf_hub_download
+
+        def _load_from_downloaded_path(*, local_files_only: bool) -> bool:
             local_path = download_fn(
                 repo_id=model_id,
                 filename=weight_file,
                 token=token,
-                force_download=force_dl,
+                force_download=force_dl and (not local_files_only),
+                etag_timeout=max(0.1, float(etag_timeout)),
+                local_files_only=local_files_only,
             )
             self.model = YOLOModel(local_path)
             self.model_name = model_ref
             self.use_hf_endpoint = False
             self.hf_model_id = model_id
-            self.logger.info("Loaded CV model weights from HF: %s (%s)", model_id, weight_file)
             return True
+
+        try:
+            if _load_from_downloaded_path(local_files_only=True):
+                self.logger.info("Loaded cached CV model weights from HF cache: %s (%s)", model_id, weight_file)
+                return True
+        except Exception as e:
+            if not allow_remote_bootstrap:
+                self.logger.warning(
+                    "HF YOLO cache miss for %s (%s). Remote bootstrap is disabled; set PHOENIXGUARD_CV_ALLOW_REMOTE_BOOTSTRAP=1 or PHOENIXGUARD_CV_FORCE_DOWNLOAD=1 to fetch weights.",
+                    model_id,
+                    e,
+                )
+                return False
+            self.logger.info("Cached HF YOLO weights unavailable for %s; attempting remote bootstrap.", model_id)
+
+        try:
+            if _load_from_downloaded_path(local_files_only=False):
+                self.logger.info("Loaded CV model weights from HF: %s (%s)", model_id, weight_file)
+                return True
         except Exception as e:
             self.logger.warning("HF YOLO weight download/load failed for %s (%s)", model_id, e)
             return False
+        return False
 
     def _try_enable_hf_endpoint(self, model_ref: str) -> bool:
         if not model_ref.startswith("hf://"):
@@ -1901,6 +1939,9 @@ class CVPatternDetector:
 
         return out[:6]
 
+    def heuristic_candle_detect(self, image_rgb: Image.Image | NDArray[np.uint8]) -> list[dict[str, Any]]:
+        return self._heuristic_candle_detect(image_rgb)
+
     # ── priority queue ranking (Design & Analysis of Algorithms) ─────────────
     def _priority_queue_rank(
         self, raw: list[dict[str, Any]], top_n: int = 15
@@ -2241,7 +2282,7 @@ class CVPatternDetector:
         raw = self._raw_detect(image_rgb)
 
         if not raw:
-            return []
+            raw = self._heuristic_candle_detect(image_rgb)
         if not raw:
             return []
 

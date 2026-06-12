@@ -1,6 +1,7 @@
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute("PSAvoidUsingWriteHost", "", Justification = "Operator launcher prints explicit live-runtime status.")]
 param(
     [string]$BrokerWindowQuery = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_QUERY) { $env:PHOENIXGUARD_BROKER_WINDOW_QUERY } else { 'The Most Innovative Trading Platform' }),
+    [int]$BrokerWindowHwnd = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_HWND) { [int]$env:PHOENIXGUARD_BROKER_WINDOW_HWND } else { 0 }),
     [string]$SessionId = $(if ($env:PHOENIXGUARD_TRACKER_SESSION_ID) { $env:PHOENIXGUARD_TRACKER_SESSION_ID } else { 'pocket-live-8788' }),
     [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 0.5 }),
     [int]$WarmupSeconds = 20,
@@ -79,9 +80,152 @@ function Get-LiveReadinessSnapshot {
     return [pscustomobject]$result
 }
 
+function Get-LivePerformanceSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BaseUrl,
+        [Parameter(Mandatory = $true)]
+        [string]$SessionId
+    )
+
+    $result = [ordered]@{
+        ready = $false
+        reason = "unknown"
+        frame_age_ms = 0.0
+        stale_status = ""
+    }
+
+    try {
+        $perf = Invoke-RestMethod -Uri "$BaseUrl/v1/mobile/performance/trace/v3/$SessionId" -TimeoutSec 20
+        $timing = $perf.timing_trace
+        $result.frame_age_ms = [double]($timing.frame_age_ms)
+        $result.stale_status = [string]($timing.stale_status)
+        if ($result.frame_age_ms -le 2500.0) {
+            $result.ready = $true
+            $result.reason = "fresh_frame"
+        } else {
+            $result.reason = "frame_age_ms=$($result.frame_age_ms)"
+        }
+    } catch {
+        $result.reason = "performance_trace_unavailable: $($_.Exception.Message)"
+    }
+
+    return [pscustomobject]$result
+}
+
+function Get-LiveRuntimeAuthoritySnapshot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BaseUrl,
+        [Parameter(Mandatory = $true)]
+        [string]$SessionId
+    )
+
+    $result = [ordered]@{
+        ready = $false
+        reason = "unknown"
+        source_lock = ""
+        latest_frame = ""
+        sequence_context = ""
+        model_council = ""
+        study_packet = ""
+        execution_packet = ""
+        packet_validator = ""
+        model_warm = ""
+        packet_contract = ""
+        instrument_state = ""
+        broker_click_safe = $false
+    }
+
+    try {
+        $sessionQuery = [System.Uri]::EscapeDataString($SessionId)
+        $trace = Invoke-RestMethod -Uri "$BaseUrl/v1/mobile/runtime/trace/v3?session_id=$sessionQuery" -TimeoutSec 25
+        $nodes = $trace.dataflow_contract_trace.nodes
+        $gates = $trace.certification_gates
+        $promotion = $gates.model_council_trace.evidence
+
+        $result.source_lock = [string]($nodes.BrokerSourceLockV3)
+        $result.latest_frame = [string]($nodes.LatestFrameBufferV3)
+        $result.sequence_context = [string]($nodes.SequenceContextV3)
+        $result.model_council = [string]($nodes.ModelCouncilV3)
+        $result.study_packet = [string]($nodes.STUDY_PACKET)
+        $result.execution_packet = [string]($nodes.PG_EXECUTION_PACKET_V3)
+        $result.packet_validator = [string]($nodes.PacketValidatorV3)
+        $result.model_warm = [string]($nodes.MultiModelRoleOutputsV3)
+        $result.packet_contract = [string]($gates.packet_contract.status)
+        $result.instrument_state = [string]($promotion.instrument_context_state)
+        $result.broker_click_safe = [bool]($promotion.instrument_context_broker_click_safe)
+
+        $coreReady = (
+            $result.source_lock -eq "PASS" -and
+            $result.latest_frame -eq "PASS" -and
+            $result.sequence_context -eq "PASS" -and
+            $result.model_council -eq "PASS" -and
+            $result.study_packet -eq "PASS" -and
+            $result.packet_validator -eq "PASS" -and
+            $result.model_warm -eq "PASS" -and
+            [bool]($gates.source_lock.passed) -and
+            [bool]($gates.sequence_context.passed) -and
+            [bool]($gates.model_warm_state.passed) -and
+            [bool]($gates.model_council_trace.passed) -and
+            [bool]($gates.packet_contract.passed)
+        )
+        $packetSafe = ($result.execution_packet -ne "PASS" -or $result.broker_click_safe)
+
+        if ($coreReady -and $packetSafe) {
+            $result.ready = $true
+            $result.reason = "runtime_authority_ready"
+        } elseif (-not $coreReady) {
+            $result.reason = "runtime_chain_not_ready source=$($result.source_lock) frame=$($result.latest_frame) sequence=$($result.sequence_context) council=$($result.model_council) study=$($result.study_packet) validator=$($result.packet_validator) models=$($result.model_warm) packet_contract=$($result.packet_contract)"
+        } else {
+            $result.reason = "execution_packet_present_but_instrument_not_broker_click_safe state=$($result.instrument_state)"
+        }
+    } catch {
+        $result.reason = "runtime_trace_unavailable: $($_.Exception.Message)"
+    }
+
+    return [pscustomobject]$result
+}
+
+function Start-LiveReadyShooter {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BaseUrl,
+        [Parameter(Mandatory = $true)]
+        [string]$SessionId,
+        [Parameter(Mandatory = $true)]
+        [string]$BrokerWindowQuery,
+        [int]$BrokerWindowHwnd = 0
+    )
+
+    $escapedRoot = $PSScriptRoot.Replace("'", "''")
+    $escapedSessionId = $SessionId.Replace("'", "''")
+    $escapedBaseUrl = $BaseUrl.Replace("'", "''")
+    $escapedBrokerWindowQuery = $BrokerWindowQuery.Replace("'", "''")
+    $windowHwndArg = ""
+    if ($BrokerWindowHwnd -gt 0) {
+        $windowHwndArg = " --window-hwnd $BrokerWindowHwnd"
+    }
+    $shooterCommand = @(
+        'Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned',
+        "cd '$escapedRoot'",
+        "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='1'",
+        ".\.venv\Scripts\python.exe 'shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll 0.05 --max-signal-age 8 --preferred-source tracker --require-preferred-source --min-confidence 0.2 --window-query '$escapedBrokerWindowQuery'$windowHwndArg --shooter-mode LIVE_READY --broker-speed-profile 'config/shooter_broker_timing_profile.json' --action-speed balanced --no-auto-open --record-action-evidence"
+    ) -join '; '
+
+    Start-Process powershell -ArgumentList @(
+        '-NoExit',
+        '-Command',
+        $shooterCommand
+    ) -WindowStyle Hidden | Out-Null
+}
+
 Write-Host "PhoenixGuard V3 live-ready launch"
 Write-Host "  Session: $SessionId"
 Write-Host "  Broker window query: $BrokerWindowQuery"
+if ($BrokerWindowHwnd -gt 0) {
+    Write-Host "  Broker window HWND: $BrokerWindowHwnd"
+}
 Write-Host "  Dashboard: $dashboardUrl"
 if ($DisableShooter) {
     Write-Host "  Shooter: DISABLED for this launch"
@@ -89,12 +233,19 @@ if ($DisableShooter) {
     Write-Warning "LIVE broker clicks will be armed for this launched shooter process. The shooter still waits for PG_EXECUTION_PACKET_V3."
 }
 
-$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS = if ($DisableShooter) { '0' } else { '1' }
+$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS = '0'
 $env:PHOENIXGUARD_BROKER_WINDOW_QUERY = $BrokerWindowQuery
 $env:PHOENIXGUARD_TRACKER_SESSION_ID = $SessionId
 $env:PHOENIXGUARD_DASHBOARD_ROUTE = 'live'
 $env:PHOENIXGUARD_PROFILE = 'FINAL_LIVE'
 $env:PHOENIXGUARD_EXECUTION_COOLDOWN_SEC = '600'
+$env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL = '0'
+$env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS = '1'
+$env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N = '300'
+$env:PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH = '320'
+$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT = '1'
+$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC = '0.5'
+$env:PHOENIXGUARD_FAST_FOCUS_PREVIEW = '1'
 $runtimeDir = Join-Path -Path $PSScriptRoot -ChildPath '.codex_runtime'
 if (-not (Test-Path -LiteralPath $runtimeDir)) {
     New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
@@ -198,17 +349,13 @@ if (-not $SkipPreview) {
 }
 
 Write-Host ""
-if ($DisableShooter) {
-    Write-Host "Launching full V3 stack with Model Council and shooter disabled..."
-} else {
-    Write-Host "Launching full V3 stack with visible shooter HUD..."
-}
+Write-Host "Launching full V3 tracker and Model Council stack; shooter arms only after readiness..."
 $launchArgs = @{
     CaptureIntervalSec = $CaptureIntervalSec
     BrokerWindowQuery = $BrokerWindowQuery
-    Profile = if ($DisableShooter) { 'TRACKER_PLUS_COUNCIL' } else { 'FULL' }
-    ShooterMode = if ($DisableShooter) { 'LIVE_DISABLED' } else { 'LIVE_READY' }
-    RecordActionEvidence = -not $DisableShooter
+    Profile = 'TRACKER_PLUS_COUNCIL'
+    ShooterMode = 'LIVE_DISABLED'
+    RecordActionEvidence = $false
     NoStatusLoop = $true
 }
 if ($NoBrowser) {
@@ -246,7 +393,67 @@ Write-Host ""
 Write-Host "Runtime trace after warmup"
 & $pythonPath 'tools\runtime_trace_v3.py' --base-url $baseUrl --session $SessionId --timeout 20
 if ($LASTEXITCODE -ne 0) {
-    Write-Warning "Runtime trace reported a non-executable live state after launch. The tracker and armed shooter remain running; the shooter continues waiting for PG_EXECUTION_PACKET_V3."
+    Write-Warning "Runtime trace reported a non-executable live state after launch. The tracker remains running; shooter arming still requires fresh frame readiness."
+}
+
+if (-not $DisableShooter) {
+    Write-Host ""
+    Write-Host "Shooter arming gate: runtime authority"
+    $authorityDeadline = (Get-Date).AddSeconds(180)
+    $authoritySnapshot = $null
+    while ((Get-Date) -lt $authorityDeadline) {
+        $authoritySnapshot = Get-LiveRuntimeAuthoritySnapshot -BaseUrl $baseUrl -SessionId $SessionId
+        if ($authoritySnapshot.ready) {
+            break
+        }
+        Start-Sleep -Seconds 2
+    }
+    if ($null -eq $authoritySnapshot) {
+        $authoritySnapshot = Get-LiveRuntimeAuthoritySnapshot -BaseUrl $baseUrl -SessionId $SessionId
+    }
+    if (-not $authoritySnapshot.ready) {
+        throw "Shooter arming refused: runtime authority gate failed ($($authoritySnapshot.reason)). Tracker remains running without shooter."
+    }
+    Write-Host "Runtime authority: PASS sequence=$($authoritySnapshot.sequence_context) study=$($authoritySnapshot.study_packet) execution=$($authoritySnapshot.execution_packet) instrument=$($authoritySnapshot.instrument_state)"
+
+    Write-Host ""
+    Write-Host "Shooter arming gate: fresh tracker frame"
+    $perfDeadline = (Get-Date).AddSeconds(90)
+    $perfSnapshot = $null
+    while ((Get-Date) -lt $perfDeadline) {
+        $perfSnapshot = Get-LivePerformanceSnapshot -BaseUrl $baseUrl -SessionId $SessionId
+        if ($perfSnapshot.ready) {
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
+    if ($null -eq $perfSnapshot) {
+        $perfSnapshot = Get-LivePerformanceSnapshot -BaseUrl $baseUrl -SessionId $SessionId
+    }
+    if (-not $perfSnapshot.ready) {
+        throw "Shooter arming refused: tracker frame is not fresh ($($perfSnapshot.reason)). Tracker remains running without shooter."
+    }
+    Write-Host "Shooter arming gate: PASS frame_age_ms=$([Math]::Round([double]$perfSnapshot.frame_age_ms, 0)) stale_status=$($perfSnapshot.stale_status)"
+
+    $authoritySnapshot = Get-LiveRuntimeAuthoritySnapshot -BaseUrl $baseUrl -SessionId $SessionId
+    if (-not $authoritySnapshot.ready) {
+        throw "Shooter arming refused: runtime authority changed after freshness gate ($($authoritySnapshot.reason)). Tracker remains running without shooter."
+    }
+    if ($BrokerWindowHwnd -le 0) {
+        try {
+            $liveState = Invoke-RestMethod -Uri "$baseUrl/v1/mobile/live/state/v3/$SessionId`?mode=CLEAN_LIVE" -TimeoutSec 20
+            $lockedHwndText = [string]($liveState.broker_source_lock.selected_target.window_handle)
+            $lockedHwnd = 0
+            if ([int]::TryParse($lockedHwndText, [ref]$lockedHwnd) -and $lockedHwnd -gt 0) {
+                $BrokerWindowHwnd = $lockedHwnd
+                Write-Host "Shooter locked HWND auto-detected from BrokerSourceLockV3: $BrokerWindowHwnd"
+            }
+        } catch {
+            Write-Warning "Could not auto-detect BrokerSourceLockV3 HWND before shooter start: $($_.Exception.Message)"
+        }
+    }
+    Write-Host "Starting shooter against $baseUrl in LIVE_READY mode"
+    Start-LiveReadyShooter -BaseUrl $baseUrl -SessionId $SessionId -BrokerWindowQuery $BrokerWindowQuery -BrokerWindowHwnd $BrokerWindowHwnd
 }
 
 Write-Host ""

@@ -29,6 +29,21 @@ _BEARISH_PATTERNS = {
 }
 
 
+def _transition_prob(transition_summary: Mapping[str, Any] | None, key: str, default: float = 0.25) -> float:
+    if transition_summary is None:
+        return float(np.clip(default, 0.0, 1.0))
+    aliases = {
+        "continue": ("continue", "continue_prob"),
+        "pullback": ("pullback", "pullback_prob"),
+        "reversal_attempt": ("reversal_attempt", "reversal_attempt_prob"),
+        "fakeout": ("fakeout", "fakeout_prob"),
+    }
+    for alias in aliases.get(str(key), (str(key),)):
+        if alias in transition_summary:
+            return float(np.clip(transition_summary.get(alias, default), 0.0, 1.0))
+    return float(np.clip(default, 0.0, 1.0))
+
+
 def _strict_no_fallback_enabled() -> bool:
     """
     Production can force strict behavior via PHOENIXGUARD_STRICT_NO_FALLBACK=1.
@@ -165,8 +180,16 @@ class ImageFusionRegressor:
         projected_box_confidence = float(np.clip(projected_box.get("confidence", 0.0), 0.0, 1.0))
         projection_dominance = float(np.clip(chart_state.get("projection_dominance", projected_box.get("dominance_gap", 0.0)), 0.0, 1.0))
         projection_bias_confidence = float(np.clip(chart_state.get("projection_bias_confidence", projected_box_confidence), 0.0, 1.0))
-        continuation_structure_ready = bool(structure_trade_ready and structure_setup in {"impulse_chain", "reversal_release"})
-        confirmation_ready = bool(active_consolidation or continuation_structure_ready)
+        swing_state = cast(dict[str, Any], chart_state.get("swing_state", {}))
+        swing_phase = str(swing_state.get("swing_phase", "")).lower()
+        macro_direction = str(
+            swing_state.get(
+                "macro_direction",
+                "BUY" if str(chart_state.get("macro_trend", "")).upper() == "BULL" else (
+                    "SELL" if str(chart_state.get("macro_trend", "")).upper() == "BEAR" else "HOLD"
+                ),
+            )
+        ).upper()
 
         try:
             implied_move = float(chart_state.get("implied_3min_move_pct", 0.0) or 0.0)
@@ -203,14 +226,196 @@ class ImageFusionRegressor:
                 raise RuntimeError("Strict mode: invalid MCTS probabilities.")
             mcts_buy, mcts_sell = 0.5, 0.5
 
-        projection_direction_ready = bool(
-            projected_box_direction in {"BUY", "SELL"}
+        if transition_summary is not None:
+            continue_prob = _transition_prob(transition_summary, 'continue', 0.25)
+            reversal_prob = _transition_prob(transition_summary, 'reversal_attempt', 0.25)
+            pullback_prob = _transition_prob(transition_summary, 'pullback', 0.25)
+            fakeout_prob = _transition_prob(transition_summary, 'fakeout', 0.25)
+        else:
+            continue_prob = 0.25
+            reversal_prob = 0.25
+            pullback_prob = 0.25
+            fakeout_prob = 0.25
+
+        projection_direction_available = projected_box_direction in {"BUY", "SELL"}
+        projection_opposes_ensemble = bool(
+            projection_direction_available
+            and direction in {"BUY", "SELL"}
+            and projected_box_direction != direction
+        )
+        reversal_anticipation_ready = bool(
+            projection_opposes_ensemble
+            and projected_box_type == "reversal_base"
+            and projected_box_confidence >= 0.64
+            and projection_bias_confidence >= 0.44
+            and path_clarity >= 0.50
+            and box_sequence_agreement >= 0.44
+            and reversal_prob >= max(continue_prob - 0.02, fakeout_prob + 0.08)
+            and swing_phase == "counter_macro_reversal"
+            and macro_direction == projected_box_direction
+        )
+        macro_pullback_reclaim_ready = bool(
+            structure_setup == "none"
+            and projection_direction_available
+            and projected_box_type in {"reversal_base", "impulse"}
+            and projected_box_confidence >= (0.68 if projected_box_type == "reversal_base" else 0.58)
+            and projection_bias_confidence >= (0.56 if projected_box_type == "reversal_base" else 0.50)
+            and path_clarity >= (0.58 if projected_box_type == "reversal_base" else 0.64)
+            and box_sequence_agreement >= (0.52 if projected_box_type == "reversal_base" else 0.60)
+            and swing_phase == "macro_pullback"
+            and macro_direction == projected_box_direction
             and (
-                structure_trade_ready
-                or projection_bias_confidence >= 0.56
-                or (projected_box_confidence >= 0.62 and projection_dominance >= 0.04)
+                reversal_prob >= max(fakeout_prob + 0.10, continue_prob - 0.02)
+                if projected_box_type == "reversal_base"
+                else continue_prob >= max(fakeout_prob + 0.08, pullback_prob - 0.02)
             )
         )
+        aligned_reversal_release_ready = bool(
+            structure_setup == "none"
+            and projection_direction_available
+            and projected_box_type == "reversal_base"
+            and projected_box_direction == direction
+            and projected_box_direction == macro_direction
+            and projected_box_confidence >= 0.64
+            and projection_bias_confidence >= 0.52
+            and path_clarity >= 0.54
+            and box_sequence_agreement >= 0.50
+            and reversal_prob >= max(fakeout_prob + 0.08, continue_prob - 0.02)
+        )
+        trend_resume_ready = bool(
+            structure_setup == "none"
+            and projection_direction_available
+            and projected_box_type in {"pullback", "impulse"}
+            and projected_box_direction == direction
+            and projected_box_direction == macro_direction
+            and projected_box_confidence >= (0.74 if projected_box_type == "pullback" else 0.68)
+            and projection_bias_confidence >= (0.68 if projected_box_type == "pullback" else 0.56)
+            and path_clarity >= 0.70
+            and box_sequence_agreement >= (0.72 if projected_box_type == "pullback" else 0.56)
+            and continue_prob >= max(fakeout_prob + 0.10, reversal_prob - 0.06)
+        )
+        high_conviction_trend_resume_ready = bool(
+            structure_setup == "none"
+            and projection_direction_available
+            and projected_box_type in {"pullback", "impulse"}
+            and projected_box_direction == direction
+            and projected_box_direction == macro_direction
+            and swing_phase in {"with_macro_push", "macro_pullback"}
+            and projected_box_confidence >= (0.80 if projected_box_type == "pullback" else 0.74)
+            and projection_bias_confidence >= (0.74 if projected_box_type == "pullback" else 0.66)
+            and path_clarity >= (0.74 if projected_box_type == "pullback" else 0.66)
+            and box_sequence_agreement >= (0.58 if projected_box_type == "pullback" else 0.54)
+            and projection_dominance >= (0.10 if projected_box_type == "pullback" else 0.06)
+            and continue_prob >= max(fakeout_prob + 0.10, reversal_prob - 0.14)
+        )
+        counter_macro_breakaway_ready = bool(
+            structure_setup == "none"
+            and projection_direction_available
+            and projected_box_type in {"pullback", "impulse"}
+            and projected_box_direction == direction
+            and projected_box_direction != macro_direction
+            and swing_phase in {"counter_macro_reversal", "macro_pullback"}
+            and projected_box_confidence >= (0.80 if projected_box_type == "pullback" else 0.82)
+            and projection_bias_confidence >= (0.74 if projected_box_type == "pullback" else 0.78)
+            and path_clarity >= (0.74 if projected_box_type == "pullback" else 0.72)
+            and box_sequence_agreement >= (0.80 if projected_box_type == "pullback" else 0.68)
+            and projection_dominance >= (0.12 if projected_box_type == "pullback" else 0.10)
+            and (
+                reversal_prob >= max(fakeout_prob + 0.10, continue_prob - 0.04)
+                or continue_prob >= max(fakeout_prob + 0.12, reversal_prob - 0.06)
+            )
+        )
+        counter_macro_extension_ready = bool(
+            structure_setup == "none"
+            and projection_direction_available
+            and projected_box_type in {"pullback", "impulse"}
+            and projected_box_direction == direction
+            and projected_box_direction != macro_direction
+            and swing_phase in {"counter_macro_reversal", "macro_pullback"}
+            and projected_box_confidence >= (0.74 if projected_box_type == "pullback" else 0.75)
+            and projection_bias_confidence >= (0.69 if projected_box_type == "pullback" else 0.70)
+            and path_clarity >= (0.52 if projected_box_type == "pullback" else 0.60)
+            and box_sequence_agreement >= (0.82 if projected_box_type == "pullback" else 0.70)
+            and projection_dominance >= 0.06
+            and (
+                reversal_prob >= max(fakeout_prob + 0.10, continue_prob - 0.06)
+                or continue_prob >= max(fakeout_prob + 0.12, reversal_prob - 0.02)
+            )
+        )
+        counter_macro_impulse_release_ready = bool(
+            structure_setup == "none"
+            and projection_direction_available
+            and projected_box_type == "impulse"
+            and projected_box_direction == direction
+            and projected_box_direction == macro_direction
+            and swing_phase == "counter_macro_reversal"
+            and projected_box_confidence >= 0.74
+            and projection_bias_confidence >= 0.62
+            and path_clarity >= 0.72
+            and box_sequence_agreement >= 0.44
+            and reversal_prob >= max(fakeout_prob + 0.12, continue_prob - 0.02)
+        )
+        effective_structure_setup = structure_setup
+        effective_structure_trade_ready = bool(structure_trade_ready)
+        if reversal_anticipation_ready and effective_structure_setup == "none":
+            effective_structure_setup = "reversal_release"
+            effective_structure_trade_ready = True
+        elif macro_pullback_reclaim_ready and effective_structure_setup == "none":
+            effective_structure_setup = "reversal_release" if projected_box_type == "reversal_base" else "impulse_chain"
+            effective_structure_trade_ready = True
+        elif aligned_reversal_release_ready and effective_structure_setup == "none":
+            effective_structure_setup = "reversal_release"
+            effective_structure_trade_ready = True
+        elif trend_resume_ready and effective_structure_setup == "none":
+            effective_structure_setup = "impulse_chain"
+            effective_structure_trade_ready = True
+        elif high_conviction_trend_resume_ready and effective_structure_setup == "none":
+            effective_structure_setup = "impulse_chain"
+            effective_structure_trade_ready = True
+        elif counter_macro_breakaway_ready and effective_structure_setup == "none":
+            effective_structure_setup = "reversal_release"
+            effective_structure_trade_ready = True
+        elif counter_macro_extension_ready and effective_structure_setup == "none":
+            effective_structure_setup = "reversal_release"
+            effective_structure_trade_ready = True
+        elif counter_macro_impulse_release_ready and effective_structure_setup == "none":
+            effective_structure_setup = "reversal_release"
+            effective_structure_trade_ready = True
+        continuation_structure_ready = bool(
+            effective_structure_trade_ready
+            and effective_structure_setup in {"impulse_chain", "reversal_release"}
+        )
+        confirmation_ready = bool(active_consolidation or continuation_structure_ready)
+        opposing_projection_structure_ready = bool(
+            effective_structure_trade_ready
+            and projected_box_confidence >= 0.70
+            and projection_dominance >= 0.08
+            and path_clarity >= 0.58
+            and box_sequence_agreement >= 0.48
+        )
+        if projection_opposes_ensemble:
+            projection_direction_ready = bool(
+                projection_direction_available
+                and (
+                    reversal_anticipation_ready
+                    or opposing_projection_structure_ready
+                    or projection_bias_confidence >= max(0.72, ensemble_prob + 0.08)
+                    or (
+                        projected_box_confidence >= max(0.76, ensemble_prob + 0.10)
+                        and projection_dominance >= 0.10
+                        and path_clarity >= 0.62
+                    )
+                )
+            )
+        else:
+            projection_direction_ready = bool(
+                projection_direction_available
+                and (
+                    effective_structure_trade_ready
+                    or projection_bias_confidence >= 0.56
+                    or (projected_box_confidence >= 0.62 and projection_dominance >= 0.04)
+                )
+            )
         effective_direction = projected_box_direction if projection_direction_ready else direction
         if effective_direction not in {"BUY", "SELL", "HOLD"}:
             effective_direction = direction
@@ -250,16 +455,7 @@ class ImageFusionRegressor:
         fused_conf = float(np.clip(0.50 * base_prob + 0.25 * mcts_aligned + 0.20 * cv_aligned + 0.05 * mem_aligned, 0.01, 0.99))
 
         if transition_summary is not None:
-            continue_prob = float(np.clip(transition_summary.get('continue_prob', 0.25), 0.0, 1.0))
-            reversal_prob = float(np.clip(transition_summary.get('reversal_attempt_prob', 0.25), 0.0, 1.0))
-            pullback_prob = float(np.clip(transition_summary.get('pullback_prob', 0.25), 0.0, 1.0))
-            fakeout_prob = float(np.clip(transition_summary.get('fakeout_prob', 0.25), 0.0, 1.0))
             fused_conf = float(np.clip(fused_conf + 0.10 * continue_prob - 0.05 * fakeout_prob, 0.01, 0.99))
-        else:
-            continue_prob = 0.25
-            reversal_prob = 0.25
-            pullback_prob = 0.25
-            fakeout_prob = 0.25
 
         ambiguity = 0.0 if memory_summary is None else float(np.clip(memory_summary.get('ambiguity', 0.0), 0.0, 1.0))
         mixed_labels = False if memory_summary is None else bool(memory_summary.get('mixed_labels', False))
@@ -287,7 +483,7 @@ class ImageFusionRegressor:
         execution_readiness = float(
             np.clip(
                 0.24 * float(1.0 if active_consolidation else 0.0)
-                + 0.18 * float(1.0 if structure_trade_ready else 0.0)
+                + 0.18 * float(1.0 if effective_structure_trade_ready else 0.0)
                 + 0.24 * effective_projection_alignment
                 + 0.22 * path_clarity
                 + 0.20 * box_sequence_agreement
@@ -302,7 +498,7 @@ class ImageFusionRegressor:
             fused_conf = float(np.clip(fused_conf + 0.08 * continue_prob + 0.04 * top_similarity, 0.01, 0.99))
         if active_consolidation:
             fused_conf = float(np.clip(fused_conf + 0.08 * effective_projection_alignment + 0.08 * execution_readiness, 0.01, 0.99))
-            if structure_trade_ready and projected_box_type == "impulse":
+            if effective_structure_trade_ready and projected_box_type == "impulse":
                 fused_conf = float(np.clip(fused_conf + 0.08, 0.01, 0.99))
         elif continuation_structure_ready:
             fused_conf = float(
@@ -383,8 +579,8 @@ class ImageFusionRegressor:
             "contradiction_score": contradiction_score,
             "execution_readiness": execution_readiness,
             "active_consolidation": float(1.0 if active_consolidation else 0.0),
-            "structure_trade_ready": float(1.0 if structure_trade_ready else 0.0),
-            "structure_setup": structure_setup,
+            "structure_trade_ready": float(1.0 if effective_structure_trade_ready else 0.0),
+            "structure_setup": effective_structure_setup,
             "projected_box_type": projected_box_type,
             "projected_box_direction": projected_box_direction,
             "projected_box_confidence": projected_box_confidence,

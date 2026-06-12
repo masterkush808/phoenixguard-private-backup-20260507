@@ -151,7 +151,7 @@ def _high_frequency_snapshot(side: str = "BUY", *, frame_id: int = 201) -> dict[
         "side": side,
         "expiry_seconds": 600,
         "target_time_text": "00:10:00",
-        "reason": "M5 candle closed; next two unseen candles are ready.",
+        "reason": "M5 candle closed; next two-candle study window is ready.",
     }
     snapshot["execution_timing"] = {
         "state": "READY",
@@ -178,7 +178,9 @@ def _high_frequency_snapshot(side: str = "BUY", *, frame_id: int = 201) -> dict[
         "confidence": 0.64,
         "current_candle_closed": True,
         "forecast_agreement": True,
-        "uses_unseen_future_candles": True,
+        "targets_future_candle_window": True,
+        "do_not_render_synthetic_candles": True,
+        "uses_unseen_future_candles": False,
         "does_not_trade_seen_last_two_candles": True,
         "swing_fallback_enabled": True,
         "expiry_seconds": 600,
@@ -213,7 +215,10 @@ def test_high_frequency_two_candle_lane_publishes_fixed_600s_packet() -> None:
     assert result["execution"]["side"] == "BUY"
     assert result["execution"]["expiry_seconds"] == 600
     assert result["selected_execution_lane"] == "HIGH_FREQUENCY_TWO_CANDLE"
-    assert result["model_council"]["execution_lane"]["high_frequency_candle_cycle"]["uses_unseen_future_candles"] is True
+    hf_cycle = result["model_council"]["execution_lane"]["high_frequency_candle_cycle"]
+    assert hf_cycle["targets_future_candle_window"] is True
+    assert hf_cycle["do_not_render_synthetic_candles"] is True
+    assert hf_cycle["uses_unseen_future_candles"] is False
 
 
 def test_model_council_resets_stability_on_symbol_switch() -> None:
@@ -773,6 +778,39 @@ def test_sequence_context_reads_nested_tracker_history() -> None:
     assert context.sequence_status == "COMPLETE"
     assert len(context.box_history) == 1
     assert len(context.progression) == 1
+    assert context.entry_progression["source"] == "sequence_context_memory_compression"
+    assert readiness["ready"] is True
+
+
+def test_sequence_context_promotes_tracked_candle_history_when_live_snapshot_marks_partial() -> None:
+    snapshot = _strong_snapshot("SELL", frame_id=140)
+    snapshot.pop("historical_structure")
+    snapshot.pop("progression")
+    snapshot.pop("entry_progression")
+    snapshot["sequence_status"] = "PARTIAL_SEQUENCE"
+    snapshot["tracking_summary"] = {
+        "visible_candle_count": 20,
+        "tracked_candles": [
+            {
+                "track_id": index,
+                "bbox": [index * 4, 80 + index, index * 4 + 3, 160 + index],
+                "direction": "SELL" if index % 3 else "BUY",
+                "color": "magenta" if index % 3 else "green",
+                "price_proxy": 0.48 + index * 0.002,
+                "body_height_pct": 0.54,
+                "normalized_x": index / 20,
+                "normalized_y": 0.58,
+            }
+            for index in range(1, 21)
+        ],
+    }
+
+    context = build_sequence_context_v3(snapshot)
+    readiness = sequence_context_readiness_report(context)
+
+    assert context.sequence_status == "COMPLETE"
+    assert len(context.box_history) == 20
+    assert len(context.progression) == 20
     assert context.entry_progression["source"] == "sequence_context_memory_compression"
     assert readiness["ready"] is True
 

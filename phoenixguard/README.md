@@ -1,112 +1,233 @@
-# 808Fx Standard Hybrid System
+# PhoenixGuard V3
 
-## Overview
-808Fx Standard Hybrid System is an advanced chart-analysis workstation for financial signal review, memory-augmented reasoning, and multi-module decision support. It combines layered visual intelligence, historical recall, and consensus logic for robust trading signal generation.
+PhoenixGuard V3 is a `FINAL_LIVE` chart-intelligence workstation. The live path is
+strictly:
 
-## Features
-- MemoryBank (HNSW few-shot recall + logit boost)
-- 12-gate CurriculumGates (formal automata, ontology, regression, predictive)
-- Live support checks for continuation strength, trend alignment, memory alignment, counterforce, execution permission, forecast calibration, interval efficiency, regime stability, and transition alignment
-- 3-condition ensemble consensus
-- Per-run Plotly skill-contribution dashboard
-- Online RL update every 50 memory-bank recalls
-- Reactive Gradio workstation with live overlay tuning
-- Confidence heatmap, compare desk, and scenario lab
-- Zone Studio with persistent support/resistance/reaction teaching memory
-- Session timeline and pattern browser for in-session review
-- Multi-timeframe hotkey capture workflow with floating HUD
-
-## Project Layout
-- `phoenixguard/core/`: shared config and utility helpers
-- `phoenixguard/vision/`: preprocessing, CV reasoning, grounded parsing, and detector logic
-- `phoenixguard/runtime/`: security, adaptation, local ensemble runtime, and continual adapters
-- `phoenixguard/memory/`: memory bank ingestion and retrieval features
-- `phoenixguard/decision/`: ensemble, regression, RL, gates, and personalization
-- `phoenixguard/training/`: reusable training implementation
-- Root `main.py`, `train_*.py`, and `hf_model_check.py`: entry scripts that now point into the organized package layout
-
-## Setup Instructions
-
-### 1. Clone the repository and enter the project directory
-```
-cd "c:/Users/thaba/OneDrive/Documents/The 808 Vision 2026/phoenixguard"
+```text
+BrokerSourceLockV3
+-> LatestFrameBufferV3
+-> ChartSegmentationV3
+-> CandleObjectTrackerV3
+-> MarketObjectTrackerV3
+-> SequenceContextV3
+-> ModelCouncilV3
+-> STUDY_PACKET or PG_EXECUTION_PACKET_V3
+-> RuntimeTraceV3
+-> Dashboard/FloatingStateV2
+-> ShooterActionSequencerV2 only when a valid executable packet exists
 ```
 
-### 2. Create and activate the virtual environment
-```
-python -m venv .venv
+Observation is not execution. Study packets are not execution. The shooter may
+reach broker action only through a fresh validated `PG_EXECUTION_PACKET_V3`.
+
+## Clean Kill, Reset, And Launch
+
+Run this from PowerShell when you need to kill all PhoenixGuard processes, clear
+runtime/cache state, and launch the production stack.
+
+```powershell
+Set-Location "C:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard"
+
+# Kill PhoenixGuard-related processes that were launched from this repo or match
+# known PhoenixGuard runtime entrypoints.
+$root = (Get-Location).Path
+Get-CimInstance Win32_Process |
+    Where-Object {
+        $_.ProcessId -ne $PID -and
+        $_.CommandLine -and
+        (
+            $_.CommandLine -like "*$root*" -or
+            $_.CommandLine -match "shooter\.py|start_phoenixguard|launch_phoenixguard|window_tracker|uvicorn.*phoenixguard"
+        )
+    } |
+    ForEach-Object {
+        Write-Host "Stopping PID $($_.ProcessId): $($_.Name)"
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+
+Start-Sleep -Seconds 3
+
+# Activate the local environment.
 .\.venv\Scripts\Activate.ps1
+
+# Clear V3 runtime/cache state before a cold launch.
+python .\tools\clean_v3_runtime_state.py --apply
+if ($LASTEXITCODE -ne 0) {
+    throw "Runtime cleanup failed. Launch aborted."
+}
+
+# Launch the full live-ready V3 stack.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser
 ```
 
-### 3. Install dependencies once
-```
-pip install -r requirements.txt
-```
+If more than one matching Edge/Chrome broker window is open, pin the shooter to
+the broker surface locked by the tracker:
 
-### 4. Fast launch
-```
-.\.venv\Scripts\Activate.ps1
-.\start_phoenixguard.ps1
+```powershell
+$state = Invoke-RestMethod "http://127.0.0.1:8793/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE"
+$hwnd = [int]$state.broker_source_lock.selected_target.window_handle
+powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser -BrokerWindowHwnd $hwnd
 ```
 
-The launcher now defaults to the `FAST` runtime profile so startup avoids the heaviest warmups and optional CPU ensemble loading.
+The launcher also attempts this HWND detection automatically before arming the
+shooter. Passing `-BrokerWindowHwnd` is the explicit override for a busy desktop.
 
-### 5. Optional runtime profiles
-```
-.\start_phoenixguard.ps1 -Profile FAST
-.\.venv\Scripts\Activate.ps1
-.\start_phoenixguard.ps1 -Profile BALANCED
-.\start_phoenixguard.ps1 -Profile FULL
-.\start_phoenixguard.ps1 -Profile HEAVY_LAZY
-```
+The production launcher sets the live tracker hot path to low latency:
 
-- `FAST`: quickest startup and lighter first inference. Disables test-time adaptation, replay continual learning, foundation grounded backends, and local ensemble auto-load.
-- `BALANCED`: keeps a lighter runtime while leaving an upgrade path to the full stack.
-- `FULL`: restores the heavier experience, including launch-time preloading and CUDA local-ensemble enablement when available.
-- `HEAVY_LAZY`: keeps startup light, but automatically runs the heavyweight council on inference through the persistent worker. On CPU, it requests the full council lazily, keeps only a small resident model cache, and reuses cached results for static images.
-- `Model Council` is now lazy-loaded from its tab. Opening that tab starts a persistent local worker, loads heavyweight council models on demand, and reuses the refined result for the current static image instead of front-loading that cost at app launch.
-
-### 6. Optional bootstrap / validation path
-```
-.\start_phoenixguard.ps1 -Bootstrap -RunTests -CheckHF -Profile FULL
+```powershell
+$env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL="0"
+$env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS="1"
+$env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N="300"
+$env:PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH="320"
+$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT="1"
+$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC="0.5"
+$env:PHOENIXGUARD_FAST_FOCUS_PREVIEW="1"
+$env:PHOENIXGUARD_ENABLE_LIVE_SCENARIO_GENERATION="0"
 ```
 
-Use this when you intentionally want dependency refresh, tests, and Hugging Face validation. It is no longer part of the default launch path.
+These keep fresh frame, model, packet, and sequence state moving while avoiding
+slow full-overlay artifact writes on every live frame and bounding candle-track
+extraction cost on large broker windows. The fast-display heartbeat refreshes
+the latest broker screenshot while the study worker is busy, and fast focus
+preview avoids a blocking full study before tracker start; the heartbeat uses
+display-only capture and neither path creates execution authority. Scenario
+generation remains diagnostic/offline by default in live execution mode so it
+cannot slow the hot path; set `PHOENIXGUARD_ENABLE_LIVE_SCENARIO_GENERATION=1`
+only for an intentional diagnostics run.
 
-### 7. Optional hotkey capture workflow
-- Press `F4` to open a drag-select capture overlay on Windows.
-- Drag the chart region, then press `Enter` to confirm or `Esc` to cancel.
-- If `F4` is unavailable, the app falls back to `Ctrl+Shift+4`.
-- The first confirmed capture is staged as the higher timeframe.
-- Switch to the trigger timeframe and press the hotkey again.
-- After the second confirmation, the app runs multi-timeframe inference automatically and refreshes the open desk.
+Read-only launch, with tracker/dashboard active and shooter disabled:
 
-### 8. Visual Lab workflow
-- `Compare Desk` shows raw, focused, annotated, and heatmap views with client-side zoom and pan controls.
-- `Scenario Lab` clones the current chart into a threshold sandbox without overwriting the live desk.
-- `Zone Studio` lets you paint support, resistance, and reaction zones that are saved into persistent teaching memory.
-
-### 9. Session review workflow
-- `Session Timeline` keeps the analyzed captures from the current session in order.
-- `Pattern Browser` surfaces visually similar session cases based on action, projection, confidence, and memory profile.
-
-### 10. Worldwide protected sharing
-- Use `share_phoenixguard.py` or `.\start_phoenixguard_share.ps1` for remote access instead of exposing `main.py`.
-- Quickest worldwide path:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser -DisableShooter
 ```
-$env:PHOENIXGUARD_SHARE_CREDENTIALS='you:StrongPass2026!,brother:BrotherPass2026!'
-.\start_phoenixguard_share.ps1 -LaunchMode FAST -AccessMode TUNNEL
-```
-- `TUNNEL` keeps the app on `127.0.0.1` and lets Gradio generate a temporary public HTTPS link protected by login.
-- `PUBLIC` binds to `0.0.0.0`, but that alone is still not worldwide. You also need port forwarding or a reverse proxy/tunnel.
-- See `WORLDWIDE_SHARE.md` for the secure quick-share path and the Cloudflare Tunnel setup.
 
-## Notes
-- The pipeline uses a layered proprietary vision ensemble tuned locally on your chart images from `808 Memory/BUYS` and `808 Memory/SELLS`.
-- Fine-tuning and model saving are fully automated; model assets are stored locally for fast, private inference.
-- Runtime behavior can be tuned with `PHOENIXGUARD_PROFILE` and the `PHOENIXGUARD_*` overrides in `phoenixguard/core/config.py`.
-- If you encounter missing module errors, install them with `pip install <module>`.
-- For Ultralytics settings, see: https://docs.ultralytics.com/quickstart/#ultralytics-settings
+## Post-Launch Verification
+
+After launch, verify runtime trace, sequence context, and canonical integrity:
+
+```powershell
+python .\tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
+python .\tools\trace_sequence_context_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
+python .\tools\verify_v3_integrity.py
+```
+
+`verify_v3_integrity.py` must report `Overall: PASS` before treating the runtime
+as production-ready.
+
+Two-hour activated burn-in:
+
+```powershell
+python .\tools\certify_v3_full_system_burn_in.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --duration-sec 7200 --interval-sec 10 --warmup-sec 60 --status-every-sec 60 --timeout 20 --mode FULL_ACTIVATED --max-frame-age-ms 2500 --max-consecutive-stale-frames 12 --max-consecutive-process-misses 5 --no-stop-on-stale-frame --no-stop-on-stale-execution-packet --out reports\FINAL_FULL_SYSTEM_ACTIVATED_BURN_IN_OVERLAYFIXED_FINAL_REPORT.md
+```
+
+For long live observation runs where transient Windows capture latency should be
+logged but not abort the run, add `--no-stop-on-stale-frame
+--no-stop-on-stale-execution-packet`. The shooter still refuses expired packets
+through runtime integrity validation.
+
+## Shooter Safety
+
+The shooter is a real-click executor. It must stay packet-driven:
+
+- `main.py::run_inference` is offline/manual analysis only.
+- Observer signals, dashboard state, overlays, and skill gates are diagnostic.
+- Startup calibration packets are time-only and cannot click BUY or SELL.
+- BUY/SELL side clicks require a fresh executable `PG_EXECUTION_PACKET_V3`.
+- A packet must carry sequence context, provenance, runtime integrity, model
+  health, instrument context, TTL, and cache freshness.
+
+To run shooter signal-follow mode manually after verification:
+
+```powershell
+$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS="1"
+$state = Invoke-RestMethod "http://127.0.0.1:8793/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE"
+$hwnd = [int]$state.broker_source_lock.selected_target.window_handle
+python shooter.py signal --session-id pocket-live-8788 --base-url http://127.0.0.1:8793 --poll 0.05 --max-signal-age 8 --preferred-source tracker --require-preferred-source --window-query "The Most Innovative Trading Platform" --window-hwnd $hwnd --shooter-mode LIVE_READY --broker-speed-profile config/shooter_broker_timing_profile.json --action-speed balanced --no-auto-open --record-action-evidence
+```
+
+Standalone one-shot manual mode is for calibration/account-safety testing only.
+It is intentionally double-armed: the environment variable and the command flag
+must both be present before it can click a side button.
+
+```powershell
+$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS="1"
+python shooter.py manual sell 5400 --window-query "Pocket Option" --allow-live-click
+```
+
+Calibration authority:
+
+- `user_calibration_manifest.json` is the live-click authority when
+  `authoritative_execution_source=true`.
+- `808_shooter_boxes.json` is treated as a legacy source and is not allowed to
+  override the user manifest.
+- Split expiry controls such as `hourly_input`, `minute_input`, `second_input`,
+  and old preset boxes are ignored unless they are explicitly marked
+  `USER_CALIBRATED` in the manifest.
+- Non-alias duplicate points now invalidate calibration instead of continuing
+  with ambiguous click targets.
+
+## Core Runtime Contracts
+
+- `raw_side`: observation only.
+- `candidate_side`: side under evaluation.
+- `final_side`: Model Council arbitration result.
+- `execution.side`: the only actionable side.
+- `STUDY_PACKET`: explanatory, never executable.
+- `PG_EXECUTION_PACKET_V3`: only valid execution authority.
+
+Every execution packet must carry provenance:
+
+```text
+frame_id, capture_count, state_version, sequence_id, source_lock_id,
+model_health_id, chart_transform_id, created_epoch_ms, valid_until_epoch_ms
+```
+
+Every live state must be explainable through RuntimeTraceV3 dataflow and
+certification gates: source lock, frame freshness, sequence context, model warm
+state, overlay truth, Model Council trace, packet contract, shooter persistence,
+and burn-in evidence.
+
+## Validation Commands
+
+Focused Grade A* hardening checks:
+
+```powershell
+python -m pytest tests/test_execution_packet_schema_v3.py tests/test_model_council_v3.py tests/test_market_reality_engine.py tests/test_market_intelligence_v3.py tests/test_v3_language_contracts.py tests/test_simulation_paper_execution.py tests/test_shooter_action_sequencer.py -q
+python -m pytest tests/test_shooter_v3_runtime.py -q
+python -m pytest tests/test_cache_observability_v3.py tests/test_runtime_telemetry_v3.py tests/test_manual_inference_queue.py -q
+python -m compileall -q main.py shooter.py phoenixguard\decision phoenixguard\execution phoenixguard\mobile_api phoenixguard\runtime tools\runtime_trace_v3.py tools\certification_common_v3.py
+python tools\verify_v3_integrity.py
+```
+
+## TradingView Study Source
+
+TradingView may be used as a chart-study source while the real-click broker
+remains Pocket Option. Keep the shooter pointed at the calibrated Pocket Option
+window and use a separate study tracker session for TradingView:
+
+```powershell
+python start_phoenixguard_24_7_tracker.py --session-id tradingview-study --window-query "TradingView" --focus-region ""
+```
+
+## Production Artifacts
+
+- `launch_phoenixguard_live_ready.ps1`: canonical production launcher.
+- `808_shooter_boxes.json`: calibrated execution targets.
+- `user_calibration_manifest.json`: user calibration manifest.
+- `.codex_runtime\`: live runtime state, traces, packet cache, and evidence.
+- `reports\`: launch, trace, validation, and certification outputs.
+
+## Tracing
+
+PhoenixGuard initializes OpenTelemetry tracing automatically when the mobile API
+or workstation launches.
+
+- Default export endpoint: `http://localhost:4318/v1/traces`
+- Disable with `PHOENIXGUARD_TRACING_DISABLED=1`
+- Override with `PHOENIXGUARD_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`
+- Override service labels with `PHOENIXGUARD_TRACE_SERVICE_NAME` or
+  `OTEL_SERVICE_NAME`
 
 ## License
+
 Proprietary. All rights reserved.

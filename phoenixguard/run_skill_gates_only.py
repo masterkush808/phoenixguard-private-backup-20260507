@@ -9,25 +9,26 @@ from typing import Any, Mapping, Sequence, cast
 import numpy as np
 from PIL import Image
 
-from adaptive_runtime import _build_heuristic_grounded_chart
-from config import MODELS, RUNTIME
-from cv_module import CVPatternDetector
-from ensemble import TransitionSummary
+from phoenixguard.core.config import MODELS, RUNTIME
+from phoenixguard.decision.ensemble import TransitionSummary
+from phoenixguard.decision.regression_module import ForecastRouter
+from phoenixguard.decision.skill_gates import CurriculumGates, GateOutput
+from phoenixguard.runtime.adaptive_runtime import build_heuristic_grounded_chart
+from phoenixguard.vision.cv_module import CVPatternDetector
+from phoenixguard.vision.preprocess import extract_price_floats, indicator_regex_filter, load_any_file_as_image
+
 from main import (
-    _build_chart_state,
-    _build_next_box_hypotheses,
-    _build_sequence_model_summary,
-    _build_transition_summary,
-    _derive_proxy_price_series,
-    _ensemble_base_probs,
-    _estimate_implied_move_pct,
-    _extract_chart_structure,
-    _extract_latest_signal_state,
-    _fuse_transition_probabilities,
+    build_chart_state,
+    build_next_box_hypotheses,
+    build_sequence_model_summary,
+    build_transition_summary,
+    derive_proxy_price_series,
+    ensemble_base_probs,
+    estimate_implied_move_pct,
+    extract_chart_structure,
+    extract_latest_signal_state,
+    fuse_transition_probabilities,
 )
-from preprocess import extract_price_floats, indicator_regex_filter, load_any_file_as_image
-from regression_module import ForecastRouter
-from skill_gates import CurriculumGates
 
 
 class _NullLogger:
@@ -123,7 +124,7 @@ def _build_heuristic_detections(
     sequence_state: Mapping[str, Any],
     sequence_model: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    detections = list(cv_proxy._heuristic_candle_detect(image_rgb))
+    detections = list(cv_proxy.heuristic_candle_detect(image_rgb))
     latest_bbox = cast(list[float], chart_geometry.get("latest_candle_bbox", [0.0, 0.0, 0.0, 0.0]))
     geom_conf = _clip01(chart_geometry.get("geometry_confidence", 0.0), 0.0)
     body_pct = _clip01(chart_geometry.get("body_height_pct", 0.0), 0.0)
@@ -379,8 +380,8 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
     img_raw, meta = load_any_file_as_image(str(image_path))
     image_rgb = img_raw.convert("RGB")
 
-    chart_geometry, sequence_state = _extract_chart_structure(cv_proxy, image_rgb)
-    sequence_state["sequence_model"] = _build_sequence_model_summary(sequence_state, chart_geometry, market_state={})
+    chart_geometry, sequence_state = extract_chart_structure(cv_proxy, image_rgb)
+    sequence_state["sequence_model"] = build_sequence_model_summary(sequence_state, chart_geometry, market_state={})
     detections = _build_heuristic_detections(
         cv_proxy,
         image_rgb,
@@ -389,12 +390,12 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
         cast(dict[str, Any], sequence_state.get("sequence_model", {})),
     )
     reasoning_trace = cv_proxy.build_reasoning_trace(detections, image_rgb=image_rgb)
-    sequence_state["sequence_model"] = _build_sequence_model_summary(
+    sequence_state["sequence_model"] = build_sequence_model_summary(
         sequence_state,
         chart_geometry,
         market_state=cast(dict[str, Any], reasoning_trace.get("market_state", {})),
     )
-    grounded_chart = _build_heuristic_grounded_chart(
+    grounded_chart = build_heuristic_grounded_chart(
         image_rgb,
         detections=detections,
         chart_geometry=chart_geometry,
@@ -406,7 +407,7 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
         grounded_chart,
         cast(dict[str, Any], sequence_state.get("sequence_model", {})),
     )
-    chart_state = _build_chart_state(
+    chart_state = build_chart_state(
         detections=detections,
         local_ensemble=local_ensemble,
         reasoning_trace=reasoning_trace,
@@ -415,12 +416,12 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
         grounded_chart=grounded_chart,
     )
 
-    fused_transition_probabilities = _fuse_transition_probabilities(
+    fused_transition_probabilities = fuse_transition_probabilities(
         reasoning_trace,
         {},
         sequence_state=sequence_state,
     )
-    transition_summary: TransitionSummary = _build_transition_summary(fused_transition_probabilities)
+    transition_summary: TransitionSummary = build_transition_summary(fused_transition_probabilities)
     sequence_state.update(
         {
             "continuation_probability": float(fused_transition_probabilities.get("continue", 0.25)),
@@ -429,7 +430,7 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
             "fakeout_probability": float(fused_transition_probabilities.get("fakeout", 0.25)),
         }
     )
-    sequence_state["next_box_hypotheses"] = _build_next_box_hypotheses(
+    sequence_state["next_box_hypotheses"] = build_next_box_hypotheses(
         cast(list[dict[str, Any]], sequence_state.get("box_history", [])),
         sequence_state,
         chart_geometry,
@@ -446,7 +447,7 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
             1.0,
         )
     )
-    sequence_state["sequence_model"] = _build_sequence_model_summary(
+    sequence_state["sequence_model"] = build_sequence_model_summary(
         sequence_state,
         chart_geometry,
         market_state=cast(dict[str, Any], reasoning_trace.get("market_state", {})),
@@ -459,7 +460,7 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
         cast(dict[str, Any], sequence_state.get("sequence_model", {})),
     )
     reasoning_trace["sequence_state"] = sequence_state
-    chart_state = _build_chart_state(
+    chart_state = build_chart_state(
         detections=detections,
         local_ensemble=local_ensemble,
         reasoning_trace=reasoning_trace,
@@ -468,7 +469,7 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
         grounded_chart=grounded_chart,
     )
 
-    base_probs = _ensemble_base_probs(local_ensemble, chart_state=chart_state, memory_summary={})
+    base_probs = ensemble_base_probs(local_ensemble, chart_state=chart_state, memory_summary={})
     chart_state["mcts"] = {
         "buy_prob": float(base_probs["BUY"]),
         "sell_prob": float(base_probs["SELL"]),
@@ -489,16 +490,16 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
     _, cleaned_expl = indicator_regex_filter(explanation_text)
     extracted_prices = extract_price_floats(annotation_text)
     if len(extracted_prices) < 4:
-        extracted_prices = _derive_proxy_price_series(sequence_state)
+        extracted_prices = derive_proxy_price_series(sequence_state)
     sub_signals = [(float(detection.get("confidence", 0.0) or 0.0), str(detection.get("pattern", ""))) for detection in detections]
     module_logits = np.array(
         [float(base_probs["BUY"]), float(base_probs["SELL"]), float(base_probs["HOLD"])],
         dtype=np.float32,
     )
-    latest_signal_state = _extract_latest_signal_state(detections)
+    latest_signal_state = extract_latest_signal_state(detections)
     latest_parse_quality = float(latest_signal_state["latest_parse_quality"])
     latest_candle_confidence = float(latest_signal_state["latest_candle_confidence"])
-    gate_outputs = gates_engine.run_all(
+    gate_outputs: list[GateOutput] = gates_engine.run_all(
         probs=base_probs,
         q05=float(forecast["q05"]),
         q95=float(forecast["q95"]),
@@ -533,7 +534,7 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
             1.0,
         )
     )
-    support_gate_outputs = gates_engine.run_support_gates(
+    support_gate_outputs: list[GateOutput] = gates_engine.run_support_gates(
         chart_state=chart_state,
         market_state=cast(dict[str, Any], reasoning_trace.get("market_state", {})),
         forecast=cast(dict[str, Any], forecast),
@@ -550,7 +551,7 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
         use_opposition_strength=RUNTIME.use_opposition_strength_gate,
     )
 
-    core_gate_details = [
+    core_gate_details: list[dict[str, Any]] = [
         {
             "name": str(gate.name),
             "score": float(gate.score),
@@ -559,7 +560,7 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
         }
         for gate in gate_outputs
     ]
-    support_gate_details = [
+    support_gate_details: list[dict[str, Any]] = [
         {
             "name": str(gate.name),
             "score": float(gate.score),
@@ -568,7 +569,7 @@ def _isolated_gate_result(image_path: Path, annotation_text: str) -> dict[str, A
         }
         for gate in support_gate_outputs
     ]
-    implied_move = _estimate_implied_move_pct(
+    implied_move = estimate_implied_move_pct(
         detections,
         float(chart_state.get("direction_probability", 0.5) or 0.5),
         float(cast(dict[str, Any], chart_state.get("entry_candle", {})).get("body_pct", 0.0) or 0.0),
@@ -664,7 +665,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--overlay-mode",
-        default="history-plus-projection",
+        default="history-boxes",
         help="Retained for compatibility. Ignored in isolated mode.",
     )
     parser.add_argument(

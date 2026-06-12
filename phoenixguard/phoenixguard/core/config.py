@@ -31,11 +31,36 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(str(raw).strip())
+    except Exception:
+        return float(default)
+
+
+def _env_str(name: str, default: str) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        return str(default)
+    value = str(raw).strip()
+    return value or str(default)
+
+
+def _env_path(name: str, default: Path) -> Path:
+    raw = os.getenv(name)
+    if raw is None:
+        return Path(default)
+    candidate = str(raw).strip()
+    if not candidate:
+        return Path(default)
+    return Path(candidate).expanduser()
+
+
 def _runtime_profile_name() -> str:
-    raw = str(os.getenv("PHOENIXGUARD_PROFILE", "FAST") or "FAST").strip().upper()
-    if raw in {"FAST", "BALANCED", "FULL", "HEAVY_LAZY"}:
-        return raw
-    return "FAST"
+    return "FINAL_LIVE"
 
 
 @dataclass(slots=True)
@@ -111,13 +136,15 @@ class RuntimeConfig:
     mcts_sims: int = 20
     memory_recall_update_every: int = 50
 
-    ui_host: str = '127.0.0.1'
-    ui_port: int = 7860
-    ui_share: bool = False
-    capture_hotkey: str = 'F4'
+    ui_host: str = field(default_factory=lambda: str(os.getenv('PHOENIXGUARD_UI_HOST', '127.0.0.1') or '127.0.0.1').strip() or '127.0.0.1')
+    ui_port: int = field(default_factory=lambda: _env_int('PHOENIXGUARD_UI_PORT', 7860))
+    ui_share: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_UI_SHARE', False))
+    ui_open_browser: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_UI_OPEN_BROWSER', False))
+    ui_show_error: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_UI_SHOW_ERROR', True))
+    capture_hotkey: str = 'CTRL+V'
     capture_hotkey_fallback: str = 'CTRL+SHIFT+4'
     capture_poll_interval_sec: float = 2.5
-    capture_bundle_size: int = 2
+    capture_bundle_size: int = 4
     capture_bundle_timeout_sec: int = 240
     cuda_cache_clear_every: int = 0
     cuda_cache_clear_reserved_gb: float = 0.0
@@ -138,6 +165,7 @@ class RuntimeConfig:
     enable_grounded_chart_parsing: bool = True
     enable_open_set_guard: bool = True
     enable_replay_continual_learning: bool = True
+    enable_feedback_learning_feed: bool = True
     enable_test_time_adaptation: bool = True
     enable_fast_personalization: bool = True
     pause_rl_updates: bool = False
@@ -155,9 +183,9 @@ class RuntimeConfig:
     def __post_init__(self) -> None:
         self.adapters_dir = self.project_root / 'adapters'
         self.models_dir = self.project_root / 'models'
-        self.data_dir = self.project_root / 'data'
-        self.logs_dir = self.project_root / 'logs'
-        self.screenshots_inbox = self.project_root / 'data' / 'inbox'
+        self.data_dir = _env_path('PHOENIXGUARD_DATA_DIR', self.project_root / 'data')
+        self.logs_dir = _env_path('PHOENIXGUARD_LOGS_DIR', self.project_root / 'logs')
+        self.screenshots_inbox = self.data_dir / 'inbox'
         self.memory_bank_dir = self.project_root / 'memory_bank'
         self.session_log_path = self.data_dir / 'session_history.jsonl'
         self.zone_memory_path = self.data_dir / 'zone_memory.json'
@@ -197,53 +225,25 @@ class RuntimeConfig:
         self.runtime_profile = _runtime_profile_name()
         device_is_cuda = self.device_preference == 'cuda'
 
-        if self.runtime_profile == 'FAST':
-            self.enable_test_time_adaptation = False
-            self.enable_replay_continual_learning = False
-            self.pause_rl_updates = True
-            self.prefer_foundation_grounding = False
-            self.preload_memory_bank_on_launch = False
-            self.background_warmup_on_launch = True
-            self.enable_local_ensemble = False
-            self.warm_local_ensemble_on_launch = False
-            self.auto_model_council_on_inference = False
-            self.force_full_council_on_cpu = False
-        elif self.runtime_profile == 'BALANCED':
-            self.enable_test_time_adaptation = False
-            self.enable_replay_continual_learning = False
-            self.prefer_foundation_grounding = False
-            self.preload_memory_bank_on_launch = False
-            self.background_warmup_on_launch = True
-            self.enable_local_ensemble = bool(device_is_cuda)
-            self.warm_local_ensemble_on_launch = False
-            self.auto_model_council_on_inference = False
-            self.force_full_council_on_cpu = False
-        elif self.runtime_profile == 'HEAVY_LAZY':
-            self.enable_test_time_adaptation = True
-            self.enable_replay_continual_learning = True
-            self.pause_rl_updates = False
-            self.prefer_foundation_grounding = True
-            self.preload_memory_bank_on_launch = False
-            self.background_warmup_on_launch = True
-            self.enable_local_ensemble = bool(device_is_cuda)
-            self.warm_local_ensemble_on_launch = False
-            self.auto_model_council_on_inference = True
-            self.force_full_council_on_cpu = True
-        else:
-            self.preload_memory_bank_on_launch = True
-            self.background_warmup_on_launch = True
-            self.enable_local_ensemble = bool(device_is_cuda)
-            self.warm_local_ensemble_on_launch = bool(device_is_cuda)
-            self.auto_model_council_on_inference = False
-            self.force_full_council_on_cpu = False
+        self.enable_test_time_adaptation = True
+        self.enable_replay_continual_learning = True
+        self.pause_rl_updates = False
+        self.prefer_foundation_grounding = True
+        self.preload_memory_bank_on_launch = True
+        self.background_warmup_on_launch = True
+        self.enable_local_ensemble = bool(device_is_cuda)
+        self.warm_local_ensemble_on_launch = bool(device_is_cuda)
+        self.auto_model_council_on_inference = True
+        self.force_full_council_on_cpu = True
 
-        self.local_ensemble_max_loaded_models = 2 if self.device_preference == 'cpu' else 6
+        self.local_ensemble_max_loaded_models = 3 if self.device_preference == 'cpu' else 6
         self.model_council_cache_size = 24
 
         env_overrides = {
             'PHOENIXGUARD_ENABLE_GROUNDED_CHART_PARSING': 'enable_grounded_chart_parsing',
             'PHOENIXGUARD_ENABLE_OPEN_SET_GUARD': 'enable_open_set_guard',
             'PHOENIXGUARD_ENABLE_REPLAY_CONTINUAL_LEARNING': 'enable_replay_continual_learning',
+            'PHOENIXGUARD_ENABLE_FEEDBACK_LEARNING_FEED': 'enable_feedback_learning_feed',
             'PHOENIXGUARD_ENABLE_TEST_TIME_ADAPTATION': 'enable_test_time_adaptation',
             'PHOENIXGUARD_ENABLE_FAST_PERSONALIZATION': 'enable_fast_personalization',
             'PHOENIXGUARD_PAUSE_RL_UPDATES': 'pause_rl_updates',
@@ -275,6 +275,66 @@ class RuntimeConfig:
             return 'cuda' if torch.cuda.is_available() else 'cpu'
         except Exception:
             return 'cpu'
+
+
+@dataclass(slots=True)
+class VoiceConfig:
+    project_root: Path = field(default_factory=lambda: PROJECT_ROOT)
+    enabled: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_VOICE_ENABLED', True))
+    listening_enabled_default: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_VOICE_LISTENING_ENABLED', True))
+    automatic_timer_enabled_default: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_VOICE_AUTOMATIC_TIMER_ENABLED', False))
+    allow_remote_model_downloads: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_VOICE_ALLOW_REMOTE_DOWNLOADS', False))
+    require_local_files_only: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_VOICE_REQUIRE_LOCAL_FILES_ONLY', True))
+    require_safetensors_for_heavy_models: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_VOICE_REQUIRE_SAFETENSORS', True))
+    forbid_cpu_offload_for_heavy_models: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_VOICE_FORBID_CPU_OFFLOAD', True))
+    max_cpu_memory_mb: int = field(default_factory=lambda: _env_int('PHOENIXGUARD_VOICE_MAX_CPU_MEMORY_MB', 1024))
+    preferred_device: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_DEVICE', 'cuda'))
+    wake_word: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_WAKE_WORD', 'Hey 808'))
+    greeting_target_name: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_GREETING_TARGET', 'Master'))
+    timezone_name: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_TIMEZONE', ''))
+    low_latency_mode: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_VOICE_LOW_LATENCY_MODE', True))
+    remote_enabled: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_VOICE_REMOTE_ENABLED', True))
+    remote_base_url: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_REMOTE_BASE_URL', ''))
+    remote_timeout_sec: int = field(default_factory=lambda: _env_int('PHOENIXGUARD_VOICE_REMOTE_TIMEOUT_SEC', 8))
+    tracker_api_base_url: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_TRACKER_API_BASE_URL', f"http://127.0.0.1:{_env_int('PHOENIXGUARD_MOBILE_API_PORT', 8791)}"))
+    tracker_session_id: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_TRACKER_SESSION_ID', 'pocket-live-8788'))
+    tracker_interval_sec_default: float = field(default_factory=lambda: _env_float('PHOENIXGUARD_VOICE_TRACKER_INTERVAL_SEC', 3.0))
+    sensitive_data_guard_enabled: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_VOICE_SENSITIVE_GUARD', True))
+    wake_word_bundle_name: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_WAKE_WORD_BUNDLE', 'openwakeword-local'))
+    speech_to_text_bundle_name: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_STT_BUNDLE', 'whisper-large-v3-local'))
+    brain_bundle_name: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_BRAIN_BUNDLE', 'qwen3-8b-instruct-local'))
+    speech_bundle_name: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_TTS_BUNDLE', 'openvoice-v2-local'))
+    bundle_root: Path = field(init=False)
+    profile_root: Path = field(init=False)
+    reference_clip_dir: Path = field(init=False)
+    logs_dir: Path = field(init=False)
+    cache_dir: Path = field(init=False)
+    state_path: Path = field(init=False)
+    command_history_path: Path = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.bundle_root = self.project_root / 'models' / 'voice'
+        self.profile_root = self.project_root / 'data' / 'voice_profiles'
+        self.reference_clip_dir = self.profile_root / 'reference'
+        self.logs_dir = self.project_root / 'logs' / 'voice'
+        self.cache_dir = self.project_root / '.hf_cache' / 'voice'
+        self.state_path = self.project_root / 'data' / 'voice_runtime_state.json'
+        self.command_history_path = self.project_root / 'data' / 'voice_command_history.jsonl'
+        normalized_device = str(self.preferred_device or 'cuda').strip().lower()
+        if normalized_device not in {'cuda', 'cpu', 'auto'}:
+            normalized_device = 'cuda'
+        self.preferred_device = normalized_device
+        self.max_cpu_memory_mb = max(0, int(self.max_cpu_memory_mb))
+        self.remote_timeout_sec = max(1, int(self.remote_timeout_sec))
+        self.tracker_interval_sec_default = min(10.0, max(0.5, float(self.tracker_interval_sec_default)))
+        for path in (
+            self.bundle_root,
+            self.profile_root,
+            self.reference_clip_dir,
+            self.logs_dir,
+            self.cache_dir,
+        ):
+            path.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass(slots=True)
@@ -315,5 +375,6 @@ class TrainConfig:
 MODELS = ModelConfig()
 MEMORY_BANK = MemoryBankConfig()
 RUNTIME = RuntimeConfig()
+VOICE = VoiceConfig()
 SECURITY = SecurityConfig()
 TRAIN = TrainConfig()

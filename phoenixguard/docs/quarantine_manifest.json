@@ -1,0 +1,5 @@
+{
+  "quarantined_files": [],
+  "reason": "No files were moved during this pass. Active execution-path files are still referenced by tests, launchers, or runtime imports.",
+  "next_step": "Run import/reference analysis before moving legacy files into _archive/legacy_quarantine."
+}

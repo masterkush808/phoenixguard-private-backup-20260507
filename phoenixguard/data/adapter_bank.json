@@ -1,0 +1,50 @@
+{
+  "dark|wide|dense|M5|consolidation_breakout": {
+    "confidence_scale": 0.97,
+    "count": 1,
+    "direction_bias": {
+      "BUY": 0.02,
+      "SELL": -0.01
+    },
+    "last_reason": "Beautiful clean setup prediction, price bought at premium low price",
+    "lora_adapter_file": "",
+    "lora_adapter_name": "",
+    "model_weight_biases": {
+      "dinov2": -0.03,
+      "swav": -0.06
+    },
+    "success_rate": 0.425
+  },
+  "dark|wide|mid|M5|none": {
+    "confidence_scale": 0.97,
+    "count": 1,
+    "direction_bias": {
+      "BUY": -0.01,
+      "SELL": 0.02
+    },
+    "last_reason": "Weak and choppy won trade but not trustworthy you can do better ",
+    "lora_adapter_file": "",
+    "lora_adapter_name": "",
+    "model_weight_biases": {
+      "mobilenetv3": -0.03,
+      "swav": -0.06
+    },
+    "success_rate": 0.425
+  },
+  "dark|wide|sparse|M5|none": {
+    "confidence_scale": 0.9409,
+    "count": 2,
+    "direction_bias": {
+      "BUY": 0.04,
+      "SELL": -0.02
+    },
+    "last_reason": "Weak and choppy won trade but not trustworthy you can do better and predict the retracements ",
+    "lora_adapter_file": "",
+    "lora_adapter_name": "",
+    "model_weight_biases": {
+      "mobilenetv3": -0.06,
+      "swav": -0.12
+    },
+    "success_rate": 0.36124999999999996
+  }
+}

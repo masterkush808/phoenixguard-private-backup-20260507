@@ -1,0 +1,1539 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import time
+from typing import Any, Callable, Mapping, Sequence, cast
+
+from PIL import Image
+
+from phoenixguard.mobile_api.realtime_sync_v3 import build_visual_health_v3
+from phoenixguard.runtime.realtime_performance_v3 import (
+    build_frame_timing_trace_v3,
+    build_performance_trace_v3,
+    model_warm_states_from_health,
+)
+from phoenixguard.tracking.market_object_tracker_v3 import (
+    MarketObjectRegistryV3,
+    build_market_object_registry_v3,
+)
+from phoenixguard.vision.broker_scene_graph_v3 import build_broker_scene_graph_v3
+from phoenixguard.vision.box_refinement_v3 import OVERLAY_PRECISION_AUDIT_SCHEMA_VERSION, resolve_precision_overlays_v3
+from phoenixguard.vision.overlay_layer_manager_v3 import OverlayLayerManagerV3
+from phoenixguard.vision.v3_overlay_contract import (
+    VIEW_MODES,
+    normalize_v3_overlay_object,
+    normalize_view_mode,
+    overlay_is_visible,
+    prediction_overlay_config,
+    view_mode_profile,
+)
+
+
+LIVE_STATE_SCHEMA_VERSION = "PG_LIVE_STATE_V3"
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+
+
+def _first_mapping(*values: Any) -> dict[str, Any]:
+    for value in values:
+        row = _mapping(value)
+        if row:
+            return row
+    return {}
+
+
+def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [dict(cast(Mapping[str, Any], item)) for item in value if isinstance(item, Mapping)]
+
+
+def _text(value: Any, default: str = "") -> str:
+    text = str(value or "").strip()
+    return text or default
+
+
+def _float(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if number != number:
+        return float(default)
+    return float(number)
+
+
+def _int(value: Any, default: int = 0) -> int:
+    return int(_float(value, float(default)))
+
+
+def _bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "on", "ok", "ready", "valid", "pass", "passed", "locked"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "off", "invalid", "fail", "failed", "missing", "mismatch", "wrong_surface"}:
+        return False
+    return default
+
+
+def _path_from(value: Any) -> Path | None:
+    text = _text(value)
+    return Path(text) if text else None
+
+
+def _artifact_frame_id_from_path(path: Path | str | None) -> int:
+    if not path:
+        return 0
+    try:
+        prefix = Path(path).stem.split("_", 1)[0]
+    except Exception:
+        return 0
+    try:
+        frame_id = int(prefix)
+    except (TypeError, ValueError):
+        return 0
+    return frame_id if frame_id > 0 else 0
+
+
+def _image_size(path: Path | None) -> tuple[int, int]:
+    if path is None or not path.exists():
+        return (0, 0)
+    try:
+        with Image.open(path) as img:
+            return int(img.width), int(img.height)
+    except Exception:
+        return (0, 0)
+
+
+def _artifact_from_path(kind: str, path: Path | str | None, *, session_id: str = "") -> dict[str, Any]:
+    resolved = Path(path) if path else None
+    exists = bool(resolved and resolved.exists())
+    width, height = _image_size(resolved)
+    mtime = 0.0
+    size = 0
+    if exists and resolved is not None:
+        try:
+            stat = resolved.stat()
+            mtime = float(stat.st_mtime)
+            size = int(stat.st_size)
+        except OSError:
+            exists = False
+    version = f"{int(mtime * 1000.0)}-{int(size)}" if exists else "missing"
+    return {
+        "kind": kind,
+        "path": str(resolved) if resolved else "",
+        "exists": exists,
+        "width": width,
+        "height": height,
+        "frame_id": _artifact_frame_id_from_path(resolved),
+        "mtime": mtime,
+        "size": size,
+        "url": f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-{kind}?v={version}" if session_id else "",
+    }
+
+
+def _artifact_refs(
+    session: Mapping[str, Any],
+    *,
+    artifacts: Mapping[str, Path | str] | None = None,
+    artifact_probe: Callable[[str], Path | str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    session_id = _text(session.get("session_id"))
+    keys = {
+        "window": "last_window_path",
+        "chart": "last_chart_path",
+        "overlay": "last_overlay_path",
+        "full-overlay": "last_full_overlay_path",
+        "projection": "last_projection_path",
+        "memory-reference": "last_memory_reference_path",
+    }
+    refs: dict[str, dict[str, Any]] = {}
+    for kind, key in keys.items():
+        value: Path | str | None = None
+        if artifacts and kind in artifacts:
+            value = artifacts[kind]
+        elif artifact_probe is not None:
+            try:
+                value = artifact_probe(kind)
+            except Exception:
+                value = None
+        if value is None and kind == "window" and _text(session.get("last_display_window_path")):
+            value = _text(session.get("last_display_window_path"))
+        if value is None:
+            value = _text(session.get(key))
+        refs[kind] = _artifact_from_path(kind, value, session_id=session_id)
+    return refs
+
+
+def _bounds_payload(values: Sequence[Any] | None) -> dict[str, Any]:
+    if not values or len(values) < 4:
+        return {"exists": False, "x": 0, "y": 0, "width": 0, "height": 0, "bbox": []}
+    x0 = _float(values[0])
+    y0 = _float(values[1])
+    x1 = _float(values[2])
+    y1 = _float(values[3])
+    left, right = sorted((x0, x1))
+    top, bottom = sorted((y0, y1))
+    return {
+        "exists": right > left and bottom > top,
+        "x": left,
+        "y": top,
+        "width": max(0.0, right - left),
+        "height": max(0.0, bottom - top),
+        "bbox": [left, top, right, bottom],
+    }
+
+
+def _plot_area(session: Mapping[str, Any], artifacts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    tracking = _mapping(session.get("tracking_summary"))
+    chart_region = _mapping(tracking.get("chart_region") or tracking.get("display_region"))
+    pixel_bbox = chart_region.get("pixel_bbox") or chart_region.get("bbox")
+    if not isinstance(pixel_bbox, Sequence) or isinstance(pixel_bbox, (str, bytes, bytearray)):
+        width = _float(artifacts.get("chart", {}).get("width"), 0.0)
+        height = _float(artifacts.get("chart", {}).get("height"), 0.0)
+        pixel_bbox = [0, 0, width, height] if width and height else []
+    payload = _bounds_payload(cast(Sequence[Any], pixel_bbox) if pixel_bbox else None)
+    bounds = dict(payload)
+    payload.update(
+        {
+            "bounds": bounds,
+            "source": _text(chart_region.get("source"), "tracker_chart_region"),
+            "confidence": _float(chart_region.get("confidence"), 0.0),
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "manual_focus_region": _mapping(session.get("manual_focus_region")),
+        }
+    )
+    return payload
+
+
+def _chart_transform(session: Mapping[str, Any], plot: Mapping[str, Any]) -> dict[str, Any]:
+    tracking = _mapping(session.get("tracking_summary"))
+    raw = _mapping(tracking.get("chart_transform"))
+    frame_id = _int(session.get("frame_index"))
+    transform_id = _text(raw.get("chart_transform_id") or raw.get("id"), f"ct_{_text(session.get('session_id'), 'session')}_{frame_id}")
+    return {
+        "chart_transform_id": transform_id,
+        "frame_id": frame_id,
+        "plot_area": dict(plot),
+        "coordinate_space": "FULL_BROKER_SURFACE_WITH_PLOT_AREA",
+    }
+
+
+def _study_packet_summary(packet: Mapping[str, Any] | None, *, now_epoch: float) -> dict[str, Any]:
+    payload = _mapping(packet)
+    valid_until = _float(payload.get("valid_until_epoch") or payload.get("valid_until_epoch_sec"), 0.0)
+    created = _float(payload.get("created_epoch") or payload.get("created_epoch_sec") or payload.get("published_epoch"), 0.0)
+    age_ms = max(0.0, (float(now_epoch) - created) * 1000.0) if created > 0.0 else 0.0
+    return {
+        "exists": bool(payload),
+        "packet_id": _text(payload.get("packet_id")),
+        "schema_version": _text(payload.get("schema_version")),
+        "created_epoch": created,
+        "valid_until_epoch": valid_until,
+        "age_ms": round(age_ms, 3),
+        "fresh": bool(payload) and (valid_until <= 0.0 or valid_until >= now_epoch),
+    }
+
+
+def _execution_packet_valid_until(packet: Mapping[str, Any]) -> float:
+    direct = _float(packet.get("valid_until_epoch_sec") or packet.get("valid_until_epoch"), 0.0)
+    if direct > 0.0:
+        return direct
+    created = _float(packet.get("created_epoch_sec") or packet.get("created_epoch"), 0.0)
+    ttl = _float(packet.get("ttl_sec") or packet.get("time_to_live_sec") or packet.get("freshness_window_sec"), 0.0)
+    return created + max(0.1, ttl) if created > 0.0 and ttl > 0.0 else 0.0
+
+
+def _current_execution_packet(packet: Any, *, now_epoch: float) -> dict[str, Any]:
+    payload = _mapping(packet)
+    if not payload:
+        return {}
+    packet_type = _text(payload.get("packet_type")).upper()
+    schema_version = _text(payload.get("schema_version")).upper()
+    if packet_type != "PG_EXECUTION_PACKET_V3" and schema_version != "PG_EXECUTION_PACKET_V3":
+        return {}
+    valid_until = _execution_packet_valid_until(payload)
+    return payload if valid_until > float(now_epoch) else {}
+
+
+def _model_council_summary(session: Mapping[str, Any], study_packet: Mapping[str, Any] | None) -> dict[str, Any]:
+    signal = _mapping(session.get("latest_signal"))
+    result = _mapping(session.get("model_council_result"))
+    packet = _mapping(study_packet)
+    council = _mapping(result.get("model_council") or packet.get("model_council"))
+    execution = _mapping(result.get("execution") or packet.get("execution"))
+    promotion = _mapping(result.get("promotion_trace") or packet.get("promotion_trace"))
+    return {
+        "state": _text(execution.get("state") or council.get("final_state") or signal.get("entry_state"), "WATCHING").upper(),
+        "side": _text(execution.get("side") or council.get("final_side") or signal.get("execution_action") or signal.get("action"), "HOLD").upper(),
+        "summary": _text(signal.get("summary"), "Awaiting live chart study."),
+        "next_required": _text(promotion.get("next_required") or promotion.get("denied_at") or signal.get("execution_block_reason")),
+        "result_present": bool(result),
+    }
+
+
+def _instrument(session: Mapping[str, Any]) -> dict[str, Any]:
+    tracking = _mapping(session.get("tracking_summary"))
+    signal = _mapping(session.get("latest_signal"))
+    market = _text(signal.get("market") or tracking.get("detected_market") or session.get("market"))
+    timeframe = _text(signal.get("focus_timeframe") or tracking.get("detected_timeframe"))
+    return {
+        "market": market,
+        "timeframe": timeframe,
+        "market_confidence": _float(signal.get("market_confidence", tracking.get("market_confidence", 0.0)), 0.0),
+        "timeframe_confidence": _float(signal.get("timeframe_confidence", tracking.get("timeframe_confidence", 0.0)), 0.0),
+        "identity_locked": bool(market and timeframe),
+        "instrument_context": _mapping(tracking.get("instrument_context") or signal.get("instrument_context")),
+        "symbol_context": _mapping(tracking.get("symbol_context") or signal.get("symbol_context")),
+    }
+
+
+def _overlay_from_active_object(
+    row: Mapping[str, Any],
+    *,
+    frame_id: int,
+    sequence_id: str,
+    chart_transform_id: str,
+    index: int,
+) -> dict[str, Any] | None:
+    overlay = _mapping(row.get("overlay"))
+    if not overlay:
+        overlay = dict(row)
+    for source_key, target_key in (("pixel_bbox", "bounds"), ("bbox", "bounds"), ("bounds", "bounds")):
+        if source_key in overlay and target_key not in overlay:
+            overlay[target_key] = overlay[source_key]
+    overlay.setdefault("overlay_id", row.get("overlay_id") or overlay.get("id") or f"registry_{index}")
+    overlay.setdefault("object_id", row.get("object_id") or overlay.get("overlay_id"))
+    overlay.setdefault("track_id", row.get("track_id") or row.get("object_id") or overlay.get("object_id"))
+    overlay.setdefault("truth_score", row.get("truth_score", overlay.get("confidence", 0.0)))
+    overlay.setdefault("lifecycle_state", row.get("lifecycle_state", "ACTIVE"))
+    overlay.setdefault("frame_id", frame_id)
+    overlay.setdefault("sequence_id", sequence_id)
+    overlay.setdefault("chart_transform_id", chart_transform_id)
+    overlay.setdefault("source_agent", row.get("source_agent", "market_registry"))
+    overlay.setdefault("reason", row.get("reason", "registry active object"))
+    try:
+        return normalize_v3_overlay_object(
+            overlay,
+            strict=False,
+            frame_id=frame_id,
+            sequence_id=sequence_id,
+            chart_transform_id=chart_transform_id,
+            fallback_index=index,
+        )
+    except Exception:
+        return None
+
+
+def _combine_overlays(
+    registry: MarketObjectRegistryV3,
+    *,
+    active_objects: Sequence[Mapping[str, Any]] | None,
+    chart_transform_id: str,
+) -> list[dict[str, Any]]:
+    overlays = [dict(overlay) for overlay in registry.overlays]
+    seen = {str(overlay.get("overlay_id")) for overlay in overlays}
+    for index, row in enumerate(active_objects or []):
+        overlay = _overlay_from_active_object(
+            row,
+            frame_id=registry.frame_id,
+            sequence_id=registry.sequence_context.sequence_id,
+            chart_transform_id=chart_transform_id,
+            index=index,
+        )
+        if overlay is not None and str(overlay.get("overlay_id")) not in seen:
+            overlays.append(overlay)
+            seen.add(str(overlay.get("overlay_id")))
+    return overlays
+
+
+def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = False) -> dict[str, Any]:
+    row = dict(overlay)
+    bbox = row.get("bbox")
+    if not isinstance(bbox, Sequence) or isinstance(bbox, (str, bytes, bytearray)) or len(bbox) < 4:
+        bounds_value = row.get("bounds")
+        if isinstance(bounds_value, Sequence) and not isinstance(bounds_value, (str, bytes, bytearray)):
+            bbox = list(bounds_value)[:4]
+        elif isinstance(bounds_value, Mapping):
+            maybe_bbox = bounds_value.get("bbox")
+            if isinstance(maybe_bbox, Sequence) and not isinstance(maybe_bbox, (str, bytes, bytearray)):
+                bbox = list(maybe_bbox)[:4]
+    if isinstance(bbox, Sequence) and not isinstance(bbox, (str, bytes, bytearray)) and len(bbox) >= 4:
+        x0 = _float(bbox[0])
+        y0 = _float(bbox[1])
+        x1 = _float(bbox[2])
+        y1 = _float(bbox[3])
+        left, right = sorted((x0, x1))
+        top, bottom = sorted((y0, y1))
+        box = [left, top, right, bottom]
+        row["bbox"] = box
+        row["bounds"] = box
+        row["bounds_rect"] = {
+            "exists": right > left and bottom > top,
+            "x": left,
+            "y": top,
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+            "width": max(0.0, right - left),
+            "height": max(0.0, bottom - top),
+            "bbox": box,
+        }
+    label_bounds = row.get("label_bounds")
+    if isinstance(label_bounds, Sequence) and not isinstance(label_bounds, (str, bytes, bytearray)) and len(label_bounds) >= 4:
+        lx0 = _float(label_bounds[0])
+        ly0 = _float(label_bounds[1])
+        lx1 = _float(label_bounds[2])
+        ly1 = _float(label_bounds[3])
+        left, right = sorted((lx0, lx1))
+        top, bottom = sorted((ly0, ly1))
+        label_box = [left, top, right, bottom]
+        row["label_bounds"] = {
+            "exists": right > left and bottom > top,
+            "x": left,
+            "y": top,
+            "left": left,
+            "top": top,
+            "right": right,
+            "bottom": bottom,
+            "width": max(0.0, right - left),
+            "height": max(0.0, bottom - top),
+            "bbox": label_box,
+        }
+    if not compact:
+        return row
+    keep_keys = (
+        "schema_version",
+        "overlay_id",
+        "id",
+        "object_id",
+        "track_id",
+        "type",
+        "overlay_type",
+        "kind",
+        "side",
+        "direction",
+        "action",
+        "bbox",
+        "bounds",
+        "bounds_rect",
+        "truth_score",
+        "confidence",
+        "label",
+        "display_label",
+        "short_label",
+        "layer",
+        "role",
+        "visible_modes",
+        "visible_default",
+        "label_hidden",
+        "label_anchor",
+        "label_bounds",
+        "parent_overlay_id",
+        "parent_type",
+        "nesting_depth",
+        "nesting_role",
+        "child_overlay_ids",
+        "containment_ratio",
+        "z_index",
+        "coordinate_mode",
+        "anchor_type",
+        "precision_rejected",
+        "precision_rejection_reason",
+    )
+    return {key: row[key] for key in keep_keys if row.get(key) not in (None, "", [], {})}
+
+
+def _zone_bbox(zone: Mapping[str, Any]) -> list[float]:
+    raw = zone.get("bbox") or zone.get("pixel_bbox") or zone.get("bounds") or zone.get("normalized_bbox")
+    if isinstance(raw, Mapping):
+        raw = raw.get("bbox")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)) or len(raw) < 4:
+        return []
+    x0, y0, x1, y1 = [_float(raw[index]) for index in range(4)]
+    left, right = sorted((x0, x1))
+    top, bottom = sorted((y0, y1))
+    if right <= left or bottom <= top:
+        return []
+    return [left, top, right, bottom]
+
+
+def _signal_thesis_overlay_objects(
+    thesis: Mapping[str, Any],
+    *,
+    frame_id: int,
+    sequence_id: str,
+    chart_transform_id: str,
+) -> list[dict[str, Any]]:
+    if not bool(thesis.get("active")):
+        return []
+    side = _text(thesis.get("effective_side") or thesis.get("side")).upper()
+    if side not in {"BUY", "SELL"}:
+        return []
+    opposite = "SELL" if side == "BUY" else "BUY"
+    thesis_id = _text(thesis.get("thesis_id"), "active-thesis")
+    confidence = max(0.5, min(1.0, _float(thesis.get("confidence"), 0.75)))
+    visible_modes = ["CLEAN_LIVE", "COUNCIL", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"]
+
+    def make_overlay(kind: str, overlay_type: str, zone: Mapping[str, Any], *, overlay_side: str, label: str, layer: str, role: str) -> dict[str, Any] | None:
+        bbox = _zone_bbox(zone)
+        if not bbox:
+            return None
+        raw = {
+            "overlay_id": f"thesis_{thesis_id}_{kind}",
+            "object_id": f"thesis_{thesis_id}_{kind}",
+            "track_id": f"thesis_{thesis_id}",
+            "type": overlay_type,
+            "side": overlay_side,
+            "bbox": bbox,
+            "truth_score": confidence,
+            "confidence": confidence,
+            "label": label,
+            "display_label": label,
+            "short_label": label,
+            "layer": layer,
+            "role": role,
+            "visible_modes": visible_modes,
+            "visible_default": True,
+            "label_hidden": False,
+            "label_anchor": "top" if kind == "countertrend_block" else "bottom",
+            "z_index": 96 if kind == "countertrend_block" else 88,
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "source_agent": "signal_thesis_tracker",
+            "reason": _text(thesis.get("plain_language"), "Active thesis context"),
+            "lifecycle_state": "ACTIVE",
+            "frame_id": frame_id,
+            "sequence_id": sequence_id,
+            "chart_transform_id": chart_transform_id,
+        }
+        try:
+            return normalize_v3_overlay_object(
+                raw,
+                strict=False,
+                frame_id=frame_id,
+                sequence_id=sequence_id,
+                chart_transform_id=chart_transform_id,
+                fallback_index=0,
+            )
+        except Exception:
+            return raw
+
+    entry_zone = _mapping(thesis.get("entry_zone"))
+    target_zone = _mapping(thesis.get("target_zone"))
+    invalidation_zone = _mapping(thesis.get("invalidation_zone"))
+    overlays: list[dict[str, Any]] = []
+    for candidate in (
+        make_overlay("active_entry", "SNIPER_ENTRY_BOX", entry_zone, overlay_side=side, label=f"ACTIVE {side}", layer="trigger_zones", role="active_thesis_entry"),
+        make_overlay("active_target", "TARGET_ZONE_BOX", target_zone, overlay_side=side, label=f"{side} TARGET", layer="target_zones", role="active_thesis_target"),
+        make_overlay("active_invalidation", "INVALIDATION_BOX", invalidation_zone, overlay_side=side, label=f"{side} INVALID", layer="invalidation", role="active_thesis_invalidation"),
+        make_overlay(
+            "countertrend_block",
+            "OPPOSING_FORCE",
+            invalidation_zone or entry_zone,
+            overlay_side=opposite,
+            label=f"{opposite} BLOCKED",
+            layer="supply_demand",
+            role="countertrend_block",
+        ),
+    ):
+        if candidate is not None:
+            overlays.append(candidate)
+    return overlays
+
+
+def _overlay_visible_for_mode(overlay: Mapping[str, Any], mode: str) -> bool:
+    if bool(overlay.get("precision_rejected", False)):
+        return False
+    normalized_mode = normalize_view_mode(mode)
+    if normalized_mode == "CLEAN_LIVE" and overlay.get("visible_default") is False:
+        return False
+    return overlay_is_visible(overlay, normalized_mode)
+
+
+def _overlay_is_frame_aligned(overlay: Mapping[str, Any], frame_id: int) -> bool:
+    if frame_id <= 0:
+        return True
+    layer = _text(overlay.get("layer")).lower()
+    if layer in {"historical_replay", "replay"}:
+        return True
+    overlay_frame = _int(overlay.get("frame_id") or overlay.get("frame_index"))
+    return overlay_frame <= 0 or overlay_frame == frame_id
+
+
+def _overlay_artifact_alignment(
+    *,
+    overlay_artifact: Mapping[str, Any],
+    overlay_object_frame_id: int,
+) -> tuple[bool, str, int]:
+    artifact_frame_id = _int(overlay_artifact.get("frame_id"))
+    if artifact_frame_id <= 0 or overlay_object_frame_id <= 0:
+        return True, "", artifact_frame_id
+    if artifact_frame_id == overlay_object_frame_id:
+        return True, "", artifact_frame_id
+    return (
+        False,
+        f"overlay artifact frame {artifact_frame_id} does not match overlay object frame {overlay_object_frame_id}",
+        artifact_frame_id,
+    )
+
+
+def _mode_visible_layers(mode: str) -> list[str]:
+    profile = view_mode_profile(mode)
+    layer_visibility = _mapping(profile.get("layer_visibility"))
+    ordered_layers = OverlayLayerManagerV3(mode).layer_order()
+    return [layer for layer in ordered_layers if _bool(layer_visibility.get(layer), False)]
+
+
+def _first_present(sources: Sequence[Mapping[str, Any]], keys: Sequence[str]) -> tuple[bool, Any]:
+    for source in sources:
+        for key in keys:
+            if key in source:
+                return True, source.get(key)
+    return False, None
+
+
+def _source_text_status_wrong(sources: Sequence[Mapping[str, Any]]) -> bool:
+    for source in sources:
+        for key in ("status", "source_status", "lock_status", "validation_status", "reason"):
+            value = source.get(key)
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if "wrong_surface" in lowered or "wrong surface" in lowered or "surface_mismatch" in lowered:
+                    return True
+    return False
+
+
+def _broker_source_summary(session: Mapping[str, Any]) -> dict[str, Any]:
+    broker_surface = _mapping(session.get("broker_surface"))
+    locked_window = _mapping(session.get("locked_window"))
+    descriptor = _mapping(session.get("descriptor"))
+    tracking = _mapping(session.get("tracking_summary"))
+    tracking_surface = _mapping(tracking.get("broker_surface"))
+    sources: list[dict[str, Any]] = [
+        _mapping(session.get("broker_source")),
+        _mapping(session.get("broker_source_lock")),
+        _mapping(session.get("broker_source_summary")),
+        _mapping(session.get("source_validation")),
+        _mapping(broker_surface.get("broker_source")),
+        _mapping(broker_surface.get("broker_source_lock")),
+        _mapping(broker_surface.get("source")),
+        _mapping(broker_surface.get("source_validation")),
+        _mapping(broker_surface.get("lock_validation")),
+        tracking_surface,
+        _mapping(tracking_surface.get("broker_source")),
+        _mapping(tracking_surface.get("broker_source_lock")),
+    ]
+    sources = [source for source in sources if source]
+
+    def bool_field(keys: Sequence[str], default: bool) -> bool:
+        found, value = _first_present(sources, keys)
+        return _bool(value, default) if found else default
+
+    lock_found, lock_value = _first_present(
+        sources,
+        ("lock_id", "source_lock_id", "surface_lock_id", "broker_lock_id", "window_lock_id", "locked_hwnd", "hwnd"),
+    )
+    lock_id = _text(lock_value) if lock_found else ""
+    if not lock_id:
+        lock_id = _text(
+            session.get("lock_id")
+            or session.get("source_capture_id")
+            or session.get("display_capture_id")
+            or locked_window.get("hwnd")
+            or descriptor.get("hwnd")
+            or locked_window.get("title")
+            or session.get("locked_title")
+            or descriptor.get("title")
+        )
+
+    wrong_surface = bool_field(
+        (
+            "wrong_surface",
+            "surface_mismatch",
+            "window_mismatch",
+            "lock_mismatch",
+            "wrong_window",
+            "wrong_broker_surface",
+        ),
+        False,
+    ) or _source_text_status_wrong(sources)
+    url_valid = bool_field(("url_valid", "frame_url_valid", "window_url_valid", "source_url_valid"), True)
+    pixel_fingerprint_valid = bool_field(
+        (
+            "pixel_fingerprint_valid",
+            "fingerprint_valid",
+            "visual_fingerprint_valid",
+            "broker_surface_hash_stable",
+            "surface_hash_stable",
+        ),
+        True,
+    )
+
+    title_found, title_value = _first_present(sources, ("title_valid", "window_title_valid", "source_title_valid"))
+    if title_found:
+        title_valid = _bool(title_value, True)
+    else:
+        title_valid = True
+    if not title_valid:
+        wrong_surface = True
+
+    valid_found, valid_value = _first_present(
+        sources,
+        ("valid", "source_valid", "lock_valid", "surface_valid", "broker_source_valid", "is_valid"),
+    )
+    base_valid = _bool(valid_value, True) if valid_found else True
+    valid = bool(base_valid and not wrong_surface and url_valid and title_valid and pixel_fingerprint_valid)
+    status_found, status_value = _first_present(sources, ("status", "lock_status"))
+    status_text = _text(status_value).upper() if status_found else ""
+    if status_text and status_text not in {"VALID", "OK", "PASS", "LOCKED"}:
+        valid = False
+        if status_text in {"WRONG_SURFACE", "TITLE_MATCH_PIXEL_MISMATCH"}:
+            wrong_surface = True
+    return {
+        "lock_id": lock_id,
+        "valid": valid,
+        "status": status_text or ("VALID" if valid else "UNKNOWN"),
+        "wrong_surface": bool(wrong_surface),
+        "url_valid": bool(url_valid),
+        "title_valid": bool(title_valid),
+        "pixel_fingerprint_valid": bool(pixel_fingerprint_valid),
+    }
+
+
+def _broker_source_block_reason(broker_source: Mapping[str, Any]) -> str:
+    if not broker_source:
+        return ""
+    if _bool(broker_source.get("wrong_surface"), False):
+        return "broker source rejected: wrong surface"
+    if _bool(broker_source.get("valid"), True):
+        return ""
+    invalid_fields = [
+        label
+        for label, key in (
+            ("url", "url_valid"),
+            ("title", "title_valid"),
+            ("pixel_fingerprint", "pixel_fingerprint_valid"),
+        )
+        if not _bool(broker_source.get(key), True)
+    ]
+    suffix = ", ".join(invalid_fields) if invalid_fields else "source lock"
+    return f"broker source rejected: invalid {suffix}"
+
+
+def _empty_overlay_reason(
+    *,
+    source_block_reason: str,
+    total_count: int,
+    renderable_count: int,
+    active_mode: str,
+) -> str:
+    if renderable_count > 0:
+        return ""
+    if source_block_reason:
+        return source_block_reason
+    if total_count <= 0:
+        return "no market overlays available for the current broker surface"
+    return f"no renderable overlays for mode {active_mode}"
+
+
+def _broker_surface_summary(
+    session: Mapping[str, Any],
+    surface_frame: Mapping[str, Any],
+    frame_timing: Mapping[str, Any],
+    *,
+    now_epoch: float,
+) -> dict[str, Any]:
+    frame_url = _text(surface_frame.get("url"))
+    frame_age = _float(frame_timing.get("frame_age_ms"), 0.0)
+    if frame_age <= 0.0:
+        published = _float(session.get("display_published_epoch") or session.get("last_capture_epoch"), 0.0)
+        if published > 0.0:
+            frame_age = max(0.0, (float(now_epoch) - published) * 1000.0)
+    return {
+        "frame_id": _int(session.get("display_frame_id") or session.get("frame_index") or session.get("capture_count")),
+        "frame_url": frame_url,
+        "url": frame_url,
+        "image_url": frame_url,
+        "latest_window_url": frame_url,
+        "width": _int(surface_frame.get("width")),
+        "height": _int(surface_frame.get("height")),
+        "age_ms": round(frame_age, 3),
+        "exists": bool(surface_frame.get("exists")),
+        "frame": dict(surface_frame),
+    }
+
+
+def _shooter_summary(session_id: str, shooter_state: Mapping[str, Any] | None) -> dict[str, Any]:
+    payload = _mapping(shooter_state)
+    explicit_available = payload.get("available")
+    available = bool(payload) if explicit_available is None else _bool(explicit_available, bool(payload))
+    return {
+        "available": available,
+        "session_id": _text(payload.get("session_id")),
+        "session_match": bool(payload and _text(payload.get("session_id")) in {"", session_id}),
+        "state": _text(payload.get("state") or payload.get("status")),
+        "mode": _text(payload.get("mode") or payload.get("shooter_mode")),
+        "side": _text(payload.get("side") or payload.get("action")),
+        "raw": payload,
+    }
+
+
+def _two_candle_and_lstm_payloads(session: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    tracking = _mapping(session.get("tracking_summary"))
+    signal = _mapping(session.get("latest_signal"))
+    kernel = _mapping(signal.get("decision_kernel") or tracking.get("decision_kernel"))
+    forecast = _mapping(
+        signal.get("high_frequency_forecast")
+        or tracking.get("high_frequency_forecast")
+        or signal.get("micro_candle_forecast")
+        or tracking.get("micro_candle_forecast")
+        or kernel.get("high_frequency_forecast")
+    )
+    two_candle = _first_mapping(
+        signal.get("two_candle_study"),
+        tracking.get("two_candle_study"),
+        forecast.get("two_candle_study"),
+        kernel.get("two_candle_study"),
+    )
+    lstm = _first_mapping(
+        signal.get("lstm_contribution"),
+        tracking.get("lstm_contribution"),
+        forecast.get("lstm_contribution"),
+        kernel.get("lstm_contribution"),
+        two_candle.get("lstm_contribution"),
+    )
+    return two_candle, lstm
+
+
+def _visual_plane_state(frontend_heartbeat: Mapping[str, Any] | None) -> dict[str, Any]:
+    heartbeat = _mapping(frontend_heartbeat)
+    plane = _mapping(heartbeat.get("visual_plane"))
+    zoom = _float(plane.get("zoom", heartbeat.get("zoom", 1.0)), 1.0)
+    pan_x = _float(plane.get("pan_x", heartbeat.get("pan_x", 0.0)), 0.0)
+    pan_y = _float(plane.get("pan_y", heartbeat.get("pan_y", 0.0)), 0.0)
+    return {
+        "schema_version": "PG_VISUAL_PLANE_STATE_V3",
+        "zoom": max(0.25, min(2.5, zoom)),
+        "pan_x": pan_x,
+        "pan_y": pan_y,
+        "locked": True,
+        "last_user_change_epoch_ms": _int(plane.get("last_user_change_epoch_ms", heartbeat.get("last_user_change_epoch_ms", 0))),
+        "auto_zoom_enabled": False,
+        "reason": "Live mode preserves the user-selected visual plane; overlays do not auto-zoom the dashboard.",
+    }
+
+
+def _overlay_layout_payload(
+    precision_audit: Mapping[str, Any],
+    *,
+    rendered_count: int,
+    hidden_count: int,
+    active_mode: str,
+) -> dict[str, Any]:
+    report = _mapping(precision_audit.get("precision_report"))
+    return {
+        "schema_version": "PG_OVERLAY_LAYOUT_V3",
+        "mode": active_mode,
+        "collision_count": _int(report.get("label_collisions")),
+        "hidden_for_budget": hidden_count,
+        "rendered_count": rendered_count,
+        "duplicate_count": _int(report.get("duplicate_boxes")),
+        "current_candle_label_hidden": active_mode == "CLEAN_LIVE",
+        "diagnostics_overlap_allowed": active_mode in {"DIAGNOSTICS", "DEBUG", "INSPECTOR"},
+    }
+
+
+def _compact_scalar_and_selected(payload: Mapping[str, Any], selected_keys: set[str]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, value in payload.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            compact[str(key)] = value
+        elif key in selected_keys:
+            compact[str(key)] = value
+    return compact
+
+
+def _compact_recent_studies(rows: Any, *, limit: int = 12) -> list[dict[str, Any]]:
+    studies = _sequence_of_mappings(rows)
+    compact_rows: list[dict[str, Any]] = []
+    for row in studies[-limit:]:
+        compact_rows.append(
+            {
+                key: row.get(key)
+                for key in (
+                    "timestamp",
+                    "created_at",
+                    "side",
+                    "action",
+                    "confidence",
+                    "summary",
+                    "setup",
+                    "execution_action",
+                    "execution_block_reason",
+                    "state",
+                    "packet_id",
+                )
+                if row.get(key) not in (None, "", [], {})
+            }
+        )
+    return compact_rows
+
+
+def _compact_tracking_summary(tracking: Mapping[str, Any]) -> dict[str, Any]:
+    selected = {
+        "artifact_integrity",
+        "box_context",
+        "broker_execution_state",
+        "broker_identity",
+        "broker_source",
+        "broker_source_lock",
+        "broker_surface",
+        "candle_statistics",
+        "chart_region",
+        "current_box",
+        "decision_kernel",
+        "display_region",
+        "execution_timing",
+        "focus_region",
+        "global_local_control",
+        "high_frequency_forecast",
+        "instrument_context",
+        "lstm_contribution",
+        "major_trend_context",
+        "map_timing",
+        "micro_candle_forecast",
+        "overlay_truth_audit",
+        "phoenixguard_report",
+        "pipeline_timing",
+        "signal_thesis_v3",
+        "smart_money_context",
+        "structure_boxes",
+        "study_stage_timings",
+        "support_resistance_context",
+        "support_resistance_zones",
+        "symbol_context",
+        "timing_signal",
+        "two_candle_study",
+        "tracked_candles",
+    }
+    compact = _compact_scalar_and_selected(tracking, selected)
+    compact["model_council_result_present"] = bool(tracking.get("model_council_result"))
+    compact["model_council_packet_present"] = bool(tracking.get("model_council") or tracking.get("model_council_study_packet"))
+    return compact
+
+
+def _compact_latest_signal(signal: Mapping[str, Any]) -> dict[str, Any]:
+    selected = {
+        "broker_execution_state",
+        "broker_source",
+        "broker_source_lock",
+        "countertrend_lane",
+        "decision_kernel",
+        "entry_distance",
+        "execution_timing",
+        "global_local_control",
+        "high_frequency_forecast",
+        "instrument_context",
+        "lstm_contribution",
+        "major_trend_context",
+        "map_timing",
+        "micro_candle_forecast",
+        "overlay_instructions",
+        "overlay_truth_audit",
+        "pipeline_timing",
+        "probability",
+        "signal_thesis_v3",
+        "smart_money_context",
+        "study_stage_timings",
+        "support_resistance_context",
+        "support_resistance_zones",
+        "symbol_context",
+        "timing_signal",
+        "two_candle_study",
+    }
+    compact = _compact_scalar_and_selected(signal, selected)
+    compact["model_council_result_present"] = bool(signal.get("model_council_result"))
+    compact["model_council_packet_present"] = bool(signal.get("model_council") or signal.get("model_council_study_packet"))
+    return compact
+
+
+def _compact_model_council_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    selected = {
+        "angle_context",
+        "current_candle_contract",
+        "entry_quality",
+        "execution_lane",
+        "final_reasoning_decision",
+        "instrument_context",
+        "market_play",
+        "market_reality",
+        "pair_profile",
+        "price_location",
+        "reality_adjustments",
+        "reasoning_arbitration",
+        "regime",
+        "promotion_trace",
+        "sequence_context",
+        "sequence_context_readiness",
+        "signal_thesis_v3",
+        "symbol_context",
+        "time_to_reward_invalidation",
+        "timing_decision",
+        "timing_forecast",
+        "trade_permission",
+        "two_candle_study",
+        "lstm_contribution",
+    }
+    compact = _compact_scalar_and_selected(result, selected)
+    council = _mapping(result.get("model_council"))
+    if council:
+        compact["model_council"] = _compact_scalar_and_selected(
+            council,
+            {
+                "execution",
+                "trade_permission",
+                "entry_quality",
+                "market_reality",
+                "promotion_trace",
+                "sequence_context",
+                "sequence_context_readiness",
+            },
+        )
+    compact["study_packet_present"] = bool(result.get("study_packet") or result.get("model_council_study_packet"))
+    return compact
+
+
+def _compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
+    keep_keys = (
+        "session_id",
+        "name",
+        "market",
+        "window_query",
+        "layout_profile",
+        "effective_layout_profile",
+        "capture_interval_sec",
+        "rl_track_interval_sec",
+        "status",
+        "tracking_enabled",
+        "created_at",
+        "updated_at",
+        "last_capture_at",
+        "last_capture_started_epoch",
+        "last_capture_epoch",
+        "display_frame_id",
+        "display_capture_epoch",
+        "display_published_epoch",
+        "chart_frame_id",
+        "overlay_frame_id",
+        "full_overlay_frame_id",
+        "model_vote_frame_id",
+        "model_capture_epoch",
+        "source_capture_id",
+        "capture_count",
+        "frame_index",
+        "state_version",
+        "decision_version",
+        "decision_valid_until_epoch",
+        "locked_window",
+        "locked_title",
+        "manual_focus_region",
+        "focus_selector",
+        "execution_controls",
+        "broker_source",
+        "broker_source_lock",
+        "broker_surface",
+        "broker_execution_state",
+        "last_frame_path",
+        "last_window_path",
+        "last_display_window_path",
+        "last_chart_path",
+        "last_display_chart_path",
+        "last_overlay_path",
+        "last_full_overlay_path",
+        "last_decision_path",
+        "memory_projection_predict",
+        "memory_projection_future",
+        "memory_projection_active_mode",
+        "execution_debug",
+        "execution_debug_log_path",
+        "signal_thesis_v3",
+        "model_council_study_packet",
+        "model_council_packet",
+        "execution_packet",
+    )
+    compact = {key: session.get(key) for key in keep_keys if key in session}
+    now_epoch = time.time()
+    for packet_key in ("model_council_packet", "execution_packet"):
+        if packet_key in compact and not _current_execution_packet(compact.get(packet_key), now_epoch=now_epoch):
+            compact.pop(packet_key, None)
+    if not compact.get("model_council_packet") and not compact.get("execution_packet"):
+        broker_execution_state = _mapping(compact.get("broker_execution_state"))
+        if _text(broker_execution_state.get("status")).lower() == "external_shooter_required":
+            broker_execution_state.update(
+                {
+                    "status": "blocked_by_runtime",
+                    "message": "Model Council V3 executable packet expired or is missing; waiting for a fresh PG_EXECUTION_PACKET_V3.",
+                    "side": "HOLD",
+                    "lane": "LIVE_MARKET_FLOW_WAIT",
+                    "actionable": False,
+                }
+            )
+            compact["broker_execution_state"] = broker_execution_state
+    if bool(compact.get("tracking_enabled", False)):
+        current_status = str(compact.get("status", "") or "").strip().lower()
+        compact["status"] = current_status if current_status in {"running", "tracking"} else "running"
+    compact["tracking_summary"] = _compact_tracking_summary(_mapping(session.get("tracking_summary")))
+    compact["latest_signal"] = _compact_latest_signal(_mapping(session.get("latest_signal")))
+    compact["model_council_result"] = _compact_model_council_result(_mapping(session.get("model_council_result")))
+    compact["recent_studies"] = _compact_recent_studies(session.get("recent_studies"))
+    return compact
+
+
+def build_live_state_v3(
+    session_payload: Mapping[str, Any],
+    *,
+    artifacts: Mapping[str, Path | str] | None = None,
+    active_objects: Sequence[Mapping[str, Any]] | None = None,
+    registry_entries: Sequence[Mapping[str, Any]] | None = None,
+    study_packet: Mapping[str, Any] | None = None,
+    execution_packet: Mapping[str, Any] | None = None,
+    model_health: Mapping[str, Any] | None = None,
+    shooter_state: Mapping[str, Any] | None = None,
+    frontend_heartbeat: Mapping[str, Any] | None = None,
+    now_epoch: float | None = None,
+    artifact_probe: Callable[[str], Path | str] | None = None,
+    overlay_mode: str = "CLEAN_LIVE",
+) -> dict[str, Any]:
+    now_value = float(now_epoch if now_epoch is not None else time.time())
+    requested_overlay_mode = _text(overlay_mode, "CLEAN_LIVE")
+    active_overlay_mode = normalize_view_mode(requested_overlay_mode)
+    visible_layers = _mode_visible_layers(active_overlay_mode)
+    overlay_mode_payload = {
+        "requested": requested_overlay_mode,
+        "active": active_overlay_mode,
+        "available_modes": list(VIEW_MODES),
+        "visible_layers": visible_layers,
+        "reason_if_empty": "",
+    }
+    session = dict(cast(Mapping[str, Any], session_payload))
+    session_id = _text(session.get("session_id"), "session")
+    model_health_payload = dict(model_health or {})
+    broker_source = _broker_source_summary(session)
+    source_block_reason = _broker_source_block_reason(broker_source)
+    artifact_refs = _artifact_refs(session, artifacts=artifacts, artifact_probe=artifact_probe)
+    plot = _plot_area(session, artifact_refs)
+    chart_transform = _chart_transform(session, plot)
+    registry = build_market_object_registry_v3(session)
+    scene_graph = build_broker_scene_graph_v3(session, artifacts=artifact_refs).as_dict()["scene_graph"]
+    display_overlay_artifact = artifact_refs["full-overlay"] if artifact_refs["full-overlay"]["exists"] else artifact_refs["overlay"]
+    overlay_artifact_aligned, overlay_artifact_mismatch_reason, overlay_artifact_frame_id = _overlay_artifact_alignment(
+        overlay_artifact=display_overlay_artifact,
+        overlay_object_frame_id=registry.frame_id,
+    )
+    current_side = _text(
+        _mapping(session.get("latest_signal")).get("action")
+        or _mapping(session.get("latest_signal")).get("side")
+        or _mapping(session.get("latest_signal")).get("execution_action")
+    ).upper()
+    raw_overlays = _combine_overlays(
+        registry,
+        active_objects=active_objects,
+        chart_transform_id=str(chart_transform["chart_transform_id"]),
+    )
+    signal_thesis = _first_mapping(
+        session.get("signal_thesis_v3"),
+        _mapping(session.get("latest_signal")).get("signal_thesis_v3"),
+        _mapping(session.get("tracking_summary")).get("signal_thesis_v3"),
+        _mapping(session.get("model_council_result")).get("signal_thesis_v3"),
+    )
+    if source_block_reason:
+        precision_overlays = []
+        precision_audit = {
+            "schema_version": OVERLAY_PRECISION_AUDIT_SCHEMA_VERSION,
+            "frame_id": registry.frame_id,
+            "overlay_count": len(raw_overlays),
+            "rendered_count": 0,
+            "rejected_count": len(raw_overlays),
+            "precision_report": {
+                "unanchored_boxes": 0,
+                "oversized_boxes": 0,
+                "duplicate_boxes": 0,
+                "label_collisions": 0,
+                "outside_plot_area": 0,
+                "stale_frame_id": 0,
+                "missing_transform": 0,
+                "refined_oversized_inputs": 0,
+                "outside_rejected": 0,
+                "unanchored_inputs_fixed": 0,
+                "broker_source_rejected": len(raw_overlays),
+            },
+            "source_block_reason": source_block_reason,
+        }
+    else:
+        precision_overlays, precision_audit = resolve_precision_overlays_v3(
+            raw_overlays,
+            scene_graph=scene_graph,
+            mode=active_overlay_mode,
+            current_side=current_side,
+            frame_id=registry.frame_id,
+        )
+    layer_manager = OverlayLayerManagerV3(active_overlay_mode)
+    clean_overlays_only = str(os.getenv("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "0") or "0").strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+    thesis_overlays = [] if source_block_reason else _signal_thesis_overlay_objects(
+        signal_thesis,
+        frame_id=registry.frame_id,
+        sequence_id=registry.sequence_context.sequence_id,
+        chart_transform_id=str(chart_transform["chart_transform_id"]),
+    )
+    if overlay_artifact_aligned:
+        overlay_source = [
+            overlay
+            for overlay in precision_overlays
+            if (not clean_overlays_only or _overlay_visible_for_mode(overlay, "CLEAN_LIVE"))
+            and _overlay_visible_for_mode(overlay, active_overlay_mode)
+            and _overlay_is_frame_aligned(overlay, registry.frame_id)
+        ]
+        overlay_source.extend(
+            overlay
+            for overlay in thesis_overlays
+            if (not clean_overlays_only or _overlay_visible_for_mode(overlay, "CLEAN_LIVE"))
+            and _overlay_visible_for_mode(overlay, active_overlay_mode)
+            and _overlay_is_frame_aligned(overlay, registry.frame_id)
+        )
+    else:
+        overlay_source = []
+    overlay_source = sorted(overlay_source, key=layer_manager.overlay_sort_key)[: int(layer_manager.as_dict()["active_budget"])]
+    overlays = [
+        _dashboard_overlay_object(overlay, compact=clean_overlays_only)
+        for overlay in overlay_source
+    ]
+    total_overlay_count = len(raw_overlays) if source_block_reason else len(precision_overlays) + len(thesis_overlays)
+    rejected_overlay_count = len(raw_overlays) if source_block_reason else len(
+        [overlay for overlay in precision_overlays if overlay.get("precision_rejected")]
+    )
+    renderable_overlay_count = len(overlays)
+    hidden_overlay_count = max(0, total_overlay_count - renderable_overlay_count - rejected_overlay_count)
+    reason_if_empty = _empty_overlay_reason(
+        source_block_reason=source_block_reason,
+        total_count=total_overlay_count,
+        renderable_count=renderable_overlay_count,
+        active_mode=active_overlay_mode,
+    )
+    if overlay_artifact_mismatch_reason and renderable_overlay_count == 0:
+        reason_if_empty = overlay_artifact_mismatch_reason
+    overlay_mode_payload["reason_if_empty"] = reason_if_empty
+    overlay_mode_payload["artifact_frame_id"] = overlay_artifact_frame_id
+    overlay_mode_payload["overlay_object_frame_id"] = registry.frame_id
+    overlay_mode_payload["artifact_frame_aligned"] = overlay_artifact_aligned
+    overlays_payload = {
+        "count": renderable_overlay_count,
+        "total_count": total_overlay_count,
+        "renderable_count": renderable_overlay_count,
+        "hidden_count": hidden_overlay_count,
+        "rejected_count": rejected_overlay_count,
+        "artifact_frame_id": overlay_artifact_frame_id,
+        "overlay_object_frame_id": registry.frame_id,
+        "artifact_frame_aligned": overlay_artifact_aligned,
+        "artifact_mismatch_reason": overlay_artifact_mismatch_reason,
+        "objects": overlays,
+    }
+    sequence_context = registry.sequence_context.as_dict()
+    visual_health = build_visual_health_v3(
+        session_id=session_id,
+        artifacts=artifact_refs,
+        overlay_objects=overlays,
+        sequence_context={"source_status": registry.source_status, **sequence_context},
+        model_health=model_health_payload,
+        frontend_heartbeat=frontend_heartbeat,
+    )
+    frame_timing = build_frame_timing_trace_v3(
+        session,
+        overlays=overlays,
+        model_health=model_health_payload,
+        frontend_heartbeat=frontend_heartbeat,
+        now_epoch=now_value,
+    )
+    model_warm_state = model_warm_states_from_health(
+        model_health_payload,
+        frame_id=registry.frame_id,
+        now_epoch=now_value,
+    )
+    surface_frame = artifact_refs["window"]
+    chart_frame = artifact_refs["chart"]
+    broker_surface_payload = _broker_surface_summary(session, surface_frame, frame_timing, now_epoch=now_value)
+    two_candle_study, lstm_contribution = _two_candle_and_lstm_payloads(session)
+    execution_packet_payload = (
+        _current_execution_packet(execution_packet, now_epoch=now_value)
+        or _current_execution_packet(session.get("model_council_packet"), now_epoch=now_value)
+        or _current_execution_packet(session.get("execution_packet"), now_epoch=now_value)
+    )
+    visual_plane = _visual_plane_state(frontend_heartbeat)
+    overlay_layout = _overlay_layout_payload(
+        precision_audit,
+        rendered_count=renderable_overlay_count,
+        hidden_count=hidden_overlay_count,
+        active_mode=active_overlay_mode,
+    )
+    prediction_overlay = prediction_overlay_config()
+    live_visual_state = {
+        "schema_version": LIVE_STATE_SCHEMA_VERSION,
+        "session_id": session_id,
+        "frame_id": _int(session.get("frame_index")),
+        "state_version": _int(session.get("state_version")),
+        "chart_transform_id": chart_transform["chart_transform_id"],
+        "requested_mode": requested_overlay_mode,
+        "active_mode": active_overlay_mode,
+        "visible_layers": visible_layers,
+        "overlay_count": total_overlay_count,
+        "renderable_count": renderable_overlay_count,
+        "overlay_artifact_frame_id": overlay_artifact_frame_id,
+        "overlay_object_frame_id": registry.frame_id,
+        "overlay_artifact_frame_aligned": overlay_artifact_aligned,
+        "reason_if_empty": reason_if_empty,
+        "visible_mode": active_overlay_mode,
+        "overlay_mode": dict(overlay_mode_payload),
+        "overlay_mode_name": active_overlay_mode,
+        "tracking_summary": _mapping(session.get("tracking_summary")),
+        "latest_signal": _mapping(session.get("latest_signal")),
+        "broker_source": broker_source,
+        "broker_surface": broker_surface_payload,
+        "broker_surface_frame": {
+            "artifact": surface_frame,
+            "frame_id": _int(session.get("display_frame_id") or session.get("frame_index")),
+            "capture_epoch": _float(session.get("display_capture_epoch") or session.get("last_capture_started_epoch")),
+            "published_epoch": _float(session.get("display_published_epoch") or session.get("last_capture_epoch")),
+            "stream": "display",
+            "capture_plane": _mapping(_mapping(session.get("broker_surface")).get("capture_plane")),
+            "locked_title": _text(session.get("locked_title") or _mapping(session.get("descriptor")).get("title")),
+            "window_query": _text(session.get("window_query"), "Pocket Option"),
+        },
+        "surface": {
+            "selected_plane": "full_broker_surface",
+            "frame": surface_frame,
+            "overlay_frame": artifact_refs["full-overlay"] if artifact_refs["full-overlay"]["exists"] else artifact_refs["overlay"],
+            "mode": "full_broker_surface",
+        },
+        "chart": {
+            "frame": chart_frame,
+            "plot_area": plot,
+            "chart_transform": chart_transform,
+            "scene_graph": scene_graph,
+        },
+        "chart_frame": {
+            "artifact": chart_frame,
+            "url": chart_frame["url"],
+            "image_url": chart_frame["url"],
+            "frame_url": chart_frame["url"],
+            "overlay_url": artifact_refs["overlay"]["url"],
+            "display_artifact": artifact_refs["full-overlay"] if artifact_refs["full-overlay"]["exists"] else chart_frame,
+        },
+        "chart_transform": chart_transform,
+        "plot_area": plot,
+        "scene_graph": scene_graph,
+        "broker_scene_graph_v3": scene_graph,
+        "overlay_layer_manager_v3": layer_manager.as_dict(),
+        "overlay_precision_audit": precision_audit,
+        "overlay_layout": overlay_layout,
+        "prediction_overlay": prediction_overlay,
+        "two_candle_study": two_candle_study,
+        "lstm_contribution": lstm_contribution,
+        "visual_plane": visual_plane,
+        "frame_timing_trace_v3": frame_timing,
+        "frame_timing": frame_timing,
+        "overlay_state_version": frame_timing["overlay_state_version"],
+        "model_state_version": frame_timing["model_state_version"],
+        "frame_age_ms": frame_timing["frame_age_ms"],
+        "overlay_age_ms": frame_timing["overlay_age_ms"],
+        "model_vote_age_ms": frame_timing["model_vote_age_ms"],
+        "packet_age_ms": frame_timing["packet_age_ms"],
+        "frontend_render_age_ms": frame_timing["frontend_render_age_ms"],
+        "stale_status": frame_timing["stale_status"],
+        "stale_flags": frame_timing["stale_flags"],
+        "artifacts": artifact_refs,
+        "overlays": overlays_payload,
+        "overlay_objects": overlays,
+        "market_objects": {
+            "active_count": len(active_objects or registry_entries or registry.objects),
+            "registry_count": len(registry_entries or registry.objects),
+            "objects": [obj.as_dict() for obj in registry.objects],
+            "source_status": dict(registry.source_status),
+        },
+        "market_object_registry": registry.as_dict(),
+        "sequence_context": sequence_context,
+        "sequence_context_v3": sequence_context,
+        "signal_thesis_v3": signal_thesis,
+        "two_candle_study_v3": two_candle_study,
+        "lstm_candle_sequence_contribution_v3": lstm_contribution,
+        "model_council": _model_council_summary(session, study_packet or session.get("model_council_study_packet")),
+        "packets": {
+            "study": _study_packet_summary(study_packet or _mapping(session.get("model_council_study_packet")), now_epoch=now_value),
+            "execution": _study_packet_summary(execution_packet_payload, now_epoch=now_value),
+        },
+        "study_packet_status": _study_packet_summary(study_packet or _mapping(session.get("model_council_study_packet")), now_epoch=now_value),
+        "execution_packet_status": _study_packet_summary(execution_packet_payload, now_epoch=now_value),
+        "model_health": model_health_payload,
+        "model_warm_state_v3": model_warm_state,
+        "instrument": _instrument(session),
+        "instrument_context": _instrument(session),
+        "visual_health": {
+            **visual_health,
+            "full_broker_surface_visible": bool(surface_frame["exists"]),
+            "overlay_contract_ok": bool(visual_health.get("overlay", {}).get("contract_ok", False)) if isinstance(visual_health.get("overlay"), Mapping) else False,
+        },
+        "shooter": _shooter_summary(session_id, shooter_state),
+        "shooter_state": dict(shooter_state or {}),
+        "frontend_heartbeat": dict(frontend_heartbeat or {}),
+    }
+    live_visual_state["performance_trace_v3"] = build_performance_trace_v3(live_visual_state, now_epoch=now_value)
+    compact_live_visual_state = {
+        "schema_version": live_visual_state["schema_version"],
+        "session_id": live_visual_state["session_id"],
+        "frame_id": live_visual_state["frame_id"],
+        "state_version": live_visual_state["state_version"],
+        "chart_transform_id": live_visual_state["chart_transform_id"],
+        "requested_mode": live_visual_state["requested_mode"],
+        "active_mode": live_visual_state["active_mode"],
+        "visible_layers": live_visual_state["visible_layers"],
+        "overlay_count": live_visual_state["overlay_count"],
+        "renderable_count": live_visual_state["renderable_count"],
+        "reason_if_empty": live_visual_state["reason_if_empty"],
+        "overlay_mode": live_visual_state["overlay_mode"],
+        "broker_source": live_visual_state["broker_source"],
+        "broker_surface": live_visual_state["broker_surface"],
+        "surface": live_visual_state["surface"],
+        "chart_frame": live_visual_state["chart_frame"],
+        "plot_area": live_visual_state["plot_area"],
+        "scene_graph": live_visual_state["scene_graph"],
+        "overlay_layer_manager_v3": live_visual_state["overlay_layer_manager_v3"],
+        "overlay_precision_audit": live_visual_state["overlay_precision_audit"],
+        "overlay_layout": live_visual_state["overlay_layout"],
+        "prediction_overlay": live_visual_state["prediction_overlay"],
+        "two_candle_study": live_visual_state["two_candle_study"],
+        "lstm_contribution": live_visual_state["lstm_contribution"],
+        "visual_plane": live_visual_state["visual_plane"],
+        "frame_timing_trace_v3": live_visual_state["frame_timing_trace_v3"],
+        "overlay_state_version": live_visual_state["overlay_state_version"],
+        "performance_trace_v3": live_visual_state["performance_trace_v3"],
+        "overlays": live_visual_state["overlays"],
+        "market_objects": {
+            "active_count": live_visual_state["market_objects"]["active_count"],
+            "registry_count": live_visual_state["market_objects"]["registry_count"],
+            "source_status": live_visual_state["market_objects"]["source_status"],
+        },
+        "model_council": live_visual_state["model_council"],
+        "signal_thesis_v3": live_visual_state["signal_thesis_v3"],
+        "packets": live_visual_state["packets"],
+        "visual_health": live_visual_state["visual_health"],
+        "shooter": live_visual_state["shooter"],
+    }
+    public_session = _compact_session_payload(session)
+    public_session.update(live_visual_state)
+    public_session["tracking_summary"] = _compact_tracking_summary(_mapping(live_visual_state.get("tracking_summary")))
+    public_session["latest_signal"] = _compact_latest_signal(_mapping(live_visual_state.get("latest_signal")))
+    public_session["model_council_result"] = _compact_model_council_result(_mapping(session.get("model_council_result")))
+    public_session["live_visual_state"] = compact_live_visual_state
+    public_session.setdefault("tracking_summary", _compact_tracking_summary(_mapping(session.get("tracking_summary"))))
+    public_session.setdefault("latest_signal", _compact_latest_signal(_mapping(session.get("latest_signal"))))
+    return public_session
+
+
+def build_live_state_v3_from_tracker_service(
+    tracker_service: Any,
+    session_id: str,
+    *,
+    model_health_builder: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    shooter_state_loader: Callable[[str], Mapping[str, Any]] | None = None,
+    active_object_loader: Callable[[str], Sequence[Mapping[str, Any]]] | None = None,
+    registry_loader: Callable[[str], Sequence[Mapping[str, Any]]] | None = None,
+    frontend_heartbeat_loader: Callable[[str], Mapping[str, Any] | None] | None = None,
+    now_epoch: float | None = None,
+    overlay_mode: str = "CLEAN_LIVE",
+) -> dict[str, Any]:
+    snapshot_getter = getattr(tracker_service, "get_session_snapshot", None)
+    if callable(snapshot_getter):
+        session = snapshot_getter(session_id)
+    else:
+        session = tracker_service.get_session(session_id)
+    artifacts: dict[str, Path | str] = {}
+    session_artifact_keys = {
+        "window": "last_window_path",
+        "chart": "last_chart_path",
+        "overlay": "last_overlay_path",
+        "full-overlay": "last_full_overlay_path",
+        "projection": "last_projection_path",
+        "memory-reference": "last_memory_reference_path",
+    }
+    for kind, key in session_artifact_keys.items():
+        direct_path = _text(session.get(key))
+        if direct_path:
+            artifacts[kind] = direct_path
+            continue
+        try:
+            artifacts[kind] = tracker_service.latest_artifact_path(session_id, kind)
+        except Exception:
+            pass
+    try:
+        study_packet = tracker_service.latest_model_council_study_packet(session_id)
+    except Exception:
+        study_packet = _mapping(session.get("model_council_study_packet"))
+    try:
+        execution_packet = tracker_service.latest_model_council_packet(session_id)
+    except Exception:
+        fallback_execution_packet = _mapping(session.get("model_council_packet") or session.get("execution_packet"))
+        execution_packet = _current_execution_packet(
+            fallback_execution_packet,
+            now_epoch=float(now_epoch if now_epoch is not None else time.time()),
+        )
+    model_health = dict(model_health_builder(session)) if model_health_builder else {}
+    try:
+        shooter_state = dict(shooter_state_loader(session_id)) if shooter_state_loader else {}
+    except Exception:
+        shooter_state = {}
+    try:
+        active_objects = list(active_object_loader(session_id)) if active_object_loader else []
+    except Exception:
+        active_objects = []
+    try:
+        registry_entries = list(registry_loader(session_id)) if registry_loader else []
+    except Exception:
+        registry_entries = []
+    try:
+        frontend_heartbeat = dict(frontend_heartbeat_loader(session_id)) if frontend_heartbeat_loader else {}
+    except Exception:
+        frontend_heartbeat = {}
+    return build_live_state_v3(
+        session,
+        artifacts=artifacts,
+        active_objects=active_objects,
+        registry_entries=registry_entries,
+        study_packet=study_packet,
+        execution_packet=execution_packet,
+        model_health=model_health,
+        shooter_state=shooter_state,
+        frontend_heartbeat=frontend_heartbeat,
+        now_epoch=now_epoch,
+        overlay_mode=overlay_mode,
+    )
+
+
+__all__ = [
+    "LIVE_STATE_SCHEMA_VERSION",
+    "build_live_state_v3",
+    "build_live_state_v3_from_tracker_service",
+]

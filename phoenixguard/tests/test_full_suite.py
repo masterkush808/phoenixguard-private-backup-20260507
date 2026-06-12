@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Callable, cast
 import unittest
@@ -90,6 +91,35 @@ class TestUtils(unittest.TestCase):
             # Each line ends with its hash
             self.assertTrue(lines[0].endswith(h1))
             self.assertTrue(lines[1].endswith(h2))
+
+    def test_append_hash_chain_is_safe_under_parallel_threads(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "chain.log"
+            start = threading.Barrier(6)
+            hashes: list[str] = []
+            guard = threading.Lock()
+
+            def _writer(index: int) -> None:
+                start.wait()
+                digest = self.append_hash_chain(p, {"worker": index})
+                with guard:
+                    hashes.append(digest)
+
+            threads = [threading.Thread(target=_writer, args=(idx,)) for idx in range(5)]
+            for thread in threads:
+                thread.start()
+            start.wait()
+            for thread in threads:
+                thread.join()
+
+            lines = [line for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(len(lines), 5)
+            self.assertEqual(len(hashes), 5)
+            prev_hash = "0" * 64
+            for line in lines:
+                _ts, payload_json, digest = line.split("|", 2)
+                self.assertEqual(self.sha256_text(prev_hash + payload_json), digest)
+                prev_hash = digest
 
     def test_safe_json_loads_valid(self):
         out = self.safe_json_loads('{"a": 1}')
@@ -394,6 +424,40 @@ class TestSecurity(unittest.TestCase):
         rows = store.fetch_recent(100)
         self.assertEqual(len(rows), 10)
 
+    def test_pref_store_contact_briefs_roundtrip(self):
+        store = self.EncryptedPreferenceStore(
+            self.td / "prefs_contact.enc.sqlite", self.fernet
+        )
+        store.insert_contact_brief({
+            "ts": "2026-03-30T00:00:00+00:00",
+            "session_id": "sess-1",
+            "alias": "808Fx",
+            "creator": "tester",
+            "full_name": "Jane Trader",
+            "contact_channel": "jane@example.com",
+            "organization": "Desk",
+            "purpose": "Review the protected desk",
+            "consent_ack": True,
+            "meta": {"client_hash": "abc"},
+        })
+        rows = store.fetch_recent_contact_briefs(10)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["full_name"], "Jane Trader")
+        self.assertEqual(rows[0]["meta"]["client_hash"], "abc")
+
+    def test_pref_store_does_not_leave_plaintext_tmp_sqlite(self):
+        db_path = self.td / "prefs_tmp.enc.sqlite"
+        store = self.EncryptedPreferenceStore(db_path, self.fernet)
+        store.insert_preference({
+            "ts": "2026-01-01T00:00:00+00:00",
+            "image_hash": "atomic",
+            "chosen": "BUY",
+            "rejected": "SELL",
+            "reason": "no plaintext residue",
+            "annotation_text": "",
+        })
+        self.assertFalse(db_path.with_suffix(".tmp.sqlite").exists())
+
     def test_open_preference_store_without_passphrase_returns_unavailable(self):
         from security import UnavailablePreferenceStore, open_preference_store
 
@@ -519,7 +583,7 @@ class TestRLModule(unittest.TestCase):
 # 6. skill_gates.py
 # ===========================================================================
 class TestSkillGates(unittest.TestCase):
-    """Covers: all 12 gates individually, run_all, CurriculumGates,
+    """Covers: all 13 gates individually, run_all, CurriculumGates,
     SkillGatedMoE, LinearRouter, FSM transitions, update_router_from_feedback"""
 
     def setUp(self):
@@ -560,6 +624,7 @@ class TestSkillGates(unittest.TestCase):
         g = self.gates.gate_discrete_fsm("neutral", "flat momentum")
         self.assertIsInstance(g.name, str)
         self.assertEqual(g.name, "discrete_fsm")
+        self.assertFalse(g.pass_fail)
 
     def test_gate_algorithmic_heap_basic(self):
         g = self.gates.gate_algorithmic_heap([(0.9, "pin_bar"), (0.7, "engulf"), (0.5, "hammer")])
@@ -591,6 +656,10 @@ class TestSkillGates(unittest.TestCase):
         self.assertGreater(g.score, 0.5)
         self.assertTrue(g.pass_fail)
 
+    def test_gate_context_retrieval_without_feedback_fails(self):
+        g = self.gates.gate_context_retrieval(recent_feedback_count=0)
+        self.assertFalse(g.pass_fail)
+
     def test_gate_ops_stability_clean(self):
         g = self.gates.gate_ops_stability(queue_depth=0, gpu_mem_ok=True)
         self.assertGreaterEqual(g.score, 0.9)
@@ -606,6 +675,7 @@ class TestSkillGates(unittest.TestCase):
     def test_gate_ui_analytics_no_dashboard(self):
         g = self.gates.gate_ui_analytics(has_dashboard=False)
         self.assertLess(g.score, 1.0)
+        self.assertFalse(g.pass_fail)
 
     def test_gate_meta_constraints_passes(self):
         g = self.gates.gate_meta_constraints(risk_ethical_ok=True)
@@ -626,6 +696,11 @@ class TestSkillGates(unittest.TestCase):
         g = self.gates.gate_regression_error_estimation(prices, 0.75)
         self.assertIsInstance(g.score, float)
         self.assertIn("r2", g.detail)
+
+    def test_gate_regression_error_estimation_flat_prices_fails(self):
+        g = self.gates.gate_regression_error_estimation([1.23, 1.23, 1.23, 1.23, 1.23], 0.95)
+        self.assertFalse(g.pass_fail)
+        self.assertEqual(g.detail["reason"], "flat_or_degenerate_prices")
 
     def test_gate_knowledge_representation_coherent_buy(self):
         chart_state = {"entry_type": "reversal", "reversal_signal": "wick_rejection", "direction": "BUY"}
@@ -672,21 +747,58 @@ class TestSkillGates(unittest.TestCase):
     def test_gate_formal_automata_full_path(self):
         gates = self.CurriculumGates(self.logger)
         # Idle → ConsolidationDetected
-        g1 = gates.gate_formal_automata({"consolidation_streak": 5, "reversal_signal": "none", "continuation_signal": "none"})
+        g1 = gates.gate_formal_automata(
+            {
+                "consolidation_streak": 5,
+                "consolidation_score": 0.66,
+                "reversal_signal": "none",
+                "continuation_signal": "none",
+            }
+        )
         self.assertEqual(g1.detail["fa_state"], "ConsolidationDetected")
         # ConsolidationDetected → ReversalAfterConsolidation
-        g2 = gates.gate_formal_automata({"consolidation_streak": 5, "reversal_signal": "engulfing", "continuation_signal": "none"})
+        g2 = gates.gate_formal_automata(
+            {
+                "consolidation_streak": 5,
+                "consolidation_score": 0.66,
+                "reversal_signal": "engulfing",
+                "reversal_probability": 0.42,
+                "continuation_signal": "none",
+            }
+        )
         self.assertEqual(g2.detail["fa_state"], "ReversalAfterConsolidation")
         self.assertTrue(g2.pass_fail)
         # ReversalAfterConsolidation → ContinuationImpulse
-        g3 = gates.gate_formal_automata({"consolidation_streak": 5, "reversal_signal": "none", "continuation_signal": "breakout"})
+        g3 = gates.gate_formal_automata(
+            {
+                "consolidation_streak": 5,
+                "consolidation_score": 0.66,
+                "reversal_signal": "none",
+                "continuation_signal": "breakout",
+                "continuation_probability": 0.58,
+                "reversal_probability": 0.22,
+            }
+        )
         self.assertEqual(g3.detail["fa_state"], "ContinuationImpulse")
         self.assertTrue(g3.pass_fail)
+
+    def test_gate_formal_automata_requires_quality_and_probabilities(self):
+        gates = self.CurriculumGates(self.logger)
+        g = gates.gate_formal_automata(
+            {
+                "consolidation_streak": 5,
+                "consolidation_score": 0.12,
+                "reversal_signal": "engulfing",
+                "continuation_signal": "breakout",
+            }
+        )
+        self.assertFalse(g.pass_fail)
+        self.assertEqual(g.detail["fa_state"], "Idle")
 
     def test_gate_predictive_analytics_high_confidence(self):
         probs = {"BUY": 0.75, "SELL": 0.15, "HOLD": 0.10}
         mcts = {"buy_prob": 0.80, "sell_prob": 0.10}
-        g = self.gates.gate_predictive_analytics(probs, mcts, memory_sim=0.90)
+        g = self.gates.gate_predictive_analytics(probs, mcts, memory_sim=0.90, latest_candle_confidence=0.72)
         self.assertTrue(g.pass_fail)
 
     def test_gate_predictive_analytics_low(self):
@@ -695,8 +807,15 @@ class TestSkillGates(unittest.TestCase):
         g = self.gates.gate_predictive_analytics(probs, mcts, memory_sim=0.0)
         self.assertFalse(g.pass_fail)
 
+    def test_gate_predictive_analytics_rejects_direction_conflict(self):
+        probs = {"BUY": 0.78, "SELL": 0.12, "HOLD": 0.10}
+        mcts = {"buy_prob": 0.12, "sell_prob": 0.78}
+        g = self.gates.gate_predictive_analytics(probs, mcts, memory_sim=0.90, latest_candle_confidence=0.80)
+        self.assertFalse(g.pass_fail)
+        self.assertFalse(g.detail["direction_agreement"])
+
     # -- run_all --
-    def test_run_all_returns_12_gates(self):
+    def test_run_all_returns_13_gates(self):
         gates = self.CurriculumGates(self.logger)
         outputs = gates.run_all(
             probs={"BUY": 0.6, "SELL": 0.2, "HOLD": 0.2},
@@ -714,7 +833,7 @@ class TestSkillGates(unittest.TestCase):
             mcts={"buy_prob": 0.70, "sell_prob": 0.20},
             memory_sim=0.70,
         )
-        self.assertEqual(len(outputs), 12)
+        self.assertEqual(len(outputs), 13)
 
     def test_run_all_scores_in_range(self):
         gates = self.CurriculumGates(self.logger)
@@ -779,6 +898,11 @@ class TestSkillGates(unittest.TestCase):
         self.assertIn("memory_regime_agreement", names)
         self.assertIn("execution_permission", names)
 
+    def test_memory_regime_agreement_without_memory_is_neutral_not_passed(self):
+        g = self.gates.memory_regime_agreement_gate("BULL", 0.0, "HOLD")
+        self.assertFalse(g.pass_fail)
+        self.assertFalse(g.detail["required"])
+
     def test_run_support_gates_adds_predictive_checks_when_forecast_present(self):
         outputs = self.gates.run_support_gates(
             chart_state={"entry_type": "continuation", "macro_trend": "BULL", "local_phase": "with_trend_push"},
@@ -826,7 +950,7 @@ class TestSkillGates(unittest.TestCase):
             gates.update_router_from_feedback(scores, reward=1.0)
         # Router weights should have been updated (no crash)
         w = gates._router.layer.weight  # type: ignore[reportPrivateUsage]
-        self.assertEqual(w.shape, (12, 12))
+        self.assertEqual(w.shape, (13, 13))
 
     # -- LinearRouter --
     def test_linear_router_init_identity(self):
@@ -903,6 +1027,49 @@ class TestEnsemble(unittest.TestCase):
         self.assertIn("support_gate_scores", result)
         self.assertTrue(result["support_gates_ok"])
         self.assertIn("forecast_calibration", result["support_gate_scores"])
+
+    def test_infer_failed_execution_support_is_diagnostic_contributor(self):
+        from skill_gates import GateOutput
+        eng = self.EDE(0.62, 0.65, 0.5, 2.0, gates_pass_minimum=6)
+        result = eng.infer(
+            rl_probs={"BUY": 0.82, "SELL": 0.10, "HOLD": 0.08},
+            forecast={
+                "q05": 0.02,
+                "q50": 0.16,
+                "q95": 0.24,
+                "execution_readiness": 0.76,
+                "active_consolidation": 1.0,
+                "structure_trade_ready": 1.0,
+                "structure_setup": "consolidation_breakout",
+                "projected_box_direction": "BUY",
+                "projected_box_confidence": 0.82,
+            },
+            gate_outputs=self._make_gates(12, pass_all=True, score=0.9),
+            memory_bank_similarity=0.82,
+            memory_summary={
+                "dominant_label": "BUY",
+                "mixed_labels": False,
+                "ambiguity": 0.0,
+                "label_entropy": 0.0,
+                "consensus_ratio": 1.0,
+            },
+            module_reliability={"cv_quality": 0.86, "structure_consistency": 0.88},
+            latest_candle_confidence=0.82,
+            transition_summary={"continue_prob": 0.66, "pullback_prob": 0.08, "reversal_attempt_prob": 0.12, "fakeout_prob": 0.08},
+            support_gate_outputs=[
+                GateOutput("continuation_strength", 0.86, True, {}),
+                GateOutput("memory_regime_agreement", 0.82, True, {}),
+                GateOutput("macro_local_alignment", 0.90, True, {}),
+                GateOutput("execution_permission", 0.31, False, {}),
+                GateOutput("forecast_calibration", 0.90, True, {}),
+                GateOutput("interval_efficiency", 0.88, True, {}),
+                GateOutput("regime_stability", 0.86, True, {}),
+                GateOutput("transition_alignment", 0.84, True, {}),
+            ],
+        )
+        self.assertFalse(result["hard_support_ok"])
+        self.assertTrue(result["consensus_ok"])
+        self.assertEqual(result["execution_permission"], "EXECUTE")
 
     def test_infer_force_hold(self):
         eng = self.EDE(0.78, 0.65, 0.5, 2.0)
@@ -1514,7 +1681,7 @@ class TestIntegrationPipeline(unittest.TestCase):
             mcts={"buy_prob": 0.65, "sell_prob": 0.25},
             memory_sim=0.0,
         )
-        self.assertEqual(len(gate_outputs), 12)
+        self.assertEqual(len(gate_outputs), 13)
 
         ensemble = EnsembleDecisionEngine(0.78, 0.65, 0.5, 2.0, gates_pass_minimum=9)
         decision = ensemble.infer(
@@ -1551,7 +1718,7 @@ class TestIntegrationPipeline(unittest.TestCase):
             recent_feedback_count=15,
             queue_depth=0, gpu_mem_ok=True, has_dashboard=True, risk_ethical_ok=True,
         )
-        self.assertEqual(len(gate_outputs), 12)
+        self.assertEqual(len(gate_outputs), 13)
 
         ensemble = EnsembleDecisionEngine(0.78, 0.65, 0.5, 2.0)
         decision = ensemble.infer(rl_out.probs, {"q05": -0.1, "q50": 0.0, "q95": 0.1}, gate_outputs)

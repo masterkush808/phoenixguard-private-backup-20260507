@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import importlib
+import os
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -79,7 +80,16 @@ class PersonalizationEngine:
             return self.embedder
         try:
             from sentence_transformers import SentenceTransformer
-            self.embedder = SentenceTransformer(self.style_model_name)
+            allow_remote_bootstrap = str(
+                os.getenv("PHOENIXGUARD_TEXT_EMBEDDER_ALLOW_REMOTE_BOOTSTRAP", "0") or "0"
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            force_download = str(
+                os.getenv("PHOENIXGUARD_TEXT_EMBEDDER_FORCE_DOWNLOAD", "0") or "0"
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            embedder_kwargs: dict[str, Any] = {
+                "local_files_only": bool(not allow_remote_bootstrap and not force_download),
+            }
+            self.embedder = SentenceTransformer(self.style_model_name, **embedder_kwargs)
             self.logger.info('Loaded style embedder: %s', self.style_model_name)
         except Exception as exc:
             self.embedder = None

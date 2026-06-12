@@ -1,0 +1,18 @@
+# PhoenixGuard Docs
+
+PhoenixGuard documentation is grouped by operating surface. Deep technical reference material has been archived to reduce top-level noise; see `docs/archive/` for full deep-dive content.
+
+Operator-facing summaries live here; archived deep dives are in `docs/archive/`.
+
+Top-level doc groups:
+
+- `architecture/` - system maps and blueprints (summary here, deep content archived)
+- `scenarios/` - scenario engine guides and quick references
+- `share/` - sharing and Cloudflare tunnel guides
+- `tracker/` - tracker user guide and operator notes (summary)
+- `vision/` - vision/CV notes and upgrade plans (summary)
+
+Archived deep dives:
+
+- `docs/archive/window_tracker_deep_dive.md`
+- `docs/archive/window_tracker_v2_architecture_spec.md`

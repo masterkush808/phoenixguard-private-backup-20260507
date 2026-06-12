@@ -24,6 +24,7 @@ from phoenixguard.mobile_api.window_tracker import (
     PhoenixGuardWindowTrackingAdapter,
     TrackingStudy,
     WindowsWindowCaptureBackend,
+    _model_council_packet_from_payload,
     _normalize_broker_execution_state,
     _preserve_newer_active_execution_state,
     _write_json_atomic,
@@ -3039,6 +3040,25 @@ def test_start_session_clears_stale_packets_before_first_fresh_capture(
         tracker.latest_model_council_study_packet(str(session["session_id"]))
 
 
+def test_model_council_packet_lookup_ignores_expired_execution_packet(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: 150.0)
+    expired_packet = {
+        "schema_version": "PG_EXECUTION_PACKET_V3",
+        "packet_type": "PG_EXECUTION_PACKET_V3",
+        "packet_id": "expired-exec",
+        "created_epoch": 100.0,
+        "valid_until_epoch": 120.0,
+        "valid_until_epoch_sec": 120.0,
+    }
+
+    assert _model_council_packet_from_payload(
+        {
+            "model_council_packet": expired_packet,
+            "execution_packet": expired_packet,
+        }
+    ) == {}
+
+
 def test_public_session_payload_does_not_block_non_executable_missing_signal_id(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
 
@@ -3398,6 +3418,89 @@ def test_tracker_capture_once_live_fast_path_returns_fresh_display_when_worker_b
     assert Path(str(result["last_display_window_path"])).exists()
 
 
+def test_tracker_capture_once_display_only_does_not_schedule_study_worker(tmp_path: Path) -> None:
+    adapter = _FakeTrackingAdapter("BUY")
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend(
+            [
+                _surface(width=1280, height=720),
+                _surface(color=(35, 42, 58), width=1280, height=720),
+            ]
+        ),
+        tracking_adapter=adapter,
+    )
+
+    session = tracker.create_session(session_id="pocket-live")
+    tracker.set_focus_region(str(session["session_id"]), [0.10, 0.10, 0.88, 0.86], source="test")
+    payload = tracker.load_session_payload(str(session["session_id"]))
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    controls = dict(payload["execution_controls"])
+    controls.update({"live_execution_enabled": True, "execution_mode": "live"})
+    payload["execution_controls"] = controls
+    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+
+    adapter_calls = adapter.calls
+    result = tracker.capture_once(str(session["session_id"]), display_only=True)
+
+    capture_result = cast(Mapping[str, Any], result["capture_once_result"])
+    assert capture_result["ok"] is True
+    assert capture_result["fast_display_path"] is True
+    assert capture_result["busy"] is False
+    assert adapter.calls == adapter_calls
+    with tracker._lock:
+        assert str(session["session_id"]) not in tracker._active_studies
+
+
+def test_tracker_display_only_refresh_does_not_replace_authority_frame(tmp_path: Path) -> None:
+    adapter = _FakeTrackingAdapter("BUY")
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend(
+            [
+                _surface(width=1280, height=720),
+                _surface(color=(35, 42, 58), width=1280, height=720),
+                _surface(color=(41, 49, 67), width=1280, height=720),
+            ]
+        ),
+        tracking_adapter=adapter,
+    )
+
+    session = tracker.create_session(session_id="pocket-live")
+    tracker.set_focus_region(str(session["session_id"]), [0.10, 0.10, 0.88, 0.86], source="test")
+    payload = tracker.load_session_payload(str(session["session_id"]))
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    controls = dict(payload["execution_controls"])
+    controls.update({"live_execution_enabled": True, "execution_mode": "live"})
+    payload["execution_controls"] = controls
+    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+
+    _allow_next_capture(tracker, str(session["session_id"]))
+    studied = tracker.capture_once(str(session["session_id"]))
+    authority_capture_count = int(studied["capture_count"])
+    authority_frame_index = int(studied["frame_index"])
+    authority_window_path = str(studied["last_window_path"])
+    authority_chart_path = str(studied["last_chart_path"])
+    authority_signal_id = str(cast(Mapping[str, Any], studied["latest_signal"]).get("signal_id") or "")
+
+    refreshed = tracker.capture_once(str(session["session_id"]), display_only=True)
+
+    assert int(refreshed["display_frame_id"]) > int(studied["display_frame_id"])
+    assert int(refreshed["capture_count"]) == authority_capture_count
+    assert int(refreshed["frame_index"]) == authority_frame_index
+    assert str(refreshed["last_window_path"]) == authority_window_path
+    assert str(refreshed["last_chart_path"]) == authority_chart_path
+    assert Path(str(refreshed["last_display_window_path"])).exists()
+    assert str(cast(Mapping[str, Any], refreshed["latest_signal"]).get("signal_id") or "") == authority_signal_id
+
+    display_state = json.loads((tracker.session_dir(str(session["session_id"])) / "display_state.json").read_text(encoding="utf-8"))
+    assert "capture_count" not in display_state
+    assert "last_window_path" not in display_state
+    assert "last_frame_path" not in display_state
+
+
 def test_tracker_prunes_stale_artifact_groups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(window_tracker_module, "_TRACKER_ARTIFACT_RETENTION_FRAMES", 2)
     tracker = ContinuousWindowTrackerService(
@@ -3640,6 +3743,32 @@ def test_tracker_scenario_generation_runs_when_enabled(tmp_path: Path) -> None:
     assert payload["execution_controls"]["scenario_generation_enabled"] is True
     assert payload["scenario_analysis"]["enabled"] is True
     assert payload["scenario_analysis"]["status"] != "disabled"
+
+
+def test_tracker_scenario_generation_stays_disabled_in_live_hot_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_ENABLE_LIVE_SCENARIO_GENERATION", raising=False)
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend([
+            _synthetic_chart_surface("buy", width=960, height=540),
+            _synthetic_chart_surface("buy", width=960, height=540),
+        ]),
+        tracking_adapter=PhoenixGuardWindowTrackingAdapter(),
+    )
+    session = tracker.create_session(session_id="pocket-live")
+    tracker.set_focus_region(str(session["session_id"]), [0.0, 0.0, 1.0, 1.0], source="test")
+    tracker.update_session_controls(
+        str(session["session_id"]),
+        live_execution_enabled=True,
+        execution_mode="live",
+        scenario_generation_enabled=True,
+    )
+
+    payload = tracker.capture_once(str(session["session_id"]))
+
+    assert payload["execution_controls"]["scenario_generation_enabled"] is True
+    assert payload["scenario_analysis"]["enabled"] is False
+    assert payload["scenario_analysis"]["status"] == "disabled"
 
 
 def test_tracker_rejects_mismatched_overlay_plane_before_publishing_signal(tmp_path: Path) -> None:

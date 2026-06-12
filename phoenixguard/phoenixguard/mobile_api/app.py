@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import threading
 import time
-from typing import Annotated, Any, Mapping, cast
+from typing import Annotated, Any, Mapping, Sequence, cast
 import urllib.error
 import urllib.request
 
@@ -53,7 +53,11 @@ from .realtime_sync_v3 import (
     record_frontend_heartbeat,
 )
 from .service import MobileApiService
-from .window_tracker import ContinuousWindowTrackerService
+from .window_tracker import (
+    ContinuousWindowTrackerService,
+    _model_council_packet_from_payload,
+    _model_council_study_packet_from_payload,
+)
 
 
 _default_service: MobileApiService | None = None
@@ -87,7 +91,13 @@ try:
     )
 except ValueError:
     _LIVE_STATE_V3_CACHE_TTL_SEC = 0.25
-_LIVE_STATE_REGISTRY_CACHE_TTL_SEC = 30.0
+try:
+    _LIVE_STATE_REGISTRY_CACHE_TTL_SEC = max(
+        0.0,
+        float(os.getenv("PHOENIXGUARD_LIVE_STATE_REGISTRY_CACHE_TTL_SEC", "1.0") or "1.0"),
+    )
+except ValueError:
+    _LIVE_STATE_REGISTRY_CACHE_TTL_SEC = 1.0
 _LIVE_STATE_V3_CACHE_LOCK = threading.Lock()
 _LIVE_STATE_V3_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, object]]] = {}
 _LIVE_STATE_REGISTRY_CACHE: dict[str, tuple[float, list[Mapping[str, Any]], list[Mapping[str, Any]]]] = {}
@@ -99,23 +109,14 @@ _NO_STORE_ARTIFACT_HEADERS = {
 _DIRECT_DISPLAY_STATE_KEYS = frozenset(
     {
         "session_id",
-        "capture_count",
         "display_frame_id",
         "display_capture_epoch",
         "display_published_epoch",
         "last_display_capture_epoch",
         "last_display_published_epoch",
         "last_display_window_path",
-        "last_window_path",
-        "last_frame_path",
-        "last_capture_started_at",
-        "last_capture_started_epoch",
         "display_snapshot_only_v3",
         "display_fast_path_v3",
-        "status",
-        "updated_at",
-        "locked_title",
-        "locked_window",
     }
 )
 
@@ -439,6 +440,7 @@ def _compact_capture_once_response(payload: Mapping[str, Any]) -> dict[str, obje
         "source_capture_id",
         "last_capture_at",
         "last_capture_epoch",
+        "last_display_window_path",
         "last_window_path",
         "last_chart_path",
         "last_overlay_path",
@@ -785,6 +787,13 @@ def create_app(
             sid = str(resolved.get("session_id") or session_id or "")
             if not sid:
                 sid = resolve_window_tracker_dashboard_session_id(None)
+            frame_id = int(
+                resolved.get("display_frame_id")
+                or resolved.get("frame_index")
+                or resolved.get("capture_count")
+                or 0
+            )
+            mtime = 0.0
             # latest artifact path
             try:
                 path = tracker.latest_artifact_path(sid, "window")
@@ -792,11 +801,9 @@ def create_app(
                     path = tracker.latest_artifact_path(sid, "chart")
                 exists = path.exists()
                 mtime = path.stat().st_mtime if exists else 0.0
-                frame_id = int(mtime)
                 url = f"/v1/mobile/frame/latest.png?session_id={sid}&t={int(mtime)}"
             except Exception:
                 exists = False
-                frame_id = 0
                 url = ""
             return {
                 "schema_version": "V3_CHART_STATE",
@@ -805,6 +812,7 @@ def create_app(
                 "frame_exists": exists,
                 "frame_url": url,
                 "frame_timestamp": float(mtime),
+                "artifact_version_mtime": float(mtime),
             }
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
@@ -848,6 +856,41 @@ def create_app(
             return dict(sessions[0])
         return {"session_id": ""}
 
+    def latest_model_council_state_from_live_session(session_id: str) -> dict[str, object]:
+        payload = resolve_model_council_session_payload(session_id)
+        result = _mapping_to_plain_dict(payload.get("model_council_result"))
+        study_packet = _model_council_study_packet_from_payload(cast(Mapping[str, Any], payload))
+        packet = _model_council_packet_from_payload(cast(Mapping[str, Any], payload))
+        if not result and not study_packet and not packet:
+            return cast(dict[str, object], get_window_tracker_service().latest_model_council_state(session_id))
+        return {
+            "session_id": str(payload.get("session_id", session_id) or session_id),
+            "model_council_result": result,
+            "model_council_study_packet": study_packet,
+            "model_council_packet": packet,
+            "execution_packet_present": bool(packet),
+            "execution_packet_id": str(packet.get("packet_id", "") or "") if packet else "",
+            "promotion_trace": _mapping_to_plain_dict(
+                result.get("promotion_trace")
+                or study_packet.get("promotion_trace")
+                or _mapping_to_plain_dict(result.get("model_council")).get("promotion_trace")
+            ),
+        }
+
+    def latest_model_council_study_packet_from_live_session(session_id: str) -> dict[str, object]:
+        payload = resolve_model_council_session_payload(session_id)
+        packet = _model_council_study_packet_from_payload(cast(Mapping[str, Any], payload))
+        if not packet:
+            packet = get_window_tracker_service().latest_model_council_study_packet(session_id)
+        return cast(dict[str, object], packet)
+
+    def latest_model_council_execution_packet_from_live_session(session_id: str) -> dict[str, object]:
+        payload = resolve_model_council_session_payload(session_id)
+        packet = _model_council_packet_from_payload(cast(Mapping[str, Any], payload))
+        if not packet:
+            packet = get_window_tracker_service().latest_model_council_packet(session_id)
+        return cast(dict[str, object], packet)
+
     @app.get("/v1/mobile/model-council/health")
     def model_council_health(session_id: str | None = None) -> dict[str, object]:
         try:
@@ -883,7 +926,7 @@ def create_app(
         )
         artifacts: dict[str, str] = {}
         for kind, key in {
-            "window": "last_window_path",
+            "window": "last_display_window_path",
             "chart": "last_chart_path",
             "overlay": "last_overlay_path",
             "full-overlay": "last_full_overlay_path",
@@ -891,6 +934,8 @@ def create_app(
             "memory-reference": "last_memory_reference_path",
         }.items():
             value = str(session_payload.get(key, "") or "").strip()
+            if not value and kind == "window":
+                value = str(session_payload.get("last_window_path") or session_payload.get("last_frame_path") or "").strip()
             if value:
                 artifacts[kind] = value
         with _LIVE_STATE_V3_CACHE_LOCK:
@@ -1072,7 +1117,7 @@ def create_app(
     @app.get("/v1/mobile/model-council/sessions/{session_id}/latest")
     def latest_model_council_state_for_session(session_id: str) -> dict[str, object]:
         try:
-            payload = get_window_tracker_service().latest_model_council_state(session_id)
+            payload = latest_model_council_state_from_live_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model Council state not found.") from exc
         return cast(dict[str, object], payload)
@@ -1086,7 +1131,7 @@ def create_app(
         if not requested_session_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.")
         try:
-            payload = get_window_tracker_service().latest_model_council_state(requested_session_id)
+            payload = latest_model_council_state_from_live_session(requested_session_id)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model Council state not found.") from exc
         return cast(dict[str, object], payload)
@@ -1094,7 +1139,7 @@ def create_app(
     @app.get("/v1/mobile/model-council/sessions/{session_id}/study/latest")
     def latest_model_council_study_packet_for_session(session_id: str) -> dict[str, object]:
         try:
-            packet = get_window_tracker_service().latest_model_council_study_packet(session_id)
+            packet = latest_model_council_study_packet_from_live_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model Council study packet not found.") from exc
         _raise_if_stale_payload(cast(Mapping[str, object], packet), detail="Model Council study packet is stale.")
@@ -1109,7 +1154,7 @@ def create_app(
         if not requested_session_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.")
         try:
-            packet = get_window_tracker_service().latest_model_council_study_packet(requested_session_id)
+            packet = latest_model_council_study_packet_from_live_session(requested_session_id)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model Council study packet not found.") from exc
         _raise_if_stale_payload(cast(Mapping[str, object], packet), detail="Model Council study packet is stale.")
@@ -1154,10 +1199,10 @@ def create_app(
             pass
         signal_payload: dict[str, object] | None = None
         try:
-            signal_payload = cast(dict[str, object], get_window_tracker_service().latest_model_council_packet(resolved_session_id))
+            signal_payload = latest_model_council_execution_packet_from_live_session(resolved_session_id)
         except KeyError:
             try:
-                signal_payload = cast(dict[str, object], get_window_tracker_service().latest_model_council_study_packet(resolved_session_id))
+                signal_payload = latest_model_council_study_packet_from_live_session(resolved_session_id)
             except KeyError:
                 signal_payload = None
         if isinstance(signal_payload, Mapping) and _payload_is_stale(cast(Mapping[str, object], signal_payload)):
@@ -1214,7 +1259,7 @@ def create_app(
     @app.get("/v1/mobile/model-council/sessions/{session_id}/execution/latest")
     def latest_model_council_execution_packet_for_session(session_id: str) -> dict[str, object]:
         try:
-            packet = get_window_tracker_service().latest_model_council_packet(session_id)
+            packet = latest_model_council_execution_packet_from_live_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model Council executable packet not found.") from exc
         _raise_if_stale_payload(cast(Mapping[str, object], packet), detail="Model Council executable packet is stale.")
@@ -1229,7 +1274,7 @@ def create_app(
         if not requested_session_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.")
         try:
-            packet = get_window_tracker_service().latest_model_council_packet(requested_session_id)
+            packet = latest_model_council_execution_packet_from_live_session(requested_session_id)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model Council executable packet not found.") from exc
         _raise_if_stale_payload(cast(Mapping[str, object], packet), detail="Model Council executable packet is stale.")
@@ -1278,15 +1323,15 @@ def create_app(
 
         model_council_latest = collect(
             "model_council_latest",
-            lambda: get_window_tracker_service().latest_model_council_state(resolved_session_id),
+            lambda: latest_model_council_state_from_live_session(resolved_session_id),
         )
         study_latest = collect(
             "study_latest",
-            lambda: get_window_tracker_service().latest_model_council_study_packet(resolved_session_id),
+            lambda: latest_model_council_study_packet_from_live_session(resolved_session_id),
         )
         execution_latest = collect(
             "execution_latest",
-            lambda: get_window_tracker_service().latest_model_council_packet(resolved_session_id),
+            lambda: latest_model_council_execution_packet_from_live_session(resolved_session_id),
         )
         floating_state = collect(
             "floating_state",
@@ -1393,12 +1438,269 @@ def create_app(
         if floating_state.get("status") == "PASS" and str(floating_state).lower().find("n/a") >= 0:
             issues.append("floating_state_contains_raw_na")
 
+        def _endpoint_status(name: str) -> str:
+            status_value = str(_mapping_to_plain_dict(endpoints.get(name)).get("status") or "MISSING").upper()
+            if status_value == "PASS":
+                return "PASS"
+            if status_value == "STALE":
+                return "STALE"
+            return "MISSING"
+
+        def _first_trace_mapping(*values: Any) -> dict[str, Any]:
+            for value in values:
+                candidate = _mapping_to_plain_dict(value)
+                if candidate:
+                    return candidate
+            return {}
+
+        def _first_trace_sequence(*values: Any) -> list[Any]:
+            for value in values:
+                if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+                    rows = list(value)
+                    if rows:
+                        return rows
+            return []
+
+        tracking_summary = _mapping_to_plain_dict(tracker_payload.get("tracking_summary"))
+        latest_signal = _mapping_to_plain_dict(tracker_payload.get("latest_signal"))
+        model_council_payload = _mapping_to_plain_dict(model_council_latest.get("payload"))
+        model_council_result = _mapping_to_plain_dict(
+            model_council_payload.get("model_council_result")
+            or model_council_payload.get("result")
+            or model_council_payload
+        )
+        study_payload = _mapping_to_plain_dict(study_latest.get("payload"))
+        execution_payload = _mapping_to_plain_dict(execution_latest.get("payload"))
+        study_model_council = _mapping_to_plain_dict(study_payload.get("model_council"))
+        execution_model_council = _mapping_to_plain_dict(execution_payload.get("model_council"))
+        broker_source_lock = _first_trace_mapping(
+            tracker_payload.get("broker_source_lock"),
+            tracking_summary.get("broker_source_lock"),
+            latest_signal.get("broker_source_lock"),
+        )
+        source_lock_valid = broker_source_lock.get("valid") is True
+        source_lock_status = "PASS" if source_lock_valid else ("MISSING" if not broker_source_lock else "FAIL")
+        model_health_payload = _mapping_to_plain_dict(_mapping_to_plain_dict(model_health.get("payload")).get("runtime_model_health") or model_health.get("payload"))
+        if not model_health_payload:
+            model_health_payload = _mapping_to_plain_dict(model_health.get("payload"))
+        model_warm_pass = bool(model_health_payload.get("all_required_models_awake") is True)
+        overlay_payload = _mapping_to_plain_dict(floating_state.get("payload"))
+        overlay_root = _mapping_to_plain_dict(overlay_payload.get("overlays"))
+        overlay_rejected_count = int(overlay_root.get("rejected_count") or overlay_payload.get("overlay_rejected_count") or 0)
+        overlay_backend_count = int(overlay_root.get("renderable_count") or overlay_payload.get("renderable_count") or 0)
+        overlay_frontend_count = int(overlay_payload.get("overlay_count") or overlay_backend_count or 0)
+        overlay_truth_pass = overlay_rejected_count == 0 and overlay_backend_count == overlay_frontend_count
+        promotion_trace = _first_trace_mapping(
+            _mapping_to_plain_dict(study_latest.get("payload")).get("promotion_trace"),
+            _mapping_to_plain_dict(execution_latest.get("payload")).get("promotion_trace"),
+            _mapping_to_plain_dict(model_council_latest.get("payload")).get("promotion_trace"),
+        )
+        council_trace_pass = bool(
+            promotion_trace.get("denied_at")
+            or promotion_trace.get("next_required")
+            or promotion_trace.get("release_condition")
+            or packet_ids["execution"]
+        )
+        packet_contract_pass = (
+            (execution_latest.get("status") in {"PASS", "MISSING"} and not packet_ids["execution"])
+            or execution_latest.get("status") == "PASS"
+        )
+        shooter_payload = _mapping_to_plain_dict(shooter_handshake.get("payload"))
+        shooter_persistence_pass = shooter_handshake.get("status") in {"PASS", "MISSING"} and (
+            str(shooter_payload.get("packet_type") or "").upper() != "STUDY_PACKET"
+            or str(shooter_payload.get("reason") or "").strip()
+        )
+        burn_in_payload = _mapping_to_plain_dict(tracker_payload.get("burn_in") or tracker_payload.get("runtime_burn_in"))
+        burn_in_pass = bool(
+            float(burn_in_payload.get("hours", 0.0) or 0.0) >= 2.0
+            and int(burn_in_payload.get("crash_count", 0) or 0) == 0
+        )
+
+        def _gate(name: str, passed: bool, *, status_value: str = "", evidence: Mapping[str, Any] | None = None) -> dict[str, Any]:
+            resolved_status = status_value or ("PASS" if passed else "FAIL")
+            return {
+                "gate": name,
+                "status": resolved_status,
+                "passed": bool(passed),
+                "evidence": dict(evidence or {}),
+            }
+
+        certification_gates = {
+            "source_lock": _gate("source_lock", source_lock_valid, status_value=source_lock_status, evidence=broker_source_lock),
+            "frame_freshness": _gate("frame_freshness", _endpoint_status("tracker_latest") == "PASS", evidence=tracker_runtime),
+            "sequence_context": _gate(
+                "sequence_context",
+                bool(sequence_context_readiness.get("ready")),
+                status_value="PASS" if sequence_context_readiness.get("ready") else "INCOMPLETE",
+                evidence=sequence_context_readiness,
+            ),
+            "model_warm_state": _gate("model_warm_state", model_warm_pass, evidence=model_health_payload),
+            "overlay_truth": _gate(
+                "overlay_truth",
+                overlay_truth_pass,
+                evidence={
+                    "backend_renderable_count": overlay_backend_count,
+                    "frontend_overlay_count": overlay_frontend_count,
+                    "rejected_count": overlay_rejected_count,
+                },
+            ),
+            "model_council_trace": _gate("model_council_trace", council_trace_pass, evidence=promotion_trace),
+            "packet_contract": _gate(
+                "packet_contract",
+                bool(packet_contract_pass),
+                status_value="PASS" if packet_contract_pass else "FAIL",
+                evidence={"execution_packet_id": packet_ids["execution"], "execution_status": execution_latest.get("status")},
+            ),
+            "shooter_persistence": _gate("shooter_persistence", bool(shooter_persistence_pass), evidence=shooter_payload),
+            "burn_in": _gate("burn_in", burn_in_pass, status_value="PASS" if burn_in_pass else "NOT_RUN", evidence=burn_in_payload),
+        }
+        reason = "none"
+        if not packet_ids["execution"]:
+            reason = str(
+                promotion_trace.get("next_required")
+                or sequence_context_readiness.get("next_required")
+                or "execution packet not published"
+            )
+        market_object_evidence = _first_trace_mapping(
+            tracking_summary.get("market_object_registry"),
+            tracker_payload.get("market_object_registry"),
+            tracking_summary.get("market_registry"),
+            latest_signal.get("market_object_registry"),
+        ) or (
+            {"sequence_box_history_len": int(sequence_context_readiness.get("box_history_len") or 0)}
+            if int(sequence_context_readiness.get("box_history_len") or 0) > 0
+            else {}
+        ) or (
+            {"historical_structure": True}
+            if _first_trace_sequence(
+                tracking_summary.get("historical_structure"),
+                latest_signal.get("historical_structure"),
+                tracker_payload.get("historical_structure"),
+            )
+            else {}
+        )
+        regime_evidence = _first_trace_mapping(
+            model_council_result.get("regime"),
+            study_payload.get("regime"),
+            execution_payload.get("regime"),
+            study_model_council.get("regime"),
+            execution_model_council.get("regime"),
+            latest_signal.get("regime"),
+            tracker_payload.get("regime"),
+        )
+        market_play_evidence = _first_trace_mapping(
+            model_council_result.get("market_play"),
+            study_payload.get("market_play"),
+            execution_payload.get("market_play"),
+            study_model_council.get("market_play"),
+            execution_model_council.get("market_play"),
+            latest_signal.get("market_play"),
+            tracker_payload.get("market_play"),
+        )
+        price_location_evidence = _first_trace_mapping(
+            model_council_result.get("price_location"),
+            study_payload.get("price_location"),
+            execution_payload.get("price_location"),
+            study_model_council.get("price_location"),
+            execution_model_council.get("price_location"),
+            latest_signal.get("price_location"),
+            tracker_payload.get("price_location"),
+        )
+        memory_evidence = _first_trace_mapping(
+            model_council_result.get("memory_confirmation"),
+            study_payload.get("memory_confirmation"),
+            execution_payload.get("memory_confirmation"),
+            latest_signal.get("memory_confirmation"),
+            latest_signal.get("memory"),
+            tracker_payload.get("memory_confirmation"),
+        )
+        pair_profile_evidence = _first_trace_mapping(
+            model_council_result.get("pair_profile"),
+            study_payload.get("pair_profile"),
+            execution_payload.get("pair_profile"),
+            latest_signal.get("pair_profile"),
+            tracker_payload.get("pair_profile"),
+        )
+        skill_evidence = _first_trace_sequence(
+            model_council_result.get("skill_contributions"),
+            study_payload.get("skill_contributions"),
+            execution_payload.get("skill_contributions"),
+            latest_signal.get("skill_contributions"),
+            tracker_payload.get("skill_contributions"),
+            latest_signal.get("skill_gates"),
+        )
+        reasoning_evidence = _first_trace_mapping(
+            model_council_result.get("reasoning_arbitration"),
+            study_payload.get("reasoning_arbitration"),
+            execution_payload.get("reasoning_arbitration"),
+            latest_signal.get("reasoning_arbitration"),
+            tracker_payload.get("reasoning_arbitration"),
+        )
+        lstm_evidence = _first_trace_mapping(
+            model_council_result.get("lstm_contribution"),
+            study_payload.get("lstm_contribution"),
+            execution_payload.get("lstm_contribution"),
+            latest_signal.get("lstm_contribution"),
+            tracking_summary.get("lstm_contribution"),
+        )
+        two_candle_evidence = _first_trace_mapping(
+            model_council_result.get("two_candle_study"),
+            study_payload.get("two_candle_study"),
+            execution_payload.get("two_candle_study"),
+            latest_signal.get("two_candle_study"),
+            tracking_summary.get("two_candle_study"),
+            latest_signal.get("high_frequency_candle_cycle"),
+            tracking_summary.get("high_frequency_candle_cycle"),
+        )
+        outcome_evidence = _first_trace_mapping(
+            tracker_payload.get("outcome_feedback"),
+            latest_signal.get("outcome_feedback"),
+            tracking_summary.get("outcome_feedback"),
+        )
+        dataflow_nodes = {
+            "BrokerSourceLockV3": source_lock_status,
+            "LatestFrameBufferV3": _endpoint_status("tracker_latest"),
+            "ChartSegmentationV3": "PASS" if tracking_summary or latest_signal else "MISSING",
+            "CandleObjectTrackerV3": "PASS" if tracking_summary or latest_signal else "MISSING",
+            "MarketObjectTrackerV3": "PASS" if market_object_evidence else "MISSING",
+            "SequenceContextV3": "PASS" if sequence_context_readiness.get("ready") else "INCOMPLETE",
+            "MultiModelRoleOutputsV3": "PASS" if model_warm_pass else _endpoint_status("model_health"),
+            "RegimeEngineV3": "PASS" if regime_evidence else "MISSING",
+            "MarketPlayEngineV3": "PASS" if market_play_evidence else "MISSING",
+            "PriceLocationEngineV3": "PASS" if price_location_evidence else "MISSING",
+            "VisualPlayMemoryBank": "PASS" if memory_evidence else "MISSING",
+            "PairBehaviorProfileV3": "PASS" if pair_profile_evidence else "MISSING",
+            "SkillContributionAggregatorV3": "PASS" if skill_evidence else "MISSING",
+            "LSTM_CandleSequenceContributorV3": "PASS" if lstm_evidence else "MISSING",
+            "TwoCandleStudyV3": "PASS" if two_candle_evidence else "MISSING",
+            "ReasoningArbitratorV3": "PASS" if reasoning_evidence else "MISSING",
+            "ModelCouncilV3": _endpoint_status("model_council_latest"),
+            "STUDY_PACKET": _endpoint_status("study_latest"),
+            "PG_EXECUTION_PACKET_V3": "PASS" if packet_ids["execution"] else "NOT_PUBLISHED",
+            "PacketValidatorV3": "PASS" if packet_contract_pass else "FAIL",
+            "OutcomeFeedbackV3": "PASS" if outcome_evidence else "WAITING",
+            "RuntimeTraceV3": "PASS",
+            "Dashboard/FloatingStateV2": _endpoint_status("floating_state"),
+            "ShooterActionSequencerV2": "WAITING" if not packet_ids["execution"] else _endpoint_status("shooter_handshake"),
+        }
+        dataflow_contract_trace = {
+            "schema_version": "PG_DATAFLOW_CONTRACT_TRACE_V3",
+            "frame_id": int(tracker_payload.get("frame_index") or tracker_payload.get("frame_id") or 0),
+            "capture_count": int(tracker_payload.get("capture_count") or 0),
+            "state_version": int(tracker_payload.get("state_version") or 0),
+            "sequence_id": str(sequence_context_readiness.get("sequence_id") or ""),
+            "nodes": dataflow_nodes,
+            "reason": reason,
+        }
+
         return {
             "schema_version": "PG_RUNTIME_TRACE_V3",
             "session_id": resolved_session_id,
             "trace_created_epoch_sec": trace_created_epoch_sec,
             "language_scorecard": public_language_scorecard(),
             "sequence_context_readiness": sequence_context_readiness,
+            "dataflow_contract_trace": dataflow_contract_trace,
+            "certification_gates": certification_gates,
             "endpoints": endpoints,
             "alignment": {
                 "status": "PASS" if not issues else "FAIL",
@@ -1916,6 +2218,7 @@ def create_app(
                 "full_overlay_frame_id": payload.get("full_overlay_frame_id"),
                 "model_vote_frame_id": payload.get("model_vote_frame_id"),
                 "last_window_path": payload.get("last_window_path") or payload.get("last_frame_path"),
+                "last_display_window_path": payload.get("last_display_window_path"),
                 "last_chart_path": payload.get("last_chart_path"),
                 "last_overlay_path": payload.get("last_overlay_path"),
                 "last_full_overlay_path": payload.get("last_full_overlay_path"),
@@ -1983,9 +2286,9 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
 
     @app.post("/v1/mobile/window-tracker/sessions/{session_id}/capture-once")
-    def capture_tracker_session_once(session_id: str) -> dict[str, object]:
+    def capture_tracker_session_once(session_id: str, display_only: bool = False) -> dict[str, object]:
         try:
-            payload = get_window_tracker_service().capture_once(session_id)
+            payload = get_window_tracker_service().capture_once(session_id, display_only=display_only)
             with _LIVE_STATE_V3_CACHE_LOCK:
                 stale_session = str(session_id or "").strip()
                 for cache_key in [key for key in _LIVE_STATE_V3_CACHE if key[0] == stale_session]:

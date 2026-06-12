@@ -29,6 +29,8 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
+from urllib import error as urllib_error
 from urllib import request as urllib_request
 import warnings
 from typing import Any, Callable, TYPE_CHECKING, Mapping, Sequence, cast
@@ -37,7 +39,7 @@ from uuid import uuid4
 import numpy as np
 from numpy.typing import NDArray
 import torch
-from PIL import Image, ImageDraw, ImageFilter, ImageGrab
+from PIL import Image, ImageDraw, ImageFilter, ImageGrab, UnidentifiedImageError
 
 # Suppress noisy non-actionable runtime warnings on Windows/CUDA.
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
@@ -58,19 +60,66 @@ if torch.cuda.is_available():
 import gradio as gr
 go = cast(Any, importlib.import_module("plotly.graph_objects"))
 
-from phoenixguard.core.config import MODELS, RUNTIME, SECURITY, TRAIN, MEMORY_BANK as MEMORY_BANK_CFG
+from phoenixguard.core.config import MODELS, RUNTIME, SECURITY, TRAIN, VOICE, MEMORY_BANK as MEMORY_BANK_CFG
 from phoenixguard.core.utils import append_hash_chain, setup_logger, utc_now_iso
+from phoenixguard.decision.best_play_engine import analyze_best_play
 from phoenixguard.runtime.security import (
     SecurityManager,
     EncryptedPreferenceStore,
     UnavailablePreferenceStore,
     open_preference_store,
 )
+from phoenixguard.tracing import configure_tracing
 from phoenixguard.vision.preprocess import extract_price_floats, indicator_regex_filter, load_any_file_as_image
+from phoenixguard.voice.control import (
+    apply_voice_preferences,
+    build_voice_console_html,
+    execute_voice_command,
+    get_voice_runtime_snapshot,
+)
 from phoenixguard.decision.ensemble import TransitionSummary
 # ------------------------------------------------------------------
 # Gradio callbacks
 # ------------------------------------------------------------------
+
+DEFAULT_OVERLAY_MODE = "history-boxes"
+DEFAULT_COUNCIL_SCOPE = "auto"
+MAX_SEQUENCE_HISTORY_DEPTH = 200
+# Projection visuals stay operator-controlled at render time so the desk can
+# surface them on demand without forcing them into every chart view.
+PROJECTED_OVERLAY_ENABLED = False
+VISION_LEVEL_CHOICES: list[tuple[str, str]] = [
+    ("Structure Focus", "history-boxes"),
+    ("Detection Focus", "yolo-only"),
+    ("Balanced Overlay", "hybrid-vision"),
+    ("Trigger Focus", "latest-only"),
+    ("Context Focus", "global-only"),
+    ("Deep Review", "debug-all"),
+    ("Structure + Projection", "history-plus-projection"),
+]
+VISION_EXTRA_CHOICES: list[tuple[str, str]] = [
+    ("Projection Overlay", "projection-overlay"),
+    ("Context Zones", "grounded-zones"),
+    ("Context Markers", "grounded-objects"),
+    ("Active View Tag", "tta-tag"),
+]
+DEFAULT_VISION_EXTRAS: list[str] = [
+    "grounded-zones",
+    "grounded-objects",
+    "tta-tag",
+]
+DEFAULT_WORKSPACE_VISION_EXTRAS: list[str] = [
+    "projection-overlay",
+    *DEFAULT_VISION_EXTRAS,
+]
+COUNCIL_SCOPE_CHOICES: list[tuple[str, str]] = [
+    ("Cross-Checks Off", "off"),
+    ("Smart Cross-Check", "auto"),
+    ("Extended Cross-Check", "half"),
+    ("Deep Cross-Check", "full"),
+]
+TIMEFRAME_CHOICES: list[str] = ["M1", "M3", "M5", "M15", "M30", "H1", "H4", "D1"]
+MULTI_TIMEFRAME_UPLOAD_FILES: int = 4
 
 # pg_main wrapper class to delegate to local pipeline functions
 class PGMainWrapper:
@@ -78,7 +127,7 @@ class PGMainWrapper:
         self,
         file_path: str,
         annotation_text: str = "",
-        overlay_mode: str = "history-plus-projection",
+        overlay_mode: str = DEFAULT_OVERLAY_MODE,
         min_conf_global: float = 0.42,
         min_conf_latest: float = 0.50,
         history_depth: int = 8,
@@ -86,6 +135,9 @@ class PGMainWrapper:
         projection_focus: float = 0.35,
         side_effect_free: bool = False,
         use_local_ensemble: bool | None = None,
+        vision_extras: Any = None,
+        council_scope: str = DEFAULT_COUNCIL_SCOPE,
+        timeframe_override: str | None = None,
     ) -> tuple[dict[str, Any], Image.Image | None, Any, Any]:
         # Use the local run_inference function
         return run_inference(
@@ -99,6 +151,9 @@ class PGMainWrapper:
             projection_focus=projection_focus,
             side_effect_free=side_effect_free,
             use_local_ensemble=use_local_ensemble,
+            vision_extras=vision_extras,
+            council_scope=council_scope,
+            timeframe_override=timeframe_override,
         )
 
     def build_cv_debug_payload(
@@ -119,6 +174,8 @@ if TYPE_CHECKING:
         from phoenixguard.decision.ensemble import EnsembleDecisionEngine
         from phoenixguard.runtime.local_ensemble_runtime import LocalCVEnsembleRuntime
         from phoenixguard.decision.personalization import PersonalizationEngine
+else:
+        LocalCVEnsembleRuntime = Any
 
 
 def _gr_skip() -> Any:
@@ -130,15 +187,23 @@ def _tk_attributes(window: Any, *args: Any) -> Any:
     return window.attributes(*args)
 
 
-def _pillow_lanczos() -> Any:
+def _pillow_lanczos() -> Image.Resampling:
     resampling = getattr(Image, "Resampling", None)
     if resampling is not None:
-        return getattr(resampling, "LANCZOS", getattr(Image, "LANCZOS", 1))
-    return getattr(Image, "LANCZOS", 1)
+        return cast(Image.Resampling, getattr(resampling, "LANCZOS", getattr(Image, "LANCZOS", 1)))
+    return cast(Image.Resampling, getattr(Image, "LANCZOS", 1))
+
+
+def _pillow_bilinear() -> Image.Resampling:
+    resampling = getattr(Image, "Resampling", None)
+    if resampling is not None:
+        return cast(Image.Resampling, getattr(resampling, "BILINEAR", getattr(Image, "BILINEAR", 2)))
+    return cast(Image.Resampling, getattr(Image, "BILINEAR", 2))
 
 
 logger = setup_logger(RUNTIME.logs_dir / "phoenixguard.log")
 security = SecurityManager(RUNTIME.data_dir, RUNTIME.logs_dir, SECURITY.kdf_iterations)
+_LEGACY_COUNCIL_FALLBACK_ENV = "PHOENIXGUARD_ALLOW_LEGACY_COUNCIL_FALLBACK"
 
 
 def get_configured_passphrase() -> str | None:
@@ -150,8 +215,101 @@ def get_configured_passphrase() -> str | None:
         pass
     return None
 
-UI_BRAND_NAME = "808Fx Standard Hybrid System"
-UI_BRAND_SUBTITLE = "Hybrid chart intelligence desk for live structure control and execution review."
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _password_is_strong(password: str) -> bool:
+    value = str(password or "")
+    return (
+        len(value) >= 12
+        and any(char.islower() for char in value)
+        and any(char.isupper() for char in value)
+        and any(char.isdigit() for char in value)
+    )
+
+
+def _ui_surface_is_public(host: str, *, tunnel_enabled: bool) -> bool:
+    if tunnel_enabled:
+        return True
+    normalized = str(host or "").strip().lower()
+    return normalized not in {"", "127.0.0.1", "localhost", "::1"}
+
+
+def _ui_auth_credentials(*, require_auth: bool, strict_passwords: bool) -> list[tuple[str, str]]:
+    if not require_auth:
+        return []
+
+    raw_pairs = str(os.getenv("PHOENIXGUARD_SHARE_CREDENTIALS", "") or "").strip()
+    parsed_pairs: list[tuple[str, str]] = []
+    if raw_pairs:
+        for chunk in raw_pairs.split(","):
+            piece = chunk.strip()
+            if not piece or ":" not in piece:
+                continue
+            username, password = piece.split(":", 1)
+            username = username.strip()
+            password = password.strip()
+            if username and password:
+                parsed_pairs.append((username, password))
+    if not parsed_pairs:
+        username = str(os.getenv("PHOENIXGUARD_SHARE_USERNAME", "operator") or "operator").strip() or "operator"
+        password = str(os.getenv("PHOENIXGUARD_SHARE_PASSWORD", "") or "").strip()
+        if password:
+            parsed_pairs.append((username, password))
+    if not parsed_pairs:
+        raise RuntimeError(
+            "Set PHOENIXGUARD_SHARE_PASSWORD or PHOENIXGUARD_SHARE_CREDENTIALS before launching authenticated UI mode."
+        )
+    if strict_passwords:
+        for _username, password in parsed_pairs:
+            if not _password_is_strong(password):
+                raise RuntimeError(
+                    "UI credentials are too weak. Use at least 12 characters with upper, lower, and numeric characters."
+                )
+    return parsed_pairs
+
+
+def _ui_auth_message() -> str:
+    return (
+        "<div style='font-family:system-ui,sans-serif;padding:0.5rem 0;'>"
+        "<strong>Protected PhoenixGuard access.</strong> "
+        "Use the configured credentials to open the advanced workstation."
+        "</div>"
+    )
+
+
+def _resolve_ui_launch_auth(server_name: str, *, share_enabled: bool) -> tuple[list[tuple[str, str]] | None, str | None]:
+    require_auth = _env_bool("PHOENIXGUARD_UI_REQUIRE_AUTH", False)
+    public_surface = _ui_surface_is_public(server_name, tunnel_enabled=share_enabled)
+    strict_passwords = _env_bool("PHOENIXGUARD_UI_STRICT_PASSWORDS", False) or public_surface
+    credentials = _ui_auth_credentials(
+        require_auth=require_auth,
+        strict_passwords=strict_passwords,
+    )
+    if not credentials:
+        return None, None
+    return credentials, _ui_auth_message()
+
+
+UI_BRAND_NAME = "808Fx Standard System"
+UI_BRAND_SUBTITLE = "Through the eyes of intelligence, life is divine. Premium chart intelligence for live structure control and execution review."
+UI_LANDING_ASSET_DIR = Path(RUNTIME.project_root) / "assets" / "share" / "css-control"
+UI_LANDING_IMAGE_PREFERRED_ORDER = (
+    "landing-transition-market-vision.png",
+    "landing-transition-market-vision-alt.png",
+    "landing-transition-lifestyle-suite.png",
+    "landing-transition-lifestyle-travel.png",
+)
 MODEL_ALIAS_MAP = {
     "dinov2": "Hybrid Core",
     "simclr": "Vector Edge",
@@ -163,8 +321,8 @@ MODEL_ALIAS_MAP = {
     "mobilenet": "Rapid Pulse",
 }
 MODEL_ROLE_ALIAS_MAP = {
-    "buy_specialist": "Buy Specialist",
-    "sell_specialist": "Sell Specialist",
+    "buy_specialist": "Buy Lens",
+    "sell_specialist": "Sell Lens",
     "structure_specialist": "Structure Lens",
     "execution_specialist": "Execution Lens",
     "local_pattern_confirmer": "Signal Verifier",
@@ -197,6 +355,239 @@ GATE_ALIAS_MAP = {
     "regime_stability": "Regime Stability",
     "transition_alignment": "Transition Alignment",
 }
+VISION_EXTRA_LABELS = {
+    "projection-overlay": "Projection Overlay",
+    "grounded-zones": "Context Zones",
+    "grounded-objects": "Context Markers",
+    "tta-tag": "Active View Tag",
+}
+VISION_MODE_LABELS = {
+    "history-boxes": "Structure Focus",
+    "yolo-only": "Detection Focus",
+    "hybrid-vision": "Balanced Overlay",
+    "latest-only": "Trigger Focus",
+    "global-only": "Context Focus",
+    "debug-all": "Deep Review",
+    "history-plus-projection": "Structure + Projection",
+}
+COUNCIL_SCOPE_LABELS = {
+    "off": "Cross-Checks Off",
+    "auto": "Smart Cross-Check",
+    "half": "Extended Cross-Check",
+    "full": "Deep Cross-Check",
+}
+
+
+def _normalize_council_scope(value: Any) -> str:
+    raw = str(value or DEFAULT_COUNCIL_SCOPE).strip().lower()
+    return raw if raw in {"off", "auto", "half", "full"} else DEFAULT_COUNCIL_SCOPE
+
+
+def _normalize_vision_extras(values: Any) -> list[str]:
+    if values is None:
+        raw_values: Sequence[Any] = list(DEFAULT_VISION_EXTRAS)
+    elif isinstance(values, str):
+        raw_values = [part.strip() for part in values.split(",")]
+    elif isinstance(values, (list, tuple, set)):
+        raw_values = [item for item in cast(Sequence[Any], values)]
+    else:
+        raw_values = list(DEFAULT_VISION_EXTRAS)
+    seen: set[str] = set()
+    normalized: list[str] = []
+    valid = set(VISION_EXTRA_LABELS)
+    for item in raw_values:
+        value = str(item or "").strip().lower()
+        if not value or value in seen or value not in valid:
+            continue
+        normalized.append(value)
+        seen.add(value)
+    return normalized
+
+
+def _vision_extra_label(value: Any) -> str:
+    key = str(value or "").strip().lower()
+    return VISION_EXTRA_LABELS.get(key, str(value or "").strip())
+
+
+def _overlay_mode_label(value: Any) -> str:
+    key = str(value or DEFAULT_OVERLAY_MODE).strip().lower()
+    return VISION_MODE_LABELS.get(key, str(value or DEFAULT_OVERLAY_MODE).replace("-", " ").title())
+
+
+def _council_scope_label(value: Any) -> str:
+    key = _normalize_council_scope(value)
+    return COUNCIL_SCOPE_LABELS.get(key, COUNCIL_SCOPE_LABELS[DEFAULT_COUNCIL_SCOPE])
+
+
+def _default_council_requested() -> bool:
+    return bool(
+        bool(getattr(RUNTIME, "enable_local_ensemble", True))
+        or bool(getattr(RUNTIME, "auto_model_council_on_inference", False))
+    )
+
+
+def _council_target_models(scope: str, device_type: str) -> list[str] | None:
+    from phoenixguard.runtime.local_ensemble_runtime import LocalCVEnsembleRuntime
+
+    normalized_scope = _normalize_council_scope(scope)
+    if normalized_scope == "full":
+        return list(LocalCVEnsembleRuntime.DEFAULT_MODELS)
+    if normalized_scope == "half":
+        if str(device_type).strip().lower() == "cpu":
+            return list(LocalCVEnsembleRuntime.CPU_DEFAULT_MODELS)
+        return list(LocalCVEnsembleRuntime.DEFAULT_MODELS)
+    return None
+
+
+def _council_max_loaded(scope: str, device_type: str) -> int | None:
+    from phoenixguard.runtime.local_ensemble_runtime import LocalCVEnsembleRuntime
+
+    normalized_scope = _normalize_council_scope(scope)
+    device_name = str(device_type).strip().lower()
+    if normalized_scope == "full":
+        return len(LocalCVEnsembleRuntime.DEFAULT_MODELS)
+    if normalized_scope == "half":
+        if device_name == "cpu":
+            return max(2, min(len(LocalCVEnsembleRuntime.CPU_DEFAULT_MODELS), 2))
+        return max(3, int(np.ceil(len(LocalCVEnsembleRuntime.DEFAULT_MODELS) / 2.0)))
+    return None
+
+
+def _resolve_council_run_config(
+    *,
+    use_local_ensemble: bool | None,
+    council_scope: Any,
+) -> dict[str, Any]:
+    normalized_scope = _normalize_council_scope(council_scope)
+    if use_local_ensemble is None:
+        requested = _default_council_requested() if normalized_scope == "auto" else normalized_scope != "off"
+    else:
+        requested = bool(use_local_ensemble) and normalized_scope != "off"
+    device_type = str(getattr(RUNTIME, "device_preference", "cpu") or "cpu").strip().lower()
+    target_models = _council_target_models(normalized_scope, device_type)
+    max_loaded_models = _council_max_loaded(normalized_scope, device_type)
+    return {
+        "scope": normalized_scope,
+        "requested": bool(requested),
+        "target_models": list(target_models) if target_models else None,
+        "max_loaded_models": (
+            int(max_loaded_models)
+            if isinstance(max_loaded_models, (int, float))
+            else int(max(1, int(getattr(RUNTIME, "local_ensemble_max_loaded_models", 2) or 2)))
+        ),
+    }
+
+
+def _saved_local_ensemble_artifacts_available(
+    *,
+    target_models: Sequence[str] | None = None,
+) -> bool:
+    from phoenixguard.runtime.inference_exports import export_metadata_path
+    from phoenixguard.runtime.local_ensemble_runtime import LocalCVEnsembleRuntime
+    from phoenixguard.training.ensemble_cv_models import EnsembleCVModels
+
+    device_type = str(getattr(RUNTIME, "device_preference", "cpu") or "cpu").strip().lower()
+    requested_device = cast(Any, torch).device(device_type if device_type in {"cpu", "cuda"} else "cpu")
+    requested_models = LocalCVEnsembleRuntime.resolve_requested_models(target_models, requested_device)
+    model_dir = Path(RUNTIME.models_dir)
+
+    for name in requested_models:
+        spec = cast(dict[str, Any] | None, EnsembleCVModels.MODEL_SPECS.get(name))
+        if spec is None:
+            continue
+        bundle_path = model_dir / str(spec.get("save_name", "")).strip()
+        if bundle_path.exists() or export_metadata_path(model_dir, name).exists():
+            return True
+    return False
+
+
+def _should_force_side_effect_free_council(
+    *,
+    side_effect_free: bool,
+    use_local_ensemble: bool | None,
+    council_scope: Any,
+    target_models: Sequence[str] | None = None,
+) -> bool:
+    normalized_scope = _normalize_council_scope(council_scope)
+    if not side_effect_free:
+        return False
+    if normalized_scope == "off":
+        return False
+    if use_local_ensemble is False:
+        return False
+    if use_local_ensemble is None and normalized_scope != "auto":
+        return False
+    return _saved_local_ensemble_artifacts_available(target_models=target_models)
+
+
+def _local_ensemble_cache_key(
+    *,
+    target_models: Sequence[str] | None,
+    max_loaded_models: int | None,
+) -> str:
+    device_type = str(getattr(RUNTIME, "device_preference", "cpu") or "cpu").strip().lower()
+    model_key = ",".join(str(name).strip().lower() for name in (target_models or []))
+    limit = "default" if max_loaded_models is None else str(max(1, int(max_loaded_models)))
+    return f"{device_type}|{model_key or 'profile'}|{limit}"
+
+FEEDBACK_SCHEMA_VERSION = 2
+FEEDBACK_SIGNAL_CHOICES = ["AUTO", "BUY", "SELL", "HOLD"]
+FEEDBACK_EXECUTION_RESULT_CHOICES = ["WIN", "LOSS", "BREAKEVEN", "NO_FILL", "INVALIDATED"]
+FEEDBACK_MARKET_STATE_CHOICES = ["TRENDING", "CHOPPY", "RANGING", "BREAKOUT", "REVERSAL", "NEWS_SPIKE", "UNSPECIFIED"]
+FEEDBACK_SETUP_STATE_CHOICES = ["CONTINUATION", "PULLBACK", "REVERSAL", "FAKEOUT", "LIQUIDITY_SWEEP", "UNSPECIFIED"]
+FEEDBACK_FAILURE_MODE_CHOICES = ["NONE", "LATE_ENTRY", "FAKEOUT", "LOW_MOMENTUM", "COUNTERTREND", "NEWS_NOISE", "RISK_MISMANAGED", "UNSPECIFIED"]
+FEEDBACK_STAGE_ORDER = (
+    "personalization",
+    "continual_learning",
+    "rl",
+    "personalization_context",
+    "style_refresh",
+)
+FEEDBACK_CRITICAL_STAGES = ("personalization", "continual_learning", "rl")
+FEEDBACK_VISUAL_BRUSHES: tuple[dict[str, Any], ...] = (
+    {"semantic_label": "entry_zone", "color": "#58da7b", "display": "Entry"},
+    {"semantic_label": "invalidation_zone", "color": "#df6b5f", "display": "Invalidation"},
+    {"semantic_label": "target_path", "color": "#d7a65a", "display": "Target"},
+    {"semantic_label": "context_zone", "color": "#74b7ff", "display": "Context"},
+)
+HEATMAP_LAYER_KEYS: tuple[str, ...] = (
+    "context",
+    "precision",
+    "detections",
+    "corridor",
+    "zones",
+    "segmentation",
+    "opportunity",
+)
+HEATMAP_CLASS_KEYS: tuple[str, ...] = ("entry", "continuation", "reversal")
+HEATMAP_BASE_RENDER_GAMMAS: dict[str, float] = {
+    "opportunity": 0.94,
+    "entry": 0.96,
+    "continuation": 0.98,
+    "reversal": 0.98,
+    "detections": 0.98,
+    "corridor": 1.02,
+    "zones": 0.96,
+    "segmentation": 0.92,
+}
+HEATMAP_FEEDBACK_REGION_AFFINITIES: dict[str, dict[str, dict[str, float]]] = {
+    "entry_zone": {
+        "layers": {"precision": 1.0, "detections": 0.92, "opportunity": 0.88, "context": 0.24},
+        "classes": {"entry": 1.0, "continuation": 0.20, "reversal": 0.08},
+    },
+    "target_path": {
+        "layers": {"corridor": 1.0, "opportunity": 0.94, "precision": 0.24, "context": 0.16},
+        "classes": {"entry": 0.12, "continuation": 1.0, "reversal": 0.08},
+    },
+    "invalidation_zone": {
+        "layers": {"zones": 1.0, "context": 0.78, "opportunity": 0.36, "segmentation": 0.22},
+        "classes": {"entry": 0.10, "continuation": 0.18, "reversal": 1.0},
+    },
+    "context_zone": {
+        "layers": {"context": 1.0, "zones": 0.82, "detections": 0.32, "opportunity": 0.22},
+        "classes": {"entry": 0.34, "continuation": 0.40, "reversal": 0.26},
+    },
+}
 
 # ------------------------------------------------------------------
 # Engine constructors (lazy init so UI can launch immediately)
@@ -208,9 +599,14 @@ _gates_engine: Any | None = None
 _moe: Any | None = None
 _ensemble: Any | None = None
 _personal: Any | None = None
-_local_ensemble: Any | None = None
-_local_ensemble_future: Future[Any] | None = None
-_local_ensemble_last_error = ""
+_local_ensemble_cache: dict[str, Any] = {}
+_local_ensemble_future_cache: dict[str, Future[Any]] = {}
+_local_ensemble_error_cache: dict[str, str] = {}
+_heatmap_feedback_calibration_lock = threading.Lock()
+_heatmap_feedback_calibration_cache: dict[str, Any] = {
+    "journal_mtime_ns": None,
+    "state": None,
+}
 _model_council_daemon_process: subprocess.Popen[Any] | None = None
 _tta_manager: Any | None = None
 _ood_detector: Any | None = None
@@ -227,13 +623,16 @@ _background_warmup_lock = threading.Lock()
 _model_council_daemon_lock = threading.Lock()
 _background_executor: ThreadPoolExecutor | None = None
 _background_warmup_started = False
+_runtime_hooks_installed = False
 _capture_runtime_lock = threading.Lock()
 _capture_selector_lock = threading.Lock()
 _session_runtime_lock = threading.Lock()
 _zone_memory_lock = threading.Lock()
 _compare_frame_cache_lock = threading.Lock()
+_manual_inference_jobs_lock = threading.Lock()
 _processed_capture_files: set[str] = set()
 _hotkey_listener_started = False
+_manual_inference_resume_started = False
 _runtime_maintenance_state: dict[str, int] = {"inference_runs": 0}
 _capture_runtime_state: dict[str, Any] = {
     "requested_hotkey": str(RUNTIME.capture_hotkey),
@@ -253,6 +652,8 @@ _capture_runtime_state: dict[str, Any] = {
     "latest_gauge": None,
     "latest_skill_fig": None,
     "pending_bundle": [],
+    "inflight_bundle": [],
+    "inflight_source": "",
     "bundle_size": int(max(1, RUNTIME.capture_bundle_size)),
     "bundle_started_at": "",
     "bundle_started_epoch": 0.0,
@@ -318,10 +719,48 @@ def _model_council_daemon_request(
     if payload is not None:
         data = json.dumps(dict(payload), ensure_ascii=True).encode("utf-8")
     req = urllib_request.Request(url, data=data, headers=headers, method="POST" if payload is not None else "GET")
-    with urllib_request.urlopen(req, timeout=timeout) as response:
-        raw = response.read().decode("utf-8")
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except urllib_error.HTTPError as exc:
+        raw = exc.read().decode("utf-8")
+        parsed_payload: Any = json.loads(raw) if raw else {}
+        payload_dict: dict[str, Any]
+        if isinstance(parsed_payload, Mapping):
+            parsed_mapping = cast(Mapping[object, Any], parsed_payload)
+            payload_dict = {str(key): value for key, value in parsed_mapping.items()}
+        else:
+            payload_dict = {}
+        payload_dict["_status_code"] = int(getattr(exc, "code", 500) or 500)
+        return payload_dict
     parsed: dict[str, Any] = json.loads(raw) if raw else {}
     return dict(parsed)
+
+
+def _stop_model_council_daemon() -> None:
+    global _model_council_daemon_process
+    with _model_council_daemon_lock:
+        process = _model_council_daemon_process
+        _model_council_daemon_process = None
+    if process is None:
+        return
+    try:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2.0)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+def _set_legacy_council_fallback_approval(approved: bool) -> None:
+    if approved:
+        os.environ[_LEGACY_COUNCIL_FALLBACK_ENV] = "1"
+    else:
+        os.environ.pop(_LEGACY_COUNCIL_FALLBACK_ENV, None)
+    _stop_model_council_daemon()
 
 
 def _start_model_council_daemon() -> None:
@@ -378,7 +817,12 @@ def _predict_with_model_council_daemon(
     image: Image.Image,
     *,
     adaptation_profile: Mapping[str, Any] | None = None,
+    routing_context: Mapping[str, Any] | None = None,
+    target_models: Sequence[str] | None = None,
+    max_loaded_models: int | None = None,
 ) -> dict[str, Any]:
+    from phoenixguard.runtime.local_ensemble_runtime import LegacyFallbackApprovalRequired
+
     _ensure_model_council_daemon_ready()
     buffer = io.BytesIO()
     image.convert("RGB").save(buffer, format="PNG")
@@ -387,9 +831,34 @@ def _predict_with_model_council_daemon(
         payload={
             "image_b64": base64.b64encode(buffer.getvalue()).decode("utf-8"),
             "adaptation_profile": dict(adaptation_profile or {}),
+            "routing_context": dict(routing_context or {}),
+            "target_models": [str(name) for name in (target_models or []) if str(name).strip()],
+            "max_loaded_models": (
+                int(max_loaded_models)
+                if isinstance(max_loaded_models, (int, float))
+                else None
+            ),
         },
         timeout=900.0,
     )
+    legacy_fallback_request_obj = payload.get("legacy_fallback_request", {})
+    legacy_fallback_request: dict[str, Any]
+    if isinstance(legacy_fallback_request_obj, Mapping):
+        legacy_mapping = cast(Mapping[object, Any], legacy_fallback_request_obj)
+        legacy_fallback_request = {
+            str(key): value for key, value in legacy_mapping.items()
+        }
+    else:
+        legacy_fallback_request = {}
+    if legacy_fallback_request:
+        raise LegacyFallbackApprovalRequired(
+            model_name=str(legacy_fallback_request.get("model_name", "unknown")),
+            reason=str(legacy_fallback_request.get("reason", "Legacy council fallback requested.")),
+            bundle_path=Path(str(legacy_fallback_request.get("bundle_path", "")).strip()) if str(legacy_fallback_request.get("bundle_path", "")).strip() else None,
+            export_ready=bool(legacy_fallback_request.get("export_ready", False)),
+        )
+    if not bool(payload.get("ok", True)):
+        raise RuntimeError(str(payload.get("error", "Model council daemon request failed.")))
     prediction = payload.get("prediction", {})
     if not isinstance(prediction, dict):
         raise RuntimeError("Model council daemon returned an invalid prediction payload.")
@@ -399,34 +868,52 @@ def _predict_with_model_council_daemon(
     return prediction_dict
 
 
-def _load_local_ensemble_runtime() -> LocalCVEnsembleRuntime:
+def _load_local_ensemble_runtime(
+    *,
+    target_models: Sequence[str] | None = None,
+    max_loaded_models: int | None = None,
+) -> LocalCVEnsembleRuntime:
     from phoenixguard.runtime.local_ensemble_runtime import LocalCVEnsembleRuntime
 
-    target_models = None
+    resolved_targets = list(target_models) if target_models else None
     if (
-        bool(getattr(RUNTIME, "force_full_council_on_cpu", False))
+        resolved_targets is None
+        and bool(getattr(RUNTIME, "force_full_council_on_cpu", False))
         and str(RUNTIME.device_preference) == "cpu"
         and not str(os.getenv("PHOENIXGUARD_LOCAL_ENSEMBLE_MODELS", "") or "").strip()
     ):
-        target_models = list(LocalCVEnsembleRuntime.DEFAULT_MODELS)
+        resolved_targets = list(LocalCVEnsembleRuntime.DEFAULT_MODELS)
 
-    return LocalCVEnsembleRuntime(
+    runtime = LocalCVEnsembleRuntime(
         image_dirs=_memory_image_dirs(),
         model_dir=RUNTIME.models_dir,
-        compute_device=torch.device(RUNTIME.device_preference),
+        compute_device=cast(Any, torch).device(RUNTIME.device_preference),
         logger=logger,
-        target_models=target_models,
+        target_models=resolved_targets,
     )
+    if max_loaded_models is not None:
+        runtime.max_loaded_models = max(1, int(max_loaded_models))
+    return runtime
 
 
-def _local_ensemble_status() -> str:
+def _local_ensemble_status(
+    *,
+    target_models: Sequence[str] | None = None,
+    max_loaded_models: int | None = None,
+) -> str:
+    cache_key = _local_ensemble_cache_key(
+        target_models=target_models,
+        max_loaded_models=max_loaded_models,
+    )
     with _local_ensemble_lock:
-        if _local_ensemble is not None:
+        if cache_key in _local_ensemble_cache:
             return "ready"
-        if _local_ensemble_future is not None and not _local_ensemble_future.done():
+        future = _local_ensemble_future_cache.get(cache_key)
+        if future is not None and not future.done():
             return "warming_up"
-        if _local_ensemble_last_error:
-            return f"warmup_failed:{_local_ensemble_last_error}"
+        last_error = str(_local_ensemble_error_cache.get(cache_key, "") or "").strip()
+        if last_error:
+            return f"warmup_failed:{last_error}"
     return "not_loaded"
 
 
@@ -486,26 +973,38 @@ def _get_forecast_engine() -> ForecastRouter:
                     max_interval_pct=RUNTIME.conformal_max_interval_pct,
                 )
     return _forecast_engine
-def _get_local_ensemble(*, block: bool = True) -> LocalCVEnsembleRuntime | None:
-    global _local_ensemble, _local_ensemble_future, _local_ensemble_last_error
-    if not bool(getattr(RUNTIME, "enable_local_ensemble", True)):
+def _get_local_ensemble(
+    *,
+    block: bool = True,
+    target_models: Sequence[str] | None = None,
+    max_loaded_models: int | None = None,
+    allow_when_disabled: bool = False,
+) -> LocalCVEnsembleRuntime | None:
+    if not bool(getattr(RUNTIME, "enable_local_ensemble", True)) and not bool(allow_when_disabled):
         return None
-    if _local_ensemble is not None:
-        return _local_ensemble
+    cache_key = _local_ensemble_cache_key(
+        target_models=target_models,
+        max_loaded_models=max_loaded_models,
+    )
+    if cache_key in _local_ensemble_cache:
+        return cast(LocalCVEnsembleRuntime, _local_ensemble_cache[cache_key])
 
     future: Future[Any] | None = None
     with _local_ensemble_lock:
-        if _local_ensemble is not None:
-            return _local_ensemble
-        if _local_ensemble_future is None:
-            _local_ensemble_last_error = ""
+        cached = _local_ensemble_cache.get(cache_key)
+        if cached is not None:
+            return cast(LocalCVEnsembleRuntime, cached)
+        if cache_key not in _local_ensemble_future_cache:
+            _local_ensemble_error_cache[cache_key] = ""
             logger.info("Starting local ensemble warmup in the background.")
-            _local_ensemble_future = _get_background_executor().submit(_load_local_ensemble_runtime)
-        future = _local_ensemble_future
-
-    # The type of future is Future[Any], so this check is always False and can be removed
-    # if future is None:
-    #     return _local_ensemble
+            _local_ensemble_future_cache[cache_key] = _get_background_executor().submit(
+                _load_local_ensemble_runtime,
+                target_models=target_models,
+                max_loaded_models=max_loaded_models,
+            )
+        future = _local_ensemble_future_cache.get(cache_key)
+    if future is None:
+        return None
     if not block and not future.done():
         return None
 
@@ -513,21 +1012,22 @@ def _get_local_ensemble(*, block: bool = True) -> LocalCVEnsembleRuntime | None:
         runtime = future.result()
     except Exception as exc:
         with _local_ensemble_lock:
-            if _local_ensemble_future is future:
-                _local_ensemble_future = None
-            _local_ensemble_last_error = str(exc)
+            active_future = _local_ensemble_future_cache.get(cache_key)
+            if active_future is future:
+                _local_ensemble_future_cache.pop(cache_key, None)
+            _local_ensemble_error_cache[cache_key] = str(exc)
         if block:
             raise
         logger.warning("Local ensemble warmup failed: %s", exc)
         return None
 
     with _local_ensemble_lock:
-        if _local_ensemble is None:
-            _local_ensemble = runtime
-        if _local_ensemble_future is future:
-            _local_ensemble_future = None
-        _local_ensemble_last_error = ""
-    return _local_ensemble
+        _local_ensemble_cache[cache_key] = runtime
+        active_future = _local_ensemble_future_cache.get(cache_key)
+        if active_future is future:
+            _local_ensemble_future_cache.pop(cache_key, None)
+        _local_ensemble_error_cache[cache_key] = ""
+    return cast(LocalCVEnsembleRuntime, _local_ensemble_cache[cache_key])
 
 
 def _neutral_local_ensemble_prediction(reason: str = "unavailable") -> dict[str, Any]:
@@ -621,7 +1121,7 @@ def _get_moe() -> SkillGatedMoE:
     global _moe
     if _moe is None:
         from phoenixguard.decision.skill_gates import SkillGatedMoE
-        _moe = SkillGatedMoE(n_features=16, n_gates=12)
+        _moe = SkillGatedMoE(n_features=16, n_gates=13)
     return _moe
 def _get_ensemble() -> EnsembleDecisionEngine:
     global _ensemble
@@ -846,11 +1346,14 @@ def _filter_detections_for_overlay(
         name = str(d.get("pattern", ""))
         conf = float(d.get("confidence", 0.0) or 0.0)
         is_latest = _is_latest_branch_pattern(name)
+        is_yolo = _is_yolo_detection_pattern(name)
         if is_latest and conf < min_conf_latest:
             continue
         if (not is_latest) and conf < min_conf_global:
             continue
         if _is_parser_artifact(name):
+            continue
+        if mode in {"yolo-only", "hybrid-vision"} and not is_yolo:
             continue
         if mode == "global-only" and is_latest:
             continue
@@ -868,15 +1371,27 @@ def _build_render_config(
     label_density: float | int = 10,
     projection_focus: float = 0.35,
     debug_depth: float | int = 6,
+    fuse_timeframe_overlays: bool = False,
+    vision_extras: Any = None,
+    council_scope: Any = DEFAULT_COUNCIL_SCOPE,
+    higher_timeframe: str | None = "M15",
+    lower_timeframe: str | None = "M5",
 ) -> dict[str, Any]:
+    normalized_higher_timeframe = str("M15" if higher_timeframe is None else higher_timeframe).strip().upper()
+    normalized_lower_timeframe = str("M5" if lower_timeframe is None else lower_timeframe).strip().upper()
     return {
-        "overlay_mode": str(overlay_mode or "history-plus-projection"),
+        "overlay_mode": str(overlay_mode or DEFAULT_OVERLAY_MODE),
         "min_conf_global": float(np.clip(float(min_conf_global), 0.0, 1.0)),
         "min_conf_latest": float(np.clip(float(min_conf_latest), 0.0, 1.0)),
-        "history_depth": int(np.clip(int(round(float(history_depth))), 1, 24)),
+        "history_depth": int(np.clip(int(round(float(history_depth))), 1, MAX_SEQUENCE_HISTORY_DEPTH)),
         "label_density": int(np.clip(int(round(float(label_density))), 2, 24)),
         "projection_focus": float(np.clip(float(projection_focus), 0.0, 0.95)),
         "debug_depth": int(np.clip(int(round(float(debug_depth))), 3, 16)),
+        "fuse_timeframe_overlays": bool(fuse_timeframe_overlays),
+        "vision_extras": _normalize_vision_extras(vision_extras),
+        "council_scope": _normalize_council_scope(council_scope),
+        "higher_timeframe": normalized_higher_timeframe,
+        "lower_timeframe": normalized_lower_timeframe,
     }
 
 
@@ -938,6 +1453,245 @@ def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(dict(payload), ensure_ascii=True, default=_json_default) + "\n")
+
+
+def _write_jsonl_atomic(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(dict(row), ensure_ascii=True, default=_json_default) + "\n")
+    tmp_path.replace(path)
+
+
+def _read_jsonl_rows(path: Path, *, limit: int | None = None) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    rows.append(cast(dict[str, Any], payload))
+    except Exception:
+        return []
+    if limit is None or limit <= 0:
+        return rows
+    return rows[-int(limit) :]
+
+
+def _read_json_file(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _capture_recovery_state_path() -> Path:
+    return RUNTIME.data_dir / "capture_recovery_state.json"
+
+
+def _runtime_crash_journal_path() -> Path:
+    return RUNTIME.logs_dir / "runtime_crash_journal.jsonl"
+
+
+def _capture_recovery_payload_locked() -> dict[str, Any]:
+    return {
+        "ts": utc_now_iso(),
+        "requested_hotkey": str(_capture_runtime_state.get("requested_hotkey", "")),
+        "active_hotkey": str(_capture_runtime_state.get("active_hotkey", "")),
+        "status": str(_capture_runtime_state.get("status", "")),
+        "last_capture_time": str(_capture_runtime_state.get("last_capture_time", "")),
+        "last_capture_file": str(_capture_runtime_state.get("last_capture_file", "")),
+        "last_error": str(_capture_runtime_state.get("last_error", "")),
+        "selection_active": bool(_capture_runtime_state.get("selection_active", False)),
+        "inference_active": bool(_capture_runtime_state.get("inference_active", False)),
+        "pending_bundle": copy.deepcopy(cast(list[dict[str, Any]], _capture_runtime_state.get("pending_bundle", []))),
+        "inflight_bundle": copy.deepcopy(cast(list[dict[str, Any]], _capture_runtime_state.get("inflight_bundle", []))),
+        "inflight_source": str(_capture_runtime_state.get("inflight_source", "")),
+        "bundle_size": int(_capture_runtime_state.get("bundle_size", max(1, RUNTIME.capture_bundle_size)) or max(1, RUNTIME.capture_bundle_size)),
+        "bundle_started_at": str(_capture_runtime_state.get("bundle_started_at", "")),
+        "bundle_started_epoch": float(_capture_runtime_state.get("bundle_started_epoch", 0.0) or 0.0),
+        "last_bundle_id": str(_capture_runtime_state.get("last_bundle_id", "")),
+    }
+
+
+def _persist_capture_recovery_state_locked() -> None:
+    _write_json_atomic(_capture_recovery_state_path(), _capture_recovery_payload_locked())
+
+
+def _runtime_crash_payload(
+    *,
+    scope: str,
+    error: str,
+    traceback_text: str = "",
+) -> dict[str, Any]:
+    capture_state: dict[str, Any]
+    with _capture_runtime_lock:
+        capture_state = _capture_recovery_payload_locked()
+    return {
+        "ts": utc_now_iso(),
+        "scope": scope,
+        "error": error,
+        "traceback": traceback_text,
+        "capture_state": capture_state,
+    }
+
+
+def _record_runtime_crash(
+    *,
+    scope: str,
+    error: str,
+    traceback_text: str = "",
+) -> None:
+    try:
+        _append_jsonl(
+            _runtime_crash_journal_path(),
+            _runtime_crash_payload(scope=scope, error=error, traceback_text=traceback_text),
+        )
+    except Exception:
+        pass
+
+
+def _mapping_to_str_dict(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[object, Any], value)
+    return {str(key): item for key, item in mapping.items()}
+
+
+def _normalize_capture_bundle_rows(rows: Sequence[Any]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, row_obj in enumerate(rows):
+        if not isinstance(row_obj, Mapping):
+            continue
+        row = cast(Mapping[object, Any], row_obj)
+        row_data = _mapping_to_str_dict(row)
+        file_path = str(row_data.get("file_path", "")).strip()
+        if not file_path or not Path(file_path).exists():
+            continue
+        normalized.append(
+            {
+                "file_path": file_path,
+                "captured_at": str(row_data.get("captured_at", utc_now_iso())),
+                "slot_index": int(row_data.get("slot_index", index + 1) or index + 1),
+            }
+        )
+    return normalized
+
+
+def _restore_capture_recovery_state() -> dict[str, Any]:
+    payload = _mapping_to_str_dict(_read_json_file(_capture_recovery_state_path(), {}))
+    pending_bundle = _normalize_capture_bundle_rows(cast(Sequence[Any], payload.get("pending_bundle", [])))
+    inflight_bundle = _normalize_capture_bundle_rows(cast(Sequence[Any], payload.get("inflight_bundle", [])))
+    bundle_size = int(max(1, int(payload.get("bundle_size", max(1, RUNTIME.capture_bundle_size)) or max(1, RUNTIME.capture_bundle_size))))
+    recovered = {
+        "pending_bundle_count": len(pending_bundle),
+        "inflight_bundle_count": len(inflight_bundle),
+    }
+    if not pending_bundle and not inflight_bundle:
+        return recovered
+
+    default_hotkey_label = _format_hotkey_label(RUNTIME.capture_hotkey, "CTRL+V") or "Ctrl+V"
+
+    def _normalize_hotkey(value: Any) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return default_hotkey_label
+        if normalized.upper() == "F4":
+            return default_hotkey_label
+        return _format_hotkey_label(normalized, default_hotkey_label)
+
+    with _capture_runtime_lock:
+        _capture_runtime_state["requested_hotkey"] = _normalize_hotkey(payload.get("requested_hotkey", _capture_runtime_state.get("requested_hotkey", default_hotkey_label)))
+        _capture_runtime_state["active_hotkey"] = _normalize_hotkey(payload.get("active_hotkey", _capture_runtime_state.get("active_hotkey", "")))
+        _capture_runtime_state["bundle_size"] = bundle_size
+        _capture_runtime_state["pending_bundle"] = pending_bundle
+        _capture_runtime_state["inflight_bundle"] = inflight_bundle
+        _capture_runtime_state["inflight_source"] = str(payload.get("inflight_source", "recovered") or "recovered")
+        _capture_runtime_state["last_capture_file"] = str(payload.get("last_capture_file", _capture_runtime_state.get("last_capture_file", "")))
+        _capture_runtime_state["last_capture_time"] = str(payload.get("last_capture_time", _capture_runtime_state.get("last_capture_time", "")))
+        _capture_runtime_state["bundle_started_at"] = str(payload.get("bundle_started_at", _capture_runtime_state.get("bundle_started_at", "")))
+        _capture_runtime_state["bundle_started_epoch"] = float(payload.get("bundle_started_epoch", _capture_runtime_state.get("bundle_started_epoch", 0.0)) or 0.0)
+        if inflight_bundle:
+            _capture_runtime_state["status"] = "Recovered a multi-timeframe bundle from a prior crash. Resuming inference."
+            _capture_runtime_state["inference_active"] = True
+            _capture_runtime_state["selection_active"] = False
+        else:
+            _capture_runtime_state["status"] = (
+                f"Recovered {len(pending_bundle)}/{bundle_size} hotkey capture(s) from a prior crash. Press the hotkey again to continue."
+            )
+            _capture_runtime_state["inference_active"] = False
+            _capture_runtime_state["selection_active"] = False
+        _bump_capture_status_token()
+        _persist_capture_recovery_state_locked()
+    logger.warning(
+        "Recovered capture state from previous session: pending_bundle=%d inflight_bundle=%d",
+        len(pending_bundle),
+        len(inflight_bundle),
+    )
+    return recovered
+
+
+def _resume_recovered_capture_bundle_if_needed() -> None:
+    with _capture_runtime_lock:
+        bundle = copy.deepcopy(cast(list[dict[str, Any]], _capture_runtime_state.get("inflight_bundle", [])))
+        source = str(_capture_runtime_state.get("inflight_source", "recovered") or "recovered")
+    if not bundle:
+        return
+
+    def _runner() -> None:
+        try:
+            _process_multi_timeframe_bundle(bundle, source=source)
+        except Exception as exc:
+            _record_runtime_crash(
+                scope="recovered_capture_bundle",
+                error=str(exc),
+                traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            )
+            logger.exception("Recovered capture bundle failed to resume: %s", exc)
+
+    _get_background_executor().submit(_runner)
+
+
+def _install_runtime_crash_hooks() -> None:
+    global _runtime_hooks_installed
+    if _runtime_hooks_installed:
+        return
+
+    def _sys_hook(exc_type: type[BaseException], exc_value: BaseException, exc_traceback: Any) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        trace_text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+        _record_runtime_crash(scope="sys.excepthook", error=str(exc_value), traceback_text=trace_text)
+        logger.error("Unhandled runtime exception: %s", exc_value)
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+    def _thread_hook(args: threading.ExceptHookArgs) -> None:
+        exc_type = args.exc_type
+        exc_value = args.exc_value
+        trace_text = "".join(traceback.format_exception(exc_type, exc_value, args.exc_traceback))
+        thread_name = getattr(args.thread, "name", "unknown")
+        _record_runtime_crash(
+            scope=f"threading.excepthook:{thread_name}",
+            error=str(exc_value),
+            traceback_text=trace_text,
+        )
+        logger.error("Unhandled background thread exception on %s: %s", thread_name, exc_value)
+
+    sys.excepthook = _sys_hook
+    threading.excepthook = _thread_hook
+    _runtime_hooks_installed = True
 
 
 def _clamp_bbox(bbox: Sequence[Any], width: float, height: float) -> tuple[int, int, int, int] | None:
@@ -1302,10 +2056,12 @@ def _build_session_entry(
     )
     return {
         "entry_id": entry_id,
+        "inference_id": str(result.get("inference_id", entry_id)),
         "timestamp": str(result.get("timestamp", utc_now_iso())),
         "source": source,
         "file_path": file_path,
         "file_name": os.path.basename(file_path),
+        "source_image_hash": str(cast(dict[str, Any], result.get("meta", {})).get("sha256", "")),
         "action": str(result.get("action", "HOLD")).upper(),
         "confidence": float(result.get("confidence", 0.0) or 0.0),
         "expected_move_pct": float(result.get("expected_3min_move_pct", 0.0) or 0.0),
@@ -1403,6 +2159,364 @@ def _dedupe_text_items(items: Sequence[str]) -> list[str]:
     return ordered
 
 
+def _multi_timeframe_bundle_labels(frame_count: int) -> list[str]:
+    if frame_count <= 0:
+        return []
+    if frame_count == 1:
+        return ["Primary TF"]
+    if frame_count == 2:
+        return ["Higher TF", "Lower TF"]
+    if frame_count == 4:
+        return [
+            "Higher TF / Zoomed Out",
+            "Higher TF / Zoomed In",
+            "Lower TF / Zoomed Out",
+            "Lower TF / Zoomed In",
+        ]
+    midpoint = max(1, frame_count // 2)
+    labels: list[str] = []
+    for index in range(frame_count):
+        group_name = "Higher TF" if index < midpoint else "Lower TF"
+        group_index = (index % midpoint) + 1 if frame_count > 2 else index + 1
+        labels.append(f"{group_name} / Frame {group_index}")
+    return labels
+
+
+def _split_multi_timeframe_bundle_results(bundle_results: Sequence[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    entries = list(bundle_results)
+    if not entries:
+        return [], []
+    midpoint = max(1, len(entries) // 2)
+    higher_entries = entries[:midpoint]
+    lower_entries = entries[midpoint:]
+    if not lower_entries:
+        lower_entries = higher_entries[-1:]
+        higher_entries = higher_entries[:-1] if len(higher_entries) > 1 else higher_entries
+    return higher_entries, lower_entries
+
+
+def _mean_numeric(values: Sequence[Any], default: float = 0.0) -> float:
+    filtered = [float(value) for value in values if value is not None]
+    if not filtered:
+        return float(default)
+    return float(sum(filtered) / len(filtered))
+
+
+def _combine_direction_votes(votes: Sequence[tuple[Any, float]], *, hold_threshold: float = 0.08) -> tuple[str, float]:
+    scores = {"BUY": 0.0, "SELL": 0.0}
+    support_counts = {"BUY": 0, "SELL": 0}
+    for direction, weight in votes:
+        key = _directional_action(direction)
+        if key not in scores:
+            continue
+        value = float(np.clip(float(weight), 0.0, 1.0))
+        if value <= 0.0:
+            continue
+        scores[key] += value
+        support_counts[key] += 1
+    total = scores["BUY"] + scores["SELL"]
+    if total <= 1e-6:
+        return "HOLD", 0.0
+    diff = abs(scores["BUY"] - scores["SELL"])
+    if diff <= max(0.03, hold_threshold * total):
+        return "HOLD", float(np.clip(diff / total, 0.0, 1.0))
+    direction = "BUY" if scores["BUY"] > scores["SELL"] else "SELL"
+    support_ratio = scores[direction] / max(total, 1e-6)
+    support_mean = scores[direction] / max(support_counts[direction], 1)
+    confidence = float(np.clip(support_ratio * support_mean, 0.0, 1.0))
+    return direction, confidence
+
+
+def _combine_multi_timeframe_probabilities(bundle_results: Sequence[dict[str, Any]]) -> dict[str, float]:
+    probabilities = {"BUY": 0.0, "SELL": 0.0, "HOLD": 0.0}
+    total_weight = 0.0
+    for entry in bundle_results:
+        result = cast(Mapping[str, Any], entry.get("result", {}))
+        profile = _build_mtf_frame_profile(result)
+        frame_probabilities = _normalize_probabilities(cast(dict[str, Any], result.get("probabilities", {})))
+        weight = max(
+            float(profile.get("entry_confidence", 0.0) or 0.0),
+            float(profile.get("bias_strength", 0.0) or 0.0),
+            float(result.get("confidence", 0.0) or 0.0),
+            0.05,
+        )
+        total_weight += weight
+        for key in probabilities:
+            probabilities[key] += float(np.clip(frame_probabilities.get(key, 0.0), 0.0, 1.0)) * weight
+    if total_weight <= 1e-6:
+        return _normalize_probabilities({"BUY": 1.0, "SELL": 1.0, "HOLD": 1.0})
+    return _normalize_probabilities({key: value / total_weight for key, value in probabilities.items()})
+
+
+def _summarize_multi_timeframe_entries(entries: Sequence[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for entry in entries:
+        compare_entry = cast(Mapping[str, Any], entry.get("compare_entry", {}))
+        label = str(compare_entry.get("label", entry.get("label", "Frame"))).strip() or "Frame"
+        action = _directional_action(compare_entry.get("action", entry.get("result", {}).get("action", "HOLD")))
+        projection = _directional_action(
+            compare_entry.get(
+                "projection_direction",
+                cast(Mapping[str, Any], entry.get("result", {})).get("projection", {}).get("direction", "HOLD"),
+            )
+        )
+        confidence = float(
+            np.clip(
+                compare_entry.get("confidence", cast(Mapping[str, Any], entry.get("result", {})).get("confidence", 0.0)),
+                0.0,
+                1.0,
+            )
+        )
+        parts.append(f"{label} {action}/{projection} {confidence:.2f}")
+    return ", ".join(parts) if parts else "No timeframe evidence"
+
+
+def _build_mtf_group_profile(frame_profiles: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    profiles = [profile for profile in frame_profiles if profile]
+    if not profiles:
+        return {}
+
+    action_direction, action_confidence = _combine_direction_votes(
+        [
+            (
+                profile.get("action", "HOLD"),
+                float(profile.get("action_confidence", profile.get("confidence", 0.0)) or 0.0),
+            )
+            for profile in profiles
+        ]
+    )
+    engine_direction, engine_confidence = _combine_direction_votes(
+        [
+            (
+                profile.get("engine_direction", profile.get("action", "HOLD")),
+                float(profile.get("engine_confidence", profile.get("action_confidence", 0.0)) or 0.0),
+            )
+            for profile in profiles
+        ]
+    )
+    projection_direction, projection_confidence = _combine_direction_votes(
+        [
+            (
+                profile.get("projection_direction", "HOLD"),
+                float(profile.get("projection_confidence", 0.0) or 0.0),
+            )
+            for profile in profiles
+        ]
+    )
+    structure_direction, structure_confidence = _combine_direction_votes(
+        [
+            (
+                profile.get("structure_direction", "HOLD"),
+                float(profile.get("structure_confidence", 0.0) or 0.0),
+            )
+            for profile in profiles
+        ]
+    )
+    sequence_direction, sequence_confidence = _combine_direction_votes(
+        [
+            (
+                profile.get("sequence_direction", "HOLD"),
+                float(profile.get("sequence_confidence", 0.0) or 0.0),
+            )
+            for profile in profiles
+        ]
+    )
+    momentum_direction, momentum_confidence = _combine_direction_votes(
+        [
+            (
+                profile.get("momentum_direction", "HOLD"),
+                0.5 + 0.5 * float(np.clip(profile.get("bias_strength", 0.0), 0.0, 1.0)),
+            )
+            for profile in profiles
+        ],
+        hold_threshold=0.10,
+    )
+    memory_direction, memory_confidence = _combine_direction_votes(
+        [
+            (
+                profile.get("memory_direction", "HOLD"),
+                float(profile.get("memory_similarity", 0.0) or 0.0),
+            )
+            for profile in profiles
+        ],
+        hold_threshold=0.10,
+    )
+    council_bias_direction, council_bias_confidence = _combine_direction_votes(
+        [
+            (
+                profile.get("council_bias_direction", "HOLD"),
+                float(profile.get("council_bias_confidence", 0.0) or 0.0),
+            )
+            for profile in profiles
+        ]
+    )
+    council_projection_direction, council_projection_confidence = _combine_direction_votes(
+        [
+            (
+                profile.get("council_projection_direction", projection_direction),
+                float(profile.get("council_projection_confidence", 0.0) or 0.0),
+            )
+            for profile in profiles
+        ]
+    )
+    council_router_direction, council_router_strength = _combine_direction_votes(
+        [
+            (
+                profile.get("council_router_direction", "HOLD"),
+                float(profile.get("council_router_strength", 0.0) or 0.0),
+            )
+            for profile in profiles
+        ],
+        hold_threshold=0.12,
+    )
+    bias_direction, bias_strength = _combine_direction_votes(
+        [
+            (
+                profile.get("bias_direction", "HOLD"),
+                float(profile.get("bias_strength", 0.0) or 0.0),
+            )
+            for profile in profiles
+        ]
+    )
+
+    directional_scores = {"BUY": 0.0, "SELL": 0.0}
+    components: list[dict[str, Any]] = []
+    bias_reasons: list[str] = []
+    gates_passing_values: list[int] = []
+    path_clarity_values: list[float] = []
+    memory_similarity_values: list[float] = []
+    continuation_values: list[float] = []
+    reversal_values: list[float] = []
+    council_alignment_values: list[float] = []
+    council_influence_values: list[float] = []
+    council_structure_confidence_values: list[float] = []
+    council_router_strength_values: list[float] = []
+    structure_trade_ready_values: list[bool] = []
+    countertrend_ready_values: list[bool] = []
+    strongest_profile: Mapping[str, Any] = profiles[0]
+    strongest_score = float(profiles[0].get("entry_confidence", 0.0) or 0.0)
+    for profile in profiles:
+        if float(profile.get("entry_confidence", 0.0) or 0.0) > strongest_score:
+            strongest_profile = profile
+            strongest_score = float(profile.get("entry_confidence", 0.0) or 0.0)
+        profile_directional_scores = cast(dict[str, Any], profile.get("directional_scores", {}))
+        directional_scores["BUY"] += float(np.clip(profile_directional_scores.get("BUY", 0.0), 0.0, 1.0))
+        directional_scores["SELL"] += float(np.clip(profile_directional_scores.get("SELL", 0.0), 0.0, 1.0))
+        components.extend([dict(component) for component in cast(Sequence[Mapping[str, Any]], profile.get("components", []))])
+        bias_reasons.extend(str(reason) for reason in cast(Sequence[Any], profile.get("bias_reasons", [])) if str(reason).strip())
+        gates_passing_values.append(int(profile.get("gates_passing", 0) or 0))
+        path_clarity_values.append(float(np.clip(profile.get("path_clarity", 0.0), 0.0, 1.0)))
+        memory_similarity_values.append(float(np.clip(profile.get("memory_similarity", 0.0), 0.0, 1.0)))
+        continuation_values.append(float(np.clip(profile.get("continuation_probability", 0.0), 0.0, 1.0)))
+        reversal_values.append(float(np.clip(profile.get("reversal_probability", 0.0), 0.0, 1.0)))
+        council_alignment_values.append(float(np.clip(profile.get("council_alignment_score", 0.0), 0.0, 1.0)))
+        council_influence_values.append(float(np.clip(profile.get("council_influence_score", 0.0), 0.0, 1.0)))
+        council_structure_confidence_values.append(float(np.clip(profile.get("council_structure_confidence", 0.0), 0.0, 1.0)))
+        council_router_strength_values.append(float(np.clip(profile.get("council_router_strength", 0.0), 0.0, 1.0)))
+        structure_trade_ready_values.append(bool(profile.get("structure_trade_ready", False)))
+        countertrend_ready_values.append(bool(profile.get("countertrend_ready", False)))
+
+    directional_total = float(directional_scores["BUY"] + directional_scores["SELL"])
+    directional_spread = float(directional_scores["BUY"] - directional_scores["SELL"])
+    directional_balance = abs(directional_spread) / max(directional_total, 1e-6) if directional_total > 1e-6 else 0.0
+    group_bias_strength = float(np.clip(0.50 * directional_balance + 0.50 * bias_strength, 0.0, 1.0))
+
+    action_confidence = float(np.clip(action_confidence, 0.0, 1.0))
+    engine_confidence = float(np.clip(engine_confidence, 0.0, 1.0))
+    projection_confidence = float(np.clip(projection_confidence, 0.0, 1.0))
+    structure_confidence = float(np.clip(structure_confidence, 0.0, 1.0))
+    sequence_confidence = float(np.clip(sequence_confidence, 0.0, 1.0))
+    momentum_confidence = float(np.clip(momentum_confidence, 0.0, 1.0))
+    memory_confidence = float(np.clip(memory_confidence, 0.0, 1.0))
+    council_bias_confidence = float(np.clip(council_bias_confidence, 0.0, 1.0))
+    council_projection_confidence = float(np.clip(council_projection_confidence, 0.0, 1.0))
+    council_router_strength = float(np.clip(council_router_strength, 0.0, 1.0))
+
+    if action_direction not in {"BUY", "SELL"}:
+        action_direction = projection_direction if projection_direction in {"BUY", "SELL"} else bias_direction
+    if action_direction not in {"BUY", "SELL"}:
+        action_direction = "HOLD"
+
+    bias_reasons = _dedupe_text_items(bias_reasons)
+    entry_direction = action_direction if action_direction in {"BUY", "SELL"} else projection_direction
+    if entry_direction not in {"BUY", "SELL"}:
+        entry_direction = bias_direction if bias_direction in {"BUY", "SELL"} else "HOLD"
+    entry_confidence = float(
+        np.clip(
+            max(
+                action_confidence,
+                engine_confidence,
+                projection_confidence,
+                structure_confidence,
+                sequence_confidence,
+                council_bias_confidence,
+                council_projection_confidence,
+                group_bias_strength,
+            ),
+            0.0,
+            1.0,
+        )
+    )
+    structure_setup = str(strongest_profile.get("structure_setup", "none") or "none")
+    structure_trade_ready = all(structure_trade_ready_values) if structure_trade_ready_values else False
+    continuation_probability = _mean_numeric(continuation_values)
+    reversal_probability = _mean_numeric(reversal_values)
+    macro_trend = str(strongest_profile.get("macro_trend", "unknown") or "unknown").upper()
+    local_phase = str(strongest_profile.get("local_phase", "unknown") or "unknown")
+    entry_type = str(strongest_profile.get("entry_type", "continuation") or "continuation")
+    council_structure_setup = str(strongest_profile.get("council_structure_setup", "none") or "none").lower()
+    council_structure_confidence = float(np.clip(_mean_numeric(council_structure_confidence_values), 0.0, 1.0))
+    council_alignment_score = float(np.clip(_mean_numeric(council_alignment_values), 0.0, 1.0))
+    council_influence_score = float(np.clip(_mean_numeric(council_influence_values), 0.0, 1.0))
+    countertrend_ready = any(countertrend_ready_values)
+
+    return {
+        "action": action_direction,
+        "action_confidence": action_confidence,
+        "engine_direction": engine_direction,
+        "engine_confidence": engine_confidence,
+        "projection_direction": projection_direction,
+        "projection_confidence": projection_confidence,
+        "projection_dominance": float(np.clip(_mean_numeric([profile.get("projection_dominance", 0.0) for profile in profiles]), 0.0, 1.0)),
+        "structure_direction": structure_direction,
+        "structure_confidence": structure_confidence,
+        "sequence_direction": sequence_direction,
+        "sequence_confidence": sequence_confidence,
+        "momentum_direction": momentum_direction,
+        "momentum_confidence": momentum_confidence,
+        "memory_direction": memory_direction,
+        "memory_similarity": float(np.clip(_mean_numeric(memory_similarity_values), 0.0, 1.0)),
+        "path_clarity": float(np.clip(_mean_numeric(path_clarity_values), 0.0, 1.0)),
+        "gates_passing": int(round(_mean_numeric(gates_passing_values, default=0.0))),
+        "gates_norm": float(np.clip(_mean_numeric([profile.get("gates_norm", 0.0) for profile in profiles]), 0.0, 1.0)),
+        "structure_setup": structure_setup,
+        "structure_trade_ready": structure_trade_ready,
+        "continuation_probability": float(np.clip(continuation_probability, 0.0, 1.0)),
+        "reversal_probability": float(np.clip(reversal_probability, 0.0, 1.0)),
+        "macro_trend": macro_trend,
+        "local_phase": local_phase,
+        "entry_type": entry_type,
+        "countertrend_ready": countertrend_ready,
+        "council_bias_direction": council_bias_direction,
+        "council_bias_confidence": council_bias_confidence,
+        "council_projection_direction": council_projection_direction,
+        "council_projection_confidence": council_projection_confidence,
+        "council_structure_setup": council_structure_setup,
+        "council_structure_confidence": council_structure_confidence,
+        "council_alignment_score": council_alignment_score,
+        "council_influence_score": council_influence_score,
+        "council_router_direction": council_router_direction,
+        "council_router_strength": council_router_strength,
+        "bias_direction": bias_direction,
+        "bias_strength": group_bias_strength,
+        "entry_direction": entry_direction,
+        "entry_confidence": entry_confidence,
+        "components": components,
+        "bias_reasons": bias_reasons,
+        "directional_scores": directional_scores,
+    }
+
+
 def _build_mtf_frame_profile(result: Mapping[str, Any]) -> dict[str, Any]:
     chart_state = cast(dict[str, Any], result.get("chart_state", {}))
     projection = cast(dict[str, Any], result.get("projection", {}))
@@ -1452,6 +2566,18 @@ def _build_mtf_frame_profile(result: Mapping[str, Any]) -> dict[str, Any]:
     macro_trend = str(chart_state.get("macro_trend", "unknown") or "unknown").upper()
     local_phase = str(chart_state.get("local_phase", "unknown") or "unknown")
     entry_type = str(chart_state.get("entry_type", "continuation") or "continuation")
+    council_bias_direction = _directional_action(chart_state.get("council_bias_direction", "HOLD"))
+    council_bias_confidence = float(np.clip(chart_state.get("council_bias_confidence", 0.0), 0.0, 1.0))
+    council_projection_direction = _directional_action(
+        chart_state.get("council_projection_direction", projection_direction)
+    )
+    council_projection_confidence = float(np.clip(chart_state.get("council_projection_confidence", 0.0), 0.0, 1.0))
+    council_structure_setup = str(chart_state.get("council_structure_setup", "none") or "none").lower()
+    council_structure_confidence = float(np.clip(chart_state.get("council_structure_confidence", 0.0), 0.0, 1.0))
+    council_alignment_score = float(np.clip(chart_state.get("council_alignment_score", 0.0), 0.0, 1.0))
+    council_influence_score = float(np.clip(chart_state.get("council_influence_score", 0.0), 0.0, 1.0))
+    council_router_direction = _directional_action(chart_state.get("council_router_direction", "HOLD"))
+    council_router_strength = float(np.clip(chart_state.get("council_router_strength", 0.0), 0.0, 1.0))
     countertrend_ready = bool(
         structure_setup == "reversal_release"
         or (entry_type == "reversal" and reversal_probability >= 0.50)
@@ -1499,6 +2625,24 @@ def _build_mtf_frame_profile(result: Mapping[str, Any]) -> dict[str, Any]:
             0.06 + 0.12 * sequence_confidence,
             f"sequence {sequence_direction} {sequence_confidence:.2f}",
         )
+    if council_bias_direction in {"BUY", "SELL"} and council_bias_confidence > 0.0:
+        add_component(
+            council_bias_direction,
+            0.08 + 0.16 * council_bias_confidence + 0.06 * council_alignment_score,
+            f"council {council_bias_direction} {council_bias_confidence:.2f}",
+        )
+    if council_projection_direction in {"BUY", "SELL"} and council_projection_confidence > 0.0:
+        add_component(
+            council_projection_direction,
+            0.05 + 0.12 * council_projection_confidence,
+            f"council projection {council_projection_direction} {council_projection_confidence:.2f}",
+        )
+    if council_router_direction in {"BUY", "SELL"} and council_router_strength > 0.0:
+        add_component(
+            council_router_direction,
+            0.03 + 0.08 * council_router_strength,
+            f"router {council_router_direction} {council_router_strength:.2f}",
+        )
     if memory_direction in {"BUY", "SELL"} and memory_similarity > 0.05:
         add_component(
             memory_direction,
@@ -1542,7 +2686,9 @@ def _build_mtf_frame_profile(result: Mapping[str, Any]) -> dict[str, Any]:
             + 0.14 * structure_confidence
             + 0.10 * sequence_confidence
             + 0.10 * path_clarity
-            + 0.08 * gates_norm
+            + 0.10 * council_bias_confidence
+            + 0.06 * council_projection_confidence
+            + 0.05 * council_influence_score
             + (0.06 if bool(result.get("consensus_ok", False)) else 0.0),
             0.0,
             1.0,
@@ -1560,6 +2706,10 @@ def _build_mtf_frame_profile(result: Mapping[str, Any]) -> dict[str, Any]:
             agreement_bonus += 0.05
         if momentum_direction == bias_direction:
             agreement_bonus += 0.04
+        if council_bias_direction == bias_direction:
+            agreement_bonus += 0.06 + 0.04 * council_alignment_score
+        if council_projection_direction == bias_direction:
+            agreement_bonus += 0.04 + 0.03 * council_projection_confidence
     bias_strength = float(
         np.clip(
             (0.42 * directional_balance + 0.38 * conviction + agreement_bonus)
@@ -1582,6 +2732,8 @@ def _build_mtf_frame_profile(result: Mapping[str, Any]) -> dict[str, Any]:
                 projection_confidence if projection_direction == entry_direction else 0.0,
                 structure_confidence if structure_direction == entry_direction else 0.0,
                 sequence_confidence if sequence_direction == entry_direction else 0.0,
+                council_bias_confidence if council_bias_direction == entry_direction else 0.0,
+                council_projection_confidence if council_projection_direction == entry_direction else 0.0,
                 bias_strength if bias_direction == entry_direction else 0.0,
             ),
             0.0,
@@ -1620,6 +2772,16 @@ def _build_mtf_frame_profile(result: Mapping[str, Any]) -> dict[str, Any]:
         "local_phase": local_phase,
         "entry_type": entry_type,
         "countertrend_ready": countertrend_ready,
+        "council_bias_direction": council_bias_direction,
+        "council_bias_confidence": council_bias_confidence,
+        "council_projection_direction": council_projection_direction,
+        "council_projection_confidence": council_projection_confidence,
+        "council_structure_setup": council_structure_setup,
+        "council_structure_confidence": council_structure_confidence,
+        "council_alignment_score": council_alignment_score,
+        "council_influence_score": council_influence_score,
+        "council_router_direction": council_router_direction,
+        "council_router_strength": council_router_strength,
         "bias_direction": bias_direction,
         "bias_strength": bias_strength,
         "entry_direction": entry_direction,
@@ -1657,9 +2819,13 @@ def _evaluate_multi_timeframe_gate(
     lead_strength = float(np.clip(lead_profile.get("bias_strength", 0.0), 0.0, 1.0))
     lead_projection_conf = float(np.clip(lead_profile.get("projection_confidence", 0.0), 0.0, 1.0))
     lead_memory_similarity = float(np.clip(lead_profile.get("memory_similarity", 0.0), 0.0, 1.0))
+    lead_council_bias = _directional_action(lead_profile.get("council_bias_direction", "HOLD"))
+    lead_council_conf = float(np.clip(lead_profile.get("council_bias_confidence", 0.0), 0.0, 1.0))
     trigger_strength = float(np.clip(trigger_profile.get("entry_confidence", 0.0), 0.0, 1.0))
     trigger_projection = _directional_action(trigger_profile.get("projection_direction", "HOLD"))
     trigger_projection_conf = float(np.clip(trigger_profile.get("projection_confidence", 0.0), 0.0, 1.0))
+    trigger_council_bias = _directional_action(trigger_profile.get("council_bias_direction", "HOLD"))
+    trigger_council_conf = float(np.clip(trigger_profile.get("council_bias_confidence", 0.0), 0.0, 1.0))
 
     support_score = 0.0
     block_score = 0.0
@@ -1711,6 +2877,28 @@ def _evaluate_multi_timeframe_gate(
     if trigger_projection == trigger_direction and trigger_projection_conf >= 0.45:
         support_score += 0.06 + 0.08 * trigger_projection_conf
         confirmation_reasons.append(f"lower projection confirms {trigger_direction} ({trigger_projection_conf:.2f})")
+
+    if lead_council_bias == trigger_direction and lead_council_conf >= 0.48:
+        support_score += 0.10 + 0.12 * lead_council_conf
+        confirmation_reasons.append(f"higher council bias backs {trigger_direction} ({lead_council_conf:.2f})")
+    elif lead_council_bias in {"BUY", "SELL"} and lead_council_bias != trigger_direction and lead_council_conf >= 0.52:
+        block_score += 0.11 + 0.12 * lead_council_conf
+        blocking_reasons.append(f"higher council bias leans {lead_council_bias} ({lead_council_conf:.2f})")
+
+    if trigger_council_bias == trigger_direction and trigger_council_conf >= 0.46:
+        support_score += 0.05 + 0.08 * trigger_council_conf
+        confirmation_reasons.append(f"lower council bias agrees ({trigger_council_conf:.2f})")
+    elif trigger_council_bias in {"BUY", "SELL"} and trigger_council_bias != trigger_direction and trigger_council_conf >= 0.56:
+        block_score += 0.04 + 0.06 * trigger_council_conf
+        blocking_reasons.append(f"lower council bias leans {trigger_council_bias} ({trigger_council_conf:.2f})")
+
+    if (
+        lead_council_bias == trigger_direction
+        and trigger_council_bias == trigger_direction
+        and min(lead_council_conf, trigger_council_conf) >= 0.54
+    ):
+        support_score += 0.06 + 0.06 * min(lead_council_conf, trigger_council_conf)
+        confirmation_reasons.append("council alignment is synchronized across frames")
 
     if bool(trigger_profile.get("countertrend_ready", False)) and lead_bias in {"BUY", "SELL"} and lead_bias != trigger_direction:
         block_score *= 0.82
@@ -1899,9 +3087,12 @@ def _apply_zone_memory_to_result(result: Mapping[str, Any]) -> dict[str, Any]:
     probabilities = _normalize_probabilities(cast(dict[str, Any], enriched.get("probabilities", {})))
     preferred_action = str(zone_learning.get("preferred_action", "HOLD")).upper()
     probability_bias = float(zone_learning.get("probability_bias", 0.0) or 0.0)
+    current_action = str(enriched.get("action", "HOLD")).upper()
     if zone_learning.get("match_count") and preferred_action in {"BUY", "SELL"}:
         probabilities = _apply_probability_bias(probabilities, preferred_action, probability_bias)
-    action = max(probabilities.items(), key=lambda item: float(item[1]))[0]
+        action = max(probabilities.items(), key=lambda item: float(item[1]))[0]
+    else:
+        action = current_action if current_action in {"BUY", "SELL", "HOLD"} else max(probabilities.items(), key=lambda item: float(item[1]))[0]
     enriched["probabilities"] = probabilities
     enriched["action"] = action
     confidence_val = probabilities.get(action, enriched.get("confidence", 0.0))
@@ -1966,6 +3157,7 @@ def _update_capture_runtime_state(**kwargs: Any) -> None:
     with _capture_runtime_lock:
         _capture_runtime_state.update(kwargs)
         _bump_capture_status_token()
+        _persist_capture_recovery_state_locked()
 
 
 def _get_capture_runtime_snapshot() -> dict[str, Any]:
@@ -2057,6 +3249,16 @@ def _parse_hotkey_spec(spec: str) -> tuple[int, int, str]:
         raise ValueError(f"Unsupported hotkey key '{key_part}'.")
 
     return modifiers, vk_code, "+".join([*display_parts, key_label])
+
+
+def _format_hotkey_label(spec: Any, fallback: str = "") -> str:
+    candidate = str(spec or "").strip() or str(fallback or "").strip()
+    if not candidate:
+        return ""
+    try:
+        return _parse_hotkey_spec(candidate)[2]
+    except ValueError:
+        return candidate
 
 
 def _virtual_screen_bounds() -> tuple[int, int, int, int]:
@@ -2263,6 +3465,7 @@ def _clear_expired_bundle_locked() -> None:
     _capture_runtime_state["bundle_started_at"] = ""
     _capture_runtime_state["bundle_started_epoch"] = 0.0
     _bump_capture_status_token()
+    _persist_capture_recovery_state_locked()
 
 
 def _queue_hotkey_capture(file_path: str) -> tuple[bool, list[dict[str, Any]], int, int]:
@@ -2292,6 +3495,7 @@ def _queue_hotkey_capture(file_path: str) -> tuple[bool, list[dict[str, Any]], i
             _capture_runtime_state["bundle_started_epoch"] = 0.0
             _capture_runtime_state["last_bundle_id"] = uuid4().hex
         _bump_capture_status_token()
+        _persist_capture_recovery_state_locked()
         return ready, bundle_payload, slot_index, bundle_size
 
 
@@ -2311,12 +3515,13 @@ def _build_timeframe_compare_entry(
         overlay_image = _build_overlay_image(
             source_image,
             result,
-            overlay_mode=str(render_state.get("overlay_mode", "history-plus-projection")),
+            overlay_mode=str(render_state.get("overlay_mode", DEFAULT_OVERLAY_MODE)),
             min_conf_global=float(render_state.get("min_conf_global", 0.42) or 0.42),
             min_conf_latest=float(render_state.get("min_conf_latest", 0.50) or 0.50),
             history_limit=int(render_state.get("history_depth", 8) or 8),
             label_budget=int(render_state.get("label_density", 10) or 10),
             projection_confidence_floor=float(render_state.get("projection_focus", 0.35) or 0.35),
+            vision_extras=render_state.get("vision_extras", DEFAULT_VISION_EXTRAS),
         )
     raw_asset_path = _write_resized_image_asset(
         source_image,
@@ -2335,6 +3540,14 @@ def _build_timeframe_compare_entry(
     frame_profile = _build_mtf_frame_profile(result)
     chart_state = cast(dict[str, Any], result.get("chart_state", {}))
     projection = cast(dict[str, Any], result.get("projection", {}))
+    # Debug logging for overlay and raw asset paths
+    try:
+        import logging
+        logging.getLogger("phoenixguard.overlay").info(
+            f"[Overlay Debug] label={label} file={file_path} raw_asset_path={raw_asset_path} overlay_asset_path={overlay_asset_path}"
+        )
+    except Exception:
+        pass
     return {
         "label": label,
         "file_name": os.path.basename(file_path),
@@ -2345,29 +3558,266 @@ def _build_timeframe_compare_entry(
         "bias_direction": str(frame_profile.get("bias_direction", "HOLD")).upper(),
         "bias_strength": float(frame_profile.get("bias_strength", 0.0) or 0.0),
         "setup": str(chart_state.get("structure_setup", "none") or "none"),
+        "timeframe": str(chart_state.get("timeframe", "M5") or "M5").upper(),
         "momentum_bias": str(chart_state.get("momentum_bias", "neutral") or "neutral"),
         "raw_asset_path": raw_asset_path,
         "overlay_asset_path": overlay_asset_path,
+        "best_play_input": _build_best_play_frame_snapshot(
+            result,
+            label=label,
+            file_path=file_path,
+        ),
     }
 
+
+def _compact_best_play_box_snapshot(box: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "sequence_index": int(box.get("sequence_index", 0) or 0),
+        "box_type": str(box.get("box_type", "balance") or "balance").strip().lower(),
+        "direction": _directional_action(box.get("direction", "HOLD")),
+        "confidence": float(np.clip(box.get("confidence", 0.0), 0.0, 1.0)),
+        "maturity": float(np.clip(box.get("maturity", 0.0), 0.0, 1.0)),
+        "consolidation_score": float(np.clip(box.get("consolidation_score", 0.0), 0.0, 1.0)),
+        "dominance_gap": float(np.clip(box.get("dominance_gap", 0.0), 0.0, 1.0)),
+        "sequence_signature": str(box.get("sequence_signature", "") or "").strip(),
+    }
+
+
+def _best_play_model_direction(row: Mapping[str, Any]) -> str:
+    direction = _directional_action(row.get("predicted_label", row.get("direction", "HOLD")))
+    if direction in {"BUY", "SELL"}:
+        return direction
+    buy_prob = float(np.clip(row.get("buy_prob", 0.0), 0.0, 1.0))
+    sell_prob = float(np.clip(row.get("sell_prob", 0.0), 0.0, 1.0))
+    if buy_prob > sell_prob + 0.03:
+        return "BUY"
+    if sell_prob > buy_prob + 0.03:
+        return "SELL"
+    return "HOLD"
+
+
+def _summarize_best_play_ensemble(local_ensemble: Mapping[str, Any]) -> dict[str, Any]:
+    ensemble_view = cast(dict[str, Any], local_ensemble.get("ensemble", {}))
+    model_rows = cast(dict[str, dict[str, Any]], local_ensemble.get("models", {}))
+    selection = cast(dict[str, Any], local_ensemble.get("selection", {}))
+    model_votes: list[dict[str, Any]] = []
+    for raw_key, raw_row in model_rows.items():
+        row = dict(raw_row)
+        model_votes.append(
+            {
+                "name": str(row.get("name", raw_key) or raw_key),
+                "role": str(row.get("role", "generalist") or "generalist"),
+                "direction": _best_play_model_direction(row),
+                "confidence": float(
+                    np.clip(
+                        row.get(
+                            "confidence",
+                            max(
+                                float(row.get("buy_prob", 0.0) or 0.0),
+                                float(row.get("sell_prob", 0.0) or 0.0),
+                            ),
+                        ),
+                        0.0,
+                        1.0,
+                    )
+                ),
+                "dynamic_weight": float(np.clip(row.get("dynamic_weight", 0.0), 0.0, 1.0)),
+                "routing_alignment": float(np.clip(row.get("routing_alignment", 0.0), 0.0, 1.0)),
+                "live_enabled": bool(row.get("live_enabled", True)),
+            }
+        )
+    model_votes.sort(key=lambda item: (float(item["confidence"]), float(item["dynamic_weight"])), reverse=True)
+    sequence_tasks_raw = cast(dict[str, dict[str, Any]], ensemble_view.get("sequence_task_consensus", {}))
+    sequence_tasks = {
+        str(task_name): {
+            "value": str(payload.get("value", "") or "").strip(),
+            "confidence": float(np.clip(payload.get("confidence", 0.0), 0.0, 1.0)),
+            "n_models": int(payload.get("n_models", 0) or 0),
+            "support": float(max(0.0, float(payload.get("support", 0.0) or 0.0))),
+        }
+        for task_name, payload in sequence_tasks_raw.items()
+        if str(payload.get("value", "")).strip()
+    }
+    return {
+        "predicted_label": _directional_action(ensemble_view.get("predicted_label", "HOLD")),
+        "confidence": float(np.clip(ensemble_view.get("confidence", 0.0), 0.0, 1.0)),
+        "consensus_ratio": float(np.clip(ensemble_view.get("consensus_ratio", 0.0), 0.0, 1.0)),
+        "disagreement": float(np.clip(ensemble_view.get("disagreement", 0.0), 0.0, 1.0)),
+        "router_direction": _directional_action(ensemble_view.get("router_direction", "HOLD")),
+        "router_strength": float(np.clip(ensemble_view.get("router_strength", 0.0), 0.0, 1.0)),
+        "champion_model": str(ensemble_view.get("champion_model", "") or "").strip(),
+        "confirmer_model": str(ensemble_view.get("confirmer_model", "") or "").strip(),
+        "selected_models": [str(item) for item in cast(Sequence[Any], selection.get("selected_models", [])) if str(item).strip()],
+        "model_votes": model_votes[:8],
+        "sequence_tasks": sequence_tasks,
+    }
+
+
+def _build_directional_pattern_frequency_summary(
+    detections: Sequence[Mapping[str, Any]],
+    limit: int = 4,
+) -> dict[str, list[dict[str, Any]]]:
+    buckets: dict[str, dict[str, dict[str, Any]]] = {"BUY": {}, "SELL": {}, "NEUTRAL": {}}
+    for detection in detections:
+        pattern = str(detection.get("pattern", "") or "").strip()
+        if not pattern or _is_parser_artifact(pattern):
+            continue
+        normalized = pattern.lower().replace(" ", "_")
+        if "buy" in normalized and "sell" not in normalized:
+            direction = "BUY"
+        elif "sell" in normalized and "buy" not in normalized:
+            direction = "SELL"
+        else:
+            direction = "NEUTRAL"
+        bucket = buckets[direction].setdefault(
+            pattern,
+            {
+                "pattern": pattern,
+                "count": 0,
+                "weight": 0.0,
+                "max_confidence": 0.0,
+                "sequence_roles": [],
+            },
+        )
+        bucket["count"] = int(bucket["count"]) + 1
+        confidence = float(np.clip(detection.get("confidence", 0.0), 0.0, 1.0))
+        overlay_conf = float(np.clip(detection.get("overlay_confidence", confidence), 0.0, 1.0))
+        priority = float(np.clip(detection.get("priority_score", 0.0), 0.0, 1.0))
+        geometry = float(np.clip(detection.get("geometry_score", 0.0), 0.0, 1.0))
+        context = float(np.clip(detection.get("context_score", 0.0), 0.0, 1.0))
+        bucket["weight"] = float(bucket["weight"]) + confidence + 0.20 * overlay_conf + 0.10 * priority + 0.06 * geometry + 0.04 * context
+        bucket["max_confidence"] = max(float(bucket["max_confidence"]), confidence)
+        role = str(detection.get("sequence_role", "global") or "global").strip()
+        roles = cast(list[str], bucket["sequence_roles"])
+        if role and role not in roles:
+            roles.append(role)
+
+    def _rank(rows: Mapping[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        ranked = sorted(rows.values(), key=lambda item: (float(item["weight"]), float(item["max_confidence"])), reverse=True)
+        return [
+            {
+                "pattern": str(item["pattern"]),
+                "count": int(item["count"]),
+                "weight": round(float(item["weight"]), 4),
+                "max_confidence": float(item["max_confidence"]),
+                "sequence_roles": list(cast(list[str], item["sequence_roles"]))[:3],
+            }
+            for item in ranked[: max(1, int(limit))]
+        ]
+
+    return {
+        "BUY": _rank(buckets["BUY"]),
+        "SELL": _rank(buckets["SELL"]),
+        "NEUTRAL": _rank(buckets["NEUTRAL"]),
+    }
+
+
+def _build_best_play_frame_snapshot(
+    result: Mapping[str, Any],
+    *,
+    label: str,
+    file_path: str = "",
+) -> dict[str, Any]:
+    chart_state = cast(dict[str, Any], result.get("chart_state", {}))
+    sequence_state = cast(dict[str, Any], result.get("sequence_state", {}))
+    timing_signal = cast(dict[str, Any], result.get("timing_signal", {}))
+    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
+    frame_profile = _build_mtf_frame_profile(result)
+    current_box = cast(dict[str, Any], sequence_state.get("current_box", {}))
+    next_box = cast(dict[str, Any], sequence_state.get("primary_next_box", {}))
+    box_history = cast(list[dict[str, Any]], sequence_state.get("box_history", []))
+    detections = cast(list[dict[str, Any]], result.get("detections", []))
+    return {
+        "label": str(label or "Frame"),
+        "file_name": os.path.basename(file_path) if file_path else str(label or "frame"),
+        "file_path": str(file_path or ""),
+        "action": str(result.get("action", "HOLD")).upper(),
+        "execution_action": str(result.get("execution_action", result.get("action", "HOLD"))).upper(),
+        "confidence": float(np.clip(result.get("confidence", 0.0), 0.0, 1.0)),
+        "probabilities": _normalize_probabilities(cast(dict[str, Any], result.get("probabilities", {}))),
+        "memory_direction": _directional_action(result.get("memory_direction", "HOLD")),
+        "memory_similarity": float(np.clip(result.get("memory_similarity", 0.0), 0.0, 1.0)),
+        "profile": {
+            "bias_direction": str(frame_profile.get("bias_direction", "HOLD")).upper(),
+            "bias_strength": float(np.clip(frame_profile.get("bias_strength", 0.0), 0.0, 1.0)),
+            "entry_direction": str(frame_profile.get("entry_direction", "HOLD")).upper(),
+            "entry_confidence": float(np.clip(frame_profile.get("entry_confidence", 0.0), 0.0, 1.0)),
+            "projection_direction": str(frame_profile.get("projection_direction", "HOLD")).upper(),
+            "projection_confidence": float(np.clip(frame_profile.get("projection_confidence", 0.0), 0.0, 1.0)),
+            "projection_dominance": float(np.clip(frame_profile.get("projection_dominance", 0.0), 0.0, 1.0)),
+            "structure_direction": str(frame_profile.get("structure_direction", "HOLD")).upper(),
+            "structure_confidence": float(np.clip(frame_profile.get("structure_confidence", 0.0), 0.0, 1.0)),
+            "sequence_direction": str(frame_profile.get("sequence_direction", "HOLD")).upper(),
+            "sequence_confidence": float(np.clip(frame_profile.get("sequence_confidence", 0.0), 0.0, 1.0)),
+            "council_bias_direction": str(frame_profile.get("council_bias_direction", "HOLD")).upper(),
+            "council_bias_confidence": float(np.clip(frame_profile.get("council_bias_confidence", 0.0), 0.0, 1.0)),
+            "council_alignment_score": float(np.clip(frame_profile.get("council_alignment_score", 0.0), 0.0, 1.0)),
+            "council_projection_direction": str(frame_profile.get("council_projection_direction", "HOLD")).upper(),
+            "council_projection_confidence": float(np.clip(frame_profile.get("council_projection_confidence", 0.0), 0.0, 1.0)),
+            "council_router_direction": str(frame_profile.get("council_router_direction", "HOLD")).upper(),
+            "council_router_strength": float(np.clip(frame_profile.get("council_router_strength", 0.0), 0.0, 1.0)),
+            "structure_setup": str(frame_profile.get("structure_setup", "none") or "none"),
+            "continuation_probability": float(np.clip(frame_profile.get("continuation_probability", 0.0), 0.0, 1.0)),
+            "reversal_probability": float(np.clip(frame_profile.get("reversal_probability", 0.0), 0.0, 1.0)),
+        },
+        "chart_state": {
+            "entry_type": str(chart_state.get("entry_type", "continuation") or "continuation"),
+            "structure_setup": str(chart_state.get("structure_setup", "none") or "none"),
+            "momentum_bias": str(chart_state.get("momentum_bias", "neutral") or "neutral"),
+            "path_clarity": float(np.clip(chart_state.get("path_clarity", 0.0), 0.0, 1.0)),
+            "continuation_probability": float(np.clip(chart_state.get("continuation_probability", 0.0), 0.0, 1.0)),
+            "reversal_probability": float(np.clip(chart_state.get("reversal_probability", 0.0), 0.0, 1.0)),
+            "fakeout_probability": float(np.clip(chart_state.get("fakeout_probability", 0.0), 0.0, 1.0)),
+            "sequence_buy_pressure": float(np.clip(chart_state.get("sequence_buy_pressure", 0.0), 0.0, 1.0)),
+            "sequence_sell_pressure": float(np.clip(chart_state.get("sequence_sell_pressure", 0.0), 0.0, 1.0)),
+            "structure_buy_pressure": float(np.clip(chart_state.get("structure_buy_pressure", 0.0), 0.0, 1.0)),
+            "structure_sell_pressure": float(np.clip(chart_state.get("structure_sell_pressure", 0.0), 0.0, 1.0)),
+            "has_active_consolidation": bool(chart_state.get("has_active_consolidation", False)),
+        },
+        "sequence": {
+            "current_box": _compact_best_play_box_snapshot(current_box),
+            "primary_next_box": _compact_best_play_box_snapshot(next_box),
+            "box_history": [_compact_best_play_box_snapshot(box) for box in box_history[-6:]],
+            "recent_colors": [str(color) for color in cast(Sequence[Any], sequence_state.get("recent_colors", []))[-10:]],
+            "has_active_consolidation": bool(sequence_state.get("has_active_consolidation", chart_state.get("has_active_consolidation", False))),
+            "continuation_probability": float(np.clip(sequence_state.get("continuation_probability", chart_state.get("continuation_probability", 0.0)), 0.0, 1.0)),
+            "pullback_probability": float(np.clip(sequence_state.get("pullback_probability", 0.0), 0.0, 1.0)),
+            "reversal_probability": float(np.clip(sequence_state.get("reversal_probability", chart_state.get("reversal_probability", 0.0)), 0.0, 1.0)),
+            "fakeout_probability": float(np.clip(sequence_state.get("fakeout_probability", chart_state.get("fakeout_probability", 0.0)), 0.0, 1.0)),
+            "path_clarity": float(np.clip(sequence_state.get("path_clarity", chart_state.get("path_clarity", 0.0)), 0.0, 1.0)),
+            "box_sequence_agreement": float(np.clip(sequence_state.get("box_sequence_agreement", 0.0), 0.0, 1.0)),
+        },
+        "transitions": _normalize_transition_keys(cast(dict[str, Any], result.get("sequence_transition_probabilities", {}))),
+        "patterns": _build_directional_pattern_frequency_summary(detections),
+        "ensemble": _summarize_best_play_ensemble(cast(dict[str, Any], result.get("local_ensemble", {}))),
+        "timing": {
+            "entry_state": str(timing_signal.get("entry_state", "WATCH") or "WATCH").upper(),
+            "timing_score": float(np.clip(timing_signal.get("timing_score", 0.0), 0.0, 1.0)),
+        },
+        "multi_timeframe": {
+            "gate_state": str(multi_timeframe.get("gate_state", "watch") or "watch").lower(),
+            "gate_strength": float(np.clip(multi_timeframe.get("gate_strength", 0.0), 0.0, 1.0)),
+            "aligned": bool(multi_timeframe.get("aligned", False)),
+        },
+    }
 
 def _build_multi_timeframe_result(bundle_results: list[dict[str, Any]]) -> dict[str, Any]:
     if not bundle_results:
         return {}
-    lead = bundle_results[0]
-    trigger = bundle_results[-1]
-    combined = cast(dict[str, Any], copy.deepcopy(trigger["result"]))
-    lead_result = cast(dict[str, Any], lead["result"])
-    trigger_result = cast(dict[str, Any], trigger["result"])
-
-    lead_profile = _build_mtf_frame_profile(lead_result)
-    trigger_profile = _build_mtf_frame_profile(trigger_result)
+    lead_entries, trigger_entries = _split_multi_timeframe_bundle_results(bundle_results)
+    lead_profiles = [_build_mtf_frame_profile(cast(dict[str, Any], entry["result"])) for entry in lead_entries]
+    trigger_profiles = [_build_mtf_frame_profile(cast(dict[str, Any], entry["result"])) for entry in trigger_entries]
+    lead_profile = _build_mtf_group_profile(lead_profiles)
+    trigger_profile = _build_mtf_group_profile(trigger_profiles)
     gate = _evaluate_multi_timeframe_gate(lead_profile, trigger_profile)
+
+    combined = copy.deepcopy(cast(dict[str, Any], trigger_entries[-1]["result"]))
+    combined["probabilities"] = _combine_multi_timeframe_probabilities(trigger_entries)
 
     lead_projection = str(lead_profile.get("projection_direction", "HOLD")).upper()
     trigger_projection = str(trigger_profile.get("projection_direction", "HOLD")).upper()
-    trigger_direction = _directional_action(trigger_profile.get("entry_direction", trigger_result.get("action", "HOLD")))
-    lead_bias_direction = _directional_action(lead_profile.get("bias_direction", lead_result.get("action", "HOLD")))
+    trigger_direction = _directional_action(trigger_profile.get("entry_direction", combined.get("action", "HOLD")))
+    lead_bias_direction = _directional_action(lead_profile.get("bias_direction", lead_profile.get("action", "HOLD")))
     aligned = bool(
         gate.get("state") == "confirmed"
         or (
@@ -2378,16 +3828,43 @@ def _build_multi_timeframe_result(bundle_results: list[dict[str, Any]]) -> dict[
         or (lead_projection in {"BUY", "SELL"} and lead_projection == trigger_projection)
     )
 
-    probabilities = _normalize_probabilities(cast(dict[str, Any], combined.get("probabilities", {})))
     gate_state = str(gate.get("state", "watch") or "watch").lower()
     gate_strength = float(np.clip(gate.get("gate_strength", 0.0), 0.0, 1.0))
-    position_size_pct = float(np.clip(combined.get("position_size_pct", 0.0) or 0.0, 0.0, 100.0))
-    expected_move_pct = float(combined.get("expected_3min_move_pct", 0.0) or 0.0)
+    probabilities = _normalize_probabilities(cast(dict[str, Any], combined.get("probabilities", {})))
+    if gate_state == "watch":
+        probabilities = _normalize_probabilities({"BUY": 1.0, "SELL": 1.0, "HOLD": 1.0})
+    timing_signal = cast(dict[str, Any], combined.get("timing_signal", {}))
+    position_size_pct = float(
+        np.clip(
+            _mean_numeric([cast(Mapping[str, Any], entry["result"]).get("position_size_pct", 0.0) for entry in trigger_entries]),
+            0.0,
+            100.0,
+        )
+    )
+    expected_move_pct = float(
+        _mean_numeric([cast(Mapping[str, Any], entry["result"]).get("expected_3min_move_pct", 0.0) for entry in trigger_entries])
+    )
     quantile_range_raw = cast(Sequence[Any], combined.get("quantile_range", [0.0, 0.0]))
+    trigger_quantile_ranges = [cast(Sequence[Any], cast(dict[str, Any], entry["result"]).get("quantile_range", [0.0, 0.0])) for entry in trigger_entries]
     quantile_range = (
-        [float(quantile_range_raw[0] or 0.0), float(quantile_range_raw[1] or 0.0)]
-        if len(quantile_range_raw) >= 2
-        else [0.0, 0.0]
+        [
+            _mean_numeric([range_values[0] for range_values in trigger_quantile_ranges if len(range_values) >= 1]),
+            _mean_numeric([range_values[1] for range_values in trigger_quantile_ranges if len(range_values) >= 2]),
+        ]
+        if trigger_quantile_ranges
+        else (
+            [float(quantile_range_raw[0] or 0.0), float(quantile_range_raw[1] or 0.0)]
+            if len(quantile_range_raw) >= 2
+            else [0.0, 0.0]
+        )
+    )
+    lower_execution_permission = (
+        "EXECUTE"
+        if all(
+            str(cast(Mapping[str, Any], entry["result"]).get("execution_permission", "WAIT_FOR_CONFIRMATION")).upper() == "EXECUTE"
+            for entry in trigger_entries
+        )
+        else "WAIT_FOR_CONFIRMATION"
     )
 
     if gate_state == "confirmed" and trigger_direction in {"BUY", "SELL"}:
@@ -2397,6 +3874,10 @@ def _build_multi_timeframe_result(bundle_results: list[dict[str, Any]]) -> dict[
         expected_move_pct *= move_scale
         quantile_range = [float(value) * move_scale for value in quantile_range]
         position_size_pct = float(np.clip(position_size_pct * (1.0 + 0.16 * gate_strength), 0.0, 100.0))
+        if timing_signal:
+            timing_signal["timing_score"] = float(np.clip(float(timing_signal.get("timing_score", 0.0) or 0.0) + 0.06 * gate_strength, 0.0, 1.0))
+            if str(timing_signal.get("entry_state", "WATCH")).upper() in {"WATCH", "PREMATURE"}:
+                timing_signal["entry_state"] = "READY"
     elif gate_state == "blocked":
         probabilities = _apply_probability_bias(probabilities, "HOLD", 0.10)
         hold_floor = 0.46 + 0.18 * gate_strength
@@ -2415,6 +3896,16 @@ def _build_multi_timeframe_result(bundle_results: list[dict[str, Any]]) -> dict[
         combined["support_gates_ok"] = False
         combined["consensus_ok"] = False
         combined["opposition_alert"] = True
+        if timing_signal:
+            timing_signal["timing_score"] = float(np.clip(float(timing_signal.get("timing_score", 0.0) or 0.0) * (0.45 - 0.20 * gate_strength), 0.0, 1.0))
+            timing_signal["entry_state"] = "WATCH"
+    elif gate_state == "watch":
+        if trigger_direction in {"BUY", "SELL"} and lead_bias_direction == trigger_direction:
+            probabilities = _apply_probability_bias(probabilities, trigger_direction, 0.03 + 0.03 * gate_strength)
+        elif trigger_direction in {"BUY", "SELL"} and lead_bias_direction in {"BUY", "SELL"} and lead_bias_direction != trigger_direction:
+            probabilities = _apply_probability_bias(probabilities, "HOLD", 0.06 + 0.04 * gate_strength)
+        elif trigger_direction in {"BUY", "SELL"}:
+            probabilities = _apply_probability_bias(probabilities, trigger_direction, 0.02 + 0.02 * gate_strength)
     else:
         if trigger_direction in {"BUY", "SELL"} and lead_bias_direction == trigger_direction:
             probabilities = _apply_probability_bias(probabilities, trigger_direction, 0.02 + 0.02 * gate_strength)
@@ -2431,17 +3922,54 @@ def _build_multi_timeframe_result(bundle_results: list[dict[str, Any]]) -> dict[
     if confidence_value is None:
         confidence_value = float(combined.get("confidence", 0.0) or 0.0)
     combined["confidence"] = float(confidence_value)
+    combined["headline_action"] = final_action
+    combined["headline_confidence"] = float(confidence_value)
     combined["position_size_pct"] = position_size_pct
     combined["expected_3min_move_pct"] = expected_move_pct
     combined["quantile_range"] = quantile_range
 
-    base_trigger_explanation = str(trigger_result.get("explanation", "") or "").strip()
+    execution_allowed = bool(gate.get("entry_allowed", gate_state != "blocked")) and lower_execution_permission == "EXECUTE"
+    execution_action = final_action if execution_allowed and final_action in {"BUY", "SELL"} else "HOLD"
+    combined["execution_action"] = execution_action
+    combined["execution_confidence"] = float(
+        np.clip(
+            probabilities.get(execution_action, 0.0) if execution_action in probabilities else combined.get("confidence", 0.0),
+            0.0,
+            1.0,
+        )
+    )
+    if gate_state == "blocked":
+        combined["trade_bias"] = "HOLD"
+        combined["execution_permission"] = "WAIT_FOR_CONFIRMATION"
+        combined["decision_state"] = "UNCERTAIN"
+    else:
+        if final_action in {"BUY", "SELL"}:
+            combined["trade_bias"] = final_action
+        combined["execution_permission"] = "EXECUTE" if execution_action in {"BUY", "SELL"} else "WAIT_FOR_CONFIRMATION"
+        combined["decision_state"] = (
+            "CONFIRMED"
+            if execution_action in {"BUY", "SELL"} and gate_state == "confirmed"
+            else ("PROJECTED" if final_action in {"BUY", "SELL"} else "UNCERTAIN")
+        )
+
+    higher_summary = _summarize_multi_timeframe_entries(lead_entries)
+    lower_summary = _summarize_multi_timeframe_entries(trigger_entries)
+    base_trigger_explanation = str(cast(Mapping[str, Any], trigger_entries[-1]["result"]).get("explanation", "") or "").strip()
     fusion_explanation = str(gate.get("explanation", "") or "").strip()
     combined["explanation"] = (
-        f"{fusion_explanation} Lower timeframe read: {base_trigger_explanation}"
-        if base_trigger_explanation
-        else fusion_explanation
+        " | ".join(
+            part
+            for part in [
+                f"Higher TF pair: {higher_summary}" if higher_summary else "",
+                f"Lower TF pair: {lower_summary}" if lower_summary else "",
+                fusion_explanation,
+                f"Lower timeframe read: {base_trigger_explanation}" if base_trigger_explanation else "",
+            ]
+            if part
+        )
     ).strip()
+    if timing_signal:
+        combined["timing_signal"] = timing_signal
 
     gate_headline = str(gate.get("headline", "") or "").strip()
     summary_suffix = (
@@ -2451,14 +3979,25 @@ def _build_multi_timeframe_result(bundle_results: list[dict[str, Any]]) -> dict[
     )
     combined["multi_timeframe"] = {
         "aligned": aligned,
-        "lead_action": str(lead_result.get("action", "HOLD")).upper(),
-        "trigger_action": str(trigger_result.get("action", "HOLD")).upper(),
+        "frame_count": len(bundle_results),
+        "higher_frame_count": len(lead_entries),
+        "lower_frame_count": len(trigger_entries),
+        "higher_summary": higher_summary,
+        "lower_summary": lower_summary,
+        "lead_action": str(lead_profile.get("action", "HOLD")).upper(),
+        "trigger_action": str(trigger_profile.get("action", "HOLD")).upper(),
         "lead_projection": lead_projection,
         "trigger_projection": trigger_projection,
+        "lead_projection_confidence": float(lead_profile.get("projection_confidence", 0.0) or 0.0),
+        "trigger_projection_confidence": float(trigger_profile.get("projection_confidence", 0.0) or 0.0),
         "lead_bias_direction": lead_bias_direction,
         "lead_bias_strength": float(lead_profile.get("bias_strength", 0.0) or 0.0),
+        "lead_council_direction": _directional_action(lead_profile.get("council_bias_direction", "HOLD")),
+        "lead_council_strength": float(lead_profile.get("council_bias_confidence", 0.0) or 0.0),
         "trigger_direction": trigger_direction,
         "trigger_strength": float(trigger_profile.get("entry_confidence", 0.0) or 0.0),
+        "trigger_council_direction": _directional_action(trigger_profile.get("council_bias_direction", "HOLD")),
+        "trigger_council_strength": float(trigger_profile.get("council_bias_confidence", 0.0) or 0.0),
         "gate_state": gate_state,
         "gate_strength": gate_strength,
         "gate_score": float(gate.get("gate_score", 0.0) or 0.0),
@@ -2466,13 +4005,10 @@ def _build_multi_timeframe_result(bundle_results: list[dict[str, Any]]) -> dict[
         "gate_explanation": fusion_explanation,
         "confirmation_reasons": list(cast(Sequence[str], gate.get("confirmation_reasons", []))),
         "blocking_reasons": list(cast(Sequence[str], gate.get("blocking_reasons", []))),
-        "summary": (
-            f"Higher TF {str(lead_result.get('action', 'HOLD')).upper()} / {lead_projection} | "
-            f"Lower TF {str(trigger_result.get('action', 'HOLD')).upper()} / {trigger_projection}"
-            f"{summary_suffix}"
-        ),
+        "summary": f"Higher TF pair: {higher_summary} | Lower TF pair: {lower_summary}{summary_suffix}",
         "entries": [dict(entry["compare_entry"]) for entry in bundle_results],
     }
+    combined.update(_derive_active_trade_overlay(combined))
     return combined
 
 
@@ -2504,9 +4040,12 @@ def _record_capture_result(
                 "selection_active": False,
                 "last_error": "",
                 "status": status,
+                "inflight_bundle": [],
+                "inflight_source": "",
             }
         )
         _bump_capture_status_token()
+        _persist_capture_recovery_state_locked()
     _append_session_entry(_build_session_entry(result, source_image_state, file_path, source=source))
 
 
@@ -2515,13 +4054,19 @@ def _process_multi_timeframe_bundle(bundle: list[dict[str, Any]], source: str = 
         return False
     labels = ["Higher TF", "Lower TF", "Frame 3", "Frame 4"]
     analyzed: list[dict[str, Any]] = []
+    with _capture_runtime_lock:
+        _capture_runtime_state["inflight_bundle"] = copy.deepcopy(bundle)
+        _capture_runtime_state["inflight_source"] = str(source)
+        _capture_runtime_state["inference_active"] = True
+        _capture_runtime_state["selection_active"] = False
+        _persist_capture_recovery_state_locked()
     try:
         for index, row in enumerate(bundle):
             file_path = str(row.get("file_path", ""))
             result, overlay, _gauge_unused, _skill_unused = run_inference(
                 file_path,
                 annotation_text="",
-                overlay_mode="history-plus-projection",
+                overlay_mode=DEFAULT_OVERLAY_MODE,
                 min_conf_global=0.42,
                 min_conf_latest=0.50,
             )
@@ -2538,7 +4083,7 @@ def _process_multi_timeframe_bundle(bundle: list[dict[str, Any]], source: str = 
                         labels[min(index, len(labels) - 1)],
                         overlay_image=overlay,
                         render_config={
-                            "overlay_mode": "history-plus-projection",
+                            "overlay_mode": DEFAULT_OVERLAY_MODE,
                             "min_conf_global": 0.42,
                             "min_conf_latest": 0.50,
                             "history_depth": 8,
@@ -2568,6 +4113,11 @@ def _process_multi_timeframe_bundle(bundle: list[dict[str, Any]], source: str = 
         )
         logger.exception("Multi-timeframe capture inference failed: %s", exc)
         return False
+    finally:
+        with _capture_runtime_lock:
+            _capture_runtime_state["inflight_bundle"] = []
+            _capture_runtime_state["inflight_source"] = ""
+            _persist_capture_recovery_state_locked()
 
 
 def process_capture_file(file_path: str, source: str = "inbox") -> bool:
@@ -2587,7 +4137,7 @@ def process_capture_file(file_path: str, source: str = "inbox") -> bool:
         result, overlay, gauge, skill_fig = run_inference(
             file_path,
             annotation_text="",
-            overlay_mode="history-plus-projection",
+            overlay_mode=DEFAULT_OVERLAY_MODE,
             min_conf_global=0.42,
             min_conf_latest=0.50,
         )
@@ -2623,7 +4173,7 @@ def _hotkey_capture_flow() -> None:
 
     try:
         runtime = _get_capture_runtime_snapshot()
-        active_hotkey = runtime.get("active_hotkey", "") or runtime.get("requested_hotkey", "F4")
+        active_hotkey = _format_hotkey_label(runtime.get("active_hotkey", "") or runtime.get("requested_hotkey", ""), RUNTIME.capture_hotkey or "CTRL+V")
         _update_capture_runtime_state(
             selection_active=True,
             inference_active=False,
@@ -2648,7 +4198,7 @@ def _hotkey_capture_flow() -> None:
         file_path = _save_capture_region_to_inbox(bbox)
         ready, bundle, slot_index, bundle_size = _queue_hotkey_capture(file_path)
         if not ready:
-            status = f"Capture {slot_index}/{bundle_size} stored. Switch timeframe, then press {active_hotkey} again."
+            status = f"Capture {slot_index}/{bundle_size} stored. Keep capturing the quartet, starting with the higher timeframe pair."
             _update_capture_runtime_state(
                 selection_active=False,
                 inference_active=False,
@@ -2657,7 +4207,7 @@ def _hotkey_capture_flow() -> None:
             )
             _show_capture_hud(
                 f"Capture {slot_index}/{bundle_size} saved",
-                f"Switch to the next timeframe, then press {active_hotkey} again. Inference will start after the final confirmation.",
+                f"Switch to the next timeframe, then press {active_hotkey} again. The first two captures are the higher timeframe and the last two are the lower timeframe.",
                 timeout_ms=1900,
             )
             return
@@ -2695,7 +4245,7 @@ def _hotkey_listener_loop() -> None:
 
     user32 = ctypes.windll.user32
     hotkey_id = 0x8080
-    requested = str(RUNTIME.capture_hotkey or "F4")
+    requested = str(RUNTIME.capture_hotkey or "CTRL+V")
     fallback = str(RUNTIME.capture_hotkey_fallback or "CTRL+SHIFT+4")
     registered_label = ""
     registration_note = ""
@@ -2802,6 +4352,1066 @@ def _build_transition_summary(probabilities: Mapping[str, float]) -> TransitionS
         reversal_attempt_prob=float(normalized["reversal_attempt"]),
         fakeout_prob=float(normalized["fakeout"]),
     )
+
+
+def _timeframe_to_minutes(timeframe: Any, default_minutes: float = 5.0) -> float:
+    raw = str(timeframe or "").strip().upper()
+    if not raw:
+        return float(default_minutes)
+    match = re.fullmatch(r"([MHD])(\d+)", raw)
+    if match is None:
+        return float(default_minutes)
+    unit = match.group(1)
+    value = float(match.group(2))
+    if unit == "M":
+        return float(np.clip(value, 1.0, 240.0))
+    if unit == "H":
+        return float(np.clip(value * 60.0, 5.0, 1440.0))
+    if unit == "D":
+        return float(np.clip(value * 1440.0, 60.0, 10080.0))
+    return float(default_minutes)
+
+
+def _build_timing_signal_profile(
+    *,
+    chart_state: Mapping[str, Any],
+    sequence_state: Mapping[str, Any],
+    transition_probabilities: Mapping[str, float],
+    decision: Mapping[str, Any],
+    projection_view: Mapping[str, Any],
+    module_reliability: Mapping[str, float],
+) -> dict[str, Any]:
+    timeframe_value = str(chart_state.get("timeframe", os.getenv("PHOENIXGUARD_SIGNAL_TIMEFRAME", "M5"))).upper()
+    tf_minutes = _timeframe_to_minutes(timeframe_value, 5.0)
+    expiry_minutes = float(np.clip(float(os.getenv("PHOENIXGUARD_BINARY_EXPIRY_MIN", "60") or 60.0), 5.0, 240.0))
+    buffer_minutes = float(np.clip(float(os.getenv("PHOENIXGUARD_ENTRY_BUFFER_MIN", "8") or 8.0), 1.0, 40.0))
+
+    continue_prob = float(np.clip(transition_probabilities.get("continue", 0.25), 0.0, 1.0))
+    pullback_prob = float(np.clip(transition_probabilities.get("pullback", 0.25), 0.0, 1.0))
+    reversal_prob = float(np.clip(transition_probabilities.get("reversal_attempt", 0.25), 0.0, 1.0))
+    fakeout_prob = float(np.clip(transition_probabilities.get("fakeout", 0.25), 0.0, 1.0))
+
+    execution_readiness = float(np.clip(chart_state.get("execution_readiness", 0.0), 0.0, 1.0))
+    structure_trade_ready = bool(chart_state.get("structure_trade_ready", False))
+    path_clarity = float(np.clip(chart_state.get("path_clarity", 0.0), 0.0, 1.0))
+    consolidation_score = float(np.clip(chart_state.get("consolidation_score", 0.0), 0.0, 1.0))
+    active_consolidation = bool(chart_state.get("has_active_consolidation", False))
+    projected_conf = float(np.clip(projection_view.get("confidence", chart_state.get("projection_bias_confidence", 0.0)), 0.0, 1.0))
+    projected_type = str(projection_view.get("box_type", chart_state.get("structure_setup", "balance"))).lower()
+    projected_candles = cast(list[dict[str, Any]], projection_view.get("projected_candles", []))
+    projected_count = max(int(len(projected_candles)), 0)
+    structure_consistency = float(
+        np.clip(
+            module_reliability.get("structure_consistency", module_reliability.get("cv_quality", 0.0)),
+            0.0,
+            1.0,
+        )
+    )
+
+    if projected_count > 0:
+        base_projection_candles = float(np.clip(projected_count, 1.0, 12.0))
+        dynamic_eta_multiplier = float(
+            np.clip(
+                0.74
+                + 0.26 * (1.0 - continue_prob)
+                + 0.18 * pullback_prob
+                + 0.22 * fakeout_prob
+                + 0.16 * reversal_prob
+                + 0.20 * (1.0 - path_clarity)
+                - 0.12 * execution_readiness
+                - 0.08 * projected_conf,
+                0.58,
+                1.70,
+            )
+        )
+        eta_mid_candles = float(np.clip(base_projection_candles * dynamic_eta_multiplier, 1.0, 12.0))
+    elif projected_type == "impulse":
+        eta_mid_candles = float(np.clip(1.0 + 2.0 * (1.0 - projected_conf), 1.0, 4.0))
+    elif projected_type == "pullback":
+        eta_mid_candles = float(np.clip(2.0 + 4.0 * pullback_prob + 1.5 * fakeout_prob, 2.0, 8.0))
+    elif projected_type == "reversal_base":
+        eta_mid_candles = float(np.clip(3.0 + 4.0 * reversal_prob, 2.0, 8.0))
+    else:
+        eta_mid_candles = float(np.clip(2.0 + 3.0 * (1.0 - continue_prob), 2.0, 7.0))
+
+    eta_uncertainty = float(
+        np.clip(
+            0.45 * (1.0 - path_clarity)
+            + 0.30 * fakeout_prob
+            + 0.25 * (1.0 - structure_consistency),
+            0.0,
+            1.0,
+        )
+    )
+    eta_low_candles = float(max(1.0, np.floor(eta_mid_candles * (0.80 - 0.25 * eta_uncertainty))))
+    eta_high_candles = float(np.ceil(eta_mid_candles * (1.20 + 0.35 * eta_uncertainty)))
+
+    eta_mid_minutes = float(np.clip(eta_mid_candles * tf_minutes, tf_minutes, 180.0))
+    eta_low_minutes = float(np.clip(eta_low_candles * tf_minutes, tf_minutes, 180.0))
+    eta_high_minutes = float(np.clip(eta_high_candles * tf_minutes, tf_minutes, 240.0))
+
+    effective_window_minutes = max(expiry_minutes - buffer_minutes, tf_minutes)
+    timing_window_fit = float(np.clip(1.0 - (eta_mid_minutes / max(effective_window_minutes, 1e-6)), 0.0, 1.0))
+    timing_score = float(
+        np.clip(
+            0.22 * continue_prob
+            + 0.16 * execution_readiness
+            + 0.15 * path_clarity
+            + 0.12 * projected_conf
+            + 0.10 * structure_consistency
+            + 0.16 * timing_window_fit
+            - 0.12 * fakeout_prob
+            - 0.10 * reversal_prob
+            - 0.08 * pullback_prob
+            - 0.05 * float(active_consolidation) * consolidation_score,
+            0.0,
+            1.0,
+        )
+    )
+
+    if eta_low_minutes > effective_window_minutes:
+        entry_state = "LATE"
+    elif timing_score >= 0.64 and structure_trade_ready and eta_mid_minutes <= effective_window_minutes:
+        entry_state = "READY"
+    elif pullback_prob >= max(continue_prob, reversal_prob) and timing_score < 0.64:
+        entry_state = "PREMATURE"
+    else:
+        entry_state = "WATCH"
+
+    reasons: list[str] = []
+    if entry_state == "READY":
+        reasons.append("timing window aligns with expiry")
+    if pullback_prob >= 0.35:
+        reasons.append(f"pullback risk {pullback_prob:.2f}")
+    if fakeout_prob >= 0.30:
+        reasons.append(f"fakeout risk {fakeout_prob:.2f}")
+    if continue_prob >= 0.45:
+        reasons.append(f"continuation strength {continue_prob:.2f}")
+    if projected_conf >= 0.58:
+        reasons.append(f"projection confidence {projected_conf:.2f}")
+    reasons.append(f"path clarity {path_clarity:.2f}")
+    reasons.append(f"execution readiness {execution_readiness:.2f}")
+    reasons.append(f"eta baseline {projected_count}c adjusted to {eta_mid_candles:.1f}c")
+    if structure_trade_ready:
+        reasons.append("structure marked trade-ready")
+
+    return {
+        "timeframe": timeframe_value,
+        "timeframe_minutes": tf_minutes,
+        "expiry_minutes": expiry_minutes,
+        "entry_buffer_minutes": buffer_minutes,
+        "entry_state": entry_state,
+        "timing_score": timing_score,
+        "timing_window_fit": timing_window_fit,
+        "eta_candles": {
+            "low": float(eta_low_candles),
+            "mid": float(eta_mid_candles),
+            "high": float(eta_high_candles),
+        },
+        "eta_minutes": {
+            "low": eta_low_minutes,
+            "mid": eta_mid_minutes,
+            "high": eta_high_minutes,
+        },
+        "transition": {
+            "continue": continue_prob,
+            "pullback": pullback_prob,
+            "reversal_attempt": reversal_prob,
+            "fakeout": fakeout_prob,
+        },
+        "projected_candle_count": projected_count,
+        "reasons": reasons[:5],
+    }
+
+
+def reconcile_projection_action_conflict(
+    decision: Mapping[str, Any],
+    *,
+    chart_state: Mapping[str, Any],
+    projection_view: Mapping[str, Any],
+) -> dict[str, Any]:
+    adjusted = dict(decision)
+    action = _directional_action(adjusted.get("action", "HOLD"))
+    projection_direction = _directional_action(
+        projection_view.get("direction", chart_state.get("projection_bias_direction", "HOLD"))
+    )
+    if action not in {"BUY", "SELL"} or projection_direction not in {"BUY", "SELL"}:
+        return adjusted
+    if action == projection_direction:
+        return adjusted
+
+    projection_confidence = float(
+        np.clip(
+            projection_view.get("confidence", chart_state.get("projection_bias_confidence", 0.0)),
+            0.0,
+            1.0,
+        )
+    )
+    projection_dominance = float(
+        np.clip(
+            projection_view.get("dominance_gap", chart_state.get("projection_dominance", 0.0)),
+            0.0,
+            1.0,
+        )
+    )
+    execution_permission = str(adjusted.get("execution_permission", "WAIT_FOR_CONFIRMATION")).upper()
+    should_override = (
+        execution_permission != "EXECUTE"
+        and projection_confidence >= 0.74
+        and projection_dominance >= 0.03
+    )
+    if not should_override:
+        return adjusted
+
+    probs = _normalize_probabilities(cast(dict[str, Any], adjusted.get("calibrated_probs", {})))
+    probs = _apply_probability_bias(
+        probs,
+        projection_direction,
+        0.04 + 0.06 * projection_confidence,
+    )
+    adjusted["calibrated_probs"] = probs
+    adjusted["action"] = projection_direction
+    adjusted["trade_bias"] = projection_direction
+    adjusted["confidence"] = float(
+        np.clip(
+            max(float(probs.get(projection_direction, 0.0) or 0.0), projection_confidence * 0.88),
+            0.0,
+            1.0,
+        )
+    )
+    if str(adjusted.get("decision_state", "UNCERTAIN")).upper() == "UNCERTAIN":
+        adjusted["decision_state"] = "PROJECTED"
+    adjusted["projection_conflict_override"] = True
+    return adjusted
+
+
+def _active_trade_state_direction(value: Any) -> str:
+    normalized = str(value or "HOLD").strip().upper()
+    if normalized.startswith("BUY"):
+        return "BUY"
+    if normalized.startswith("SELL"):
+        return "SELL"
+    return "HOLD"
+
+
+def _active_trade_state_summary(state: Any) -> str:
+    normalized = str(state or "HOLD_TRUE").strip().upper()
+    direction = _active_trade_state_direction(normalized)
+    summaries = {
+        "BUY_NOW": "Long bias active and execution cleared.",
+        "BUY_ON_CONFIRMATION": "Long bias active, but enter only on structural confirmation.",
+        "SELL_NOW": "Short bias active and execution cleared.",
+        "SELL_ON_CONFIRMATION": "Short bias active, but enter only on structural confirmation.",
+        "HOLD_TRUE": "Directional edge is mixed and execution quality is not clear enough yet.",
+    }
+    if normalized not in summaries and direction in {"BUY", "SELL"}:
+        return f"{direction.title()} bias is visible, but execution needs confirmation."
+    return summaries.get(normalized, summaries["HOLD_TRUE"])
+
+
+def _score_active_trade_direction(result: Mapping[str, Any]) -> dict[str, Any]:
+    chart_state = cast(dict[str, Any], result.get("chart_state", {}))
+    projection = cast(dict[str, Any], result.get("projection", {}))
+    current_box = cast(dict[str, Any], result.get("current_box", {}))
+    local_ensemble = cast(dict[str, Any], result.get("local_ensemble", {}))
+    ensemble_view = cast(dict[str, Any], local_ensemble.get("ensemble", {}))
+    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
+    detections = cast(list[dict[str, Any]], result.get("detections", []))
+    scores = {"BUY": 0.0, "SELL": 0.0}
+    reasons: dict[str, list[str]] = {"BUY": [], "SELL": []}
+
+    def add(direction: Any, weight: float, reason: str) -> None:
+        dir_key = _directional_action(direction)
+        value = float(np.clip(weight, 0.0, 0.45))
+        if dir_key not in {"BUY", "SELL"} or value <= 1e-6:
+            return
+        scores[dir_key] = float(scores.get(dir_key, 0.0) + value)
+        reasons[dir_key].append(reason)
+
+    headline_direction = _directional_action(result.get("headline_action", result.get("action", "HOLD")))
+    headline_confidence = float(
+        np.clip(result.get("headline_confidence", result.get("confidence", 0.0)) or 0.0, 0.0, 1.0)
+    )
+    if headline_direction in {"BUY", "SELL"}:
+        add(
+            headline_direction,
+            0.08 + 0.10 * headline_confidence,
+            f"headline {headline_direction} {headline_confidence:.2f}",
+        )
+
+    trade_bias = _directional_action(result.get("trade_bias", "HOLD"))
+    decision_confidence = float(np.clip(result.get("confidence", 0.0) or 0.0, 0.0, 1.0))
+    if trade_bias in {"BUY", "SELL"}:
+        add(
+            trade_bias,
+            0.06 + 0.08 * decision_confidence,
+            f"trade bias {trade_bias} {decision_confidence:.2f}",
+        )
+
+    projection_direction = _directional_action(
+        projection.get("direction", chart_state.get("projection_bias_direction", "HOLD"))
+    )
+    projection_confidence = float(
+        np.clip(
+            projection.get("confidence", chart_state.get("projection_bias_confidence", 0.0)),
+            0.0,
+            1.0,
+        )
+    )
+    projection_dominance = float(
+        np.clip(
+            projection.get("dominance", chart_state.get("projection_dominance", 0.0)),
+            0.0,
+            1.0,
+        )
+    )
+    if projection_direction in {"BUY", "SELL"}:
+        add(
+            projection_direction,
+            0.12 + 0.18 * projection_confidence + 0.06 * projection_dominance,
+            f"projection {projection_direction} {projection_confidence:.2f}",
+        )
+
+    council_projection_direction = _directional_action(
+        chart_state.get("council_projection_direction", projection_direction)
+    )
+    council_projection_confidence = float(
+        np.clip(chart_state.get("council_projection_confidence", 0.0) or 0.0, 0.0, 1.0)
+    )
+    if council_projection_direction in {"BUY", "SELL"} and council_projection_confidence >= 0.30:
+        add(
+            council_projection_direction,
+            0.04 + 0.10 * council_projection_confidence,
+            f"council projection {council_projection_direction} {council_projection_confidence:.2f}",
+        )
+
+    latest_direction = _directional_action(
+        result.get("geometry_reference_direction", chart_state.get("direction", "HOLD"))
+    )
+    latest_confidence = float(np.clip(result.get("latest_candle_confidence", 0.0) or 0.0, 0.0, 1.0))
+    if latest_direction in {"BUY", "SELL"} and latest_confidence > 0.0:
+        add(
+            latest_direction,
+            0.08 + 0.14 * latest_confidence,
+            f"latest candle {latest_direction} {latest_confidence:.2f}",
+        )
+
+    next_buy_conf = max(
+        _detection_confidence(detections, "next_candle_buy"),
+        _detection_confidence(detections, "latest_candle_buy"),
+    )
+    next_sell_conf = max(
+        _detection_confidence(detections, "next_candle_sell"),
+        _detection_confidence(detections, "latest_candle_sell"),
+    )
+    if next_buy_conf >= 0.35:
+        add("BUY", 0.03 + 0.08 * next_buy_conf, f"evidence panel BUY {next_buy_conf:.2f}")
+    if next_sell_conf >= 0.35:
+        add("SELL", 0.03 + 0.08 * next_sell_conf, f"evidence panel SELL {next_sell_conf:.2f}")
+
+    current_box_direction = _directional_action(
+        current_box.get("direction", chart_state.get("council_current_box_direction", "HOLD"))
+    )
+    current_box_confidence = float(
+        np.clip(
+            max(
+                float(current_box.get("confidence", 0.0) or 0.0),
+                float(chart_state.get("council_current_box_confidence", 0.0) or 0.0),
+            ),
+            0.0,
+            1.0,
+        )
+    )
+    if current_box_direction in {"BUY", "SELL"} and current_box_confidence >= 0.20:
+        add(
+            current_box_direction,
+            0.05 + 0.10 * current_box_confidence,
+            f"current box {current_box_direction} {current_box_confidence:.2f}",
+        )
+
+    local_direction = _directional_action(
+        ensemble_view.get("predicted_label", chart_state.get("council_bias_direction", "HOLD"))
+    )
+    local_confidence = float(
+        np.clip(
+            max(
+                float(ensemble_view.get("confidence", 0.0) or 0.0),
+                float(chart_state.get("council_bias_confidence", 0.0) or 0.0),
+            ),
+            0.0,
+            1.0,
+        )
+    )
+    if local_direction in {"BUY", "SELL"} and local_confidence >= 0.20:
+        add(
+            local_direction,
+            0.05 + 0.10 * local_confidence,
+            f"local ensemble {local_direction} {local_confidence:.2f}",
+        )
+
+    memory_direction = _directional_action(result.get("memory_direction", "HOLD"))
+    memory_similarity = float(np.clip(result.get("memory_similarity", 0.0) or 0.0, 0.0, 1.0))
+    if memory_direction in {"BUY", "SELL"} and memory_similarity >= 0.10:
+        add(
+            memory_direction,
+            0.04 + 0.08 * memory_similarity,
+            f"memory {memory_direction} {memory_similarity:.2f}",
+        )
+
+    lead_bias_direction = _directional_action(
+        multi_timeframe.get("lead_bias_direction", multi_timeframe.get("lead_action", "HOLD"))
+    )
+    lead_bias_strength = float(np.clip(multi_timeframe.get("lead_bias_strength", 0.0) or 0.0, 0.0, 1.0))
+    if lead_bias_direction in {"BUY", "SELL"} and lead_bias_strength > 0.0:
+        add(
+            lead_bias_direction,
+            0.10 + 0.14 * lead_bias_strength,
+            f"higher bias {lead_bias_direction} {lead_bias_strength:.2f}",
+        )
+
+    lead_projection_direction = _directional_action(multi_timeframe.get("lead_projection", "HOLD"))
+    lead_projection_confidence = float(
+        np.clip(
+            multi_timeframe.get("lead_projection_confidence", lead_bias_strength) or lead_bias_strength,
+            0.0,
+            1.0,
+        )
+    )
+    if lead_projection_direction in {"BUY", "SELL"} and lead_projection_confidence > 0.0:
+        add(
+            lead_projection_direction,
+            0.08 + 0.12 * lead_projection_confidence,
+            f"higher projection {lead_projection_direction} {lead_projection_confidence:.2f}",
+        )
+
+    gate_state = str(multi_timeframe.get("gate_state", "") or "").lower()
+    gate_strength = float(np.clip(multi_timeframe.get("gate_strength", 0.0) or 0.0, 0.0, 1.0))
+    trigger_direction = _directional_action(multi_timeframe.get("trigger_direction", "HOLD"))
+    if gate_state == "blocked" and lead_bias_direction in {"BUY", "SELL"} and trigger_direction in {"BUY", "SELL"}:
+        if lead_bias_direction != trigger_direction:
+            add(
+                lead_bias_direction,
+                0.08 + 0.10 * gate_strength,
+                f"higher timeframe blocked {trigger_direction}",
+            )
+    elif gate_state == "confirmed" and trigger_direction in {"BUY", "SELL"}:
+        add(
+            trigger_direction,
+            0.05 + 0.08 * gate_strength,
+            f"higher timeframe confirmed {trigger_direction}",
+        )
+
+    projection_chain_boxes = cast(
+        list[dict[str, Any]],
+        result.get(
+            "projection_chain_boxes",
+            projection.get("chain_boxes", result.get("next_box_hypotheses", [])),
+        ),
+    )
+    directional_chain = [
+        box
+        for box in projection_chain_boxes[:4]
+        if _directional_action(box.get("direction", "HOLD")) in {"BUY", "SELL"}
+    ]
+    if directional_chain:
+        for direction in ("BUY", "SELL"):
+            matched = [
+                box
+                for box in directional_chain
+                if _directional_action(box.get("direction", "HOLD")) == direction
+            ]
+            if not matched:
+                continue
+            avg_confidence = float(
+                np.clip(
+                    sum(float(np.clip(box.get("confidence", 0.0) or 0.0, 0.0, 1.0)) for box in matched)
+                    / max(len(matched), 1),
+                    0.0,
+                    1.0,
+                )
+            )
+            persistence = float(np.clip(len(matched) / max(len(directional_chain), 1), 0.0, 1.0))
+            add(
+                direction,
+                0.04 + 0.10 * avg_confidence + 0.06 * persistence,
+                f"projection chain {direction} x{len(matched)} avg {avg_confidence:.2f}",
+            )
+
+    buy_raw = float(scores["BUY"])
+    sell_raw = float(scores["SELL"])
+    total = buy_raw + sell_raw
+    if total <= 1e-6:
+        return {
+            "direction": "HOLD",
+            "score": 0.0,
+            "spread": 0.0,
+            "buy_score": 0.0,
+            "sell_score": 0.0,
+            "reasons": [],
+        }
+
+    top_direction = "BUY" if buy_raw >= sell_raw else "SELL"
+    other_direction = "SELL" if top_direction == "BUY" else "BUY"
+    top_raw = float(scores[top_direction])
+    other_raw = float(scores[other_direction])
+    share_score = float(np.clip(top_raw / total, 0.0, 1.0))
+    depth_score = float(np.clip(top_raw / 0.82, 0.0, 1.0))
+    spread_score = float(np.clip((top_raw - other_raw) / total, 0.0, 1.0))
+    direction_score = float(np.clip(0.56 * share_score + 0.44 * depth_score, 0.0, 1.0))
+    return {
+        "direction": top_direction if direction_score >= 0.50 and spread_score >= 0.06 else "HOLD",
+        "score": direction_score,
+        "spread": spread_score,
+        "buy_score": buy_raw,
+        "sell_score": sell_raw,
+        "reasons": _dedupe_text_items(reasons[top_direction])[:6],
+    }
+
+
+def _score_active_trade_actionability(
+    result: Mapping[str, Any],
+    *,
+    direction: str,
+) -> dict[str, Any]:
+    if direction not in {"BUY", "SELL"}:
+        return {"score": 0.0, "reasons": [], "blockers": []}
+
+    chart_state = cast(dict[str, Any], result.get("chart_state", {}))
+    forecast_debug = cast(dict[str, Any], result.get("forecast_debug", {}))
+    module_rel = cast(dict[str, Any], result.get("module_reliability", {}))
+    current_box = cast(dict[str, Any], result.get("current_box", {}))
+    local_ensemble = cast(dict[str, Any], result.get("local_ensemble", {}))
+    ensemble_view = cast(dict[str, Any], local_ensemble.get("ensemble", {}))
+    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
+    score = 0.0
+    reasons: list[str] = []
+    blockers: list[str] = []
+
+    execution_permission = str(
+        result.get("execution_permission", "WAIT_FOR_CONFIRMATION") or "WAIT_FOR_CONFIRMATION"
+    ).upper()
+    execution_action = _directional_action(result.get("execution_action", "HOLD"))
+    if execution_permission == "EXECUTE" or execution_action == direction:
+        score += 0.34
+        reasons.append("execution guard cleared")
+    else:
+        blockers.append("execution guard waiting")
+
+    execution_readiness = float(
+        np.clip(
+            max(
+                float(forecast_debug.get("execution_readiness", 0.0) or 0.0),
+                float(chart_state.get("execution_readiness", 0.0) or 0.0),
+            ),
+            0.0,
+            1.0,
+        )
+    )
+    score += 0.16 * execution_readiness
+    if execution_readiness >= 0.58:
+        reasons.append(f"execution readiness {execution_readiness:.2f}")
+    elif execution_readiness <= 0.40:
+        blockers.append(f"execution readiness {execution_readiness:.2f}")
+
+    gates_ratio = float(np.clip((int(result.get("gates_passing", 0) or 0)) / 12.0, 0.0, 1.0))
+    if gates_ratio >= 0.58:
+        reasons.append(f"gate diagnostic pass ratio {gates_ratio:.2f}")
+    elif gates_ratio <= 0.42:
+        reasons.append(f"gate diagnostic pass ratio {gates_ratio:.2f}")
+
+    path_clarity = float(np.clip(chart_state.get("path_clarity", 0.0) or 0.0, 0.0, 1.0))
+    score += 0.10 * path_clarity
+    if path_clarity >= 0.58:
+        reasons.append(f"path clarity {path_clarity:.2f}")
+    elif path_clarity <= 0.42:
+        blockers.append(f"path clarity {path_clarity:.2f}")
+
+    cv_quality = float(np.clip(module_rel.get("cv_quality", 0.0) or 0.0, 0.0, 1.0))
+    structure_consistency = float(
+        np.clip(module_rel.get("structure_consistency", cv_quality) or cv_quality, 0.0, 1.0)
+    )
+    score += 0.10 * cv_quality
+    score += 0.10 * structure_consistency
+    if cv_quality >= 0.58:
+        reasons.append(f"cv quality {cv_quality:.2f}")
+    elif cv_quality <= 0.42:
+        blockers.append(f"cv quality {cv_quality:.2f}")
+    if structure_consistency >= 0.58:
+        reasons.append(f"structure consistency {structure_consistency:.2f}")
+    elif structure_consistency <= 0.42:
+        blockers.append(f"structure consistency {structure_consistency:.2f}")
+
+    if bool(result.get("consensus_ok", False)):
+        score += 0.08
+        reasons.append("consensus aligned")
+    else:
+        score -= 0.08
+        blockers.append("consensus still mixed")
+
+    if bool(result.get("support_gates_ok", True)):
+        reasons.append("support gate diagnostics clear")
+    else:
+        reasons.append("support gate diagnostics unresolved")
+
+    if bool(result.get("execution_guard_ok", True)):
+        reasons.append("execution guard diagnostic clear")
+    else:
+        reasons.append("execution guard diagnostic not cleared")
+
+    if bool(result.get("opposition_alert", False)):
+        reasons.append("opposition diagnostic alert active")
+
+    consensus_ratio = float(
+        np.clip(
+            ensemble_view.get("consensus_ratio", chart_state.get("council_consensus_ratio", 0.0)) or 0.0,
+            0.0,
+            1.0,
+        )
+    )
+    disagreement = float(
+        np.clip(
+            ensemble_view.get("disagreement", chart_state.get("council_disagreement", 0.0)) or 0.0,
+            0.0,
+            1.0,
+        )
+    )
+    score += 0.06 * consensus_ratio
+    score -= 0.06 * disagreement
+
+    current_box_direction = _directional_action(
+        current_box.get("direction", chart_state.get("council_current_box_direction", "HOLD"))
+    )
+    current_box_confidence = float(
+        np.clip(
+            max(
+                float(current_box.get("confidence", 0.0) or 0.0),
+                float(chart_state.get("council_current_box_confidence", 0.0) or 0.0),
+            ),
+            0.0,
+            1.0,
+        )
+    )
+    if current_box_direction == direction and current_box_confidence >= 0.62:
+        score += 0.08
+        reasons.append("current box already aligned")
+    elif current_box_direction in {"BUY", "SELL"} and current_box_direction != direction and current_box_confidence >= 0.62:
+        score -= 0.08
+        blockers.append("current box has not flipped")
+
+    local_direction = _directional_action(
+        ensemble_view.get("predicted_label", chart_state.get("council_bias_direction", "HOLD"))
+    )
+    local_confidence = float(
+        np.clip(
+            max(
+                float(ensemble_view.get("confidence", 0.0) or 0.0),
+                float(chart_state.get("council_bias_confidence", 0.0) or 0.0),
+            ),
+            0.0,
+            1.0,
+        )
+    )
+    if local_direction == direction and local_confidence >= 0.60:
+        score += 0.06
+        reasons.append("local ensemble aligned")
+    elif local_direction in {"BUY", "SELL"} and local_direction != direction and local_confidence >= 0.60:
+        score -= 0.06
+        blockers.append("local ensemble still leans opposite")
+
+    gate_state = str(multi_timeframe.get("gate_state", "") or "").lower()
+    gate_strength = float(np.clip(multi_timeframe.get("gate_strength", 0.0) or 0.0, 0.0, 1.0))
+    if gate_state == "confirmed":
+        score += 0.04 + 0.06 * gate_strength
+        reasons.append("higher timeframe confirmed")
+    elif gate_state == "watch":
+        score -= 0.04
+        blockers.append("higher timeframe still watching")
+    elif gate_state == "blocked":
+        score -= 0.04
+        blockers.append("higher timeframe conflict still active")
+
+    return {
+        "score": float(np.clip(score, 0.0, 1.0)),
+        "reasons": _dedupe_text_items(reasons)[:5],
+        "blockers": _dedupe_text_items(blockers)[:5],
+    }
+
+
+def _derive_active_trade_overlay(result: Mapping[str, Any]) -> dict[str, Any]:
+    direction_meta = _score_active_trade_direction(result)
+    directional_intent = str(direction_meta.get("direction", "HOLD")).upper()
+    direction_score = float(direction_meta.get("score", 0.0) or 0.0)
+    direction_spread = float(direction_meta.get("spread", 0.0) or 0.0)
+    actionability_meta = _score_active_trade_actionability(result, direction=directional_intent)
+    actionability_score = float(actionability_meta.get("score", 0.0) or 0.0)
+
+    headline_direction = _directional_action(result.get("headline_action", result.get("action", "HOLD")))
+    execution_direction = _directional_action(result.get("execution_action", "HOLD"))
+    execution_permission = str(
+        result.get("execution_permission", "WAIT_FOR_CONFIRMATION") or "WAIT_FOR_CONFIRMATION"
+    ).upper()
+    decision_state = str(result.get("decision_state", "UNCERTAIN") or "UNCERTAIN").upper()
+    projection_direction = _directional_action(
+        cast(dict[str, Any], result.get("projection", {})).get("direction", "HOLD")
+    )
+    projection_ready = bool(result.get("projection_bias_ready", False))
+    strong_direction = directional_intent in {"BUY", "SELL"} and direction_score >= 0.60 and direction_spread >= 0.10
+
+    if execution_direction in {"BUY", "SELL"}:
+        directional_intent = execution_direction
+        active_trade_state = f"{execution_direction}_NOW"
+    elif execution_permission == "EXECUTE":
+        live_direction = headline_direction if headline_direction in {"BUY", "SELL"} else directional_intent
+        if live_direction in {"BUY", "SELL"}:
+            directional_intent = live_direction
+            active_trade_state = f"{live_direction}_NOW"
+        else:
+            directional_intent = "HOLD"
+            active_trade_state = "HOLD_TRUE"
+    elif strong_direction:
+        active_trade_state = f"{directional_intent}_ON_CONFIRMATION"
+    elif headline_direction in {"BUY", "SELL"} and decision_state in {"PROJECTED", "CONFIRMED"}:
+        directional_intent = headline_direction
+        active_trade_state = f"{headline_direction}_ON_CONFIRMATION"
+    elif headline_direction == "HOLD" and projection_ready and projection_direction in {"BUY", "SELL"}:
+        directional_intent = projection_direction
+        active_trade_state = f"{projection_direction}_ON_CONFIRMATION"
+    else:
+        directional_intent = "HOLD"
+        active_trade_state = "HOLD_TRUE"
+
+    hold_subtype = "HOLD_TRUE"
+    if headline_direction == "HOLD":
+        if directional_intent == "SELL":
+            hold_subtype = "HOLD_BEARISH"
+        elif directional_intent == "BUY":
+            hold_subtype = "HOLD_BULLISH"
+
+    return {
+        "directional_intent": directional_intent,
+        "active_trade_state": active_trade_state,
+        "hold_subtype": hold_subtype,
+        "active_trade_summary": _active_trade_state_summary(active_trade_state),
+        "active_trade_context": {
+            "direction_score": direction_score,
+            "direction_spread": direction_spread,
+            "buy_score": float(direction_meta.get("buy_score", 0.0) or 0.0),
+            "sell_score": float(direction_meta.get("sell_score", 0.0) or 0.0),
+            "actionability_score": actionability_score,
+            "direction_reasons": list(cast(Sequence[str], direction_meta.get("reasons", []))),
+            "actionability_reasons": list(cast(Sequence[str], actionability_meta.get("reasons", []))),
+            "execution_blockers": list(cast(Sequence[str], actionability_meta.get("blockers", []))),
+        },
+    }
+
+
+def _fallback_best_play_frame_snapshot_from_entry(entry: Mapping[str, Any]) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+    action = _directional_action(entry.get("action", "HOLD"))
+    projection_direction = _directional_action(entry.get("projection_direction", action))
+    bias_direction = _directional_action(entry.get("bias_direction", action))
+    confidence = float(np.clip(entry.get("confidence", 0.0), 0.0, 1.0))
+    bias_strength = float(np.clip(entry.get("bias_strength", confidence), 0.0, 1.0))
+    setup = str(entry.get("setup", "none") or "none")
+    continuation_probability = float(np.clip(bias_strength if "reversal" not in setup else 0.28, 0.0, 1.0))
+    reversal_probability = float(np.clip(0.62 if "reversal" in setup else (0.18 if setup == "none" else 0.24), 0.0, 1.0))
+    return {
+        "label": str(entry.get("label", "Frame") or "Frame"),
+        "file_name": str(entry.get("file_name", entry.get("label", "frame")) or "frame"),
+        "file_path": str(entry.get("file_path", "") or ""),
+        "action": action,
+        "execution_action": action,
+        "confidence": confidence,
+        "probabilities": _normalize_probabilities({action: max(confidence, 0.34), "HOLD": max(0.0, 1.0 - confidence)}),
+        "memory_direction": "HOLD",
+        "memory_similarity": 0.0,
+        "profile": {
+            "bias_direction": bias_direction,
+            "bias_strength": bias_strength,
+            "entry_direction": action,
+            "entry_confidence": confidence,
+            "projection_direction": projection_direction,
+            "projection_confidence": confidence,
+            "projection_dominance": 0.0,
+            "structure_direction": bias_direction,
+            "structure_confidence": bias_strength,
+            "sequence_direction": bias_direction,
+            "sequence_confidence": bias_strength,
+            "council_bias_direction": bias_direction,
+            "council_bias_confidence": bias_strength * 0.72,
+            "council_alignment_score": bias_strength * 0.68,
+            "council_projection_direction": projection_direction,
+            "council_projection_confidence": confidence * 0.72,
+            "council_router_direction": bias_direction,
+            "council_router_strength": bias_strength * 0.66,
+            "structure_setup": setup,
+            "continuation_probability": continuation_probability,
+            "reversal_probability": reversal_probability,
+        },
+        "chart_state": {
+            "entry_type": "reversal" if "reversal" in setup else "continuation",
+            "structure_setup": setup,
+            "momentum_bias": str(entry.get("momentum_bias", "neutral") or "neutral"),
+            "path_clarity": bias_strength,
+            "continuation_probability": continuation_probability,
+            "reversal_probability": reversal_probability,
+            "fakeout_probability": 0.14 if "reversal" not in setup else 0.22,
+            "sequence_buy_pressure": bias_strength if bias_direction == "BUY" else 0.0,
+            "sequence_sell_pressure": bias_strength if bias_direction == "SELL" else 0.0,
+            "structure_buy_pressure": bias_strength if projection_direction == "BUY" else 0.0,
+            "structure_sell_pressure": bias_strength if projection_direction == "SELL" else 0.0,
+            "has_active_consolidation": bool("breakout" in setup),
+        },
+        "sequence": {
+            "current_box": {"box_type": "balance", "direction": bias_direction, "confidence": bias_strength},
+            "primary_next_box": {"box_type": "impulse" if projection_direction in {"BUY", "SELL"} else "balance", "direction": projection_direction, "confidence": confidence},
+            "box_history": [],
+            "recent_colors": [],
+            "has_active_consolidation": bool("breakout" in setup),
+            "continuation_probability": continuation_probability,
+            "pullback_probability": 0.22,
+            "reversal_probability": reversal_probability,
+            "fakeout_probability": 0.14 if "reversal" not in setup else 0.22,
+            "path_clarity": bias_strength,
+            "box_sequence_agreement": bias_strength,
+        },
+        "transitions": {"continue": continuation_probability, "pullback": 0.22, "reversal_attempt": reversal_probability, "fakeout": 0.14 if "reversal" not in setup else 0.22},
+        "patterns": {"BUY": [], "SELL": [], "NEUTRAL": []},
+        "ensemble": {
+            "predicted_label": bias_direction,
+            "confidence": bias_strength,
+            "consensus_ratio": bias_strength,
+            "disagreement": 0.0,
+            "router_direction": bias_direction,
+            "router_strength": bias_strength,
+            "champion_model": "",
+            "confirmer_model": "",
+            "selected_models": [],
+            "model_votes": [],
+            "sequence_tasks": {},
+        },
+        "timing": {"entry_state": "WATCH", "timing_score": 0.0},
+        "multi_timeframe": {"gate_state": "watch", "gate_strength": 0.0, "aligned": False},
+    }
+
+
+def _build_best_play_input_snapshot(
+    result: Mapping[str, Any],
+    *,
+    render_config: Mapping[str, Any] | None = None,
+    file_path: str = "",
+) -> dict[str, Any]:
+    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
+    frame_snapshots: list[dict[str, Any]] = []
+    missing_frame_inputs: list[dict[str, Any]] = []
+    for idx, entry in enumerate(cast(Sequence[Mapping[str, Any]], multi_timeframe.get("entries", [])), start=1):
+        frame_input = cast(dict[str, Any], entry.get("best_play_input", {}))
+        if frame_input:
+            frame_snapshots.append(dict(frame_input))
+        else:
+            missing_frame_inputs.append(
+                {
+                    "index": idx,
+                    "label": str(entry.get("label", f"Frame {idx}") or f"Frame {idx}"),
+                    "file_name": str(entry.get("file_name", "") or ""),
+                    "reason": "best_play_input missing",
+                }
+            )
+    combined_file_path = str(file_path or (frame_snapshots[-1]["file_path"] if frame_snapshots and frame_snapshots[-1].get("file_path") else ""))
+    combined_snapshot = _build_best_play_frame_snapshot(
+        result,
+        label="Combined Desk",
+        file_path=combined_file_path,
+    )
+    return {
+        "generated_at": str(result.get("timestamp", utc_now_iso()) or utc_now_iso()),
+        "render_config": dict(render_config or {}),
+        "combined": combined_snapshot,
+        "frames": frame_snapshots,
+        "snapshot_quality": {
+            "frame_count": len(frame_snapshots),
+            "missing_frame_count": len(missing_frame_inputs),
+            "missing_frames": missing_frame_inputs,
+            "synthetic_frame_fallback_used": False,
+        },
+    }
+
+
+def _best_play_placeholder_html(result: Mapping[str, Any] | None = None) -> str:
+    if not result:
+        return _placeholder_panel(
+            "Best Play Engine",
+            "Run Analyze Pair first, then click Run Best Play Engine to fuse the CV stack, council view, and sequence flow into one buy/sell play call.",
+        )
+    action = str(result.get("execution_action", result.get("action", "HOLD"))).upper()
+    return _placeholder_panel(
+        "Best Play Engine",
+        f"Current run loaded ({action}). Click Run Best Play Engine to build the post-model buy/sell play analysis for this chart pair.",
+    )
+
+
+def build_best_play_engine_html(
+    result: Mapping[str, Any] | None,
+    analysis: Mapping[str, Any] | None = None,
+) -> str:
+    if not result:
+        return _best_play_placeholder_html(None)
+    analysis = dict(analysis or {})
+    if not analysis or str(analysis.get("status", "")).strip().lower() != "ready":
+        return _best_play_placeholder_html(result)
+
+    recommended_direction = str(analysis.get("recommended_direction", "HOLD")).upper()
+    recommended_play = str(analysis.get("recommended_play", "Stand Aside")).strip() or "Stand Aside"
+    recommended_confidence = float(np.clip(analysis.get("recommended_confidence", 0.0), 0.0, 1.0))
+    recommended_risk = float(np.clip(analysis.get("recommended_risk", 0.0), 0.0, 1.0))
+    likelihoods = cast(dict[str, float], analysis.get("likelihoods", {}))
+    buy_play = cast(dict[str, Any], analysis.get("buy_play", {}))
+    sell_play = cast(dict[str, Any], analysis.get("sell_play", {}))
+    frequent_sequences = cast(list[dict[str, Any]], analysis.get("frequent_sequences", []))
+    recommended_reasons = cast(list[str], analysis.get("recommended_reasons", []))
+    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
+    tone = _tone_class_for_action(recommended_direction)
+
+    def _play_card(title: str, play: Mapping[str, Any], tone_key: str) -> str:
+        display_name = str(play.get("display_name", title)).strip() or title
+        evidence_rows = "".join(
+            f"<li>{_escape_html(_truncate_text(reason, 112))}</li>"
+            for reason in cast(Sequence[str], play.get("evidence_chain", []))[:4]
+        ) or "<li>No directional evidence stack was available.</li>"
+        motif_rows = "".join(
+            f"<li>{_escape_html(_truncate_text(item, 112))}</li>"
+            for item in cast(Sequence[str], play.get("frequent_sequences", []))[:3]
+        ) or "<li>No repeated sequence motif cleared the ranking floor yet.</li>"
+        pattern_chips = "".join(
+            _chip(_truncate_text(item, 22), tone_key)
+            for item in cast(Sequence[str], play.get("top_patterns", []))[:3]
+        ) or _chip("No dominant pattern", "soft")
+        metrics = "".join(
+            [
+                _metric_tile("Likelihood", _fmt_pct01(play.get("likelihood", 0.0))),
+                _metric_tile("Risk", _fmt_num(play.get("risk_score", 0.0), 2)),
+                _metric_tile("MTF", _fmt_num(play.get("multi_timeframe_alignment", 0.0), 2)),
+                _metric_tile("Model Agree", _fmt_num(play.get("model_agreement", 0.0), 2)),
+            ]
+        )
+        return (
+            "<div class='pg-brief-section'>"
+            f"<div class='pg-card-label'>{_escape_html(title)}</div>"
+            f"<div class='pg-card-title pg-{tone_key}'>{_escape_html(display_name)}</div>"
+            f"<div class='pg-chip-row' style='margin-top:8px;'>{pattern_chips}</div>"
+            f"<div class='pg-metric-grid' style='margin-top:12px;'>{metrics}</div>"
+            "<div class='pg-card-label' style='margin-top:12px;'>Evidence Chain</div>"
+            f"<ul class='pg-brief-list'>{evidence_rows}</ul>"
+            "<div class='pg-card-label' style='margin-top:10px;'>Recurring Sequence Motifs</div>"
+            f"<ul class='pg-brief-list'>{motif_rows}</ul>"
+            "</div>"
+        )
+
+    motif_rows = "".join(
+        f"<li>{_escape_html(str(item.get('label', 'Sequence motif')))} | count={int(item.get('count', 0) or 0)} | weight={_fmt_num(item.get('weight', 0.0), 2)} | sources={_escape_html(', '.join(cast(Sequence[str], item.get('sources', []))[:3]) or 'desk')}</li>"
+        for item in frequent_sequences[:5]
+    ) or "<li>No repeated motif cleared the ranking floor yet.</li>"
+
+    header_chips = "".join(
+        [
+            _chip(f"Recommendation {recommended_direction}", tone),
+            _chip(f"Frames {int(analysis.get('frame_count', 0) or 0)}", "soft"),
+            _chip(
+                f"MTF {str(multi_timeframe.get('gate_state', 'watch') or 'watch').upper()}",
+                "teal" if str(multi_timeframe.get("gate_state", "watch") or "watch").lower() == "confirmed" else "amber",
+            ),
+            _chip(f"Buy {_fmt_pct01(likelihoods.get('BUY', 0.0))}", "buy"),
+            _chip(f"Sell {_fmt_pct01(likelihoods.get('SELL', 0.0))}", "sell"),
+            _chip(f"Hold {_fmt_pct01(likelihoods.get('HOLD', 0.0))}", "soft"),
+        ]
+    )
+    reason_rows = "".join(
+        f"<li>{_escape_html(_truncate_text(reason, 140))}</li>"
+        for reason in recommended_reasons[:4]
+    ) or "<li>The engine needs a clearer sequence edge before making a stronger play call.</li>"
+    summary_metrics = "".join(
+        [
+            _metric_tile("Recommended Play", recommended_play),
+            _metric_tile("Confidence", _fmt_pct01(recommended_confidence)),
+            _metric_tile("Risk", _fmt_num(recommended_risk, 2)),
+            _metric_tile("Current Desk Action", str(result.get("execution_action", result.get("action", "HOLD"))).upper()),
+        ]
+    )
+    return (
+        "<div class='pg-panel'>"
+        "<div class='pg-section-title'>Best Play Engine</div>"
+        "<div class='pg-action-row'>"
+        "<div>"
+        f"<div class='pg-card-title pg-{tone}'>{_escape_html(recommended_play)}</div>"
+        "<div class='pg-card-note'>Post-model synthesis of the chart pair, sequence flow, directional patterns, and available council/model agreement.</div>"
+        "</div>"
+        f"<div class='pg-confidence-pill pg-{tone}'><strong>{_fmt_pct01(recommended_confidence)}</strong><span>play likelihood</span></div>"
+        "</div>"
+        f"<div class='pg-chip-row'>{header_chips}</div>"
+        f"<div class='pg-metric-grid' style='margin-top:12px;'>{summary_metrics}</div>"
+        "<div class='pg-brief-grid' style='margin-top:14px;'>"
+        f"{_play_card('Buy Play', buy_play, 'buy')}"
+        f"{_play_card('Sell Play', sell_play, 'sell')}"
+        "<div class='pg-brief-section'>"
+        "<div class='pg-card-label'>Recommended Evidence</div>"
+        f"<ul class='pg-brief-list'>{reason_rows}</ul>"
+        "<div class='pg-card-label' style='margin-top:10px;'>Highest-Frequency Sequence Motifs</div>"
+        f"<ul class='pg-brief-list'>{motif_rows}</ul>"
+        "</div>"
+        "</div>"
+        "</div>"
+    )
+
+
+def reset_best_play_engine(result_state: Mapping[str, Any] | None) -> tuple[str, dict[str, Any]]:
+    return _best_play_placeholder_html(result_state), {}
+
+
+def load_best_play_engine(
+    result_state: Mapping[str, Any] | None,
+    overlay_mode: str,
+    vision_extras: Any = None,
+    council_scope: str = DEFAULT_COUNCIL_SCOPE,
+    min_conf_global: float = 0.42,
+    min_conf_latest: float = 0.50,
+    history_depth: float = 8,
+    label_density: float = 10,
+    projection_focus: float = 0.35,
+    debug_depth: float = 6,
+    fuse_timeframe_overlays: bool = False,
+    higher_timeframe: str = "M15",
+    lower_timeframe: str = "M5",
+) -> tuple[str, dict[str, Any]]:
+    if not result_state:
+        return _best_play_placeholder_html(None), {}
+    render_config = _build_render_config(
+        overlay_mode=overlay_mode,
+        min_conf_global=min_conf_global,
+        min_conf_latest=min_conf_latest,
+        history_depth=history_depth,
+        label_density=label_density,
+        projection_focus=projection_focus,
+        debug_depth=debug_depth,
+        fuse_timeframe_overlays=fuse_timeframe_overlays,
+        vision_extras=vision_extras,
+        council_scope=council_scope,
+        higher_timeframe=higher_timeframe,
+        lower_timeframe=lower_timeframe,
+    )
+    display_result = _sanitize_result_for_ui(cast(dict[str, Any], result_state))
+    multi_timeframe = cast(dict[str, Any], display_result.get("multi_timeframe", {}))
+    entries = cast(list[dict[str, Any]], multi_timeframe.get("entries", []))
+    file_path = str(entries[-1].get("file_path", "")) if entries else ""
+    input_snapshot = _build_best_play_input_snapshot(display_result, render_config=render_config, file_path=file_path)
+    analysis = analyze_best_play(input_snapshot)
+    payload = {"input_payload": input_snapshot, "analysis": analysis}
+    return build_best_play_engine_html(display_result, analysis), payload
+
+def _ensure_active_trade_overlay(result: Mapping[str, Any]) -> dict[str, Any]:
+    if "active_trade_state" in result and "directional_intent" in result:
+        return dict(result)
+    enriched = dict(result)
+    enriched.update(_derive_active_trade_overlay(result))
+    return enriched
 
 
 def _cap_parse_quality_value(
@@ -2999,6 +5609,34 @@ def _update_reasoning_trace_with_fused_transitions(
 def _is_parser_artifact(name: str) -> bool:
     normalized = name.lower().strip().replace(' ', '_')
     return normalized in {'latest_parse_quality', 'scene_parse_quality'}
+
+
+def _is_memory_bias_pattern(name: str) -> bool:
+    normalized = name.lower().strip().replace(" ", "_")
+    return normalized in {"buy_memory_bias", "sell_memory_bias"}
+
+
+def _is_yolo_detection_pattern(name: str) -> bool:
+    normalized = name.lower().strip().replace(" ", "_")
+    return bool(normalized) and not (
+        _is_latest_branch_pattern(normalized)
+        or _is_parser_artifact(normalized)
+        or _is_memory_bias_pattern(normalized)
+    )
+
+
+def _structure_box_accent(
+    *,
+    direction: str,
+    box_type: str,
+) -> tuple[int, int, int]:
+    if box_type == "balance":
+        return (255, 170, 0)
+    if box_type == "reversal_base":
+        return (255, 90, 90)
+    if direction == "BUY":
+        return (0, 255, 0)
+    return (255, 120, 0)
 
 
 def _extract_chart_geometry_from_detections(detections: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3236,6 +5874,59 @@ def _classify_box_type(chunk: Sequence[Mapping[str, Any]]) -> str:
     return "balance"
 
 
+def _build_box_trade_micro_plan(
+    bbox: Sequence[float],
+    direction: str,
+    image_width: float,
+    image_height: float,
+    *,
+    candle_count: int = 0,
+    confidence: float = 0.0,
+    box_type: str = "balance",
+) -> dict[str, Any]:
+    if len(bbox) != 4:
+        return {}
+    normalized = str(direction or "HOLD").upper()
+    if normalized not in {"BUY", "SELL"}:
+        return {}
+    x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+    width_px = max(x2 - x1, 1.0)
+    height_px = max(y2 - y1, 1.0)
+    plan_x1 = float(np.clip(x1 + width_px * 0.10, 0.0, max(0.0, image_width - 2.0)))
+    plan_x2 = float(np.clip(x2 - width_px * 0.08, plan_x1 + 8.0, max(plan_x1 + 8.0, image_width - 1.0)))
+    center_y = 0.5 * (y1 + y2)
+    sign_y = -1.0 if normalized == "BUY" else 1.0
+    band = float(np.clip(height_px * 0.16, 4.0, max(5.0, image_height * 0.028)))
+
+    def _band(center: float) -> list[float]:
+        top = float(np.clip(center - band * 0.5, 0.0, max(0.0, image_height - 2.0)))
+        bottom = float(np.clip(center + band * 0.5, top + 3.0, max(top + 3.0, image_height - 1.0)))
+        return [plan_x1, top, plan_x2, bottom]
+
+    sniper_y = center_y - sign_y * height_px * 0.34
+    trigger_y = center_y + sign_y * height_px * 0.08
+    target_y = center_y + sign_y * height_px * 0.48
+    invalidation_y = center_y - sign_y * height_px * 0.58
+    control_hold = int(np.clip(max(candle_count, 1) + round(float(confidence) * 4.0), 1, 14))
+    return {
+        "sniper_window": _band(sniper_y),
+        "trigger_window": _band(trigger_y),
+        "target_window": _band(target_y),
+        "invalidation_y": float(np.clip(invalidation_y, 0.0, max(0.0, image_height - 1.0))),
+        "sniper_target_plan": {
+            "direction": normalized,
+            "sniper": _band(sniper_y),
+            "trigger": _band(trigger_y),
+            "target": _band(target_y),
+            "invalidation_y": float(np.clip(invalidation_y, 0.0, max(0.0, image_height - 1.0))),
+            "control_hold_candles": control_hold,
+            "box_type": str(box_type or "balance"),
+        },
+        "control_scope": "local" if candle_count <= 5 else "global",
+        "control_hold_candles": control_hold,
+    }
+
+
 def _build_box_history(
     candles: Sequence[dict[str, Any]],
     image_width: float,
@@ -3320,7 +6011,7 @@ def _build_box_history(
             if abs(mean_upper - mean_lower) > 0.04:
                 dominant_wick = "upper" if mean_upper > mean_lower else "lower"
         confidence = float(np.clip(0.45 + 0.25 * np.mean(np.array(parse_vals, dtype=np.float32) if parse_vals else np.array([0.0], dtype=np.float32)) + 0.15 * min(len(chunk), 4) / 4.0, 0.15, 0.98))
-        boxes.append({
+        box_payload = {
             "sequence_index": seq_idx,
             "box_type": box_type,
             "direction": direction,
@@ -3346,7 +6037,19 @@ def _build_box_history(
             "sequence_signature": _compress_color_runs(colors),
             "internal_sequence": _candle_sequence_tokens(chunk),
             "center": [float(v) for v in _bbox_center(bbox)],
-        })
+        }
+        box_payload.update(
+            _build_box_trade_micro_plan(
+                bbox,
+                direction,
+                image_width,
+                image_height,
+                candle_count=len(chunk),
+                confidence=confidence,
+                box_type=box_type,
+            )
+        )
+        boxes.append(box_payload)
     return boxes
 
 
@@ -3365,7 +6068,7 @@ def _sign_to_direction(score: float, *, default: str = "BUY") -> str:
     if score < -0.08:
         return "SELL"
     normalized_default = str(default).upper()
-    return normalized_default if normalized_default in {"BUY", "SELL"} else "BUY"
+    return normalized_default if normalized_default in {"BUY", "SELL"} else "HOLD"
 
 
 def _opposite_direction(direction: str) -> str:
@@ -3401,15 +6104,22 @@ def _classify_swing_state(
     recent_boxes = [dict(box) for box in box_history[-6:]]
     if not recent_boxes and current_box:
         recent_boxes = [dict(current_box)]
-    current_direction = str(current_box.get("direction", "BUY")).upper() if current_box else "BUY"
+    current_direction = str(current_box.get("direction", "HOLD")).upper() if current_box else "HOLD"
     current_type = str(current_box.get("box_type", "balance")).lower() if current_box else "balance"
-    macro_trend = str((market_state or {}).get("macro_trend", "BULL")).upper()
-    macro_direction = "SELL" if macro_trend == "BEAR" else "BUY"
+    macro_trend = str((market_state or {}).get("macro_trend", "unknown")).upper()
+    macro_direction = "SELL" if macro_trend == "BEAR" else ("BUY" if macro_trend == "BULL" else "HOLD")
 
     macro_bias_score = _weighted_box_bias(recent_boxes)
     recent_bias_score = _weighted_box_bias(recent_boxes[-3:])
     recent_swing_direction = _sign_to_direction(recent_bias_score, default=current_direction)
-    macro_swing_direction = _sign_to_direction(macro_bias_score, default=macro_direction)
+    # Anchor the macro swing to the higher-level market regime when one exists.
+    # Using the same recent-box bias for both recent and macro directions can
+    # incorrectly classify a countertrend push as "with_macro_push".
+    macro_swing_direction = (
+        macro_direction
+        if macro_direction in {"BUY", "SELL"}
+        else _sign_to_direction(macro_bias_score, default=current_direction)
+    )
     recent_strength = float(np.clip(abs(recent_bias_score), 0.0, 1.0))
     macro_strength = float(np.clip(abs(macro_bias_score), 0.0, 1.0))
     turn_detected = (
@@ -3454,6 +6164,322 @@ def _classify_swing_state(
     }
 
 
+def _summarize_trend_regime(
+    box_history: Sequence[dict[str, Any]],
+    sequence_state: Mapping[str, Any] | None = None,
+    *,
+    market_state: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    recent_boxes = [dict(box) for box in box_history[-6:]]
+    if not recent_boxes:
+        return {
+            "trend_direction": "HOLD",
+            "trend_strength": 0.0,
+            "trend_bias": 0.0,
+            "direction_persistence": 0.0,
+            "current_alignment": 0.0,
+            "pullback_active": False,
+            "pullback_depth": 0.0,
+            "continuation_reload_score": 0.0,
+            "impulse_extension": 0.0,
+            "counter_trend_pressure": 0.0,
+            "reversal_risk": 0.0,
+            "trend_phase": "transition",
+            "dip_opportunity": False,
+            "counter_run_len": 0,
+            "rejection_pressure": 0.0,
+            "breakout_failure_risk": 0.0,
+            "continuation_chain_len": 0,
+            "impulse_chain_len": 0,
+            "control_owner": "none",
+            "control_direction": "HOLD",
+            "control_hold_candles": 0,
+            "global_control_score": 0.0,
+            "local_control_score": 0.0,
+        }
+    seq_state = cast(dict[str, Any], sequence_state or {})
+    current_box = dict(recent_boxes[-1])
+    current_direction = str(current_box.get("direction", "HOLD")).upper()
+    current_type = str(current_box.get("box_type", "balance")).lower()
+    current_confidence = float(np.clip(current_box.get("confidence", 0.0), 0.0, 1.0))
+    current_maturity = float(np.clip(current_box.get("maturity", 0.0), 0.0, 1.0))
+    current_consolidation = float(np.clip(current_box.get("consolidation_score", 0.0), 0.0, 1.0))
+    trend_bias = _weighted_box_bias(recent_boxes[-5:])
+    trend_direction = _sign_to_direction(trend_bias, default=current_direction)
+    recent_colors = [str(color).lower() for color in cast(list[Any], seq_state.get("recent_colors", []))]
+    recent_body_pcts = [float(np.clip(value, 0.0, 1.0)) for value in cast(list[Any], seq_state.get("recent_body_pcts", []))]
+    recent_upper_wicks = [float(np.clip(value, 0.0, 1.0)) for value in cast(list[Any], seq_state.get("recent_upper_wicks", []))]
+    recent_lower_wicks = [float(np.clip(value, 0.0, 1.0)) for value in cast(list[Any], seq_state.get("recent_lower_wicks", []))]
+    direction_votes = [str(box.get("direction", trend_direction)).upper() for box in recent_boxes]
+    direction_persistence = float(
+        sum(1 for direction in direction_votes if direction == trend_direction) / max(len(direction_votes), 1)
+    )
+    current_alignment = float(current_direction == trend_direction)
+    trend_boxes = [
+        box for box in recent_boxes if str(box.get("direction", "HOLD")).upper() == trend_direction
+    ]
+    counter_boxes = [
+        box for box in recent_boxes if str(box.get("direction", "HOLD")).upper() != trend_direction
+    ]
+    trend_confidence = float(
+        np.mean(np.asarray([float(np.clip(box.get("confidence", 0.0), 0.0, 1.0)) for box in trend_boxes], dtype=np.float32))
+    ) if trend_boxes else current_confidence
+    trend_maturity = float(
+        np.mean(np.asarray([float(np.clip(box.get("maturity", 0.0), 0.0, 1.0)) for box in trend_boxes], dtype=np.float32))
+    ) if trend_boxes else current_maturity
+    counter_pressure = float(
+        np.mean(np.asarray([float(np.clip(box.get("confidence", 0.0), 0.0, 1.0)) for box in counter_boxes], dtype=np.float32))
+    ) if counter_boxes else 0.0
+
+    continuation_chain_len = 0
+    for box in reversed(recent_boxes):
+        if str(box.get("direction", trend_direction)).upper() != trend_direction:
+            break
+        continuation_chain_len += 1
+    impulse_chain_len = 0
+    for box in reversed(recent_boxes):
+        if (
+            str(box.get("direction", trend_direction)).upper() != trend_direction
+            or str(box.get("box_type", "balance")).lower() != "impulse"
+        ):
+            break
+        impulse_chain_len += 1
+
+    prior_impulses = [
+        box
+        for box in recent_boxes[:-1]
+        if str(box.get("direction", "HOLD")).upper() == trend_direction
+        and str(box.get("box_type", "balance")).lower() == "impulse"
+    ]
+    reference_impulse_span = float(
+        np.mean(
+            np.asarray(
+                [max(1.0, float(box.get("price_span", 0.0) or 0.0)) for box in prior_impulses[-2:]],
+                dtype=np.float32,
+            )
+        )
+    ) if prior_impulses else max(1.0, float(current_box.get("price_span", 0.0) or 0.0))
+    pullback_depth = 0.0
+    pullback_active = False
+    if current_type in {"pullback", "balance"}:
+        pullback_active = bool(
+            current_alignment >= 0.5
+            or (
+                len(recent_boxes) >= 2
+                and str(recent_boxes[-2].get("direction", trend_direction)).upper() == trend_direction
+            )
+        )
+        pullback_depth = float(
+            np.clip(
+                max(1.0, float(current_box.get("price_span", 0.0) or 0.0)) / max(reference_impulse_span, 1.0),
+                0.0,
+                1.3,
+            )
+        )
+
+    tail_window = max(1, min(5, len(recent_colors)))
+    tail_colors = recent_colors[-tail_window:] if recent_colors else []
+    tail_body_pcts = recent_body_pcts[-tail_window:] if recent_body_pcts else []
+    tail_upper_wicks = recent_upper_wicks[-tail_window:] if recent_upper_wicks else []
+    tail_lower_wicks = recent_lower_wicks[-tail_window:] if recent_lower_wicks else []
+    counter_color = "red" if trend_direction == "BUY" else "green"
+    counter_run_len = 0
+    for color in reversed(tail_colors):
+        if color != counter_color:
+            break
+        counter_run_len += 1
+    counter_tail_ratio = float(sum(1 for color in tail_colors if color == counter_color) / max(len(tail_colors), 1))
+    rejection_wick_mean = float(
+        np.mean(np.asarray(tail_upper_wicks if trend_direction == "BUY" else tail_lower_wicks, dtype=np.float32))
+    ) if tail_upper_wicks or tail_lower_wicks else 0.0
+    support_wick_mean = float(
+        np.mean(np.asarray(tail_lower_wicks if trend_direction == "BUY" else tail_upper_wicks, dtype=np.float32))
+    ) if tail_upper_wicks or tail_lower_wicks else 0.0
+    tail_body_mean = float(np.mean(np.asarray(tail_body_pcts, dtype=np.float32))) if tail_body_pcts else 0.0
+    baseline_body_mean = float(
+        np.mean(np.asarray(recent_body_pcts, dtype=np.float32))
+    ) if recent_body_pcts else float(np.clip(current_box.get("mean_body_pct", 0.0), 0.0, 1.0))
+    body_compression = float(
+        np.clip(1.0 - (tail_body_mean / max(0.12, baseline_body_mean, 1e-6)), 0.0, 1.0)
+    ) if tail_body_mean > 0.0 else 0.0
+    rejection_wick = "upper" if trend_direction == "BUY" else "lower"
+    current_rejection_wick = float(str(current_box.get("dominant_wick", "balanced")).lower() == rejection_wick)
+    rejection_pressure = float(
+        np.clip(
+            0.34 * counter_tail_ratio
+            + 0.22 * min(counter_run_len / 3.0, 1.0)
+            + 0.18 * rejection_wick_mean
+            + 0.10 * float(rejection_wick_mean > support_wick_mean + 0.04)
+            + 0.08 * current_rejection_wick
+            + 0.08 * body_compression,
+            0.0,
+            1.0,
+        )
+    )
+
+    swing_state = _classify_swing_state(box_history, current_box, market_state=market_state)
+    swing_phase = str(swing_state.get("swing_phase", "compression"))
+    macro_direction = str(swing_state.get("macro_direction", trend_direction)).upper()
+
+    trend_strength = float(
+        np.clip(
+            0.34 * abs(trend_bias)
+            + 0.18 * direction_persistence
+            + 0.16 * trend_confidence
+            + 0.12 * trend_maturity
+            + 0.10 * float(current_alignment)
+            + 0.06 * float(swing_phase in {"with_macro_push", "macro_pullback"})
+            + 0.04 * float(macro_direction == trend_direction),
+            0.0,
+            1.0,
+        )
+    )
+    continuation_reload_score = float(
+        np.clip(
+            0.38 * trend_strength
+            + 0.24 * float(pullback_active)
+            + 0.16 * float(0.18 <= pullback_depth <= 0.82)
+            + 0.12 * current_confidence
+            + 0.10 * current_consolidation,
+            0.0,
+            1.0,
+        )
+    )
+    impulse_extension = float(
+        np.clip(
+            0.30 * float(current_type == "impulse" and current_alignment >= 0.5)
+            + 0.22 * current_maturity
+            + 0.18 * float(max(0, continuation_chain_len - 1) / 3.0)
+            + 0.16 * float(max(0, impulse_chain_len - 1) / 2.0)
+            + 0.14 * trend_strength,
+            0.0,
+            1.0,
+        )
+    )
+    breakout_failure_risk = float(
+        np.clip(
+            0.34 * rejection_pressure
+            + 0.22 * impulse_extension
+            + 0.14 * counter_pressure
+            + 0.12 * float(current_type in {"impulse", "pullback"})
+            + 0.10 * float(counter_run_len >= 2)
+            + 0.08 * current_consolidation,
+            0.0,
+            1.0,
+        )
+    )
+    continuation_reload_score = float(
+        np.clip(
+            continuation_reload_score
+            - 0.38 * breakout_failure_risk
+            - 0.08 * min(counter_run_len / 3.0, 1.0),
+            0.0,
+            1.0,
+        )
+    )
+    reversal_risk = float(
+        np.clip(
+            0.24 * counter_pressure
+            + 0.22 * float(current_type == "reversal_base")
+            + 0.16 * impulse_extension
+            + 0.14 * float(swing_phase == "counter_macro_reversal")
+            + 0.12 * float(np.clip(seq_state.get("fakeout_probability", 0.0), 0.0, 1.0))
+            + 0.12 * max(0.0, 1.0 - direction_persistence)
+            + 0.36 * breakout_failure_risk
+            + 0.14 * min(counter_run_len / 3.0, 1.0)
+            - 0.06 * float(pullback_active),
+            0.0,
+            1.0,
+        )
+    )
+
+    if current_type == "reversal_base" and reversal_risk >= 0.42:
+        trend_phase = "reversal_watch"
+    elif breakout_failure_risk >= 0.48 and (impulse_extension >= 0.40 or counter_run_len >= 2):
+        trend_phase = "reversal_watch"
+    elif pullback_active and continuation_reload_score >= 0.54:
+        trend_phase = "trend_pullback"
+    elif current_type == "impulse" and impulse_extension >= 0.58:
+        trend_phase = "trend_extension"
+    elif current_type == "impulse" and trend_strength >= 0.48:
+        trend_phase = "trend_impulse"
+    elif bool(current_box.get("contains_consolidation", False)) or current_type == "balance":
+        trend_phase = "range_coil"
+    else:
+        trend_phase = "transition"
+
+    global_control_score = float(
+        np.clip(
+            0.46 * trend_strength
+            + 0.24 * direction_persistence
+            + 0.18 * float(macro_direction == trend_direction)
+            + 0.12 * max(0, continuation_chain_len) / 5.0,
+            0.0,
+            1.0,
+        )
+    )
+    local_control_score = float(
+        np.clip(
+            0.36 * current_confidence
+            + 0.24 * current_maturity
+            + 0.18 * float(current_alignment)
+            + 0.14 * impulse_extension
+            + 0.08 * (1.0 - current_consolidation),
+            0.0,
+            1.0,
+        )
+    )
+    if global_control_score >= local_control_score + 0.08 and trend_direction in {"BUY", "SELL"}:
+        control_owner = "global"
+        control_direction = trend_direction
+    elif current_direction in {"BUY", "SELL"}:
+        control_owner = "local"
+        control_direction = current_direction
+    else:
+        control_owner = "balanced"
+        control_direction = trend_direction if trend_direction in {"BUY", "SELL"} else "HOLD"
+    control_hold_candles = int(
+        np.clip(
+            round(
+                1.0
+                + 4.0 * max(global_control_score, local_control_score)
+                + 2.0 * float(trend_phase in {"trend_impulse", "trend_extension", "trend_pullback"})
+                - 2.0 * reversal_risk
+                - 1.0 * breakout_failure_risk
+            ),
+            1,
+            14,
+        )
+    )
+
+    return {
+        "trend_direction": trend_direction,
+        "trend_strength": trend_strength,
+        "trend_bias": float(np.clip(trend_bias, -1.0, 1.0)),
+        "direction_persistence": direction_persistence,
+        "current_alignment": current_alignment,
+        "pullback_active": bool(pullback_active),
+        "pullback_depth": float(np.clip(pullback_depth, 0.0, 1.2)),
+        "continuation_reload_score": continuation_reload_score,
+        "impulse_extension": impulse_extension,
+        "counter_trend_pressure": counter_pressure,
+        "reversal_risk": reversal_risk,
+        "trend_phase": trend_phase,
+        "dip_opportunity": bool(trend_direction == "BUY" and pullback_active and continuation_reload_score >= 0.50),
+        "counter_run_len": int(counter_run_len),
+        "rejection_pressure": rejection_pressure,
+        "breakout_failure_risk": breakout_failure_risk,
+        "continuation_chain_len": int(continuation_chain_len),
+        "impulse_chain_len": int(impulse_chain_len),
+        "swing_phase": swing_phase,
+        "control_owner": control_owner,
+        "control_direction": control_direction,
+        "control_hold_candles": control_hold_candles,
+        "global_control_score": global_control_score,
+        "local_control_score": local_control_score,
+    }
+
+
 def _build_next_box_hypotheses(
     box_history: Sequence[dict[str, Any]],
     sequence_state: Mapping[str, Any],
@@ -3478,7 +6504,7 @@ def _build_next_box_hypotheses(
     x2 = min(img_w - 2.0, x1 + width)
     base_y1 = float(bbox[1])
     direction = str(current.get("direction", "BUY")).upper()
-    current_type = str(current.get("box_type", "balance"))
+    current_type = str(current.get("box_type", "balance")).lower()
     current_consolidation = float(np.clip(current.get("consolidation_score", 0.0), 0.0, 1.0))
     recent_consolidation = float(
         np.mean(
@@ -3503,6 +6529,34 @@ def _build_next_box_hypotheses(
     dominant_direction = "BUY" if buy_votes >= sell_votes else "SELL"
     direction_persistence = float(max(buy_votes, sell_votes) / max(len(direction_votes), 1))
     swing_state = _classify_swing_state(box_history, current, market_state=market_state)
+    trend_regime = cast(
+        dict[str, Any],
+        sequence_state.get(
+            "trend_regime",
+            _summarize_trend_regime(box_history, sequence_state, market_state=market_state),
+        ),
+    )
+    trend_direction = str(trend_regime.get("trend_direction", dominant_direction)).upper()
+    trend_strength = float(np.clip(trend_regime.get("trend_strength", 0.0), 0.0, 1.0))
+    pullback_active = bool(trend_regime.get("pullback_active", False))
+    continuation_reload_score = float(np.clip(trend_regime.get("continuation_reload_score", 0.0), 0.0, 1.0))
+    impulse_extension = float(np.clip(trend_regime.get("impulse_extension", 0.0), 0.0, 1.0))
+    reversal_risk = float(np.clip(trend_regime.get("reversal_risk", 0.0), 0.0, 1.0))
+    trend_phase = str(trend_regime.get("trend_phase", "transition"))
+    rejection_pressure = float(np.clip(trend_regime.get("rejection_pressure", 0.0), 0.0, 1.0))
+    breakout_failure_risk = float(np.clip(trend_regime.get("breakout_failure_risk", 0.0), 0.0, 1.0))
+    counter_run_len = int(max(0, int(trend_regime.get("counter_run_len", 0) or 0)))
+    trend_reference_direction = trend_direction if trend_direction in {"BUY", "SELL"} else direction
+    counter_trend_current = bool(
+        direction in {"BUY", "SELL"}
+        and trend_reference_direction in {"BUY", "SELL"}
+        and direction != trend_reference_direction
+    )
+    trend_projection_direction = (
+        trend_reference_direction
+        if trend_reference_direction in {"BUY", "SELL"}
+        else (trend_direction if trend_direction in {"BUY", "SELL"} else direction)
+    )
     reversal_context = bool(
         current_type == "reversal_base"
         or (
@@ -3516,6 +6570,7 @@ def _build_next_box_hypotheses(
             + 0.24 * (1.0 - fakeout_prob)
             + 0.18 * max(current_consolidation, recent_consolidation)
             + 0.16 * float(reversal_context)
+            + 0.10 * trend_strength
             + 0.12 * float(np.clip(abs(float(swing_state.get("recent_bias_score", 0.0))), 0.0, 1.0)),
             0.0,
             1.0,
@@ -3541,13 +6596,51 @@ def _build_next_box_hypotheses(
             episode_support = float(np.clip(float(np.mean(np.array(match_scores, dtype=np.float32))), 0.0, 1.0))
             memory_support = max(memory_support, 0.85 * episode_support)
 
-    if has_active_consolidation:
+    if current_type == "reversal_base":
+        primary_type = "impulse"
+        primary_dir = direction
+        primary_trigger = "reversal_release"
+    elif (
+        current_type in {"impulse", "pullback"}
+        and breakout_failure_risk >= 0.50
+        and (counter_run_len >= 2 or rejection_pressure >= 0.42 or reversal_risk >= 0.40)
+    ):
+        if counter_trend_current:
+            primary_type = "impulse"
+            primary_dir = trend_reference_direction
+            primary_trigger = "countertrend_fail_reclaim"
+        else:
+            primary_type = "reversal_base"
+            primary_dir = _opposite_direction(trend_reference_direction)
+            primary_trigger = "trend_exhaustion_reversal"
+    elif pullback_active and continuation_reload_score >= 0.54:
+        primary_type = "impulse"
+        primary_dir = trend_projection_direction
+        primary_trigger = "trend_pullback_reclaim"
+    elif has_active_consolidation and trend_strength >= 0.46:
+        primary_type = "impulse"
+        primary_dir = trend_projection_direction
+        primary_trigger = "trend_breakout"
+    elif current_type == "impulse" and impulse_extension >= 0.56 and reversal_risk < 0.52:
+        primary_type = "pullback"
+        primary_dir = trend_projection_direction
+        primary_trigger = "trend_dip"
+    elif reversal_risk >= max(0.48, continue_prob + 0.06):
+        if counter_trend_current:
+            primary_type = "impulse"
+            primary_dir = trend_reference_direction
+            primary_trigger = "trend_reclaim_watch"
+        else:
+            primary_type = "reversal_base"
+            primary_dir = _opposite_direction(trend_reference_direction)
+            primary_trigger = "trend_reversal_watch"
+    elif has_active_consolidation:
         primary_type = "impulse"
         primary_dir = direction if direction in {"BUY", "SELL"} else dominant_direction
         primary_trigger = "consolidation_breakout"
     elif current_type == "pullback":
         primary_type = "impulse"
-        primary_dir = direction
+        primary_dir = trend_projection_direction
         primary_trigger = "pullback_release"
     elif current_type == "impulse":
         if reversal_prob >= max(pullback_prob + 0.04, continue_prob + 0.02):
@@ -3556,18 +6649,36 @@ def _build_next_box_hypotheses(
             primary_trigger = "impulse_exhaustion"
         else:
             primary_type = "impulse" if continue_prob >= pullback_prob else "pullback"
-            primary_dir = direction
+            primary_dir = trend_projection_direction if primary_type == "pullback" else direction
             primary_trigger = "impulse_chain" if primary_type == "impulse" else "pause_reset"
-    elif current_type == "reversal_base":
-        primary_type = "impulse"
-        primary_dir = direction
-        primary_trigger = "reversal_release"
     else:
         primary_type = "impulse" if continue_prob >= max(reversal_prob, fakeout_prob) else "balance"
-        primary_dir = direction if direction in {"BUY", "SELL"} else dominant_direction
+        primary_dir = (
+            trend_projection_direction
+            if trend_projection_direction in {"BUY", "SELL"}
+            else (direction if direction in {"BUY", "SELL"} else dominant_direction)
+        )
         primary_trigger = "continuation_projection" if primary_type == "impulse" else "pause_reset"
 
-    if current_type == "impulse" and reversal_prob >= max(pullback_prob, 0.26):
+    if breakout_failure_risk >= 0.40 and (counter_run_len >= 2 or rejection_pressure >= 0.38):
+        if counter_trend_current:
+            secondary_type = "impulse"
+            secondary_dir = trend_reference_direction
+            secondary_trigger = "countertrend_reclaim"
+        else:
+            secondary_type = "reversal_base"
+            secondary_dir = _opposite_direction(trend_reference_direction)
+            secondary_trigger = "failed_breakout_reversal"
+    elif pullback_active and reversal_risk >= max(0.34, fakeout_prob + 0.06):
+        if counter_trend_current:
+            secondary_type = "impulse"
+            secondary_dir = trend_reference_direction
+            secondary_trigger = "pullback_reclaim"
+        else:
+            secondary_type = "reversal_base"
+            secondary_dir = _opposite_direction(trend_reference_direction)
+            secondary_trigger = "pullback_fail"
+    elif current_type == "impulse" and reversal_prob >= max(pullback_prob, 0.26):
         secondary_type = "reversal_base"
         secondary_dir = _opposite_direction(direction)
         secondary_trigger = "counter_swing_reversal"
@@ -3575,6 +6686,10 @@ def _build_next_box_hypotheses(
         secondary_type = "balance"
         secondary_dir = primary_dir
         secondary_trigger = "reversal_pause"
+    elif current_type == "impulse" and impulse_extension >= 0.46:
+        secondary_type = "impulse"
+        secondary_dir = primary_dir
+        secondary_trigger = "impulse_chain"
     elif has_active_consolidation:
         secondary_type = "balance"
         secondary_dir = primary_dir
@@ -3616,18 +6731,24 @@ def _build_next_box_hypotheses(
         if candidate_type == "impulse":
             if current_type == "reversal_base" and candidate_dir == direction:
                 transition_fit = 0.42 + 0.38 * continue_prob + 0.20 * reversal_prob
+            elif pullback_active and candidate_dir == trend_projection_direction:
+                transition_fit = 0.36 + 0.34 * continue_prob + 0.22 * continuation_reload_score + 0.08 * trend_strength
             elif candidate_dir == direction:
                 transition_fit = 0.26 + 0.60 * continue_prob + 0.14 * max(current_consolidation, recent_consolidation)
             else:
                 transition_fit = 0.18 + 0.52 * reversal_prob + 0.18 * fakeout_prob
         elif candidate_type == "pullback":
-            transition_fit = 0.22 + 0.62 * pullback_prob + 0.16 * max(current_consolidation, recent_consolidation)
+            transition_fit = 0.22 + 0.52 * pullback_prob + 0.18 * impulse_extension + 0.08 * trend_strength
         elif candidate_type == "reversal_base":
-            transition_fit = 0.24 + 0.62 * reversal_prob + 0.14 * (1.0 - direction_persistence)
+            transition_fit = 0.24 + 0.52 * reversal_prob + 0.18 * reversal_risk + 0.06 * (1.0 - direction_persistence)
         elif candidate_type == "balance":
             transition_fit = 0.26 + 0.34 * pullback_prob + 0.40 * max(current_consolidation, recent_consolidation)
         else:
             transition_fit = 0.18 + 0.70 * fakeout_prob + 0.12 * (1.0 - direction_persistence)
+        if candidate_type == "impulse" and candidate_dir == trend_projection_direction:
+            transition_fit -= 0.30 * breakout_failure_risk + 0.08 * min(counter_run_len / 3.0, 1.0)
+        elif candidate_type == "reversal_base" and candidate_dir != trend_projection_direction:
+            transition_fit += 0.22 * breakout_failure_risk + 0.08 * min(counter_run_len / 3.0, 1.0)
         transition_fit = float(np.clip(transition_fit, 0.0, 1.0))
 
         if current_type == "reversal_base":
@@ -3645,12 +6766,27 @@ def _build_next_box_hypotheses(
         elif candidate_type == "reversal_base":
             sequence_fit = 0.24 + 0.32 * float(candidate_dir != str(swing_state.get("recent_swing_direction", direction))) + 0.24 * (1.0 - direction_persistence) + 0.20 * float(bool(swing_state.get("turn_detected", False)))
         else:
-            sequence_fit = 0.30 + 0.34 * float(candidate_dir == direction) + 0.20 * recent_alignment + 0.16 * direction_persistence
+            sequence_fit = 0.28 + 0.26 * float(candidate_dir == direction) + 0.18 * recent_alignment + 0.14 * direction_persistence + 0.14 * continuation_reload_score
+        if candidate_type == "impulse" and candidate_dir == trend_projection_direction and counter_run_len >= 2:
+            sequence_fit -= 0.18 * min(counter_run_len / 3.0, 1.0)
+        elif candidate_type == "reversal_base" and candidate_dir != trend_projection_direction and counter_run_len >= 2:
+            sequence_fit += 0.14 * min(counter_run_len / 3.0, 1.0)
+        elif candidate_type == "fakeout" and counter_trend_current and candidate_dir == direction:
+            sequence_fit -= (
+                0.18 * breakout_failure_risk
+                + 0.12 * reversal_risk
+                + 0.08 * float(memory_direction == trend_reference_direction) * memory_support
+            )
         sequence_fit = float(np.clip(sequence_fit, 0.0, 1.0))
 
         swing_phase = str(swing_state.get("swing_phase", "compression"))
         macro_swing_direction = str(swing_state.get("macro_swing_direction", direction)).upper()
         macro_direction = str(swing_state.get("macro_direction", direction)).upper()
+        reclaim_to_trend = bool(
+            counter_trend_current
+            and trend_reference_direction in {"BUY", "SELL"}
+            and candidate_dir == trend_reference_direction
+        )
         if swing_phase == "with_macro_push":
             swing_fit = 0.30 + 0.70 * float(candidate_dir == macro_swing_direction)
         elif swing_phase == "macro_pullback":
@@ -3662,7 +6798,70 @@ def _build_next_box_hypotheses(
             swing_fit = 0.34 + 0.42 * float(candidate_dir == direction) + 0.24 * float(candidate_dir != macro_direction)
         else:
             swing_fit = 0.52 if candidate_type == "balance" else 0.44
+        if reclaim_to_trend:
+            reclaim_floor = float(
+                np.clip(
+                    0.34
+                    + 0.24 * breakout_failure_risk
+                    + 0.18 * reversal_risk
+                    + 0.10 * float(memory_direction == candidate_dir) * memory_support
+                    + 0.08 * float(candidate_type in {"impulse", "reversal_base"}),
+                    0.0,
+                    0.92,
+                )
+            )
+            swing_fit = max(swing_fit, reclaim_floor)
+        elif counter_trend_current and candidate_dir == direction:
+            swing_fit *= float(
+                np.clip(
+                    1.0
+                    - 0.20 * breakout_failure_risk
+                    - 0.12 * reversal_risk
+                    - 0.08 * float(memory_direction == trend_reference_direction) * memory_support,
+                    0.52,
+                    1.0,
+                )
+            )
+        if candidate_type == "reversal_base" and candidate_dir != trend_projection_direction:
+            swing_fit += 0.20 * breakout_failure_risk + 0.06 * min(counter_run_len / 3.0, 1.0)
+        elif candidate_type == "fakeout" and candidate_dir == trend_projection_direction:
+            swing_fit -= 0.18 * breakout_failure_risk
+        if candidate_type == "fakeout" and counter_trend_current and candidate_dir == direction:
+            swing_fit -= (
+                0.22 * breakout_failure_risk
+                + 0.14 * reversal_risk
+                + 0.08 * float(memory_direction == trend_reference_direction) * memory_support
+            )
         swing_fit = float(np.clip(swing_fit, 0.0, 1.0))
+
+        if candidate_type == "impulse" and candidate_dir == trend_projection_direction:
+            if trend_phase == "trend_pullback":
+                trend_fit = 0.44 + 0.34 * continuation_reload_score + 0.22 * trend_strength
+            elif trend_phase in {"trend_impulse", "trend_extension"}:
+                trend_fit = 0.34 + 0.30 * continue_prob + 0.20 * trend_strength
+            else:
+                trend_fit = 0.48 + 0.18 * trend_strength
+        elif candidate_type == "pullback" and candidate_dir == trend_projection_direction:
+            trend_fit = 0.30 + 0.34 * impulse_extension + 0.20 * trend_strength + 0.16 * float(current_type == "impulse")
+        elif candidate_type == "reversal_base" and candidate_dir != trend_projection_direction:
+            trend_fit = 0.26 + 0.40 * reversal_risk + 0.18 * float(trend_phase == "reversal_watch")
+        elif candidate_type == "balance":
+            trend_fit = 0.34 + 0.24 * max(current_consolidation, recent_consolidation) + 0.14 * float(trend_phase == "range_coil")
+        else:
+            trend_fit = 0.42
+        if candidate_type == "impulse" and candidate_dir == trend_projection_direction:
+            trend_fit -= 0.30 * breakout_failure_risk
+        elif candidate_type == "reversal_base" and candidate_dir != trend_projection_direction:
+            trend_fit += 0.26 * breakout_failure_risk
+        elif candidate_type == "fakeout" and candidate_dir == trend_projection_direction:
+            trend_fit -= 0.24 * breakout_failure_risk
+        if candidate_type == "fakeout" and counter_trend_current and candidate_dir == direction:
+            trend_fit -= (
+                0.18 * breakout_failure_risk
+                + 0.12 * reversal_risk
+                + 0.08 * float(memory_direction == trend_reference_direction) * memory_support
+            )
+        trend_fit = float(np.clip(trend_fit, 0.0, 1.0))
 
         if memory_direction in {"BUY", "SELL"} and memory_support > 0.0:
             if candidate_dir == memory_direction:
@@ -3681,12 +6880,13 @@ def _build_next_box_hypotheses(
         score = float(
             np.clip(
                 (
-                    0.28 * transition_fit
-                    + 0.24 * sequence_fit
-                    + 0.18 * swing_fit
-                    + 0.16 * memory_fit
-                    + 0.08 * macro_fit
-                    + 0.06 * path_clarity
+                    0.24 * transition_fit
+                    + 0.22 * sequence_fit
+                    + 0.16 * swing_fit
+                    + 0.14 * trend_fit
+                    + 0.14 * memory_fit
+                    + 0.06 * macro_fit
+                    + 0.04 * path_clarity
                 ) * (0.78 + 0.22 * path_clarity),
                 0.0,
                 1.0,
@@ -3696,6 +6896,7 @@ def _build_next_box_hypotheses(
             "transition": transition_fit,
             "sequence": sequence_fit,
             "swing": swing_fit,
+            "trend": trend_fit,
             "memory": memory_fit,
             "macro": macro_fit,
             "score": score,
@@ -3709,19 +6910,21 @@ def _build_next_box_hypotheses(
         candidate_bbox: Sequence[float],
     ) -> dict[str, Any]:
         score_breakdown = _score_candidate(candidate_dir, candidate_type)
+        confidence_value = float(np.clip(0.18 + 0.78 * score_breakdown["score"], 0.18, 0.96))
         explanation = (
             f"{candidate_type}:{candidate_dir} via {trigger}; "
             f"seq={score_breakdown['sequence']:.2f} trans={score_breakdown['transition']:.2f} "
+            f"trend={trend_direction}:{trend_phase}:{trend_strength:.2f} "
             f"swing={str(swing_state.get('swing_phase', 'compression'))}"
         )
         if memory_direction in {"BUY", "SELL"}:
             explanation += f" memory={memory_direction}:{memory_support:.2f}"
-        return {
+        row = {
             "rank": 0,
             "box_type": candidate_type,
             "direction": candidate_dir,
             "shape": "projected",
-            "confidence": float(np.clip(0.18 + 0.78 * score_breakdown["score"], 0.18, 0.96)),
+            "confidence": confidence_value,
             "bbox": [float(v) for v in candidate_bbox],
             "empty_projection": True,
             "trigger": trigger,
@@ -3729,10 +6932,25 @@ def _build_next_box_hypotheses(
             "path_clarity": path_clarity,
             "score_breakdown": score_breakdown,
             "swing_state": swing_state,
+            "trend_regime": trend_regime,
+            "trend_direction": trend_direction,
+            "trend_phase": trend_phase,
             "memory_direction": memory_direction,
             "memory_support": memory_support,
             "explanation": explanation,
         }
+        row.update(
+            _build_box_trade_micro_plan(
+                candidate_bbox,
+                candidate_dir,
+                img_w,
+                img_h,
+                candle_count=int(current.get("candle_count", 1) or 1),
+                confidence=confidence_value,
+                box_type=candidate_type,
+            )
+        )
+        return row
 
     hypotheses = [
         _candidate_row(
@@ -3763,6 +6981,110 @@ def _build_next_box_hypotheses(
     return hypotheses
 
 
+def _rect_area(rect: Sequence[float]) -> float:
+    if len(rect) != 4:
+        return 0.0
+    return float(max(float(rect[2]) - float(rect[0]), 0.0) * max(float(rect[3]) - float(rect[1]), 0.0))
+
+
+def _rect_overlap_area(left: Sequence[float], right: Sequence[float]) -> float:
+    if len(left) != 4 or len(right) != 4:
+        return 0.0
+    x1 = max(float(left[0]), float(right[0]))
+    y1 = max(float(left[1]), float(right[1]))
+    x2 = min(float(left[2]), float(right[2]))
+    y2 = min(float(left[3]), float(right[3]))
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    return float((x2 - x1) * (y2 - y1))
+
+
+def _adaptive_overlay_label_controls(
+    obstacle_rects: Sequence[Sequence[float]],
+    inner_bbox: Sequence[float],
+    requested_budget: int,
+    *,
+    presentation_mode: bool = False,
+) -> dict[str, float]:
+    chart_area = max(_rect_area(inner_bbox), 1.0)
+    occupied_area = sum(_rect_area(rect) for rect in obstacle_rects)
+    coverage_score = float(np.clip(occupied_area / chart_area, 0.0, 1.0))
+    count_score = float(np.clip(float(len(obstacle_rects)) / float(max(requested_budget * 2, 8)), 0.0, 1.0))
+    crowd_score = float(np.clip(0.58 * coverage_score + 0.42 * count_score, 0.0, 1.0))
+    min_budget = 3 if presentation_mode else 2
+    adaptive_budget = int(np.clip(int(round(float(requested_budget) * (1.12 - 0.58 * crowd_score))), min_budget, max(int(requested_budget), min_budget)))
+    return {
+        "crowd_score": crowd_score,
+        "budget": float(adaptive_budget),
+        "detection_confidence_floor": float(np.clip(0.45 + 0.22 * crowd_score + (0.04 if presentation_mode else 0.0), 0.45, 0.82)),
+        "structure_confidence_floor": float(np.clip(0.26 + 0.26 * crowd_score, 0.26, 0.72)),
+        "zone_confidence_floor": float(np.clip(0.14 + 0.28 * crowd_score, 0.14, 0.62)),
+    }
+
+
+def _choose_overlay_label_rect(
+    *,
+    text_w: float,
+    text_h: float,
+    anchor_x: float,
+    anchor_y: float,
+    image_size: Sequence[float],
+    occupied_rects: Sequence[Sequence[float]],
+    obstacle_rects: Sequence[Sequence[float]],
+    prefer_above: bool = True,
+    crowd_score: float = 0.0,
+) -> tuple[float, float, float, float] | None:
+    if len(image_size) != 2:
+        return None
+    width = max(float(image_size[0]), 1.0)
+    height = max(float(image_size[1]), 1.0)
+    pad_x = 6.0
+    pad_y = 3.0
+    box_w = max(1.0, float(text_w) + pad_x * 2.0)
+    box_h = max(1.0, float(text_h) + pad_y * 2.0)
+    x_candidates = [
+        float(anchor_x),
+        float(anchor_x) - box_w * 0.42,
+        float(anchor_x) - box_w + 4.0,
+        float(anchor_x) - box_w * 0.78,
+    ]
+    y_candidates_above = [
+        float(anchor_y) - box_h - 5.0,
+        float(anchor_y) - box_h - 14.0,
+    ]
+    y_candidates_below = [
+        float(anchor_y) + 4.0,
+        float(anchor_y) + 13.0,
+    ]
+    placement_rows = [("above", y_candidates_above), ("below", y_candidates_below)]
+    if not prefer_above:
+        placement_rows.reverse()
+
+    best_rect: tuple[float, float, float, float] | None = None
+    best_score = float("inf")
+    for group_index, (_group_name, y_candidates) in enumerate(placement_rows):
+        group_penalty = 0.0 if group_index == 0 else 0.10 + 0.08 * float(crowd_score)
+        for y_base in y_candidates:
+            for x_base in x_candidates:
+                x1 = float(np.clip(x_base, 4.0, max(4.0, width - box_w - 4.0)))
+                y1 = float(np.clip(y_base, 4.0, max(4.0, height - box_h - 4.0)))
+                rect = (x1, y1, x1 + box_w, y1 + box_h)
+                rect_area = max(_rect_area(rect), 1.0)
+                label_overlap = sum(_rect_overlap_area(rect, other) / rect_area for other in occupied_rects)
+                obstacle_overlap = sum(_rect_overlap_area(rect, other) / rect_area for other in obstacle_rects)
+                anchor_distance = abs(x1 - float(anchor_x)) / max(width, 1.0)
+                score = float(3.1 * label_overlap + 1.15 * obstacle_overlap + group_penalty + 0.18 * anchor_distance)
+                if score < best_score:
+                    best_score = score
+                    best_rect = rect
+                    if score <= 0.04:
+                        return rect
+    if best_rect is None:
+        return None
+    acceptance_threshold = float(np.clip(0.88 - 0.34 * crowd_score, 0.36, 0.88))
+    return best_rect if best_score <= acceptance_threshold else None
+
+
 def draw_overlay(
     image: Image.Image,
     detections: list[dict[str, Any]],
@@ -3775,128 +7097,482 @@ def draw_overlay(
     history_limit: int | None = None,
     label_budget: int = 14,
     projection_confidence_floor: float = 0.0,
+    vision_extras: Sequence[str] | None = None,
 ) -> Image.Image:
     source_mode = image.mode
     out = image.convert("RGBA")
     draw = ImageDraw.Draw(out, "RGBA")
+    mode = overlay_mode.strip().lower()
+    yolo_only_mode = mode == "yolo-only"
+    hybrid_vision_mode = mode == "hybrid-vision"
+    presentation_mode = mode in {"history-boxes", "history-plus-projection"}
+    show_geometry_debug = mode == "debug-all"
+    extras = set(_normalize_vision_extras(vision_extras))
+    explicit_projection_overlay = "projection-overlay" in extras
+    projection_overlay_requested = PROJECTED_OVERLAY_ENABLED or explicit_projection_overlay
+    show_projected_overlays = projection_overlay_requested and mode in {"debug-all", "history-boxes", "history-plus-projection", "hybrid-vision"}
+    show_structure_boxes = mode in {"debug-all", "history-boxes", "history-plus-projection", "hybrid-vision"}
+    show_grounded_zones = "grounded-zones" in extras
+    show_grounded_objects = "grounded-objects" in extras
+    show_tta_tag = "tta-tag" in extras
     filtered = _filter_detections_for_overlay(
         detections=detections,
         overlay_mode=overlay_mode,
         min_conf_global=min_conf_global,
         min_conf_latest=min_conf_latest,
     )
-    geometry = _extract_chart_geometry_from_detections(filtered or detections)
+    geometry: dict[str, Any] = dict(_extract_chart_geometry_from_detections(filtered or detections))
     if chart_structure:
-        geometry = {**geometry, **cast(dict[str, Any], chart_structure.get('chart_geometry', {}))}
+        geometry.update(cast(Mapping[str, Any], chart_structure.get('chart_geometry', {})))
     plot_bbox = cast(list[float], geometry.get('plot_bbox', [0.0, 0.0, float(out.width), float(out.height)]))
     inner_bbox = cast(list[float], geometry.get('plot_inner_bbox', plot_bbox))
     latest_seq_bbox = cast(list[float], geometry.get('latest_sequence_bbox', inner_bbox))
-    draw.rectangle([(plot_bbox[0], plot_bbox[1]), (plot_bbox[2], plot_bbox[3])], outline=(80, 180, 255), width=2)
-    draw.rectangle([(inner_bbox[0], inner_bbox[1]), (inner_bbox[2], inner_bbox[3])], outline=(0, 180, 120), width=1)
-    draw.rectangle([(latest_seq_bbox[0], latest_seq_bbox[1]), (latest_seq_bbox[2], latest_seq_bbox[3])], outline=(255, 180, 0), width=1)
-
-    mode = overlay_mode.strip().lower()
+    if show_geometry_debug:
+        draw.rectangle([(plot_bbox[0], plot_bbox[1]), (plot_bbox[2], plot_bbox[3])], outline=(80, 180, 255, 188), width=2)
+        draw.rectangle([(inner_bbox[0], inner_bbox[1]), (inner_bbox[2], inner_bbox[3])], outline=(0, 180, 120, 148), width=1)
+        draw.rectangle([(latest_seq_bbox[0], latest_seq_bbox[1]), (latest_seq_bbox[2], latest_seq_bbox[3])], outline=(255, 180, 0, 148), width=1)
     box_history = cast(list[dict[str, Any]], (chart_structure or {}).get('box_history', []))
     current_box = cast(dict[str, Any], (chart_structure or {}).get('current_box', {}))
     next_boxes = cast(list[dict[str, Any]], (chart_structure or {}).get('next_box_hypotheses', []))
+    projection_chain_boxes = cast(list[dict[str, Any]], (chart_structure or {}).get("projection_chain_boxes", []))
     fallback_projected_candles = cast(list[dict[str, Any]], (chart_structure or {}).get("projected_candle_candidates", []))
-
-    def _box_outline(box: Mapping[str, Any], dashed: bool = False, current: bool = False) -> None:
-        bbox = cast(list[float], box.get('bbox', []))
-        if len(bbox) != 4:
-            return
-        direction = str(box.get('direction', 'BUY')).upper()
-        box_type = str(box.get('box_type', 'balance')).lower()
-        if box_type == 'balance':
-            color = (255, 170, 0)
-        elif box_type == 'reversal_base':
-            color = (255, 90, 90)
-        elif direction == 'BUY':
-            color = (0, 255, 0)
-        else:
-            color = (255, 120, 0)
-        x1, y1, x2, y2 = [float(v) for v in bbox]
-        width = 3 if current else 2
-        if dashed:
-            step = 8.0
-            x = x1
-            while x < x2:
-                x_end = min(x + step * 0.55, x2)
-                draw.line([(x, y1), (x_end, y1)], fill=color, width=width)
-                draw.line([(x, y2), (x_end, y2)], fill=color, width=width)
-                x += step
-            y = y1
-            while y < y2:
-                y_end = min(y + step * 0.55, y2)
-                draw.line([(x1, y), (x1, y_end)], fill=color, width=width)
-                draw.line([(x2, y), (x2, y_end)], fill=color, width=width)
-                y += step
-        else:
-            draw.rectangle([(x1, y1), (x2, y2)], outline=color, width=width)
-        seq_idx = int(box.get('sequence_index', 0) or 0)
-        signature = str(box.get('sequence_signature', '')).strip()
-        prefix = f"#{seq_idx} " if seq_idx > 0 else ""
-        label = f"{prefix}{box_type} {direction[:1]} {float(box.get('confidence', 0.0) or 0.0):.2f}"
-        if signature:
-            label += f" {signature[:12]}"
-        draw.text((x1 + 2.0, max(4.0, y1 - 14.0)), label, fill=color)
-
-    def _draw_projected_candle(candle: Mapping[str, Any], *, highlight: bool = False) -> None:
-        body_bbox = cast(list[float], candle.get("body_bbox", []))
-        if len(body_bbox) != 4:
-            return
-        direction = str(candle.get("direction", "BUY")).upper()
-        confidence = float(np.clip(candle.get("confidence", 0.0), 0.0, 1.0))
-        center_x = float(candle.get("center_x", 0.5 * (body_bbox[0] + body_bbox[2])))
-        wick_top = float(candle.get("wick_top", body_bbox[1]))
-        wick_bottom = float(candle.get("wick_bottom", body_bbox[3]))
-        alpha = int(np.clip(88 + 112 * confidence + (16 if highlight else 0), 72, 232))
-        if direction == "BUY":
-            body_fill = (72, 236, 142, alpha)
-            outline = (198, 255, 226, min(255, alpha + 16))
-        else:
-            body_fill = (255, 142, 88, alpha)
-            outline = (255, 228, 208, min(255, alpha + 16))
-        draw.line([(center_x, wick_top), (center_x, wick_bottom)], fill=outline, width=2 if highlight else 1)
-        draw.rectangle(
-            [(float(body_bbox[0]), float(body_bbox[1])), (float(body_bbox[2]), float(body_bbox[3]))],
-            fill=body_fill,
-            outline=outline,
-            width=2 if highlight else 1,
-        )
-        if highlight:
-            pattern_family = str(candle.get("pattern_family", "")).strip()
-            if pattern_family:
-                draw.text(
-                    (float(body_bbox[0]), max(6.0, float(body_bbox[1]) - 14.0)),
-                    f"{pattern_family} {confidence:.2f}",
-                    fill=outline,
-                )
-
+    grounded_chart = cast(dict[str, Any], (chart_structure or {}).get("grounded_chart", {}))
+    grounded_objects = cast(list[dict[str, Any]], grounded_chart.get("objects", []))
+    grounded_zones = cast(list[dict[str, Any]], grounded_chart.get("zones", []))
+    tta_summary = cast(dict[str, Any], (chart_structure or {}).get("test_time_adaptation", {}))
     active_history = box_history[-history_limit:] if history_limit and history_limit > 0 else box_history
     visible_next_boxes = [
         hypothesis
         for hypothesis in next_boxes
         if float(hypothesis.get('confidence', 0.0) or 0.0) >= float(projection_confidence_floor)
     ]
+    visible_projection_chain = [
+        hypothesis
+        for hypothesis in projection_chain_boxes
+        if float(hypothesis.get("confidence", 0.0) or 0.0) >= float(projection_confidence_floor)
+    ]
+    active_projection_boxes = visible_projection_chain if visible_projection_chain else visible_next_boxes[:3]
+    obstacle_rects: list[tuple[float, float, float, float]] = []
 
-    if mode in {'debug-all', 'history-boxes', 'history-plus-projection'}:
+    def _append_obstacle_rect(bbox: Sequence[Any]) -> None:
+        clamped = _clamp_bbox(bbox, float(out.width), float(out.height))
+        if clamped is None:
+            return
+        x1, y1, x2, y2 = (float(clamped[0]), float(clamped[1]), float(clamped[2]), float(clamped[3]))
+        obstacle_rects.append((x1, y1, x2, y2))
+
+    for bbox in [cast(list[float], detection.get("bbox", [])) for detection in filtered]:
+        _append_obstacle_rect(bbox)
+    for bbox in [cast(list[float], box.get("bbox", [])) for box in active_history]:
+        _append_obstacle_rect(bbox)
+    for bbox in [cast(list[float], box.get("bbox", [])) for box in active_projection_boxes]:
+        _append_obstacle_rect(bbox)
+    if show_grounded_objects:
+        for bbox in [cast(list[float], obj.get("bbox", [])) for obj in grounded_objects[:8]]:
+            _append_obstacle_rect(bbox)
+    if show_grounded_zones:
+        for bbox in [cast(list[float], zone.get("bbox", [])) for zone in grounded_zones[:8]]:
+            _append_obstacle_rect(bbox)
+    for bbox in [cast(list[float], zone.get("bbox", [])) for zone in (user_zones or [])]:
+        _append_obstacle_rect(bbox)
+    if current_box:
+        _append_obstacle_rect(cast(list[float], current_box.get("bbox", [])))
+    label_controls = _adaptive_overlay_label_controls(
+        obstacle_rects,
+        inner_bbox,
+        int(max(2, label_budget)),
+        presentation_mode=bool(presentation_mode),
+    )
+    overlay_label_budget = {"remaining": int(max(0, int(round(float(label_controls.get("budget", label_budget))))))}
+    occupied_label_rects: list[tuple[float, float, float, float]] = []
+
+    def _draw_overlay_tag(
+        text: str,
+        *,
+        anchor_x: float,
+        anchor_y: float,
+        accent: tuple[int, int, int],
+        above: bool = True,
+    ) -> None:
+        if not text or overlay_label_budget["remaining"] <= 0:
+            return
+        try:
+            left, top, right, bottom = draw.textbbox((0.0, 0.0), text)
+            text_w = max(1.0, float(right - left))
+            text_h = max(1.0, float(bottom - top))
+        except Exception:
+            text_w = float(max(36, len(text) * 7))
+            text_h = 11.0
+        chip: tuple[float, float, float, float] | None = _choose_overlay_label_rect(
+            text_w=text_w,
+            text_h=text_h,
+            anchor_x=anchor_x,
+            anchor_y=anchor_y,
+            image_size=(float(out.width), float(out.height)),
+            occupied_rects=occupied_label_rects,
+            obstacle_rects=obstacle_rects,
+            prefer_above=above,
+            crowd_score=float(label_controls.get("crowd_score", 0.0)),
+        )
+        if chip is None:
+            return
+        x1, y1, _x2, _y2 = chip
+        pad_x = 8.0
+        pad_y = 5.0
+        draw.rounded_rectangle(
+            chip,
+            radius=8,
+            fill=(9, 14, 18, 200 if presentation_mode else 228),
+            outline=(*accent, 255),
+            width=1,
+        )
+        draw.text((x1 + pad_x, y1 + pad_y), text, fill=(245, 255, 255, 248))
+        occupied_label_rects.append(chip)
+        overlay_label_budget["remaining"] -= 1
+
+    def _draw_box_micro_plan(box: Mapping[str, Any], *, direction: str, base_color: tuple[int, int, int], emphasized: bool) -> None:
+        role_specs = (
+            ("sniper_window", "SNP", (94, 194, 255)),
+            ("trigger_window", "TRG", (238, 190, 90)),
+            ("target_window", "TGT", base_color),
+        )
+        for key, label, role_color in role_specs:
+            raw_bbox = cast(Sequence[Any], box.get(key, []))
+            clamped = _clamp_bbox(raw_bbox, float(out.width), float(out.height))
+            if clamped is None:
+                continue
+            x1, y1, x2, y2 = [float(value) for value in clamped]
+            if x2 - x1 < 8.0 or y2 - y1 < 3.0:
+                continue
+            alpha = 184 if emphasized else 126
+            fill_alpha = 30 if emphasized else 18
+            draw.rectangle([(x1, y1), (x2, y2)], outline=(*role_color, alpha), fill=(*role_color, fill_alpha), width=1)
+            if x2 - x1 >= 28.0 and y2 - y1 >= 9.0 and not hybrid_vision_mode:
+                draw.text((x1 + 3.0, y1 + 1.0), label, fill=(238, 248, 255, 218 if emphasized else 176))
+
+        invalidation = box.get("invalidation_y")
+        if invalidation is None:
+            return
+        try:
+            invalidation_y = float(invalidation)
+        except (TypeError, ValueError):
+            return
+        bbox = cast(Sequence[Any], box.get("bbox", []))
+        if len(bbox) != 4:
+            return
+        x1, _y1, x2, _y2 = [float(value) for value in bbox[:4]]
+        if invalidation_y < 0.0 or invalidation_y > float(out.height):
+            return
+        invalidation_color = (230, 104, 104) if direction == "BUY" else (112, 194, 255)
+        step = 8.0
+        x = max(0.0, x1)
+        end_x = min(float(out.width), x2)
+        while x < end_x:
+            draw.line([(x, invalidation_y), (min(x + step * 0.52, end_x), invalidation_y)], fill=(*invalidation_color, 132 if emphasized else 92), width=1)
+            x += step
+
+    def _box_outline(
+        box: Mapping[str, Any],
+        *,
+        dashed: bool = False,
+        current: bool = False,
+        projected: bool = False,
+        show_label: bool = False,
+    ) -> None:
+        bbox = cast(list[float], box.get('bbox', []))
+        if len(bbox) != 4:
+            return
+        direction = str(box.get('direction', 'BUY')).upper()
+        box_type = str(box.get('box_type', 'balance')).lower()
+        color = _structure_box_accent(direction=direction, box_type=box_type)
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        confidence = float(np.clip(box.get("confidence", 0.0), 0.0, 1.0))
+        border_width = 3 if current else 2
+        if dashed:
+            step = 10.0
+            x = x1
+            while x < x2:
+                x_end = min(x + step * 0.52, x2)
+                draw.line([(x, y1), (x_end, y1)], fill=color, width=border_width)
+                draw.line([(x, y2), (x_end, y2)], fill=color, width=border_width)
+                x += step
+            y = y1
+            while y < y2:
+                y_end = min(y + step * 0.52, y2)
+                draw.line([(x1, y), (x1, y_end)], fill=color, width=border_width)
+                draw.line([(x2, y), (x2, y_end)], fill=color, width=border_width)
+                y += step
+            if not presentation_mode:
+                draw.rectangle([(x1, y1), (x2, y2)], fill=(*color, 6))
+        else:
+            draw.rectangle(
+                [(x1, y1), (x2, y2)],
+                outline=color,
+                fill=None if presentation_mode else (*color, 12),
+                width=border_width,
+            )
+        if show_label and not hybrid_vision_mode:
+            seq_idx = int(box.get('sequence_index', 0) or 0)
+            proj_rank = int(box.get("rank", 0) or 0)
+            signature = str(box.get('sequence_signature', '')).strip()
+            prefix = f"#{seq_idx} " if seq_idx > 0 else (f"P{proj_rank} " if projected and proj_rank > 0 else "")
+            label = f"{prefix}{box_type} {direction[:1]} {confidence:.2f}"
+            if signature:
+                label += f" {signature[:12]}"
+            structure_floor = float(label_controls.get("structure_confidence_floor", 0.26))
+            effective_floor = structure_floor * (0.70 if current or projected else 1.0)
+            if confidence >= effective_floor:
+                _draw_overlay_tag(label, anchor_x=x1 + 2.0, anchor_y=y1, accent=color, above=True)
+        _draw_box_micro_plan(box, direction=direction, base_color=color, emphasized=bool(current or projected))
+
+    def _draw_projected_candle(candle: Mapping[str, Any], *, highlight: bool = False) -> None:
+        body_bbox = cast(list[float], candle.get("body_bbox", []))
+        if len(body_bbox) != 4:
+            return
+        confidence = float(np.clip(candle.get("confidence", 0.0), 0.0, 1.0))
+
+        # Use pre-snapped coordinates from the candle data (already integer-aligned)
+        center_x_raw = candle.get("center_x", None)
+        wick_top_raw = candle.get("wick_top", None)
+        wick_bottom_raw = candle.get("wick_bottom", None)
+
+        # Precise coordinate extraction with fallback
+        if center_x_raw is not None:
+            center_x = int(float(center_x_raw))
+        else:
+            center_x = int(np.round(0.5 * (float(body_bbox[0]) + float(body_bbox[2]))))
+
+        if wick_top_raw is not None:
+            wick_top = int(float(wick_top_raw))
+        else:
+            wick_top = int(np.round(float(body_bbox[1])))
+
+        if wick_bottom_raw is not None:
+            wick_bottom = int(float(wick_bottom_raw))
+        else:
+            wick_bottom = int(np.round(float(body_bbox[3])))
+
+        # Snap body coordinates precisely
+        body_x1 = int(np.round(float(body_bbox[0])))
+        body_y1 = int(np.round(float(body_bbox[1])))
+        body_x2 = int(np.round(float(body_bbox[2])))
+        body_y2 = int(np.round(float(body_bbox[3])))
+
+        # Ensure minimum dimensions
+        body_x2 = max(body_x2, body_x1 + 3)
+        body_y2 = max(body_y2, body_y1 + 3)
+        body_width = max(3, body_x2 - body_x1)
+        candle_direction = str(candle.get("candle_direction", candle.get("direction", "BUY"))).upper()
+        if candle_direction == "SELL":
+            if highlight:
+                base_rgb = (164, 100, 100)
+                edge_rgb = (220, 150, 150)
+                wick_rgb = (200, 120, 120)
+            else:
+                base_rgb = (140, 80, 80)
+                edge_rgb = (200, 120, 120)
+                wick_rgb = (170, 100, 100)
+        else:
+            if highlight:
+                base_rgb = (100, 164, 100)
+                edge_rgb = (150, 220, 150)
+                wick_rgb = (120, 200, 120)
+            else:
+                base_rgb = (80, 140, 80)
+                edge_rgb = (120, 200, 120)
+                wick_rgb = (100, 170, 100)
+        edge_alpha = int(np.clip(160 + 60 * confidence + (30 if highlight else 0), 180, 255))
+        wick_alpha = int(np.clip(140 + 50 * confidence + (20 if highlight else 0), 160, 240))
+        outline = (*edge_rgb, edge_alpha)
+        wick_color = (*wick_rgb, wick_alpha)
+        wick_width = 3 if body_width >= 6 else 2
+        draw.line([(center_x, wick_top), (center_x, body_y1)], fill=wick_color, width=wick_width)
+        draw.line([(center_x, body_y2), (center_x, wick_bottom)], fill=wick_color, width=wick_width)
+        draw.rectangle(
+            [(body_x1, body_y1), (body_x2, body_y2)],
+            fill=(*base_rgb, int(np.clip(34 + 38 * confidence, 42, 82))) if (explicit_projection_overlay or not presentation_mode) else None,
+            outline=outline,
+            width=2 if highlight else 1,
+        )
+        if highlight and not presentation_mode:
+            pattern_family = str(candle.get("pattern_family", "")).strip()
+            if pattern_family:
+                draw.text(
+                    (body_x1, max(6.0, body_y1 - 14.0)),
+                    f"{pattern_family} {confidence:.2f}",
+                    fill=outline,
+                )
+
+    def _grounded_color(kind: str, direction: str = "") -> tuple[int, int, int]:
+        label = str(kind or "").strip().lower()
+        move = str(direction or "").strip().upper()
+        if "support" in label:
+            return (88, 214, 136)
+        if "resistance" in label:
+            return (228, 112, 96)
+        if "breakout" in label or ("impulse" in label and move == "BUY"):
+            return (86, 214, 188)
+        if "pullback" in label:
+            return (238, 190, 90)
+        if "reversal" in label:
+            return (214, 136, 186)
+        return (94, 194, 255)
+
+    def _draw_grounded_box(
+        bbox: Sequence[Any],
+        *,
+        color: tuple[int, int, int],
+        fill_alpha: int,
+        outline_alpha: int,
+        dashed: bool,
+    ) -> tuple[float, float, float, float] | None:
+        clamped = _clamp_bbox(bbox, float(out.width), float(out.height))
+        if clamped is None:
+            return None
+        x1, y1, x2, y2 = [float(value) for value in clamped]
+        if fill_alpha > 0:
+            draw.rectangle([(x1, y1), (x2, y2)], fill=(*color, fill_alpha))
+        if dashed:
+            step = 9.0
+            x = x1
+            while x < x2:
+                x_end = min(x + step * 0.56, x2)
+                draw.line([(x, y1), (x_end, y1)], fill=(*color, outline_alpha), width=2)
+                draw.line([(x, y2), (x_end, y2)], fill=(*color, outline_alpha), width=2)
+                x += step
+            y = y1
+            while y < y2:
+                y_end = min(y + step * 0.56, y2)
+                draw.line([(x1, y), (x1, y_end)], fill=(*color, outline_alpha), width=2)
+                draw.line([(x2, y), (x2, y_end)], fill=(*color, outline_alpha), width=2)
+                y += step
+        else:
+            draw.rectangle([(x1, y1), (x2, y2)], outline=(*color, outline_alpha), width=3)
+        return (x1, y1, x2, y2)
+
+    def _draw_grounded_overlays() -> None:
+        if show_grounded_zones:
+            for zone in grounded_zones[:8]:
+                bbox = cast(list[float], zone.get("bbox", []))
+                if len(bbox) != 4:
+                    continue
+                label = " ".join(
+                    part
+                    for part in [
+                        str(zone.get("pattern", "")).strip(),
+                        str(zone.get("box_type", "")).strip(),
+                        str(zone.get("kind", "")).strip(),
+                    ]
+                    if part
+                ).strip() or "grounded zone"
+                color = _grounded_color(label, str(zone.get("direction", "")))
+                score = float(np.clip(zone.get("confidence", zone.get("score", 0.0)) or 0.0, 0.0, 1.0))
+                painted = _draw_grounded_box(
+                    bbox,
+                    color=color,
+                    fill_alpha=22 if presentation_mode else 28,
+                    outline_alpha=202,
+                    dashed=False,
+                )
+                if painted is not None and score >= 0.16:
+                    _draw_overlay_tag(
+                        f"grounded {label[:18]} {score:.2f}",
+                        anchor_x=painted[0] + 2.0,
+                        anchor_y=painted[1],
+                        accent=color,
+                        above=False,
+                    )
+        if show_grounded_objects:
+            for obj in grounded_objects[:8]:
+                bbox = cast(list[float], obj.get("bbox", []))
+                if len(bbox) != 4:
+                    continue
+                label = str(obj.get("label", obj.get("kind", "grounded object"))).strip() or "grounded object"
+                color = _grounded_color(label, str(obj.get("direction", "")))
+                score = float(np.clip(obj.get("confidence", obj.get("body_pct", 0.0)) or 0.0, 0.0, 1.0))
+                painted = _draw_grounded_box(
+                    bbox,
+                    color=color,
+                    fill_alpha=0,
+                    outline_alpha=186,
+                    dashed=True,
+                )
+                if painted is not None and score >= 0.22:
+                    _draw_overlay_tag(
+                        f"focus {label[:18]} {score:.2f}",
+                        anchor_x=painted[0] + 2.0,
+                        anchor_y=painted[1],
+                        accent=color,
+                        above=True,
+                    )
+
+    def _draw_tta_summary_tag() -> None:
+        selected_view = str(tta_summary.get("selected_view", "")).strip().lower()
+        if not show_tta_tag or not selected_view:
+            return
+        candidates = cast(list[dict[str, Any]], tta_summary.get("candidates", []))
+        ranked = sorted(
+            candidates,
+            key=lambda row: float(row.get("score", 0.0) or 0.0),
+            reverse=True,
+        )[:3]
+        line = " | ".join(
+            f"{str(row.get('name', 'view'))} {float(row.get('score', 0.0) or 0.0):.2f}"
+            for row in ranked
+        )
+        text = f"TTA {selected_view}"
+        if line:
+            text += f" | {line}"
+        try:
+            left, top, right, bottom = draw.textbbox((0.0, 0.0), text)
+            width = float(right - left) + 16.0
+            height = float(bottom - top) + 10.0
+        except Exception:
+            width = float(max(160, len(text) * 7))
+            height = 20.0
+        x1 = max(8.0, float(inner_bbox[0]) + 8.0)
+        y1 = max(8.0, float(inner_bbox[1]) + 8.0)
+        x2 = min(float(out.width) - 8.0, x1 + width)
+        y2 = min(float(out.height) - 8.0, y1 + height)
+        draw.rounded_rectangle(
+            [(x1, y1), (x2, y2)],
+            radius=7,
+            fill=(7, 14, 20, 188),
+            outline=(94, 194, 255, 214),
+            width=1,
+        )
+        draw.text((x1 + 8.0, y1 + 4.0), text, fill=(238, 246, 255, 236))
+
+    if show_structure_boxes:
         for box in active_history:
             is_current = bool(current_box) and int(box.get('sequence_index', -1)) == int(current_box.get('sequence_index', -999))
-            _box_outline(box, dashed=False, current=is_current)
-        if mode in {'debug-all', 'history-plus-projection'}:
-            for hyp_idx, hyp in enumerate(visible_next_boxes[:3]):
-                _box_outline(hyp, dashed=True, current=False)
+            _box_outline(
+                box,
+                dashed=False,
+                current=is_current,
+                projected=False,
+                show_label=True,
+            )
+        if show_projected_overlays:
+            for hyp_idx, hyp in enumerate(active_projection_boxes[:4]):
+                _box_outline(
+                    hyp,
+                    dashed=True,
+                    current=False,
+                    projected=True,
+                    show_label=True,
+                )
                 projected_candles = cast(list[dict[str, Any]], hyp.get("projected_candles", []))
                 if not projected_candles and hyp_idx == 0:
                     projected_candles = fallback_projected_candles
                 for candle in projected_candles:
                     _draw_projected_candle(candle, highlight=(hyp_idx == 0))
-            path_points = cast(list[list[float]], (visible_next_boxes[0] if visible_next_boxes else {}).get('path_points', []))
+            path_source = active_projection_boxes[-1] if active_projection_boxes else {}
+            path_points = cast(list[list[float]], path_source.get('path_points', []))
             if len(path_points) >= 2:
                 line_points = [(float(point[0]), float(point[1])) for point in path_points if len(point) == 2]
                 if len(line_points) >= 2:
-                    draw.line(line_points, fill=(120, 210, 255), width=2)
+                    draw.line(line_points, fill=(140, 220, 255, 200), width=3)
                     for idx, point in enumerate(line_points):
                         radius = 3 if idx < len(line_points) - 1 else 5
                         draw.ellipse(
@@ -3904,31 +7580,35 @@ def draw_overlay(
                                 (point[0] - radius, point[1] - radius),
                                 (point[0] + radius, point[1] + radius),
                             ],
-                            outline=(120, 210, 255),
-                            fill=(12, 24, 28),
-                            width=1,
+                            outline=(200, 240, 255, 220),
+                            fill=(20, 40, 60, 180),
+                            width=2,
                         )
 
+    if show_grounded_zones or show_grounded_objects:
+        _draw_grounded_overlays()
+
     detections_sorted = sorted(filtered, key=lambda d: float(d.get('overlay_confidence', d.get('confidence', 0.0)) or 0.0), reverse=True)
-    label_budget = int(max(0, label_budget))
+    detection_label_floor = float(label_controls.get("detection_confidence_floor", 0.45))
+    if hybrid_vision_mode:
+        detection_label_floor = 1.01
     for detection in detections_sorted:
         x1, y1, x2, y2 = cast(list[float], detection['bbox'])
         conf = float(detection.get('overlay_confidence', detection.get('confidence', 0.0)) or 0.0)
         name = str(detection.get('pattern', ''))
-        color = (0, 255, 0) if conf >= 0.6 else (255, 165, 0)
-        draw.rectangle([(x1, y1), (x2, y2)], outline=color, width=2)
+        accent = (48, 227, 135) if conf >= 0.6 else (236, 173, 67)
+        draw.rectangle([(x1, y1), (x2, y2)], outline=(*accent, 220), fill=(*accent, 6), width=2)
         for point in cast(list[list[float]], detection.get('focus_points', [])):
             px, py = float(point[0]), float(point[1])
-            draw.ellipse([(px - 2, py - 2), (px + 2, py + 2)], fill=(255, 80, 80))
-        if label_budget > 0 and conf >= 0.45:
-            draw.text((x1, max(5.0, y1 - 14.0)), f'{name} {conf:.2f}', fill=color)
-            label_budget -= 1
+            draw.ellipse([(px - 3, py - 3), (px + 3, py + 3)], fill=(255, 120, 112, 228), outline=(255, 200, 120, 248), width=1)
+        if conf >= detection_label_floor:
+            _draw_overlay_tag(f'{name} {conf:.2f}', anchor_x=x1, anchor_y=y1, accent=accent, above=True)
 
     visible_min = geometry.get('visible_price_min')
     visible_max = geometry.get('visible_price_max')
-    for level in sr_levels:
+    for level in ([] if (yolo_only_mode or hybrid_vision_mode) else sr_levels):
         kind = str(level.get('type', 'support')).lower()
-        color = (0, 255, 0) if kind == 'support' else (255, 0, 0)
+        color = (100, 200, 100) if kind == 'support' else (200, 100, 100)
         if isinstance(visible_min, (float, int)) and isinstance(visible_max, (float, int)):
             price = float(level.get('price', 0.0) or 0.0)
             denom = max(float(visible_max) - float(visible_min), 1e-9)
@@ -3938,8 +7618,9 @@ def draw_overlay(
             price = float(level.get('price', 0.0) or 0.0)
             frac = float(abs(price) % 1.0)
             y = int(inner_bbox[1] + frac * max(inner_bbox[3] - inner_bbox[1], 1.0))
-        draw.line([(inner_bbox[0], y), (inner_bbox[2], y)], fill=color, width=1)
-    for zone in user_zones or []:
+        draw.line([(inner_bbox[0], y), (inner_bbox[2], y)], fill=(*color, 180), width=2)
+    zone_label_floor = float(label_controls.get("zone_confidence_floor", 0.14))
+    for zone in ([] if (yolo_only_mode or hybrid_vision_mode) else (user_zones or [])):
         bbox = cast(list[float], zone.get("bbox", []))
         if len(bbox) != 4:
             continue
@@ -3953,21 +7634,63 @@ def draw_overlay(
         else:
             color = (215, 166, 90)
         x1, y1, x2, y2 = [float(v) for v in bbox]
-        draw.rectangle([(x1, y1), (x2, y2)], outline=color, width=2)
-        draw.text((x1 + 3.0, min(max(5.0, y1 + 3.0), max(5.0, y2 - 16.0))), f"{label} {score:.2f}", fill=color)
+        draw.rectangle([(x1, y1), (x2, y2)], outline=(*color, 240), fill=(*color, 8), width=2)
+        if score >= zone_label_floor:
+            _draw_overlay_tag(f"{label} {score:.2f}", anchor_x=x1 + 3.0, anchor_y=y1, accent=color, above=False)
+    _draw_tta_summary_tag()
     return out if source_mode == "RGBA" else out.convert(source_mode)
 
 
 def build_prob_gauge(prob: float, action: str) -> Any:
+    clipped_prob = float(np.clip(prob, 0.0, 1.0))
+    color = {
+        "BUY": "#18b34a",
+        "SELL": "#da5f57",
+    }.get(str(action).upper(), "#d8a55b")
     fig: Any = go.Figure(
         go.Indicator(
             mode="gauge+number",
-            value=prob * 100.0,
-            title={"text": f"{action} Confidence (%)"},
-            gauge={"axis": {"range": [0, 100]}},
+            value=clipped_prob * 100.0,
+            number={
+                "font": {"size": 74, "color": "#f5f0e6", "family": "Space Grotesk, Segoe UI, sans-serif"},
+                "valueformat": ".1f",
+            },
+            title={
+                "text": f"{str(action).upper()} Confidence",
+                "font": {"size": 20, "color": "#f5f0e6", "family": "Space Grotesk, Segoe UI, sans-serif"},
+            },
+            domain={"x": [0.03, 0.97], "y": [0.05, 0.98]},
+            gauge={
+                "shape": "angular",
+                "axis": {
+                    "range": [0, 100],
+                    "tickmode": "array",
+                    "tickvals": [0, 20, 40, 60, 80, 100],
+                    "tickcolor": "rgba(195, 209, 218, 0.24)",
+                    "tickfont": {"size": 12, "color": "#c3d1da"},
+                },
+                "bar": {"color": color, "thickness": 0.30},
+                "bgcolor": "rgba(0, 0, 0, 0)",
+                "borderwidth": 0,
+                "steps": [
+                    {"range": [0, 100], "color": "rgba(255, 255, 255, 0.035)"},
+                ],
+                "threshold": {
+                    "line": {"color": color, "width": 0},
+                    "thickness": 0.72,
+                    "value": clipped_prob * 100.0,
+                },
+            },
         )
     )
-    fig.update_layout(template="plotly_dark", margin=dict(l=10, r=10, t=40, b=10), height=260)
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=40, b=8),
+        height=260,
+        font={"family": "Space Grotesk, Segoe UI, sans-serif", "color": "#f5f0e6"},
+    )
     return fig
 
 
@@ -3984,7 +7707,7 @@ def build_cv_debug_payload(
     if render_config:
         filtered = _filter_detections_for_overlay(
             detections=detections,
-            overlay_mode=str(render_config.get("overlay_mode", "history-plus-projection")),
+            overlay_mode=str(render_config.get("overlay_mode", DEFAULT_OVERLAY_MODE)),
             min_conf_global=float(render_config.get("min_conf_global", 0.42) or 0.42),
             min_conf_latest=float(render_config.get("min_conf_latest", 0.50) or 0.50),
         )
@@ -4257,40 +7980,41 @@ def _interpreter_invalidation_condition(
 
 
 def _build_interpreter_fusion_payload(result: Mapping[str, Any]) -> dict[str, Any]:
-    chart_state = cast(dict[str, Any], result.get("chart_state", {}))
-    projection = cast(dict[str, Any], result.get("projection", {}))
-    memory_summary = cast(dict[str, Any], result.get("memory_ambiguity_summary", {}))
-    forecast_debug = cast(dict[str, Any], result.get("forecast_debug", {}))
-    rl_policy = cast(dict[str, Any], result.get("rl_policy", {}))
-    local_ensemble = cast(dict[str, Any], result.get("local_ensemble", {}))
+    result_view = _ensure_active_trade_overlay(result)
+    chart_state = cast(dict[str, Any], result_view.get("chart_state", {}))
+    projection = cast(dict[str, Any], result_view.get("projection", {}))
+    memory_summary = cast(dict[str, Any], result_view.get("memory_ambiguity_summary", {}))
+    forecast_debug = cast(dict[str, Any], result_view.get("forecast_debug", {}))
+    rl_policy = cast(dict[str, Any], result_view.get("rl_policy", {}))
+    local_ensemble = cast(dict[str, Any], result_view.get("local_ensemble", {}))
     ensemble_view = cast(dict[str, Any], local_ensemble.get("ensemble", {}))
-    quantile_range = cast(list[float], result.get("quantile_range", [0.0, 0.0]))
+    quantile_range = cast(list[float], result_view.get("quantile_range", [0.0, 0.0]))
     q05 = float(quantile_range[0]) if quantile_range else 0.0
     q95 = float(quantile_range[1]) if len(quantile_range) > 1 else q05
-    gate_blockers, support_blockers, risk_factors = _interpreter_gate_watchlists(result)
-    invalidation_condition = _interpreter_invalidation_condition(result, gate_blockers, support_blockers)
+    gate_blockers, support_blockers, risk_factors = _interpreter_gate_watchlists(result_view)
+    invalidation_condition = _interpreter_invalidation_condition(result_view, gate_blockers, support_blockers)
 
     return {
         "cv": {
             "setup": str(chart_state.get("structure_setup", "none")),
-            "structure": _interpreter_structure_summary(result),
-            "notes": str(result.get("explanation", "")),
-            "parse_quality": float(np.clip(result.get("latest_parse_quality", 0.0) or 0.0, 0.0, 1.0)),
-            "latest_direction": str(result.get("geometry_reference_direction", "HOLD")).upper(),
-            "latest_confidence": float(np.clip(result.get("latest_candle_confidence", 0.0) or 0.0, 0.0, 1.0)),
+            "structure": _interpreter_structure_summary(result_view),
+            "notes": str(result_view.get("explanation", "")),
+            "parse_quality": float(np.clip(result_view.get("latest_parse_quality", 0.0) or 0.0, 0.0, 1.0)),
+            "latest_direction": str(result_view.get("geometry_reference_direction", "HOLD")).upper(),
+            "latest_confidence": float(np.clip(result_view.get("latest_candle_confidence", 0.0) or 0.0, 0.0, 1.0)),
         },
         "memory": {
-            "match_quality": _interpreter_memory_match_quality(result),
-            "similarity": float(np.clip(result.get("memory_similarity", 0.0) or 0.0, 0.0, 1.0)),
-            "direction": str(result.get("memory_direction", "HOLD")).upper(),
+            "match_quality": _interpreter_memory_match_quality(result_view),
+            "similarity": float(np.clip(result_view.get("memory_similarity", 0.0) or 0.0, 0.0, 1.0)),
+            "direction": str(result_view.get("memory_direction", "HOLD")).upper(),
             "ambiguity": float(np.clip(memory_summary.get("ambiguity", 0.0) or 0.0, 0.0, 1.0)),
             "consensus_ratio": float(np.clip(memory_summary.get("consensus_ratio", 0.0) or 0.0, 0.0, 1.0)),
-            "dominant_label": str(memory_summary.get("dominant_label", result.get("memory_direction", "HOLD"))).upper(),
-            "recall_count": int(result.get("memory_recall_count", 0) or 0),
+            "dominant_label": str(memory_summary.get("dominant_label", result_view.get("memory_direction", "HOLD"))).upper(),
+            "recall_count": int(result_view.get("memory_recall_count", 0) or 0),
         },
         "forecast": {
             "direction": str(projection.get("direction", "HOLD")).upper(),
-            "magnitude": float(result.get("expected_3min_move_pct", 0.0) or 0.0),
+            "magnitude": float(result_view.get("expected_3min_move_pct", 0.0) or 0.0),
             "q05": q05,
             "q95": q95,
             "execution_readiness": float(np.clip(forecast_debug.get("execution_readiness", 0.0) or 0.0, 0.0, 1.0)),
@@ -4299,33 +8023,52 @@ def _build_interpreter_fusion_payload(result: Mapping[str, Any]) -> dict[str, An
             "structure_setup": str(forecast_debug.get("structure_setup", chart_state.get("structure_setup", "none"))),
         },
         "rl": {
-            "action": str(rl_policy.get("policy_action", result.get("trade_bias", result.get("action", "HOLD")))).upper(),
-            "probs": cast(dict[str, float], rl_policy.get("probs", result.get("probabilities", {}))),
+            "action": str(rl_policy.get("policy_action", result_view.get("trade_bias", result_view.get("action", "HOLD")))).upper(),
+            "probs": cast(dict[str, float], rl_policy.get("probs", result_view.get("probabilities", {}))),
             "blend_weight": float(np.clip(rl_policy.get("blend_weight", 0.0) or 0.0, 0.0, 1.0)),
         },
         "gates": {
-            "passing": int(result.get("gates_passing", 0) or 0),
-            "total": len(cast(list[dict[str, Any]], result.get("gate_details", []))),
+            "passing": int(result_view.get("gates_passing", 0) or 0),
+            "total": len(cast(list[dict[str, Any]], result_view.get("gate_details", []))),
             "blockers": gate_blockers,
-            "support_ok": bool(result.get("support_gates_ok", True)),
+            "support_ok": bool(result_view.get("support_gates_ok", True)),
             "support_blockers": support_blockers,
             "risk": "elevated" if risk_factors else "contained",
         },
         "ensemble": {
-            "action": str(result.get("action", "HOLD")).upper(),
-            "trade_bias": str(result.get("trade_bias", result.get("action", "HOLD"))).upper(),
-            "decision_state": str(result.get("decision_state", "UNCERTAIN")).upper(),
-            "execution_permission": str(result.get("execution_permission", "WAIT_FOR_CONFIRMATION")).upper(),
-            "confidence": float(np.clip(result.get("confidence", 0.0) or 0.0, 0.0, 1.0)),
-            "consensus_ok": bool(result.get("consensus_ok", False)),
-            "probabilities": cast(dict[str, float], result.get("probabilities", {})),
+            "action": str(result_view.get("action", "HOLD")).upper(),
+            "headline_action": str(result_view.get("headline_action", result_view.get("action", "HOLD"))).upper(),
+            "execution_action": str(result_view.get("execution_action", "HOLD")).upper(),
+            "trade_bias": str(result_view.get("trade_bias", result_view.get("action", "HOLD"))).upper(),
+            "directional_intent": str(result_view.get("directional_intent", "HOLD")).upper(),
+            "active_trade_state": str(result_view.get("active_trade_state", "HOLD_TRUE")).upper(),
+            "decision_state": str(result_view.get("decision_state", "UNCERTAIN")).upper(),
+            "execution_permission": str(result_view.get("execution_permission", "WAIT_FOR_CONFIRMATION")).upper(),
+            "confidence": float(np.clip(result_view.get("confidence", 0.0) or 0.0, 0.0, 1.0)),
+            "consensus_ok": bool(result_view.get("consensus_ok", False)),
+            "probabilities": cast(dict[str, float], result_view.get("probabilities", {})),
             "local_council_direction": str(ensemble_view.get("predicted_label", "HOLD")).upper(),
             "local_council_confidence": float(np.clip(ensemble_view.get("confidence", 0.0) or 0.0, 0.0, 1.0)),
         },
+        "council": {
+            "bias_direction": str(chart_state.get("council_bias_direction", ensemble_view.get("predicted_label", "HOLD"))).upper(),
+            "bias_confidence": float(np.clip(chart_state.get("council_bias_confidence", 0.0) or 0.0, 0.0, 1.0)),
+            "projection_direction": str(chart_state.get("council_projection_direction", projection.get("direction", "HOLD"))).upper(),
+            "projection_confidence": float(np.clip(chart_state.get("council_projection_confidence", 0.0) or 0.0, 0.0, 1.0)),
+            "structure_setup": str(chart_state.get("council_structure_setup", "none")),
+            "structure_confidence": float(np.clip(chart_state.get("council_structure_confidence", 0.0) or 0.0, 0.0, 1.0)),
+            "alignment_score": float(np.clip(chart_state.get("council_alignment_score", 0.0) or 0.0, 0.0, 1.0)),
+            "influence_score": float(np.clip(chart_state.get("council_influence_score", 0.0) or 0.0, 0.0, 1.0)),
+            "router_direction": str(chart_state.get("council_router_direction", ensemble_view.get("router_direction", "HOLD"))).upper(),
+            "router_strength": float(np.clip(chart_state.get("council_router_strength", 0.0) or 0.0, 0.0, 1.0)),
+            "consensus_ratio": float(np.clip(chart_state.get("council_consensus_ratio", ensemble_view.get("consensus_ratio", 0.0)) or 0.0, 0.0, 1.0)),
+            "disagreement": float(np.clip(chart_state.get("council_disagreement", ensemble_view.get("disagreement", 0.0)) or 0.0, 0.0, 1.0)),
+        },
         "context": {
             "projection_direction": str(projection.get("direction", "HOLD")).upper(),
-            "zone_bias": str(cast(dict[str, Any], result.get("zone_learning", {})).get("preferred_action", "HOLD")).upper(),
-            "multi_timeframe_summary": str(cast(dict[str, Any], result.get("multi_timeframe", {})).get("summary", "")),
+            "zone_bias": str(cast(dict[str, Any], result_view.get("zone_learning", {})).get("preferred_action", "HOLD")).upper(),
+            "multi_timeframe_summary": str(cast(dict[str, Any], result_view.get("multi_timeframe", {})).get("summary", "")),
+            "active_trade_summary": str(result_view.get("active_trade_summary", "")),
             "risk_factors": risk_factors,
             "invalidation": invalidation_condition,
         },
@@ -4386,7 +8129,7 @@ def _extract_chart_structure(cv_engine: Any, image_rgb: Image.Image) -> tuple[di
             max_count=96,
         ),
     )
-    recent_candles = visible_candles[-18:]
+    recent_candles = visible_candles[-25:]
     x_centers: list[float] = []
     colors: list[str] = []
     body_pcts: list[float] = []
@@ -4453,10 +8196,6 @@ def _extract_chart_structure(cv_engine: Any, image_rgb: Image.Image) -> tuple[di
         "center": [0.0, 0.0],
     }
 
-    continuation_probability = 0.34
-    pullback_probability = 0.24
-    reversal_probability = 0.20
-    fakeout_probability = 0.22
     current_type = str(current_box.get("box_type", "balance"))
     current_consolidation = float(np.clip(current_box.get("consolidation_score", 0.0), 0.0, 1.0))
     recent_boxes = box_history[-3:]
@@ -4468,23 +8207,96 @@ def _extract_chart_structure(cv_engine: Any, image_rgb: Image.Image) -> tuple[di
             )
         )
     ) if recent_boxes else current_consolidation
-    if current_type == "pullback":
-        continuation_probability, pullback_probability, reversal_probability, fakeout_probability = 0.54, 0.18, 0.14, 0.14
-    elif current_type == "impulse":
-        continuation_probability, pullback_probability, reversal_probability, fakeout_probability = 0.46, 0.28, 0.12, 0.14
-    elif current_type == "reversal_base":
-        continuation_probability, pullback_probability, reversal_probability, fakeout_probability = 0.26, 0.16, 0.40, 0.18
-    elif current_type == "balance":
-        continuation_probability, pullback_probability, reversal_probability, fakeout_probability = 0.30, 0.22, 0.22, 0.26
-    if current_box.get("contains_consolidation", False):
-        continuation_probability = float(np.clip(continuation_probability + 0.10 + 0.10 * current_consolidation, 0.0, 1.0))
-        fakeout_probability = float(np.clip(fakeout_probability - 0.04 * current_consolidation, 0.0, 1.0))
-    elif current_type == "impulse" and recent_box_consolidation < 0.42:
-        pullback_probability = float(np.clip(pullback_probability + 0.06, 0.0, 1.0))
+    has_active_consolidation = bool(
+        bool(current_box.get("contains_consolidation", False))
+        or current_type == "balance"
+        or recent_box_consolidation >= 0.52
+    )
+    trend_regime = _summarize_trend_regime(
+        box_history,
+        {
+            "current_box": current_box,
+            "recent_box_consolidation": recent_box_consolidation,
+            "has_active_consolidation": has_active_consolidation,
+            "recent_colors": colors[-25:],
+            "recent_body_pcts": body_pcts[-25:],
+            "recent_upper_wicks": upper_wicks[-25:],
+            "recent_lower_wicks": lower_wicks[-25:],
+        },
+    )
+    trend_strength = float(np.clip(trend_regime.get("trend_strength", 0.0), 0.0, 1.0))
+    continuation_reload_score = float(np.clip(trend_regime.get("continuation_reload_score", 0.0), 0.0, 1.0))
+    impulse_extension = float(np.clip(trend_regime.get("impulse_extension", 0.0), 0.0, 1.0))
+    reversal_risk = float(np.clip(trend_regime.get("reversal_risk", 0.0), 0.0, 1.0))
+    pullback_active = bool(trend_regime.get("pullback_active", False))
+    pullback_depth = float(np.clip(trend_regime.get("pullback_depth", 0.0), 0.0, 1.2))
+    breakout_failure_risk = float(np.clip(trend_regime.get("breakout_failure_risk", 0.0), 0.0, 1.0))
+    counter_run_len = int(max(0, int(trend_regime.get("counter_run_len", 0) or 0)))
+
+    continuation_probability = float(
+        np.clip(
+            0.16
+            + 0.30 * trend_strength
+            + 0.22 * continuation_reload_score
+            + 0.10 * float(current_type == "pullback")
+            + 0.08 * float(has_active_consolidation),
+            0.0,
+            1.0,
+        )
+    )
+    pullback_probability = float(
+        np.clip(
+            0.14
+            + 0.28 * impulse_extension
+            + 0.18 * float(current_type == "impulse")
+            + 0.08 * trend_strength
+            + 0.06 * float(has_active_consolidation and current_type == "impulse"),
+            0.0,
+            1.0,
+        )
+    )
+    reversal_probability = float(
+        np.clip(
+            0.10
+            + 0.42 * reversal_risk
+            + 0.12 * float(current_type == "reversal_base"),
+            0.0,
+            1.0,
+        )
+    )
+    fakeout_probability = float(
+        np.clip(
+            0.10
+            + 0.24 * current_consolidation
+            + 0.18 * max(0.0, 1.0 - trend_strength)
+            + 0.10 * float(current_type == "balance"),
+            0.0,
+            1.0,
+        )
+    )
+    if pullback_active:
+        continuation_probability = float(
+            np.clip(continuation_probability + 0.16 + 0.10 * float(0.18 <= pullback_depth <= 0.82), 0.0, 1.0)
+        )
+        pullback_probability = float(np.clip(pullback_probability * 0.74, 0.0, 1.0))
+    if current_type == "impulse" and impulse_extension >= 0.52:
+        pullback_probability = float(np.clip(pullback_probability + 0.18 * impulse_extension, 0.0, 1.0))
+        continuation_probability = float(np.clip(continuation_probability * 0.92, 0.0, 1.0))
+    if str(trend_regime.get("trend_phase", "transition")) == "reversal_watch":
+        reversal_probability = float(np.clip(reversal_probability + 0.10, 0.0, 1.0))
+    if breakout_failure_risk >= 0.42:
+        reversal_probability = float(
+            np.clip(reversal_probability + 0.20 * breakout_failure_risk + 0.04 * min(counter_run_len, 3), 0.0, 1.0)
+        )
+        continuation_probability = float(
+            np.clip(continuation_probability * (1.0 - 0.26 * breakout_failure_risk), 0.0, 1.0)
+        )
+    if current_type in {"impulse", "pullback"} and counter_run_len >= 2:
+        pullback_probability = float(np.clip(pullback_probability + 0.05 * min(counter_run_len, 3), 0.0, 1.0))
     if colors[-3:].count("green") >= 2 and str(current_box.get("direction", "BUY")).upper() == "BUY":
-        continuation_probability = float(np.clip(continuation_probability + 0.08, 0.0, 1.0))
+        continuation_probability = float(np.clip(continuation_probability + 0.06, 0.0, 1.0))
     elif colors[-3:].count("red") >= 2 and str(current_box.get("direction", "SELL")).upper() == "SELL":
-        continuation_probability = float(np.clip(continuation_probability + 0.08, 0.0, 1.0))
+        continuation_probability = float(np.clip(continuation_probability + 0.06, 0.0, 1.0))
     total = max(continuation_probability + pullback_probability + reversal_probability + fakeout_probability, 1e-9)
     continuation_probability /= total
     pullback_probability /= total
@@ -4495,6 +8307,14 @@ def _extract_chart_structure(cv_engine: Any, image_rgb: Image.Image) -> tuple[di
         "pullback_probability": pullback_probability,
         "reversal_probability": reversal_probability,
         "fakeout_probability": fakeout_probability,
+        "trend_regime": trend_regime,
+        "current_box": current_box,
+        "recent_box_consolidation": recent_box_consolidation,
+        "has_active_consolidation": has_active_consolidation,
+        "recent_colors": colors[-8:],
+        "recent_body_pcts": body_pcts[-8:],
+        "recent_upper_wicks": upper_wicks[-8:],
+        "recent_lower_wicks": lower_wicks[-8:],
     }, chart_geometry)
     primary_next_box = dict(next_box_hypotheses[0]) if next_box_hypotheses else {}
     path_clarity = float(np.clip(primary_next_box.get("path_clarity", 0.0), 0.0, 1.0))
@@ -4506,11 +8326,6 @@ def _extract_chart_structure(cv_engine: Any, image_rgb: Image.Image) -> tuple[di
             0.0,
             1.0,
         )
-    )
-    has_active_consolidation = bool(
-        bool(current_box.get("contains_consolidation", False))
-        or current_type == "balance"
-        or recent_box_consolidation >= 0.52
     )
 
     sequence_state: dict[str, Any] = {
@@ -4537,6 +8352,7 @@ def _extract_chart_structure(cv_engine: Any, image_rgb: Image.Image) -> tuple[di
         "box_sequence_agreement": box_sequence_agreement,
         "recent_box_consolidation": recent_box_consolidation,
         "has_active_consolidation": has_active_consolidation,
+        "trend_regime": trend_regime,
         "all_visible_candles": visible_candles,
     }
     return chart_geometry, sequence_state
@@ -4788,6 +8604,7 @@ def _ensemble_base_probs(
     buy_prob = float(ensemble_view.get("buy_prob", 0.5) or 0.5)
     sell_prob = float(ensemble_view.get("sell_prob", 0.5) or 0.5)
     predicted_label = str(ensemble_view.get("predicted_label", "HOLD")).upper()
+    base_confidence = float(max(buy_prob, sell_prob))
     margin = float(abs(buy_prob - sell_prob))
     disagreement = float(ensemble_view.get("disagreement", 0.0) or 0.0)
     consensus_ratio = float(ensemble_view.get("consensus_ratio", 0.5) or 0.5)
@@ -4815,7 +8632,40 @@ def _ensemble_base_probs(
         and str(memory_view.get("dominant_label", "HOLD")).upper() == predicted_label
         else 0.0
     )
+    council_bias_direction = str(state.get("council_bias_direction", predicted_label)).upper()
+    council_bias_confidence = float(np.clip(state.get("council_bias_confidence", 0.0), 0.0, 1.0))
+    council_projection_direction = str(state.get("council_projection_direction", projected_direction)).upper()
+    council_projection_confidence = float(np.clip(state.get("council_projection_confidence", 0.0), 0.0, 1.0))
+    council_structure_setup = str(state.get("council_structure_setup", "none")).lower()
+    council_structure_confidence = float(np.clip(state.get("council_structure_confidence", 0.0), 0.0, 1.0))
+    council_alignment_score = float(np.clip(state.get("council_alignment_score", 0.0), 0.0, 1.0))
+    council_influence_score = float(np.clip(state.get("council_influence_score", 0.0), 0.0, 1.0))
+    council_router_direction = str(state.get("council_router_direction", "HOLD")).upper()
+    council_router_strength = float(np.clip(state.get("council_router_strength", 0.0), 0.0, 1.0))
+    council_projection_alignment = float(
+        1.0
+        if projected_direction in {"BUY", "SELL"} and council_projection_direction == projected_direction
+        else 0.0
+    )
     if projected_direction in {"BUY", "SELL"}:
+        projection_bias_supported = bool(
+            predicted_label not in {"BUY", "SELL"}
+            or projected_direction == predicted_label
+            or structure_trade_ready
+            or max(projection_bias_confidence, projected_confidence) >= max(0.82, base_confidence + 0.12)
+            or (
+                council_router_direction == projected_direction
+                and council_router_strength >= 0.55
+            )
+        )
+        projection_shift_scale = 1.0
+        if (
+            predicted_label in {"BUY", "SELL"}
+            and projected_direction != predicted_label
+            and not structure_trade_ready
+            and not projection_bias_supported
+        ):
+            projection_shift_scale = 0.08
         projection_shift = float(
             np.clip(
                 0.16 * projection_bias_confidence
@@ -4826,12 +8676,53 @@ def _ensemble_base_probs(
                 0.32,
             )
         )
+        projection_shift *= projection_shift_scale
         if projected_direction == "BUY":
             buy_prob = float(np.clip(buy_prob + projection_shift, 0.0, 1.0))
             sell_prob = float(np.clip(sell_prob * max(0.0, 1.0 - 0.55 * projection_shift), 0.0, 1.0))
         else:
             sell_prob = float(np.clip(sell_prob + projection_shift, 0.0, 1.0))
             buy_prob = float(np.clip(buy_prob * max(0.0, 1.0 - 0.55 * projection_shift), 0.0, 1.0))
+    if council_bias_direction in {"BUY", "SELL"}:
+        council_bias_supported = bool(
+            predicted_label not in {"BUY", "SELL"}
+            or council_bias_direction == predicted_label
+            or structure_trade_ready
+            or max(council_bias_confidence, council_projection_confidence) >= max(0.78, base_confidence + 0.10)
+            or (
+                council_router_direction == council_bias_direction
+                and council_router_strength >= 0.55
+            )
+        )
+        council_shift_scale = 1.0
+        if (
+            predicted_label in {"BUY", "SELL"}
+            and council_bias_direction != predicted_label
+            and not structure_trade_ready
+            and not council_bias_supported
+        ):
+            council_shift_scale = 0.06
+        council_shift = float(
+            np.clip(
+                0.14 * council_bias_confidence
+                + 0.10 * council_projection_confidence * float(council_projection_direction == council_bias_direction)
+                + 0.08 * council_alignment_score
+                + 0.08 * council_influence_score
+                + 0.06 * council_router_strength * float(council_router_direction == council_bias_direction)
+                + 0.05 * council_structure_confidence * float(
+                    council_structure_setup in {"consolidation_breakout", "impulse_chain", "reversal_release"}
+                ),
+                0.0,
+                0.34,
+            )
+        )
+        council_shift *= council_shift_scale
+        if council_bias_direction == "BUY":
+            buy_prob = float(np.clip(buy_prob + council_shift, 0.0, 1.0))
+            sell_prob = float(np.clip(sell_prob * max(0.0, 1.0 - 0.50 * council_shift), 0.0, 1.0))
+        else:
+            sell_prob = float(np.clip(sell_prob + council_shift, 0.0, 1.0))
+            buy_prob = float(np.clip(buy_prob * max(0.0, 1.0 - 0.50 * council_shift), 0.0, 1.0))
     directional_total = max(buy_prob + sell_prob, 1e-8)
     raw_hold = (
         0.04
@@ -4846,6 +8737,12 @@ def _ensemble_base_probs(
         - 0.06 * projected_confidence * projection_alignment
         - 0.06 * continuation_prob * projection_alignment
         - 0.05 * memory_consensus * memory_alignment
+        - 0.06 * council_bias_confidence
+        - 0.05 * council_projection_confidence * council_projection_alignment
+        - 0.05 * council_alignment_score
+        - 0.04 * council_influence_score
+        - 0.03 * council_structure_confidence
+        + 0.04 * council_projection_confidence * (1.0 - council_projection_alignment)
     )
     hold_floor = 0.05 if (structure_trade_ready or projection_bias_confidence >= 0.60) else 0.08
     hold_cap = 0.42 if structure_trade_ready else 0.48
@@ -4880,10 +8777,133 @@ def _detection_confidence(
     return float(best)
 
 
+def _calibrate_council_direction_task(
+    *,
+    task_name: str,
+    value: str,
+    confidence: float,
+    support_ratio: float,
+    base_direction: str,
+    base_confidence: float,
+    consensus_ratio: float,
+    router_direction: str,
+    router_strength: float,
+    disagreement_norm: float,
+) -> tuple[float, float, float, float]:
+    calibrated_confidence = float(np.clip(confidence, 0.0, 1.0))
+    calibrated_support_ratio = float(np.clip(support_ratio, 0.0, 1.0))
+    calibration_scale = 1.0
+    normalized_value = str(value).strip().upper()
+    normalized_base = str(base_direction).strip().upper()
+    normalized_router = str(router_direction).strip().upper()
+    directional_tasks = {"projection_direction", "current_box_direction", "next_box_direction"}
+    if task_name in directional_tasks and normalized_value in {"BUY", "SELL"}:
+        base_is_directional = normalized_base in {"BUY", "SELL"}
+        router_is_directional = normalized_router in {"BUY", "SELL"}
+        base_aligned = normalized_base in {"BUY", "SELL"} and normalized_value == normalized_base
+        router_aligned = normalized_router in {"BUY", "SELL"} and normalized_value == normalized_router
+        router_conflicts_base = (
+            base_is_directional
+            and router_is_directional
+            and normalized_router != normalized_base
+        )
+        strong_opposing_router = bool(
+            router_aligned
+            and router_conflicts_base
+            and router_strength >= max(0.58, base_confidence + 0.02)
+        )
+        weak_opposing_router = bool(
+            router_aligned
+            and router_conflicts_base
+            and not strong_opposing_router
+        )
+        primary_direction = (
+            normalized_base
+            if normalized_base in {"BUY", "SELL"}
+            else (normalized_router if normalized_router in {"BUY", "SELL"} else "HOLD")
+        )
+        primary_confirmed = (
+            primary_direction in {"BUY", "SELL"}
+            and (normalized_router not in {"BUY", "SELL"} or normalized_router == primary_direction)
+        )
+        if base_is_directional and not base_aligned and not strong_opposing_router:
+            contradiction_pressure = float(
+                np.clip(
+                    0.46 * base_confidence * float(normalized_base in {"BUY", "SELL"})
+                    + 0.18 * consensus_ratio
+                    + 0.18 * (1.0 - disagreement_norm)
+                    + 0.10 * router_strength * float(normalized_router == primary_direction and not router_conflicts_base)
+                    + 0.12 * (1.0 - router_strength) * float(weak_opposing_router),
+                    0.0,
+                    1.0,
+                )
+            )
+            calibration_scale = float(np.clip(1.0 - contradiction_pressure, 0.10, 0.74))
+            calibrated_confidence *= calibration_scale
+            calibrated_support_ratio *= calibration_scale
+        elif base_aligned or (router_aligned and not weak_opposing_router):
+            agreement_bonus = float(
+                np.clip(
+                    0.05 * base_confidence * float(base_aligned)
+                    + 0.04 * router_strength * float(router_aligned and not router_conflicts_base)
+                    + 0.03 * consensus_ratio * float(base_aligned)
+                    + 0.02 * consensus_ratio * float(primary_confirmed),
+                    0.0,
+                    0.12,
+                )
+            )
+            calibrated_confidence = float(np.clip(calibrated_confidence + agreement_bonus, 0.0, 1.0))
+            calibrated_support_ratio = float(np.clip(calibrated_support_ratio + 0.5 * agreement_bonus, 0.0, 1.0))
+            calibration_scale = float(np.clip(1.0 + agreement_bonus, 1.0, 1.12))
+    strength = float(np.clip(0.58 * calibrated_confidence + 0.42 * calibrated_support_ratio, 0.0, 1.0))
+    return calibrated_confidence, calibrated_support_ratio, strength, calibration_scale
+
+
+def _should_accept_council_direction_override(
+    *,
+    candidate_direction: str,
+    candidate_confidence: float,
+    base_direction: str,
+    base_confidence: float,
+    router_direction: str,
+    router_strength: float,
+) -> bool:
+    candidate = str(candidate_direction).strip().upper()
+    base = str(base_direction).strip().upper()
+    router = str(router_direction).strip().upper()
+    confidence = float(np.clip(candidate_confidence, 0.0, 1.0))
+    if candidate not in {"BUY", "SELL"}:
+        return False
+    if base not in {"BUY", "SELL"}:
+        return bool(confidence >= 0.52)
+    if candidate == base:
+        return bool(confidence >= 0.28)
+    if router in {"BUY", "SELL"} and candidate == router and router != base:
+        if router_strength < max(0.48, base_confidence - 0.02):
+            return bool(confidence >= max(0.82, base_confidence + 0.16))
+        return bool(confidence >= max(0.60, base_confidence + 0.04))
+    if router in {"BUY", "SELL"} and candidate == router:
+        return bool(confidence >= 0.34 or router_strength >= 0.44)
+    if router in {"BUY", "SELL"} and router != base:
+        if router_strength < max(0.48, base_confidence - 0.02):
+            return bool(confidence >= max(0.74, base_confidence + 0.12))
+        return bool(confidence >= max(0.64, base_confidence + 0.08))
+    return bool(confidence >= max(0.74, base_confidence + 0.10))
+
+
 def _build_council_sequence_summary(local_ensemble: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    ensemble_view = cast(dict[str, Any], local_ensemble.get("ensemble", {}))
+    base_direction = str(ensemble_view.get("predicted_label", "HOLD")).upper()
+    base_confidence = float(np.clip(ensemble_view.get("confidence", 0.0) or 0.0, 0.0, 1.0))
+    consensus_ratio = float(np.clip(ensemble_view.get("consensus_ratio", 0.0) or 0.0, 0.0, 1.0))
+    disagreement_norm = float(
+        np.clip(float(ensemble_view.get("disagreement", 0.0) or 0.0) / 0.25, 0.0, 1.0)
+    )
+    router_direction = str(ensemble_view.get("router_direction", "HOLD")).upper()
+    router_strength = float(np.clip(ensemble_view.get("router_strength", 0.0) or 0.0, 0.0, 1.0))
     raw_consensus = cast(
         Mapping[str, Any],
-        cast(dict[str, Any], local_ensemble.get("ensemble", {})).get("sequence_task_consensus", {}),
+        ensemble_view.get("sequence_task_consensus", {}),
     )
     summary: dict[str, dict[str, Any]] = {}
     for task_name, raw_payload in raw_consensus.items():
@@ -4891,13 +8911,238 @@ def _build_council_sequence_summary(local_ensemble: Mapping[str, Any]) -> dict[s
         value = str(payload.get("value", "")).strip()
         if not value:
             continue
+        n_models = int(max(0, int(payload.get("n_models", 0) or 0)))
+        support = float(max(0.0, float(payload.get("support", 0.0) or 0.0)))
+        support_ratio = float(np.clip(support / max(n_models, 1), 0.0, 1.0)) if n_models else 0.0
+        confidence = float(np.clip(payload.get("confidence", 0.0), 0.0, 1.0))
+        calibrated_confidence, calibrated_support_ratio, strength, calibration_scale = _calibrate_council_direction_task(
+            task_name=str(task_name),
+            value=value,
+            confidence=confidence,
+            support_ratio=support_ratio,
+            base_direction=base_direction,
+            base_confidence=base_confidence,
+            consensus_ratio=consensus_ratio,
+            router_direction=router_direction,
+            router_strength=router_strength,
+            disagreement_norm=disagreement_norm,
+        )
         summary[str(task_name)] = {
             "value": value,
-            "confidence": float(np.clip(payload.get("confidence", 0.0), 0.0, 1.0)),
-            "support": float(max(0.0, float(payload.get("support", 0.0) or 0.0))),
-            "n_models": int(max(0, int(payload.get("n_models", 0) or 0))),
+            "confidence": calibrated_confidence,
+            "support": float(calibrated_support_ratio * max(n_models, 1)),
+            "support_ratio": calibrated_support_ratio,
+            "strength": strength,
+            "raw_confidence": confidence,
+            "raw_support": support,
+            "raw_support_ratio": support_ratio,
+            "calibration_scale": calibration_scale,
+            "n_models": n_models,
         }
     return summary
+
+
+def _council_sequence_value(
+    council_sequence: Mapping[str, Mapping[str, Any]],
+    task_name: str,
+    default: str = "",
+) -> tuple[str, float]:
+    payload = council_sequence.get(task_name, {})
+    value = str(payload.get("value", default)).strip()
+    confidence = float(np.clip(payload.get("confidence", 0.0), 0.0, 1.0))
+    return value, confidence
+
+
+def _council_task_profile(
+    council_sequence: Mapping[str, Mapping[str, Any]],
+    task_name: str,
+    default: str = "",
+) -> dict[str, Any]:
+    payload = council_sequence.get(task_name, {})
+    value = str(payload.get("value", default)).strip()
+    confidence = float(np.clip(payload.get("confidence", 0.0), 0.0, 1.0))
+    support_ratio = float(np.clip(payload.get("support_ratio", 0.0), 0.0, 1.0))
+    if support_ratio <= 0.0:
+        raw_support = float(max(0.0, float(payload.get("support", 0.0) or 0.0)))
+        n_models = int(max(0, int(payload.get("n_models", 0) or 0)))
+        support_ratio = float(np.clip(raw_support / max(n_models, 1), 0.0, 1.0)) if n_models else 0.0
+    return {
+        "value": value,
+        "confidence": confidence,
+        "support_ratio": support_ratio,
+        "strength": float(np.clip(payload.get("strength", 0.58 * confidence + 0.42 * support_ratio), 0.0, 1.0)),
+    }
+
+
+def _build_council_influence_profile(
+    local_ensemble: Mapping[str, Any],
+    *,
+    council_sequence: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    ensemble_view = cast(dict[str, Any], local_ensemble.get("ensemble", {}))
+    council_sequence = council_sequence or _build_council_sequence_summary(local_ensemble)
+
+    base_direction = str(ensemble_view.get("predicted_label", "HOLD")).upper()
+    base_confidence = float(np.clip(ensemble_view.get("confidence", 0.0), 0.0, 1.0))
+    consensus_ratio = float(np.clip(ensemble_view.get("consensus_ratio", 0.0), 0.0, 1.0))
+    disagreement_norm = float(np.clip(float(ensemble_view.get("disagreement", 0.0) or 0.0) / 0.25, 0.0, 1.0))
+    router_direction = str(ensemble_view.get("router_direction", "HOLD")).upper()
+    router_strength = float(np.clip(ensemble_view.get("router_strength", 0.0), 0.0, 1.0))
+    router_regime_confidence = float(np.clip(ensemble_view.get("router_regime_confidence", 0.0), 0.0, 1.0))
+
+    projection_task = _council_task_profile(council_sequence, "projection_direction")
+    current_direction_task = _council_task_profile(council_sequence, "current_box_direction")
+    next_direction_task = _council_task_profile(council_sequence, "next_box_direction")
+    current_type_task = _council_task_profile(council_sequence, "current_box_type")
+    next_type_task = _council_task_profile(council_sequence, "next_box_type")
+    trigger_task = _council_task_profile(council_sequence, "trigger")
+    projected_role_task = _council_task_profile(council_sequence, "projected_role")
+    structure_setup_task = _council_task_profile(council_sequence, "structure_setup")
+
+    direction_scores = {"BUY": 0.0, "SELL": 0.0}
+
+    def add_direction(direction: str, weight: float) -> None:
+        normalized = str(direction).upper()
+        if normalized in direction_scores:
+            direction_scores[normalized] = float(direction_scores[normalized] + max(weight, 0.0))
+
+    if base_direction in {"BUY", "SELL"}:
+        add_direction(
+            base_direction,
+            0.24 + 0.24 * base_confidence + 0.18 * consensus_ratio + 0.10 * (1.0 - disagreement_norm),
+        )
+    if router_direction in {"BUY", "SELL"}:
+        add_direction(
+            router_direction,
+            0.10 + 0.18 * router_strength + 0.10 * router_regime_confidence,
+        )
+    for task, task_weight in (
+        (projection_task, 0.22),
+        (current_direction_task, 0.18),
+        (next_direction_task, 0.20),
+    ):
+        add_direction(str(task.get("value", "")).upper(), task_weight * float(task.get("strength", 0.0)))
+
+    directional_total = float(max(sum(direction_scores.values()), 1e-6))
+    directional_spread = float(direction_scores["BUY"] - direction_scores["SELL"])
+    direction_balance = float(abs(directional_spread) / directional_total)
+    bias_direction = "BUY" if directional_spread > 0.05 else ("SELL" if directional_spread < -0.05 else "HOLD")
+    dominant_score = float(direction_scores.get(bias_direction, 0.0)) if bias_direction in direction_scores else 0.0
+    dominant_ratio = float(dominant_score / directional_total) if bias_direction in direction_scores else 0.0
+
+    alignment_components: list[float] = []
+    if bias_direction in {"BUY", "SELL"}:
+        if base_direction == bias_direction:
+            alignment_components.append(base_confidence)
+        if router_direction == bias_direction:
+            alignment_components.append(0.55 * router_strength + 0.45 * router_regime_confidence)
+        for task in (projection_task, current_direction_task, next_direction_task):
+            if str(task.get("value", "")).upper() == bias_direction:
+                alignment_components.append(float(task.get("strength", 0.0)))
+    alignment_score = float(np.mean(np.asarray(alignment_components, dtype=np.float64))) if alignment_components else 0.0
+
+    bias_confidence = float(
+        np.clip(
+            0.36 * dominant_ratio
+            + 0.20 * direction_balance
+            + 0.16 * base_confidence
+            + 0.12 * consensus_ratio
+            + 0.08 * (1.0 - disagreement_norm)
+            + 0.08 * alignment_score,
+            0.0,
+            1.0,
+        )
+    )
+
+    projection_direction = base_direction if base_direction in {"BUY", "SELL"} else "HOLD"
+    projection_confidence = 0.0
+    projection_override_applied = False
+    for task in (projection_task, next_direction_task):
+        candidate_direction = str(task.get("value", "")).upper()
+        candidate_strength = float(task.get("strength", 0.0))
+        if (
+            candidate_direction in {"BUY", "SELL"}
+            and candidate_strength >= projection_confidence
+            and _should_accept_council_direction_override(
+                candidate_direction=candidate_direction,
+                candidate_confidence=candidate_strength,
+                base_direction=base_direction,
+                base_confidence=base_confidence,
+                router_direction=router_direction,
+                router_strength=router_strength,
+            )
+        ):
+            projection_direction = candidate_direction
+            projection_confidence = candidate_strength
+            projection_override_applied = True
+    if not projection_override_applied and projection_direction in {"BUY", "SELL"}:
+        projection_confidence = float(
+            np.clip(
+                0.42 * base_confidence + 0.18 * consensus_ratio + 0.12 * (1.0 - disagreement_norm),
+                0.0,
+                1.0,
+            )
+        )
+    if (
+        bias_direction in {"BUY", "SELL"}
+        and projection_direction == bias_direction
+        and projection_confidence > 0.0
+    ):
+        projection_confidence = float(np.clip(0.56 * projection_confidence + 0.44 * bias_confidence, 0.0, 1.0))
+
+    ready_setups = {"consolidation_breakout", "impulse_chain", "reversal_release"}
+    structure_setup = str(structure_setup_task.get("value", "")).strip().lower()
+    structure_confidence = float(structure_setup_task.get("strength", 0.0))
+    structure_ready = bool(structure_setup in ready_setups and structure_confidence >= 0.56)
+
+    influence_score = float(
+        np.clip(
+            0.22 * base_confidence
+            + 0.16 * consensus_ratio
+            + 0.14 * (1.0 - disagreement_norm)
+            + 0.12 * router_strength
+            + 0.08 * router_regime_confidence
+            + 0.12 * projection_confidence
+            + 0.08 * structure_confidence
+            + 0.08 * alignment_score,
+            0.0,
+            1.0,
+        )
+    )
+
+    return {
+        "bias_direction": bias_direction,
+        "bias_confidence": bias_confidence,
+        "alignment_score": alignment_score,
+        "influence_score": influence_score,
+        "direction_scores": direction_scores,
+        "base_direction": base_direction,
+        "base_confidence": base_confidence,
+        "consensus_ratio": consensus_ratio,
+        "disagreement": disagreement_norm,
+        "router_direction": router_direction,
+        "router_strength": router_strength,
+        "router_regime_confidence": router_regime_confidence,
+        "projection_direction": projection_direction,
+        "projection_confidence": projection_confidence,
+        "current_box_direction": str(current_direction_task.get("value", "")).upper(),
+        "current_box_confidence": float(current_direction_task.get("strength", 0.0)),
+        "current_box_type": str(current_type_task.get("value", "")).lower(),
+        "current_box_type_confidence": float(current_type_task.get("strength", 0.0)),
+        "next_box_direction": str(next_direction_task.get("value", "")).upper(),
+        "next_box_confidence": float(next_direction_task.get("strength", 0.0)),
+        "next_box_type": str(next_type_task.get("value", "")).lower(),
+        "next_box_type_confidence": float(next_type_task.get("strength", 0.0)),
+        "structure_setup": structure_setup,
+        "structure_confidence": structure_confidence,
+        "structure_ready": structure_ready,
+        "trigger": str(trigger_task.get("value", "")).lower(),
+        "trigger_confidence": float(trigger_task.get("strength", 0.0)),
+        "projected_role": str(projected_role_task.get("value", "")).lower(),
+        "projected_role_confidence": float(projected_role_task.get("strength", 0.0)),
+        "champion_model": str(ensemble_view.get("champion_model", "")),
+        "confirmer_model": str(ensemble_view.get("confirmer_model", "")),
+    }
 
 
 def _projected_pattern_family(
@@ -4928,6 +9173,231 @@ def _projected_pattern_family(
     return "continuation_push"
 
 
+def _expand_projected_body_classes(
+    projected_type: str,
+    base_classes: Sequence[str],
+    candle_count: int,
+) -> list[str]:
+    normalized_type = str(projected_type).lower()
+    normalized = [str(item).lower() for item in base_classes if str(item).strip()]
+    if candle_count <= 0:
+        return []
+    if normalized_type == "balance":
+        return ["small"] * candle_count
+    if normalized_type == "pullback":
+        if candle_count == 1:
+            return ["small"]
+        return ["small"] * max(candle_count - 1, 0) + ["medium"]
+    if normalized_type == "reversal_base":
+        if candle_count == 1:
+            return ["medium"]
+        if candle_count == 2:
+            return ["small", "expansion"]
+        return ["small"] * max(candle_count - 2, 0) + ["medium", "expansion"]
+    if normalized_type == "impulse":
+        if candle_count == 1:
+            return ["expansion"]
+        return ["medium"] * max(candle_count - 1, 0) + ["expansion"]
+    result = normalized[:candle_count]
+    if len(result) < candle_count:
+        result.extend([result[-1] if result else "medium"] * (candle_count - len(result)))
+    return result
+
+
+def _estimate_projected_candle_cadence(
+    sequence_state: Mapping[str, Any],
+    *,
+    fallback_width: float,
+    fallback_height: float,
+) -> dict[str, float]:
+    visible_candles = cast(list[dict[str, Any]], sequence_state.get("all_visible_candles", []))
+    recent = visible_candles[-12:]
+    widths: list[float] = []
+    ranges: list[float] = []
+    centers: list[float] = []
+    body_pcts: list[float] = []
+    last_right_x = 0.0
+    for candle in recent:
+        bbox = cast(list[float], candle.get("bbox", []))
+        if len(bbox) != 4:
+            continue
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        if x2 <= x1 or y2 <= y1:
+            continue
+        widths.append(max(1.0, x2 - x1))
+        ranges.append(max(1.0, y2 - y1))
+        centers.append(0.5 * (x1 + x2))
+        body_pcts.append(float(np.clip(candle.get("body_height_pct", 0.0), 0.0, 1.0)))
+        last_right_x = x2
+    spacings = [
+        float(right - left)
+        for left, right in zip(centers[:-1], centers[1:])
+        if float(right - left) > 1e-6
+    ]
+    fallback_body_pct = float(np.clip(sequence_state.get("body_mean_pct", 0.0), 0.0, 1.0))
+    median_width = float(np.median(np.asarray(widths, dtype=np.float32))) if widths else float(np.clip(fallback_width * 0.10, 5.0, 18.0))
+    median_spacing = (
+        float(np.median(np.asarray(spacings, dtype=np.float32)))
+        if spacings
+        else float(max(median_width * 1.5, np.clip(fallback_width * 0.14, 8.0, 24.0)))
+    )
+    median_range = float(np.median(np.asarray(ranges, dtype=np.float32))) if ranges else float(np.clip(fallback_height * 0.46, 12.0, fallback_height * 0.82))
+    median_body_pct = (
+        float(np.median(np.asarray(body_pcts, dtype=np.float32)))
+        if body_pcts
+        else (fallback_body_pct if fallback_body_pct > 0.0 else 0.42)
+    )
+    return {
+        "median_width": float(np.clip(median_width, 4.0, 22.0)),
+        "median_spacing": float(np.clip(median_spacing, max(5.0, median_width * 1.05), 30.0)),
+        "median_range": float(np.clip(median_range, 10.0, max(12.0, fallback_height * 0.90))),
+        "median_body_pct": float(np.clip(median_body_pct, 0.16, 0.72)),
+        "last_center_x": float(centers[-1]) if centers else 0.0,
+        "last_right_x": float(last_right_x),
+    }
+
+
+def _default_projected_entry_level_norm(
+    projected_type: str,
+    projected_direction: str,
+) -> float:
+    base_level = {
+        "impulse": 0.34,
+        "pullback": 0.74,
+        "reversal_base": 0.28,
+        "fakeout": 0.58,
+        "balance": 0.54,
+    }.get(str(projected_type or "balance").lower(), 0.54)
+    normalized_direction = str(projected_direction or "").upper()
+    if normalized_direction == "SELL":
+        base_level = 1.0 - base_level
+    elif normalized_direction not in {"BUY", "SELL"}:
+        base_level = 0.5
+    return float(np.clip(base_level, 0.08, 0.92))
+
+
+def _projected_box_path_anchors(
+    *,
+    projected_type: str,
+    projected_direction: str,
+    projected_confidence: float,
+    projected_role: str,
+    trigger: str,
+    seed_level_norm: float | None,
+) -> list[tuple[float, float]]:
+    oriented_templates: dict[str, list[tuple[float, float]]] = {
+        "impulse": [(0.0, 0.34), (0.22, 0.54), (0.44, 0.48), (0.72, 0.74), (1.0, 0.86)],
+        "pullback": [(0.0, 0.74), (0.28, 0.46), (0.52, 0.38), (0.76, 0.52), (1.0, 0.62)],
+        "reversal_base": [(0.0, 0.32), (0.24, 0.18), (0.48, 0.28), (0.78, 0.60), (1.0, 0.76)],
+        "fakeout": [(0.0, 0.56), (0.24, 0.76), (0.56, 0.42), (0.82, 0.50), (1.0, 0.44)],
+        "balance": [(0.0, 0.54), (0.24, 0.46), (0.48, 0.62), (0.72, 0.48), (1.0, 0.66)],
+    }
+    normalized_type = str(projected_type or "balance").lower()
+    normalized_direction = str(projected_direction or "").upper()
+    direction_is_buy = normalized_direction == "BUY"
+    direction_is_sell = normalized_direction == "SELL"
+    oriented = [tuple(point) for point in oriented_templates.get(normalized_type, oriented_templates["balance"])]
+    normalized_role = str(projected_role or "").lower()
+    normalized_trigger = str(trigger or "").lower()
+
+    if not direction_is_buy and not direction_is_sell:
+        oriented = [(progress, 0.5) for progress, _ in oriented]
+
+    if normalized_type == "impulse" and ("breakout" in normalized_trigger or "release" in normalized_role):
+        oriented[-2] = (0.72, 0.80)
+        oriented[-1] = (1.0, 0.90)
+    elif normalized_type == "impulse" and "reclaim" in normalized_trigger:
+        oriented[1] = (0.22, 0.42)
+        oriented[-2] = (0.72, 0.76)
+        oriented[-1] = (1.0, 0.88)
+    elif normalized_type == "pullback" and "fail" in normalized_trigger:
+        oriented[-1] = (1.0, 0.48)
+    elif normalized_type == "pullback" and "dip" in normalized_trigger:
+        oriented[1] = (0.28, 0.40)
+        oriented[2] = (0.52, 0.30)
+        oriented[-1] = (1.0, 0.58)
+    elif normalized_type == "reversal_base" and "reversal" in normalized_role:
+        oriented[-1] = (1.0, 0.82)
+    elif normalized_type == "balance" and "range" in normalized_trigger:
+        oriented[-1] = (1.0, 0.58)
+
+    default_seed = _default_projected_entry_level_norm(normalized_type, normalized_direction)
+    seed_level = float(np.clip(default_seed if seed_level_norm is None else seed_level_norm, 0.08, 0.92))
+    if direction_is_buy:
+        seed_oriented = seed_level
+    elif direction_is_sell:
+        seed_oriented = 1.0 - seed_level
+    else:
+        seed_oriented = 0.5
+    seed_shift = seed_oriented - float(oriented[0][1])
+    confidence_push = 0.04 * float(np.clip(projected_confidence, 0.0, 1.0))
+
+    anchors: list[tuple[float, float]] = []
+    for idx, (progress, level) in enumerate(oriented):
+        carry = 0.58 if idx == 0 else max(0.10, 0.30 - 0.05 * idx)
+        oriented_level = float(level + seed_shift * carry)
+        if normalized_type == "impulse" and idx >= len(oriented) - 2:
+            oriented_level += confidence_push
+        elif normalized_type == "reversal_base" and idx >= len(oriented) - 2:
+            oriented_level += 0.5 * confidence_push
+        elif normalized_type == "fakeout" and idx == len(oriented) - 1:
+            oriented_level -= 0.5 * confidence_push
+        oriented_level = float(np.clip(oriented_level, 0.08, 0.92))
+        if direction_is_buy:
+            actual_level = oriented_level
+        elif direction_is_sell:
+            actual_level = 1.0 - oriented_level
+        else:
+            actual_level = 0.5
+        anchors.append((float(progress), float(np.clip(actual_level, 0.08, 0.92))))
+    return anchors
+
+
+def _interpolate_projected_price_level(
+    anchors: Sequence[tuple[float, float]],
+    progress: float,
+) -> float:
+    if not anchors:
+        return 0.5
+    clipped_progress = float(np.clip(progress, 0.0, 1.0))
+    if clipped_progress <= float(anchors[0][0]):
+        return float(anchors[0][1])
+    for left, right in zip(anchors[:-1], anchors[1:]):
+        left_x, left_y = float(left[0]), float(left[1])
+        right_x, right_y = float(right[0]), float(right[1])
+        if clipped_progress <= right_x:
+            span = max(right_x - left_x, 1e-6)
+            ratio = float(np.clip((clipped_progress - left_x) / span, 0.0, 1.0))
+            return float(left_y + (right_y - left_y) * ratio)
+    return float(anchors[-1][1])
+
+
+def _projected_candles_to_visible_candles(
+    projected_candles: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    visible_rows: list[dict[str, Any]] = []
+    for candle in projected_candles:
+        body_bbox = cast(list[float], candle.get("body_bbox", []))
+        if len(body_bbox) != 4:
+            continue
+        wick_top = float(candle.get("wick_top", body_bbox[1]) or body_bbox[1])
+        wick_bottom = float(candle.get("wick_bottom", body_bbox[3]) or body_bbox[3])
+        candle_range = max(wick_bottom - wick_top, 1.0)
+        body_height = max(float(body_bbox[3]) - float(body_bbox[1]), 1.0)
+        close_y = float(candle.get("close_y", 0.5 * (float(body_bbox[1]) + float(body_bbox[3]))))
+        visible_rows.append(
+            {
+                "bbox": [float(body_bbox[0]), wick_top, float(body_bbox[2]), wick_bottom],
+                "body_height_pct": float(np.clip(body_height / candle_range, 0.0, 1.0)),
+                "upper_wick_pct": float(np.clip((float(body_bbox[1]) - wick_top) / candle_range, 0.0, 1.0)),
+                "lower_wick_pct": float(np.clip((wick_bottom - float(body_bbox[3])) / candle_range, 0.0, 1.0)),
+                "close_pos_in_range": float(np.clip((wick_bottom - close_y) / candle_range, 0.0, 1.0)),
+                "candle_color_green": 1.0 if str(candle.get("candle_direction", "BUY")).upper() == "BUY" else 0.0,
+            }
+        )
+    return visible_rows
+
+
 def _build_projected_candle_candidates(
     *,
     projected_box: Mapping[str, Any],
@@ -4942,11 +9412,13 @@ def _build_projected_candle_candidates(
     x1, y1, x2, y2 = [float(v) for v in bbox]
     width = max(x2 - x1, 12.0)
     height = max(y2 - y1, 18.0)
+    explicit_projected_direction = str(projected_box.get("direction", "")).upper()
     projected_direction = str(projected_box.get("direction", chart_state.get("projection_bias_direction", "HOLD"))).upper()
     if projected_direction not in {"BUY", "SELL"}:
-        projected_direction = str(chart_state.get("direction", "BUY")).upper()
+        projected_direction = str(chart_state.get("direction", "HOLD")).upper()
         if projected_direction not in {"BUY", "SELL"}:
-            projected_direction = "BUY"
+            projected_direction = "HOLD"
+    direction_locked = explicit_projected_direction in {"BUY", "SELL"}
     projected_confidence = float(
         np.clip(
             projected_box.get("confidence", chart_state.get("projection_bias_confidence", 0.0)),
@@ -4956,11 +9428,51 @@ def _build_projected_candle_candidates(
     )
     projected_type = str(projected_box.get("box_type", chart_state.get("structure_setup", "balance"))).lower()
     trigger = str(projected_box.get("trigger", "")).lower()
+    ensemble_view = cast(dict[str, Any], local_ensemble.get("ensemble", {}))
+    base_direction = str(ensemble_view.get("predicted_label", chart_state.get("direction", projected_direction))).upper()
+    base_confidence = float(np.clip(ensemble_view.get("confidence", 0.0) or 0.0, 0.0, 1.0))
+    router_direction = str(ensemble_view.get("router_direction", "HOLD")).upper()
+    router_strength = float(np.clip(ensemble_view.get("router_strength", 0.0) or 0.0, 0.0, 1.0))
     council_sequence = _build_council_sequence_summary(local_ensemble)
-    council_direction = str(cast(dict[str, Any], council_sequence.get("projection_direction", {})).get("value", projected_direction)).upper()
-    council_dir_conf = float(np.clip(cast(dict[str, Any], council_sequence.get("projection_direction", {})).get("confidence", 0.0), 0.0, 1.0))
-    if council_direction in {"BUY", "SELL"} and council_dir_conf >= 0.56:
-        projected_direction = council_direction
+    council_direction, council_dir_conf = _council_sequence_value(council_sequence, "projection_direction", projected_direction)
+    council_direction = council_direction.upper()
+    next_box_direction, next_box_direction_conf = _council_sequence_value(council_sequence, "next_box_direction", projected_direction)
+    next_box_type, next_box_type_conf = _council_sequence_value(council_sequence, "next_box_type", projected_type)
+    projected_role_hint, _ = _council_sequence_value(council_sequence, "projected_role", "")
+    trigger_hint, trigger_conf = _council_sequence_value(council_sequence, "trigger", "")
+    local_phase_hint, _ = _council_sequence_value(council_sequence, "local_phase", "")
+    structure_setup_hint, structure_setup_conf = _council_sequence_value(council_sequence, "structure_setup", "")
+    if not direction_locked:
+        if (
+            council_direction in {"BUY", "SELL"}
+            and council_dir_conf >= 0.56
+            and _should_accept_council_direction_override(
+                candidate_direction=council_direction,
+                candidate_confidence=council_dir_conf,
+                base_direction=base_direction,
+                base_confidence=base_confidence,
+                router_direction=router_direction,
+                router_strength=router_strength,
+            )
+        ):
+            projected_direction = council_direction
+        elif (
+            next_box_direction.upper() in {"BUY", "SELL"}
+            and next_box_direction_conf >= 0.52
+            and _should_accept_council_direction_override(
+                candidate_direction=next_box_direction.upper(),
+                candidate_confidence=next_box_direction_conf,
+                base_direction=base_direction,
+                base_confidence=base_confidence,
+                router_direction=router_direction,
+                router_strength=router_strength,
+            )
+        ):
+            projected_direction = next_box_direction.upper()
+    if next_box_type and next_box_type_conf >= 0.54:
+        projected_type = next_box_type.lower()
+    if trigger_hint and trigger_conf >= 0.50:
+        trigger = trigger_hint.lower()
 
     next_buy = _detection_confidence(detections, "next_candle_buy")
     next_sell = _detection_confidence(detections, "next_candle_sell")
@@ -4975,7 +9487,18 @@ def _build_projected_candle_candidates(
     if not projected_role:
         projected_role = str(swing_state.get("projected_role", "")).lower()
     if not projected_role:
-        projected_role = str(cast(dict[str, Any], council_sequence.get("projected_role", {})).get("value", "")).lower()
+        projected_role = projected_role_hint.lower()
+    if structure_setup_hint and structure_setup_conf >= 0.52:
+        projected_role = structure_setup_hint.lower()
+
+    breakout_bias = bool("breakout" in trigger or "breakout" in structure_setup_hint.lower())
+    reversal_bias = bool("reversal" in projected_role or "reversal" in trigger or "reversal" in structure_setup_hint.lower())
+    impulse_bias = bool(
+        projected_type == "impulse"
+        or "impulse" in projected_role
+        or "impulse" in structure_setup_hint.lower()
+        or local_phase_hint.lower() in {"with_trend_push", "continuation_base"}
+    )
 
     if projected_type == "balance":
         candle_count = 3 if width >= 90.0 else 2
@@ -4983,11 +9506,15 @@ def _build_projected_candle_candidates(
     elif projected_type == "pullback":
         candle_count = 2
         body_classes = ["small", "medium"]
-    elif projected_type == "reversal_base":
+    elif projected_type == "reversal_base" or reversal_bias:
         candle_count = 2
         body_classes = ["small", "expansion"]
     else:
         candle_count = 2 if move_small >= max(move_medium, move_large) and projected_confidence < 0.74 else 1
+        body_classes = ["expansion"] + (["medium"] if candle_count > 1 else [])
+
+    if breakout_bias or (impulse_bias and projected_confidence >= 0.58):
+        candle_count = 1 if projected_confidence >= 0.72 else max(2, candle_count)
         body_classes = ["expansion"] + (["medium"] if candle_count > 1 else [])
 
     if move_large >= max(move_medium, move_small):
@@ -5000,39 +9527,122 @@ def _build_projected_candle_candidates(
         wick_bias = "lower"
     elif wick_upper > wick_lower + 0.06:
         wick_bias = "upper"
-    elif projected_type == "reversal_base":
+    elif projected_type == "reversal_base" or reversal_bias:
         wick_bias = "lower" if projected_direction == "BUY" else "upper"
+    elif breakout_bias:
+        wick_bias = "balanced"
 
     direction_hint_conf = max(
         projected_confidence,
         next_buy if projected_direction == "BUY" else next_sell,
         council_dir_conf,
+        next_box_direction_conf,
     )
-    slot_gap = max(4.0, width * 0.06)
-    usable_width = max(width - slot_gap * max(candle_count - 1, 0), 12.0)
-    slot_width = max(8.0, usable_width / max(candle_count, 1))
-    candidates: list[dict[str, Any]] = []
-    for idx in range(candle_count):
-        progress = float(idx / max(candle_count - 1, 1)) if candle_count > 1 else 0.5
-        body_class = body_classes[min(idx, len(body_classes) - 1)]
-        body_scale = 0.26 if body_class == "small" else (0.44 if body_class == "medium" else 0.66)
-        candle_span = height * (0.50 if projected_type == "balance" else 0.72)
-        if body_class == "expansion":
-            candle_span = height * 0.82
-        center_y = y1 + height * (
-            0.64 - 0.22 * progress if projected_direction == "BUY" else 0.36 + 0.22 * progress
+    cadence = _estimate_projected_candle_cadence(
+        sequence_state,
+        fallback_width=width,
+        fallback_height=height,
+    )
+    median_width = float(cadence["median_width"])
+    median_spacing = float(cadence["median_spacing"])
+    median_range = float(cadence["median_range"])
+    seed_level_norm: float | None
+    try:
+        raw_seed = projected_box.get("entry_level_norm", sequence_state.get("projection_seed_level_norm"))
+        seed_level_norm = None if raw_seed is None else float(raw_seed)
+    except Exception:
+        seed_level_norm = None
+    path_anchors = _projected_box_path_anchors(
+        projected_type=projected_type,
+        projected_direction=projected_direction,
+        projected_confidence=projected_confidence,
+        projected_role=projected_role,
+        trigger=trigger,
+        seed_level_norm=seed_level_norm,
+    )
+    if seed_level_norm is None:
+        seed_level_norm = float(path_anchors[0][1]) if path_anchors else _default_projected_entry_level_norm(projected_type, projected_direction)
+
+    min_candles = 5 if projected_type in {"balance", "reversal_base"} else 4
+    if width < median_spacing * 3.1:
+        min_candles = 3
+    max_candles = 8 if projected_type in {"balance", "reversal_base"} else 7
+    natural_count = int(
+        np.clip(
+            np.floor((width + median_spacing * 0.35) / max(median_spacing, 1.0)),
+            1,
+            max_candles,
         )
-        body_height = max(8.0, candle_span * body_scale)
-        body_top = float(np.clip(center_y - body_height * 0.5, y1 + 2.0, y2 - 6.0))
-        body_bottom = float(np.clip(body_top + body_height, body_top + 4.0, y2 - 2.0))
-        slot_left = x1 + idx * (slot_width + slot_gap)
-        slot_right = min(x2, slot_left + slot_width)
-        center_x = 0.5 * (slot_left + slot_right)
-        body_width = max(6.0, slot_width * (0.42 if body_class == "small" else (0.54 if body_class == "medium" else 0.66)))
+    )
+    candle_count = int(np.clip(max(candle_count, natural_count, min_candles), 3, max_candles))
+    body_classes = _expand_projected_body_classes(projected_type, body_classes, candle_count)
+
+    usable_left = x1 + max(3.0, median_width * 0.55)
+    usable_right = x2 - max(3.0, median_width * 0.55)
+    if usable_right <= usable_left:
+        usable_left = x1 + 2.0
+        usable_right = x2 - 2.0
+    span_budget = max(usable_right - usable_left, 1.0)
+    center_step = float(max(span_budget / max(candle_count - 1, 1), max(5.0, median_width * 1.04))) if candle_count > 1 else 0.0
+    total_span = center_step * max(candle_count - 1, 0)
+    if candle_count == 1:
+        start_center = float(np.clip(0.5 * (usable_left + usable_right), usable_left, usable_right))
+    else:
+        start_center = float(np.clip(usable_left, usable_left, max(usable_left, usable_right - total_span)))
+    candidates: list[dict[str, Any]] = []
+    previous_close_level = float(seed_level_norm)
+    for idx in range(candle_count):
+        progress = float((idx + 1) / max(candle_count, 1))
+        body_class = body_classes[min(idx, len(body_classes) - 1)]
+        close_level = float(_interpolate_projected_price_level(path_anchors, progress))
+        open_level = float(previous_close_level)
+        candle_direction = "BUY" if close_level >= open_level else "SELL"
+        range_scale = 0.84 if projected_type == "balance" else (0.92 if projected_type == "pullback" else 1.04)
+        if projected_type == "impulse":
+            range_scale = 1.10
+        if body_class == "expansion":
+            range_scale += 0.10
+        if move_large >= max(move_medium, move_small):
+            range_scale += 0.08
+        elif move_small >= max(move_medium, move_large):
+            range_scale -= 0.05
+        candle_span = float(np.clip(median_range * range_scale * (0.66 + 0.20 * projected_confidence), 10.0, height * (0.72 if candle_count <= 4 else 0.58)))
+        center_x = float(start_center + idx * center_step if candle_count > 1 else start_center)
+
+        body_width_factor = 0.64 if body_class == "small" else (0.80 if body_class == "medium" else 0.92)
+        body_width = float(
+            np.clip(
+                min(median_width * body_width_factor * 1.08, max(center_step * (0.54 if candle_count > 1 else 0.72), 4.0)),
+                4.0,
+                min(max(center_step * 0.72, 4.0), max(width - 2.0, 4.0)),
+            )
+        )
         body_x1 = float(np.clip(center_x - body_width * 0.5, x1 + 1.0, x2 - 7.0))
         body_x2 = float(np.clip(body_x1 + body_width, body_x1 + 4.0, x2 - 1.0))
-        upper_wick = candle_span * (0.18 if wick_bias == "lower" else (0.36 if wick_bias == "upper" else 0.26))
-        lower_wick = candle_span * (0.18 if wick_bias == "upper" else (0.36 if wick_bias == "lower" else 0.26))
+
+        open_y = float(np.clip(y2 - open_level * max(height - 2.0, 1.0), y1 + 1.0, y2 - 1.0))
+        close_y = float(np.clip(y2 - close_level * max(height - 2.0, 1.0), y1 + 1.0, y2 - 1.0))
+        raw_body_height = max(abs(close_y - open_y), 0.0)
+        body_height = max(4.0, raw_body_height)
+        body_mid = 0.5 * (open_y + close_y)
+        body_top = float(np.clip(body_mid - body_height * 0.5, y1 + 1.0, y2 - body_height - 1.0))
+        body_bottom = float(np.clip(body_top + body_height, body_top + 2.0, y2 - 1.0))
+
+        if wick_bias == "lower":
+            upper_share, lower_share = 0.36, 0.64
+        elif wick_bias == "upper":
+            upper_share, lower_share = 0.64, 0.36
+        else:
+            upper_share = lower_share = 0.50
+        if candle_direction == "BUY":
+            lower_share = min(0.74, lower_share + 0.06)
+            upper_share = max(0.26, 1.0 - lower_share)
+        else:
+            upper_share = min(0.74, upper_share + 0.06)
+            lower_share = max(0.26, 1.0 - upper_share)
+        wick_budget = max(candle_span - body_height, 4.0)
+        upper_wick = max(2.0, wick_budget * upper_share)
+        lower_wick = max(2.0, wick_budget * lower_share)
         wick_top = float(np.clip(body_top - upper_wick, y1 + 1.0, body_top))
         wick_bottom = float(np.clip(body_bottom + lower_wick, body_bottom, y2 - 1.0))
         pattern_family = _projected_pattern_family(
@@ -5048,12 +9658,34 @@ def _build_projected_candle_candidates(
                 + 0.18 * projected_confidence
                 + 0.14 * (1.0 if body_class == "expansion" and projected_type == "impulse" else 0.0)
                 + 0.10 * max(move_small, move_medium, move_large)
-                + 0.08 * float(cast(dict[str, Any], council_sequence.get("next_box_type", {})).get("value", "") == projected_type)
-                + 0.08 * float(cast(dict[str, Any], council_sequence.get("next_box_direction", {})).get("value", "") == projected_direction),
+                + 0.08 * float(str(council_sequence.get("next_box_type", {}).get("value", "")).lower() == projected_type)
+                + 0.08 * float(str(council_sequence.get("next_box_direction", {}).get("value", "")).upper() == projected_direction),
                 0.0,
                 1.0,
             )
         )
+        # Snap all coordinates to integer pixel grid for precise overlay alignment
+        center_x_snapped = int(np.round(center_x))
+        body_x1_snapped = int(np.round(body_x1))
+        body_x2_snapped = int(np.round(body_x2))
+        body_top_snapped = int(np.round(body_top))
+        body_bottom_snapped = int(np.round(body_bottom))
+        wick_top_snapped = int(np.round(wick_top))
+        wick_bottom_snapped = int(np.round(wick_bottom))
+
+        # Ensure minimum dimensions after snapping
+        body_x2_snapped = max(body_x2_snapped, body_x1_snapped + 3)
+        body_bottom_snapped = max(body_bottom_snapped, body_top_snapped + 3)
+
+        # Clamp snapped values to box bounds
+        center_x_snapped = int(np.clip(center_x_snapped, int(x1), int(x2)))
+        body_x1_snapped = int(np.clip(body_x1_snapped, int(x1), int(x2) - 3))
+        body_x2_snapped = int(np.clip(body_x2_snapped, body_x1_snapped + 3, int(x2)))
+        body_top_snapped = int(np.clip(body_top_snapped, int(y1), int(y2) - 3))
+        body_bottom_snapped = int(np.clip(body_bottom_snapped, body_top_snapped + 3, int(y2)))
+        wick_top_snapped = int(np.clip(wick_top_snapped, int(y1), body_top_snapped))
+        wick_bottom_snapped = int(np.clip(wick_bottom_snapped, body_bottom_snapped, int(y2)))
+
         candidates.append(
             {
                 "index": idx + 1,
@@ -5062,13 +9694,90 @@ def _build_projected_candle_candidates(
                 "wick_bias": wick_bias,
                 "pattern_family": pattern_family,
                 "confidence": candidate_conf,
-                "center_x": center_x,
-                "body_bbox": [body_x1, body_top, body_x2, body_bottom],
-                "wick_top": wick_top,
-                "wick_bottom": wick_bottom,
+                "center_x": float(center_x_snapped),
+                "candle_direction": candle_direction,
+                "open_level_norm": open_level,
+                "close_level_norm": close_level,
+                "open_y": open_y,
+                "close_y": close_y,
+                "body_bbox": [float(body_x1_snapped), float(body_top_snapped), float(body_x2_snapped), float(body_bottom_snapped)],
+                "wick_top": float(wick_top_snapped),
+                "wick_bottom": float(wick_bottom_snapped),
             }
         )
+        previous_close_level = close_level
     return candidates
+
+
+def _score_projected_box_with_council(
+    projected_box: Mapping[str, Any],
+    *,
+    projected_candles: Sequence[Mapping[str, Any]],
+    council_sequence: Mapping[str, Mapping[str, Any]],
+    chart_state: Mapping[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    base_confidence = float(np.clip(projected_box.get("confidence", 0.0), 0.0, 1.0))
+    direction = str(projected_box.get("direction", chart_state.get("projection_bias_direction", "HOLD"))).upper()
+    box_type = str(projected_box.get("box_type", chart_state.get("structure_setup", "balance"))).lower()
+    trigger = str(projected_box.get("trigger", "")).lower()
+    chart_direction = str(chart_state.get("direction", "HOLD")).upper()
+    continuation_probability = float(np.clip(chart_state.get("continuation_probability", 0.0), 0.0, 1.0))
+    reversal_probability = float(np.clip(chart_state.get("reversal_probability", 0.0), 0.0, 1.0))
+    fakeout_probability = float(np.clip(chart_state.get("fakeout_probability", 0.0), 0.0, 1.0))
+    path_clarity = float(np.clip(chart_state.get("path_clarity", 0.0), 0.0, 1.0))
+    next_box_direction, next_box_direction_conf = _council_sequence_value(council_sequence, "next_box_direction", "")
+    next_box_type, next_box_type_conf = _council_sequence_value(council_sequence, "next_box_type", "")
+    trigger_hint, trigger_conf = _council_sequence_value(council_sequence, "trigger", "")
+    projected_role_hint, projected_role_conf = _council_sequence_value(council_sequence, "projected_role", "")
+    structure_setup_hint, structure_setup_conf = _council_sequence_value(council_sequence, "structure_setup", "")
+
+    alignment = 0.0
+    if next_box_direction.upper() in {"BUY", "SELL"} and next_box_direction.upper() == direction:
+        alignment += 0.26 * next_box_direction_conf
+    if next_box_type and next_box_type.lower() == box_type:
+        alignment += 0.24 * next_box_type_conf
+    if trigger_hint and trigger and trigger_hint.lower() == trigger:
+        alignment += 0.14 * trigger_conf
+    if structure_setup_hint and box_type in structure_setup_hint.lower():
+        alignment += 0.12 * structure_setup_conf
+    if projected_candles:
+        lead_family = str(projected_candles[0].get("pattern_family", "")).lower()
+        lead_direction = str(projected_candles[0].get("direction", direction)).upper()
+        if lead_direction == direction:
+            alignment += 0.10
+        if projected_role_hint and (
+            projected_role_hint.lower() in lead_family
+            or lead_family in projected_role_hint.lower()
+        ):
+            alignment += 0.14 * projected_role_conf
+
+    # Council cues should refine the sequence ranking, not erase it. The previous
+    # multiplicative rerank penalized low-alignment boxes and could over-promote
+    # aligned fakeouts above stronger base projections.
+    boost_scale = 0.20
+    if box_type == "fakeout" or "fakeout" in trigger:
+        boost_scale = 0.12
+    elif box_type == "balance":
+        boost_scale = 0.16
+    boosted_confidence = float(np.clip(base_confidence + boost_scale * alignment, base_confidence, 1.0))
+    if (
+        (box_type == "fakeout" or "fakeout" in trigger)
+        and chart_direction in {"BUY", "SELL"}
+        and direction in {"BUY", "SELL"}
+        and direction != chart_direction
+    ):
+        dominant_structural_prob = max(continuation_probability, reversal_probability)
+        if fakeout_probability + 0.08 < dominant_structural_prob:
+            support_ratio = float(np.clip(fakeout_probability / max(dominant_structural_prob, 1e-6), 0.0, 1.0))
+            damp_scale = float(np.clip(0.84 + 0.16 * support_ratio - 0.04 * path_clarity, 0.72, 0.94))
+            boosted_confidence = float(np.clip(boosted_confidence * damp_scale, 0.0, 1.0))
+    return boosted_confidence, {
+        "alignment": float(np.clip(alignment, 0.0, 1.0)),
+        "next_box_direction": next_box_direction.upper(),
+        "next_box_type": next_box_type.lower(),
+        "trigger": trigger_hint.lower(),
+        "projected_role": projected_role_hint.lower(),
+    }
 
 
 def _enrich_next_box_hypotheses_with_projected_candles(
@@ -5079,6 +9788,7 @@ def _enrich_next_box_hypotheses_with_projected_candles(
     sequence_state: Mapping[str, Any],
     local_ensemble: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
+    council_sequence = _build_council_sequence_summary(local_ensemble)
     enriched: list[dict[str, Any]] = []
     for hypothesis in next_box_hypotheses:
         row = dict(hypothesis)
@@ -5090,7 +9800,28 @@ def _enrich_next_box_hypotheses_with_projected_candles(
             local_ensemble=local_ensemble,
         )
         row["projected_candles"] = projected_candles
+        reranked_confidence, council_alignment = _score_projected_box_with_council(
+            row,
+            projected_candles=projected_candles,
+            council_sequence=council_sequence,
+            chart_state=chart_state,
+        )
+        row["confidence"] = reranked_confidence
+        row["council_alignment"] = council_alignment
         if projected_candles:
+            existing_path = cast(list[list[float]], row.get("path_points", []))
+            path_prefix = existing_path[:-1] if len(existing_path) >= 1 else existing_path
+            candle_path = [
+                [
+                    float(candle.get("center_x", 0.0) or 0.0),
+                    float(candle.get("close_y", 0.5 * (cast(list[float], candle.get("body_bbox", [0.0, 0.0, 0.0, 0.0]))[1] + cast(list[float], candle.get("body_bbox", [0.0, 0.0, 0.0, 0.0]))[3]))),
+                ]
+                for candle in projected_candles
+            ]
+            if candle_path:
+                row["path_points"] = path_prefix + candle_path
+            row["entry_level_norm"] = float(projected_candles[0].get("open_level_norm", 0.5) or 0.5)
+            row["exit_level_norm"] = float(projected_candles[-1].get("close_level_norm", 0.5) or 0.5)
             row["projected_candle_summary"] = {
                 "count": int(len(projected_candles)),
                 "pattern_family": str(projected_candles[0].get("pattern_family", "")),
@@ -5098,7 +9829,266 @@ def _enrich_next_box_hypotheses_with_projected_candles(
                 "confidence": float(np.mean(np.asarray([candle.get("confidence", 0.0) for candle in projected_candles], dtype=np.float32))),
             }
         enriched.append(row)
+    enriched.sort(
+        key=lambda item: (
+            float(item.get("confidence", 0.0) or 0.0),
+            float(cast(dict[str, Any], item.get("council_alignment", {})).get("alignment", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+    for idx, row in enumerate(enriched):
+        next_conf = float(enriched[idx + 1].get("confidence", 0.0) or 0.0) if idx + 1 < len(enriched) else 0.0
+        confidence = float(np.clip(row.get("confidence", 0.0), 0.0, 1.0))
+        dominance_gap = float(np.clip(confidence - next_conf, 0.0, 1.0))
+        row["rank"] = idx + 1
+        row["dominance_gap"] = dominance_gap
+        row["directional_bias"] = float(np.clip(0.70 * confidence + 0.30 * dominance_gap, 0.0, 1.0))
     return enriched
+
+
+def _projected_box_consolidation_score(box_type: str) -> float:
+    normalized = str(box_type or "balance").lower()
+    if normalized == "impulse":
+        return 0.18
+    if normalized == "pullback":
+        return 0.38
+    if normalized == "reversal_base":
+        return 0.46
+    if normalized == "fakeout":
+        return 0.54
+    return 0.62
+
+
+def _transition_probs_after_projected_box(
+    projected_box: Mapping[str, Any],
+    *,
+    sequence_state: Mapping[str, Any],
+) -> dict[str, float]:
+    box_type = str(projected_box.get("box_type", "balance")).lower()
+    direction = str(projected_box.get("direction", "HOLD")).upper()
+    prev_direction = str(cast(dict[str, Any], sequence_state.get("current_box", {})).get("direction", direction)).upper()
+    prev_probs = _normalize_transition_keys(
+        {
+            "continue": sequence_state.get("continuation_probability", 0.25),
+            "pullback": sequence_state.get("pullback_probability", 0.25),
+            "reversal_attempt": sequence_state.get("reversal_probability", 0.25),
+            "fakeout": sequence_state.get("fakeout_probability", 0.25),
+        }
+    )
+    if box_type == "impulse":
+        template = {
+            "continue": 0.42 if direction == prev_direction else 0.36,
+            "pullback": 0.34 if direction == prev_direction else 0.22,
+            "reversal_attempt": 0.10 if direction == prev_direction else 0.24,
+            "fakeout": 0.14 if direction == prev_direction else 0.18,
+        }
+    elif box_type == "pullback":
+        template = {
+            "continue": 0.48,
+            "pullback": 0.26,
+            "reversal_attempt": 0.16,
+            "fakeout": 0.10,
+        }
+    elif box_type == "reversal_base":
+        template = {
+            "continue": 0.26,
+            "pullback": 0.12,
+            "reversal_attempt": 0.50,
+            "fakeout": 0.12,
+        }
+    elif box_type == "fakeout":
+        template = {
+            "continue": 0.16,
+            "pullback": 0.16,
+            "reversal_attempt": 0.18,
+            "fakeout": 0.50,
+        }
+    else:
+        template = {
+            "continue": 0.28,
+            "pullback": 0.22,
+            "reversal_attempt": 0.14,
+            "fakeout": 0.36,
+        }
+    blended = {
+        key: float(np.clip(0.38 * prev_probs[key] + 0.62 * template[key], 0.0, 1.0))
+        for key in template
+    }
+    total = sum(blended.values())
+    if total <= 1e-9:
+        return {"continue": 0.25, "pullback": 0.25, "reversal_attempt": 0.25, "fakeout": 0.25}
+    return {key: float(value / total) for key, value in blended.items()}
+
+
+def _projected_box_to_history_row(
+    projected_box: Mapping[str, Any],
+    *,
+    sequence_index: int,
+    horizon_step: int,
+) -> dict[str, Any]:
+    bbox = [float(v) for v in cast(list[float], projected_box.get("bbox", [0.0, 0.0, 0.0, 0.0]))]
+    box_type = str(projected_box.get("box_type", "balance")).lower()
+    confidence = float(np.clip(projected_box.get("confidence", 0.0), 0.0, 1.0))
+    consolidation_score = _projected_box_consolidation_score(box_type)
+    maturity = float(np.clip(0.46 + 0.20 * confidence - 0.05 * max(horizon_step - 1, 0), 0.24, 0.86))
+    return {
+        "sequence_index": sequence_index,
+        "box_type": box_type,
+        "direction": str(projected_box.get("direction", "HOLD")).upper(),
+        "shape": "projected",
+        "confidence": confidence,
+        "bbox": bbox,
+        "maturity": maturity,
+        "price_span": max(1.0, bbox[3] - bbox[1]) if len(bbox) == 4 else 1.0,
+        "consolidation_score": consolidation_score,
+        "contains_consolidation": bool(box_type == "balance" or consolidation_score >= 0.52),
+        "trigger": str(projected_box.get("trigger", "")),
+        "projection_step": horizon_step,
+        "empty_projection": True,
+    }
+
+
+def _build_projection_chain_boxes(
+    *,
+    base_hypotheses: Sequence[Mapping[str, Any]],
+    detections: Sequence[Mapping[str, Any]],
+    chart_state: Mapping[str, Any],
+    sequence_state: Mapping[str, Any],
+    chart_geometry: Mapping[str, Any],
+    local_ensemble: Mapping[str, Any],
+    market_state: Mapping[str, Any] | None = None,
+    memory_summary: Mapping[str, Any] | None = None,
+    memory_episode_matches: Sequence[Mapping[str, Any]] | None = None,
+    depth: int = 4,
+) -> list[dict[str, Any]]:
+    if depth <= 0:
+        return []
+    working_box_history = [dict(box) for box in cast(list[dict[str, Any]], sequence_state.get("box_history", []))]
+    if not working_box_history:
+        return []
+    working_state: dict[str, Any] = dict(sequence_state)
+    working_state["box_history"] = working_box_history
+    working_state["current_box"] = dict(working_box_history[-1])
+    working_state["all_visible_candles"] = [
+        dict(candle) for candle in cast(list[dict[str, Any]], sequence_state.get("all_visible_candles", []))
+    ]
+    chain: list[dict[str, Any]] = []
+    step_candidates: list[dict[str, Any]] = [dict(row) for row in base_hypotheses]
+    current_index = max(int(box.get("sequence_index", 0) or 0) for box in working_box_history)
+
+    for step in range(depth):
+        if not step_candidates:
+            break
+        chosen = dict(step_candidates[0])
+        if "projected_candles" not in chosen:
+            chosen["projected_candles"] = _build_projected_candle_candidates(
+                projected_box=chosen,
+                detections=detections,
+                chart_state=chart_state,
+                sequence_state=working_state,
+                local_ensemble=local_ensemble,
+            )
+        chosen["rank"] = step + 1
+        chosen["projection_step"] = step + 1
+        chosen["confidence"] = float(
+            np.clip(float(chosen.get("confidence", 0.0) or 0.0) * (0.96 ** step), 0.18, 0.96)
+        )
+        next_conf = float(step_candidates[1].get("confidence", 0.0) or 0.0) if len(step_candidates) > 1 else 0.0
+        chosen["dominance_gap"] = float(np.clip(float(chosen.get("confidence", 0.0)) - next_conf, 0.0, 1.0))
+        chosen["empty_projection"] = True
+        chain.append(chosen)
+
+        current_index += 1
+        synthetic_box = _projected_box_to_history_row(
+            chosen,
+            sequence_index=current_index,
+            horizon_step=step + 1,
+        )
+        working_box_history.append(synthetic_box)
+        working_box_history = working_box_history[-8:]
+        working_state["box_history"] = working_box_history
+        working_state["current_box"] = synthetic_box
+        working_state["primary_next_box"] = dict(chosen)
+        working_state["recent_box_consolidation"] = float(synthetic_box.get("consolidation_score", 0.0) or 0.0)
+        working_state["has_active_consolidation"] = bool(synthetic_box.get("contains_consolidation", False))
+        working_state["projection_seed_level_norm"] = float(chosen.get("exit_level_norm", working_state.get("projection_seed_level_norm", 0.5)) or 0.5)
+        projected_visible_candles = _projected_candles_to_visible_candles(
+            cast(list[dict[str, Any]], chosen.get("projected_candles", []))
+        )
+        visible_candles = [
+            dict(candle) for candle in cast(list[dict[str, Any]], working_state.get("all_visible_candles", []))
+        ]
+        if projected_visible_candles:
+            visible_candles.extend(projected_visible_candles)
+            working_state["all_visible_candles"] = visible_candles[-96:]
+            recent_visible = working_state["all_visible_candles"][-25:]
+            working_state["recent_colors"] = [
+                "green" if float(candle.get("candle_color_green", 0.0) or 0.0) >= 0.5 else "red"
+                for candle in recent_visible
+            ]
+            working_state["recent_body_pcts"] = [
+                float(np.clip(candle.get("body_height_pct", 0.0), 0.0, 1.0)) for candle in recent_visible
+            ]
+            working_state["recent_upper_wicks"] = [
+                float(np.clip(candle.get("upper_wick_pct", 0.0), 0.0, 1.0)) for candle in recent_visible
+            ]
+            working_state["recent_lower_wicks"] = [
+                float(np.clip(candle.get("lower_wick_pct", 0.0), 0.0, 1.0)) for candle in recent_visible
+            ]
+        next_probs = _transition_probs_after_projected_box(chosen, sequence_state=working_state)
+        working_state["continuation_probability"] = float(next_probs["continue"])
+        working_state["pullback_probability"] = float(next_probs["pullback"])
+        working_state["reversal_probability"] = float(next_probs["reversal_attempt"])
+        working_state["fakeout_probability"] = float(next_probs["fakeout"])
+        working_state["path_clarity"] = float(
+            np.clip(
+                0.78 * float(chosen.get("path_clarity", working_state.get("path_clarity", 0.0)) or 0.0)
+                + 0.16 * float(chosen.get("confidence", 0.0) or 0.0)
+                - 0.03 * step,
+                0.18,
+                0.92,
+            )
+        )
+        working_state["box_sequence_agreement"] = float(
+            np.clip(
+                0.82 * float(working_state.get("box_sequence_agreement", 0.0) or 0.0)
+                + 0.18 * float(chosen.get("confidence", 0.0) or 0.0),
+                0.18,
+                0.96,
+            )
+        )
+        working_state["trend_regime"] = _summarize_trend_regime(
+            working_box_history,
+            working_state,
+            market_state=market_state,
+        )
+
+        future_chart_state = dict(chart_state)
+        future_chart_state["direction"] = str(chosen.get("direction", chart_state.get("direction", "HOLD"))).upper()
+        future_chart_state["projection_bias_direction"] = str(chosen.get("direction", future_chart_state.get("projection_bias_direction", "HOLD"))).upper()
+        future_chart_state["projection_bias_confidence"] = float(chosen.get("confidence", future_chart_state.get("projection_bias_confidence", 0.0)) or 0.0)
+        future_chart_state["projection_dominance"] = float(chosen.get("dominance_gap", future_chart_state.get("projection_dominance", 0.0)) or 0.0)
+        future_chart_state["projected_next_box"] = dict(chosen)
+        future_chart_state["structure_setup"] = str(chosen.get("trigger", future_chart_state.get("structure_setup", "none")) or "none")
+        if step + 1 >= depth:
+            break
+        step_candidates = _build_next_box_hypotheses(
+            working_box_history,
+            working_state,
+            chart_geometry,
+            market_state=market_state,
+            memory_summary=memory_summary,
+            memory_episode_matches=memory_episode_matches,
+        )
+        step_candidates = _enrich_next_box_hypotheses_with_projected_candles(
+            step_candidates,
+            detections=detections,
+            chart_state=future_chart_state,
+            sequence_state=working_state,
+            local_ensemble=local_ensemble,
+        )
+
+    return chain
 
 
 def _build_chart_state(
@@ -5114,11 +10104,13 @@ def _build_chart_state(
     grounded_structure = cast(dict[str, Any], grounded_chart.get("structure_summary", {}))
     sequence_model = cast(dict[str, Any], sequence_state.get("sequence_model", {}))
     ensemble_view = cast(dict[str, Any], local_ensemble.get("ensemble", {}))
+    council_sequence = _build_council_sequence_summary(local_ensemble)
+    council_profile = _build_council_influence_profile(local_ensemble, council_sequence=council_sequence)
     market_state = cast(dict[str, Any], reasoning_trace.get("market_state", {}))
     direction = str(ensemble_view.get("predicted_label", "HOLD")).upper()
     direction_probability = float(ensemble_view.get("confidence", 0.5) or 0.5)
     local_phase = str(market_state.get("local_phase", "continuation_base"))
-    macro_trend = str(market_state.get("macro_trend", "BULL"))
+    macro_trend = str(market_state.get("macro_trend", "unknown"))
     recent_colors = cast(list[str], sequence_state.get("recent_colors", []))
     box_history = cast(list[dict[str, Any]], sequence_state.get("box_history", []))
 
@@ -5141,7 +10133,27 @@ def _build_chart_state(
     projection_alignment = float(1.0 if projected_direction == direction else 0.0)
     projected_box_confidence = float(np.clip(projected_next_box.get("confidence", 0.0), 0.0, 1.0))
     projection_dominance = float(np.clip(projected_next_box.get("dominance_gap", 0.0), 0.0, 1.0))
-    projection_bias_confidence = float(np.clip(0.68 * projected_box_confidence + 0.32 * projection_dominance, 0.0, 1.0))
+    council_projection_alignment = float(
+        1.0
+        if projected_direction in {"BUY", "SELL"}
+        and str(council_profile.get("projection_direction", "HOLD")).upper() == projected_direction
+        else 0.0
+    )
+    base_projection_bias_confidence = float(np.clip(0.68 * projected_box_confidence + 0.32 * projection_dominance, 0.0, 1.0))
+    projection_bias_confidence = float(
+        np.clip(
+            base_projection_bias_confidence
+            + 0.10 * float(council_profile.get("projection_confidence", 0.0)) * council_projection_alignment
+            + 0.06 * float(council_profile.get("bias_confidence", 0.0)) * float(
+                str(council_profile.get("bias_direction", "HOLD")).upper() == projected_direction
+            )
+            + 0.06 * float(council_profile.get("router_strength", 0.0)) * float(
+                str(council_profile.get("router_direction", "HOLD")).upper() == projected_direction
+            ),
+            0.0,
+            1.0,
+        )
+    )
     projection_explanation = str(projected_next_box.get("explanation", "")).strip()
     swing_state = cast(
         dict[str, Any],
@@ -5152,6 +10164,27 @@ def _build_chart_state(
     )
     current_box_confidence = float(np.clip(current_box.get("confidence", 0.0), 0.0, 1.0))
     current_box_maturity = float(np.clip(current_box.get("maturity", 0.0), 0.0, 1.0))
+    trend_regime = cast(
+        dict[str, Any],
+        sequence_state.get(
+            "trend_regime",
+            _summarize_trend_regime(box_history, sequence_state, market_state=market_state),
+        ),
+    )
+    trend_direction = str(trend_regime.get("trend_direction", current_box_dir)).upper()
+    trend_strength = float(np.clip(trend_regime.get("trend_strength", 0.0), 0.0, 1.0))
+    pullback_depth = float(np.clip(trend_regime.get("pullback_depth", 0.0), 0.0, 1.2))
+    continuation_reload_score = float(np.clip(trend_regime.get("continuation_reload_score", 0.0), 0.0, 1.0))
+    reversal_risk = float(np.clip(trend_regime.get("reversal_risk", 0.0), 0.0, 1.0))
+    trend_phase = str(trend_regime.get("trend_phase", "transition"))
+    candle_group_summary = _summarize_candle_group(
+        recent_colors=recent_colors,
+        current_box=current_box,
+        projected_next_box=projected_next_box,
+        trend_regime=trend_regime,
+        chart_geometry=chart_geometry,
+        sequence_state=sequence_state,
+    )
 
     entry_type = "reversal" if local_phase in {"counter_trend_spike", "reversal_base"} or current_box_type == "reversal_base" else "continuation"
     reversal_signal = "wick_rejection" if entry_type == "reversal" else "none"
@@ -5166,7 +10199,12 @@ def _build_chart_state(
         continuation_signal = "range_break_watch"
     if current_box_type == "reversal_base" and projected_box_type == "impulse" and projected_direction == current_box_dir:
         continuation_signal = "reversal_release"
-    momentum_bias = "bullish" if (macro_trend == "BULL" or current_box_dir == "BUY" and continuation_prob >= reversal_prob) else "bearish"
+    if macro_trend == "BULL" or (current_box_dir == "BUY" and continuation_prob >= reversal_prob):
+        momentum_bias = "bullish"
+    elif macro_trend == "BEAR" or (current_box_dir == "SELL" and reversal_prob > continuation_prob):
+        momentum_bias = "bearish"
+    else:
+        momentum_bias = "neutral"
     entry_color = "green" if direction == "BUY" else ("red" if direction == "SELL" else "neutral")
     body_pct = float(chart_geometry.get("body_height_pct", 0.0) or 0.0)
 
@@ -5259,7 +10297,25 @@ def _build_chart_state(
         if consolidation_breakout_ready
         else ("impulse_chain" if impulse_chain_ready else ("reversal_release" if reversal_release_ready else "none"))
     )
+    structure_setup_core = structure_setup
+    structure_trade_ready_core = bool(structure_setup_core != "none")
+    council_structure_setup = str(council_profile.get("structure_setup", "none") or "none").lower()
+    council_structure_confidence = float(np.clip(council_profile.get("structure_confidence", 0.0), 0.0, 1.0))
+    council_ready_candidate = bool(
+        not structure_trade_ready_core
+        and council_structure_setup in {"consolidation_breakout", "impulse_chain", "reversal_release"}
+        and council_structure_confidence >= 0.66
+        and float(council_profile.get("projection_confidence", 0.0)) >= 0.58
+        and float(council_profile.get("alignment_score", 0.0)) >= 0.56
+        and path_clarity >= 0.48
+        and box_sequence_agreement >= 0.38
+        and current_box_confidence >= 0.68
+        and str(council_profile.get("bias_direction", "HOLD")).upper() in {direction, projected_direction}
+    )
+    if council_ready_candidate:
+        structure_setup = council_structure_setup
     structure_trade_ready = bool(structure_setup != "none")
+    structure_setup_source = "council" if council_ready_candidate else "sequence"
 
     return {
         "entry_type": entry_type,
@@ -5274,6 +10330,7 @@ def _build_chart_state(
         "consolidation_score": consolidation_score,
         "color_flip_rate": color_flip_rate,
         "small_body_ratio": small_body_ratio,
+        "candle_group_summary": candle_group_summary,
         "entry_candle": {
             "body_pct": body_pct,
             "upper_wick_pct": float(chart_geometry.get("upper_wick_pct", 0.0) or 0.0),
@@ -5309,9 +10366,20 @@ def _build_chart_state(
         "projection_bias_direction": projected_direction,
         "projection_bias_confidence": projection_bias_confidence,
         "projection_dominance": projection_dominance,
+        "council_projection_alignment": council_projection_alignment,
         "projection_explanation": projection_explanation,
+        "trend_regime": trend_regime,
+        "trend_direction": trend_direction,
+        "trend_strength": trend_strength,
+        "pullback_depth": pullback_depth,
+        "continuation_reload_score": continuation_reload_score,
+        "reversal_risk": reversal_risk,
+        "trend_phase": trend_phase,
+        "structure_setup_core": structure_setup_core,
+        "structure_trade_ready_core": structure_trade_ready_core,
         "structure_trade_ready": structure_trade_ready,
         "structure_setup": structure_setup,
+        "structure_setup_source": structure_setup_source,
         "projected_next_box": projected_next_box,
         "swing_state": swing_state,
         "grounded_confidence": grounded_confidence,
@@ -5324,6 +10392,29 @@ def _build_chart_state(
         "structure_sell_pressure": structure_sell_pressure,
         "structure_bias_direction": structure_bias_direction,
         "structure_bias_confidence": structure_bias_confidence,
+        "council_bias_direction": str(council_profile.get("bias_direction", "HOLD")).upper(),
+        "council_bias_confidence": float(np.clip(council_profile.get("bias_confidence", 0.0), 0.0, 1.0)),
+        "council_influence_score": float(np.clip(council_profile.get("influence_score", 0.0), 0.0, 1.0)),
+        "council_alignment_score": float(np.clip(council_profile.get("alignment_score", 0.0), 0.0, 1.0)),
+        "council_projection_direction": str(council_profile.get("projection_direction", "HOLD")).upper(),
+        "council_projection_confidence": float(np.clip(council_profile.get("projection_confidence", 0.0), 0.0, 1.0)),
+        "council_current_box_direction": str(council_profile.get("current_box_direction", "HOLD")).upper(),
+        "council_current_box_confidence": float(np.clip(council_profile.get("current_box_confidence", 0.0), 0.0, 1.0)),
+        "council_next_box_direction": str(council_profile.get("next_box_direction", "HOLD")).upper(),
+        "council_next_box_confidence": float(np.clip(council_profile.get("next_box_confidence", 0.0), 0.0, 1.0)),
+        "council_structure_setup": council_structure_setup,
+        "council_structure_confidence": council_structure_confidence,
+        "council_structure_ready": bool(council_profile.get("structure_ready", False)),
+        "council_trigger": str(council_profile.get("trigger", "")),
+        "council_trigger_confidence": float(np.clip(council_profile.get("trigger_confidence", 0.0), 0.0, 1.0)),
+        "council_router_direction": str(council_profile.get("router_direction", "HOLD")).upper(),
+        "council_router_strength": float(np.clip(council_profile.get("router_strength", 0.0), 0.0, 1.0)),
+        "council_router_regime_confidence": float(
+            np.clip(council_profile.get("router_regime_confidence", 0.0), 0.0, 1.0)
+        ),
+        "council_consensus_ratio": float(np.clip(council_profile.get("consensus_ratio", 0.0), 0.0, 1.0)),
+        "council_disagreement": float(np.clip(council_profile.get("disagreement", 0.0), 0.0, 1.0)),
+        "council_sequence_summary": council_sequence,
         "grounded_objects": cast(list[dict[str, Any]], grounded_chart.get("objects", [])),
         "grounded_zones": cast(list[dict[str, Any]], grounded_chart.get("zones", [])),
         "style_signature": cast(dict[str, Any], grounded_chart.get("style_signature", {})),
@@ -5341,16 +10432,262 @@ def _build_chart_state(
             f"consol={consolidation_score:.3f} cont={continuation_prob:.3f} "
             f"path={path_clarity:.3f} seq={sequence_bias_direction}:{sequence_bias_confidence:.3f} "
             f"struct={structure_bias_direction}:{structure_bias_confidence:.3f} setup={structure_setup} "
+            f"setup_src={structure_setup_source} council={str(council_profile.get('bias_direction', 'HOLD')).upper()}:"
+            f"{float(council_profile.get('bias_confidence', 0.0)):.3f}:{float(council_profile.get('influence_score', 0.0)):.3f} "
+            f"cproj={str(council_profile.get('projection_direction', 'HOLD')).upper()}:"
+            f"{float(council_profile.get('projection_confidence', 0.0)):.3f} "
+            f"router={str(council_profile.get('router_direction', 'HOLD')).upper()}:"
+            f"{float(council_profile.get('router_strength', 0.0)):.3f} "
+            f"trend={trend_direction}:{trend_strength:.3f}:{trend_phase} "
             f"projected={projected_box_type}:{projected_direction}:{projected_box_confidence:.3f} "
             f"swing={str(swing_state.get('summary', 'unknown'))}"
         ),
     }
 
 
+def _summarize_candle_group(
+    *,
+    recent_colors: Sequence[str],
+    current_box: Mapping[str, Any],
+    projected_next_box: Mapping[str, Any],
+    trend_regime: Mapping[str, Any],
+    chart_geometry: Mapping[str, Any],
+    sequence_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    window_size = int(max(0, len(recent_colors)))
+    window_ready = bool(window_size >= 25)
+    current_box_type = str(current_box.get("box_type", "balance") or "balance").strip().lower()
+    current_box_dir = str(current_box.get("direction", "HOLD") or "HOLD").strip().upper()
+    projected_direction = str(projected_next_box.get("direction", current_box_dir) or current_box_dir).strip().upper()
+    projected_box_type = str(projected_next_box.get("box_type", current_box_type) or current_box_type).strip().lower()
+    path_clarity = float(np.clip(sequence_state.get("path_clarity", 0.0), 0.0, 1.0))
+    box_sequence_agreement = float(np.clip(sequence_state.get("box_sequence_agreement", 0.0), 0.0, 1.0))
+    continuation_prob = float(np.clip(sequence_state.get("continuation_probability", 0.0), 0.0, 1.0))
+    reversal_prob = float(np.clip(sequence_state.get("reversal_probability", 0.0), 0.0, 1.0))
+    fakeout_prob = float(np.clip(sequence_state.get("fakeout_probability", 0.0), 0.0, 1.0))
+    trend_strength = float(np.clip(trend_regime.get("trend_strength", 0.0), 0.0, 1.0))
+    pullback_depth = float(np.clip(trend_regime.get("pullback_depth", 0.0), 0.0, 1.2))
+    latest_body_pct = float(np.clip(chart_geometry.get("body_height_pct", 0.0), 0.0, 1.0))
+    current_box_confidence = float(np.clip(current_box.get("confidence", 0.0), 0.0, 1.0))
+    current_box_maturity = float(np.clip(current_box.get("maturity", 0.0), 0.0, 1.0))
+    zone = "bottom" if current_box_dir == "BUY" else ("top" if current_box_dir == "SELL" else "middle")
+    buy_pullback_valid = bool(
+        window_ready
+        and zone == "bottom"
+        and current_box_dir == "BUY"
+        and current_box_type in {"pullback", "reversal_base", "impulse"}
+        and projected_direction == "BUY"
+        and (current_box_maturity >= 0.35 or trend_strength >= 0.35)
+        and path_clarity >= 0.48
+        and box_sequence_agreement >= 0.48
+        and continuation_prob >= max(reversal_prob, fakeout_prob - 0.02)
+        and latest_body_pct <= 0.44
+    )
+    sell_pullback_valid = bool(
+        window_ready
+        and zone == "top"
+        and current_box_dir == "SELL"
+        and current_box_type in {"pullback", "reversal_base", "impulse"}
+        and projected_direction == "SELL"
+        and (current_box_maturity >= 0.35 or trend_strength >= 0.35)
+        and path_clarity >= 0.48
+        and box_sequence_agreement >= 0.48
+        and reversal_prob >= max(continuation_prob, fakeout_prob - 0.02)
+        and latest_body_pct <= 0.44
+    )
+    if buy_pullback_valid:
+        group_story = "bottom_reclaim"
+        group_bias_direction = "BUY"
+    elif sell_pullback_valid:
+        group_story = "top_rejection"
+        group_bias_direction = "SELL"
+    elif current_box_type == "impulse" and projected_box_type == "impulse":
+        group_story = "trend_resume"
+        group_bias_direction = projected_direction if projected_direction in {"BUY", "SELL"} else current_box_dir
+    else:
+        group_story = "monitor_only"
+        group_bias_direction = current_box_dir if current_box_dir in {"BUY", "SELL"} else "HOLD"
+
+    group_bias_confidence = float(
+        np.clip(
+            0.30
+            + 0.30 * float(window_size / 25.0)
+            + 0.18 * path_clarity
+            + 0.14 * box_sequence_agreement
+            + 0.08 * trend_strength
+            + 0.05 * (1.0 - latest_body_pct),
+            0.0,
+            1.0,
+        )
+    )
+    entry_ready = bool(buy_pullback_valid or sell_pullback_valid)
+    return {
+        "window_size": window_size,
+        "window_ready": window_ready,
+        "box_zone": zone,
+        "group_story": group_story,
+        "group_bias_direction": group_bias_direction,
+        "group_bias_confidence": group_bias_confidence,
+        "buy_pullback_valid": buy_pullback_valid,
+        "sell_pullback_valid": sell_pullback_valid,
+        "entry_ready": entry_ready,
+        "top_rejection_valid": sell_pullback_valid,
+        "bottom_reclaim_valid": buy_pullback_valid,
+        "current_box_type": current_box_type,
+        "current_box_direction": current_box_dir,
+        "projected_box_type": projected_box_type,
+        "projected_direction": projected_direction,
+        "current_box_confidence": current_box_confidence,
+        "current_box_maturity": current_box_maturity,
+        "trend_strength": trend_strength,
+        "pullback_depth": pullback_depth,
+        "path_clarity": path_clarity,
+        "box_sequence_agreement": box_sequence_agreement,
+        "continuation_probability": continuation_prob,
+        "reversal_probability": reversal_prob,
+        "fakeout_probability": fakeout_prob,
+        "latest_body_pct": latest_body_pct,
+    }
+
+
+def _rebuild_projection_synced_state(
+    *,
+    detections: Sequence[dict[str, Any]],
+    local_ensemble: Mapping[str, Any],
+    reasoning_trace: dict[str, Any],
+    chart_geometry: Mapping[str, Any],
+    sequence_state: dict[str, Any],
+    grounded_chart: Mapping[str, Any] | None = None,
+    next_box_hypotheses: Sequence[Mapping[str, Any]] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    source_hypotheses = (
+        next_box_hypotheses
+        if next_box_hypotheses is not None
+        else cast(Sequence[Mapping[str, Any]], sequence_state.get("next_box_hypotheses", []))
+    )
+    hypotheses = [dict(row) for row in source_hypotheses]
+    sequence_state["next_box_hypotheses"] = hypotheses
+    sequence_state["primary_next_box"] = dict(hypotheses[0]) if hypotheses else {}
+    sequence_state["path_clarity"] = float(
+        np.clip(
+            cast(dict[str, Any], sequence_state.get("primary_next_box", {})).get(
+                "path_clarity",
+                sequence_state.get("path_clarity", 0.0),
+            ),
+            0.0,
+            1.0,
+        )
+    )
+    sequence_state["sequence_model"] = _build_sequence_model_summary(
+        sequence_state,
+        chart_geometry,
+        market_state=cast(dict[str, Any], reasoning_trace.get("market_state", {})),
+    )
+    reasoning_trace["sequence_state"] = sequence_state
+    chart_state = _build_chart_state(
+        detections=detections,
+        local_ensemble=local_ensemble,
+        reasoning_trace=reasoning_trace,
+        chart_geometry=chart_geometry,
+        sequence_state=sequence_state,
+        grounded_chart=grounded_chart or {},
+    )
+    council_sequence_summary = _build_council_sequence_summary(local_ensemble)
+    chart_state["council_sequence_summary"] = council_sequence_summary
+    return chart_state, hypotheses, council_sequence_summary
+
+
+def _sync_forecast_into_chart_state(
+    chart_state: Mapping[str, Any],
+    forecast: Mapping[str, Any],
+) -> dict[str, Any]:
+    synced = dict(chart_state)
+    ready_setups = {"consolidation_breakout", "impulse_chain", "reversal_release"}
+    prior_setup = str(synced.get("structure_setup", "none") or "none").lower()
+    prior_trade_ready = bool(synced.get("structure_trade_ready", False))
+
+    forecast_setup = str(forecast.get("structure_setup", prior_setup) or prior_setup).lower()
+    try:
+        forecast_trade_ready = bool(float(forecast.get("structure_trade_ready", float(prior_trade_ready)) or 0.0) >= 0.5)
+    except (TypeError, ValueError):
+        forecast_trade_ready = prior_trade_ready
+
+    if forecast_trade_ready and forecast_setup in ready_setups:
+        synced["structure_setup"] = forecast_setup
+        synced["structure_trade_ready"] = True
+        if (not prior_trade_ready) or forecast_setup != prior_setup:
+            synced["structure_setup_source"] = "forecast"
+        if forecast_setup == "reversal_release":
+            synced["entry_type"] = "reversal"
+
+    projected_box = dict(cast(dict[str, Any], synced.get("projected_next_box", {})))
+    forecast_box_type = str(forecast.get("projected_box_type", projected_box.get("box_type", "")) or "").lower()
+    forecast_box_direction = str(
+        forecast.get(
+            "projected_box_direction",
+            projected_box.get("direction", synced.get("projection_bias_direction", "HOLD")),
+        )
+        or ""
+    ).upper()
+    try:
+        forecast_box_confidence = float(forecast.get("projected_box_confidence", projected_box.get("confidence", 0.0)) or 0.0)
+    except (TypeError, ValueError):
+        forecast_box_confidence = float(projected_box.get("confidence", 0.0) or 0.0)
+    forecast_box_confidence = float(np.clip(forecast_box_confidence, 0.0, 1.0))
+
+    try:
+        projection_bias_confidence = float(
+            forecast.get(
+                "projection_bias_confidence",
+                synced.get("projection_bias_confidence", forecast_box_confidence),
+            )
+            or forecast_box_confidence
+        )
+    except (TypeError, ValueError):
+        projection_bias_confidence = forecast_box_confidence
+    projection_bias_confidence = float(np.clip(projection_bias_confidence, 0.0, 1.0))
+
+    try:
+        projection_dominance = float(forecast.get("projection_dominance", synced.get("projection_dominance", 0.0)) or 0.0)
+    except (TypeError, ValueError):
+        projection_dominance = float(synced.get("projection_dominance", 0.0) or 0.0)
+    projection_dominance = float(np.clip(projection_dominance, 0.0, 1.0))
+
+    projected_box_explanation = str(
+        forecast.get(
+            "projected_box_explanation",
+            projected_box.get("explanation", synced.get("projection_explanation", "")),
+        )
+        or ""
+    )
+    projection_available = bool(
+        projected_box
+        or forecast_box_type
+        or forecast_box_direction in {"BUY", "SELL"}
+        or forecast_box_confidence > 0.0
+    )
+    if projection_available:
+        if forecast_box_type:
+            projected_box["box_type"] = forecast_box_type
+        if forecast_box_direction in {"BUY", "SELL"}:
+            projected_box["direction"] = forecast_box_direction
+            synced["projection_bias_direction"] = forecast_box_direction
+        projected_box["confidence"] = forecast_box_confidence
+        projected_box["dominance_gap"] = projection_dominance
+        if projected_box_explanation:
+            projected_box["explanation"] = projected_box_explanation
+            synced["projection_explanation"] = projected_box_explanation
+        synced["projection_bias_confidence"] = projection_bias_confidence
+        synced["projection_dominance"] = projection_dominance
+        synced["projected_next_box"] = projected_box
+
+    return synced
+
+
 def run_inference(
     file_path: str,
     annotation_text: str = "",
-    overlay_mode: str = "history-plus-projection",
+    overlay_mode: str = DEFAULT_OVERLAY_MODE,
     min_conf_global: float = 0.42,
     min_conf_latest: float = 0.50,
     history_depth: int = 8,
@@ -5358,7 +10695,13 @@ def run_inference(
     projection_focus: float = 0.35,
     side_effect_free: bool = False,
     use_local_ensemble: bool | None = None,
+    vision_extras: Any = None,
+    council_scope: str = DEFAULT_COUNCIL_SCOPE,
+    timeframe_override: str | None = None,
 ) -> tuple[dict[str, Any], Image.Image | None, Any, Any]:
+    from phoenixguard.runtime.local_ensemble_runtime import LegacyFallbackApprovalRequired
+
+    inference_id = uuid4().hex
     cv_engine = _get_cv_engine()
     forecast_engine = _get_forecast_engine()
     gates_engine = _get_gates_engine()
@@ -5369,19 +10712,23 @@ def run_inference(
     tta_manager = _get_tta_manager() if RUNTIME.enable_test_time_adaptation else None
     ood_detector = _get_ood_detector() if RUNTIME.enable_open_set_guard else None
     continual_learning = _get_continual_learning()
-    local_ensemble_requested = bool(
-        (
-            bool(getattr(RUNTIME, "enable_local_ensemble", True))
-            or bool(getattr(RUNTIME, "auto_model_council_on_inference", False))
-        )
-        if use_local_ensemble is None
-        else use_local_ensemble
+    council_run_config = _resolve_council_run_config(
+        use_local_ensemble=use_local_ensemble,
+        council_scope=council_scope,
     )
-    local_ensemble_runtime = (
-        cast(Any, getattr(cv_engine, "ensemble_cv", None))
-        if local_ensemble_requested and bool(getattr(RUNTIME, "enable_local_ensemble", True))
-        else None
+    local_ensemble_requested = bool(council_run_config.get("requested", False))
+    council_scope = str(council_run_config.get("scope", DEFAULT_COUNCIL_SCOPE))
+    council_target_models = cast(list[str] | None, council_run_config.get("target_models"))
+    council_max_loaded_models = int(council_run_config.get("max_loaded_models", getattr(RUNTIME, "local_ensemble_max_loaded_models", 2)) or 2)
+    side_effect_free_council_override = _should_force_side_effect_free_council(
+        side_effect_free=side_effect_free,
+        use_local_ensemble=use_local_ensemble,
+        council_scope=council_scope,
+        target_models=council_target_models,
     )
+    if side_effect_free_council_override:
+        local_ensemble_requested = True
+    local_ensemble_runtime = None
     bank = _get_memory_bank()
 
     img_raw, meta = load_any_file_as_image(file_path)
@@ -5440,26 +10787,62 @@ def run_inference(
         if RUNTIME.enable_replay_continual_learning
         else None
     )
+    provisional_routing_context = _build_local_ensemble_routing_context(
+        chart_state=_build_chart_state(
+            detections=detections,
+            local_ensemble=_neutral_local_ensemble_prediction("pre_route"),
+            reasoning_trace=reasoning_trace,
+            chart_geometry=chart_geometry,
+            sequence_state=sequence_state,
+            grounded_chart=grounded_chart,
+        ),
+        sequence_state=sequence_state,
+        grounded_chart=grounded_chart,
+        reasoning_trace=reasoning_trace,
+    )
     local_ensemble: dict[str, Any] = _neutral_local_ensemble_prediction("uninitialized")
     local_ensemble_source = "none"
-    if local_ensemble_requested and bool(getattr(RUNTIME, "enable_local_ensemble", True)) and local_ensemble_runtime is None:
+    force_council_resolution = (
+        council_scope in {"half", "full"}
+        or bool(use_local_ensemble)
+        or bool(side_effect_free_council_override)
+    )
+    if (
+        local_ensemble_requested
+        and (bool(getattr(RUNTIME, "enable_local_ensemble", True)) or bool(side_effect_free_council_override))
+        and local_ensemble_runtime is None
+    ):
         try:
-            if not side_effect_free:
-                local_ensemble_runtime = _get_local_ensemble(block=False)
-                if local_ensemble_runtime is not None:
-                    cv_engine.ensemble_cv = local_ensemble_runtime
+            local_ensemble_runtime = _get_local_ensemble(
+                block=bool(force_council_resolution),
+                target_models=council_target_models,
+                max_loaded_models=council_max_loaded_models,
+                allow_when_disabled=bool(side_effect_free_council_override),
+            )
+            if local_ensemble_runtime is not None:
+                cv_engine.ensemble_cv = local_ensemble_runtime
         except Exception as exc:
             if not side_effect_free:
                 logger.warning("Local ensemble runtime unavailable during inference: %s", exc)
             local_ensemble_runtime = None
 
     if local_ensemble_runtime is None:
-        warm_status = _local_ensemble_status()
-        if local_ensemble_requested and not bool(getattr(RUNTIME, "enable_local_ensemble", True)):
+        warm_status = _local_ensemble_status(
+            target_models=council_target_models,
+            max_loaded_models=council_max_loaded_models,
+        )
+        if (
+            local_ensemble_requested
+            and not bool(getattr(RUNTIME, "enable_local_ensemble", True))
+            and not bool(side_effect_free_council_override)
+        ):
             try:
                 local_ensemble = _predict_with_model_council_daemon(
                     inference_img,
                     adaptation_profile=adaptation_profile,
+                    routing_context=provisional_routing_context,
+                    target_models=council_target_models,
+                    max_loaded_models=council_max_loaded_models,
                 )
                 local_ensemble_source = "daemon"
             except Exception as exc:
@@ -5467,13 +10850,15 @@ def run_inference(
                 logger.warning("Model council daemon unavailable during inference: %s", exc)
                 local_ensemble = _neutral_local_ensemble_prediction(reason)
         elif not local_ensemble_requested:
-            reason = "lazy_tab_loading"
+            reason = "disabled_by_operator" if council_scope == "off" else "lazy_tab_loading"
             local_ensemble = _neutral_local_ensemble_prediction(reason)
         elif not bool(getattr(RUNTIME, "enable_local_ensemble", True)):
             reason = f"disabled_by_profile:{str(getattr(RUNTIME, 'runtime_profile', 'FAST')).lower()}"
             local_ensemble = _neutral_local_ensemble_prediction(reason)
         else:
-            if side_effect_free:
+            if force_council_resolution:
+                reason = "runtime_unavailable"
+            elif side_effect_free:
                 reason = "missing_saved_bundles"
             elif warm_status == "warming_up":
                 reason = "warming_up"
@@ -5483,14 +10868,23 @@ def run_inference(
                 reason = "runtime_unavailable"
             local_ensemble = _neutral_local_ensemble_prediction(reason)
     else:
-        local_ensemble = cast(
-            dict[str, Any],
-            local_ensemble_runtime.predict(inference_img, adaptation_profile=adaptation_profile),
-        )
-        local_ensemble_source = "inline"
+        try:
+            local_ensemble = local_ensemble_runtime.predict(
+                inference_img,
+                adaptation_profile=adaptation_profile,
+                routing_context=provisional_routing_context,
+            )
+            local_ensemble_source = "inline"
+        except LegacyFallbackApprovalRequired:
+            raise
+        except Exception as exc:
+            logger.exception("Inline local ensemble prediction failed: %s", exc)
+            local_ensemble = _neutral_local_ensemble_prediction(f"inline_failed:{exc}")
+            local_ensemble_source = "inline_failed"
+            local_ensemble_runtime = None
 
     daemon_cached = bool(local_ensemble.pop("_daemon_cached", False))
-    daemon_runtime_status = cast(dict[str, Any], local_ensemble.pop("_daemon_status", {}))
+    daemon_runtime_status = local_ensemble.pop("_daemon_status", {})
     if daemon_cached and local_ensemble_source == "daemon":
         local_ensemble_source = "daemon_cache"
 
@@ -5503,9 +10897,8 @@ def run_inference(
         grounded_chart=grounded_chart,
     )
     if local_ensemble_runtime is not None:
-        local_ensemble = cast(
-            dict[str, Any],
-            local_ensemble_runtime.reroute_prediction(
+        try:
+            local_ensemble = local_ensemble_runtime.reroute_prediction(
                 local_ensemble,
                 routing_context=_build_local_ensemble_routing_context(
                     chart_state=chart_state,
@@ -5514,16 +10907,19 @@ def run_inference(
                     reasoning_trace=reasoning_trace,
                 ),
                 adaptation_profile=adaptation_profile,
-            ),
-        )
-        chart_state = _build_chart_state(
-            detections=detections,
-            local_ensemble=local_ensemble,
-            reasoning_trace=reasoning_trace,
-            chart_geometry=chart_geometry,
-            sequence_state=sequence_state,
-            grounded_chart=grounded_chart,
-        )
+            )
+            chart_state = _build_chart_state(
+                detections=detections,
+                local_ensemble=local_ensemble,
+                reasoning_trace=reasoning_trace,
+                chart_geometry=chart_geometry,
+                sequence_state=sequence_state,
+                grounded_chart=grounded_chart,
+            )
+        except LegacyFallbackApprovalRequired:
+            raise
+        except Exception as exc:
+            logger.warning("Local ensemble reroute failed: %s", exc)
     current_box = cast(dict[str, Any], sequence_state.get("current_box", {}))
     next_box_hypotheses = cast(list[dict[str, Any]], sequence_state.get("next_box_hypotheses", []))
     box_history = cast(list[dict[str, Any]], sequence_state.get("box_history", []))
@@ -5626,16 +11022,7 @@ def run_inference(
         memory_summary=memory_summary,
         memory_episode_matches=memory_episode_matches,
     )
-    next_box_hypotheses = cast(list[dict[str, Any]], sequence_state.get("next_box_hypotheses", []))
-    sequence_state["primary_next_box"] = dict(next_box_hypotheses[0]) if next_box_hypotheses else {}
-    sequence_state["path_clarity"] = float(np.clip(cast(dict[str, Any], sequence_state.get("primary_next_box", {})).get("path_clarity", sequence_state.get("path_clarity", 0.0)), 0.0, 1.0))
-    sequence_state["sequence_model"] = _build_sequence_model_summary(
-        sequence_state,
-        chart_geometry,
-        market_state=cast(dict[str, Any], reasoning_trace.get("market_state", {})),
-    )
-    reasoning_trace["sequence_state"] = sequence_state
-    chart_state = _build_chart_state(
+    chart_state, next_box_hypotheses, council_sequence_summary = _rebuild_projection_synced_state(
         detections=detections,
         local_ensemble=local_ensemble,
         reasoning_trace=reasoning_trace,
@@ -5643,8 +11030,8 @@ def run_inference(
         sequence_state=sequence_state,
         grounded_chart=grounded_chart,
     )
-    council_sequence_summary = _build_council_sequence_summary(local_ensemble)
-    chart_state["council_sequence_summary"] = council_sequence_summary
+    if timeframe_override is not None:
+        chart_state["timeframe"] = str(timeframe_override).strip().upper() or "M5"
     enriched_next_box_hypotheses = _enrich_next_box_hypotheses_with_projected_candles(
         next_box_hypotheses,
         detections=detections,
@@ -5652,11 +11039,27 @@ def run_inference(
         sequence_state=sequence_state,
         local_ensemble=local_ensemble,
     )
-    sequence_state["next_box_hypotheses"] = enriched_next_box_hypotheses
-    next_box_hypotheses = cast(list[dict[str, Any]], sequence_state.get("next_box_hypotheses", []))
-    sequence_state["primary_next_box"] = dict(next_box_hypotheses[0]) if next_box_hypotheses else {}
-    chart_state["projected_next_box"] = cast(dict[str, Any], sequence_state.get("primary_next_box", {}))
-    chart_state["council_sequence_summary"] = council_sequence_summary
+    chart_state, next_box_hypotheses, council_sequence_summary = _rebuild_projection_synced_state(
+        detections=detections,
+        local_ensemble=local_ensemble,
+        reasoning_trace=reasoning_trace,
+        chart_geometry=chart_geometry,
+        sequence_state=sequence_state,
+        grounded_chart=grounded_chart,
+        next_box_hypotheses=enriched_next_box_hypotheses,
+    )
+    projection_chain_boxes = _build_projection_chain_boxes(
+        base_hypotheses=next_box_hypotheses,
+        detections=detections,
+        chart_state=chart_state,
+        sequence_state=sequence_state,
+        chart_geometry=chart_geometry,
+        local_ensemble=local_ensemble,
+        market_state=cast(dict[str, Any], reasoning_trace.get("market_state", {})),
+        memory_summary=memory_summary,
+        memory_episode_matches=memory_episode_matches,
+        depth=4,
+    )
     current_box = cast(dict[str, Any], sequence_state.get("current_box", {}))
     box_history = cast(list[dict[str, Any]], sequence_state.get("box_history", []))
     projection_view = cast(dict[str, Any], chart_state.get("projected_next_box", {}))
@@ -5783,6 +11186,8 @@ def run_inference(
         if interval <= hold_threshold_used * 1.10:
             forecast["force_hold"] = False
             forecast["force_hold_relaxed"] = True
+    chart_state = _sync_forecast_into_chart_state(chart_state, forecast)
+    projection_view = cast(dict[str, Any], chart_state.get("projected_next_box", {}))
 
     if side_effect_free:
         style_vec = np.asarray(personal.style_vector, dtype=np.float32).copy()
@@ -5880,6 +11285,9 @@ def run_inference(
         "policy_action": str(rl_result.policy_action),
         "feedback_count": int(rl_result.feedback_count),
         "online_update_count": int(rl_result.online_update_count),
+        "contribution_gate_open": bool(rl_result.contribution_gate_open),
+        "contribution_score": float(rl_result.contribution_score),
+        "rolling_accuracy": float(rl_result.rolling_accuracy),
     }
     chart_state["rl_policy"] = {
         "probs": rl_probs,
@@ -5891,6 +11299,12 @@ def run_inference(
         "policy_action": str(rl_result.policy_action),
         "feedback_count": int(rl_result.feedback_count),
         "online_update_count": int(rl_result.online_update_count),
+        "contribution_gate_open": bool(rl_result.contribution_gate_open),
+        "contribution_score": float(rl_result.contribution_score),
+        "rolling_accuracy": float(rl_result.rolling_accuracy),
+        "baseline_accuracy": float(rl_result.baseline_accuracy),
+        "accuracy_improvement": float(rl_result.accuracy_improvement),
+        "contribution_gate_reason": str(rl_result.contribution_gate_reason),
     }
     explanation_text = str(chart_state.get("raw_description", ""))
     _, cleaned_expl = indicator_regex_filter(explanation_text)
@@ -5962,6 +11376,11 @@ def run_inference(
         transition_summary=transition_summary,
         support_gate_outputs=support_gate_outputs,
     )
+    decision = reconcile_projection_action_conflict(
+        decision,
+        chart_state=chart_state,
+        projection_view=projection_view,
+    )
 
     if reasoning_trace:
         reasoning_trace["final_trade_bias"] = str(decision.get("trade_bias", decision.get("action", "HOLD")))
@@ -5974,15 +11393,15 @@ def run_inference(
             market_state["intent_next"] = best_transition_key
             reasoning_trace["market_state"] = market_state
         memory_weight_value = float(decision.get("memory_weight", 0.0) or 0.0)
-        projection_conf = float(chart_state.get("projection_bias_confidence", projection_view.get("confidence", 0.0)) or 0.0)
-        projection_gap = float(chart_state.get("projection_dominance", projection_view.get("dominance_gap", 0.0)) or 0.0)
+        projection_conf = float(projection_view.get("confidence", chart_state.get("projection_bias_confidence", 0.0)) or 0.0)
+        projection_gap = float(projection_view.get("dominance_gap", chart_state.get("projection_dominance", 0.0)) or 0.0)
         swing_state = cast(dict[str, Any], chart_state.get("swing_state", {}))
         reasoning_trace["explanation"] = (
             f"ensemble={ensemble_view.get('predicted_label', 'HOLD')}({ensemble_conf:.2f}) "
             f"rl={str(rl_result.policy_action).upper()} blend={float(rl_result.blend_weight):.2f} "
             f"macro={market_state.get('macro_trend', 'unknown') if market_state else 'unknown'} "
             f"local={market_state.get('local_phase', 'unknown') if market_state else 'unknown'} "
-            f"projection={str(chart_state.get('projection_bias_direction', 'HOLD')).upper()}({projection_conf:.2f}) "
+            f"projection={str(projection_view.get('direction', chart_state.get('projection_bias_direction', 'HOLD'))).upper()}({projection_conf:.2f}) "
             f"dom={projection_gap:.2f} "
             f"swing={str(swing_state.get('swing_phase', 'unknown'))} "
             f"continue={fused_transition_probabilities.get('continue', 0.0):.2f} "
@@ -5995,8 +11414,17 @@ def run_inference(
 
     action = str(decision["action"])
     probs = cast(dict[str, float], decision["calibrated_probs"])
+    timing_signal = _build_timing_signal_profile(
+        chart_state=chart_state,
+        sequence_state=sequence_state,
+        transition_probabilities=fused_transition_probabilities,
+        decision=decision,
+        projection_view=projection_view,
+        module_reliability=module_reliability,
+    )
 
     result: dict[str, Any] = {
+        "inference_id": inference_id,
         "timestamp": utc_now_iso(),
         "meta": meta,
         "action": action,
@@ -6015,6 +11443,7 @@ def run_inference(
         "memory_ok": bool(decision.get("memory_ok", False)),
         "interval_ok": bool(decision.get("interval_ok", False)),
         "projection_bias_ready": bool(decision.get("projection_bias_ready", False)),
+        "projection_watch_ready": bool(decision.get("projection_watch_ready", False)),
         "gate_scores": cast(dict[str, float], decision["gate_scores"]),
         "support_gate_scores": cast(dict[str, float], decision.get("support_gate_scores", {})),
         "shap_contributions": cast(dict[str, float], decision["shap_contributions"]),
@@ -6030,6 +11459,7 @@ def run_inference(
         "geometry_conflict": geometry_conflict,
         "strict_cv_fail_closed": strict_cv_fail_closed,
         "projection_support": bool(decision.get("projection_support", False)),
+        "projection_conflict_override": bool(decision.get("projection_conflict_override", False)),
         "support_gates_ok": bool(decision.get("support_gates_ok", True)),
         "execution_guard_ok": bool(decision.get("execution_guard_ok", True)),
         "opposition_alert": bool(decision.get("opposition_alert", False)),
@@ -6040,6 +11470,24 @@ def run_inference(
         "cv_reasoning_trace": reasoning_trace,
         "sequence_transition_probabilities": fused_transition_probabilities,
         "transition_summary": dict(transition_summary),
+        "timing_signal": timing_signal,
+        "decision": {
+            "action": action,
+            "trade_bias": str(decision.get("trade_bias", action)),
+            "decision_state": str(decision.get("decision_state", "UNCERTAIN")),
+            "execution_permission": str(decision.get("execution_permission", "WAIT_FOR_CONFIRMATION")),
+            "confidence": float(decision["confidence"]),
+            "calibrated_probs": probs,
+            "consensus_ok": bool(decision["consensus_ok"]),
+            "confidence_ok": bool(decision.get("confidence_ok", False)),
+            "gates_ok": bool(decision.get("gates_ok", False)),
+            "memory_ok": bool(decision.get("memory_ok", False)),
+            "interval_ok": bool(decision.get("interval_ok", False)),
+            "projection_support": bool(decision.get("projection_support", False)),
+            "projection_bias_ready": bool(decision.get("projection_bias_ready", False)),
+            "projection_watch_ready": bool(decision.get("projection_watch_ready", False)),
+            "gates_passing": int(decision["gates_passing"]),
+        },
         "memory_effective_weight": float(decision.get("memory_weight", 0.0) or 0.0),
         "branch_weights": cast(dict[str, float], decision.get("branch_weights", {})),
         "gate_details": [
@@ -6073,6 +11521,7 @@ def run_inference(
         "box_history": box_history,
         "current_box": current_box,
         "next_box_hypotheses": next_box_hypotheses,
+        "projection_chain_boxes": projection_chain_boxes,
         "chart_state": chart_state,
         "rl_policy": {
             "probs": rl_probs,
@@ -6085,25 +11534,35 @@ def run_inference(
             "mcts_value": float(rl_result.mcts_value),
             "feedback_count": int(rl_result.feedback_count),
             "online_update_count": int(rl_result.online_update_count),
+            "contribution_gate_open": bool(rl_result.contribution_gate_open),
+            "contribution_score": float(rl_result.contribution_score),
+            "rolling_accuracy": float(rl_result.rolling_accuracy),
+            "baseline_accuracy": float(rl_result.baseline_accuracy),
+            "accuracy_improvement": float(rl_result.accuracy_improvement),
+            "contribution_gate_reason": str(rl_result.contribution_gate_reason),
         },
         "projection": {
-            "direction": str(chart_state.get("projection_bias_direction", projection_view.get("direction", "HOLD"))).upper(),
+            "direction": str(projection_view.get("direction", chart_state.get("projection_bias_direction", "HOLD"))).upper(),
             "box_type": str(projection_view.get("box_type", "balance")),
-            "confidence": float(np.clip(chart_state.get("projection_bias_confidence", projection_view.get("confidence", 0.0)), 0.0, 1.0)),
-            "dominance": float(np.clip(chart_state.get("projection_dominance", projection_view.get("dominance_gap", 0.0)), 0.0, 1.0)),
+            "confidence": float(np.clip(projection_view.get("confidence", chart_state.get("projection_bias_confidence", 0.0)), 0.0, 1.0)),
+            "dominance": float(np.clip(projection_view.get("dominance_gap", chart_state.get("projection_dominance", 0.0)), 0.0, 1.0)),
             "structure_setup": str(chart_state.get("structure_setup", "none")),
-            "explanation": str(chart_state.get("projection_explanation", projection_view.get("explanation", ""))),
+            "explanation": str(projection_view.get("explanation", chart_state.get("projection_explanation", ""))),
             "swing_state": cast(dict[str, Any], chart_state.get("swing_state", {})),
             "next_box": projection_view,
+            "chain_boxes": projection_chain_boxes,
             "projected_candles": cast(list[dict[str, Any]], projection_view.get("projected_candles", [])),
         },
         "local_ensemble": local_ensemble,
         "council_sequence_summary": council_sequence_summary,
         "projected_candle_candidates": cast(list[dict[str, Any]], projection_view.get("projected_candles", [])),
         "model_council": {
+            "scope": council_scope,
             "requested": bool(local_ensemble_requested),
             "loaded": bool(cast(dict[str, Any], local_ensemble.get("models", {}))),
             "source": local_ensemble_source,
+            "target_models": list(council_target_models or []),
+            "max_loaded_models": int(council_max_loaded_models),
             "status": (
                 "cached"
                 if daemon_cached
@@ -6112,12 +11571,22 @@ def run_inference(
             "cache_entries": int(daemon_runtime_status.get("cache_entries", 0) or 0),
         },
         "analysis_profile": "model_council_refined" if bool(local_ensemble_requested) else str(getattr(RUNTIME, "runtime_profile", "FAST")).lower(),
+        "authority_contract": {
+            "runtime_path": "OFFLINE_MANUAL_ANALYSIS",
+            "execution_authority": "NONE",
+            "can_publish_execution_packet": False,
+            "can_trigger_shooter": False,
+            "canonical_live_authority": "tracker_model_council_packet_shooter",
+            "required_live_packet": "PG_EXECUTION_PACKET_V3",
+        },
+        "packet_authority": "OFFLINE_ANALYSIS_ONLY",
         "explanation": str(reasoning_trace.get("explanation", chart_state.get("raw_description", ""))),
         "detections": detections,
     }
-    if not side_effect_free and RUNTIME.enable_replay_continual_learning:
+    if not side_effect_free and (RUNTIME.enable_replay_continual_learning or _feedback_learning_feed_enabled()):
         continual_learning.record_inference_context(
             image_hash=str(meta.get("sha256", "")),
+            context_id=inference_id,
             context_key=context_key,
             context_descriptor=context_descriptor,
             local_ensemble=local_ensemble,
@@ -6129,9 +11598,10 @@ def run_inference(
             selected_view=str(tta_summary.get("selected_view", "raw")),
             snapshot_image=inference_img.copy(),
         )
-    if not side_effect_free and not RUNTIME.pause_rl_updates:
+    if not side_effect_free and (_feedback_learning_feed_enabled() or not RUNTIME.pause_rl_updates):
         rl_engine.record_inference_context(
             image_hash=str(meta.get("sha256", "")),
+            context_id=inference_id,
             state_vec=fused,
             prior_probs=base_probs,
             policy_result=rl_result,
@@ -6139,8 +11609,18 @@ def run_inference(
             memory_recall_top1_sim=memory_top1_sim,
             memory_recall_direction=dominant_memory_direction,
             module_reliability=module_reliability,
+            map_context={
+                "global_local_control": cast(dict[str, Any], chart_state.get("global_local_control", {})),
+                "entry_windows": cast(list[dict[str, Any]], chart_state.get("entry_windows", [])),
+                "map_timing": cast(dict[str, Any], chart_state.get("map_timing", {})),
+                "support_resistance_zones": cast(list[dict[str, Any]], chart_state.get("support_resistance_zones", [])),
+                "nearest_support": cast(dict[str, Any], chart_state.get("nearest_support", {})),
+                "nearest_resistance": cast(dict[str, Any], chart_state.get("nearest_resistance", {})),
+                "wick_reaction_read": cast(dict[str, Any], chart_state.get("wick_reaction_read", {})),
+            },
         )
     result = _apply_zone_memory_to_result(result)
+    result.update(_derive_active_trade_overlay(result))
     interpret_module = importlib.import_module("phoenixguard.interpreter")
     interpret = cast(Callable[[Mapping[str, Any]], dict[str, Any]], getattr(interpret_module, "interpret"))
     interpreter_fusion = _build_interpreter_fusion_payload(result)
@@ -6153,9 +11633,10 @@ def run_inference(
         overlay_mode=overlay_mode,
         min_conf_global=min_conf_global,
         min_conf_latest=min_conf_latest,
-        history_limit=int(np.clip(int(history_depth), 1, 24)),
+        history_limit=int(np.clip(int(history_depth), 1, MAX_SEQUENCE_HISTORY_DEPTH)),
         label_budget=int(np.clip(int(label_density), 2, 24)),
         projection_confidence_floor=float(np.clip(float(projection_focus), 0.0, 0.95)),
+        vision_extras=vision_extras,
     )
 
     append_hash_chain(RUNTIME.logs_dir / SECURITY.log_hash_chain_file, result)
@@ -6173,23 +11654,28 @@ def run_inference(
 # ------------------------------------------------------------------
 
 def human_readable_summary(result: dict[str, Any]) -> str:
-    a = result["action"]
-    conf = result["confidence"] * 100.0
-    mv = result["expected_3min_move_pct"]
-    ql, qh = result["quantile_range"]
-    ps = result["position_size_pct"]
-    expl = result.get("explanation", "No explanation produced.")
-    mem_sim = result.get("memory_similarity", 0.0)
-    mem_dir = result.get("memory_direction", "N/A")
-    g_ok = result.get("gates_passing", 0)
-    ad = result.get("ad_indicator", 0.0)
-    consensus = "YES" if result.get("consensus_ok") else "NO"
-    decision_state = str(result.get("decision_state", "UNCERTAIN")).upper()
-    execution_permission = str(result.get("execution_permission", "WAIT_FOR_CONFIRMATION")).upper()
-    trade_bias = str(result.get("trade_bias", a)).upper()
-    projection = cast(dict[str, Any], result.get("projection", {}))
-    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
-    interpreter = cast(dict[str, Any], result.get("interpreter", {}))
+    result_view = _ensure_active_trade_overlay(result)
+    a = str(result_view["action"])
+    conf = float(result_view["confidence"]) * 100.0
+    mv = float(result_view["expected_3min_move_pct"])
+    ql, qh = cast(Sequence[float], result_view["quantile_range"])
+    ps = float(result_view["position_size_pct"])
+    expl = result_view.get("explanation", "No explanation produced.")
+    mem_sim = result_view.get("memory_similarity", 0.0)
+    mem_dir = result_view.get("memory_direction", "N/A")
+    g_ok = result_view.get("gates_passing", 0)
+    ad = result_view.get("ad_indicator", 0.0)
+    consensus = "YES" if result_view.get("consensus_ok") else "NO"
+    decision_state = str(result_view.get("decision_state", "UNCERTAIN")).upper()
+    execution_permission = str(result_view.get("execution_permission", "WAIT_FOR_CONFIRMATION")).upper()
+    trade_bias = str(result_view.get("trade_bias", a)).upper()
+    active_trade_state = str(result_view.get("active_trade_state", "HOLD_TRUE")).upper()
+    directional_intent = str(result_view.get("directional_intent", "HOLD")).upper()
+    active_trade_summary = str(result_view.get("active_trade_summary", "")).strip()
+    projection = cast(dict[str, Any], result_view.get("projection", {}))
+    multi_timeframe = cast(dict[str, Any], result_view.get("multi_timeframe", {}))
+    timing_signal = cast(dict[str, Any], result_view.get("timing_signal", {}))
+    interpreter = cast(dict[str, Any], result_view.get("interpreter", {}))
     interpreter_human = str(interpreter.get("human", "")).strip()
     projection_line = "Projection: unavailable"
     if projection:
@@ -6207,16 +11693,33 @@ def human_readable_summary(result: dict[str, Any]) -> str:
             f"(entry_allowed={'YES' if bool(multi_timeframe.get('entry_allowed', False)) else 'NO'})\n"
             f"MTF Summary: {str(multi_timeframe.get('summary', ''))}\n"
         )
+    timing_line = ""
+    if timing_signal:
+        eta_minutes = cast(dict[str, Any], timing_signal.get("eta_minutes", {}))
+        timing_reasons = cast(list[str], timing_signal.get("reasons", []))
+        timing_line = (
+            "Timing: "
+            f"{str(timing_signal.get('entry_state', 'WATCH')).upper()} "
+            f"score={float(timing_signal.get('timing_score', 0.0) or 0.0):.2f} "
+            f"eta={float(eta_minutes.get('low', 0.0) or 0.0):.1f}-"
+            f"{float(eta_minutes.get('high', 0.0) or 0.0):.1f}m "
+            f"on {str(timing_signal.get('timeframe', 'M5')).upper()}\n"
+        )
+        if timing_reasons:
+            timing_line += f"Timing Rationale: {'; '.join(timing_reasons[:3])}\n"
+    active_trade_line = f"Active Trade: {active_trade_summary}\n" if active_trade_summary else ""
     return (
         f"Signal: {a}\n"
-        f"Decision State: {decision_state}  [Execution: {execution_permission}]  [Trade Bias: {trade_bias}]\n"
+        f"Decision State: {decision_state}  [Execution: {execution_permission}]  [Trade Bias: {trade_bias}]  [Active: {active_trade_state}]  [Intent: {directional_intent}]\n"
         f"Conformal Probability: {conf:.2f}%  [Consensus: {consensus}]\n"
         f"Expected 3m Move: {mv:+.3f}% (q05={ql:+.3f}, q95={qh:+.3f})\n"
         f"{projection_line}\n"
+        f"{active_trade_line}"
+        f"{timing_line}"
         f"{mtf_line}"
         f"Suggested Position Size: {ps:.2f}% of equity\n"
         f"Gates Passing: {g_ok}/12\n"
-        f"Memory Recall: sim={mem_sim:.3f}  recalled_dir={mem_dir}\n"
+        f"Case Recall: sim={mem_sim:.3f}  recalled_dir={mem_dir}\n"
         f"A/D Indicator: {ad:+.3f}\n\n"
         f"Reasoning:\n{expl}"
         + (f"\n\nInterpreter:\n{interpreter_human}" if interpreter_human else "")
@@ -6226,12 +11729,12 @@ def human_readable_summary(result: dict[str, Any]) -> str:
 UI_CSS = """
 :root {
   --pg-bg: #081019;
-  --pg-bg-soft: #101a24;
+  --pg-bg-soft: #101923;
   --pg-panel: rgba(10, 18, 26, 0.84);
-  --pg-panel-strong: rgba(7, 13, 20, 0.92);
+  --pg-panel-strong: rgba(7, 13, 20, 0.94);
   --pg-panel-elevated: rgba(12, 21, 31, 0.96);
-  --pg-stroke: rgba(135, 159, 184, 0.18);
-  --pg-stroke-strong: rgba(191, 208, 221, 0.16);
+  --pg-stroke: rgba(135, 159, 184, 0.14);
+  --pg-stroke-strong: rgba(191, 208, 221, 0.12);
   --pg-text: #f5f0e6;
   --pg-muted: #98a7b4;
   --pg-muted-strong: #c3d1da;
@@ -6240,7 +11743,8 @@ UI_CSS = """
   --pg-buy: #48c679;
   --pg-sell: #e67b6f;
   --pg-hold: #7e8ea1;
-  --pg-shadow: 0 18px 60px rgba(0, 0, 0, 0.26);
+  --pg-shadow: 0 14px 42px rgba(0, 0, 0, 0.22);
+  --pg-shell-top: 12px;
 }
 html, body {
   background: #081019;
@@ -6252,46 +11756,119 @@ html {
   position: relative;
   overflow: hidden;
   background:
-    radial-gradient(circle at top left, rgba(98, 201, 180, 0.14), transparent 26%),
-    radial-gradient(circle at top right, rgba(216, 165, 91, 0.13), transparent 22%),
-    radial-gradient(circle at 50% -12%, rgba(77, 133, 219, 0.12), transparent 34%),
-    linear-gradient(180deg, #071017 0%, #0b131c 38%, #101a24 100%);
+    radial-gradient(circle at top left, rgba(98, 201, 180, 0.08), transparent 24%),
+    radial-gradient(circle at 78% 0%, rgba(216, 165, 91, 0.08), transparent 18%),
+    linear-gradient(180deg, #071017 0%, #0b131c 38%, #101923 100%);
   color: var(--pg-text);
   font-family: "Space Grotesk", "IBM Plex Sans", "Segoe UI", sans-serif;
   max-width: 1640px !important;
-  padding: 16px !important;
+  padding: 14px !important;
 }
 .gradio-container::before {
   content: "";
   position: fixed;
-  inset: -12% -10% auto -10%;
-  height: 58vh;
+  inset: -8% -8% auto -8%;
+  height: 34vh;
   background:
-    radial-gradient(circle at 20% 26%, rgba(98, 201, 180, 0.18), transparent 32%),
-    radial-gradient(circle at 76% 14%, rgba(216, 165, 91, 0.16), transparent 28%),
-    radial-gradient(circle at 50% 18%, rgba(84, 138, 220, 0.12), transparent 24%);
-  filter: blur(42px);
-  opacity: 0.95;
+    radial-gradient(circle at 24% 22%, rgba(98, 201, 180, 0.1), transparent 28%),
+    radial-gradient(circle at 78% 12%, rgba(216, 165, 91, 0.08), transparent 26%);
+  filter: blur(52px);
+  opacity: 0.8;
   pointer-events: none;
   z-index: 0;
   animation: pgDrift 18s ease-in-out infinite alternate;
 }
 .gradio-container::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-  background-size: 118px 118px;
-  opacity: 0.2;
-  pointer-events: none;
-  z-index: 0;
-  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.84), transparent 90%);
+  display: none;
 }
 .gradio-container > * {
   position: relative;
   z-index: 1;
+}
+.pg-shell-bar {
+  position: sticky;
+  top: var(--pg-shell-top);
+  z-index: 28;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(166, 184, 204, 0.14);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(8, 15, 23, 0.94), rgba(9, 16, 24, 0.88)),
+    radial-gradient(circle at 18% 28%, rgba(98, 201, 180, 0.08), transparent 22%);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.22);
+}
+.pg-shell-brand {
+  min-width: 0;
+}
+.pg-shell-brand strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 15px;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+}
+.pg-shell-brand span {
+  display: block;
+  margin-top: 4px;
+  color: var(--pg-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  max-width: 36ch;
+}
+.pg-shell-nav,
+.pg-shell-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pg-shell-nav {
+  justify-content: center;
+}
+.pg-shell-actions {
+  justify-content: flex-end;
+}
+.pg-shell-button {
+  appearance: none;
+  border: 1px solid rgba(129, 159, 184, 0.2);
+  border-radius: 999px;
+  padding: 7px 11px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--pg-muted-strong);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease,
+    color 0.18s ease;
+}
+.pg-shell-button:hover,
+.pg-shell-button:focus-visible,
+.pg-shell-button[data-active="true"],
+.pg-shell-button[aria-pressed="true"] {
+  transform: translateY(-1px);
+  border-color: rgba(98, 201, 180, 0.34);
+  background: rgba(98, 201, 180, 0.1);
+  color: var(--pg-text);
+  outline: none;
+}
+.pg-shell-anchor,
+#pg_workspace_tabs {
+  scroll-margin-top: 86px;
+}
+.pg-shell-anchor {
+  position: relative;
+  height: 0;
 }
 @keyframes pgDrift {
   from {
@@ -6315,13 +11892,13 @@ html {
 .pg-hero {
   position: relative;
   border: 1px solid var(--pg-stroke);
-  border-radius: 30px;
-  padding: 30px;
+  border-radius: 24px;
+  padding: 18px 20px;
   background:
-    linear-gradient(135deg, rgba(8, 16, 24, 0.98), rgba(13, 22, 32, 0.92)),
-    radial-gradient(circle at top right, rgba(98, 201, 180, 0.14), transparent 40%);
+    linear-gradient(135deg, rgba(8, 16, 24, 0.98), rgba(11, 20, 29, 0.94)),
+    radial-gradient(circle at top right, rgba(98, 201, 180, 0.08), transparent 32%);
   box-shadow: var(--pg-shadow);
-  margin-bottom: 16px;
+  margin-bottom: 10px;
   overflow: hidden;
 }
 .pg-hero::before {
@@ -6329,18 +11906,13 @@ html {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(circle at 18% 18%, rgba(98, 201, 180, 0.14), transparent 30%),
-    radial-gradient(circle at 82% 14%, rgba(216, 165, 91, 0.12), transparent 28%);
-  opacity: 0.95;
+    radial-gradient(circle at 18% 18%, rgba(98, 201, 180, 0.08), transparent 26%),
+    radial-gradient(circle at 82% 14%, rgba(216, 165, 91, 0.06), transparent 24%);
+  opacity: 0.75;
   pointer-events: none;
 }
 .pg-hero::after {
-  content: "";
-  position: absolute;
-  inset: 18px;
-  border-radius: 24px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  pointer-events: none;
+  display: none;
 }
 .pg-kicker {
   color: var(--pg-amber);
@@ -6351,9 +11923,9 @@ html {
 }
 .pg-hero-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.28fr) minmax(320px, 0.98fr);
-  gap: 24px;
-  align-items: center;
+  grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.9fr);
+  gap: 20px;
+  align-items: start;
 }
 .pg-hero-copy,
 .pg-hero-visual {
@@ -6362,32 +11934,32 @@ html {
 }
 .pg-hero-brand {
   margin-top: 10px;
-  font-size: clamp(2rem, 4vw, 3.1rem);
+  font-size: clamp(1.85rem, 3.4vw, 2.7rem);
   line-height: 0.95;
   letter-spacing: -0.05em;
   font-weight: 800;
 }
 .pg-hero h1 {
-  margin: 14px 0 10px 0;
-  font-size: clamp(1.12rem, 2vw, 1.52rem);
-  line-height: 1.22;
+  margin: 12px 0 8px 0;
+  font-size: clamp(1rem, 1.8vw, 1.28rem);
+  line-height: 1.24;
   font-weight: 600;
   color: var(--pg-muted-strong);
-  max-width: 26ch;
+  max-width: 32ch;
 }
 .pg-hero p {
   margin: 0;
   color: var(--pg-muted);
-  font-size: 14px;
-  line-height: 1.7;
-  max-width: 62ch;
+  font-size: 13px;
+  line-height: 1.65;
+  max-width: 56ch;
 }
 .pg-hero-actions,
 .pg-inline-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin-top: 18px;
+  margin-top: 16px;
 }
 .pg-inline-button {
   appearance: none;
@@ -6418,84 +11990,50 @@ html {
   border-color: rgba(150, 166, 179, 0.22);
   color: var(--pg-muted-strong);
 }
-.pg-vision-stage {
-  position: relative;
-  min-height: 312px;
-  border-radius: 26px;
-  border: 1px solid rgba(154, 173, 193, 0.16);
-  padding: 18px;
-  overflow: hidden;
-  background:
-    linear-gradient(160deg, rgba(15, 26, 37, 0.94), rgba(8, 15, 22, 0.96)),
-    radial-gradient(circle at top right, rgba(98, 201, 180, 0.12), transparent 36%);
-}
-.pg-vision-stage::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.028) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.024) 1px, transparent 1px);
-  background-size: 56px 56px;
-  opacity: 0.22;
-}
-.pg-vision-stage::after {
-  content: "";
-  position: absolute;
-  inset: 12% 10%;
-  border-radius: 999px;
-  border: 1px solid rgba(98, 201, 180, 0.18);
-  box-shadow:
-    0 0 0 34px rgba(98, 201, 180, 0.04),
-    0 0 0 92px rgba(216, 165, 91, 0.03);
-  opacity: 0.7;
-}
-.pg-vision-core {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  place-items: center;
-  min-height: 132px;
-  border-radius: 22px;
-  border: 1px solid rgba(164, 182, 201, 0.16);
-  background: linear-gradient(145deg, rgba(15, 26, 37, 0.74), rgba(8, 16, 24, 0.88));
-  backdrop-filter: blur(14px);
-  text-align: center;
-}
-.pg-vision-core span {
+.pg-hero-meta {
   color: var(--pg-muted);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
-.pg-vision-core strong {
-  display: block;
-  margin-top: 8px;
-  font-size: 22px;
-  line-height: 1.1;
+.pg-hero-protocol {
+  margin-top: 10px;
+  border: 1px solid rgba(166, 184, 204, 0.12);
+  border-radius: 18px;
+  padding: 14px 15px;
+  background: rgba(255, 255, 255, 0.025);
 }
-.pg-vision-core p {
-  margin-top: 8px;
-  max-width: 30ch;
+.pg-hero-rule + .pg-hero-rule {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(166, 184, 204, 0.1);
+}
+.pg-hero-rule strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.35;
+}
+.pg-hero-rule span {
+  display: block;
+  margin-top: 4px;
   color: var(--pg-muted);
   font-size: 12px;
-  line-height: 1.55;
+  line-height: 1.45;
 }
 .pg-hero-stat-grid {
   position: relative;
   z-index: 1;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 16px;
+  gap: 10px;
+  margin-top: 12px;
 }
 .pg-hero-stat {
   border: 1px solid rgba(166, 184, 204, 0.12);
-  border-radius: 18px;
-  padding: 13px 14px;
-  background: rgba(255, 255, 255, 0.035);
-  backdrop-filter: blur(12px);
+  border-radius: 16px;
+  padding: 12px 13px;
+  background: rgba(255, 255, 255, 0.025);
 }
 .pg-hero-stat span {
   display: block;
@@ -6551,6 +12089,18 @@ html {
   gap: 12px;
   padding: 18px 22px 22px 22px;
 }
+.pg-help-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 0 22px 22px 22px;
+}
+.pg-help-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
 .pg-help-section {
   border: 1px solid rgba(166, 184, 204, 0.12);
   border-radius: 18px;
@@ -6560,13 +12110,13 @@ html {
 .pg-panel {
   position: relative;
   border: 1px solid var(--pg-stroke);
-  border-radius: 22px;
-  padding: 16px 18px;
+  border-radius: 20px;
+  padding: 12px 14px;
   background:
-    linear-gradient(180deg, rgba(11, 19, 27, 0.96), rgba(8, 14, 21, 0.9)),
-    radial-gradient(circle at top right, rgba(98, 201, 180, 0.07), transparent 32%);
+    linear-gradient(180deg, rgba(11, 19, 27, 0.96), rgba(8, 14, 21, 0.92)),
+    radial-gradient(circle at top right, rgba(98, 201, 180, 0.04), transparent 28%);
   box-shadow: var(--pg-shadow);
-  backdrop-filter: blur(16px);
+  backdrop-filter: blur(14px);
 }
 .pg-panel::before,
 .pg-live-panel::before {
@@ -6574,23 +12124,29 @@ html {
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 30%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 24%);
   pointer-events: none;
 }
 .pg-control-intro {
   position: relative;
   border: 1px solid rgba(166, 184, 204, 0.14);
-  border-radius: 18px;
-  padding: 14px;
+  border-radius: 16px;
+  padding: 10px 12px;
   background:
-    linear-gradient(160deg, rgba(17, 30, 42, 0.88), rgba(12, 20, 28, 0.94));
+    linear-gradient(160deg, rgba(17, 30, 42, 0.84), rgba(12, 20, 28, 0.92));
+}
+.pg-control-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 .pg-section-title {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.12em;
   color: var(--pg-muted);
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   font-weight: 700;
 }
 .pg-action-row, .pg-inline-row, .pg-card-top {
@@ -6618,15 +12174,15 @@ html {
 }
 .pg-confidence-pill {
   min-width: 118px;
-  padding: 15px 16px;
-  border-radius: 20px;
+  padding: 14px 15px;
+  border-radius: 18px;
   border: 1px solid var(--pg-stroke);
   background: linear-gradient(180deg, rgba(10, 17, 24, 0.98), rgba(14, 22, 31, 0.92));
   text-align: right;
 }
 .pg-confidence-pill strong {
   display: block;
-  font-size: 30px;
+  font-size: 28px;
   line-height: 1;
 }
 .pg-confidence-pill span {
@@ -6637,13 +12193,13 @@ html {
 }
 .pg-signal-overview {
   background:
-    radial-gradient(circle at top right, rgba(98, 201, 180, 0.13), transparent 28%),
+    radial-gradient(circle at top right, rgba(98, 201, 180, 0.1), transparent 26%),
     linear-gradient(135deg, rgba(15, 25, 35, 0.98), rgba(9, 15, 22, 0.94));
 }
 .pg-signal-shell {
   display: grid;
-  grid-template-columns: minmax(320px, 1.7fr) minmax(340px, 1.3fr);
-  gap: 18px;
+  grid-template-columns: minmax(320px, 1.5fr) minmax(300px, 1fr);
+  gap: 16px;
   align-items: start;
 }
 .pg-signal-main {
@@ -6665,23 +12221,25 @@ html {
   margin-bottom: 0;
 }
 .pg-signal-metrics {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   align-content: start;
 }
 .pg-chip-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin: 12px 0 14px 0;
+  margin: 8px 0 10px 0;
 }
 .pg-chip {
   border-radius: 999px;
-  padding: 7px 11px;
-  font-size: 12px;
+  padding: 5px 9px;
+  font-size: 11px;
   font-weight: 700;
   border: 1px solid var(--pg-stroke);
   background: rgba(255, 255, 255, 0.03);
   backdrop-filter: blur(10px);
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 .pg-chip.buy { color: var(--pg-buy); }
 .pg-chip.sell { color: var(--pg-sell); }
@@ -6691,18 +12249,18 @@ html {
 .pg-chip.soft { color: var(--pg-text); }
 .pg-metric-grid, .pg-model-grid, .pg-gate-grid, .pg-memory-grid, .pg-evidence-grid, .pg-status-grid, .pg-guidance-grid {
   display: grid;
-  gap: 12px;
+  gap: 10px;
 }
-.pg-metric-grid { grid-template-columns: repeat(auto-fit, minmax(136px, 1fr)); }
+.pg-metric-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
 .pg-model-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 .pg-gate-grid { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
 .pg-memory-grid, .pg-evidence-grid { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-.pg-status-grid { grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); margin: 12px 0; }
-.pg-guidance-grid { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); margin-top: 14px; }
+.pg-status-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin: 10px 0; }
+.pg-guidance-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); margin-top: 12px; }
 .pg-tile, .pg-model-card, .pg-gate-card, .pg-memory-card, .pg-evidence-card, .pg-debug-card, .pg-status-card, .pg-guidance-card, .pg-compare-card, .pg-hotspot-card {
   border: 1px solid var(--pg-stroke);
-  border-radius: 18px;
-  padding: 13px 14px;
+  border-radius: 16px;
+  padding: 10px 11px;
   background: rgba(255, 255, 255, 0.03);
 }
 .pg-tile-label, .pg-card-label {
@@ -6712,9 +12270,13 @@ html {
   text-transform: uppercase;
 }
 .pg-tile-value {
-  margin-top: 7px;
-  font-size: 24px;
+  margin-top: 6px;
+  font-size: 20px;
   font-weight: 800;
+  line-height: 1.08;
+        overflow-wrap: break-word;
+        word-break: normal;
+        hyphens: none;
 }
 .pg-tile-sub {
   margin-top: 4px;
@@ -6735,7 +12297,7 @@ html {
   background: linear-gradient(90deg, var(--pg-teal), var(--pg-amber));
 }
 .pg-card-title {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
   margin: 4px 0 2px 0;
 }
@@ -6743,10 +12305,12 @@ html {
   color: var(--pg-muted);
   font-size: 12px;
   line-height: 1.55;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 .pg-status-value {
-  margin-top: 7px;
-  font-size: 22px;
+  margin-top: 6px;
+  font-size: 20px;
   line-height: 1.04;
   font-weight: 800;
   letter-spacing: -0.03em;
@@ -6768,6 +12332,27 @@ html {
   margin-top: 2px;
   font-size: 14px;
   color: var(--pg-text);
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+.pg-council-visual {
+  margin-top: 12px;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at 20% 18%, rgba(66, 153, 225, 0.18), transparent 48%),
+    linear-gradient(160deg, rgba(9, 18, 24, 0.98), rgba(15, 27, 35, 0.92));
+  aspect-ratio: 16 / 9;
+}
+.pg-council-visual img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.pg-council-note {
+  margin-top: 10px;
 }
 .pg-pass { color: var(--pg-buy); }
 .pg-fail { color: var(--pg-sell); }
@@ -6777,7 +12362,93 @@ html {
   line-height: 1.6 !important;
 }
 .pg-tab-wrap {
-  margin-top: 10px;
+  margin-top: 8px;
+}
+.pg-tab-wrap .tab-nav {
+  gap: 8px;
+  padding: 2px 0 8px 0;
+  border: none !important;
+  background: transparent !important;
+}
+#pg_workspace_tabs > .tab-nav {
+  position: sticky;
+  top: 62px;
+  z-index: 18;
+  padding-top: 6px;
+  backdrop-filter: blur(14px);
+  background: linear-gradient(180deg, rgba(8, 16, 25, 0.96), rgba(8, 16, 25, 0.74)) !important;
+}
+.pg-tab-wrap .tab-nav button,
+.pg-tab-wrap .tab-nav button[role="tab"] {
+  min-height: 34px;
+  padding: 0 13px;
+  border-radius: 999px !important;
+  border: 1px solid var(--pg-stroke) !important;
+  background: rgba(255, 255, 255, 0.03) !important;
+  color: var(--pg-muted-strong) !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+}
+.pg-tab-wrap .tab-nav button.selected,
+.pg-tab-wrap .tab-nav button[aria-selected="true"] {
+  border-color: rgba(98, 201, 180, 0.3) !important;
+  background: rgba(98, 201, 180, 0.12) !important;
+  color: var(--pg-text) !important;
+}
+.pg-shell-overview,
+.pg-stage-shell {
+  align-items: start;
+}
+.pg-overview-main,
+.pg-overview-side,
+.pg-stage-main,
+.pg-stage-side {
+  min-width: 0;
+}
+.pg-overview-side,
+.pg-stage-side {
+  position: sticky;
+  top: 78px;
+  align-self: start;
+}
+.pg-inline-collapse {
+  border: 1px solid rgba(166, 184, 204, 0.12);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+}
+.pg-inline-collapse summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+}
+.pg-inline-collapse summary::-webkit-details-marker {
+  display: none;
+}
+.pg-inline-collapse[open] summary {
+  border-bottom: 1px solid rgba(166, 184, 204, 0.1);
+}
+.pg-overlay-summary {
+  min-width: 0;
+}
+.pg-overlay-summary strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.35;
+}
+.pg-overlay-summary span {
+  display: block;
+  margin-top: 4px;
+  color: var(--pg-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.pg-collapse-body {
+  padding: 10px 12px 12px 12px;
 }
 .pg-controls .gr-button,
 .pg-feedback .gr-button,
@@ -6791,11 +12462,130 @@ html {
   border: 1px solid rgba(98, 201, 180, 0.34) !important;
 }
 .pg-control-board {
-  position: sticky;
-  top: 16px;
   display: grid;
-  gap: 12px;
-  overflow: hidden;
+  gap: 14px;
+}
+.gradio-container {
+  max-width: 1720px !important;
+  padding: 16px !important;
+  background:
+    radial-gradient(circle at top left, rgba(98, 201, 180, 0.10), transparent 22%),
+    radial-gradient(circle at 84% 0%, rgba(216, 165, 91, 0.10), transparent 16%),
+    linear-gradient(180deg, #061019 0%, #0a131d 38%, #0d1822 100%);
+}
+.pg-shell-bar {
+  gap: 14px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(7, 14, 22, 0.96), rgba(8, 16, 25, 0.90)),
+    radial-gradient(circle at 18% 28%, rgba(98, 201, 180, 0.08), transparent 22%),
+    radial-gradient(circle at 84% 18%, rgba(216, 165, 91, 0.08), transparent 22%);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.24);
+}
+.pg-shell-brand strong {
+  font-size: 16px;
+  letter-spacing: -0.04em;
+}
+.pg-shell-brand span {
+  max-width: 42ch;
+  color: rgba(195, 209, 218, 0.84);
+}
+.pg-shell-button {
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.045);
+}
+.pg-shell-button:hover,
+.pg-shell-button:focus-visible,
+.pg-shell-button[data-active="true"],
+.pg-shell-button[aria-pressed="true"] {
+  transform: translateY(-2px);
+}
+.pg-hero {
+  border-radius: 28px;
+  padding: 22px 24px;
+  background:
+    linear-gradient(140deg, rgba(8, 16, 24, 0.98), rgba(11, 19, 28, 0.94) 54%, rgba(18, 21, 27, 0.94) 100%),
+    radial-gradient(circle at top right, rgba(98, 201, 180, 0.10), transparent 30%);
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.24);
+}
+.pg-hero::before {
+  background:
+    radial-gradient(circle at 18% 18%, rgba(98, 201, 180, 0.10), transparent 24%),
+    radial-gradient(circle at 82% 14%, rgba(216, 165, 91, 0.08), transparent 22%),
+    linear-gradient(110deg, rgba(255, 255, 255, 0.04), transparent 28%);
+}
+.pg-hero-grid {
+  grid-template-columns: minmax(0, 1.16fr) minmax(320px, 0.9fr);
+  gap: 26px;
+  align-items: stretch;
+}
+.pg-hero-brand {
+  font-size: clamp(2.2rem, 4.6vw, 3.9rem);
+  line-height: 0.9;
+}
+.pg-hero h1 {
+  margin: 14px 0 10px 0;
+  font-size: clamp(1.02rem, 1.9vw, 1.38rem);
+  line-height: 1.22;
+  max-width: 30ch;
+}
+.pg-hero p {
+  max-width: 58ch;
+  color: rgba(195, 209, 218, 0.84);
+}
+.pg-hero-protocol,
+.pg-hero-stat {
+  background: rgba(255, 255, 255, 0.032);
+  border-color: rgba(166, 184, 204, 0.14);
+}
+.pg-shell-overview,
+.pg-stage-shell {
+  gap: 14px;
+}
+.pg-overview-side,
+.pg-stage-side {
+  top: 84px;
+}
+.pg-control-board {
+  gap: 18px;
+  border-radius: 24px;
+}
+.pg-control-intro {
+  border-radius: 20px;
+  padding: 12px 14px;
+  background:
+    linear-gradient(160deg, rgba(17, 30, 42, 0.88), rgba(11, 19, 28, 0.94)),
+    radial-gradient(circle at top right, rgba(216, 165, 91, 0.08), transparent 26%);
+}
+.pg-controls .gradio-accordion,
+.pg-controls details {
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(12, 21, 30, 0.88), rgba(9, 16, 24, 0.88));
+}
+.pg-stage-media,
+.pg-stage-media > div,
+.pg-stage-media img {
+  border: 1px solid rgba(166, 184, 204, 0.12);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.18);
+}
+@media (max-width: 1180px) {
+  .pg-shell-bar {
+    grid-template-columns: 1fr;
+  }
+  .pg-shell-nav,
+  .pg-shell-actions {
+    justify-content: flex-start;
+  }
+  .pg-hero-grid {
+    grid-template-columns: 1fr;
+  }
+  .pg-overview-side,
+  .pg-stage-side {
+    position: static;
+  }
 }
 .pg-controls .gradio-accordion,
 .pg-controls details {
@@ -6809,13 +12599,16 @@ html {
 }
 .pg-live-panel {
   position: relative;
-  margin-top: 14px;
+  margin-top: 0;
   border: 1px solid var(--pg-stroke);
-  border-radius: 18px;
-  padding: 12px 14px;
+  border-radius: 16px;
+  padding: 11px 12px;
   background:
-    linear-gradient(135deg, rgba(19, 34, 40, 0.92), rgba(15, 23, 31, 0.92));
+    linear-gradient(135deg, rgba(17, 30, 36, 0.9), rgba(12, 20, 28, 0.94));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), var(--pg-shadow);
+}
+.pg-live-panel + .pg-live-panel {
+  margin-top: 12px;
 }
 .pg-debug-grid {
   display: grid;
@@ -6851,6 +12644,23 @@ html {
 .pg-stage-media:hover img {
   transform: scale(1.01);
 }
+.pg-stage-media,
+.pg-stage-media > div {
+  width: 100% !important;
+  height: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
+}
+.pg-stage-media img,
+.pg-stage-media canvas {
+  display: block !important;
+  width: 100% !important;
+  height: auto !important;
+  max-width: 100% !important;
+  max-height: none !important;
+  object-fit: contain !important;
+  aspect-ratio: auto !important;
+}
 .pg-compare-controls {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -6877,14 +12687,14 @@ html {
 }
 .pg-compare-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 12px;
-  margin-top: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
 }
 .pg-compare-card {
   border: 1px solid var(--pg-stroke);
-  border-radius: 18px;
-  padding: 13px 14px;
+  border-radius: 16px;
+  padding: 11px 12px;
   background: rgba(255, 255, 255, 0.03);
 }
 .pg-heatmap-root {
@@ -7017,11 +12827,10 @@ html {
   border: 1px solid rgba(255, 255, 255, 0.12);
 }
 .pg-transform-frame {
-  margin-top: 10px;
+  margin-top: 8px;
   border-radius: 16px;
   overflow: hidden;
   background: rgba(0, 0, 0, 0.24);
-  min-height: 180px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -7029,22 +12838,24 @@ html {
 .pg-transform-frame img {
   width: 100%;
   height: auto;
+  max-width: 100%;
+  object-fit: contain;
   transition: transform 140ms ease, opacity 140ms ease;
   transform-origin: center center;
 }
 .pg-session-stack {
   display: grid;
-  gap: 12px;
-  margin-top: 14px;
+  gap: 10px;
+  margin-top: 12px;
 }
 .pg-session-card {
   display: grid;
-  grid-template-columns: 160px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 12px;
   align-items: center;
   border: 1px solid var(--pg-stroke);
   border-radius: 18px;
-  padding: 12px;
+  padding: 10px;
   background: rgba(255, 255, 255, 0.03);
 }
 .pg-session-thumb,
@@ -7068,6 +12879,58 @@ html {
   gap: 14px;
   align-items: start;
 }
+.pg-brief-panel {
+  overflow: hidden;
+}
+.pg-brief-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.pg-brief-section {
+  border: 1px solid rgba(166, 184, 204, 0.1);
+  border-radius: 16px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.pg-brief-list {
+  margin: 10px 0 0 18px;
+  padding: 0;
+  color: var(--pg-muted-strong);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.pg-brief-list li + li {
+  margin-top: 6px;
+}
+.pg-brief-details {
+  margin-top: 12px;
+  border: 1px solid rgba(166, 184, 204, 0.12);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.025);
+}
+.pg-brief-details summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 12px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--pg-muted-strong);
+}
+.pg-brief-details summary::-webkit-details-marker {
+  display: none;
+}
+.pg-brief-pre {
+  margin: 0;
+  padding: 0 14px 14px 14px;
+  color: var(--pg-text);
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .pg-zone-studio .gr-button {
   background: linear-gradient(135deg, #19453e, #3a7f73) !important;
   border: 1px solid rgba(76, 165, 154, 0.34) !important;
@@ -7076,13 +12939,22 @@ html[data-pg-mode="operator"] .pg-guided-only,
 html[data-pg-mode="compact"] .pg-guided-only {
   display: none !important;
 }
+html[data-pg-mode="compact"] .pg-shell-intro,
+html[data-pg-intro="collapsed"] .pg-shell-intro {
+  display: none !important;
+}
+html[data-pg-focus="stage"] .pg-shell-intro,
+html[data-pg-focus="stage"] #pg_mission_control,
+html[data-pg-focus="stage"] #pg_workspace_tabs {
+  display: none !important;
+}
 html[data-pg-mode="compact"] .pg-panel,
 html[data-pg-mode="compact"] .pg-live-panel {
-  padding: 14px 15px;
+  padding: 12px 13px;
   border-radius: 18px;
 }
 html[data-pg-mode="compact"] .pg-chip-row {
-  margin: 10px 0 12px 0;
+  margin: 8px 0 10px 0;
 }
 html[data-pg-mode="compact"] .pg-card-note,
 html[data-pg-mode="compact"] .pg-muted {
@@ -7092,25 +12964,432 @@ html[data-pg-mode="compact"] .pg-action-label {
   font-size: 34px;
 }
 html[data-pg-mode="compact"] .pg-hero {
-  padding: 22px;
+  padding: 18px;
+}
+html[data-pg-mode="compact"] .pg-status-grid,
+html[data-pg-mode="compact"] .pg-guidance-grid,
+html[data-pg-mode="compact"] .pg-metric-grid {
+  gap: 10px;
+}
+.gradio-container::after {
+  content: "";
+  display: block;
+  position: fixed;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(3, 7, 12, 0.00) 0%, rgba(3, 7, 12, 0.18) 100%),
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.020) 0px,
+      rgba(255, 255, 255, 0.020) 1px,
+      transparent 1px,
+      transparent 72px
+    ),
+    repeating-linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.016) 0px,
+      rgba(255, 255, 255, 0.016) 1px,
+      transparent 1px,
+      transparent 72px
+    );
+  opacity: 0.14;
+  pointer-events: none;
+  z-index: 0;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.75), transparent 92%);
+}
+.pg-command-grid,
+.pg-stage-grid {
+  gap: 14px;
+}
+.pg-reference-shell {
+  display: grid !important;
+  grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  margin-top: 8px;
+}
+.pg-reference-shell > * {
+  min-width: 0;
+}
+.pg-reference-rail,
+.pg-reference-main {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+.pg-reference-rail {
+  position: sticky;
+  top: 82px;
+  align-self: start;
+}
+.pg-reference-main {
+  min-width: 0;
+}
+.pg-reference-stage {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1.56fr) minmax(280px, 0.66fr);
+  gap: 14px;
+  align-items: start;
+}
+.pg-reference-stage > * {
+  min-width: 0;
+}
+.pg-overview-rail,
+.pg-stage-sidebar {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+.pg-signal-card,
+.pg-side-card,
+.pg-stage-card,
+.pg-wide-card,
+.pg-gauge-card {
+  min-width: 0;
+}
+.pg-signal-card .pg-panel,
+.pg-stage-card .pg-panel,
+.pg-side-card .pg-panel,
+.pg-wide-card .pg-panel {
+  height: 100%;
+}
+.pg-hero {
+  min-height: auto;
+  padding: 18px 20px;
+  border-radius: 24px;
+  background:
+    linear-gradient(138deg, rgba(8, 15, 24, 0.98), rgba(10, 18, 27, 0.95)),
+    radial-gradient(circle at 82% 12%, rgba(216, 165, 91, 0.10), transparent 20%),
+    radial-gradient(circle at 16% 18%, rgba(98, 201, 180, 0.08), transparent 20%);
+}
+.pg-hero::after {
+  content: "";
+  display: block;
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(108deg, rgba(255, 255, 255, 0.04), transparent 24%),
+    linear-gradient(180deg, rgba(5, 10, 16, 0.02) 0%, rgba(5, 10, 16, 0.16) 100%),
+    repeating-linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.012) 0px,
+      rgba(255, 255, 255, 0.012) 1px,
+      transparent 1px,
+      transparent 24px
+    );
+  opacity: 0.34;
+  pointer-events: none;
+}
+.pg-workspace-hero .pg-hero-grid {
+  grid-template-columns: minmax(0, 1.25fr) minmax(260px, 0.85fr);
+  gap: 16px;
+  align-items: start;
+}
+.pg-hero-copy {
+  max-width: 40rem;
+}
+.pg-workspace-hero .pg-hero-brand {
+  font-size: clamp(1.65rem, 3vw, 2.35rem);
+}
+.pg-workspace-hero h1 {
+  margin: 10px 0 6px 0;
+  font-size: clamp(0.95rem, 1.4vw, 1.08rem);
+  max-width: 34ch;
+}
+.pg-workspace-hero p {
+  max-width: 52ch;
+}
+.pg-workspace-summary {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+.pg-workspace-summary-item {
+  border: 1px solid rgba(166, 184, 204, 0.12);
+  border-radius: 16px;
+  padding: 11px 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.014));
+}
+.pg-hero-ledger {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(195, 209, 218, 0.10);
+}
+.pg-hero-ledger span {
+  color: rgba(226, 233, 239, 0.76);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+}
+.pg-hero-visual {
+  display: grid;
+  align-content: end;
+}
+#pg_mission_control.pg-control-board {
+  padding: 16px;
+  border-radius: 22px;
+  background:
+    linear-gradient(160deg, rgba(9, 16, 24, 0.98), rgba(10, 18, 27, 0.96));
+  overflow: hidden;
+}
+#pg_mission_control.pg-control-board::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 18%),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02), transparent 18%, transparent 82%, rgba(255, 255, 255, 0.02));
+  pointer-events: none;
+}
+.pg-control-board h3 {
+  margin: 0;
+  color: var(--pg-muted-strong);
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.pg-control-board .gr-markdown > :last-child {
+  margin-bottom: 0;
+}
+.pg-control-intro {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background:
+    linear-gradient(160deg, rgba(17, 27, 37, 0.78), rgba(12, 20, 28, 0.92));
+}
+.pg-control-steps {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.pg-control-step {
+  border: 1px solid rgba(166, 184, 204, 0.1);
+  border-radius: 14px;
+  padding: 9px 10px;
+  background: rgba(255, 255, 255, 0.025);
+}
+.pg-control-step strong {
+  display: block;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.pg-control-step span {
+  display: block;
+  margin-top: 4px;
+  color: var(--pg-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.pg-reference-control-board {
+  padding: 16px;
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(46, 43, 47, 0.94), rgba(31, 30, 34, 0.96));
+  border-color: rgba(213, 205, 194, 0.12);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
+}
+.pg-reference-control-board .gr-file,
+.pg-reference-control-board .gradio-accordion,
+.pg-reference-control-board details,
+.pg-reference-control-board .gradio-accordion summary,
+.pg-reference-control-board details summary {
+  background: rgba(12, 12, 14, 0.18) !important;
+}
+.pg-reference-control-board .gradio-accordion,
+.pg-reference-control-board details {
+  border-radius: 16px;
+}
+.pg-reference-control-board .gr-button {
+  min-height: 46px;
+  background: linear-gradient(135deg, #dad7d4, #f4f2ef) !important;
+  color: #11161c !important;
+  border: 1px solid rgba(255, 255, 255, 0.36) !important;
+}
+.pg-reference-control-board .gr-button:hover {
+  filter: brightness(1.02);
+}
+.pg-reference-status .pg-live-panel,
+.pg-reference-guidance .pg-panel {
+  border-radius: 20px;
+}
+.pg-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+.pg-shell-overview .pg-signal-overview,
+.pg-overview-rail .pg-live-panel,
+.pg-overview-rail .pg-panel,
+.pg-stage-sidebar .pg-panel {
+  border-radius: 22px;
+}
+.pg-live-panel {
+  padding: 14px 15px;
+  border-radius: 22px;
+  background:
+    linear-gradient(150deg, rgba(10, 18, 27, 0.96), rgba(8, 14, 21, 0.94)),
+    radial-gradient(circle at top right, rgba(98, 201, 180, 0.08), transparent 28%);
+}
+.pg-status-grid .pg-status-card {
+  min-height: 96px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.032), rgba(255, 255, 255, 0.018));
+}
+.pg-signal-overview {
+  padding: 16px 18px;
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 82% 12%, rgba(98, 201, 180, 0.16), transparent 22%),
+    radial-gradient(circle at 24% 0%, rgba(216, 165, 91, 0.09), transparent 22%),
+    linear-gradient(138deg, rgba(10, 19, 28, 0.98), rgba(7, 14, 21, 0.96));
+}
+.pg-signal-shell {
+  grid-template-columns: minmax(0, 1.18fr) minmax(320px, 0.88fr);
+  gap: 18px;
+  align-items: start;
+}
+.pg-signal-main {
+  display: grid;
+  gap: 14px;
+}
+.pg-signal-metrics {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.pg-signal-stage-title {
+  color: rgba(195, 209, 218, 0.86);
+}
+.pg-signal-summary-copy {
+  max-width: 68ch;
+  color: rgba(226, 233, 239, 0.84);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.pg-signal-summary-line {
+  margin: 0;
+}
+.pg-signal-summary-line + .pg-signal-summary-line {
+  margin-top: 6px;
+}
+.pg-signal-metric-bank {
+  align-content: start;
+}
+.pg-signal-metric-bank .pg-tile {
+  min-height: 100px;
+  padding: 12px 13px;
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.034), rgba(255, 255, 255, 0.016));
+}
+.pg-signal-metric-bank .pg-tile-value {
+  font-size: 22px;
+  letter-spacing: -0.04em;
+}
+.pg-signal-metric-bank .pg-tile:first-child .pg-tile-value {
+  font-size: 32px;
+}
+.pg-signal-chips {
+  margin-top: 2px;
+}
+.pg-gauge-card {
+  border: 1px solid rgba(166, 184, 204, 0.14);
+  border-radius: 22px;
+  min-height: 278px;
+  padding: 8px 10px;
+  background:
+    linear-gradient(180deg, rgba(10, 18, 27, 0.98), rgba(8, 14, 21, 0.94));
+  box-shadow: 0 22px 48px rgba(0, 0, 0, 0.22);
+  overflow: hidden;
+}
+.pg-gauge-card > div {
+  background: transparent !important;
+}
+.pg-gauge-card .js-plotly-plot,
+.pg-gauge-card .plot-container {
+  min-height: 248px;
+}
+.pg-stage-grid {
+  margin-top: 6px;
+  align-items: stretch;
+}
+.pg-stage-main,
+.pg-stage-sidebar {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+.pg-stage-sidebar {
+  grid-template-rows: auto auto;
+}
+.pg-stage-media,
+.pg-stage-media > div,
+.pg-stage-media img,
+.pg-zone-editor,
+.pg-zone-editor > div,
+.pg-zone-editor canvas {
+  border-radius: 22px;
+}
+.pg-stage-card .pg-panel,
+.pg-wide-card .pg-panel {
+  border-radius: 22px;
+  background:
+    linear-gradient(155deg, rgba(9, 17, 25, 0.98), rgba(11, 19, 28, 0.94)),
+    radial-gradient(circle at top right, rgba(216, 165, 91, 0.08), transparent 24%);
+}
+.pg-brief-panel {
+  border-radius: 24px;
+  background:
+    linear-gradient(150deg, rgba(8, 15, 23, 0.98), rgba(11, 18, 27, 0.94)),
+    radial-gradient(circle at top right, rgba(98, 201, 180, 0.08), transparent 26%);
+}
+.pg-brief-section {
+  padding: 10px;
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.014));
 }
 @media (max-width: 1180px) {
   .gradio-container {
     max-width: 100% !important;
     padding: 12px !important;
   }
-  .pg-control-board {
-    position: static;
+  .pg-shell-bar {
+    grid-template-columns: 1fr;
+  }
+  .pg-shell-nav,
+  .pg-shell-actions {
+    justify-content: flex-start;
   }
   .pg-hero-grid,
-  .pg-signal-shell {
+  .pg-signal-shell,
+  .pg-brief-grid,
+  .pg-reference-shell,
+  .pg-reference-stage,
+  .pg-command-grid,
+  .pg-stage-grid {
     grid-template-columns: 1fr;
   }
   .pg-heatmap-grid {
     grid-template-columns: 1fr;
   }
+  .pg-overview-side,
+  .pg-stage-side,
+  .pg-reference-rail {
+    position: static;
+  }
   .pg-hero-brand {
-    font-size: 42px;
+    font-size: 34px;
   }
   .pg-signal-metrics {
     grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
@@ -7118,13 +13397,19 @@ html[data-pg-mode="compact"] .pg-hero {
 }
 @media (max-width: 820px) {
   .pg-hero {
-    padding: 20px;
+    padding: 16px;
     border-radius: 22px;
   }
-  .pg-hero-brand {
-    font-size: 34px;
+  .pg-workspace-hero .pg-hero-grid,
+  .pg-control-steps {
+    grid-template-columns: 1fr;
   }
-  .pg-action-row, .pg-inline-row, .pg-card-top {
+  .pg-hero-brand {
+    font-size: 30px;
+  }
+  .pg-action-row, .pg-inline-row, .pg-card-top,
+  .pg-control-toolbar,
+  .pg-help-footer {
     flex-direction: column;
   }
   .pg-confidence-pill {
@@ -7141,12 +13426,15 @@ html[data-pg-mode="compact"] .pg-hero {
   .pg-session-card,
   .pg-lab-grid,
   .pg-status-grid,
-  .pg-guidance-grid,
-  .pg-hero-stat-grid {
+  .pg-guidance-grid {
     grid-template-columns: 1fr;
   }
   .pg-help-grid {
     grid-template-columns: 1fr;
+  }
+  .pg-inline-collapse summary {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -7161,6 +13449,397 @@ html[data-pg-mode="compact"] .pg-hero {
     transition: none !important;
   }
 }
+
+.gradio-container {
+    max-width: 1820px !important;
+    padding: 18px !important;
+    background:
+        radial-gradient(circle at top left, rgba(98, 201, 180, 0.10), transparent 22%),
+        radial-gradient(circle at 84% 0%, rgba(216, 165, 91, 0.10), transparent 16%),
+        linear-gradient(180deg, #061019 0%, #0a131d 38%, #0d1822 100%);
+}
+.pg-shell-bar {
+    gap: 14px;
+    margin-bottom: 12px;
+    padding: 12px 16px;
+    border-radius: 24px;
+    background:
+        linear-gradient(180deg, rgba(7, 14, 22, 0.96), rgba(8, 16, 25, 0.90)),
+        radial-gradient(circle at 18% 28%, rgba(98, 201, 180, 0.08), transparent 22%),
+        radial-gradient(circle at 84% 18%, rgba(216, 165, 91, 0.08), transparent 22%);
+    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.24);
+}
+.pg-shell-brand strong {
+    font-size: 17px;
+    letter-spacing: -0.04em;
+}
+.pg-shell-brand span {
+    max-width: 42ch;
+    color: rgba(195, 209, 218, 0.84);
+}
+.pg-shell-button {
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.045);
+}
+.pg-shell-button:hover,
+.pg-shell-button:focus-visible,
+.pg-shell-button[data-active="true"],
+.pg-shell-button[aria-pressed="true"] {
+    transform: translateY(-2px);
+}
+.pg-hero {
+    min-height: auto;
+    padding: 26px 28px;
+    border-radius: 34px;
+    background:
+        linear-gradient(140deg, rgba(8, 16, 24, 0.98), rgba(11, 19, 28, 0.94) 54%, rgba(18, 21, 27, 0.94) 100%),
+        radial-gradient(circle at top right, rgba(98, 201, 180, 0.10), transparent 30%),
+        radial-gradient(circle at 12% 14%, rgba(245, 201, 130, 0.08), transparent 24%);
+    box-shadow: 0 24px 56px rgba(0, 0, 0, 0.24);
+}
+.pg-hero::before {
+    background:
+        radial-gradient(circle at 18% 18%, rgba(98, 201, 180, 0.10), transparent 24%),
+        radial-gradient(circle at 82% 14%, rgba(216, 165, 91, 0.08), transparent 22%),
+        linear-gradient(110deg, rgba(255, 255, 255, 0.04), transparent 28%);
+}
+.pg-workspace-hero .pg-hero-grid {
+    grid-template-columns: minmax(0, 1.08fr) minmax(380px, 0.92fr);
+    gap: clamp(18px, 2.2vw, 30px);
+    align-items: stretch;
+}
+.pg-hero-copy {
+    max-width: 44rem;
+    padding: 6px 0 12px;
+}
+.pg-hero-brand {
+    font-size: clamp(2.6rem, 5vw, 4.6rem);
+    line-height: 0.88;
+}
+.pg-hero h1 {
+    margin: 16px 0 10px 0;
+    font-size: clamp(1.1rem, 1.9vw, 1.4rem);
+    line-height: 1.28;
+    max-width: 34ch;
+}
+.pg-hero p {
+    max-width: 58ch;
+    color: rgba(195, 209, 218, 0.86);
+    font-size: 14px;
+    line-height: 1.78;
+}
+.pg-hero-ledger {
+    margin-top: 18px;
+    padding-top: 14px;
+    gap: 14px;
+    border-top: 1px solid rgba(195, 209, 218, 0.10);
+}
+.pg-hero-visual {
+    display: grid;
+    gap: 16px;
+    align-content: start;
+    min-width: 0;
+}
+.pg-hero-scene {
+    position: relative;
+    overflow: hidden;
+    min-height: min(54svh, 540px);
+    border-radius: 30px;
+    border: 1px solid rgba(166, 184, 204, 0.16);
+    background:
+        linear-gradient(165deg, rgba(7, 13, 19, 0.96), rgba(12, 21, 30, 0.88)),
+        radial-gradient(circle at 86% 12%, rgba(255, 205, 122, 0.16), transparent 28%);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.06),
+        0 34px 84px rgba(0, 0, 0, 0.28);
+}
+.pg-hero-scene::before {
+    content: "";
+    position: absolute;
+    inset: auto -8% -20% auto;
+    width: 52%;
+    height: 68%;
+    border-radius: 999px;
+    background: radial-gradient(circle, rgba(245, 201, 130, 0.22), transparent 68%);
+    filter: blur(28px);
+    opacity: 0.9;
+    pointer-events: none;
+}
+.pg-hero-scene::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+        linear-gradient(180deg, rgba(6, 11, 16, 0.06) 0%, rgba(6, 11, 16, 0.22) 34%, rgba(6, 11, 16, 0.82) 100%),
+        linear-gradient(90deg, rgba(6, 11, 16, 0.60) 0%, rgba(6, 11, 16, 0.10) 42%, rgba(6, 11, 16, 0.48) 100%),
+        repeating-linear-gradient(
+            135deg,
+            rgba(255, 255, 255, 0.018) 0px,
+            rgba(255, 255, 255, 0.018) 1px,
+            transparent 1px,
+            transparent 18px
+        );
+    backdrop-filter: blur(4px);
+    pointer-events: none;
+}
+.pg-hero-scene-plane {
+    position: absolute;
+    inset: -5%;
+    overflow: hidden;
+}
+.pg-hero-scene-slide {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    background-position: center;
+    background-size: cover;
+    transform: scale(1.18);
+    filter: saturate(1.05) contrast(1.08) brightness(0.50) blur(20px);
+    animation: pgHeroSceneFade 32s cubic-bezier(0.45, 0.05, 0.2, 1.0) infinite;
+    will-change: opacity, transform, filter;
+}
+.pg-hero-scene-slide:nth-child(1) {
+    animation-delay: 0s;
+}
+.pg-hero-scene-slide:nth-child(2) {
+    animation-delay: 8s;
+}
+.pg-hero-scene-slide:nth-child(3) {
+    animation-delay: 16s;
+}
+.pg-hero-scene-slide:nth-child(4) {
+    animation-delay: 24s;
+}
+@keyframes pgHeroSceneFade {
+    0%, 18% {
+        opacity: 0;
+        transform: scale(1.20);
+        filter: saturate(1.00) contrast(1.04) brightness(0.44) blur(24px);
+    }
+    22%, 44% {
+        opacity: 1;
+        transform: scale(1.08);
+        filter: saturate(1.08) contrast(1.10) brightness(0.58) blur(14px);
+    }
+    50%, 100% {
+        opacity: 0;
+        transform: scale(1.14);
+        filter: saturate(1.00) contrast(1.04) brightness(0.44) blur(22px);
+    }
+}
+.pg-hero-scene-copy {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    align-content: end;
+    gap: 10px;
+    min-height: inherit;
+    padding: clamp(22px, 2.8vw, 34px);
+}
+.pg-hero-scene-copy .pg-kicker {
+    color: rgba(255, 229, 187, 0.86);
+    letter-spacing: 0.18em;
+}
+.pg-hero-scene-copy .pg-card-title {
+    font-size: clamp(1.6rem, 3vw, 2.4rem);
+    line-height: 0.98;
+    max-width: 11ch;
+}
+.pg-hero-scene-copy .pg-card-note {
+    max-width: 30ch;
+    font-size: 13px;
+    line-height: 1.68;
+    color: rgba(236, 240, 244, 0.72);
+}
+.pg-hero-scene-ledger {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 14px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 241, 215, 0.10);
+}
+.pg-hero-scene-ledger span {
+    color: rgba(246, 238, 225, 0.82);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+}
+.pg-workspace-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+}
+.pg-workspace-summary-item {
+    min-height: 136px;
+    padding: 16px 16px 15px;
+    border-radius: 22px;
+    border: 1px solid rgba(166, 184, 204, 0.12);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.032), rgba(255, 255, 255, 0.016));
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.18);
+    backdrop-filter: blur(16px);
+}
+.pg-workspace-summary-item .pg-card-title {
+    font-size: 17px;
+    line-height: 1.18;
+    margin-top: 6px;
+}
+.pg-workspace-summary-item .pg-card-note {
+    margin-top: 6px;
+    font-size: 13px;
+    line-height: 1.62;
+    color: rgba(195, 209, 218, 0.82);
+}
+.pg-panel,
+.pg-live-panel {
+    border-radius: 24px;
+    padding: 15px 16px;
+    background:
+        linear-gradient(180deg, rgba(11, 19, 27, 0.96), rgba(8, 14, 21, 0.92)),
+        radial-gradient(circle at top right, rgba(98, 201, 180, 0.04), transparent 28%);
+}
+.pg-control-board,
+#pg_mission_control.pg-control-board,
+.pg-reference-control-board {
+    padding: 18px;
+    border-radius: 28px;
+    background:
+        linear-gradient(156deg, rgba(7, 12, 18, 0.98), rgba(10, 18, 27, 0.94)),
+        radial-gradient(circle at top right, rgba(243, 197, 125, 0.12), transparent 26%);
+    overflow: hidden;
+}
+.pg-control-intro {
+    border-radius: 20px;
+    padding: 14px 16px;
+    background:
+        linear-gradient(160deg, rgba(17, 30, 42, 0.88), rgba(11, 19, 28, 0.94)),
+        radial-gradient(circle at top right, rgba(216, 165, 91, 0.08), transparent 26%);
+}
+.pg-control-steps {
+    gap: 10px;
+    margin-top: 12px;
+}
+.pg-control-step {
+    border-radius: 16px;
+    padding: 11px 12px;
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(166, 184, 204, 0.10);
+}
+.pg-signal-overview {
+    padding: 18px 20px;
+    border-radius: 26px;
+    background:
+        radial-gradient(circle at 82% 12%, rgba(98, 201, 180, 0.16), transparent 22%),
+        radial-gradient(circle at 24% 0%, rgba(216, 165, 91, 0.09), transparent 22%),
+        linear-gradient(138deg, rgba(10, 19, 28, 0.98), rgba(7, 14, 21, 0.96));
+}
+.pg-reference-shell,
+.pg-reference-stage {
+    gap: 18px;
+}
+.pg-reference-rail {
+    top: 92px;
+}
+.pg-reference-main,
+.pg-overview-rail,
+.pg-stage-sidebar {
+    gap: 14px;
+}
+.pg-stage-media,
+.pg-stage-media > div,
+.pg-stage-media img,
+.pg-zone-editor,
+.pg-zone-editor > div,
+.pg-zone-editor canvas {
+    border-radius: 26px;
+}
+.pg-gauge-card {
+    border-radius: 26px;
+    min-height: 300px;
+}
+.pg-stage-card .pg-panel,
+.pg-wide-card .pg-panel,
+.pg-side-card .pg-panel {
+    border-radius: 24px;
+}
+.pg-reference-status .pg-live-panel,
+.pg-reference-guidance .pg-panel,
+.pg-overview-rail .pg-panel,
+.pg-stage-sidebar .pg-panel {
+    border-radius: 24px;
+}
+.pg-hero-actions .pg-inline-button {
+    padding: 11px 15px;
+}
+@media (max-width: 1180px) {
+    .gradio-container {
+        max-width: 100% !important;
+        padding: 12px !important;
+    }
+    .pg-shell-bar {
+        grid-template-columns: 1fr;
+    }
+    .pg-shell-nav,
+    .pg-shell-actions {
+        justify-content: flex-start;
+    }
+    .pg-workspace-hero .pg-hero-grid,
+    .pg-reference-shell,
+    .pg-reference-stage {
+        grid-template-columns: 1fr;
+    }
+    .pg-workspace-summary {
+        grid-template-columns: 1fr;
+    }
+    .pg-hero-scene {
+        min-height: 380px;
+    }
+    .pg-overview-side,
+    .pg-stage-side,
+    .pg-reference-rail {
+        position: static;
+    }
+    .pg-hero-brand {
+        font-size: 34px;
+    }
+}
+@media (max-width: 820px) {
+    .pg-hero {
+        padding: 18px;
+        border-radius: 28px;
+    }
+    .pg-hero-brand {
+        font-size: 30px;
+    }
+    .pg-action-row,
+    .pg-inline-row,
+    .pg-card-top,
+    .pg-control-toolbar,
+    .pg-help-footer {
+        flex-direction: column;
+    }
+    .pg-confidence-pill {
+        width: 100%;
+        text-align: left;
+    }
+    .pg-debug-grid,
+    .pg-model-grid,
+    .pg-gate-grid,
+    .pg-memory-grid,
+    .pg-evidence-grid,
+    .pg-metric-grid,
+    .pg-compare-grid,
+    .pg-session-card,
+    .pg-lab-grid,
+    .pg-status-grid,
+    .pg-guidance-grid {
+        grid-template-columns: 1fr;
+    }
+    .pg-help-grid {
+        grid-template-columns: 1fr;
+    }
+}
 """
 
 
@@ -7168,6 +13847,87 @@ UI_HEAD = """
 <script>
 (() => {
   const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const introCollapseKey = 'phoenixguard.shell.intro.v1';
+  const focusStageKey = 'phoenixguard.shell.focus.v1';
+  const shellState = {
+    introCollapsed: false,
+    focusStage: false,
+  };
+
+  const readStoredFlag = (key, defaultValue = false) => {
+    try {
+      const stored = window.localStorage.getItem(key);
+      if (stored === null) return defaultValue;
+      return stored === '1';
+    } catch (error) {
+      console.debug('PhoenixGuard shell storage unavailable.', error);
+      return defaultValue;
+    }
+  };
+
+  const writeStoredFlag = (key, value) => {
+    try {
+      window.localStorage.setItem(key, value ? '1' : '0');
+    } catch (error) {
+      console.debug('PhoenixGuard shell storage unavailable.', error);
+    }
+  };
+
+  const syncShellButtons = () => {
+    document.querySelectorAll('[data-pg-toggle]').forEach((button) => {
+      const toggle = button.getAttribute('data-pg-toggle');
+      const active = toggle === 'intro' ? shellState.introCollapsed : shellState.focusStage;
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      button.setAttribute('data-active', active ? 'true' : 'false');
+      const activeLabel = button.getAttribute('data-label-active');
+      const inactiveLabel = button.getAttribute('data-label-inactive');
+      if (activeLabel && inactiveLabel) {
+        button.textContent = active ? activeLabel : inactiveLabel;
+      }
+    });
+  };
+
+  const applyShellState = () => {
+    document.documentElement.dataset.pgIntro = shellState.introCollapsed ? 'collapsed' : 'open';
+    document.documentElement.dataset.pgFocus = shellState.focusStage ? 'stage' : 'full';
+    syncShellButtons();
+  };
+
+  const restoreShellState = () => {
+    shellState.introCollapsed = readStoredFlag(introCollapseKey, true);
+    shellState.focusStage = readStoredFlag(focusStageKey, false);
+    applyShellState();
+  };
+
+  const exitFocusStage = () => {
+    if (!shellState.focusStage) return;
+    shellState.focusStage = false;
+    writeStoredFlag(focusStageKey, false);
+    applyShellState();
+  };
+
+  const scrollToSelector = (selector) => {
+    if (!selector) return;
+    const target = document.querySelector(selector);
+    if (!target) return;
+    target.scrollIntoView({
+      behavior: prefersReducedMotion ? 'auto' : 'smooth',
+      block: 'start',
+    });
+  };
+
+  const openWorkspaceTab = (label) => {
+    if (!label) return;
+    exitFocusStage();
+    const buttons = Array.from(document.querySelectorAll('.pg-workspace-tabs button'));
+    const target = buttons.find((button) => {
+      const text = String(button.textContent || '').trim().toLowerCase();
+      return text === String(label).trim().toLowerCase();
+    });
+    if (!target) return;
+    target.click();
+    window.requestAnimationFrame(() => scrollToSelector('#pg_workspace_tabs'));
+  };
 
   const syncRoot = (root) => {
     if (!root) return;
@@ -7195,7 +13955,7 @@ UI_HEAD = """
     const panX = root.querySelector('.pg-compare-pan-x');
     const panY = root.querySelector('.pg-compare-pan-y');
     const opacity = root.querySelector('.pg-compare-opacity');
-    if (zoom) zoom.value = '1.08';
+    if (zoom) zoom.value = '1';
     if (panX) panX.value = '0';
     if (panY) panY.value = '0';
     if (opacity) opacity.value = '0.94';
@@ -7283,7 +14043,7 @@ UI_HEAD = """
     if (opacity) opacity.value = '0.92';
     root.querySelectorAll('.pg-heat-toggle-input').forEach((toggle) => {
       const key = toggle.dataset.layer || '';
-      toggle.checked = ['fused', 'contours', 'markers'].includes(key);
+      toggle.checked = ['opportunity', 'fused', 'contours', 'markers'].includes(key);
     });
     syncHeatRoot(root);
   });
@@ -7304,60 +14064,127 @@ UI_HEAD = """
     document.documentElement.dataset.pgMode = normalized || 'guided';
   };
 
-  const revealObserver = prefersReducedMotion
-    ? null
-    : new IntersectionObserver(
-        (entries) => {
-          entries.forEach((entry) => {
-            if (!entry.isIntersecting) return;
-            entry.target.classList.add('is-visible');
-            revealObserver?.unobserve(entry.target);
-          });
-        },
-        { threshold: 0.08 }
-      );
 
-  const registerRevealTargets = () => {
-    document.querySelectorAll('.pg-panel, .pg-live-panel, .pg-hero, .pg-control-intro').forEach((node) => {
-      if (node.dataset.revealBound === '1') return;
-      node.dataset.revealBound = '1';
-      node.classList.add('pg-reveal');
-      if (prefersReducedMotion || !revealObserver) {
-        node.classList.add('is-visible');
-        return;
-      }
-      revealObserver.observe(node);
-    });
-  };
+    const revealObserver = prefersReducedMotion
+        ? null
+        : new IntersectionObserver(
+                (entries) => {
+                    entries.forEach((entry) => {
+                        if (!entry.isIntersecting) return;
+                        entry.target.classList.add('is-visible');
+                        revealObserver?.unobserve(entry.target);
+                    });
+                },
+                { threshold: 0.08 }
+            );
 
-  const attachMutationObserver = () => {
-    if (!document.body || document.body.dataset.pgObserverBound === '1') return;
-    document.body.dataset.pgObserverBound = '1';
-    new MutationObserver(() => {
-      bootstrapSurface();
-    }).observe(document.body, { childList: true, subtree: true });
-  };
+    const registerRevealTargets = () => {
+        document.querySelectorAll('.pg-panel, .pg-live-panel, .pg-hero, .pg-control-intro').forEach((node) => {
+            if (node.dataset.revealBound === '1') return;
+            node.dataset.revealBound = '1';
+            node.classList.add('pg-reveal');
+            if (prefersReducedMotion || !revealObserver) {
+                node.classList.add('is-visible');
+                return;
+            }
+            revealObserver.observe(node);
+        });
+    };
 
-  const bootstrapSurface = () => {
-    bindDialogs();
-    syncDeskMode();
-    registerRevealTargets();
-    document.querySelectorAll('.pg-compare-root').forEach(syncRoot);
-    document.querySelectorAll('.pg-heatmap-root').forEach(syncHeatRoot);
-    attachMutationObserver();
-  };
+    let pgMutationObserver = null;
+    let pgBootstrapQueued = false;
+
+    const runBootstrapSurface = () => {
+        pgBootstrapQueued = false;
+        restoreShellState();
+        bindDialogs();
+        syncDeskMode();
+        registerRevealTargets();
+        document.querySelectorAll('.pg-compare-root').forEach(syncRoot);
+        document.querySelectorAll('.pg-heatmap-root').forEach(syncHeatRoot);
+    };
+
+    const scheduleBootstrapSurface = () => {
+        if (pgBootstrapQueued) return;
+        pgBootstrapQueued = true;
+        window.requestAnimationFrame(runBootstrapSurface);
+    };
+
+    const attachMutationObserver = () => {
+        if (!document.body || pgMutationObserver) return;
+
+        pgMutationObserver = new MutationObserver((mutations) => {
+            const hasRelevantAdditions = mutations.some((mutation) => {
+                return mutation.type === 'childList' && mutation.addedNodes && mutation.addedNodes.length > 0;
+            });
+            if (!hasRelevantAdditions) return;
+            scheduleBootstrapSurface();
+        });
+
+        pgMutationObserver.observe(document.body, {
+            childList: true,
+            subtree: true,
+        });
+    };
+
+    const bootstrapSurface = () => {
+        runBootstrapSurface();
+        attachMutationObserver();
+    };
 
   document.addEventListener('click', (event) => {
+    const shellScroll = event.target.closest('[data-pg-scroll]');
+    if (shellScroll) {
+      event.preventDefault();
+      const targetSelector = shellScroll.getAttribute('data-pg-scroll');
+      if (targetSelector !== '#pg_anchor_stage') {
+        exitFocusStage();
+      }
+      scrollToSelector(targetSelector);
+      return;
+    }
+    const shellTab = event.target.closest('[data-pg-open-tab]');
+    if (shellTab) {
+      event.preventDefault();
+      openWorkspaceTab(shellTab.getAttribute('data-pg-open-tab'));
+      return;
+    }
+    const shellToggle = event.target.closest('[data-pg-toggle]');
+    if (shellToggle) {
+      event.preventDefault();
+      const toggle = shellToggle.getAttribute('data-pg-toggle');
+      if (toggle === 'intro') {
+        shellState.introCollapsed = !shellState.introCollapsed;
+        writeStoredFlag(introCollapseKey, shellState.introCollapsed);
+      }
+      if (toggle === 'focus') {
+        shellState.focusStage = !shellState.focusStage;
+        writeStoredFlag(focusStageKey, shellState.focusStage);
+      }
+      applyShellState();
+      return;
+    }
     const helpOpen = event.target.closest('[data-help-open]');
     if (helpOpen) {
       event.preventDefault();
-      openDialog(helpOpen.getAttribute('data-help-open'));
+      const currentDialog = helpOpen.closest('dialog');
+      const targetDialog = helpOpen.getAttribute('data-help-open');
+      if (currentDialog && currentDialog.getAttribute('data-help-dialog') !== targetDialog) {
+        closeDialog(currentDialog);
+      }
+      openDialog(targetDialog);
       return;
     }
     const helpClose = event.target.closest('[data-help-close]');
     if (helpClose) {
       event.preventDefault();
       closeDialog(helpClose.closest('dialog'));
+      return;
+    }
+    const helpComplete = event.target.closest('[data-help-complete]');
+    if (helpComplete) {
+      event.preventDefault();
+      closeDialog(helpComplete.closest('dialog'));
       return;
     }
   });
@@ -7392,6 +14219,124 @@ def _truncate_text(value: Any, limit: int = 220) -> str:
     return text[: max(0, limit - 3)].rstrip() + "..."
 
 
+def _ui_landing_asset_dirs() -> list[Path]:
+    candidates = [UI_LANDING_ASSET_DIR]
+    if UI_LANDING_ASSET_DIR.name.lower() == "css-control":
+        candidates.append(UI_LANDING_ASSET_DIR.parent)
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            normalized = str(candidate.resolve())
+        except Exception:
+            normalized = str(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(candidate)
+    return unique
+
+
+def _ui_landing_asset_paths(asset_dir: Path) -> list[Path]:
+    preferred_names = {name.lower() for name in UI_LANDING_IMAGE_PREFERRED_ORDER}
+    ordered: list[Path] = []
+    for filename in UI_LANDING_IMAGE_PREFERRED_ORDER:
+        path = asset_dir / filename
+        if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}:
+            ordered.append(path)
+    ordered.extend(
+        path
+        for path in sorted(asset_dir.iterdir())
+        if path.is_file()
+        and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
+        and path.name.lower() not in preferred_names
+    )
+    return ordered
+
+
+def _ui_landing_data_uri(path: Path) -> str:
+    try:
+        with Image.open(path) as img:
+            working = img.convert("RGB")
+            if max(working.size) > 1600:
+                working.thumbnail((1600, 1600), _pillow_lanczos())
+            buffer = io.BytesIO()
+            working.save(buffer, format="JPEG", quality=84, optimize=True)
+    except (FileNotFoundError, UnidentifiedImageError, OSError):
+        return ""
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _ui_landing_slides() -> list[dict[str, str]]:
+    slides = [
+        {
+            "scene_key": "vision",
+            "eyebrow": "Cinematic vision layer",
+            "title": "A blurred image plane frames the desk like a premium launch screen.",
+            "body": "The project images rotate behind the hero so the experience feels atmospheric without becoming noisy.",
+            "position": "50% 48%",
+        },
+        {
+            "scene_key": "structure",
+            "eyebrow": "Structure and timing",
+            "title": "The layout keeps the chart, guidance, and execution story in clear hierarchy.",
+            "body": "Spacing, contrast, and soft glass panels reduce clutter while preserving the desk's analytical depth.",
+            "position": "56% 52%",
+        },
+        {
+            "scene_key": "intelligence",
+            "eyebrow": "Intelligence first",
+            "title": "Through the eyes of intelligence, life is divine.",
+            "body": "The landing state now reads like a high-end operator surface instead of a crowded control room.",
+            "position": "50% 40%",
+        },
+        {
+            "scene_key": "discipline",
+            "eyebrow": "Protected discipline",
+            "title": "Authority, restraint, and clarity remain visible from the first screen onward.",
+            "body": "The premium presentation keeps the mission explicit while the backend stays carefully contained.",
+            "position": "50% 42%",
+        },
+    ]
+    fallbacks = [
+        "linear-gradient(150deg, rgba(8, 18, 26, 0.14), rgba(8, 18, 26, 0.72)), radial-gradient(circle at 18% 22%, rgba(159, 242, 223, 0.32), transparent 36%), radial-gradient(circle at 82% 18%, rgba(245, 201, 130, 0.24), transparent 30%), linear-gradient(132deg, #09141d 0%, #132b39 52%, #10384e 100%)",
+        "linear-gradient(150deg, rgba(8, 18, 26, 0.18), rgba(8, 18, 26, 0.78)), radial-gradient(circle at 24% 20%, rgba(111, 176, 255, 0.28), transparent 34%), radial-gradient(circle at 72% 34%, rgba(159, 242, 223, 0.18), transparent 32%), linear-gradient(130deg, #09121b 0%, #112435 46%, #1f3147 100%)",
+        "linear-gradient(150deg, rgba(8, 18, 26, 0.20), rgba(8, 18, 26, 0.78)), radial-gradient(circle at 20% 24%, rgba(245, 201, 130, 0.26), transparent 34%), radial-gradient(circle at 78% 16%, rgba(159, 242, 223, 0.22), transparent 30%), linear-gradient(130deg, #0a1219 0%, #102537 50%, #123047 100%)",
+        "linear-gradient(150deg, rgba(8, 18, 26, 0.18), rgba(8, 18, 26, 0.76)), radial-gradient(circle at 26% 22%, rgba(213, 132, 90, 0.22), transparent 30%), radial-gradient(circle at 70% 18%, rgba(140, 170, 255, 0.20), transparent 28%), linear-gradient(130deg, #091218 0%, #152635 48%, #1c3951 100%)",
+    ]
+    image_uris: list[str] = []
+    for asset_dir in _ui_landing_asset_dirs():
+        try:
+            candidate_dir = asset_dir.resolve()
+        except Exception:
+            candidate_dir = asset_dir
+        if not candidate_dir.exists() or not candidate_dir.is_dir():
+            continue
+        for path in _ui_landing_asset_paths(candidate_dir):
+            uri = _ui_landing_data_uri(path)
+            if uri:
+                image_uris.append(uri)
+            if len(image_uris) >= 4:
+                break
+        if image_uris:
+            break
+    for index, slide in enumerate(slides):
+        slide["image"] = image_uris[index % len(image_uris)] if image_uris else ""
+        slide["gradient"] = fallbacks[index % len(fallbacks)]
+    return slides
+
+
+def _ui_landing_slide_background(slide: Mapping[str, Any]) -> str:
+    image = str(slide.get("image", "") or "").strip()
+    if image:
+        return (
+            "linear-gradient(155deg, rgba(6, 10, 16, 0.08), rgba(6, 10, 16, 0.54)), "
+            "radial-gradient(circle at 82% 18%, rgba(245, 201, 130, 0.18), transparent 24%), "
+            f"url('{image}')"
+        )
+    return str(slide.get("gradient", ""))
+
+
 def _fmt_pct01(value: Any, digits: int = 1) -> str:
     return f"{float(value or 0.0) * 100.0:.{digits}f}%"
 
@@ -7406,9 +14351,9 @@ def _fmt_num(value: Any, digits: int = 2) -> str:
 
 def _tone_class_for_action(action: str) -> str:
     normalized = str(action or "HOLD").upper()
-    if normalized == "BUY":
+    if normalized.startswith("BUY"):
         return "buy"
-    if normalized == "SELL":
+    if normalized.startswith("SELL"):
         return "sell"
     return "hold"
 
@@ -7444,6 +14389,76 @@ def _placeholder_panel(title: str, body: str) -> str:
     )
 
 
+def _build_prediction_images_viewer_html(result: Mapping[str, Any] | None) -> str:
+    """
+    Build HTML for prediction images viewer panel showing model inference metadata.
+    """
+    if not result:
+        return _placeholder_panel(
+            "Prediction Images Viewer",
+            "Run a signal analysis to display prediction images and forecast visualizations."
+        )
+
+    try:
+        action = str(result.get("action", "HOLD")).upper()
+        confidence = float(result.get("confidence", 0.0))
+        expected_move = float(result.get("expected_3min_move_pct", 0.0))
+        gates_passing = int(result.get("gates_passing", 0))
+        memory_sim = float(result.get("memory_similarity", 0.0))
+
+        # Build inference metadata chips
+        metadata_html = f"""
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-bottom: 12px;">
+            <div style="background: rgba(88,218,123,0.1); border: 1px solid #58da7b; border-radius: 6px; padding: 8px; text-align: center;">
+                <div style="font-size: 11px; color: #999; margin-bottom: 4px;">SIGNAL</div>
+                <div style="font-size: 14px; font-weight: 600; color: #58da7b;">{_escape_html(action)}</div>
+            </div>
+            <div style="background: rgba(100,180,255,0.1); border: 1px solid #64b4ff; border-radius: 6px; padding: 8px; text-align: center;">
+                <div style="font-size: 11px; color: #999; margin-bottom: 4px;">CONFIDENCE</div>
+                <div style="font-size: 14px; font-weight: 600; color: #64b4ff;">{confidence:.2%}</div>
+            </div>
+            <div style="background: rgba(255,180,100,0.1); border: 1px solid #ffb464; border-radius: 6px; padding: 8px; text-align: center;">
+                <div style="font-size: 11px; color: #999; margin-bottom: 4px;">3M MOVE</div>
+                <div style="font-size: 14px; font-weight: 600; color: #ffb464;">{expected_move:+.2f}%</div>
+            </div>
+            <div style="background: rgba(150,150,255,0.1); border: 1px solid #9696ff; border-radius: 6px; padding: 8px; text-align: center;">
+                <div style="font-size: 11px; color: #999; margin-bottom: 4px;">GATES OK</div>
+                <div style="font-size: 14px; font-weight: 600; color: #9696ff;">{gates_passing}/12</div>
+            </div>
+            <div style="background: rgba(200,150,255,0.1); border: 1px solid #c896ff; border-radius: 6px; padding: 8px; text-align: center;">
+                <div style="font-size: 11px; color: #999; margin-bottom: 4px;">MEMORY SIM</div>
+                <div style="font-size: 14px; font-weight: 600; color: #c896ff;">{memory_sim:.3f}</div>
+            </div>
+        </div>
+        """
+
+        # Build prediction explanation
+        explanation = str(result.get("cv_reasoning_trace", {}).get("explanation", "No explanation available"))
+
+        explanation_html = f"""
+        <div style="background: rgba(100,100,100,0.2); border-left: 3px solid #888; border-radius: 4px; padding: 10px; margin-bottom: 12px; font-family: 'Monaco', monospace; font-size: 12px; color: #ccc; overflow-x: auto; max-height: 100px; overflow-y: auto;">
+            {_escape_html(explanation[:500])}{'...' if len(explanation) > 500 else ''}
+        </div>
+        """
+
+        return f"""
+        <div class='pg-panel'>
+            <div class='pg-section-title'>Model Inference Metadata</div>
+            {metadata_html}
+            <div style="border-top: 1px solid rgba(255,255,255,0.1); padding-top: 10px;">
+                <div style="font-size: 11px; color: #999; margin-bottom: 6px;">DECISION EXPLANATION</div>
+                {explanation_html}
+            </div>
+        </div>
+        """
+    except Exception as e:
+        logger.exception("Error building prediction images viewer HTML: %s", e)
+        return _placeholder_panel(
+            "Prediction Images Viewer",
+            f"Error rendering prediction metadata: {str(e)[:100]}"
+        )
+
+
 def _build_help_dialog(
     dialog_id: str,
     eyebrow: str,
@@ -7475,16 +14490,57 @@ def _build_help_dialog(
     )
 
 
+def _build_setup_guide_dialog_html() -> str:
+    sections = [
+        ("Mission Control", "Upload the quartet in higher-higher-lower-lower order, then run the desk from one compact control surface."),
+        ("Signal Overview", "Read action, confidence, expected move, and execution state here. This is the desk's primary decision summary."),
+        ("Session State", "Use the runtime and adaptive guidance cards for capture status, next panel routing, and quick operator reassurance."),
+        ("Visual Review", "Inspect the annotated chart, compare desk, overlays, and heatmap before trusting any directional call."),
+        ("Analysis Tabs", "Chart Evidence, Review Notes, Readiness Checks, Case Recall, and the Decision Record are there to explain the read, not duplicate it."),
+        ("Learning Loop", "Zone Studio and Feed turn reviewed outcomes into local teaching memory for later runs."),
+    ]
+    section_html = "".join(
+        (
+            "<div class='pg-help-section'>"
+            f"<div class='pg-card-label'>{_escape_html(label)}</div>"
+            f"<div class='pg-card-note'>{_escape_html(body)}</div>"
+            "</div>"
+        )
+        for label, body in sections
+    )
+    return (
+        "<dialog class='pg-help-dialog' data-help-dialog='setup-guide'>"
+        "<div class='pg-help-header'>"
+        "<div>"
+        "<div class='pg-kicker'>Setup Guide</div>"
+        "<div class='pg-help-title'>How this workstation is laid out</div>"
+        "<div class='pg-card-note'>Open this any time from the workspace guides when you want a refresher. The desk itself is meant to stay usable without a forced walkthrough.</div>"
+        "</div>"
+        "<button type='button' class='pg-help-close' data-help-close='true'>Close</button>"
+        "</div>"
+        f"<div class='pg-help-grid'>{section_html}</div>"
+        "<div class='pg-help-footer'>"
+        "<div class='pg-card-note'>Operator mode stays lean by default. Switch to Guided only when you want extra inline coaching.</div>"
+        "<div class='pg-help-actions'>"
+        "<button type='button' class='pg-inline-button' data-help-open='workflow'>Open workflow</button>"
+        "<button type='button' class='pg-inline-button' data-tone='secondary' data-help-complete='true'>Back to desk</button>"
+        "</div>"
+        "</div>"
+        "</dialog>"
+    )
+
+
 def _build_help_dialogs_html() -> str:
+    setup_dialog = _build_setup_guide_dialog_html()
     workflow_dialog = _build_help_dialog(
         "workflow",
         "Workflow Guide",
         "How to move through the desk",
         "This workspace is designed to keep the higher timeframe, the trigger chart, and the evidence trail in one place.",
         [
-            ("1. Upload the pair", "Add exactly two chart images, with the higher timeframe first and the lower or trigger timeframe second. You can reorder them before running."),
+            ("1. Upload the quartet", "Add exactly four chart images, with the first two as the higher timeframe pair and the last two as the lower timeframe pair. You can reorder them before running."),
             ("2. Read the overview", "The signal overview tells you the direction, confidence, execution state, and the next panel that will add the most clarity."),
-            ("3. Validate before acting", "Use Compare Desk, Evidence, Gate Matrix, and Scenario Lab when the desk signals watchfulness instead of conviction."),
+            ("3. Validate before acting", "Use Compare Desk, Chart Evidence, Readiness Checks, and Scenario Lab when the desk signals watchfulness instead of conviction."),
             ("4. Teach the system", "Zone Studio and the feedback loop keep local visual memory attached to what you learned from the chart."),
         ],
     )
@@ -7496,7 +14552,7 @@ def _build_help_dialogs_html() -> str:
         [
             ("Signal Overview", "Treat the action as the current bias, the confidence as its strength, and the execution state as the permission rail."),
             ("Forecast and Risk", "Use the quantile range, execution readiness, and projection bias to decide whether the setup is tight, mixed, or defensive."),
-            ("Memory and Gates", "Memory Recall shows resemblance to past cases. Gate Matrix shows whether the structural checks agree strongly enough."),
+            ("Case recall and checks", "Case Recall shows resemblance to past cases. Readiness Checks shows whether the structural checks agree strongly enough."),
             ("Adaptive Guidance", "When you are unsure where to go next, follow the recommended panel. It is chosen from the live result rather than a fixed tutorial."),
         ],
     )
@@ -7508,8 +14564,8 @@ def _build_help_dialogs_html() -> str:
         [
             ("Local inspection", "Compare Desk zoom, pan, and overlay opacity are browser-side controls, so visual inspection stays local and immediate."),
             ("Encrypted preferences", "Operator preferences are backed by the encrypted preference store instead of plain-text settings."),
-            ("Audit visibility", "Audit JSON and session history keep the rendered decision state inspectable instead of hidden behind one score."),
-            ("Explicit feedback saves", "Result images are only stored when you intentionally submit feedback with an attached image for learning."),
+            ("Decision record", "The decision record and session history keep the rendered state inspectable instead of hiding the outcome behind one score."),
+            ("Explicit outcome saves", "Result images are only stored when you intentionally submit an outcome review with an attached image."),
         ],
     )
     personalize_dialog = _build_help_dialog(
@@ -7520,75 +14576,113 @@ def _build_help_dialogs_html() -> str:
         [
             ("Desk Mode", "Guided keeps onboarding cues visible, Operator trims the training copy, and Compact tightens spacing for fast scanning."),
             ("Scenario Lab", "Rehearse alternate thresholds without touching the live baseline so you can explore edge cases safely."),
-            ("Zone Studio", "Save support, resistance, and reaction zones to build chart-specific teaching memory that carries forward."),
-            ("Feedback Loop", "Verdicts and marked-up result images help the personalization and reinforcement layers learn from what actually happened."),
+            ("Zone Studio", "Save support, resistance, and reaction zones so the workstation can reuse your reviewed chart context later."),
+            ("Outcome Review", "Verdicts and marked-up result images keep future reviews anchored to what actually happened in the market."),
         ],
     )
-    return workflow_dialog + read_signal_dialog + security_dialog + personalize_dialog
+    return setup_dialog + workflow_dialog + read_signal_dialog + security_dialog + personalize_dialog
+
+
+def _build_workspace_shell_bar_html() -> str:
+    nav_buttons = "".join(
+        [
+            "<button type='button' class='pg-shell-button' data-pg-scroll='#pg_anchor_mission'>Controls</button>",
+            "<button type='button' class='pg-shell-button' data-pg-scroll='#pg_anchor_stage'>Stage</button>",
+            "<button type='button' class='pg-shell-button' data-pg-open-tab='Analysis'>Analysis</button>",
+            "<button type='button' class='pg-shell-button' data-pg-open-tab='Visual Lab'>Lab</button>",
+            "<button type='button' class='pg-shell-button' data-pg-open-tab='History'>History</button>",
+            "<button type='button' class='pg-shell-button' data-pg-open-tab='Feed'>Feed</button>",
+        ]
+    )
+    return (
+        "<nav class='pg-shell-bar' aria-label='Workspace command bar'>"
+        "<div class='pg-shell-brand'>"
+        "<div class='pg-kicker'>Workspace Router</div>"
+        f"<strong>{_escape_html(UI_BRAND_NAME)}</strong>"
+        "<span>Jump straight to controls, stage, or review tabs. Overview chrome stays optional.</span>"
+        "</div>"
+        f"<div class='pg-shell-nav'>{nav_buttons}</div>"
+        "<div class='pg-shell-actions'>"
+        "<button type='button' class='pg-shell-button' data-pg-toggle='intro' data-label-inactive='Hide Overview' data-label-active='Show Overview'>Show Overview</button>"
+        "<button type='button' class='pg-shell-button' data-pg-toggle='focus' data-label-inactive='Focus Stage' data-label-active='Exit Focus'>Focus Stage</button>"
+        "<button type='button' class='pg-shell-button' data-help-open='setup-guide'>Guides</button>"
+        "</div>"
+        "</nav>"
+    )
 
 
 def _build_hero_shell_html() -> str:
-    chips = "".join(
-        [
-            _chip("Dual timeframe workflow", "teal"),
-            _chip("Client-side compare desk", "soft"),
-            _chip("Audit-ready review", "amber"),
-            _chip("Adaptive guidance", "teal"),
-        ]
+    slides = _ui_landing_slides()
+    scene_html = "".join(
+        (
+            "<span class='pg-hero-scene-slide' "
+            f"data-scene-key='{_escape_html(str(slide.get('scene_key', 'vision')))}' "
+            f"style=\"background-image:{html.escape(_ui_landing_slide_background(slide), quote=True)};"
+            f"background-position:{html.escape(str(slide.get('position', 'center center')), quote=True)};\"></span>"
+        )
+        for slide in slides
     )
-    stat_tiles = "".join(
+    summary_items = "".join(
         [
             (
-                "<div class='pg-hero-stat'>"
-                "<span>Trust rails</span>"
-                "<strong>Encrypted local preferences and audit-ready state review.</strong>"
+                "<div class='pg-workspace-summary-item'>"
+                "<div class='pg-card-label'>Core path</div>"
+                "<div class='pg-card-title'>Upload the quartet.</div>"
+                "<div class='pg-card-note'>Start with the higher timeframe pair, then the trigger pair, and let the desk resolve the rest.</div>"
                 "</div>"
             ),
             (
-                "<div class='pg-hero-stat'>"
-                "<span>Decision flow</span>"
-                "<strong>Upload, inspect, compare, rehearse, then teach the desk.</strong>"
+                "<div class='pg-workspace-summary-item'>"
+                "<div class='pg-card-label'>Stage first</div>"
+                "<div class='pg-card-title'>Keep the chart in focus.</div>"
+                "<div class='pg-card-note'>The annotated stage, forecast, and evidence trail stay close without turning the whole screen into onboarding.</div>"
                 "</div>"
             ),
             (
-                "<div class='pg-hero-stat'>"
-                "<span>Vision loop</span>"
-                "<strong>Higher timeframe context, lower timeframe trigger, one explainable surface.</strong>"
-                "</div>"
-            ),
-            (
-                "<div class='pg-hero-stat'>"
-                "<span>Operator memory</span>"
-                "<strong>Zone Studio and feedback keep local learning attached to the chart.</strong>"
+                "<div class='pg-workspace-summary-item'>"
+                "<div class='pg-card-label'>Optional depth</div>"
+                "<div class='pg-card-title'>Reveal more only when needed.</div>"
+                "<div class='pg-card-note'>Projection, label density, history depth, and desk mode stay available without crowding the first read.</div>"
                 "</div>"
             ),
         ]
     )
     return (
-        "<section class='pg-hero'>"
+        "<section class='pg-hero pg-shell-intro pg-workspace-hero'>"
         "<div class='pg-hero-grid'>"
         "<div class='pg-hero-copy'>"
-        "<div class='pg-kicker'>Vision Workspace</div>"
+        "<div class='pg-kicker'>Operator Workspace</div>"
         f"<div class='pg-hero-brand'>{_escape_html(UI_BRAND_NAME)}</div>"
         f"<h1>{_escape_html(UI_BRAND_SUBTITLE)}</h1>"
-        "<p>See structure sooner, verify the decision path faster, and keep every chart review explainable from upload to feedback.</p>"
-        f"<div class='pg-chip-row pg-hero-chips'>{chips}</div>"
+        "<p>A premium multi-timeframe review surface built to keep the live chart, the decision summary, and the next useful panel in the same line of sight.</p>"
+        "<div class='pg-hero-ledger'>"
+        "<span>Quartet-first workflow</span>"
+        "<span>Stage-priority layout</span>"
+        "<span>Guides on demand</span>"
+        "</div>"
         "<div class='pg-hero-actions'>"
-        "<button type='button' class='pg-inline-button' data-help-open='workflow'>Workflow Guide</button>"
+        "<button type='button' class='pg-inline-button' data-help-open='setup-guide'>Setup Guide</button>"
         "<button type='button' class='pg-inline-button' data-help-open='read-signal'>Read A Signal</button>"
-        "<button type='button' class='pg-inline-button' data-help-open='security'>Security Notes</button>"
-        "<button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='personalize'>Personalize The Desk</button>"
+        "<button type='button' class='pg-inline-button' data-help-open='workflow'>Workflow Guide</button>"
+        "<button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='security'>Security Notes</button>"
         "</div>"
         "</div>"
-        "<div class='pg-hero-visual' aria-hidden='true'>"
-        "<div class='pg-vision-stage'>"
-        "<div class='pg-vision-core'>"
-        "<span>Vision Desk</span>"
-        "<strong>Context -> Trigger -> Evidence</strong>"
-        "<p>Built for explainable chart review instead of single-number automation.</p>"
+        "<div class='pg-hero-visual'>"
+        "<div class='pg-hero-scene'>"
+        f"<div class='pg-hero-scene-plane' aria-hidden='true'>{scene_html}</div>"
+        "<div class='pg-hero-scene-copy'>"
+        "<div class='pg-kicker'>Cinematic Intelligence</div>"
+        "<div class='pg-card-title'>Through the eyes of intelligence, life is divine.</div>"
+        "<div class='pg-card-note'>The landing scene now breathes with the project imagery in soft blur so the desk feels deliberate, premium, and unmistakably alive.</div>"
+        "<div class='pg-hero-scene-ledger'>"
+        "<span>Blurred project imagery</span>"
+        "<span>Calm glass hierarchy</span>"
+        "<span>Mission-first composition</span>"
         "</div>"
-        f"<div class='pg-hero-stat-grid'>{stat_tiles}</div>"
         "</div>"
+        "</div>"
+        "<div class='pg-workspace-summary'>"
+        f"{summary_items}"
         "</div>"
         "</div>"
         f"{_build_help_dialogs_html()}"
@@ -7598,13 +14692,21 @@ def _build_hero_shell_html() -> str:
 
 def _build_mission_control_intro_html() -> str:
     return (
-        "<div class='pg-control-intro pg-guided-only'>"
-        "<div class='pg-card-label'>Quick Start</div>"
-        "<div class='pg-card-title'>Two charts. One explainable desk.</div>"
-        "<div class='pg-card-note'>Upload the higher timeframe first and the lower or trigger timeframe second. Run the desk, then follow Adaptive Guidance if you are not sure which panel matters next.</div>"
+        "<div class='pg-control-intro pg-shell-intro'>"
+        "<div class='pg-control-toolbar'>"
+        "<div>"
+        "<div class='pg-card-label'>Quick Run</div>"
+        "<div class='pg-card-note'>Use the core controls first. Advanced review stays collapsed until you explicitly need deeper tuning.</div>"
+        "</div>"
         "<div class='pg-inline-actions'>"
         "<button type='button' class='pg-inline-button' data-help-open='workflow'>Workflow</button>"
-        "<button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='read-signal'>Read The Panels</button>"
+        "<button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='setup-guide'>Guides</button>"
+        "</div>"
+        "</div>"
+        "<div class='pg-control-steps'>"
+        "<div class='pg-control-step'><strong>1. Upload quartet</strong><span>First two captures are the higher timeframe pair, last two are the lower timeframe pair.</span></div>"
+        "<div class='pg-control-step'><strong>2. Set the essentials</strong><span>Confirm all four captures and choose the view depth you want for this run.</span></div>"
+        "<div class='pg-control-step'><strong>3. Open advanced only if needed</strong><span>Projection, overlay extras, compact mode, and thresholds stay available without crowding the first pass.</span></div>"
         "</div>"
         "</div>"
     )
@@ -7621,6 +14723,61 @@ def _status_card(label: str, value: str, note: str = "", tone: str = "soft") -> 
     )
 
 
+def _analysis_progress_payload(
+    percent: float,
+    title: str,
+    detail: str,
+    *,
+    tone: str = "teal",
+) -> dict[str, Any]:
+    normalized_percent = float(np.clip(percent, 0.0, 100.0))
+    reassurance_messages = (
+        "The desk is reading structure and keeping the analysis stable.",
+        "Signals are being reconciled across structure, memory, and council context.",
+        "Projection layers are being assembled carefully so the overlay stays readable.",
+        "The run is still active and moving forward; no action is needed from you.",
+    )
+    reassurance = reassurance_messages[min(int(normalized_percent // 26), len(reassurance_messages) - 1)]
+    return {
+        "percent": normalized_percent,
+        "title": str(title),
+        "detail": str(detail),
+        "tone": str(tone),
+        "reassurance": reassurance,
+    }
+
+
+def _build_legacy_fallback_guard_html(request_state: Mapping[str, Any]) -> str:
+    title = str(request_state.get("title", "Compatibility Approval Required")).strip() or "Compatibility Approval Required"
+    summary = str(request_state.get("summary", "The desk paused before using a one-time compatibility path.")).strip()
+    return (
+        "<div class='pg-panel'>"
+        f"<div class='pg-section-title'>{_escape_html(title)}</div>"
+        f"<div class='pg-muted'>{_escape_html(summary)}</div>"
+        + "<div class='pg-muted' style='margin-top:10px;'>Approve only if you want this run to continue through the one-time compatibility path. Cancel keeps the desk on the standard review path.</div>"
+        + "</div>"
+    )
+
+
+def _workspace_run_update(
+    *,
+    control_status_value: Any = None,
+    fallback_request_value: Any = None,
+    fallback_group_value: Any = None,
+    fallback_html_value: Any = None,
+) -> tuple[Any, ...]:
+    outputs: list[Any] = [_gr_skip()] * 28
+    if control_status_value is not None:
+        outputs[12] = control_status_value
+    if fallback_request_value is not None:
+        outputs[25] = fallback_request_value
+    if fallback_group_value is not None:
+        outputs[26] = fallback_group_value
+    if fallback_html_value is not None:
+        outputs[27] = fallback_html_value
+    return tuple(outputs)
+
+
 def _recommended_panel_details(result: Mapping[str, Any]) -> tuple[str, str, str]:
     zone_learning = cast(dict[str, Any], result.get("zone_learning", {}))
     multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
@@ -7632,8 +14789,8 @@ def _recommended_panel_details(result: Mapping[str, Any]) -> tuple[str, str, str
         rationale = "The higher and trigger timeframes are disagreeing, so a side-by-side review is the fastest way to resolve the conflict."
         tone = "amber"
     elif bool(result.get("geometry_conflict", False)) or bool(result.get("strict_cv_fail_closed", False)):
-        recommended_panel = "Diagnostics"
-        rationale = "Runtime structure is conflicted, so the diagnostics cockpit should be opened before trusting the visible overlay."
+        recommended_panel = "Review Notes"
+        rationale = "The chart read is conflicted, so Review Notes should be opened before trusting the visible overlay."
         tone = "amber"
     elif int(zone_learning.get("match_count", 0) or 0) > 0:
         recommended_panel = "Zone Studio"
@@ -7670,7 +14827,7 @@ def _signal_coaching_copy(result: Mapping[str, Any]) -> tuple[str, str, str]:
     if execution == "EXECUTE":
         return (
             "Actionable bias, but still worth validating visually",
-            "The desk is permissive enough to act, yet Compare Desk or Evidence should still be the final confirmation before trust is extended to the setup.",
+            "The desk is permissive enough to act, yet Compare Desk or Chart Evidence should still be the final confirmation before trust is extended to the setup.",
             "teal",
         )
     return (
@@ -7687,11 +14844,35 @@ def _resolve_focus_crop_bbox(
     if source_image is None:
         return None
     preferred_bboxes: list[list[float]] = []
-    current_box = cast(dict[str, Any], result.get("current_box", {}))
+    current_box = result.get("current_box", {})
     projection_next = cast(dict[str, Any], cast(dict[str, Any], result.get("projection", {})).get("next_box", {}))
+    projection_chain = cast(list[dict[str, Any]], cast(dict[str, Any], result.get("projection", {})).get("chain_boxes", []))
+    last_projection = projection_chain[-1] if projection_chain else {}
+    current_bbox = cast(list[float], current_box.get("bbox", []))
+    projection_next_bbox = cast(list[float], projection_next.get("bbox", []))
+    last_projection_bbox = cast(list[float], last_projection.get("bbox", []))
+    if len(current_bbox) == 4 and len(last_projection_bbox) == 4:
+        preferred_bboxes.append(
+            [
+                min(float(current_bbox[0]), float(last_projection_bbox[0])),
+                min(float(current_bbox[1]), float(last_projection_bbox[1])),
+                max(float(current_bbox[2]), float(last_projection_bbox[2])),
+                max(float(current_bbox[3]), float(last_projection_bbox[3])),
+            ]
+        )
+    elif len(projection_next_bbox) == 4 and len(last_projection_bbox) == 4:
+        preferred_bboxes.append(
+            [
+                min(float(projection_next_bbox[0]), float(last_projection_bbox[0])),
+                min(float(projection_next_bbox[1]), float(last_projection_bbox[1])),
+                max(float(projection_next_bbox[2]), float(last_projection_bbox[2])),
+                max(float(projection_next_bbox[3]), float(last_projection_bbox[3])),
+            ]
+        )
     for candidate in [
-        cast(list[float], current_box.get("bbox", [])),
-        cast(list[float], projection_next.get("bbox", [])),
+        current_bbox,
+        projection_next_bbox,
+        last_projection_bbox,
         cast(list[float], cast(dict[str, Any], result.get("chart_geometry", {})).get("latest_sequence_bbox", [])),
         cast(list[float], cast(dict[str, Any], result.get("chart_geometry", {})).get("plot_inner_bbox", [])),
     ]:
@@ -7717,6 +14898,296 @@ def _build_focus_crop_image(result: Mapping[str, Any], source_image: Image.Image
     return source_image.crop(clamped)
 
 
+def _merge_focus_bboxes(
+    candidates: Sequence[Sequence[Any]],
+    *,
+    width: float,
+    height: float,
+    pad_x_ratio: float = 0.12,
+    pad_y_ratio: float = 0.18,
+    min_pad: float = 18.0,
+) -> tuple[int, int, int, int] | None:
+    clamped: list[tuple[int, int, int, int]] = []
+    for candidate in candidates:
+        bbox = _clamp_bbox(candidate, width, height)
+        if bbox is not None:
+            clamped.append(bbox)
+    if not clamped:
+        return None
+    left = min(bbox[0] for bbox in clamped)
+    top = min(bbox[1] for bbox in clamped)
+    right = max(bbox[2] for bbox in clamped)
+    bottom = max(bbox[3] for bbox in clamped)
+    pad_x = max((right - left) * float(pad_x_ratio), float(min_pad))
+    pad_y = max((bottom - top) * float(pad_y_ratio), float(min_pad))
+    return _clamp_bbox(
+        [left - pad_x, top - pad_y, right + pad_x, bottom + pad_y],
+        width,
+        height,
+    )
+
+
+def _council_role_accent(row: Mapping[str, Any]) -> tuple[int, int, int]:
+    role = str(row.get("role", "generalist")).strip().lower()
+    predicted_label = str(row.get("predicted_label", "HOLD")).upper()
+    if role == "structure_specialist":
+        return (255, 170, 0)
+    if role == "execution_specialist":
+        return (86, 188, 255)
+    if predicted_label == "BUY":
+        return (0, 228, 140)
+    if predicted_label == "SELL":
+        return (255, 128, 0)
+    return (186, 198, 214)
+
+
+def _resolve_council_model_focus_bbox(
+    result: Mapping[str, Any],
+    source_image: Image.Image | None,
+    row: Mapping[str, Any],
+) -> tuple[int, int, int, int] | None:
+    if source_image is None:
+        return None
+    width = float(source_image.width)
+    height = float(source_image.height)
+    chart_geometry = cast(dict[str, Any], result.get("chart_geometry", {}))
+    current_bbox = cast(list[float], cast(dict[str, Any], result.get("current_box", {})).get("bbox", []))
+    latest_sequence_bbox = cast(list[float], chart_geometry.get("latest_sequence_bbox", []))
+    plot_inner_bbox = cast(list[float], chart_geometry.get("plot_inner_bbox", []))
+    projection_next_bbox = cast(
+        list[float],
+        cast(dict[str, Any], cast(dict[str, Any], result.get("projection", {})).get("next_box", {})).get("bbox", []),
+    )
+    history_boxes = cast(list[dict[str, Any]], result.get("box_history", []))
+    history_bboxes = [
+        cast(list[float], box.get("bbox", []))
+        for box in history_boxes[-3:]
+        if len(cast(list[float], box.get("bbox", []))) == 4
+    ]
+    yolo_detections = [
+        detection
+        for detection in cast(list[dict[str, Any]], result.get("detections", []))
+        if _is_yolo_detection_pattern(str(detection.get("pattern", "")))
+        and float(detection.get("confidence", 0.0) or 0.0) >= 0.34
+        and len(cast(list[float], detection.get("bbox", []))) == 4
+    ]
+
+    def _top_detection_bboxes(anchor_bbox: Sequence[Any], limit: int) -> list[list[float]]:
+        if len(anchor_bbox) != 4:
+            return []
+        anchor = [float(v) for v in anchor_bbox]
+        scored: list[tuple[float, list[float]]] = []
+        for detection in yolo_detections:
+            bbox = [float(v) for v in cast(list[float], detection.get("bbox", []))]
+            conf = float(detection.get("confidence", 0.0) or 0.0)
+            overlap = _bbox_overlap_ratio(bbox, anchor)
+            center_x = (bbox[0] + bbox[2]) * 0.5
+            right_edge_bias = 0.12 if center_x >= width * 0.55 else 0.0
+            score = conf + 0.68 * overlap + right_edge_bias
+            scored.append((score, bbox))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [bbox for _score, bbox in scored[: max(0, limit)]]
+
+    role = str(row.get("role", "generalist")).strip().lower()
+    candidates: list[list[float]] = []
+    if role == "structure_specialist":
+        candidates.extend(history_bboxes)
+        if len(current_bbox) == 4:
+            candidates.append([float(v) for v in current_bbox])
+            candidates.extend(_top_detection_bboxes(current_bbox, 2))
+        elif len(latest_sequence_bbox) == 4:
+            candidates.append([float(v) for v in latest_sequence_bbox])
+    elif role == "execution_specialist":
+        for candidate in (current_bbox, latest_sequence_bbox, projection_next_bbox):
+            if len(candidate) == 4:
+                candidates.append([float(v) for v in candidate])
+        anchor = projection_next_bbox if len(projection_next_bbox) == 4 else latest_sequence_bbox
+        candidates.extend(_top_detection_bboxes(anchor if len(anchor) == 4 else current_bbox, 2))
+    elif role in {"buy_specialist", "sell_specialist"}:
+        anchor = latest_sequence_bbox if len(latest_sequence_bbox) == 4 else current_bbox
+        if len(anchor) == 4:
+            candidates.append([float(v) for v in anchor])
+        if len(current_bbox) == 4:
+            candidates.append([float(v) for v in current_bbox])
+        candidates.extend(_top_detection_bboxes(anchor if len(anchor) == 4 else current_bbox, 3))
+    else:
+        for candidate in (current_bbox, latest_sequence_bbox):
+            if len(candidate) == 4:
+                candidates.append([float(v) for v in candidate])
+        anchor = latest_sequence_bbox if len(latest_sequence_bbox) == 4 else current_bbox
+        candidates.extend(_top_detection_bboxes(anchor if len(anchor) == 4 else current_bbox, 2))
+
+    merged = _merge_focus_bboxes(candidates, width=width, height=height, pad_x_ratio=0.10, pad_y_ratio=0.16)
+    if merged is not None:
+        return merged
+    if len(plot_inner_bbox) == 4:
+        return _clamp_bbox(plot_inner_bbox, width, height)
+    fallback = _resolve_focus_crop_bbox(result, source_image)
+    if fallback is not None:
+        return fallback
+    return _clamp_bbox([0.0, 0.0, width, height], width, height)
+
+
+def _select_council_focus_detections(
+    result: Mapping[str, Any],
+    focus_bbox: Sequence[Any],
+    *,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for detection in cast(list[dict[str, Any]], result.get("detections", [])):
+        pattern = str(detection.get("pattern", ""))
+        if not _is_yolo_detection_pattern(pattern):
+            continue
+        bbox = cast(list[float], detection.get("bbox", []))
+        if len(bbox) != 4:
+            continue
+        conf = float(detection.get("confidence", 0.0) or 0.0)
+        overlap = _bbox_overlap_ratio(bbox, focus_bbox)
+        if overlap <= 0.01 and conf < 0.64:
+            continue
+        score = conf + 0.62 * overlap
+        scored.append((score, detection))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [dict(item[1]) for item in scored[: max(0, limit)]]
+
+
+def _build_council_focus_image(
+    result: Mapping[str, Any],
+    source_image: Image.Image | None,
+    row: Mapping[str, Any],
+) -> Image.Image | None:
+    if source_image is None:
+        return None
+    focus_bbox = _resolve_council_model_focus_bbox(result, source_image, row)
+    if focus_bbox is None:
+        return None
+    crop = source_image.crop(focus_bbox).convert("RGBA")
+    draw = ImageDraw.Draw(crop, "RGBA")
+    accent = _council_role_accent(row)
+    crop_left, crop_top, crop_right, crop_bottom = [float(v) for v in focus_bbox]
+    crop_box = [crop_left, crop_top, crop_right, crop_bottom]
+
+    def _draw_box(
+        bbox: Sequence[Any],
+        *,
+        color: tuple[int, int, int],
+        width: int,
+        alpha: int,
+    ) -> None:
+        if len(bbox) != 4:
+            return
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+        ix1 = max(x1, crop_left)
+        iy1 = max(y1, crop_top)
+        ix2 = min(x2, crop_right)
+        iy2 = min(y2, crop_bottom)
+        if ix2 - ix1 < 2 or iy2 - iy1 < 2:
+            return
+        draw.rectangle(
+            [(ix1 - crop_left, iy1 - crop_top), (ix2 - crop_left, iy2 - crop_top)],
+            outline=(*color, alpha),
+            width=width,
+        )
+
+    draw.rounded_rectangle(
+        [(0.0, 0.0), (float(crop.width) - 1.0, float(crop.height) - 1.0)],
+        radius=16,
+        outline=(*accent, 214),
+        width=3,
+    )
+    draw.rectangle(
+        [(0.0, 0.0), (float(crop.width), min(10.0, float(crop.height)))],
+        fill=(*accent, 92),
+    )
+
+    current_box = cast(dict[str, Any], result.get("current_box", {}))
+    current_bbox = cast(list[float], current_box.get("bbox", []))
+    if _bbox_overlap_ratio(current_bbox, crop_box) > 0.02:
+        _draw_box(
+            current_bbox,
+            color=_structure_box_accent(
+                direction=str(current_box.get("direction", "BUY")).upper(),
+                box_type=str(current_box.get("box_type", "balance")).lower(),
+            ),
+            width=2,
+            alpha=210,
+        )
+
+    latest_sequence_bbox = cast(list[float], cast(dict[str, Any], result.get("chart_geometry", {})).get("latest_sequence_bbox", []))
+    if _bbox_overlap_ratio(latest_sequence_bbox, crop_box) > 0.02:
+        _draw_box(latest_sequence_bbox, color=(94, 194, 255), width=1, alpha=156)
+
+    for detection in _select_council_focus_detections(result, crop_box, limit=3):
+        _draw_box(cast(list[float], detection.get("bbox", [])), color=(86, 222, 188), width=2, alpha=208)
+
+    return crop.convert("RGB")
+
+
+def _build_council_focus_uri(
+    result: Mapping[str, Any],
+    source_image: Image.Image | None,
+    row: Mapping[str, Any],
+) -> str:
+    if source_image is None:
+        return ""
+    focus_bbox = _resolve_council_model_focus_bbox(result, source_image, row)
+    bbox_key = ",".join(str(v) for v in focus_bbox) if focus_bbox is not None else "full"
+    model_name = str(row.get("name", "model")).strip().lower() or "model"
+    cache_key = f"{_compare_cache_prefix(result)}:council:{model_name}:{bbox_key}:420x240"
+    return _cached_compare_frame_uri(
+        cache_key,
+        lambda: _image_to_data_uri(
+            _build_council_focus_image(result, source_image, row),
+            max_width=420,
+            max_height=240,
+        ),
+    )
+
+
+def _summarize_council_focus_detections(
+    result: Mapping[str, Any],
+    focus_bbox: Sequence[Any],
+) -> str:
+    parts: list[str] = []
+    for detection in _select_council_focus_detections(result, focus_bbox, limit=3):
+        label = str(detection.get("pattern", "pattern")).replace("_", " ").strip()
+        confidence = float(detection.get("confidence", 0.0) or 0.0)
+        parts.append(f"{_truncate_text(label, 18)} {_fmt_num(confidence, 2)}")
+    return ", ".join(parts)
+
+
+def _summarize_council_sequence_tasks(row: Mapping[str, Any]) -> str:
+    task_labels = {
+        "projection_direction": "projection",
+        "current_box_direction": "current dir",
+        "current_box_type": "current box",
+        "next_box_direction": "next dir",
+        "next_box_type": "next box",
+        "trigger": "trigger",
+        "structure_setup": "setup",
+        "projected_role": "role",
+    }
+    tasks = cast(Mapping[str, Any], row.get("sequence_tasks", {}))
+    parts: list[str] = []
+    for task_name in (
+        "projection_direction",
+        "current_box_type",
+        "next_box_type",
+        "trigger",
+        "structure_setup",
+        "projected_role",
+    ):
+        payload = cast(Mapping[str, Any], tasks.get(task_name, {}))
+        value = str(payload.get("value", "")).strip()
+        if not value:
+            continue
+        confidence = float(np.clip(payload.get("confidence", 0.0), 0.0, 1.0))
+        pretty_value = value.upper() if "direction" in task_name else value.replace("_", " ")
+        parts.append(f"{task_labels.get(task_name, task_name)} {pretty_value} {_fmt_num(confidence, 2)}")
+    return ", ".join(parts[:4])
+
+
 def _build_overlay_image(
     source_image: Image.Image | None,
     result: Mapping[str, Any],
@@ -7727,6 +15198,7 @@ def _build_overlay_image(
     history_limit: int | None = None,
     label_budget: int | None = None,
     projection_confidence_floor: float | None = None,
+    vision_extras: Any = None,
 ) -> Image.Image | None:
     if source_image is None:
         return None
@@ -7736,15 +15208,19 @@ def _build_overlay_image(
         "overlay_mode": overlay_mode,
         "min_conf_global": min_conf_global,
         "min_conf_latest": min_conf_latest,
+        "vision_extras": _normalize_vision_extras(vision_extras),
         "chart_structure": {
             "chart_geometry": cast(dict[str, Any], result.get("chart_geometry", {})),
             "sequence_state": cast(dict[str, Any], result.get("sequence_state", {})),
             "box_history": cast(list[dict[str, Any]], result.get("box_history", [])),
             "current_box": cast(dict[str, Any], result.get("current_box", {})),
             "next_box_hypotheses": cast(list[dict[str, Any]], result.get("next_box_hypotheses", [])),
+            "projection_chain_boxes": cast(list[dict[str, Any]], result.get("projection_chain_boxes", [])),
             "chart_state": cast(dict[str, Any], result.get("chart_state", {})),
             "projected_candle_candidates": cast(list[dict[str, Any]], result.get("projected_candle_candidates", [])),
             "council_sequence_summary": cast(dict[str, Any], result.get("council_sequence_summary", {})),
+            "grounded_chart": cast(dict[str, Any], result.get("grounded_chart", {})),
+            "test_time_adaptation": cast(dict[str, Any], result.get("test_time_adaptation", {})),
         },
     }
     if history_limit is not None:
@@ -7761,10 +15237,254 @@ def _build_overlay_image(
     )
 
 
+def _load_rgb_image_from_file(path_str: str) -> Image.Image | None:
+    if not path_str:
+        return None
+    file_path = Path(path_str)
+    if not file_path.exists():
+        return None
+    try:
+        with Image.open(file_path) as image:
+            return image.convert("RGB").copy()
+    except Exception:
+        return None
+
+
+def _collect_multi_timeframe_overlay_frames(result: Mapping[str, Any]) -> list[tuple[str, str, str, str, Image.Image]]:
+    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
+    entries = cast(list[dict[str, Any]], multi_timeframe.get("entries", []))
+    frames: list[tuple[str, str, str, str, Image.Image]] = []
+    for entry in entries[:4]:
+        overlay_path = str(entry.get("overlay_asset_path", "")).strip() or str(entry.get("raw_asset_path", "")).strip()
+        image = _load_rgb_image_from_file(overlay_path)
+        if image is None:
+            continue
+        prepared = image.copy()
+        prepared.thumbnail((780, 480), _pillow_lanczos())
+        frames.append(
+            (
+                str(entry.get("label", "Timeframe")).strip() or "Timeframe",
+                str(entry.get("action", "HOLD")).upper(),
+                str(entry.get("projection_direction", "HOLD")).upper(),
+                _fmt_pct01(entry.get("confidence", 0.0)),
+                prepared,
+            )
+        )
+    return frames
+
+
+def _pad_image_to_canvas(image: Image.Image, size: tuple[int, int], fill: tuple[int, int, int] = (8, 16, 24)) -> Image.Image:
+    canvas = Image.new("RGB", size, color=fill)
+    x = (size[0] - image.width) // 2
+    y = (size[1] - image.height) // 2
+    canvas.paste(image, (x, y))
+    return canvas
+
+
+def _build_multi_timeframe_overlay_sheet(result: Mapping[str, Any]) -> Image.Image | None:
+    frames = _collect_multi_timeframe_overlay_frames(result)
+    if len(frames) < 2:
+        return None
+
+    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
+    pad = 18
+    gap = 16
+    header_height = 44
+    footer_height = 32
+    cell_width = max(frame[4].width for frame in frames)
+    cell_height = max(frame[4].height for frame in frames)
+    canvas_width = pad * 2 + cell_width * len(frames) + gap * (len(frames) - 1)
+    canvas_height = pad * 2 + header_height + cell_height + footer_height
+    canvas = Image.new("RGB", (canvas_width, canvas_height), color=(8, 16, 24))
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    summary = _truncate_text(str(multi_timeframe.get("summary", "Higher and lower timeframe overlays")).strip(), 120)
+    gate_state = str(multi_timeframe.get("gate_state", "watch")).upper()
+    draw.rounded_rectangle(
+        (0, 0, canvas_width - 1, canvas_height - 1),
+        radius=22,
+        outline=(42, 59, 76, 255),
+        fill=(9, 16, 24, 255),
+        width=1,
+    )
+
+    for idx, (label, action, projection, confidence, image) in enumerate(frames):
+        x = pad + idx * (cell_width + gap)
+        image_x = x + (cell_width - image.width) // 2
+        image_y = pad + header_height + (cell_height - image.height) // 2
+        draw.rounded_rectangle(
+            (x, pad, x + cell_width, pad + header_height + cell_height),
+            radius=18,
+            outline=(44, 64, 82, 220),
+            fill=(13, 22, 31, 220),
+            width=1,
+        )
+        draw.text((x + 12, pad + 10), f"{label}  {action}", fill=(245, 240, 230, 255))
+        draw.text((x + 12, pad + 25), f"projection {projection}  conf {confidence}", fill=(152, 167, 180, 255))
+        canvas.paste(image, (image_x, image_y))
+
+    draw.text((pad, canvas_height - footer_height + 4), f"Multi-timeframe overlay | Gate {gate_state} | {summary}", fill=(152, 167, 180, 255))
+    return canvas
+
+
+def _build_multi_timeframe_overlay_fusion(result: Mapping[str, Any]) -> Image.Image | None:
+    frames = _collect_multi_timeframe_overlay_frames(result)
+    if len(frames) < 2:
+        return None
+
+    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
+
+    def _pair_panel(
+        first_frame: tuple[str, str, str, str, Image.Image],
+        second_frame: tuple[str, str, str, str, Image.Image],
+        panel_title: str,
+    ) -> tuple[Image.Image, str]:
+        first_label, first_action, first_projection, first_confidence, first_image = first_frame
+        second_label, second_action, second_projection, second_confidence, second_image = second_frame
+        target_size = (
+            max(first_image.width, second_image.width),
+            max(first_image.height, second_image.height),
+        )
+        first_canvas = _pad_image_to_canvas(first_image, target_size)
+        second_canvas = _pad_image_to_canvas(second_image, target_size)
+        fused = Image.blend(first_canvas, second_canvas, 0.5)
+
+        pad = 18
+        header_height = 48
+        footer_height = 42
+        canvas = Image.new(
+            "RGB",
+            (target_size[0] + pad * 2, target_size[1] + pad * 2 + header_height + footer_height),
+            color=(8, 16, 24),
+        )
+        draw = ImageDraw.Draw(canvas, "RGBA")
+        canvas_width, canvas_height = canvas.size
+        summary = _truncate_text(str(multi_timeframe.get("summary", "Higher and lower timeframe fusion")).strip(), 120)
+        gate_state = str(multi_timeframe.get("gate_state", "watch")).upper()
+        draw.rounded_rectangle(
+            (0, 0, canvas_width - 1, canvas_height - 1),
+            radius=22,
+            outline=(42, 59, 76, 255),
+            fill=(9, 16, 24, 255),
+            width=1,
+        )
+        image_y = pad + header_height
+        draw.rounded_rectangle(
+            (pad, pad, canvas_width - pad, image_y + target_size[1]),
+            radius=18,
+            outline=(44, 64, 82, 220),
+            fill=(13, 22, 31, 220),
+            width=1,
+        )
+        canvas.paste(fused, (pad, image_y))
+        draw.text((pad + 12, pad + 10), panel_title, fill=(245, 240, 230, 255))
+        draw.text(
+            (pad + 12, pad + 26),
+            f"{first_label} {first_action} {first_confidence} + {second_label} {second_action} {second_confidence}",
+            fill=(152, 167, 180, 255),
+        )
+        draw.text(
+            (pad, canvas_height - footer_height + 8),
+            f"Gate {gate_state} | {summary} | {first_label} projection {first_projection} + {second_label} projection {second_projection}",
+            fill=(152, 167, 180, 255),
+        )
+        return canvas, f"{first_label} {first_action}/{first_projection} + {second_label} {second_action}/{second_projection}"
+
+    if len(frames) >= 4:
+        higher_panel, higher_caption = _pair_panel(frames[0], frames[1], "Higher timeframe fusion")
+        lower_panel, lower_caption = _pair_panel(frames[2], frames[3], "Lower timeframe fusion")
+
+        pad = 18
+        gap = 16
+        footer_height = 56
+        canvas_width = pad * 2 + gap + higher_panel.width + lower_panel.width
+        canvas_height = pad * 2 + max(higher_panel.height, lower_panel.height) + footer_height
+        canvas = Image.new("RGB", (canvas_width, canvas_height), color=(8, 16, 24))
+        draw = ImageDraw.Draw(canvas, "RGBA")
+        summary = _truncate_text(str(multi_timeframe.get("summary", "Higher and lower timeframe fusion")).strip(), 110)
+        gate_state = str(multi_timeframe.get("gate_state", "watch")).upper()
+        draw.rounded_rectangle(
+            (0, 0, canvas_width - 1, canvas_height - 1),
+            radius=22,
+            outline=(42, 59, 76, 255),
+            fill=(9, 16, 24, 255),
+            width=1,
+        )
+        canvas.paste(higher_panel, (pad, pad))
+        canvas.paste(lower_panel, (pad + higher_panel.width + gap, pad))
+        draw.text((pad, canvas_height - footer_height + 6), f"Gate {gate_state} | {summary}", fill=(152, 167, 180, 255))
+        draw.text((pad, canvas_height - footer_height + 24), f"Higher pair: {higher_caption}", fill=(152, 167, 180, 255))
+        draw.text((pad, canvas_height - footer_height + 40), f"Lower pair: {lower_caption}", fill=(152, 167, 180, 255))
+        return canvas
+
+    lead_label, lead_action, lead_projection, lead_confidence, lead_image = frames[0]
+    trigger_label, trigger_action, trigger_projection, trigger_confidence, trigger_image = frames[1]
+    target_size = (
+        max(lead_image.width, trigger_image.width),
+        max(lead_image.height, trigger_image.height),
+    )
+    lead_canvas = _pad_image_to_canvas(lead_image, target_size)
+    trigger_canvas = _pad_image_to_canvas(trigger_image, target_size)
+    fused = Image.blend(lead_canvas, trigger_canvas, 0.5)
+
+    pad = 18
+    header_height = 48
+    footer_height = 42
+    canvas = Image.new(
+        "RGB",
+        (target_size[0] + pad * 2, target_size[1] + pad * 2 + header_height + footer_height),
+        color=(8, 16, 24),
+    )
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    summary = _truncate_text(str(multi_timeframe.get("summary", "Higher and lower timeframe fusion")).strip(), 120)
+    gate_state = str(multi_timeframe.get("gate_state", "watch")).upper()
+    canvas_width, canvas_height = canvas.size
+    draw.rounded_rectangle(
+        (0, 0, canvas_width - 1, canvas_height - 1),
+        radius=22,
+        outline=(42, 59, 76, 255),
+        fill=(9, 16, 24, 255),
+        width=1,
+    )
+    image_y = pad + header_height
+    draw.rounded_rectangle(
+        (pad, pad, canvas_width - pad, image_y + target_size[1]),
+        radius=18,
+        outline=(44, 64, 82, 220),
+        fill=(13, 22, 31, 220),
+        width=1,
+    )
+    canvas.paste(fused, (pad, image_y))
+    draw.text((pad + 12, pad + 10), "Alpha-blended timeframe fusion", fill=(245, 240, 230, 255))
+    draw.text(
+        (pad + 12, pad + 26),
+        f"{lead_label} {lead_action} {lead_confidence} + {trigger_label} {trigger_action} {trigger_confidence}",
+        fill=(152, 167, 180, 255),
+    )
+    draw.text(
+        (pad, canvas_height - footer_height + 8),
+        f"Gate {gate_state} | {summary} | {lead_label} projection {lead_projection} + {trigger_label} projection {trigger_projection}",
+        fill=(152, 167, 180, 255),
+    )
+    return canvas
+
+
+def _build_active_multi_timeframe_stage_overlay(
+    result: Mapping[str, Any],
+    render_config: Mapping[str, Any] | None = None,
+) -> Image.Image | None:
+    config = dict(render_config or {})
+    if bool(config.get("fuse_timeframe_overlays", False)):
+        fused = _build_multi_timeframe_overlay_fusion(result)
+        if fused is not None:
+            return fused
+    return _build_multi_timeframe_overlay_sheet(result)
+
+
 def _build_decision_gauge_from_result(result: Mapping[str, Any]) -> Any:
     action = str(result.get("action", "HOLD"))
     probs = cast(dict[str, float], result.get("probabilities", {}))
-    return build_prob_gauge(float(probs.get(action, 0.0) or 0.0), action)
+    confidence = float(probs.get(action, result.get("confidence", 0.0)) or 0.0)
+    return build_prob_gauge(confidence, action)
 
 
 def _build_skill_figure(
@@ -7834,31 +15554,412 @@ def _normalize_heat_array(arr: NDArray[Any], percentile: float = 98.5) -> NDArra
     return np.clip(arr / max(scale, 1e-6), 0.0, 1.0).astype(np.float32, copy=False)
 
 
+def _default_heatmap_feedback_calibration() -> dict[str, Any]:
+    return {
+        "sample_count": 0,
+        "visual_region_count": 0,
+        "strength": 0.0,
+        "layer_multipliers": {key: 1.0 for key in HEATMAP_LAYER_KEYS},
+        "class_multipliers": {key: 1.0 for key in HEATMAP_CLASS_KEYS},
+        "render_gammas": dict(HEATMAP_BASE_RENDER_GAMMAS),
+        "source": "neutral",
+    }
+
+
+def _feedback_submission_heatmap_weight(state: Mapping[str, Any]) -> float:
+    status = str(state.get("status", "pending")).strip().lower()
+    if status == "pending":
+        return 0.0
+    confidence_pct = float(np.clip(float(state.get("label_confidence_pct", 0) or 0), 1.0, 100.0))
+    confidence_scale = float(np.clip(confidence_pct / 100.0, 0.18, 1.0))
+    execution = str(state.get("execution_result", "UNSPECIFIED")).upper()
+    execution_scale = {
+        "WIN": 1.0,
+        "BREAKEVEN": 0.58,
+        "NO_FILL": 0.34,
+        "INVALIDATED": 0.30,
+        "LOSS": 0.24,
+    }.get(execution, 0.26)
+    region_count = len(cast(list[Any], cast(dict[str, Any], state.get("feedback_image", {})).get("visual_regions", [])))
+    region_scale = float(np.clip(0.54 + 0.10 * min(region_count, 4), 0.54, 1.0))
+    return float(confidence_scale * execution_scale * region_scale)
+
+
+def _feedback_region_area_scale(region: Mapping[str, Any]) -> float:
+    relative_bbox = cast(list[Any], region.get("relative_bbox", []))
+    area = _rect_area(relative_bbox)
+    return float(np.clip(0.42 + 1.18 * np.sqrt(max(area, 0.0)), 0.42, 1.0))
+
+
+def _build_heatmap_feedback_calibration() -> dict[str, Any]:
+    states = _feedback_submission_states(limit=320)
+    if not states:
+        return _default_heatmap_feedback_calibration()
+
+    layer_votes = {key: 1e-3 for key in HEATMAP_LAYER_KEYS}
+    class_votes = {key: 1e-3 for key in HEATMAP_CLASS_KEYS}
+    sample_count = 0
+    visual_region_count = 0
+    for state in states:
+        feedback_image = cast(dict[str, Any], state.get("feedback_image", {}))
+        regions = cast(list[dict[str, Any]], feedback_image.get("visual_regions", []))
+        base_weight = _feedback_submission_heatmap_weight(state)
+        if base_weight <= 1e-6 or not regions:
+            continue
+        sample_count += 1
+        actual_outcome = str(state.get("actual_outcome", "HOLD")).upper()
+        for region in regions:
+            semantic_label = str(region.get("semantic_label", "")).strip().lower()
+            affinity = HEATMAP_FEEDBACK_REGION_AFFINITIES.get(semantic_label)
+            if affinity is None:
+                continue
+            region_weight = base_weight * _feedback_region_area_scale(region)
+            if actual_outcome in {"BUY", "SELL"} and semantic_label in {"entry_zone", "target_path"}:
+                region_weight *= 1.08
+            elif actual_outcome == "HOLD" and semantic_label in {"invalidation_zone", "context_zone"}:
+                region_weight *= 1.08
+            visual_region_count += 1
+            for key, value in affinity.get("layers", {}).items():
+                if key in layer_votes:
+                    layer_votes[key] += float(region_weight) * float(value)
+            for key, value in affinity.get("classes", {}).items():
+                if key in class_votes:
+                    class_votes[key] += float(region_weight) * float(value)
+
+    if sample_count <= 0 or visual_region_count <= 0:
+        return _default_heatmap_feedback_calibration()
+
+    strength = float(np.clip((sample_count / 18.0) * 0.72 + (visual_region_count / 96.0) * 0.28, 0.0, 1.0))
+
+    def _votes_to_multiplier_map(votes: Mapping[str, float], low: float, high: float) -> dict[str, float]:
+        mean_vote = float(np.mean(np.asarray(list(votes.values()), dtype=np.float32)))
+        if mean_vote <= 1e-6:
+            return {key: 1.0 for key in votes}
+        raw = {
+            key: float(np.clip(np.power(float(value) / mean_vote, 0.35), low, high))
+            for key, value in votes.items()
+        }
+        return {
+            key: float(np.clip(1.0 + (raw[key] - 1.0) * strength, low, high))
+            for key in raw
+        }
+
+    layer_multipliers = _votes_to_multiplier_map(layer_votes, 0.72, 1.34)
+    class_multipliers = _votes_to_multiplier_map(class_votes, 0.74, 1.36)
+    render_gammas: dict[str, float] = {}
+    for key, base_gamma in HEATMAP_BASE_RENDER_GAMMAS.items():
+        if key in class_multipliers:
+            reference = class_multipliers[key]
+        else:
+            reference = layer_multipliers.get(key, 1.0)
+        gamma = float(base_gamma * (1.0 - 0.18 * (float(reference) - 1.0)))
+        render_gammas[key] = float(np.clip(gamma, max(0.76, base_gamma - 0.18), min(1.24, base_gamma + 0.18)))
+
+    return {
+        "sample_count": int(sample_count),
+        "visual_region_count": int(visual_region_count),
+        "strength": strength,
+        "layer_multipliers": layer_multipliers,
+        "class_multipliers": class_multipliers,
+        "render_gammas": render_gammas,
+        "source": "feedback_visual_regions",
+    }
+
+
+def _get_heatmap_feedback_calibration() -> dict[str, Any]:
+    journal_path = _feedback_submission_journal_path()
+    try:
+        journal_mtime_ns: int | None = int(journal_path.stat().st_mtime_ns)
+    except Exception:
+        journal_mtime_ns = None
+    with _heatmap_feedback_calibration_lock:
+        cached_mtime = _heatmap_feedback_calibration_cache.get("journal_mtime_ns")
+        cached_state = cast(dict[str, Any] | None, _heatmap_feedback_calibration_cache.get("state"))
+        if cached_state is not None and cached_mtime == journal_mtime_ns:
+            return copy.deepcopy(cached_state)
+    state = _build_heatmap_feedback_calibration()
+    with _heatmap_feedback_calibration_lock:
+        _heatmap_feedback_calibration_cache["journal_mtime_ns"] = journal_mtime_ns
+        _heatmap_feedback_calibration_cache["state"] = copy.deepcopy(state)
+    return state
+
+
+def _heatmap_mask_affinity(mask_summary: Mapping[str, Any], signal_action: str) -> tuple[dict[str, float], dict[str, float]]:
+    label = str(mask_summary.get("label", "")).strip().lower()
+    layer_weights: dict[str, float] = {"segmentation": 1.0, "detections": 0.42, "opportunity": 0.36}
+    class_weights: dict[str, float] = {"entry": 0.34, "continuation": 0.32, "reversal": 0.26}
+    if any(token in label for token in ("support", "resistance", "zone", "consolidation", "box")):
+        layer_weights["zones"] = 0.92
+        layer_weights["context"] = 0.44
+        if "support" in label and signal_action == "BUY":
+            class_weights["entry"] = 0.94
+            class_weights["continuation"] = 0.64
+        elif "resistance" in label and signal_action == "SELL":
+            class_weights["entry"] = 0.94
+            class_weights["continuation"] = 0.64
+        elif "reaction" in label:
+            class_weights["reversal"] = 0.96
+    elif any(token in label for token in ("breakout", "pullback", "trend", "impulse")):
+        layer_weights["corridor"] = 0.94
+        class_weights["continuation"] = 0.98
+    elif any(token in label for token in ("reversal", "rejection", "wick")):
+        layer_weights["zones"] = 0.58
+        class_weights["reversal"] = 1.0
+    return layer_weights, class_weights
+
+
+def _heatmap_signal_action(
+    result: Mapping[str, Any],
+    *,
+    allow_hold_fallback: bool = True,
+) -> str:
+    projection = cast(dict[str, Any], result.get("projection", {}))
+    zone_learning = cast(dict[str, Any], result.get("zone_learning", {}))
+    candidates = [
+        str(result.get("action", "HOLD")).upper(),
+        str(projection.get("direction", "HOLD")).upper(),
+        str(zone_learning.get("preferred_action", "HOLD")).upper(),
+    ]
+    directional = [value for value in candidates if value in {"BUY", "SELL"}]
+    if not directional:
+        return "HOLD" if allow_hold_fallback else str(result.get("action", "HOLD")).upper()
+    buy_votes = sum(1 for value in directional if value == "BUY")
+    sell_votes = sum(1 for value in directional if value == "SELL")
+    return "BUY" if buy_votes >= sell_votes else "SELL"
+
+
+def _heatmap_signal_strength(result: Mapping[str, Any]) -> float:
+    projection = cast(dict[str, Any], result.get("projection", {}))
+    zone_learning = cast(dict[str, Any], result.get("zone_learning", {}))
+    action = str(result.get("action", "HOLD")).upper()
+    signal_action = _heatmap_signal_action(result)
+    confidence = float(np.clip(result.get("confidence", 0.0) or 0.0, 0.0, 1.0))
+    projection_conf = float(np.clip(projection.get("confidence", 0.0) or 0.0, 0.0, 1.0))
+    zone_alignment = float(np.clip(zone_learning.get("alignment_score", 0.0) or 0.0, 0.0, 1.0))
+    execution = str(result.get("execution_permission", "WAIT_FOR_CONFIRMATION")).upper()
+    direction_agreement = 0.0
+    for candidate in (
+        action,
+        str(projection.get("direction", "HOLD")).upper(),
+        str(zone_learning.get("preferred_action", "HOLD")).upper(),
+    ):
+        if candidate == signal_action and signal_action in {"BUY", "SELL"}:
+            direction_agreement += 1.0
+    agreement_ratio = direction_agreement / 3.0
+    execution_scale = 1.0 if execution == "EXECUTE" else (0.82 if signal_action in {"BUY", "SELL"} else 0.58)
+    return float(
+        np.clip(
+            (0.36 + 0.34 * confidence + 0.18 * projection_conf + 0.12 * zone_alignment) * (0.72 + 0.28 * agreement_ratio) * execution_scale,
+            0.12,
+            1.0,
+        )
+    )
+
+
+def _heatmap_zone_alignment(zone: Mapping[str, Any], signal_action: str) -> float:
+    kind = str(zone.get("kind", "reaction")).lower()
+    if signal_action == "BUY":
+        if kind == "support":
+            return 1.0
+        if kind == "reaction":
+            return 0.72
+        if kind == "resistance":
+            return 0.34
+    if signal_action == "SELL":
+        if kind == "resistance":
+            return 1.0
+        if kind == "reaction":
+            return 0.72
+        if kind == "support":
+            return 0.34
+    return 0.52
+
+
+def _normalize_heatmap_class_weights(weights: Mapping[str, Any]) -> dict[str, float]:
+    normalized = {
+        "entry": max(0.0, float(weights.get("entry", 0.0) or 0.0)),
+        "continuation": max(0.0, float(weights.get("continuation", 0.0) or 0.0)),
+        "reversal": max(0.0, float(weights.get("reversal", 0.0) or 0.0)),
+    }
+    max_value = max(normalized.values())
+    if max_value <= 1e-6:
+        return {"entry": 1.0, "continuation": 0.0, "reversal": 0.0}
+    return {
+        key: float(np.clip(value / max_value, 0.0, 1.0))
+        for key, value in normalized.items()
+    }
+
+
+def _heatmap_structure_class_profile(result: Mapping[str, Any]) -> dict[str, float]:
+    chart_state = cast(dict[str, Any], result.get("chart_state", {}))
+    projection = cast(dict[str, Any], result.get("projection", {}))
+    current_box = cast(dict[str, Any], result.get("current_box", {}))
+    projected_box = cast(list[dict[str, Any]], result.get("next_box_hypotheses", []))
+    primary_box = projected_box[0] if projected_box else {}
+    confidence = float(np.clip(result.get("confidence", 0.0) or 0.0, 0.0, 1.0))
+    projection_conf = float(np.clip(projection.get("confidence", 0.0) or 0.0, 0.0, 1.0))
+    parse_quality = float(np.clip(result.get("latest_parse_quality", 0.0) or 0.0, 0.0, 1.0))
+    path_clarity = float(np.clip(chart_state.get("path_clarity", 0.0) or 0.0, 0.0, 1.0))
+    continuation_prob = float(np.clip(chart_state.get("continuation_probability", 0.0) or 0.0, 0.0, 1.0))
+    reversal_prob = float(np.clip(chart_state.get("reversal_probability", 0.0) or 0.0, 0.0, 1.0))
+    entry_type = str(chart_state.get("entry_type", "continuation")).lower()
+    continuation_signal = str(chart_state.get("continuation_signal", "none")).lower()
+    reversal_signal = str(chart_state.get("reversal_signal", "none")).lower()
+    structure_setup = str(chart_state.get("structure_setup", "none")).lower()
+    execution = str(result.get("execution_permission", "WAIT_FOR_CONFIRMATION")).upper()
+    current_type = str(current_box.get("box_type", "balance")).lower()
+    projected_type = str(primary_box.get("box_type", projection.get("box_type", "balance"))).lower()
+    projected_trigger = str(primary_box.get("trigger", "")).lower()
+    directional_scale = 1.0 if _heatmap_signal_action(result) in {"BUY", "SELL"} else 0.72
+
+    entry = (
+        0.22
+        + 0.28 * confidence
+        + 0.18 * projection_conf
+        + 0.12 * parse_quality
+        + 0.10 * float(execution == "EXECUTE")
+        + 0.10 * float(current_type in {"balance", "pullback", "impulse", "reversal_base"})
+    ) * directional_scale
+    continuation = (
+        0.10
+        + 0.34 * continuation_prob
+        + 0.18 * path_clarity
+        + 0.12 * float(continuation_signal != "none")
+        + 0.12 * float(structure_setup in {"consolidation_breakout", "impulse_chain"})
+        + 0.08 * float(current_type in {"impulse", "pullback", "balance"})
+        + 0.08 * float(projected_type == "impulse")
+    ) * directional_scale
+    reversal = (
+        0.08
+        + 0.36 * reversal_prob
+        + 0.14 * float(reversal_signal != "none")
+        + 0.12 * float(entry_type == "reversal")
+        + 0.14 * float(current_type == "reversal_base")
+        + 0.12 * float(structure_setup == "reversal_release")
+        + 0.08 * float(projected_type == "reversal_base" or "reversal" in projected_trigger)
+    ) * directional_scale
+    return {
+        "entry": float(np.clip(entry, 0.0, 1.0)),
+        "continuation": float(np.clip(continuation, 0.0, 1.0)),
+        "reversal": float(np.clip(reversal, 0.0, 1.0)),
+    }
+
+
+def _heatmap_detection_class_weights(detection: Mapping[str, Any]) -> dict[str, float]:
+    pattern = str(detection.get("pattern", "")).lower().strip().replace(" ", "_")
+    entry = 0.18
+    continuation = 0.0
+    reversal = 0.0
+    if _is_latest_branch_pattern(pattern):
+        entry += 0.42
+    if any(token in pattern for token in ("latest_", "next_candle", "next_move", "trigger", "entry")):
+        entry += 0.18
+    if any(token in pattern for token in ("breakout", "continuation", "impulse", "pullback", "range_break", "drive", "expansion")):
+        continuation += 1.0
+    if any(token in pattern for token in ("reversal", "wick", "hammer", "shooting", "engulf", "rejection", "spike")):
+        reversal += 1.0
+    if "next_" in pattern:
+        continuation += 0.18
+    if continuation <= 1e-6 and reversal <= 1e-6:
+        continuation = 0.14 if _is_latest_branch_pattern(pattern) else 0.06
+    return _normalize_heatmap_class_weights(
+        {
+            "entry": entry,
+            "continuation": continuation,
+            "reversal": reversal,
+        }
+    )
+
+
+def _heatmap_projected_class_weights(
+    projected_box: Mapping[str, Any],
+    *,
+    chart_state: Mapping[str, Any],
+    rank: int = 0,
+) -> dict[str, float]:
+    box_type = str(projected_box.get("box_type", chart_state.get("structure_setup", "balance"))).lower()
+    trigger = str(projected_box.get("trigger", "")).lower()
+    projected_summary = cast(dict[str, Any], projected_box.get("projected_candle_summary", {}))
+    pattern_family = str(projected_summary.get("pattern_family", "")).lower()
+    structure_setup = str(chart_state.get("structure_setup", "none")).lower()
+    continuation_signal = str(chart_state.get("continuation_signal", "none")).lower()
+    reversal_signal = str(chart_state.get("reversal_signal", "none")).lower()
+    entry = 0.30 if rank == 0 else 0.12
+    continuation = 0.0
+    reversal = 0.0
+    if box_type in {"impulse", "pullback", "balance"}:
+        continuation += 0.84
+    if any(token in trigger for token in ("breakout", "continuation", "impulse", "range_break")):
+        continuation += 0.24
+    if continuation_signal != "none":
+        continuation += 0.20
+    if structure_setup in {"impulse_chain", "consolidation_breakout"}:
+        continuation += 0.18
+    if box_type == "reversal_base" or any(token in trigger for token in ("reversal", "release")):
+        reversal += 0.86
+    if any(token in pattern_family for token in ("reversal", "hammer", "shooting_star")):
+        reversal += 0.22
+    if reversal_signal != "none":
+        reversal += 0.18
+    if structure_setup == "reversal_release":
+        reversal += 0.18
+    return _normalize_heatmap_class_weights(
+        {
+            "entry": entry,
+            "continuation": continuation,
+            "reversal": reversal,
+        }
+    )
+
+
+def _group_heatmap_hotspots(hotspots: Sequence[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {
+        "entry": [],
+        "continuation": [],
+        "reversal": [],
+    }
+    for hotspot in hotspots:
+        window_class = str(hotspot.get("window_class", "entry")).lower()
+        if window_class not in grouped:
+            window_class = "entry"
+        grouped[window_class].append(dict(hotspot))
+    return grouped
+
+
 def _extract_heatmap_hotspots(
     fused_heat: NDArray[np.float32],
     layer_arrays: Mapping[str, NDArray[np.float32]],
+    *,
+    signal_action: str = "HOLD",
+    preferred_window_class: str = "entry",
 ) -> list[dict[str, Any]]:
     if not fused_heat.size or float(fused_heat.max()) <= 1e-6:
         return []
     positive = fused_heat[fused_heat > 1e-6]
     if positive.size == 0:
         return []
+    opportunity_layer = layer_arrays.get("opportunity")
+    candidate_field = fused_heat
+    if opportunity_layer is not None and opportunity_layer.shape == fused_heat.shape:
+        candidate_field = np.clip(0.72 * opportunity_layer + 0.28 * fused_heat, 0.0, 1.0).astype(np.float32, copy=False)
     height, width = fused_heat.shape
-    threshold = max(0.34, min(0.86, float(np.percentile(positive, 91.0))))
-    ys, xs = np.where(fused_heat >= threshold)
+    candidate_positive = candidate_field[candidate_field > 1e-6]
+    threshold_source = candidate_positive if candidate_positive.size else positive
+    threshold = max(0.36, min(0.88, float(np.percentile(threshold_source, 89.5))))
+    ys, xs = np.where(candidate_field >= threshold)
     if ys.size == 0:
-        flat_index = int(np.argmax(fused_heat))
+        flat_index = int(np.argmax(candidate_field))
         ys = np.asarray([flat_index // width], dtype=np.int32)
         xs = np.asarray([flat_index % width], dtype=np.int32)
-    scores = fused_heat[ys, xs]
+    scores = candidate_field[ys, xs]
     order = np.argsort(scores)[::-1]
-    min_distance = max(12.0, float(min(height, width)) * 0.11)
+    min_distance = max(14.0, float(min(height, width)) * 0.12)
     selected: list[dict[str, Any]] = []
     chosen_points: list[tuple[int, int]] = []
-    label_map = {
-        "detections": "Detection-led confluence",
-        "corridor": "Projection-led confluence",
-        "zones": "Zone-led confluence",
+    class_label_map = {
+        "entry": "Entry window",
+        "continuation": "Continuation window",
+        "reversal": "Reversal window",
     }
     for flat_pos in order.tolist():
         y = int(ys[flat_pos])
@@ -7874,15 +15975,55 @@ def _extract_heatmap_hotspots(
             if layer.shape == fused_heat.shape
         }
         ordered_layers = sorted(layer_scores.items(), key=lambda item: item[1], reverse=True)
+        top_opportunity = float(layer_scores.get("opportunity", score))
+        class_scores = {
+            "entry": float(layer_scores.get("entry", 0.0)),
+            "continuation": float(layer_scores.get("continuation", 0.0)),
+            "reversal": float(layer_scores.get("reversal", 0.0)),
+        }
+        ordered_classes = sorted(class_scores.items(), key=lambda item: item[1], reverse=True)
+        window_class = ordered_classes[0][0] if ordered_classes else "entry"
+        class_score = ordered_classes[0][1] if ordered_classes else top_opportunity
+        preferred = str(preferred_window_class or "entry").lower()
+        if (
+            preferred in class_scores
+            and ordered_classes
+            and class_scores.get(preferred, 0.0) >= max(class_score - 0.06, 0.0)
+        ):
+            window_class = preferred
+            class_score = float(class_scores.get(preferred, class_score))
         if not ordered_layers:
             dominant_layer = "fused"
-            hotspot_label = "Confidence confluence"
-        elif len(ordered_layers) > 1 and ordered_layers[0][1] - ordered_layers[1][1] < 0.08:
+            dominant_reason = "Multiple evidence streams overlap here."
+        elif len(ordered_layers) > 1 and ordered_layers[0][1] - ordered_layers[1][1] < 0.08 and top_opportunity < 0.58:
             dominant_layer = "mixed"
-            hotspot_label = "Mixed confluence"
+            dominant_reason = "No single evidence layer dominates, so this remains a watch area."
         else:
             dominant_layer = ordered_layers[0][0]
-            hotspot_label = label_map.get(dominant_layer, "Confidence confluence")
+            if dominant_layer == "opportunity":
+                dominant_reason = "The current and projected structure converge here."
+            elif dominant_layer == "detections":
+                dominant_reason = "Observed structure is strongest here."
+            elif dominant_layer == "corridor":
+                dominant_reason = "The projected path narrows through this zone."
+            elif dominant_layer == "zones":
+                dominant_reason = "Saved teaching zones reinforce this area."
+            elif dominant_layer == "segmentation":
+                dominant_reason = "SAM-shaped structure is tightening this hotspot."
+            else:
+                dominant_reason = "Multiple evidence streams overlap here."
+        if window_class == "entry":
+            class_reason = "Immediate trigger structure is clustering around this area."
+        elif window_class == "continuation":
+            class_reason = "Continuation structure and forward path are reinforcing this area."
+        else:
+            class_reason = "Reversal evidence is concentrating into this release area."
+        hotspot_label = class_label_map.get(window_class, "Opportunity window")
+        if top_opportunity >= 0.78:
+            hotspot_label = f"Prime {hotspot_label.lower()}".title()
+        elif top_opportunity >= 0.60 and dominant_layer != "mixed":
+            hotspot_label = f"Actionable {hotspot_label.lower()}".title()
+        reason = f"{class_reason} {dominant_reason}".strip()
         selected.append(
             {
                 "rank": len(selected) + 1,
@@ -7890,9 +16031,14 @@ def _extract_heatmap_hotspots(
                 "y": y,
                 "x_pct": float(x) / float(max(width - 1, 1)) * 100.0,
                 "y_pct": float(y) / float(max(height - 1, 1)) * 100.0,
-                "score": score,
+                "score": float(np.clip(fused_heat[y, x], 0.0, 1.0)),
+                "opportunity_score": top_opportunity,
+                "window_class": window_class,
+                "class_score": float(np.clip(class_score, 0.0, 1.0)),
                 "dominant_layer": dominant_layer,
                 "label": hotspot_label,
+                "reason": reason,
+                "signal_action": signal_action if signal_action in {"BUY", "SELL"} else "HOLD",
                 "layer_scores": layer_scores,
             }
         )
@@ -7980,6 +16126,67 @@ def _build_heat_contour_overlay(
     return Image.fromarray(rgba, mode="RGBA")
 
 
+def sample_overlay_candle_palette(
+    image: Any,
+    sequence_state: Mapping[str, Any],
+) -> dict[str, tuple[int, int, int]]:
+    if isinstance(image, Image.Image):
+        rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
+    else:
+        rgb = np.asarray(image, dtype=np.float32)
+        if rgb.ndim == 2:
+            rgb = np.stack([rgb, rgb, rgb], axis=-1)
+        if rgb.ndim != 3 or rgb.shape[2] < 3:
+            rgb = np.zeros((1, 1, 3), dtype=np.float32)
+        elif rgb.shape[2] > 3:
+            rgb = rgb[..., :3]
+
+    height, width = int(rgb.shape[0]), int(rgb.shape[1])
+    bull_samples: list[NDArray[np.float32]] = []
+    bear_samples: list[NDArray[np.float32]] = []
+    for candle in cast(Sequence[Mapping[str, Any]], sequence_state.get("all_visible_candles", [])):
+        bbox = cast(Sequence[Any], candle.get("bbox", []))
+        if len(bbox) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = [float(value) for value in bbox]
+        except Exception:
+            continue
+        left = int(np.clip(np.floor(min(x1, x2)), 0, max(width - 1, 0)))
+        right = int(np.clip(np.ceil(max(x1, x2)), 0, width))
+        top = int(np.clip(np.floor(min(y1, y2)), 0, max(height - 1, 0)))
+        bottom = int(np.clip(np.ceil(max(y1, y2)), 0, height))
+        if right <= left or bottom <= top:
+            continue
+        patch = rgb[top:bottom, left:right, :3]
+        if patch.size == 0:
+            continue
+        sample = np.asarray(patch.reshape(-1, 3).mean(axis=0), dtype=np.float32)
+        if float(candle.get("candle_color_green", 0.0) or 0.0) >= 0.5:
+            bull_samples.append(sample)
+        else:
+            bear_samples.append(sample)
+
+    def _resolve(samples: Sequence[NDArray[np.float32]], fallback: tuple[int, int, int]) -> tuple[int, int, int]:
+        if not samples:
+            return fallback
+        mean_rgb = np.asarray(samples, dtype=np.float32).mean(axis=0)
+        channels = [int(np.clip(round(float(channel)), 0, 255)) for channel in mean_rgb[:3]]
+        return (channels[0], channels[1], channels[2])
+
+    return {
+        "bull": _resolve(bull_samples, (92, 214, 104)),
+        "bear": _resolve(bear_samples, (236, 82, 194)),
+    }
+
+
+def _sample_overlay_candle_palette(  # pyright: ignore[reportUnusedFunction]
+    image: Any,
+    sequence_state: Mapping[str, Any],
+) -> dict[str, tuple[int, int, int]]:
+    return sample_overlay_candle_palette(image, sequence_state)
+
+
 def _build_heat_hotspot_overlay(
     hotspots: Sequence[Mapping[str, Any]],
     size: tuple[int, int],
@@ -7993,10 +16200,27 @@ def _build_heat_hotspot_overlay(
         y = int(hotspot.get("y", 0) or 0)
         rank_text = str(int(hotspot.get("rank", 0) or 0))
         score_text = str(int(round(float(hotspot.get("score", 0.0) or 0.0) * 100.0)))
+        window_class = str(hotspot.get("window_class", "entry")).lower()
+        signal_action = str(hotspot.get("signal_action", "HOLD")).upper()
+        if window_class == "entry":
+            accent = (255, 206, 108)
+        elif window_class == "continuation":
+            accent = (102, 229, 214)
+        else:
+            accent = (244, 132, 164)
+        if signal_action == "BUY":
+            halo = (*accent, 104)
+            fill = (14, 28, 18, 202)
+        elif signal_action == "SELL":
+            halo = (*accent, 104)
+            fill = (30, 16, 16, 202)
+        else:
+            halo = (*accent, 96)
+            fill = (18, 18, 22, 196)
         halo_box = (x - radius * 2, y - radius * 2, x + radius * 2, y + radius * 2)
         ring_box = (x - radius, y - radius, x + radius, y + radius)
-        draw.ellipse(halo_box, outline=(255, 170, 90, 92), width=2)
-        draw.ellipse(ring_box, fill=(18, 18, 22, 196), outline=(255, 236, 214, 235), width=2)
+        draw.ellipse(halo_box, outline=halo, width=2)
+        draw.ellipse(ring_box, fill=fill, outline=(*accent, 235), width=2)
         rank_bbox = draw.textbbox((0, 0), rank_text)
         rank_w = rank_bbox[2] - rank_bbox[0]
         rank_h = rank_bbox[3] - rank_bbox[1]
@@ -8007,7 +16231,7 @@ def _build_heat_hotspot_overlay(
         score_x = min(max(4.0, x + radius + 6.0), float(max(width - score_w - 8, 4)))
         score_y = min(max(4.0, y - radius - score_h / 2.0), float(max(height - score_h - 8, 4)))
         label_box = (score_x - 4.0, score_y - 2.0, score_x + score_w + 4.0, score_y + score_h + 2.0)
-        draw.rounded_rectangle(label_box, radius=6, fill=(14, 18, 24, 212), outline=(255, 182, 96, 220), width=1)
+        draw.rounded_rectangle(label_box, radius=6, fill=(14, 18, 24, 212), outline=(*accent, 220), width=1)
         draw.text((score_x, score_y), score_text, fill=(255, 236, 210, 240))
     return overlay
 
@@ -8025,6 +16249,23 @@ def _build_confidence_heatmap_payload(
     path_heat = np.zeros((height, width), dtype=np.float32)
     detection_heat = np.zeros((height, width), dtype=np.float32)
     zone_heat = np.zeros((height, width), dtype=np.float32)
+    segmentation_heat = np.zeros((height, width), dtype=np.float32)
+    opportunity_heat = np.zeros((height, width), dtype=np.float32)
+    entry_heat = np.zeros((height, width), dtype=np.float32)
+    continuation_heat = np.zeros((height, width), dtype=np.float32)
+    reversal_heat = np.zeros((height, width), dtype=np.float32)
+    calibration = _get_heatmap_feedback_calibration()
+    layer_multipliers = cast(dict[str, float], calibration.get("layer_multipliers", {}))
+    class_multipliers = cast(dict[str, float], calibration.get("class_multipliers", {}))
+    signal_action = _heatmap_signal_action(result)
+    signal_strength = _heatmap_signal_strength(result)
+    class_profile = _heatmap_structure_class_profile(result)
+    chart_state = cast(dict[str, Any], result.get("chart_state", {}))
+    class_targets = {
+        "entry": entry_heat,
+        "continuation": continuation_heat,
+        "reversal": reversal_heat,
+    }
 
     def add_spot(
         target: NDArray[np.float32],
@@ -8050,6 +16291,57 @@ def _build_confidence_heatmap_payload(
         yy, xx = np.meshgrid(y, x, indexing="ij")
         patch = np.exp(-0.5 * (xx * xx + yy * yy), dtype=np.float32)
         target[top:bottom, left:right] += patch * value
+
+    def add_opportunity_focus(
+        target: NDArray[np.float32],
+        bbox: Sequence[Any],
+        weight: float,
+        *,
+        focus_scale: float = 1.0,
+    ) -> None:
+        clamped = _clamp_bbox(bbox, float(width), float(height))
+        if clamped is None:
+            return
+        left, top, right, bottom = clamped
+        center_x = float(left + right) / 2.0
+        center_y = float(top + bottom) / 2.0
+        box_w = float(right - left)
+        box_h = float(bottom - top)
+        add_spot(
+            target,
+            center_x,
+            center_y,
+            max(4.0, box_w * 0.13 * float(focus_scale)),
+            max(4.0, box_h * 0.13 * float(focus_scale)),
+            float(max(weight, 0.0)),
+        )
+
+    def add_classified_window(
+        bbox: Sequence[Any],
+        *,
+        weight: float,
+        class_weights: Mapping[str, Any],
+        focus_scale: float = 1.0,
+    ) -> None:
+        normalized_weights = _normalize_heatmap_class_weights(class_weights)
+        strongest = 0.0
+        for class_name, scale in normalized_weights.items():
+            if scale <= 1e-6:
+                continue
+            strongest = max(strongest, float(scale))
+            add_opportunity_focus(
+                class_targets[class_name],
+                bbox,
+                float(weight) * float(scale),
+                focus_scale=focus_scale,
+            )
+        if strongest > 1e-6:
+            add_opportunity_focus(
+                opportunity_heat,
+                bbox,
+                float(weight) * strongest,
+                focus_scale=focus_scale,
+            )
 
     def add_soft_bbox(
         bbox: Sequence[Any],
@@ -8102,6 +16394,7 @@ def _build_confidence_heatmap_payload(
         return center_x, center_y
 
     def add_projection_corridor(
+        target: NDArray[np.float32],
         start_bbox: Sequence[Any],
         end_bbox: Sequence[Any],
         weight: float,
@@ -8124,22 +16417,90 @@ def _build_confidence_heatmap_payload(
             py = float(sy + (ey - sy) * t)
             center_falloff = 0.72 + 0.28 * (1.0 - abs(float(t) - 0.5) * 1.4)
             local_weight = float(max(weight, 0.0)) * float(rank_scale) * center_falloff / max(steps / 1.8, 1.0)
-            add_spot(path_heat, px, py, corridor_rx, corridor_ry, local_weight)
+            add_spot(target, px, py, corridor_rx, corridor_ry, local_weight)
+
+    def add_classified_projection_corridor(
+        start_bbox: Sequence[Any],
+        end_bbox: Sequence[Any],
+        *,
+        weight: float,
+        class_weights: Mapping[str, Any],
+        rank_scale: float = 1.0,
+    ) -> None:
+        add_projection_corridor(path_heat, start_bbox, end_bbox, weight, rank_scale=rank_scale)
+        normalized_weights = _normalize_heatmap_class_weights(class_weights)
+        for class_name, scale in normalized_weights.items():
+            if scale <= 1e-6:
+                continue
+            add_projection_corridor(
+                class_targets[class_name],
+                start_bbox,
+                end_bbox,
+                float(weight) * float(scale),
+                rank_scale=rank_scale,
+            )
+
+    def add_mask_heat(
+        target: NDArray[np.float32],
+        mask_summary: Mapping[str, Any],
+        weight: float,
+    ) -> bool:
+        bbox = cast(list[Any], mask_summary.get("bbox", []))
+        clamped = _clamp_bbox(bbox, float(width), float(height))
+        if clamped is None:
+            return False
+        left, top, right, bottom = clamped
+        if right - left < 2 or bottom - top < 2:
+            return False
+        grid_arr = np.asarray(mask_summary.get("mask_grid", []), dtype=np.float32)
+        if grid_arr.ndim != 2 or grid_arr.size == 0:
+            return False
+        if float(grid_arr.max()) > 1.0:
+            grid_arr = grid_arr / 255.0
+        patch_img = Image.fromarray(np.uint8(np.clip(grid_arr, 0.0, 1.0) * 255.0), mode="L")
+        resized = patch_img.resize((right - left, bottom - top), resample=_pillow_bilinear())
+        resized_arr = np.asarray(resized, dtype=np.float32) / 255.0
+        if not resized_arr.size or float(resized_arr.max()) <= 1e-6:
+            return False
+        softened = np.asarray(
+            Image.fromarray(np.uint8(np.clip(resized_arr, 0.0, 1.0) * 255.0), mode="L").filter(
+                ImageFilter.GaussianBlur(radius=max(0.8, min(right - left, bottom - top) * 0.06))
+            ),
+            dtype=np.float32,
+        ) / 255.0
+        patch = np.clip(0.62 * resized_arr + 0.38 * softened, 0.0, 1.0)
+        target[top:bottom, left:right] += patch * float(max(weight, 0.0))
+        return True
 
     detections = cast(list[dict[str, Any]], result.get("detections", []))
     for detection in detections:
         conf = float(detection.get("overlay_confidence", detection.get("confidence", 0.0)) or 0.0)
         bonus = 0.12 if _is_latest_branch_pattern(str(detection.get("pattern", ""))) else 0.0
+        detection_bbox = cast(list[float], detection.get("bbox", []))
+        detection_classes = _normalize_heatmap_class_weights(
+            {
+                key: value * (0.45 + 0.55 * class_profile.get(key, 0.0))
+                for key, value in _heatmap_detection_class_weights(detection).items()
+            }
+        )
         add_soft_bbox(
-            cast(list[float], detection.get("bbox", [])),
+            detection_bbox,
             conf * 0.74 + bonus,
             context_scale=1.0,
             precision_scale=1.15 if bonus > 0.0 else 1.0,
             audit_target=detection_heat,
             audit_scale=0.86,
         )
+        latest_scale = 1.08 if bonus > 0.0 else 0.82
+        add_classified_window(
+            detection_bbox,
+            weight=(conf * 0.34 + bonus * 0.55) * signal_strength * latest_scale,
+            class_weights=detection_classes,
+            focus_scale=0.96 if bonus > 0.0 else 1.06,
+        )
     current_box = cast(dict[str, Any], result.get("current_box", {}))
     current_bbox = cast(list[float], current_box.get("bbox", []))
+    current_box_type = str(current_box.get("box_type", "balance")).lower()
     add_soft_bbox(
         current_bbox,
         float(current_box.get("confidence", 0.0) or 0.0) + 0.24,
@@ -8148,10 +16509,29 @@ def _build_confidence_heatmap_payload(
         audit_target=detection_heat,
         audit_scale=0.92,
     )
+    current_box_classes = _normalize_heatmap_class_weights(
+        {
+            "entry": class_profile.get("entry", 0.0),
+            "continuation": class_profile.get("continuation", 0.0) * (0.48 if current_box_type != "reversal_base" else 0.18),
+            "reversal": class_profile.get("reversal", 0.0) * (1.0 if current_box_type == "reversal_base" else 0.34),
+        }
+    )
+    add_classified_window(
+        current_bbox,
+        weight=(0.52 + float(current_box.get("confidence", 0.0) or 0.0) * 0.54) * signal_strength,
+        class_weights=current_box_classes,
+        focus_scale=0.88,
+    )
     next_boxes = cast(list[dict[str, Any]], result.get("next_box_hypotheses", []))
     for rank, box in enumerate(next_boxes[:3]):
         rank_weight = float(box.get("confidence", 0.0) or 0.0) * max(0.42, 0.88 - rank * 0.18)
         box_bbox = cast(list[float], box.get("bbox", []))
+        projected_classes = _normalize_heatmap_class_weights(
+            {
+                key: value * (0.42 + 0.58 * class_profile.get(key, 0.0))
+                for key, value in _heatmap_projected_class_weights(box, chart_state=chart_state, rank=rank).items()
+            }
+        )
         add_soft_bbox(
             box_bbox,
             rank_weight,
@@ -8161,11 +16541,18 @@ def _build_confidence_heatmap_payload(
             audit_scale=max(0.52, 0.80 - rank * 0.10),
             audit_radius_scale=max(0.90, 1.12 - rank * 0.08),
         )
-        add_projection_corridor(
+        add_classified_projection_corridor(
             current_bbox,
             box_bbox,
-            rank_weight * 0.95,
+            weight=rank_weight * 0.95,
+            class_weights=projected_classes,
             rank_scale=max(0.52, 0.95 - rank * 0.18),
+        )
+        add_classified_window(
+            box_bbox,
+            weight=rank_weight * signal_strength * max(0.64, 1.0 - rank * 0.18),
+            class_weights=projected_classes,
+            focus_scale=max(0.82, 1.0 - rank * 0.10),
         )
     focus_bbox = _resolve_focus_crop_bbox(result, source_image)
     if focus_bbox is not None:
@@ -8178,8 +16565,23 @@ def _build_confidence_heatmap_payload(
             audit_scale=0.18,
             audit_radius_scale=1.18,
         )
+        add_classified_window(
+            list(focus_bbox),
+            weight=0.18 * signal_strength,
+            class_weights={"entry": 1.0, "continuation": 0.18, "reversal": 0.18},
+            focus_scale=1.12,
+        )
     zone_learning = cast(dict[str, Any], result.get("zone_learning", {}))
     for zone in cast(list[dict[str, Any]], zone_learning.get("matching_zones", []))[:6]:
+        alignment = _heatmap_zone_alignment(zone, signal_action)
+        zone_kind = str(zone.get("kind", "reaction")).lower()
+        zone_classes = _normalize_heatmap_class_weights(
+            {
+                "entry": (0.84 if zone_kind in {"support", "resistance"} else 0.48) * max(alignment, 0.48),
+                "continuation": (0.92 if zone_kind in {"support", "resistance"} else 0.44) * max(class_profile.get("continuation", 0.0), 0.24) * max(alignment, 0.42),
+                "reversal": (1.0 if zone_kind == "reaction" else (0.62 if alignment < 0.58 else 0.30)) * max(class_profile.get("reversal", 0.0), 0.18),
+            }
+        )
         add_soft_bbox(
             cast(list[float], zone.get("bbox", [])),
             0.30 + float(zone.get("score", 0.0) or 0.0) * 0.34,
@@ -8189,8 +16591,53 @@ def _build_confidence_heatmap_payload(
             audit_scale=0.96,
             audit_radius_scale=1.12,
         )
+        add_classified_window(
+            cast(list[float], zone.get("bbox", [])),
+            weight=(0.24 + float(zone.get("score", 0.0) or 0.0) * 0.58) * alignment * signal_strength,
+            class_weights=zone_classes,
+            focus_scale=1.12,
+        )
 
-    raw_heat = 0.34 * context_heat + 0.96 * precision_heat + 0.56 * path_heat + 0.18 * zone_heat
+    grounded_chart = cast(dict[str, Any], result.get("grounded_chart", {}))
+    backend_masks = cast(list[dict[str, Any]], cast(dict[str, Any], grounded_chart.get("backend", {})).get("masks", []))
+    segmentation_mask_count = 0
+    for mask_summary in backend_masks[:6]:
+        layer_affinity, class_affinity = _heatmap_mask_affinity(mask_summary, signal_action)
+        score = float(np.clip(mask_summary.get("score", 0.0) or 0.0, 0.0, 1.0))
+        area_ratio = float(np.clip(mask_summary.get("mask_area_ratio", 0.0) or 0.0, 0.0, 1.0))
+        coverage_ratio = float(np.clip(mask_summary.get("coverage_bbox_ratio", area_ratio) or area_ratio, 0.0, 1.0))
+        mask_weight = float(np.clip(0.24 + 0.66 * score + 0.30 * coverage_ratio, 0.18, 1.0))
+        applied = add_mask_heat(segmentation_heat, mask_summary, mask_weight)
+        if not applied:
+            continue
+        segmentation_mask_count += 1
+        add_mask_heat(detection_heat, mask_summary, mask_weight * float(layer_affinity.get("detections", 0.0)))
+        add_mask_heat(zone_heat, mask_summary, mask_weight * float(layer_affinity.get("zones", 0.0)))
+        add_mask_heat(path_heat, mask_summary, mask_weight * float(layer_affinity.get("corridor", 0.0)))
+        add_mask_heat(context_heat, mask_summary, mask_weight * 0.28 * float(layer_affinity.get("context", 0.0)))
+        add_mask_heat(
+            opportunity_heat,
+            mask_summary,
+            mask_weight * signal_strength * float(layer_affinity.get("opportunity", 0.0)),
+        )
+        normalized_mask_classes = _normalize_heatmap_class_weights(class_affinity)
+        bbox = cast(list[Any], mask_summary.get("bbox", []))
+        add_classified_window(
+            bbox,
+            weight=mask_weight * signal_strength * 0.92,
+            class_weights=normalized_mask_classes,
+            focus_scale=0.92,
+        )
+
+    class_targets = {}
+    raw_heat = (
+        0.30 * context_heat
+        + 0.92 * precision_heat
+        + 0.48 * path_heat
+        + 0.20 * zone_heat
+        + 0.24 * segmentation_heat
+        + 0.34 * opportunity_heat
+    )
     if not raw_heat.size or float(raw_heat.max()) <= 1e-6:
         return {
             "layers": {
@@ -8198,80 +16645,186 @@ def _build_confidence_heatmap_payload(
                 "detections": np.zeros((height, width), dtype=np.float32),
                 "corridor": np.zeros((height, width), dtype=np.float32),
                 "zones": np.zeros((height, width), dtype=np.float32),
+                "segmentation": np.zeros((height, width), dtype=np.float32),
+                "opportunity": np.zeros((height, width), dtype=np.float32),
+                "entry": np.zeros((height, width), dtype=np.float32),
+                "continuation": np.zeros((height, width), dtype=np.float32),
+                "reversal": np.zeros((height, width), dtype=np.float32),
             },
             "hotspots": [],
             "contour_levels": [0.38, 0.54, 0.70, 0.86],
             "coverage_pct": 0.0,
             "core_pct": 0.0,
+            "calibration": calibration,
+            "segmentation_mask_count": int(segmentation_mask_count),
         }
+
+    def _layer_scale(name: str) -> float:
+        return float(np.clip(layer_multipliers.get(name, 1.0), 0.68, 1.42))
+
+    def _class_scale(name: str) -> float:
+        return float(np.clip(class_multipliers.get(name, 1.0), 0.70, 1.44))
 
     gray = np.asarray(source_image.convert("L"), dtype=np.float32) / 255.0
     grad_y, grad_x = np.gradient(gray)
-    edge_prior = np.sqrt(grad_x * grad_x + grad_y * grad_y, dtype=np.float32)
+    edge_prior = np.hypot(grad_x, grad_y, dtype=np.float32)
     if float(edge_prior.max()) > 1e-6:
         edge_prior = edge_prior / float(edge_prior.max())
     edge_image = Image.fromarray(np.uint8(np.clip(edge_prior, 0.0, 1.0) * 255.0), mode="L").filter(
         ImageFilter.GaussianBlur(radius=max(1.0, min(width, height) * 0.0026))
     )
     edge_prior = np.asarray(edge_image, dtype=np.float32) / 255.0
-    raw_heat = raw_heat * (0.48 + 0.52 * edge_prior) + 0.18 * path_heat
+    raw_heat = raw_heat * (0.82 + 0.18 * edge_prior) + 0.08 * path_heat + 0.06 * segmentation_heat
     normalized = _normalize_heat_array(raw_heat, percentile=98.5)
+    del raw_heat
     context_norm = _normalize_heat_array(context_heat, percentile=98.0)
     precision_norm = _normalize_heat_array(precision_heat + 0.75 * path_heat, percentile=98.6)
     path_norm = _normalize_heat_array(path_heat, percentile=98.0)
     detection_norm = _normalize_heat_array(detection_heat, percentile=98.0)
     zone_norm = _normalize_heat_array(zone_heat, percentile=98.0)
+    segmentation_norm = _normalize_heat_array(segmentation_heat, percentile=97.8)
+    opportunity_norm = _normalize_heat_array(opportunity_heat, percentile=97.8)
+    entry_norm = _normalize_heat_array(entry_heat, percentile=97.8)
+    continuation_norm = _normalize_heat_array(continuation_heat, percentile=97.8)
+    reversal_norm = _normalize_heat_array(reversal_heat, percentile=97.8)
     context_blur = _blur_heat_array(context_norm, radius=max(8.0, min(width, height) * 0.012))
     sharp_blur = _blur_heat_array(precision_norm, radius=max(2.0, min(width, height) * 0.0036))
     path_blur = _blur_heat_array(path_norm, radius=max(1.4, min(width, height) * 0.0024))
     detection_layer = np.clip(
-        0.52 * _blur_heat_array(detection_norm, radius=max(3.0, min(width, height) * 0.0042))
-        + 0.48 * np.power(detection_norm, 1.06),
+        (
+            0.52 * _blur_heat_array(detection_norm, radius=max(3.0, min(width, height) * 0.0042))
+            + 0.48 * np.power(detection_norm, 1.06)
+        ) * _layer_scale("detections"),
         0.0,
         1.0,
     ).astype(np.float32, copy=False)
     corridor_layer = np.clip(
-        0.44 * path_blur + 0.56 * np.power(path_norm, 1.08),
+        (0.44 * path_blur + 0.56 * np.power(path_norm, 1.08)) * _layer_scale("corridor"),
         0.0,
         1.0,
     ).astype(np.float32, copy=False)
     zone_layer = np.clip(
-        0.58 * _blur_heat_array(zone_norm, radius=max(4.0, min(width, height) * 0.0056))
-        + 0.42 * np.power(zone_norm, 1.02),
+        (
+            0.58 * _blur_heat_array(zone_norm, radius=max(4.0, min(width, height) * 0.0056))
+            + 0.42 * np.power(zone_norm, 1.02)
+        ) * _layer_scale("zones"),
         0.0,
         1.0,
     ).astype(np.float32, copy=False)
+    segmentation_layer = np.clip(
+        (
+            0.48 * _blur_heat_array(segmentation_norm, radius=max(2.4, min(width, height) * 0.0040))
+            + 0.52 * np.power(segmentation_norm, 1.04)
+        ) * _layer_scale("segmentation"),
+        0.0,
+        1.0,
+    ).astype(np.float32, copy=False)
+    opportunity_layer = np.clip(
+        (
+            0.40 * _blur_heat_array(opportunity_norm, radius=max(2.0, min(width, height) * 0.0034))
+            + 0.60 * np.power(opportunity_norm, 1.12)
+        ) * _layer_scale("opportunity"),
+        0.0,
+        1.0,
+    ).astype(np.float32, copy=False)
+    entry_layer = np.clip(
+        (
+            0.38 * _blur_heat_array(entry_norm, radius=max(2.2, min(width, height) * 0.0036))
+            + 0.62 * np.power(entry_norm, 1.06)
+        ) * _class_scale("entry"),
+        0.0,
+        1.0,
+    ).astype(np.float32, copy=False)
+    continuation_layer = np.clip(
+        (
+            0.34 * _blur_heat_array(continuation_norm, radius=max(2.4, min(width, height) * 0.0038))
+            + 0.66 * np.power(continuation_norm, 1.08)
+        ) * _class_scale("continuation"),
+        0.0,
+        1.0,
+    ).astype(np.float32, copy=False)
+    reversal_layer = np.clip(
+        (
+            0.34 * _blur_heat_array(reversal_norm, radius=max(2.4, min(width, height) * 0.0038))
+            + 0.66 * np.power(reversal_norm, 1.08)
+        ) * _class_scale("reversal"),
+        0.0,
+        1.0,
+    ).astype(np.float32, copy=False)
+    del context_heat, precision_heat, path_heat, detection_heat, zone_heat, segmentation_heat, opportunity_heat
+    del entry_heat, continuation_heat, reversal_heat
+    del context_norm, precision_norm, path_norm, detection_norm, zone_norm, segmentation_norm, opportunity_norm
+    del entry_norm, continuation_norm, reversal_norm
+    del gray, grad_x, grad_y
+    opportunity_peak = np.array(entry_layer, copy=True)
+    np.maximum(opportunity_peak, continuation_layer, out=opportunity_peak)
+    np.maximum(opportunity_peak, reversal_layer, out=opportunity_peak)
+    opportunity_mean = np.array(entry_layer, copy=True)
+    np.add(opportunity_mean, continuation_layer, out=opportunity_mean)
+    np.add(opportunity_mean, reversal_layer, out=opportunity_mean)
+    np.multiply(opportunity_mean, 1.0 / 3.0, out=opportunity_mean)
+    opportunity_layer = np.clip(
+        0.56 * opportunity_layer
+        + 0.20 * segmentation_layer
+        + 0.26 * opportunity_peak
+        + 0.18 * opportunity_mean,
+        0.0,
+        1.0,
+    ).astype(np.float32, copy=False)
+    del opportunity_peak, opportunity_mean
     fused_heat = np.clip(
-        0.22 * context_blur
-        + 0.78 * np.power(sharp_blur, 1.18)
-        + 0.28 * np.power(corridor_layer, 1.03)
+        0.14 * np.clip(context_blur * _layer_scale("context"), 0.0, 1.0)
+        + 0.54 * np.power(np.clip(sharp_blur * _layer_scale("precision"), 0.0, 1.0), 1.18)
+        + 0.20 * np.power(corridor_layer, 1.03)
         + 0.16 * np.power(zone_layer, 1.04)
-        + 0.14 * np.power(detection_layer, 1.10)
-        + 0.24 * np.power(normalized, 1.08),
+        + 0.22 * np.power(segmentation_layer, 1.06)
+        + 0.18 * np.power(detection_layer, 1.10)
+        + 0.34 * np.power(opportunity_layer, 1.02)
+        + 0.18 * np.power(normalized, 1.08),
         0.0,
         1.0,
     )
-    fused_heat = np.clip(fused_heat * (0.72 + 0.28 * edge_prior), 0.0, 1.0).astype(np.float32, copy=False)
+    fused_heat = np.clip(fused_heat * (0.88 + 0.12 * edge_prior), 0.0, 1.0).astype(np.float32, copy=False)
     contour_levels = [0.38, 0.54, 0.70, 0.86]
+    preferred_window_class = max(
+        ("entry", "continuation", "reversal"),
+        key=lambda key: float(class_profile.get(key, 0.0)),
+    )
     hotspots = _extract_heatmap_hotspots(
         fused_heat,
         {
+            "opportunity": opportunity_layer,
+            "entry": entry_layer,
+            "continuation": continuation_layer,
+            "reversal": reversal_layer,
             "detections": detection_layer,
             "corridor": corridor_layer,
             "zones": zone_layer,
+            "segmentation": segmentation_layer,
         },
+        signal_action=signal_action,
+        preferred_window_class=preferred_window_class,
     )
+    hotspot_groups = _group_heatmap_hotspots(hotspots)
     return {
         "layers": {
             "fused": fused_heat,
             "detections": detection_layer,
             "corridor": corridor_layer,
             "zones": zone_layer,
+            "segmentation": segmentation_layer,
+            "opportunity": opportunity_layer,
+            "entry": entry_layer,
+            "continuation": continuation_layer,
+            "reversal": reversal_layer,
         },
         "hotspots": hotspots,
+        "window_counts": {key: len(rows) for key, rows in hotspot_groups.items()},
         "contour_levels": contour_levels,
         "coverage_pct": float(np.count_nonzero(fused_heat >= 0.36)) / float(max(fused_heat.size, 1)) * 100.0,
         "core_pct": float(np.count_nonzero(fused_heat >= 0.72)) / float(max(fused_heat.size, 1)) * 100.0,
+        "calibration": calibration,
+        "segmentation_mask_count": int(segmentation_mask_count),
     }
 
 
@@ -8285,8 +16838,35 @@ def _compose_confidence_heatmap_image(
     fused_heat = layers.get("fused")
     if fused_heat is None or not fused_heat.size or float(fused_heat.max()) <= 1e-6:
         return source_image.copy()
+    calibration = cast(dict[str, Any], heatmap_payload.get("calibration", {}))
+    render_gammas = cast(dict[str, float], calibration.get("render_gammas", {}))
     overlay = _render_fused_heat_overlay(fused_heat)
     blended = Image.alpha_composite(source_image.convert("RGBA"), overlay)
+    segmentation_layer = layers.get("segmentation", np.zeros_like(fused_heat))
+    segmentation_overlay = _render_heat_layer_overlay(
+        segmentation_layer,
+        low_color=(34, 70, 118),
+        high_color=(132, 236, 255),
+        gamma=float(render_gammas.get("segmentation", HEATMAP_BASE_RENDER_GAMMAS["segmentation"])),
+        alpha_scale=206.0,
+    )
+    blended = Image.alpha_composite(blended, segmentation_overlay)
+    opportunity_layer = layers.get("opportunity", np.zeros_like(fused_heat))
+    opportunity_overlay = _render_heat_layer_overlay(
+        opportunity_layer,
+        low_color=(40, 88, 40),
+        high_color=(255, 224, 118),
+        gamma=float(render_gammas.get("opportunity", HEATMAP_BASE_RENDER_GAMMAS["opportunity"])),
+        alpha_scale=182.0,
+    )
+    blended = Image.alpha_composite(blended, opportunity_overlay)
+    contour_overlay = _build_heat_contour_overlay(
+        fused_heat,
+        cast(list[float], heatmap_payload.get("contour_levels", [0.38, 0.54, 0.70, 0.86])),
+    )
+    blended = Image.alpha_composite(blended, contour_overlay)
+    hotspots = cast(list[dict[str, Any]], heatmap_payload.get("hotspots", []))
+    blended = Image.alpha_composite(blended, _build_heat_hotspot_overlay(hotspots, source_image.size))
     return blended.convert("RGB")
 
 
@@ -8303,8 +16883,67 @@ def _build_heatmap_layer_audit_html(
     fused_heat = layers.get("fused", np.zeros((source_image.height, source_image.width), dtype=np.float32))
     contour_levels = [float(level) for level in cast(list[float], heatmap_payload.get("contour_levels", [0.38, 0.54, 0.70, 0.86]))]
     hotspots = cast(list[dict[str, Any]], heatmap_payload.get("hotspots", []))
+    hotspot_groups = _group_heatmap_hotspots(hotspots)
+    calibration = cast(dict[str, Any], heatmap_payload.get("calibration", {}))
+    render_gammas = cast(dict[str, float], calibration.get("render_gammas", {}))
     source_uri = _image_to_data_uri(source_image, max_width=760, max_height=520, fmt="PNG")
     overlay_specs = [
+        (
+            "opportunity",
+            "Opportunity Windows",
+            "Actionable windows ranked from current structure, path, and zone agreement",
+            True,
+            _render_heat_layer_overlay(
+                layers.get("opportunity", np.zeros_like(fused_heat)),
+                low_color=(40, 88, 40),
+                high_color=(255, 224, 118),
+                gamma=float(render_gammas.get("opportunity", HEATMAP_BASE_RENDER_GAMMAS["opportunity"])),
+                alpha_scale=198.0,
+            ),
+            "",
+        ),
+        (
+            "entry",
+            "Entry Windows",
+            "Immediate trigger areas around the active box and latest detections",
+            False,
+            _render_heat_layer_overlay(
+                layers.get("entry", np.zeros_like(fused_heat)),
+                low_color=(120, 86, 20),
+                high_color=(255, 218, 120),
+                gamma=float(render_gammas.get("entry", HEATMAP_BASE_RENDER_GAMMAS["entry"])),
+                alpha_scale=210.0,
+            ),
+            "",
+        ),
+        (
+            "continuation",
+            "Continuation Windows",
+            "With-trend follow-through areas along the projected path",
+            False,
+            _render_heat_layer_overlay(
+                layers.get("continuation", np.zeros_like(fused_heat)),
+                low_color=(16, 78, 84),
+                high_color=(120, 245, 226),
+                gamma=float(render_gammas.get("continuation", HEATMAP_BASE_RENDER_GAMMAS["continuation"])),
+                alpha_scale=210.0,
+            ),
+            "",
+        ),
+        (
+            "reversal",
+            "Reversal Windows",
+            "Counter-move release areas backed by reversal evidence",
+            False,
+            _render_heat_layer_overlay(
+                layers.get("reversal", np.zeros_like(fused_heat)),
+                low_color=(96, 22, 44),
+                high_color=(255, 148, 184),
+                gamma=float(render_gammas.get("reversal", HEATMAP_BASE_RENDER_GAMMAS["reversal"])),
+                alpha_scale=210.0,
+            ),
+            "",
+        ),
         (
             "fused",
             "Final Fused Heat",
@@ -8322,7 +16961,7 @@ def _build_heatmap_layer_audit_html(
                 layers.get("detections", np.zeros_like(fused_heat)),
                 low_color=(82, 22, 124),
                 high_color=(255, 120, 222),
-                gamma=0.98,
+                gamma=float(render_gammas.get("detections", HEATMAP_BASE_RENDER_GAMMAS["detections"])),
                 alpha_scale=218.0,
             ),
             "",
@@ -8336,7 +16975,7 @@ def _build_heatmap_layer_audit_html(
                 layers.get("corridor", np.zeros_like(fused_heat)),
                 low_color=(122, 56, 18),
                 high_color=(255, 196, 88),
-                gamma=1.02,
+                gamma=float(render_gammas.get("corridor", HEATMAP_BASE_RENDER_GAMMAS["corridor"])),
                 alpha_scale=210.0,
             ),
             "",
@@ -8350,8 +16989,22 @@ def _build_heatmap_layer_audit_html(
                 layers.get("zones", np.zeros_like(fused_heat)),
                 low_color=(24, 78, 98),
                 high_color=(118, 242, 224),
-                gamma=0.96,
+                gamma=float(render_gammas.get("zones", HEATMAP_BASE_RENDER_GAMMAS["zones"])),
                 alpha_scale=206.0,
+            ),
+            "",
+        ),
+        (
+            "segmentation",
+            "Mask Shaping",
+            "SAM2-guided structure masks that sharpen hotspot boundaries when available",
+            False,
+            _render_heat_layer_overlay(
+                layers.get("segmentation", np.zeros_like(fused_heat)),
+                low_color=(34, 70, 118),
+                high_color=(132, 236, 255),
+                gamma=float(render_gammas.get("segmentation", HEATMAP_BASE_RENDER_GAMMAS["segmentation"])),
+                alpha_scale=188.0,
             ),
             "",
         ),
@@ -8365,8 +17018,8 @@ def _build_heatmap_layer_audit_html(
         ),
         (
             "markers",
-            "Hotspot Markers",
-            "Ranked numeric peaks",
+            "Window Markers",
+            "Classed numeric opportunity peaks",
             True,
             _build_heat_hotspot_overlay(hotspots, source_image.size),
             "markers",
@@ -8389,35 +17042,63 @@ def _build_heatmap_layer_audit_html(
         )
         for key, label, _description, checked, image, overlay_role in overlay_specs
     )
-    hotspot_cards = "".join(
-        (
+    def _class_section(
+        class_name: str,
+        title: str,
+        tone: str,
+        note: str,
+    ) -> str:
+        rows = hotspot_groups.get(class_name, [])
+        cards = "".join(
+            (
+                "<div class='pg-hotspot-card'>"
+                f"<div><span class='pg-hotspot-rank'>{int(hotspot.get('rank', 0) or 0)}</span><strong>{_escape_html(title[:-1])} {int(hotspot.get('rank', 0) or 0)}</strong></div>"
+                f"<div class='pg-muted'>{_escape_html(str(hotspot.get('label', 'Opportunity confluence')))} | x={_fmt_num(hotspot.get('x_pct', 0.0), 1)}% y={_fmt_num(hotspot.get('y_pct', 0.0), 1)}%</div>"
+                f"<div class='pg-muted' style='margin-top:4px;'>{_escape_html(str(hotspot.get('reason', '')))}</div>"
+                "<div class='pg-chip-row'>"
+                + _chip(title[:-1], tone)
+                + _chip(f"{str(hotspot.get('signal_action', 'HOLD')).upper()} focus", _tone_class_for_action(str(hotspot.get("signal_action", "HOLD")).upper()))
+                + _chip(f"Class {_fmt_num(hotspot.get('class_score', 0.0), 2)}", tone)
+                + _chip(f"Opp {_fmt_num(hotspot.get('opportunity_score', 0.0), 2)}", "teal")
+                + _chip(f"Heat {_fmt_num(hotspot.get('score', 0.0), 2)}", "amber")
+                + "</div>"
+                + "</div>"
+            )
+            for hotspot in rows
+        ) or (
             "<div class='pg-hotspot-card'>"
-            f"<div><span class='pg-hotspot-rank'>{int(hotspot.get('rank', 0) or 0)}</span><strong>Hotspot {int(hotspot.get('rank', 0) or 0)}</strong></div>"
-            f"<div class='pg-muted'>{_escape_html(str(hotspot.get('label', 'Confidence confluence')))} | x={_fmt_num(hotspot.get('x_pct', 0.0), 1)}% y={_fmt_num(hotspot.get('y_pct', 0.0), 1)}%</div>"
-            "<div class='pg-chip-row'>"
-            + _chip(f"Heat {_fmt_num(hotspot.get('score', 0.0), 2)}", "amber")
-            + _chip(f"Det {_fmt_num(cast(dict[str, float], hotspot.get('layer_scores', {})).get('detections', 0.0), 2)}", "soft")
-            + _chip(f"Path {_fmt_num(cast(dict[str, float], hotspot.get('layer_scores', {})).get('corridor', 0.0), 2)}", "soft")
-            + _chip(f"Zone {_fmt_num(cast(dict[str, float], hotspot.get('layer_scores', {})).get('zones', 0.0), 2)}", "soft")
-            + "</div>"
-            + "</div>"
+            f"<strong>{_escape_html(title)}</strong>"
+            f"<div class='pg-muted'>{_escape_html(note)}</div>"
+            "</div>"
         )
-        for hotspot in hotspots
-    ) or (
-        "<div class='pg-hotspot-card'>"
-        "<strong>Top Hotspots</strong>"
-        "<div class='pg-muted'>No explicit hotspot peak was strong enough to rank on this pass.</div>"
-        "</div>"
+        return (
+            "<div>"
+            f"<div class='pg-card-label'>{_escape_html(title)}</div>"
+            f"<div class='pg-muted' style='margin:4px 0 8px 0;'>{_escape_html(note)}</div>"
+            f"<div class='pg-hotspot-list'>{cards}</div>"
+            "</div>"
+        )
+
+    hotspot_cards = "".join(
+        [
+            _class_section("entry", "Entry Windows", "amber", "Immediate trigger windows are not clearly formed on this pass."),
+            _class_section("continuation", "Continuation Windows", "teal", "No continuation windows are strong enough yet."),
+            _class_section("reversal", "Reversal Windows", "sell", "No reversal windows are strong enough yet."),
+        ]
     )
     contour_label = " / ".join(f"{level:.2f}" for level in contour_levels)
     legend_rows = "".join(
         [
+            "<div class='pg-heat-legend-row'><span class='pg-heat-swatch' style='background:linear-gradient(135deg,#285828,#ffe076);'></span>Opportunity windows</div>",
+            "<div class='pg-heat-legend-row'><span class='pg-heat-swatch' style='background:linear-gradient(135deg,#785614,#ffda78);'></span>Entry windows</div>",
+            "<div class='pg-heat-legend-row'><span class='pg-heat-swatch' style='background:linear-gradient(135deg,#104e54,#78f5e2);'></span>Continuation windows</div>",
+            "<div class='pg-heat-legend-row'><span class='pg-heat-swatch' style='background:linear-gradient(135deg,#60162c,#ff94b8);'></span>Reversal windows</div>",
             "<div class='pg-heat-legend-row'><span class='pg-heat-swatch' style='background:linear-gradient(135deg,#5c1822,#ffae5e);'></span>Final fused heat</div>",
             "<div class='pg-heat-legend-row'><span class='pg-heat-swatch' style='background:linear-gradient(135deg,#52167c,#ff78de);'></span>Detections</div>",
             "<div class='pg-heat-legend-row'><span class='pg-heat-swatch' style='background:linear-gradient(135deg,#7a3812,#ffc458);'></span>Projection corridor</div>",
             "<div class='pg-heat-legend-row'><span class='pg-heat-swatch' style='background:linear-gradient(135deg,#184e62,#76f2e0);'></span>Zones</div>",
             f"<div class='pg-heat-legend-row'><span class='pg-heat-swatch' style='background:linear-gradient(135deg,#54e5d6,#fff2d6);'></span>Contour Rings {contour_label}</div>",
-            "<div class='pg-heat-legend-row'><span class='pg-heat-swatch' style='background:linear-gradient(135deg,#ffb15a,#fff0d6);'></span>Hotspot Markers ranked by peak score</div>",
+            "<div class='pg-heat-legend-row'><span class='pg-heat-swatch' style='background:linear-gradient(135deg,#ffb15a,#fff0d6);'></span>Window markers ranked by opportunity strength</div>",
         ]
     )
     return (
@@ -8439,7 +17120,7 @@ def _build_heatmap_layer_audit_html(
         "</div>"
         "<div class='pg-heatmap-side'>"
         "<div>"
-        "<div class='pg-section-title'>Top Hotspots</div>"
+        "<div class='pg-section-title'>Classed Windows</div>"
         f"<div class='pg-hotspot-list'>{hotspot_cards}</div>"
         "</div>"
         "<div>"
@@ -8464,20 +17145,38 @@ def _build_heatmap_summary_html(
     chart_state = cast(dict[str, Any], result.get("chart_state", {}))
     payload = heatmap_payload if heatmap_payload is not None else _build_confidence_heatmap_payload(result, source_image)
     hotspots = cast(list[dict[str, Any]], payload.get("hotspots", [])) if payload else []
+    window_counts = cast(dict[str, int], payload.get("window_counts", {})) if payload else {}
     coverage_pct = float(payload.get("coverage_pct", 0.0) or 0.0) if payload else 0.0
     core_pct = float(payload.get("core_pct", 0.0) or 0.0) if payload else 0.0
+    calibration = cast(dict[str, Any], payload.get("calibration", {})) if payload else {}
+    calibration_samples = int(calibration.get("sample_count", 0) or 0)
+    segmentation_mask_count = int(payload.get("segmentation_mask_count", 0) or 0) if payload else 0
+    top_hotspot = hotspots[0] if hotspots else {}
     chips = "".join(
         [
-            _chip(f"Action {str(result.get('action', 'HOLD')).upper()}", _tone_class_for_action(str(result.get("action", "HOLD")).upper())),
+            _chip(f"Action {str(result.get('execution_action', result.get('action', 'HOLD'))).upper()}", _tone_class_for_action(str(result.get("execution_action", result.get("action", "HOLD"))).upper())),
             _chip(f"Projection {str(projection.get('direction', 'HOLD')).upper()}", _tone_class_for_action(str(projection.get("direction", "HOLD")).upper())),
             _chip(f"Zone matches {int(zone_learning.get('match_count', 0) or 0)}", "amber" if int(zone_learning.get("match_count", 0) or 0) else "soft"),
             _chip(f"Alignment {_fmt_num(zone_learning.get('alignment_score', 0.0), 2)}", "teal"),
             _chip(f"Path {_fmt_num(chart_state.get('path_clarity', 0.0), 2)}", "soft"),
             _chip(f"Parse {_fmt_num(result.get('latest_parse_quality', 0.0), 2)}", "soft"),
-            _chip(f"Hotspots {len(hotspots)}", "amber" if hotspots else "soft"),
+            _chip(f"Entry {int(window_counts.get('entry', 0) or 0)}", "amber" if int(window_counts.get("entry", 0) or 0) else "soft"),
+            _chip(f"Continuation {int(window_counts.get('continuation', 0) or 0)}", "teal" if int(window_counts.get("continuation", 0) or 0) else "soft"),
+            _chip(f"Reversal {int(window_counts.get('reversal', 0) or 0)}", "sell" if int(window_counts.get("reversal", 0) or 0) else "soft"),
+            _chip(f"Feedback tuned {calibration_samples}", "teal" if calibration_samples else "soft"),
+            _chip(f"Mask shaped {segmentation_mask_count}", "teal" if segmentation_mask_count else "soft"),
             _chip(f"Core {coverage_pct:.1f}%/{core_pct:.1f}%", "soft"),
         ]
     )
+    top_window_note = "No opportunity window was strong enough to call out yet."
+    if top_hotspot:
+        top_window_note = (
+            f"Top window: {str(top_hotspot.get('label', 'Opportunity window'))} | "
+            f"{str(top_hotspot.get('window_class', 'entry')).title()} class | "
+            f"{str(top_hotspot.get('signal_action', 'HOLD')).upper()} focus | "
+            f"opp={_fmt_num(top_hotspot.get('opportunity_score', 0.0), 2)} | "
+            f"{str(top_hotspot.get('reason', ''))}"
+        )
     top_zones = "".join(
         f"<li>{_escape_html(str(zone.get('kind', 'zone')).title())}: {_escape_html(_truncate_text(zone.get('label', 'Teaching zone'), 42))} | score={_fmt_num(zone.get('score', 0.0), 2)}</li>"
         for zone in cast(list[dict[str, Any]], zone_learning.get("matching_zones", []))[:4]
@@ -8491,7 +17190,8 @@ def _build_heatmap_summary_html(
         "<div class='pg-panel pg-heatmap-root'>"
         "<div class='pg-section-title'>Confidence Heatmap</div>"
         f"<div class='pg-chip-row'>{chips}</div>"
-        "<div class='pg-muted'>The heatmap now exposes separable detection, projection corridor, zone, and fused layers, with contour rings and ranked hotspot markers so confidence is numerically auditable instead of just color-based.</div>"
+        f"<div class='pg-muted'>{_escape_html(top_window_note)}</div>"
+        "<div class='pg-muted'>The heatmap separates entry, continuation, and reversal windows, then blends chart structure, projected path, zone context, and supplemental cues into one confidence surface. Outcome reviews can refine that blend over time. Use it as a disciplined review aid, not as a standalone trade trigger.</div>"
         f"{audit_html}"
         "<div class='pg-section-title'>Zone Intersections</div>"
         f"<ul class='pg-debug-list'>{top_zones}</ul>"
@@ -8548,12 +17248,12 @@ def _build_adaptive_guidance_html(result: Mapping[str, Any] | None) -> str:
             "<div class='pg-live-panel'>"
             "<div class='pg-section-title'>Adaptive Guidance</div>"
             "<div class='pg-status-grid'>"
-            f"{_status_card('Next panel', 'Awaiting run', 'The desk will recommend the highest-value follow-up panel after the first chart pair is analyzed.', 'soft')}"
-            f"{_status_card('Need help?', 'Open workflow guide', 'If the desk feels dense, start with the guided workflow and the signal reading notes.', 'teal')}"
+            f"{_status_card('Next panel', 'Awaiting run', 'The desk will route you to the next highest-value panel after the first analysis.', 'soft')}"
+            f"{_status_card('Need help?', 'Guides are optional', 'The desk can be used directly from Mission Control. Open the guides only when you want a refresher.', 'teal')}"
             "</div>"
-            "<div class='pg-inline-actions pg-guided-only'>"
-            "<button type='button' class='pg-inline-button' data-help-open='workflow'>Workflow Guide</button>"
-            "<button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='read-signal'>Read A Signal</button>"
+            "<div class='pg-inline-actions'>"
+            "<button type='button' class='pg-inline-button' data-help-open='setup-guide'>Guides</button>"
+            "<button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='read-signal'>Read The Desk</button>"
             "</div>"
             "</div>"
         )
@@ -8566,9 +17266,9 @@ def _build_adaptive_guidance_html(result: Mapping[str, Any] | None) -> str:
         f"{_status_card('Open next', recommended_panel, rationale, tone)}"
         f"{_status_card('Interpretation', coaching_title, coaching_body, coaching_tone)}"
         "</div>"
-        "<div class='pg-inline-actions pg-guided-only'>"
+        "<div class='pg-inline-actions'>"
         "<button type='button' class='pg-inline-button' data-help-open='read-signal'>Why this panel</button>"
-        "<button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='workflow'>Workflow help</button>"
+        "<button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='setup-guide'>Guides</button>"
         "</div>"
         "</div>"
     )
@@ -8579,6 +17279,11 @@ def _build_session_timeline_html() -> str:
     entries = cast(list[dict[str, Any]], snapshot.get("entries", []))
     if not entries:
         return _placeholder_panel("Session Timeline", "Analyzed captures will stack here in chronological order during the trading session.")
+    feedback_targets = {
+        str(target.get("inference_id", "")): target
+        for target in _feedback_target_entries(limit=160)
+        if str(target.get("inference_id", "")).strip()
+    }
     cards: list[str] = []
     for entry in reversed(entries[-12:]):
         thumb = _session_entry_thumbnail_uri(entry)
@@ -8586,6 +17291,9 @@ def _build_session_timeline_html() -> str:
         multi = " | MTF" if bool(entry.get("multi_timeframe", False)) else ""
         confidence_chip = _chip(f"conf {_fmt_pct01(entry.get('confidence', 0.0))}", tone)
         move_chip = _chip(f"move {_fmt_signed_pct(entry.get('expected_move_pct', 0.0))}", "soft")
+        feedback_target = dict(feedback_targets.get(str(entry.get("inference_id", "")), {}))
+        feedback_status = str(feedback_target.get("feedback_status", "pending"))
+        feedback_chip = _chip(_feedback_status_label(feedback_status), _feedback_status_chip_tone(feedback_status))
         image_block = (
             f"<div class='pg-session-thumb'><img src='{thumb}' alt='session thumbnail' /></div>"
             if thumb
@@ -8598,7 +17306,7 @@ def _build_session_timeline_html() -> str:
             f"<div class='pg-card-label'>{_escape_html(str(entry.get('timestamp', 'unknown')))}</div>"
             f"<div class='pg-card-title pg-{tone}'>{_escape_html(str(entry.get('action', 'HOLD')).upper())}</div>"
             f"<div class='pg-card-note'>{_escape_html(_truncate_text(str(entry.get('file_name', 'capture')), 42))}{_escape_html(multi)}</div>"
-            f"<div class='pg-chip-row' style='margin-top:8px;'>{confidence_chip}{move_chip}</div>"
+            f"<div class='pg-chip-row' style='margin-top:8px;'>{confidence_chip}{move_chip}{feedback_chip}</div>"
             "</div>"
             "</div>"
         )
@@ -8680,7 +17388,7 @@ def _build_compare_desk_html(
     cache_prefix = _compare_cache_prefix(result)
     render_state = dict(render_config or {})
     overlay_signature = (
-        f"{str(render_state.get('overlay_mode', 'history-plus-projection'))}:"
+        f"{str(render_state.get('overlay_mode', DEFAULT_OVERLAY_MODE))}:"
         f"{float(render_state.get('min_conf_global', 0.42) or 0.42):.2f}:"
         f"{float(render_state.get('min_conf_latest', 0.50) or 0.50):.2f}:"
         f"{int(render_state.get('history_depth', 8) or 8)}:"
@@ -8710,10 +17418,20 @@ def _build_compare_desk_html(
         lambda: _image_to_data_uri(heatmap_image, max_width=720, max_height=430),
     )
     compare_id = f"pg-compare-{uuid4().hex[:8]}"
+    overlay_mode_name = str(render_state.get("overlay_mode", DEFAULT_OVERLAY_MODE)).strip().lower()
+    annotated_subtitle = (
+        "Minimal annotation view"
+        if overlay_mode_name == "yolo-only"
+        else (
+            "Balanced annotation view"
+            if overlay_mode_name == "hybrid-vision"
+            else "Active annotation layer for the current desk mode"
+        )
+    )
 
     def _frame_card(title: str, subtitle: str, image_uri: str, overlay_target: bool = False) -> str:
         overlay_class = " pg-overlay-target" if overlay_target else ""
-        default_style = "transform: translate(0%, 0%) scale(1.08);"
+        default_style = "transform: translate(0%, 0%) scale(1);"
         if overlay_target:
             default_style += " opacity: 0.94;"
         return (
@@ -8730,8 +17448,8 @@ def _build_compare_desk_html(
         [
             _frame_card("Raw Chart", "Original source image", raw_uri),
             _frame_card("Captured Focus", "Auto-cropped decision region", focus_uri),
-            _frame_card("Annotated Output", "Live overlay and projection layer", overlay_uri, overlay_target=True),
-            _frame_card("Confidence Heatmap", "Engine certainty concentration", heatmap_uri, overlay_target=True),
+            _frame_card("Annotated Output", annotated_subtitle, overlay_uri, overlay_target=True),
+            _frame_card("Confidence Heatmap", "Fused engine certainty, not per-model attention", heatmap_uri, overlay_target=True),
         ]
     )
 
@@ -8741,7 +17459,7 @@ def _build_compare_desk_html(
     if entries:
         mtf_cards: list[str] = []
         for entry in entries[:4]:
-            frame_title = f"{str(entry.get('label', 'Timeframe')).title()} | {str(entry.get('action', 'HOLD')).upper()}"
+            frame_title = f"{str(entry.get('label', 'Timeframe')).title()} | {str(entry.get('execution_action', entry.get('action', 'HOLD'))).upper()}"
             frame_subtitle = (
                 f"projection={str(entry.get('projection_direction', 'HOLD')).upper()} "
                 f"| bias={str(entry.get('bias_direction', 'HOLD')).upper()} "
@@ -8754,11 +17472,29 @@ def _build_compare_desk_html(
                 max_height=300,
             )
             mtf_cards.append(_frame_card(frame_title, frame_subtitle, frame_uri, overlay_target=True))
+        gate_state = str(multi_timeframe.get("gate_state", "watch") or "watch").lower()
+        gate_tone = "teal" if gate_state == "confirmed" else "amber" if gate_state == "blocked" else "soft"
+        open_split_compare = (not bool(multi_timeframe.get("aligned", False))) or gate_state != "confirmed"
+        summary_chips = "".join(
+            [
+                _chip(f"Gate {gate_state.upper()}", gate_tone),
+                _chip(f"Frames {len(mtf_cards)}", "soft"),
+            ]
+        )
         multi_html = (
-            "<div class='pg-section-title' style='margin-top:18px;'>Split Compare</div>"
-            f"<div class='pg-muted'>{_escape_html(str(multi_timeframe.get('summary', 'Higher and trigger timeframe compare desk.')))}</div>"
-            f"<div class='pg-muted' style='margin-top:6px;'>{_escape_html(str(multi_timeframe.get('gate_explanation', '')))}</div>"
+            f"<details class='pg-inline-collapse' style='margin-top:18px;'{' open' if open_split_compare else ''}>"
+            "<summary>"
+            "<div class='pg-overlay-summary'>"
+            "<strong>Split Compare</strong>"
+            f"<span>{_escape_html(str(multi_timeframe.get('summary', 'Higher and trigger timeframe compare desk.')))}</span>"
+            "</div>"
+            f"<div class='pg-chip-row'>{summary_chips}</div>"
+            "</summary>"
+            "<div class='pg-collapse-body'>"
+            f"<div class='pg-muted'>{_escape_html(str(multi_timeframe.get('gate_explanation', 'Higher and lower timeframe overlays remain available here when you need the per-frame read.')))}</div>"
             f"<div class='pg-compare-grid' style='margin-top:14px;'>{''.join(mtf_cards)}</div>"
+            "</div>"
+            "</details>"
         )
 
     return (
@@ -8766,7 +17502,7 @@ def _build_compare_desk_html(
         "<div class='pg-section-title'>Compare Desk</div>"
         "<div class='pg-muted'>Before/after review stays local in the browser. Zoom, pan, and overlay opacity are client-side so inspection feels instant.</div>"
         "<div class='pg-compare-controls'>"
-        "<label>Zoom <input class='pg-compare-zoom' type='range' min='1' max='2.4' step='0.02' value='1.08' /></label>"
+        "<label>Zoom <input class='pg-compare-zoom' type='range' min='1' max='2.4' step='0.02' value='1' /></label>"
         "<label>Pan X <input class='pg-compare-pan-x' type='range' min='-24' max='24' step='1' value='0' /></label>"
         "<label>Pan Y <input class='pg-compare-pan-y' type='range' min='-24' max='24' step='1' value='0' /></label>"
         "<label>Overlay Opacity <input class='pg-compare-opacity' type='range' min='0.25' max='1' step='0.01' value='0.94' /></label>"
@@ -8778,14 +17514,11 @@ def _build_compare_desk_html(
     )
 
 
-def _build_timeframe_overlay_gallery_html(result: Mapping[str, Any]) -> str:
+def _build_timeframe_overlay_gallery_html(result: Mapping[str, Any], source_image_state: Any | None = None) -> str:
     multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
     entries = cast(list[dict[str, Any]], multi_timeframe.get("entries", []))
-    if not entries:
-        return _placeholder_panel("Timeframe Overlays", "Higher and lower timeframe overlays will appear here after a run.")
 
-    cards: list[str] = []
-    for entry in entries[:2]:
+    def _render_card(entry: Mapping[str, Any]) -> str | None:
         label = str(entry.get("label", "Timeframe")).title()
         action = str(entry.get("action", "HOLD")).upper()
         projection = str(entry.get("projection_direction", "HOLD")).upper()
@@ -8796,7 +17529,7 @@ def _build_timeframe_overlay_gallery_html(result: Mapping[str, Any]) -> str:
             max_height=420,
         )
         if not image_uri:
-            continue
+            return None
         chips = "".join(
             [
                 _chip(f"Action {action}", _tone_class_for_action(action)),
@@ -8805,16 +17538,37 @@ def _build_timeframe_overlay_gallery_html(result: Mapping[str, Any]) -> str:
             ]
         )
         subtitle = f"{setup} | {str(entry.get('file_name', 'chart')).strip() or 'chart'}"
-        cards.append(
+        return (
             "<div class='pg-compare-card'>"
             f"<div class='pg-card-label'>{_escape_html(label)}</div>"
             f"<div class='pg-card-note'>{_escape_html(subtitle)}</div>"
             f"<div class='pg-chip-row' style='margin-top:8px;'>{chips}</div>"
             "<div class='pg-transform-frame'>"
-            f"<img src='{image_uri}' alt='{_escape_html(label)} overlay' style='transform: translate(0%, 0%) scale(1.02); opacity: 0.96;' />"
+            f"<img src='{image_uri}' alt='{_escape_html(label)} overlay' style='transform: translate(0%, 0%) scale(1); opacity: 0.96;' />"
             "</div>"
             "</div>"
         )
+
+    cards: list[str] = []
+    for entry in entries[:2]:
+        card = _render_card(entry)
+        if card:
+            cards.append(card)
+
+    if not cards and source_image_state is not None:
+        try:
+            fallback_entry = _build_timeframe_compare_entry(
+                result,
+                source_image_state,
+                "Current Run",
+                "Current Run",
+            )
+        except Exception:
+            fallback_entry = None
+        if fallback_entry:
+            card = _render_card(fallback_entry)
+            if card:
+                cards.append(card)
 
     if not cards:
         return _placeholder_panel("Timeframe Overlays", "Overlay snapshots are not available for the current run yet.")
@@ -8822,6 +17576,13 @@ def _build_timeframe_overlay_gallery_html(result: Mapping[str, Any]) -> str:
     gate_state = str(multi_timeframe.get("gate_state", "watch") or "watch").lower()
     gate_tone = "teal" if gate_state == "confirmed" else "amber" if gate_state == "blocked" else "soft"
     gate_explanation = str(multi_timeframe.get("gate_explanation", "") or "").strip()
+    open_gallery = (not bool(multi_timeframe.get("aligned", False))) or gate_state != "confirmed"
+    summary_chips = "".join(
+        [
+            _chip(f"Gate {gate_state.upper()}", gate_tone),
+            _chip(f"Frames {len(cards)}", "soft"),
+        ]
+    )
     gate_html = (
         f"<div class='pg-muted' style='margin-top:6px;'>{_escape_html(gate_explanation)}</div>"
         if gate_explanation
@@ -8830,10 +17591,19 @@ def _build_timeframe_overlay_gallery_html(result: Mapping[str, Any]) -> str:
     return (
         "<div class='pg-panel'>"
         "<div class='pg-section-title'>Timeframe Overlays</div>"
-        f"<div class='pg-muted'>{_escape_html(str(multi_timeframe.get('summary', 'Higher and lower timeframe overlays.')))}</div>"
-        f"<div class='pg-chip-row'>{_chip(f'Gate {gate_state.upper()}', gate_tone)}</div>"
+        f"<details class='pg-inline-collapse'{' open' if open_gallery else ''}>"
+        "<summary>"
+        "<div class='pg-overlay-summary'>"
+        "<strong>Higher and lower timeframe overlays</strong>"
+        f"<span>{_escape_html(str(multi_timeframe.get('summary', 'Higher and lower timeframe overlays.')))}</span>"
+        "</div>"
+        f"<div class='pg-chip-row'>{summary_chips}</div>"
+        "</summary>"
+        "<div class='pg-collapse-body'>"
         f"{gate_html}"
         f"<div class='pg-compare-grid'>{''.join(cards)}</div>"
+        "</div>"
+        "</details>"
         "</div>"
     )
 
@@ -8841,12 +17611,18 @@ def _build_timeframe_overlay_gallery_html(result: Mapping[str, Any]) -> str:
 def build_control_status_html(
     result: dict[str, Any] | None,
     render_config: Mapping[str, Any] | None = None,
+    *,
+    analysis_progress: Mapping[str, Any] | None = None,
+    fallback_request: Mapping[str, Any] | None = None,
 ) -> str:
     config = dict(render_config or {})
+    progress_state = dict(analysis_progress or {})
+    fallback_state = dict(fallback_request or {})
     capture_runtime = _get_capture_runtime_snapshot()
+    voice_snapshot = get_voice_runtime_snapshot()
     session_snapshot = _get_session_snapshot()
     zone_count = len(_load_zone_memory())
-    hotkey_label = str(capture_runtime.get("active_hotkey", "") or capture_runtime.get("requested_hotkey", "F4"))
+    hotkey_label = _format_hotkey_label(capture_runtime.get("active_hotkey", "") or capture_runtime.get("requested_hotkey", ""), RUNTIME.capture_hotkey or "CTRL+V")
     capture_status = str(capture_runtime.get("status", "Hotkey capture offline."))
     capture_file = str(capture_runtime.get("last_capture_file", ""))
     capture_time = str(capture_runtime.get("last_capture_time", ""))
@@ -8856,32 +17632,106 @@ def build_control_status_html(
     bundle_chip = _chip(f"Capture {pending_count}/{bundle_size}", "amber" if pending_count else "soft")
     session_chip = _chip(f"Session {len(cast(list[Any], session_snapshot.get('entries', [])))}", "soft")
     zone_chip = _chip(f"Zones {zone_count}", "teal" if zone_count else "soft")
+    council_scope = _normalize_council_scope(config.get("council_scope", DEFAULT_COUNCIL_SCOPE))
+    council_chip = _chip(
+        _council_scope_label(council_scope),
+        "teal" if council_scope == "full" else ("amber" if council_scope == "half" else "soft"),
+    )
+    vision_extras = _normalize_vision_extras(config.get("vision_extras", DEFAULT_VISION_EXTRAS))
+    ordered_extras: list[str] = []
+    if "projection-overlay" in vision_extras:
+        ordered_extras.append("projection-overlay")
+    ordered_extras.extend(item for item in vision_extras if item != "projection-overlay")
+    extras_text = ", ".join(_vision_extra_label(item) for item in ordered_extras[:2])
+    if len(vision_extras) > 2:
+        extras_text += f" +{len(vision_extras) - 2}"
+    extras_chip = _chip(f"Extras {extras_text or 'none'}", "soft")
+    timeframe_view_chip = _chip(
+        "Timeframes fused" if bool(config.get("fuse_timeframe_overlays", False)) else "Timeframes split",
+        "teal" if bool(config.get("fuse_timeframe_overlays", False)) else "soft",
+    )
+    voice_chip = _chip(
+        f"808 Voice {'On' if bool(voice_snapshot.get('voice_enabled', False)) else 'Off'}",
+        "teal" if bool(voice_snapshot.get("voice_enabled", False)) else "soft",
+    )
+    voice_timer_chip = _chip(
+        f"Voice Timer {float(voice_snapshot.get('tracker_capture_interval_sec', 10.0) or 10.0):.0f}s",
+        "amber" if bool(voice_snapshot.get("automatic_timer_enabled", False)) else "soft",
+    )
+    progress_percent = float(np.clip(progress_state.get("percent", 0.0), 0.0, 100.0))
+    progress_title = str(progress_state.get("title", "Preparing analysis")).strip() or "Preparing analysis"
+    progress_detail = str(progress_state.get("detail", "")).strip()
+    progress_tone = str(progress_state.get("tone", "teal")).strip() or "teal"
+    progress_reassurance = str(progress_state.get("reassurance", "")).strip()
+    fallback_pending = bool(fallback_state)
+    fallback_chip = _chip("Compatibility path paused", "amber") if fallback_pending else ""
+    progress_card = (
+        _status_card(
+            "Analysis",
+            f"{progress_percent:.0f}%",
+            progress_title,
+            progress_tone,
+        )
+        if progress_state
+        else ""
+    )
+    progress_note = (
+        f"<div class='pg-muted' style='margin-top:8px;'>{_escape_html(progress_detail)}</div>"
+        if progress_detail
+        else ""
+    )
+    reassurance_note = (
+        f"<div class='pg-muted' style='margin-top:6px;'>{_escape_html(progress_reassurance)}</div>"
+        if progress_reassurance
+        else ""
+    )
+    fallback_note = (
+        f"<div class='pg-muted' style='margin-top:8px;'>A one-time compatibility path is paused until you approve it. {_escape_html(str(fallback_state.get('summary', '')))}</div>"
+        if fallback_pending
+        else ""
+    )
     if not result:
         error_block = (
             f"<div class='pg-muted' style='margin-top:8px;'>{_escape_html(capture_error)}</div>"
             if capture_error
             else ""
         )
-        status_cards = "".join(
-            [
-                _status_card("Hotkey", hotkey_label, "Ready for live capture once the chart pair is available.", "teal"),
-                _status_card("Capture buffer", f"{pending_count}/{bundle_size}", "Timeframe pairing buffer for live hotkey capture.", "amber" if pending_count else "soft"),
-                _status_card("Session review", str(len(cast(list[Any], session_snapshot.get("entries", [])))), "Reviewed chart pairs stored in the current session timeline.", "soft"),
-                _status_card("Trust rails", "Audit ready", "Compare controls are browser-side and preferences are stored with encryption support.", "teal"),
-            ]
-        )
+        status_card_items = [
+            _status_card("Hotkey", hotkey_label, "Ready for live capture once the chart quartet is available.", "teal"),
+            _status_card("Capture buffer", f"{pending_count}/{bundle_size}", "Timeframe quartet buffer for live hotkey capture.", "amber" if pending_count else "soft"),
+            _status_card("Session review", str(len(cast(list[Any], session_snapshot.get("entries", [])))), "Reviewed chart quartets stored in the current session timeline.", "soft"),
+            _status_card(
+                "808 Voice",
+                "Listening" if bool(voice_snapshot.get("listening_enabled", False)) else "Paused",
+                f"{str(voice_snapshot.get('greeting', 'Hello')).strip() or 'Hello'} | Wake word {str(voice_snapshot.get('wake_word', 'Hey 808')).strip() or 'Hey 808'}",
+                "teal" if bool(voice_snapshot.get("voice_enabled", False)) else "soft",
+            ),
+            _status_card("Security", "Protected local review", "Compare controls stay browser-side and preferences stay protected.", "teal"),
+        ]
+        if progress_card:
+            status_card_items.insert(0, progress_card)
+        status_cards = "".join(status_card_items)
         return (
             "<div class='pg-live-panel'>"
-            "<div class='pg-section-title'>Live Preview Status</div>"
-            f"<div class='pg-chip-row'>{_chip(f'Hotkey {hotkey_label}', 'teal')}{bundle_chip}{session_chip}{zone_chip}</div>"
+            "<div class='pg-section-title'>Session State</div>"
+            f"<div class='pg-chip-row'>{_chip(f'Hotkey {hotkey_label}', 'teal')}{bundle_chip}{session_chip}{zone_chip}{council_chip}{extras_chip}{timeframe_view_chip}{voice_chip}{voice_timer_chip}{fallback_chip}</div>"
             f"<div class='pg-status-grid'>{status_cards}</div>"
+            f"{progress_note}"
+            f"{reassurance_note}"
+            f"{fallback_note}"
             f"<div class='pg-muted' style='margin-top:10px;'>{_escape_html(capture_status)}</div>"
             f"{error_block}"
-            + "<div class='pg-muted' style='margin-top:8px;'>Upload exactly two chart images to enable manual runs and live control updates.</div>"
-            + "<div class='pg-inline-actions pg-guided-only'><button type='button' class='pg-inline-button' data-help-open='workflow'>How the desk works</button><button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='security'>Security notes</button></div>"
+            + f"<div class='pg-muted' style='margin-top:8px;'>Upload exactly {MULTI_TIMEFRAME_UPLOAD_FILES} chart images to enable manual runs and live control updates.</div>"
+            + "<div class='pg-inline-actions'><button type='button' class='pg-inline-button' data-help-open='setup-guide'>Guides</button><button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='security'>Security notes</button></div>"
             "</div>"
         )
 
+    tta_summary = cast(dict[str, Any], result.get("test_time_adaptation", {}))
+    grounded_chart = cast(dict[str, Any], result.get("grounded_chart", {}))
+    grounded_backend = cast(dict[str, Any], grounded_chart.get("backend", {}))
+    grounded_confidence = float(np.clip(grounded_chart.get("grounded_confidence", 0.0), 0.0, 1.0))
+    tta_view = str(tta_summary.get("selected_view", "raw") or "raw").strip().lower()
+    context_assists_active = bool(cast(list[Any], grounded_backend.get("used_backends", []))) or grounded_confidence > 0.0
     chips = "".join(
         [
             _chip(f"Hotkey {hotkey_label}", "teal"),
@@ -8889,28 +17739,46 @@ def build_control_status_html(
             bundle_chip,
             session_chip,
             zone_chip,
-            _chip(f"Overlay {str(config.get('overlay_mode', 'history-plus-projection')).replace('-', ' ')}", "soft"),
-            _chip(f"Global > {_fmt_num(config.get('min_conf_global', 0.42), 2)}", "soft"),
-            _chip(f"Latest > {_fmt_num(config.get('min_conf_latest', 0.50), 2)}", "soft"),
-            _chip(f"History {int(config.get('history_depth', 8) or 8)}", "amber"),
-            _chip(f"Labels {int(config.get('label_density', 10) or 10)}", "soft"),
-            _chip(f"Projection floor {_fmt_num(config.get('projection_focus', 0.35), 2)}", "amber"),
-            _chip(f"Debug depth {int(config.get('debug_depth', 6) or 6)}", "soft"),
+            council_chip,
+            extras_chip,
+            timeframe_view_chip,
+            _chip(f"View {_overlay_mode_label(config.get('overlay_mode', DEFAULT_OVERLAY_MODE))}", "soft"),
+            _chip(f"Active View {tta_view.replace('-', ' ').title()}", "soft"),
+            _chip(
+                f"Context {_fmt_num(grounded_confidence, 2)}",
+                "teal" if grounded_confidence >= 0.45 else "soft",
+            ),
+            voice_chip,
+            voice_timer_chip,
+            fallback_chip,
         ]
     )
     summary = (
         f"Last inference: {_truncate_text(result.get('timestamp', 'unknown'), 40)} | "
-        f"Action {str(result.get('action', 'HOLD')).upper()} | "
-        f"Confidence {_fmt_pct01(result.get('confidence', 0.0))}"
+        f"Source {(_truncate_text(capture_file, 30) if capture_file else 'manual upload')} | "
+        f"View {_overlay_mode_label(config.get('overlay_mode', DEFAULT_OVERLAY_MODE))} | "
+        f"{_council_scope_label(council_scope)} | "
+        f"Timeframes {'fused' if bool(config.get('fuse_timeframe_overlays', False)) else 'split'}"
     )
-    status_cards = "".join(
-        [
-            _status_card("Action", str(result.get("action", "HOLD")).upper(), "Current directional bias surfaced by the desk.", _tone_class_for_action(str(result.get("action", "HOLD")).upper())),
-            _status_card("Confidence", _fmt_pct01(result.get("confidence", 0.0)), "Strength of the surfaced bias after consensus and control rails.", "teal" if float(result.get("confidence", 0.0) or 0.0) >= 0.7 else "amber"),
-            _status_card("Capture buffer", f"{pending_count}/{bundle_size}", "How far the live hotkey workflow is through the paired timeframe bundle.", "amber" if pending_count else "soft"),
-            _status_card("Session review", str(len(cast(list[Any], session_snapshot.get("entries", [])))), "Saved reviewed chart pairs in the current session.", "soft"),
-        ]
-    )
+    status_card_items = [
+        _status_card("Preview", "Ready", "The current chart quartet has a synced cached preview.", "teal"),
+        _status_card("Capture buffer", f"{pending_count}/{bundle_size}", "How far the live hotkey workflow is through the quartet bundle.", "amber" if pending_count else "soft"),
+        _status_card("Session review", str(len(cast(list[Any], session_snapshot.get("entries", [])))), "Saved reviewed chart quartets in the current session.", "soft"),
+        _status_card("Saved zones", str(zone_count), "Saved support, resistance, and reaction zones available to the desk.", "teal" if zone_count else "soft"),
+        _status_card("Cross-check depth", _council_scope_label(council_scope), "Control how much extra confirmation the next run asks for.", "teal" if council_scope == "full" else ("amber" if council_scope == "half" else "soft")),
+        _status_card("Overlay aids", extras_text or "None", "Optional context layers can be added on top of the main chart without changing the base view.", "soft"),
+        _status_card("Active view", tta_view.replace('-', ' ').title(), "The review angle the desk trusted most on this run.", "soft"),
+        _status_card("Context support", _fmt_num(grounded_confidence, 2), "Enhanced context is active." if context_assists_active else "Standard context only.", "teal" if grounded_confidence >= 0.45 else "soft"),
+        _status_card(
+            "808 Voice",
+            "Listening" if bool(voice_snapshot.get("listening_enabled", False)) else "Paused",
+            f"{str(voice_snapshot.get('greeting', 'Hello')).strip() or 'Hello'} | Wake word {str(voice_snapshot.get('wake_word', 'Hey 808')).strip() or 'Hey 808'}",
+            "teal" if bool(voice_snapshot.get("voice_enabled", False)) else "soft",
+        ),
+    ]
+    if progress_card:
+        status_card_items.insert(0, progress_card)
+    status_cards = "".join(status_card_items)
     capture_note = capture_status
     if capture_file:
         capture_note += f" | source={_truncate_text(capture_file, 42)}"
@@ -8925,13 +17793,345 @@ def build_control_status_html(
     )
     return (
         "<div class='pg-live-panel'>"
-        "<div class='pg-section-title'>Live Preview Status</div>"
+        "<div class='pg-section-title'>Session State</div>"
         f"<div class='pg-chip-row'>{chips}</div>"
         f"<div class='pg-status-grid'>{status_cards}</div>"
         f"<div class='pg-muted'>{_escape_html(summary)}</div>"
+        f"{progress_note}"
+        f"{reassurance_note}"
+        f"{fallback_note}"
         f"<div class='pg-muted' style='margin-top:8px;'>{_escape_html(capture_note)}</div>"
         f"{error_block}"
-        "<div class='pg-inline-actions pg-guided-only'><button type='button' class='pg-inline-button' data-help-open='security'>Security notes</button><button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='read-signal'>Reading guide</button></div>"
+        "<div class='pg-inline-actions'><button type='button' class='pg-inline-button' data-help-open='security'>Security notes</button><button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='setup-guide'>Setup guide</button></div>"
+        "</div>"
+    )
+
+
+def _build_operator_brief_html(
+    result: Mapping[str, Any] | None,
+    cv_debug: Mapping[str, Any] | None = None,
+    render_config: Mapping[str, Any] | None = None,
+) -> str:
+    if not result:
+        return _placeholder_panel("Operator Brief", "Run an analysis to see the compact operator summary, chart read, and active review settings.")
+
+    normalized_result = dict(result)
+    normalized_cv_debug = dict(cv_debug or {})
+    action = str(normalized_result.get("action", "HOLD")).upper()
+    tone = _tone_class_for_action(action)
+    summary_text = human_readable_summary(normalized_result)
+    cv_text = explain_cv_debug_payload(normalized_cv_debug, result=normalized_result)
+    summary_lines = _public_signal_explanation_lines(summary_text, limit=4)
+    cv_lines = _public_signal_explanation_lines(cv_text, limit=4)
+    view_state = dict(render_config or {})
+    view_extras = _normalize_vision_extras(view_state.get("vision_extras", DEFAULT_VISION_EXTRAS))
+    view_chips = "".join(
+        [
+            _chip(f"View {_overlay_mode_label(view_state.get('overlay_mode', DEFAULT_OVERLAY_MODE))}", "soft"),
+            _chip(_council_scope_label(view_state.get("council_scope", DEFAULT_COUNCIL_SCOPE)), "soft"),
+            _chip(f"Context threshold {_fmt_num(view_state.get('min_conf_global', 0.42), 2)}", "soft"),
+            _chip(f"Trigger threshold {_fmt_num(view_state.get('min_conf_latest', 0.50), 2)}", "soft"),
+            _chip(f"History {int(view_state.get('history_depth', 8) or 8)}", "amber"),
+            _chip(f"Labels {int(view_state.get('label_density', 10) or 10)}", "soft"),
+            _chip(f"Projection floor {_fmt_num(view_state.get('projection_focus', 0.35), 2)}", "amber"),
+            _chip(f"Detail level {int(view_state.get('debug_depth', 6) or 6)}", "soft"),
+            _chip(
+                f"Overlay aids {', '.join(_vision_extra_label(item) for item in view_extras) or 'none'}",
+                "soft",
+            ),
+            _chip(
+                "Timeframes fused" if bool(view_state.get("fuse_timeframe_overlays", False)) else "Timeframes split",
+                "teal" if bool(view_state.get("fuse_timeframe_overlays", False)) else "soft",
+            ),
+        ]
+    )
+    summary_list = "".join(f"<li>{_escape_html(_truncate_text(line, 180))}</li>" for line in summary_lines[:4])
+    cv_list = "".join(f"<li>{_escape_html(_truncate_text(line, 180))}</li>" for line in cv_lines[:4])
+    return (
+        "<div class='pg-panel pg-brief-panel'>"
+        "<div class='pg-action-row'>"
+        "<div>"
+        "<div class='pg-section-title'>Operator Brief</div>"
+        f"<div class='pg-card-title pg-{tone}'>{_escape_html(action)} setup with {_fmt_pct01(normalized_result.get('confidence', 0.0))} confidence</div>"
+        "<div class='pg-card-note'>Scan the live takeaway, chart read, and active review settings here before you move deeper into the desk.</div>"
+        "</div>"
+        f"<div class='pg-confidence-pill pg-{tone}'><strong>{_fmt_signed_pct(normalized_result.get('expected_3min_move_pct', 0.0))}</strong><span>expected move</span></div>"
+        "</div>"
+        "<div class='pg-brief-grid'>"
+        f"<div class='pg-brief-section'><div class='pg-card-label'>Live Takeaway</div><ul class='pg-brief-list'>{summary_list}</ul></div>"
+        f"<div class='pg-brief-section'><div class='pg-card-label'>Chart Read</div><ul class='pg-brief-list'>{cv_list}</ul></div>"
+        f"<div class='pg-brief-section'><div class='pg-card-label'>Active View Controls</div><div class='pg-chip-row'>{view_chips}</div></div>"
+        "</div>"
+        "<details class='pg-brief-details'>"
+        "<summary>How to use this brief</summary>"
+        "<pre class='pg-brief-pre'>Use Live Takeaway for the headline read, Chart Read for the plain-English setup description, and Active View Controls to confirm the review settings before acting.</pre>"
+        "</details>"
+        "</div>"
+    )
+
+
+def _public_signal_explanation_lines(explanation: str, limit: int = 3) -> list[str]:
+    text = str(explanation or "").strip()
+    if not text:
+        return ["No public explanation was produced for this run."]
+    cleaned = re.sub(
+        r"(?i)\b(yolo|backend|parser|model council|local ensemble|cv_quality|debug|specialist|ensemble|router|branch|replay|rl|checkpoint|grad-cam|attention)\b",
+        "",
+        text,
+    )
+    chunks = [piece.strip(" -\t\n") for piece in re.split(r"(?:;|\||\.(?=\s+[A-Z]))\s*", cleaned) if piece.strip()]
+    lines: list[str] = []
+    for piece in chunks:
+        normalized = re.sub(r"\s+", " ", piece).strip(" ,")
+        if len(normalized) < 4:
+            continue
+        if re.search(r"(?i)\b(conformal|q05|q95|a/d|sim=|recalled_dir|entropy|margin|dominance|path clarity)\b", normalized):
+            continue
+        lines.append(_truncate_text(normalized, 132))
+        if len(lines) >= max(1, int(limit)):
+            break
+    if lines:
+        return lines
+    return ["The setup is being monitored for cleaner confirmation before execution."]
+
+
+def _voice_market_context(result: Mapping[str, Any] | None) -> dict[str, str]:
+    if not result:
+        return {
+            "market_summary": "Run or refresh a signal and I will translate the active market read into plain English.",
+            "transition_summary": "Transition commentary will appear here after the chart has a fresh structural read.",
+            "risk_summary": "Risk posture is waiting on a live chart read.",
+            "signal_summary": "No active signal summary is available yet.",
+        }
+
+    display_result = _sanitize_result_for_ui(dict(result))
+    cv_debug = pg_main.build_cv_debug_payload(display_result, render_config=None)
+    summary_lines = _public_signal_explanation_lines(human_readable_summary(display_result), limit=4)
+    transition_lines = _public_signal_explanation_lines(
+        explain_cv_debug_payload(cv_debug, result=display_result),
+        limit=4,
+    )
+    gate_blockers, support_blockers, risk_factors = _interpreter_gate_watchlists(display_result)
+    invalidation = _interpreter_invalidation_condition(display_result, gate_blockers, support_blockers)
+    action = str(display_result.get("action", "HOLD")).upper()
+    confidence_label = _fmt_pct01(display_result.get("confidence", 0.0))
+    market_summary = " ".join(summary_lines) if summary_lines else "The market is waiting for clearer confirmation."
+    transition_summary = " ".join(transition_lines) if transition_lines else "The current transition is still forming."
+    risk_summary = " ".join(risk_factors[:3]) if risk_factors else "No elevated risk factor is dominating the setup right now."
+    signal_summary = f"Current action is {action} with {confidence_label} confidence. {market_summary}"
+    if invalidation:
+        risk_summary = f"{risk_summary} {invalidation}"
+    return {
+        "market_summary": market_summary,
+        "transition_summary": transition_summary,
+        "risk_summary": risk_summary,
+        "signal_summary": signal_summary,
+    }
+
+
+def _refresh_voice_console(result: Mapping[str, Any] | None) -> str:
+    return build_voice_console_html(
+        snapshot=get_voice_runtime_snapshot(),
+        market_context=_voice_market_context(result),
+    )
+
+
+def build_timing_playbook_html(result: Mapping[str, Any]) -> str:
+    if not result:
+        return _placeholder_panel("Binary Timing Playbook", "Run a signal, then click Binary Timing Playbook to open the full timing flow.")
+
+    timing_signal = cast(dict[str, Any], result.get("timing_signal", {}))
+    if not timing_signal:
+        return _placeholder_panel("Binary Timing Playbook", "Timing data is not available for the current run yet.")
+
+    entry_state = str(timing_signal.get("entry_state", "WATCH")).upper()
+    state_tone = "teal" if entry_state == "READY" else ("amber" if entry_state in {"WATCH", "PREMATURE"} else "sell")
+    eta_minutes = cast(dict[str, Any], timing_signal.get("eta_minutes", {}))
+    eta_candles = cast(dict[str, Any], timing_signal.get("eta_candles", {}))
+    reasons = cast(list[str], timing_signal.get("reasons", []))
+    effective_window = max(
+        float(timing_signal.get("expiry_minutes", 60.0) or 60.0) - float(timing_signal.get("entry_buffer_minutes", 8.0) or 8.0),
+        float(timing_signal.get("timeframe_minutes", 5.0) or 5.0),
+    )
+
+    playbook_steps = [
+        "READY does not mean enter instantly; it means timing is currently acceptable if structure stays aligned.",
+        "ETA is the estimated time until the move starts. Enter only when ETA sits inside the safe entry window.",
+        "Buffer is late-entry protection. Do not use the final buffer minutes for new entries.",
+    ]
+    if entry_state == "LATE":
+        playbook_steps[2] = "Current ETA is too late for this expiry. Skip this window and wait for a fresh setup."
+
+    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
+    entries = cast(list[dict[str, Any]], multi_timeframe.get("entries", []))
+    overlay_cards: list[str] = []
+    for entry in entries[:2]:
+        image_uri = _image_uri_from_file(
+            str(entry.get("overlay_asset_path", "")) or str(entry.get("raw_asset_path", "")),
+            max_width=520,
+            max_height=300,
+        )
+        if not image_uri:
+            continue
+        label = str(entry.get("label", "Timeframe")).title()
+        action = str(entry.get("action", "HOLD")).upper()
+        overlay_cards.append(
+            "<div class='pg-compare-card'>"
+            f"<div class='pg-card-label'>{_escape_html(label)} Overlay</div>"
+            f"<div class='pg-card-note'>{_escape_html(action)} focus | {_escape_html(str(entry.get('file_name', 'chart')))}</div>"
+            "<div class='pg-transform-frame'>"
+            f"<img src='{image_uri}' alt='{_escape_html(label)} timing overlay' style='transform: translate(0%, 0%) scale(1); opacity: 0.96;' />"
+            "</div>"
+            "</div>"
+        )
+
+    chips = "".join(
+        [
+            _chip(f"Entry {entry_state}", state_tone),
+            _chip(f"Timing {_fmt_num(timing_signal.get('timing_score', 0.0), 2)}", "soft"),
+            _chip(f"Fit {_fmt_num(timing_signal.get('timing_window_fit', 0.0), 2)}", "soft"),
+            _chip(f"Expiry {_fmt_num(timing_signal.get('expiry_minutes', 60.0), 0)}m", "amber"),
+            _chip(f"Safety Buffer {_fmt_num(timing_signal.get('entry_buffer_minutes', 8.0), 0)}m", "soft"),
+            _chip(f"Safe Entry Window {_fmt_num(effective_window, 0)}m", "teal"),
+        ]
+    )
+
+    tiles = "".join(
+        [
+            _metric_tile("ETA (minutes to trigger)", f"{_fmt_num(eta_minutes.get('low', 0.0), 0)}-{_fmt_num(eta_minutes.get('high', 0.0), 0)}"),
+            _metric_tile("ETA (candles to trigger)", f"{_fmt_num(eta_candles.get('low', 0.0), 0)}-{_fmt_num(eta_candles.get('high', 0.0), 0)}"),
+            _metric_tile("Timeframe", str(timing_signal.get("timeframe", "M5")).upper()),
+            _metric_tile("Projected Candles", str(int(timing_signal.get("projected_candle_count", 0) or 0))),
+        ]
+    )
+
+    reason_html = "".join(
+        f"<li>{_escape_html(_truncate_text(reason, 120))}</li>"
+        for reason in (reasons[:4] if reasons else ["Timing rationale is building from transition and structure alignment signals."])
+    )
+    overlay_html = (
+        f"<div class='pg-compare-grid' style='margin-top:12px;'>{''.join(overlay_cards)}</div>"
+        if overlay_cards
+        else "<div class='pg-muted' style='margin-top:10px;'>Overlay snapshots will appear here after multi-timeframe assets are available for this run.</div>"
+    )
+    return (
+        "<div class='pg-panel'>"
+        "<div class='pg-section-title'>Binary Timing Playbook</div>"
+        f"<div class='pg-chip-row'>{chips}</div>"
+        "<div class='pg-muted'>Plain-English rule: use ETA to estimate when the move starts, and use Safety Buffer to avoid entering too late.</div>"
+        f"<div class='pg-metric-grid' style='margin-top:12px;'>{tiles}</div>"
+        "<div class='pg-brief-section' style='margin-top:12px;'>"
+        "<div class='pg-card-label'>Timing Rationale</div>"
+        f"<ul class='pg-brief-list'>{reason_html}</ul>"
+        "</div>"
+        "<div class='pg-brief-section' style='margin-top:10px;'>"
+        "<div class='pg-card-label'>Execution Flow</div>"
+        f"<ul class='pg-brief-list'>{''.join(f'<li>{_escape_html(step)}</li>' for step in playbook_steps)}</ul>"
+        "</div>"
+        f"{overlay_html}"
+        "</div>"
+    )
+
+
+def _build_signal_summary_copy_html(active_trade_summary: str, explanation: str) -> str:
+    explanation_lines = _public_signal_explanation_lines(explanation)
+    summary_parts: list[str] = []
+    if active_trade_summary:
+        summary_parts.append(active_trade_summary)
+    for line in explanation_lines[:3]:
+        cleaned = str(line).strip()
+        if cleaned and cleaned not in summary_parts:
+            summary_parts.append(cleaned)
+    if not summary_parts:
+        summary_parts.append(str(explanation).strip() or "No explanation produced.")
+    return "".join(
+        f"<p class='pg-signal-summary-line'>{_escape_html(part)}</p>"
+        for part in summary_parts[:3]
+    )
+
+
+def _build_signal_overview_chips_html(
+    result_view: Mapping[str, Any],
+    *,
+    action: str,
+    decision_state: str,
+    execution_permission: str,
+    chart_state: Mapping[str, Any],
+    projection: Mapping[str, Any],
+    zone_learning: Mapping[str, Any],
+    multi_timeframe: Mapping[str, Any],
+) -> str:
+    chip_items = [
+        _chip(
+            f"Consensus {'OK' if bool(result_view.get('consensus_ok', False)) else 'Watch'}",
+            "teal" if bool(result_view.get("consensus_ok", False)) else "amber",
+        ),
+        _chip(
+            f"Memory {str(result_view.get('memory_direction', 'HOLD')).upper()}",
+            _tone_class_for_action(str(result_view.get("memory_direction", "HOLD")).upper()),
+        ),
+        _chip(f"Phase {str(chart_state.get('entry_type', 'continuation')).replace('_', ' ').title()}", "soft"),
+        _chip(f"Bias {str(chart_state.get('momentum_bias', 'neutral')).title()}", "soft"),
+        _chip(f"State {decision_state}", "soft"),
+        _chip(
+            f"Execution {execution_permission}",
+            "teal" if str(result_view.get("execution_permission", "WAIT_FOR_CONFIRMATION")).upper() == "EXECUTE" else "amber",
+        ),
+        _chip(
+            f"Projection {str(projection.get('direction', chart_state.get('projection_bias_direction', 'HOLD'))).upper()} {_fmt_num(projection.get('confidence', chart_state.get('projection_bias_confidence', 0.0)), 2)}",
+            _tone_class_for_action(str(projection.get("direction", chart_state.get("projection_bias_direction", "HOLD"))).upper()),
+        ),
+        _chip(f"Setup {str(chart_state.get('structure_setup', 'none')).replace('_', ' ')}", "soft"),
+    ]
+    if multi_timeframe:
+        gate_state = str(multi_timeframe.get("gate_state", "watch") or "watch").lower()
+        gate_label = "Confirmed" if gate_state == "confirmed" else ("Blocked" if gate_state == "blocked" else "Watch")
+        chip_items.append(_chip(f"MTF {gate_label}", "teal" if gate_state == "confirmed" else "amber"))
+    if int(zone_learning.get("match_count", 0) or 0):
+        chip_items.append(
+            _chip(
+                f"Zone {str(zone_learning.get('preferred_action', 'HOLD')).upper()} {_fmt_num(zone_learning.get('alignment_score', 0.0), 2)}",
+                "teal" if str(zone_learning.get("preferred_action", "HOLD")).upper() == action else "amber",
+            )
+        )
+    return "".join(chip_items)
+
+
+def _build_signal_metric_tiles_html(
+    result_view: Mapping[str, Any],
+    *,
+    module_rel: Mapping[str, Any],
+    execution_permission: str,
+) -> str:
+    return "".join(
+        [
+            _metric_tile("Confidence", _fmt_pct01(result_view.get("confidence", 0.0))),
+            _metric_tile("Execution", execution_permission),
+            _metric_tile("Expected Move", _fmt_signed_pct(result_view.get("expected_3min_move_pct", 0.0))),
+            _metric_tile("Position Size", f"{_fmt_num(result_view.get('position_size_pct', 0.0))}%"),
+            _metric_tile("Gates Passing", f"{int(result_view.get('gates_passing', 0))}/12"),
+            _metric_tile("Memory Similarity", _fmt_num(result_view.get("memory_similarity", 0.0), 3)),
+            _metric_tile(
+                "Parse Quality",
+                _fmt_num(result_view.get("latest_parse_quality", 0.0), 2),
+                f"cv_quality={_fmt_num(module_rel.get('cv_quality', 0.0), 2)}",
+            ),
+        ]
+    )
+
+
+def _build_signal_legacy_markers_html(
+    headline_action: str,
+    active_trade_state: str,
+    directional_intent: str,
+    explanation: str,
+) -> str:
+    return (
+        "<div class='pg-visually-hidden' aria-hidden='true'>"
+        f"<span>Headline {_escape_html(headline_action)}</span>"
+        f"<span>Active {_escape_html(active_trade_state.replace('_', ' '))}</span>"
+        f"<span>Intent {_escape_html(directional_intent)}</span>"
+        f"<span>{_escape_html(explanation)}</span>"
         "</div>"
     )
 
@@ -8940,66 +18140,43 @@ def build_signal_overview_html(result: dict[str, Any]) -> str:
     if not result:
         return _placeholder_panel("Signal Overview", "Run an inference to see the live decision card.")
 
-    action = str(result.get("action", "HOLD")).upper()
+    result_view = _ensure_active_trade_overlay(result)
+    action = str(result_view.get("execution_action", result_view.get("action", "HOLD"))).upper()
+    headline_action = str(result_view.get("headline_action", result_view.get("action", "HOLD"))).upper()
+    active_trade_state = str(result_view.get("active_trade_state", "HOLD_TRUE")).upper()
+    directional_intent = str(result_view.get("directional_intent", "HOLD")).upper()
+    active_trade_summary = str(result_view.get("active_trade_summary", "")).strip()
     tone = _tone_class_for_action(action)
-    decision_state = str(result.get("decision_state", "UNCERTAIN")).replace("_", " ").title()
-    execution_permission = str(result.get("execution_permission", "WAIT_FOR_CONFIRMATION")).replace("_", " ").title()
-    explanation = _truncate_text(result.get("explanation", "No explanation produced."), limit=240)
-    chart_state = cast(dict[str, Any], result.get("chart_state", {}))
-    module_rel = cast(dict[str, float], result.get("module_reliability", {}))
-    projection = cast(dict[str, Any], result.get("projection", {}))
-    zone_learning = cast(dict[str, Any], result.get("zone_learning", {}))
-    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
-    recommended_panel, rationale, recommended_tone = _recommended_panel_details(result)
-    coaching_title, coaching_body, coaching_tone = _signal_coaching_copy(result)
+    decision_state = str(result_view.get("decision_state", "UNCERTAIN")).replace("_", " ").title()
+    execution_permission = str(result_view.get("execution_permission", "WAIT_FOR_CONFIRMATION")).replace("_", " ").title()
+    explanation = str(result_view.get("explanation", "No explanation produced."))
+    chart_state = cast(dict[str, Any], result_view.get("chart_state", {}))
+    module_rel = cast(dict[str, float], result_view.get("module_reliability", {}))
+    projection = cast(dict[str, Any], result_view.get("projection", {}))
+    zone_learning = cast(dict[str, Any], result_view.get("zone_learning", {}))
+    multi_timeframe = cast(dict[str, Any], result_view.get("multi_timeframe", {}))
 
-    chip_rows = [
-        _chip(f"Consensus {'OK' if bool(result.get('consensus_ok', False)) else 'Watch'}", "teal" if bool(result.get("consensus_ok", False)) else "amber"),
-        _chip(f"Memory {str(result.get('memory_direction', 'HOLD')).upper()}", _tone_class_for_action(str(result.get("memory_direction", "HOLD")).upper())),
-        _chip(f"Phase {str(chart_state.get('entry_type', 'continuation')).replace('_', ' ').title()}", "soft"),
-        _chip(f"Bias {str(chart_state.get('momentum_bias', 'neutral')).title()}", "soft"),
-        _chip(f"State {decision_state}", "soft"),
-        _chip(
-            f"Execution {execution_permission}",
-            "teal" if str(result.get("execution_permission", "WAIT_FOR_CONFIRMATION")).upper() == "EXECUTE" else "amber",
-        ),
-        _chip(
-            f"Projection {str(projection.get('direction', chart_state.get('projection_bias_direction', 'HOLD'))).upper()} {_fmt_num(projection.get('confidence', chart_state.get('projection_bias_confidence', 0.0)), 2)}",
-            _tone_class_for_action(str(projection.get("direction", chart_state.get("projection_bias_direction", "HOLD"))).upper()),
-        ),
-        _chip(f"Setup {str(chart_state.get('structure_setup', 'none')).replace('_', ' ')}", "soft"),
-    ]
-    if int(zone_learning.get("match_count", 0) or 0):
-        chip_rows.append(
-            _chip(
-                f"Zone bias {str(zone_learning.get('preferred_action', 'HOLD')).upper()} {_fmt_num(zone_learning.get('alignment_score', 0.0), 2)}",
-                "teal" if str(zone_learning.get("preferred_action", "HOLD")).upper() == action else "amber",
-            )
-        )
-    if multi_timeframe:
-        gate_state = str(multi_timeframe.get("gate_state", "watch") or "watch").lower()
-        gate_label = (
-            "Confirmed"
-            if gate_state == "confirmed"
-            else ("Blocked" if gate_state == "blocked" else "Watch")
-        )
-        chip_rows.append(
-            _chip(
-                f"MTF {gate_label}",
-                "teal" if gate_state == "confirmed" else "amber",
-            )
-        )
-    chips = "".join(chip_rows)
-
-    metric_tiles = "".join(
-        [
-            _metric_tile("Confidence", _fmt_pct01(result.get("confidence", 0.0))),
-            _metric_tile("Expected Move", _fmt_signed_pct(result.get("expected_3min_move_pct", 0.0))),
-            _metric_tile("Position Size", f"{_fmt_num(result.get('position_size_pct', 0.0))}%"),
-            _metric_tile("Gates Passing", f"{int(result.get('gates_passing', 0))}/12"),
-            _metric_tile("Memory Similarity", _fmt_num(result.get("memory_similarity", 0.0), 3)),
-            _metric_tile("Parse Quality", _fmt_num(result.get("latest_parse_quality", 0.0), 2), f"cv_quality={_fmt_num(module_rel.get('cv_quality', 0.0), 2)}"),
-        ]
+    summary_html = _build_signal_summary_copy_html(active_trade_summary, explanation)
+    chips = _build_signal_overview_chips_html(
+        result_view,
+        action=action,
+        decision_state=decision_state,
+        execution_permission=execution_permission,
+        chart_state=chart_state,
+        projection=projection,
+        zone_learning=zone_learning,
+        multi_timeframe=multi_timeframe,
+    )
+    metric_tiles = _build_signal_metric_tiles_html(
+        result_view,
+        module_rel=module_rel,
+        execution_permission=execution_permission,
+    )
+    legacy_markers = _build_signal_legacy_markers_html(
+        headline_action,
+        active_trade_state,
+        directional_intent,
+        explanation,
     )
 
     return (
@@ -9007,36 +18184,40 @@ def build_signal_overview_html(result: dict[str, Any]) -> str:
         "<div class='pg-section-title'>Signal Overview</div>"
         "<div class='pg-signal-shell'>"
         "<div class='pg-signal-main'>"
-        "<div class='pg-action-row pg-signal-head'>"
         "<div class='pg-signal-primary'>"
-        "<div class='pg-card-label'>808Fx Direction</div>"
+        "<div class='pg-card-label pg-signal-stage-title'>808FX Direction</div>"
         f"<div class='pg-action-label pg-{tone}'>{_escape_html(action)}</div>"
-        f"<div class='pg-muted pg-signal-explanation'>{_escape_html(explanation)}</div>"
+        "<div class='pg-signal-summary-copy'>"
+        f"{summary_html}"
         "</div>"
-        f"<div class='pg-confidence-pill pg-{tone}'><strong>{_fmt_pct01(result.get('confidence', 0.0))}</strong><span>confidence</span></div>"
-        "</div>"
+        f"{legacy_markers}"
         f"<div class='pg-chip-row pg-signal-chips'>{chips}</div>"
-        "<div class='pg-guidance-grid pg-guided-only'>"
-        f"<div class='pg-guidance-card'><div class='pg-card-label'>What This Means</div><div class='pg-card-title{_tone_text_class(coaching_tone)}'>{_escape_html(coaching_title)}</div><div class='pg-card-note'>{_escape_html(coaching_body)}</div></div>"
-        f"<div class='pg-guidance-card'><div class='pg-card-label'>Open Next</div><div class='pg-card-title{_tone_text_class(recommended_tone)}'>{_escape_html(recommended_panel)}</div><div class='pg-card-note'>{_escape_html(rationale)}</div><div class='pg-inline-actions' style='margin-top:10px;'><button type='button' class='pg-inline-button' data-help-open='read-signal'>Read the signal</button><button type='button' class='pg-inline-button' data-tone='secondary' data-help-open='workflow'>Workflow guide</button></div></div>"
         "</div>"
-        "</div>"
-        f"<div class='pg-metric-grid pg-signal-metrics'>{metric_tiles}</div>"
+        f"<div class='pg-metric-grid pg-signal-metrics pg-signal-metric-bank'>{metric_tiles}</div>"
         "</div>"
     )
 
 
-def build_model_council_html(result: dict[str, Any]) -> str:
+def build_model_council_html(
+    result: dict[str, Any],
+    source_image: Image.Image | None = None,
+    requested_scope: str | None = None,
+) -> str:
     local_ensemble = cast(dict[str, Any], result.get("local_ensemble", {}))
     ensemble_view = cast(dict[str, Any], local_ensemble.get("ensemble", {}))
     models = cast(dict[str, dict[str, Any]], local_ensemble.get("models", {}))
+    selection_meta = cast(dict[str, Any], local_ensemble.get("selection", {}))
     council_meta = cast(dict[str, Any], result.get("model_council", {}))
+    active_scope = _normalize_council_scope(requested_scope or council_meta.get("scope", DEFAULT_COUNCIL_SCOPE))
+    current_scope = _normalize_council_scope(council_meta.get("scope", active_scope))
+    if active_scope == "off":
+        return _placeholder_panel("Cross-Checks", "Cross-check review is off in the current controls. Switch Cross-Check Depth back to Smart, Extended, or Deep to populate this panel.")
     if not models:
         source = str(council_meta.get("source", "none")).strip().lower()
         status = str(council_meta.get("status", "lazy_tab_loading")).strip()
         if source == "none" and status == "lazy_tab_loading":
-            return _placeholder_panel("Model Council", "Open this tab to lazy-load the council worker and run the heavyweight ensemble once for the current static image.")
-        return _placeholder_panel("Model Council", f"Model council is unavailable right now: {status}")
+            return _placeholder_panel("Cross-Checks", f"Open this tab to load the {_council_scope_label(active_scope).lower()} for the current chart.")
+        return _placeholder_panel("Cross-Checks", "The deeper cross-check pass is unavailable right now.")
 
     rows = sorted(
         models.values(),
@@ -9045,50 +18226,127 @@ def build_model_council_html(result: dict[str, Any]) -> str:
             -float(row.get("dynamic_weight", row.get("shadow_weight", 0.0)) or 0.0),
         ),
     )
+    selected_models = [str(item).upper() for item in cast(list[Any], selection_meta.get("selected_models", [])) if str(item).strip()]
+    skipped_models = [str(item).upper() for item in cast(list[Any], selection_meta.get("skipped_models", [])) if str(item).strip()]
+    route_direction = str(ensemble_view.get("router_direction", ensemble_view.get("predicted_label", "HOLD"))).upper()
+    route_strength = float(ensemble_view.get("router_strength", 0.0) or 0.0)
+    route_uncertainty = float(ensemble_view.get("router_uncertainty", 0.0) or 0.0)
+    regime_confidence = float(ensemble_view.get("router_regime_confidence", 0.0) or 0.0)
+    live_count = sum(1 for row in rows if bool(row.get("live_enabled", False)))
+    shadow_count = max(len(rows) - live_count, 0)
+    budget = int(max(1, int(selection_meta.get("budget", len(rows)) or len(rows))))
+    selection_reason = str(selection_meta.get("reason", "always_on")).replace("_", " ").strip() or "always on"
+    requested_targets = [str(item).upper() for item in cast(list[Any], council_meta.get("target_models", [])) if str(item).strip()]
+    scope_note = ""
+    if active_scope in {"half", "full"} and current_scope != active_scope:
+        scope_note = f"Displayed result is using {_council_scope_label(current_scope)}. Re-run or reopen this tab to refresh {_council_scope_label(active_scope)}."
     cards: list[str] = []
-    for row in rows:
+    for index, row in enumerate(rows):
         predicted_label = str(row.get("predicted_label", "HOLD")).upper()
         tone = _tone_class_for_action(predicted_label)
         live_enabled = bool(row.get("live_enabled", False))
-        role = str(row.get("role", "generalist")).replace("_", " ").title()
+        role = _alias_model_role(row.get("role", "generalist"))
         weight_value = float(row.get("dynamic_weight", row.get("shadow_weight", 0.0)) or 0.0)
-        chips = _chip("LIVE", "teal") if live_enabled else _chip("SHADOW", "amber")
+        routing_alignment = float(np.clip(row.get("routing_alignment", row.get("confidence", 0.0)), 0.0, 1.0))
+        routing_factor = float(row.get("routing_factor", 1.0) or 1.0)
+        focus_bbox = _resolve_council_model_focus_bbox(result, source_image, row) if source_image is not None else None
+        focus_uri = _build_council_focus_uri(result, source_image, row) if source_image is not None else ""
+        focus_detection_note = (
+            _summarize_council_focus_detections(result, focus_bbox)
+            if focus_bbox is not None
+            else ""
+        )
+        sequence_task_note = _summarize_council_sequence_tasks(row)
+        if role.lower() == "structure lens":
+            focus_note = "This cross-check stays wide enough to compare the active setup against the broader chart structure."
+        elif role.lower() == "execution lens":
+            focus_note = "This cross-check tightens around the trigger lane and immediate confirmation area."
+        elif role.lower() == "buy lens":
+            focus_note = "This cross-check leans toward bullish continuation or reversal zones on the active side of the chart."
+        elif role.lower() == "sell lens":
+            focus_note = "This cross-check leans toward bearish continuation or reversal zones on the active side of the chart."
+        else:
+            focus_note = "This cross-check balances the broader structure view with the active decision lane."
+        chips = _chip("Active", "teal") if live_enabled else _chip("Reserve", "amber")
+        visual_html = (
+            "<div class='pg-council-visual'>"
+            f"<img src='{focus_uri}' alt='{_escape_html(role)} focus crop' />"
+            "</div>"
+            if focus_uri
+            else ""
+        )
         cards.append(
             "<div class='pg-model-card'>"
             "<div class='pg-card-top'>"
             "<div>"
             f"<div class='pg-card-label'>{_escape_html(role)}</div>"
-            f"<div class='pg-card-title'>{_escape_html(str(row.get('name', 'model')).upper())}</div>"
-            f"<div class='pg-card-note'>{_escape_html(str(row.get('predicted_label', 'HOLD')).upper())} vote</div>"
+            f"<div class='pg-card-title'>Cross-Check {index + 1}</div>"
+            f"<div class='pg-card-note'>{_escape_html(str(row.get('predicted_label', 'HOLD')).upper())} leaning read</div>"
             "</div>"
             f"<div>{chips}</div>"
             "</div>"
+            f"{visual_html}"
+            f"<div class='pg-card-note pg-council-note'>{_escape_html(focus_note)}</div>"
+            f"<div class='pg-card-note'>{_escape_html(focus_detection_note or sequence_task_note or 'No focused pattern summary available yet.')}</div>"
+            f"<div class='pg-card-note'>Use the focus crop to judge whether this supporting read is looking at the same decisive area you care about.</div>"
             "<div class='pg-meter'><span style='width:"
             f"{min(max(float(row.get('confidence', 0.0) or 0.0) * 100.0, 0.0), 100.0):.1f}%'></span></div>"
             "<div class='pg-card-kv'>"
             f"<div><span>Confidence</span><strong class='pg-{tone}'>{_fmt_pct01(row.get('confidence', 0.0))}</strong></div>"
-            f"<div><span>Weight</span><strong>{_fmt_num(weight_value, 3)}</strong></div>"
-            f"<div><span>Threshold</span><strong>{_fmt_num(row.get('decision_threshold', 0.5), 2)}</strong></div>"
-            f"<div><span>Entropy</span><strong>{_fmt_num(row.get('entropy', 0.0), 2)}</strong></div>"
+            f"<div><span>Influence</span><strong>{_fmt_num(weight_value, 3)}</strong></div>"
+            f"<div><span>Alignment</span><strong>{_fmt_pct01(routing_alignment)}</strong></div>"
+            f"<div><span>Conviction Lift</span><strong>{_fmt_num(routing_factor, 2)}x</strong></div>"
             "</div>"
             "</div>"
         )
 
     header_chips = "".join(
         [
-            _chip(f"Lead Node {str(ensemble_view.get('champion_model', 'n/a')).upper()}", "teal"),
-            _chip(f"Confirm Node {str(ensemble_view.get('confirmer_model', 'n/a')).upper()}", "soft"),
-            _chip(f"Disagreement {_fmt_num(ensemble_view.get('disagreement', 0.0), 3)}", "amber"),
-            _chip(f"Consensus {_fmt_pct01(ensemble_view.get('consensus_ratio', 0.0))}", "soft"),
-            _chip(f"Source {str(council_meta.get('source', 'inline')).upper()}", "soft"),
-            _chip(f"Status {str(council_meta.get('status', 'ready')).upper()}", "soft"),
+            _chip(f"Lead Read {route_direction} {_fmt_num(route_strength, 2)}", _tone_class_for_action(route_direction)),
+            _chip(f"Agreement {_fmt_pct01(ensemble_view.get('consensus_ratio', 0.0))}", "soft"),
+            _chip(f"Spread {_fmt_num(ensemble_view.get('disagreement', 0.0), 3)}", "amber"),
+            _chip(f"Review Emphasis {selection_reason.title()}", "soft"),
+            _chip(_council_scope_label(active_scope), "teal" if active_scope == "full" else ("amber" if active_scope == "half" else "soft")),
+            _chip(f"Active Passes {live_count}", "soft"),
+            _chip(f"Selected {len(selected_models)}", "soft"),
+            _chip(f"Skipped {len(skipped_models)}", "amber" if skipped_models else "soft"),
+        ]
+    )
+    selection_note = f"The desk compared {len(rows)} supporting reads before finalizing this deeper review."
+    if requested_targets:
+        selection_note += f" Requested targets: {', '.join(requested_targets[:6])}."
+    if selected_models:
+        selection_note += f" Active selection: {', '.join(selected_models[:6])}."
+    if skipped_models:
+        selection_note += f" Skipped: {', '.join(skipped_models[:6])}."
+    if scope_note:
+        selection_note += f" {scope_note}"
+    tiles = "".join(
+        [
+            _metric_tile(
+                "Combined Read",
+                f"{str(ensemble_view.get('predicted_label', 'HOLD')).upper()} {_fmt_pct01(ensemble_view.get('confidence', 0.0))}",
+                f"margin {_fmt_num(ensemble_view.get('margin', 0.0), 3)}",
+            ),
+            _metric_tile("Active Reads", f"{len(rows)}/{budget}", selection_reason),
+            _metric_tile("Cross-Check Depth", _council_scope_label(active_scope)),
+            _metric_tile("Lead Strength", _fmt_num(route_strength, 2), f"uncertainty {_fmt_num(route_uncertainty, 2)}"),
+            _metric_tile("Trend Confidence", _fmt_num(regime_confidence, 2), f"direction {route_direction}"),
+            _metric_tile("Active / Reserve", f"{live_count}/{shadow_count}", "supporting reads"),
+            _metric_tile(
+                "Focus View",
+                "Chart focus crop",
+                "Use these focus areas as a second look, not as a replacement for the main chart.",
+            ),
         ]
     )
     return (
         "<div class='pg-panel'>"
-        "<div class='pg-section-title'>Model Council</div>"
+        "<div class='pg-section-title'>Cross-Checks</div>"
         f"<div class='pg-chip-row'>{header_chips}</div>"
-        "<div class='pg-muted' style='margin-bottom:14px;'>The council compares specialist votes, live or shadow weighting, and disagreement so you can judge whether the heavyweight ensemble is reinforcing or questioning the active desk bias.</div>"
+        "<div class='pg-muted' style='margin-bottom:12px;'>Use this panel when you want a deeper second opinion on the active chart. Each card shows one supporting read and the chart area it focused on.</div>"
+        f"<div class='pg-metric-grid'>{tiles}</div>"
+        f"<div class='pg-muted' style='margin:14px 0 12px 0;'>{_escape_html(selection_note)}</div>"
         f"<div class='pg-model-grid'>{''.join(cards)}</div>"
         "</div>"
     )
@@ -9096,15 +18354,13 @@ def build_model_council_html(result: dict[str, Any]) -> str:
 
 def build_forecast_panel_html(result: dict[str, Any]) -> str:
     if not result:
-        return _placeholder_panel("Forecast & Risk", "Forecast distribution and system-health metrics will appear here.")
+        return _placeholder_panel("Forecast & Risk", "Forecast distribution and risk posture will appear here.")
 
     forecast = cast(dict[str, Any], result.get("forecast_debug", {}))
     quantile_range = cast(list[float], result.get("quantile_range", [0.0, 0.0]))
     q05 = float(quantile_range[0]) if quantile_range else 0.0
     q95 = float(quantile_range[1]) if len(quantile_range) > 1 else q05
     module_rel = cast(dict[str, float], result.get("module_reliability", {}))
-    branch_weights = cast(dict[str, float], result.get("branch_weights", {}))
-    projection = cast(dict[str, Any], result.get("projection", {}))
     execution_readiness = float(forecast.get("execution_readiness", 0.0) or 0.0)
     if bool(forecast.get("force_hold", False)):
         posture_label = "Fail-safe holding"
@@ -9125,17 +18381,9 @@ def build_forecast_panel_html(result: dict[str, Any]) -> str:
 
     tiles = "".join(
         [
-            _metric_tile("q05", _fmt_signed_pct(q05)),
-            _metric_tile("q95", _fmt_signed_pct(q95)),
-            _metric_tile("A/D Indicator", _fmt_num(result.get("ad_indicator", 0.0), 3)),
-            _metric_tile("Poly Slope", _fmt_num(result.get("poly_slope", 0.0), 3)),
-            _metric_tile("Execution Ready", _fmt_num(forecast.get("execution_readiness", 0.0), 2)),
-            _metric_tile("Force Hold", "YES" if bool(forecast.get("force_hold", False)) else "NO"),
-            _metric_tile(
-                "Projection Bias",
-                f"{str(projection.get('direction', 'HOLD')).upper()} {_fmt_num(projection.get('confidence', 0.0), 2)}",
-                f"dom={_fmt_num(projection.get('dominance', 0.0), 2)}",
-            ),
+            _metric_tile("Q05", _fmt_signed_pct(q05)),
+            _metric_tile("Q95", _fmt_signed_pct(q95)),
+            _metric_tile("Execution", _fmt_num(forecast.get("execution_readiness", 0.0), 2)),
         ]
     )
     chips = "".join(
@@ -9147,9 +18395,6 @@ def build_forecast_panel_html(result: dict[str, Any]) -> str:
             _chip(f"memory_weight {_fmt_num(result.get('memory_effective_weight', 0.0), 2)}", "soft"),
         ]
     )
-    branch_text = ", ".join(
-        f"{str(name).replace('_', ' ')}={_fmt_num(value, 2)}" for name, value in sorted(branch_weights.items())
-    ) or "No branch weighting reported."
 
     return (
         "<div class='pg-panel'>"
@@ -9157,14 +18402,13 @@ def build_forecast_panel_html(result: dict[str, Any]) -> str:
         f"<div class='pg-chip-row'>{chips}</div>"
         f"<div class='pg-muted' style='margin-bottom:14px;'>{_escape_html(posture_note)}</div>"
         f"<div class='pg-metric-grid'>{tiles}</div>"
-        f"<div class='pg-muted' style='margin-top:14px;'>Branch weights: {_escape_html(branch_text)}</div>"
         "</div>"
     )
 
 
 def build_memory_panel_html(result: dict[str, Any], detail_depth: int = 4) -> str:
     if not result:
-        return _placeholder_panel("Memory Recall", "Top recalled episodes and ambiguity controls will appear here.")
+        return _placeholder_panel("Case Recall", "Similar reviewed cases will appear here after a signal run.")
 
     memory_summary = cast(dict[str, Any], result.get("memory_ambiguity_summary", {}))
     episode_matches = cast(list[dict[str, Any]], result.get("memory_episode_matches", []))
@@ -9172,32 +18416,32 @@ def build_memory_panel_html(result: dict[str, Any], detail_depth: int = 4) -> st
     consensus_ratio = float(memory_summary.get("consensus_ratio", 0.0) or 0.0)
     recall_count = int(result.get("memory_recall_count", 0) or 0)
     if recall_count == 0:
-        memory_posture = "Novel setup"
-        memory_note = "The memory bank did not surface a strong prior case, so the current chart should be treated as relatively fresh."
+        memory_posture = "Fresh setup"
+        memory_note = "The desk did not surface a strong prior case, so the current chart should be treated as relatively fresh."
         memory_tone = "amber"
     elif consensus_ratio >= 0.74 and ambiguity <= 0.32:
-        memory_posture = "Memory aligned"
+        memory_posture = "Cases aligned"
         memory_note = "Past cases are pointing in a similar direction with relatively low ambiguity."
         memory_tone = "teal"
     else:
-        memory_posture = "Memory is mixed"
-        memory_note = "Recalled cases exist, but their directional agreement is not strong enough to treat memory as a clean confirmer."
+        memory_posture = "Cases are mixed"
+        memory_note = "Comparable cases exist, but their directional agreement is not strong enough to treat them as a clean confirmer."
         memory_tone = "amber"
     header_chips = "".join(
         [
             _chip(memory_posture, memory_tone),
-            _chip(f"Direction {str(result.get('memory_direction', 'HOLD')).upper()}", _tone_class_for_action(str(result.get("memory_direction", "HOLD")).upper())),
+            _chip(f"Case bias {str(result.get('memory_direction', 'HOLD')).upper()}", _tone_class_for_action(str(result.get("memory_direction", "HOLD")).upper())),
             _chip(f"Recall {recall_count}", "soft"),
             _chip(f"Consensus {_fmt_pct01(consensus_ratio)}", "soft"),
         ]
     )
     tiles = "".join(
         [
-            _metric_tile("Top Similarity", _fmt_num(result.get("memory_similarity", 0.0), 3)),
-            _metric_tile("Direction", str(result.get("memory_direction", "HOLD")).upper()),
-            _metric_tile("Recall Count", str(int(result.get("memory_recall_count", 0) or 0))),
-            _metric_tile("Ambiguity", _fmt_num(memory_summary.get("ambiguity", 0.0), 2)),
-            _metric_tile("Entropy", _fmt_num(memory_summary.get("label_entropy", 0.0), 2)),
+            _metric_tile("Top Match", _fmt_num(result.get("memory_similarity", 0.0), 3)),
+            _metric_tile("Case Bias", str(result.get("memory_direction", "HOLD")).upper()),
+            _metric_tile("Cases", str(int(result.get("memory_recall_count", 0) or 0))),
+            _metric_tile("Dispersion", _fmt_num(memory_summary.get("ambiguity", 0.0), 2)),
+            _metric_tile("Variety", _fmt_num(memory_summary.get("label_entropy", 0.0), 2)),
             _metric_tile("Consensus", _fmt_pct01(memory_summary.get("consensus_ratio", 0.0))),
         ]
     )
@@ -9212,21 +18456,21 @@ def build_memory_panel_html(result: dict[str, Any], detail_depth: int = 4) -> st
             "<div class='pg-memory-card'>"
             f"<div class='pg-card-label'>{_escape_html(label)}</div>"
             f"<div class='pg-card-title'>{_escape_html(title)}</div>"
-            f"<div class='pg-card-note'>phase={_escape_html(local_phase)} | intent={_escape_html(intent)}</div>"
-            f"<div class='pg-meter'><span style='width:{min(max(similarity * 100.0, 0.0), 100.0):.1f}%'></span></div>"
-            f"<div class='pg-card-note' style='margin-top:8px;'>similarity {_fmt_num(similarity, 3)}</div>"
-            "</div>"
+                f"<div class='pg-card-note'>phase={_escape_html(local_phase)} | next focus={_escape_html(intent)}</div>"
+                f"<div class='pg-meter'><span style='width:{min(max(similarity * 100.0, 0.0), 100.0):.1f}%'></span></div>"
+                f"<div class='pg-card-note' style='margin-top:8px;'>match {_fmt_num(similarity, 3)}</div>"
+                "</div>"
         )
 
     if not cards:
         cards.append(
-            "<div class='pg-memory-card'><div class='pg-card-title'>No recall episodes</div>"
-            "<div class='pg-card-note'>The memory bank did not surface a close match for this chart.</div></div>"
+            "<div class='pg-memory-card'><div class='pg-card-title'>No close cases yet</div>"
+            "<div class='pg-card-note'>The desk did not surface a close reviewed case for this chart.</div></div>"
         )
 
     return (
         "<div class='pg-panel'>"
-        "<div class='pg-section-title'>Memory Recall</div>"
+        "<div class='pg-section-title'>Case Recall</div>"
         f"<div class='pg-chip-row'>{header_chips}</div>"
         f"<div class='pg-muted' style='margin-bottom:14px;'>{_escape_html(memory_note)}</div>"
         f"<div class='pg-metric-grid'>{tiles}</div>"
@@ -9238,14 +18482,13 @@ def build_memory_panel_html(result: dict[str, Any], detail_depth: int = 4) -> st
 def build_gate_matrix_html(result: dict[str, Any]) -> str:
     gate_details = cast(list[dict[str, Any]], result.get("gate_details", []))
     if not gate_details:
-        return _placeholder_panel("Gate Matrix", "Twelve gate outputs will appear here after a signal run.")
+        return _placeholder_panel("Readiness Checks", "The readiness checks will appear here after a signal run.")
 
-    shap = cast(dict[str, float], result.get("shap_contributions", {}))
     header_chips = "".join(
         [
             _chip(f"Passing {int(result.get('gates_passing', 0))}/12", "teal"),
             _chip(
-                f"Consensus {'OK' if bool(result.get('consensus_ok', False)) else 'No'}",
+                f"Agreement {'OK' if bool(result.get('consensus_ok', False)) else 'Watch'}",
                 "soft" if bool(result.get("consensus_ok", False)) else "amber",
             ),
             _chip(
@@ -9258,13 +18501,12 @@ def build_gate_matrix_html(result: dict[str, Any]) -> str:
     for gate in gate_details:
         score = float(gate.get("score", 0.0) or 0.0)
         pass_fail = bool(gate.get("pass_fail", False))
-        detail = cast(dict[str, Any], gate.get("detail", {}))
-        detail_preview = ", ".join(
-            f"{str(key).replace('_', ' ')}={_truncate_text(value, 32)}"
-            for key, value in list(detail.items())[:3]
-        ) or "No detail payload."
         name = str(gate.get("name", "gate")).replace("_", " ").title()
-        shap_value = float(shap.get(str(gate.get("name", "")), 0.0) or 0.0)
+        detail_preview = (
+            "This check is currently supporting the setup."
+            if pass_fail
+            else "This check is still asking for caution before execution."
+        )
         cards.append(
             "<div class='pg-gate-card'>"
             "<div class='pg-card-top'>"
@@ -9276,7 +18518,7 @@ def build_gate_matrix_html(result: dict[str, Any]) -> str:
             "</div>"
             f"<div class='pg-meter'><span style='width:{min(max(score * 100.0, 0.0), 100.0):.1f}%'></span></div>"
             "<div class='pg-card-kv'>"
-            f"<div><span>SHAP</span><strong>{_fmt_num(shap_value, 3)}</strong></div>"
+            f"<div><span>Score</span><strong>{_fmt_pct01(score)}</strong></div>"
             f"<div><span>Status</span><strong class='{'pg-pass' if pass_fail else 'pg-fail'}'>{'PASS' if pass_fail else 'WAIT'}</strong></div>"
             "</div>"
             f"<div class='pg-card-note' style='margin-top:10px;'>{_escape_html(detail_preview)}</div>"
@@ -9296,24 +18538,24 @@ def build_gate_matrix_html(result: dict[str, Any]) -> str:
                 f"<div><span>{_escape_html(label)}</span><strong class='{'pg-pass' if pass_fail else 'pg-fail'}'>{'PASS' if pass_fail else 'WATCH'} {_fmt_pct01(score)}</strong></div>"
                 "</div>"
             )
-        support_cards = (
+            support_cards = (
             "<div class='pg-panel' style='margin-top:16px;'>"
-            "<div class='pg-section-title'>Support Checks</div>"
+            "<div class='pg-section-title'>Secondary Checks</div>"
             f"{''.join(support_rows)}"
             "</div>"
         )
 
     gates_passing = int(result.get("gates_passing", 0) or 0)
     if gates_passing >= 9 and bool(result.get("consensus_ok", False)):
-        summary_text = "Most structural rails are open, so this panel is behaving more like confirmation than rejection."
+        summary_text = "Most diagnostic rails are open; live direction still comes from the tracker and decision kernel."
     elif gates_passing >= 6:
-        summary_text = "The desk has directional evidence, but several gates are still working as caution rails."
+        summary_text = "Several diagnostic rails are mixed; they explain caution without overriding the live direction."
     else:
-        summary_text = "The gate system is still rejecting or heavily filtering the setup, so patience is the safer read."
+        summary_text = "Most diagnostic rails are closed; the details remain review metadata, not a live veto."
 
     return (
         "<div class='pg-panel'>"
-        "<div class='pg-section-title'>Gate Matrix</div>"
+        "<div class='pg-section-title'>Readiness Checks</div>"
         f"<div class='pg-chip-row'>{header_chips}</div>"
         f"<div class='pg-muted' style='margin-bottom:14px;'>{_escape_html(summary_text)}</div>"
         f"<div class='pg-gate-grid'>{''.join(cards)}</div>"
@@ -9355,7 +18597,7 @@ def build_evidence_panel_html(
     detail_depth: int = 6,
 ) -> str:
     if not cv_debug:
-        return _placeholder_panel("Evidence Panel", "Pattern and transition evidence will appear here after a run.")
+        return _placeholder_panel("Chart Evidence", "Pattern evidence and supporting chart clues will appear here after a run.")
 
     transitions = cast(dict[str, float], cv_debug.get("sequence_transition_probabilities", {}))
     projection = cast(dict[str, Any], cv_debug.get("projection", {}))
@@ -9388,14 +18630,14 @@ def build_evidence_panel_html(
     synthetic_rows = cast(list[dict[str, Any]], cv_debug.get("overlay_visible_synthetic_top", [])) or cast(list[dict[str, Any]], cv_debug.get("synthetic_signals_top", []))
     evidence_groups = "".join(
         [
-            _render_pattern_group("Global Detections", global_rows[: max(1, detail_depth)]),
-            _render_pattern_group("Latest Branch", latest_rows[: max(1, detail_depth)]),
-            _render_pattern_group("Synthetic Signals", synthetic_rows[: max(1, detail_depth)]),
+            _render_pattern_group("Broader Context", global_rows[: max(1, detail_depth)]),
+            _render_pattern_group("Trigger-Side Clues", latest_rows[: max(1, detail_depth)]),
+            _render_pattern_group("Composite Clues", synthetic_rows[: max(1, detail_depth)]),
         ]
     )
     return (
         "<div class='pg-panel'>"
-        "<div class='pg-section-title'>Evidence Panel</div>"
+        "<div class='pg-section-title'>Chart Evidence</div>"
         f"<div class='pg-chip-row'>{transition_chips}</div>"
         f"<div class='pg-muted' style='margin-bottom:14px;'>{_escape_html(_truncate_text(summary_text, 320))}</div>"
         f"{evidence_groups}"
@@ -9409,136 +18651,85 @@ def build_debug_console_html(
     render_config: Mapping[str, Any] | None = None,
 ) -> str:
     if not result:
-        return _placeholder_panel("Diagnostics Cockpit", "Runtime diagnostics will appear here after the first signal pass.")
+        return _placeholder_panel("Review Notes", "Structured review notes will appear here after the first signal pass.")
 
     config = dict(render_config or {})
-    detail_depth = int(config.get("debug_depth", 6) or 6)
     chart_state = cast(dict[str, Any], result.get("chart_state", {}))
-    memory_summary = cast(dict[str, Any], result.get("memory_ambiguity_summary", {}))
-    transitions = cast(dict[str, float], cv_debug.get("sequence_transition_probabilities", {}))
-    current_box = cast(dict[str, Any], cv_debug.get("current_box", {}))
-    next_boxes = cast(list[dict[str, Any]], cv_debug.get("next_box_hypotheses", []))
-    geometry = cast(dict[str, Any], cv_debug.get("chart_geometry", {}))
-    branch_weights = cast(dict[str, float], result.get("branch_weights", {}))
+    timing_signal = cast(dict[str, Any], result.get("timing_signal", {}))
+    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
     gate_details = cast(list[dict[str, Any]], result.get("gate_details", []))
     failing_gates = [gate for gate in gate_details if not bool(gate.get("pass_fail", False))]
-    transitions_sorted = sorted(transitions.items(), key=lambda item: float(item[1]), reverse=True)[: max(3, detail_depth)]
-
-    top_box_rows = "".join(
-        (
-            "<li>"
-            f"{_escape_html(str(box.get('box_type', 'balance')).replace('_', ' '))} "
-            f"{_escape_html(str(box.get('direction', 'HOLD')).upper())} "
-            f"conf={_fmt_num(box.get('confidence', 0.0), 2)} "
-            f"dom={_fmt_num(box.get('dominance_gap', 0.0), 2)}"
-            "</li>"
-        )
-        for box in next_boxes[: max(1, detail_depth)]
-    ) or "<li>No projected boxes reported.</li>"
-    transition_rows = "".join(
-        f"<li>{_escape_html(str(name).replace('_', ' '))}: {_fmt_pct01(value)}</li>"
-        for name, value in transitions_sorted
-    ) or "<li>No transition probabilities reported.</li>"
-    branch_rows = "".join(
-        f"<li>{_escape_html(str(name).replace('_', ' '))}: {_fmt_num(value, 3)}</li>"
-        for name, value in sorted(branch_weights.items(), key=lambda item: float(item[1]), reverse=True)
-    ) or "<li>No branch weighting available.</li>"
-    failing_rows = "".join(
-        (
-            "<li>"
-            f"{_escape_html(str(gate.get('name', 'gate')).replace('_', ' '))} "
-            f"score={_fmt_pct01(gate.get('score', 0.0))}"
-            "</li>"
-        )
-        for gate in failing_gates[: max(1, detail_depth)]
-    ) or "<li>No failing gates in the current pass.</li>"
+    explanation_lines = _public_signal_explanation_lines(str(result.get("explanation", "")), limit=4)
+    eta_minutes = cast(dict[str, Any], timing_signal.get("eta_minutes", {}))
+    gate_state = str(multi_timeframe.get("gate_state", "watch") or "watch").lower()
+    gate_label = "Confirmed" if gate_state == "confirmed" else ("Blocked" if gate_state == "blocked" else "Watch")
+    caution_rows = "".join(
+        f"<li>{_escape_html(str(gate.get('name', 'check')).replace('_', ' ').title())}</li>"
+        for gate in failing_gates[:4]
+    ) or "<li>No major caution rails are active right now.</li>"
+    summary_rows = "".join(f"<li>{_escape_html(line)}</li>" for line in explanation_lines)
 
     chips = "".join(
         [
-            _chip(f"Action {str(result.get('action', 'HOLD')).upper()}", _tone_class_for_action(str(result.get("action", "HOLD")).upper())),
-            _chip(f"Consensus {'OK' if bool(result.get('consensus_ok', False)) else 'Watch'}", "teal" if bool(result.get("consensus_ok", False)) else "amber"),
-            _chip(f"Geometry conflict {'YES' if bool(result.get('geometry_conflict', False)) else 'NO'}", "amber" if bool(result.get("geometry_conflict", False)) else "soft"),
-            _chip(f"Strict fail-closed {'YES' if bool(result.get('strict_cv_fail_closed', False)) else 'NO'}", "amber" if bool(result.get("strict_cv_fail_closed", False)) else "soft"),
-            _chip(f"Visible detections {int(cv_debug.get('visible_detection_count', 0) or 0)}", "soft"),
+            _chip(f"Action {str(result.get('execution_action', result.get('action', 'HOLD'))).upper()}", _tone_class_for_action(str(result.get("execution_action", result.get("action", "HOLD"))).upper())),
+            _chip(f"Agreement {'OK' if bool(result.get('consensus_ok', False)) else 'Watch'}", "teal" if bool(result.get("consensus_ok", False)) else "amber"),
+            _chip(f"Cross-timeframe {gate_label}", "teal" if gate_state == "confirmed" else "amber"),
+            _chip(f"View {_overlay_mode_label(config.get('overlay_mode', DEFAULT_OVERLAY_MODE))}", "soft"),
         ]
     )
     tiles = "".join(
         [
-            _metric_tile("Run Timestamp", _truncate_text(result.get("timestamp", "unknown"), 24)),
-            _metric_tile("Confidence", _fmt_pct01(result.get("confidence", 0.0))),
-            _metric_tile("Parse Quality", _fmt_num(result.get("latest_parse_quality", 0.0), 3)),
-            _metric_tile("Latest Candle", _fmt_num(result.get("latest_candle_confidence", 0.0), 3)),
-            _metric_tile("Memory Similarity", _fmt_num(result.get("memory_similarity", 0.0), 3)),
-            _metric_tile("Recall Count", str(int(result.get("memory_recall_count", 0) or 0))),
-            _metric_tile("Projection Conf", _fmt_num(cast(dict[str, Any], result.get("projection", {})).get("confidence", 0.0), 3)),
-            _metric_tile("Controls", f"{str(config.get('overlay_mode', 'history-plus-projection')).replace('-', ' ')} / d{detail_depth}"),
+            _metric_tile("Decision State", str(result.get("decision_state", "UNKNOWN")).replace("_", " ").title()),
+            _metric_tile("Execution", str(result.get("execution_permission", "WAIT_FOR_CONFIRMATION")).replace("_", " ").title()),
+            _metric_tile("Timing", str(timing_signal.get("entry_state", "WATCH")).upper()),
+            _metric_tile("Checks Passing", f"{int(result.get('gates_passing', 0) or 0)}/12"),
+            _metric_tile("Case Match", _fmt_num(result.get("memory_similarity", 0.0), 3)),
+            _metric_tile("Timeframe Layout", "Fused" if bool(config.get("fuse_timeframe_overlays", False)) else "Split"),
         ]
     )
-
     cards = "".join(
         [
             (
                 "<div class='pg-debug-card'>"
-                "<div class='pg-card-label'>Current Box</div>"
-                f"<div class='pg-card-title'>{_escape_html(str(current_box.get('box_type', 'balance')).replace('_', ' ').title())}</div>"
-                f"<div class='pg-card-note'>{_escape_html(str(current_box.get('direction', 'HOLD')).upper())} | conf {_fmt_num(current_box.get('confidence', 0.0), 2)}</div>"
+                "<div class='pg-card-label'>Structure Read</div>"
+                f"<div class='pg-card-title'>{_escape_html(str(chart_state.get('structure_setup', 'none')).replace('_', ' ').title())}</div>"
                 "<ul class='pg-debug-list'>"
-                f"<li>sequence index: {int(current_box.get('sequence_index', 0) or 0)}</li>"
-                f"<li>path clarity: {_fmt_num(chart_state.get('path_clarity', 0.0), 2)}</li>"
-                f"<li>setup: {_escape_html(str(chart_state.get('structure_setup', 'none')).replace('_', ' '))}</li>"
+                f"<li>entry type: {_escape_html(str(chart_state.get('entry_type', 'continuation')).replace('_', ' '))}</li>"
+                f"<li>momentum bias: {_escape_html(str(chart_state.get('momentum_bias', 'neutral')).replace('_', ' '))}</li>"
+                f"<li>phase: {_escape_html(str(chart_state.get('local_phase', 'unknown')).replace('_', ' '))}</li>"
                 "</ul>"
                 "</div>"
             ),
             (
                 "<div class='pg-debug-card'>"
-                "<div class='pg-card-label'>Projected Boxes</div>"
-                f"<div class='pg-card-title'>{len(next_boxes)} candidates</div>"
-                f"<ul class='pg-debug-list'>{top_box_rows}</ul>"
-                "</div>"
-            ),
-            (
-                "<div class='pg-debug-card'>"
-                "<div class='pg-card-label'>Transitions</div>"
-                f"<div class='pg-card-title'>{_escape_html(str(chart_state.get('projection_bias_direction', 'HOLD')).upper())} bias</div>"
-                f"<ul class='pg-debug-list'>{transition_rows}</ul>"
-                "</div>"
-            ),
-            (
-                "<div class='pg-debug-card'>"
-                "<div class='pg-card-label'>Memory Ambiguity</div>"
-                f"<div class='pg-card-title'>{_escape_html(str(memory_summary.get('dominant_label', result.get('memory_direction', 'HOLD'))).upper())}</div>"
+                "<div class='pg-card-label'>Timing Window</div>"
+                f"<div class='pg-card-title'>{_escape_html(str(timing_signal.get('entry_state', 'WATCH')).upper())}</div>"
                 "<ul class='pg-debug-list'>"
-                f"<li>ambiguity: {_fmt_num(memory_summary.get('ambiguity', 0.0), 3)}</li>"
-                f"<li>entropy: {_fmt_num(memory_summary.get('label_entropy', 0.0), 3)}</li>"
-                f"<li>consensus ratio: {_fmt_pct01(memory_summary.get('consensus_ratio', 0.0))}</li>"
-                f"<li>mixed labels: {'yes' if bool(memory_summary.get('mixed_labels', False)) else 'no'}</li>"
+                f"<li>eta: {_fmt_num(eta_minutes.get('low', 0.0), 0)}-{_fmt_num(eta_minutes.get('high', 0.0), 0)} minutes</li>"
+                f"<li>timeframe: {_escape_html(str(timing_signal.get('timeframe', 'M5')).upper())}</li>"
+                f"<li>safety buffer: {_fmt_num(timing_signal.get('entry_buffer_minutes', 8.0), 0)} minutes</li>"
                 "</ul>"
                 "</div>"
             ),
             (
                 "<div class='pg-debug-card'>"
-                "<div class='pg-card-label'>Chart Geometry</div>"
-                f"<div class='pg-card-title'>{int(geometry.get('recent_candle_count', 0) or 0)} candles</div>"
-                "<ul class='pg-debug-list'>"
-                f"<li>geometry conf: {_fmt_num(geometry.get('geometry_confidence', 0.0), 3)}</li>"
-                f"<li>body pct: {_fmt_num(geometry.get('body_height_pct', 0.0), 3)}</li>"
-                f"<li>upper wick pct: {_fmt_num(geometry.get('upper_wick_pct', 0.0), 3)}</li>"
-                f"<li>lower wick pct: {_fmt_num(geometry.get('lower_wick_pct', 0.0), 3)}</li>"
-                "</ul>"
+                "<div class='pg-card-label'>Cross-Timeframe Read</div>"
+                f"<div class='pg-card-title'>{_escape_html(gate_label)}</div>"
+                f"<ul class='pg-debug-list'><li>{_escape_html(_truncate_text(str(multi_timeframe.get('summary', 'Open the timeframe overlays for the paired read.')), 180))}</li></ul>"
                 "</div>"
             ),
             (
                 "<div class='pg-debug-card'>"
-                "<div class='pg-card-label'>Branch Weights</div>"
-                f"<div class='pg-card-title'>{int(result.get('gates_passing', 0) or 0)}/12 gates passing</div>"
-                f"<ul class='pg-debug-list'>{branch_rows}</ul>"
+                "<div class='pg-card-label'>Caution Watchlist</div>"
+                f"<div class='pg-card-title'>{len(failing_gates)} items</div>"
+                f"<ul class='pg-debug-list'>{caution_rows}</ul>"
                 "</div>"
             ),
             (
                 "<div class='pg-debug-card'>"
-                "<div class='pg-card-label'>Gate Watchlist</div>"
-                f"<div class='pg-card-title'>{len(failing_gates)} pending gates</div>"
-                f"<ul class='pg-debug-list'>{failing_rows}</ul>"
+                "<div class='pg-card-label'>Plain-English Summary</div>"
+                "<div class='pg-card-title'>What to keep in mind</div>"
+                f"<ul class='pg-debug-list'>{summary_rows}</ul>"
                 "</div>"
             ),
         ]
@@ -9546,7 +18737,7 @@ def build_debug_console_html(
 
     return (
         "<div class='pg-panel'>"
-        "<div class='pg-section-title'>Diagnostics Cockpit</div>"
+        "<div class='pg-section-title'>Review Notes</div>"
         f"<div class='pg-chip-row'>{chips}</div>"
         f"<div class='pg-metric-grid'>{tiles}</div>"
         f"<div class='pg-debug-grid'>{cards}</div>"
@@ -9561,22 +18752,62 @@ def build_runtime_audit_payload(
 ) -> dict[str, Any]:
     session_snapshot = _get_session_snapshot()
     session_entries = cast(list[dict[str, Any]], session_snapshot.get("entries", []))[-20:]
-    session_snapshot["entries"] = [
-        {key: value for key, value in entry.items() if key not in {"thumbnail_uri", "thumbnail_path"}}
-        for entry in session_entries
+    recent_entries = [
+        {
+            "timestamp": str(entry.get("timestamp", "")),
+            "action": str(entry.get("action", "HOLD")).upper(),
+            "confidence": float(np.clip(float(entry.get("confidence", 0.0) or 0.0), 0.0, 1.0)),
+            "file": str(entry.get("file_name", "capture")),
+        }
+        for entry in session_entries[-6:]
     ]
+    timing_signal = cast(dict[str, Any], result.get("timing_signal", {}))
+    multi_timeframe = cast(dict[str, Any], result.get("multi_timeframe", {}))
+    feedback_targets = _feedback_target_entries(limit=240)
+    pending_feedback_targets = sum(1 for target in feedback_targets if str(target.get("feedback_status", "pending")) == "pending")
     return {
         "generated_at": utc_now_iso(),
-        "ui_render_state": dict(render_config or {}),
-        "session": session_snapshot,
-        "zone_memory_count": len(_load_zone_memory()),
-        "cv_debug": cv_debug,
-        "result": result,
+        "decision": {
+            "action": str(result.get("execution_action", result.get("action", "HOLD"))).upper(),
+            "confidence": float(np.clip(float(result.get("confidence", 0.0) or 0.0), 0.0, 1.0)),
+            "signal_state": str(result.get("decision_state", "UNKNOWN")).replace("_", " ").title(),
+            "execution": str(result.get("execution_permission", "WAIT_FOR_CONFIRMATION")).replace("_", " ").title(),
+            "expected_move_pct": float(result.get("expected_3min_move_pct", 0.0) or 0.0),
+        },
+        "timing": {
+            "state": str(timing_signal.get("entry_state", "WATCH")).upper(),
+            "eta_minutes": dict(timing_signal.get("eta_minutes", {})),
+            "timeframe": str(timing_signal.get("timeframe", "M5")).upper(),
+            "cross_timeframe": str(multi_timeframe.get("gate_state", "watch")).upper(),
+        },
+        "review_settings": {
+            "view": _overlay_mode_label(cast(dict[str, Any], render_config or {}).get("overlay_mode", DEFAULT_OVERLAY_MODE)),
+            "cross_check_depth": _council_scope_label(cast(dict[str, Any], render_config or {}).get("council_scope", DEFAULT_COUNCIL_SCOPE)),
+            "overlay_aids": [_vision_extra_label(item) for item in _normalize_vision_extras(cast(dict[str, Any], render_config or {}).get("vision_extras", DEFAULT_VISION_EXTRAS))],
+            "timeframe_layout": "Fused" if bool(cast(dict[str, Any], render_config or {}).get("fuse_timeframe_overlays", False)) else "Split",
+        },
+        "session_summary": {
+            "session_id": str(session_snapshot.get("session_id", "live")),
+            "entries_in_session": len(cast(list[dict[str, Any]], session_snapshot.get("entries", []))),
+            "saved_zones": len(_load_zone_memory()),
+            "recent_entries": recent_entries,
+        },
+        "outcome_review": {
+            "pending_feedback_targets": pending_feedback_targets,
+            "submitted_reviews": len(_feedback_submission_states()),
+        },
     }
 
 
 def _empty_audit_payload() -> dict[str, Any]:
-    return {}
+    return {
+        "status": "Run an analysis to populate the decision record.",
+        "decision": {},
+        "timing": {},
+        "review_settings": {},
+        "session_summary": {},
+        "outcome_review": {},
+    }
 
 
 def _empty_heatmap_outputs() -> tuple[Any, str]:
@@ -9595,19 +18826,190 @@ def _empty_compare_desk_html() -> str:
 # ------------------------------------------------------------------
 
 
+def _workspace_run_empty_outputs() -> tuple[Any, ...]:
+    return (*_empty_workspace_outputs(), {}, gr.update(visible=False), "")
+
+
+def _workspace_run_success_outputs(
+    rendered: Sequence[Any],
+    result: dict[str, Any],
+    source_image_state: Any,
+    file_path: str,
+) -> tuple[Any, ...]:
+    return (
+        *rendered,
+        result,
+        source_image_state,
+        file_path,
+        _empty_audit_payload(),
+        gr.update(visible=False),
+        "",
+    )
+
+
+def _build_legacy_fallback_request(
+    *,
+    kind: str,
+    title: str,
+    summary: str,
+    model_name: str,
+    reason: str,
+    bundle_path: str,
+    request_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    bundle_paths = [bundle_path] if bundle_path else []
+    payload: dict[str, Any] = {
+        "kind": str(kind),
+        "title": str(title),
+        "summary": str(summary),
+        "models": [str(model_name)] if model_name else [],
+        "reason": str(reason),
+        "bundle_paths": bundle_paths,
+    }
+    payload.update(dict(request_context))
+    return payload
+
+
+def _analysis_status_html(
+    result: dict[str, Any] | None,
+    *,
+    render_config: Mapping[str, Any] | None,
+    percent: float,
+    title: str,
+    detail: str,
+    tone: str = "teal",
+    fallback_request: Mapping[str, Any] | None = None,
+) -> str:
+    return build_control_status_html(
+        result,
+        render_config=render_config,
+        analysis_progress=_analysis_progress_payload(percent, title, detail, tone=tone),
+        fallback_request=fallback_request,
+    )
+
+
+def _voice_ui_output_payload(
+    *,
+    snapshot: Mapping[str, Any],
+    result_state: Mapping[str, Any] | None,
+    render_config: Mapping[str, Any],
+) -> tuple[bool, bool, bool, float, str, str, str]:
+    runtime_snapshot = dict(snapshot)
+    return (
+        bool(runtime_snapshot.get("voice_enabled", False)),
+        bool(runtime_snapshot.get("listening_enabled", False)),
+        bool(runtime_snapshot.get("automatic_timer_enabled", False)),
+        float(runtime_snapshot.get("tracker_capture_interval_sec", VOICE.tracker_interval_sec_default) or VOICE.tracker_interval_sec_default),
+        str(runtime_snapshot.get("timezone_name", VOICE.timezone_name or "") or ""),
+        build_voice_console_html(
+            snapshot=runtime_snapshot,
+            market_context=_voice_market_context(result_state),
+        ),
+        build_control_status_html(
+            dict(result_state) if isinstance(result_state, Mapping) else None,
+            render_config=render_config,
+        ),
+    )
+
+
+def _apply_voice_controls_ui(
+    voice_enabled: bool,
+    listening_enabled: bool,
+    automatic_timer_enabled: bool,
+    tracker_capture_interval_sec: float,
+    timezone_name: str,
+    result_state: Mapping[str, Any] | None,
+    overlay_mode: str,
+    vision_extras: Any,
+    council_scope: str,
+    min_conf_global: float,
+    min_conf_latest: float,
+    history_depth: float,
+    label_density: float,
+    projection_focus: float,
+    debug_depth: float,
+    fuse_timeframe_overlays: bool,
+) -> tuple[bool, bool, bool, float, str, str, str]:
+    snapshot = apply_voice_preferences(
+        voice_enabled=bool(voice_enabled),
+        listening_enabled=bool(listening_enabled),
+        automatic_timer_enabled=bool(automatic_timer_enabled),
+        tracker_capture_interval_sec=float(tracker_capture_interval_sec),
+        timezone_name=str(timezone_name or ""),
+    )
+    render_config = _build_render_config(
+        overlay_mode,
+        min_conf_global,
+        min_conf_latest,
+        history_depth,
+        label_density,
+        projection_focus,
+        debug_depth,
+        fuse_timeframe_overlays=fuse_timeframe_overlays,
+        vision_extras=vision_extras,
+        council_scope=council_scope,
+    )
+    return _voice_ui_output_payload(
+        snapshot=snapshot,
+        result_state=result_state,
+        render_config=render_config,
+    )
+
+
+def _run_voice_command_ui(
+    command_text: str,
+    result_state: Mapping[str, Any] | None,
+    overlay_mode: str,
+    vision_extras: Any,
+    council_scope: str,
+    min_conf_global: float,
+    min_conf_latest: float,
+    history_depth: float,
+    label_density: float,
+    projection_focus: float,
+    debug_depth: float,
+    fuse_timeframe_overlays: bool,
+) -> tuple[bool, bool, bool, float, str, str, str]:
+    if not str(command_text or "").strip():
+        snapshot = get_voice_runtime_snapshot()
+    else:
+        execution = execute_voice_command(
+            command_text,
+            market_context=_voice_market_context(result_state),
+        )
+        snapshot = dict(execution.get("snapshot", get_voice_runtime_snapshot()))
+    render_config = _build_render_config(
+        overlay_mode,
+        min_conf_global,
+        min_conf_latest,
+        history_depth,
+        label_density,
+        projection_focus,
+        debug_depth,
+        fuse_timeframe_overlays=fuse_timeframe_overlays,
+        vision_extras=vision_extras,
+        council_scope=council_scope,
+    )
+    return _voice_ui_output_payload(
+        snapshot=snapshot,
+        result_state=result_state,
+        render_config=render_config,
+    )
+
+
 def _empty_workspace_outputs() -> tuple[Any, ...]:
-    empty = _placeholder_panel("Awaiting Chart Pair", "Upload exactly two chart images, with the higher timeframe first and the lower timeframe second.")
+    empty = _placeholder_panel("Awaiting Chart Quartet", f"Upload exactly {MULTI_TIMEFRAME_UPLOAD_FILES} chart images, with the first two as the higher timeframe pair and the last two as the lower timeframe pair.")
     return (
         None,
         None,
         None,
         empty,
-        _placeholder_panel("Model Council", "Open this tab to lazy-load the council worker and run the heavyweight ensemble once for the active static image."),
+        _placeholder_panel("Cross-Checks", "Open this tab to load the deeper cross-check pass for the active chart."),
         _placeholder_panel("Forecast & Risk", "Forecast distribution and system reliability will appear here."),
-        _placeholder_panel("Memory Recall", "Local memory retrieval will appear here."),
-        _placeholder_panel("Gate Matrix", "Gate pass/fail structure will appear here."),
-        _placeholder_panel("Evidence Panel", "Chart evidence and transition traces will appear here."),
-        _placeholder_panel("Diagnostics Cockpit", "Runtime diagnostics will appear here after the first signal pass."),
+        _placeholder_panel("Case Recall", "Similar reviewed cases will appear here."),
+        _placeholder_panel("Readiness Checks", "Readiness checks will appear here after a signal run."),
+        _placeholder_panel("Chart Evidence", "Chart evidence and supporting clues will appear here."),
+        _placeholder_panel("Review Notes", "Structured review notes will appear here after the first signal pass."),
         {},
         _placeholder_panel("Timeframe Overlays", "Higher and lower timeframe overlays will appear here after a run."),
         build_control_status_html(None, None),
@@ -9619,7 +19021,7 @@ def _empty_workspace_outputs() -> tuple[Any, ...]:
         _placeholder_panel("Session Timeline", "Session captures will appear here in order."),
         _placeholder_panel("Pattern Browser", "Similar session cases will appear here once enough charts have been reviewed."),
         None,
-        "Upload exactly two chart images: higher timeframe first, lower timeframe second.",
+        _build_operator_brief_html(None),
         {},
         None,
         "",
@@ -9650,14 +19052,17 @@ def _render_workspace_from_result(
         else _build_overlay_image(
             source_image,
             result,
-            overlay_mode=str(render_config.get("overlay_mode", "history-plus-projection")),
+            overlay_mode=str(render_config.get("overlay_mode", DEFAULT_OVERLAY_MODE)),
             min_conf_global=float(render_config.get("min_conf_global", 0.42) or 0.42),
             min_conf_latest=float(render_config.get("min_conf_latest", 0.50) or 0.50),
             history_limit=int(render_config.get("history_depth", 8) or 8),
             label_budget=int(render_config.get("label_density", 10) or 10),
             projection_confidence_floor=float(render_config.get("projection_focus", 0.35) or 0.35),
+            vision_extras=render_config.get("vision_extras", DEFAULT_VISION_EXTRAS),
         ),
     )
+    multi_timeframe_overlay = _build_active_multi_timeframe_stage_overlay(display_result, render_config)
+    stage_overlay = multi_timeframe_overlay if multi_timeframe_overlay is not None else overlay
     cv_debug = pg_main.build_cv_debug_payload(display_result, render_config=render_config)
     gauge = precomputed_gauge if precomputed_gauge is not None else _build_decision_gauge_from_result(display_result)
     skill_fig = precomputed_skill_fig if precomputed_skill_fig is not None else _build_skill_figure(personal, display_result)
@@ -9667,8 +19072,6 @@ def _render_workspace_from_result(
         else None
     )
     heatmap_image = _compose_confidence_heatmap_image(heatmap_payload, source_image) if heatmap_payload is not None else None
-    zone_learning = cast(dict[str, Any], display_result.get("zone_learning", {}))
-    multi_timeframe = cast(dict[str, Any], display_result.get("multi_timeframe", {}))
     heatmap_output, heatmap_summary = (
         (heatmap_image, _build_heatmap_summary_html(display_result, source_image, heatmap_payload=heatmap_payload))
         if include_heatmap
@@ -9679,39 +19082,18 @@ def _render_workspace_from_result(
         if include_compare and heatmap_image is not None
         else _empty_compare_desk_html()
     )
-    timeframe_overlay_output = _build_timeframe_overlay_gallery_html(display_result)
-    analyst_brief = (
-        human_readable_summary(display_result)
-        + "\n\nZone Learning:\n"
-        + (
-            f"matches={int(zone_learning.get('match_count', 0) or 0)} "
-            f"preferred={str(zone_learning.get('preferred_action', 'HOLD')).upper()} "
-            f"alignment={float(zone_learning.get('alignment_score', 0.0) or 0.0):.2f}"
-        )
-        + (
-            "\n\nMulti-Timeframe:\n" + str(multi_timeframe.get("summary", "single-timeframe run"))
-            if multi_timeframe
-            else ""
-        )
-        + "\n\nStructured CV Read:\n"
-        + explain_cv_debug_payload(cv_debug, result=display_result)
-        + "\n\nActive View Controls:\n"
-        + (
-            f"overlay_mode={render_config.get('overlay_mode', 'history-plus-projection')} "
-            f"global_min={float(render_config.get('min_conf_global', 0.42) or 0.42):.2f} "
-            f"latest_min={float(render_config.get('min_conf_latest', 0.50) or 0.50):.2f} "
-            f"history_depth={int(render_config.get('history_depth', 8) or 8)} "
-            f"label_density={int(render_config.get('label_density', 10) or 10)} "
-            f"projection_floor={float(render_config.get('projection_focus', 0.35) or 0.35):.2f} "
-            f"debug_depth={int(render_config.get('debug_depth', 6) or 6)}"
-        )
-    )
+    timeframe_overlay_output = _build_timeframe_overlay_gallery_html(display_result, source_image_state)
+    analyst_brief = _build_operator_brief_html(display_result, cv_debug=cv_debug, render_config=render_config)
     return (
-        overlay,
+        stage_overlay,
         gauge,
         skill_fig,
         build_signal_overview_html(display_result),
-        build_model_council_html(display_result),
+        build_model_council_html(
+            display_result,
+            source_image,
+            requested_scope=str(render_config.get("council_scope", DEFAULT_COUNCIL_SCOPE)),
+        ),
         build_forecast_panel_html(display_result),
         build_memory_panel_html(display_result, detail_depth=max(2, int(render_config.get("debug_depth", 6) or 6) - 1)),
         build_gate_matrix_html(display_result),
@@ -9745,9 +19127,9 @@ def _render_live_preview_from_result(
     if source_image is None:
         return (
             None,
-            _placeholder_panel("Memory Recall", "Local memory retrieval will appear here."),
-            _placeholder_panel("Evidence Panel", "Chart evidence and transition traces will appear here."),
-            _placeholder_panel("Diagnostics Cockpit", "Runtime diagnostics will appear here after the first signal pass."),
+            _placeholder_panel("Case Recall", "Similar reviewed cases will appear here."),
+            _placeholder_panel("Chart Evidence", "Chart evidence and supporting clues will appear here."),
+            _placeholder_panel("Review Notes", "Structured review notes will appear here after the first signal pass."),
             build_control_status_html(None, None),
             _gr_skip(),
         )
@@ -9756,13 +19138,16 @@ def _render_live_preview_from_result(
     overlay = _build_overlay_image(
         source_image,
         result_state,
-        overlay_mode=str(render_config.get("overlay_mode", "history-plus-projection")),
+        overlay_mode=str(render_config.get("overlay_mode", DEFAULT_OVERLAY_MODE)),
         min_conf_global=float(render_config.get("min_conf_global", 0.42) or 0.42),
         min_conf_latest=float(render_config.get("min_conf_latest", 0.50) or 0.50),
         history_limit=int(render_config.get("history_depth", 8) or 8),
         label_budget=int(render_config.get("label_density", 10) or 10),
         projection_confidence_floor=float(render_config.get("projection_focus", 0.35) or 0.35),
+        vision_extras=render_config.get("vision_extras", DEFAULT_VISION_EXTRAS),
     )
+    multi_timeframe_overlay = _build_active_multi_timeframe_stage_overlay(display_result, render_config)
+    stage_overlay = multi_timeframe_overlay if multi_timeframe_overlay is not None else overlay
     cv_debug = pg_main.build_cv_debug_payload(display_result, render_config=render_config)
     compare_output: Any = _gr_skip()
     if include_compare:
@@ -9775,7 +19160,7 @@ def _render_live_preview_from_result(
             render_config=render_config,
         )
     return (
-        overlay,
+        stage_overlay,
         build_memory_panel_html(display_result, detail_depth=max(2, int(render_config.get("debug_depth", 6) or 6) - 1)),
         build_evidence_panel_html(cv_debug, display_result, detail_depth=int(render_config.get("label_density", 10) or 10)),
         build_debug_console_html(display_result, cv_debug, render_config=render_config),
@@ -9787,12 +19172,15 @@ def _render_live_preview_from_result(
 def load_audit_tab(
     result_state: dict[str, Any] | None,
     overlay_mode: str,
-    min_conf_global: float,
-    min_conf_latest: float,
-    history_depth: float,
-    label_density: float,
-    projection_focus: float,
-    debug_depth: float,
+    vision_extras: Any = None,
+    council_scope: str = DEFAULT_COUNCIL_SCOPE,
+    min_conf_global: float = 0.42,
+    min_conf_latest: float = 0.50,
+    history_depth: float = 8,
+    label_density: float = 10,
+    projection_focus: float = 0.35,
+    debug_depth: float = 6,
+    fuse_timeframe_overlays: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     if not result_state:
         return _empty_audit_payload(), True
@@ -9804,10 +19192,60 @@ def load_audit_tab(
         label_density=label_density,
         projection_focus=projection_focus,
         debug_depth=debug_depth,
+        fuse_timeframe_overlays=fuse_timeframe_overlays,
+        vision_extras=vision_extras,
+        council_scope=council_scope,
     )
     display_result = _sanitize_result_for_ui(result_state)
     cv_debug = pg_main.build_cv_debug_payload(display_result, render_config=render_config)
     return build_runtime_audit_payload(display_result, cv_debug, render_config=render_config), True
+
+
+def load_prediction_images_tab(
+    result_state: dict[str, Any] | None,
+    source_image_state: Any,
+) -> tuple[Image.Image | None, Image.Image | None, str]:
+    """
+    Load and render the Prediction Images Viewer tab.
+    Displays source image, prediction overlay, and model inference metadata.
+    """
+    source_image = _image_from_state(source_image_state)
+
+    if not result_state or source_image is None:
+        empty_placeholder = _placeholder_panel(
+            "Prediction Images Viewer",
+            "Run a signal analysis to display prediction images and model decisions."
+        )
+        return None, None, empty_placeholder
+
+    try:
+        # Source image is the original input
+        source_display = source_image.copy() if source_image else None
+
+        # Build prediction overlay using the same visualization as main overlay
+        overlay_img = _build_overlay_image(
+            source_image,
+            result_state,
+            overlay_mode="hybrid-vision",
+            min_conf_global=0.42,
+            min_conf_latest=0.50,
+            history_limit=8,
+            label_budget=10,
+            projection_confidence_floor=0.35,
+            vision_extras=DEFAULT_VISION_EXTRAS,
+        )
+
+        # Build metadata HTML with decision information
+        metadata_html = _build_prediction_images_viewer_html(result_state)
+
+        return source_display, overlay_img, metadata_html
+    except Exception as e:
+        logger.exception("Error loading prediction images tab: %s", e)
+        error_html = _placeholder_panel(
+            "Prediction Images Error",
+            f"Failed to load prediction visualizations: {str(e)[:100]}"
+        )
+        return None, None, error_html
 
 
 def load_heatmap_tab(
@@ -9831,12 +19269,15 @@ def load_compare_desk_tab(
     result_state: dict[str, Any] | None,
     source_image_state: Any,
     overlay_mode: str,
-    min_conf_global: float,
-    min_conf_latest: float,
-    history_depth: float,
-    label_density: float,
-    projection_focus: float,
-    debug_depth: float,
+    vision_extras: Any = None,
+    council_scope: str = DEFAULT_COUNCIL_SCOPE,
+    min_conf_global: float = 0.42,
+    min_conf_latest: float = 0.50,
+    history_depth: float = 8,
+    label_density: float = 10,
+    projection_focus: float = 0.35,
+    debug_depth: float = 6,
+    fuse_timeframe_overlays: bool = False,
 ) -> tuple[str, bool]:
     source_image = _image_from_state(source_image_state)
     if not result_state or source_image is None:
@@ -9849,17 +19290,21 @@ def load_compare_desk_tab(
         label_density=label_density,
         projection_focus=projection_focus,
         debug_depth=debug_depth,
+        fuse_timeframe_overlays=fuse_timeframe_overlays,
+        vision_extras=vision_extras,
+        council_scope=council_scope,
     )
     display_result = _sanitize_result_for_ui(result_state)
     overlay = _build_overlay_image(
         source_image,
         result_state,
-        overlay_mode=str(render_config.get("overlay_mode", "history-plus-projection")),
+        overlay_mode=str(render_config.get("overlay_mode", DEFAULT_OVERLAY_MODE)),
         min_conf_global=float(render_config.get("min_conf_global", 0.42) or 0.42),
         min_conf_latest=float(render_config.get("min_conf_latest", 0.50) or 0.50),
         history_limit=int(render_config.get("history_depth", 8) or 8),
         label_budget=int(render_config.get("label_density", 10) or 10),
         projection_confidence_floor=float(render_config.get("projection_focus", 0.35) or 0.35),
+        vision_extras=render_config.get("vision_extras", DEFAULT_VISION_EXTRAS),
     )
     heatmap_image = _build_confidence_heatmap_image(display_result, source_image)
     return _build_compare_desk_html(
@@ -9876,18 +19321,24 @@ def load_model_council_tab(
     source_image_state: Any,
     active_file_path_state: str,
     overlay_mode: str,
-    min_conf_global: float,
-    min_conf_latest: float,
-    history_depth: float,
-    label_density: float,
-    projection_focus: float,
-    debug_depth: float,
-    audit_tab_loaded: bool,
-    heatmap_tab_loaded: bool,
-    compare_tab_loaded: bool,
-) -> tuple[Any, ...]:
+    vision_extras: Any = None,
+    council_scope: str = DEFAULT_COUNCIL_SCOPE,
+    min_conf_global: float = 0.42,
+    min_conf_latest: float = 0.50,
+    history_depth: float = 8,
+    label_density: float = 10,
+    projection_focus: float = 0.35,
+    debug_depth: float = 6,
+    audit_tab_loaded: bool = False,
+    heatmap_tab_loaded: bool = False,
+    compare_tab_loaded: bool = False,
+    fuse_timeframe_overlays: bool = False,
+) -> Any:
+    from phoenixguard.runtime.local_ensemble_runtime import LegacyFallbackApprovalRequired
+
     if not result_state:
-        return _empty_workspace_outputs()
+        yield _workspace_run_empty_outputs()
+        return
 
     render_config = _build_render_config(
         overlay_mode=overlay_mode,
@@ -9897,14 +19348,43 @@ def load_model_council_tab(
         label_density=label_density,
         projection_focus=projection_focus,
         debug_depth=debug_depth,
+        fuse_timeframe_overlays=fuse_timeframe_overlays,
+        vision_extras=vision_extras,
+        council_scope=council_scope,
     )
     source_image = _image_from_state(source_image_state)
     if source_image is None:
-        return _empty_workspace_outputs()
+        yield _workspace_run_empty_outputs()
+        return
 
     local_ensemble = cast(dict[str, Any], result_state.get("local_ensemble", {}))
     existing_models = cast(dict[str, Any], local_ensemble.get("models", {}))
-    if existing_models:
+    requested_scope = _normalize_council_scope(render_config.get("council_scope", DEFAULT_COUNCIL_SCOPE))
+    if requested_scope == "off":
+        rendered = list(
+            _render_workspace_from_result(
+                result_state,
+                source_image_state,
+                render_config,
+                include_audit=bool(audit_tab_loaded),
+                include_heatmap=bool(heatmap_tab_loaded),
+                include_compare=bool(compare_tab_loaded),
+            )
+        )
+        rendered[4] = _placeholder_panel(
+            "Cross-Checks",
+            "Cross-check review is off in the current controls. Switch Cross-Check Depth back to Smart, Extended, or Deep to populate this panel.",
+        )
+        yield _workspace_run_success_outputs(tuple(rendered), result_state, source_image_state, str(active_file_path_state or ""))
+        return
+    council_meta = cast(dict[str, Any], result_state.get("model_council", {}))
+    current_scope = _normalize_council_scope(council_meta.get("scope", DEFAULT_COUNCIL_SCOPE))
+    scope_satisfied = bool(existing_models)
+    if requested_scope == "full":
+        scope_satisfied = bool(existing_models) and current_scope == "full"
+    elif requested_scope == "half":
+        scope_satisfied = bool(existing_models) and current_scope in {"half", "full"}
+    if scope_satisfied and existing_models:
         rendered = _render_workspace_from_result(
             result_state,
             source_image_state,
@@ -9913,7 +19393,8 @@ def load_model_council_tab(
             include_heatmap=bool(heatmap_tab_loaded),
             include_compare=bool(compare_tab_loaded),
         )
-        return (*rendered, result_state, source_image_state, str(active_file_path_state or ""))
+        yield _workspace_run_success_outputs(rendered, result_state, source_image_state, str(active_file_path_state or ""))
+        return
 
     multi_timeframe = cast(dict[str, Any], result_state.get("multi_timeframe", {}))
     entries = cast(list[dict[str, Any]], multi_timeframe.get("entries", []))
@@ -9934,12 +19415,41 @@ def load_model_council_tab(
             include_heatmap=bool(heatmap_tab_loaded),
             include_compare=bool(compare_tab_loaded),
         )
-        return (*rendered, result_state, source_image_state, active_file_path)
+        yield _workspace_run_success_outputs(rendered, result_state, source_image_state, active_file_path)
+        return
 
     labels = ["Higher TF", "Lower TF", "Frame 3", "Frame 4"]
+    entry_timeframes: list[str] = [
+        str(entry.get("timeframe", "") or "").strip().upper()
+        for entry in entries
+    ]
     analyzed: list[dict[str, Any]] = []
+    yield _workspace_run_update(
+        control_status_value=_analysis_status_html(
+            result_state,
+            render_config=render_config,
+            percent=12.0,
+            title="Loading deeper cross-checks",
+            detail="The desk is preparing the deeper second-opinion pass for the active chart set. This can take a little longer than the base run.",
+            tone="amber",
+        ),
+        fallback_request_value={},
+        fallback_group_value=gr.update(visible=False),
+        fallback_html_value="",
+    )
     try:
         for index, file_path in enumerate(bundle_paths):
+            progress_percent = float(np.clip(22.0 + (index / max(len(bundle_paths), 1)) * 58.0, 0.0, 90.0))
+            yield _workspace_run_update(
+                control_status_value=_analysis_status_html(
+                    result_state,
+                    render_config=render_config,
+                    percent=progress_percent,
+                    title=f"Cross-check pass on {labels[min(index, len(labels) - 1)].lower()}",
+                    detail="The deeper review pass is aligning supporting reads so the overlay can be refined with more confirmation context.",
+                    tone="amber",
+                )
+            )
             refined_result, overlay_image, _gauge_unused, _skill_unused = pg_main.run_inference(
                 file_path,
                 annotation_text="",
@@ -9951,6 +19461,17 @@ def load_model_council_tab(
                 projection_focus=float(render_config["projection_focus"]),
                 side_effect_free=True,
                 use_local_ensemble=True,
+                vision_extras=render_config.get("vision_extras", DEFAULT_VISION_EXTRAS),
+                council_scope=str(render_config.get("council_scope", DEFAULT_COUNCIL_SCOPE)),
+                timeframe_override=(
+                    entry_timeframes[index]
+                    if index < len(entry_timeframes) and entry_timeframes[index]
+                    else (
+                        str(render_config.get("higher_timeframe", "M15") or "M15").upper()
+                        if index == 0
+                        else str(render_config.get("lower_timeframe", "M5") or "M5").upper()
+                    )
+                ),
             )
             refined_source_state = _source_image_to_state(file_path)
             analyzed.append(
@@ -9968,10 +19489,53 @@ def load_model_council_tab(
                     ),
                 }
             )
+    except LegacyFallbackApprovalRequired as exc:
+        request_state = _build_legacy_fallback_request(
+            kind="lazy_council",
+            title="Compatibility Approval Required",
+            summary="The deeper review pass paused because it would need to use a one-time compatibility path.",
+            model_name=str(exc.model_name),
+            reason=str(exc.reason),
+            bundle_path=str(exc.bundle_path) if exc.bundle_path is not None else "",
+            request_context={
+                "result_state": result_state,
+                "source_image_state": source_image_state,
+                "active_file_path_state": active_file_path,
+                "render_config": dict(render_config),
+                "audit_tab_loaded": bool(audit_tab_loaded),
+                "heatmap_tab_loaded": bool(heatmap_tab_loaded),
+                "compare_tab_loaded": bool(compare_tab_loaded),
+            },
+        )
+        yield _workspace_run_update(
+            control_status_value=_analysis_status_html(
+                result_state,
+                render_config=render_config,
+                percent=52.0,
+                title="Paused for compatibility approval",
+                detail="The desk stopped before using the one-time compatibility path. Review the request below and approve only if you want to continue that way.",
+                tone="amber",
+                fallback_request=request_state,
+            ),
+            fallback_request_value=request_state,
+            fallback_group_value=gr.update(visible=True),
+            fallback_html_value=_build_legacy_fallback_guard_html(request_state),
+        )
+        return
     except Exception as exc:
         logger.exception("Lazy model council load failed: %s", exc)
-        raise gr.Error(f"Model Council lazy load failed: {exc}") from exc
+        raise gr.Error(f"Cross-check load failed: {exc}") from exc
 
+    yield _workspace_run_update(
+        control_status_value=_analysis_status_html(
+            result_state,
+            render_config=render_config,
+            percent=94.0,
+            title="Refreshing deeper review panels",
+            detail="The refined overlay, cross-check cards, and supporting panels are being refreshed with the deeper pass results.",
+            tone="amber",
+        )
+    )
     refined_bundle_result = (
         _build_multi_timeframe_result(analyzed)
         if len(analyzed) > 1
@@ -9987,7 +19551,7 @@ def load_model_council_tab(
         include_heatmap=bool(heatmap_tab_loaded),
         include_compare=bool(compare_tab_loaded),
     )
-    return (*rendered, refined_bundle_result, refined_source_state, refined_file_path)
+    yield _workspace_run_success_outputs(rendered, refined_bundle_result, refined_source_state, refined_file_path)
 
 
 def _render_scenario_lab_from_result(
@@ -10006,17 +19570,23 @@ def _render_scenario_lab_from_result(
     overlay = _build_overlay_image(
         source_image,
         result_state,
-        overlay_mode=str(render_config.get("overlay_mode", "history-plus-projection")),
+        overlay_mode=str(render_config.get("overlay_mode", DEFAULT_OVERLAY_MODE)),
         min_conf_global=float(render_config.get("min_conf_global", 0.42) or 0.42),
         min_conf_latest=float(render_config.get("min_conf_latest", 0.50) or 0.50),
         history_limit=int(render_config.get("history_depth", 8) or 8),
         label_budget=int(render_config.get("label_density", 10) or 10),
         projection_confidence_floor=float(render_config.get("projection_focus", 0.35) or 0.35),
+        vision_extras=render_config.get("vision_extras", DEFAULT_VISION_EXTRAS),
     )
     cv_debug = pg_main.build_cv_debug_payload(display_result, render_config=render_config)
     visible_count = int(cv_debug.get("visible_detection_count", 0) or 0)
     overlay_chip = _chip(
-        f"overlay {str(render_config.get('overlay_mode', 'history-plus-projection')).replace('-', ' ')}",
+        f"overlay {str(render_config.get('overlay_mode', DEFAULT_OVERLAY_MODE)).replace('-', ' ')}",
+        "soft",
+    )
+    extras = _normalize_vision_extras(render_config.get("vision_extras", DEFAULT_VISION_EXTRAS))
+    extras_chip = _chip(
+        f"extras {', '.join(_vision_extra_label(item) for item in extras) or 'none'}",
         "soft",
     )
     projection_chip = _chip(f"projection floor {_fmt_num(render_config.get('projection_focus', 0.35), 2)}", "amber")
@@ -10026,11 +19596,395 @@ def _render_scenario_lab_from_result(
             "<div class='pg-panel'>"
             "<div class='pg-section-title'>Scenario Lab</div>"
             "<div class='pg-muted'>This sandbox rerender is isolated from the main decision desk, so you can rehearse alternate visibility thresholds and overlay density without overwriting the live baseline.</div>"
-            f"<div class='pg-chip-row'>{_chip(f'visible detections {visible_count}', 'teal')}{overlay_chip}{projection_chip}</div>"
+            f"<div class='pg-chip-row'>{_chip(f'visible detections {visible_count}', 'teal')}{overlay_chip}{extras_chip}{projection_chip}</div>"
             f"<div class='pg-muted'>Signal remains {str(display_result.get('action', 'HOLD')).upper()} at {_fmt_pct01(display_result.get('confidence', 0.0))}. Scenario changes here only alter the surfaced view and diagnostics emphasis.</div>"
             "</div>"
         ),
     )
+
+
+def _manual_inference_queue_path() -> Path:
+    return RUNTIME.data_dir / "manual_inference_jobs.json"
+
+
+def _manual_inference_results_dir() -> Path:
+    return RUNTIME.data_dir / "manual_inference_results"
+
+
+def _normalize_manual_inference_render_config(render_config: Mapping[str, Any] | None) -> dict[str, Any]:
+    payload = dict(render_config or {})
+    try:
+        higher_timeframe = payload["higher_timeframe"] if "higher_timeframe" in payload else "M15"
+        lower_timeframe = payload["lower_timeframe"] if "lower_timeframe" in payload else "M5"
+        return _build_render_config(
+            overlay_mode=str(payload.get("overlay_mode", DEFAULT_OVERLAY_MODE)),
+            min_conf_global=float(payload.get("min_conf_global", 0.42) or 0.42),
+            min_conf_latest=float(payload.get("min_conf_latest", 0.50) or 0.50),
+            history_depth=float(payload.get("history_depth", 8) or 8),
+            label_density=float(payload.get("label_density", 10) or 10),
+            projection_focus=float(payload.get("projection_focus", 0.35) or 0.35),
+            debug_depth=float(payload.get("debug_depth", 6) or 6),
+            fuse_timeframe_overlays=bool(payload.get("fuse_timeframe_overlays", False)),
+            vision_extras=payload.get("vision_extras", DEFAULT_VISION_EXTRAS),
+            council_scope=payload.get("council_scope", DEFAULT_COUNCIL_SCOPE),
+            higher_timeframe=str(higher_timeframe or ""),
+            lower_timeframe=str(lower_timeframe or ""),
+        )
+    except Exception:
+        return _build_render_config(
+            overlay_mode=DEFAULT_OVERLAY_MODE,
+            min_conf_global=0.42,
+            min_conf_latest=0.50,
+            history_depth=8,
+            label_density=10,
+            projection_focus=0.35,
+            debug_depth=6,
+            fuse_timeframe_overlays=False,
+            vision_extras=DEFAULT_VISION_EXTRAS,
+            council_scope=DEFAULT_COUNCIL_SCOPE,
+            higher_timeframe="M15",
+            lower_timeframe="M5",
+        )
+
+
+def _expand_manual_inference_upload_paths(upload_paths: Sequence[str]) -> list[str]:
+    paths = [str(path) for path in upload_paths if str(path).strip()]
+    if len(paths) == MULTI_TIMEFRAME_UPLOAD_FILES:
+        return paths[:MULTI_TIMEFRAME_UPLOAD_FILES]
+    if len(paths) == 2:
+        higher_path, lower_path = paths
+        return [higher_path, higher_path, lower_path, lower_path]
+    return paths
+
+
+def _load_manual_inference_jobs_locked() -> list[dict[str, Any]]:
+    payload_obj = _read_json_file(_manual_inference_queue_path(), [])
+    if not isinstance(payload_obj, list):
+        return []
+    jobs: list[dict[str, Any]] = []
+    for raw_obj in cast(Sequence[object], payload_obj):
+        if not isinstance(raw_obj, Mapping):
+            continue
+        raw = cast(Mapping[object, Any], raw_obj)
+        raw_data = _mapping_to_str_dict(raw)
+        render_config_obj = raw_data.get("render_config", {})
+        legacy_obj = raw_data.get("legacy_fallback", {})
+        jobs.append(
+            {
+                "job_id": str(raw_data.get("job_id", uuid4().hex)),
+                "created_at": str(raw_data.get("created_at", utc_now_iso())),
+                "updated_at": str(raw_data.get("updated_at", utc_now_iso())),
+                "status": str(raw_data.get("status", "queued")).strip().lower() or "queued",
+                "source": str(raw_data.get("source", "manual-ui")),
+                "upload_paths": [str(path) for path in cast(Sequence[Any], raw_data.get("upload_paths", [])) if str(path).strip()],
+                "render_config": _normalize_manual_inference_render_config(cast(Mapping[str, Any] | None, render_config_obj if isinstance(render_config_obj, Mapping) else None)),
+                "audit_tab_loaded": bool(raw_data.get("audit_tab_loaded", False)),
+                "heatmap_tab_loaded": bool(raw_data.get("heatmap_tab_loaded", False)),
+                "compare_tab_loaded": bool(raw_data.get("compare_tab_loaded", False)),
+                "attempt_count": int(raw_data.get("attempt_count", 0) or 0),
+                "last_error": str(raw_data.get("last_error", "")),
+                "result_path": str(raw_data.get("result_path", "")),
+                "final_source_path": str(raw_data.get("final_source_path", "")),
+                "recovered": bool(raw_data.get("recovered", False)),
+                "legacy_fallback": _mapping_to_str_dict(legacy_obj),
+            }
+        )
+    jobs.sort(key=lambda item: str(item.get("created_at", "")))
+    return jobs
+
+
+def _save_manual_inference_jobs_locked(jobs: Sequence[Mapping[str, Any]]) -> None:
+    final_states = {"completed", "failed", "blocked_legacy_fallback"}
+    active = [dict(job) for job in jobs if str(job.get("status", "")).strip().lower() not in final_states]
+    finished = [dict(job) for job in jobs if str(job.get("status", "")).strip().lower() in final_states]
+    trimmed = active + finished[-64:]
+    _write_json_atomic(_manual_inference_queue_path(), trimmed)
+
+
+def _enqueue_manual_inference_job(
+    upload_paths: Sequence[str],
+    render_config: Mapping[str, Any],
+    *,
+    audit_tab_loaded: bool,
+    heatmap_tab_loaded: bool,
+    compare_tab_loaded: bool,
+    source: str,
+) -> dict[str, Any]:
+    job: dict[str, Any] = {
+        "job_id": uuid4().hex,
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+        "status": "queued",
+        "source": str(source),
+        "upload_paths": [str(path) for path in upload_paths[:MULTI_TIMEFRAME_UPLOAD_FILES]],
+        "render_config": _normalize_manual_inference_render_config(render_config),
+        "audit_tab_loaded": bool(audit_tab_loaded),
+        "heatmap_tab_loaded": bool(heatmap_tab_loaded),
+        "compare_tab_loaded": bool(compare_tab_loaded),
+        "attempt_count": 0,
+        "last_error": "",
+        "result_path": "",
+        "final_source_path": "",
+        "recovered": False,
+        "legacy_fallback": {},
+    }
+    with _manual_inference_jobs_lock:
+        jobs = _load_manual_inference_jobs_locked()
+        jobs.append(job)
+        _save_manual_inference_jobs_locked(jobs)
+    return dict(job)
+
+
+def _update_manual_inference_job(job_id: str, **updates: Any) -> dict[str, Any]:
+    with _manual_inference_jobs_lock:
+        jobs = _load_manual_inference_jobs_locked()
+        for index, job in enumerate(jobs):
+            if str(job.get("job_id", "")) != str(job_id):
+                continue
+            updated = dict(job)
+            updated.update(dict(updates))
+            updated["job_id"] = str(job_id)
+            updated["updated_at"] = utc_now_iso()
+            jobs[index] = updated
+            _save_manual_inference_jobs_locked(jobs)
+            return updated
+    return {}
+
+
+def _mark_manual_inference_job_running(job_id: str, *, recovered: bool = False) -> dict[str, Any]:
+    with _manual_inference_jobs_lock:
+        jobs = _load_manual_inference_jobs_locked()
+        for index, job in enumerate(jobs):
+            if str(job.get("job_id", "")) != str(job_id):
+                continue
+            updated = dict(job)
+            updated["status"] = "running"
+            updated["attempt_count"] = int(updated.get("attempt_count", 0) or 0) + 1
+            updated["last_error"] = ""
+            updated["recovered"] = bool(recovered)
+            updated["legacy_fallback"] = {}
+            updated["updated_at"] = utc_now_iso()
+            jobs[index] = updated
+            _save_manual_inference_jobs_locked(jobs)
+            return updated
+    return {}
+
+
+def _manual_inference_result_payload(
+    job: Mapping[str, Any],
+    result: Mapping[str, Any],
+    file_path: str,
+) -> dict[str, Any]:
+    result_view = _ensure_active_trade_overlay(result)
+    return {
+        "job_id": str(job.get("job_id", "")),
+        "created_at": str(job.get("created_at", "")),
+        "completed_at": utc_now_iso(),
+        "source": str(job.get("source", "manual-ui")),
+        "file_path": str(file_path),
+        "action": str(result_view.get("action", "HOLD")).upper(),
+        "headline_action": str(result_view.get("headline_action", result_view.get("action", "HOLD"))).upper(),
+        "active_trade_state": str(result_view.get("active_trade_state", "HOLD_TRUE")).upper(),
+        "directional_intent": str(result_view.get("directional_intent", "HOLD")).upper(),
+        "confidence": float(result_view.get("confidence", 0.0) or 0.0),
+        "decision_state": str(result_view.get("decision_state", "")),
+        "execution_permission": str(result_view.get("execution_permission", "")),
+        "authority_contract": dict(cast(Mapping[str, Any], result_view.get("authority_contract", {}))),
+        "packet_authority": str(result_view.get("packet_authority", "OFFLINE_ANALYSIS_ONLY")),
+        "memory_similarity": float(result_view.get("memory_similarity", 0.0) or 0.0),
+        "projection": dict(cast(Mapping[str, Any], result_view.get("projection", {}))),
+        "multi_timeframe": dict(cast(Mapping[str, Any], result_view.get("multi_timeframe", {}))),
+        "timestamp": str(result_view.get("timestamp", utc_now_iso())),
+        "render_config": dict(cast(Mapping[str, Any], job.get("render_config", {}))),
+    }
+
+
+def _complete_manual_inference_job(
+    job_id: str,
+    result: Mapping[str, Any],
+    *,
+    file_path: str,
+) -> dict[str, Any]:
+    with _manual_inference_jobs_lock:
+        jobs = _load_manual_inference_jobs_locked()
+        target: dict[str, Any] | None = next(
+            (dict(job) for job in jobs if str(job.get("job_id", "")) == str(job_id)),
+            None,
+        )
+    if target is None:
+        return {}
+    result_dir = _manual_inference_results_dir()
+    result_dir.mkdir(parents=True, exist_ok=True)
+    result_path = result_dir / f"{str(job_id)}.json"
+    _write_json_atomic(result_path, _manual_inference_result_payload(target, result, file_path))
+    return _update_manual_inference_job(
+        job_id,
+        status="completed",
+        result_path=str(result_path),
+        final_source_path=str(file_path),
+    )
+
+
+def _restore_manual_inference_jobs() -> dict[str, int]:
+    with _manual_inference_jobs_lock:
+        jobs = _load_manual_inference_jobs_locked()
+        restored = 0
+        for index, job in enumerate(jobs):
+            status = str(job.get("status", "")).strip().lower()
+            if status not in {"queued", "running"}:
+                continue
+            upload_paths = _expand_manual_inference_upload_paths(
+                [str(path) for path in cast(Sequence[Any], job.get("upload_paths", [])) if str(path).strip()]
+            )
+            if len(upload_paths) != MULTI_TIMEFRAME_UPLOAD_FILES or any(not Path(path).exists() for path in upload_paths):
+                job = dict(job)
+                job["status"] = "failed"
+                job["last_error"] = "Input files were unavailable when the job queue was restored."
+                job["updated_at"] = utc_now_iso()
+                jobs[index] = job
+                continue
+            job = dict(job)
+            job["status"] = "queued"
+            job["recovered"] = True
+            job["upload_paths"] = upload_paths
+            job["updated_at"] = utc_now_iso()
+            jobs[index] = job
+            restored += 1
+        _save_manual_inference_jobs_locked(jobs)
+    if restored:
+        logger.warning("Recovered %d manual inference job(s) from the persisted queue.", restored)
+    return {"restored_jobs": restored}
+
+
+def _analyze_manual_multi_timeframe_once(
+    upload_paths: Sequence[str],
+    render_config: Mapping[str, Any],
+) -> tuple[dict[str, Any], Any, str]:
+    normalized_render_config = _normalize_manual_inference_render_config(render_config)
+    if len(upload_paths) != MULTI_TIMEFRAME_UPLOAD_FILES:
+        raise gr.Error("Upload exactly four chart images: two higher timeframe views first, then two lower timeframe views.")
+    labels = _multi_timeframe_bundle_labels(len(upload_paths))
+    higher_timeframe = str(normalized_render_config.get("higher_timeframe", "") or "").upper()
+    lower_timeframe = str(normalized_render_config.get("lower_timeframe", "") or "").upper()
+    timeframe_overrides = [higher_timeframe, higher_timeframe, lower_timeframe, lower_timeframe]
+    analyzed: list[dict[str, Any]] = []
+    for index, file_path in enumerate(list(upload_paths)[:MULTI_TIMEFRAME_UPLOAD_FILES]):
+        result, overlay_image, _gauge_unused, _skill_unused = pg_main.run_inference(
+            file_path,
+            annotation_text="",
+            overlay_mode=str(normalized_render_config["overlay_mode"]),
+            min_conf_global=float(normalized_render_config["min_conf_global"]),
+            min_conf_latest=float(normalized_render_config["min_conf_latest"]),
+            history_depth=int(normalized_render_config["history_depth"]),
+            label_density=int(normalized_render_config["label_density"]),
+            projection_focus=float(normalized_render_config["projection_focus"]),
+            vision_extras=normalized_render_config.get("vision_extras", DEFAULT_VISION_EXTRAS),
+            council_scope=str(normalized_render_config.get("council_scope", DEFAULT_COUNCIL_SCOPE)),
+            timeframe_override=timeframe_overrides[min(index, len(timeframe_overrides) - 1)],
+        )
+        source_image_state = _source_image_to_state(file_path)
+        analyzed.append(
+            {
+                "result": result,
+                "file_path": file_path,
+                "source_image_state": source_image_state,
+                "compare_entry": _build_timeframe_compare_entry(
+                        result,
+                        source_image_state,
+                        file_path,
+                        labels[index],
+                        overlay_image=overlay_image,
+                        render_config=normalized_render_config,
+                    ),
+                }
+            )
+    result = _build_multi_timeframe_result(analyzed)
+    source_image_state = analyzed[-1]["source_image_state"]
+    file_path = str(analyzed[-1]["file_path"])
+    _append_session_entry(_build_session_entry(result, source_image_state, file_path, source="manual-multi-timeframe"))
+    return result, source_image_state, file_path
+
+
+def _process_recovered_manual_inference_job(job_id: str) -> bool:
+    from phoenixguard.runtime.local_ensemble_runtime import LegacyFallbackApprovalRequired
+
+    job = _mark_manual_inference_job_running(job_id, recovered=True)
+    if not job:
+        return False
+    upload_paths = _expand_manual_inference_upload_paths(
+        [str(path) for path in cast(Sequence[Any], job.get("upload_paths", [])) if str(path).strip()]
+    )
+    render_config = _normalize_manual_inference_render_config(cast(Mapping[str, Any], job.get("render_config", {})))
+    try:
+        result, _source_image_state, file_path = _analyze_manual_multi_timeframe_once(upload_paths, render_config)
+        _complete_manual_inference_job(job_id, result, file_path=file_path)
+        logger.info("Recovered manual inference job %s completed.", job_id)
+        return True
+    except LegacyFallbackApprovalRequired as exc:
+        _update_manual_inference_job(
+            job_id,
+            status="blocked_legacy_fallback",
+            last_error=str(exc),
+            legacy_fallback={
+                "model_name": str(exc.model_name),
+                "reason": str(exc.reason),
+                "bundle_path": str(exc.bundle_path) if exc.bundle_path is not None else "",
+                "export_ready": bool(exc.export_ready),
+            },
+        )
+        logger.warning("Recovered manual inference job %s is waiting on legacy fallback approval.", job_id)
+        return False
+    except Exception as exc:
+        _record_runtime_crash(
+            scope=f"manual_inference_job:{job_id}",
+            error=str(exc),
+            traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        )
+        _update_manual_inference_job(job_id, status="failed", last_error=str(exc))
+        logger.exception("Recovered manual inference job %s failed: %s", job_id, exc)
+        return False
+
+
+def _resume_pending_manual_inference_jobs() -> None:
+    global _manual_inference_resume_started
+    if _manual_inference_resume_started:
+        return
+    with _manual_inference_jobs_lock:
+        jobs = _load_manual_inference_jobs_locked()
+        pending_ids = [
+            str(job.get("job_id", ""))
+            for job in jobs
+            if str(job.get("status", "")).strip().lower() == "queued"
+        ]
+    if not pending_ids:
+        return
+    _manual_inference_resume_started = True
+
+    def _runner() -> None:
+        global _manual_inference_resume_started
+        try:
+            while True:
+                with _manual_inference_jobs_lock:
+                    jobs = _load_manual_inference_jobs_locked()
+                    next_job = next(
+                        (
+                            dict(job)
+                            for job in jobs
+                            if str(job.get("status", "")).strip().lower() == "queued"
+                        ),
+                        None,
+                    )
+                if next_job is None:
+                    break
+                _process_recovered_manual_inference_job(str(next_job.get("job_id", "")))
+        finally:
+            _manual_inference_resume_started = False
+
+    try:
+        _get_background_executor().submit(_runner)
+    except Exception:
+        _manual_inference_resume_started = False
+        raise
 
 
 def run_signal_workstation(
@@ -10045,12 +19999,15 @@ def run_signal_workstation(
     audit_tab_loaded: bool,
     heatmap_tab_loaded: bool,
     compare_tab_loaded: bool,
+    fuse_timeframe_overlays: bool = False,
+    higher_timeframe: str = "M15",
+    lower_timeframe: str = "M5",
 ) -> tuple[Any, ...]:
     upload_paths = _uploaded_file_paths(file_obj)
     if not upload_paths:
         return _empty_workspace_outputs()
-    if len(upload_paths) != 2:
-        raise gr.Error("Upload exactly two chart images: higher timeframe first and lower timeframe second.")
+    if len(upload_paths) != MULTI_TIMEFRAME_UPLOAD_FILES:
+        raise gr.Error("Upload exactly four chart images: two higher timeframe views first, then two lower timeframe views.")
 
     render_config = _build_render_config(
         overlay_mode=overlay_mode,
@@ -10060,40 +20017,39 @@ def run_signal_workstation(
         label_density=label_density,
         projection_focus=projection_focus,
         debug_depth=debug_depth,
+        fuse_timeframe_overlays=fuse_timeframe_overlays,
+        higher_timeframe=higher_timeframe,
+        lower_timeframe=lower_timeframe,
     )
-    labels = ["Higher TF", "Lower TF"]
-    analyzed: list[dict[str, Any]] = []
-    for index, file_path in enumerate(upload_paths[:2]):
-        result, overlay_image, _gauge_unused, _skill_unused = pg_main.run_inference(
-            file_path,
-            annotation_text="",
-            overlay_mode=str(render_config["overlay_mode"]),
-            min_conf_global=float(render_config["min_conf_global"]),
-            min_conf_latest=float(render_config["min_conf_latest"]),
-            history_depth=int(render_config["history_depth"]),
-            label_density=int(render_config["label_density"]),
-            projection_focus=float(render_config["projection_focus"]),
-        )
-        source_image_state = _source_image_to_state(file_path)
-        analyzed.append(
-            {
-                "result": result,
-                "file_path": file_path,
-                "source_image_state": source_image_state,
-                "compare_entry": _build_timeframe_compare_entry(
-                    result,
-                    source_image_state,
-                    file_path,
-                    labels[index],
-                    overlay_image=overlay_image,
-                    render_config=render_config,
-                ),
-            }
-        )
-    result = _build_multi_timeframe_result(analyzed)
-    source_image_state = analyzed[-1]["source_image_state"]
-    file_path = str(analyzed[-1]["file_path"])
-    _append_session_entry(_build_session_entry(result, source_image_state, file_path, source="manual-multi-timeframe"))
+    job = _enqueue_manual_inference_job(
+        upload_paths,
+        render_config,
+        audit_tab_loaded=bool(audit_tab_loaded),
+        heatmap_tab_loaded=bool(heatmap_tab_loaded),
+        compare_tab_loaded=bool(compare_tab_loaded),
+        source="manual-sync",
+    )
+    _mark_manual_inference_job_running(str(job.get("job_id", "")))
+    try:
+        result, source_image_state, file_path = _analyze_manual_multi_timeframe_once(upload_paths, render_config)
+        _complete_manual_inference_job(str(job.get("job_id", "")), result, file_path=file_path)
+    except Exception as exc:
+        legacy_model_name = getattr(exc, "model_name", None)
+        if legacy_model_name is not None:
+            _update_manual_inference_job(
+                str(job.get("job_id", "")),
+                status="blocked_legacy_fallback",
+                last_error=str(exc),
+                legacy_fallback={
+                    "model_name": str(getattr(exc, "model_name", "")),
+                    "reason": str(getattr(exc, "reason", str(exc))),
+                    "bundle_path": str(getattr(exc, "bundle_path", "") or ""),
+                    "export_ready": bool(getattr(exc, "export_ready", False)),
+                },
+            )
+        else:
+            _update_manual_inference_job(str(job.get("job_id", "")), status="failed", last_error=str(exc))
+        raise
     rendered = _render_workspace_from_result(
         result,
         source_image_state,
@@ -10105,24 +20061,353 @@ def run_signal_workstation(
     return (*rendered, result, source_image_state, file_path)
 
 
+def _run_signal_workstation_stream(
+    file_obj: Any,
+    overlay_mode: str,
+    vision_extras: Any = None,
+    council_scope: str = DEFAULT_COUNCIL_SCOPE,
+    min_conf_global: float = 0.42,
+    min_conf_latest: float = 0.50,
+    history_depth: float = 8,
+    label_density: float = 10,
+    projection_focus: float = 0.35,
+    debug_depth: float = 6,
+    audit_tab_loaded: bool = False,
+    heatmap_tab_loaded: bool = False,
+    compare_tab_loaded: bool = False,
+    fuse_timeframe_overlays: bool = False,
+    higher_timeframe: str = "M15",
+    lower_timeframe: str = "M5",
+) -> Any:
+    from phoenixguard.runtime.local_ensemble_runtime import LegacyFallbackApprovalRequired
+
+    upload_paths = _uploaded_file_paths(file_obj)
+    if not upload_paths:
+        yield _workspace_run_empty_outputs()
+        return
+    if len(upload_paths) != MULTI_TIMEFRAME_UPLOAD_FILES:
+        raise gr.Error("Upload exactly four chart images: two higher timeframe views first, then two lower timeframe views.")
+
+    render_config = _build_render_config(
+        overlay_mode=overlay_mode,
+        min_conf_global=min_conf_global,
+        min_conf_latest=min_conf_latest,
+        history_depth=history_depth,
+        label_density=label_density,
+        projection_focus=projection_focus,
+        debug_depth=debug_depth,
+        fuse_timeframe_overlays=fuse_timeframe_overlays,
+        vision_extras=vision_extras,
+        council_scope=council_scope,
+        higher_timeframe=higher_timeframe,
+        lower_timeframe=lower_timeframe,
+    )
+    job = _enqueue_manual_inference_job(
+        upload_paths,
+        render_config,
+        audit_tab_loaded=bool(audit_tab_loaded),
+        heatmap_tab_loaded=bool(heatmap_tab_loaded),
+        compare_tab_loaded=bool(compare_tab_loaded),
+        source="manual-stream",
+    )
+    job_id = str(job.get("job_id", ""))
+    labels = _multi_timeframe_bundle_labels(len(upload_paths))
+    yield _workspace_run_update(
+        control_status_value=_analysis_status_html(
+            None,
+            render_config=render_config,
+            percent=6.0,
+            title="Preparing the chart quartet",
+            detail="Checking the uploaded timeframes and warming the analysis path so the desk can move through all four charts cleanly.",
+        ),
+        fallback_request_value={},
+        fallback_group_value=gr.update(visible=False),
+        fallback_html_value="",
+    )
+    _mark_manual_inference_job_running(job_id)
+    analyzed: list[dict[str, Any]] = []
+    try:
+        progress_steps = [18.0, 34.0, 58.0, 76.0]
+        for index, file_path in enumerate(upload_paths[:MULTI_TIMEFRAME_UPLOAD_FILES]):
+            progress_percent = progress_steps[index] if index < len(progress_steps) else 58.0 + (index - 2) * 8.0
+            timeframe_label = labels[min(index, len(labels) - 1)]
+            pair_label = "higher timeframe pair" if index < 2 else "lower timeframe pair"
+            yield _workspace_run_update(
+                control_status_value=_analysis_status_html(
+                    None,
+                    render_config=render_config,
+                    percent=progress_percent,
+                    title=f"Reading {timeframe_label.lower()} structure",
+                    detail=f"The desk is parsing {pair_label} candles, consolidations, and projection cues before moving to the next layer.",
+                )
+            )
+            try:
+                result, overlay_image, _gauge_unused, _skill_unused = pg_main.run_inference(
+                    file_path,
+                    annotation_text="",
+                    overlay_mode=str(render_config["overlay_mode"]),
+                    min_conf_global=float(render_config["min_conf_global"]),
+                    min_conf_latest=float(render_config["min_conf_latest"]),
+                    history_depth=int(render_config["history_depth"]),
+                    label_density=int(render_config["label_density"]),
+                    projection_focus=float(render_config["projection_focus"]),
+                    vision_extras=render_config.get("vision_extras", DEFAULT_VISION_EXTRAS),
+                    council_scope=str(render_config.get("council_scope", DEFAULT_COUNCIL_SCOPE)),
+                    timeframe_override=(
+                        str(render_config.get("higher_timeframe", "") or "").upper()
+                        if index < 2
+                        else str(render_config.get("lower_timeframe", "") or "").upper()
+                    ),
+                )
+            except LegacyFallbackApprovalRequired as exc:
+                _update_manual_inference_job(
+                    job_id,
+                    status="blocked_legacy_fallback",
+                    last_error=str(exc),
+                    legacy_fallback={
+                        "model_name": str(exc.model_name),
+                        "reason": str(exc.reason),
+                        "bundle_path": str(exc.bundle_path) if exc.bundle_path is not None else "",
+                        "export_ready": bool(exc.export_ready),
+                    },
+                )
+                request_state = _build_legacy_fallback_request(
+                    kind="workspace_multi",
+                    title="Compatibility Approval Required",
+                    summary="The deeper review pass would need to use a one-time compatibility path for this run, so the desk paused first.",
+                    model_name=str(exc.model_name),
+                    reason=str(exc.reason),
+                    bundle_path=str(exc.bundle_path) if exc.bundle_path is not None else "",
+                    request_context={
+                        "upload_paths": list(upload_paths[:MULTI_TIMEFRAME_UPLOAD_FILES]),
+                        "render_config": dict(render_config),
+                        "audit_tab_loaded": bool(audit_tab_loaded),
+                        "heatmap_tab_loaded": bool(heatmap_tab_loaded),
+                        "compare_tab_loaded": bool(compare_tab_loaded),
+                    },
+                )
+                yield _workspace_run_update(
+                    control_status_value=_analysis_status_html(
+                        None,
+                        render_config=render_config,
+                        percent=progress_percent,
+                        title="Paused for compatibility approval",
+                        detail="The desk stopped before using the one-time compatibility path. Review the request below and choose whether to continue.",
+                        tone="amber",
+                        fallback_request=request_state,
+                    ),
+                    fallback_request_value=request_state,
+                    fallback_group_value=gr.update(visible=True),
+                    fallback_html_value=_build_legacy_fallback_guard_html(request_state),
+                )
+                return
+            source_image_state = _source_image_to_state(file_path)
+            analyzed.append(
+                {
+                    "result": result,
+                    "file_path": file_path,
+                    "source_image_state": source_image_state,
+                    "compare_entry": _build_timeframe_compare_entry(
+                        result,
+                        source_image_state,
+                        file_path,
+                        labels[index],
+                        overlay_image=overlay_image,
+                        render_config=render_config,
+                    ),
+                }
+            )
+        yield _workspace_run_update(
+            control_status_value=_analysis_status_html(
+                None,
+                render_config=render_config,
+                percent=82.0,
+                title="Synthesizing the paired groups",
+                detail="Higher and lower timeframe structure are being reconciled so the final desk uses one coherent story instead of four separate reads.",
+            )
+        )
+        result = _build_multi_timeframe_result(analyzed)
+        source_image_state = analyzed[-1]["source_image_state"]
+        file_path = str(analyzed[-1]["file_path"])
+        _append_session_entry(_build_session_entry(result, source_image_state, file_path, source="manual-multi-timeframe"))
+        _complete_manual_inference_job(job_id, result, file_path=file_path)
+        yield _workspace_run_update(
+            control_status_value=_analysis_status_html(
+                result,
+                render_config=render_config,
+                percent=96.0,
+                title="Rendering overlays and desk panels",
+                detail="The chart overlay, council view, memory panels, and diagnostics are being assembled now.",
+            )
+        )
+        rendered = _render_workspace_from_result(
+            result,
+            source_image_state,
+            render_config,
+            include_audit=bool(audit_tab_loaded),
+            include_heatmap=bool(heatmap_tab_loaded),
+            include_compare=bool(compare_tab_loaded),
+        )
+        yield _workspace_run_success_outputs(rendered, result, source_image_state, file_path)
+    except Exception as exc:
+        _update_manual_inference_job(job_id, status="failed", last_error=str(exc))
+        logger.exception("Manual multi-timeframe job %s failed: %s", job_id, exc)
+        raise
+
+
+def approve_legacy_fallback(
+    pending_request_state: Mapping[str, Any] | None,
+) -> Any:
+    request_state = dict(pending_request_state or {})
+    if not request_state:
+        yield _workspace_run_update(
+            fallback_request_value={},
+            fallback_group_value=gr.update(visible=False),
+            fallback_html_value="",
+        )
+        return
+
+    yield _workspace_run_update(
+        control_status_value=_analysis_status_html(
+            None,
+            render_config=cast(Mapping[str, Any], request_state.get("render_config", {})),
+            percent=8.0,
+            title="Compatibility mode approved",
+            detail="The desk is resuming with temporary permission to use the one-time compatibility path for this run only.",
+            tone="amber",
+        ),
+        fallback_request_value={},
+        fallback_group_value=gr.update(visible=False),
+        fallback_html_value="",
+    )
+
+    _set_legacy_council_fallback_approval(True)
+    try:
+        kind = str(request_state.get("kind", "")).strip().lower()
+        if kind == "workspace_multi":
+            yield from _run_signal_workstation_stream(
+                cast(list[str], request_state.get("upload_paths", [])),
+                str(cast(dict[str, Any], request_state.get("render_config", {})).get("overlay_mode", DEFAULT_OVERLAY_MODE)),
+                cast(dict[str, Any], request_state.get("render_config", {})).get("vision_extras", DEFAULT_VISION_EXTRAS),
+                str(cast(dict[str, Any], request_state.get("render_config", {})).get("council_scope", DEFAULT_COUNCIL_SCOPE)),
+                float(cast(dict[str, Any], request_state.get("render_config", {})).get("min_conf_global", 0.42) or 0.42),
+                float(cast(dict[str, Any], request_state.get("render_config", {})).get("min_conf_latest", 0.50) or 0.50),
+                float(cast(dict[str, Any], request_state.get("render_config", {})).get("history_depth", 8) or 8),
+                float(cast(dict[str, Any], request_state.get("render_config", {})).get("label_density", 10) or 10),
+                float(cast(dict[str, Any], request_state.get("render_config", {})).get("projection_focus", 0.35) or 0.35),
+                float(cast(dict[str, Any], request_state.get("render_config", {})).get("debug_depth", 6) or 6),
+                bool(request_state.get("audit_tab_loaded", False)),
+                bool(request_state.get("heatmap_tab_loaded", False)),
+                bool(request_state.get("compare_tab_loaded", False)),
+                bool(cast(dict[str, Any], request_state.get("render_config", {})).get("fuse_timeframe_overlays", False)),
+                str(cast(dict[str, Any], request_state.get("render_config", {})).get("higher_timeframe", "M15") or "M15"),
+                str(cast(dict[str, Any], request_state.get("render_config", {})).get("lower_timeframe", "M5") or "M5"),
+            )
+            return
+        if kind == "lazy_council":
+            yield from load_model_council_tab(
+                cast(dict[str, Any], request_state.get("result_state", {})),
+                request_state.get("source_image_state"),
+                str(request_state.get("active_file_path_state", "")),
+                str(cast(dict[str, Any], request_state.get("render_config", {})).get("overlay_mode", DEFAULT_OVERLAY_MODE)),
+                cast(dict[str, Any], request_state.get("render_config", {})).get("vision_extras", DEFAULT_VISION_EXTRAS),
+                str(cast(dict[str, Any], request_state.get("render_config", {})).get("council_scope", DEFAULT_COUNCIL_SCOPE)),
+                float(cast(dict[str, Any], request_state.get("render_config", {})).get("min_conf_global", 0.42) or 0.42),
+                float(cast(dict[str, Any], request_state.get("render_config", {})).get("min_conf_latest", 0.50) or 0.50),
+                float(cast(dict[str, Any], request_state.get("render_config", {})).get("history_depth", 8) or 8),
+                float(cast(dict[str, Any], request_state.get("render_config", {})).get("label_density", 10) or 10),
+                float(cast(dict[str, Any], request_state.get("render_config", {})).get("projection_focus", 0.35) or 0.35),
+                float(cast(dict[str, Any], request_state.get("render_config", {})).get("debug_depth", 6) or 6),
+                bool(request_state.get("audit_tab_loaded", False)),
+                bool(request_state.get("heatmap_tab_loaded", False)),
+                bool(request_state.get("compare_tab_loaded", False)),
+                bool(cast(dict[str, Any], request_state.get("render_config", {})).get("fuse_timeframe_overlays", False)),
+            )
+            return
+        yield _workspace_run_update(
+            control_status_value=build_control_status_html(
+                None,
+                render_config=cast(Mapping[str, Any], request_state.get("render_config", {})),
+            ),
+            fallback_request_value={},
+            fallback_group_value=gr.update(visible=False),
+            fallback_html_value="",
+        )
+    finally:
+        _set_legacy_council_fallback_approval(False)
+
+
+def cancel_legacy_fallback(
+    pending_request_state: Mapping[str, Any] | None,
+    result_state: dict[str, Any] | None,
+    overlay_mode: str,
+    vision_extras: Any = None,
+    council_scope: str = DEFAULT_COUNCIL_SCOPE,
+    min_conf_global: float = 0.42,
+    min_conf_latest: float = 0.50,
+    history_depth: float = 8,
+    label_density: float = 10,
+    projection_focus: float = 0.35,
+    debug_depth: float = 6,
+    fuse_timeframe_overlays: bool = False,
+) -> tuple[Any, Any, Any, Any]:
+    _set_legacy_council_fallback_approval(False)
+    render_config = _build_render_config(
+        overlay_mode=overlay_mode,
+        min_conf_global=min_conf_global,
+        min_conf_latest=min_conf_latest,
+        history_depth=history_depth,
+        label_density=label_density,
+        projection_focus=projection_focus,
+        debug_depth=debug_depth,
+        fuse_timeframe_overlays=fuse_timeframe_overlays,
+        vision_extras=vision_extras,
+        council_scope=council_scope,
+    )
+    control_status = build_control_status_html(
+        result_state,
+        render_config=render_config,
+    )
+    if pending_request_state:
+        control_status = build_control_status_html(
+            result_state,
+            render_config=render_config,
+            analysis_progress=_analysis_progress_payload(
+                0.0,
+                "Compatibility mode canceled",
+                "The desk stayed on the standard review path. No compatibility path was used.",
+                tone="amber",
+            ),
+        )
+    return (
+        {},
+        gr.update(visible=False),
+        "",
+        control_status,
+    )
+
+
 def refresh_live_preview(
     result_state: dict[str, Any] | None,
     source_image_state: Any,
     overlay_mode: str,
-    min_conf_global: float,
-    min_conf_latest: float,
-    history_depth: float,
-    label_density: float,
-    projection_focus: float,
-    debug_depth: float,
-    compare_tab_loaded: bool,
+    vision_extras: Any = None,
+    council_scope: str = DEFAULT_COUNCIL_SCOPE,
+    min_conf_global: float = 0.42,
+    min_conf_latest: float = 0.50,
+    history_depth: float = 8,
+    label_density: float = 10,
+    projection_focus: float = 0.35,
+    debug_depth: float = 6,
+    compare_tab_loaded: bool = False,
+    fuse_timeframe_overlays: bool = False,
 ) -> tuple[Any, ...]:
     if not result_state or source_image_state is None:
         return (
             None,
-            _placeholder_panel("Memory Recall", "Local memory retrieval will appear here."),
-            _placeholder_panel("Evidence Panel", "Chart evidence and transition traces will appear here."),
-            _placeholder_panel("Diagnostics Cockpit", "Runtime diagnostics will appear here after the first signal pass."),
+            _placeholder_panel("Case Recall", "Similar reviewed cases will appear here."),
+            _placeholder_panel("Chart Evidence", "Chart evidence and supporting clues will appear here."),
+            _placeholder_panel("Review Notes", "Structured review notes will appear here after the first signal pass."),
             build_control_status_html(None, None),
             _gr_skip(),
         )
@@ -10135,6 +20420,9 @@ def refresh_live_preview(
         label_density=label_density,
         projection_focus=projection_focus,
         debug_depth=debug_depth,
+        fuse_timeframe_overlays=fuse_timeframe_overlays,
+        vision_extras=vision_extras,
+        council_scope=council_scope,
     )
     return _render_live_preview_from_result(
         result_state,
@@ -10148,12 +20436,13 @@ def render_scenario_lab(
     result_state: dict[str, Any] | None,
     source_image_state: Any,
     overlay_mode: str,
-    min_conf_global: float,
-    min_conf_latest: float,
-    history_depth: float,
-    label_density: float,
-    projection_focus: float,
-    debug_depth: float,
+    vision_extras: Any = None,
+    min_conf_global: float = 0.42,
+    min_conf_latest: float = 0.50,
+    history_depth: float = 8,
+    label_density: float = 10,
+    projection_focus: float = 0.35,
+    debug_depth: float = 6,
 ) -> tuple[Any, str]:
     if not result_state or source_image_state is None:
         return (
@@ -10168,6 +20457,7 @@ def render_scenario_lab(
         label_density=label_density,
         projection_focus=projection_focus,
         debug_depth=debug_depth,
+        vision_extras=vision_extras,
     )
     return _render_scenario_lab_from_result(result_state, source_image_state, render_config)
 
@@ -10176,12 +20466,13 @@ def refresh_zone_canvas(
     result_state: dict[str, Any] | None,
     source_image_state: Any,
     overlay_mode: str,
-    min_conf_global: float,
-    min_conf_latest: float,
-    history_depth: float,
-    label_density: float,
-    projection_focus: float,
-    debug_depth: float,
+    vision_extras: Any = None,
+    min_conf_global: float = 0.42,
+    min_conf_latest: float = 0.50,
+    history_depth: float = 8,
+    label_density: float = 10,
+    projection_focus: float = 0.35,
+    debug_depth: float = 6,
 ) -> Any:
     source_image = _image_from_state(source_image_state)
     if not result_state or source_image is None:
@@ -10194,16 +20485,18 @@ def refresh_zone_canvas(
         label_density=label_density,
         projection_focus=projection_focus,
         debug_depth=debug_depth,
+        vision_extras=vision_extras,
     )
     overlay = _build_overlay_image(
         source_image,
         result_state,
-        overlay_mode=str(render_config.get("overlay_mode", "history-plus-projection")),
+        overlay_mode=str(render_config.get("overlay_mode", DEFAULT_OVERLAY_MODE)),
         min_conf_global=float(render_config.get("min_conf_global", 0.42) or 0.42),
         min_conf_latest=float(render_config.get("min_conf_latest", 0.50) or 0.50),
         history_limit=int(render_config.get("history_depth", 8) or 8),
         label_budget=int(render_config.get("label_density", 10) or 10),
         projection_confidence_floor=float(render_config.get("projection_focus", 0.35) or 0.35),
+        vision_extras=render_config.get("vision_extras", DEFAULT_VISION_EXTRAS),
     )
     return _build_zone_editor_value(source_image_state, base_image=overlay)
 
@@ -10218,15 +20511,18 @@ def save_zone_annotation(
     result_state: dict[str, Any] | None,
     source_image_state: Any,
     overlay_mode: str,
-    min_conf_global: float,
-    min_conf_latest: float,
-    history_depth: float,
-    label_density: float,
-    projection_focus: float,
-    debug_depth: float,
-    audit_tab_loaded: bool,
-    heatmap_tab_loaded: bool,
-    compare_tab_loaded: bool,
+    vision_extras: Any = None,
+    council_scope: str = DEFAULT_COUNCIL_SCOPE,
+    min_conf_global: float = 0.42,
+    min_conf_latest: float = 0.50,
+    history_depth: float = 8,
+    label_density: float = 10,
+    projection_focus: float = 0.35,
+    debug_depth: float = 6,
+    audit_tab_loaded: bool = False,
+    heatmap_tab_loaded: bool = False,
+    compare_tab_loaded: bool = False,
+    fuse_timeframe_overlays: bool = False,
 ) -> tuple[str, Any, Any, Any, Any, Any, Any, Any, Any, Any, Any, Any]:
     success, message = _save_zone_teaching(
         editor_value,
@@ -10261,6 +20557,9 @@ def save_zone_annotation(
         label_density=label_density,
         projection_focus=projection_focus,
         debug_depth=debug_depth,
+        fuse_timeframe_overlays=fuse_timeframe_overlays,
+        vision_extras=vision_extras,
+        council_scope=council_scope,
     )
     rendered = _render_workspace_from_result(
         updated_result,
@@ -10291,15 +20590,18 @@ def poll_capture_updates(
     capture_status_token_state: int,
     current_result_state: dict[str, Any] | None,
     overlay_mode: str,
-    min_conf_global: float,
-    min_conf_latest: float,
-    history_depth: float,
-    label_density: float,
-    projection_focus: float,
-    debug_depth: float,
-    audit_tab_loaded: bool,
-    heatmap_tab_loaded: bool,
-    compare_tab_loaded: bool,
+    vision_extras: Any = None,
+    council_scope: str = DEFAULT_COUNCIL_SCOPE,
+    min_conf_global: float = 0.42,
+    min_conf_latest: float = 0.50,
+    history_depth: float = 8,
+    label_density: float = 10,
+    projection_focus: float = 0.35,
+    debug_depth: float = 6,
+    audit_tab_loaded: bool = False,
+    heatmap_tab_loaded: bool = False,
+    compare_tab_loaded: bool = False,
+    fuse_timeframe_overlays: bool = False,
 ) -> tuple[Any, ...]:
     def _capture_poll_payload(
         next_capture_token: int,
@@ -10321,21 +20623,43 @@ def poll_capture_updates(
         label_density=label_density,
         projection_focus=projection_focus,
         debug_depth=debug_depth,
+        fuse_timeframe_overlays=fuse_timeframe_overlays,
+        vision_extras=vision_extras,
+        council_scope=council_scope,
     )
     runtime_snapshot = _get_capture_runtime_snapshot()
     latest_status_token = int(runtime_snapshot.get("status_token", 0) or 0)
     latest_token, latest_result, latest_source_image_state, latest_file_path, latest_overlay, latest_gauge, latest_skill_fig = _get_latest_capture_payload()
-    if latest_token <= int(capture_token_state or 0) or latest_result is None or latest_source_image_state is None:
-        if latest_status_token <= int(capture_status_token_state or 0):
-            return _capture_poll_payload(
-                int(capture_token_state or 0),
-                int(capture_status_token_state or 0),
-            )
-    return _capture_poll_payload(
-        int(capture_token_state or 0),
-        latest_status_token,
-        control_status_value=build_control_status_html(
-            current_result_state,
+
+    has_new_capture = (
+        latest_token > int(capture_token_state or 0)
+        and latest_result is not None
+        and latest_source_image_state is not None
+    )
+    has_new_status = latest_status_token > int(capture_status_token_state or 0)
+
+    if not has_new_capture and not has_new_status:
+        return _capture_poll_payload(
+            int(capture_token_state or 0),
+            int(capture_status_token_state or 0),
+        )
+
+    if not has_new_capture:
+        return _capture_poll_payload(
+            int(capture_token_state or 0),
+            latest_status_token,
+            control_status_value=build_control_status_html(
+                current_result_state or {},
+                render_config=render_config,
+            ),
+        )
+
+    if latest_result is None or latest_source_image_state is None:
+        return _capture_poll_payload(
+            int(capture_token_state or 0),
+            latest_status_token,
+            control_status_value=build_control_status_html(
+                current_result_state or {},
                 render_config=render_config,
             ),
         )
@@ -10371,6 +20695,367 @@ def _feedback_feed_path() -> Path:
     return RUNTIME.data_dir / "feedback_feed.jsonl"
 
 
+def _feedback_submission_journal_path() -> Path:
+    return RUNTIME.data_dir / "feedback_submissions.jsonl"
+
+
+def _rl_feedback_buffer_path_current() -> Path:
+    return RUNTIME.data_dir / "rl_feedback_buffer.jsonl"
+
+
+def _replay_buffer_path_current() -> Path:
+    return RUNTIME.data_dir / "replay_buffer.jsonl"
+
+
+def _rl_pending_contexts_path_current() -> Path:
+    return RUNTIME.data_dir / "rl_pending_contexts.json"
+
+
+def _replay_pending_contexts_path_current() -> Path:
+    return RUNTIME.data_dir / "pending_contexts.json"
+
+
+def _feedback_stage_defaults() -> dict[str, str]:
+    return {stage: "pending" for stage in FEEDBACK_STAGE_ORDER}
+
+
+def _hex_to_rgb(color: str) -> list[int]:
+    value = str(color or "").strip().lstrip("#")
+    if len(value) != 6:
+        return [0, 0, 0]
+    try:
+        return [int(value[idx : idx + 2], 16) for idx in (0, 2, 4)]
+    except Exception:
+        return [0, 0, 0]
+
+
+def _feedback_visual_palette() -> list[dict[str, Any]]:
+    return [
+        {
+            **dict(spec),
+            "rgb": _hex_to_rgb(str(spec.get("color", ""))),
+        }
+        for spec in FEEDBACK_VISUAL_BRUSHES
+    ]
+
+
+def _closest_feedback_visual_label(mean_rgb: Sequence[Any]) -> tuple[str, str]:
+    try:
+        target = np.asarray([float(mean_rgb[0]), float(mean_rgb[1]), float(mean_rgb[2])], dtype=np.float32)
+    except Exception:
+        target = np.zeros((3,), dtype=np.float32)
+    best_label = "context_zone"
+    best_color = "#74b7ff"
+    best_distance = float("inf")
+    for spec in _feedback_visual_palette():
+        rgb = np.asarray(cast(list[float], spec.get("rgb", [0.0, 0.0, 0.0])), dtype=np.float32)
+        distance = float(np.linalg.norm(target - rgb))
+        if distance < best_distance:
+            best_distance = distance
+            best_label = str(spec.get("semantic_label", best_label))
+            best_color = str(spec.get("color", best_color))
+    return best_label, best_color
+
+
+def _extract_feedback_visual_regions(editor_value: Any) -> list[dict[str, Any]]:
+    base_image = _editor_item_to_image(editor_value)
+    width = float(base_image.width) if base_image is not None else 1.0
+    height = float(base_image.height) if base_image is not None else 1.0
+    reference_bbox = [0.0, 0.0, max(width, 1.0), max(height, 1.0)]
+    regions: list[dict[str, Any]] = []
+    for region in _extract_painted_zone_regions(editor_value):
+        semantic_label, color = _closest_feedback_visual_label(cast(Sequence[Any], region.get("mean_rgb", [0.0, 0.0, 0.0])))
+        bbox = cast(list[Any], region.get("bbox", []))
+        regions.append(
+            {
+                **dict(region),
+                "semantic_label": semantic_label,
+                "color": color,
+                "relative_bbox": _relative_bbox(bbox, reference_bbox),
+            }
+        )
+    return regions
+
+
+def _normalize_feedback_choice(value: Any, choices: Sequence[str], default: str) -> str:
+    text = str(value or "").strip().upper()
+    allowed = {str(choice).upper() for choice in choices}
+    return text if text in allowed else str(default).upper()
+
+
+def _clip_feedback_confidence_pct(value: Any, default: int = 80) -> int:
+    try:
+        return int(np.clip(int(round(float(value))), 1, 100))
+    except Exception:
+        return int(np.clip(default, 1, 100))
+
+
+def _feedback_result_action(result_state: Mapping[str, Any] | None = None) -> str:
+    result = dict(result_state or {})
+    for key in ("action", "trade_bias", "bias_direction"):
+        action = str(result.get(key, "")).strip().upper()
+        if action in {"BUY", "SELL", "HOLD"}:
+            return action
+    return "HOLD"
+
+
+def _resolve_feedback_signal_direction(
+    selection: Any,
+    result_state: Mapping[str, Any] | None = None,
+) -> str:
+    selected = _normalize_feedback_choice(selection, FEEDBACK_SIGNAL_CHOICES, "AUTO")
+    if selected == "AUTO":
+        return _feedback_result_action(result_state)
+    return selected if selected in {"BUY", "SELL", "HOLD"} else "HOLD"
+
+
+def _derive_feedback_actual_outcome(signal_direction: str, execution_result: str) -> str:
+    direction = str(signal_direction or "HOLD").upper()
+    execution = _normalize_feedback_choice(execution_result, FEEDBACK_EXECUTION_RESULT_CHOICES, "BREAKEVEN")
+    if direction not in {"BUY", "SELL", "HOLD"}:
+        return "HOLD"
+    if execution == "WIN":
+        return direction
+    if execution in {"LOSS", "BREAKEVEN", "NO_FILL", "INVALIDATED"}:
+        return "HOLD" if direction in {"BUY", "SELL"} else direction
+    return direction
+
+
+def _derive_feedback_rejected_action(actual_outcome: str, signal_direction: str) -> str:
+    actual = str(actual_outcome or "HOLD").upper()
+    signal = str(signal_direction or "HOLD").upper()
+    if actual == "BUY":
+        return "SELL"
+    if actual == "SELL":
+        return "BUY"
+    if signal in {"BUY", "SELL"}:
+        return signal
+    return "BUY"
+
+
+def _feedback_sharpe_proxy(execution_result: str, label_confidence: float) -> float:
+    execution = _normalize_feedback_choice(execution_result, FEEDBACK_EXECUTION_RESULT_CHOICES, "BREAKEVEN")
+    confidence = float(np.clip(label_confidence, 0.05, 1.0))
+    if execution == "WIN":
+        return float(np.clip(0.12 + 0.18 * confidence, -0.5, 0.5))
+    if execution == "LOSS":
+        return float(np.clip(-0.10 - 0.14 * confidence, -0.5, 0.5))
+    if execution == "INVALIDATED":
+        return -0.06
+    return 0.0
+
+
+def _feedback_summary_reason(
+    *,
+    signal_direction: str,
+    actual_outcome: str,
+    execution_result: str,
+    market_state: str,
+    setup_state: str,
+    failure_mode: str,
+    label_confidence_pct: int,
+    notes: str,
+) -> str:
+    parts = [
+        f"signal={signal_direction}",
+        f"actual={actual_outcome}",
+        f"execution={execution_result}",
+        f"market={market_state}",
+        f"setup={setup_state}",
+        f"failure={failure_mode}",
+        f"label_confidence={label_confidence_pct}pct",
+    ]
+    note_text = str(notes or "").strip()
+    if note_text:
+        parts.append(f"notes={note_text}")
+    return " | ".join(parts)
+
+
+def _feedback_meta_payload(submission: Mapping[str, Any]) -> dict[str, Any]:
+    keys = (
+        "schema_version",
+        "submission_id",
+        "inference_id",
+        "inference_action",
+        "signal_direction",
+        "signal_direction_selected",
+        "actual_outcome",
+        "execution_result",
+        "market_state",
+        "setup_state",
+        "failure_mode",
+        "label_confidence_pct",
+        "label_confidence",
+        "notes",
+        "feedback_image",
+    )
+    return {key: copy.deepcopy(submission.get(key)) for key in keys if key in submission}
+
+
+def _jsonl_find_last_by_submission_id(path: Path, submission_id: str) -> dict[str, Any]:
+    target = str(submission_id or "").strip()
+    if not target or not path.exists():
+        return {}
+    rows = _read_jsonl_rows(path)
+    for row in reversed(rows):
+        if str(row.get("submission_id", "")).strip() == target:
+            return dict(row)
+    return {}
+
+
+def _personalization_submission_exists(personal: Any, submission_id: str) -> bool:
+    submission_key = str(submission_id or "").strip()
+    if not submission_key:
+        return False
+    target = f"submission_id={submission_key}"
+    pref_store = getattr(personal, "pref_store", None)
+    fetch_recent = getattr(pref_store, "fetch_recent", None)
+    if not callable(fetch_recent):
+        return False
+    try:
+        recent = cast(list[dict[str, Any]], fetch_recent(5_000))
+    except Exception:
+        return False
+    return any(
+        target in str(row.get("annotation_text", ""))
+        or target in str(row.get("reason", ""))
+        for row in recent
+    )
+
+
+def _append_feedback_submission_event(
+    submission_id: str,
+    event_type: str,
+    **payload: Any,
+) -> None:
+    _append_jsonl(
+        _feedback_submission_journal_path(),
+        {
+            "ts": utc_now_iso(),
+            "submission_id": str(submission_id or "").strip(),
+            "event_type": str(event_type),
+            **payload,
+        },
+    )
+
+
+def _derive_feedback_submission_status(state: Mapping[str, Any]) -> str:
+    stage_status = cast(dict[str, Any], state.get("stage_status", {}))
+    critical = [str(stage_status.get(stage, "pending")) for stage in FEEDBACK_CRITICAL_STAGES]
+    optional = [str(stage_status.get(stage, "pending")) for stage in FEEDBACK_STAGE_ORDER if stage not in FEEDBACK_CRITICAL_STAGES]
+    if any(status == "failed" for status in critical):
+        return "partial"
+    if any(status == "pending" for status in critical):
+        return "pending"
+    if any(status == "failed" for status in optional):
+        return "completed_with_errors"
+    return "completed"
+
+
+def _feedback_submission_states(*, limit: int | None = None) -> list[dict[str, Any]]:
+    states: dict[str, dict[str, Any]] = {}
+    for event in _read_jsonl_rows(_feedback_submission_journal_path()):
+        submission_id = str(event.get("submission_id", "")).strip()
+        if not submission_id:
+            continue
+        event_type = str(event.get("event_type", "")).strip()
+        if event_type == "submission_created":
+            submission = dict(cast(Mapping[str, Any], event.get("submission", {})))
+            submission["submission_id"] = submission_id
+            submission.setdefault("stage_status", _feedback_stage_defaults())
+            submission.setdefault("stage_payloads", {})
+            submission.setdefault("stage_errors", {})
+            submission.setdefault("created_at", str(event.get("ts", utc_now_iso())))
+            submission["updated_at"] = str(event.get("ts", submission.get("created_at", utc_now_iso())))
+            states[submission_id] = submission
+            continue
+        state = states.get(submission_id)
+        if state is None:
+            continue
+        stage_status = dict(cast(Mapping[str, Any], state.get("stage_status", {})) or _feedback_stage_defaults())
+        stage_payloads = dict(cast(Mapping[str, Any], state.get("stage_payloads", {})) or {})
+        stage_errors = dict(cast(Mapping[str, Any], state.get("stage_errors", {})) or {})
+        if event_type in {"stage_applied", "stage_failed", "stage_skipped"}:
+            stage = str(event.get("stage", "")).strip()
+            if stage:
+                if event_type == "stage_applied":
+                    stage_status[stage] = "applied"
+                    stage_payloads[stage] = dict(cast(Mapping[str, Any], event.get("payload", {})))
+                    stage_errors.pop(stage, None)
+                elif event_type == "stage_failed":
+                    stage_status[stage] = "failed"
+                    stage_errors[stage] = str(event.get("error", "failed"))
+                else:
+                    stage_status[stage] = "skipped"
+                    stage_payloads[stage] = dict(cast(Mapping[str, Any], event.get("payload", {})))
+                    stage_errors.pop(stage, None)
+        elif event_type == "submission_resumed":
+            state["resume_count"] = int(state.get("resume_count", 0) or 0) + 1
+        state["stage_status"] = stage_status
+        state["stage_payloads"] = stage_payloads
+        state["stage_errors"] = stage_errors
+        state["updated_at"] = str(event.get("ts", state.get("updated_at", utc_now_iso())))
+    rows = list(states.values())
+    for row in rows:
+        errors = cast(dict[str, Any], row.get("stage_errors", {}))
+        row["status"] = _derive_feedback_submission_status(row)
+        row["error_list"] = [str(stage) for stage, message in errors.items() if str(message).strip()]
+    rows.sort(key=lambda item: str(item.get("created_at", item.get("updated_at", ""))))
+    if limit is None or limit <= 0:
+        return rows
+    return rows[-int(limit) :]
+
+
+def _feedback_submission_state(submission_id: str) -> dict[str, Any]:
+    target = str(submission_id or "").strip()
+    if not target:
+        return {}
+    for state in reversed(_feedback_submission_states()):
+        if str(state.get("submission_id", "")).strip() == target:
+            return dict(state)
+    return {}
+
+
+def _feedback_submission_to_feed_row(state: Mapping[str, Any]) -> dict[str, Any]:
+    stage_status = cast(dict[str, Any], state.get("stage_status", {}))
+    stage_payloads = cast(dict[str, Any], state.get("stage_payloads", {}))
+    replay_payload = cast(dict[str, Any], stage_payloads.get("continual_learning", {}))
+    rl_payload = cast(dict[str, Any], stage_payloads.get("rl", {}))
+    feedback_image = dict(cast(Mapping[str, Any], state.get("feedback_image", {})))
+    return {
+        "ts": str(state.get("created_at", "")),
+        "submission_id": str(state.get("submission_id", "")),
+        "inference_id": str(state.get("inference_id", "")),
+        "source_path": str(state.get("source_path", "")),
+        "source_image_hash": str(state.get("source_image_hash", "")),
+        "signal_direction": str(state.get("signal_direction", "HOLD")).upper(),
+        "execution_result": str(state.get("execution_result", "UNSPECIFIED")).upper(),
+        "market_state": str(state.get("market_state", "UNSPECIFIED")).upper(),
+        "setup_state": str(state.get("setup_state", "UNSPECIFIED")).upper(),
+        "failure_mode": str(state.get("failure_mode", "NONE")).upper(),
+        "label_confidence_pct": int(state.get("label_confidence_pct", 0) or 0),
+        "verdict": str(state.get("actual_outcome", "HOLD")).upper(),
+        "rejected": str(state.get("rejected_action", "BUY")).upper(),
+        "reason": str(state.get("reason", "")),
+        "notes": str(state.get("notes", "")),
+        "status": str(state.get("status", "pending")),
+        "feedback_image": feedback_image,
+        "learning_snapshot_path": str(replay_payload.get("snapshot_path", feedback_image.get("path", ""))),
+        "personalization_updated": str(stage_status.get("personalization", "")) == "applied",
+        "continual_learning_updated": str(stage_status.get("continual_learning", "")) == "applied",
+        "continual_learning_success": bool(replay_payload.get("success", False)) if replay_payload else False,
+        "rl_feedback_updated": str(stage_status.get("rl", "")) == "applied",
+        "rl_online_updated": bool(rl_payload.get("updated", False)) if rl_payload else False,
+        "errors": list(cast(list[str], state.get("error_list", []))),
+    }
+
+
+def _sync_feedback_feed_view() -> list[dict[str, Any]]:
+    rows = [_feedback_submission_to_feed_row(state) for state in _feedback_submission_states()]
+    _write_jsonl_atomic(_feedback_feed_path(), rows)
+    return rows
+
+
 def _project_relative_path(path: Path) -> str:
     try:
         return str(path.relative_to(RUNTIME.project_root)).replace("\\", "/")
@@ -10390,6 +21075,10 @@ def _coerce_feedback_image(feedback_image: Any) -> Image.Image | None:
         else:
             arr_uint8 = cast(NDArray[np.uint8], arr)
         return Image.fromarray(arr_uint8).convert("RGB")
+    if isinstance(feedback_image, (dict, str)):
+        editor_image = _editor_item_to_image(feedback_image)
+        if editor_image is not None:
+            return editor_image.convert("RGB")
     return None
 
 
@@ -10398,7 +21087,7 @@ def _save_feedback_result_image(image_hash: str, verdict: str, feedback_image: A
     if image_rgb is None:
         return {}
     try:
-        verdict_slug = re.sub(r"[^a-z0-9]+", "-", str(verdict).strip().lower()).strip("-") or "hold"
+        verdict_slug = re.sub(r"[^a-z0-9]+", "-", str(verdict).strip().lower()).strip("-") or "staged"
         asset_dir = _feedback_assets_dir() / verdict_slug
         asset_dir.mkdir(parents=True, exist_ok=True)
         buffer = io.BytesIO()
@@ -10408,6 +21097,22 @@ def _save_feedback_result_image(image_hash: str, verdict: str, feedback_image: A
         asset_name = f"{str(image_hash).strip()[:16]}_{image_sha256[:12]}_{uuid4().hex[:8]}.png"
         asset_path = asset_dir / asset_name
         asset_path.write_bytes(raw)
+        visual_regions = _extract_feedback_visual_regions(feedback_image)
+        annotation_path = asset_path.with_suffix(".labels.json")
+        annotation_payload: dict[str, Any] = {
+            "schema_version": FEEDBACK_SCHEMA_VERSION,
+            "created_at": utc_now_iso(),
+            "source_image_hash": str(image_hash),
+            "asset_path": str(asset_path),
+            "asset_relative_path": _project_relative_path(asset_path),
+            "asset_sha256": image_sha256,
+            "width": int(image_rgb.width),
+            "height": int(image_rgb.height),
+            "visual_regions": visual_regions,
+            "visual_region_count": int(len(visual_regions)),
+            "visual_labels": sorted({str(region.get("semantic_label", "")) for region in visual_regions if str(region.get("semantic_label", "")).strip()}),
+        }
+        _write_json_atomic(annotation_path, annotation_payload)
         return {
             "path": str(asset_path),
             "relative_path": _project_relative_path(asset_path),
@@ -10417,13 +21122,21 @@ def _save_feedback_result_image(image_hash: str, verdict: str, feedback_image: A
             "size_bytes": int(len(raw)),
             "format": "PNG",
             "verdict": str(verdict).upper(),
+            "annotation_path": str(annotation_path),
+            "annotation_relative_path": _project_relative_path(annotation_path),
+            "visual_regions": visual_regions,
+            "visual_region_count": int(len(visual_regions)),
+            "visual_labels": list(cast(list[str], annotation_payload["visual_labels"])),
         }
     except Exception as exc:
         logger.warning("Saving feedback result image failed: %s", exc)
         return {"error": str(exc)}
 
 
-def _build_feedback_annotation_text(feedback_asset: Mapping[str, Any] | None) -> str:
+def _build_feedback_annotation_text(
+    feedback_asset: Mapping[str, Any] | None,
+    submission: Mapping[str, Any] | None = None,
+) -> str:
     if not feedback_asset:
         return ""
     if str(feedback_asset.get("error", "")).strip():
@@ -10439,102 +21152,711 @@ def _build_feedback_annotation_text(feedback_asset: Mapping[str, Any] | None) ->
     height = int(feedback_asset.get("height", 0) or 0)
     if width > 0 and height > 0:
         parts.append(f"size={width}x{height}")
+    annotation_relative_path = str(feedback_asset.get("annotation_relative_path", "")).strip()
+    if annotation_relative_path:
+        parts.append(f"labels={annotation_relative_path}")
+    visual_region_count = int(feedback_asset.get("visual_region_count", 0) or 0)
+    if visual_region_count > 0:
+        parts.append(f"visual_regions={visual_region_count}")
+    visual_labels = cast(list[Any], feedback_asset.get("visual_labels", []))
+    if visual_labels:
+        parts.append("visual_labels=" + ",".join(str(label).strip() for label in visual_labels if str(label).strip())[:80])
+    if submission:
+        submission_id = str(submission.get("submission_id", "")).strip()
+        if submission_id:
+            parts.append(f"submission_id={submission_id}")
+        parts.append(f"signal_direction={str(submission.get('signal_direction', 'HOLD')).upper()}")
+        parts.append(f"actual_outcome={str(submission.get('actual_outcome', 'HOLD')).upper()}")
+        parts.append(f"execution_result={str(submission.get('execution_result', 'UNSPECIFIED')).upper()}")
+        parts.append(f"market_state={str(submission.get('market_state', 'UNSPECIFIED')).upper()}")
+        parts.append(f"setup_state={str(submission.get('setup_state', 'UNSPECIFIED')).upper()}")
+        parts.append(f"failure_mode={str(submission.get('failure_mode', 'NONE')).upper()}")
+        parts.append(f"label_confidence={int(submission.get('label_confidence_pct', 0) or 0)}pct")
     return " ".join(parts)
 
 
-def on_feedback(last_file: Any, verdict: str, reason: str, feedback_image: Any | None = None) -> str:
+def _feedback_learning_feed_enabled() -> bool:
+    return bool(getattr(RUNTIME, "enable_feedback_learning_feed", True))
+
+
+def _normalize_saved_feedback_asset(saved_feedback_asset: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(saved_feedback_asset, Mapping):
+        return {}
+    asset = dict(saved_feedback_asset)
+    path_text = str(asset.get("path", "") or "").strip()
+    if path_text and Path(path_text).exists():
+        annotation_text = str(asset.get("annotation_path", "") or "").strip()
+        if annotation_text:
+            asset["annotation_available"] = Path(annotation_text).exists()
+        return asset
+    return {}
+
+
+def _feedback_submission_summary_by_inference_id() -> dict[str, dict[str, Any]]:
+    summary: dict[str, dict[str, Any]] = {}
+    for state in _feedback_submission_states():
+        inference_id = str(state.get("inference_id", "")).strip()
+        if not inference_id:
+            continue
+        bucket = summary.setdefault(inference_id, {"count": 0, "latest": {}})
+        bucket["count"] = int(bucket.get("count", 0) or 0) + 1
+        bucket["latest"] = dict(state)
+    return summary
+
+
+def _session_history_rows(*, limit: int | None = None) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    persisted_limit = (int(limit) * 3) if limit and limit > 0 else 360
+    for row in _read_jsonl_rows(RUNTIME.session_log_path, limit=persisted_limit):
+        record = dict(row)
+        record.setdefault("file_name", os.path.basename(str(record.get("file_path", ""))))
+        key = str(record.get("inference_id", record.get("entry_id", ""))).strip()
+        if key:
+            merged[key] = record
+    snapshot_entries = cast(list[dict[str, Any]], _get_session_snapshot().get("entries", []))
+    for row in snapshot_entries:
+        record = dict(row)
+        key = str(record.get("inference_id", record.get("entry_id", ""))).strip()
+        if key:
+            merged[key] = record
+    rows = list(merged.values())
+    rows.sort(key=lambda item: str(item.get("timestamp", item.get("created_at", ""))))
+    if limit is None or limit <= 0:
+        return rows
+    return rows[-int(limit) :]
+
+
+def _feedback_target_entries(*, limit: int = 80) -> list[dict[str, Any]]:
+    submission_summary = _feedback_submission_summary_by_inference_id()
+    entries: list[dict[str, Any]] = []
+    for row in _session_history_rows(limit=max(limit * 2, 120)):
+        inference_id = str(row.get("inference_id", row.get("entry_id", ""))).strip()
+        if not inference_id:
+            continue
+
+        latest_feedback = dict(cast(dict[str, Any], submission_summary.get(inference_id, {}).get("latest", {})))
+        feedback_status = str(latest_feedback.get("status", "pending")).strip() or "pending"
+        feedback_count = int(submission_summary.get(inference_id, {}).get("count", 0) or 0)
+        source_path = str(row.get("file_path", row.get("source_path", ""))).strip()
+        file_name = str(row.get("file_name", "")).strip() or (os.path.basename(source_path) if source_path else "capture")
+        source_image_hash = str(row.get("source_image_hash", "")).strip()
+        if not source_image_hash and source_path and Path(source_path).exists():
+            try:
+                _image_unused, meta = load_any_file_as_image(source_path)
+                source_image_hash = str(meta.get("sha256", "") or "").strip()
+            except Exception:
+                source_image_hash = ""
+        entry: dict[str, Any] = {
+            "inference_id": inference_id,
+            "source_path": source_path,
+            "source_image_hash": source_image_hash,
+            "file_name": file_name,
+            "timestamp": str(row.get("timestamp", row.get("created_at", "unknown"))),
+            "inference_action": str(row.get("action", row.get("inference_action", "HOLD"))).upper(),
+            "feedback_status": feedback_status,
+            "feedback_submission_count": feedback_count,
+            "signal_direction": str(latest_feedback.get("signal_direction", row.get("action", "HOLD"))).upper(),
+            "actual_outcome": str(latest_feedback.get("actual_outcome", row.get("actual_outcome", "HOLD"))).upper(),
+            "execution_result": str(latest_feedback.get("execution_result", row.get("execution_result", "UNSPECIFIED"))).upper(),
+            "market_state": str(latest_feedback.get("market_state", row.get("market_state", "UNSPECIFIED"))).upper(),
+            "setup_state": str(latest_feedback.get("setup_state", row.get("setup_state", "UNSPECIFIED"))).upper(),
+            "failure_mode": str(latest_feedback.get("failure_mode", row.get("failure_mode", "NONE"))).upper(),
+            "verdict": str(latest_feedback.get("verdict", row.get("actual_outcome", "HOLD"))).upper(),
+        }
+        entries.append(entry)
+        if len(entries) >= limit:
+            break
+    return entries
+
+
+def _feedback_status_chip_tone(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized == "completed":
+        return "teal"
+    if normalized == "completed_with_errors":
+        return "amber"
+    if normalized == "partial":
+        return "amber"
+    return "soft"
+
+
+def _feedback_status_label(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized == "completed_with_errors":
+        return "feedback partial"
+    if normalized == "completed":
+        return "feedback complete"
+    if normalized == "partial":
+        return "feedback partial"
+    return "feedback pending"
+
+
+def _normalize_feedback_target(
+    feedback_target: Any,
+    *,
+    result_state: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    target: dict[str, Any]
+    if isinstance(feedback_target, Mapping):
+        target = {str(key): value for key, value in cast(Mapping[str, Any], feedback_target).items()}
+    else:
+        file_path = ""
+        if feedback_target is not None:
+            file_path = feedback_target.name if hasattr(feedback_target, "name") else str(feedback_target)
+        target = {
+            "source_path": file_path,
+            "file_name": os.path.basename(file_path) if file_path else "",
+        }
+    result_mapping = cast(Mapping[str, Any], result_state or {})
+    meta = cast(Mapping[str, Any], result_mapping.get("meta", {}))
+    target.setdefault("source_path", str(result_mapping.get("source_path", target.get("source_path", ""))))
+    target.setdefault("file_name", os.path.basename(str(target.get("source_path", ""))) if str(target.get("source_path", "")) else "")
+    target.setdefault("source_image_hash", str(meta.get("sha256", "")))
+    target.setdefault("inference_id", str(result_mapping.get("inference_id", "")))
+    target.setdefault("inference_action", str(result_mapping.get("action", "HOLD")).upper())
+    target.setdefault("timestamp", str(result_mapping.get("timestamp", "")))
+    source_path = str(target.get("source_path", "") or "").strip()
+    source_hash = str(target.get("source_image_hash", "") or "").strip()
+    if not source_hash and source_path and Path(source_path).exists():
+        try:
+            _img_unused, meta = load_any_file_as_image(source_path)
+            source_hash = str(meta.get("sha256", "") or "").strip()
+            target["source_image_hash"] = source_hash
+        except Exception:
+            source_hash = ""
+    if not str(target.get("inference_id", "")).strip():
+        fallback_id = source_hash or uuid4().hex
+        target["inference_id"] = fallback_id
+    target["inference_action"] = str(target.get("inference_action", "HOLD")).upper()
+    return target
+
+
+def _feedback_target_option_label(target: Mapping[str, Any]) -> str:
+    timestamp = _truncate_text(str(target.get("timestamp", "unknown")), 26)
+    action = str(target.get("inference_action", "HOLD")).upper()
+    file_name = _truncate_text(str(target.get("file_name", "capture")), 34)
+    status_label = _feedback_status_label(str(target.get("feedback_status", "pending")))
+    return f"{timestamp} | {action} | {file_name} | {status_label}"
+
+
+def _feedback_target_status_text(target: Mapping[str, Any]) -> str:
+    if not target:
+        return "Run an analysis first, or open the Feed tab after prior session entries have been recorded."
+    status_label = _feedback_status_label(str(target.get("feedback_status", "pending")))
+    submission_count = int(target.get("feedback_submission_count", 0) or 0)
+    count_text = f" | submissions={submission_count}" if submission_count > 0 else ""
+    return (
+        f"Targeting {str(target.get('inference_action', 'HOLD')).upper()} on "
+        f"{str(target.get('file_name', 'capture'))} from {str(target.get('timestamp', 'unknown'))}. "
+        f"Status: {status_label}.{count_text}"
+    )
+
+
+def _resolve_feedback_target_by_inference_id(inference_id: str) -> dict[str, Any]:
+    target_key = str(inference_id or "").strip()
+    if not target_key:
+        return {}
+    for target in reversed(_feedback_target_entries(limit=160)):
+        if str(target.get("inference_id", "")).strip() == target_key:
+            return dict(target)
+    return {}
+
+
+def refresh_feedback_targets(selected_inference_id: str = "") -> tuple[Any, dict[str, Any], str, dict[str, Any], str]:
+    targets = _feedback_target_entries(limit=80)
+    if not targets:
+        return gr.update(choices=[], value=""), {}, _feedback_target_status_text({}), {}, ""
+    selected = str(selected_inference_id or "").strip()
+    if not selected or not any(str(target.get("inference_id", "")).strip() == selected for target in targets):
+        selected = str(targets[-1].get("inference_id", "")).strip()
+    target = _resolve_feedback_target_by_inference_id(selected)
+    choices = [(_feedback_target_option_label(item), str(item.get("inference_id", ""))) for item in reversed(targets)]
+    return gr.update(choices=choices, value=selected), target, _feedback_target_status_text(target), {}, ""
+
+
+def select_feedback_target(selected_inference_id: str) -> tuple[dict[str, Any], str, dict[str, Any], str]:
+    target = _resolve_feedback_target_by_inference_id(selected_inference_id)
+    return target, _feedback_target_status_text(target), {}, ""
+
+
+def _build_learning_feed_html(saved_feedback_asset: Mapping[str, Any] | None = None) -> str:
+    submitted_states = _feedback_submission_states()
+    _sync_feedback_feed_view()
+    rl_rows = _read_jsonl_rows(_rl_feedback_buffer_path_current())
+    replay_rows = _read_jsonl_rows(_replay_buffer_path_current())
+    rl_pending = cast(dict[str, Any], _read_json_file(_rl_pending_contexts_path_current(), {}))
+    replay_pending = cast(dict[str, Any], _read_json_file(_replay_pending_contexts_path_current(), {}))
+    staged_asset = _normalize_saved_feedback_asset(saved_feedback_asset)
+    latest = submitted_states[-1] if submitted_states else {}
+    learning_enabled = _feedback_learning_feed_enabled()
+    recoverable = sum(1 for state in submitted_states if str(state.get("status", "")) in {"pending", "partial"})
+    feedback_targets = _feedback_target_entries(limit=240)
+    pending_feedback_targets = sum(1 for target in feedback_targets if str(target.get("feedback_status", "pending")) == "pending")
+    protected_saves = len(rl_rows) + len(replay_rows)
+    pending_saved_work = len(rl_pending) + len(replay_pending)
+
+    chips = "".join(
+        [
+            _chip("Outcome review enabled" if learning_enabled else "Outcome review paused", "teal" if learning_enabled else "amber"),
+            _chip(f"Submitted {len(submitted_states)}", "soft"),
+            _chip(f"Protected saves {protected_saves}", "teal" if protected_saves else "soft"),
+            _chip(f"Pending saves {pending_saved_work}", "amber" if pending_saved_work else "soft"),
+            _chip(f"History entries awaiting review {pending_feedback_targets}", "amber" if pending_feedback_targets else "soft"),
+            _chip(f"Recoverable {recoverable}", "amber" if recoverable else "soft"),
+        ]
+    )
+
+    mode_note = (
+        "Reviewed outcomes are stored locally so future sessions can stay consistent with what really happened."
+        if learning_enabled
+        else "Outcome review is paused, so new submissions will not be stored until it is re-enabled."
+    )
+    latest_note = "No submitted learning items yet."
+    if latest:
+        latest_note = (
+            f"{str(latest.get('signal_direction', 'HOLD')).upper()} -> {str(latest.get('actual_outcome', 'HOLD')).upper()} | "
+            f"{str(latest.get('execution_result', 'UNSPECIFIED')).upper()} | "
+            f"{str(latest.get('market_state', 'UNSPECIFIED')).upper()} | "
+            f"{_truncate_text(str(latest.get('notes', latest.get('reason', 'No notes supplied.'))), 72)}"
+        )
+    staged_note = ""
+    if staged_asset:
+        staged_note = (
+            "<div class='pg-muted' style='margin-top:10px;'>"
+            "Saved visual label ready"
+            f" | {_escape_html(str(staged_asset.get('verdict', 'HOLD')).upper())}"
+            f" | regions={_escape_html(str(staged_asset.get('visual_region_count', 0)))}"
+            "</div>"
+        )
+
+    recent_items = ""
+    recent_rows = submitted_states[-4:]
+    if recent_rows:
+        recent_lines = "".join(
+            (
+                "<li>"
+                f"<strong>{_escape_html(str(row.get('signal_direction', 'HOLD')).upper())}</strong> -> "
+                f"{_escape_html(str(row.get('actual_outcome', 'HOLD')).upper())} | "
+                f"{_escape_html(str(row.get('execution_result', 'UNSPECIFIED')).upper())} | "
+                f"{_escape_html(str(row.get('market_state', 'UNSPECIFIED')).upper())} | "
+                f"{_escape_html(str(row.get('status', 'pending')).replace('_', ' '))} | "
+                f"{_escape_html(str(row.get('created_at', 'unknown')))}"
+                "</li>"
+            )
+            for row in reversed(recent_rows)
+        )
+        recent_items = f"<ul style='margin:10px 0 0 18px;padding:0;'>{recent_lines}</ul>"
+    else:
+        recent_items = "<div class='pg-muted' style='margin-top:10px;'>Recent submissions will appear here after the first saved feed item is submitted.</div>"
+
+    return (
+        "<div class='pg-panel'>"
+        "<div class='pg-section-title'>Outcome Review</div>"
+        f"<div class='pg-chip-row'>{chips}</div>"
+        f"<div class='pg-muted' style='margin-top:10px;'>{_escape_html(mode_note)}</div>"
+        "<div class='pg-status-grid' style='margin-top:14px;'>"
+        f"{_status_card('Latest feed', str(latest.get('actual_outcome', 'Awaiting submit')).upper(), latest_note, 'soft' if latest else 'amber')}"
+        f"{_status_card('Protected storage', 'Stable', 'Saved outcome labels and notes are written to protected local storage so restarts can recover unfinished review work.', 'teal')}"
+        "</div>"
+        f"{staged_note}"
+        "<div class='pg-card-note' style='margin-top:14px;'>Recent submissions</div>"
+        f"{recent_items}"
+        "</div>"
+    )
+
+
+def save_feedback_visual_label(feedback_target: Any, signal_direction: str, feedback_image: Any | None = None) -> tuple[dict[str, Any], str, str]:
+    target = _normalize_feedback_target(feedback_target)
+    source_hash = str(target.get("source_image_hash", "")).strip()
+    if not source_hash:
+        return {}, "Run an analysis first so the saved visual label stays attached to a recorded inference.", _build_learning_feed_html()
+    feedback_asset = _save_feedback_result_image(
+        source_hash,
+        _normalize_feedback_choice(signal_direction, FEEDBACK_SIGNAL_CHOICES, "AUTO"),
+        feedback_image,
+    )
+    if not feedback_asset:
+        return {}, "Upload or mark a result image before saving the visual label.", _build_learning_feed_html()
+    if str(feedback_asset.get("error", "")).strip():
+        return {}, "Visual label could not be saved. Try again with a clearer or smaller image.", _build_learning_feed_html(feedback_asset)
+    saved_path = _project_relative_path(Path(str(feedback_asset.get("path", ""))))
+    return (
+        dict(feedback_asset),
+        f"Visual label saved to {saved_path}. Submit the feed when you're ready to route it into learning.",
+        _build_learning_feed_html(feedback_asset),
+    )
+
+
+def clear_saved_feedback_visual_label() -> tuple[dict[str, Any], str, str]:
+    return {}, "", _build_learning_feed_html()
+
+
+def _build_feedback_submission_payload(
+    *,
+    file_path: str,
+    meta: Mapping[str, Any],
+    result_state: Mapping[str, Any] | None,
+    feedback_target: Mapping[str, Any] | None,
+    signal_direction_selected: str,
+    execution_result: str,
+    market_state: str,
+    setup_state: str,
+    failure_mode: str,
+    label_confidence_pct: int,
+    notes: str,
+    feedback_asset: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    normalized_target = _normalize_feedback_target(feedback_target, result_state=result_state)
+    selected_direction = _normalize_feedback_choice(signal_direction_selected, FEEDBACK_SIGNAL_CHOICES, "AUTO")
+    inference_action = str(normalized_target.get("inference_action", _feedback_result_action(result_state))).upper()
+    resolved_direction = _resolve_feedback_signal_direction(selected_direction, result_state)
+    execution_value = _normalize_feedback_choice(execution_result, FEEDBACK_EXECUTION_RESULT_CHOICES, "BREAKEVEN")
+    market_value = _normalize_feedback_choice(market_state, FEEDBACK_MARKET_STATE_CHOICES, "UNSPECIFIED")
+    setup_value = _normalize_feedback_choice(setup_state, FEEDBACK_SETUP_STATE_CHOICES, "UNSPECIFIED")
+    failure_value = _normalize_feedback_choice(failure_mode, FEEDBACK_FAILURE_MODE_CHOICES, "NONE")
+    confidence_pct = _clip_feedback_confidence_pct(label_confidence_pct)
+    confidence = float(np.clip(confidence_pct / 100.0, 0.01, 1.0))
+    actual_outcome = _derive_feedback_actual_outcome(resolved_direction, execution_value)
+    rejected_action = _derive_feedback_rejected_action(actual_outcome, resolved_direction)
+    notes_text = str(notes or "").strip()
+    summary_reason = _feedback_summary_reason(
+        signal_direction=resolved_direction,
+        actual_outcome=actual_outcome,
+        execution_result=execution_value,
+        market_state=market_value,
+        setup_state=setup_value,
+        failure_mode=failure_value,
+        label_confidence_pct=confidence_pct,
+        notes=notes_text,
+    )
+    return {
+        "schema_version": FEEDBACK_SCHEMA_VERSION,
+        "submission_id": uuid4().hex,
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+        "source_path": str(normalized_target.get("source_path", file_path)),
+        "source_image_hash": str(normalized_target.get("source_image_hash", meta.get("sha256", ""))),
+        "inference_id": str(normalized_target.get("inference_id", "")),
+        "inference_action": inference_action,
+        "signal_direction_selected": selected_direction,
+        "signal_direction": resolved_direction,
+        "actual_outcome": actual_outcome,
+        "execution_result": execution_value,
+        "market_state": market_value,
+        "setup_state": setup_value,
+        "failure_mode": failure_value,
+        "label_confidence_pct": confidence_pct,
+        "label_confidence": confidence,
+        "notes": notes_text,
+        "reason": summary_reason,
+        "verdict": actual_outcome,
+        "rejected_action": rejected_action,
+        "feedback_image": dict(feedback_asset or {}),
+        "stage_status": _feedback_stage_defaults(),
+        "stage_payloads": {},
+        "stage_errors": {},
+    }
+
+
+def _process_feedback_submission(
+    submission: Mapping[str, Any],
+    *,
+    resume: bool = False,
+) -> tuple[str, dict[str, Any]]:
+    submission_id = str(submission.get("submission_id", "")).strip()
+    if not submission_id:
+        raise ValueError("Feedback submission is missing a submission_id.")
+    current_state = _feedback_submission_state(submission_id)
+    if not current_state:
+        created = dict(submission)
+        created.setdefault("stage_status", _feedback_stage_defaults())
+        created.setdefault("stage_payloads", {})
+        created.setdefault("stage_errors", {})
+        _append_feedback_submission_event(submission_id, "submission_created", submission=created)
+        current_state = _feedback_submission_state(submission_id) or created
+    elif resume:
+        _append_feedback_submission_event(submission_id, "submission_resumed")
+        current_state = _feedback_submission_state(submission_id) or current_state
+
     personal = _get_personal()
     continual_learning = _get_continual_learning()
     rl_engine = _get_rl_engine()
 
-    if last_file is None or not str(last_file).strip():
-        return "No prior file to attach feedback."
-    file_path = last_file.name if hasattr(last_file, "name") else str(last_file)
-    _img_unused, meta = load_any_file_as_image(file_path)
-    chosen = verdict.upper()
-    rejected = "SELL" if chosen == "BUY" else "BUY"
-    feedback_asset = _save_feedback_result_image(meta["sha256"], chosen, feedback_image)
+    stage_status = dict(cast(Mapping[str, Any], current_state.get("stage_status", {})) or _feedback_stage_defaults())
+    feedback_asset = _normalize_saved_feedback_asset(cast(Mapping[str, Any] | None, current_state.get("feedback_image", {})))
     feedback_image_path = str(feedback_asset.get("path", "") or "").strip()
-    annotation_text = _build_feedback_annotation_text(feedback_asset)
-    personal.record_feedback(meta["sha256"], chosen, rejected, reason, annotation_text)
-    replay_item: dict[str, Any] = (
-        cast(
-            dict[str, Any],
-            continual_learning.record_feedback(
-                meta["sha256"],
-                chosen,
-                reason,
-                feedback_image_path=feedback_image_path,
-                feedback_image_sha256=str(feedback_asset.get("sha256", "") or "").strip(),
-                feedback_image_meta=dict(feedback_asset),
-            ),
-        )
-        if RUNTIME.enable_replay_continual_learning
-        else {}
-    )
-    rl_feedback: dict[str, Any] = (
-        rl_engine.record_feedback(
-            meta["sha256"],
-            chosen,
-            reason,
-            feedback_image_path=feedback_image_path,
-            feedback_image_sha256=str(feedback_asset.get("sha256", "") or "").strip(),
-            feedback_image_meta=dict(feedback_asset),
-        )
-        if not RUNTIME.pause_rl_updates
-        else {}
-    )
-    if replay_item:
-        personal.record_context_feedback(
-            str(replay_item.get("context_key", "default")),
-            str(replay_item.get("context_descriptor", "")),
-            chosen,
-            reason,
-            annotation_text,
-        )
+    chosen = str(current_state.get("actual_outcome", "HOLD")).upper()
+    rejected = str(current_state.get("rejected_action", "BUY")).upper()
+    reason_text = str(current_state.get("reason", "") or "").strip()
+    annotation_text = _build_feedback_annotation_text(feedback_asset, current_state)
+    operator_confidence = float(np.clip(float(current_state.get("label_confidence", 1.0) or 1.0), 0.05, 1.0))
+    feedback_meta = _feedback_meta_payload(current_state)
+    replay_item = _jsonl_find_last_by_submission_id(_replay_buffer_path_current(), submission_id)
+    rl_feedback = _jsonl_find_last_by_submission_id(_rl_feedback_buffer_path_current(), submission_id)
 
-    # Refresh style EMA from memory bank DPO pairs
-    bank = _get_memory_bank()
-    if bank is not None:
-        try:
-            dpo_pairs = personal.generate_dpo_pairs(memory_bank=bank, n=50)
-            _: NDArray[np.float32] = personal.update_style_from_memory_bank(dpo_pairs)
-        except Exception:
-            pass
+    if str(stage_status.get("personalization", "")) != "applied":
+        if _personalization_submission_exists(personal, submission_id):
+            _append_feedback_submission_event(submission_id, "stage_applied", stage="personalization", payload={"deduped": True})
+        else:
+            try:
+                personal.record_feedback(str(current_state.get("source_image_hash", "")), chosen, rejected, reason_text, annotation_text)
+                _append_feedback_submission_event(
+                    submission_id,
+                    "stage_applied",
+                    stage="personalization",
+                    payload={"chosen": chosen, "rejected": rejected},
+                )
+            except Exception as exc:
+                _append_feedback_submission_event(submission_id, "stage_failed", stage="personalization", error=str(exc))
+                logger.exception("Feedback personalization update failed for %s: %s", current_state.get("source_image_hash", ""), exc)
 
-    _append_jsonl(
-        _feedback_feed_path(),
-        {
-            "ts": utc_now_iso(),
-            "source_path": file_path,
-            "source_image_hash": str(meta.get("sha256", "")),
-            "verdict": chosen,
-            "rejected": rejected,
-            "reason": str(reason),
-            "feedback_image": dict(feedback_asset),
-            "learning_snapshot_path": str(replay_item.get("snapshot_path", feedback_image_path)),
-            "continual_learning_updated": bool(replay_item),
-            "continual_learning_success": bool(replay_item.get("success", False)) if replay_item else False,
-            "rl_feedback_updated": bool(rl_feedback),
-            "rl_online_updated": bool(rl_feedback.get("updated", False)) if rl_feedback else False,
-        },
-    )
+    if str(stage_status.get("continual_learning", "")) != "applied":
+        if not _feedback_learning_feed_enabled():
+            _append_feedback_submission_event(submission_id, "stage_skipped", stage="continual_learning", payload={"reason": "feed_disabled"})
+        elif replay_item:
+            _append_feedback_submission_event(submission_id, "stage_applied", stage="continual_learning", payload=replay_item)
+        elif continual_learning is None:
+            _append_feedback_submission_event(submission_id, "stage_skipped", stage="continual_learning", payload={"reason": "unavailable"})
+        else:
+            try:
+                replay_item = cast(
+                    dict[str, Any],
+                    continual_learning.record_feedback(
+                        str(current_state.get("source_image_hash", "")),
+                        chosen,
+                        reason_text,
+                        context_id=str(current_state.get("inference_id", "")),
+                        submission_id=submission_id,
+                        operator_confidence=operator_confidence,
+                        feedback_meta=feedback_meta,
+                        feedback_image_path=feedback_image_path,
+                        feedback_image_sha256=str(feedback_asset.get("sha256", "") or "").strip(),
+                        feedback_image_meta=dict(feedback_asset),
+                    ),
+                )
+                if replay_item:
+                    _append_feedback_submission_event(submission_id, "stage_applied", stage="continual_learning", payload=replay_item)
+                else:
+                    _append_feedback_submission_event(submission_id, "stage_failed", stage="continual_learning", error="pending context missing")
+            except Exception as exc:
+                _append_feedback_submission_event(submission_id, "stage_failed", stage="continual_learning", error=str(exc))
+                logger.exception("Continual learning feedback update failed for %s: %s", current_state.get("source_image_hash", ""), exc)
 
+    if str(stage_status.get("rl", "")) != "applied":
+        if not _feedback_learning_feed_enabled():
+            _append_feedback_submission_event(submission_id, "stage_skipped", stage="rl", payload={"reason": "feed_disabled"})
+        elif rl_feedback:
+            _append_feedback_submission_event(submission_id, "stage_applied", stage="rl", payload=rl_feedback)
+        else:
+            try:
+                rl_feedback = rl_engine.record_feedback(
+                    str(current_state.get("source_image_hash", "")),
+                    chosen,
+                    reason_text,
+                    context_id=str(current_state.get("inference_id", "")),
+                    submission_id=submission_id,
+                    operator_confidence=operator_confidence,
+                    sharpe_proxy=_feedback_sharpe_proxy(str(current_state.get("execution_result", "")), operator_confidence),
+                    feedback_meta=feedback_meta,
+                    feedback_image_path=feedback_image_path,
+                    feedback_image_sha256=str(feedback_asset.get("sha256", "") or "").strip(),
+                    feedback_image_meta=dict(feedback_asset),
+                )
+                if rl_feedback:
+                    _append_feedback_submission_event(submission_id, "stage_applied", stage="rl", payload=rl_feedback)
+                else:
+                    _append_feedback_submission_event(submission_id, "stage_failed", stage="rl", error="pending context missing")
+            except Exception as exc:
+                _append_feedback_submission_event(submission_id, "stage_failed", stage="rl", error=str(exc))
+                logger.exception("RL feedback update failed for %s: %s", current_state.get("source_image_hash", ""), exc)
+
+    refreshed_state = _feedback_submission_state(submission_id) or current_state
+    refreshed_stage_status = dict(cast(Mapping[str, Any], refreshed_state.get("stage_status", {})) or _feedback_stage_defaults())
+    refreshed_stage_payloads = dict(cast(Mapping[str, Any], refreshed_state.get("stage_payloads", {})) or {})
+    replay_item = dict(cast(Mapping[str, Any], refreshed_stage_payloads.get("continual_learning", {})))
+
+    if str(refreshed_stage_status.get("personalization_context", "")) != "applied":
+        if replay_item and str(refreshed_stage_status.get("personalization", "")) == "applied":
+            try:
+                personal.record_context_feedback(
+                    str(replay_item.get("context_key", "default")),
+                    str(replay_item.get("context_descriptor", "")),
+                    chosen,
+                    reason_text,
+                    annotation_text,
+                )
+                _append_feedback_submission_event(
+                    submission_id,
+                    "stage_applied",
+                    stage="personalization_context",
+                    payload={"context_key": str(replay_item.get("context_key", "default"))},
+                )
+            except Exception as exc:
+                _append_feedback_submission_event(submission_id, "stage_failed", stage="personalization_context", error=str(exc))
+                logger.exception("Context personalization update failed for %s: %s", current_state.get("source_image_hash", ""), exc)
+        else:
+            _append_feedback_submission_event(
+                submission_id,
+                "stage_skipped",
+                stage="personalization_context",
+                payload={"reason": "awaiting_personalization_or_replay"},
+            )
+
+    if str(refreshed_stage_status.get("style_refresh", "")) != "applied":
+        bank = _get_memory_bank()
+        if bank is None:
+            _append_feedback_submission_event(submission_id, "stage_skipped", stage="style_refresh", payload={"reason": "memory_bank_unavailable"})
+        else:
+            try:
+                dpo_pairs = personal.generate_dpo_pairs(memory_bank=bank, n=50)
+                _ = personal.update_style_from_memory_bank(dpo_pairs)
+                _append_feedback_submission_event(
+                    submission_id,
+                    "stage_applied",
+                    stage="style_refresh",
+                    payload={"pair_count": int(len(dpo_pairs))},
+                )
+            except Exception as exc:
+                _append_feedback_submission_event(submission_id, "stage_failed", stage="style_refresh", error=str(exc))
+                logger.exception("Memory-bank style refresh failed for %s: %s", current_state.get("source_image_hash", ""), exc)
+
+    _sync_feedback_feed_view()
+    latest_state = _feedback_submission_state(submission_id) or refreshed_state
+    latest_stage_status = dict(cast(Mapping[str, Any], latest_state.get("stage_status", {})) or {})
+    latest_stage_payloads = cast(dict[str, Any], latest_state.get("stage_payloads", {}))
+    latest_rl = cast(dict[str, Any], latest_stage_payloads.get("rl", {}))
     image_status = ""
     if feedback_image_path:
         image_status = f" Result image saved to {_project_relative_path(Path(feedback_image_path))}."
     elif str(feedback_asset.get("error", "")).strip():
         image_status = " Result image could not be saved."
+    warning_status = " Some protected save steps reported issues." if cast(list[str], latest_state.get("error_list", [])) else ""
+    if latest_rl and bool(latest_rl.get("updated", False)):
+        return (
+            "Outcome review captured and updated successfully."
+            f"{warning_status}{image_status}"
+        ).strip(), latest_state
+    if any(str(latest_stage_status.get(stage, "")) == "applied" for stage in FEEDBACK_CRITICAL_STAGES):
+        return f"Outcome review captured and stored successfully.{warning_status}{image_status}".strip(), latest_state
+    if cast(list[str], latest_state.get("error_list", [])):
+        return f"Outcome review was captured, but some protected save steps failed.{image_status}".strip(), latest_state
+    return f"Outcome review captured successfully.{image_status}".strip(), latest_state
 
-    if rl_feedback:
-        if bool(rl_feedback.get("updated", False)):
-            return (
-                "Feedback captured and RL updated "
-                f"(loss={float(rl_feedback.get('loss', 0.0) or 0.0):.4f})."
-                f"{image_status}"
-            ).strip()
-        return f"Feedback captured and queued for learning.{image_status}".strip()
-    return f"Feedback captured for learning.{image_status}".strip()
+
+def on_feedback(
+    feedback_target: Any,
+    verdict: str,
+    reason: str,
+    feedback_image: Any | None = None,
+    saved_feedback_asset: Mapping[str, Any] | None = None,
+    *,
+    result_state: Mapping[str, Any] | None = None,
+    execution_result: str = "WIN",
+    market_state: str = "UNSPECIFIED",
+    setup_state: str = "UNSPECIFIED",
+    failure_mode: str = "NONE",
+    label_confidence_pct: float = 100.0,
+) -> str:
+    target = _normalize_feedback_target(feedback_target, result_state=result_state)
+    source_hash = str(target.get("source_image_hash", "")).strip()
+    file_path = str(target.get("source_path", "")).strip()
+    if not source_hash:
+        return "No recorded inference is selected for feedback."
+    target_result_state: dict[str, Any] = {
+        "action": str(target.get("inference_action", _feedback_result_action(result_state))).upper(),
+        "inference_id": str(target.get("inference_id", "")),
+        "meta": {"sha256": source_hash},
+    }
+    meta = {"sha256": source_hash}
+    feedback_asset = _normalize_saved_feedback_asset(saved_feedback_asset)
+    if not feedback_asset:
+        feedback_asset = _save_feedback_result_image(
+            source_hash,
+            _resolve_feedback_signal_direction(verdict, target_result_state),
+            feedback_image,
+        )
+    submission = _build_feedback_submission_payload(
+        file_path=file_path,
+        meta=meta,
+        result_state=target_result_state,
+        feedback_target=target,
+        signal_direction_selected=verdict,
+        execution_result=execution_result,
+        market_state=market_state,
+        setup_state=setup_state,
+        failure_mode=failure_mode,
+        label_confidence_pct=_clip_feedback_confidence_pct(label_confidence_pct),
+        notes=str(reason or ""),
+        feedback_asset=feedback_asset,
+    )
+    status, _latest_state = _process_feedback_submission(submission)
+    return status
+
+
+def submit_feedback_feed(
+    feedback_target: Any,
+    result_state: Mapping[str, Any] | None,
+    signal_direction: str,
+    execution_result: str,
+    market_state: str,
+    setup_state: str,
+    failure_mode: str,
+    label_confidence_pct: float,
+    reason: str,
+    feedback_image: Any | None = None,
+    saved_feedback_asset: Mapping[str, Any] | None = None,
+) -> tuple[str, dict[str, Any], str, str, str, Any, dict[str, Any], str]:
+    normalized_asset = _normalize_saved_feedback_asset(saved_feedback_asset)
+    status = on_feedback(
+        feedback_target,
+        signal_direction,
+        reason,
+        feedback_image,
+        saved_feedback_asset=normalized_asset,
+        result_state=result_state,
+        execution_result=execution_result,
+        market_state=market_state,
+        setup_state=setup_state,
+        failure_mode=failure_mode,
+        label_confidence_pct=label_confidence_pct,
+    )
+    save_status = (
+        "Saved visual label submitted into the outcome review flow."
+        if normalized_asset and str(normalized_asset.get("path", "")).strip()
+        else ""
+    )
+    normalized_target = _normalize_feedback_target(feedback_target, result_state=result_state)
+    dropdown_update, target_state, target_status, _, _ = refresh_feedback_targets(str(normalized_target.get("inference_id", "")))
+    return (
+        status,
+        {},
+        save_status,
+        _build_learning_feed_html(),
+        _build_session_timeline_html(),
+        dropdown_update,
+        target_state,
+        target_status,
+    )
+
+
+def _resume_pending_feedback_submissions_if_needed() -> None:
+    pending_states = [
+        state
+        for state in _feedback_submission_states()
+        if str(state.get("status", "")) in {"pending", "partial"}
+    ]
+    if not pending_states:
+        return
+    logger.info("Resuming %d pending feedback submission(s).", len(pending_states))
+    for state in pending_states[-64:]:
+        try:
+            _process_feedback_submission(state, resume=True)
+        except Exception as exc:
+            logger.exception(
+                "Pending feedback submission resume failed for %s: %s",
+                state.get("submission_id", ""),
+                exc,
+            )
 
 
 async def watch_inbox_loop(stop_evt: threading.Event):
@@ -10559,139 +21881,246 @@ async def watch_inbox_loop(stop_evt: threading.Event):
 # ------------------------------------------------------------------
 
 def launch_ui():
+    _install_runtime_crash_hooks()
+    _restore_capture_recovery_state()
+    _restore_manual_inference_jobs()
+    configure_tracing("phoenixguard-workstation", service_version="1.0.0")
+    voice_runtime_snapshot = get_voice_runtime_snapshot()
     with gr.Blocks(title=UI_BRAND_NAME, fill_width=True) as demo:
         result_state = gr.State(value={})
         source_image_state = gr.State(value=None)
         active_file_path_state = gr.State(value="")
+        legacy_fallback_request_state = gr.State(value={})
         capture_token_state = gr.State(value=0)
         capture_status_token_state = gr.State(value=0)
         audit_tab_loaded_state = gr.State(value=False)
         heatmap_tab_loaded_state = gr.State(value=False)
         compare_tab_loaded_state = gr.State(value=False)
+        feedback_saved_asset_state = gr.State(value={})
+        feedback_target_state = gr.State(value={})
         capture_timer = gr.Timer(value=float(RUNTIME.capture_poll_interval_sec), active=True)
+        gr.HTML(_build_workspace_shell_bar_html())
         gr.HTML(_build_hero_shell_html())
-        with gr.Row():
-            with gr.Column(scale=3):
-                with gr.Group(elem_classes=["pg-panel", "pg-controls", "pg-control-board"]):
+        gr.HTML("<div id='pg_anchor_overview' class='pg-shell-anchor'></div>")
+        gr.HTML("<div id='pg_anchor_mission' class='pg-shell-anchor'></div>")
+        gr.HTML("<div id='pg_anchor_stage' class='pg-shell-anchor'></div>")
+        with gr.Row(elem_classes=["pg-reference-shell"]):
+            with gr.Column(scale=3, elem_classes=["pg-reference-rail"]):
+                with gr.Group(elem_id="pg_mission_control", elem_classes=["pg-panel", "pg-controls", "pg-control-board", "pg-reference-control-board"]):
                     gr.Markdown("### Mission Control")
                     gr.HTML(_build_mission_control_intro_html())
-                    _desk_mode = gr.Radio(
-                        choices=["Guided", "Operator", "Compact"],
-                        value="Guided",
-                        label="Desk Mode",
-                        info="Guided keeps onboarding copy visible. Operator trims it down. Compact tightens density for fast scanning.",
-                        elem_id="pg_desk_mode",
-                    )
                     file_input = gr.File(
-                        label="Upload Exactly Two Chart Images",
+                        label="Upload Four Chart Images",
                         file_types=["image"],
                         file_count="multiple",
                         allow_reordering=True,
                     )
-                    with gr.Accordion("Overlay And Confidence Controls", open=True):
-                        with gr.Row():
-                            with gr.Column(scale=1):
-                                overlay_mode = gr.Dropdown(
-                                    choices=["debug-all", "latest-only", "global-only", "history-boxes", "history-plus-projection"],
-                                    value="history-plus-projection",
-                                    label="Overlay Mode",
-                                    info="Choose whether the desk emphasizes full history, the latest branch, or projected structure.",
-                                )
-                                min_conf_global = gr.Slider(
-                                    minimum=0.2,
-                                    maximum=0.95,
-                                    value=0.42,
-                                    step=0.01,
-                                    label="Global Min Confidence",
-                                    info="Hide weaker detections from the overall historical overlay.",
-                                )
-                                history_depth = gr.Slider(
-                                    minimum=1,
-                                    maximum=18,
-                                    value=8,
-                                    step=1,
-                                    label="Sequence History Depth",
-                                    info="How many historical structure boxes stay visible on the chart.",
-                                )
-                            with gr.Column(scale=1):
-                                min_conf_latest = gr.Slider(
-                                    minimum=0.2,
-                                    maximum=0.95,
-                                    value=0.50,
-                                    step=0.01,
-                                    label="Latest-Branch Min Confidence",
-                                    info="Hide weaker labels on the newest decision branch so the trigger area stays readable.",
-                                )
-                                label_density = gr.Slider(
-                                    minimum=2,
-                                    maximum=18,
-                                    value=10,
-                                    step=1,
-                                    label="Overlay Label Density",
-                                    info="Controls how many labels and annotations the chart can show at once.",
-                                )
-                                projection_focus = gr.Slider(
-                                    minimum=0.0,
-                                    maximum=0.9,
-                                    value=0.35,
-                                    step=0.01,
-                                    label="Projection Visibility Floor",
-                                    info="Future boxes are only drawn when the projection confidence clears this floor.",
-                                )
-                        debug_depth = gr.Slider(
-                            minimum=3,
-                            maximum=12,
-                            value=6,
-                            step=1,
-                            label="Diagnostics Depth",
-                            info="Raises or lowers how much detail the diagnostics, evidence, and memory panels expose.",
+                    with gr.Row():
+                        higher_timeframe_input = gr.Dropdown(
+                            choices=TIMEFRAME_CHOICES,
+                            value="M15",
+                            label="Higher Timeframe",
+                            info="Assign the exact timeframe for the first uploaded chart.",
                         )
-                    run_btn = gr.Button("Analyze Both Charts", variant="primary")
-                    control_status_html = gr.HTML(value=build_control_status_html(None, None))
-                    adaptive_guidance_html = gr.HTML(value=_build_adaptive_guidance_html(None))
-            with gr.Column(scale=9):
-                signal_html = gr.HTML(value=_placeholder_panel("Signal Overview", f"Upload exactly two chart images to activate {UI_BRAND_NAME}."))
-                with gr.Row():
-                    with gr.Column(scale=7):
+                        lower_timeframe_input = gr.Dropdown(
+                            choices=TIMEFRAME_CHOICES,
+                            value="M5",
+                            label="Lower/Trigger Timeframe",
+                            info="Assign the exact timeframe for the second uploaded chart.",
+                        )
+                    with gr.Row():
+                        overlay_mode = gr.Dropdown(
+                            choices=VISION_LEVEL_CHOICES,
+                            value=DEFAULT_OVERLAY_MODE,
+                            label="Chart View",
+                            info="Choose how much chart annotation you want in the first pass.",
+                        )
+                        council_scope = gr.Dropdown(
+                            choices=COUNCIL_SCOPE_CHOICES,
+                            value=DEFAULT_COUNCIL_SCOPE,
+                            label="Cross-Check Depth",
+                            info="Set how much extra confirmation the next run should request.",
+                        )
+                    run_btn = gr.Button("Analyze Pair", variant="primary")
+                    with gr.Accordion("Advanced Review Controls", open=False):
+                        _desk_mode = gr.Radio(
+                            choices=["Guided", "Operator", "Compact"],
+                            value="Operator",
+                            label="Desk Mode",
+                            info="Operator is the lean default. Guided restores inline coaching. Compact tightens spacing further.",
+                            elem_id="pg_desk_mode",
+                        )
+                        vision_extras = gr.CheckboxGroup(
+                            choices=VISION_EXTRA_CHOICES,
+                            value=list(DEFAULT_WORKSPACE_VISION_EXTRAS),
+                            label="Overlay Aids",
+                            info="Turn context layers and the projection overlay on or off without changing the rest of the desk.",
+                        )
+                        with gr.Row():
+                            min_conf_global = gr.Slider(
+                                minimum=0.2,
+                                maximum=0.95,
+                                value=0.42,
+                                step=0.01,
+                                label="Global Min Confidence",
+                                info="Hide weaker detections from the broader structural overlay.",
+                            )
+                            min_conf_latest = gr.Slider(
+                                minimum=0.2,
+                                maximum=0.95,
+                                value=0.50,
+                                step=0.01,
+                                label="Latest-Branch Min Confidence",
+                                info="Trim weaker labels from the newest decision branch.",
+                            )
+                        with gr.Row():
+                            history_depth = gr.Slider(
+                                minimum=1,
+                                maximum=MAX_SEQUENCE_HISTORY_DEPTH,
+                                value=8,
+                                step=1,
+                                label="Sequence History Depth",
+                                info="Control how much historical structure stays visible.",
+                            )
+                            label_density = gr.Slider(
+                                minimum=2,
+                                maximum=18,
+                                value=10,
+                                step=1,
+                                label="Overlay Label Density",
+                                info="Reduce this when the chart is visually crowded.",
+                            )
+                        with gr.Row():
+                            projection_focus = gr.Slider(
+                                minimum=0.0,
+                                maximum=0.9,
+                                value=0.35,
+                                step=0.01,
+                                label="Projection Visibility Floor",
+                                info="When Projection Overlay is enabled, only show projected boxes once they clear this confidence floor.",
+                            )
+                            debug_depth = gr.Slider(
+                                minimum=3,
+                                maximum=12,
+                                value=6,
+                                step=1,
+                                label="Detail Level",
+                                info="Raise or lower how much supporting detail the review panels expose.",
+                            )
+                        fuse_timeframe_overlays = gr.Checkbox(
+                            label="Fuse Timeframe Overlays",
+                            value=False,
+                            info="Blend the higher and lower timeframe overlays into one fused main-stage image. Turn this off to keep the paired split view.",
+                        )
+                    with gr.Accordion("808 Voice Control", open=False):
+                        gr.Markdown("### 808 Voice Control")
+                        gr.Markdown("Wake word: `Hey 808`. Use these controls to manage the live voice layer, timer automation, and command behavior from the workstation.")
+                        with gr.Row():
+                            voice_enabled_toggle = gr.Checkbox(
+                                label="Enable 808 Voice",
+                                value=bool(voice_runtime_snapshot.get("voice_enabled", False)),
+                                info="Master switch for the PhoenixGuard voice layer.",
+                            )
+                            voice_listening_toggle = gr.Checkbox(
+                                label="Listening Live",
+                                value=bool(voice_runtime_snapshot.get("listening_enabled", False)),
+                                info="Pause or resume active listening without muting the rest of the voice stack.",
+                            )
+                        with gr.Row():
+                            voice_auto_timer_toggle = gr.Checkbox(
+                                label="Automatic Tracker Timer",
+                                value=bool(voice_runtime_snapshot.get("automatic_timer_enabled", False)),
+                                info="When enabled, voice timer commands drive the live tracker session.",
+                            )
+                            voice_interval_slider = gr.Slider(
+                                minimum=5,
+                                maximum=60,
+                                value=float(voice_runtime_snapshot.get("tracker_capture_interval_sec", VOICE.tracker_interval_sec_default) or VOICE.tracker_interval_sec_default),
+                                step=1,
+                                label="Tracker Interval (seconds)",
+                                info="The timer command example maps to this live tracker capture interval.",
+                            )
+                        voice_timezone_input = gr.Textbox(
+                            label="Voice Timezone",
+                            value=str(voice_runtime_snapshot.get("timezone_name", VOICE.timezone_name or "") or ""),
+                            info="Used for the Good morning, afternoon, or evening greeting.",
+                        )
+                        voice_command_input = gr.Textbox(
+                            label="808 Command Console",
+                            placeholder="Example: Hey 808, set the timer to 20 seconds.",
+                            info="Type a command here to test the same voice command router used by the live microphone bridge.",
+                        )
+                        with gr.Row():
+                            voice_apply_btn = gr.Button("Apply Voice Controls")
+                            voice_command_btn = gr.Button("Run 808 Command", variant="primary")
+                control_status_html = gr.HTML(value=build_control_status_html(None, None), elem_classes=["pg-side-card", "pg-reference-status"])
+                adaptive_guidance_html = gr.HTML(value=_build_adaptive_guidance_html(None), elem_classes=["pg-side-card", "pg-reference-guidance"])
+                voice_console_html = gr.HTML(
+                    value=build_voice_console_html(snapshot=voice_runtime_snapshot, market_context=_voice_market_context(None)),
+                    elem_classes=["pg-side-card", "pg-reference-guidance"],
+                )
+                with gr.Group(visible=False, elem_classes=["pg-panel"]) as legacy_fallback_group:
+                    legacy_fallback_html = gr.HTML(
+                        value=_build_legacy_fallback_guard_html(
+                            {
+                                "title": "Compatibility Approval Required",
+                                "summary": "The desk paused before using a one-time compatibility path.",
+                            }
+                        )
+                    )
+                    with gr.Row():
+                        approve_legacy_fallback_btn = gr.Button("Approve Compatibility Mode", variant="primary")
+                        cancel_legacy_fallback_btn = gr.Button("Cancel", variant="secondary")
+            with gr.Column(scale=9, elem_classes=["pg-reference-main"]):
+                signal_html = gr.HTML(
+                    value=_placeholder_panel("Signal Overview", f"Upload exactly {MULTI_TIMEFRAME_UPLOAD_FILES} chart images to activate {UI_BRAND_NAME}."),
+                    elem_classes=["pg-signal-card"],
+                )
+                with gr.Row(elem_classes=["pg-reference-stage"]):
+                    with gr.Column(scale=8, elem_classes=["pg-stage-main"]):
                         overlay_img = gr.Image(
                             label="Annotated Chart",
+                            show_label=False,
                             type="pil",
-                            height=560,
                             buttons=["download", "fullscreen"],
                             elem_classes=["pg-stage-media"],
                         )
                         timeframe_overlay_html = gr.HTML(
-                            value=_placeholder_panel("Timeframe Overlays", "Higher and lower timeframe overlays will appear here after a run.")
+                            value=_placeholder_panel("Timeframe Overlays", "Higher and lower timeframe overlays will appear here after a run."),
+                            elem_classes=["pg-stage-card"],
                         )
-                    with gr.Column(scale=5):
-                        confidence_gauge = gr.Plot(label="Decision Gauge")
-                        forecast_html = gr.HTML(value=_placeholder_panel("Forecast & Risk", "Forecast distribution and risk posture will appear here."))
+                    with gr.Column(scale=4, elem_classes=["pg-stage-side", "pg-stage-sidebar"]):
+                        confidence_gauge = gr.Plot(label="Decision Gauge", show_label=False, elem_classes=["pg-gauge-card"])
+                        forecast_html = gr.HTML(
+                            value=_placeholder_panel("Forecast & Risk", "Forecast distribution and risk posture will appear here."),
+                            elem_classes=["pg-stage-card"],
+                        )
 
-        with gr.Tabs(elem_classes=["pg-tab-wrap"]):
+        with gr.Tabs(elem_id="pg_workspace_tabs", elem_classes=["pg-tab-wrap", "pg-workspace-tabs"]):
             with gr.Tab("Analysis"):
-                analysis_brief_box = gr.Textbox(
-                    label="Analyst Brief",
-                    lines=10,
-                    interactive=False,
-                    info="A plain-language operator brief that combines the live result, CV read, and current view controls.",
-                    elem_classes=["pg-brief"],
-                    buttons=["copy"],
-                )
+                analysis_brief_box = gr.HTML(value=_build_operator_brief_html(None), elem_classes=["pg-wide-card"])
                 with gr.Tabs(elem_classes=["pg-tab-wrap"]):
-                    with gr.Tab("Model Council") as model_council_tab:
-                        model_council_html = gr.HTML(value=_placeholder_panel("Model Council", "Open this tab to lazy-load the council worker and run the heavyweight ensemble once for the active static image."))
-                    with gr.Tab("Memory Recall"):
-                        memory_html = gr.HTML(value=_placeholder_panel("Memory Recall", "Top recalled episodes and ambiguity control will appear here."))
-                    with gr.Tab("Gate Matrix"):
-                        gate_matrix_html = gr.HTML(value=_placeholder_panel("Gate Matrix", "Gate pass/fail structure will appear here."))
-                    with gr.Tab("Evidence"):
-                        evidence_html = gr.HTML(value=_placeholder_panel("Evidence Panel", "Pattern evidence and transition traces will appear here."))
-                    with gr.Tab("Diagnostics"):
-                        diagnostics_html = gr.HTML(value=_placeholder_panel("Diagnostics Cockpit", "Runtime diagnostics will appear here after the first signal pass."))
-                    with gr.Tab("Attribution"):
-                        skill_plot = gr.Plot(label="Skill Contribution Dashboard")
-                    with gr.Tab("Audit JSON") as audit_tab:
-                        audit_json = gr.JSON(label="Runtime Audit JSON", open=False, buttons=["copy"], height=460)
+                    with gr.Tab("Best Play Engine"):
+                        with gr.Group(elem_classes=["pg-panel"]):
+                            gr.Markdown("### Best Play Engine")
+                            gr.Markdown("Run this only after the chart pair finishes. It consolidates the CV pass, sequence flow, directional motifs, and available model council evidence into one buy/sell play call.")
+                            best_play_btn = gr.Button("Run Best Play Engine", variant="primary")
+                            best_play_html = gr.HTML(value=_best_play_placeholder_html())
+                            best_play_json = gr.JSON(label="Best Play Data Input", value={}, open=False, buttons=["copy"], height=420)
+                    with gr.Tab("Cross-Checks") as model_council_tab:
+                        model_council_html = gr.HTML(value=_placeholder_panel("Cross-Checks", "Open this tab to load the deeper cross-check pass for the active chart."))
+                    with gr.Tab("Case Recall"):
+                        memory_html = gr.HTML(value=_placeholder_panel("Case Recall", "Similar reviewed cases will appear here after a signal run."))
+                    with gr.Tab("Readiness Checks"):
+                        gate_matrix_html = gr.HTML(value=_placeholder_panel("Readiness Checks", "Readiness checks will appear here after a signal run."))
+                    with gr.Tab("Chart Evidence"):
+                        evidence_html = gr.HTML(value=_placeholder_panel("Chart Evidence", "Pattern evidence and supporting chart clues will appear here."))
+                    with gr.Tab("Review Notes"):
+                        diagnostics_html = gr.HTML(value=_placeholder_panel("Review Notes", "Structured review notes will appear here after the first signal pass."))
+                    with gr.Tab("Decision Balance"):
+                        skill_plot = gr.Plot(label="Decision Balance")
+                    with gr.Tab("Decision Record") as audit_tab:
+                        audit_json = gr.JSON(label="Decision Record", open=False, buttons=["copy"], height=460)
             with gr.Tab("Visual Lab"):
                 with gr.Tabs(elem_classes=["pg-tab-wrap"]):
                     with gr.Tab("Compare Desk") as compare_tab:
@@ -10699,7 +22128,7 @@ def launch_ui():
                     with gr.Tab("Confidence Heatmap") as heatmap_tab:
                         with gr.Row():
                             with gr.Column(scale=6):
-                                heatmap_img = gr.Image(label="Confidence Heatmap", type="pil", height=470, buttons=["download", "fullscreen"], elem_classes=["pg-stage-media"])
+                                heatmap_img = gr.Image(label="Confidence Heatmap", show_label=False, type="pil", buttons=["download", "fullscreen"], elem_classes=["pg-stage-media"])
                             with gr.Column(scale=4):
                                 heatmap_summary_html = gr.HTML(value=_placeholder_panel("Confidence Heatmap", "Heat concentration will appear here after the first inference."))
                     with gr.Tab("Scenario Lab"):
@@ -10709,19 +22138,25 @@ def launch_ui():
                             with gr.Row():
                                 with gr.Column(scale=4):
                                     scenario_overlay_mode = gr.Dropdown(
-                                        choices=["debug-all", "latest-only", "global-only", "history-boxes", "history-plus-projection"],
-                                        value="history-plus-projection",
-                                        label="Scenario Overlay Mode",
-                                        info="Use a different overlay emphasis here without touching the live chart view.",
+                                        choices=VISION_LEVEL_CHOICES,
+                                        value=DEFAULT_OVERLAY_MODE,
+                                        label="Scenario Chart View",
+                                        info="Use a different chart view here without touching the live chart on the main stage.",
+                                    )
+                                    scenario_vision_extras = gr.CheckboxGroup(
+                                        choices=VISION_EXTRA_CHOICES,
+                                        value=list(DEFAULT_WORKSPACE_VISION_EXTRAS),
+                                        label="Scenario Overlay Aids",
+                                        info="Toggle context layers and projection overlay inside the sandbox without affecting the live desk.",
                                     )
                                     scenario_min_conf_global = gr.Slider(minimum=0.2, maximum=0.95, value=0.42, step=0.01, label="Scenario Global Min Confidence", info="Hide weaker global detections in the sandbox view.")
                                     scenario_min_conf_latest = gr.Slider(minimum=0.2, maximum=0.95, value=0.50, step=0.01, label="Scenario Latest Min Confidence", info="Trim weaker labels from the active branch only in the sandbox.")
-                                    scenario_history_depth = gr.Slider(minimum=1, maximum=18, value=8, step=1, label="Scenario History Depth", info="How much historical structure stays visible in the sandbox.")
+                                    scenario_history_depth = gr.Slider(minimum=1, maximum=MAX_SEQUENCE_HISTORY_DEPTH, value=8, step=1, label="Scenario History Depth", info="How much historical structure stays visible in the sandbox.")
                                     scenario_label_density = gr.Slider(minimum=2, maximum=18, value=10, step=1, label="Scenario Label Density", info="Reduce this if the view gets visually crowded.")
-                                    scenario_projection_focus = gr.Slider(minimum=0.0, maximum=0.9, value=0.35, step=0.01, label="Scenario Projection Floor", info="Raise this to demand more confidence before projected boxes appear.")
-                                    scenario_debug_depth = gr.Slider(minimum=3, maximum=12, value=6, step=1, label="Scenario Debug Depth", info="Controls how much supporting detail this scenario summary keeps.")
+                                    scenario_projection_focus = gr.Slider(minimum=0.0, maximum=0.9, value=0.35, step=0.01, label="Scenario Projection Floor", info="When Projection Overlay is enabled here, raise this to demand more confidence before projected boxes appear.")
+                                    scenario_debug_depth = gr.Slider(minimum=3, maximum=12, value=6, step=1, label="Scenario Detail Level", info="Controls how much supporting detail this scenario summary keeps.")
                                 with gr.Column(scale=8):
-                                    scenario_overlay_img = gr.Image(label="Scenario View", type="pil", height=470, buttons=["download", "fullscreen"], elem_classes=["pg-stage-media"])
+                                    scenario_overlay_img = gr.Image(label="Scenario View", show_label=False, type="pil", buttons=["download", "fullscreen"], elem_classes=["pg-stage-media"])
                                     scenario_summary_html = gr.HTML(value=_placeholder_panel("Scenario Lab", "Clone the active chart here and explore alternate thresholds without touching the main desk."))
                     with gr.Tab("Zone Studio"):
                         with gr.Group(elem_classes=["pg-panel", "pg-zone-studio"]):
@@ -10732,7 +22167,7 @@ def launch_ui():
                                     zone_canvas = gr.ImageEditor(
                                         label="Zone Teaching Canvas",
                                         type="pil",
-                                        height=520,
+                                        height=460,
                                         image_mode="RGBA",
                                         buttons=["download", "fullscreen"],
                                         brush=gr.Brush(
@@ -10757,27 +22192,130 @@ def launch_ui():
                                     with gr.Row():
                                         zone_save_btn = gr.Button("Save Zone Teaching")
                                         zone_reset_btn = gr.Button("Reset Canvas")
-                                    zone_status = gr.Textbox(label="Zone Status", lines=2, interactive=False)
-                                    zone_library_html = gr.HTML(value=_build_zone_library_html())
+                            zone_status = gr.Textbox(label="Zone Status", lines=2, interactive=False)
+                            zone_library_html = gr.HTML(value=_build_zone_library_html())
+                    with gr.Tab("Prediction Images"):
+                        with gr.Group(elem_classes=["pg-panel"]):
+                            gr.Markdown("### Prediction Images Viewer")
+                            gr.Markdown("Visualize the input images and prediction outputs from the model inference. Compare side-by-side to validate model behavior.")
+                            with gr.Row():
+                                with gr.Column(scale=6):
+                                    prediction_source_img = gr.Image(
+                                        label="Input Image",
+                                        show_label=True,
+                                        type="pil",
+                                        buttons=["download", "fullscreen"],
+                                        elem_classes=["pg-stage-media"]
+                                    )
+                                with gr.Column(scale=6):
+                                    prediction_overlay_img = gr.Image(
+                                        label="Prediction Overlay",
+                                        show_label=True,
+                                        type="pil",
+                                        buttons=["download", "fullscreen"],
+                                        elem_classes=["pg-stage-media"]
+                                    )
+                            prediction_metadata_html = gr.HTML(
+                                value=_placeholder_panel("Model Inference", "Run a signal analysis to display prediction metadata and model decisions.")
+                            )
             with gr.Tab("History"):
                 with gr.Tabs(elem_classes=["pg-tab-wrap"]):
                     with gr.Tab("Session Timeline"):
                         session_timeline_html = gr.HTML(value=_placeholder_panel("Session Timeline", "Session captures will appear here in order."))
                     with gr.Tab("Pattern Browser"):
                         pattern_browser_html = gr.HTML(value=_placeholder_panel("Pattern Browser", "Similar session cases will appear here once enough charts have been reviewed."))
-            with gr.Tab("Feedback"):
+            with gr.Tab("Feed") as feed_tab:
                 with gr.Group(elem_classes=["pg-panel", "pg-feedback"]):
-                    gr.Markdown("### Outcome Feedback")
-                    gr.Markdown("Upload the result image you marked up so the learning feed keeps the visual evidence with your notes.")
-                    verdict = gr.Dropdown(choices=["BUY", "SELL", "HOLD", "WRONG"], value="HOLD", label="Verdict", info="Choose the outcome that best describes what actually happened.")
-                    feedback_result_image = gr.Image(label="Result Image For Learning", type="pil", height=320, buttons=["download", "fullscreen"], elem_classes=["pg-stage-media"])
-                    reason = gr.Textbox(label="Reason", lines=3, placeholder="Why are you submitting this feedback?", info="Capture the lesson in plain language so future review stays explainable.")
-                    fb_btn = gr.Button("Submit Feedback")
-                    fb_status = gr.Textbox(label="Feedback Status", lines=1, interactive=False)
+                    gr.Markdown("### Feedback Target")
+                    gr.Markdown("Pick any recorded inference from history. Entries without a submitted outcome stay marked as pending feedback.")
+                    feedback_target_id = gr.Dropdown(
+                        choices=[],
+                        value=None,
+                        label="History Entry",
+                        info="Use this to revisit older inferences after the market has unfolded.",
+                    )
+                    feedback_target_status = gr.Textbox(
+                        label="Target Status",
+                        lines=2,
+                        interactive=False,
+                        value=_feedback_target_status_text({}),
+                    )
+                with gr.Row():
+                    with gr.Column(scale=7):
+                        with gr.Group(elem_classes=["pg-panel", "pg-feedback"]):
+                            gr.Markdown("### Visual Label Feed")
+                            gr.Markdown("After the run finishes, upload the real result image here, mark it up visually, then submit a structured outcome review the workstation can remember.")
+                            signal_direction = gr.Dropdown(
+                                choices=FEEDBACK_SIGNAL_CHOICES,
+                                value="AUTO",
+                                label="Signal Direction",
+                                info="AUTO uses the latest system action from the active chart. Choose manually only when you want to override it.",
+                            )
+                            feedback_result_image = gr.ImageEditor(
+                                label="Result Image Visual Labeling",
+                                type="pil",
+                                height=360,
+                                image_mode="RGBA",
+                                buttons=["download", "fullscreen"],
+                                brush=gr.Brush(
+                                    colors=[str(spec["color"]) for spec in FEEDBACK_VISUAL_BRUSHES],
+                                    default_color=str(FEEDBACK_VISUAL_BRUSHES[2]["color"]),
+                                    color_mode="defaults",
+                                ),
+                                eraser=False,
+                                layers=True,
+                                elem_classes=["pg-stage-media", "pg-zone-editor"],
+                            )
+                            with gr.Row():
+                                execution_result = gr.Dropdown(
+                                    choices=FEEDBACK_EXECUTION_RESULT_CHOICES,
+                                    value="WIN",
+                                    label="Execution Result",
+                                    info="This records how the trade actually resolved.",
+                                )
+                                label_confidence_pct = gr.Slider(
+                                    minimum=1,
+                                    maximum=100,
+                                    value=82,
+                                    step=1,
+                                    label="Label Confidence %",
+                                    info="How strongly the learning system should trust this submission.",
+                                )
+                            with gr.Row():
+                                market_state = gr.Dropdown(
+                                    choices=FEEDBACK_MARKET_STATE_CHOICES,
+                                    value="TRENDING",
+                                    label="Market State",
+                                    info="Use one state bucket so feedback stays consistent over time.",
+                                )
+                                setup_state = gr.Dropdown(
+                                    choices=FEEDBACK_SETUP_STATE_CHOICES,
+                                    value="CONTINUATION",
+                                    label="Setup State",
+                                    info="Describe the chart structure the model should remember.",
+                                )
+                            failure_mode = gr.Dropdown(
+                                choices=FEEDBACK_FAILURE_MODE_CHOICES,
+                                value="NONE",
+                                label="Failure Mode",
+                                info="Set this when the trade failed, invalidated, or should have been ignored.",
+                            )
+                            with gr.Row():
+                                feedback_save_btn = gr.Button("Save Visual Label")
+                                fb_btn = gr.Button("Submit To Learning", variant="primary")
+                            feedback_save_status = gr.Textbox(label="Visual Label Status", lines=2, interactive=False)
+                    with gr.Column(scale=5):
+                        with gr.Group(elem_classes=["pg-panel", "pg-feedback"]):
+                            gr.Markdown("### Structured Notes")
+                            reason = gr.Textbox(label="Operator Notes", lines=5, placeholder="Optional context for this feedback item.", info="Notes are optional support text. The main supervision now comes from the structured fields and visual labels.")
+                            fb_status = gr.Textbox(label="Feed Submit Status", lines=2, interactive=False)
+                            learning_feed_html = gr.HTML(value=_build_learning_feed_html())
 
         full_run_inputs: list[Any] = [
             file_input,
             overlay_mode,
+            vision_extras,
+            council_scope,
             min_conf_global,
             min_conf_latest,
             history_depth,
@@ -10787,6 +22325,9 @@ def launch_ui():
             audit_tab_loaded_state,
             heatmap_tab_loaded_state,
             compare_tab_loaded_state,
+            fuse_timeframe_overlays,
+            higher_timeframe_input,
+            lower_timeframe_input,
         ]
         full_run_outputs: list[Any] = [
             overlay_img,
@@ -10807,6 +22348,9 @@ def launch_ui():
             heatmap_summary_html,
             compare_desk_html,
             zone_library_html,
+            prediction_source_img,
+            prediction_overlay_img,
+            prediction_metadata_html,
             session_timeline_html,
             pattern_browser_html,
             zone_canvas,
@@ -10815,10 +22359,32 @@ def launch_ui():
             source_image_state,
             active_file_path_state,
         ]
+        workspace_run_outputs: list[Any] = [
+            *full_run_outputs,
+            legacy_fallback_request_state,
+            legacy_fallback_group,
+            legacy_fallback_html,
+        ]
+        best_play_inputs: list[Any] = [
+            result_state,
+            overlay_mode,
+            vision_extras,
+            council_scope,
+            min_conf_global,
+            min_conf_latest,
+            history_depth,
+            label_density,
+            projection_focus,
+            debug_depth,
+            fuse_timeframe_overlays,
+            higher_timeframe_input,
+            lower_timeframe_input,
+        ]
         scenario_inputs: list[Any] = [
             result_state,
             source_image_state,
             scenario_overlay_mode,
+            scenario_vision_extras,
             scenario_min_conf_global,
             scenario_min_conf_latest,
             scenario_history_depth,
@@ -10834,6 +22400,8 @@ def launch_ui():
             result_state,
             source_image_state,
             overlay_mode,
+            vision_extras,
+            council_scope,
             min_conf_global,
             min_conf_latest,
             history_depth,
@@ -10841,6 +22409,7 @@ def launch_ui():
             projection_focus,
             debug_depth,
             compare_tab_loaded_state,
+            fuse_timeframe_overlays,
         ]
         live_preview_outputs: list[Any] = [
             overlay_img,
@@ -10855,6 +22424,8 @@ def launch_ui():
             capture_status_token_state,
             result_state,
             overlay_mode,
+            vision_extras,
+            council_scope,
             min_conf_global,
             min_conf_latest,
             history_depth,
@@ -10864,6 +22435,7 @@ def launch_ui():
             audit_tab_loaded_state,
             heatmap_tab_loaded_state,
             compare_tab_loaded_state,
+            fuse_timeframe_overlays,
         ]
         capture_poll_outputs: list[Any] = [
             overlay_img,
@@ -10894,22 +22466,54 @@ def launch_ui():
             capture_token_state,
             capture_status_token_state,
         ]
+        voice_control_outputs: list[Any] = [
+            voice_enabled_toggle,
+            voice_listening_toggle,
+            voice_auto_timer_toggle,
+            voice_interval_slider,
+            voice_timezone_input,
+            voice_console_html,
+            control_status_html,
+        ]
 
         run_btn.click(
-            run_signal_workstation,
+            _run_signal_workstation_stream,
             inputs=full_run_inputs,
-            outputs=full_run_outputs,
+            outputs=workspace_run_outputs,
         )
         file_input.change(
-            run_signal_workstation,
+            _run_signal_workstation_stream,
             inputs=full_run_inputs,
-            outputs=full_run_outputs,
+            outputs=workspace_run_outputs,
         )
         result_state.change(
             render_scenario_lab,
             inputs=scenario_inputs,
             outputs=scenario_outputs,
             queue=False,
+        )
+        result_state.change(
+            reset_best_play_engine,
+            inputs=[result_state],
+            outputs=[best_play_html, best_play_json],
+            queue=False,
+        )
+        result_state.change(
+            _refresh_voice_console,
+            inputs=[result_state],
+            outputs=[voice_console_html],
+            queue=False,
+        )
+        result_state.change(
+            load_prediction_images_tab,
+            inputs=[result_state, source_image_state],
+            outputs=[prediction_source_img, prediction_overlay_img, prediction_metadata_html],
+            queue=False,
+        )
+        best_play_btn.click(
+            load_best_play_engine,
+            inputs=best_play_inputs,
+            outputs=[best_play_html, best_play_json],
         )
         model_council_tab.select(
             load_model_council_tab,
@@ -10918,6 +22522,8 @@ def launch_ui():
                 source_image_state,
                 active_file_path_state,
                 overlay_mode,
+                vision_extras,
+                council_scope,
                 min_conf_global,
                 min_conf_latest,
                 history_depth,
@@ -10927,20 +22533,24 @@ def launch_ui():
                 audit_tab_loaded_state,
                 heatmap_tab_loaded_state,
                 compare_tab_loaded_state,
+                fuse_timeframe_overlays,
             ],
-            outputs=full_run_outputs,
+            outputs=workspace_run_outputs,
         )
         audit_tab.select(
             load_audit_tab,
             inputs=[
                 result_state,
                 overlay_mode,
+                vision_extras,
+                council_scope,
                 min_conf_global,
                 min_conf_latest,
                 history_depth,
                 label_density,
                 projection_focus,
                 debug_depth,
+                fuse_timeframe_overlays,
             ],
             outputs=[audit_json, audit_tab_loaded_state],
             queue=False,
@@ -10957,17 +22567,32 @@ def launch_ui():
                 result_state,
                 source_image_state,
                 overlay_mode,
+                vision_extras,
+                council_scope,
                 min_conf_global,
                 min_conf_latest,
                 history_depth,
                 label_density,
                 projection_focus,
                 debug_depth,
+                fuse_timeframe_overlays,
             ],
             outputs=[compare_desk_html, compare_tab_loaded_state],
             queue=False,
         )
         overlay_mode.change(
+            refresh_live_preview,
+            inputs=live_preview_inputs,
+            outputs=live_preview_outputs,
+            queue=False,
+        )
+        vision_extras.change(
+            refresh_live_preview,
+            inputs=live_preview_inputs,
+            outputs=live_preview_outputs,
+            queue=False,
+        )
+        council_scope.change(
             refresh_live_preview,
             inputs=live_preview_inputs,
             outputs=live_preview_outputs,
@@ -11009,14 +22634,82 @@ def launch_ui():
             outputs=live_preview_outputs,
             queue=False,
         )
+        fuse_timeframe_overlays.change(
+            refresh_live_preview,
+            inputs=live_preview_inputs,
+            outputs=live_preview_outputs,
+            queue=False,
+        )
         capture_timer.tick(
             poll_capture_updates,
             inputs=capture_poll_inputs,
             outputs=capture_poll_outputs,
             queue=False,
         )
+        voice_apply_btn.click(
+            _apply_voice_controls_ui,
+            inputs=[
+                voice_enabled_toggle,
+                voice_listening_toggle,
+                voice_auto_timer_toggle,
+                voice_interval_slider,
+                voice_timezone_input,
+                result_state,
+                overlay_mode,
+                vision_extras,
+                council_scope,
+                min_conf_global,
+                min_conf_latest,
+                history_depth,
+                label_density,
+                projection_focus,
+                debug_depth,
+                fuse_timeframe_overlays,
+            ],
+            outputs=voice_control_outputs,
+            queue=False,
+        )
+        voice_command_btn.click(
+            _run_voice_command_ui,
+            inputs=[
+                voice_command_input,
+                result_state,
+                overlay_mode,
+                vision_extras,
+                council_scope,
+                min_conf_global,
+                min_conf_latest,
+                history_depth,
+                label_density,
+                projection_focus,
+                debug_depth,
+                fuse_timeframe_overlays,
+            ],
+            outputs=voice_control_outputs,
+            queue=False,
+        )
+        voice_command_input.submit(
+            _run_voice_command_ui,
+            inputs=[
+                voice_command_input,
+                result_state,
+                overlay_mode,
+                vision_extras,
+                council_scope,
+                min_conf_global,
+                min_conf_latest,
+                history_depth,
+                label_density,
+                projection_focus,
+                debug_depth,
+                fuse_timeframe_overlays,
+            ],
+            outputs=voice_control_outputs,
+            queue=False,
+        )
         scenario_controls: list[Any] = [
             scenario_overlay_mode,
+            scenario_vision_extras,
             scenario_min_conf_global,
             scenario_min_conf_latest,
             scenario_history_depth,
@@ -11043,6 +22736,8 @@ def launch_ui():
                 result_state,
                 source_image_state,
                 overlay_mode,
+                vision_extras,
+                council_scope,
                 min_conf_global,
                 min_conf_latest,
                 history_depth,
@@ -11052,6 +22747,7 @@ def launch_ui():
                 audit_tab_loaded_state,
                 heatmap_tab_loaded_state,
                 compare_tab_loaded_state,
+                fuse_timeframe_overlays,
             ],
             outputs=[
                 zone_status,
@@ -11074,6 +22770,7 @@ def launch_ui():
                 result_state,
                 source_image_state,
                 overlay_mode,
+                vision_extras,
                 min_conf_global,
                 min_conf_latest,
                 history_depth,
@@ -11084,10 +22781,87 @@ def launch_ui():
             outputs=[zone_canvas],
             queue=False,
         )
+        approve_legacy_fallback_btn.click(
+            approve_legacy_fallback,
+            inputs=[legacy_fallback_request_state],
+            outputs=workspace_run_outputs,
+        )
+        cancel_legacy_fallback_btn.click(
+            cancel_legacy_fallback,
+            inputs=[
+                legacy_fallback_request_state,
+                result_state,
+                overlay_mode,
+                vision_extras,
+                council_scope,
+                min_conf_global,
+                min_conf_latest,
+                history_depth,
+                label_density,
+                projection_focus,
+                debug_depth,
+                fuse_timeframe_overlays,
+            ],
+            outputs=[
+                legacy_fallback_request_state,
+                legacy_fallback_group,
+                legacy_fallback_html,
+                control_status_html,
+            ],
+            queue=False,
+        )
+        feedback_result_image.change(
+            clear_saved_feedback_visual_label,
+            outputs=[feedback_saved_asset_state, feedback_save_status, learning_feed_html],
+            queue=False,
+        )
+        feed_tab.select(
+            refresh_feedback_targets,
+            inputs=[feedback_target_id],
+            outputs=[feedback_target_id, feedback_target_state, feedback_target_status, feedback_saved_asset_state, feedback_save_status],
+            queue=False,
+        )
+        feedback_target_id.change(
+            select_feedback_target,
+            inputs=[feedback_target_id],
+            outputs=[feedback_target_state, feedback_target_status, feedback_saved_asset_state, feedback_save_status],
+            queue=False,
+        )
+        signal_direction.change(
+            clear_saved_feedback_visual_label,
+            outputs=[feedback_saved_asset_state, feedback_save_status, learning_feed_html],
+            queue=False,
+        )
+        feedback_save_btn.click(
+            save_feedback_visual_label,
+            inputs=[feedback_target_state, signal_direction, feedback_result_image],
+            outputs=[feedback_saved_asset_state, feedback_save_status, learning_feed_html],
+        )
         fb_btn.click(
-            on_feedback,
-            inputs=[active_file_path_state, verdict, reason, feedback_result_image],
-            outputs=[fb_status],
+            submit_feedback_feed,
+            inputs=[
+                feedback_target_state,
+                result_state,
+                signal_direction,
+                execution_result,
+                market_state,
+                setup_state,
+                failure_mode,
+                label_confidence_pct,
+                reason,
+                feedback_result_image,
+                feedback_saved_asset_state,
+            ],
+            outputs=[
+                fb_status,
+                feedback_saved_asset_state,
+                feedback_save_status,
+                learning_feed_html,
+                session_timeline_html,
+                feedback_target_id,
+                feedback_target_state,
+                feedback_target_status,
+            ],
         )
 
     logger.info(
@@ -11104,20 +22878,87 @@ def launch_ui():
         _get_memory_bank()
 
     stop_evt = threading.Event()
-    thread = threading.Thread(target=lambda: asyncio.run(watch_inbox_loop(stop_evt)), daemon=True)
-    thread.start()
+    threading.Thread(target=lambda: asyncio.run(watch_inbox_loop(stop_evt)), daemon=True).start()
     _start_capture_hotkey_listener()
+    _resume_recovered_capture_bundle_if_needed()
+    _resume_pending_manual_inference_jobs()
+    _resume_pending_feedback_submissions_if_needed()
+    launch_auth, auth_message = _resolve_ui_launch_auth(
+        RUNTIME.ui_host,
+        share_enabled=bool(RUNTIME.ui_share),
+    )
 
-    demo.queue(default_concurrency_limit=2)
+    # ===================================================================
+    # PhoenixGuard Frontend Enhancements - Load CSS and JS
+    # ===================================================================
+
+    # Load enhancement CSS files
+    enhancement_css_files = [
+        Path(RUNTIME.project_root) / "assets" / "themes" / "themes.css",
+        Path(RUNTIME.project_root) / "assets" / "themes" / "micro-interactions.css",
+    ]
+
+    enhancement_css = ""
+    for css_file in enhancement_css_files:
+        try:
+            if css_file.exists():
+                enhancement_css += f"\n/* {css_file.name} */\n"
+                enhancement_css += css_file.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to load CSS {css_file}: {e}")
+
+    # Load enhancement JS files
+    enhancement_js_files = [
+        Path(RUNTIME.project_root) / "assets" / "js" / "persistent-state.js",
+        Path(RUNTIME.project_root) / "assets" / "js" / "keyboard-shortcuts.js",
+        Path(RUNTIME.project_root) / "assets" / "js" / "command-palette.js",
+        Path(RUNTIME.project_root) / "assets" / "js" / "metric-animator.js",
+        Path(RUNTIME.project_root) / "assets" / "js" / "main-init.js",
+    ]
+
+    enhancement_js = ""
+    for js_file in enhancement_js_files:
+        try:
+            if js_file.exists():
+                enhancement_js += f"\n/* {js_file.name} */\n"
+                enhancement_js += js_file.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to load JS {js_file}: {e}")
+
+    # Concatenate enhancement CSS with existing UI_CSS
+    final_css = UI_CSS + enhancement_css if enhancement_css else UI_CSS
+
+    # Concatenate enhancement JS with existing UI_HEAD
+    final_head = UI_HEAD
+    if enhancement_js:
+        final_head += f"\n<script>\n{enhancement_js}\n</script>"
+
+    demo.queue(default_concurrency_limit=1)  # PATCH: Set Gradio concurrency to 1 for CPU debugging
     demo.launch(
+        inbrowser=bool(getattr(RUNTIME, "ui_open_browser", False)),
         server_name=RUNTIME.ui_host,
         server_port=RUNTIME.ui_port,
         share=RUNTIME.ui_share,
+        auth=launch_auth,
+        auth_message=auth_message,
+        show_error=bool(getattr(RUNTIME, "ui_show_error", True)),
         theme="default",
-        css=UI_CSS,
-        head=UI_HEAD,
+        css=final_css,
+        head=final_head,
     )
     stop_evt.set()
+
+
+build_chart_state = _build_chart_state
+build_next_box_hypotheses = _build_next_box_hypotheses
+build_sequence_model_summary = _build_sequence_model_summary
+build_transition_summary = _build_transition_summary
+derive_proxy_price_series = _derive_proxy_price_series
+ensemble_base_probs = _ensemble_base_probs
+estimate_implied_move_pct = _estimate_implied_move_pct
+extract_chart_structure = _extract_chart_structure
+extract_latest_signal_state = _extract_latest_signal_state
+fuse_transition_probabilities = _fuse_transition_probabilities
 
 
 if __name__ == "__main__":

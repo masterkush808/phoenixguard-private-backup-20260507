@@ -8,9 +8,11 @@ import torch
 from torch import Tensor
 
 try:
+    from safetensors import safe_open as _safe_open_safetensors
     from safetensors.torch import load_file as _load_safetensors_file
     from safetensors.torch import save_file as _save_safetensors_file
 except Exception:  # pragma: no cover - optional dependency guard
+    _safe_open_safetensors = None
     _load_safetensors_file = None
     _save_safetensors_file = None
 
@@ -24,7 +26,7 @@ ONNX_FILENAME = "model.onnx"
 
 
 def supports_safetensors() -> bool:
-    return _load_safetensors_file is not None and _save_safetensors_file is not None
+    return _safe_open_safetensors is not None and _save_safetensors_file is not None
 
 
 def inference_export_dir(model_dir: str | Path, model_name: str) -> Path:
@@ -96,5 +98,9 @@ def save_state_dict_safetensors(path: str | Path, state_dict: Mapping[str, Any],
 def load_state_dict_safetensors(path: str | Path, *, device: str | torch.device = "cpu") -> dict[str, Tensor]:
     if not supports_safetensors():
         raise RuntimeError("safetensors is not installed in this environment.")
-    loaded = _load_safetensors_file(str(Path(path)), device=str(torch.device(device)))
-    return {str(key): value for key, value in loaded.items()}
+    requested_device = str(torch.device(device))
+    state_dict: dict[str, Tensor] = {}
+    with _safe_open_safetensors(str(Path(path)), framework="pt", device=requested_device) as handle:
+        for key in handle.keys():
+            state_dict[str(key)] = handle.get_tensor(key)
+    return state_dict

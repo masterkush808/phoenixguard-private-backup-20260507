@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import logging
@@ -7,12 +8,71 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any
+from typing import Any, Generator
+
+
+_hash_chain_locks: dict[str, threading.Lock] = {}
+_hash_chain_locks_guard = threading.Lock()
+
+
+def _hash_chain_mutex(path: Path) -> threading.Lock:
+    key = str(path)
+    with _hash_chain_locks_guard:
+        lock = _hash_chain_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _hash_chain_locks[key] = lock
+        return lock
+
+
+if os.name == "nt":
+    import msvcrt
+
+    def _acquire_file_lock(handle: Any) -> None:
+        handle.seek(0)
+        handle.write(b"\0")
+        handle.flush()
+        while True:
+            try:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                time.sleep(0.02)
+
+    def _release_file_lock(handle: Any) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _acquire_file_lock(handle: Any) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+    def _release_file_lock(handle: Any) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _hash_chain_write_guard(log_path: Path) -> Generator[None, None, None]:
+    lock_path = log_path.with_name(log_path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _hash_chain_mutex(lock_path):
+        with lock_path.open("a+b") as lock_handle:
+            _acquire_file_lock(lock_handle)
+            try:
+                yield
+            finally:
+                _release_file_lock(lock_handle)
 
 
 def setup_logger(log_file: Path, name: str = "phoenixguard") -> logging.Logger:
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -38,32 +98,35 @@ def sha256_text(text: str) -> str:
 
 def append_hash_chain(log_path: Path, payload: dict[str, Any]) -> str:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    prev_hash = "0" * 64
-    if log_path.exists():
-        try:
-            with log_path.open("rb") as f:
-                f.seek(0, os.SEEK_END)
-                pos = f.tell()
-                line = b""
-                while pos > 0:
-                    pos -= 1
-                    f.seek(pos, os.SEEK_SET)
-                    char = f.read(1)
-                    if char == b"\n" and line:
-                        break
-                    line = char + line
-                last_line = line.decode("utf-8").strip()
-                if last_line:
-                    prev_hash = last_line.split("|")[-1]
-        except Exception:
-            pass  # fallback to default prev_hash if any error
+    with _hash_chain_write_guard(log_path):
+        prev_hash = "0" * 64
+        if log_path.exists():
+            try:
+                with log_path.open("rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    pos = f.tell()
+                    line = b""
+                    while pos > 0:
+                        pos -= 1
+                        f.seek(pos, os.SEEK_SET)
+                        char = f.read(1)
+                        if char == b"\n" and line:
+                            break
+                        line = char + line
+                    last_line = line.decode("utf-8").strip()
+                    if last_line:
+                        prev_hash = last_line.split("|")[-1]
+            except Exception:
+                pass
 
-    payload_json = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-    current_hash = sha256_text(prev_hash + payload_json)
-    line = f"{utc_now_iso()}|{payload_json}|{current_hash}\n"
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write(line)
-    return current_hash
+        payload_json = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        current_hash = sha256_text(prev_hash + payload_json)
+        line = f"{utc_now_iso()}|{payload_json}|{current_hash}\n"
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
+        return current_hash
 
 
 def safe_json_loads(raw: str, fallback: dict[str, Any] | None = None) -> dict[str, Any]:

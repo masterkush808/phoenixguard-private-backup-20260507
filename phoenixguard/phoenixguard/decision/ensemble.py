@@ -134,42 +134,15 @@ class EnsembleDecisionEngine:
         sequence_clarity = _clip01(reliability.get('sequence_clarity', structure_consistency), structure_consistency)
         consolidation_quality = _clip01(reliability.get('consolidation_quality', 0.0), 0.0)
         structure_active = structure_consistency >= 0.10
-        gate_factor = _clip01(_finite_mean(gate_scores, 0.5), 0.5)
         memory_weight = self._memory_weight(memory_bank_similarity, memory_summary)
-        support_gate_scores = {
-            str(getattr(gate, 'name', 'gate')): _clip01(getattr(gate, 'score', 0.0), 0.0)
-            for gate in (support_gate_outputs or [])
-        }
-        continuation_strength = support_gate_scores.get('continuation_strength', 0.0)
-        memory_regime_agreement = support_gate_scores.get('memory_regime_agreement', 0.0)
-        macro_local_alignment = support_gate_scores.get('macro_local_alignment', 0.0)
-        opposition_strength = support_gate_scores.get('opposition_strength', 0.0)
-        execution_permission = support_gate_scores.get('execution_permission', 1.0)
-        forecast_calibration = support_gate_scores.get('forecast_calibration', 0.0)
-        interval_efficiency = support_gate_scores.get('interval_efficiency', 0.0)
-        regime_stability = support_gate_scores.get('regime_stability', 0.0)
-        transition_alignment = support_gate_scores.get('transition_alignment', 0.0)
 
         direction_logits = np.log(alpha)
         buy_idx, sell_idx, hold_idx = 0, 1, 2
         dominant_idx = buy_idx if alpha[buy_idx] >= alpha[sell_idx] else sell_idx
         opposite_idx = sell_idx if dominant_idx == buy_idx else buy_idx
 
-        direction_logits[buy_idx] += 0.55 * gate_factor * cv_quality
-        direction_logits[sell_idx] += 0.55 * gate_factor * cv_quality
         direction_logits[hold_idx] += 0.30 * (1.0 - cv_quality)
         direction_logits[hold_idx] += 0.20 * (1.0 - structure_consistency)
-        direction_logits[dominant_idx] += 0.12 * macro_local_alignment + 0.10 * continuation_strength + 0.08 * memory_regime_agreement
-        direction_logits[dominant_idx] += 0.10 * forecast_calibration + 0.08 * interval_efficiency + 0.08 * transition_alignment + 0.06 * regime_stability
-        direction_logits[hold_idx] += 0.18 * opposition_strength + 0.24 * max(0.0, 1.0 - execution_permission)
-        direction_logits[hold_idx] += 0.10 * max(0.0, 1.0 - forecast_calibration)
-        direction_logits[hold_idx] += 0.10 * max(0.0, 1.0 - interval_efficiency)
-        direction_logits[hold_idx] += 0.12 * max(0.0, 1.0 - regime_stability)
-        direction_logits[hold_idx] += 0.08 * max(0.0, 1.0 - transition_alignment)
-        if execution_permission < 0.5:
-            damp = 0.08 * (0.5 - execution_permission) / 0.5
-            direction_logits[buy_idx] -= damp
-            direction_logits[sell_idx] -= damp
         direction_logits[dominant_idx] += 0.14 * sequence_clarity + 0.12 * consolidation_quality
         direction_logits[hold_idx] += 0.06 * max(0.0, 1.0 - max(sequence_clarity, consolidation_quality))
         if not structure_active:
@@ -286,11 +259,14 @@ class EnsembleDecisionEngine:
             support_gate_pass.get('opposition_strength', False)
             and float(support_gate_scores.get('opposition_strength', 0.0)) >= 0.55
         )
-        support_gates_ok = all(
-            bool(getattr(g, 'pass_fail', False))
-            for g in support_gates
-            if str(getattr(g, 'name', '')) != 'opposition_strength'
-        ) if support_gates else True
+        required_support_gates = [
+            gate
+            for gate in support_gates
+            if str(getattr(gate, 'name', '')) != 'opposition_strength'
+            and bool(getattr(gate, 'detail', {}).get('required', True))
+        ]
+        support_gates_ok = all(bool(getattr(g, 'pass_fail', False)) for g in required_support_gates) if required_support_gates else True
+        hard_support_ok = bool(support_gates_ok and execution_guard_ok and not opposition_alert)
 
         action = max(calibrated_probs, key=lambda key: float(calibrated_probs[key]))
         confidence = _clip01(calibrated_probs[action], 0.0)
@@ -314,14 +290,31 @@ class EnsembleDecisionEngine:
         projected_box_confidence = _clip01(forecast.get('projected_box_confidence', 0.0), 0.0)
         projection_bias_confidence = _clip01(forecast.get('projection_bias_confidence', projected_box_confidence), projected_box_confidence)
         projection_dominance = _clip01(forecast.get('projection_dominance', 0.0), 0.0)
-        directional_action = 'BUY' if calibrated_probs['BUY'] >= calibrated_probs['SELL'] else 'SELL'
+        forecast_q50 = _finite_float(forecast.get('q50', 0.0), 0.0)
+        reversal_projection_rescue = (
+            structure_trade_ready
+            and structure_setup == 'reversal_release'
+            and projected_box_direction in {'BUY', 'SELL'}
+            and projected_box_confidence >= 0.52
+            and projection_bias_confidence >= 0.44
+            and execution_readiness >= 0.48
+            and (
+                (projected_box_direction == 'BUY' and forecast_q50 > 0.0)
+                or (projected_box_direction == 'SELL' and forecast_q50 < 0.0)
+            )
+        )
+        directional_action = (
+            projected_box_direction
+            if reversal_projection_rescue
+            else ('BUY' if calibrated_probs['BUY'] >= calibrated_probs['SELL'] else 'SELL')
+        )
         projection_support = (
             structure_trade_ready
             and structure_setup in {'consolidation_breakout', 'impulse_chain', 'reversal_release'}
             and projected_box_direction in {'BUY', 'SELL'}
             and projected_box_direction == directional_action
             and projected_box_confidence >= (0.52 if structure_setup == 'reversal_release' else 0.58)
-            and projection_dominance >= (0.04 if structure_setup == 'reversal_release' else 0.0)
+            and projection_dominance >= (0.0 if structure_setup == 'reversal_release' else 0.0)
             and (active_consolidation or execution_readiness >= (0.48 if structure_setup == 'reversal_release' else 0.58))
         )
         memory_threshold_used = self.memory_veto_threshold
@@ -343,6 +336,8 @@ class EnsembleDecisionEngine:
             if supportive_memory:
                 memory_threshold_used = max(0.74, self.memory_veto_threshold - 0.12)
             memory_ok = memory_weight >= memory_threshold_used
+        weak_memory_neutral = bool(memory_similarity < 0.35 and ambiguity <= 0.20 and label_entropy <= 0.25)
+        projection_memory_ok = bool(memory_ok or weak_memory_neutral)
         structure_consistency_value = _clip01(
             (module_reliability or {}).get(
                 'structure_consistency',
@@ -351,16 +346,18 @@ class EnsembleDecisionEngine:
             0.0,
         )
         projection_rescue = (
-            projected_box_direction in {'BUY', 'SELL'}
-            and projected_box_confidence >= 0.54
-            and projection_bias_confidence >= 0.56
-            and execution_readiness >= 0.48
-            and structure_trade_ready
+            reversal_projection_rescue
+            or (
+                projected_box_direction in {'BUY', 'SELL'}
+                and projected_box_confidence >= 0.54
+                and projection_bias_confidence >= 0.56
+                and execution_readiness >= 0.48
+                and structure_trade_ready
+            )
         )
         forced_uncertain = (
             ambiguity >= 0.45
             or structure_consistency_value < 0.10
-            or (opposition_alert and structure_consistency_value < 0.40 and not projection_rescue)
             # Uses the sanitized latest-candle signal so sparse callers never
             # feed NaNs or None into the uncertainty rule.
             or (
@@ -369,8 +366,6 @@ class EnsembleDecisionEngine:
                 and structure_consistency_value < 0.28
             )
         )
-        if not execution_guard_ok and not projection_rescue:
-            force_hold = True
         confidence_target = self.consensus_threshold
         gates_target = self.gates_pass_minimum
         interval_target = self.max_interval_pct
@@ -385,15 +380,25 @@ class EnsembleDecisionEngine:
         confidence_ok = confidence >= confidence_target
         gates_ok = gates_passing >= gates_target
         interval_ok = interval <= interval_target
-        consensus_ok = confidence_ok and gates_ok and memory_ok and interval_ok and (not forced_uncertain)
+        consensus_ok = confidence_ok and memory_ok and interval_ok and (not forced_uncertain)
         directional_confidence = float(max(calibrated_probs['BUY'], calibrated_probs['SELL']))
+        projection_signal_confidence = float(
+            max(directional_confidence, projection_bias_confidence, projected_box_confidence)
+        )
         projection_bias_ready = (
             not force_hold
             and projection_support
-            and memory_ok
+            and projection_memory_ok
             and interval_ok
-            and gates_passing >= max(4, gates_target - 3)
-            and directional_confidence >= max(0.48, confidence_target - 0.12)
+            and projection_signal_confidence >= max(0.48, confidence_target - 0.12)
+            and structure_consistency_value >= 0.18
+            and (latest_confidence_input >= 0.10 or projection_rescue)
+            and not forced_uncertain
+        )
+        projection_watch_ready = (
+            projection_support
+            and projection_memory_ok
+            and projection_signal_confidence >= max(0.42, confidence_target - 0.20)
             and structure_consistency_value >= 0.18
             and (latest_confidence_input >= 0.10 or projection_rescue)
             and not forced_uncertain
@@ -401,21 +406,34 @@ class EnsembleDecisionEngine:
         if (
             not force_hold
             and projection_support
-            and memory_ok
+            and projection_memory_ok
             and interval_ok
-            and gates_passing >= max(6, gates_target - 1)
-            and directional_confidence >= max(0.52, confidence_target - 0.06)
+            and projection_signal_confidence >= max(0.52, confidence_target - 0.06)
             and not forced_uncertain
         ):
             consensus_ok = True
             action = projected_box_direction
-            confidence = max(directional_confidence, projection_bias_confidence)
+            confidence = max(directional_confidence, projection_bias_confidence, projected_box_confidence)
 
-        if projection_bias_ready and action == 'HOLD':
+        if projection_bias_ready and projected_box_direction in {'BUY', 'SELL'} and action != projected_box_direction:
             action = projected_box_direction
-            confidence = max(directional_confidence, projection_bias_confidence)
+            confidence = max(
+                _clip01(calibrated_probs.get(projected_box_direction, 0.0), 0.0),
+                projection_bias_confidence,
+                projected_box_confidence,
+            )
+        elif projection_bias_ready and action == 'HOLD':
+            action = projected_box_direction
+            confidence = max(directional_confidence, projection_bias_confidence, projected_box_confidence)
+        elif projection_watch_ready and projected_box_direction in {'BUY', 'SELL'}:
+            action = projected_box_direction
+            confidence = max(
+                _clip01(calibrated_probs.get(projected_box_direction, 0.0), 0.0),
+                projection_bias_confidence,
+                projected_box_confidence,
+            )
 
-        if force_hold or ((not consensus_ok) and (not projection_bias_ready)):
+        if (force_hold and not projection_watch_ready) or ((not consensus_ok) and (not projection_bias_ready) and (not projection_watch_ready)):
             action = 'HOLD'
             confidence = float(calibrated_probs['HOLD'])
 
@@ -439,7 +457,7 @@ class EnsembleDecisionEngine:
             'action': action,
             'trade_bias': trade_bias,
             'execution_permission': 'EXECUTE' if (consensus_ok and action != 'HOLD') else 'WAIT_FOR_CONFIRMATION',
-            'decision_state': 'CONFIRMED' if consensus_ok else ('PROJECTED' if (projection_bias_ready and action != 'HOLD') else 'UNCERTAIN'),
+            'decision_state': 'CONFIRMED' if consensus_ok else ('PROJECTED' if ((projection_bias_ready or projection_watch_ready) and action != 'HOLD') else 'UNCERTAIN'),
             'decision_confidence': confidence,
             'confidence': confidence,
             'calibrated_probs': calibrated_probs,
@@ -452,8 +470,10 @@ class EnsembleDecisionEngine:
             'memory_ok': memory_ok,
             'interval_ok': interval_ok,
             'support_gates_ok': support_gates_ok,
+            'hard_support_ok': hard_support_ok,
             'execution_guard_ok': execution_guard_ok,
             'opposition_alert': opposition_alert,
+            'required_support_gates': [str(getattr(g, 'name', 'support_gate')) for g in required_support_gates],
             'gates_passing': gates_passing,
             'gate_scores': {str(getattr(g, 'name', f'gate_{i}')): _clip01(getattr(g, 'score', 0.0), 0.0) for i, g in enumerate(gate_outputs)},
             'support_gate_scores': support_gate_scores,
@@ -470,6 +490,7 @@ class EnsembleDecisionEngine:
             'structure_active': bool(structure_consistency_value >= 0.10),
             'projection_support': bool(projection_support),
             'projection_bias_ready': bool(projection_bias_ready),
+            'projection_watch_ready': bool(projection_watch_ready),
             'projection_dominance': projection_dominance,
             'branch_weights': {
                 'cv': _clip01((module_reliability or {}).get('cv_quality', 0.0), 0.0),

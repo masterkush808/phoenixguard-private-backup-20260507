@@ -1,0 +1,167 @@
+/* PhoenixGuard Frontend V4 - Phoenix Command design tokens */
+
+:root,
+.phoenix-command,
+:root[data-theme="phoenix-command"] {
+  color-scheme: dark;
+
+  /* Typography */
+  --pc-font-display: "Segoe UI Variable Display", "Segoe UI", Inter, system-ui, sans-serif;
+  --pc-font-mono: "Cascadia Code", "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  --pc-letter-normal: 0;
+  --pc-letter-overline: 0.08em;
+
+  /* Type scale */
+  --pc-text-xs: 0.6875rem;
+  --pc-text-sm: 0.8125rem;
+  --pc-text-md: 0.9375rem;
+  --pc-text-lg: 1.125rem;
+  --pc-text-xl: 1.5rem;
+  --pc-text-2xl: 2rem;
+  --pc-text-hero: clamp(1.875rem, 3.4vw, 3.625rem);
+
+  /* Base cockpit palette */
+  --pc-bg: #070806;
+  --pc-bg-elevated: #0b0d0b;
+  --pc-carbon: #11120f;
+  --pc-carbon-soft: rgba(255, 255, 255, 0.045);
+  --pc-carbon-strong: rgba(15, 15, 13, 0.94);
+  --pc-surface-console: linear-gradient(180deg, rgba(18, 17, 13, 0.92), rgba(8, 10, 9, 0.86));
+  --pc-surface-panel: linear-gradient(180deg, rgba(255, 255, 255, 0.052), rgba(255, 255, 255, 0.024));
+  --pc-surface-raised: linear-gradient(180deg, rgba(22, 22, 18, 0.96), rgba(10, 11, 10, 0.9));
+  --pc-surface-inset: rgba(0, 0, 0, 0.24);
+  --pc-surface-grid: rgba(255, 255, 255, 0.032);
+
+  /* Text */
+  --pc-text: #f4f0e4;
+  --pc-text-soft: #e8e2d1;
+  --pc-text-muted: #aaa796;
+  --pc-text-dim: #757264;
+  --pc-text-inverse: #06100a;
+
+  /* Command accents */
+  --pc-gold: #f2c866;
+  --pc-gold-soft: #ffe3a3;
+  --pc-gold-deep: #b87928;
+  --pc-cyan: #6bc8ff;
+  --pc-cyan-soft: #a8e7ff;
+  --pc-cyan-deep: #187fa8;
+  --pc-jade: #63e09a;
+  --pc-jade-soft: #a8f5c6;
+  --pc-jade-deep: #2c9e63;
+  --pc-red: #ff654f;
+  --pc-red-soft: #ffb8a8;
+  --pc-red-deep: #b93b2b;
+  --pc-steel: #bcc1b4;
+  --pc-steel-deep: #6f766c;
+
+  /* Semantic aliases */
+  --pc-state-buy: var(--pc-jade);
+  --pc-state-sell: var(--pc-red);
+  --pc-state-hold: var(--pc-steel);
+  --pc-state-running: var(--pc-jade);
+  --pc-state-warning: var(--pc-gold);
+  --pc-state-error: var(--pc-red);
+  --pc-state-info: var(--pc-cyan);
+
+  /* Lines and focus */
+  --pc-line-subtle: rgba(255, 255, 255, 0.06);
+  --pc-line: rgba(230, 209, 148, 0.16);
+  --pc-line-strong: rgba(230, 209, 148, 0.32);
+  --pc-line-cyan: rgba(107, 200, 255, 0.36);
+  --pc-line-jade: rgba(99, 224, 154, 0.40);
+  --pc-line-red: rgba(255, 101, 79, 0.36);
+  --pc-focus-ring: 0 0 0 2px var(--pc-gold), 0 0 0 5px rgba(242, 200, 102, 0.14);
+
+  /* Gradients */
+  --pc-gradient-brand: linear-gradient(92deg, #fff7dc 0%, var(--pc-gold) 38%, #d98a31 72%, #fff0bf 100%);
+  --pc-gradient-confidence: linear-gradient(90deg, var(--pc-gold-deep), var(--pc-gold));
+  --pc-gradient-execute: linear-gradient(180deg, rgba(99, 224, 154, 0.96), rgba(70, 184, 122, 0.86));
+  --pc-gradient-telemetry: linear-gradient(90deg, rgba(107, 200, 255, 0.16), rgba(99, 224, 154, 0.12));
+  --pc-gradient-danger: linear-gradient(180deg, rgba(255, 101, 79, 0.18), rgba(255, 101, 79, 0.08));
+
+  /* Spacing */
+  --pc-space-1: 0.25rem;
+  --pc-space-2: 0.5rem;
+  --pc-space-3: 0.75rem;
+  --pc-space-4: 1rem;
+  --pc-space-5: 1.25rem;
+  --pc-space-6: 1.5rem;
+  --pc-space-8: 2rem;
+
+  /* Shape */
+  --pc-radius-xs: 0.25rem;
+  --pc-radius-sm: 0.375rem;
+  --pc-radius-md: 0.5rem;
+  --pc-radius-lg: 0.625rem;
+  --pc-radius-round: 999px;
+
+  /* Elevation */
+  --pc-shadow-console: 0 30px 90px rgba(0, 0, 0, 0.52);
+  --pc-shadow-panel: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --pc-shadow-gold-glow: 0 0 34px rgba(242, 200, 102, 0.14);
+  --pc-shadow-cyan-glow: 0 0 24px rgba(107, 200, 255, 0.16);
+  --pc-shadow-jade-glow: 0 0 24px rgba(99, 224, 154, 0.16);
+
+  /* Motion */
+  --pc-duration-instant: 90ms;
+  --pc-duration-fast: 150ms;
+  --pc-duration-base: 220ms;
+  --pc-duration-slow: 360ms;
+  --pc-duration-scene: 36000ms;
+  --pc-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --pc-ease-emphasized: cubic-bezier(0.16, 1, 0.3, 1);
+  --pc-ease-linear: linear;
+  --pc-lift-sm: -1px;
+  --pc-lift-md: -2px;
+
+  /* Legacy PhoenixGuard variable bridge */
+  --pg-bg: var(--pc-bg);
+  --pg-surface: #11120f;
+  --pg-surface-variant: #181a16;
+  --pg-on-bg: var(--pc-text);
+  --pg-on-surface: var(--pc-text-soft);
+  --pg-border: rgba(230, 209, 148, 0.18);
+  --pg-primary: var(--pc-gold);
+  --pg-secondary: var(--pc-gold-deep);
+  --pg-accent: var(--pc-cyan);
+  --pg-accent-light: rgba(107, 200, 255, 0.22);
+  --pg-success: var(--pc-jade);
+  --pg-warning: var(--pc-gold);
+  --pg-error: var(--pc-red);
+  --pg-info: var(--pc-cyan);
+  --pg-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.18);
+  --pg-shadow-md: 0 8px 20px rgba(0, 0, 0, 0.22);
+  --pg-shadow-lg: 0 18px 42px rgba(0, 0, 0, 0.34);
+  --pg-shadow-xl: var(--pc-shadow-console);
+  --pg-transition-fast: all var(--pc-duration-fast) var(--pc-ease-standard);
+  --pg-transition: all var(--pc-duration-base) var(--pc-ease-standard);
+  --pg-transition-slow: all var(--pc-duration-slow) var(--pc-ease-emphasized);
+}
+
+.phoenix-command {
+  background: var(--pc-bg);
+  color: var(--pc-text);
+  font-family: var(--pc-font-display);
+  letter-spacing: var(--pc-letter-normal);
+}
+
+.phoenix-command * {
+  letter-spacing: inherit;
+}
+
+.phoenix-command :focus-visible {
+  outline: none;
+  box-shadow: var(--pc-focus-ring);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .phoenix-command *,
+  .phoenix-command *::before,
+  .phoenix-command *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}

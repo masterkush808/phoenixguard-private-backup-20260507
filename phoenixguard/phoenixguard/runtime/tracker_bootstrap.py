@@ -50,7 +50,7 @@ def build_locked_tracker_controls(
         "high_frequency_expiry_seconds": 600,
         "high_frequency_entry_grace_sec": 45.0,
         "high_frequency_min_confidence": 0.44,
-        "scenario_generation_enabled": True,
+        "scenario_generation_enabled": False,
         "auto_memory_projection": True,
         "require_memory_projection": False,
         "require_market_identity": bool(require_market_identity),

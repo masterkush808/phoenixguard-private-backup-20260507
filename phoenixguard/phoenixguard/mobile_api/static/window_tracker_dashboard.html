@@ -2628,6 +2628,9 @@
         overlayFrameGap: 0,
         visibleArtifactKind: "",
         visibleFrameKey: "",
+        viewportSignature: "",
+        viewportRequestId: 0,
+        failedArtifactKeys: new Set(),
       },
     };
 
@@ -2930,7 +2933,6 @@
         artifactPathFrame(session.last_full_overlay_path),
         frameNumber(session.overlay_frame_id),
         frameNumber(session.full_overlay_frame_id),
-        frameNumber(session.chart_frame_id),
       );
     }
 
@@ -2940,7 +2942,7 @@
       const pathKey = clean(
         normalized === "overlay" ? session.last_overlay_path
           : normalized === "full-overlay" ? session.last_full_overlay_path
-            : normalized === "window" ? (session.last_window_path || session.last_frame_path)
+              : normalized === "window" ? (session.last_display_window_path || session.last_window_path || session.last_frame_path)
               : normalized === "chart" ? session.last_chart_path
                 : normalized === "memory-reference" ? (projection.reference_image_path || session.last_memory_reference_path)
                   : normalized === "projection" ? (projection.projection_image_path || session.last_projection_path)
@@ -2961,7 +2963,7 @@
         "",
       );
       const frameKey = normalized === "window"
-        ? Math.max(newestDisplayFrame(session), artifactPathFrame(session.last_window_path || session.last_frame_path))
+        ? Math.max(newestDisplayFrame(session), artifactPathFrame(session.last_display_window_path || session.last_window_path || session.last_frame_path))
         : normalized === "overlay"
           ? Math.max(artifactPathFrame(session.last_overlay_path), frameNumber(session.overlay_frame_id))
           : normalized === "full-overlay"
@@ -2971,7 +2973,9 @@
               : normalized === "memory-reference" || normalized === "projection"
                 ? projectionFrame
                 : newestDisplayFrame(session);
-      const captureKey = clean(session.source_capture_id, "");
+      const captureKey = ["window", "overlay", "full-overlay", "chart"].includes(normalized)
+        ? ""
+        : clean(session.source_capture_id, "");
       return [normalized, frameKey, projectionVersion, captureKey, pathKey].filter(Boolean).join("|");
     }
 
@@ -2979,16 +2983,110 @@
       return `${sessionUrl()}/artifacts/latest-${encodeURIComponent(kind)}?v=${encodeURIComponent(artifactFrameKey(kind, session))}`;
     }
 
+    function artifactPayload(kind, session = state.session || {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const artifacts = objectOrEmpty(session.artifacts || liveState.artifacts);
+      return objectOrEmpty(artifacts[kind] || artifacts[String(kind).replace(/-/g, "_")]);
+    }
+
+    function artifactSourcePath(kind, session = state.session || {}) {
+      const artifact = artifactPayload(kind, session);
+      const normalized = String(kind || "").toLowerCase();
+      const fromArtifact = artifact.path || artifact.url || artifact.image_url || artifact.frame_url || "";
+      if (normalized === "window") {
+        return session.last_display_window_path || session.last_window_path || session.last_frame_path || fromArtifact;
+      }
+      if (normalized === "overlay") {
+        return session.last_overlay_path || fromArtifact;
+      }
+      if (normalized === "full-overlay") {
+        return session.last_full_overlay_path || fromArtifact;
+      }
+      if (normalized === "chart") {
+        return session.last_chart_path || fromArtifact;
+      }
+      return fromArtifact;
+    }
+
+    function artifactFailureKey(kind, session = state.session || {}) {
+      return `${kind}|${artifactFrameKey(kind, session)}`;
+    }
+
+    function artifactAvailable(kind, session = state.session || {}) {
+      const artifact = artifactPayload(kind, session);
+      if (artifact.exists === false) {
+        return false;
+      }
+      if (state.surface.failedArtifactKeys.has(artifactFailureKey(kind, session))) {
+        return false;
+      }
+      return Boolean(artifactSourcePath(kind, session));
+    }
+
     function setImageSource(image, url) {
       if (!image || !url) {
-        return;
+        return false;
       }
       if (image.getAttribute("src") !== url) {
+        image.dataset.loadedSrc = "";
         image.src = url;
+        return true;
       }
+      const currentSrc = image.currentSrc || image.src || image.getAttribute("src") || "";
+      return Boolean(currentSrc && image.dataset.loadedSrc !== currentSrc);
+    }
+
+    function visibleSurfaceArtifactKind(image) {
+      const visibleKind = String(state.surface.visibleArtifactKind || "");
+      if (image === els.overlayImg) {
+        return visibleKind === "full-overlay" ? "full-overlay" : "overlay";
+      }
+      if (visibleKind === "window" || visibleKind === "window-fallback") {
+        return "window";
+      }
+      if (visibleKind === "chart" || visibleKind === "chart-fallback") {
+        return "chart";
+      }
+      return visibleKind;
+    }
+
+    function handleSurfaceImageError(image) {
+      const kind = visibleSurfaceArtifactKind(image);
+      if (!kind) {
+        return;
+      }
+      state.surface.failedArtifactKeys.add(artifactFailureKey(kind, state.session || {}));
+      image.classList.remove("visible");
+      renderSurface();
+    }
+
+    function backendRenderableOverlayCount(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const overlaysPayload = objectOrEmpty(session.overlays || liveState.overlays);
+      return Number(
+        session.renderable_count
+        || liveState.renderable_count
+        || overlaysPayload.renderable_count
+        || overlaysPayload.count
+        || 0
+      );
     }
 
     function overlayArtifactIsStale(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const renderableCount = backendRenderableOverlayCount(session);
+      const staleStatus = clean(
+        session.stale_status
+        || liveState.stale_status
+        || objectOrEmpty(session.performance_trace_v3 || liveState.performance_trace_v3).stale_status,
+        "",
+      ).toUpperCase();
+      const overlayAgeMs = Number(
+        session.overlay_age_ms
+        || liveState.overlay_age_ms
+        || objectOrEmpty(session.frame_timing_trace_v3 || liveState.frame_timing_trace_v3).overlay_age_ms
+        || 0
+      );
       const displayFrame = newestDisplayFrame(session);
       const overlayFrame = overlayArtifactFrame(session);
       const modelEpoch = Number(session.model_capture_epoch || 0);
@@ -2997,8 +3095,13 @@
       const epochGap = displayEpoch > 0 && modelEpoch > 0 ? displayEpoch - modelEpoch : 0;
       state.surface.overlayFrameGap = Math.max(0, frameGap);
       state.surface.overlayAgeSec = Math.max(0, epochGap);
+      if (renderableCount > 0 && (staleStatus === "PASS" || (Number.isFinite(overlayAgeMs) && overlayAgeMs > 0 && overlayAgeMs <= 8000))) {
+        return false;
+      }
       return frameGap > 1 || epochGap > 1.2;
-    }async function jsonRequest(url, options = {}) {
+    }
+
+    async function jsonRequest(url, options = {}) {
       const response = await fetch(url, {
         cache: "no-store",
         headers: {"Content-Type": "application/json"},
@@ -4058,6 +4161,8 @@
 
     function updateSurfaceViewport(preserveCenter = true) {
       const size = surfaceImageSize();
+      state.surface.viewportRequestId = Number(state.surface.viewportRequestId || 0) + 1;
+      const requestId = state.surface.viewportRequestId;
       const previousMaxX = Math.max(1, els.surfaceStage.scrollWidth - els.surfaceStage.clientWidth);
       const previousMaxY = Math.max(1, els.surfaceStage.scrollHeight - els.surfaceStage.clientHeight);
       const centerX = previousMaxX > 0 ? (els.surfaceStage.scrollLeft + els.surfaceStage.clientWidth / 2) / previousMaxX : 0.5;
@@ -4096,6 +4201,9 @@
       const modeTitle = fallbackActive ? `Overlay catching up ${state.surface.overlayFrameGap || 0}f` : state.mode === "overlay" ? "Overlay" : "Raw";
       els.surfaceCaption.textContent = `${modeTitle} | ${planeLabel} | ${viewLabel}`;
       window.requestAnimationFrame(() => {
+        if (requestId !== state.surface.viewportRequestId) {
+          return;
+        }
         if (state.surface.zoomMode === "fit-plane") {
           els.surfaceStage.scrollLeft = 0;
           els.surfaceStage.scrollTop = 0;
@@ -4111,16 +4219,38 @@
       });
     }
 
+    function surfaceViewportSignature() {
+      const size = surfaceImageSize();
+      const width = size ? Number(size.width || 0) : 0;
+      const height = size ? Number(size.height || 0) : 0;
+      return [
+        state.surface.visibleArtifactKind || "",
+        state.surfaceUsesFullOverlay ? "full" : "chart",
+        state.surface.zoomMode || "manual",
+        Number(state.surface.zoom || 1).toFixed(3),
+        `${width}x${height}`,
+      ].join("|");
+    }
+
+    function refreshSurfaceViewportIfNeeded(preserveCenter = true, force = false) {
+      const signature = surfaceViewportSignature();
+      if (!force && signature && signature === state.surface.viewportSignature) {
+        return;
+      }
+      state.surface.viewportSignature = signature;
+      updateSurfaceViewport(preserveCenter);
+    }
+
     function setSurfaceZoom(value, mode = "manual") {
       state.surface.zoomMode = mode;
       state.surface.zoom = clamp(Number(value) || 1, 0.25, 2.5);
-      updateSurfaceViewport(true);
+      refreshSurfaceViewportIfNeeded(true, true);
       renderHotspots();
     }
 
     function fitSurface() {
       state.surface.zoomMode = "fit-plane";
-      updateSurfaceViewport(false);
+      refreshSurfaceViewportIfNeeded(false, true);
       renderHotspots();
     }
 
@@ -4570,10 +4700,44 @@
     function getBoxes(session) {
       const tracking = session.tracking_summary || {};
       const signal = session.latest_signal || {};
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const overlayPayload = objectOrEmpty(session.overlays || liveState.overlays);
       const overlayGeometry = tracking.overlay_geometry || signal.overlay_geometry || {};
       const memoryProjection = currentMemoryProjection(session);
       const brokerSurface = session.broker_surface || {};
       const boxes = [];
+      const backendOverlayObjects = []
+        .concat(Array.isArray(session.overlay_objects) ? session.overlay_objects : [])
+        .concat(Array.isArray(liveState.overlay_objects) ? liveState.overlay_objects : [])
+        .concat(Array.isArray(overlayPayload.objects) ? overlayPayload.objects : []);
+      const seenOverlayIds = new Set();
+      backendOverlayObjects.forEach((overlay, index) => {
+        if (!overlay || typeof overlay !== "object" || !Array.isArray(overlay.bbox)) {
+          return;
+        }
+        const overlayId = clean(overlay.overlay_id || overlay.id || overlay.object_id || `backend_${index}`, `backend_${index}`);
+        if (seenOverlayIds.has(overlayId)) {
+          return;
+        }
+        seenOverlayIds.add(overlayId);
+        const coordinateMode = clean(overlay.coordinate_mode, "CHART_IMAGE_SPACE").toUpperCase();
+        const brokerSurfaceSpace = coordinateMode.includes("FULL_BROKER_SURFACE") || coordinateMode.includes("WINDOW_SPACE");
+        const chartSpace = !brokerSurfaceSpace && (coordinateMode.includes("CHART") || coordinateMode.includes("PLOT_AREA"));
+        boxes.push({
+          ...overlay,
+          key: overlayId,
+          label: overlay.display_label || overlay.label || overlay.type || `Overlay ${index + 1}`,
+          direction: overlay.side || overlay.direction || "HOLD",
+          _layer: overlay.layer || "diagnostics",
+          _space: chartSpace ? "chart" : "window",
+          _coordinateMode: coordinateMode,
+          _index: boxes.length,
+          _backendOverlay: true,
+        });
+      });
+      if (boxes.length) {
+        return boxes;
+      }
       const addExecutionBox = (key, box) => {
         if (!box || !Array.isArray(box.bbox)) {
           return;
@@ -4844,7 +5008,7 @@
       if (updateUrl && window.history && window.history.pushState) {
         window.history.pushState({route: nextRoute}, "", routeUrl(nextRoute));
       }
-      updateSurfaceViewport(true);
+      refreshSurfaceViewportIfNeeded(true, true);
       renderHotspots();
     }
 
@@ -4859,47 +5023,45 @@
 
     function renderSurface() {
       const session = state.session || {};
-      const overlayPath = session.last_overlay_path || "";
-      const fullOverlayPath = session.last_full_overlay_path || "";
-      const chartPath = session.last_chart_path || "";
-      const windowPath = session.last_window_path || session.last_frame_path || "";
       const wantsOverlay = state.mode === "overlay";
-      const hasFullOverlay = Boolean(fullOverlayPath);
-      const hasOverlay = Boolean(overlayPath);
-      const hasChart = Boolean(chartPath);
-      const hasWindow = Boolean(windowPath);
+      const hasFullOverlay = artifactAvailable("full-overlay", session);
+      const hasOverlay = artifactAvailable("overlay", session);
+      const hasChart = artifactAvailable("chart", session);
+      const hasWindow = artifactAvailable("window", session);
       const overlayAvailable = hasOverlay || hasFullOverlay;
       const overlayStale = wantsOverlay && overlayAvailable && overlayArtifactIsStale(session);
       state.surfaceUsesFullOverlay = false;
       state.surface.overlayStale = overlayStale;
       state.surface.visibleArtifactKind = "";
       state.surface.visibleFrameKey = "";
+      let imageSourceChanged = false;
 
       els.overlayImg.classList.remove("visible");
       els.rawImg.classList.remove("visible");
 
       if (wantsOverlay && overlayAvailable && !overlayStale) {
-        const kind = hasOverlay ? "overlay" : "full-overlay";
-        setImageSource(els.overlayImg, artifactUrl(kind, session));
+        const kind = hasFullOverlay ? "full-overlay" : "overlay";
+        imageSourceChanged = setImageSource(els.overlayImg, artifactUrl(kind, session)) || imageSourceChanged;
         state.surfaceUsesFullOverlay = kind === "full-overlay";
         state.surface.visibleArtifactKind = kind;
         state.surface.visibleFrameKey = artifactFrameKey(kind, session);
         els.overlayImg.classList.add("visible");
         els.placeholder.style.display = "none";
-      } else if ((wantsOverlay && overlayStale && hasWindow) || (!wantsOverlay && hasWindow)) {
-        setImageSource(els.rawImg, artifactUrl("window", session));
+      } else if (hasWindow) {
+        imageSourceChanged = setImageSource(els.rawImg, artifactUrl("window", session)) || imageSourceChanged;
+        state.surfaceUsesFullOverlay = true;
         state.surface.visibleArtifactKind = wantsOverlay ? "window-fallback" : "window";
         state.surface.visibleFrameKey = artifactFrameKey("window", session);
         els.rawImg.classList.add("visible");
         els.placeholder.style.display = "none";
       } else if (hasChart) {
-        setImageSource(els.rawImg, artifactUrl("chart", session));
+        imageSourceChanged = setImageSource(els.rawImg, artifactUrl("chart", session)) || imageSourceChanged;
         state.surface.visibleArtifactKind = wantsOverlay && overlayStale ? "chart-fallback" : "chart";
         state.surface.visibleFrameKey = artifactFrameKey("chart", session);
         els.rawImg.classList.add("visible");
         els.placeholder.style.display = "none";
       } else if (wantsOverlay && hasFullOverlay && !overlayStale) {
-        setImageSource(els.overlayImg, artifactUrl("full-overlay", session));
+        imageSourceChanged = setImageSource(els.overlayImg, artifactUrl("full-overlay", session)) || imageSourceChanged;
         state.surfaceUsesFullOverlay = true;
         state.surface.visibleArtifactKind = "full-overlay";
         state.surface.visibleFrameKey = artifactFrameKey("full-overlay", session);
@@ -4908,8 +5070,13 @@
       } else {
         els.placeholder.style.display = "grid";
       }
-      updateSurfaceViewport(true);
-      renderHotspots();
+      refreshSurfaceViewportIfNeeded(true);
+      if (imageSourceChanged) {
+        els.hotspotLayer.innerHTML = "";
+        state.surface.lastStaticLayerHash = "";
+      } else {
+        renderHotspots();
+      }
     }
     function renderPredictionImages() {
       const session = state.session || {};
@@ -5081,8 +5248,71 @@
       if (bbox.length < 4 || bbox.some((value) => !Number.isFinite(value))) {
         return null;
       }
+      const session = state.session || {};
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const chartPayload = objectOrEmpty(liveState.chart || session.chart);
+      const sceneGraph = objectOrEmpty(
+        session.broker_scene_graph_v3
+        || session.scene_graph
+        || liveState.broker_scene_graph_v3
+        || liveState.scene_graph
+        || chartPayload.scene_graph
+      );
+      const coordinateMode = clean(box._coordinateMode || box.coordinate_mode || box.space, "CHART_IMAGE_SPACE").toUpperCase();
+      const brokerSurfaceSpace = coordinateMode.includes("FULL_BROKER_SURFACE") || coordinateMode.includes("WINDOW_SPACE");
+      const plotNormalized = coordinateMode.includes("PLOT_AREA_NORMALIZED");
+      const chartNormalized = coordinateMode.includes("CHART_NORMALIZED");
+      const imageWidth = Number(image.naturalWidth || image.clientWidth || 0);
+      const imageHeight = Number(image.naturalHeight || image.clientHeight || 0);
+      if (!imageWidth || !imageHeight) {
+        return null;
+      }
+      const pixelBoundsToPercent = (left, top, right, bottom) => ({
+        left: (left / imageWidth) * 100,
+        top: (top / imageHeight) * 100,
+        width: Math.max(0.5, ((right - left) / imageWidth) * 100),
+        height: Math.max(0.5, ((bottom - top) / imageHeight) * 100),
+      });
+      const sceneBounds = (key) => {
+        const values = Array.isArray(sceneGraph[key]) ? sceneGraph[key].map(Number) : [];
+        return values.length >= 4 && values.every(Number.isFinite) && values[2] > values[0] && values[3] > values[1]
+          ? values
+          : [];
+      };
+      const normalizedInPixelBounds = (target) => pixelBoundsToPercent(
+        target[0] + bbox[0] * (target[2] - target[0]),
+        target[1] + bbox[1] * (target[3] - target[1]),
+        target[0] + bbox[2] * (target[2] - target[0]),
+        target[1] + bbox[3] * (target[3] - target[1]),
+      );
       const maxValue = Math.max(...bbox.map(Math.abs));
       if (maxValue <= 1.0001) {
+        if (brokerSurfaceSpace) {
+          return {
+            left: bbox[0] * 100,
+            top: bbox[1] * 100,
+            width: Math.max(0.5, (bbox[2] - bbox[0]) * 100),
+            height: Math.max(0.5, (bbox[3] - bbox[1]) * 100),
+          };
+        }
+        const fullOverlayBounds = plotNormalized
+          ? sceneBounds("plot_area_bounds")
+          : sceneBounds("chart_region_bounds");
+        if (state.surfaceUsesFullOverlay && fullOverlayBounds.length >= 4) {
+          return normalizedInPixelBounds(fullOverlayBounds);
+        }
+        const chartPlaneBounds = plotNormalized ? sceneBounds("plot_area_chart_bounds") : [];
+        if (!state.surfaceUsesFullOverlay && chartPlaneBounds.length >= 4) {
+          return normalizedInPixelBounds(chartPlaneBounds);
+        }
+        if (chartNormalized || coordinateMode.includes("CHART") || plotNormalized) {
+          return {
+            left: bbox[0] * 100,
+            top: bbox[1] * 100,
+            width: Math.max(0.5, (bbox[2] - bbox[0]) * 100),
+            height: Math.max(0.5, (bbox[3] - bbox[1]) * 100),
+          };
+        }
         const focusRegion = tracking.focus_region || {};
         const focus = state.surfaceUsesFullOverlay
           ? (Array.isArray(focusRegion.normalized_bbox)
@@ -5111,16 +5341,23 @@
         };
       }
       const region = tracking.chart_region || tracking.display_region || {};
-      const imageWidth = Number(image.naturalWidth || image.clientWidth || 0);
-      const imageHeight = Number(image.naturalHeight || image.clientHeight || 0);
-      if (!imageWidth || !imageHeight) {
-        return null;
+      const chartFullBounds = sceneBounds("chart_region_bounds");
+      if (state.surfaceUsesFullOverlay && box._space === "chart" && !brokerSurfaceSpace && chartFullBounds.length >= 4) {
+        return pixelBoundsToPercent(
+          bbox[0] + chartFullBounds[0],
+          bbox[1] + chartFullBounds[1],
+          bbox[2] + chartFullBounds[0],
+          bbox[3] + chartFullBounds[1],
+        );
       }
       const regionBox = Array.isArray(region.pixel_bbox) ? region.pixel_bbox.map(Number) : [];
       const focusRegion = tracking.focus_region || {};
       const focusBox = Array.isArray(focusRegion.pixel_bbox) ? focusRegion.pixel_bbox.map(Number) : [];
-      const fullOverlayFocusX = state.surfaceUsesFullOverlay && box._space === "chart" && focusBox.length >= 4 ? Number(focusBox[0] || 0) : 0;
-      const fullOverlayFocusY = state.surfaceUsesFullOverlay && box._space === "chart" && focusBox.length >= 4 ? Number(focusBox[1] || 0) : 0;
+      const regionRelativeTo = clean(region.relative_to || region.space || "", "").toLowerCase();
+      const regionIsWindowRelative = ["window_capture", "full_broker_surface", "window_space"].includes(regionRelativeTo);
+      const needsFocusOffset = state.surfaceUsesFullOverlay && box._space === "chart" && !regionIsWindowRelative;
+      const fullOverlayFocusX = needsFocusOffset && focusBox.length >= 4 ? Number(focusBox[0] || 0) : 0;
+      const fullOverlayFocusY = needsFocusOffset && focusBox.length >= 4 ? Number(focusBox[1] || 0) : 0;
       const offsetX = box._space === "chart" && regionBox.length >= 4 ? fullOverlayFocusX + Number(regionBox[0] || 0) : fullOverlayFocusX;
       const offsetY = box._space === "chart" && regionBox.length >= 4 ? fullOverlayFocusY + Number(regionBox[1] || 0) : fullOverlayFocusY;
       const x0 = bbox[0] + offsetX;
@@ -5151,7 +5388,7 @@
       const visibleImage = els.overlayImg.classList.contains("visible") ? els.overlayImg : els.rawImg;
       const hasImage = visibleImage.classList.contains("visible");
       const overlayCatchingUp = state.mode === "overlay" && Boolean(state.surface.overlayStale);
-      const boxes = overlayCatchingUp ? [] : getBoxes(session);
+      const boxes = getBoxes(session);
       const staticVisibility = JSON.stringify({
         chart_bounds: state.layers.chart_bounds,
         major_swings: state.layers.major_swings,
@@ -5835,8 +6072,7 @@
           state.streamConnected = true;
           try {
             const payload = JSON.parse(event.data);
-            renderSession(await enrichSessionTelemetry(payload));
-            refreshLiveVisualStateForMode(state.overlayMode);
+            renderSession(await enrichSessionTelemetry(await mergeSelectedLiveState(payload)));
           } catch (_err) {
           }
         });
@@ -6080,15 +6316,23 @@
     els.surfaceStage.addEventListener("pointerup", stopSurfacePan);
     els.surfaceStage.addEventListener("pointercancel", stopSurfacePan);
     els.overlayImg.addEventListener("load", () => {
-      updateSurfaceViewport(true);
+      els.overlayImg.dataset.loadedSrc = els.overlayImg.currentSrc || els.overlayImg.src || "";
+      refreshSurfaceViewportIfNeeded(true);
       renderHotspots();
+    });
+    els.overlayImg.addEventListener("error", () => {
+      handleSurfaceImageError(els.overlayImg);
     });
     els.rawImg.addEventListener("load", () => {
-      updateSurfaceViewport(true);
+      els.rawImg.dataset.loadedSrc = els.rawImg.currentSrc || els.rawImg.src || "";
+      refreshSurfaceViewportIfNeeded(true);
       renderHotspots();
     });
+    els.rawImg.addEventListener("error", () => {
+      handleSurfaceImageError(els.rawImg);
+    });
     window.addEventListener("resize", () => {
-      updateSurfaceViewport(true);
+      refreshSurfaceViewportIfNeeded(true, true);
       renderHotspots();
     });
 

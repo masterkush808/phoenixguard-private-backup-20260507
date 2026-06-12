@@ -12,7 +12,9 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
 import json
 import sqlite3
+import tempfile
 from contextlib import closing
+from threading import RLock
 
 
 class SecurityManager:
@@ -87,6 +89,7 @@ class UnavailablePreferenceStore:
     def __init__(self, reason: str, logger: Any | None = None) -> None:
         self.reason = str(reason)
         self.logger = logger
+        self.available = False
 
     def insert_preference(self, row: dict[str, str]) -> None:
         _ = row
@@ -98,6 +101,14 @@ class UnavailablePreferenceStore:
 
     def export_json(self) -> str:
         return "[]"
+
+    def insert_contact_brief(self, row: dict[str, Any]) -> None:
+        _ = row
+        return None
+
+    def fetch_recent_contact_briefs(self, limit: int = 200) -> list[dict[str, Any]]:
+        _ = limit
+        return []
 
     def close(self) -> None:
         return None
@@ -113,78 +124,89 @@ class EncryptedPreferenceStore:
     def __init__(self, db_path: Path, fernet: Fernet) -> None:
         self.db_path = db_path
         self.fernet = fernet
-        self.tmp_path = db_path.with_suffix(".tmp.sqlite")
+        self.available = True
+        self._lock = RLock()
         self._initialize()
 
     def _initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = self._open_plaintext_conn()
-        try:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS preferences (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ts TEXT NOT NULL,
-                    image_hash TEXT,
-                    chosen TEXT NOT NULL,
-                    rejected TEXT,
-                    reason TEXT,
-                    annotation_text TEXT
-                )
-                """
+        self._with_plaintext_conn(write=True, fn=lambda conn, plain_path: None)
+
+    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS preferences (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                image_hash TEXT,
+                chosen TEXT NOT NULL,
+                rejected TEXT,
+                reason TEXT,
+                annotation_text TEXT
             )
-            conn.commit()
-        finally:
-            conn.close()
-
-        self._sync_encrypted()
-        self._cleanup_plaintext_files()
-
-    def _plaintext_sidecars(self) -> tuple[Path, ...]:
-        return (
-            self.tmp_path,
-            self.tmp_path.with_name(self.tmp_path.name + "-journal"),
-            self.tmp_path.with_name(self.tmp_path.name + "-wal"),
-            self.tmp_path.with_name(self.tmp_path.name + "-shm"),
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS contact_briefs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                session_id TEXT,
+                alias TEXT,
+                creator TEXT,
+                full_name TEXT NOT NULL,
+                contact_channel TEXT NOT NULL,
+                organization TEXT,
+                purpose TEXT NOT NULL,
+                consent_ack INTEGER NOT NULL DEFAULT 0,
+                meta_json TEXT
+            )
+            """
         )
 
-    def _cleanup_plaintext_files(self) -> None:
-        for path in self._plaintext_sidecars():
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-    def _ensure_plaintext_db(self) -> None:
-        if self.tmp_path.exists():
-            return
-        if self.db_path.exists():
-            plain = self.fernet.decrypt(self.db_path.read_bytes())
-            self.tmp_path.write_bytes(plain)
-
-    def _open_plaintext_conn(self) -> sqlite3.Connection:
-        self._ensure_plaintext_db()
-        conn = sqlite3.connect(str(self.tmp_path))
+    def _open_plaintext_conn(self, plain_path: Path) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(plain_path))
         conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("PRAGMA temp_store=MEMORY")
         return conn
 
-    def _sync_encrypted(self) -> None:
-        if self.tmp_path.exists():
-            cipher = self.fernet.encrypt(self.tmp_path.read_bytes())
-            cipher_tmp_path = self.db_path.with_name(self.db_path.name + ".tmp")
+    def _sync_encrypted_from_plaintext(self, plain_path: Path) -> None:
+        cipher = self.fernet.encrypt(plain_path.read_bytes())
+        cipher_tmp_path = self.db_path.with_name(self.db_path.name + ".tmp")
+        try:
+            cipher_tmp_path.write_bytes(cipher)
+            os.replace(cipher_tmp_path, self.db_path)
+        finally:
             try:
-                cipher_tmp_path.write_bytes(cipher)
-                os.replace(cipher_tmp_path, self.db_path)
-            finally:
+                cipher_tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _with_plaintext_conn(
+        self,
+        *,
+        write: bool,
+        fn: Any,
+    ) -> Any:
+        with self._lock:
+            with tempfile.TemporaryDirectory(prefix=f"{self.db_path.stem}_prefs_") as tmp_dir_raw:
+                tmp_dir = Path(tmp_dir_raw)
+                plain_path = tmp_dir / "store.sqlite"
+                if self.db_path.exists():
+                    plain_path.write_bytes(self.fernet.decrypt(self.db_path.read_bytes()))
+                conn = self._open_plaintext_conn(plain_path)
                 try:
-                    cipher_tmp_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                    self._ensure_schema(conn)
+                    result = fn(conn, plain_path)
+                    if write:
+                        conn.commit()
+                        self._sync_encrypted_from_plaintext(plain_path)
+                    return result
+                finally:
+                    conn.close()
 
     def insert_preference(self, row: dict[str, str]) -> None:
-        conn = self._open_plaintext_conn()
-        try:
+        def _insert(conn: sqlite3.Connection, _plain_path: Path) -> None:
             conn.execute(
                 """
                 INSERT INTO preferences (ts, image_hash, chosen, rejected, reason, annotation_text)
@@ -199,20 +221,15 @@ class EncryptedPreferenceStore:
                     row.get("annotation_text", ""),
                 ),
             )
-            conn.commit()
-        finally:
-            conn.close()
-        self._sync_encrypted()
-        self._cleanup_plaintext_files()
+        self._with_plaintext_conn(write=True, fn=_insert)
 
     def fetch_recent(self, limit: int = 200) -> list[dict[str, str]]:
-        out: list[dict[str, str]] = []
-        conn = self._open_plaintext_conn()
-        try:
+        def _fetch(conn: sqlite3.Connection, _plain_path: Path) -> list[dict[str, str]]:
+            out: list[dict[str, str]] = []
             with closing(conn.cursor()) as cur:
                 cur.execute(
-                "SELECT ts, image_hash, chosen, rejected, reason, annotation_text FROM preferences ORDER BY id DESC LIMIT ?",
-                (limit,),
+                    "SELECT ts, image_hash, chosen, rejected, reason, annotation_text FROM preferences ORDER BY id DESC LIMIT ?",
+                    (limit,),
                 )
                 for ts, image_hash, chosen, rejected, reason, annotation_text in cur.fetchall():
                     out.append(
@@ -225,16 +242,80 @@ class EncryptedPreferenceStore:
                             "annotation_text": annotation_text,
                         }
                     )
-        finally:
-            conn.close()
-            self._cleanup_plaintext_files()
-        return out
+            return out
+        return self._with_plaintext_conn(write=False, fn=_fetch)
+
+    def insert_contact_brief(self, row: dict[str, Any]) -> None:
+        meta_json = json.dumps(dict(row.get("meta", {})), ensure_ascii=False, sort_keys=True)
+
+        def _insert(conn: sqlite3.Connection, _plain_path: Path) -> None:
+            conn.execute(
+                """
+                INSERT INTO contact_briefs (
+                    ts, session_id, alias, creator, full_name, contact_channel,
+                    organization, purpose, consent_ack, meta_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(row.get("ts", "")),
+                    str(row.get("session_id", "")),
+                    str(row.get("alias", "")),
+                    str(row.get("creator", "")),
+                    str(row.get("full_name", "")),
+                    str(row.get("contact_channel", "")),
+                    str(row.get("organization", "")),
+                    str(row.get("purpose", "")),
+                    int(bool(row.get("consent_ack", False))),
+                    meta_json,
+                ),
+            )
+
+        self._with_plaintext_conn(write=True, fn=_insert)
+
+    def fetch_recent_contact_briefs(self, limit: int = 200) -> list[dict[str, Any]]:
+        def _fetch(conn: sqlite3.Connection, _plain_path: Path) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            with closing(conn.cursor()) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        ts, session_id, alias, creator, full_name, contact_channel,
+                        organization, purpose, consent_ack, meta_json
+                    FROM contact_briefs
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+                for ts, session_id, alias, creator, full_name, contact_channel, organization, purpose, consent_ack, meta_json in cur.fetchall():
+                    try:
+                        meta = json.loads(str(meta_json or ""))
+                    except Exception:
+                        meta = {}
+                    out.append(
+                        {
+                            "ts": ts,
+                            "session_id": session_id,
+                            "alias": alias,
+                            "creator": creator,
+                            "full_name": full_name,
+                            "contact_channel": contact_channel,
+                            "organization": organization,
+                            "purpose": purpose,
+                            "consent_ack": bool(consent_ack),
+                            "meta": meta if isinstance(meta, dict) else {},
+                        }
+                    )
+            return out
+
+        return self._with_plaintext_conn(write=False, fn=_fetch)
 
     def export_json(self) -> str:
         return json.dumps(self.fetch_recent(10_000), ensure_ascii=False, indent=2)
 
     def close(self) -> None:
-        self._cleanup_plaintext_files()
+        return None
 
     def __enter__(self) -> "EncryptedPreferenceStore":
         return self

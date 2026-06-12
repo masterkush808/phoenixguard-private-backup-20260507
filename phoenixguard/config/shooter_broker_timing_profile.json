@@ -1,0 +1,28 @@
+{
+  "broker_timing_profile": {
+    "profile_id": "pocket_option_edge_local_v1",
+    "window_activate_wait_ms": 600,
+    "broker_focus_after_click_ms": 500,
+    "move_duration_ms": 260,
+    "post_move_hold_ms": 120,
+    "post_click_min_wait_ms": 450,
+    "time_button_after_click_wait_ms": 5000,
+    "time_panel_ready_timeout_ms": 2500,
+    "input_focus_wait_ms": 400,
+    "select_existing_value_wait_ms": 180,
+    "typing_key_interval_ms": 75,
+    "post_typing_wait_ms": 550,
+    "post_time_confirm_wait_ms": 650,
+    "preset_click_wait_ms": 600,
+    "arrow_click_wait_ms": 280,
+    "final_pre_side_click_hold_ms": 8000,
+    "post_side_click_capture_delay_ms": 900,
+    "safe_radius_px": 10,
+    "window_layout_tolerance_px": 40
+  },
+  "arrow_fallback": {
+    "enabled": true,
+    "max_total_arrow_clicks": 12,
+    "wait_between_arrow_clicks_ms": 300
+  }
+}

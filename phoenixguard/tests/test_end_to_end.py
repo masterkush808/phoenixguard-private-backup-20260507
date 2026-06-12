@@ -52,8 +52,8 @@ class TestPhoenixGuardE2E(unittest.TestCase):
             has_dashboard=True,
             risk_ethical_ok=True,
         )
-        # SIGE-VLA 3.0 added 4 new gates (9-12), total is now 12
-        self.assertEqual(len(gate_outputs), 12)
+        # SIGE-VLA 3.0 uses the full 13-gate council.
+        self.assertEqual(len(gate_outputs), 13)
 
         ensemble = EnsembleDecisionEngine(0.78, 0.65, 0.5, 2.0)
         decision = ensemble.infer(out.probs, {"q05": -0.1, "q50": 0.1, "q95": 0.2}, gate_outputs)

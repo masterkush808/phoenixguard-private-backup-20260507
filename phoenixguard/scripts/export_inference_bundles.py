@@ -8,37 +8,46 @@ import torch
 from torch import nn
 
 from phoenixguard.core.config import MEMORY_BANK as MEMORY_BANK_CFG, RUNTIME
-from phoenixguard.runtime.continual_adapters import (
-    AdapterConfig,
-    apply_lora_adapters,
-    sanitize_adapter_name,
-    set_active_adapter,
-)
 from phoenixguard.runtime.inference_exports import (
     export_aux_head_path,
     export_backbone_path,
     export_head_path,
     export_onnx_path,
+    read_export_metadata,
     save_state_dict_safetensors,
     supports_safetensors,
     write_export_metadata,
 )
-from phoenixguard.training.ensemble_cv_models import (
-    EnsembleCVModels,
-    SequenceAuxiliaryHead,
-    TRAIN_CONFIGS,
-    forward_features,
-)
+
+
+MODEL_SAVE_NAMES: dict[str, str] = {
+    "dinov2": "dinov2_finetuned.pkl",
+    "mobilenetv3": "mobilenetv3_finetuned.pkl",
+    "simclr": "simclr_finetuned.pkl",
+    "byol": "byol_finetuned.pkl",
+    "swav": "swav_finetuned.pkl",
+    "clip": "clip_finetuned.pkl",
+}
+
+MODEL_INPUT_SIZES: dict[str, int] = {
+    "dinov2": 392,
+    "mobilenetv3": 224,
+    "simclr": 224,
+    "byol": 224,
+    "swav": 224,
+    "clip": 224,
+}
 
 
 class _InferenceExportModule(nn.Module):
-    def __init__(self, backbone: nn.Module, head: nn.Module) -> None:
+    def __init__(self, backbone: nn.Module, head: nn.Module, forward_features_fn: Any) -> None:
         super().__init__()
         self.backbone = backbone
         self.head = head
+        self._forward_features_fn = forward_features_fn
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        features = forward_features(self.backbone, x)
+        features = self._forward_features_fn(self.backbone, x)
         logits = self.head(features)
         return logits, features
 
@@ -60,7 +69,38 @@ def _load_bundle(path: Path) -> dict[str, Any]:
     return cast(dict[str, Any], payload)
 
 
-def _apply_lora_from_payload(ensemble: EnsembleCVModels, model: nn.Module, payload: dict[str, Any]) -> str:
+def _training_symbols() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
+    from phoenixguard.runtime.continual_adapters import (
+        AdapterConfig,
+        apply_lora_adapters,
+        sanitize_adapter_name,
+        set_active_adapter,
+    )
+    from phoenixguard.training.ensemble_cv_models import EnsembleCVModels, TRAIN_CONFIGS, forward_features
+
+    return (
+        EnsembleCVModels,
+        TRAIN_CONFIGS,
+        forward_features,
+        AdapterConfig,
+        apply_lora_adapters,
+        sanitize_adapter_name,
+        set_active_adapter,
+    )
+
+
+def _apply_lora_from_payload(ensemble: Any, model: nn.Module, payload: dict[str, Any]) -> str:
+    (
+        _ensemble_cls,
+        _train_configs,
+        _forward_features,
+        AdapterConfig,
+        apply_lora_adapters,
+        sanitize_adapter_name,
+        set_active_adapter,
+    ) = _training_symbols()
+    del _ensemble_cls, _train_configs, _forward_features
+
     lora_payload = cast(dict[str, Any], payload.get("lora", {}))
     if not bool(lora_payload.get("enabled", False)):
         return ""
@@ -96,18 +136,21 @@ def _apply_lora_from_payload(ensemble: EnsembleCVModels, model: nn.Module, paylo
     return active_adapter
 
 
-def _build_ensemble_for_model(model_name: str) -> tuple[EnsembleCVModels, nn.Module, nn.Module]:
+def _build_ensemble_for_model(model_name: str) -> tuple[Any, nn.Module, nn.Module, Any]:
+    EnsembleCVModels, _train_configs, forward_features_fn, _AdapterConfig, _apply_lora_adapters, _sanitize_adapter_name, _set_active_adapter = _training_symbols()
+    del _train_configs, _AdapterConfig, _apply_lora_adapters, _sanitize_adapter_name, _set_active_adapter
     ensemble = EnsembleCVModels(
         image_dirs=_memory_image_dirs(),
         device=torch.device("cpu"),
         target_models=[model_name],
+        pretrained_backbones=False,
     )
     ensemble._init_models()
     model = ensemble.models.get(model_name)
     if model is None:
         raise RuntimeError(f"Model init failed for {model_name}.")
     head = ensemble._ensure_head(model_name)
-    return ensemble, model, head
+    return ensemble, model, head, forward_features_fn
 
 
 def _save_onnx_export(
@@ -115,11 +158,12 @@ def _save_onnx_export(
     model_name: str,
     model: nn.Module,
     head: nn.Module,
+    forward_features_fn: Any,
     destination: Path,
 ) -> Path:
-    cfg = TRAIN_CONFIGS[model_name]
-    bundle = _InferenceExportModule(model, head).eval()
-    example = torch.randn(1, 3, int(cfg.input_size), int(cfg.input_size), dtype=torch.float32)
+    input_size = int(MODEL_INPUT_SIZES[model_name])
+    bundle = _InferenceExportModule(model, head, forward_features_fn).eval()
+    example = torch.randn(1, 3, input_size, input_size, dtype=torch.float32)
     destination.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(
         bundle,
@@ -142,56 +186,53 @@ def export_model(model_name: str, *, export_onnx: bool = False) -> dict[str, Any
     if not supports_safetensors():
         raise RuntimeError("safetensors is required for inference bundle export.")
 
-    spec = EnsembleCVModels.MODEL_SPECS.get(model_name)
-    if spec is None:
+    save_name = MODEL_SAVE_NAMES.get(model_name)
+    if not save_name:
         raise RuntimeError(f"Unknown model name: {model_name}")
-    bundle_path = Path(RUNTIME.models_dir) / str(spec["save_name"])
+    bundle_path = Path(RUNTIME.models_dir) / save_name
     if not bundle_path.exists():
         raise FileNotFoundError(f"Bundle not found: {bundle_path}")
 
     payload = _load_bundle(bundle_path)
-    ensemble, model, head = _build_ensemble_for_model(model_name)
-    active_adapter = _apply_lora_from_payload(ensemble, model, payload)
-    model.load_state_dict(cast(dict[str, Any], payload["backbone_state_dict"]))
-    head.load_state_dict(cast(dict[str, Any], payload["head_state_dict"]))
-    model.eval()
-    head.eval()
-
-    feature_dim = int(payload.get("feature_dim", ensemble.feature_dims.get(model_name, 0)) or 0)
+    existing_export_metadata = read_export_metadata(RUNTIME.models_dir, model_name)
+    active_adapter = str(cast(dict[str, Any], payload.get("lora", {})).get("active_adapter", "") or "")
+    feature_dim = int(payload.get("feature_dim", 0) or 0)
     task_values = cast(dict[str, list[str]], payload.get("sequence_task_values", {}))
-    aux_head: SequenceAuxiliaryHead | None = None
-    if task_values and isinstance(payload.get("aux_head_state_dict"), dict):
-        aux_head = SequenceAuxiliaryHead(feature_dim, task_values)
-        aux_head.load_state_dict(cast(dict[str, Any], payload["aux_head_state_dict"]))
-        aux_head.eval()
 
     backbone_path = save_state_dict_safetensors(
         export_backbone_path(RUNTIME.models_dir, model_name),
-        model.state_dict(),
+        cast(dict[str, Any], payload["backbone_state_dict"]),
         metadata={"model_name": model_name, "kind": "backbone"},
     )
     head_path = save_state_dict_safetensors(
         export_head_path(RUNTIME.models_dir, model_name),
-        head.state_dict(),
+        cast(dict[str, Any], payload["head_state_dict"]),
         metadata={"model_name": model_name, "kind": "head"},
     )
     aux_path = ""
-    if aux_head is not None:
+    if task_values and isinstance(payload.get("aux_head_state_dict"), dict):
         aux_path = str(
             save_state_dict_safetensors(
                 export_aux_head_path(RUNTIME.models_dir, model_name),
-                aux_head.state_dict(),
+                cast(dict[str, Any], payload["aux_head_state_dict"]),
                 metadata={"model_name": model_name, "kind": "aux_head"},
             )
         )
 
     onnx_path = ""
     if export_onnx:
+        ensemble, model, head, forward_features_fn = _build_ensemble_for_model(model_name)
+        active_adapter = _apply_lora_from_payload(ensemble, model, payload)
+        model.load_state_dict(cast(dict[str, Any], payload["backbone_state_dict"]))
+        head.load_state_dict(cast(dict[str, Any], payload["head_state_dict"]))
+        model.eval()
+        head.eval()
         onnx_path = str(
             _save_onnx_export(
                 model_name=model_name,
                 model=model,
                 head=head,
+                forward_features_fn=forward_features_fn,
                 destination=export_onnx_path(RUNTIME.models_dir, model_name),
             )
         )
@@ -200,10 +241,17 @@ def export_model(model_name: str, *, export_onnx: bool = False) -> dict[str, Any
         "format_version": 1,
         "model_name": model_name,
         "source_bundle": str(bundle_path.name),
-        "input_size": int(TRAIN_CONFIGS[model_name].input_size),
+        "input_size": int(MODEL_INPUT_SIZES[model_name]),
         "feature_dim": feature_dim,
         "temperature": float(payload.get("temperature", 1.0) or 1.0),
         "decision_threshold": float(payload.get("decision_threshold", 0.5) or 0.5),
+        "runtime_calibration": cast(
+            dict[str, Any],
+            payload.get(
+                "runtime_calibration",
+                existing_export_metadata.get("runtime_calibration", {}),
+            ),
+        ),
         "best_val_accuracy": float(payload.get("best_val_accuracy", 0.0) or 0.0),
         "evaluation_metrics": cast(dict[str, Any], payload.get("evaluation_metrics", {})),
         "sequence_task_values": task_values,
@@ -246,7 +294,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Export lean inference bundles from PhoenixGuard training checkpoints.")
     parser.add_argument(
         "--models",
-        default=",".join(EnsembleCVModels.MODEL_SPECS.keys()),
+        default=",".join(MODEL_SAVE_NAMES.keys()),
         help="Comma-separated model names to export as safetensors inference bundles.",
     )
     parser.add_argument(
@@ -256,7 +304,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    models = _parse_model_list(args.models, default=tuple(EnsembleCVModels.MODEL_SPECS.keys()))
+    models = _parse_model_list(args.models, default=tuple(MODEL_SAVE_NAMES.keys()))
     onnx_models = set(_parse_model_list(args.onnx_models, default=()))
 
     for model_name in models:

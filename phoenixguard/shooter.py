@@ -45,6 +45,7 @@ from phoenixguard.execution import shooter_modes
 from phoenixguard.execution.execution_constitution import evaluate_execution_constitution
 from phoenixguard.execution.execution_rehearsal import rehearse_execution
 from phoenixguard.execution.floating_state_reducer import build_floating_state
+from phoenixguard.execution.packet_v3 import validate_execution_packet_v3
 from phoenixguard.execution.sequence_context import resolve_sequence_context
 from phoenixguard.execution.shooter_action_sequencer import (
     ActionEvidenceRecorder,
@@ -113,6 +114,7 @@ except Exception:
     pass
 
 BOXES_FILE = Path("808_shooter_boxes.json")
+CALIBRATION_MANIFEST_FILE = Path("user_calibration_manifest.json")
 DEFAULT_BROKER_TIMING_PROFILE_FILE = Path("config") / "shooter_broker_timing_profile.json"
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 COMMON_LOCAL_BASE_PORTS = (8793, 8787, 8000)
@@ -2108,12 +2110,30 @@ def _title_has_broker_hint(title: str) -> bool:
 def find_pocket_option_window(
     window_query: Optional[str] = None,
     *,
+    preferred_hwnd: Optional[int] = None,
     allow_active_fallback: bool = True,
     quiet: bool = False,
 ) -> Optional[int]:
     """Find target broker window by explicit query, then Pocket Option/trading heuristics."""
     all_windows = list_visible_windows()
     query_miss = False
+    preferred = int(preferred_hwnd or 0)
+    if preferred > 0:
+        for hwnd, title, class_name in all_windows:
+            if int(hwnd) != preferred:
+                continue
+            if window_query and window_query.lower().strip() not in title.lower():
+                break
+            if not quiet:
+                LOGGER.info(
+                    "Window selected by locked HWND %s: class=%s | title=%s",
+                    preferred,
+                    class_name,
+                    _log_safe_text(title),
+                )
+            return int(hwnd)
+        if not quiet:
+            LOGGER.warning("Preferred broker HWND %s is not visible or no longer matches query.", preferred)
 
     if window_query:
         filtered = list_visible_windows(window_query)
@@ -2273,13 +2293,19 @@ def open_broker_window(broker_url: str) -> bool:
 def prepare_pocket_option_window(
     window_query: Optional[str],
     *,
+    preferred_hwnd: Optional[int] = None,
     auto_open: bool = False,
     broker_url: str = DEFAULT_BROKER_URL,
     open_timeout: float = DEFAULT_BROKER_OPEN_TIMEOUT,
     allow_active_fallback: bool = True,
 ) -> Optional[int]:
     """Find the broker window, optionally opening Pocket Option before failing."""
-    hwnd = find_pocket_option_window(window_query, allow_active_fallback=allow_active_fallback, quiet=auto_open)
+    hwnd = find_pocket_option_window(
+        window_query,
+        preferred_hwnd=preferred_hwnd,
+        allow_active_fallback=allow_active_fallback,
+        quiet=auto_open,
+    )
     if hwnd is not None:
         return hwnd
 
@@ -2291,7 +2317,12 @@ def prepare_pocket_option_window(
 
     deadline = time.time() + max(1.0, float(open_timeout))
     while time.time() < deadline:
-        hwnd = find_pocket_option_window(window_query, allow_active_fallback=False, quiet=True)
+        hwnd = find_pocket_option_window(
+            window_query,
+            preferred_hwnd=preferred_hwnd,
+            allow_active_fallback=False,
+            quiet=True,
+        )
         if hwnd is not None:
             LOGGER.info("Pocket Option broker window ready after auto-open.")
             return hwnd
@@ -2414,7 +2445,135 @@ def rect_bounds(rect: RECT) -> Tuple[int, int, int, int]:
     return rect.left, rect.top, rect.right, rect.bottom
 
 
+_MANIFEST_TARGET_TO_RUNTIME_BOXES: Dict[str, Tuple[str, ...]] = {
+    "buy_button": ("buy_icon",),
+    "sell_button": ("sell_icon",),
+    "expiry_time_field": ("time_button", "time_input", "expiry_time_field"),
+    "expiry_plus": ("hourly_plus", "expiry_plus"),
+    "expiry_minus": ("hourly_minus", "expiry_minus"),
+    "broker_focus_area": ("broker_screen",),
+    "chart_area": ("final_screen",),
+    "confirmation_button": ("confirmation_button",),
+    "confirmation_area": ("confirmation_area",),
+    "position_area": ("position_area",),
+    "open_position_area": ("open_position_area",),
+}
+
+
+def _manifest_point(record: Mapping[str, Any]) -> Optional[Dict[str, float]]:
+    point = record.get("point")
+    if not isinstance(point, Mapping):
+        return None
+    x = _coerce_finite_float(point.get("x"))
+    y = _coerce_finite_float(point.get("y"))
+    if x is None or y is None or not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+        return None
+    if record.get("marked") is not True:
+        return None
+    if str(record.get("status") or "").strip().upper() != "USER_CALIBRATED":
+        return None
+    return {"x": float(x), "y": float(y)}
+
+
+def _first_manifest_layout(manifest: Mapping[str, Any]) -> Optional[Tuple[str, str, Mapping[str, Any]]]:
+    profiles = manifest.get("profiles")
+    if not isinstance(profiles, Mapping):
+        return None
+    preferred_profile_ids = ["default", *[str(key) for key in profiles.keys() if str(key) != "default"]]
+    for profile_id in preferred_profile_ids:
+        profile = profiles.get(profile_id)
+        if not isinstance(profile, Mapping):
+            continue
+        layouts = profile.get("layouts")
+        if not isinstance(layouts, Mapping):
+            continue
+        preferred_layout_ids = ["default", *[str(key) for key in layouts.keys() if str(key) != "default"]]
+        for layout_id in preferred_layout_ids:
+            layout = layouts.get(layout_id)
+            if isinstance(layout, Mapping):
+                return str(profile_id), str(layout_id), layout
+    return None
+
+
+def _load_manifest_runtime_boxes(manifest_path: Path) -> Optional[Dict[str, Dict[str, Any]]]:
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest_any = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        LOGGER.error("Failed to parse authoritative calibration manifest %s: %s", str(manifest_path), exc)
+        return {}
+    if not isinstance(manifest_any, Mapping):
+        LOGGER.error("Authoritative calibration manifest is not a JSON object: %s", str(manifest_path))
+        return {}
+    if manifest_any.get("authoritative_execution_source") is not True:
+        return None
+
+    layout_info = _first_manifest_layout(manifest_any)
+    if layout_info is None:
+        LOGGER.error("Authoritative calibration manifest has no profile/layout records: %s", str(manifest_path))
+        return {}
+    profile_id, layout_id, layout = layout_info
+    records: Dict[str, Any] = {}
+    for key in ("required_targets", "optional_targets"):
+        value = layout.get(key)
+        if isinstance(value, Mapping):
+            records.update(dict(value))
+
+    runtime: Dict[str, Dict[str, Any]] = {}
+    marked_targets: List[str] = []
+    for manifest_target, runtime_keys in _MANIFEST_TARGET_TO_RUNTIME_BOXES.items():
+        record = records.get(manifest_target)
+        if not isinstance(record, Mapping):
+            continue
+        point = _manifest_point(cast(Mapping[str, Any], record))
+        if point is None:
+            continue
+        marked_targets.append(manifest_target)
+        for runtime_key in runtime_keys:
+            runtime[runtime_key] = {
+                "x": point["x"],
+                "y": point["y"],
+                "calibration_source": "user_calibration_manifest",
+                "manifest_profile": profile_id,
+                "manifest_layout": layout_id,
+                "manifest_target": manifest_target,
+                "manifest_source_key": str(record.get("source_key") or ""),
+                "locked": True,
+            }
+
+    runtime["capabilities"] = {
+        "authoritative_manifest": True,
+        "manifest_path": str(manifest_path),
+        "manifest_profile": profile_id,
+        "manifest_layout": layout_id,
+        "marked_targets": marked_targets,
+        "runtime_targets": sorted(key for key in runtime.keys() if key != "capabilities"),
+        "legacy_box_fallback_allowed": False,
+    }
+    required_runtime = {"buy_icon", "sell_icon", "time_button"}
+    missing_runtime = sorted(key for key in required_runtime if key not in runtime)
+    if missing_runtime:
+        runtime["capabilities"]["invalid_reason"] = f"missing_runtime_targets:{','.join(missing_runtime)}"
+        runtime["capabilities"]["missing_runtime_targets"] = missing_runtime
+        LOGGER.error(
+            "Authoritative calibration manifest is missing runtime execution targets: %s",
+            ", ".join(missing_runtime),
+        )
+    return runtime
+
+
 def load_boxes() -> Dict[str, Dict[str, Any]]:
+    manifest_boxes = _load_manifest_runtime_boxes(CALIBRATION_MANIFEST_FILE)
+    if manifest_boxes is not None:
+        if manifest_boxes:
+            LOGGER.info(
+                "Loaded authoritative user calibration manifest from %s with runtime targets: %s",
+                str(CALIBRATION_MANIFEST_FILE),
+                ", ".join(str(key) for key in manifest_boxes.keys() if key != "capabilities"),
+            )
+        return manifest_boxes
+
     if BOXES_FILE.exists():
         try:
             parsed_any = json.loads(BOXES_FILE.read_text(encoding="utf-8"))
@@ -2617,13 +2776,38 @@ def is_broker_ready(hwnd: int, expected_rect: Optional[RECT] = None, tol_px: int
 
 def validate_calibration(boxes: Dict[str, Dict[str, Any]], rect: RECT) -> bool:
     # Ensure mapped boxes are within rect and not overlapping dangerously
+    capabilities = boxes.get("capabilities", {})
+    if isinstance(capabilities, Mapping):
+        missing_targets = capabilities.get("missing_runtime_targets")
+        if missing_targets:
+            LOGGER.error("Calibration invalid: authoritative manifest missing runtime targets: %s", missing_targets)
+            return False
+        invalid_reason = str(capabilities.get("invalid_reason") or "").strip()
+        if invalid_reason:
+            LOGGER.error("Calibration invalid: %s", invalid_reason)
+            return False
     left, top, right, bottom = rect_bounds(rect)
     w = right - left
     h = bottom - top
     seen: List[Tuple[str, int, int]] = []
+    allowed_alias_groups = (
+        {"time_button", "time_input", "time_box", "expiry_time_field"},
+        {"buy_icon", "buy_button"},
+        {"sell_icon", "sell_button"},
+        {"broker_screen", "broker_focus_area"},
+        {"hourly_plus", "expiry_plus"},
+        {"hourly_minus", "expiry_minus"},
+    )
+
+    def _same_allowed_alias_group(a: str, b: str) -> bool:
+        return any(a in group and b in group for group in allowed_alias_groups)
+
     for name, rel in boxes.items():
         if name == "capabilities":
             continue
+        if not isinstance(rel, Mapping):
+            LOGGER.error("Calibration point %s is malformed: %s", name, rel)
+            return False
         x = left + int(w * float(rel.get("x", 0.0)))
         y = top + int(h * float(rel.get("y", 0.0)))
         if x < left or x > right or y < top or y > bottom:
@@ -2631,8 +2815,10 @@ def validate_calibration(boxes: Dict[str, Dict[str, Any]], rect: RECT) -> bool:
             return False
         for other_name, ox, oy in seen:
             if abs(ox - x) < 8 and abs(oy - y) < 8:
+                if _same_allowed_alias_group(name, other_name):
+                    continue
                 LOGGER.warning(
-                    "Calibration points close: %s and %s (abs(%s,%s) vs abs(%s,%s)); continuing",
+                    "Calibration points close: %s and %s (abs(%s,%s) vs abs(%s,%s)); aborting",
                     name,
                     other_name,
                     x,
@@ -2640,7 +2826,7 @@ def validate_calibration(boxes: Dict[str, Dict[str, Any]], rect: RECT) -> bool:
                     ox,
                     oy,
                 )
-                # tolerate small overlaps; do not abort calibration here
+                return False
         seen.append((name, x, y))
     return True
 
@@ -3631,11 +3817,19 @@ def _v3_study_wait_decision(study_packet: Mapping[str, Any], now: Optional[float
         or council.get("arbitration_reason")
         or "EXECUTION_PACKET_NOT_PUBLISHED"
     ).strip()
+    execution_state = str(execution.get("state") or council.get("final_state") or "WATCHING").strip().upper()
+    if not bool(execution.get("enabled")) and execution_state in {
+        "EXECUTABLE",
+        "EXECUTABLE_PACKET",
+        "EXECUTION_READY",
+        "READY_TO_EXECUTE",
+    }:
+        execution_state = "WATCHING"
     decision.update(
         {
             "packet_id": _v3_packet_id(study_packet) or str(study_packet.get("packet_id") or ""),
             "packet_type": "STUDY_PACKET",
-            "execution_state": str(execution.get("state") or council.get("final_state") or "WATCHING").strip().upper(),
+            "execution_state": execution_state,
             "side": side,
             "candidate_id": str(
                 promotion.get("candidate_id")
@@ -3663,7 +3857,7 @@ def _v3_study_wait_decision(study_packet: Mapping[str, Any], now: Optional[float
             "runtime_integrity": "WAITING_STUDY_PACKET",
             "model_council_wait": (
                 f"packet={_v3_packet_id(study_packet) or study_packet.get('packet_id')} "
-                f"state={str(execution.get('state') or council.get('final_state') or 'WATCHING').strip().upper()} "
+                f"state={execution_state} "
                 f"side={side or 'HOLD'} "
                 f"lane={lane_context['selected_execution_lane'] or 'NONE'} "
                 f"lane_accepted={lane_context['lane_accepted']} "
@@ -3687,7 +3881,7 @@ def _v3_packet_age_seconds(packet: Mapping[str, Any], now: float) -> Optional[fl
     age_ms = _coerce_finite_float(live_integrity.get("packet_age_ms"))
     if age_ms is not None and age_ms >= 0.0:
         return float(age_ms) / 1000.0
-    created = _coerce_finite_float(packet.get("created_epoch"))
+    created = _coerce_finite_float(packet.get("created_epoch_sec") or packet.get("created_epoch"))
     if created is None:
         return None
     return max(0.0, float(now) - float(created))
@@ -3786,10 +3980,10 @@ def _v3_runtime_integrity_check(
     if not _v3_live_hash(packet):
         return False, "RUNTIME_INTEGRITY: INPUT_FRAME_HASH_MISSING"
 
-    valid_until = _coerce_finite_float(packet.get("valid_until_epoch"))
+    valid_until = _coerce_finite_float(packet.get("valid_until_epoch_sec") or packet.get("valid_until_epoch"))
     if valid_until is None or valid_until <= timestamp:
         return False, "RUNTIME_INTEGRITY: PACKET_EXPIRED"
-    created = _coerce_finite_float(packet.get("created_epoch"))
+    created = _coerce_finite_float(packet.get("created_epoch_sec") or packet.get("created_epoch"))
     if created is None or created <= 0.0:
         return False, "RUNTIME_INTEGRITY: CREATED_EPOCH_MISSING"
     age = _v3_packet_age_seconds(packet, timestamp)
@@ -4396,6 +4590,22 @@ def _v3_pre_click_confirmation(
         if str(packet.get(key) or "").strip() != str(latest_packet.get(key) or "").strip():
             return False, "PRE_CLICK_PACKET_STALE_OR_MISMATCHED"
 
+    if _v3_packet_execution_key(packet) != _v3_packet_execution_key(latest_packet):
+        return False, "PRE_CLICK_PACKET_STALE_OR_MISMATCHED"
+
+    if _v3_packet_expiry_seconds(packet) != _v3_packet_expiry_seconds(latest_packet):
+        return False, "PRE_CLICK_PACKET_STALE_OR_MISMATCHED"
+
+    def time_contract(candidate: Mapping[str, Any]) -> tuple[int, str]:
+        execution = _v3_mapping(candidate.get("execution"))
+        time_sequence = _v3_mapping(execution.get("time_sequence"))
+        target_seconds = _parse_expiry_seconds_value(time_sequence.get("target_seconds"))
+        target_text = str(time_sequence.get("target_text") or "").strip()
+        return int(target_seconds or 0), target_text
+
+    if time_contract(packet) != time_contract(latest_packet):
+        return False, "PRE_CLICK_PACKET_STALE_OR_MISMATCHED"
+
     side = _v3_packet_side(packet)
     latest_side = _v3_packet_side(latest_packet)
     latest_council = _v3_mapping(latest_packet.get("model_council"))
@@ -4422,9 +4632,27 @@ def _v3_log_final_decision(decision: Mapping[str, Any]) -> None:
         LOGGER.debug("V3_SHOOTER_DECISION %s", decision)
 
 
-def _extract_model_council_packet(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if str(payload.get("schema_version") or "").strip() == PG_EXECUTION_PACKET_SCHEMA_V3:
-        return payload
+def _extract_model_council_packet(payload: Dict[str, Any], *, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    timestamp = float(now if now is not None else time.time())
+
+    def current_execution_packet(candidate: Mapping[str, Any], source: str) -> Optional[Dict[str, Any]]:
+        if str(candidate.get("schema_version") or "").strip() != PG_EXECUTION_PACKET_SCHEMA_V3:
+            return None
+        valid_until = _coerce_finite_float(candidate.get("valid_until_epoch_sec") or candidate.get("valid_until_epoch"))
+        if valid_until is None or valid_until <= timestamp:
+            LOGGER.debug(
+                "Ignoring stale V3 execution packet from %s: packet_id=%s valid_until=%s now=%s",
+                source,
+                candidate.get("packet_id"),
+                valid_until,
+                timestamp,
+            )
+            return None
+        return cast(Dict[str, Any], dict(candidate))
+
+    packet = current_execution_packet(payload, "root")
+    if packet is not None:
+        return packet
     for key in (
         "execution_packet",
         "model_council_packet",
@@ -4434,8 +4662,10 @@ def _extract_model_council_packet(payload: Dict[str, Any]) -> Optional[Dict[str,
         "packet",
     ):
         nested = payload.get(key)
-        if isinstance(nested, dict) and str(nested.get("schema_version") or "").strip() == PG_EXECUTION_PACKET_SCHEMA_V3:
-                return cast(Dict[str, Any], nested)
+        if isinstance(nested, dict):
+            packet = current_execution_packet(nested, key)
+            if packet is not None:
+                return packet
     return None
 
 
@@ -4475,6 +4705,15 @@ def _synthesize_model_council_study_packet(payload: Mapping[str, Any]) -> Option
             "WATCHING",
         )
     ).strip().upper()
+    raw_state = state
+    missing_execution_authority = raw_state in {
+        "EXECUTABLE",
+        "EXECUTABLE_PACKET",
+        "EXECUTION_READY",
+        "READY_TO_EXECUTE",
+    }
+    if missing_execution_authority:
+        state = "WATCHING"
     side = (
         _normalize_trade_side(execution.get("side"))
         or _normalize_trade_side(council.get("final_side"))
@@ -4523,6 +4762,8 @@ def _synthesize_model_council_study_packet(payload: Mapping[str, Any]) -> Option
             "EXECUTION_PACKET_NOT_PUBLISHED",
         )
     ).strip()
+    if missing_execution_authority:
+        true_blocker = "EXECUTION_PACKET_NOT_PUBLISHED"
     created_epoch = _coerce_finite_float(
         _first_visible_value(
             source.get("created_epoch"),
@@ -4557,7 +4798,10 @@ def _synthesize_model_council_study_packet(payload: Mapping[str, Any]) -> Option
     execution_payload["side"] = side
 
     council_payload = dict(council)
-    council_payload.setdefault("final_state", state or "WATCHING")
+    if missing_execution_authority:
+        council_payload["final_state"] = state or "WATCHING"
+    else:
+        council_payload.setdefault("final_state", state or "WATCHING")
     council_payload.setdefault("final_side", side)
     council_payload.setdefault(
         "final_execution_score",
@@ -4572,11 +4816,18 @@ def _synthesize_model_council_study_packet(payload: Mapping[str, Any]) -> Option
     promotion_payload = dict(promotion)
     promotion_payload.setdefault("packet_id", packet_id)
     promotion_payload.setdefault("candidate_side", side or "HOLD")
-    promotion_payload.setdefault("true_blocker", true_blocker)
-    promotion_payload.setdefault("blocked_by", true_blocker)
-    promotion_payload.setdefault("promotion_result", state or "WATCHING")
-    promotion_payload.setdefault("packet_result", "STUDY_PACKET_SYNTHESIZED")
-    promotion_payload.setdefault("next_required", "publish PG_EXECUTION_PACKET_V3 when executable")
+    if missing_execution_authority:
+        promotion_payload["true_blocker"] = true_blocker
+        promotion_payload["blocked_by"] = true_blocker
+        promotion_payload["promotion_result"] = state or "WATCHING"
+        promotion_payload["packet_result"] = "STUDY_PACKET_SYNTHESIZED_EXECUTION_AUTHORITY_MISSING"
+        promotion_payload["next_required"] = "publish fresh PG_EXECUTION_PACKET_V3 before shooter gates can open"
+    else:
+        promotion_payload.setdefault("true_blocker", true_blocker)
+        promotion_payload.setdefault("blocked_by", true_blocker)
+        promotion_payload.setdefault("promotion_result", state or "WATCHING")
+        promotion_payload.setdefault("packet_result", "STUDY_PACKET_SYNTHESIZED")
+        promotion_payload.setdefault("next_required", "publish PG_EXECUTION_PACKET_V3 when executable")
     lane_context = _v3_execution_lane_context(source, council_payload, promotion_payload)
     if lane_context["selected_execution_lane"]:
         promotion_payload.setdefault("selected_lane", lane_context["selected_execution_lane"])
@@ -4783,6 +5034,8 @@ def _write_shooter_handshake(
     decision: Mapping[str, Any],
     packet: Optional[Mapping[str, Any]],
     tracker_snapshot: Optional[Mapping[str, Any]],
+    selected_window_hwnd: Optional[int] = None,
+    preferred_window_hwnd: Optional[int] = None,
 ) -> None:
     try:
         packet_payload = _v3_mapping(packet)
@@ -4806,6 +5059,13 @@ def _write_shooter_handshake(
             "session_id": str(session_id or "").strip(),
             "base_url": str(base_url or "").strip(),
             "timestamp_epoch": time.time(),
+            "selected_window_hwnd": int(selected_window_hwnd or 0) or None,
+            "preferred_window_hwnd": int(preferred_window_hwnd or 0) or None,
+            "window_matches_preferred": (
+                bool(int(selected_window_hwnd or 0))
+                and bool(int(preferred_window_hwnd or 0))
+                and int(selected_window_hwnd or 0) == int(preferred_window_hwnd or 0)
+            ),
             "packet_seen": bool(decision.get("packet_id")),
             "packet_id": decision.get("packet_id"),
             "packet_type": packet_type or decision.get("packet_type") or "MISSING",
@@ -4896,6 +5156,20 @@ def execute_v3_packet_trade(
     if side not in {"BUY", "SELL"} or expiry <= 0:
         LOGGER.error("V3 execute refused: invalid side or expiry in packet_id=%s", _v3_packet_id(packet))
         return False
+    if not skip_side_click:
+        validation = validate_execution_packet_v3(
+            packet,
+            now_epoch=time.time(),
+            require_executable=True,
+            require_broker_click_safe_identity=True,
+        )
+        if not validation.ok:
+            LOGGER.error(
+                "V3 execute refused: packet_id=%s failed direct live-click validation reason=%s",
+                _v3_packet_id(packet),
+                validation.first_reason,
+            )
+            return False
     profile_path = broker_timing_profile_path or str(DEFAULT_BROKER_TIMING_PROFILE_FILE)
     try:
         timing_profile = BrokerTimingProfile.from_file(profile_path, action_speed=action_speed)
@@ -6130,6 +6404,13 @@ def execute_trade(hwnd: int, boxes: Dict[str, Dict[str, Any]], side: str, expiry
 
 
 def run_manual(args: argparse.Namespace) -> int:
+    if not bool(getattr(args, "allow_live_click", False)) or not _v3_live_broker_clicks_explicitly_enabled():
+        LOGGER.error(
+            "Manual live click refused. Set %s=1 and pass --allow-live-click for standalone live execution.",
+            LIVE_BROKER_CLICK_ENV,
+        )
+        return 2
+
     hwnd = find_pocket_option_window(args.window_query)
     if hwnd is None:
         return 2
@@ -6305,6 +6586,13 @@ def resolve_and_set_expiry(hwnd: int, boxes: Dict[str, Dict[str, Any]], expiry: 
                 return True
             LOGGER.warning("resolver: exact preset %s did not verify; retrying with typed/stepper controls", exact_key)
             _open_time_picker()
+
+        if int(expiry) % 60:
+            LOGGER.error(
+                "resolver: expiry %ss requires second precision, but manual fallback controls only support exact presets or whole minutes",
+                expiry,
+            )
+            return False
 
         # Step 3: Hourly + minute breakdown with typing
         if all(key in boxes for key in ["hourly_input", "minute_input"]):
@@ -6587,6 +6875,12 @@ def _run_startup_test_entry(
     timeout_sec = max(0.0, float(getattr(args, "test_signal_timeout", TEST_SIGNAL_TIMEOUT_SECONDS) or TEST_SIGNAL_TIMEOUT_SECONDS))
     poll_sec = max(0.05, float(getattr(args, "test_signal_poll", TEST_SIGNAL_POLL_INTERVAL) or TEST_SIGNAL_POLL_INTERVAL))
     time_only = bool(getattr(args, "calibration_test_time_only", False))
+    if not time_only:
+        LOGGER.warning(
+            "startup_test_entry: CALIBRATION_TEST is time-only under V3 authority; "
+            "generated calibration packets cannot click BUY/SELL."
+        )
+        time_only = True
 
     LOGGER.warning(
         "startup_test_entry: waiting up to %.1fs for a fresh Phoenix BUY/SELL startup test signal",
@@ -6717,6 +7011,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
     """
     global automatic_trigger_enabled
     shooter_mode = shooter_modes.resolve_shooter_mode(getattr(args, "shooter_mode", None))
+    preferred_window_hwnd = int(getattr(args, "window_hwnd", 0) or 0) or None
 
     try:
         if bool(getattr(args, "clear_phoenix_cache", False)):
@@ -6729,6 +7024,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
 
     hwnd = prepare_pocket_option_window(
         args.window_query,
+        preferred_hwnd=preferred_window_hwnd,
         auto_open=bool(getattr(args, "auto_open_broker", False)),
         broker_url=str(getattr(args, "broker_url", DEFAULT_BROKER_URL)),
         allow_active_fallback=False,
@@ -6814,7 +7110,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
 
                 tracker_snapshot = last_tracker_snapshot
                 fetch_started = time.time()
-                payload = _extract_model_council_packet(tracker_snapshot) if isinstance(tracker_snapshot, dict) else None
+                payload = _extract_model_council_packet(tracker_snapshot, now=now) if isinstance(tracker_snapshot, dict) else None
                 study_payload: Optional[Dict[str, Any]] = None
                 if not isinstance(payload, dict) or not payload:
                     if isinstance(tracker_snapshot, dict):
@@ -6871,6 +7167,8 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                         decision=decision,
                         packet=study_payload if isinstance(study_payload, dict) else None,
                         tracker_snapshot=tracker_snapshot if isinstance(tracker_snapshot, dict) else None,
+                        selected_window_hwnd=hwnd,
+                        preferred_window_hwnd=preferred_window_hwnd,
                     )
                     if now - last_waiting_log_ts >= 2.0:
                         LOGGER.info("waiting for PhoenixGuard V3 executable packet: %s", wait_summary)
@@ -6893,6 +7191,8 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                     decision=decision,
                     packet=payload,
                     tracker_snapshot=tracker_snapshot if isinstance(tracker_snapshot, dict) else None,
+                    selected_window_hwnd=hwnd,
+                    preferred_window_hwnd=preferred_window_hwnd,
                 )
                 _three_gate_save_state(state)
                 status_box.update(payload, tracker_snapshot, int(decision.get("discipline_remaining_seconds", 0) or 0))
@@ -6930,6 +7230,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                 if hwnd is None or get_window_rect(hwnd) is None:
                     resolved_hwnd = prepare_pocket_option_window(
                         args.window_query,
+                        preferred_hwnd=preferred_window_hwnd,
                         auto_open=bool(getattr(args, "auto_open_broker", False)),
                         broker_url=str(getattr(args, "broker_url", DEFAULT_BROKER_URL)),
                         allow_active_fallback=False,
@@ -7072,6 +7373,11 @@ def build_parser() -> argparse.ArgumentParser:
     manual.add_argument("expiry", type=int, help="Expiry seconds")
     manual.add_argument("--amount", type=int, default=5, help="Order amount")
     manual.add_argument("--window-query", default=None, help="Title substring to select broker window")
+    manual.add_argument(
+        "--allow-live-click",
+        action="store_true",
+        help="Required manual safety acknowledgement for standalone live broker clicks.",
+    )
     manual.set_defaults(mode="manual")
 
     signal = sub.add_parser("signal", help="Follow Model Council V3 packets and auto-click executable trades.")
@@ -7080,6 +7386,12 @@ def build_parser() -> argparse.ArgumentParser:
     signal.add_argument("--poll", type=float, default=DEFAULT_SIGNAL_POLL_SECONDS, help="Signal poll interval seconds")
     signal.add_argument("--cooldown", type=float, default=DEFAULT_TRADE_COOLDOWN_SECONDS, help="Min seconds between clicks")
     signal.add_argument("--expiry", type=int, default=DEFAULT_EXPIRY_FALLBACK_SECONDS, help="Fallback/manual expiry")
+    signal.add_argument(
+        "--window-hwnd",
+        type=int,
+        default=0,
+        help="Preferred broker window handle from BrokerSourceLockV3; title query remains the fallback.",
+    )
     signal.add_argument(
         "--max-signal-age",
         type=float,

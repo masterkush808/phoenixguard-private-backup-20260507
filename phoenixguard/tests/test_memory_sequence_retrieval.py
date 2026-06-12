@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import numpy as np
 from numpy.typing import NDArray
 from pathlib import Path
@@ -48,6 +49,21 @@ def test_memory_entry_from_dict_is_backward_compatible() -> None:
     assert entry.intent_next == "continue"
 
 
+def test_memory_entry_missing_label_defaults_to_hold() -> None:
+    raw: dict[str, Any] = {
+        "entry_id": "no-label",
+        "image_path": "no-label.png",
+        "chart_state": {},
+        "text_embed": _make_embed(5),
+        "visual_fp": [0.0] * 128,
+        "combined_embed": _make_embed(6),
+    }
+
+    entry = MemoryEntry.from_dict(raw)
+
+    assert entry.label == "HOLD"
+
+
 def test_memory_entry_from_legacy_vlm_json_recovers_taxonomy() -> None:
     raw: dict[str, Any] = {
         "entry_id": "legacy-sell",
@@ -73,6 +89,35 @@ def test_memory_entry_from_legacy_vlm_json_recovers_taxonomy() -> None:
     assert entry.local_phase == "with_trend_pause"
     assert entry.phase_risk == "chop_risk"
     assert entry.intent_next == "continue"
+
+
+def test_memory_entry_backfills_teaching_and_aggressive_sniper_context() -> None:
+    raw: dict[str, Any] = {
+        "entry_id": "buy-profit",
+        "image_path": "700pips profit.png",
+        "label": "BUY",
+        "chart_state": {
+            "direction": "BUY",
+            "entry_type": "continuation",
+            "continuation_signal": "impulse_pause",
+            "momentum_bias": "bullish",
+        },
+        "text_embed": _make_embed(7),
+        "visual_fp": [0.0] * 128,
+        "combined_embed": _make_embed(8),
+        "sequence_index": 2,
+    }
+
+    entry = MemoryEntry.from_dict(raw)
+
+    teaching = cast(dict[str, Any], entry.chart_state["memory_teaching"])
+    progression = cast(dict[str, Any], entry.chart_state["entry_progression"])
+    sniper = cast(dict[str, Any], entry.chart_state["sniper_profile"])
+    assert teaching["lesson_role"] == "win_resolution"
+    assert "win_resolution" in teaching["tags"]
+    assert float(teaching["teaching_weight"]) >= 0.90
+    assert progression["progression_stage"] == "win_resolution"
+    assert float(sniper["aggressive_entry_score"]) > 0.0
 
 
 def test_sequence_context_and_transition_summary() -> None:
@@ -221,3 +266,103 @@ def test_search_expands_centroid_shortlist_to_cluster_members() -> None:
     assert results[0].entry_id == "member_buy_exact"
     assert results[0].is_archetype_centroid is False
     assert float(results[0].similarity) >= float(results[1].similarity)
+
+
+def test_memory_bank_load_backfills_sequence_metadata(tmp_path: Path) -> None:
+    bank_dir = tmp_path / "memory_bank"
+    index_dir = bank_dir / "index"
+    index_dir.mkdir(parents=True)
+
+    metadata = [
+        {
+            "entry_id": "buy-a",
+            "image_path": str(tmp_path / "Screenshot 2026-04-21 120000.png"),
+            "label": "BUY",
+            "chart_state": {
+                "direction": "BUY",
+                "entry_type": "continuation",
+                "continuation_signal": "impulse_pause",
+                "momentum_bias": "bullish",
+            },
+            "text_embed": _make_embed(31),
+            "visual_fp": [0.0] * 128,
+            "combined_embed": _make_embed(32),
+            "episode_id": None,
+            "sequence_index": None,
+        },
+        {
+            "entry_id": "buy-b",
+            "image_path": str(tmp_path / "Screenshot 2026-04-21 120500.png"),
+            "label": "BUY",
+            "chart_state": {
+                "direction": "BUY",
+                "entry_type": "continuation",
+                "continuation_signal": "impulse_pause",
+                "momentum_bias": "bullish",
+            },
+            "text_embed": _make_embed(33),
+            "visual_fp": [0.0] * 128,
+            "combined_embed": _make_embed(34),
+        },
+    ]
+    (bank_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (index_dir / "id_map.json").write_text(json.dumps(["buy-a", "buy-b"]), encoding="utf-8")
+    np.save(
+        str(index_dir / "numpy_vecs.npy"),
+        np.asarray([_make_embed(32), _make_embed(34)], dtype=np.float32),
+    )
+
+    bank = MemoryBank.load(bank_dir)
+
+    assert bank.is_loaded is True
+    loaded = {entry.entry_id: entry for entry in bank.entries}
+    assert loaded["buy-a"].episode_id == loaded["buy-b"].episode_id
+    assert loaded["buy-a"].sequence_index == 0
+    assert loaded["buy-b"].sequence_index == 1
+
+    persisted = cast(list[dict[str, Any]], json.loads((bank_dir / "metadata.json").read_text(encoding="utf-8")))
+    persisted_by_id = {row["entry_id"]: row for row in persisted}
+    assert persisted_by_id["buy-a"]["episode_id"] == persisted_by_id["buy-b"]["episode_id"]
+    assert persisted_by_id["buy-a"]["sequence_index"] == 0
+    assert persisted_by_id["buy-b"]["sequence_index"] == 1
+
+
+def test_memory_bank_load_survives_incompatible_hnsw_index(tmp_path: Path) -> None:
+    bank_dir = tmp_path / "memory_bank"
+    index_dir = bank_dir / "index"
+    index_dir.mkdir(parents=True)
+    metadata = [
+        {
+            "entry_id": "sell-a",
+            "image_path": str(tmp_path / "sell-a.png"),
+            "label": "SELL",
+            "chart_state": {"direction": "SELL", "entry_type": "continuation"},
+            "text_embed": _make_embed(41),
+            "visual_fp": [0.0] * 128,
+            "combined_embed": _make_embed(42),
+        },
+        {
+            "entry_id": "sell-b",
+            "image_path": str(tmp_path / "sell-b.png"),
+            "label": "SELL",
+            "chart_state": {"direction": "SELL", "entry_type": "continuation"},
+            "text_embed": _make_embed(43),
+            "visual_fp": [0.0] * 128,
+            "combined_embed": _make_embed(44),
+        },
+    ]
+    (bank_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (index_dir / "id_map.json").write_text(json.dumps(["sell-a", "sell-b"]), encoding="utf-8")
+    (index_dir / "hnsw.bin").write_bytes(b"not a compatible hnsw index")
+    np.save(
+        str(index_dir / "numpy_vecs.npy"),
+        np.asarray([_make_embed(42), _make_embed(44)], dtype=np.float32),
+    )
+
+    bank = MemoryBank.load(bank_dir)
+    results = bank.search(np.asarray(_make_embed(42), dtype=np.float32), top_k=1)
+
+    assert bank.is_loaded is True
+    assert len(bank.entries) == 2
+    assert results
+    assert results[0].entry_id == "sell-a"

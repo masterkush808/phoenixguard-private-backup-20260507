@@ -69,12 +69,39 @@ class RuntimeModelInfo:
     decision_threshold: float = 0.5
     feature_dim: int = 0
     sequence_task_values: dict[str, list[str]] = field(default_factory=dict)
+    runtime_calibration: dict[str, Any] = field(default_factory=dict)
     export_metadata_path: Path | None = None
     backbone_weights_path: Path | None = None
     head_weights_path: Path | None = None
     aux_head_weights_path: Path | None = None
     onnx_path: Path | None = None
     exported_active_adapter: str = ""
+
+
+class LegacyFallbackApprovalRequired(RuntimeError):
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        reason: str,
+        bundle_path: Path | None,
+        export_ready: bool,
+    ) -> None:
+        self.model_name = str(model_name)
+        self.reason = str(reason)
+        self.bundle_path = bundle_path
+        self.export_ready = bool(export_ready)
+        super().__init__(
+            f"Legacy council fallback approval required for {self.model_name}: {self.reason}"
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "model_name": self.model_name,
+            "reason": self.reason,
+            "bundle_path": str(self.bundle_path) if self.bundle_path is not None else "",
+            "export_ready": bool(self.export_ready),
+        }
 
 
 class LocalCVEnsembleRuntime:
@@ -121,6 +148,16 @@ class LocalCVEnsembleRuntime:
         "byol": 0.96,
     }
 
+    CPU_ALWAYS_ON_MODELS: tuple[str, ...] = (
+        "mobilenetv3",
+        "swav",
+    )
+    GPU_ALWAYS_ON_MODELS: tuple[str, ...] = (
+        "mobilenetv3",
+        "swav",
+        "dinov2",
+    )
+
     def __init__(
         self,
         *,
@@ -142,7 +179,7 @@ class LocalCVEnsembleRuntime:
         self.compute_device = requested_device
         self.storage_device = torch.device("cpu")
         self._image_dirs = [str(path) for path in image_dirs]
-        self.requested_models = self._resolve_requested_models(target_models, requested_device)
+        self.requested_models = self.resolve_requested_models(target_models, requested_device)
         self.max_loaded_models = self._resolve_max_loaded_models(requested_device)
         self.loaded_model_names: list[str] = []
         self.failed_models: dict[str, str] = {}
@@ -165,6 +202,7 @@ class LocalCVEnsembleRuntime:
             self._image_dirs,
             self.storage_device,
             [name for name in self.requested_models if name in self._ensemble_cls.MODEL_SPECS],
+            pretrained_backbones=False,
         )
         self.logger.info(
             "Local ensemble target models on %s: %s",
@@ -177,6 +215,14 @@ class LocalCVEnsembleRuntime:
             raise RuntimeError(
                 f"No saved local ensemble bundles could be loaded from {self.model_dir}."
             )
+
+    @classmethod
+    def resolve_requested_models(
+        cls,
+        target_models: Sequence[str] | None,
+        requested_device: torch.device,
+    ) -> list[str]:
+        return cls._resolve_requested_models(target_models, requested_device)
 
     @classmethod
     def _resolve_requested_models(
@@ -540,6 +586,7 @@ class LocalCVEnsembleRuntime:
                         for task_name, values in cast(Mapping[str, Sequence[Any]], metadata.get("sequence_task_values", {})).items()
                         if isinstance(values, Sequence) and not isinstance(values, (str, bytes))
                     },
+                    runtime_calibration=dict(cast(Mapping[str, Any], metadata.get("runtime_calibration", {}))),
                     export_metadata_path=export_meta_path if has_export else None,
                     backbone_weights_path=export_backbone_path(self.model_dir, name) if has_export else None,
                     head_weights_path=export_head_path(self.model_dir, name) if has_export else None,
@@ -567,32 +614,64 @@ class LocalCVEnsembleRuntime:
                 self._image_dirs,
                 self.storage_device,
                 [name],
+                pretrained_backbones=False,
             )
             ensemble._init_models()
             model = ensemble.models.get(name)
             if model is None:
                 raise RuntimeError(f"Model init failed for {name}.")
 
+            export_ready = bool(
+                info.export_metadata_path is not None
+                and info.backbone_weights_path is not None
+                and info.head_weights_path is not None
+                and info.export_metadata_path.exists()
+                and info.backbone_weights_path.exists()
+                and info.head_weights_path.exists()
+            )
+            legacy_bundle_ready = bool(info.bundle_path is not None and info.bundle_path.exists())
+
             try:
-                if (
-                    info.export_metadata_path is not None
-                    and info.backbone_weights_path is not None
-                    and info.head_weights_path is not None
-                    and info.export_metadata_path.exists()
-                    and info.backbone_weights_path.exists()
-                    and info.head_weights_path.exists()
-                ):
-                    runtime, metrics, temperature, decision_threshold, best_val_accuracy = self._load_runtime_from_export(
-                        info=info,
-                        ensemble=ensemble,
-                        model=model,
-                    )
+                if export_ready:
+                    try:
+                        runtime, metrics, temperature, decision_threshold, best_val_accuracy = self._load_runtime_from_export(
+                            info=info,
+                            ensemble=ensemble,
+                            model=model,
+                        )
+                    except Exception as exc:
+                        if not legacy_bundle_ready:
+                            raise
+                        if not self._legacy_fallback_allowed():
+                            raise LegacyFallbackApprovalRequired(
+                                model_name=name,
+                                reason=f"Export load failed: {exc}",
+                                bundle_path=info.bundle_path,
+                                export_ready=True,
+                            ) from exc
+                        runtime, metrics, temperature, decision_threshold, best_val_accuracy = self._load_runtime_from_legacy_bundle(
+                            info=info,
+                            ensemble=ensemble,
+                            model=model,
+                        )
+                        metrics = dict(metrics)
+                        metrics["legacy_fallback_reason"] = str(exc)
+                        metrics["runtime_bundle_mode"] = "legacy_pickle"
                 else:
+                    if legacy_bundle_ready and not self._legacy_fallback_allowed():
+                        raise LegacyFallbackApprovalRequired(
+                            model_name=name,
+                            reason="Lean export bundle is unavailable, so the runtime would need the legacy .pkl checkpoint.",
+                            bundle_path=info.bundle_path,
+                            export_ready=False,
+                        )
                     runtime, metrics, temperature, decision_threshold, best_val_accuracy = self._load_runtime_from_legacy_bundle(
                         info=info,
                         ensemble=ensemble,
                         model=model,
                     )
+                    metrics = dict(metrics)
+                    metrics["runtime_bundle_mode"] = "legacy_pickle"
                 ensemble.temperature_scalers[name] = temperature
                 ensemble.decision_thresholds[name] = decision_threshold
                 ensemble.evaluation_metrics[name] = metrics
@@ -608,6 +687,7 @@ class LocalCVEnsembleRuntime:
                     decision_threshold=decision_threshold,
                     feature_dim=info.feature_dim,
                     sequence_task_values=dict(info.sequence_task_values),
+                    runtime_calibration=dict(info.runtime_calibration),
                     export_metadata_path=info.export_metadata_path,
                     backbone_weights_path=info.backbone_weights_path,
                     head_weights_path=info.head_weights_path,
@@ -620,6 +700,8 @@ class LocalCVEnsembleRuntime:
                 self._evict_loaded_models(exclude={name})
                 self.failed_models.pop(name, None)
                 return runtime
+            except LegacyFallbackApprovalRequired:
+                raise
             except Exception as exc:
                 self.failed_models[name] = str(exc)
                 self.logger.warning("Local ensemble bundle load failed for %s: %s", name, exc)
@@ -656,6 +738,167 @@ class LocalCVEnsembleRuntime:
         probs /= max(float(probs.sum()), 1e-12)
         entropy = -float(np.sum(probs * np.log(probs)))
         return float(entropy / math.log(2.0))
+
+    @staticmethod
+    def _threshold_adjusted_buy_support(
+        buy_prob: float,
+        decision_threshold: float,
+        *,
+        support_mode: str = "",
+        predicted_label: str = "",
+        route_direction: str = "",
+        route_strength: float = 0.0,
+    ) -> float:
+        clipped_buy = float(np.clip(buy_prob, 0.0, 1.0))
+        mode = str(support_mode).strip().lower()
+        if mode == "threshold_centered":
+            threshold = float(np.clip(decision_threshold, 1e-6, 1.0 - 1e-6))
+            if clipped_buy >= threshold:
+                return float(
+                    np.clip(
+                        0.5 + 0.5 * ((clipped_buy - threshold) / max(1.0 - threshold, 1e-6)),
+                        0.0,
+                        1.0,
+                    )
+                )
+            return float(np.clip(0.5 * (clipped_buy / max(threshold, 1e-6)), 0.0, 1.0))
+        return clipped_buy
+
+    @staticmethod
+    def _resolve_effective_decision_threshold(
+        row: Mapping[str, Any],
+        *,
+        route_direction: str = "",
+    ) -> float:
+        threshold = float(np.clip(row.get("decision_threshold", 0.5), 0.0, 1.0))
+        if not route_direction:
+            return threshold
+        calibration = cast(Mapping[str, Any], row.get("runtime_calibration", {}))
+        route_thresholds = cast(Mapping[str, Any], calibration.get("route_decision_thresholds", {}))
+        override = route_thresholds.get(route_direction)
+        if isinstance(override, (float, int)):
+            return float(np.clip(float(override), 0.0, 1.0))
+        return threshold
+
+    @staticmethod
+    def _resolve_support_mode(
+        row: Mapping[str, Any],
+        *,
+        route_direction: str = "",
+    ) -> str:
+        calibration = cast(Mapping[str, Any], row.get("runtime_calibration", {}))
+        route_modes = cast(Mapping[str, Any], calibration.get("route_support_modes", {}))
+        mode = route_modes.get(route_direction) if route_direction else None
+        if isinstance(mode, str) and mode.strip():
+            return str(mode).strip().lower()
+        fallback = calibration.get("support_mode", "")
+        return str(fallback).strip().lower()
+
+    @staticmethod
+    def _resolve_route_weight_multiplier(
+        row: Mapping[str, Any],
+        *,
+        route_direction: str = "",
+    ) -> float:
+        calibration = cast(Mapping[str, Any], row.get("runtime_calibration", {}))
+        route_weights = cast(Mapping[str, Any], calibration.get("route_weight_multipliers", {}))
+        if route_direction:
+            override = route_weights.get(route_direction)
+            if isinstance(override, (float, int)):
+                return float(np.clip(float(override), 0.05, 4.0))
+        fallback = calibration.get("weight_multiplier", 1.0)
+        if isinstance(fallback, (float, int)):
+            return float(np.clip(float(fallback), 0.05, 4.0))
+        return 1.0
+
+    @staticmethod
+    def _legacy_fallback_allowed() -> bool:
+        return str(
+            os.getenv("PHOENIXGUARD_ALLOW_LEGACY_COUNCIL_FALLBACK", "") or ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _prediction_budget(self) -> int:
+        available = max(1, len(self.loaded_model_names))
+        if self.compute_device.type == "cpu":
+            return max(2, min(available, max(1, int(self.max_loaded_models))))
+        return max(3, min(available, max(1, int(self.max_loaded_models))))
+
+    def _select_prediction_models(
+        self,
+        routing_context: Mapping[str, Any] | None = None,
+    ) -> tuple[list[str], dict[str, Any]]:
+        available = [name for name in self.loaded_model_names if name in self.model_info]
+        if not available:
+            return [], {"selected_models": [], "skipped_models": [], "reason": "no_available_models"}
+
+        budget = min(len(available), self._prediction_budget())
+        preferred = self.CPU_ALWAYS_ON_MODELS if self.compute_device.type == "cpu" else self.GPU_ALWAYS_ON_MODELS
+        route_priority: list[str] = []
+        fallback_priority: list[str] = []
+
+        def _add(name: str) -> None:
+            if name in available and name not in route_priority:
+                route_priority.append(name)
+
+        def _add_fallback(name: str) -> None:
+            if name in available and name not in fallback_priority:
+                fallback_priority.append(name)
+
+        selection_reason = "fallback_always_on"
+        if routing_context:
+            chart_state = cast(Mapping[str, Any], routing_context.get("chart_state", {}))
+            sequence_state = cast(Mapping[str, Any], routing_context.get("sequence_state", {}))
+            grounded_chart = cast(Mapping[str, Any], routing_context.get("grounded_chart", {}))
+            memory_summary = cast(Mapping[str, Any], routing_context.get("memory_summary", {}))
+            projection_direction = str(chart_state.get("projection_bias_direction", chart_state.get("direction", "BUY"))).upper()
+            grounded_confidence = self._safe_clip(chart_state.get("grounded_confidence", grounded_chart.get("grounded_confidence", 0.0)))
+            path_clarity = self._safe_clip(chart_state.get("path_clarity", sequence_state.get("path_clarity", 0.0)))
+            direction_confidence = self._safe_clip(chart_state.get("direction_probability", 0.5), 0.5)
+            structure_trade_ready = float(bool(chart_state.get("structure_trade_ready", False)))
+            sequence_model = cast(Mapping[str, Any], chart_state.get("sequence_model", sequence_state.get("sequence_model", {})))
+            sequence_uncertainty = self._safe_clip(chart_state.get("sequence_uncertainty", sequence_model.get("uncertainty", 0.0)))
+            memory_ambiguity = self._safe_clip(memory_summary.get("ambiguity", 0.0))
+            needs_structure = bool(
+                grounded_confidence >= 0.45
+                or path_clarity <= 0.55
+                or sequence_uncertainty >= 0.52
+            )
+            if projection_direction == "BUY":
+                _add("byol")
+                if direction_confidence >= 0.62:
+                    _add("clip")
+                selection_reason = "buy_route"
+            elif projection_direction == "SELL":
+                _add("simclr")
+                _add("swav")
+                selection_reason = "sell_route"
+            if needs_structure:
+                _add("dinov2")
+                selection_reason = "structure_route"
+            if sequence_uncertainty >= 0.60 or memory_ambiguity >= 0.42 or structure_trade_ready >= 1.0:
+                _add("swav")
+                if projection_direction != "SELL":
+                    _add("simclr")
+                selection_reason = "uncertainty_route"
+
+        for name in preferred:
+            _add_fallback(name)
+        for name in available:
+            _add_fallback(name)
+
+        selected: list[str] = []
+        for name in route_priority + fallback_priority:
+            if name not in selected:
+                selected.append(name)
+            if len(selected) >= budget:
+                break
+        skipped = [name for name in available if name not in selected]
+        return selected, {
+            "selected_models": list(selected),
+            "skipped_models": skipped,
+            "budget": budget,
+            "reason": selection_reason,
+        }
 
     def _predict_single(
         self,
@@ -788,6 +1031,7 @@ class LocalCVEnsembleRuntime:
                     "active_lora_adapter": active_adapter_name,
                     "runtime_backend": "onnx" if can_use_onnx else "pytorch",
                     "sequence_tasks": sequence_tasks,
+                    "runtime_calibration": dict(info.runtime_calibration),
                 }
         finally:
             if not can_use_onnx:
@@ -819,10 +1063,12 @@ class LocalCVEnsembleRuntime:
         sell_prob /= total
         row["buy_prob"] = float(buy_prob)
         row["sell_prob"] = float(sell_prob)
-        row["predicted_label"] = "BUY" if buy_prob >= sell_prob else "SELL"
+        threshold = float(np.clip(row.get("decision_threshold", 0.5), 0.0, 1.0))
+        row["predicted_label"] = "BUY" if buy_prob >= threshold else "SELL"
         row["confidence"] = float(max(buy_prob, sell_prob))
         row["margin"] = float(abs(buy_prob - sell_prob))
         row["entropy"] = float(LocalCVEnsembleRuntime._normalized_entropy(buy_prob, sell_prob))
+        row["threshold_gap"] = float(abs(buy_prob - threshold))
         weight_bias = float(model_weight_biases.get(name, 0.0) or 0.0)
         row["dynamic_weight"] = float(max(float(row.get("dynamic_weight", 0.0)) * confidence_scale * (1.0 + weight_bias), 0.0))
         row["adaptation_bias"] = float(weight_bias)
@@ -848,14 +1094,41 @@ class LocalCVEnsembleRuntime:
         live_buy_probs: list[float] = []
         live_sell_probs: list[float] = []
         vote_counts = {"BUY": 0, "SELL": 0}
+        route_direction = str((route_summary or {}).get("route_direction", "")).upper()
+        route_strength = float(np.clip((route_summary or {}).get("route_strength", 0.0) or 0.0, 0.0, 1.0))
 
         for row in model_outputs.values():
             if not bool(row.get("live_enabled", False)):
                 continue
-            live_weights.append(float(max(0.0, float(row.get("dynamic_weight", 0.0) or 0.0))))
-            live_buy_probs.append(float(np.clip(row.get("buy_prob", 0.5), 0.0, 1.0)))
-            live_sell_probs.append(float(np.clip(row.get("sell_prob", 0.5), 0.0, 1.0)))
-            label = str(row.get("predicted_label", "BUY")).upper()
+            effective_threshold = LocalCVEnsembleRuntime._resolve_effective_decision_threshold(
+                row,
+                route_direction=route_direction,
+            )
+            support_mode = LocalCVEnsembleRuntime._resolve_support_mode(
+                row,
+                route_direction=route_direction,
+            )
+            route_weight_multiplier = LocalCVEnsembleRuntime._resolve_route_weight_multiplier(
+                row,
+                route_direction=route_direction,
+            )
+            effective_dynamic_weight = float(
+                max(0.0, float(row.get("dynamic_weight", 0.0) or 0.0)) * route_weight_multiplier
+            )
+            row["route_weight_multiplier"] = float(route_weight_multiplier)
+            row["effective_dynamic_weight"] = float(effective_dynamic_weight)
+            live_weights.append(effective_dynamic_weight)
+            adjusted_buy_support = LocalCVEnsembleRuntime._threshold_adjusted_buy_support(
+                float(np.clip(row.get("buy_prob", 0.5), 0.0, 1.0)),
+                effective_threshold,
+                support_mode=support_mode,
+                predicted_label=str(row.get("predicted_label", "")),
+                route_direction=route_direction,
+                route_strength=route_strength,
+            )
+            live_buy_probs.append(adjusted_buy_support)
+            live_sell_probs.append(float(1.0 - adjusted_buy_support))
+            label = "BUY" if float(np.clip(row.get("buy_prob", 0.5), 0.0, 1.0)) >= effective_threshold else "SELL"
             if label in vote_counts:
                 vote_counts[label] += 1
 
@@ -883,7 +1156,9 @@ class LocalCVEnsembleRuntime:
         for name, row in model_outputs.items():
             if not bool(row.get("live_enabled", False)):
                 continue
-            confidence_score = float(row.get("dynamic_weight", 0.0)) * float(row.get("confidence", 0.0))
+            confidence_score = float(row.get("effective_dynamic_weight", row.get("dynamic_weight", 0.0))) * float(
+                row.get("confidence", 0.0)
+            )
             if confidence_score > champion_score:
                 confirmer_name, confirmer_score = champion_name, champion_score
                 champion_name, champion_score = name, confidence_score
@@ -956,10 +1231,23 @@ class LocalCVEnsembleRuntime:
         projection_confidence = cls._safe_clip(chart_state.get("projection_bias_confidence", 0.0))
         direction = str(chart_state.get("direction", base_direction)).upper()
         direction_confidence = cls._safe_clip(chart_state.get("direction_probability", base_ensemble.get("confidence", 0.5)))
+        council_projection_direction = str(chart_state.get("council_projection_direction", projection_direction)).upper()
+        council_projection_confidence = cls._safe_clip(
+            chart_state.get(
+                "council_projection_confidence",
+                projection_confidence if council_projection_direction == projection_direction else 0.0,
+            )
+        )
+        council_current_box_direction = str(chart_state.get("council_current_box_direction", "HOLD")).upper()
+        council_current_box_confidence = cls._safe_clip(chart_state.get("council_current_box_confidence", 0.0))
+        council_router_direction = str(chart_state.get("council_router_direction", "HOLD")).upper()
+        council_router_strength = cls._safe_clip(chart_state.get("council_router_strength", 0.0))
         path_clarity = cls._safe_clip(chart_state.get("path_clarity", sequence_state.get("path_clarity", 0.0)))
         box_sequence_agreement = cls._safe_clip(chart_state.get("box_sequence_agreement", sequence_state.get("box_sequence_agreement", 0.0)))
         grounded_confidence = cls._safe_clip(chart_state.get("grounded_confidence", grounded_chart.get("grounded_confidence", 0.0)))
         structure_trade_ready = float(bool(chart_state.get("structure_trade_ready", False)))
+        local_phase = str(chart_state.get("local_phase", market_state.get("local_phase", ""))).lower()
+        momentum_bias = str(chart_state.get("momentum_bias", "neutral")).lower()
         support_strength = cls._safe_clip(grounded_structure.get("support_strength", chart_state.get("support_strength", 0.0)))
         resistance_strength = cls._safe_clip(grounded_structure.get("resistance_strength", chart_state.get("resistance_strength", 0.0)))
         structure_buy_pressure = cls._safe_clip(grounded_structure.get("buy_pressure", chart_state.get("structure_buy_pressure", 0.0)))
@@ -983,6 +1271,9 @@ class LocalCVEnsembleRuntime:
                 + 0.18 * structure_buy_pressure
                 + 0.16 * support_strength
                 + (0.16 * projection_confidence if projection_direction == "BUY" else 0.0)
+                + (0.10 * council_projection_confidence if council_projection_direction == "BUY" else 0.0)
+                + (0.08 * council_current_box_confidence if council_current_box_direction == "BUY" else 0.0)
+                + (0.06 * council_router_strength if council_router_direction == "BUY" else 0.0)
                 + (0.12 * direction_confidence if direction == "BUY" else 0.0)
                 + (0.10 if macro_trend == "BULL" else 0.0)
                 + 0.08 * path_clarity,
@@ -996,6 +1287,9 @@ class LocalCVEnsembleRuntime:
                 + 0.18 * structure_sell_pressure
                 + 0.16 * resistance_strength
                 + (0.16 * projection_confidence if projection_direction == "SELL" else 0.0)
+                + (0.10 * council_projection_confidence if council_projection_direction == "SELL" else 0.0)
+                + (0.08 * council_current_box_confidence if council_current_box_direction == "SELL" else 0.0)
+                + (0.06 * council_router_strength if council_router_direction == "SELL" else 0.0)
                 + (0.12 * direction_confidence if direction == "SELL" else 0.0)
                 + (0.10 if macro_trend == "BEAR" else 0.0)
                 + 0.08 * path_clarity,
@@ -1003,6 +1297,38 @@ class LocalCVEnsembleRuntime:
                 1.0,
             )
         )
+        macro_direction = "BUY" if macro_trend == "BULL" else ("SELL" if macro_trend == "BEAR" else "HOLD")
+        countertrend_reclaim_direction = "HOLD"
+        countertrend_reclaim_bonus = 0.0
+        if (
+            projection_direction in {"BUY", "SELL"}
+            and direction in {"BUY", "SELL"}
+            and projection_direction != direction
+            and projection_direction == macro_direction
+            and local_phase in {"counter_trend_pullback", "with_trend_pause"}
+            and projection_confidence >= 0.56
+        ):
+            countertrend_reclaim_direction = projection_direction
+            countertrend_reclaim_bonus = float(
+                np.clip(
+                    0.16 * projection_confidence
+                    + 0.10 * path_clarity
+                    + 0.08 * box_sequence_agreement
+                    + 0.06 * float(
+                        (projection_direction == "BUY" and momentum_bias == "bullish")
+                        or (projection_direction == "SELL" and momentum_bias == "bearish")
+                    )
+                    - 0.06 * sequence_uncertainty,
+                    0.0,
+                    0.24,
+                )
+            )
+            if projection_direction == "BUY":
+                buy_support = float(np.clip(buy_support + countertrend_reclaim_bonus, 0.0, 1.0))
+                sell_support = float(np.clip(sell_support * max(0.0, 1.0 - 0.40 * countertrend_reclaim_bonus), 0.0, 1.0))
+            else:
+                sell_support = float(np.clip(sell_support + countertrend_reclaim_bonus, 0.0, 1.0))
+                buy_support = float(np.clip(buy_support * max(0.0, 1.0 - 0.40 * countertrend_reclaim_bonus), 0.0, 1.0))
         route_direction = base_direction if base_direction in {"BUY", "SELL"} else "BUY"
         if buy_support > sell_support * 1.03:
             route_direction = "BUY"
@@ -1047,6 +1373,8 @@ class LocalCVEnsembleRuntime:
             "regime_confidence": regime_confidence,
             "buy_support": buy_support,
             "sell_support": sell_support,
+            "countertrend_reclaim_direction": countertrend_reclaim_direction,
+            "countertrend_reclaim_bonus": countertrend_reclaim_bonus,
             "path_clarity": path_clarity,
             "grounded_confidence": grounded_confidence,
             "structure_trade_ready": structure_trade_ready,
@@ -1140,6 +1468,7 @@ class LocalCVEnsembleRuntime:
         return {
             "models": model_outputs,
             "ensemble": ensemble,
+            "selection": dict(cast(Mapping[str, Any], prediction.get("selection", {}))),
         }
 
     def predict(
@@ -1149,9 +1478,11 @@ class LocalCVEnsembleRuntime:
         routing_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         model_outputs: dict[str, dict[str, Any]] = {}
+        selected_model_names, selection_meta = self._select_prediction_models(routing_context)
+        model_names = selected_model_names or list(self.loaded_model_names)
 
         with self._predict_lock:
-            for name in self.loaded_model_names:
+            for name in model_names:
                 try:
                     row = self._apply_adaptation_profile(
                         self._predict_single(name, image, adaptation_profile=adaptation_profile),
@@ -1159,6 +1490,8 @@ class LocalCVEnsembleRuntime:
                         adaptation_profile,
                     )
                     model_outputs[name] = row
+                except LegacyFallbackApprovalRequired:
+                    raise
                 except Exception as exc:
                     self.failed_models[name] = str(exc)
                     self.logger.warning("Local ensemble predict failed for %s: %s", name, exc)
@@ -1174,6 +1507,7 @@ class LocalCVEnsembleRuntime:
                 adaptation_profile=adaptation_profile,
                 route_summary=route_summary,
             ),
+            "selection": selection_meta,
         }
 
     def predict_ensemble(self, image: Image.Image) -> dict[str, Any]:
