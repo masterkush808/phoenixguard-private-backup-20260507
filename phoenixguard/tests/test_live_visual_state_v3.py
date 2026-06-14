@@ -302,19 +302,8 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
         overlay for overlay in state["overlay_objects"]
         if str(overlay.get("overlay_id", "")).startswith("thesis_")
     ]
-    assert {overlay["role"] for overlay in thesis_overlays} >= {
-        "active_thesis_entry",
-        "active_thesis_target",
-        "countertrend_block",
-    }
-    assert "active_thesis_invalidation" not in {overlay["role"] for overlay in thesis_overlays}
-    assert any(
-        overlay["type"] == "OPPOSING_FORCE"
-        and overlay["side"] == "SELL"
-        and overlay["display_label"] == "OPPOSING FORCE"
-        and "BLOCKED" not in overlay["label"]
-        for overlay in thesis_overlays
-    )
+    assert thesis_overlays == []
+    assert state["overlay_precision_audit"]["precision_report"]["floating_unanchored_rejected"] >= 2
     for overlay_object in state["overlays"]["objects"]:
         assert {
             "overlay_id",

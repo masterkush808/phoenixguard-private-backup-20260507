@@ -44,6 +44,7 @@ MARKET_OVERLAY_TYPES = {
 
 ZONE_TYPES = {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"}
 ACTIONABLE_TYPES = {"SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"}
+FLOATING_REJECT_TYPES = ZONE_TYPES | ACTIONABLE_TYPES
 SEQUENCE_TYPES = {
     "IMPULSE_BOX",
     "PULLBACK_BOX",
@@ -218,6 +219,178 @@ def _clip_or_snap_to_plot(box: Sequence[Any], plot: Sequence[Any], *, thin: bool
     if clipped is not None:
         return clipped
     return None
+
+
+def _point_from_value(value: Any) -> list[float] | None:
+    if isinstance(value, Mapping):
+        x = _float(
+            value.get("x", value.get("center_x", value.get("left", value.get("x0", value.get("price_x"))))),
+            float("nan"),
+        )
+        y = _float(
+            value.get("y", value.get("center_y", value.get("top", value.get("y0", value.get("price_y"))))),
+            float("nan"),
+        )
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) and len(value) >= 2:
+        x = _float(value[0], float("nan"))
+        y = _float(value[1], float("nan"))
+    else:
+        return None
+    if x != x or y != y:
+        return None
+    return [float(x), float(y)]
+
+
+def _anchor_points_from_row(row: Mapping[str, Any]) -> list[list[float]]:
+    points: list[list[float]] = []
+    seen: set[tuple[float, float]] = set()
+    for key in ("touch_points", "line_points", "points", "anchors", "path"):
+        for item in _sequence(row.get(key)):
+            point = _point_from_value(item)
+            if point is None:
+                continue
+            rounded = (round(point[0], 3), round(point[1], 3))
+            if rounded in seen:
+                continue
+            seen.add(rounded)
+            points.append([rounded[0], rounded[1]])
+    for key in ("start_point", "end_point", "nearest", "anchor_point"):
+        point = _point_from_value(row.get(key))
+        if point is None:
+            continue
+        rounded = (round(point[0], 3), round(point[1], 3))
+        if rounded in seen:
+            continue
+        seen.add(rounded)
+        points.append([rounded[0], rounded[1]])
+    return points
+
+
+def _points_inside_box(points: Sequence[Sequence[Any]], box: Sequence[Any], padding: float = 0.0) -> list[list[float]]:
+    bounds = normalize_bounds(box)
+    if bounds is None:
+        return []
+    pad = max(0.0, float(padding))
+    inside: list[list[float]] = []
+    for item in points:
+        point = _point_from_value(item)
+        if point is None:
+            continue
+        if bounds[0] - pad <= point[0] <= bounds[2] + pad and bounds[1] - pad <= point[1] <= bounds[3] + pad:
+            inside.append(point)
+    return inside
+
+
+def _has_structural_anchor(row: Mapping[str, Any]) -> bool:
+    if bool(row.get("structural_anchor") or row.get("anchored") or row.get("still_significant")):
+        return True
+    if _sequence(row.get("anchor_candles")) or _sequence(row.get("source_indices")):
+        return True
+    if _anchor_points_from_row(row):
+        return True
+    for key in ("touch_count", "wick_probe_count", "reaction_count", "retest_count", "sweep_count", "candle_count"):
+        if _float(row.get(key), 0.0) > 0.0:
+            return True
+    if row.get("line_y") is not None and (row.get("line_x0") is not None or row.get("line_x1") is not None):
+        return True
+    source_agent = str(row.get("source_agent") or "").strip().lower()
+    source_path = str(row.get("source_path") or "").strip().lower()
+    if source_agent == "market_object_tracker_v3" and source_path.startswith(
+        (
+            "tracking_summary.support_resistance_zones",
+            "tracking_summary.execution_timing",
+            "tracking_summary.projection.zones",
+            "tracking_summary.structure_boxes",
+            "tracking_summary.historical_structure",
+        )
+    ):
+        return True
+    for key in (
+        "parent_overlay_id",
+        "parent_label",
+        "zone_family",
+        "liquidity_pool_type",
+        "liquidity_source",
+        "role_flip_state",
+        "zone_stack_id",
+        "source_rule",
+        "validation_reason",
+        "replay_sequence",
+        "replay_action",
+        "story",
+        "knowledge_tags",
+    ):
+        value = row.get(key)
+        if value not in (None, "", [], {}):
+            return True
+    return False
+
+
+def _snap_box_to_anchor_evidence(row: Mapping[str, Any], bounds: Sequence[Any], plot: Sequence[Any]) -> tuple[list[float], list[str]]:
+    box = normalize_bounds(bounds)
+    clip = normalize_bounds(plot)
+    if box is None or clip is None:
+        return list(normalize_bounds(bounds) or [0.0, 0.0, 0.0, 0.0]), []
+    overlay_type = str(row.get("type") or "")
+    if overlay_type not in FLOATING_REJECT_TYPES:
+        return [round(float(value), 3) for value in box], []
+    points = _anchor_points_from_row(row)
+    if not points:
+        return [round(float(value), 3) for value in box], []
+    plot_w = max(1.0, clip[2] - clip[0])
+    plot_h = max(1.0, clip[3] - clip[1])
+    inside_plot = _points_inside_box(points, clip, padding=1.0)
+    inside_current = _points_inside_box(inside_plot, box, padding=14.0)
+    selected = inside_current or inside_plot
+    if not selected:
+        return [round(float(value), 3) for value in box], []
+
+    xs = [point[0] for point in selected]
+    ys = [point[1] for point in selected]
+    min_x = min(xs)
+    max_x = max(xs)
+    min_y = min(ys)
+    max_y = max(ys)
+    flags: list[str] = []
+    refined = list(box)
+
+    if overlay_type in ZONE_TYPES:
+        vertical_pad = max(8.0, min(plot_h * 0.055, max(_box_height(box) * 0.22, 10.0)))
+        top = max(clip[1], min_y - vertical_pad)
+        bottom = min(clip[3], max_y + vertical_pad)
+        max_height = plot_h * 0.12
+        if bottom - top > max_height:
+            center = (min_y + max_y) * 0.5
+            top = max(clip[1], center - max_height * 0.5)
+            bottom = min(clip[3], top + max_height)
+        if bottom > top and (abs(top - refined[1]) > 0.5 or abs(bottom - refined[3]) > 0.5):
+            refined[1] = top
+            refined[3] = bottom
+            flags.append("anchor_snap_refined")
+        if max_x > min_x and _box_width(box) > plot_w * 0.26:
+            horizontal_pad = max(18.0, min(plot_w * 0.035, _box_width(box) * 0.12))
+            left = max(clip[0], min_x - horizontal_pad)
+            right = min(clip[2], max_x + horizontal_pad)
+            if right - left >= 12.0 and (abs(left - refined[0]) > 0.5 or abs(right - refined[2]) > 0.5):
+                refined[0] = left
+                refined[2] = right
+                if "anchor_snap_refined" not in flags:
+                    flags.append("anchor_snap_refined")
+    else:
+        horizontal_pad = max(12.0, min(plot_w * 0.045, _box_width(box) * 0.35))
+        vertical_pad = max(8.0, min(plot_h * 0.045, _box_height(box) * 0.40))
+        left = max(clip[0], min_x - horizontal_pad)
+        right = min(clip[2], max_x + horizontal_pad)
+        top = max(clip[1], min_y - vertical_pad)
+        bottom = min(clip[3], max_y + vertical_pad)
+        if right - left >= 8.0 and bottom - top >= 6.0:
+            candidate = _clamp_box([left, top, right, bottom], box)
+            if candidate is not None and _box_area(candidate) > 0.0:
+                refined = candidate
+                flags.append("anchor_snap_refined")
+
+    clamped = _clamp_box(refined, clip) or box
+    return [round(float(value), 3) for value in clamped], flags
 
 
 def _bounds_for_overlay(row: Mapping[str, Any], scene: Mapping[str, Any]) -> tuple[list[float] | None, list[float] | None, str]:
@@ -514,6 +687,25 @@ def _apply_overlay_nesting(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict
     }
 
 
+def _reject_unanchored_floating_boxes(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    output: list[dict[str, Any]] = []
+    rejected = 0
+    for raw in rows:
+        row = dict(raw)
+        overlay_type = str(row.get("type") or "")
+        if row.get("precision_rejected") or overlay_type not in FLOATING_REJECT_TYPES:
+            output.append(row)
+            continue
+        if _has_structural_anchor(row):
+            output.append(row)
+            continue
+        rejected += 1
+        rejected_row = _mark_rejected(row, "floating_unanchored_overlay")
+        rejected_row.setdefault("precision_flags", []).append("floating_unanchored_overlay")
+        output.append(rejected_row)
+    return output, rejected
+
+
 def _apply_clean_live_budget(rows: Sequence[Mapping[str, Any]], current_side: str) -> list[dict[str, Any]]:
     output = [dict(row) for row in rows]
     current_candle_visible = 0
@@ -623,6 +815,7 @@ def resolve_precision_overlays_v3(
     unanchored = 0
     oversized = 0
     outside = 0
+    anchor_snap_refined = 0
     for index, raw in enumerate(overlays):
         try:
             source_frame = raw.get("frame_id", raw.get("frame_index"))
@@ -674,6 +867,11 @@ def resolve_precision_overlays_v3(
                 continue
             if "height_refined" in flags or "width_refined" in flags:
                 oversized += 1
+            snapped_bounds, snap_flags = _snap_box_to_anchor_evidence(row, refined_bounds, clip_bounds)
+            if snap_flags:
+                anchor_snap_refined += 1
+                row["precision_flags"] = list(row.get("precision_flags") or []) + snap_flags
+                refined_bounds = snapped_bounds
             row["bounds"] = refined_bounds
             row["bbox"] = refined_bounds
             row["tight_bounds"] = refined_bounds
@@ -691,10 +889,11 @@ def resolve_precision_overlays_v3(
     current_policy, duplicate_now_hidden = _apply_current_candle_policy(normalized)
     suppressed, duplicate_count = _suppress_duplicates(current_policy)
     nested, nesting_report = _apply_overlay_nesting(suppressed)
+    anchored, floating_rejected = _reject_unanchored_floating_boxes(nested)
     budgeted = (
-        _apply_clean_live_budget(nested, str(current_side or "").upper())
+        _apply_clean_live_budget(anchored, str(current_side or "").upper())
         if normalized_mode == "CLEAN_LIVE"
-        else [dict(row) for row in nested]
+        else [dict(row) for row in anchored]
     )
     budgeted = _apply_render_budget(budgeted, normalized_mode)
     laid_out = layout_overlay_labels(budgeted, chart_bounds=plot_chart)
@@ -720,6 +919,8 @@ def resolve_precision_overlays_v3(
         "refined_oversized_inputs": oversized,
         "outside_rejected": outside,
         "unanchored_inputs_fixed": unanchored,
+        "anchor_snap_refined": anchor_snap_refined,
+        "floating_unanchored_rejected": floating_rejected,
         **nesting_report,
     }
     audit = OverlayPrecisionAuditV3(

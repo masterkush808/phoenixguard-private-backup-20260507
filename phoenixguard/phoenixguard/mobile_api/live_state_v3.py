@@ -325,6 +325,8 @@ def _overlay_from_active_object(
     overlay.setdefault("chart_transform_id", chart_transform_id)
     overlay.setdefault("source_agent", row.get("source_agent", "market_registry"))
     overlay.setdefault("reason", row.get("reason", "registry active object"))
+    overlay.setdefault("source_rule", row.get("source_rule", "active_object_registry"))
+    overlay.setdefault("structural_anchor", row.get("structural_anchor", True))
     try:
         return normalize_v3_overlay_object(
             overlay,
@@ -437,6 +439,8 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
         "action",
         "source_agent",
         "source_version",
+        "source_path",
+        "source_key",
         "broker_source_lock_id",
         "frame_id",
         "sequence_id",
@@ -1500,14 +1504,21 @@ def build_live_state_v3(
         _mapping(session.get("tracking_summary")).get("signal_thesis_v3"),
         _mapping(session.get("model_council_result")).get("signal_thesis_v3"),
     )
+    thesis_overlays = [] if source_block_reason else _signal_thesis_overlay_objects(
+        signal_thesis,
+        frame_id=registry.frame_id,
+        sequence_id=registry.sequence_context.sequence_id,
+        chart_transform_id=str(chart_transform["chart_transform_id"]),
+    )
+    precision_input_overlays = raw_overlays + thesis_overlays
     if source_block_reason:
         precision_overlays = []
         precision_audit = {
             "schema_version": OVERLAY_PRECISION_AUDIT_SCHEMA_VERSION,
             "frame_id": registry.frame_id,
-            "overlay_count": len(raw_overlays),
+            "overlay_count": len(precision_input_overlays),
             "rendered_count": 0,
-            "rejected_count": len(raw_overlays),
+            "rejected_count": len(precision_input_overlays),
             "precision_report": {
                 "unanchored_boxes": 0,
                 "oversized_boxes": 0,
@@ -1519,13 +1530,13 @@ def build_live_state_v3(
                 "refined_oversized_inputs": 0,
                 "outside_rejected": 0,
                 "unanchored_inputs_fixed": 0,
-                "broker_source_rejected": len(raw_overlays),
+                "broker_source_rejected": len(precision_input_overlays),
             },
             "source_block_reason": source_block_reason,
         }
     else:
         precision_overlays, precision_audit = resolve_precision_overlays_v3(
-            raw_overlays,
+            precision_input_overlays,
             scene_graph=scene_graph,
             mode=active_overlay_mode,
             current_side=current_side,
@@ -1539,12 +1550,6 @@ def build_live_state_v3(
         "no",
     }
     clean_mode_prefilter = bool(clean_overlays_only and active_overlay_mode == "CLEAN_LIVE")
-    thesis_overlays = [] if source_block_reason else _signal_thesis_overlay_objects(
-        signal_thesis,
-        frame_id=registry.frame_id,
-        sequence_id=registry.sequence_context.sequence_id,
-        chart_transform_id=str(chart_transform["chart_transform_id"]),
-    )
     if overlay_render_alignment_ok:
         overlay_source = [
             overlay
@@ -1553,13 +1558,6 @@ def build_live_state_v3(
             and _overlay_visible_for_mode(overlay, active_overlay_mode, now_ms=now_ms)
             and _overlay_is_frame_aligned(overlay, registry.frame_id)
         ]
-        overlay_source.extend(
-            overlay
-            for overlay in thesis_overlays
-            if (not clean_mode_prefilter or _overlay_visible_for_mode(overlay, "CLEAN_LIVE", now_ms=now_ms))
-            and _overlay_visible_for_mode(overlay, active_overlay_mode, now_ms=now_ms)
-            and _overlay_is_frame_aligned(overlay, registry.frame_id)
-        )
     else:
         overlay_source = []
     overlay_source = sorted(overlay_source, key=layer_manager.overlay_sort_key)[: int(layer_manager.as_dict()["active_budget"])]
@@ -1567,8 +1565,8 @@ def build_live_state_v3(
         _dashboard_overlay_object(overlay, compact=clean_overlays_only)
         for overlay in overlay_source
     ]
-    total_overlay_count = len(raw_overlays) if source_block_reason else len(precision_overlays) + len(thesis_overlays)
-    rejected_overlay_count = len(raw_overlays) if source_block_reason else len(
+    total_overlay_count = len(precision_input_overlays) if source_block_reason else len(precision_overlays)
+    rejected_overlay_count = len(precision_input_overlays) if source_block_reason else len(
         [overlay for overlay in precision_overlays if overlay.get("precision_rejected")]
     )
     renderable_overlay_count = len(overlays)
@@ -1672,6 +1670,9 @@ def build_live_state_v3(
         "latest_signal": _mapping(session.get("latest_signal")),
         "broker_source": broker_source,
         "broker_surface": broker_surface_payload,
+        "manual_focus_region": _mapping(session.get("manual_focus_region")),
+        "focus_selector": _mapping(session.get("focus_selector")),
+        "session": _compact_live_poll_session_payload(session),
         "broker_surface_frame": {
             "artifact": surface_frame,
             "frame_id": _int(session.get("display_frame_id") or session.get("frame_index")),
@@ -1779,6 +1780,9 @@ def build_live_state_v3(
         "overlay_mode": live_visual_state["overlay_mode"],
         "broker_source": live_visual_state["broker_source"],
         "broker_surface": live_visual_state["broker_surface"],
+        "manual_focus_region": live_visual_state["manual_focus_region"],
+        "focus_selector": live_visual_state["focus_selector"],
+        "session": live_visual_state["session"],
         "surface": live_visual_state["surface"],
         "chart_frame": live_visual_state["chart_frame"],
         "plot_area": live_visual_state["plot_area"],

@@ -796,6 +796,8 @@ class _RegistryBuilder:
                     "type": object_type,
                     "side": side_value,
                     "source_agent": "market_object_tracker_v3",
+                    "source_path": source_path,
+                    "source_key": source_key,
                     "frame_id": frame_id,
                     "sequence_id": sequence_id,
                     "chart_transform_id": chart_transform_id,

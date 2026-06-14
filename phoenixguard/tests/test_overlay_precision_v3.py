@@ -156,6 +156,7 @@ def test_precision_resolver_can_run_directly_on_overlay_contract_objects(tmp_pat
             "ttl_ms": 30000,
             "reason": "oversized target must be tightened",
             "label": "TARGET ZONE BOX",
+            "touch_points": [[245, 332], [272, 352]],
         }
     ]
 
@@ -165,6 +166,93 @@ def test_precision_resolver_can_run_directly_on_overlay_contract_objects(tmp_pat
     assert audit["precision_report"]["missing_transform"] == 0
     assert resolved[0]["display_label"] == "TARGET"
     assert resolved[0]["bounds"][2] - resolved[0]["bounds"][0] < 300
+
+
+def test_precision_resolver_rejects_floating_unanchored_live_zone(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
+    overlays = [
+        {
+            "overlay_id": "floating-zone",
+            "object_id": "floating-zone",
+            "track_id": "floating-zone",
+            "type": "SUPPLY_ZONE",
+            "side": "SELL",
+            "source_agent": "test",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [420, 220, 820, 330],
+            "truth_score": 0.91,
+            "confidence": 0.91,
+            "visible_modes": ["CLEAN_LIVE", "SUPPLY_DEMAND", "INSPECTOR"],
+            "ttl_ms": 30000,
+            "reason": "naked rectangle without wick, candle, parent, or source rule evidence",
+            "label": "SUPPLY",
+        }
+    ]
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="CLEAN_LIVE",
+        current_side="SELL",
+        frame_id=14494,
+    )
+
+    assert audit["rendered_count"] == 0
+    assert audit["precision_report"]["floating_unanchored_rejected"] == 1
+    assert resolved[0]["precision_rejected"] is True
+    assert resolved[0]["precision_rejection_reason"] == "floating_unanchored_overlay"
+    assert "CLEAN_LIVE" not in resolved[0]["visible_modes"]
+
+
+def test_precision_resolver_snaps_anchored_zone_to_touch_cluster(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
+    overlays = [
+        {
+            "overlay_id": "anchored-demand",
+            "object_id": "anchored-demand",
+            "track_id": "anchored-demand",
+            "type": "DEMAND_ZONE",
+            "side": "BUY",
+            "source_agent": "test",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [160, 440, 920, 610],
+            "truth_score": 0.86,
+            "confidence": 0.86,
+            "visible_modes": ["CLEAN_LIVE", "SUPPLY_DEMAND", "INSPECTOR"],
+            "ttl_ms": 30000,
+            "reason": "touch-supported demand zone",
+            "label": "DEMAND",
+            "touch_points": [[520, 522], [574, 528], [612, 518]],
+            "anchor_candles": [12, 13, 14],
+        }
+    ]
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="CLEAN_LIVE",
+        current_side="BUY",
+        frame_id=14494,
+    )
+    row = resolved[0]
+
+    assert audit["rendered_count"] == 1
+    assert audit["precision_report"]["floating_unanchored_rejected"] == 0
+    assert audit["precision_report"]["anchor_snap_refined"] == 1
+    assert row.get("precision_rejected") is not True
+    assert row["bounds"][0] >= 470
+    assert row["bounds"][2] <= 665
+    assert row["bounds"][1] <= 522 <= row["bounds"][3]
 
 
 def test_precision_resolver_preserves_source_frame_before_stale_check(tmp_path: Path) -> None:
@@ -297,6 +385,7 @@ def test_precision_resolver_clean_live_budget_does_not_suppress_active_context_c
             "ttl_ms": 30000,
             "reason": "counter-side context should remain visible outside clean live",
             "label": "SNIPER BUY",
+            "parent_label": "local pullback",
         }
     ]
 
