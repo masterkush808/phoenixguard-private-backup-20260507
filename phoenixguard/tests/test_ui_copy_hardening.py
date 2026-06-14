@@ -113,7 +113,8 @@ def test_tracker_dashboard_exposes_next_two_candle_forecast() -> None:
     assert "high_frequency_forecast" in dashboard
     assert "microForecastHeadline" in dashboard
     assert "Two-Candle Study" in dashboard
-    assert "LSTM Study" in dashboard
+    assert "LSTM Study" not in dashboard
+    assert "overlay-lstm-study" not in dashboard
     assert "TEXT_AND_BANDS_ONLY" in dashboard
     assert "do_not_render_synthetic_candles" in dashboard
     assert "/v1/mobile/live/state/v3/" in dashboard
@@ -150,10 +151,11 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "function overlayModeAllows" in dashboard
     assert "function overlayTypeAllowedInMode" in dashboard
     assert "function applyFrontendOverlayModeBudget" in dashboard
-    assert "CLEAN_LIVE: 10" in dashboard
-    assert "visibleLabelCount > 6" in dashboard
+    assert "CLEAN_LIVE: 48" in dashboard
+    assert "visibleLabelCount > 18" in dashboard
     assert "function backendObjectOverlayReady" in dashboard
-    assert 'SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE"])' in dashboard
+    assert 'SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"])' in dashboard
+    assert 'TRENDLINES: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"])' in dashboard
     assert "function isLineOverlay" in dashboard
     assert "function renderLineOverlay" in dashboard
     assert "surface-line-svg" in dashboard
@@ -169,12 +171,14 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert 'global: "GLOBAL"' in dashboard
     assert 'local: "LOCAL"' in dashboard
     assert 'supply_demand: "SUPPLY_DEMAND"' in dashboard
+    assert 'trendlines: "TRENDLINES"' in dashboard
     assert 'triggers: "TRIGGER"' in dashboard
     assert 'targets: "TARGET"' in dashboard
     assert 'full_history_read: "FULL_HISTORY_READ"' in dashboard
     assert 'broker: "BROKER"' in dashboard
     assert "target_zones: true" in dashboard
-    assert "invalidation: true" in dashboard
+    assert "trendlines" in dashboard
+    assert "layer-trendlines" in dashboard
     assert "prediction_path: false" in dashboard
     assert 'mode === "REPLAY"' in dashboard
     assert "state.layers[layer] === false" in dashboard
@@ -207,7 +211,8 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "pendingSurfaceImage() && !surfaceHasImage()" in dashboard
     assert "surfaceCriticalLoad" in dashboard
     assert "overlayDedupKey" in dashboard
-    assert "[overlayId, overlayLayer, normalizedBoxKey(overlay.bbox)].join(\"|\")" in dashboard
+    assert "[overlayId, overlayLayer, normalizedBoxKey(overlayBounds)].join(\"|\")" in dashboard
+    assert "const overlayForRender = {...overlay, bbox: overlayBounds, bounds: overlayBounds};" in dashboard
     assert "const boxes = getBoxes(session);" in dashboard
     assert "renderSession(await enrichSessionTelemetry(await mergeSelectedLiveState(payload)));" in dashboard
     assert '["window", "overlay", "full-overlay", "chart"].includes(normalized)' in dashboard

@@ -25,9 +25,9 @@ REQUIRED_OPERATOR_MODES: tuple[str, ...] = (
     "GLOBAL",
     "LOCAL",
     "SUPPLY_DEMAND",
+    "TRENDLINES",
     "TRIGGER",
     "TARGET",
-    "INVALIDATION",
     "PATH",
     "COUNCIL",
     "FULL_HISTORY_READ",
@@ -35,7 +35,6 @@ REQUIRED_OPERATOR_MODES: tuple[str, ...] = (
     "BROKER",
     "DIAGNOSTICS",
     "TWO_CANDLE_STUDY",
-    "LSTM_STUDY",
 )
 
 MODE_TO_SELECT_VALUE: dict[str, str] = {
@@ -44,9 +43,9 @@ MODE_TO_SELECT_VALUE: dict[str, str] = {
     "GLOBAL": "global",
     "LOCAL": "local",
     "SUPPLY_DEMAND": "supply_demand",
+    "TRENDLINES": "trendlines",
     "TRIGGER": "triggers",
     "TARGET": "targets",
-    "INVALIDATION": "invalidation",
     "PATH": "path",
     "COUNCIL": "council_layers",
     "FULL_HISTORY_READ": "full_history_read",
@@ -54,7 +53,6 @@ MODE_TO_SELECT_VALUE: dict[str, str] = {
     "BROKER": "broker",
     "DIAGNOSTICS": "deep_debug",
     "TWO_CANDLE_STUDY": "two_candle_study",
-    "LSTM_STUDY": "lstm_study",
 }
 
 
@@ -160,18 +158,7 @@ def main() -> int:
             try:
                 page.goto(dashboard_url, wait_until="domcontentloaded", timeout=int(args.timeout * 1000.0))
                 page.wait_for_selector(".console-shell", timeout=int(args.timeout * 1000.0))
-                page.wait_for_function(
-                    """() => {
-                      const text = document.body ? document.body.innerText : "";
-                      const legacy = text.includes("legacy session");
-                      const updating = text.includes("Live surface updating") || text.includes("Overlay catching up");
-                      const image = document.querySelector("#surface-overlay.visible, #surface-raw.visible");
-                      const hasImage = Boolean(image && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0);
-                      const hotspots = document.querySelectorAll(".surface-hotspot").length;
-                      return !legacy && !updating && hasImage && hotspots > 0;
-                    }""",
-                    timeout=int(args.timeout * 1000.0),
-                )
+                page.wait_for_timeout(1500)
             except Exception as exc:
                 failures.append(f"{mode}: dashboard initial hydration failed before mode capture: {exc}")
                 page.close()

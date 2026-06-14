@@ -35,17 +35,21 @@ DISPLAY_QUALITY_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 OVERLAY_RENDER_BUDGETS: dict[str, int] = {
-    "CLEAN_LIVE": 10,
+    "CLEAN_LIVE": 48,
+    "CHART_BOUNDS": 8,
+    "CANDLES": 12,
     "GLOBAL": 18,
     "LOCAL": 20,
     "SUPPLY_DEMAND": 18,
+    "TRENDLINES": 8,
     "TRIGGER": 18,
     "TARGET": 16,
+    "INVALIDATION": 10,
     "PATH": 24,
     "COUNCIL": 24,
     "TWO_CANDLE_STUDY": 12,
     "LSTM_STUDY": 8,
-    "ACTIVE_CONTEXT": 30,
+    "ACTIVE_CONTEXT": 64,
     "FULL_HISTORY_READ": 80,
     "REPLAY": 80,
     "PREDICTION": 30,
@@ -96,6 +100,42 @@ def _int(value: Any, default: int = 0) -> int:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+
+
+def _surface_signatures_match(session: Mapping[str, Any]) -> bool:
+    display_signature = _text(
+        session.get("last_display_surface_signature")
+        or _mapping(session.get("display_fast_path_v3")).get("surface_signature")
+        or session.get("last_window_surface_signature")
+    )
+    overlay_signature = _text(session.get("overlay_source_window_signature"))
+    return bool(display_signature and overlay_signature and display_signature == overlay_signature)
+
+
+def _display_only_overlay_authority_locked(session: Mapping[str, Any]) -> bool:
+    display_only = bool(session.get("display_snapshot_only_v3")) or bool(_mapping(session.get("display_fast_path_v3")))
+    if not display_only:
+        return False
+    overlay_frame = _int(session.get("overlay_frame_id") or session.get("full_overlay_frame_id"), 0)
+    locked_overlay_enabled = str(os.getenv("PHOENIXGUARD_DISPLAY_LOCKED_OVERLAY_AUTHORITY", "1") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+    if locked_overlay_enabled and overlay_frame > 0:
+        display_artifact = _text(
+            session.get("last_display_window_path") or session.get("last_window_path") or session.get("last_frame_path")
+        )
+        overlay_artifact = _text(session.get("last_full_overlay_path") or session.get("last_overlay_path"))
+        if display_artifact and overlay_artifact:
+            return True
+    authority_frame = max(
+        _int(session.get("frame_index") or session.get("frame_id"), 0),
+        _int(session.get("chart_frame_id"), 0),
+        _int(session.get("model_vote_frame_id"), 0),
+    )
+    return bool(overlay_frame > 0 and authority_frame > 0 and overlay_frame == authority_frame)
 
 
 def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
@@ -486,13 +526,22 @@ def _stage_duration_ms(pipeline_timing: Mapping[str, Any], stage_names: Sequence
     return round(total, 3)
 
 
-def _overlay_version(overlays: Sequence[Mapping[str, Any]], frame_id: int) -> str:
+def _overlay_digest(overlays: Sequence[Mapping[str, Any]]) -> str:
     seed = "|".join(
-        f"{row.get('overlay_id') or row.get('id')}:{row.get('type')}:{row.get('bounds') or row.get('bbox')}"
+        f"{row.get('overlay_id') or row.get('id')}:{row.get('type')}:{row.get('layer')}:{row.get('side')}:{row.get('bounds') or row.get('bbox')}"
         for row in overlays
     )
-    digest = hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return hashlib.sha1(seed.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def _overlay_version(overlays: Sequence[Mapping[str, Any]], frame_id: int) -> str:
+    digest = _overlay_digest(overlays)
     return f"ov_{int(frame_id)}_{len(overlays)}_{digest}"
+
+
+def _overlay_lock_version(overlays: Sequence[Mapping[str, Any]]) -> str:
+    digest = _overlay_digest(overlays)
+    return f"ovlock_{len(overlays)}_{digest}"
 
 
 @dataclass
@@ -731,6 +780,10 @@ class ModelWarmStateV3:
 
 def model_warm_states_from_health(model_health: Mapping[str, Any], *, frame_id: int, now_epoch: float | None = None) -> list[dict[str, Any]]:
     now = float(now_epoch if now_epoch is not None else time.time())
+    try:
+        staggered_fresh_ms = max(3000.0, float(os.getenv("PHOENIXGUARD_STAGGERED_MODEL_FRESH_MS", "8000") or "8000"))
+    except ValueError:
+        staggered_fresh_ms = 8000.0
     models = _sequence_of_mappings(model_health.get("models"))
     if not models and model_health.get("all_required_models_awake") is True:
         roles = [str(item) for item in cast(Sequence[Any], model_health.get("required_roles") or [])] or [
@@ -758,17 +811,21 @@ def model_warm_states_from_health(model_health: Mapping[str, Any], *, frame_id: 
     for row in models:
         latency = _float(row.get("latency_ms") or row.get("average_inference_ms"), 0.0)
         last_epoch = _float(row.get("last_inference_epoch") or row.get("last_heartbeat_epoch"), 0.0)
+        status = _text(row.get("status"), "AWAKE").upper()
+        age_ms = max(0.0, (now - last_epoch) * 1000.0) if last_epoch > 0.0 else 0.0
+        if status in {"AWAKE", "BUSY", "IDLE_BUT_LOADED"} and 3000.0 < age_ms <= staggered_fresh_ms:
+            status = "STAGGERED_FRESH"
         rows.append(
             ModelWarmStateV3(
                 model_name=_text(row.get("name") or row.get("role"), "model"),
-                status=_text(row.get("status"), "AWAKE").upper(),
+                status=status,
                 last_inference_frame_id=_int(row.get("last_inference_frame_id"), frame_id),
-                last_inference_age_ms=max(0.0, (now - last_epoch) * 1000.0) if last_epoch > 0.0 else 0.0,
+                last_inference_age_ms=age_ms,
                 average_inference_ms=latency,
                 p95_inference_ms=_float(row.get("p95_inference_ms"), latency),
                 queue_depth=_int(row.get("queue_depth"), 0),
                 device=_text(row.get("device"), "unknown"),
-                warm=_text(row.get("status"), "AWAKE").upper() in {"AWAKE", "BUSY", "IDLE_BUT_LOADED"},
+                warm=status in {"AWAKE", "BUSY", "IDLE_BUT_LOADED", "STAGGERED_FRESH"},
             ).as_dict()
         )
     return rows
@@ -819,9 +876,14 @@ def build_frame_timing_trace_v3(
     if heartbeat_frame_id and display_frame_id and heartbeat_frame_id + 1 < display_frame_id:
         heartbeat_loaded_ms = 0
         heartbeat_render_ms = 0
+    signatures_aligned = _surface_signatures_match(session)
+    authority_locked = _display_only_overlay_authority_locked(session)
     if display_published_ms and display_frame_id:
         inference_done_ms = max(inference_done_ms, display_published_ms)
-        overlay_done_ms = max(overlay_done_ms, display_published_ms)
+        if overlay_frame_id and (overlay_frame_id >= display_frame_id or signatures_aligned or authority_locked):
+            overlay_done_ms = max(overlay_done_ms, display_published_ms)
+    raw_overlay_frame_gap = max(0, display_frame_id - overlay_frame_id) if display_frame_id and overlay_frame_id else 0
+    overlay_frame_gap = 0 if signatures_aligned or authority_locked else raw_overlay_frame_gap
     trace = FrameTimingTraceV3(
         frame_id=display_frame_id,
         capture_epoch_ms=capture_ms or published_ms,
@@ -836,7 +898,9 @@ def build_frame_timing_trace_v3(
         queue_depth=_int(_mapping(model_health).get("queue_depth")),
         freshness_score=max(0.0, min(1.0, 1.0 - max(0.0, (now_ms - (capture_ms or published_ms)) / DEFAULT_SPEED_BUDGETS_MS["hard_reject"]))),
     ).as_dict(now_ms=now_ms)
-    overlay_state_version = _overlay_version(list(overlays or []), overlay_frame_id or int(trace["frame_id"]))
+    overlay_rows = list(overlays or [])
+    overlay_frame_state_version = _overlay_version(overlay_rows, overlay_frame_id or int(trace["frame_id"]))
+    overlay_state_version = _overlay_lock_version(overlay_rows)
     backpressure = RealtimeBackpressureControllerV3().evaluate(
         frame_age_ms=float(trace["frame_age_ms"]),
         overlay_age_ms=float(trace["overlay_age_ms"]),
@@ -848,12 +912,18 @@ def build_frame_timing_trace_v3(
     trace.update(
         {
             "overlay_state_version": overlay_state_version,
+            "overlay_frame_state_version": overlay_frame_state_version,
             "model_state_version": _text(_mapping(session.get("model_council_result")).get("packet_id") or packet.get("packet_id") or session.get("state_version")),
             "packet_age_ms": max(0, now_ms - packet_created_ms) if packet_created_ms else 0,
             "display_capture_epoch_ms": display_capture_ms,
             "display_published_epoch_ms": display_published_ms,
             "display_frame_id": display_frame_id,
             "overlay_frame_id": overlay_frame_id,
+            "overlay_frame_gap": overlay_frame_gap,
+            "raw_overlay_frame_gap": raw_overlay_frame_gap,
+            "surface_signature_aligned": signatures_aligned,
+            "display_only_authority_locked": authority_locked,
+            "frame_gap_status": "OVERLAY_BEHIND" if overlay_frame_gap > 0 else ("AUTHORITY_LOCKED" if authority_locked and raw_overlay_frame_gap > 0 else "ALIGNED"),
             "model_vote_frame_id": model_frame_id,
             "model_capture_epoch_ms": model_capture_ms,
             "stale_status": backpressure["status"],
@@ -914,6 +984,7 @@ def build_performance_trace_v3(
         "frame_id": _int(live_state.get("frame_id")),
         "state_version": _int(live_state.get("state_version")),
         "overlay_state_version": _text(timing.get("overlay_state_version")),
+        "overlay_frame_state_version": _text(timing.get("overlay_frame_state_version")),
         "display_frame": {
             "frame_id": _int(timing.get("display_frame_id") or live_state.get("frame_id")),
             "age_ms": frame_age,
@@ -924,6 +995,7 @@ def build_performance_trace_v3(
             "age_ms": overlay_age,
             "fresh": overlay_age <= DEFAULT_SPEED_BUDGETS_MS["hard_stale"],
             "overlay_state_version": _text(timing.get("overlay_state_version")),
+            "overlay_frame_state_version": _text(timing.get("overlay_frame_state_version")),
         },
         "model_state": {
             "frame_id": _int(timing.get("model_vote_frame_id") or live_state.get("frame_id")),

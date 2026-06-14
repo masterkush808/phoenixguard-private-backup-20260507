@@ -31,9 +31,9 @@ except Exception:
         "SUPPLY_ZONE": "supply_demand",
         "DEMAND_ZONE": "supply_demand",
         "OPPOSING_FORCE": "supply_demand",
-        "SUPPORT_TRENDLINE": "supply_demand",
-        "RESISTANCE_TRENDLINE": "supply_demand",
-        "INNER_TRENDLINE": "local_swings",
+        "SUPPORT_TRENDLINE": "trendlines",
+        "RESISTANCE_TRENDLINE": "trendlines",
+        "INNER_TRENDLINE": "trendlines",
         "ANGLE_VECTOR": "active_council_decision",
         "PREDICTION_PATH": "active_council_decision",
         "PROGRESSION_PATH": "historical_replay",
@@ -504,7 +504,7 @@ def _derive_trendline_overlays(candles: Sequence[Mapping[str, Any]]) -> list[dic
                     "trendline_role": role,
                     "anchor_type": "LINE",
                     "bounds": _point_pair_bounds(candidate["points"]),
-                    "visible_modes": ["GLOBAL", "LOCAL", "SUPPLY_DEMAND", "PATH", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+                    "visible_modes": ["CLEAN_LIVE", "TRENDLINES", "PATH", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
                     "lifecycle_state": "ACTIVE",
                 }
             )
@@ -535,7 +535,7 @@ def _derive_trendline_overlays(candles: Sequence[Mapping[str, Any]]) -> list[dic
                 "trendline_role": latest_direction,
                 "anchor_type": "LINE",
                 "bounds": _point_pair_bounds(inner["points"]),
-                "visible_modes": ["LOCAL", "PATH", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+                "visible_modes": ["CLEAN_LIVE", "TRENDLINES", "PATH", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
                 "lifecycle_state": "ACTIVE",
             }
         )

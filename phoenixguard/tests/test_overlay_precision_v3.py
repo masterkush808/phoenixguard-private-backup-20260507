@@ -8,7 +8,7 @@ from PIL import Image
 from phoenixguard.mobile_api.live_state_v3 import build_live_state_v3
 from phoenixguard.vision.broker_scene_graph_v3 import build_broker_scene_graph_v3
 from phoenixguard.vision.box_refinement_v3 import resolve_precision_overlays_v3
-from phoenixguard.vision.v3_overlay_contract import rectangles_overlap
+from phoenixguard.vision.v3_overlay_contract import overlay_is_visible, rectangles_overlap
 
 
 def _png(path: Path, size: tuple[int, int]) -> Path:
@@ -121,13 +121,13 @@ def test_live_state_respects_requested_granular_overlay_mode(tmp_path: Path) -> 
     assert state["overlay_mode"]["active"] == "TARGET"
     assert state["overlay_mode"]["visible_layers"] == state["visible_layers"]
     assert "target_zones" in state["visible_layers"]
-    assert "invalidation" in state["visible_layers"]
+    assert "invalidation" not in state["visible_layers"]
     assert "TARGET" in state["overlay_mode"]["available_modes"]
     assert state["renderable_count"] == len(state["overlay_objects"])
     assert state["overlay_layer_manager_v3"]["mode"] == "TARGET"
     assert state["overlay_layer_manager_v3"]["active_budget"] == 16
     assert all(
-        row.get("layer") in {"target_zones", "invalidation", "supply_demand", "prediction_path"}
+        row.get("layer") in {"target_zones", "supply_demand", "prediction_path"}
         for row in state["overlay_objects"]
     )
 
@@ -165,6 +165,33 @@ def test_precision_resolver_can_run_directly_on_overlay_contract_objects(tmp_pat
     assert audit["precision_report"]["missing_transform"] == 0
     assert resolved[0]["display_label"] == "TARGET"
     assert resolved[0]["bounds"][2] - resolved[0]["bounds"][0] < 300
+
+
+def test_precision_resolver_preserves_source_frame_before_stale_check(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
+    overlays = [
+        {
+            "overlay_id": "old-trigger",
+            "object_id": "old-trigger",
+            "track_id": "old-trigger",
+            "type": "TRIGGER_ZONE_BOX",
+            "side": "SELL",
+            "source_agent": "test",
+            "frame_id": 1,
+            "sequence_id": "seq-old",
+            "chart_transform_id": "ct-old",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [100, 100, 180, 150],
+            "truth_score": 0.9,
+        }
+    ]
+
+    resolved, audit = resolve_precision_overlays_v3(overlays, scene_graph=scene, current_side="SELL", frame_id=14494)
+
+    assert resolved[0]["frame_id"] == 1
+    assert audit["precision_report"]["stale_frame_id"] == 1
 
 
 def test_precision_resolver_nests_local_and_replay_children_inside_global_parent(tmp_path: Path) -> None:
@@ -244,3 +271,186 @@ def test_precision_resolver_nests_local_and_replay_children_inside_global_parent
     assert by_id["replay-1"]["parent_overlay_id"] == "global-1"
     assert by_id["global-1"]["child_overlay_ids"]
     assert by_id["local-1"]["nesting_depth"] == 1
+
+
+def test_precision_resolver_clean_live_budget_does_not_suppress_active_context_counter_side(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
+    overlays = [
+        {
+            "overlay_id": "buy-sniper-counter-side",
+            "object_id": "buy-sniper-counter-side",
+            "track_id": "buy-sniper-counter-side",
+            "type": "SNIPER_ENTRY_BOX",
+            "side": "BUY",
+            "source_agent": "test",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [500, 300, 590, 342],
+            "truth_score": 0.86,
+            "confidence": 0.86,
+            "lifecycle_state": "ACTIVE",
+            "visible_modes": ["CLEAN_LIVE", "ACTIVE_CONTEXT", "INSPECTOR"],
+            "ttl_ms": 30000,
+            "reason": "counter-side context should remain visible outside clean live",
+            "label": "SNIPER BUY",
+        }
+    ]
+
+    active, active_audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="ACTIVE_CONTEXT",
+        current_side="SELL",
+        frame_id=14494,
+    )
+    clean, clean_audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="CLEAN_LIVE",
+        current_side="SELL",
+        frame_id=14494,
+    )
+
+    assert active_audit["rendered_count"] == 1
+    assert active_audit["rejected_count"] == 0
+    assert "ACTIVE_CONTEXT" in active[0]["visible_modes"]
+    assert active[0].get("visible_default") is not False
+    assert active[0].get("precision_rejected") is not True
+    assert clean_audit["rendered_count"] == 0
+    assert clean_audit["rejected_count"] == 1
+    assert "CLEAN_LIVE" not in clean[0]["visible_modes"]
+    assert clean[0]["visible_default"] is False
+
+
+def test_precision_resolver_counts_replay_hidden_defaults_as_rendered(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
+    overlays = [
+        {
+            "overlay_id": "replay-path-hidden-default",
+            "object_id": "replay-path-hidden-default",
+            "track_id": "replay-path-hidden-default",
+            "type": "PROGRESSION_PATH",
+            "side": "SELL",
+            "source_agent": "test",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [420, 360, 720, 520],
+            "truth_score": 0.74,
+            "confidence": 0.74,
+            "lifecycle_state": "HISTORICAL",
+            "visible_modes": ["REPLAY", "FULL_HISTORY_READ", "INSPECTOR"],
+            "visible_default": False,
+            "ttl_ms": 30000,
+            "reason": "replay context is hidden by default in clean live only",
+            "label": "REPLAY",
+        }
+    ]
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="REPLAY",
+        current_side="SELL",
+        frame_id=14494,
+    )
+
+    assert audit["rendered_count"] == 1
+    assert audit["rejected_count"] == 0
+    assert resolved[0]["visible_default"] is False
+    assert "REPLAY" in resolved[0]["visible_modes"]
+    assert resolved[0].get("precision_rejected") is not True
+
+
+def test_no_duplicate_now_labels_in_clean_live_and_history_maps_to_replay(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
+    overlays = [
+        {
+            "overlay_id": "current-live",
+            "object_id": "current-live",
+            "track_id": "current-live",
+            "type": "CURRENT_CANDLE",
+            "side": "SELL",
+            "source_agent": "current_candle_tracker",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [1020, 400, 1040, 520],
+            "truth_score": 0.96,
+            "confidence": 0.96,
+            "visible_modes": ["CLEAN_LIVE", "ACTIVE_CONTEXT", "COUNCIL", "INSPECTOR"],
+            "label": "NOW",
+        },
+        {
+            "overlay_id": "current-duplicate",
+            "object_id": "current-duplicate",
+            "track_id": "current-duplicate",
+            "type": "CURRENT_CANDLE",
+            "side": "SELL",
+            "source_agent": "current_candle_tracker",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [980, 390, 1000, 510],
+            "truth_score": 0.82,
+            "confidence": 0.82,
+            "visible_modes": ["CLEAN_LIVE", "ACTIVE_CONTEXT", "COUNCIL", "INSPECTOR"],
+            "label": "NOW",
+        },
+        {
+            "overlay_id": "historical-now",
+            "object_id": "historical-now",
+            "track_id": "historical-now",
+            "type": "CURRENT_CANDLE",
+            "side": "SELL",
+            "source_agent": "historical_replay",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [650, 380, 670, 500],
+            "truth_score": 0.74,
+            "confidence": 0.74,
+            "lifecycle_state": "HISTORICAL",
+            "visible_modes": ["CLEAN_LIVE", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+            "label": "NOW",
+        },
+    ]
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="CLEAN_LIVE",
+        current_side="SELL",
+        frame_id=14494,
+    )
+    live_now = [
+        row
+        for row in resolved
+        if row.get("type") == "CURRENT_CANDLE"
+        and row.get("display_label") == "NOW"
+        and overlay_is_visible(row, "CLEAN_LIVE")
+        and row.get("visible_default") is not False
+    ]
+    history_rows = [row for row in resolved if row.get("overlay_id") == "historical-now"]
+
+    assert audit["precision_report"]["duplicate_now_hidden"] == 2
+    assert len(live_now) == 1
+    assert history_rows
+    assert history_rows[0]["type"] == "PROGRESSION_PATH"
+    assert history_rows[0]["display_label"] == "HISTORICAL PROGRESSION"
+    assert overlay_is_visible(history_rows[0], "REPLAY") is True
+    assert overlay_is_visible(history_rows[0], "CLEAN_LIVE") is False

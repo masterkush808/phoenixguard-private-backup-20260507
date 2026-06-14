@@ -3,6 +3,7 @@ from __future__ import annotations
 from phoenixguard.runtime.realtime_performance_v3 import (
     AsyncArtifactWriterV3,
     LatestFrameBufferV3,
+    OVERLAY_RENDER_BUDGETS,
     build_frame_timing_trace_v3,
     build_performance_trace_v3,
 )
@@ -58,7 +59,104 @@ def test_frame_timing_trace_reports_required_age_fields() -> None:
     assert trace["overlay_age_ms"] == 400
     assert trace["model_vote_age_ms"] == 480
     assert trace["packet_age_ms"] == 300
-    assert trace["overlay_state_version"].startswith("ov_42_1_")
+    assert trace["overlay_state_version"].startswith("ovlock_1_")
+    assert trace["overlay_frame_state_version"].startswith("ov_42_1_")
+
+
+def test_display_only_publish_does_not_refresh_stale_overlay_age() -> None:
+    session = {
+        "session_id": "speed",
+        "frame_index": 42,
+        "display_frame_id": 43,
+        "overlay_frame_id": 42,
+        "display_published_epoch": 101.9,
+        "last_capture_started_epoch": 100.0,
+        "last_capture_epoch": 100.8,
+        "tracking_summary": {
+            "pipeline_timing": {
+                "capture_started_epoch": 100.0,
+                "published_epoch": 100.8,
+                "stages": [
+                    {"stage": "tracker_study", "elapsed_sec": 0.52, "duration_sec": 0.42},
+                    {"stage": "artifact_write", "elapsed_sec": 0.60, "duration_sec": 0.08},
+                ],
+            }
+        },
+    }
+
+    trace = build_frame_timing_trace_v3(session, overlays=[], now_epoch=102.0)
+
+    assert trace["overlay_age_ms"] == 1400
+    assert trace["overlay_frame_gap"] == 1
+    assert trace["frame_gap_status"] == "OVERLAY_BEHIND"
+
+
+def test_display_only_matching_surface_signature_keeps_overlay_aligned() -> None:
+    session = {
+        "session_id": "speed",
+        "frame_index": 42,
+        "display_frame_id": 47,
+        "overlay_frame_id": 42,
+        "display_published_epoch": 101.9,
+        "last_display_surface_signature": "same-window",
+        "overlay_source_window_signature": "same-window",
+        "last_capture_started_epoch": 100.0,
+        "last_capture_epoch": 100.8,
+        "tracking_summary": {
+            "pipeline_timing": {
+                "capture_started_epoch": 100.0,
+                "published_epoch": 100.8,
+                "stages": [
+                    {"stage": "tracker_study", "elapsed_sec": 0.52, "duration_sec": 0.42},
+                    {"stage": "artifact_write", "elapsed_sec": 0.60, "duration_sec": 0.08},
+                ],
+            }
+        },
+    }
+
+    trace = build_frame_timing_trace_v3(session, overlays=[{"overlay_id": "o1"}], now_epoch=102.0)
+
+    assert trace["overlay_age_ms"] == 100
+    assert trace["overlay_frame_gap"] == 0
+    assert trace["raw_overlay_frame_gap"] == 5
+    assert trace["surface_signature_aligned"] is True
+    assert trace["frame_gap_status"] == "ALIGNED"
+
+
+def test_display_only_authority_lock_keeps_overlay_aligned_when_pixels_change() -> None:
+    session = {
+        "session_id": "speed",
+        "frame_index": 42,
+        "chart_frame_id": 42,
+        "model_vote_frame_id": 42,
+        "display_frame_id": 47,
+        "overlay_frame_id": 42,
+        "display_snapshot_only_v3": True,
+        "display_published_epoch": 101.9,
+        "last_display_surface_signature": "new-candle-pixels",
+        "overlay_source_window_signature": "studied-candle-pixels",
+        "last_capture_started_epoch": 100.0,
+        "last_capture_epoch": 100.8,
+        "tracking_summary": {
+            "pipeline_timing": {
+                "capture_started_epoch": 100.0,
+                "published_epoch": 100.8,
+                "stages": [
+                    {"stage": "tracker_study", "elapsed_sec": 0.52, "duration_sec": 0.42},
+                    {"stage": "artifact_write", "elapsed_sec": 0.60, "duration_sec": 0.08},
+                ],
+            }
+        },
+    }
+
+    trace = build_frame_timing_trace_v3(session, overlays=[{"overlay_id": "o1"}], now_epoch=102.0)
+
+    assert trace["overlay_age_ms"] == 100
+    assert trace["overlay_frame_gap"] == 0
+    assert trace["raw_overlay_frame_gap"] == 5
+    assert trace["surface_signature_aligned"] is False
+    assert trace["display_only_authority_locked"] is True
+    assert trace["frame_gap_status"] == "AUTHORITY_LOCKED"
 
 
 def test_performance_trace_contains_model_warm_state_and_budgets() -> None:
@@ -92,7 +190,12 @@ def test_performance_trace_contains_model_warm_state_and_budgets() -> None:
     assert trace["schema_version"] == "PG_PERFORMANCE_TRACE_V3"
     assert trace["visual_health"]["status"] == "ALIVE"
     assert trace["model_health_summary"]["label"] == "2/2 awake"
-    assert trace["overlay_render_budget"]["CLEAN_LIVE"] == 10
+    assert trace["overlay_render_budget"]["CLEAN_LIVE"] == 48
+
+
+def test_all_selectable_overlay_modes_have_positive_render_budget() -> None:
+    for mode in ("CHART_BOUNDS", "CANDLES", "SUPPLY_DEMAND", "TRENDLINES", "TRIGGER", "TARGET", "INVALIDATION", "PATH"):
+        assert OVERLAY_RENDER_BUDGETS[mode] > 0
 
 
 def test_async_artifact_writer_limits_pending_jobs() -> None:

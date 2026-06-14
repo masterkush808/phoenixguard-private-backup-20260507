@@ -268,6 +268,7 @@ def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
         "major/global": "GLOBAL",
         "local": "LOCAL",
         "supply-demand": "SUPPLY_DEMAND",
+        "trendlines": "TRENDLINES",
         "trigger": "TRIGGER",
         "target": "TARGET",
         "invalidation": "INVALIDATION",
@@ -285,7 +286,11 @@ def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
     assert {raw: normalize_view_mode(raw) for raw in cases} == cases
     assert view_mode_profile("chart-bounds")["layer_visibility"]["chart_bounds"] is True
     assert view_mode_profile("candles")["layer_visibility"]["recent_candles"] is True
-    assert view_mode_profile("invalidation")["layer_visibility"]["invalidation"] is True
+    assert view_mode_profile("invalidation")["layer_visibility"]["invalidation"] is False
+    trend_profile = view_mode_profile("trendlines")
+    assert trend_profile["mode"] == "TRENDLINES"
+    assert trend_profile["layer_visibility"]["trendlines"] is True
+    assert set(trend_profile["allowed_types"]) == {"INNER_TRENDLINE", "RESISTANCE_TRENDLINE", "SUPPORT_TRENDLINE"}
     active_profile = view_mode_profile("active-context")
     assert active_profile["layer_visibility"]["historical_replay"] is True
     assert "PROGRESSION_PATH" in active_profile["allowed_types"]
@@ -294,7 +299,7 @@ def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
     assert "TARGET_ZONE_BOX" in replay_profile["allowed_types"]
     assert replay_profile["layer_visibility"]["trigger_zones"] is True
     assert replay_profile["layer_visibility"]["target_zones"] is True
-    assert replay_profile["layer_visibility"]["invalidation"] is True
+    assert replay_profile["layer_visibility"]["invalidation"] is False
 
 
 def test_contract_reports_missing_required_fields_and_strict_mode_raises() -> None:
@@ -369,7 +374,7 @@ def test_trendline_overlays_preserve_line_geometry_and_layer_modes() -> None:
             anchor_type="LINE",
             bounds=None,
             points=[[10, 100], [120, 100]],
-            visible_modes=["SUPPLY_DEMAND", "PATH", "ACTIVE_CONTEXT", "REPLAY"],
+            visible_modes=["TRENDLINES", "PATH", "ACTIVE_CONTEXT", "REPLAY"],
         ),
         strict=False,
     )
@@ -382,7 +387,7 @@ def test_trendline_overlays_preserve_line_geometry_and_layer_modes() -> None:
             anchor_type="LINE",
             bounds=None,
             line_points=[[40, 90], [140, 72]],
-            visible_modes=["LOCAL", "PATH", "ACTIVE_CONTEXT", "REPLAY"],
+            visible_modes=["TRENDLINES", "PATH", "ACTIVE_CONTEXT", "REPLAY"],
         ),
         strict=False,
     )
@@ -393,18 +398,19 @@ def test_trendline_overlays_preserve_line_geometry_and_layer_modes() -> None:
 
     assert support["type"] == "SUPPORT_TRENDLINE"
     assert support["display_label"] == "SUPPORT TRENDLINE"
-    assert support["layer"] == "supply_demand"
+    assert support["layer"] == "trendlines"
     assert support["anchor_type"] == "POLYGON"
     assert support["line_points"] == [[10.0, 100.0], [120.0, 100.0]]
     assert support["bounds"] == [10.0, 97.0, 120.0, 103.0]
-    assert overlay_is_visible(support, "SUPPLY_DEMAND") is True
-    assert overlay_is_visible(support, "PATH") is True
-    assert overlay_is_visible(support, "CLEAN_LIVE") is False
+    assert overlay_is_visible(support, "SUPPLY_DEMAND") is False
+    assert overlay_is_visible(support, "TRENDLINES") is True
+    assert overlay_is_visible(support, "PATH") is False
+    assert overlay_is_visible(support, "CLEAN_LIVE") is True
     assert inner["type"] == "INNER_TRENDLINE"
     assert inner["display_label"] == "INNER TRENDLINE"
-    assert inner["layer"] == "local_swings"
-    assert overlay_is_visible(inner, "LOCAL") is True
-    assert overlay_is_visible(inner, "PATH") is True
+    assert inner["layer"] == "trendlines"
+    assert overlay_is_visible(inner, "LOCAL") is False
+    assert overlay_is_visible(inner, "TRENDLINES") is True
     assert progression["layer"] == "historical_replay"
 
 
@@ -442,9 +448,13 @@ def test_semantic_target_invalidation_and_path_layers_override_legacy_layers() -
     assert invalidation["layer"] == "invalidation"
     assert target["layer"] == "target_zones"
     assert path["layer"] == "prediction_path"
+    assert overlay_is_visible(invalidation, "CLEAN_LIVE") is False
+    assert overlay_is_visible(invalidation, "DIAGNOSTICS") is False
+    assert overlay_is_visible(invalidation, "CALIBRATION") is False
+    assert overlay_is_visible(invalidation, "INSPECTOR") is True
 
 
-def test_mode_resolver_hides_replay_debug_expired_and_broker_controls_from_live() -> None:
+def test_mode_resolver_allows_clean_live_replay_but_hides_debug_expired_and_broker_controls() -> None:
     now_ms = 10_000
     overlays = [
         _base_overlay(overlay_id="live-sniper", created_at_ms=9000, ttl_ms=5000),
@@ -475,7 +485,7 @@ def test_mode_resolver_hides_replay_debug_expired_and_broker_controls_from_live(
     calibration = resolve_visible_overlays(overlays, "CALIBRATION", now_ms=now_ms)
     inspector = resolve_visible_overlays(overlays, "INSPECTOR", now_ms=now_ms)
 
-    assert [overlay["overlay_id"] for overlay in live] == ["live-sniper"]
+    assert {"live-sniper", "replay-1"}.issubset({overlay["overlay_id"] for overlay in live})
     assert "replay-1" in {overlay["overlay_id"] for overlay in replay}
     assert "broker-1" in {overlay["overlay_id"] for overlay in calibration}
     assert "debug-1" in {overlay["overlay_id"] for overlay in inspector}
@@ -489,7 +499,8 @@ def test_view_mode_profile_exposes_layer_policy() -> None:
     supply = view_mode_profile("supply-demand")
     trigger = view_mode_profile("trigger")
 
-    assert clean["layer_visibility"]["historical_replay"] is False
+    assert clean["layer_visibility"]["historical_replay"] is True
+    assert clean["layer_visibility"]["trendlines"] is True
     assert clean["layer_visibility"]["diagnostics"] is False
     assert clean["layer_visibility"]["prediction_path"] is False
     assert council["layer_visibility"]["recent_candles"] is False
@@ -504,9 +515,11 @@ def test_view_mode_profile_exposes_layer_policy() -> None:
     assert supply["layer_visibility"]["chart_bounds"] is False
     assert supply["layer_visibility"]["recent_candles"] is False
     assert supply["layer_visibility"]["supply_demand"] is True
+    assert supply["layer_visibility"]["trendlines"] is False
     assert supply["layer_visibility"]["trigger_zones"] is False
     assert "CURRENT_CANDLE" not in supply["allowed_types"]
     assert "CHART_BOUNDS" not in supply["allowed_types"]
+    assert "SUPPORT_TRENDLINE" not in supply["allowed_types"]
     assert trigger["layer_visibility"]["recent_candles"] is False
     assert trigger["layer_visibility"]["trigger_zones"] is True
     assert "CURRENT_CANDLE" not in trigger["allowed_types"]

@@ -1234,6 +1234,10 @@
       grid-column: 1 / -1;
     }
 
+    .telemetry-module {
+      display: none !important;
+    }
+
     .prediction-module {
       grid-column: 1 / -1;
       overflow: visible;
@@ -2338,16 +2342,15 @@
               <option value="global">Global</option>
               <option value="local">Local</option>
               <option value="supply_demand">Supply/Demand</option>
+              <option value="trendlines">Trendlines</option>
               <option value="triggers">Triggers</option>
               <option value="targets">Targets</option>
-              <option value="invalidation">Invalidation</option>
               <option value="path">Path</option>
               <option value="active_context">Active Context</option>
               <option value="council_layers">Council Layers</option>
               <option value="full_history_read">Full History</option>
               <option value="broker">Broker</option>
               <option value="two_candle_study">Two-Candle Study</option>
-              <option value="lstm_study">LSTM Study</option>
               <option value="deep_debug">Deep Debug</option>
               <option value="calibration">Calibration</option>
               <option value="replay">Replay</option>
@@ -2411,11 +2414,11 @@
                 <button class="layer-toggle active" id="layer-major-swings" type="button" data-layer-toggle="major_swings">Major</button>
                 <button class="layer-toggle active" id="layer-local-swings" type="button" data-layer-toggle="local_swings">Local</button>
                 <button class="layer-toggle active" id="layer-supply-demand" type="button" data-layer-toggle="supply_demand">Supply/Demand</button>
+                <button class="layer-toggle active" id="layer-trendlines" type="button" data-layer-toggle="trendlines">Trendlines</button>
                 <button class="layer-toggle active" id="layer-trigger-zones" type="button" data-layer-toggle="trigger_zones">Triggers</button>
                 <button class="layer-toggle" id="overlay-two-candle-study" type="button">Two-Candle Study</button>
-                <button class="layer-toggle" id="overlay-lstm-study" type="button">LSTM</button>
-                <button class="layer-toggle active" id="layer-council-decision" type="button" data-layer-toggle="active_council_decision">Council</button>
-                <button class="layer-toggle" id="layer-historical-replay" type="button" data-layer-toggle="historical_replay">Replay</button>
+                <button class="layer-toggle active" id="layer-council-decision" type="button" data-layer-toggle="active_council_decision">SMC/Council</button>
+                <button class="layer-toggle active" id="layer-historical-replay" type="button" data-layer-toggle="historical_replay">Replay</button>
                 <button class="layer-toggle active" id="layer-broker-controls" type="button" data-layer-toggle="broker_controls">Broker</button>
                 <button class="layer-toggle" id="layer-diagnostics" type="button" data-layer-toggle="diagnostics">Diagnostics</button>
               </div>
@@ -2462,11 +2465,6 @@
           <div class="read-dictionary" id="read-dictionary" aria-label="Trading read dictionary"></div>
         </article>
       </section>
-      <details class="bottom-drawer" id="bottom-drawer">
-        <summary>
-          <span>Runtime</span>
-          <span class="runtime-strip" id="runtime-strip">CPU -- | RAM -- | Queue -- | Packet -- | Cache -- | Models --</span>
-        </summary>
       <section class="lower-grid" aria-label="Study details">
         <section class="matrix-module">
           <div class="matrix-head">
@@ -2657,7 +2655,6 @@
           </div>
         </section>
       </section>
-      </details>
     </section>
   </main>
 
@@ -2673,7 +2670,7 @@
     const state = {
       session: null,
       route: "live",
-      overlayMode: "active_context",
+      overlayMode: "clean_live",
       mode: "overlay",
       refreshTimer: null,
       heartbeatTimer: null,
@@ -2701,12 +2698,13 @@
         major_swings: true,
         local_swings: true,
         supply_demand: true,
+        trendlines: true,
         trigger_zones: true,
         target_zones: true,
-        invalidation: true,
+        invalidation: false,
         prediction_path: false,
         active_council_decision: true,
-        historical_replay: false,
+        historical_replay: true,
         broker_controls: true,
         diagnostics: false,
       },
@@ -2797,9 +2795,9 @@
       layerMajorSwings: $("layer-major-swings"),
       layerLocalSwings: $("layer-local-swings"),
       layerSupplyDemand: $("layer-supply-demand"),
+      layerTrendlines: $("layer-trendlines"),
       layerTriggerZones: $("layer-trigger-zones"),
       overlayTwoCandle: $("overlay-two-candle-study"),
-      overlayLstm: $("overlay-lstm-study"),
       layerCouncilDecision: $("layer-council-decision"),
       layerHistoricalReplay: $("layer-historical-replay"),
       layerBrokerControls: $("layer-broker-controls"),
@@ -3446,7 +3444,19 @@
       const normalized = String(kind || "").toLowerCase();
       const fromArtifact = artifact.path || artifact.url || artifact.image_url || artifact.frame_url || "";
       if (normalized === "window") {
-        return session.last_display_window_path || session.last_window_path || session.last_frame_path || fromArtifact;
+        const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+        const brokerSurface = objectOrEmpty(session.broker_surface || liveState.broker_surface);
+        const brokerFrame = objectOrEmpty(brokerSurface.frame);
+        return session.last_display_window_path
+          || session.last_window_path
+          || session.last_frame_path
+          || brokerFrame.path
+          || brokerFrame.url
+          || brokerSurface.image_url
+          || brokerSurface.url
+          || brokerSurface.frame_url
+          || brokerSurface.latest_window_url
+          || fromArtifact;
       }
       if (normalized === "overlay") {
         return session.last_overlay_path || fromArtifact;
@@ -3470,9 +3480,27 @@
     }
 
     function artifactUrl(kind, session = state.session || {}) {
+      const normalizedKind = String(kind || "").toLowerCase();
+      const version = encodeURIComponent(artifactFrameKey(kind, session));
+      if (normalizedKind === "window") {
+        const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+        const brokerSurface = objectOrEmpty(session.broker_surface || liveState.broker_surface);
+        const brokerFrame = objectOrEmpty(brokerSurface.frame);
+        const directWindowUrl = clean(
+          brokerSurface.image_url
+            || brokerSurface.latest_window_url
+            || brokerSurface.url
+            || brokerSurface.frame_url
+            || brokerFrame.url,
+          "",
+        );
+        if (directWindowUrl) {
+          const separator = directWindowUrl.includes("?") ? "&" : "?";
+          return `${directWindowUrl}${separator}pgv=${version}`;
+        }
+      }
       const sourcePath = artifactSourcePath(kind, session);
       const fileName = artifactFileNameFromPath(sourcePath);
-      const version = encodeURIComponent(artifactFrameKey(kind, session));
       if (fileName) {
         return `${sessionUrl()}/artifacts/files/${encodeURIComponent(fileName)}?v=${version}`;
       }
@@ -3555,7 +3583,11 @@
       if (token && state.surface.pendingImageToken && token !== state.surface.pendingImageToken) {
         return false;
       }
-      const visibleKind = clean(image.dataset.surfaceVisibleKind, "");
+      let visibleKind = clean(image.dataset.surfaceVisibleKind, "");
+      if (!visibleKind) {
+        visibleKind = clean(image.dataset.surfaceArtifactKind, "") || (image === els.rawImg ? "window" : "overlay");
+        image.dataset.surfaceVisibleKind = visibleKind;
+      }
       if (!visibleKind) {
         return false;
       }
@@ -3733,6 +3765,7 @@
         global: "GLOBAL",
         local: "LOCAL",
         supply_demand: "SUPPLY_DEMAND",
+        trendlines: "TRENDLINES",
         triggers: "TRIGGER",
         targets: "TARGET",
         invalidation: "INVALIDATION",
@@ -3742,7 +3775,6 @@
         full_history_read: "FULL_HISTORY_READ",
         broker: "BROKER",
         two_candle_study: "TWO_CANDLE_STUDY",
-        lstm_study: "LSTM_STUDY",
         deep_debug: "DIAGNOSTICS",
         calibration: "CALIBRATION",
         replay: "REPLAY",
@@ -4373,22 +4405,6 @@
       return hasForecast ? payload : derivedHighFrequencyForecast(session, signal, tracking, kernel);
     }
 
-    function lstmStudyPayload(session = {}, signal = {}, tracking = {}) {
-      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
-      const kernel = kernelPayload(signal, tracking);
-      const forecast = objectOrEmpty(signal.high_frequency_forecast || tracking.high_frequency_forecast || kernel.high_frequency_forecast);
-      const twoCandle = objectOrEmpty(signal.two_candle_study || tracking.two_candle_study || liveState.two_candle_study || session.two_candle_study);
-      return objectOrEmpty(
-        liveState.lstm_contribution
-        || session.lstm_contribution
-        || signal.lstm_contribution
-        || tracking.lstm_contribution
-        || forecast.lstm_contribution
-        || kernel.lstm_contribution
-        || twoCandle.lstm_contribution
-      );
-    }
-
     function forecastCandleRows(forecast = {}) {
       const study = objectOrEmpty(forecast.two_candle_study || forecast);
       const rows = forecast.candle_forecasts || forecast.study_rows || study.study_steps;
@@ -4668,6 +4684,7 @@
         [els.layerMajorSwings, "major_swings"],
         [els.layerLocalSwings, "local_swings"],
         [els.layerSupplyDemand, "supply_demand"],
+        [els.layerTrendlines, "trendlines"],
         [els.layerTriggerZones, "trigger_zones"],
         [els.layerCouncilDecision, "active_council_decision"],
         [els.layerHistoricalReplay, "historical_replay"],
@@ -4684,10 +4701,6 @@
       if (els.overlayTwoCandle) {
         els.overlayTwoCandle.classList.toggle("active", state.overlayMode === "two_candle_study");
         els.overlayTwoCandle.setAttribute("aria-pressed", state.overlayMode === "two_candle_study" ? "true" : "false");
-      }
-      if (els.overlayLstm) {
-        els.overlayLstm.classList.toggle("active", state.overlayMode === "lstm_study");
-        els.overlayLstm.setAttribute("aria-pressed", state.overlayMode === "lstm_study" ? "true" : "false");
       }
     }
 
@@ -4709,262 +4722,44 @@
     }
 
     function applyOverlayPreset(mode) {
+      const allLayerKeys = [
+        "chart_bounds",
+        "recent_candles",
+        "major_swings",
+        "local_swings",
+        "supply_demand",
+        "trendlines",
+        "trigger_zones",
+        "target_zones",
+        "invalidation",
+        "prediction_path",
+        "active_council_decision",
+        "historical_replay",
+        "broker_controls",
+        "diagnostics",
+      ];
+      const layerPreset = (...enabled) => {
+        const enabledSet = new Set(enabled);
+        return Object.fromEntries(allLayerKeys.map((key) => [key, enabledSet.has(key)]));
+      };
       const presets = {
-        clean_live: {
-          chart_bounds: true,
-          recent_candles: true,
-          major_swings: false,
-          local_swings: false,
-          supply_demand: true,
-          trigger_zones: true,
-          target_zones: true,
-          invalidation: true,
-          prediction_path: false,
-          active_council_decision: true,
-          historical_replay: false,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        global: {
-          chart_bounds: true,
-          recent_candles: false,
-          major_swings: true,
-          local_swings: false,
-          supply_demand: true,
-          trigger_zones: false,
-          target_zones: false,
-          invalidation: false,
-          prediction_path: false,
-          active_council_decision: false,
-          historical_replay: true,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        local: {
-          chart_bounds: true,
-          recent_candles: true,
-          major_swings: true,
-          local_swings: true,
-          supply_demand: true,
-          trigger_zones: true,
-          target_zones: false,
-          invalidation: false,
-          prediction_path: false,
-          active_council_decision: false,
-          historical_replay: false,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        supply_demand: {
-          chart_bounds: false,
-          recent_candles: false,
-          major_swings: false,
-          local_swings: false,
-          supply_demand: true,
-          trigger_zones: false,
-          target_zones: false,
-          invalidation: false,
-          prediction_path: false,
-          active_council_decision: false,
-          historical_replay: false,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        triggers: {
-          chart_bounds: false,
-          recent_candles: false,
-          major_swings: false,
-          local_swings: false,
-          supply_demand: false,
-          trigger_zones: true,
-          target_zones: false,
-          invalidation: false,
-          prediction_path: false,
-          active_council_decision: false,
-          historical_replay: false,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        targets: {
-          chart_bounds: false,
-          recent_candles: false,
-          major_swings: false,
-          local_swings: false,
-          supply_demand: true,
-          trigger_zones: false,
-          target_zones: true,
-          invalidation: true,
-          prediction_path: false,
-          active_council_decision: false,
-          historical_replay: false,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        invalidation: {
-          chart_bounds: false,
-          recent_candles: false,
-          major_swings: false,
-          local_swings: false,
-          supply_demand: true,
-          trigger_zones: false,
-          target_zones: false,
-          invalidation: true,
-          prediction_path: false,
-          active_council_decision: false,
-          historical_replay: false,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        path: {
-          chart_bounds: false,
-          recent_candles: false,
-          major_swings: false,
-          local_swings: true,
-          supply_demand: true,
-          trigger_zones: false,
-          target_zones: true,
-          invalidation: true,
-          prediction_path: false,
-          active_council_decision: false,
-          historical_replay: true,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        active_context: {
-          chart_bounds: true,
-          recent_candles: true,
-          major_swings: true,
-          local_swings: true,
-          supply_demand: true,
-          trigger_zones: true,
-          target_zones: true,
-          invalidation: true,
-          prediction_path: false,
-          active_council_decision: true,
-          historical_replay: false,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        council_layers: {
-          chart_bounds: false,
-          recent_candles: false,
-          major_swings: false,
-          local_swings: false,
-          supply_demand: false,
-          trigger_zones: false,
-          target_zones: false,
-          invalidation: false,
-          prediction_path: false,
-          active_council_decision: true,
-          historical_replay: false,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        full_history_read: {
-          chart_bounds: true,
-          recent_candles: false,
-          major_swings: true,
-          local_swings: true,
-          supply_demand: true,
-          trigger_zones: true,
-          target_zones: true,
-          invalidation: true,
-          prediction_path: false,
-          active_council_decision: true,
-          historical_replay: true,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        broker: {
-          chart_bounds: false,
-          recent_candles: false,
-          major_swings: false,
-          local_swings: false,
-          supply_demand: false,
-          trigger_zones: false,
-          target_zones: false,
-          invalidation: false,
-          prediction_path: false,
-          active_council_decision: false,
-          historical_replay: false,
-          broker_controls: true,
-          diagnostics: false,
-        },
-        two_candle_study: {
-          chart_bounds: false,
-          recent_candles: false,
-          major_swings: false,
-          local_swings: false,
-          supply_demand: false,
-          trigger_zones: false,
-          target_zones: false,
-          invalidation: false,
-          prediction_path: false,
-          active_council_decision: true,
-          historical_replay: false,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        lstm_study: {
-          chart_bounds: false,
-          recent_candles: false,
-          major_swings: false,
-          local_swings: false,
-          supply_demand: false,
-          trigger_zones: false,
-          target_zones: false,
-          invalidation: false,
-          prediction_path: false,
-          active_council_decision: true,
-          historical_replay: false,
-          broker_controls: false,
-          diagnostics: false,
-        },
-        deep_debug: {
-          chart_bounds: true,
-          recent_candles: true,
-          major_swings: true,
-          local_swings: true,
-          supply_demand: true,
-          trigger_zones: true,
-          target_zones: true,
-          invalidation: true,
-          prediction_path: true,
-          active_council_decision: true,
-          historical_replay: true,
-          broker_controls: true,
-          diagnostics: true,
-        },
-        calibration: {
-          chart_bounds: false,
-          recent_candles: false,
-          major_swings: false,
-          local_swings: false,
-          supply_demand: false,
-          trigger_zones: false,
-          target_zones: false,
-          invalidation: false,
-          prediction_path: false,
-          active_council_decision: false,
-          historical_replay: false,
-          broker_controls: true,
-          diagnostics: true,
-        },
-        replay: {
-          chart_bounds: true,
-          recent_candles: false,
-          major_swings: true,
-          local_swings: true,
-          supply_demand: true,
-          trigger_zones: true,
-          target_zones: true,
-          invalidation: true,
-          prediction_path: false,
-          active_council_decision: true,
-          historical_replay: true,
-          broker_controls: false,
-          diagnostics: false,
-        },
+        clean_live: layerPreset("chart_bounds", "recent_candles", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
+        global: layerPreset("chart_bounds", "major_swings", "historical_replay"),
+        local: layerPreset("chart_bounds", "recent_candles", "local_swings", "trigger_zones"),
+        supply_demand: layerPreset("supply_demand"),
+        trendlines: layerPreset("trendlines"),
+        triggers: layerPreset("trigger_zones"),
+        targets: layerPreset("target_zones", "supply_demand"),
+        invalidation: layerPreset("supply_demand"),
+        path: layerPreset("prediction_path", "historical_replay"),
+        active_context: layerPreset("chart_bounds", "recent_candles", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
+        council_layers: layerPreset("active_council_decision", "supply_demand"),
+        full_history_read: layerPreset("chart_bounds", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
+        broker: layerPreset("broker_controls"),
+        two_candle_study: layerPreset("active_council_decision"),
+        deep_debug: layerPreset(...allLayerKeys),
+        calibration: layerPreset("broker_controls", "diagnostics"),
+        replay: layerPreset("chart_bounds", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
       };
       state.overlayMode = presets[mode] ? mode : "clean_live";
       state.layers = {...state.layers, ...presets[state.overlayMode]};
@@ -5584,22 +5379,22 @@
         return true;
       }
       const allowedByMode = {
-        CLEAN_LIVE: new Set(["CURRENT_CANDLE", "OPPOSING_FORCE", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX", "MODEL_COUNCIL_MARKER"]),
+        CLEAN_LIVE: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER"]),
         CHART_BOUNDS: new Set(["CHART_BOUNDS"]),
         CANDLES: new Set(["CHART_BOUNDS", "CURRENT_CANDLE"]),
-        GLOBAL: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "SUPPLY_ZONE", "DEMAND_ZONE"]),
-        LOCAL: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "PULLBACK_BOX", "RETEST_BOX", "CONTINUATION_BOX", "SNIPER_ENTRY_BOX", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "SUPPLY_ZONE", "DEMAND_ZONE"]),
-        SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE"]),
+        GLOBAL: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "PROGRESSION_PATH"]),
+        LOCAL: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "PULLBACK_BOX", "RETEST_BOX", "CONTINUATION_BOX", "SNIPER_ENTRY_BOX"]),
+        SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"]),
+        TRENDLINES: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"]),
         TRIGGER: new Set(["RETEST_BOX", "SNIPER_ENTRY_BOX"]),
-        TARGET: new Set(["TARGET_ZONE_BOX", "INVALIDATION_BOX", "OPPOSING_FORCE"]),
-        INVALIDATION: new Set(["INVALIDATION_BOX", "OPPOSING_FORCE"]),
-        PATH: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"]),
+        TARGET: new Set(["TARGET_ZONE_BOX", "OPPOSING_FORCE"]),
+        INVALIDATION: new Set(["OPPOSING_FORCE"]),
+        PATH: new Set(["ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"]),
         COUNCIL: new Set(["MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER"]),
         TWO_CANDLE_STUDY: new Set(["TWO_CANDLE_STUDY"]),
-        LSTM_STUDY: new Set(["LSTM_STUDY"]),
-        ACTIVE_CONTEXT: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY", "LSTM_STUDY"]),
-        FULL_HISTORY_READ: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY", "LSTM_STUDY"]),
-        REPLAY: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"]),
+        ACTIVE_CONTEXT: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY"]),
+        FULL_HISTORY_READ: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY"]),
+        REPLAY: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"]),
         BROKER: new Set(["BROKER_CONTROL"]),
         CALIBRATION: new Set(["BROKER_CONTROL", "DEBUG_RAW_DETECTION"]),
       };
@@ -5610,13 +5405,14 @@
     function applyFrontendOverlayModeBudget(boxes = [], activeMode = backendOverlayMode(state.overlayMode)) {
       const mode = clean(activeMode, "CLEAN_LIVE").toUpperCase();
       const budgetByMode = {
-        CLEAN_LIVE: 10,
+        CLEAN_LIVE: 48,
         SUPPLY_DEMAND: 18,
+        TRENDLINES: 8,
         TRIGGER: 18,
         TARGET: 16,
         INVALIDATION: 10,
         PATH: 24,
-        ACTIVE_CONTEXT: 30,
+        ACTIVE_CONTEXT: 64,
         FULL_HISTORY_READ: 80,
         REPLAY: 80,
       };
@@ -5638,7 +5434,7 @@
           return;
         }
         visibleLabelCount += 1;
-        if (visibleLabelCount > 6) {
+        if (visibleLabelCount > 18) {
           box.label_hidden = true;
           box.label_anchor = "hidden";
         }
@@ -5718,15 +5514,24 @@
       const trustBackendMode = !diagnosticsViewActive() && payloadModeMatches;
       const seenOverlayIds = new Set();
       backendOverlayObjects.forEach((overlay, index) => {
-        if (!overlay || typeof overlay !== "object" || !Array.isArray(overlay.bbox)) {
+        if (!overlay || typeof overlay !== "object") {
           return;
         }
-        if (!overlayRenderableInCurrentView(overlay, {trustBackendMode, ignoreVisibleModes: bridgeSelectedModeWhileHydrating})) {
+        const overlayBounds = Array.isArray(overlay.bbox)
+          ? overlay.bbox
+          : Array.isArray(overlay.bounds)
+            ? overlay.bounds
+            : [];
+        if (overlayBounds.length < 4) {
+          return;
+        }
+        const overlayForRender = {...overlay, bbox: overlayBounds, bounds: overlayBounds};
+        if (!overlayRenderableInCurrentView(overlayForRender, {trustBackendMode, ignoreVisibleModes: bridgeSelectedModeWhileHydrating})) {
           return;
         }
         const overlayId = clean(overlay.overlay_id || overlay.id || overlay.object_id || `backend_${index}`, `backend_${index}`);
         const overlayLayer = clean(overlay.layer || "diagnostics", "diagnostics");
-        const overlayDedupKey = [overlayId, overlayLayer, normalizedBoxKey(overlay.bbox)].join("|");
+        const overlayDedupKey = [overlayId, overlayLayer, normalizedBoxKey(overlayBounds)].join("|");
         if (seenOverlayIds.has(overlayDedupKey)) {
           return;
         }
@@ -5735,7 +5540,7 @@
         const brokerSurfaceSpace = coordinateMode.includes("FULL_BROKER_SURFACE") || coordinateMode.includes("WINDOW_SPACE");
         const chartSpace = !brokerSurfaceSpace && (coordinateMode.includes("CHART") || coordinateMode.includes("PLOT_AREA"));
         boxes.push({
-          ...overlay,
+          ...overlayForRender,
           key: overlayId,
           label: overlay.display_label || overlay.label || overlay.type || `Overlay ${index + 1}`,
           direction: overlay.side || overlay.direction || "HOLD",
@@ -5902,22 +5707,6 @@
           _index: boxes.length,
         });
       });
-      const invalidationY = Number(source.invalidation_y);
-      if (Number.isFinite(invalidationY) && Array.isArray(source.bbox) && source.bbox.length >= 4) {
-        boxes.push({
-          key: `${parentKey}_invalidation`,
-          label: `INVALIDATION ${direction}`,
-          direction,
-          confidence: source.confidence,
-          bbox: [source.bbox[0], invalidationY - 2, source.bbox[2], invalidationY + 2],
-          role: "invalidation",
-          parent_label: source.label || source.key || parentKey,
-          _layer: "invalidation",
-          _space: space,
-          _micro: true,
-          _index: boxes.length,
-        });
-      }
     }
 
     function inspectBox(index, session) {
@@ -6435,7 +6224,7 @@
     }
 
     function isStaticOverlayLayer(layer) {
-      return ["chart_bounds", "major_swings", "supply_demand", "target_zones", "invalidation", "historical_replay", "broker_controls"].includes(String(layer || ""));
+      return ["chart_bounds", "major_swings", "supply_demand", "trendlines", "target_zones", "historical_replay", "broker_controls"].includes(String(layer || ""));
     }
 
     function isLineOverlay(box = {}) {
@@ -6647,8 +6436,8 @@
         chart_bounds: state.layers.chart_bounds,
         major_swings: state.layers.major_swings,
         supply_demand: state.layers.supply_demand,
+        trendlines: state.layers.trendlines,
         target_zones: state.layers.target_zones,
-        invalidation: state.layers.invalidation,
         prediction_path: state.layers.prediction_path,
         historical_replay: state.layers.historical_replay,
         broker_controls: state.layers.broker_controls,
@@ -6768,19 +6557,6 @@
         rows.push(
           ["Study mode", clean(microForecast.status, "READING").toUpperCase(), clean(microForecast.display_as, "TEXT_AND_BANDS_ONLY")],
           ["Synthetic candles", microForecast.do_not_render_synthetic_candles === false ? "ALLOWED" : "BLOCKED", "Two-candle mode renders study text and bands only."]
-        );
-      }
-      if (state.overlayMode === "lstm_study") {
-        const signal = objectOrEmpty(session.latest_signal);
-        const tracking = objectOrEmpty(session.tracking_summary);
-        const lstm = lstmStudyPayload(session, signal, tracking);
-        const continuation = Number(lstm.continuation_probability ?? lstm.p_continuation ?? lstm.continuation ?? 0);
-        const reversal = Number(lstm.reversal_probability ?? lstm.p_reversal ?? lstm.reversal ?? 0);
-        const pullback = Number(lstm.pullback_first_risk ?? lstm.pullback_risk ?? lstm.p_pullback_first ?? 0);
-        rows.push(
-          ["LSTM next 1", forecastDirection(lstm.next_1_bias || lstm.next_candle_bias || lstm.side), clean(lstm.interpretation || lstm.summary, "Diagnostic sequence evidence.")],
-          ["Continuation", Number.isFinite(continuation) ? formatPct(continuation, 0) : "--", `reversal ${Number.isFinite(reversal) ? formatPct(reversal, 0) : "--"} | pullback ${Number.isFinite(pullback) ? formatPct(pullback, 0) : "--"}`],
-          ["Freshness", lstm.fresh === false ? "STALE" : "FRESH", `blocker ${lstm.blocker === true ? "yes" : "no"}`]
         );
       }
       if (diagnosticsViewActive()) {
@@ -7509,12 +7285,10 @@
     els.layerMajorSwings.addEventListener("click", () => toggleLayer("major_swings"));
     els.layerLocalSwings.addEventListener("click", () => toggleLayer("local_swings"));
     els.layerSupplyDemand.addEventListener("click", () => toggleLayer("supply_demand"));
+    els.layerTrendlines.addEventListener("click", () => toggleLayer("trendlines"));
     els.layerTriggerZones.addEventListener("click", () => toggleLayer("trigger_zones"));
     if (els.overlayTwoCandle) {
       els.overlayTwoCandle.addEventListener("click", () => applyOverlayPreset("two_candle_study"));
-    }
-    if (els.overlayLstm) {
-      els.overlayLstm.addEventListener("click", () => applyOverlayPreset("lstm_study"));
     }
     els.layerCouncilDecision.addEventListener("click", () => toggleLayer("active_council_decision"));
     els.layerHistoricalReplay.addEventListener("click", () => toggleLayer("historical_replay"));
@@ -7694,7 +7468,7 @@
     });
 
     setMode("overlay");
-    applyOverlayPreset("active_context");
+    applyOverlayPreset("clean_live");
     applyRoute(routeFromLocation(), false);
     updateLayerControls();
     refreshSession();

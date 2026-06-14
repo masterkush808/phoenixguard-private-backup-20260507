@@ -20,7 +20,14 @@ from certification_common_v3 import (
     write_report,
 )
 
-from phoenixguard.vision.v3_overlay_contract import VIEW_MODES, normalize_view_mode
+from phoenixguard.vision.v3_overlay_contract import (
+    DIAGNOSTIC_OVERLAY_TYPES,
+    DIAGNOSTIC_VIEW_MODES,
+    VIEW_MODES,
+    is_approved_overlay_display_label,
+    normalize_view_mode,
+)
+from phoenixguard.runtime.realtime_performance_v3 import OVERLAY_RENDER_BUDGETS
 
 
 CORE_MODES: tuple[str, ...] = (
@@ -30,15 +37,29 @@ CORE_MODES: tuple[str, ...] = (
     "GLOBAL",
     "LOCAL",
     "SUPPLY_DEMAND",
+    "TRENDLINES",
     "TRIGGER",
     "TARGET",
-    "INVALIDATION",
     "PATH",
     "COUNCIL",
+    "TWO_CANDLE_STUDY",
+    "ACTIVE_CONTEXT",
+    "FULL_HISTORY_READ",
     "REPLAY",
+    "PREDICTION",
     "BROKER",
+    "CALIBRATION",
     "DIAGNOSTICS",
+    "DEBUG",
+    "INSPECTOR",
 )
+
+COUNCIL_MARKER_TYPES: set[str] = {
+    "MODEL_COUNCIL_MARKER",
+    "REGIME_MARKER",
+    "MARKET_PLAY_MARKER",
+    "PRICE_LOCATION_MARKER",
+}
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -84,6 +105,7 @@ def _validate_payload(requested_mode: str, payload: Mapping[str, Any]) -> list[s
     renderable_count = int(payload.get("renderable_count") or 0)
     overlay_count = int(payload.get("overlay_count") or overlays.get("total_count") or 0)
     overlays_renderable = int(overlays.get("renderable_count") or overlays.get("count") or 0)
+    unknown_terms = _sequence(payload.get("unknown_or_unmapped_terms") or overlays.get("unknown_or_unmapped_terms"))
 
     if active_mode != expected_active:
         failures.append(f"{requested_mode}: active_mode={active_mode}, expected {expected_active}")
@@ -105,6 +127,44 @@ def _validate_payload(requested_mode: str, payload: Mapping[str, Any]) -> list[s
         failures.append(f"{requested_mode}: overlay_count={overlay_count} < renderable_count={renderable_count}")
     if broker_source and not _bool(broker_source.get("valid"), True) and renderable_count > 0:
         failures.append(f"{requested_mode}: invalid broker_source rendered {renderable_count} overlays")
+    visible_label_rows = [
+        row
+        for row in overlay_objects
+        if isinstance(row, Mapping) and row.get("label_hidden") is not True and str(row.get("label_hidden") or "").lower() != "true"
+    ]
+    visible_labels = [str(row.get("display_label") or row.get("label") or "").strip() for row in visible_label_rows]
+    raw_visible_labels = [str(row.get("label") or "").strip() for row in visible_label_rows]
+    unapproved_labels = [label for label in visible_labels if label and not is_approved_overlay_display_label(label)]
+    unapproved_raw_labels = [label for label in raw_visible_labels if label and not is_approved_overlay_display_label(label)]
+    if unapproved_labels:
+        failures.append(f"{requested_mode}: visible unapproved labels={sorted(set(unapproved_labels))}")
+    if unapproved_raw_labels:
+        failures.append(f"{requested_mode}: visible raw labels are not dictionary labels={sorted(set(unapproved_raw_labels))}")
+    if expected_active not in DIAGNOSTIC_VIEW_MODES:
+        leaked_diag = [
+            str(row.get("type") or "")
+            for row in overlay_objects
+            if isinstance(row, Mapping) and str(row.get("type") or "") in DIAGNOSTIC_OVERLAY_TYPES
+        ]
+        if leaked_diag:
+            failures.append(f"{requested_mode}: diagnostics overlay leaked into live mode={sorted(set(leaked_diag))}")
+    if expected_active == "CLEAN_LIVE":
+        now_count = sum(1 for label in visible_labels if label in {"NOW", "CURRENT"})
+        if now_count > 1:
+            failures.append(f"{requested_mode}: duplicate NOW/CURRENT labels visible={now_count}")
+        clean_live_budget = int(OVERLAY_RENDER_BUDGETS.get("CLEAN_LIVE", 0) or 0)
+        if clean_live_budget > 0 and renderable_count > clean_live_budget:
+            failures.append(f"{requested_mode}: clean live overlay budget exceeded={renderable_count}")
+    if expected_active == "COUNCIL":
+        spam_types = [
+            str(row.get("type") or "")
+            for row in overlay_objects
+            if isinstance(row, Mapping) and str(row.get("type") or "") not in COUNCIL_MARKER_TYPES
+        ]
+        if spam_types:
+            failures.append(f"{requested_mode}: council mode rendered box spam={sorted(set(spam_types))}")
+    if expected_active in DIAGNOSTIC_VIEW_MODES and unknown_terms and renderable_count == 0:
+        failures.append(f"{requested_mode}: diagnostics has unmapped terms but no diagnostic overlays")
     return failures
 
 
@@ -124,7 +184,7 @@ def main() -> int:
     samples: list[dict[str, Any]] = []
     modes = _mode_list(args.modes, all_modes=args.all_modes)
     for mode in modes:
-        response = http_json(f"{base}/v1/mobile/live/state/v3/{session_q}?mode={quote_session(mode)}", timeout=args.timeout)
+        response = http_json(f"{base}/v1/mobile/live/state/v3/{session_q}?mode={quote_session(mode)}&compact=1", timeout=args.timeout)
         payload = _mapping(response.payload)
         sample = {
             "mode": mode,
@@ -137,6 +197,8 @@ def main() -> int:
             "overlay_count": payload.get("overlay_count"),
             "renderable_count": payload.get("renderable_count"),
             "reason_if_empty": payload.get("reason_if_empty"),
+            "unknown_or_unmapped_terms": payload.get("unknown_or_unmapped_terms"),
+            "overlay_vocabulary": payload.get("overlay_vocabulary"),
             "broker_source": payload.get("broker_source"),
         }
         samples.append(sample)

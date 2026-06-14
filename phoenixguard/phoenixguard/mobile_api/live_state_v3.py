@@ -31,6 +31,7 @@ from phoenixguard.vision.v3_overlay_contract import (
     prediction_overlay_config,
     view_mode_profile,
 )
+from phoenixguard.vlm.context_skeleton_v3 import build_vlm_context_skeleton_v3
 
 
 LIVE_STATE_SCHEMA_VERSION = "PG_LIVE_STATE_V3"
@@ -1762,6 +1763,7 @@ def build_live_state_v3(
         "frontend_heartbeat": dict(frontend_heartbeat or {}),
     }
     live_visual_state["performance_trace_v3"] = build_performance_trace_v3(live_visual_state, now_epoch=now_value)
+    live_visual_state["vlm_context_skeleton_v3"] = build_vlm_context_skeleton_v3(live_visual_state)
     compact_live_visual_state = {
         "schema_version": live_visual_state["schema_version"],
         "session_id": live_visual_state["session_id"],
@@ -1793,6 +1795,7 @@ def build_live_state_v3(
         "overlay_state_version": live_visual_state["overlay_state_version"],
         "overlay_frame_state_version": live_visual_state["overlay_frame_state_version"],
         "performance_trace_v3": _compact_performance_trace_v3(_mapping(live_visual_state.get("performance_trace_v3"))),
+        "vlm_context_skeleton_v3": live_visual_state["vlm_context_skeleton_v3"],
         "overlays": live_visual_state["overlays"],
         "market_objects": {
             "active_count": live_visual_state["market_objects"]["active_count"],

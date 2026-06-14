@@ -534,7 +534,7 @@ def _apply_clean_live_budget(rows: Sequence[Mapping[str, Any]], current_side: st
             row.setdefault("precision_flags", []).append("counter_side_hidden_from_live")
         if overlay_type in ZONE_TYPES:
             supply_demand_visible += 1
-            if supply_demand_visible > 3:
+            if supply_demand_visible > 6:
                 row["visible_default"] = False
                 row["visible_modes"] = [mode for mode in _sequence(row.get("visible_modes")) if str(mode).upper() != "CLEAN_LIVE"]
                 row.setdefault("precision_flags", []).append("clean_live_zone_budget_hidden")
@@ -546,13 +546,10 @@ def _apply_clean_live_budget(rows: Sequence[Mapping[str, Any]], current_side: st
                 row.setdefault("precision_flags", []).append("clean_live_current_candle_budget_hidden")
         if overlay_type in ACTIONABLE_TYPES:
             actionable_visible += 1
-            if actionable_visible > 6:
+            if actionable_visible > 10:
                 row["visible_default"] = False
                 row["visible_modes"] = [mode for mode in _sequence(row.get("visible_modes")) if str(mode).upper() != "CLEAN_LIVE"]
                 row.setdefault("precision_flags", []).append("clean_live_actionable_budget_hidden")
-        if overlay_type in SEQUENCE_TYPES:
-            row["visible_default"] = False
-            row["visible_modes"] = [mode for mode in _sequence(row.get("visible_modes")) if str(mode).upper() != "CLEAN_LIVE"]
     return output
 
 

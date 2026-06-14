@@ -7,6 +7,7 @@
     "vlm_role": "The VLM explains PhoenixGuard state in English. It must not invent independent predictions or create unapproved labels."
   },
   "candlestick_glossary": "docs/phoenixguard_v3_candlestick_glossary.json",
+  "vlm_context_skeleton": "phoenixguard/vlm/context_skeleton_v3.py",
   "source_material": [
     {
       "file": "book knowledge/HLZ - Market Structure And Powerful Setups.pdf",
@@ -72,7 +73,7 @@
   },
   "trendlines": {
     "principle": "Major trendlines use obvious outer swing anchors; inner trendlines use local pivots for timing only.",
-    "visual_boundary": "Diagonal support/resistance renders as SUPPORT_TRENDLINE, RESISTANCE_TRENDLINE, or INNER_TRENDLINE. Horizontal support/resistance must not be rendered as a trendline.",
+    "visual_boundary": "Diagonal support/resistance renders in the TRENDLINES mode/layer as SUPPORT_TRENDLINE, RESISTANCE_TRENDLINE, or INNER_TRENDLINE. Horizontal support/resistance must not be rendered as a trendline.",
     "book_rules": [
       "A support trendline connects at least two higher lows or troughs.",
       "A resistance trendline connects at least two lower highs or peaks.",

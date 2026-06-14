@@ -305,11 +305,14 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
     assert {overlay["role"] for overlay in thesis_overlays} >= {
         "active_thesis_entry",
         "active_thesis_target",
-        "active_thesis_invalidation",
         "countertrend_block",
     }
+    assert "active_thesis_invalidation" not in {overlay["role"] for overlay in thesis_overlays}
     assert any(
-        overlay["type"] == "OPPOSING_FORCE" and overlay["side"] == "SELL" and "BLOCKED" in overlay["label"]
+        overlay["type"] == "OPPOSING_FORCE"
+        and overlay["side"] == "SELL"
+        and overlay["display_label"] == "OPPOSING FORCE"
+        and "BLOCKED" not in overlay["label"]
         for overlay in thesis_overlays
     )
     for overlay_object in state["overlays"]["objects"]:
@@ -391,6 +394,118 @@ def test_live_state_suppresses_overlay_objects_when_visual_artifact_frame_is_reu
     assert "does not match overlay object frame" in state["reason_if_empty"]
 
 
+def test_live_state_keeps_locked_overlay_objects_when_surface_authority_matches(tmp_path: Path) -> None:
+    window = _png(tmp_path / "54_pocket_window.png", (640, 360))
+    chart = _png(tmp_path / "54_pocket_chart.png", (560, 260))
+    stale_overlay = _png(tmp_path / "53_pocket_overlay.png", (560, 260))
+    session = {
+        "session_id": "pocket-live-8788",
+        "frame_index": 54,
+        "display_frame_id": 120,
+        "capture_count": 54,
+        "state_version": 54,
+        "display_snapshot_only_v3": True,
+        "last_display_surface_signature": "locked-surface",
+        "last_window_surface_signature": "locked-surface",
+        "overlay_source_window_signature": "locked-surface",
+        "descriptor": {"title": "Pocket Option", "hwnd": 808},
+        "manual_focus_region": {"enabled": True, "normalized_bbox": [0.05, 0.12, 0.78, 0.92]},
+        "tracking_summary": {
+            "chart_region": {"pixel_bbox": [40, 30, 600, 330], "confidence": 0.91},
+            "broker_surface": {"controls_ready": True},
+        },
+        "latest_signal": {"side": "BUY", "execution_action": "BUY"},
+    }
+    active_objects = [
+        {
+            "overlay_id": "sniper-54",
+            "object_id": "obj-sniper",
+            "track_id": "trk-sniper",
+            "truth_score": 0.95,
+            "lifecycle_state": "ACTIVE",
+            "frame_id": 54,
+            "overlay": {
+                "type": "SNIPER_ENTRY_BOX",
+                "side": "BUY",
+                "pixel_bbox": [500, 150, 545, 225],
+                "confidence": 0.95,
+                "reason": "BUY sniper",
+            },
+        }
+    ]
+
+    state = build_live_state_v3(
+        session,
+        artifacts={"window": window, "chart": chart, "overlay": stale_overlay},
+        active_objects=active_objects,
+        registry_entries=active_objects,
+        now_epoch=110.0,
+    )
+
+    assert state["overlay_artifact_frame_id"] == 53
+    assert state["overlay_object_frame_id"] == 54
+    assert state["overlay_artifact_frame_aligned"] is True
+    assert state["overlay_artifact_authority_locked"] is True
+    assert state["renderable_count"] >= 1
+    assert state["overlay_objects"]
+    assert state["reason_if_empty"] == ""
+
+
+def test_live_state_keeps_current_frame_objects_when_overlay_artifact_is_stale(tmp_path: Path) -> None:
+    window = _png(tmp_path / "182_pocket_window.png", (640, 360))
+    chart = _png(tmp_path / "182_pocket_chart.png", (560, 260))
+    stale_overlay = _png(tmp_path / "001_pocket_overlay.png", (560, 260))
+    session = {
+        "session_id": "pocket-live-8788",
+        "frame_index": 182,
+        "display_frame_id": 182,
+        "capture_count": 182,
+        "state_version": 182,
+        "last_display_window_path": str(window),
+        "broker_source": {"valid": True, "wrong_surface": False, "source": "BrokerSourceLockV3", "lock_id": "locked-window-808"},
+        "descriptor": {"title": "Pocket Option", "hwnd": 808},
+        "manual_focus_region": {"enabled": True, "normalized_bbox": [0.05, 0.12, 0.78, 0.92]},
+        "tracking_summary": {
+            "chart_region": {"pixel_bbox": [40, 30, 600, 330], "confidence": 0.91},
+            "broker_surface": {"controls_ready": True},
+        },
+        "latest_signal": {"side": "BUY", "execution_action": "BUY"},
+    }
+    active_objects = [
+        {
+            "overlay_id": "support-182",
+            "object_id": "obj-support",
+            "track_id": "trk-support",
+            "truth_score": 0.95,
+            "lifecycle_state": "ACTIVE",
+            "frame_id": 182,
+            "overlay": {
+                "type": "SNIPER_ENTRY_BOX",
+                "side": "BUY",
+                "pixel_bbox": [500, 150, 545, 225],
+                "confidence": 0.95,
+                "reason": "current-frame object",
+            },
+        }
+    ]
+
+    state = build_live_state_v3(
+        session,
+        artifacts={"window": window, "chart": chart, "overlay": stale_overlay},
+        active_objects=active_objects,
+        registry_entries=active_objects,
+        now_epoch=110.0,
+    )
+
+    assert state["overlay_artifact_frame_id"] == 1
+    assert state["overlay_object_frame_id"] == 182
+    assert state["overlay_artifact_frame_aligned"] is True
+    assert state["overlay_artifact_authority_locked"] is True
+    assert state["renderable_count"] >= 1
+    assert state["overlay_objects"]
+    assert state["reason_if_empty"] == ""
+
+
 def test_build_live_state_v3_is_tolerant_of_missing_tracker_fields() -> None:
     state = build_live_state_v3(
         {"session_id": "empty"},
@@ -432,6 +547,105 @@ def test_build_live_state_v3_respects_unavailable_shooter_fallback() -> None:
     assert state["shooter"]["state"] == "WAITING"
     assert state["shooter"]["session_match"] is True
     assert state["shooter_state"]["reason"] == "Shooter handshake not found."
+
+
+def test_replay_mode_ignores_clean_live_prefilter_env(monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "1")
+    window = _png(tmp_path / "window.png", (640, 360))
+    chart = _png(tmp_path / "chart.png", (560, 260))
+    session = {
+        "session_id": "pocket-live-replay",
+        "frame_index": 12,
+        "tracking_enabled": True,
+        "tracking_summary": {"chart_region": {"pixel_bbox": [0, 0, 560, 260]}},
+    }
+    active_objects = [
+        {
+            "overlay_id": "history-locked",
+            "truth_score": 0.82,
+            "overlay": {
+                "overlay_id": "history-locked",
+                "type": "HISTORICAL_REPLAY",
+                "layer": "historical_replay",
+                "side": "SELL",
+                "bbox": [120, 80, 260, 210],
+                "confidence": 0.82,
+                "visible_modes": ["REPLAY", "FULL_HISTORY_READ", "INSPECTOR"],
+            },
+        }
+    ]
+
+    replay_state = build_live_state_v3(
+        session,
+        artifacts={"window": window, "chart": chart},
+        active_objects=active_objects,
+        overlay_mode="REPLAY",
+        now_epoch=110.0,
+    )
+    clean_state = build_live_state_v3(
+        session,
+        artifacts={"window": window, "chart": chart},
+        active_objects=active_objects,
+        overlay_mode="CLEAN_LIVE",
+        now_epoch=110.0,
+    )
+
+    assert replay_state["renderable_count"] == 1
+    assert replay_state["overlays"]["objects"][0]["layer"] == "historical_replay"
+    assert clean_state["renderable_count"] == 1
+    assert clean_state["overlays"]["objects"][0]["layer"] == "historical_replay"
+
+
+def test_unknown_overlay_labels_hidden_from_live_and_collected_for_diagnostics(tmp_path: Path) -> None:
+    window = _png(tmp_path / "window.png", (640, 360))
+    chart = _png(tmp_path / "chart.png", (560, 260))
+    session = {
+        "session_id": "pocket-live-vocab",
+        "frame_index": 12,
+        "tracking_enabled": True,
+        "tracking_summary": {"chart_region": {"pixel_bbox": [0, 0, 560, 260]}},
+    }
+    active_objects = [
+        {
+            "overlay_id": "unknown-leftover",
+            "truth_score": 0.82,
+            "overlay": {
+                "overlay_id": "unknown-leftover",
+                "type": "OLD_NOW_DEBUG_BOX",
+                "side": "SELL",
+                "bbox": [120, 80, 180, 140],
+                "confidence": 0.82,
+                "visible_modes": ["CLEAN_LIVE", "DIAGNOSTICS", "INSPECTOR"],
+                "label": "OLD NOW DEBUG BOX",
+                "display_label": "OLD NOW DEBUG BOX",
+            },
+        }
+    ]
+
+    clean_state = build_live_state_v3(
+        session,
+        artifacts={"window": window, "chart": chart},
+        active_objects=active_objects,
+        overlay_mode="CLEAN_LIVE",
+        now_epoch=110.0,
+    )
+    diagnostics_state = build_live_state_v3(
+        session,
+        artifacts={"window": window, "chart": chart},
+        active_objects=active_objects,
+        overlay_mode="DIAGNOSTICS",
+        now_epoch=110.0,
+    )
+
+    assert clean_state["overlay_count"] == 1
+    assert clean_state["renderable_count"] == 0
+    assert "OLD NOW DEBUG BOX" in clean_state["unknown_or_unmapped_terms"]
+    assert diagnostics_state["renderable_count"] == 1
+    assert diagnostics_state["overlays"]["objects"][0]["display_label"] == "DEBUG RAW DETECTION"
+    assert diagnostics_state["overlays"]["objects"][0]["label"] == "DEBUG RAW DETECTION"
+    assert diagnostics_state["overlays"]["objects"][0]["raw_label"] == "OLD NOW DEBUG BOX"
+    assert diagnostics_state["overlay_vocabulary"]["dictionary_coverage_ok"] is True
+    assert "OLD NOW DEBUG BOX" in diagnostics_state["unknown_or_unmapped_terms"]
 
 
 def test_build_live_state_v3_rejects_market_overlays_for_wrong_broker_source(tmp_path: Path) -> None:
@@ -546,6 +760,8 @@ def test_build_live_state_v3_from_tracker_service_resolves_common_inputs(tmp_pat
     assert state["artifacts"]["window"]["exists"] is True
     assert state["packets"]["study"]["packet_id"] == "study-helper"
     assert state["packets"]["execution"]["exists"] is False
+    assert state["provider_status"]["degraded"] is True
+    assert any(row["source"] == "model_council_execution_packet" for row in state["provider_status"]["degraded_sources"])
     assert state["market_objects"]["active_count"] == 1
     assert state["overlays"]["objects"][0]["type"] == "TARGET_ZONE_BOX"
     assert state["shooter"]["session_match"] is True

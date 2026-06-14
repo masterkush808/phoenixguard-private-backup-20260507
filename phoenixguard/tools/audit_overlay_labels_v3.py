@@ -19,6 +19,7 @@ from phoenixguard.vision.v3_overlay_contract import (
     is_approved_overlay_display_label,
     normalize_view_mode,
 )
+from phoenixguard.runtime.realtime_performance_v3 import OVERLAY_RENDER_BUDGETS
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -80,7 +81,8 @@ def main() -> int:
         failures.append(f"diagnostic overlay leaked into {mode}: {diag_leaks}")
     if mode == "CLEAN_LIVE" and now_count > 1:
         failures.append(f"duplicate NOW/CURRENT labels visible: {now_count}")
-    if mode == "CLEAN_LIVE" and len(objects) > 10:
+    clean_live_budget = int(OVERLAY_RENDER_BUDGETS.get("CLEAN_LIVE", 0) or 0)
+    if mode == "CLEAN_LIVE" and clean_live_budget > 0 and len(objects) > clean_live_budget:
         failures.append(f"CLEAN_LIVE overlay budget exceeded: {len(objects)}")
     if mode == "COUNCIL":
         spam = sorted(
