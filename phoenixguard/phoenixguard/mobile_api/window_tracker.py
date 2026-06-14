@@ -29,7 +29,7 @@ from phoenixguard.core.utils import utc_now_iso
 from phoenixguard.decision.decision_kernel import analyze_decision_kernel
 from phoenixguard.decision.high_frequency_candle_predictor import build_high_frequency_candle_forecast
 from phoenixguard.decision.lstm_candle_sequence_contributor_v3 import build_lstm_candle_sequence_contribution
-from phoenixguard.decision.model_council_v3 import ModelCouncilV3
+from phoenixguard.decision.model_council_v3 import ModelCouncilV3, build_promotion_failure_audit_v3
 from phoenixguard.runtime.instrument_context import (
     build_instrument_context,
     symbol_context_from_instrument_context,
@@ -263,6 +263,11 @@ _EXECUTION_CURRENT_FLOW_MIN_ALIGNMENT = 4
 _EXECUTION_CURRENT_FLOW_STRETCHED_MIN_CLEAR_PATH = 0.72
 _EXECUTION_CURRENT_FLOW_STRETCHED_MIN_TARGET = 0.78
 _EXECUTION_LIVE_MOMENTUM_MIN_VISIBLE_CANDLES = 8
+_PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES = 64
+_PHOENIXGUARD_DEFAULT_SR_MAX_ZONES_PER_ROLE = 4
+_PHOENIXGUARD_DEFAULT_SR_MAX_TOTAL_ZONES = 8
+_PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES = 8
+_PHOENIXGUARD_DEFAULT_SMC_MAX_LIQUIDITY_POOLS = 8
 _EXECUTION_LIVE_MOMENTUM_MIN_SCORE = 0.54
 _EXECUTION_LIVE_MOMENTUM_MIN_ALIGNMENT = 3
 _EXECUTION_OPPOSING_FORCE_REACTION_MIN_RISK = 0.72
@@ -385,20 +390,68 @@ _SESSION_NESTED_DUPLICATE_KEYS = frozenset(
 _DISPLAY_STATE_KEYS = frozenset(
     {
         "session_id",
+        "capture_count",
+        "frame_index",
+        "chart_frame_id",
+        "overlay_frame_id",
+        "full_overlay_frame_id",
+        "model_vote_frame_id",
+        "state_version",
         "display_frame_id",
         "display_capture_epoch",
         "display_published_epoch",
         "last_display_capture_epoch",
         "last_display_published_epoch",
         "last_display_window_path",
+        "last_chart_path",
+        "last_overlay_path",
+        "last_full_overlay_path",
+        "last_display_surface_signature",
+        "last_window_surface_signature",
+        "last_study_surface_signature",
+        "overlay_source_window_signature",
+        "overlay_source_study_signature",
         "display_snapshot_only_v3",
         "display_fast_path_v3",
+        "display_busy_reuse_heartbeat_v3",
+        "display_reuse_only_heartbeat_v3",
+    }
+)
+_DISPLAY_STATE_NONEMPTY_STRING_KEYS = frozenset(
+    {
+        "last_display_window_path",
+        "last_chart_path",
+        "last_overlay_path",
+        "last_full_overlay_path",
+        "last_display_surface_signature",
+        "last_window_surface_signature",
+        "last_study_surface_signature",
+        "overlay_source_window_signature",
+        "overlay_source_study_signature",
     }
 )
 
 
 def _display_state_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: payload[key] for key in _DISPLAY_STATE_KEYS if key in payload}
+    display_state: dict[str, Any] = {}
+    display_surface_signature = str(
+        payload.get("last_display_surface_signature") or payload.get("last_window_surface_signature") or ""
+    ).strip()
+    study_surface_signature = str(payload.get("last_study_surface_signature") or "").strip()
+    for key in _DISPLAY_STATE_KEYS:
+        if key not in payload:
+            continue
+        value = payload[key]
+        if key in _DISPLAY_STATE_NONEMPTY_STRING_KEYS:
+            value_text = str(value or "").strip()
+            if not value_text:
+                continue
+            if key == "overlay_source_window_signature" and display_surface_signature and value_text != display_surface_signature:
+                continue
+            if key == "overlay_source_study_signature" and study_surface_signature and value_text != study_surface_signature:
+                continue
+        display_state[key] = value
+    return display_state
 
 
 def _compact_live_nested_payload(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -530,7 +583,7 @@ def _build_high_frequency_candle_cycle_context(
 ) -> dict[str, Any]:
     profile = _execution_trade_profile(controls.get("trade_profile") or controls.get("execution_profile"))
     enabled = bool(controls.get("high_frequency_enabled", True)) and profile != "SWING"
-    swing_fallback_enabled = bool(controls.get("swing_fallback_enabled", True))
+    swing_fallback_enabled = bool(controls.get("swing_fallback_enabled", False))
     configured_timeframe = str(
         controls.get("high_frequency_timeframe", _HIGH_FREQUENCY_TIMEFRAME) or _HIGH_FREQUENCY_TIMEFRAME
     ).strip().upper()
@@ -2038,6 +2091,10 @@ def _is_tradingview_like_title(title: Any) -> bool:
     return "tradingview" in compact_title or "trading view" in lowered_title or "supercharts" in compact_title
 
 
+class CaptureSurfaceUnavailableError(RuntimeError):
+    """Raised when a matched browser window is visible but does not contain a usable trading surface."""
+
+
 def _capture_looks_like_pocket_option_surface(image: Image.Image) -> bool:
     try:
         width, height = image.size
@@ -2087,12 +2144,35 @@ def _capture_looks_like_pocket_option_surface(image: Image.Image) -> bool:
     return bool(green_pixels >= minimum_pixels and red_pixels >= minimum_pixels)
 
 
+def _capture_looks_like_pocket_option_visible_surface(
+    image: Image.Image,
+    descriptor: Mapping[str, Any] | None = None,
+) -> bool:
+    if _capture_looks_like_pocket_option_surface(image):
+        return True
+    row = _mapping_to_dict(descriptor or {})
+    try:
+        lock = _broker_source_lock_dict_v3(
+            row,
+            image,
+            window_query=row.get("title", row.get("window_query", "")),
+            study_source_expected=True,
+        )
+    except Exception:
+        return False
+    reason_codes = {str(item) for item in cast(Sequence[Any], lock.get("reason_codes", []))}
+    return bool(lock.get("valid", False)) and bool(
+        reason_codes.intersection({"CHART_SOURCE_PIXELS_CONFIRMED", "CHART_STUDY_SOURCE_LOCKED"})
+    )
+
+
 def _broker_source_lock_payload_v3(
     descriptor: Mapping[str, Any],
     window_image: Image.Image,
     *,
     broker_surface: Mapping[str, Any] | None = None,
     window_query: Any = "",
+    study_source_expected: bool = False,
 ) -> dict[str, Any]:
     try:
         width, height = window_image.size
@@ -2123,6 +2203,14 @@ def _broker_source_lock_payload_v3(
             "broker_title_tokens": ["tradingview", "trading view"],
             "broker_url_tokens": ["tradingview.com", "tradingview"],
         }
+    elif study_source_expected:
+        row["expected_broker_source_lock"] = {
+            "source_role": "study",
+            "source_kind": "pocket_option_chart" if _is_pocket_option_query(query_text) or _is_pocket_option_like_title(title) else "visible_chart",
+            "required_browser": "edge",
+            "broker_title_tokens": ["pocket option", "pocketoption", "the most innovative trading platform"],
+            "broker_url_tokens": ["pocketoption.com", "pocketoption"],
+        }
     return row
 
 
@@ -2132,6 +2220,7 @@ def _broker_source_lock_dict_v3(
     *,
     broker_surface: Mapping[str, Any] | None = None,
     window_query: Any = "",
+    study_source_expected: bool = False,
 ) -> dict[str, Any]:
     return build_broker_source_lock_v3(
         _broker_source_lock_payload_v3(
@@ -2139,9 +2228,18 @@ def _broker_source_lock_dict_v3(
             window_image,
             broker_surface=broker_surface,
             window_query=window_query,
+            study_source_expected=study_source_expected,
         ),
         image=window_image,
     ).as_dict()
+
+
+def _broker_source_lock_is_study_only(lock: Mapping[str, Any]) -> bool:
+    reason_codes = [str(item) for item in cast(Sequence[Any], lock.get("reason_codes", []))]
+    if "CHART_STUDY_SOURCE_LOCKED" in reason_codes:
+        return True
+    evidence = _mapping_to_dict(lock.get("evidence", {}))
+    return bool(evidence.get("study_source_expected", False) or evidence.get("chart_source_like", False))
 
 
 def _browser_family(title: Any) -> str:
@@ -2601,10 +2699,7 @@ def _live_window_jpeg_enabled(payload: Mapping[str, Any]) -> bool:
     enabled = str(os.getenv("PHOENIXGUARD_LIVE_WINDOW_JPEG", "1") or "1").strip().lower()
     if enabled in {"0", "false", "off", "no"}:
         return False
-    controls = _normalize_execution_controls(payload.get("execution_controls", {}))
-    return bool(controls.get("live_execution_enabled", False)) or str(
-        controls.get("execution_mode", "shadow") or "shadow"
-    ).strip().lower() == "live"
+    return True
 
 
 def _window_artifact_suffix(payload: Mapping[str, Any]) -> str:
@@ -3380,7 +3475,7 @@ def _default_execution_controls() -> dict[str, Any]:
         "trade_profile": _HIGH_FREQUENCY_TRADE_PROFILE,
         "execution_profile": _HIGH_FREQUENCY_TRADE_PROFILE,
         "high_frequency_enabled": True,
-        "swing_fallback_enabled": True,
+        "swing_fallback_enabled": False,
         "continuous_model_feed_enabled": True,
         "high_frequency_timeframe": _HIGH_FREQUENCY_TIMEFRAME,
         "high_frequency_horizon_candles": _HIGH_FREQUENCY_HORIZON_CANDLES,
@@ -3413,6 +3508,11 @@ def _default_execution_controls() -> dict[str, Any]:
         "min_primary_target_candles": _EXECUTION_MIN_PRIMARY_TARGET_CANDLES,
         "max_primary_target_candles": _EXECUTION_MAX_PRIMARY_TARGET_CANDLES,
         "min_location_sniper_target_candles": 3,
+        "live_max_tracked_candles": _PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES,
+        "support_resistance_max_zones_per_role": _PHOENIXGUARD_DEFAULT_SR_MAX_ZONES_PER_ROLE,
+        "support_resistance_max_total_zones": _PHOENIXGUARD_DEFAULT_SR_MAX_TOTAL_ZONES,
+        "support_resistance_max_significant_zones": _PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES,
+        "smart_money_max_liquidity_pools": _PHOENIXGUARD_DEFAULT_SMC_MAX_LIQUIDITY_POOLS,
         "phoenix_report_interval_sec": 20.0,
     }
 
@@ -3434,7 +3534,7 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     controls["trade_profile"] = trade_profile
     controls["execution_profile"] = trade_profile
     controls["high_frequency_enabled"] = bool(controls.get("high_frequency_enabled", True)) and trade_profile != "SWING"
-    controls["swing_fallback_enabled"] = bool(controls.get("swing_fallback_enabled", True))
+    controls["swing_fallback_enabled"] = bool(controls.get("swing_fallback_enabled", False))
     controls["continuous_model_feed_enabled"] = bool(controls.get("continuous_model_feed_enabled", True))
     controls["high_frequency_timeframe"] = str(
         controls.get("high_frequency_timeframe", _HIGH_FREQUENCY_TIMEFRAME) or _HIGH_FREQUENCY_TIMEFRAME
@@ -3509,6 +3609,71 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     controls["min_location_sniper_target_candles"] = max(
         1,
         int(controls.get("min_location_sniper_target_candles", 3) or 3),
+    )
+    controls["live_max_tracked_candles"] = max(
+        8,
+        min(
+            256,
+            int(
+                controls.get(
+                    "live_max_tracked_candles",
+                    _PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES,
+                )
+                or _PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES
+            ),
+        ),
+    )
+    controls["support_resistance_max_zones_per_role"] = max(
+        2,
+        min(
+            12,
+            int(
+                controls.get(
+                    "support_resistance_max_zones_per_role",
+                    _PHOENIXGUARD_DEFAULT_SR_MAX_ZONES_PER_ROLE,
+                )
+                or _PHOENIXGUARD_DEFAULT_SR_MAX_ZONES_PER_ROLE
+            ),
+        ),
+    )
+    controls["support_resistance_max_total_zones"] = max(
+        4,
+        min(
+            24,
+            int(
+                controls.get(
+                    "support_resistance_max_total_zones",
+                    _PHOENIXGUARD_DEFAULT_SR_MAX_TOTAL_ZONES,
+                )
+                or _PHOENIXGUARD_DEFAULT_SR_MAX_TOTAL_ZONES
+            ),
+        ),
+    )
+    controls["support_resistance_max_significant_zones"] = max(
+        4,
+        min(
+            24,
+            int(
+                controls.get(
+                    "support_resistance_max_significant_zones",
+                    _PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES,
+                )
+                or _PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES
+            ),
+        ),
+    )
+    controls["smart_money_max_liquidity_pools"] = max(
+        4,
+        min(
+            24,
+            int(
+                controls.get(
+                    "smart_money_max_liquidity_pools",
+                    _PHOENIXGUARD_DEFAULT_SMC_MAX_LIQUIDITY_POOLS,
+                )
+                or _PHOENIXGUARD_DEFAULT_SMC_MAX_LIQUIDITY_POOLS
+            ),
+        ),
     )
     controls["min_live_momentum_visible_candles"] = max(
         _EXECUTION_LIVE_MOMENTUM_MIN_VISIBLE_CANDLES,
@@ -4658,6 +4823,11 @@ class WindowsWindowCaptureBackend:
             and str(os.getenv("PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB", "0") or "0").strip().lower()
             not in {"0", "false", "off", "no"}
         )
+        require_pocket_foreground = (
+            pocket_option_window
+            and str(os.getenv("PHOENIXGUARD_POCKET_REQUIRE_FOREGROUND_IMAGEGRAB", "1") or "1").strip().lower()
+            not in {"0", "false", "off", "no"}
+        )
 
         if fast_visible_grab and self._is_windows() and not pocket_option_window:
             try:
@@ -4670,10 +4840,15 @@ class WindowsWindowCaptureBackend:
         if pocket_option_window and hwnd > 0 and self._is_windows():
             if fast_visible_grab and pocket_fast_foreground_grab:
                 try:
-                    self._activate_window_for_visible_capture(hwnd)
-                    live_capture = self._capture_window_imagegrab(descriptor)
-                    if not self._looks_blank(live_capture) and not self._looks_browser_content_blank(live_capture):
-                        return live_capture.convert("RGB")
+                    foreground_ready = self._activate_window_for_visible_capture(hwnd)
+                    if foreground_ready or not require_pocket_foreground:
+                        live_capture = self._capture_window_imagegrab(descriptor)
+                        if (
+                            not self._looks_blank(live_capture)
+                            and not self._looks_browser_content_blank(live_capture)
+                            and _capture_looks_like_pocket_option_visible_surface(live_capture, descriptor)
+                        ):
+                            return live_capture.convert("RGB")
                 except Exception:
                     LOGGER.debug("Pocket Option foreground ImageGrab failed; falling back to PrintWindow.", exc_info=True)
             offscreen = self._capture_window_printwindow(hwnd, descriptor)
@@ -4685,17 +4860,23 @@ class WindowsWindowCaptureBackend:
                     or not self._looks_blank(offscreen)
                 )
                 and not self._looks_browser_content_blank(offscreen)
+                and _capture_looks_like_pocket_option_visible_surface(offscreen, descriptor)
             ):
                 return offscreen.convert("RGB")
             try:
-                self._activate_window_for_visible_capture(hwnd)
-                live_capture = self._capture_window_imagegrab(descriptor)
-                if not self._looks_blank(live_capture) and not self._looks_browser_content_blank(live_capture):
-                    return live_capture.convert("RGB")
+                foreground_ready = self._activate_window_for_visible_capture(hwnd)
+                if foreground_ready or not require_pocket_foreground:
+                    live_capture = self._capture_window_imagegrab(descriptor)
+                    if (
+                        not self._looks_blank(live_capture)
+                        and not self._looks_browser_content_blank(live_capture)
+                        and _capture_looks_like_pocket_option_visible_surface(live_capture, descriptor)
+                    ):
+                        return live_capture.convert("RGB")
             except Exception:
                 LOGGER.debug("Pocket Option live ImageGrab fallback failed.", exc_info=True)
-            if offscreen is not None and not self._looks_blank(offscreen):
-                return offscreen.convert("RGB")
+            if offscreen is not None:
+                raise CaptureSurfaceUnavailableError("Pocket Option capture did not include the broker/chart surface.")
         elif prefer_imagegrab:
             live_capture = self._capture_window_imagegrab(descriptor)
             if not self._looks_blank(live_capture):
@@ -4706,12 +4887,12 @@ class WindowsWindowCaptureBackend:
                 return offscreen.convert("RGB")
         return self._capture_window_imagegrab(descriptor)
 
-    def _activate_window_for_visible_capture(self, hwnd: int) -> None:
+    def _activate_window_for_visible_capture(self, hwnd: int) -> bool:
         if hwnd <= 0 or not self._is_windows():
-            return
+            return False
         enabled = str(os.getenv("PHOENIXGUARD_CAPTURE_ACTIVATE_WINDOW_FALLBACK", "1") or "1").strip().lower()
         if enabled in {"0", "false", "off", "no"}:
-            return
+            return False
         try:
             import ctypes
 
@@ -4733,9 +4914,14 @@ class WindowsWindowCaptureBackend:
                 user32.SetForegroundWindow(hwnd)
             except Exception:
                 pass
-            time.sleep(0.12)
+            time.sleep(0.18)
+            try:
+                return int(user32.GetForegroundWindow()) == int(hwnd)
+            except Exception:
+                return False
         except Exception:
             LOGGER.debug("Window activation before visible capture failed.", exc_info=True)
+            return False
 
     def _capture_window_imagegrab(self, descriptor: Mapping[str, Any]) -> Image.Image:
         bbox = cast(Sequence[Any], descriptor.get("bbox", []))
@@ -6332,6 +6518,16 @@ class PocketOptionBrokerExecutionBackend:
         target_total = int(max(0, target_seconds))
         if bool(current.get("matches", False)):
             return current
+        if str(os.getenv("PHOENIXGUARD_ALLOW_EMERGENCY_EXPIRY_ASSUMPTION", "") or "").strip().lower() not in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            current.setdefault("source", str(current.get("source", "") or "time_field_ocr"))
+            current["assumption_blocked"] = True
+            current["assumption_block_reason"] = "emergency expiry assumption is disabled"
+            return current
         if target_total < _EXECUTION_MIN_LIVE_EXPIRY_SEC or target_total > _EXECUTION_MAX_LIVE_EXPIRY_SEC:
             return current
         if target_total % 60 != 0:
@@ -7348,9 +7544,18 @@ class PhoenixGuardWindowTrackingAdapter:
             if session_payload is not None
             else {}
         )
-        skip_missing_live_market_selector = (
+        live_execution_context = bool(selector_execution_controls.get("live_execution_enabled", False))
+        locked_study_context = bool(
             session_payload is not None
-            and bool(selector_execution_controls.get("live_execution_enabled", False))
+            and (
+                _mapping_to_dict(session_payload).get("_study_focus_region")
+                or _mapping_to_dict(session_payload).get("manual_focus_region")
+                or _mapping_to_dict(session_payload).get("locked_window")
+            )
+        )
+        fast_locked_context = bool(fast_selectors and (live_execution_context or locked_study_context))
+        skip_missing_live_market_selector = (
+            fast_locked_context
             and str(os.getenv("PHOENIXGUARD_LIVE_SKIP_MISSING_MARKET_SELECTOR", "1") or "").strip().lower() not in {"0", "false", "off", "no"}
         )
         previous_tracking: dict[str, Any] = {}
@@ -7393,7 +7598,7 @@ class PhoenixGuardWindowTrackingAdapter:
         mark_study_stage("detect_selectors")
         cached_chart_bbox_enabled = (
             fast_selectors
-            and bool(selector_execution_controls.get("live_execution_enabled", False))
+            and fast_locked_context
             and str(os.getenv("PHOENIXGUARD_LIVE_CACHED_CHART_BBOX", "1") or "").strip().lower() not in {"0", "false", "off", "no"}
         )
         cached_chart_region = _mapping_to_dict(previous_tracking.get("chart_region", previous_tracking.get("display_region", {})))
@@ -7432,7 +7637,7 @@ class PhoenixGuardWindowTrackingAdapter:
         candle_image = chart_image
         candle_scale_x = 1.0
         candle_scale_y = 1.0
-        if fast_selectors and bool(selector_execution_controls.get("live_execution_enabled", False)):
+        if fast_locked_context:
             try:
                 live_candle_max_width = int(os.getenv("PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH", "320") or "320")
             except ValueError:
@@ -7449,15 +7654,31 @@ class PhoenixGuardWindowTrackingAdapter:
             scale_x=candle_scale_x,
             scale_y=candle_scale_y,
         )
-        if fast_selectors and bool(selector_execution_controls.get("live_execution_enabled", False)):
+        if fast_locked_context:
             try:
-                live_max_tracked_candles = int(os.getenv("PHOENIXGUARD_LIVE_MAX_TRACKED_CANDLES", "32") or "32")
+                live_controls = _normalize_execution_controls(
+                    _mapping_to_dict(session_payload.get("execution_controls", {}))
+                    if isinstance(session_payload, Mapping)
+                    else {}
+                )
+                configured_live_max = int(
+                    live_controls.get(
+                        "live_max_tracked_candles",
+                        _PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES,
+                    )
+                    or _PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES
+                )
+                live_max_tracked_candles = int(
+                    os.getenv("PHOENIXGUARD_LIVE_MAX_TRACKED_CANDLES", str(configured_live_max))
+                    or configured_live_max
+                )
             except ValueError:
-                live_max_tracked_candles = 32
+                live_max_tracked_candles = _PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES
             live_max_tracked_candles = max(8, int(live_max_tracked_candles))
             if len(tracked_candles) > live_max_tracked_candles:
                 tracked_candles = tracked_candles[-live_max_tracked_candles:]
         mark_study_stage("extract_candle_tracks")
+        broker_exclusion_boxes = self._chart_space_broker_exclusion_boxes(surface, chart_bbox, session_payload=session_payload)
         tracking_summary, latest_signal = self._build_signal_payloads(
             chart_image,
             chart_region,
@@ -7465,6 +7686,7 @@ class PhoenixGuardWindowTrackingAdapter:
             timeframe_selector,
             market_selector=market_selector,
             session_payload=session_payload,
+            broker_exclusion_boxes=broker_exclusion_boxes,
         )
         mark_study_stage("build_signal_payloads")
         overlay_image = self._render_overlay(surface, chart_bbox, tracking_summary, latest_signal)
@@ -9426,6 +9648,18 @@ class PhoenixGuardWindowTrackingAdapter:
                 sniper_zone = zone
             elif kind == "primary" and not primary_zone:
                 primary_zone = zone
+        if not primary_zone:
+            trigger_window = current_box.get("trigger_window")
+            target_window = current_box.get("target_window")
+            fallback_bbox = trigger_window if isinstance(trigger_window, Sequence) and not isinstance(trigger_window, (str, bytes, bytearray)) else current_box.get("bbox")
+            if isinstance(fallback_bbox, Sequence) and not isinstance(fallback_bbox, (str, bytes, bytearray)) and len(fallback_bbox) >= 4:
+                primary_zone = {
+                    "kind": "primary",
+                    "direction": dominant_side,
+                    "bbox": list(fallback_bbox),
+                    "target_bbox": list(target_window) if isinstance(target_window, Sequence) and not isinstance(target_window, (str, bytes, bytearray)) and len(target_window) >= 4 else [],
+                    "invalidation_y": current_box.get("invalidation_y", sniper_zone.get("invalidation_y")),
+                }
         primary_top = _first_mapping(primary_fit.get("top_matches", []))
         counter_top = _first_mapping(counter_fit.get("top_matches", []))
         primary_matches = _sequence_of_mappings(primary_fit.get("top_matches", []))
@@ -10241,6 +10475,113 @@ class PhoenixGuardWindowTrackingAdapter:
         confidence = _clip01(0.32 + coverage * 1.8)
         return expanded, confidence
 
+    def _chart_space_broker_exclusion_boxes(
+        self,
+        surface: Image.Image,
+        chart_bbox: Sequence[Any],
+        *,
+        session_payload: Mapping[str, Any] | None = None,
+    ) -> list[list[float]]:
+        chart_box = _clip_bbox_to_image(surface.size, chart_bbox)
+        chart_width = max(1, int(chart_box[2] - chart_box[0]))
+        chart_height = max(1, int(chart_box[3] - chart_box[1]))
+        chart_bounds = [0, 0, chart_width, chart_height]
+        rows: list[list[float]] = []
+        seen: set[tuple[int, int, int, int]] = set()
+
+        def append(local_box: Sequence[Any]) -> None:
+            if len(local_box) < 4:
+                return
+            clipped = _clip_bbox_to_bounds(chart_bounds, local_box)
+            width = int(clipped[2] - clipped[0])
+            height = int(clipped[3] - clipped[1])
+            if width < 6 or height < 8:
+                return
+            key = tuple(int(round(float(value))) for value in clipped[:4])
+            if key in seen:
+                return
+            seen.add(key)
+            rows.append([float(value) for value in clipped])
+
+        try:
+            arr = np.asarray(surface.convert("RGB"), dtype=np.uint8)
+            panel_limit = self._detect_order_panel_left_boundary(arr)
+        except Exception:
+            panel_limit = None
+        if panel_limit is not None and int(chart_box[0]) < int(panel_limit) < int(chart_box[2]):
+            pad = max(4, int(round(surface.width * 0.004)))
+            local_left = float(panel_limit - chart_box[0] - pad)
+            append([local_left, 0.0, float(chart_width), float(chart_height)])
+
+        session = _mapping_to_dict(session_payload)
+        broker_surface = _mapping_to_dict(session.get("broker_surface", {}))
+        if not broker_surface:
+            return rows
+        capture_plane = _mapping_to_dict(broker_surface.get("capture_plane", {}))
+        capture_width = int(capture_plane.get("width", 0) or 0)
+        capture_height = int(capture_plane.get("height", 0) or 0)
+        if capture_width <= 0:
+            capture_width = int(surface.width)
+        if capture_height <= 0:
+            capture_height = int(surface.height)
+
+        raw_boxes: list[list[float]] = []
+
+        def add_raw_box(value: Any) -> None:
+            row = _mapping_to_dict(value)
+            raw = row.get("bbox", [])
+            if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)) or len(raw) < 4:
+                return
+            try:
+                x0, y0, x1, y1 = [float(raw[index]) for index in range(4)]
+            except (TypeError, ValueError):
+                return
+            left, right = sorted((x0, x1))
+            top, bottom = sorted((y0, y1))
+            if right <= left or bottom <= top:
+                return
+            if max(abs(left), abs(top), abs(right), abs(bottom)) <= 1.0001:
+                left *= float(capture_width)
+                right *= float(capture_width)
+                top *= float(capture_height)
+                bottom *= float(capture_height)
+            raw_boxes.append([left, top, right, bottom])
+
+        execution_boxes = _mapping_to_dict(broker_surface.get("execution_boxes", {}))
+        for key, value in execution_boxes.items():
+            if str(key) == "popup_controls":
+                for popup_value in _mapping_to_dict(value).values():
+                    add_raw_box(popup_value)
+            else:
+                add_raw_box(value)
+        for key in ("order_panel", "buy_button", "sell_button", "amount_field", "time_field"):
+            add_raw_box(broker_surface.get(key))
+        if not raw_boxes:
+            return rows
+
+        origins: list[tuple[float, float]] = [(float(chart_box[0]), float(chart_box[1]))]
+        study_focus = _mapping_to_dict(session.get("_study_focus_region") or session.get("study_focus_region"))
+        focus_bbox = cast(Sequence[Any], study_focus.get("pixel_bbox", []))
+        if len(focus_bbox) >= 4:
+            try:
+                focus_x = float(focus_bbox[0])
+                focus_y = float(focus_bbox[1])
+                origins.insert(0, (focus_x + float(chart_box[0]), focus_y + float(chart_box[1])))
+            except (TypeError, ValueError):
+                pass
+
+        for raw_box in raw_boxes:
+            for origin_x, origin_y in origins:
+                append(
+                    [
+                        raw_box[0] - origin_x,
+                        raw_box[1] - origin_y,
+                        raw_box[2] - origin_x,
+                        raw_box[3] - origin_y,
+                    ]
+                )
+        return rows
+
     def _detect_order_panel_left_boundary(self, arr: ArrayND) -> int | None:
         try:
             detector = PocketOptionBrokerExecutionBackend()
@@ -10427,9 +10768,13 @@ class PhoenixGuardWindowTrackingAdapter:
         image_size: tuple[int, int],
         *,
         candidate_action: str,
+        max_zones_per_role: int = _PHOENIXGUARD_DEFAULT_SR_MAX_ZONES_PER_ROLE,
+        max_total_zones: int = _PHOENIXGUARD_DEFAULT_SR_MAX_TOTAL_ZONES,
     ) -> list[dict[str, Any]]:
         if len(candles) < 6:
             return []
+        max_zones_per_role = max(1, min(24, int(max_zones_per_role)))
+        max_total_zones = max(2, min(48, int(max_total_zones)))
         width, height = int(image_size[0]), int(image_size[1])
         lows: list[dict[str, float]] = []
         highs: list[dict[str, float]] = []
@@ -10639,11 +10984,33 @@ class PhoenixGuardWindowTrackingAdapter:
                     relevance = "entry_resistance" if role == "resistance" and relation in {"above_price", "at_price"} else "target_support" if role == "support" and relation == "below_price" else "context"
                 else:
                     relevance = "context"
+                broken_after_touch = bool(history_metrics.get("broken_after_touch", False))
+                zone_family = "DEMAND_ZONE" if role == "support" else "SUPPLY_ZONE"
+                liquidity_pool_type = "sell_side_liquidity" if role == "support" else "buy_side_liquidity"
+                role_flip_state = (
+                    "broken_support_watch_resistance_flip"
+                    if role == "support" and broken_after_touch
+                    else "broken_resistance_watch_support_flip"
+                    if role == "resistance" and broken_after_touch
+                    else "unbroken_zone"
+                )
                 rows.append(
                     {
                         "key": f"{role}_{len(rows) + 1}",
                         "role": role,
                         "label": f"{role.upper()} {touch_count}T",
+                        "zone_family": zone_family,
+                        "liquidity_pool_type": liquidity_pool_type,
+                        "liquidity_source": "wick_touch_cluster",
+                        "role_flip_state": role_flip_state,
+                        "zone_stack_id": f"{role}_{int(round(center / max(1.0, merge_band)))}",
+                        "source_rule": "zone_not_exact_price",
+                        "validation_reason": "touch_reaction_recency_unbroken_zone",
+                        "knowledge_tags": [
+                            "SUPPLY_DEMAND_ZONE",
+                            "LIQUIDITY_POOL",
+                            "SUPPORT_RESISTANCE_AS_ZONE",
+                        ],
                         "direction": "BUY" if role == "support" else "SELL",
                         "bbox": [int(round(left)), top, int(round(right)), max(top + 1, bottom)],
                         "line_y": int(round(center)),
@@ -10658,7 +11025,7 @@ class PhoenixGuardWindowTrackingAdapter:
                         "reaction_count": int(history_metrics.get("reaction_count", 0) or 0),
                         "retest_count": int(history_metrics.get("retest_count", 0) or 0),
                         "sweep_count": int(history_metrics.get("sweep_count", 0) or 0),
-                        "broken_after_touch": bool(history_metrics.get("broken_after_touch", False)),
+                        "broken_after_touch": broken_after_touch,
                         "still_significant": bool(history_metrics.get("still_significant", False)),
                         "unbroken_score": round(float(_clip01(history_metrics.get("unbroken_score", 0.0))), 4),
                         "historical_significance": round(float(historical_significance), 4),
@@ -10675,7 +11042,7 @@ class PhoenixGuardWindowTrackingAdapter:
                     }
                 )
             rows.sort(key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
-            return rows[:2]
+            return rows[:max_zones_per_role]
 
         zones = clusters(lows, "support") + clusters(highs, "resistance")
         for role in ("support", "resistance"):
@@ -10685,7 +11052,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 nearest["nearest"] = True
                 nearest["label"] = f"NEAREST {str(nearest.get('label', role.upper()))}"
         zones.sort(key=lambda item: (0 if bool(item.get("nearest", False)) else 1, str(item.get("role", "")), -float(item.get("confidence", 0.0))))
-        return zones[:4]
+        return zones[:max_total_zones]
 
     def _bbox_overlap_ratio(self, first: Any, second: Any) -> float:
         if (
@@ -10742,7 +11109,9 @@ class PhoenixGuardWindowTrackingAdapter:
         zones: Sequence[Mapping[str, Any]],
         *,
         candidate_action: str,
+        max_significant_zones: int = _PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES,
     ) -> dict[str, Any]:
+        max_significant_zones = max(1, min(48, int(max_significant_zones)))
         rows = [_mapping_to_dict(zone) for zone in zones]
         significant = [
             zone
@@ -10782,7 +11151,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "sell_structure_score": round(float(sell_structure), 4),
             "nearest_support": nearest_support,
             "nearest_resistance": nearest_resistance,
-            "significant_zones": significant[:4],
+            "significant_zones": significant[:max_significant_zones],
             "summary": f"{len(significant)} significant S/R zone(s); nearest {nearest_text}.",
         }
 
@@ -10801,7 +11170,11 @@ class PhoenixGuardWindowTrackingAdapter:
         consolidation_score: float,
         continuation_score: float,
         reversal_score: float,
+        max_significant_zones: int = _PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES,
+        max_liquidity_pools: int = _PHOENIXGUARD_DEFAULT_SMC_MAX_LIQUIDITY_POOLS,
     ) -> dict[str, Any]:
+        max_significant_zones = max(1, min(48, int(max_significant_zones)))
+        max_liquidity_pools = max(1, min(48, int(max_liquidity_pools)))
         rows = [dict(item) for item in candles]
         direction = _upper_action(candidate_action)
         if direction not in {"BUY", "SELL"}:
@@ -10814,6 +11187,7 @@ class PhoenixGuardWindowTrackingAdapter:
             sr_context = self._support_resistance_decision_context(
                 support_resistance_zones,
                 candidate_action=candidate_action,
+                max_significant_zones=max_significant_zones,
             )
             return {
                 "dominant_side": "HOLD",
@@ -10959,13 +11333,18 @@ class PhoenixGuardWindowTrackingAdapter:
                 "direction": _upper_action(zone.get("direction", "HOLD")),
                 "label": str(zone.get("label", "") or ""),
                 "key": str(zone.get("key", "") or ""),
+                "zone_family": str(zone.get("zone_family", "") or ""),
+                "liquidity_pool_type": str(zone.get("liquidity_pool_type", "") or ""),
+                "liquidity_source": str(zone.get("liquidity_source", "") or ""),
+                "role_flip_state": str(zone.get("role_flip_state", "") or ""),
+                "entry_relevance": str(zone.get("entry_relevance", "") or ""),
                 "significance_score": _clip01(zone.get("significance_score", zone.get("confidence", 0.0))),
                 "distance_to_latest_norm": _clip01(zone.get("distance_to_latest_norm", 1.0)),
                 "still_significant": bool(zone.get("still_significant", False)),
             }
             for zone in support_resistance_zones
             if bool(zone.get("still_significant", False)) or _clip01(zone.get("significance_score", zone.get("confidence", 0.0))) >= 0.48
-        ][:4]
+        ][:max_liquidity_pools]
         mss_confidence = _clip01(0.40 * reversal_score + 0.30 * float(global_direction != local_direction and local_direction in {"BUY", "SELL"}) + 0.30 * float(local_direction == impulse_direction and local_direction in {"BUY", "SELL"}))
         market_structure_shift = {
             "active": bool(mss_confidence >= 0.48),
@@ -10978,6 +11357,7 @@ class PhoenixGuardWindowTrackingAdapter:
         sr_context = self._support_resistance_decision_context(
             support_resistance_zones,
             candidate_action=candidate_action,
+            max_significant_zones=max_significant_zones,
         )
 
         buy_score = 0.0
@@ -11198,9 +11578,13 @@ class PhoenixGuardWindowTrackingAdapter:
         *,
         market_selector: Mapping[str, Any] | None = None,
         session_payload: Mapping[str, Any] | None = None,
+        broker_exclusion_boxes: Sequence[Sequence[Any]] = (),
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         candles = [dict(item) for item in tracked_candles]
         session_row = _mapping_to_dict(session_payload)
+        execution_controls = _normalize_execution_controls(
+            _mapping_to_dict(session_row.get("execution_controls", {}))
+        )
         frame_index = int(session_row.get("frame_index", session_row.get("display_frame_id", 0)) or 0)
         sequence_id = f"seq_{str(session_row.get('session_id', '') or 'tracker').strip()}_{frame_index}"
         timeframe = str(timeframe_selector.get("value", "") or "").upper()
@@ -11324,6 +11708,20 @@ class PhoenixGuardWindowTrackingAdapter:
             candles,
             chart_image.size,
             candidate_action=candidate_action,
+            max_zones_per_role=int(
+                execution_controls.get(
+                    "support_resistance_max_zones_per_role",
+                    _PHOENIXGUARD_DEFAULT_SR_MAX_ZONES_PER_ROLE,
+                )
+                or _PHOENIXGUARD_DEFAULT_SR_MAX_ZONES_PER_ROLE
+            ),
+            max_total_zones=int(
+                execution_controls.get(
+                    "support_resistance_max_total_zones",
+                    _PHOENIXGUARD_DEFAULT_SR_MAX_TOTAL_ZONES,
+                )
+                or _PHOENIXGUARD_DEFAULT_SR_MAX_TOTAL_ZONES
+            ),
         )
         projection = self._build_projection_payload(
             candles,
@@ -11352,6 +11750,20 @@ class PhoenixGuardWindowTrackingAdapter:
             consolidation_score=consolidation_score,
             continuation_score=continuation_score,
             reversal_score=reversal_score,
+            max_significant_zones=int(
+                execution_controls.get(
+                    "support_resistance_max_significant_zones",
+                    _PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES,
+                )
+                or _PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES
+            ),
+            max_liquidity_pools=int(
+                execution_controls.get(
+                    "smart_money_max_liquidity_pools",
+                    _PHOENIXGUARD_DEFAULT_SMC_MAX_LIQUIDITY_POOLS,
+                )
+                or _PHOENIXGUARD_DEFAULT_SMC_MAX_LIQUIDITY_POOLS
+            ),
         )
         support_resistance_context = _mapping_to_dict(smart_money_context.get("support_resistance", {}))
         smc_adjustment = _mapping_to_dict(smart_money_context.get("decision_adjustment", {}))
@@ -11492,11 +11904,6 @@ class PhoenixGuardWindowTrackingAdapter:
         decision_kernel["lstm_contribution"] = lstm_contribution
         kernel_trade_mode = str(decision_kernel.get("trade_mode", "STAND_ASIDE") or "STAND_ASIDE").upper()
         kernel_candle_side = _upper_action(decision_kernel.get("candle_execution_side", "HOLD"))
-        execution_controls = _normalize_execution_controls(
-            _mapping_to_dict((session_payload or {}).get("execution_controls", {}))
-            if session_payload is not None
-            else {}
-        )
         countertrend_allowed = bool(execution_controls.get("allow_countertrend_scalp", False))
         countertrend_lane = {
             "state": (
@@ -11826,6 +12233,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 tracking_summary,
                 signal,
                 chart_size=chart_image.size,
+                broker_exclusion_boxes=broker_exclusion_boxes,
                 previous_geometry=previous_geometry,
                 debug_enabled=str(os.getenv("PHOENIXGUARD_OVERLAY_DEBUG", "0") or "0").strip().lower()
                 in {"1", "true", "yes", "on"},
@@ -11834,6 +12242,7 @@ class PhoenixGuardWindowTrackingAdapter:
             signal = _mapping_to_dict(geometry_payload.get("latest_signal", signal))
             overlay_geometry = _mapping_to_dict(geometry_payload.get("overlay_geometry", {}))
             tracking_summary["overlay_geometry"] = overlay_geometry
+            tracking_summary["broker_exclusion_boxes"] = [list(item[:4]) for item in broker_exclusion_boxes if len(item) >= 4]
             signal["overlay_geometry"] = overlay_geometry
             signal["support_resistance_zones"] = tracking_summary.get("support_resistance_zones", [])
             # Persist overlay objects to the market registry for traceability
@@ -14250,6 +14659,7 @@ class PhoenixGuardWindowTrackingAdapter:
         projection_view = _mapping_to_dict(tracking_summary.get("projection", {}))
         overlay_geometry = _mapping_to_dict(tracking_summary.get("overlay_geometry", {}))
         layer_visibility = _mapping_to_dict(overlay_geometry.get("layer_visibility", {}))
+        diagnostics_visible = bool(layer_visibility.get("diagnostics", False)) or bool(overlay_geometry.get("debug_enabled", False))
         chart_width = max(1, int(chart_box[2] - chart_box[0]))
         chart_height = max(1, int(chart_box[3] - chart_box[1]))
         chart_radius = max(12, min(20, int(round(min(chart_width, chart_height) * 0.018))))
@@ -14312,6 +14722,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 chart_box=chart_box,
                 offset=(chart_offset_x, chart_offset_y),
                 font=caption_font,
+                require_visible_default=not diagnostics_visible,
             )
         structure_boxes = cast(Sequence[Any], tracking_summary.get("structure_boxes", []))
         for raw_box in structure_boxes:
@@ -14319,6 +14730,8 @@ class PhoenixGuardWindowTrackingAdapter:
             key = str(row.get("key", "") or "")
             layer = str(row.get("layer", "") or "").lower()
             if layer and not bool(layer_visibility.get(layer, True)):
+                continue
+            if not diagnostics_visible and row.get("visible_default") is False:
                 continue
             bbox = cast(Sequence[Any], row.get("bbox", []))
             if len(bbox) < 4:
@@ -14359,12 +14772,15 @@ class PhoenixGuardWindowTrackingAdapter:
         chart_box: Sequence[Any],
         offset: tuple[float, float],
         font: OverlayFont,
+        require_visible_default: bool = True,
     ) -> None:
         chart_bounds = [int(round(float(value))) for value in chart_box[:4]]
         offset_x = float(offset[0])
         offset_y = float(offset[1])
         for raw_zone in zones:
             zone = _mapping_to_dict(raw_zone)
+            if require_visible_default and zone.get("visible_default") is False:
+                continue
             bbox = cast(Sequence[Any], zone.get("bbox", []))
             if len(bbox) < 4:
                 continue
@@ -14390,10 +14806,14 @@ class PhoenixGuardWindowTrackingAdapter:
                 gap=7,
             )
             label = str(zone.get("label", role.upper() or "LEVEL") or "LEVEL")
+            tag_text = f"{label} {float(zone.get('confidence', 0.0) or 0.0):.2f}"
+            tag_width, tag_height = self._overlay_tag_size(draw, tag_text, font=font, padding_x=8, padding_y=3)
+            label_x = max(chart_bounds[0] + 8, min(int(clipped[0]) + 8, chart_bounds[2] - tag_width - 8))
+            label_y = max(chart_bounds[1] + 6, min(line_y - tag_height - 8, chart_bounds[3] - tag_height - 6))
             self._draw_overlay_tag(
                 draw,
-                (chart_bounds[0] + 12, max(chart_bounds[1] + 6, line_y - 28)),
-                f"{label} {float(zone.get('confidence', 0.0) or 0.0):.2f}",
+                (label_x, label_y),
+                tag_text,
                 font=font,
                 fill=(7, 16, 22, 188),
                 outline=_rgba(color, 132),
@@ -15176,6 +15596,7 @@ class ContinuousWindowTrackerService:
         self._signal_theses: dict[str, dict[str, Any]] = {}
         self._active_studies: set[str] = set()
         self._active_study_started_epoch: dict[str, float] = {}
+        self._display_snapshot_started_epoch: dict[str, float] = {}
         self._capture_watchdog_v3 = CaptureWatchdogV3()
         self._last_artifact_prune_epoch: dict[str, float] = {}
         self._resolved_window_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -16121,11 +16542,54 @@ class ContinuousWindowTrackerService:
                     "packet_result": "STUDY_PACKET_PUBLISHED",
                 }
             )
+            audit = build_promotion_failure_audit_v3(
+                packet_id=str(promotion_trace.get("packet_id") or result_payload.get("packet_id") or study_packet.get("packet_id") or ""),
+                candidate_id=str(promotion_trace.get("candidate_id") or result_payload.get("candidate_id") or study_packet.get("candidate_id") or ""),
+                promotion_trace=promotion_trace,
+                sequence_context_readiness=_mapping_to_dict(
+                    result_payload.get("sequence_context_readiness")
+                    or council_payload.get("sequence_context_readiness")
+                    or study_packet.get("sequence_context_readiness")
+                ),
+                execution_lane=_mapping_to_dict(
+                    result_payload.get("execution_lane")
+                    or council_payload.get("execution_lane")
+                    or study_packet.get("execution_lane")
+                    or promotion_trace.get("execution_lane")
+                ),
+                final_score=float(
+                    promotion_trace.get("final_score")
+                    or council_payload.get("final_score")
+                    or result_payload.get("final_score")
+                    or study_packet.get("final_score")
+                    or 0.0
+                ),
+                threshold=float(
+                    promotion_trace.get("threshold")
+                    or council_payload.get("threshold")
+                    or result_payload.get("threshold")
+                    or study_packet.get("threshold")
+                    or 0.0
+                ),
+                timing_mode=str(promotion_trace.get("timing_mode") or council_payload.get("timing_mode") or study_packet.get("timing_mode") or ""),
+                instrument_context=_mapping_to_dict(result_payload.get("instrument_context") or study_packet.get("instrument_context")),
+                packet_result="STUDY_PACKET_PUBLISHED",
+                extra_source_fields={
+                    "active_signal_thesis_id": signal_thesis.get("thesis_id"),
+                    "attempted_side": attempted_side,
+                    "mutation_source": "window_tracker.signal_thesis_countertrend_block",
+                },
+            )
+            promotion_trace["promotion_failure_audit_v3"] = audit
+            council_payload["promotion_failure_audit_v3"] = audit
+            council_payload["promotion_trace"] = promotion_trace
             result_payload["promotion_trace"] = promotion_trace
+            result_payload["promotion_failure_audit_v3"] = audit
             result_payload["block_reason"] = "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK"
             result_payload["packet_result"] = "STUDY_PACKET_PUBLISHED"
             if study_packet:
                 study_packet["promotion_trace"] = promotion_trace
+                study_packet["promotion_failure_audit_v3"] = audit
                 study_packet["block_reason"] = "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK"
                 study_packet["next_required"] = "active thesis invalidation before opposite execution"
                 study_packet["release_condition"] = "confirmed invalidation or pair/timeframe switch"
@@ -16454,12 +16918,29 @@ class ContinuousWindowTrackerService:
                 frame_groups.setdefault(f"{parts[0]}_{parts[1]}", []).append(path)
             if len(frame_groups) <= keep_frames:
                 return
+            protected_groups: set[str] = set()
+            current_payload = _mapping_to_dict(_read_json(artifact_dir.parent / "session.json", {}))
+            for key in (
+                "last_window_path",
+                "last_frame_path",
+                "last_display_window_path",
+                "last_chart_path",
+                "last_overlay_path",
+                "last_full_overlay_path",
+                "last_decision_path",
+            ):
+                raw_path = str(current_payload.get(key, "") or "")
+                if not raw_path:
+                    continue
+                parts = Path(raw_path).name.split("_", 2)
+                if len(parts) >= 3 and parts[0].isdigit():
+                    protected_groups.add(f"{parts[0]}_{parts[1]}")
             ordered = sorted(
                 frame_groups.items(),
                 key=lambda item: int(item[0].split("_", 1)[0]),
                 reverse=True,
             )
-            stale_groups = ordered[keep_frames:]
+            stale_groups = [(group_key, paths) for group_key, paths in ordered[keep_frames:] if group_key not in protected_groups]
             removed = 0
             for _, paths in stale_groups:
                 for path in paths:
@@ -16706,6 +17187,11 @@ class ContinuousWindowTrackerService:
                 0.0,
             ),
             "source_capture_id": str(raw.get("source_capture_id", "") or ""),
+            "last_window_surface_signature": str(raw.get("last_window_surface_signature", "") or ""),
+            "last_display_surface_signature": str(raw.get("last_display_surface_signature", "") or ""),
+            "last_study_surface_signature": str(raw.get("last_study_surface_signature", "") or ""),
+            "overlay_source_window_signature": str(raw.get("overlay_source_window_signature", "") or ""),
+            "overlay_source_study_signature": str(raw.get("overlay_source_study_signature", "") or ""),
             "last_error": str(raw.get("last_error", "") or ""),
             "capture_count": int(raw.get("capture_count", 0) or 0),
             "frame_index": int(raw.get("frame_index", 0) or 0),
@@ -17173,7 +17659,7 @@ class ContinuousWindowTrackerService:
             mode="future" if active_mode == "future" else "predict",
         )
         candidates = {
-            "window": str(payload.get("last_window_path", "") or ""),
+            "window": str(payload.get("last_display_window_path", "") or payload.get("last_window_path", "") or ""),
             "frame": str(payload.get("last_frame_path", "") or ""),
             "chart": str(payload.get("last_chart_path", "") or ""),
             "display-chart": str(payload.get("last_display_chart_path", "") or ""),
@@ -17330,6 +17816,33 @@ class ContinuousWindowTrackerService:
                 LOGGER.exception("Emergency stop failed for tracker session %s.", session_id)
         return stopped
 
+    def _capture_display_snapshot_window(self, descriptor: Mapping[str, Any]) -> Image.Image:
+        fast_visible_enabled = str(
+            os.getenv("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1") or "1"
+        ).strip().lower() not in {"0", "false", "off", "no"}
+        native_fallback_enabled = str(
+            os.getenv("PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK", "0") or "0"
+        ).strip().lower() not in {"0", "false", "off", "no"}
+        fast_capture = getattr(self.capture_backend, "_capture_window_imagegrab", None)
+        if fast_visible_enabled and callable(fast_capture):
+            try:
+                image = cast(Image.Image, fast_capture(descriptor)).convert("RGB")
+                looks_blank = getattr(self.capture_backend, "_looks_blank", None)
+                if callable(looks_blank) and bool(looks_blank(image)):
+                    raise CaptureSurfaceUnavailableError("Display fast visible capture was blank.")
+                looks_content_blank = getattr(self.capture_backend, "_looks_browser_content_blank", None)
+                if callable(looks_content_blank) and bool(looks_content_blank(image)):
+                    raise CaptureSurfaceUnavailableError("Display fast visible capture did not include browser content.")
+                title = str(descriptor.get("title", "") or "")
+                if _is_pocket_option_query(title) and not _capture_looks_like_pocket_option_visible_surface(image, descriptor):
+                    raise CaptureSurfaceUnavailableError("Display fast visible capture did not include Pocket Option pixels.")
+                return image
+            except Exception:
+                if not native_fallback_enabled:
+                    raise
+                LOGGER.debug("Display fast visible capture failed; using native capture.", exc_info=True)
+        return self.capture_backend.capture_window(descriptor).convert("RGB")
+
     def _publish_display_snapshot_only(
         self,
         session_id: str,
@@ -17346,7 +17859,134 @@ class ContinuousWindowTrackerService:
             return {}
         capture_started_epoch = _now_epoch()
         capture_started_iso = _epoch_to_utc_iso(capture_started_epoch)
-        window_image = self.capture_backend.capture_window(descriptor).convert("RGB")
+        try:
+            stale_reset_sec = max(
+                5.0,
+                float(os.getenv("PHOENIXGUARD_DISPLAY_SNAPSHOT_STALE_RESET_SEC", "30.0") or "30.0"),
+            )
+        except ValueError:
+            stale_reset_sec = 30.0
+        reuse_only_enabled = str(
+            os.getenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "1") or "1"
+        ).strip().lower() not in {"0", "false", "off", "no"}
+        if reuse_only_enabled:
+            with self._lock:
+                current = self._load_session_with_display_state(normalized_session_id) or dict(payload)
+                previous_display_path = str(current.get("last_display_window_path", "") or "").strip()
+                if previous_display_path and Path(previous_display_path).is_file():
+                    current_frame = int(current.get("frame_index", current.get("frame_id", 0)) or 0)
+                    current_capture = int(current.get("capture_count", current_frame) or 0)
+                    current_display = int(current.get("display_frame_id", current_frame) or 0)
+                    display_frame_id = max(current_display, current_capture, current_frame) + 1
+                    heartbeat_published_epoch = _now_epoch()
+                    published_iso = _epoch_to_utc_iso(heartbeat_published_epoch)
+                    current.setdefault("frame_index", current_frame)
+                    if current_frame > 0:
+                        current.setdefault("frame_id", current_frame)
+                    current["display_frame_id"] = display_frame_id
+                    current["display_published_epoch"] = heartbeat_published_epoch
+                    current["last_display_published_epoch"] = heartbeat_published_epoch
+                    current["display_snapshot_only_v3"] = True
+                    current["last_display_window_path"] = previous_display_path
+                    surface_signature = str(
+                        current.get("last_display_surface_signature")
+                        or current.get("last_window_surface_signature")
+                        or _mapping_to_dict(current.get("display_fast_path_v3", {})).get("surface_signature")
+                        or ""
+                    )
+                    current["display_fast_path_v3"] = {
+                        "schema_version": "PG_DISPLAY_FAST_PATH_V3",
+                        "reason": "display_reuse_only_heartbeat",
+                        "display_frame_id": display_frame_id,
+                        "capture_count": current_capture,
+                        "capture_epoch": _float_or(
+                            current.get("display_capture_epoch", current.get("last_display_capture_epoch", 0.0)),
+                            0.0,
+                        ),
+                        "published_epoch": heartbeat_published_epoch,
+                        "window_path": previous_display_path,
+                        "surface_signature": surface_signature,
+                        "reused_window_path": True,
+                        "reuse_only_heartbeat": True,
+                    }
+                    current["display_reuse_only_heartbeat_v3"] = {
+                        "schema_version": "PG_DISPLAY_REUSE_ONLY_HEARTBEAT_V1",
+                        "display_frame_id": display_frame_id,
+                        "published_epoch": heartbeat_published_epoch,
+                        "window_path": previous_display_path,
+                    }
+                    current["updated_at"] = published_iso
+                    self._write_display_state(normalized_session_id, current)
+                    self._write_session_event_log(
+                        normalized_session_id,
+                        "display_snapshot_reuse_only_heartbeat",
+                        display_frame_id=display_frame_id,
+                        published_at=published_iso,
+                        window_path=previous_display_path,
+                    )
+                    return dict(current)
+        with self._lock:
+            active_started = float(self._display_snapshot_started_epoch.get(normalized_session_id, 0.0) or 0.0)
+            active_age_sec = max(0.0, capture_started_epoch - active_started) if active_started > 0.0 else 0.0
+            if active_started > 0.0 and active_age_sec < stale_reset_sec:
+                current = self._load_session_with_display_state(normalized_session_id) or dict(payload)
+                current["display_snapshot_busy_v3"] = True
+                current["display_snapshot_busy_since_epoch"] = active_started
+                current["display_snapshot_busy_age_sec"] = round(active_age_sec, 3)
+                heartbeat_enabled = str(
+                    os.getenv("PHOENIXGUARD_DISPLAY_BUSY_REUSE_HEARTBEAT", "1") or "1"
+                ).strip().lower() not in {"0", "false", "off", "no"}
+                previous_display_path = str(current.get("last_display_window_path", "") or "").strip()
+                if heartbeat_enabled and previous_display_path and Path(previous_display_path).is_file():
+                    current_frame = int(current.get("frame_index", current.get("frame_id", 0)) or 0)
+                    current_capture = int(current.get("capture_count", current_frame) or 0)
+                    current_display = int(current.get("display_frame_id", current_frame) or 0)
+                    display_frame_id = max(current_display, current_capture, current_frame) + 1
+                    heartbeat_published_epoch = _now_epoch()
+                    published_iso = _epoch_to_utc_iso(heartbeat_published_epoch)
+                    current.setdefault("frame_index", current_frame)
+                    if current_frame > 0:
+                        current.setdefault("frame_id", current_frame)
+                    current["display_frame_id"] = display_frame_id
+                    current["display_published_epoch"] = heartbeat_published_epoch
+                    current["last_display_published_epoch"] = heartbeat_published_epoch
+                    current["display_snapshot_only_v3"] = True
+                    current["display_busy_reuse_heartbeat_v3"] = {
+                        "schema_version": "PG_DISPLAY_BUSY_REUSE_HEARTBEAT_V1",
+                        "display_frame_id": display_frame_id,
+                        "published_epoch": heartbeat_published_epoch,
+                        "window_path": previous_display_path,
+                        "active_capture_started_epoch": active_started,
+                        "active_capture_age_sec": round(active_age_sec, 3),
+                    }
+                    self._write_display_state(normalized_session_id, current)
+                    self._write_session_event_log(
+                        normalized_session_id,
+                        "display_snapshot_busy_reuse_heartbeat",
+                        display_frame_id=display_frame_id,
+                        published_at=published_iso,
+                        window_path=previous_display_path,
+                        active_capture_started_epoch=active_started,
+                        active_capture_age_sec=round(active_age_sec, 3),
+                    )
+                return dict(current)
+            if active_started > 0.0:
+                self._write_session_event_log(
+                    normalized_session_id,
+                    "display_snapshot_stale_reset",
+                    stale_started_epoch=active_started,
+                    stale_age_sec=round(active_age_sec, 3),
+                    stale_reset_sec=stale_reset_sec,
+                    reason=str(reason or "display_snapshot_only"),
+                )
+            self._display_snapshot_started_epoch[normalized_session_id] = capture_started_epoch
+        try:
+            window_image = self._capture_display_snapshot_window(descriptor)
+        except Exception:
+            with self._lock:
+                if self._display_snapshot_started_epoch.get(normalized_session_id) == capture_started_epoch:
+                    self._display_snapshot_started_epoch.pop(normalized_session_id, None)
+            raise
         with self._lock:
             current = self._load_session_with_display_state(normalized_session_id) or dict(payload)
             current_frame = int(current.get("frame_index", current.get("frame_id", 0)) or 0)
@@ -17356,9 +17996,29 @@ class ContinuousWindowTrackerService:
             capture_count = max(current_capture + 1, display_frame_id)
         artifact_dir = self._session_dir(normalized_session_id) / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{display_frame_id:06d}_{_surface_signature(window_image)}"
-        window_path = artifact_dir / f"{stem}_window{_window_artifact_suffix(payload)}"
-        _encode_window_artifact(window_image, window_path)
+        window_signature = _surface_signature(window_image)
+        reuse_identical_surface = str(
+            os.getenv("PHOENIXGUARD_DISPLAY_REUSE_IDENTICAL_SURFACE", "1") or "1"
+        ).strip().lower() not in {"0", "false", "off", "no"}
+        reused_window_path = False
+        previous_display_path = ""
+        if reuse_identical_surface:
+            with self._lock:
+                current_for_reuse = self._load_session_with_display_state(normalized_session_id) or dict(payload)
+            previous_signature = str(current_for_reuse.get("last_display_surface_signature", "") or "")
+            candidate_path = str(current_for_reuse.get("last_display_window_path", "") or "").strip()
+            if previous_signature == window_signature and candidate_path and Path(candidate_path).is_file():
+                previous_display_path = candidate_path
+        stem = f"{display_frame_id:06d}_{window_signature}"
+        window_path = (
+            Path(previous_display_path)
+            if previous_display_path
+            else artifact_dir / f"{stem}_window{_window_artifact_suffix(payload)}"
+        )
+        if previous_display_path:
+            reused_window_path = True
+        else:
+            _encode_window_artifact(window_image, window_path)
         display_published_epoch = _now_epoch()
         display_published_iso = _epoch_to_utc_iso(display_published_epoch)
         with self._lock:
@@ -17367,6 +18027,8 @@ class ContinuousWindowTrackerService:
             current_capture = int(current.get("capture_count", current_frame) or 0)
             current_display = int(current.get("display_frame_id", current_frame) or 0)
             if current_display >= display_frame_id:
+                if self._display_snapshot_started_epoch.get(normalized_session_id) == capture_started_epoch:
+                    self._display_snapshot_started_epoch.pop(normalized_session_id, None)
                 return dict(current)
             display_frame_id = max(display_frame_id, current_display + 1)
             display_capture_count = max(current_capture, display_frame_id)
@@ -17380,6 +18042,8 @@ class ContinuousWindowTrackerService:
             current["last_display_published_epoch"] = display_published_epoch
             current["display_snapshot_only_v3"] = True
             current["last_display_window_path"] = str(window_path)
+            current["last_display_surface_signature"] = window_signature
+            current["last_window_surface_signature"] = window_signature
             current["locked_window"] = dict(descriptor)
             current["locked_title"] = str(descriptor.get("title", "") or current.get("locked_title", "") or "")
             current["display_fast_path_v3"] = {
@@ -17390,6 +18054,8 @@ class ContinuousWindowTrackerService:
                 "capture_epoch": capture_started_epoch,
                 "published_epoch": display_published_epoch,
                 "window_path": str(window_path),
+                "surface_signature": window_signature,
+                "reused_window_path": reused_window_path,
             }
             self._write_display_state(normalized_session_id, current)
             self._write_session_event_log(
@@ -17401,7 +18067,10 @@ class ContinuousWindowTrackerService:
                 captured_at=capture_started_iso,
                 published_at=display_published_iso,
                 window_path=str(window_path),
+                reused_window_path=reused_window_path,
             )
+            if self._display_snapshot_started_epoch.get(normalized_session_id) == capture_started_epoch:
+                self._display_snapshot_started_epoch.pop(normalized_session_id, None)
             return dict(current)
 
     def capture_once(self, session_id: str, *, display_only: bool = False) -> dict[str, Any]:
@@ -17495,13 +18164,22 @@ class ContinuousWindowTrackerService:
         )
         with self._lock:
             capture_still_busy = normalized_session_id in self._active_studies
+        display_snapshot_busy = bool(
+            fast_after_payload is not None and fast_after_payload.get("display_snapshot_busy_v3")
+        )
+        capture_ok = bool(attempted and (advanced or display_snapshot_busy) and not error_message)
         result = {
             "schema_version": "PG_CAPTURE_ONCE_RESULT_V3",
-            "ok": bool(attempted and advanced and not error_message),
-            "status": "captured" if attempted and advanced and not error_message else ("busy" if capture_still_busy else "failed"),
+            "ok": capture_ok,
+            "status": (
+                "busy"
+                if (display_snapshot_busy or capture_still_busy)
+                else ("captured" if attempted and advanced and not error_message else "failed")
+            ),
             "attempted": bool(attempted),
             "advanced": bool(advanced),
             "busy": bool(capture_still_busy),
+            "display_busy": display_snapshot_busy,
             "duration_ms": round(max(0.0, time.monotonic() - started) * 1000.0, 3),
             "before": {
                 "capture_count": before_capture_count,
@@ -19558,11 +20236,53 @@ class ContinuousWindowTrackerService:
         previous_active_trade_live = bool(previous_active_until > surface_now_epoch)
         selected_actionable = bool(selected.get("actionable", False))
         state = _normalize_broker_execution_state(previous_state)
-        state["enabled"] = bool(controls.get("live_execution_enabled", False))
-        state["mode"] = str(controls.get("execution_mode", "shadow") or "shadow")
+        live_execution_enabled = bool(controls.get("live_execution_enabled", False))
+        execution_mode = str(controls.get("execution_mode", "shadow") or "shadow")
+        state["enabled"] = live_execution_enabled
+        state["mode"] = execution_mode
         side = _upper_action(selected.get("side", "HOLD"))
         lane = str(selected.get("lane", "NONE") or "NONE").upper()
-        if bool(controls.get("live_execution_enabled", False)) and str(controls.get("execution_mode", "shadow") or "shadow") == "live":
+        if not live_execution_enabled:
+            has_previous_surface = bool(
+                previous_surface
+                and (
+                    str(previous_surface.get("broker_surface_hash", "") or "").strip()
+                    or bool(previous_surface.get("controls_ready", False))
+                    or _float_or(previous_surface.get("read_epoch", 0.0), 0.0) > 0.0
+                )
+            )
+            broker_surface = dict(previous_surface) if has_previous_surface else _default_broker_surface_payload(
+                message="Live execution is disabled. Broker control scan skipped; tracker is study-only."
+            )
+            broker_surface["cached"] = has_previous_surface
+            broker_surface["cache_age_sec"] = round(float(previous_surface_age), 3) if has_previous_surface else 0.0
+            broker_surface["scan_skipped"] = True
+            broker_surface["scan_skip_reason"] = "live_execution_disabled"
+            broker_surface["read_epoch"] = _float_or(broker_surface.get("read_epoch", 0.0), 0.0) or surface_now_epoch
+            broker_surface["broker_surface_hash"] = str(
+                broker_surface.get("broker_surface_hash", "") or _surface_signature(window_image)
+            )
+            state["broker_surface"] = broker_surface
+            state["amount"] = "preserve"
+            state["amount_policy"] = _BROKER_AMOUNT_POLICY
+            state["last_attempt_at"] = _now_iso()
+            state["side"] = side
+            state["lane"] = lane
+            state["expiry_seconds"] = 0
+            state["execution_timing"] = _mapping_to_dict(selected.get("execution_timing", {}))
+            state["actionable"] = False
+            state["status"] = "disabled"
+            state["message"] = "Live execution is disabled. Tracker will only report."
+            state["memory_projection"] = state.get("memory_projection", {})
+            state["recent_log"] = self._append_execution_log(
+                state,
+                status="disabled",
+                message=str(state["message"]),
+                side=side,
+                lane=lane,
+            )
+            return broker_surface, _normalize_broker_execution_state(state), None
+        if live_execution_enabled and execution_mode == "live":
             packet = _model_council_packet_from_payload(
                 {
                     "model_council_packet": payload.get("model_council_packet"),
@@ -19801,9 +20521,7 @@ class ContinuousWindowTrackerService:
             state["recent_log"] = self._append_execution_log(state, status=status, message=message, side=side, lane=lane)
             return broker_surface, _normalize_broker_execution_state(state), memory_projection
 
-        if not bool(controls.get("live_execution_enabled", False)):
-            return block("disabled", "Live execution is disabled. Tracker will only report.")
-        if str(controls.get("execution_mode", "shadow") or "shadow") == "live":
+        if execution_mode == "live":
             packet = _model_council_packet_from_payload(
                 {
                     "model_council_packet": payload.get("model_council_packet"),
@@ -20430,6 +21148,51 @@ class ContinuousWindowTrackerService:
             return False
         return isinstance(self.capture_backend, WindowsWindowCaptureBackend)
 
+    def _mark_capture_surface_unavailable(self, session_id: str, message: str) -> None:
+        now_epoch = _now_epoch()
+        now_iso = _epoch_to_utc_iso(now_epoch)
+        with self._lock:
+            payload = _mapping_to_dict(_read_json(self._session_path(session_id), {}))
+            if not payload:
+                return
+            tracking_enabled = bool(payload.get("tracking_enabled", False))
+            tracking_summary = _mapping_to_dict(payload.get("tracking_summary", {}))
+            if not tracking_summary:
+                tracking_summary = _default_tracking_summary(message=message)
+            tracking_summary["source_capture_blocked_v3"] = {
+                "schema_version": "PG_SOURCE_CAPTURE_BLOCKED_V3",
+                "status": "WAITING_FOR_SOURCE_PIXELS",
+                "message": message,
+                "blocked_epoch": now_epoch,
+                "preserved_frame_index": int(payload.get("frame_index", 0) or 0),
+                "preserved_overlay_frame_id": int(payload.get("overlay_frame_id", 0) or 0),
+            }
+            tracking_summary["source_capture_status"] = "WAITING_FOR_SOURCE_PIXELS"
+            tracking_summary["summary"] = str(tracking_summary.get("summary") or message)
+            latest_signal = _mapping_to_dict(payload.get("latest_signal", {}))
+            if not latest_signal:
+                latest_signal = _default_signal(message=message, status="waiting_for_broker_surface")
+            latest_signal["status"] = "waiting_for_broker_surface"
+            latest_signal["summary"] = message
+            latest_signal["timestamp"] = now_iso
+            latest_signal["published_at"] = now_iso
+            latest_signal["published_epoch"] = now_epoch
+            latest_signal["signal_age_sec"] = 0.0
+            payload["status"] = "waiting_for_broker_surface" if tracking_enabled else str(payload.get("status", "ready") or "ready")
+            payload["last_error"] = message
+            payload["tracking_summary"] = tracking_summary
+            payload["latest_signal"] = latest_signal
+            payload["updated_at"] = now_iso
+            self._save_session(payload)
+            self._write_session_event_log(
+                session_id,
+                "capture_surface_unavailable",
+                status=payload["status"],
+                message=message,
+                frame_index=int(payload.get("frame_index", 0) or 0),
+                overlay_frame_id=int(payload.get("overlay_frame_id", 0) or 0),
+            )
+
     def _capture_and_analyze(self, session_id: str, *, force: bool = False) -> bool:
         if not self._begin_study_gate(session_id):
             LOGGER.debug("Study gate skipped overlapping capture for session %s.", session_id)
@@ -20437,6 +21200,11 @@ class ContinuousWindowTrackerService:
         try:
             self._capture_and_analyze_claimed(session_id, force=force)
             return True
+        except CaptureSurfaceUnavailableError as exc:
+            message = str(exc) or "Pocket Option capture did not include the broker/chart surface."
+            LOGGER.warning("Capture source unavailable for session %s: %s", session_id, message)
+            self._mark_capture_surface_unavailable(session_id, message)
+            return False
         finally:
             self._finish_study_gate(session_id)
 
@@ -20524,6 +21292,7 @@ class ContinuousWindowTrackerService:
         payload["locked_window"] = dict(descriptor)
         payload["locked_title"] = str(descriptor.get("title", "") or payload.get("locked_title", "") or "")
         window_image = self.capture_backend.capture_window(descriptor).convert("RGB")
+        window_signature = _surface_signature(window_image)
         mark_stage("capture_window")
         surface_image, focus_meta = _crop_normalized_bbox(window_image, cast(Sequence[Any], manual_focus.get("normalized_bbox", [])))
         study_surface_image, study_focus_meta = self._derive_study_surface(
@@ -20531,6 +21300,7 @@ class ContinuousWindowTrackerService:
             selected_surface=surface_image,
             selected_focus_meta=focus_meta,
         )
+        study_surface_signature = _surface_signature(study_surface_image)
         mark_stage("derive_study_surface")
         with self._lock:
             fresh_for_index = self._load_session_with_display_state(str(payload["session_id"]))
@@ -20555,7 +21325,7 @@ class ContinuousWindowTrackerService:
         session_dir = self._session_dir(str(payload["session_id"]))
         artifact_dir = session_dir / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{frame_index:06d}_{_surface_signature(study_surface_image)}"
+        stem = f"{frame_index:06d}_{study_surface_signature}"
         window_path = artifact_dir / f"{stem}_window{_window_artifact_suffix(payload)}"
         chart_path = artifact_dir / f"{stem}_chart.png"
         overlay_path = artifact_dir / f"{stem}_overlay.png"
@@ -20585,6 +21355,9 @@ class ContinuousWindowTrackerService:
                 display_payload["last_display_window_path"] = str(window_path)
                 display_payload["last_window_path"] = str(window_path)
                 display_payload["last_frame_path"] = str(window_path)
+                display_payload["last_window_surface_signature"] = window_signature
+                display_payload["last_display_surface_signature"] = window_signature
+                display_payload["last_study_surface_signature"] = study_surface_signature
                 display_payload["display_fast_path_v3"] = {
                     "schema_version": "PG_DISPLAY_FAST_PATH_V3",
                     "reason": "capture_and_analyze_display_publish",
@@ -20593,6 +21366,7 @@ class ContinuousWindowTrackerService:
                     "capture_epoch": capture_started_epoch,
                     "published_epoch": display_published_epoch,
                     "window_path": str(window_path),
+                    "surface_signature": window_signature,
                 }
                 display_payload["updated_at"] = _epoch_to_utc_iso(display_published_epoch)
                 self._write_display_state(str(payload["session_id"]), display_payload)
@@ -20616,18 +21390,29 @@ class ContinuousWindowTrackerService:
                             "capture_epoch": capture_started_epoch,
                             "published_epoch": display_published_epoch,
                             "window_path": str(window_path),
+                            "surface_signature": window_signature,
                         },
                         "last_display_window_path": str(window_path),
                         "last_window_path": str(window_path),
                         "last_frame_path": str(window_path),
+                        "last_window_surface_signature": window_signature,
+                        "last_display_surface_signature": window_signature,
+                        "last_study_surface_signature": study_surface_signature,
                     }
                 )
         mark_stage("display_artifact_write")
+        source_lock_controls = _normalize_execution_controls(payload.get("execution_controls", {}))
+        source_lock_study_source_expected = not (
+            bool(source_lock_controls.get("live_execution_enabled", False))
+            and str(source_lock_controls.get("execution_mode", "shadow") or "shadow").strip().lower() == "live"
+        )
         broker_source_lock = _broker_source_lock_dict_v3(
             descriptor,
             window_image,
             window_query=payload.get("window_query", ""),
+            study_source_expected=source_lock_study_source_expected,
         )
+        broker_source_study_only = _broker_source_lock_is_study_only(broker_source_lock)
         broker_source_summary = {
             "lock_id": str(broker_source_lock.get("viewport_fingerprint") or broker_source_lock.get("broker_pixel_fingerprint") or ""),
             "valid": bool(broker_source_lock.get("valid", False)),
@@ -20636,6 +21421,8 @@ class ContinuousWindowTrackerService:
             "url_valid": bool(_mapping_to_dict(broker_source_lock.get("evidence", {})).get("candidates", [])),
             "title_valid": True,
             "pixel_fingerprint_valid": bool(broker_source_lock.get("valid", False)),
+            "study_source_only": broker_source_study_only,
+            "broker_click_safe": bool(broker_source_lock.get("valid", False)) and not broker_source_study_only,
             "reason": str(broker_source_lock.get("reason", "") or ""),
         }
         broker_guard_invalid = self._pocket_option_surface_guard_enabled(payload) and not bool(broker_source_lock.get("valid", False))
@@ -20711,6 +21498,9 @@ class ContinuousWindowTrackerService:
                 guarded_payload["last_display_published_epoch"] = display_published_epoch
                 guarded_payload.pop("display_snapshot_only_v3", None)
                 guarded_payload.pop("display_fast_path_v3", None)
+                guarded_payload["last_window_surface_signature"] = window_signature
+                guarded_payload["last_display_surface_signature"] = window_signature
+                guarded_payload["last_study_surface_signature"] = study_surface_signature
                 guarded_payload["source_capture_id"] = (
                     f"{payload.get('session_id', session_id)}:{capture_count}:{frame_index}:"
                     f"{int(capture_started_epoch * 1000.0)}"
@@ -20747,7 +21537,10 @@ class ContinuousWindowTrackerService:
         study: TrackingStudy | None = None
         error_message = ""
         try:
-            study = self.tracking_adapter.study(study_surface_image, session_payload=payload)
+            study_payload = dict(payload)
+            study_payload["_study_focus_region"] = dict(study_focus_meta)
+            study_payload["_selected_focus_region"] = dict(focus_meta)
+            study = self.tracking_adapter.study(study_surface_image, session_payload=study_payload)
             mark_stage("tracker_study")
         except Exception as exc:
             LOGGER.exception("Tracker study failed for session %s.", session_id)
@@ -20863,6 +21656,14 @@ class ContinuousWindowTrackerService:
                 "source": "tracking_adapter",
             }
             latest_signal = dict(study.latest_signal)
+        tracking_summary["broker_source_lock"] = broker_source_lock
+        tracking_summary["broker_source"] = dict(broker_source_summary)
+        latest_signal["broker_source_lock"] = broker_source_lock
+        latest_signal["broker_source"] = dict(broker_source_summary)
+        latest_signal["broker_click_safe"] = bool(broker_source_summary.get("broker_click_safe", False))
+        latest_signal["broker_source_status"] = str(broker_source_lock.get("status", "NOT_CLICK_SAFE") or "NOT_CLICK_SAFE")
+        payload["broker_source_lock"] = broker_source_lock
+        payload["broker_source"] = dict(broker_source_summary)
         if broker_guard_invalid and allow_chart_study_when_guard_blocked:
             tracking_summary["broker_source_lock"] = broker_source_lock
             tracking_summary["broker_source"] = dict(broker_source_summary)
@@ -20966,6 +21767,11 @@ class ContinuousWindowTrackerService:
                 visual_ready_payload["display_published_epoch"] = display_published_epoch
                 visual_ready_payload.pop("display_snapshot_only_v3", None)
                 visual_ready_payload.pop("display_fast_path_v3", None)
+                visual_ready_payload["last_window_surface_signature"] = window_signature
+                visual_ready_payload["last_display_surface_signature"] = window_signature
+                visual_ready_payload["last_study_surface_signature"] = study_surface_signature
+                visual_ready_payload["overlay_source_window_signature"] = window_signature
+                visual_ready_payload["overlay_source_study_signature"] = study_surface_signature
                 visual_ready_payload["chart_frame_id"] = chart_artifact_frame_id
                 visual_ready_payload["overlay_frame_id"] = overlay_artifact_frame_id
                 visual_ready_payload["full_overlay_frame_id"] = full_overlay_artifact_frame_id
@@ -21005,6 +21811,8 @@ class ContinuousWindowTrackerService:
                 chart_frame_id=chart_artifact_frame_id,
                 overlay_frame_id=overlay_artifact_frame_id,
                 full_overlay_frame_id=full_overlay_artifact_frame_id,
+                window_surface_signature=window_signature,
+                study_surface_signature=study_surface_signature,
             )
             mark_stage("visual_overlay_publish")
         model_council_result = self._publish_model_council_v3_state(
@@ -21013,7 +21821,7 @@ class ContinuousWindowTrackerService:
             latest_signal=latest_signal,
             frame_index=frame_index,
             capture_count=capture_count,
-            input_frame_hash=_surface_signature(study_surface_image),
+            input_frame_hash=study_surface_signature,
             capture_started_epoch=capture_started_epoch,
         )
         mark_stage("model_council")
@@ -21146,6 +21954,13 @@ class ContinuousWindowTrackerService:
             )
             if not str(fast_blocked_surface.get("scan_skip_reason", "") or "").strip():
                 fast_blocked_surface["scan_skip_reason"] = "model_council_packet_not_executable"
+            fast_blocked_surface["broker_source_lock"] = broker_source_lock
+            fast_blocked_surface["broker_source"] = dict(broker_source_summary)
+            if broker_source_study_only:
+                fast_blocked_surface["state"] = "study_source_only"
+                fast_blocked_surface["study_source_only"] = True
+                fast_blocked_surface["broker_click_safe"] = False
+                fast_blocked_surface["controls_ready"] = False
             fast_blocked_state = _normalize_broker_execution_state(payload.get("broker_execution_state", {}))
             fast_blocked_state.update(
                 {
@@ -21219,6 +22034,11 @@ class ContinuousWindowTrackerService:
             visual_payload["display_published_epoch"] = display_published_epoch
             visual_payload.pop("display_snapshot_only_v3", None)
             visual_payload.pop("display_fast_path_v3", None)
+            visual_payload["last_window_surface_signature"] = window_signature
+            visual_payload["last_display_surface_signature"] = window_signature
+            visual_payload["last_study_surface_signature"] = study_surface_signature
+            visual_payload["overlay_source_window_signature"] = window_signature
+            visual_payload["overlay_source_study_signature"] = study_surface_signature
             visual_payload["chart_frame_id"] = chart_artifact_frame_id
             visual_payload["overlay_frame_id"] = overlay_artifact_frame_id
             visual_payload["full_overlay_frame_id"] = full_overlay_artifact_frame_id
@@ -21334,9 +22154,11 @@ class ContinuousWindowTrackerService:
             window_image,
             broker_surface=broker_surface,
             window_query=payload.get("window_query", ""),
+            study_source_expected=source_lock_study_source_expected,
         )
         broker_source_guard = _mapping_to_dict(broker_source_lock.get("surface_guard", {}))
         broker_source_evidence = _mapping_to_dict(broker_source_lock.get("evidence", {}))
+        broker_source_study_only = _broker_source_lock_is_study_only(broker_source_lock)
         broker_source = {
             "lock_id": str(
                 broker_source_lock.get("viewport_fingerprint")
@@ -21350,8 +22172,15 @@ class ContinuousWindowTrackerService:
             "url_valid": True,
             "title_valid": bool(broker_source_evidence.get("candidates", [])),
             "pixel_fingerprint_valid": bool(broker_source_lock.get("broker_pixel_fingerprint") or broker_source_lock.get("broker_control_fingerprint")),
+            "study_source_only": broker_source_study_only,
+            "broker_click_safe": bool(broker_source_lock.get("valid", False)) and not broker_source_study_only,
             "reason": str(broker_source_lock.get("reason", "") or ""),
         }
+        if broker_source_study_only:
+            broker_surface["state"] = "study_source_only"
+            broker_surface["study_source_only"] = True
+            broker_surface["broker_click_safe"] = False
+            broker_surface["controls_ready"] = False
         broker_surface["broker_source_lock"] = broker_source_lock
         broker_surface["broker_source"] = dict(broker_source)
         payload["broker_source_lock"] = broker_source_lock
@@ -21476,6 +22305,11 @@ class ContinuousWindowTrackerService:
             payload["display_published_epoch"] = display_published_epoch
             payload.pop("display_snapshot_only_v3", None)
             payload.pop("display_fast_path_v3", None)
+            payload["last_window_surface_signature"] = window_signature
+            payload["last_display_surface_signature"] = window_signature
+            payload["last_study_surface_signature"] = study_surface_signature
+            payload["overlay_source_window_signature"] = window_signature
+            payload["overlay_source_study_signature"] = study_surface_signature
             payload["chart_frame_id"] = chart_artifact_frame_id
             payload["overlay_frame_id"] = overlay_artifact_frame_id
             payload["full_overlay_frame_id"] = full_overlay_artifact_frame_id
@@ -21748,6 +22582,7 @@ class ContinuousWindowTrackerService:
             for row in self.capture_backend.list_windows(query)
             if _window_descriptor_is_capture_usable(row)
         ]
+        stale_locked_hwnd_for_query = False
         if locked_hwnd > 0:
             for row in windows:
                 if int(row.get("hwnd", 0) or 0) == locked_hwnd:
@@ -21760,16 +22595,21 @@ class ContinuousWindowTrackerService:
                         self._remember_window_descriptor(session_id, row)
                         return dict(row)
                     if _is_pocket_option_query(query) and not row_matches_query:
-                        return None
+                        stale_locked_hwnd_for_query = True
+                        locked_hwnd = 0
+                        locked_title = ""
+                        locked_family = ""
+                        break
                     restored = self._restore_locked_window_descriptor(locked_hwnd)
                     if _window_descriptor_is_capture_usable(restored):
                         self._remember_window_descriptor(session_id, restored)
                         return restored
                     break
-            restored = self._restore_locked_window_descriptor(locked_hwnd)
-            if _window_descriptor_is_capture_usable(restored):
-                self._remember_window_descriptor(session_id, restored)
-                return restored
+            if not stale_locked_hwnd_for_query:
+                restored = self._restore_locked_window_descriptor(locked_hwnd)
+                if _window_descriptor_is_capture_usable(restored):
+                    self._remember_window_descriptor(session_id, restored)
+                    return restored
         if windows:
             self._remember_window_descriptor(session_id, windows[0])
             return dict(windows[0])
@@ -21865,8 +22705,20 @@ class ContinuousWindowTrackerService:
             return merged
         if state_display_frame == base_display_frame and state_published_epoch + 0.001 < base_published_epoch:
             return merged
+        state_display_signature = str(
+            display_state.get("last_display_surface_signature") or display_state.get("last_window_surface_signature") or ""
+        ).strip()
+        state_study_signature = str(display_state.get("last_study_surface_signature") or "").strip()
         for key, value in display_state.items():
             if key in _DISPLAY_STATE_KEYS:
+                if key in _DISPLAY_STATE_NONEMPTY_STRING_KEYS:
+                    value_text = str(value or "").strip()
+                    if not value_text:
+                        continue
+                    if key == "overlay_source_window_signature" and state_display_signature and value_text != state_display_signature:
+                        continue
+                    if key == "overlay_source_study_signature" and state_study_signature and value_text != state_study_signature:
+                        continue
                 merged[key] = value
         return merged
 

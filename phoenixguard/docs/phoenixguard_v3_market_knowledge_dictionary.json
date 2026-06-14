@@ -1,0 +1,157 @@
+{
+  "schema_version": "PG_V3_MARKET_KNOWLEDGE_DICTIONARY_V1",
+  "purpose": "Codable PhoenixGuard V3 market-knowledge vocabulary for supply/demand, trendlines, candlestick filters, replay explanation, and future VLM narration.",
+  "authority_rules": {
+    "execution_authority": "This dictionary explains and scores context only. Execution authority remains PG_EXECUTION_PACKET_V3 and ShooterActionSequencerV2.",
+    "visible_labels": "Operator-visible overlay labels must still come from docs/phoenixguard_v3_visual_dictionary.json.",
+    "vlm_role": "The VLM explains PhoenixGuard state in English. It must not invent independent predictions or create unapproved labels."
+  },
+  "source_material": [
+    {
+      "file": "book knowledge/HLZ - Market Structure And Powerful Setups.pdf",
+      "focus": "Market structure, stop hunts, order blocks, BMS/SMS/RTO, liquidity pools, AMD session logic."
+    },
+    {
+      "file": "book knowledge/FOREX BLACK BOOK.pdf",
+      "focus": "Support/resistance as zones, channels, swing highs/lows, Fibonacci and pivot discipline."
+    },
+    {
+      "file": "book knowledge/secrets revealed $10 000 cost price-1-1.pdf",
+      "focus": "Outer/inner trendlines, valid touches, candle obstruction, entry timing, confirmation and invalidation."
+    },
+    {
+      "file": "book knowledge/The power of Japanese candlestick charts _ advanced filtering techniques for trading stocks, futures and Forex ( PDFDrive ).pdf",
+      "focus": "Candlestick morphology, reversal/continuation patterns, confirmation, filtering and pattern reliability."
+    },
+    {
+      "file": "book knowledge/zlib.pub_the-art-of-currency-trading-a-professionals-guide-to-the-foreign-exchange-market.pdf",
+      "focus": "FX market structure, liquidity, session risk, support/resistance causes, candle setups and risk context."
+    }
+  ],
+  "concept_aliases": {
+    "BMS": ["market_structure_shift", "break_in_market_structure", "close_through_swing"],
+    "SMS": ["failure_swing", "structure_shift_candidate"],
+    "SH": ["stop_hunt", "liquidity_sweep"],
+    "TURTLE_SOUP": ["liquidity_sweep_reversal", "stop_hunt_reclaim"],
+    "RTO": ["retest", "order_block_retest"],
+    "OB": ["order_block", "supply_zone", "demand_zone"],
+    "BSL": ["buy_side_liquidity", "resistance_liquidity_pool"],
+    "SSL": ["sell_side_liquidity", "support_liquidity_pool"],
+    "OTE": ["retracement_zone", "optimal_trade_entry"],
+    "AMD": ["accumulation_phase", "manipulation_phase", "distribution_phase"]
+  },
+  "support_resistance": {
+    "principle": "Support and resistance are zones, not exact prices.",
+    "zone_strength_fields": [
+      "touch_count",
+      "reaction_count",
+      "retest_count",
+      "sweep_count",
+      "last_touch_age_candles",
+      "unbroken_score",
+      "historical_significance",
+      "significance_score",
+      "distance_to_latest_norm"
+    ],
+    "zone_metadata_fields": [
+      "zone_family",
+      "liquidity_pool_type",
+      "liquidity_source",
+      "role_flip_state",
+      "zone_stack_id",
+      "entry_relevance",
+      "knowledge_tags"
+    ],
+    "anti_patterns": [
+      "Do not treat exact-line S/R as sufficient.",
+      "Do not enter from a zone without path room to opposing force.",
+      "Do not count a broken stale zone as live authority without reclaim or role-flip evidence."
+    ]
+  },
+  "trendlines": {
+    "principle": "Major trendlines use obvious outer swing anchors; inner trendlines use local pivots for timing only.",
+    "validity_fields": [
+      "trendline_scope",
+      "trendline_role",
+      "anchor_candles",
+      "touch_points",
+      "touch_count",
+      "wick_probe_count",
+      "line_obstruction_count",
+      "body_cross_fraction",
+      "close_distance_norm",
+      "significant_close",
+      "touch_quality",
+      "breach_state",
+      "validation_reason"
+    ],
+    "states": ["ACTIVE", "SOFT_BREACHED", "INVALIDATED", "HISTORICAL"],
+    "anti_patterns": [
+      "Reject lines that do not touch both anchors.",
+      "Reject lines that cut through intervening candles between anchors.",
+      "Do not let an inner trendline override a nearby opposing major line.",
+      "Treat wick probes differently from body-close breaches."
+    ]
+  },
+  "candlestick_filters": {
+    "principle": "Candlestick patterns are tactical evidence and require location, trend context and confirmation.",
+    "score_shape": "morphology_score * location_score * trend_alignment_score * confirmation_score * filter_score * freshness_decay",
+    "primitive_fields": [
+      "real_body",
+      "upper_shadow",
+      "lower_shadow",
+      "range",
+      "body_range_ratio",
+      "upper_wick_body_ratio",
+      "lower_wick_body_ratio",
+      "doji_body_pct",
+      "long_body_zscore",
+      "midpoint_penetration"
+    ],
+    "pattern_roles": ["REVERSAL", "CONTINUATION", "EXHAUSTION", "INDECISION", "FAKEOUT", "RECLAIM", "CONFIRMED", "UNCONFIRMED", "INVALIDATED"],
+    "anti_patterns": [
+      "Do not trade a candle pattern in the middle of range without stronger confirmation.",
+      "Do not render candle pattern names as live labels unless they are intentionally approved.",
+      "Do not fade overbought or oversold conditions blindly."
+    ]
+  },
+  "fx_context": {
+    "fields": [
+      "pair_liquidity_class",
+      "session_phase",
+      "spread_pips",
+      "avg_range_pips",
+      "range_spread_ratio",
+      "news_pivot",
+      "jump_risk_score",
+      "correlation_alignment_score",
+      "crosswinds"
+    ],
+    "risk_notes": [
+      "Prefer liquid pairs for short-term overlays.",
+      "Downweight thin liquidity windows and high jump-risk periods.",
+      "Correlation is valid only when logical drivers agree."
+    ]
+  },
+  "replay": {
+    "principle": "Replay objects explain historical would-have behavior and never provide live execution authority.",
+    "required_story_fields": [
+      "replay_sequence",
+      "replay_action",
+      "story",
+      "parent_label",
+      "line_points",
+      "touch_points",
+      "target",
+      "invalidation"
+    ],
+    "metrics": [
+      "false_executable_rate",
+      "missed_good_entry_rate",
+      "trap_avoidance_rate",
+      "mfe_mae_ratio",
+      "outcome_by_setup",
+      "walk_forward_split_id"
+    ]
+  }
+}

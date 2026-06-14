@@ -38,6 +38,7 @@ lightly>=1.5.22
 pytorch-lightning-bolts>=0.3.2
 pytest>=9.0.0
 pytest-asyncio>=1.0.0
+pyright>=1.1.390
 keyboard>=0.13.5
 git+https://github.com/huggingface/pytorch-image-models.git
 git+https://github.com/openai/CLIP.git

@@ -370,13 +370,15 @@ def _validated_trendline(
     pivots = _pivot_rows(scoped, role=role, window=1 if local_only else 2)
     if len(pivots) < 2:
         return None
+    average_range = (
+        sum(max(1.0, float(row.get("bottom", 0.0)) - float(row.get("top", 0.0))) for row in scoped)
+        / max(1, len(scoped))
+    )
     tolerance = max(
         2.0,
         min(
             8.0,
-            sum(max(1.0, float(row.get("bottom", 0.0)) - float(row.get("top", 0.0))) for row in scoped)
-            / max(1, len(scoped))
-            * 0.28,
+            average_range * 0.28,
         ),
     )
     best: dict[str, Any] | None = None
@@ -420,7 +422,11 @@ def _validated_trendline(
             if crossed:
                 continue
             last_x = float(scoped[-1]["center_x"])
-            end_point = [last_x, _line_y_at(first_point, second_point, last_x)]
+            latest_row = scoped[-1]
+            latest_line_y = _line_y_at(first_point, second_point, last_x)
+            latest_center_y = float(latest_row.get("center_y", latest_line_y))
+            close_distance_norm = min(9.999, abs(latest_center_y - latest_line_y) / max(1.0, average_range))
+            end_point = [last_x, latest_line_y]
             score = (abs(float(second["center_x"]) - float(first["center_x"])) * 0.01) + touches
             candidate = {
                 "role": role,
@@ -428,8 +434,17 @@ def _validated_trendline(
                 "touch_points": [first_point, second_point],
                 "anchor_candles": [anchor_start, anchor_end],
                 "touch_count": int(max(2, touches)),
+                "wick_probe_count": int(max(0, touches - 2)),
+                "line_obstruction_count": 0,
+                "body_cross_fraction": 0.0,
+                "close_distance_norm": round(float(close_distance_norm), 4),
+                "significant_close": False,
+                "trendline_scope": "LOCAL" if local_only else "MAJOR",
+                "touch_quality": "VALIDATED",
+                "breach_state": "ACTIVE",
                 "confidence": _clip01(0.58 + min(0.30, touches * 0.06)),
                 "trendline_validation": "first_two_touches_no_candle_cross",
+                "validation_reason": "anchors_touch_and_no_intervening_candle_obstruction",
                 "skill_gate": "TRENDLINE_NO_CANDLE_CROSS_V1",
                 "_score": score,
             }
@@ -473,11 +488,11 @@ def _derive_trendline_overlays(candles: Sequence[Mapping[str, Any]]) -> list[dic
         overlays.append(
             {
                 **inner,
-            "type": "INNER_TRENDLINE",
-            "label": "INNER TRENDLINE",
-            "display_label": "INNER TRENDLINE",
-            "direction": "BUY" if latest_direction == "support" else "SELL",
-            "role": "inner_trendline",
+                "type": "INNER_TRENDLINE",
+                "label": "INNER TRENDLINE",
+                "display_label": "INNER TRENDLINE",
+                "direction": "BUY" if latest_direction == "support" else "SELL",
+                "role": "inner_trendline",
                 "trendline_role": latest_direction,
                 "anchor_type": "LINE",
                 "bounds": _point_pair_bounds(inner["points"]),

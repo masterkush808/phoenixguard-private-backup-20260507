@@ -184,6 +184,21 @@ def test_visual_dictionary_artifact_covers_runtime_approved_labels() -> None:
     assert guide_path.exists()
 
 
+def test_market_knowledge_dictionary_is_linked_without_becoming_label_authority() -> None:
+    visual_dictionary_path = _REPO / "docs" / "phoenixguard_v3_visual_dictionary.json"
+    visual_dictionary = json.loads(visual_dictionary_path.read_text(encoding="utf-8"))
+    knowledge_path = _REPO / visual_dictionary["knowledge_dictionary"]
+    knowledge = json.loads(knowledge_path.read_text(encoding="utf-8"))
+
+    assert knowledge["schema_version"] == "PG_V3_MARKET_KNOWLEDGE_DICTIONARY_V1"
+    assert knowledge["authority_rules"]["visible_labels"].startswith("Operator-visible overlay labels")
+    assert knowledge["concept_aliases"]["BMS"][0] == "market_structure_shift"
+    assert "zone_family" in knowledge["support_resistance"]["zone_metadata_fields"]
+    assert "trendline_scope" in knowledge["trendlines"]["validity_fields"]
+    assert "morphology_score" in knowledge["candlestick_filters"]["score_shape"]
+    assert set(knowledge["concept_aliases"]).isdisjoint(set(visual_dictionary["approved_labels"]))
+
+
 def test_unmapped_display_terms_are_diagnostics_only() -> None:
     diagnostic = normalize_v3_overlay_object(
         _base_overlay(
