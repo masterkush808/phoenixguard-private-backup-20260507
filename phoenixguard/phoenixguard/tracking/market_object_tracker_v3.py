@@ -364,8 +364,8 @@ def _validated_trendline(
     role: str,
     local_only: bool = False,
 ) -> dict[str, Any] | None:
-    scoped = list(rows[-min(10, len(rows)) :]) if local_only else list(rows)
-    if len(scoped) < 2:
+    scoped = list(rows[-min(12, len(rows)) :]) if local_only else list(rows)
+    if len(scoped) < (5 if local_only else 4):
         return None
     pivots = _pivot_rows(scoped, role=role, window=1 if local_only else 2)
     if len(pivots) < 2:
@@ -374,19 +374,18 @@ def _validated_trendline(
         sum(max(1.0, float(row.get("bottom", 0.0)) - float(row.get("top", 0.0))) for row in scoped)
         / max(1, len(scoped))
     )
-    tolerance = max(
-        2.0,
-        min(
-            8.0,
-            average_range * 0.28,
-        ),
-    )
+    touch_tolerance = max(1.5, min(5.0 if local_only else 6.0, average_range * (0.16 if local_only else 0.20)))
+    break_tolerance = max(touch_tolerance * 1.65, average_range * 0.34)
+    min_anchor_dx = max(14.0, average_range * (0.55 if local_only else 0.75))
+    min_anchor_dy = max(2.0, average_range * (0.12 if local_only else 0.10))
+    latest_index = int(scoped[-1]["index"])
     best: dict[str, Any] | None = None
     for first_index in range(0, len(pivots) - 1):
         for second_index in range(first_index + 1, len(pivots)):
             first = pivots[first_index]
             second = pivots[second_index]
-            if abs(float(second["center_x"]) - float(first["center_x"])) < 16.0:
+            anchor_dx = abs(float(second["center_x"]) - float(first["center_x"]))
+            if anchor_dx < min_anchor_dx:
                 continue
             first_point = [
                 float(first["center_x"]),
@@ -396,56 +395,83 @@ def _validated_trendline(
                 float(second["center_x"]),
                 float(second["bottom" if role == "support" else "top"]),
             ]
+            anchor_dy = float(second_point[1]) - float(first_point[1])
+            if role == "support" and anchor_dy >= -min_anchor_dy:
+                continue
+            if role == "resistance" and anchor_dy <= min_anchor_dy:
+                continue
             anchor_start = int(min(first["index"], second["index"]))
             anchor_end = int(max(first["index"], second["index"]))
-            crossed = False
-            touches = 0
+            if anchor_end <= anchor_start:
+                continue
+            line_obstruction_count = 0
+            wick_probe_count = 0
+            body_cross_count = 0
+            evaluated_after_anchor = 0
+            touch_indices = {anchor_start, anchor_end}
+            significant_close = False
             for row in scoped:
                 row_index = int(row["index"])
-                if row_index < anchor_start or row_index > int(scoped[-1]["index"]):
+                if row_index < anchor_start or row_index > latest_index:
                     continue
                 line_y = _line_y_at(first_point, second_point, float(row["center_x"]))
+                top = float(row["top"])
+                bottom = float(row["bottom"])
+                center_y = float(row.get("center_y", (top + bottom) * 0.5))
                 if role == "support":
-                    distance = float(row["bottom"]) - line_y
-                    if distance > tolerance:
-                        crossed = True
-                        break
-                    if abs(distance) <= tolerance * 1.4:
-                        touches += 1
+                    wick_distance = bottom - line_y
+                    body_break_distance = center_y - line_y
                 else:
-                    distance = line_y - float(row["top"])
-                    if distance > tolerance:
-                        crossed = True
+                    wick_distance = line_y - top
+                    body_break_distance = line_y - center_y
+                if anchor_start < row_index < anchor_end and wick_distance > touch_tolerance:
+                    line_obstruction_count += 1
+                    break
+                if row_index > anchor_end:
+                    evaluated_after_anchor += 1
+                    if body_break_distance > break_tolerance:
+                        significant_close = True
+                        body_cross_count += 1
                         break
-                    if abs(distance) <= tolerance * 1.4:
-                        touches += 1
-            if crossed:
+                    if wick_distance > touch_tolerance:
+                        wick_probe_count += 1
+                    if body_break_distance > touch_tolerance:
+                        body_cross_count += 1
+                if abs(wick_distance) <= touch_tolerance * 1.2:
+                    touch_indices.add(row_index)
+            if line_obstruction_count or significant_close:
                 continue
             last_x = float(scoped[-1]["center_x"])
             latest_row = scoped[-1]
             latest_line_y = _line_y_at(first_point, second_point, last_x)
             latest_center_y = float(latest_row.get("center_y", latest_line_y))
             close_distance_norm = min(9.999, abs(latest_center_y - latest_line_y) / max(1.0, average_range))
+            if local_only and close_distance_norm > 2.25:
+                continue
             end_point = [last_x, latest_line_y]
-            score = (abs(float(second["center_x"]) - float(first["center_x"])) * 0.01) + touches
+            touches = max(2, len(touch_indices))
+            body_cross_fraction = body_cross_count / max(1, evaluated_after_anchor)
+            score = (anchor_dx * 0.012) + touches + (0.75 / max(0.35, close_distance_norm + 0.35) if local_only else 0.0)
             candidate = {
                 "role": role,
                 "points": [first_point, end_point],
                 "touch_points": [first_point, second_point],
                 "anchor_candles": [anchor_start, anchor_end],
-                "touch_count": int(max(2, touches)),
-                "wick_probe_count": int(max(0, touches - 2)),
-                "line_obstruction_count": 0,
-                "body_cross_fraction": 0.0,
+                "touch_count": int(touches),
+                "wick_probe_count": int(wick_probe_count),
+                "line_obstruction_count": int(line_obstruction_count),
+                "body_cross_fraction": round(float(body_cross_fraction), 4),
                 "close_distance_norm": round(float(close_distance_norm), 4),
-                "significant_close": False,
+                "significant_close": bool(significant_close),
                 "trendline_scope": "LOCAL" if local_only else "MAJOR",
                 "touch_quality": "VALIDATED",
                 "breach_state": "ACTIVE",
-                "confidence": _clip01(0.58 + min(0.30, touches * 0.06)),
-                "trendline_validation": "first_two_touches_no_candle_cross",
-                "validation_reason": "anchors_touch_and_no_intervening_candle_obstruction",
-                "skill_gate": "TRENDLINE_NO_CANDLE_CROSS_V1",
+                "confidence": _clip01(0.60 + min(0.28, touches * 0.055) - min(0.08, wick_probe_count * 0.015)),
+                "trendline_validation": "wick_anchor_no_obstruction_no_significant_close",
+                "validation_reason": (
+                    "diagonal_wick_anchors_touch_no_price_obstruction_between_points_and_no_significant_close"
+                ),
+                "skill_gate": "TRENDLINE_WICK_ANCHOR_NO_OBSTRUCTION_V2",
                 "_score": score,
             }
             if best is None or float(candidate["_score"]) > float(best.get("_score", 0.0)):
@@ -483,8 +509,21 @@ def _derive_trendline_overlays(candles: Sequence[Mapping[str, Any]]) -> list[dic
                 }
             )
     latest_direction = "support" if float(rows[-1]["center_y"]) <= float(rows[max(0, len(rows) - 4)]["center_y"]) else "resistance"
-    inner = _validated_trendline(rows, role=latest_direction, local_only=True)
+    inner_candidates: list[dict[str, Any]] = []
+    for role in ("support", "resistance"):
+        candidate = _validated_trendline(rows, role=role, local_only=True)
+        if candidate:
+            candidate = dict(candidate)
+            candidate["_inner_score"] = (
+                float(candidate.get("touch_count", 0.0) or 0.0)
+                - float(candidate.get("close_distance_norm", 9.0) or 9.0)
+                + (0.75 if role == latest_direction else 0.0)
+            )
+            inner_candidates.append(candidate)
+    inner = max(inner_candidates, key=lambda item: float(item.get("_inner_score", 0.0))) if inner_candidates else None
     if inner:
+        inner.pop("_inner_score", None)
+        latest_direction = str(inner.get("role") or latest_direction)
         overlays.append(
             {
                 **inner,

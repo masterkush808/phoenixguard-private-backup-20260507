@@ -6,6 +6,7 @@
     "visible_labels": "Operator-visible overlay labels must still come from docs/phoenixguard_v3_visual_dictionary.json.",
     "vlm_role": "The VLM explains PhoenixGuard state in English. It must not invent independent predictions or create unapproved labels."
   },
+  "candlestick_glossary": "docs/phoenixguard_v3_candlestick_glossary.json",
   "source_material": [
     {
       "file": "book knowledge/HLZ - Market Structure And Powerful Setups.pdf",
@@ -42,6 +43,7 @@
   },
   "support_resistance": {
     "principle": "Support and resistance are zones, not exact prices.",
+    "visual_boundary": "Horizontal areas render as SUPPLY_ZONE or DEMAND_ZONE overlays. Support/resistance words may remain metadata, but visible horizontal boxes must display SUPPLY or DEMAND.",
     "zone_strength_fields": [
       "touch_count",
       "reaction_count",
@@ -70,6 +72,15 @@
   },
   "trendlines": {
     "principle": "Major trendlines use obvious outer swing anchors; inner trendlines use local pivots for timing only.",
+    "visual_boundary": "Diagonal support/resistance renders as SUPPORT_TRENDLINE, RESISTANCE_TRENDLINE, or INNER_TRENDLINE. Horizontal support/resistance must not be rendered as a trendline.",
+    "book_rules": [
+      "A support trendline connects at least two higher lows or troughs.",
+      "A resistance trendline connects at least two lower highs or peaks.",
+      "The line must touch the selected anchors.",
+      "There must be no price obstruction between point 1 and point 2.",
+      "A significant body close beyond the line invalidates the active line.",
+      "Inner trendlines are local timing deciders and must not override the major outer line."
+    ],
     "validity_fields": [
       "trendline_scope",
       "trendline_role",

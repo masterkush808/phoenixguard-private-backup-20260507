@@ -39,6 +39,7 @@ def _base_overlay(**overrides):
         "type": "SNIPER_ENTRY_BOX",
         "side": "SELL",
         "source_agent": "model_council_v3",
+        "layer": "trigger_zones",
         "frame_id": 42,
         "sequence_id": "seq-42",
         "chart_transform_id": "ct-42",
@@ -189,14 +190,49 @@ def test_market_knowledge_dictionary_is_linked_without_becoming_label_authority(
     visual_dictionary = json.loads(visual_dictionary_path.read_text(encoding="utf-8"))
     knowledge_path = _REPO / visual_dictionary["knowledge_dictionary"]
     knowledge = json.loads(knowledge_path.read_text(encoding="utf-8"))
+    candlestick_path = _REPO / knowledge["candlestick_glossary"]
+    candlesticks = json.loads(candlestick_path.read_text(encoding="utf-8"))
 
     assert knowledge["schema_version"] == "PG_V3_MARKET_KNOWLEDGE_DICTIONARY_V1"
     assert knowledge["authority_rules"]["visible_labels"].startswith("Operator-visible overlay labels")
     assert knowledge["concept_aliases"]["BMS"][0] == "market_structure_shift"
     assert "zone_family" in knowledge["support_resistance"]["zone_metadata_fields"]
+    assert knowledge["support_resistance"]["visual_boundary"].startswith("Horizontal areas render")
     assert "trendline_scope" in knowledge["trendlines"]["validity_fields"]
+    assert "no price obstruction" in " ".join(knowledge["trendlines"]["book_rules"])
     assert "morphology_score" in knowledge["candlestick_filters"]["score_shape"]
+    assert candlesticks["schema_version"] == "PG_V3_CANDLESTICK_GLOSSARY_V1"
+    assert "bullish_engulfing" in candlesticks["double_candle_patterns"]["reversal"]
     assert set(knowledge["concept_aliases"]).isdisjoint(set(visual_dictionary["approved_labels"]))
+
+
+def test_horizontal_zones_keep_supply_demand_labels_not_trendline_labels() -> None:
+    demand = normalize_v3_overlay_object(
+        _base_overlay(
+            type="DEMAND_ZONE",
+            layer="supply_demand",
+            label="NEAREST SUPPORT 4T",
+            display_label="NEAREST SUPPORT 4T",
+            visible_modes=["SUPPLY_DEMAND", "ACTIVE_CONTEXT"],
+        ),
+        strict=False,
+    )
+    supply = normalize_v3_overlay_object(
+        _base_overlay(
+            type="SUPPLY_ZONE",
+            side="SELL",
+            layer="supply_demand",
+            label="NEAREST RESISTANCE 5T",
+            display_label="NEAREST RESISTANCE 5T",
+            visible_modes=["SUPPLY_DEMAND", "ACTIVE_CONTEXT"],
+        ),
+        strict=False,
+    )
+
+    assert demand["display_label"] == "DEMAND"
+    assert supply["display_label"] == "SUPPLY"
+    assert demand["type"] == "DEMAND_ZONE"
+    assert supply["type"] == "SUPPLY_ZONE"
 
 
 def test_unmapped_display_terms_are_diagnostics_only() -> None:
@@ -272,6 +308,18 @@ def test_contract_reports_missing_required_fields_and_strict_mode_raises() -> No
     with pytest.raises(V3OverlayContractError) as exc:
         normalize_v3_overlay_object(raw)
     assert "overlay_id" in str(exc.value)
+
+
+def test_live_modes_reject_unfiltered_raw_overlays_missing_renderer_contract() -> None:
+    raw = {"type": "SNIPER_ENTRY_BOX", "bbox": [1, 2, 3, 4], "confidence": 0.7}
+
+    reasons = overlay_rejection_reasons(raw, "CLEAN_LIVE")
+
+    assert "missing_live_render_field:layer" in reasons
+    assert "missing_live_render_field:frame_id" in reasons
+    assert "missing_live_render_field:chart_transform_id" in reasons
+    assert "missing_live_render_field:truth_score" in reasons
+    assert overlay_is_visible(raw, "CLEAN_LIVE") is False
 
 
 def test_non_strict_normalization_accepts_v2_aliases_rect_and_anchors() -> None:

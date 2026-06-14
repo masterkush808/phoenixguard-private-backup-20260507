@@ -2712,7 +2712,7 @@
       },
       surface: {
         zoom: 1,
-        zoomMode: "manual",
+        zoomMode: "fit-plane",
         dragging: false,
         startX: 0,
         startY: 0,
@@ -4354,9 +4354,12 @@
 
     function highFrequencyForecast(session = {}, signal = {}, tracking = {}) {
       const kernel = kernelPayload(signal, tracking);
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
       const payload = objectOrEmpty(
         signal.two_candle_study
         || tracking.two_candle_study
+        || liveState.two_candle_study
+        || session.two_candle_study
         || kernel.two_candle_study
         || signal.high_frequency_forecast
         || tracking.high_frequency_forecast
@@ -4368,6 +4371,22 @@
       );
       const hasForecast = forecastCandleRows(payload).length > 0 || String(payload.status || "").toUpperCase() === "READY";
       return hasForecast ? payload : derivedHighFrequencyForecast(session, signal, tracking, kernel);
+    }
+
+    function lstmStudyPayload(session = {}, signal = {}, tracking = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const kernel = kernelPayload(signal, tracking);
+      const forecast = objectOrEmpty(signal.high_frequency_forecast || tracking.high_frequency_forecast || kernel.high_frequency_forecast);
+      const twoCandle = objectOrEmpty(signal.two_candle_study || tracking.two_candle_study || liveState.two_candle_study || session.two_candle_study);
+      return objectOrEmpty(
+        liveState.lstm_contribution
+        || session.lstm_contribution
+        || signal.lstm_contribution
+        || tracking.lstm_contribution
+        || forecast.lstm_contribution
+        || kernel.lstm_contribution
+        || twoCandle.lstm_contribution
+      );
     }
 
     function forecastCandleRows(forecast = {}) {
@@ -5690,10 +5709,7 @@
       const rawFallbackVisible = state.mode === "overlay" && (visibleKind === "window-fallback" || visibleKind === "chart-fallback");
       const payloadModeMatches = payloadMatchesSelectedOverlayMode(session);
       const bridgeSelectedModeWhileHydrating = !diagnosticsViewActive() && !payloadModeMatches;
-      const backendOverlayObjects = []
-        .concat(Array.isArray(session.overlay_objects) ? session.overlay_objects : [])
-        .concat(Array.isArray(liveState.overlay_objects) ? liveState.overlay_objects : [])
-        .concat(Array.isArray(overlayPayload.objects) ? overlayPayload.objects : []);
+      const backendOverlayObjects = Array.isArray(overlayPayload.objects) ? overlayPayload.objects : [];
       const overlayFrameReady = backendOverlayFrameAligned(session);
       const backendObjectsAvailable = backendOverlayObjects.length > 0 && backendObjectOverlayReady(session);
       if (!diagnosticsViewActive() && (rawFallbackVisible || (!backendObjectsAvailable && state.surface.overlayStale) || (!backendObjectsAvailable && !overlayFrameReady))) {
@@ -5743,12 +5759,12 @@
           return renderableBoxes;
         }
       }
+      if (!diagnosticsViewActive()) {
+        return [];
+      }
       const lockedBoxes = lockedOverlayBoxes(session);
       if (lockedBoxes.length) {
         return lockedBoxes;
-      }
-      if (!diagnosticsViewActive()) {
-        return boxes;
       }
       const addExecutionBox = (key, box) => {
         if (!box || !Array.isArray(box.bbox)) {
@@ -6748,6 +6764,25 @@
         ["Tactical read", story.label, story.tactical],
         ["Invalidation", story.thesisActive ? "Guardrail" : "Pending", story.invalidation],
       ];
+      if (state.overlayMode === "two_candle_study") {
+        rows.push(
+          ["Study mode", clean(microForecast.status, "READING").toUpperCase(), clean(microForecast.display_as, "TEXT_AND_BANDS_ONLY")],
+          ["Synthetic candles", microForecast.do_not_render_synthetic_candles === false ? "ALLOWED" : "BLOCKED", "Two-candle mode renders study text and bands only."]
+        );
+      }
+      if (state.overlayMode === "lstm_study") {
+        const signal = objectOrEmpty(session.latest_signal);
+        const tracking = objectOrEmpty(session.tracking_summary);
+        const lstm = lstmStudyPayload(session, signal, tracking);
+        const continuation = Number(lstm.continuation_probability ?? lstm.p_continuation ?? lstm.continuation ?? 0);
+        const reversal = Number(lstm.reversal_probability ?? lstm.p_reversal ?? lstm.reversal ?? 0);
+        const pullback = Number(lstm.pullback_first_risk ?? lstm.pullback_risk ?? lstm.p_pullback_first ?? 0);
+        rows.push(
+          ["LSTM next 1", forecastDirection(lstm.next_1_bias || lstm.next_candle_bias || lstm.side), clean(lstm.interpretation || lstm.summary, "Diagnostic sequence evidence.")],
+          ["Continuation", Number.isFinite(continuation) ? formatPct(continuation, 0) : "--", `reversal ${Number.isFinite(reversal) ? formatPct(reversal, 0) : "--"} | pullback ${Number.isFinite(pullback) ? formatPct(pullback, 0) : "--"}`],
+          ["Freshness", lstm.fresh === false ? "STALE" : "FRESH", `blocker ${lstm.blocker === true ? "yes" : "no"}`]
+        );
+      }
       if (diagnosticsViewActive()) {
         const signal = objectOrEmpty(session.latest_signal);
         const tracking = objectOrEmpty(session.tracking_summary);

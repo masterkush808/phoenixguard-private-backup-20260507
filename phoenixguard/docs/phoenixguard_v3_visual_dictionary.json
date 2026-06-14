@@ -97,6 +97,8 @@
     "DIAGNOSTICS": "Raw, rejected, stale, transform, scene graph, collision, and unknown terms."
   },
   "label_definitions": {
+    "SUPPLY": "Horizontal supply zone or supply area. It is not a diagonal resistance trendline.",
+    "DEMAND": "Horizontal demand zone or demand area. It is not a diagonal support trendline.",
     "SUPPORT TRENDLINE": "Validated wick-to-wick support line. It must not cut through candles after the anchor touches.",
     "RESISTANCE TRENDLINE": "Validated wick-to-wick resistance line. It must not cut through candles after the anchor touches.",
     "INNER TRENDLINE": "Local microstructure trendline from recent candles. It supports the active pullback or continuation read.",

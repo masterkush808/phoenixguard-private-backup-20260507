@@ -130,9 +130,8 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "renderableCount > 0" in dashboard
     assert "staleStatus === \"PASS\"" in dashboard
     assert "backendOverlayObjects" in dashboard
-    assert "session.overlay_objects" in dashboard
-    assert "liveState.overlay_objects" in dashboard
     assert "overlayPayload.objects" in dashboard
+    assert "const backendOverlayObjects = Array.isArray(overlayPayload.objects) ? overlayPayload.objects : [];" in dashboard
     assert "_backendOverlay: true" in dashboard
     assert "function rememberOverlayLock" in dashboard
     assert "function lockedOverlayBoxes" in dashboard
@@ -190,7 +189,7 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "const lockedBoxes = lockedOverlayBoxes(session);" in dashboard
     assert "backendMode: backendOverlayMode(state.overlayMode)" in dashboard
     assert "payloadMatchesSelectedOverlayMode(session)" in dashboard
-    assert "if (!diagnosticsViewActive()) {\n        return boxes;\n      }" in dashboard
+    assert "if (!diagnosticsViewActive()) {\n        return [];\n      }" in dashboard
     assert "clearModeScopedOverlayDom" in dashboard
     assert "updateLayerControls();\n      renderHotspots();\n      refreshLiveVisualStateForMode(state.overlayMode);" in dashboard
     assert "useLockedWindowOverlayPlane" in dashboard

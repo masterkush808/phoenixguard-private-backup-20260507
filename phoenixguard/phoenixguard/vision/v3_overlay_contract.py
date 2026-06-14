@@ -43,6 +43,18 @@ DEFAULTABLE_REQUIRED_FIELDS: frozenset[str] = frozenset(
         "layer",
     }
 )
+LIVE_RENDER_REQUIRED_FIELDS: tuple[str, ...] = (
+    "type",
+    "layer",
+    "frame_id",
+    "chart_transform_id",
+    "coordinate_mode",
+    "bounds",
+    "visible_modes",
+    "ttl_ms",
+    "truth_score",
+    "source_agent",
+)
 
 OVERLAY_TYPES: tuple[str, ...] = (
     "CHART_BOUNDS",
@@ -1409,6 +1421,8 @@ def normalize_overlay_type(raw: Any, *, layer: Any = "", role: Any = "", side: A
     normalized = _canonical_token(raw)
     if normalized in TYPE_ALIASES:
         return TYPE_ALIASES[normalized]
+    if normalized and normalized not in OVERLAY_TYPES:
+        return "DEBUG_RAW_DETECTION"
     layer_value = _normalized_layer_value(layer) or str(layer or "").strip().lower()
     role_value = str(role or "").strip().lower()
     if role_value in {"support_trend", "support_trendline", "support_line", "trendline_support"}:
@@ -1558,12 +1572,8 @@ def short_label_for_overlay(overlay_type: Any, side: Any = "", label: Any = "") 
     if overlay_type_value == "INVALIDATION_BOX":
         return "INVALID"
     if overlay_type_value == "SUPPLY_ZONE":
-        if raw_label_token in {"RESISTANCE", "RESISTANCE_ZONE"}:
-            return "RESISTANCE"
         return "SUPPLY"
     if overlay_type_value == "DEMAND_ZONE":
-        if raw_label_token in {"SUPPORT", "SUPPORT_ZONE"}:
-            return "SUPPORT"
         return "DEMAND"
     if overlay_type_value == "OPPOSING_FORCE":
         return "OPPOSING FORCE"
@@ -1917,12 +1927,22 @@ def overlay_rejection_reasons(
     layer_overrides: Mapping[str, bool] | None = None,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
+    normalized_mode = normalize_view_mode(mode)
+    if normalized_mode in LIVE_VIEW_MODES:
+        missing_live_fields: list[str] = []
+        for field in LIVE_RENDER_REQUIRED_FIELDS:
+            if field == "bounds":
+                if _raw_bounds(overlay)[0] is None:
+                    missing_live_fields.append(field)
+            elif field not in overlay or overlay.get(field) in (None, "", []):
+                missing_live_fields.append(field)
+        if missing_live_fields:
+            return tuple(f"missing_live_render_field:{field}" for field in missing_live_fields)
     raw_has_created_at = "created_at_ms" in overlay or "created_epoch_ms" in overlay
     try:
         normalized = normalize_v3_overlay_object(overlay, strict=False)
     except V3OverlayContractError as exc:
         return (f"invalid_contract:{str(exc)}",)
-    normalized_mode = normalize_view_mode(mode)
     label_texts = {
         _canonical_token(normalized.get(key))
         for key in ("label", "role", "reason", "overlay_id", "object_id", "track_id")

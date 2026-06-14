@@ -7,6 +7,7 @@ from phoenixguard.tracking.market_object_tracker_v3 import (
     OVERLAY_SCHEMA_VERSION,
     TRACKER_SCHEMA_VERSION,
     MarketObjectTrackerV3,
+    _derive_trendline_overlays,
     build_market_object_registry_v3,
 )
 
@@ -202,8 +203,6 @@ def test_market_object_registry_v3_extracts_tracked_objects_and_overlays() -> No
         "CONTINUATION_BOX",
         "DEMAND_ZONE",
         "SUPPLY_ZONE",
-        "SUPPORT_TRENDLINE",
-        "RESISTANCE_TRENDLINE",
         "INNER_TRENDLINE",
         "SNIPER_ENTRY_BOX",
         "RETEST_BOX",
@@ -220,9 +219,7 @@ def test_market_object_registry_v3_extracts_tracked_objects_and_overlays() -> No
     trendline_overlays = [overlay for overlay in payload["overlay_objects"] if str(overlay.get("type", "")).endswith("_TRENDLINE")]
     assert trendline_overlays
     assert all(overlay.get("line_points") for overlay in trendline_overlays)
-    assert {"SUPPORT TRENDLINE", "RESISTANCE TRENDLINE", "INNER TRENDLINE"}.issubset(
-        {overlay.get("display_label") for overlay in trendline_overlays}
-    )
+    assert {overlay.get("display_label") for overlay in trendline_overlays} == {"INNER TRENDLINE"}
     replay_labels = {overlay.get("display_label") for overlay in payload["overlay_objects"] if overlay.get("type") in {"REPLAY_ENTRY", "REPLAY_EXIT"}}
     assert {"WOULD HAVE ENTERED", "WOULD HAVE EXITED"}.issubset(replay_labels)
     source_paths = {obj["source_path"] for obj in payload["object_registry"]}
@@ -255,6 +252,34 @@ def test_market_object_registry_v3_ids_are_stable_when_geometry_moves() -> None:
     assert second_by_source["tracking_summary.projection.zones[1]"] == first_by_source["tracking_summary.projection.zones[1]"]
     assert second_by_source["tracking_summary.projection.zones[1].target_bbox"] == first_by_source["tracking_summary.projection.zones[1].target_bbox"]
     assert first_payload["sequence_context"]["sequence_signature"] != second_payload["sequence_context"]["sequence_signature"]
+
+
+def test_trendline_derivation_rejects_horizontal_lines() -> None:
+    horizontal_lows = [
+        {"bbox": [10 + index * 20, 100, 20 + index * 20, 140], "center_x": 15 + index * 20, "center_y": 120}
+        for index in range(8)
+    ]
+
+    assert not [row for row in _derive_trendline_overlays(horizontal_lows) if row["type"].endswith("_TRENDLINE")]
+
+
+def test_trendline_derivation_emits_valid_downtrend_resistance_only_when_clean() -> None:
+    downtrend = [
+        {
+            "bbox": [10 + index * 42, 80 + index * 9, 24 + index * 42, 126 + index * 7],
+            "center_x": 17 + index * 42,
+            "center_y": 103 + index * 8,
+        }
+        for index in range(8)
+    ]
+
+    overlays = _derive_trendline_overlays(downtrend)
+    resistance = [row for row in overlays if row["type"] == "RESISTANCE_TRENDLINE"]
+
+    assert resistance
+    assert all(row["display_label"] == "RESISTANCE TRENDLINE" for row in resistance)
+    assert all(row["line_obstruction_count"] == 0 for row in resistance)
+    assert all(row["significant_close"] is False for row in resistance)
 
 
 def test_market_object_tracker_v3_preserves_first_seen_frame() -> None:
