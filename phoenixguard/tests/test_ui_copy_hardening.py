@@ -134,17 +134,90 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "liveState.overlay_objects" in dashboard
     assert "overlayPayload.objects" in dashboard
     assert "_backendOverlay: true" in dashboard
+    assert "function rememberOverlayLock" in dashboard
+    assert "function lockedOverlayBoxes" in dashboard
+    assert "function sessionInstrumentContext" in dashboard
+    assert "function sessionSymbolContext" in dashboard
+    assert "function instrumentInvalidationKey" in dashboard
+    assert "instrument.instrument_id" in dashboard
+    assert "INSTRUMENT_LOCKED" in dashboard
+    assert "windowArtifactFrame || newestDisplayFrame(session)" in dashboard
+    assert "/artifacts/files/" in dashboard
+    assert "artifactFileNameFromPath" in dashboard
+    assert "instrument.invalidation_reason" in dashboard
+    assert "frameNumber(modePayload.artifact_frame_id)" in dashboard
+    assert "frameNumber(modePayload.overlay_object_frame_id)" in dashboard
+    assert "function overlayRenderableInCurrentView" in dashboard
+    assert "function overlayModeAllows" in dashboard
+    assert "function overlayTypeAllowedInMode" in dashboard
+    assert "function applyFrontendOverlayModeBudget" in dashboard
+    assert "CLEAN_LIVE: 10" in dashboard
+    assert "visibleLabelCount > 6" in dashboard
+    assert "function backendObjectOverlayReady" in dashboard
+    assert 'SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE"])' in dashboard
+    assert "function isLineOverlay" in dashboard
+    assert "function renderLineOverlay" in dashboard
+    assert "surface-line-svg" in dashboard
+    assert "surface-line-hotspot" in dashboard
+    assert "SUPPORT_TRENDLINE" in dashboard
+    assert "RESISTANCE_TRENDLINE" in dashboard
+    assert "INNER_TRENDLINE" in dashboard
+    assert 'TRIGGER: new Set(["RETEST_BOX", "SNIPER_ENTRY_BOX"])' in dashboard
+    assert "function payloadMatchesSelectedOverlayMode" in dashboard
+    assert ".surface-hotspot.label-hidden span" in dashboard
+    assert "const labelHidden = box.label_hidden === true || box.label_hidden === \"true\";" in dashboard
+    assert 'button.innerHTML = labelHidden ? "" : `<span>${escapeHtml(label)}</span>`;' in dashboard
+    assert 'global: "GLOBAL"' in dashboard
+    assert 'local: "LOCAL"' in dashboard
+    assert 'supply_demand: "SUPPLY_DEMAND"' in dashboard
+    assert 'triggers: "TRIGGER"' in dashboard
+    assert 'targets: "TARGET"' in dashboard
+    assert 'full_history_read: "FULL_HISTORY_READ"' in dashboard
+    assert 'broker: "BROKER"' in dashboard
+    assert "target_zones: true" in dashboard
+    assert "invalidation: true" in dashboard
+    assert "prediction_path: false" in dashboard
+    assert 'mode === "REPLAY"' in dashboard
+    assert "state.layers[layer] === false" in dashboard
+    assert "row.visible_default === false" in dashboard
+    assert "row.precision_rejected === true" in dashboard
+    assert 'const currentCandleLiveModes = new Set(["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT"]);' in dashboard
+    assert '!currentCandleLiveModes.has(activeMode)' in dashboard
+    assert "rememberOverlayLock(surfaceIdentityKey(session), renderableBoxes, session);" in dashboard
+    assert "bridgeSelectedModeWhileHydrating" in dashboard
+    assert "ignoreVisibleModes: bridgeSelectedModeWhileHydrating" in dashboard
+    assert "if (trustBackendMode) {\n            rememberOverlayLock" in dashboard
+    assert "const lockedBoxes = lockedOverlayBoxes(session);" in dashboard
+    assert "backendMode: backendOverlayMode(state.overlayMode)" in dashboard
+    assert "payloadMatchesSelectedOverlayMode(session)" in dashboard
+    assert "if (!diagnosticsViewActive()) {\n        return boxes;\n      }" in dashboard
+    assert "clearModeScopedOverlayDom" in dashboard
+    assert "updateLayerControls();\n      renderHotspots();\n      refreshLiveVisualStateForMode(state.overlayMode);" in dashboard
+    assert "useLockedWindowOverlayPlane" in dashboard
+    assert "window-locked-overlay" in dashboard
     assert "function artifactAvailable" in dashboard
     assert "artifact.exists === false" in dashboard
     assert "failedArtifactKeys" in dashboard
     assert "function handleSurfaceImageError" in dashboard
+    assert "function pendingSurfaceImage" in dashboard
+    assert "pendingSurfaceImageMatches" in dashboard
+    assert "surfaceImageLoading(targetImage)" in dashboard
+    assert "liveRefreshBusy" in dashboard
+    assert "streamHydrationBusy" in dashboard
+    assert "(!backendObjectsAvailable && state.surface.overlayStale)" in dashboard
+    assert "pendingSurfaceImage() && !surfaceHasImage()" in dashboard
+    assert "surfaceCriticalLoad" in dashboard
+    assert "overlayDedupKey" in dashboard
+    assert "[overlayId, overlayLayer, normalizedBoxKey(overlay.bbox)].join(\"|\")" in dashboard
     assert "const boxes = getBoxes(session);" in dashboard
     assert "renderSession(await enrichSessionTelemetry(await mergeSelectedLiveState(payload)));" in dashboard
     assert '["window", "overlay", "full-overlay", "chart"].includes(normalized)' in dashboard
     assert "imageSourceChanged" in dashboard
     assert "dataset.loadedSrc" in dashboard
     assert "overlayArtifactFrame(session)" in dashboard
-    assert "frameNumber(session.full_overlay_frame_id),\n      );" in dashboard
+    assert "frameNumber(session.full_overlay_frame_id)" in dashboard
+    assert "frameNumber(overlaysPayload.artifact_frame_id)" in dashboard
+    assert "renderSessionImmediate(payload);" in dashboard
 
 
 def test_compare_desk_images_default_to_uncropped_contained_views() -> None:

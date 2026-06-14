@@ -51,6 +51,10 @@ def _sample_payload() -> dict[str, Any]:
                     "key": "current",
                     "label": "BUY continuation box",
                     "bbox": [250, 154, 340, 262],
+                    "sniper_window": [300, 232, 382, 264],
+                    "trigger_window": [318, 198, 404, 228],
+                    "target_window": [360, 132, 448, 164],
+                    "invalidation_y": 292,
                     "direction": "BUY",
                     "confidence": 0.81,
                 },
@@ -61,6 +65,12 @@ def _sample_payload() -> dict[str, Any]:
                     "label": "#10 pullback B69",
                     "story": "pullback into continuation support",
                     "bbox": [338, 206, 426, 294],
+                    "sniper_window": [348, 252, 388, 274],
+                    "trigger_window": [362, 236, 408, 256],
+                    "target_window": [396, 210, 426, 230],
+                    "invalidation_y": 302,
+                    "start_point": [338, 294],
+                    "end_point": [426, 206],
                     "direction": "BUY",
                     "confidence": 0.72,
                     "source_indices": [4, 5],
@@ -192,16 +202,38 @@ def test_market_object_registry_v3_extracts_tracked_objects_and_overlays() -> No
         "CONTINUATION_BOX",
         "DEMAND_ZONE",
         "SUPPLY_ZONE",
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+        "INNER_TRENDLINE",
         "SNIPER_ENTRY_BOX",
         "RETEST_BOX",
         "TARGET_ZONE_BOX",
         "INVALIDATION_BOX",
         "ANGLE_VECTOR",
         "PREDICTION_PATH",
+        "REPLAY_ENTRY",
+        "REPLAY_EXIT",
     }.issubset(object_types)
     assert all(overlay["schema_version"] == OVERLAY_SCHEMA_VERSION for overlay in payload["overlay_objects"])
     assert all(overlay["bounds"] == overlay["bbox"] for overlay in payload["overlay_objects"])
     assert all(overlay["visible_modes"] for overlay in payload["overlay_objects"])
+    trendline_overlays = [overlay for overlay in payload["overlay_objects"] if str(overlay.get("type", "")).endswith("_TRENDLINE")]
+    assert trendline_overlays
+    assert all(overlay.get("line_points") for overlay in trendline_overlays)
+    assert {"SUPPORT TRENDLINE", "RESISTANCE TRENDLINE", "INNER TRENDLINE"}.issubset(
+        {overlay.get("display_label") for overlay in trendline_overlays}
+    )
+    replay_labels = {overlay.get("display_label") for overlay in payload["overlay_objects"] if overlay.get("type") in {"REPLAY_ENTRY", "REPLAY_EXIT"}}
+    assert {"WOULD HAVE ENTERED", "WOULD HAVE EXITED"}.issubset(replay_labels)
+    source_paths = {obj["source_path"] for obj in payload["object_registry"]}
+    assert "tracking_summary.structure_boxes[1].sniper_window" in source_paths
+    assert "tracking_summary.structure_boxes[1].trigger_window" in source_paths
+    assert "tracking_summary.structure_boxes[1].target_window" in source_paths
+    assert "tracking_summary.structure_boxes[1].invalidation_y" in source_paths
+    assert registry.sequence_context.sniper_entries
+    assert registry.sequence_context.retest_tracks
+    assert registry.sequence_context.target_zones
+    assert registry.sequence_context.invalidation_zones
 
 
 def test_market_object_registry_v3_ids_are_stable_when_geometry_moves() -> None:

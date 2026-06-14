@@ -70,6 +70,7 @@ def normalize_frontend_heartbeat(payload: Mapping[str, Any], *, now_ms: int | fl
         "rendered_frame_id": _int(payload.get("rendered_frame_id", payload.get("frame_id"))),
         "chart_transform_id": _text(payload.get("chart_transform_id")),
         "overlay_state_version": _text(payload.get("overlay_state_version")),
+        "overlay_frame_state_version": _text(payload.get("overlay_frame_state_version")),
         "state_version": _text(payload.get("state_version")),
         "overlay_count": _int(payload.get("overlay_count", payload.get("visible_overlay_count", 0))),
         "visible_overlay_count": _int(payload.get("visible_overlay_count", payload.get("overlay_count", 0))),
@@ -98,7 +99,9 @@ def record_frontend_heartbeat(
         store_dir=store_dir,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(heartbeat, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(heartbeat, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp_path, path)
     heartbeat["path"] = str(path)
     return heartbeat
 
@@ -113,22 +116,17 @@ def latest_frontend_heartbeat(
     if not path.exists():
         return None
     try:
+        if path.stat().st_size <= 0:
+            return None
+    except OSError:
+        return None
+    try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(payload, Mapping):
         return None
     heartbeat = dict(cast(Mapping[str, Any], payload))
-    try:
-        stale_after_sec = float(os.getenv("PHOENIXGUARD_FRONTEND_HEARTBEAT_STALE_SEC", "8.0") or "8.0")
-    except ValueError:
-        stale_after_sec = 8.0
-    if stale_after_sec > 0.0:
-        received_ms = _float(heartbeat.get("received_at_ms"), 0.0)
-        if received_ms > 0.0:
-            age_sec = max(0.0, ((time.time() * 1000.0) - received_ms) / 1000.0)
-            if age_sec > stale_after_sec:
-                return None
     heartbeat["path"] = str(path)
     return heartbeat
 

@@ -15,6 +15,9 @@ OVERLAY_LAYERS: tuple[str, ...] = (
     "major_swings",
     "local_swings",
     "supply_demand",
+    "target_zones",
+    "invalidation",
+    "prediction_path",
     "historical_replay",
     "trigger_zones",
     "active_council_decision",  # Council predictions RENDER ON TOP of candles and zones
@@ -29,6 +32,9 @@ DEFAULT_LAYER_VISIBILITY: dict[str, bool] = {
     "local_swings": False,
     "supply_demand": True,
     "trigger_zones": True,
+    "target_zones": True,
+    "invalidation": True,
+    "prediction_path": False,
     "active_council_decision": True,
     "historical_replay": False,
     "broker_controls": False,
@@ -38,9 +44,12 @@ DEFAULT_LAYER_VISIBILITY: dict[str, bool] = {
 STATIC_OVERLAY_LAYERS: frozenset[str] = frozenset(
     {
         "chart_bounds",
-        "major_swings",
-        "supply_demand",
-        "historical_replay",
+            "major_swings",
+            "supply_demand",
+            "target_zones",
+            "invalidation",
+            "prediction_path",
+            "historical_replay",
         "broker_controls",
     }
 )
@@ -199,7 +208,7 @@ def _refine_supply_demand_box_to_reaction_cluster(
     horizontal_pad = max(20.0, min(52.0, chart_width * 0.045))
     vertical_pad = max(8.0, min(24.0, chart_height * 0.026))
     minimum_width = min(chart_width * 0.16, 140.0)
-    maximum_width = max(minimum_width, chart_width * 0.42)
+    maximum_width = max(minimum_width, chart_width * 0.30)
     if touch_points:
         recent_points = touch_points[-min(8, len(touch_points)) :]
         xs = [point[0] for point in recent_points]
@@ -429,12 +438,120 @@ def sanitize_overlay_box(
         return None
     row["bbox"] = [round(float(value), 3) for value in clipped]
     row["layer"] = layer
+    if str(layer or "").strip().lower() == "supply_demand":
+        row["line_x0"] = round(float(clipped[0]), 3)
+        row["line_x1"] = round(float(clipped[2]), 3)
+        line_y = _float(row.get("line_y"), (clipped[1] + clipped[3]) * 0.5)
+        row["line_y"] = round(max(float(clipped[1]), min(float(clipped[3]), line_y)), 3)
     row["visible_default"] = bool(DEFAULT_LAYER_VISIBILITY.get(layer, False))
     row["geometry_kind"] = _box_kind(row)
     row["area_ratio"] = round(float(area_ratio), 6)
     row["aspect_ratio"] = round(float(bbox_aspect_ratio(clipped)), 4)
     row["structural_anchor"] = bool(has_structural_anchor(row))
     return row
+
+
+def _normalized_exclusion_boxes(
+    chart_bounds: Sequence[Any],
+    broker_exclusion_boxes: Sequence[Sequence[Any]],
+) -> list[list[float]]:
+    rows: list[list[float]] = []
+    seen: set[tuple[float, float, float, float]] = set()
+    for raw_box in broker_exclusion_boxes:
+        clipped = clip_bbox_to_bounds(raw_box, chart_bounds)
+        if clipped is None:
+            continue
+        key = tuple(round(float(value), 2) for value in clipped)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append([float(value) for value in clipped])
+    return rows
+
+
+def _default_axis_exclusion_boxes(chart_bounds: Sequence[Any]) -> list[list[float]]:
+    bounds = normalize_bbox(chart_bounds)
+    if bounds is None:
+        return []
+    width = max(1.0, bounds[2] - bounds[0])
+    height = max(1.0, bounds[3] - bounds[1])
+    transform = V3ChartTransform.create((width, height), frame_id=0)
+    rows: list[list[float]] = []
+    for raw_box in (transform.price_axis_bounds, transform.time_axis_bounds):
+        translated = [
+            float(raw_box[0]) + bounds[0],
+            float(raw_box[1]) + bounds[1],
+            float(raw_box[2]) + bounds[0],
+            float(raw_box[3]) + bounds[1],
+        ]
+        clipped = clip_bbox_to_bounds(translated, bounds)
+        if clipped is not None:
+            rows.append([float(value) for value in clipped])
+    return rows
+
+
+def _market_exclusion_boxes(
+    chart_bounds: Sequence[Any],
+    broker_exclusion_boxes: Sequence[Sequence[Any]],
+) -> list[list[float]]:
+    return _normalized_exclusion_boxes(chart_bounds, broker_exclusion_boxes) + _default_axis_exclusion_boxes(chart_bounds)
+
+
+def _point_x(value: Any) -> float | None:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)) or len(value) < 2:
+        return None
+    return _float(value[0], float("nan"))
+
+
+def _tighten_micro_plan_bbox(
+    row: Mapping[str, Any],
+    key: str,
+    bbox: Sequence[Any],
+    chart_bounds: Sequence[Any],
+) -> list[float] | None:
+    box = normalize_bbox(bbox)
+    bounds = normalize_bbox(chart_bounds)
+    if box is None or bounds is None:
+        return box
+    chart_width = max(1.0, bounds[2] - bounds[0])
+    chart_height = max(1.0, bounds[3] - bounds[1])
+    normalized_key = str(key or "").strip().lower()
+    is_entry_window = "sniper" in normalized_key or "trigger" in normalized_key
+    max_width = min(chart_width, max(48.0, chart_width * (0.22 if is_entry_window else 0.26)))
+    max_height = min(chart_height, max(12.0, chart_height * (0.085 if is_entry_window else 0.10)))
+    width = max(1.0, box[2] - box[0])
+    height = max(1.0, box[3] - box[1])
+    if width <= max_width and height <= max_height:
+        return box
+
+    anchor_candidates: list[float] = []
+    base_box = normalize_bbox(cast(Sequence[Any], row.get("bbox", [])))
+    if base_box is not None:
+        anchor_candidates.extend([base_box[2], (base_box[0] + base_box[2]) * 0.5])
+    for point_key in ("end_point", "entry_point", "trigger_point", "sniper_point", "target_point"):
+        point_x = _point_x(row.get(point_key))
+        if point_x is not None and point_x == point_x:
+            anchor_candidates.append(point_x)
+    anchor_candidates.append(box[2])
+    anchor_x = max(bounds[0], min(box[2], max(anchor_candidates)))
+
+    left, right = box[0], box[2]
+    if width > max_width:
+        right = min(bounds[2], max(bounds[0] + max_width, anchor_x))
+        left = right - max_width
+        if left < bounds[0]:
+            left = bounds[0]
+            right = min(bounds[2], left + max_width)
+
+    top, bottom = box[1], box[3]
+    if height > max_height:
+        center_y = (box[1] + box[3]) * 0.5
+        top = max(bounds[1], center_y - max_height * 0.5)
+        bottom = min(bounds[3], top + max_height)
+        if bottom - top < max_height:
+            top = max(bounds[1], bottom - max_height)
+
+    return clip_bbox_to_bounds([left, top, right, bottom], bounds)
 
 
 def _sanitize_sequence(
@@ -483,6 +600,7 @@ def _clip_micro_plan_fields(
         if clipped is None:
             row.pop(key, None)
         else:
+            clipped = _tighten_micro_plan_bbox(row, key, clipped, chart_bounds) or clipped
             row[key] = [round(float(value), 3) for value in clipped]
     plan = _mapping(row.get("sniper_target_plan", {}))
     for plan_key in ("sniper", "trigger", "target"):
@@ -498,6 +616,7 @@ def _clip_micro_plan_fields(
         if clipped is None:
             plan.pop(plan_key, None)
         else:
+            clipped = _tighten_micro_plan_bbox(row, plan_key, clipped, chart_bounds) or clipped
             plan[plan_key] = [round(float(value), 3) for value in clipped]
     if plan:
         row["sniper_target_plan"] = plan
@@ -579,7 +698,8 @@ def _apply_live_default_visibility(boxes: Sequence[Mapping[str, Any]], active_si
     rows = [dict(box) for box in boxes]
     for row in rows:
         layer = str(row.get("layer", "") or "")
-        row["visible_default"] = layer in {"chart_bounds", "recent_candles", "active_council_decision"}
+        key = str(row.get("key", "") or "").strip().lower()
+        row["visible_default"] = layer in {"chart_bounds", "recent_candles", "active_council_decision"} or key == "current"
 
     supply_rows = [row for row in rows if str(row.get("layer", "") or "") == "supply_demand"]
     supports = [row for row in supply_rows if str(row.get("role", row.get("kind", "")) or "").lower() in {"support", "demand"}]
@@ -747,6 +867,8 @@ def prepare_overlay_geometry(
     policy: OverlayGeometryPolicy = DEFAULT_GEOMETRY_POLICY,
 ) -> dict[str, Any]:
     chart_bounds = _chart_bounds_from_size(chart_size)
+    broker_exclusions = _normalized_exclusion_boxes(chart_bounds, broker_exclusion_boxes)
+    market_exclusions = _market_exclusion_boxes(chart_bounds, broker_exclusions)
     tracking = dict(tracking_summary)
     signal = dict(latest_signal)
     boxes: list[dict[str, Any]] = []
@@ -781,7 +903,7 @@ def prepare_overlay_geometry(
             recent_candles,
             chart_bounds=chart_bounds,
             layer="recent_candles",
-            broker_exclusion_boxes=broker_exclusion_boxes,
+            broker_exclusion_boxes=broker_exclusions,
             require_anchor=True,
             policy=policy,
             merge=False,
@@ -796,14 +918,14 @@ def prepare_overlay_geometry(
         row = _clip_micro_plan_fields(
             raw_box,
             chart_bounds=chart_bounds,
-            broker_exclusion_boxes=broker_exclusion_boxes,
+            broker_exclusion_boxes=market_exclusions,
             policy=policy,
         )
         sanitized = sanitize_overlay_box(
             row,
             chart_bounds=chart_bounds,
             layer=layer,
-            broker_exclusion_boxes=broker_exclusion_boxes,
+            broker_exclusion_boxes=market_exclusions,
             require_anchor=True,
             policy=policy,
         )
@@ -821,14 +943,14 @@ def prepare_overlay_geometry(
             _clip_micro_plan_fields(
                 row,
                 chart_bounds=chart_bounds,
-                broker_exclusion_boxes=broker_exclusion_boxes,
+                broker_exclusion_boxes=market_exclusions,
                 policy=policy,
             )
             for row in _sequence_of_mappings(tracking.get("historical_structure", []))
         ],
         chart_bounds=chart_bounds,
         layer="historical_replay",
-        broker_exclusion_boxes=broker_exclusion_boxes,
+        broker_exclusion_boxes=market_exclusions,
         require_anchor=True,
         policy=policy,
     )
@@ -839,7 +961,7 @@ def prepare_overlay_geometry(
         _sequence_of_mappings(tracking.get("support_resistance_zones", [])),
         chart_bounds=chart_bounds,
         layer="supply_demand",
-        broker_exclusion_boxes=broker_exclusion_boxes,
+        broker_exclusion_boxes=market_exclusions,
         require_anchor=True,
         policy=policy,
     )
@@ -852,7 +974,7 @@ def prepare_overlay_geometry(
         row = _clip_micro_plan_fields(
             raw_zone,
             chart_bounds=chart_bounds,
-            broker_exclusion_boxes=broker_exclusion_boxes,
+            broker_exclusion_boxes=market_exclusions,
             policy=policy,
         )
         row["structural_anchor"] = bool(row.get("path") or row.get("invalidation_y") is not None)
@@ -860,7 +982,7 @@ def prepare_overlay_geometry(
             row,
             chart_bounds=chart_bounds,
             layer="trigger_zones",
-            broker_exclusion_boxes=broker_exclusion_boxes,
+            broker_exclusion_boxes=market_exclusions,
             require_anchor=True,
             policy=policy,
         )
@@ -891,7 +1013,7 @@ def prepare_overlay_geometry(
             council,
             chart_bounds=chart_bounds,
             layer="active_council_decision",
-            broker_exclusion_boxes=broker_exclusion_boxes,
+            broker_exclusion_boxes=market_exclusions,
             require_anchor=True,
             policy=policy,
         )
@@ -935,7 +1057,7 @@ def prepare_overlay_geometry(
             "alpha": float(policy.temporal_smoothing_alpha),
             "previous_frame_available": bool(previous_boxes),
         },
-        "broker_exclusion_count": int(len(broker_exclusion_boxes)),
+        "broker_exclusion_count": int(len(market_exclusions)),
     }
     # Attach a chart transform for this frame
     try:

@@ -72,7 +72,7 @@ def test_dashboard_label_collision_priority():
         }''')
         # Verify placement helpers are available and computePriority ranks HIGH above LOW
         comp = page.evaluate('''() => {
-          const layerWeights = {broker_controls:5, active_council_decision:4, trigger_zones:3, target_level:3, major_swings:2.5, supply_demand:2, local_swings:2, recent_candles:1.5, historical_replay:1, diagnostics:0.5};
+          const layerWeights = {broker_controls:5, active_council_decision:4, trigger_zones:3, target_zones:3, invalidation:3, prediction_path:2.5, major_swings:2.5, supply_demand:2, local_swings:2, recent_candles:1.5, historical_replay:1, diagnostics:0.5};
           const lowPri = (0.1*100 + (true?50:0) + (layerWeights['recent_candles']||0)*10);
           const highPri = (0.99*100 + (true?50:0) + (layerWeights['broker_controls']||0)*10);
           return {lowPri, highPri};

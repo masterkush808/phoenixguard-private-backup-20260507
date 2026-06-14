@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from phoenixguard.vision.v3_overlay_contract import (
     REQUIRED_FIELDS,
     V3OverlayContractError,
     abbreviate_label,
+    approved_overlay_display_labels,
+    is_approved_overlay_display_label,
     layout_overlay_labels,
     normalize_bounds,
+    normalize_overlay_display_label,
     normalize_v3_overlay_object,
     normalize_view_mode,
     overlay_is_visible,
@@ -20,6 +26,9 @@ from phoenixguard.vision.v3_overlay_contract import (
     validate_v3_overlay_object,
     view_mode_profile,
 )
+
+
+_REPO = Path(__file__).resolve().parents[1]
 
 
 def _base_overlay(**overrides):
@@ -108,6 +117,98 @@ def test_contract_normalizes_professional_required_fields_and_aliases() -> None:
     assert validate_v3_overlay_object(overlay).ok is True
 
 
+def test_legacy_registry_overlay_types_stay_renderable_in_active_context() -> None:
+    expected = {
+        "CHART_BOUNDS": ("CHART_BOUNDS", "chart_bounds"),
+        "RECENT_CANDLE": ("CURRENT_CANDLE", "recent_candles"),
+        "MAJOR_SWINGS": ("IMPULSE_BOX", "major_swings"),
+        "LOCAL_SWINGS": ("PULLBACK_BOX", "local_swings"),
+        "SNIPER": ("SNIPER_ENTRY_BOX", "trigger_zones"),
+        "PRIMARY": ("RETEST_BOX", "trigger_zones"),
+        "TARGET": ("TARGET_ZONE_BOX", "target_zones"),
+        "SUPPORT": ("DEMAND_ZONE", "supply_demand"),
+        "RESISTANCE": ("SUPPLY_ZONE", "supply_demand"),
+        "HISTORICAL_REPLAY": ("PROGRESSION_PATH", "historical_replay"),
+    }
+
+    for legacy_type, (normalized_type, layer) in expected.items():
+        overlay = normalize_v3_overlay_object(
+            _base_overlay(
+                overlay_id=f"legacy-{legacy_type.lower()}",
+                type=legacy_type,
+                layer=layer,
+                visible_modes=["ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+            ),
+            strict=False,
+        )
+        assert overlay["type"] == normalized_type
+        assert overlay["layer"] == layer
+        assert overlay_is_visible(overlay, "ACTIVE_CONTEXT") is True
+
+
+def test_visible_labels_are_locked_to_approved_dictionary() -> None:
+    assert "NOW" in approved_overlay_display_labels()
+    assert is_approved_overlay_display_label("SNIPER SELL") is True
+    assert is_approved_overlay_display_label("SUPPORT TRENDLINE") is True
+    assert is_approved_overlay_display_label("RESISTANCE TRENDLINE") is True
+    assert is_approved_overlay_display_label("INNER TRENDLINE") is True
+    assert is_approved_overlay_display_label("SNIPER ENTRY BOX") is False
+
+    sniper = normalize_v3_overlay_object(
+        _base_overlay(label="SNIPER ENTRY BOX", display_label="SNIPER ENTRY BOX"),
+        strict=False,
+    )
+    target = normalize_v3_overlay_object(
+        _base_overlay(type="TARGET_ZONE_BOX", label="TARGET ZONE BOX", display_label="TARGET ZONE BOX"),
+        strict=False,
+    )
+    continuation = normalize_v3_overlay_object(
+        _base_overlay(type="CONTINUATION_BOX", label="CONT", display_label="CONT"),
+        strict=False,
+    )
+
+    assert sniper["display_label"] == "SNIPER SELL"
+    assert sniper["display_label_status"] == "remapped"
+    assert target["display_label"] == "TARGET"
+    assert continuation["display_label"] == "CONTINUATION"
+    assert all(is_approved_overlay_display_label(row["display_label"]) for row in (sniper, target, continuation))
+
+
+def test_visual_dictionary_artifact_covers_runtime_approved_labels() -> None:
+    dictionary_path = _REPO / "docs" / "phoenixguard_v3_visual_dictionary.json"
+    guide_path = _REPO / "docs" / "phoenixguard_v3_operator_view_guide.pdf"
+    dictionary = json.loads(dictionary_path.read_text(encoding="utf-8"))
+
+    assert dictionary["schema_version"] == "PG_V3_VISUAL_DICTIONARY_V1"
+    assert set(approved_overlay_display_labels()).issubset(set(dictionary["approved_labels"]))
+    assert guide_path.exists()
+
+
+def test_unmapped_display_terms_are_diagnostics_only() -> None:
+    diagnostic = normalize_v3_overlay_object(
+        _base_overlay(
+            type="UNKNOWN_EXPERIMENTAL_BOX",
+            label="mystery leftover label",
+            display_label="mystery leftover label",
+            visible_modes=["CLEAN_LIVE", "DIAGNOSTICS"],
+        ),
+        strict=False,
+    )
+
+    assert diagnostic["type"] == "DEBUG_RAW_DETECTION"
+    assert diagnostic["display_label"] == "DEBUG RAW DETECTION"
+    assert diagnostic["display_label_status"] == "unmapped"
+    assert diagnostic["unmapped_display_label"] == "mystery leftover label"
+    assert overlay_is_visible(diagnostic, "CLEAN_LIVE") is False
+    assert overlay_is_visible(diagnostic, "DIAGNOSTICS") is True
+
+
+def test_normalize_overlay_display_label_maps_leftover_short_tokens() -> None:
+    assert normalize_overlay_display_label("NOW", "CURRENT_CANDLE", "HOLD") == ("NOW", "approved", "")
+    assert normalize_overlay_display_label("T", "RETEST_BOX", "SELL") == ("TRIGGER", "remapped", "T")
+    assert normalize_overlay_display_label("P", "PROGRESSION_PATH", "SELL") == ("PATH", "remapped", "P")
+
+
 def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
     cases = {
         "chart-bounds": "CHART_BOUNDS",
@@ -134,6 +235,15 @@ def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
     assert view_mode_profile("chart-bounds")["layer_visibility"]["chart_bounds"] is True
     assert view_mode_profile("candles")["layer_visibility"]["recent_candles"] is True
     assert view_mode_profile("invalidation")["layer_visibility"]["invalidation"] is True
+    active_profile = view_mode_profile("active-context")
+    assert active_profile["layer_visibility"]["historical_replay"] is True
+    assert "PROGRESSION_PATH" in active_profile["allowed_types"]
+    replay_profile = view_mode_profile("replay")
+    assert "SNIPER_ENTRY_BOX" in replay_profile["allowed_types"]
+    assert "TARGET_ZONE_BOX" in replay_profile["allowed_types"]
+    assert replay_profile["layer_visibility"]["trigger_zones"] is True
+    assert replay_profile["layer_visibility"]["target_zones"] is True
+    assert replay_profile["layer_visibility"]["invalidation"] is True
 
 
 def test_contract_reports_missing_required_fields_and_strict_mode_raises() -> None:
@@ -183,6 +293,56 @@ def test_non_strict_normalization_accepts_v2_aliases_rect_and_anchors() -> None:
     assert progression["type"] == "PROGRESSION_PATH"
     assert progression["bounds"] == [5.0, 3.0, 20.0, 30.0]
     assert progression["anchor_type"] == "POLYGON"
+    assert progression["line_points"] == [[5.0, 9.0], [12.0, 3.0], [20.0, 30.0]]
+
+
+def test_trendline_overlays_preserve_line_geometry_and_layer_modes() -> None:
+    support = normalize_v3_overlay_object(
+        _base_overlay(
+            type="SUPPORT_TRENDLINE",
+            side="BUY",
+            label="support trendline",
+            display_label="support trendline",
+            anchor_type="LINE",
+            bounds=None,
+            points=[[10, 100], [120, 100]],
+            visible_modes=["SUPPLY_DEMAND", "PATH", "ACTIVE_CONTEXT", "REPLAY"],
+        ),
+        strict=False,
+    )
+    inner = normalize_v3_overlay_object(
+        _base_overlay(
+            type="INNER_TRENDLINE",
+            side="BUY",
+            label="inner trendline",
+            display_label="inner trendline",
+            anchor_type="LINE",
+            bounds=None,
+            line_points=[[40, 90], [140, 72]],
+            visible_modes=["LOCAL", "PATH", "ACTIVE_CONTEXT", "REPLAY"],
+        ),
+        strict=False,
+    )
+    progression = normalize_v3_overlay_object(
+        _base_overlay(type="PROGRESSION_PATH", layer="PROGRESSION_PATH", label="history", visible_modes=["REPLAY"]),
+        strict=False,
+    )
+
+    assert support["type"] == "SUPPORT_TRENDLINE"
+    assert support["display_label"] == "SUPPORT TRENDLINE"
+    assert support["layer"] == "supply_demand"
+    assert support["anchor_type"] == "POLYGON"
+    assert support["line_points"] == [[10.0, 100.0], [120.0, 100.0]]
+    assert support["bounds"] == [10.0, 97.0, 120.0, 103.0]
+    assert overlay_is_visible(support, "SUPPLY_DEMAND") is True
+    assert overlay_is_visible(support, "PATH") is True
+    assert overlay_is_visible(support, "CLEAN_LIVE") is False
+    assert inner["type"] == "INNER_TRENDLINE"
+    assert inner["display_label"] == "INNER TRENDLINE"
+    assert inner["layer"] == "local_swings"
+    assert overlay_is_visible(inner, "LOCAL") is True
+    assert overlay_is_visible(inner, "PATH") is True
+    assert progression["layer"] == "historical_replay"
 
 
 def test_coordinate_normalization_converts_between_chart_pixels_and_normalized() -> None:
@@ -261,17 +421,77 @@ def test_mode_resolver_hides_replay_debug_expired_and_broker_controls_from_live(
 
 def test_view_mode_profile_exposes_layer_policy() -> None:
     clean = view_mode_profile("CLEAN_LIVE")
+    council = view_mode_profile("COUNCIL")
     inspector = view_mode_profile("INSPECTOR")
     supply = view_mode_profile("supply-demand")
+    trigger = view_mode_profile("trigger")
 
     assert clean["layer_visibility"]["historical_replay"] is False
     assert clean["layer_visibility"]["diagnostics"] is False
     assert clean["layer_visibility"]["prediction_path"] is False
+    assert council["layer_visibility"]["recent_candles"] is False
+    assert council["layer_visibility"]["trigger_zones"] is False
+    assert set(council["allowed_types"]) == {
+        "MARKET_PLAY_MARKER",
+        "MODEL_COUNCIL_MARKER",
+        "PRICE_LOCATION_MARKER",
+        "REGIME_MARKER",
+    }
     assert supply["mode"] == "SUPPLY_DEMAND"
+    assert supply["layer_visibility"]["chart_bounds"] is False
+    assert supply["layer_visibility"]["recent_candles"] is False
     assert supply["layer_visibility"]["supply_demand"] is True
     assert supply["layer_visibility"]["trigger_zones"] is False
+    assert "CURRENT_CANDLE" not in supply["allowed_types"]
+    assert "CHART_BOUNDS" not in supply["allowed_types"]
+    assert trigger["layer_visibility"]["recent_candles"] is False
+    assert trigger["layer_visibility"]["trigger_zones"] is True
+    assert "CURRENT_CANDLE" not in trigger["allowed_types"]
+    assert "CHART_BOUNDS" not in trigger["allowed_types"]
     assert inspector["layer_visibility"]["diagnostics"] is True
     assert inspector["allow_selection"] is True
+
+
+def test_story_scoped_modes_do_not_render_now_or_chart_bounds_spam() -> None:
+    replay_now = _base_overlay(
+        overlay_id="replay-now",
+        type="CURRENT_CANDLE",
+        layer="recent_candles",
+        visible_modes=["REPLAY", "PREDICTION", "INSPECTOR"],
+        label="NOW",
+    )
+    chart_bounds = _base_overlay(
+        overlay_id="chart-bounds",
+        type="CHART_BOUNDS",
+        layer="chart_bounds",
+        visible_modes=["ACTIVE_CONTEXT", "TRIGGER", "SUPPLY_DEMAND", "INSPECTOR"],
+        label="CHART BOUNDS",
+    )
+    trigger = _base_overlay(type="RETEST_BOX", layer="trigger_zones", visible_modes=["ACTIVE_CONTEXT"])
+    supply = _base_overlay(type="SUPPLY_ZONE", layer="supply_demand", visible_modes=["ACTIVE_CONTEXT"])
+
+    assert overlay_is_visible(replay_now, "ACTIVE_CONTEXT") is False
+    assert overlay_is_visible(replay_now, "TRIGGER") is False
+    assert overlay_is_visible(replay_now, "SUPPLY_DEMAND") is False
+    assert overlay_is_visible(chart_bounds, "TRIGGER") is False
+    assert overlay_is_visible(chart_bounds, "SUPPLY_DEMAND") is False
+    assert overlay_is_visible(trigger, "TRIGGER") is True
+    assert overlay_is_visible(supply, "SUPPLY_DEMAND") is True
+
+
+def test_council_mode_does_not_render_current_candle_or_trigger_spam() -> None:
+    current = _base_overlay(type="CURRENT_CANDLE", layer="recent_candles", visible_modes=["CLEAN_LIVE", "COUNCIL"])
+    trigger = _base_overlay(type="RETEST_BOX", layer="trigger_zones", visible_modes=["CLEAN_LIVE", "COUNCIL"])
+    council = _base_overlay(
+        type="MODEL_COUNCIL_MARKER",
+        layer="active_council_decision",
+        visible_modes=["COUNCIL"],
+        label="MODEL COUNCIL MARKER",
+    )
+
+    assert overlay_is_visible(current, "COUNCIL") is False
+    assert overlay_is_visible(trigger, "COUNCIL") is False
+    assert overlay_is_visible(council, "COUNCIL") is True
 
 
 def test_prediction_path_overlays_are_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:

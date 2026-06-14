@@ -23,6 +23,7 @@ from phoenixguard.runtime.observability_v3 import (
     build_intelligence_health,
     build_model_council_health_from_session,
 )
+from phoenixguard.runtime.realtime_performance_v3 import build_frame_timing_trace_v3, build_performance_trace_v3
 from phoenixguard.runtime.tracker_bootstrap import tracker_session_runtime_state
 from phoenixguard.tracing import configure_tracing, instrument_fastapi_app
 from phoenixguard.voice.control import (
@@ -38,6 +39,7 @@ from phoenixguard.voice.live import (
 )
 
 from phoenixguard.vision.market_registry import (
+    _active_objects_from_entries,
     load_recent_market_objects,
     promote_lifecycle,
     query_recent_active_objects,
@@ -45,7 +47,11 @@ from phoenixguard.vision.market_registry import (
 from phoenixguard.vision.renderer import render_overlays_on_chart
 from phoenixguard.vision.v3_overlay_contract import normalize_view_mode
 
-from .live_state_v3 import _compact_session_payload, build_live_state_v3, build_live_state_v3_from_tracker_service
+from .live_state_v3 import (
+    _compact_session_payload,
+    build_live_state_v3,
+    build_live_state_v3_from_tracker_service,
+)
 from .observer import SignalObserverService
 from .realtime_sync_v3 import (
     build_visual_realtime_health,
@@ -87,20 +93,29 @@ _PUBLISHED_PACKET_FALLBACK_TTL_SEC = 8.0
 try:
     _LIVE_STATE_V3_CACHE_TTL_SEC = max(
         0.0,
-        float(os.getenv("PHOENIXGUARD_LIVE_STATE_CACHE_TTL_SEC", "0.25") or "0.25"),
+        float(os.getenv("PHOENIXGUARD_LIVE_STATE_CACHE_TTL_SEC", "5.0") or "5.0"),
     )
 except ValueError:
-    _LIVE_STATE_V3_CACHE_TTL_SEC = 0.25
+    _LIVE_STATE_V3_CACHE_TTL_SEC = 5.0
 try:
     _LIVE_STATE_REGISTRY_CACHE_TTL_SEC = max(
         0.0,
-        float(os.getenv("PHOENIXGUARD_LIVE_STATE_REGISTRY_CACHE_TTL_SEC", "1.0") or "1.0"),
+        float(os.getenv("PHOENIXGUARD_LIVE_STATE_REGISTRY_CACHE_TTL_SEC", "5.0") or "5.0"),
     )
 except ValueError:
-    _LIVE_STATE_REGISTRY_CACHE_TTL_SEC = 1.0
+    _LIVE_STATE_REGISTRY_CACHE_TTL_SEC = 5.0
+try:
+    _LIVE_STATE_REGISTRY_MAX_LINES = max(
+        50,
+        int(float(os.getenv("PHOENIXGUARD_LIVE_STATE_REGISTRY_MAX_LINES", "2000") or "2000")),
+    )
+except ValueError:
+    _LIVE_STATE_REGISTRY_MAX_LINES = 2000
 _LIVE_STATE_V3_CACHE_LOCK = threading.Lock()
-_LIVE_STATE_V3_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, object]]] = {}
+_LIVE_STATE_V3_CACHE: dict[tuple[str, str, str, bool], tuple[float, dict[str, object]]] = {}
 _LIVE_STATE_REGISTRY_CACHE: dict[str, tuple[float, list[Mapping[str, Any]], list[Mapping[str, Any]]]] = {}
+_DIRECT_PERFORMANCE_TRACE_CACHE_LOCK = threading.Lock()
+_DIRECT_PERFORMANCE_TRACE_CACHE: dict[str, tuple[float, dict[str, object]]] = {}
 _NO_STORE_ARTIFACT_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     "Pragma": "no-cache",
@@ -109,14 +124,44 @@ _NO_STORE_ARTIFACT_HEADERS = {
 _DIRECT_DISPLAY_STATE_KEYS = frozenset(
     {
         "session_id",
+        "capture_count",
+        "frame_index",
+        "chart_frame_id",
+        "overlay_frame_id",
+        "full_overlay_frame_id",
+        "model_vote_frame_id",
+        "state_version",
         "display_frame_id",
         "display_capture_epoch",
         "display_published_epoch",
         "last_display_capture_epoch",
         "last_display_published_epoch",
         "last_display_window_path",
+        "last_chart_path",
+        "last_overlay_path",
+        "last_full_overlay_path",
+        "last_display_surface_signature",
+        "last_window_surface_signature",
+        "last_study_surface_signature",
+        "overlay_source_window_signature",
+        "overlay_source_study_signature",
         "display_snapshot_only_v3",
         "display_fast_path_v3",
+        "display_busy_reuse_heartbeat_v3",
+        "display_reuse_only_heartbeat_v3",
+    }
+)
+_DIRECT_DISPLAY_STATE_NONEMPTY_STRING_KEYS = frozenset(
+    {
+        "last_display_window_path",
+        "last_chart_path",
+        "last_overlay_path",
+        "last_full_overlay_path",
+        "last_display_surface_signature",
+        "last_window_surface_signature",
+        "last_study_surface_signature",
+        "overlay_source_window_signature",
+        "overlay_source_study_signature",
     }
 )
 
@@ -133,6 +178,10 @@ def _direct_window_tracker_display_state_path(session_id: str) -> Path:
     return _direct_live_state_session_path(session_id).with_name("display_state.json")
 
 
+def _direct_market_registry_path(session_id: str) -> Path:
+    return Path(RUNTIME.data_dir) / "market_registry" / f"{str(session_id or '').strip()}.jsonl"
+
+
 def _path_cache_signature(path: Path) -> str:
     try:
         stat = path.stat()
@@ -141,14 +190,200 @@ def _path_cache_signature(path: Path) -> str:
     return f"{stat.st_mtime_ns}:{stat.st_size}"
 
 
-def _live_state_cache_signature(session_id: str) -> str:
+def _json_field_cache_signature(path: Path, keys: Sequence[str]) -> str:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return _path_cache_signature(path)
+    if not isinstance(raw, Mapping):
+        return _path_cache_signature(path)
+    payload = dict(cast(Mapping[str, Any], raw))
+
+    def nested_value(root: Mapping[str, Any], dotted_key: str) -> Any:
+        current: Any = root
+        for part in dotted_key.split("."):
+            if not isinstance(current, Mapping):
+                return None
+            current = current.get(part)
+        return current
+
+    selected = {key: nested_value(payload, key) for key in keys}
+    return json.dumps(selected, sort_keys=True, default=str, separators=(",", ":"))
+
+
+def _direct_session_has_v3_overlay_sources(payload: Mapping[str, Any]) -> bool:
+    def mapping(value: Any) -> Mapping[str, Any]:
+        return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
+
+    def sequence(value: Any) -> Sequence[Any]:
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return value
+        return ()
+
+    tracking = mapping(payload.get("tracking_summary"))
+    signal = mapping(payload.get("latest_signal"))
+    projection = mapping(tracking.get("projection"))
+    thesis = mapping(payload.get("signal_thesis_v3") or signal.get("signal_thesis_v3"))
+    source_keys = (
+        "tracked_candles",
+        "trendlines_v3",
+        "structure_boxes",
+        "historical_structure",
+        "support_resistance_zones",
+        "angle_vectors",
+    )
+    if any(len(sequence(tracking.get(key))) > 0 for key in source_keys):
+        return True
+    if len(sequence(projection.get("zones"))) > 0:
+        return True
+    if any(thesis.get(key) not in (None, "", [], {}) for key in ("entry", "target", "invalidation", "support", "resistance")):
+        return True
+    return False
+
+
+def _direct_session_path_has_v3_overlay_sources(path: Path) -> bool:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(raw, Mapping):
+        return False
+    return _direct_session_has_v3_overlay_sources(cast(Mapping[str, Any], raw))
+
+
+def _live_state_cache_signature(session_id: str, *, compact_public: bool = False) -> str:
     session_path = _direct_live_state_session_path(session_id)
     display_path = _direct_window_tracker_display_state_path(session_id)
-    return f"session={_path_cache_signature(session_path)}|display={_path_cache_signature(display_path)}"
+    display_signature = _json_field_cache_signature(
+        display_path,
+        (
+            "session_id",
+            "frame_index",
+            "chart_frame_id",
+            "overlay_frame_id",
+            "full_overlay_frame_id",
+            "model_vote_frame_id",
+            "last_display_window_path",
+            "last_chart_path",
+            "last_overlay_path",
+            "last_full_overlay_path",
+            "last_display_surface_signature",
+            "last_window_surface_signature",
+            "last_study_surface_signature",
+            "overlay_source_window_signature",
+            "overlay_source_study_signature",
+            "display_snapshot_only_v3",
+            "display_fast_path_v3.surface_signature",
+        ),
+    )
+    if compact_public:
+        context_fields = (
+            "tracking_summary.structure_boxes",
+            "tracking_summary.historical_structure",
+            "tracking_summary.support_resistance_zones",
+            "tracking_summary.projection",
+            "tracking_summary.angle_vectors",
+            "tracking_summary.trendlines_v3",
+            "latest_signal.signal_id",
+            "latest_signal.published_epoch",
+            "model_council_result.packet_id",
+            "model_council_study_packet.packet_id",
+            "model_council_packet.packet_id",
+            "execution_packet.packet_id",
+        )
+        context_signature = _json_field_cache_signature(
+            session_path,
+            context_fields,
+        )
+        registry_signature = ""
+        if not _direct_session_path_has_v3_overlay_sources(session_path):
+            registry_signature = f"|registry={_path_cache_signature(_direct_market_registry_path(session_id))}"
+        return (
+            f"compact=1|display={display_signature}"
+            f"|context={context_signature}"
+            f"{registry_signature}"
+        )
+    session_signature = _json_field_cache_signature(
+        session_path,
+        (
+            "session_id",
+            "tracking_enabled",
+            "status",
+            "frame_index",
+            "capture_count",
+            "state_version",
+            "decision_version",
+            "chart_frame_id",
+            "overlay_frame_id",
+            "full_overlay_frame_id",
+            "model_vote_frame_id",
+            "source_capture_id",
+            "last_display_window_path",
+            "last_chart_path",
+            "last_overlay_path",
+            "last_full_overlay_path",
+            "last_display_surface_signature",
+            "last_window_surface_signature",
+            "last_study_surface_signature",
+            "overlay_source_window_signature",
+            "overlay_source_study_signature",
+            "latest_signal.signal_id",
+            "latest_signal.published_epoch",
+            "latest_signal.model_council_packet.packet_id",
+            "model_council_result.packet_id",
+            "model_council_study_packet.packet_id",
+            "model_council_packet.packet_id",
+            "execution_packet.packet_id",
+        ),
+    )
+    return f"session={session_signature}|display={display_signature}"
 
 
 def _mapping_to_plain_dict(value: Any) -> dict[str, object]:
     return dict(cast(Mapping[str, object], value)) if isinstance(value, Mapping) else {}
+
+
+def _registry_entry_overlay_id(entry: Mapping[str, Any]) -> str:
+    overlay = _mapping_to_plain_dict(entry.get("overlay"))
+    return str(
+        entry.get("overlay_id")
+        or overlay.get("overlay_id")
+        or overlay.get("id")
+        or overlay.get("key")
+        or ""
+    ).strip()
+
+
+def _registry_entry_sort_key(entry: Mapping[str, Any]) -> tuple[float, str]:
+    overlay = _mapping_to_plain_dict(entry.get("overlay"))
+    epoch = max(
+        _epoch_float(entry.get("updated_at"), 0.0),
+        _epoch_float(entry.get("timestamp"), 0.0),
+        _epoch_float(entry.get("last_seen_at"), 0.0),
+        _epoch_float(overlay.get("updated_at"), 0.0),
+        _epoch_float(overlay.get("timestamp"), 0.0),
+    )
+    text = str(entry.get("updated_at") or entry.get("timestamp") or entry.get("last_seen_at") or "").strip()
+    return (epoch, text)
+
+
+def _locked_registry_entries_from_entries(entries: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    latest_by_overlay: dict[str, Mapping[str, Any]] = {}
+    for entry in entries:
+        overlay_id = _registry_entry_overlay_id(entry)
+        if not overlay_id:
+            continue
+        current = latest_by_overlay.get(overlay_id)
+        if current is None or _registry_entry_sort_key(entry) >= _registry_entry_sort_key(current):
+            latest_by_overlay[overlay_id] = entry
+    locked: list[Mapping[str, Any]] = []
+    for entry in latest_by_overlay.values():
+        overlay = _mapping_to_plain_dict(entry.get("overlay"))
+        lifecycle = str(entry.get("lifecycle_state") or overlay.get("lifecycle_state") or "").strip().upper()
+        if lifecycle in {"BROKEN", "HIDDEN", "INVALIDATED", "MERGED"}:
+            continue
+        locked.append(entry)
+    return locked
 
 
 def _merge_direct_window_tracker_display_state(
@@ -172,8 +407,24 @@ def _merge_direct_window_tracker_display_state(
         return payload
     if display_frame == payload_frame and display_epoch + 0.001 < payload_epoch:
         return payload
+    if not display_state.get("last_display_window_path"):
+        legacy_window_path = display_state.get("last_window_path") or display_state.get("last_frame_path")
+        if legacy_window_path:
+            display_state["last_display_window_path"] = legacy_window_path
+    display_signature = str(
+        display_state.get("last_display_surface_signature") or display_state.get("last_window_surface_signature") or ""
+    ).strip()
+    study_signature = str(display_state.get("last_study_surface_signature") or "").strip()
     for key, value in display_state.items():
         if key in _DIRECT_DISPLAY_STATE_KEYS:
+            if key in _DIRECT_DISPLAY_STATE_NONEMPTY_STRING_KEYS:
+                value_text = str(value or "").strip()
+                if not value_text:
+                    continue
+                if key == "overlay_source_window_signature" and display_signature and value_text != display_signature:
+                    continue
+                if key == "overlay_source_study_signature" and study_signature and value_text != study_signature:
+                    continue
             payload[str(key)] = value
     return payload
 
@@ -220,6 +471,155 @@ def _direct_window_tracker_session_snapshot(session_id: str) -> dict[str, object
     payload.setdefault("next_capture_in_sec", 0.0)
     payload.setdefault("effective_capture_interval_sec", payload.get("capture_interval_sec", _WINDOW_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC))
     return payload
+
+
+def _direct_window_tracker_display_snapshot(session_id: str) -> dict[str, object] | None:
+    if str(os.getenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "1") or "1").strip().lower() in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }:
+        return None
+    requested_session_id = str(session_id or "").strip()
+    if not requested_session_id:
+        return None
+    try:
+        raw = json.loads(_direct_window_tracker_display_state_path(requested_session_id).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, Mapping):
+        return None
+    payload = dict(cast(Mapping[str, object], raw))
+    display_frame = int(_epoch_float(payload.get("display_frame_id"), 0.0))
+    overlay_frame = int(_epoch_float(payload.get("overlay_frame_id") or payload.get("full_overlay_frame_id"), 0.0))
+    model_frame = int(_epoch_float(payload.get("model_vote_frame_id"), 0.0))
+    display_window = str(
+        payload.get("last_display_window_path") or payload.get("last_window_path") or payload.get("last_frame_path") or ""
+    ).strip()
+    if display_frame <= 0 or overlay_frame <= 0 or model_frame <= 0 or not display_window:
+        return None
+    payload["session_id"] = requested_session_id
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    payload["display_frame_id"] = display_frame
+    payload.setdefault("frame_index", max(overlay_frame, model_frame))
+    payload.setdefault("capture_count", display_frame)
+    payload.setdefault("chart_frame_id", max(overlay_frame, model_frame))
+    payload.setdefault("last_window_path", display_window)
+    payload.setdefault("last_frame_path", display_window)
+    display_published = _epoch_float(payload.get("display_published_epoch") or payload.get("last_display_published_epoch"), 0.0)
+    display_capture = _epoch_float(payload.get("display_capture_epoch") or payload.get("last_display_capture_epoch"), 0.0)
+    if display_published > 0.0:
+        payload["last_capture_epoch"] = display_published
+    if display_capture > 0.0:
+        payload["last_capture_started_epoch"] = display_capture
+    payload.setdefault("event_log_path", str(_direct_window_tracker_display_state_path(requested_session_id).with_name("events.jsonl")))
+    payload.setdefault("next_capture_in_sec", 0.0)
+    payload.setdefault("effective_capture_interval_sec", _WINDOW_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC)
+    return payload
+
+
+def _direct_performance_trace_cache_ttl_sec() -> float:
+    try:
+        return max(
+            0.0,
+            float(os.getenv("PHOENIXGUARD_DIRECT_PERFORMANCE_TRACE_CACHE_TTL_SEC", "1.25") or "1.25"),
+        )
+    except ValueError:
+        return 1.25
+
+
+def _direct_performance_trace_direct_only() -> bool:
+    return str(os.getenv("PHOENIXGUARD_PERFORMANCE_TRACE_DIRECT_ONLY", "1") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+
+
+def _store_direct_performance_trace_cache(session_id: str, trace: Mapping[str, object], *, now_epoch: float) -> None:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return
+    with _DIRECT_PERFORMANCE_TRACE_CACHE_LOCK:
+        _DIRECT_PERFORMANCE_TRACE_CACHE[normalized_session_id] = (float(now_epoch), dict(trace))
+
+
+def _bump_cached_age_ms(container: dict[str, object], key: str, elapsed_ms: int) -> None:
+    value = container.get(key)
+    try:
+        number = float(value) if value is not None else 0.0
+    except (TypeError, ValueError):
+        return
+    if number <= 0.0:
+        return
+    container[key] = int(round(number + elapsed_ms))
+
+
+def _cached_direct_performance_trace(session_id: str, *, now_epoch: float | None = None) -> dict[str, object] | None:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return None
+    ttl_sec = _direct_performance_trace_cache_ttl_sec()
+    if ttl_sec <= 0.0:
+        return None
+    now_value = time.time() if now_epoch is None else float(now_epoch)
+    with _DIRECT_PERFORMANCE_TRACE_CACHE_LOCK:
+        cached = _DIRECT_PERFORMANCE_TRACE_CACHE.get(normalized_session_id)
+    if cached is None:
+        return None
+    cached_epoch, cached_trace = cached
+    age_sec = max(0.0, now_value - float(cached_epoch))
+    if age_sec > ttl_sec:
+        return None
+    elapsed_ms = int(round(age_sec * 1000.0))
+    trace = dict(cached_trace)
+    trace["generated_epoch"] = now_value
+    trace["direct_trace_cache_reused_v3"] = {
+        "schema_version": "PG_DIRECT_PERFORMANCE_TRACE_CACHE_V1",
+        "reason": "direct_snapshot_read_race",
+        "cached_age_ms": elapsed_ms,
+        "ttl_ms": int(round(ttl_sec * 1000.0)),
+    }
+    for section_key in ("display_frame", "overlay_state", "model_state", "frontend_state"):
+        section = trace.get(section_key)
+        if isinstance(section, Mapping):
+            section_copy = dict(cast(Mapping[str, object], section))
+            _bump_cached_age_ms(section_copy, "age_ms", elapsed_ms)
+            trace[section_key] = section_copy
+    metrics = trace.get("metrics")
+    if isinstance(metrics, Mapping):
+        metrics_copy = dict(cast(Mapping[str, object], metrics))
+        _bump_cached_age_ms(metrics_copy, "end_to_end_age_ms", elapsed_ms)
+        trace["metrics"] = metrics_copy
+    timing = trace.get("timing_trace")
+    if isinstance(timing, Mapping):
+        timing_copy = dict(cast(Mapping[str, object], timing))
+        for key in (
+            "frame_age_ms",
+            "overlay_age_ms",
+            "model_vote_age_ms",
+            "frontend_render_age_ms",
+            "state_publish_age_ms",
+            "packet_age_ms",
+        ):
+            _bump_cached_age_ms(timing_copy, key, elapsed_ms)
+        trace["timing_trace"] = timing_copy
+    visual = trace.get("visual_health")
+    if isinstance(visual, Mapping):
+        visual_copy = dict(cast(Mapping[str, object], visual))
+        for key in (
+            "frame_age_ms",
+            "overlay_age_ms",
+            "model_vote_age_ms",
+            "packet_age_ms",
+            "frontend_render_age_ms",
+        ):
+            _bump_cached_age_ms(visual_copy, key, elapsed_ms)
+        trace["visual_health"] = visual_copy
+    return trace
 
 
 def _packet_id_from_endpoint(endpoint_result: Mapping[str, object]) -> str:
@@ -325,11 +725,21 @@ def _live_model_health_summary(payload: Mapping[str, object]) -> dict[str, objec
     packet = _mapping_to_plain_dict(payload.get("model_council_packet") or payload.get("execution_packet"))
     tracking = _mapping_to_plain_dict(payload.get("tracking_summary"))
     pipeline = _mapping_to_plain_dict(tracking.get("pipeline_timing") or latest_signal.get("pipeline_timing"))
-    published_epoch = (
-        _payload_created_epoch(latest_signal)
-        or _payload_created_epoch(result)
-        or _payload_created_epoch(packet)
-        or _epoch_float(payload.get("last_capture_epoch"), 0.0)
+    published_epoch = max(
+        [
+            value
+            for value in (
+                _payload_created_epoch(latest_signal),
+                _payload_created_epoch(result),
+                _payload_created_epoch(packet),
+                _epoch_float(payload.get("model_capture_epoch"), 0.0),
+                _epoch_float(payload.get("display_published_epoch"), 0.0),
+                _epoch_float(payload.get("last_display_published_epoch"), 0.0),
+                _epoch_float(payload.get("last_capture_epoch"), 0.0),
+            )
+            if value > 0.0
+        ],
+        default=0.0,
     )
     max_latency = 0.0
     for value in pipeline.values():
@@ -344,7 +754,12 @@ def _live_model_health_summary(payload: Mapping[str, object]) -> dict[str, objec
         "risk_opposing_force",
         "arbitration_synthesis",
     ]
-    has_model_state = bool(result or packet or latest_signal)
+    has_model_state = bool(
+        result
+        or packet
+        or latest_signal
+        or int(_epoch_float(payload.get("model_vote_frame_id"), 0.0)) > 0
+    )
     return {
         "schema_version": "PG_MODEL_HEALTH_LIGHT_V3",
         "session_id": str(payload.get("session_id", "") or ""),
@@ -910,20 +1325,66 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         return build_intelligence_health(cast(Mapping[str, Any], payload))
 
-    def _direct_live_state_v3_for_session(requested_session_id: str, now_epoch: float, overlay_mode: str) -> dict[str, object] | None:
+    def _direct_live_state_v3_for_session(
+        requested_session_id: str,
+        now_epoch: float,
+        overlay_mode: str,
+        *,
+        compact_public: bool = False,
+    ) -> dict[str, object] | None:
+        direct_started = time.perf_counter()
+        timing_marks: list[tuple[str, float]] = [("start", direct_started)]
+
+        def mark_timing(name: str) -> None:
+            timing_marks.append((name, time.perf_counter()))
+
+        def timing_steps() -> dict[str, float]:
+            steps: dict[str, float] = {}
+            previous = timing_marks[0][1]
+            for name, current in timing_marks[1:]:
+                steps[name] = round((current - previous) * 1000.0, 3)
+                previous = current
+            return steps
+
         if str(os.getenv("PHOENIXGUARD_LIVE_STATE_DIRECT_READ", "1") or "1").strip().lower() in {"0", "false", "off", "no"}:
             return None
         path = _direct_live_state_session_path(requested_session_id)
-        try:
-            raw_session = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return None
+        raw_session: object
+        if compact_public:
+            raw_context: dict[str, object] = {}
+            try:
+                raw_context_payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                raw_context_payload = None
+            if isinstance(raw_context_payload, Mapping):
+                raw_context = cast(dict[str, object], _compact_session_payload(cast(Mapping[str, Any], raw_context_payload)))
+            try:
+                raw_display = json.loads(_direct_window_tracker_display_state_path(requested_session_id).read_text(encoding="utf-8"))
+            except Exception:
+                raw_display = None
+            if isinstance(raw_display, Mapping) and (
+                _epoch_float(raw_display.get("frame_index"), 0.0) > 0.0
+                and str(raw_display.get("last_display_window_path") or raw_display.get("last_window_path") or "").strip()
+            ):
+                raw_session = {**raw_context, **dict(cast(Mapping[str, object], raw_display))}
+            else:
+                if raw_context:
+                    raw_session = raw_context
+                else:
+                    return None
+        else:
+            try:
+                raw_session = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+        mark_timing("read_session")
         if not isinstance(raw_session, Mapping):
             return None
         session_payload = _merge_direct_window_tracker_display_state(
             requested_session_id,
             dict(cast(Mapping[str, object], raw_session)),
         )
+        mark_timing("merge_display")
         artifacts: dict[str, str] = {}
         for kind, key in {
             "window": "last_display_window_path",
@@ -938,45 +1399,103 @@ def create_app(
                 value = str(session_payload.get("last_window_path") or session_payload.get("last_frame_path") or "").strip()
             if value:
                 artifacts[kind] = value
+        mark_timing("artifacts")
+        registry_source = "skipped_session_v3_overlay_sources"
+        active_objects: list[Mapping[str, Any]] = []
+        registry_entries: list[Mapping[str, Any]] = []
         with _LIVE_STATE_V3_CACHE_LOCK:
-            cached_sources = _LIVE_STATE_REGISTRY_CACHE.get(requested_session_id)
-            if cached_sources and now_epoch - cached_sources[0] <= _LIVE_STATE_REGISTRY_CACHE_TTL_SEC:
-                active_objects = list(cached_sources[1])
-                registry_entries = list(cached_sources[2])
-            else:
-                active_objects = []
-                registry_entries = []
-                try:
+            if not _direct_session_has_v3_overlay_sources(cast(Mapping[str, Any], session_payload)):
+                cached_sources = _LIVE_STATE_REGISTRY_CACHE.get(requested_session_id)
+                if cached_sources and now_epoch - cached_sources[0] <= _LIVE_STATE_REGISTRY_CACHE_TTL_SEC:
+                    active_objects = list(cached_sources[1])
+                    registry_entries = list(cached_sources[2])
+                    registry_source = "cache"
+                else:
+                    try:
+                        registry_entries = [
+                            cast(Mapping[str, Any], item)
+                            for item in load_recent_market_objects(
+                                requested_session_id,
+                                max_lines=_LIVE_STATE_REGISTRY_MAX_LINES,
+                            )
+                        ]
+                    except Exception:
+                        registry_entries = []
                     active_objects = [
                         cast(Mapping[str, Any], item)
-                        for item in query_recent_active_objects(requested_session_id, min_truth_score=0.0)
+                        for item in _active_objects_from_entries(
+                            registry_entries,
+                            min_truth_score=0.0,
+                            now_epoch=now_epoch,
+                        )
                     ]
-                except Exception:
-                    active_objects = []
-                try:
-                    registry_entries = [
-                        cast(Mapping[str, Any], item)
-                        for item in load_recent_market_objects(requested_session_id)
-                    ]
-                except Exception:
-                    registry_entries = []
-                _LIVE_STATE_REGISTRY_CACHE[requested_session_id] = (now_epoch, active_objects, registry_entries)
-        return cast(
+                    _LIVE_STATE_REGISTRY_CACHE[requested_session_id] = (now_epoch, active_objects, registry_entries)
+                    registry_source = "legacy_registry"
+        if compact_public and registry_entries:
+            active_objects = _locked_registry_entries_from_entries(registry_entries)
+        mark_timing("registry")
+        model_health = _live_model_health_summary(cast(Mapping[str, object], session_payload))
+        mark_timing("model_health")
+        shooter_state = _latest_shooter_handshake_or_waiting(requested_session_id)
+        mark_timing("shooter")
+        frontend_heartbeat = latest_frontend_heartbeat(requested_session_id)
+        mark_timing("frontend_heartbeat")
+        live_state = cast(
             dict[str, object],
             build_live_state_v3(
                 session_payload,
                 artifacts=artifacts,
-                model_health=_live_model_health_summary(cast(Mapping[str, object], session_payload)),
-                shooter_state=_latest_shooter_handshake_or_waiting(requested_session_id),
+                model_health=model_health,
+                shooter_state=shooter_state,
                 active_objects=active_objects,
                 registry_entries=registry_entries,
-                frontend_heartbeat=latest_frontend_heartbeat(requested_session_id),
+                frontend_heartbeat=frontend_heartbeat,
                 now_epoch=now_epoch,
                 overlay_mode=overlay_mode,
+                compact_public=compact_public,
             ),
         )
+        mark_timing("build")
+        live_state["provider_status"] = {
+            **_mapping_to_plain_dict(live_state.get("provider_status")),
+            "live_state_source": "direct_file",
+            "direct_duration_ms": round((time.perf_counter() - direct_started) * 1000.0, 3),
+            "direct_steps_ms": timing_steps(),
+            "direct_registry_source": registry_source,
+            "direct_registry_entries": len(registry_entries),
+        }
+        live_visual_state = live_state.get("live_visual_state")
+        if isinstance(live_visual_state, Mapping):
+            live_visual = dict(cast(Mapping[str, object], live_visual_state))
+            live_visual["provider_status"] = live_state["provider_status"]
+            live_state["live_visual_state"] = live_visual
+        return live_state
 
     def compact_live_state_response(live_state: Mapping[str, object]) -> dict[str, object]:
+        def compact_mapping(value: object, fields: set[str]) -> dict[str, object]:
+            row = _mapping_to_plain_dict(value)
+            return {
+                key: row.get(key)
+                for key in fields
+                if row.get(key) not in (None, "", [], {})
+            }
+
+        def compact_promotion_trace(value: object) -> dict[str, object]:
+            return compact_mapping(
+                value,
+                {
+                    "state",
+                    "final_state",
+                    "promotion_result",
+                    "denied_at",
+                    "next_required",
+                    "true_blocker",
+                    "first_reason",
+                    "runtime_release_condition",
+                    "exact_field_preventing_execution_packet",
+                },
+            )
+
         compact = cast(dict[str, object], _compact_session_payload(live_state))
         live_visual_state = live_state.get("live_visual_state")
         if isinstance(live_visual_state, Mapping):
@@ -997,16 +1516,101 @@ def create_app(
                 compact["study_packet_status"] = dict(study)
             if isinstance(execution, Mapping):
                 compact["execution_packet_status"] = dict(execution)
+        compact["latest_signal"] = compact_mapping(
+            compact.get("latest_signal"),
+            {
+                "session_id",
+                "signal_id",
+                "side",
+                "action",
+                "execution_action",
+                "confidence",
+                "status",
+                "final_state",
+                "lane",
+                "execution_lane",
+                "symbol",
+                "pair",
+                "timeframe",
+                "published_epoch",
+                "signal_age_sec",
+                "broker_source",
+                "broker_source_lock",
+                "promotion_failure_audit_v3",
+            },
+        )
+        compact["tracking_summary"] = compact_mapping(
+            compact.get("tracking_summary"),
+            {
+                "session_id",
+                "detected_market",
+                "detected_timeframe",
+                "status",
+                "frame_index",
+                "capture_count",
+                "display_frame_id",
+                "last_capture_epoch",
+                "broker_source",
+                "broker_source_lock",
+                "broker_surface",
+                "pipeline_timing",
+            },
+        )
+        model_result = _mapping_to_plain_dict(compact.get("model_council_result"))
+        if model_result:
+            compact["model_council_result"] = {
+                **compact_mapping(
+                    model_result,
+                    {
+                        "packet_id",
+                        "state",
+                        "final_state",
+                        "side",
+                        "final_side",
+                        "lane",
+                        "execution_lane",
+                        "score",
+                        "confidence",
+                        "actionable",
+                        "denied_at",
+                        "next_required",
+                        "promotion_failure_audit_v3",
+                    },
+                ),
+                "promotion_trace": compact_promotion_trace(model_result.get("promotion_trace")),
+                "model_council": compact_mapping(
+                    model_result.get("model_council"),
+                    {"final_state", "final_side", "state", "side", "lane", "execution_lane", "score", "actionable"},
+                ),
+            }
+        broker_execution_state = compact_mapping(
+            compact.get("broker_execution_state"),
+            {"status", "message", "side", "lane", "actionable", "reason", "next_required"},
+        )
+        if broker_execution_state:
+            compact["broker_execution_state"] = broker_execution_state
+        for heavy_key in (
+            "model_council_study_packet",
+            "model_council_packet",
+            "execution_packet",
+            "recent_studies",
+        ):
+            compact.pop(heavy_key, None)
         return compact
 
-    def build_live_state_v3_for_session(session_id: str, overlay_mode: str = "CLEAN_LIVE") -> dict[str, object]:
+    def build_live_state_v3_for_session(
+        session_id: str,
+        overlay_mode: str = "CLEAN_LIVE",
+        *,
+        compact_public: bool = False,
+    ) -> dict[str, object]:
         requested_session_id = str(session_id or "").strip()
         if not requested_session_id:
             requested_session_id = resolve_window_tracker_dashboard_session_id(None)
         active_overlay_mode = normalize_view_mode(overlay_mode)
-        cache_signature = _live_state_cache_signature(requested_session_id)
+        cache_signature = _live_state_cache_signature(requested_session_id, compact_public=compact_public)
         cache_enabled = _LIVE_STATE_V3_CACHE_TTL_SEC > 0.0 and not cache_signature.startswith("session=missing")
-        cache_key = (requested_session_id, active_overlay_mode, cache_signature)
+        cache_key = (requested_session_id, active_overlay_mode, cache_signature, bool(compact_public))
         now_epoch = time.time()
         if cache_enabled:
             with _LIVE_STATE_V3_CACHE_LOCK:
@@ -1026,7 +1630,12 @@ def create_app(
                     _LIVE_STATE_V3_CACHE.pop(stale_key, None)
                 _LIVE_STATE_V3_CACHE[cache_key] = (time.time(), dict(live_state))
 
-        direct_live_state = _direct_live_state_v3_for_session(requested_session_id, now_epoch, active_overlay_mode)
+        direct_live_state = _direct_live_state_v3_for_session(
+            requested_session_id,
+            now_epoch,
+            active_overlay_mode,
+            compact_public=compact_public,
+        )
         if direct_live_state is not None:
             store_live_state_cache(direct_live_state)
             return direct_live_state
@@ -1038,11 +1647,34 @@ def create_app(
         def shooter_loader(resolved_session_id: str) -> Mapping[str, Any]:
             return _latest_shooter_handshake_or_waiting(resolved_session_id)
 
-        def active_object_loader(resolved_session_id: str) -> list[Mapping[str, Any]]:
-            return [cast(Mapping[str, Any], item) for item in query_recent_active_objects(resolved_session_id, min_truth_score=0.0)]
+        registry_loader_cache: dict[str, list[Mapping[str, Any]]] = {}
 
         def registry_loader(resolved_session_id: str) -> list[Mapping[str, Any]]:
-            return [cast(Mapping[str, Any], item) for item in load_recent_market_objects(resolved_session_id)]
+            cached_rows = registry_loader_cache.get(resolved_session_id)
+            if cached_rows is not None:
+                return list(cached_rows)
+            rows = [
+                cast(Mapping[str, Any], item)
+                for item in load_recent_market_objects(
+                    resolved_session_id,
+                    max_lines=_LIVE_STATE_REGISTRY_MAX_LINES,
+                )
+            ]
+            registry_loader_cache[resolved_session_id] = rows
+            return list(rows)
+
+        def active_object_loader(resolved_session_id: str) -> list[Mapping[str, Any]]:
+            rows = registry_loader(resolved_session_id)
+            if compact_public:
+                return _locked_registry_entries_from_entries(rows)
+            return [
+                cast(Mapping[str, Any], item)
+                for item in _active_objects_from_entries(
+                    rows,
+                    min_truth_score=0.0,
+                    now_epoch=now_epoch,
+                )
+            ]
 
         def heartbeat_loader(resolved_session_id: str) -> Mapping[str, Any] | None:
             return latest_frontend_heartbeat(resolved_session_id)
@@ -1060,8 +1692,13 @@ def create_app(
                     frontend_heartbeat_loader=heartbeat_loader,
                     now_epoch=now_epoch,
                     overlay_mode=active_overlay_mode,
+                    compact_public=compact_public,
                 ),
             )
+            live_state["provider_status"] = {
+                **_mapping_to_plain_dict(live_state.get("provider_status")),
+                "live_state_source": "tracker_service",
+            }
             store_live_state_cache(live_state)
             return live_state
         except KeyError as exc:
@@ -1069,7 +1706,7 @@ def create_app(
 
     @app.get("/v1/mobile/live/state/v3/{session_id}")
     def live_state_v3_for_session(session_id: str, mode: str = "CLEAN_LIVE", compact: bool = False) -> dict[str, object]:
-        live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode)
+        live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=compact)
         return compact_live_state_response(live_state) if compact else live_state
 
     @app.get("/v1/mobile/live/state/v3")
@@ -1077,11 +1714,110 @@ def create_app(
         live_state = build_live_state_v3_for_session(
             session_id or resolve_window_tracker_dashboard_session_id(None),
             overlay_mode=mode,
+            compact_public=compact,
         )
         return compact_live_state_response(live_state) if compact else live_state
 
+    def _performance_trace_overlay_count(trace: Mapping[str, object] | None) -> int:
+        if not isinstance(trace, Mapping):
+            return 0
+        version = str(trace.get("overlay_state_version") or "").strip()
+        match = re.match(r"^ovlock_(\d+)_", version)
+        if match:
+            try:
+                return max(0, int(match.group(1)))
+            except ValueError:
+                return 0
+        overlay_state = trace.get("overlay_state")
+        if isinstance(overlay_state, Mapping):
+            nested_version = str(overlay_state.get("overlay_state_version") or "").strip()
+            nested_match = re.match(r"^ovlock_(\d+)_", nested_version)
+            if nested_match:
+                try:
+                    return max(0, int(nested_match.group(1)))
+                except ValueError:
+                    return 0
+        return 0
+
+    def _canonical_performance_trace_v3_for_session(session_id: str) -> dict[str, object] | None:
+        live_state = build_live_state_v3_for_session(
+            session_id,
+            overlay_mode="ACTIVE_CONTEXT",
+            compact_public=True,
+        )
+        trace = live_state.get("performance_trace_v3")
+        if isinstance(trace, Mapping):
+            return cast(dict[str, object], dict(trace))
+        compact = live_state.get("live_visual_state")
+        if isinstance(compact, Mapping) and isinstance(compact.get("performance_trace_v3"), Mapping):
+            return cast(dict[str, object], dict(cast(Mapping[str, object], compact["performance_trace_v3"])))
+        return None
+
+    def _direct_performance_trace_v3_for_session(session_id: str) -> dict[str, object] | None:
+        requested_session_id = str(session_id or "").strip()
+        if not requested_session_id:
+            return None
+        session = (
+            _direct_window_tracker_display_snapshot(requested_session_id)
+            or _direct_window_tracker_session_snapshot(requested_session_id)
+        )
+        if session is None:
+            return None
+        now_epoch = time.time()
+        model_health = _live_model_health_summary(cast(Mapping[str, object], session))
+        frontend_heartbeat = latest_frontend_heartbeat(requested_session_id)
+        frame_timing = build_frame_timing_trace_v3(
+            cast(Mapping[str, Any], session),
+            overlays=[],
+            model_health=cast(Mapping[str, Any], model_health),
+            frontend_heartbeat=frontend_heartbeat,
+            now_epoch=now_epoch,
+        )
+        live_state = {
+            "session_id": requested_session_id,
+            "frame_id": int(session.get("display_frame_id") or session.get("frame_index") or session.get("capture_count") or 0),
+            "state_version": int(session.get("state_version") or 0),
+            "tracking_summary": _mapping_to_plain_dict(session.get("tracking_summary")),
+            "latest_signal": _mapping_to_plain_dict(session.get("latest_signal")),
+            "model_health": model_health,
+            "frame_timing_trace_v3": frame_timing,
+            "frame_timing": frame_timing,
+            "broker_surface": {
+                "url": str(
+                    session.get("last_display_window_path")
+                    or session.get("last_window_path")
+                    or session.get("last_frame_path")
+                    or ""
+                )
+            },
+            "frontend_heartbeat": frontend_heartbeat,
+        }
+        trace = cast(dict[str, object], build_performance_trace_v3(live_state, now_epoch=now_epoch))
+        _store_direct_performance_trace_cache(requested_session_id, trace, now_epoch=now_epoch)
+        return trace
+
     @app.get("/v1/mobile/performance/trace/v3/{session_id}")
-    def performance_trace_v3_for_session(session_id: str) -> dict[str, object]:
+    async def performance_trace_v3_for_session(session_id: str) -> dict[str, object]:
+        direct_trace = _direct_performance_trace_v3_for_session(session_id)
+        if direct_trace is not None:
+            if _performance_trace_overlay_count(direct_trace) > 0:
+                return direct_trace
+            try:
+                canonical_trace = _canonical_performance_trace_v3_for_session(session_id)
+            except Exception:
+                canonical_trace = None
+            if canonical_trace is not None and _performance_trace_overlay_count(canonical_trace) > 0:
+                _store_direct_performance_trace_cache(session_id, canonical_trace, now_epoch=time.time())
+                return canonical_trace
+            return direct_trace
+        cached_trace = _cached_direct_performance_trace(session_id)
+        if cached_trace is not None and _performance_trace_overlay_count(cached_trace) > 0:
+            return cached_trace
+        if _direct_performance_trace_direct_only():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Direct performance trace temporarily unavailable.",
+            )
         live_state = build_live_state_v3_for_session(session_id)
         trace = live_state.get("performance_trace_v3")
         if isinstance(trace, Mapping):
@@ -1092,12 +1828,43 @@ def create_app(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Performance trace not available.")
 
     @app.get("/v1/mobile/performance/trace/v3")
-    def performance_trace_v3(session_id: str | None = None) -> dict[str, object]:
-        return performance_trace_v3_for_session(session_id or resolve_window_tracker_dashboard_session_id(None))
+    async def performance_trace_v3(session_id: str | None = None) -> dict[str, object]:
+        return await performance_trace_v3_for_session(session_id or resolve_window_tracker_dashboard_session_id(None))
 
     @app.post("/v1/mobile/frontend/heartbeat/v3")
     def frontend_heartbeat_v3(payload: dict[str, object] = Body(...)) -> dict[str, object]:
         try:
+            heartbeat_session_id = str(payload.get("session_id") or "").strip() or resolve_window_tracker_dashboard_session_id(None)
+            rendered_frame = int(_epoch_float(payload.get("rendered_frame_id") or payload.get("frame_id"), 0.0))
+            heartbeat_overlay_version = str(payload.get("overlay_state_version") or "").strip()
+            payload_overlay_count = int(_epoch_float(payload.get("overlay_count"), 0.0))
+            visible_overlay_count = int(_epoch_float(payload.get("visible_overlay_count") or payload.get("overlay_count"), 0.0))
+            latest_heartbeat = latest_frontend_heartbeat(heartbeat_session_id)
+            latest_visible_count = int(
+                _epoch_float(
+                    _mapping_to_plain_dict(latest_heartbeat).get("visible_overlay_count")
+                    or _mapping_to_plain_dict(latest_heartbeat).get("overlay_count"),
+                    0.0,
+                )
+            )
+            if visible_overlay_count > 0 and not heartbeat_overlay_version:
+                return {
+                    "schema_version": "PG_FRONTEND_HEARTBEAT_V3",
+                    "session_id": heartbeat_session_id,
+                    "status": "ignored",
+                    "reason": "missing_overlay_state_version",
+                    "rendered_frame_id": rendered_frame,
+                }
+            if (latest_visible_count > 0 or payload_overlay_count > 0) and visible_overlay_count <= 0:
+                return {
+                    "schema_version": "PG_FRONTEND_HEARTBEAT_V3",
+                    "session_id": heartbeat_session_id,
+                    "status": "ignored",
+                    "reason": "degraded_overlay_heartbeat",
+                    "rendered_frame_id": rendered_frame,
+                    "visible_overlay_count": visible_overlay_count,
+                    "latest_visible_overlay_count": latest_visible_count,
+                }
             return cast(dict[str, object], record_frontend_heartbeat(payload))
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -1473,13 +2240,40 @@ def create_app(
         execution_payload = _mapping_to_plain_dict(execution_latest.get("payload"))
         study_model_council = _mapping_to_plain_dict(study_payload.get("model_council"))
         execution_model_council = _mapping_to_plain_dict(execution_payload.get("model_council"))
+        broker_surface = _mapping_to_plain_dict(tracker_payload.get("broker_surface"))
+        broker_surface_source = _mapping_to_plain_dict(broker_surface.get("broker_source"))
+        broker_surface_lock = _mapping_to_plain_dict(broker_surface.get("broker_source_lock"))
+        tracking_surface = _mapping_to_plain_dict(tracking_summary.get("broker_surface"))
+        tracking_surface_source = _mapping_to_plain_dict(tracking_surface.get("broker_source"))
+        tracking_surface_lock = _mapping_to_plain_dict(tracking_surface.get("broker_source_lock"))
         broker_source_lock = _first_trace_mapping(
             tracker_payload.get("broker_source_lock"),
+            tracker_payload.get("broker_source"),
             tracking_summary.get("broker_source_lock"),
+            tracking_summary.get("broker_source"),
             latest_signal.get("broker_source_lock"),
+            latest_signal.get("broker_source"),
+            broker_surface_lock,
+            broker_surface_source,
+            tracking_surface_lock,
+            tracking_surface_source,
         )
-        source_lock_valid = broker_source_lock.get("valid") is True
+        source_lock_status_text = str(broker_source_lock.get("status") or broker_source_lock.get("state") or "").strip().upper()
+        source_lock_valid = broker_source_lock.get("valid") is True or source_lock_status_text in {"PASS", "VALID", "LOCKED"}
         source_lock_status = "PASS" if source_lock_valid else ("MISSING" if not broker_source_lock else "FAIL")
+        locked_overlay_authority = bool(
+            (tracker_payload.get("display_snapshot_only_v3") or tracker_payload.get("display_fast_path_v3"))
+            and (
+                tracker_payload.get("last_full_overlay_path")
+                or tracker_payload.get("last_overlay_path")
+                or tracking_summary.get("last_full_overlay_path")
+                or tracking_summary.get("last_overlay_path")
+            )
+        )
+        if source_lock_status == "FAIL" and not packet_ids["execution"] and locked_overlay_authority:
+            broker_source_lock["display_only_overlay_authority_locked"] = True
+            source_lock_valid = True
+            source_lock_status = "PASS"
         model_health_payload = _mapping_to_plain_dict(_mapping_to_plain_dict(model_health.get("payload")).get("runtime_model_health") or model_health.get("payload"))
         if not model_health_payload:
             model_health_payload = _mapping_to_plain_dict(model_health.get("payload"))
@@ -1970,6 +2764,27 @@ def create_app(
         except FileNotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         media_type = "image/jpeg" if path.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
+        return _safe_file_bytes_response(path, media_type=media_type)
+
+    @app.get("/v1/mobile/window-tracker/sessions/{session_id}/artifacts/files/{artifact_name}")
+    def get_tracker_artifact_file(session_id: str, artifact_name: str) -> FileResponse:
+        safe_name = Path(str(artifact_name or "")).name
+        if not safe_name or safe_name != str(artifact_name or ""):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid artifact name.")
+        try:
+            tracker = get_window_tracker_service()
+            artifact_dir = tracker.session_dir(session_id) / "artifacts"
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
+        path = artifact_dir / safe_name
+        try:
+            if path.resolve().parent != artifact_dir.resolve():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid artifact path.")
+        except OSError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact is not readable.") from exc
+        if not path.exists() or not path.is_file():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found.")
+        media_type = "image/jpeg" if path.suffix.lower() in {".jpg", ".jpeg"} else "image/png" if path.suffix.lower() == ".png" else "application/json" if path.suffix.lower() == ".json" else None
         return _safe_file_bytes_response(path, media_type=media_type)
 
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-{artifact_kind}")

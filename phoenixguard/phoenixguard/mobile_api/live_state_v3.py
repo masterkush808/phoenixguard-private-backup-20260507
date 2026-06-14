@@ -21,7 +21,10 @@ from phoenixguard.vision.broker_scene_graph_v3 import build_broker_scene_graph_v
 from phoenixguard.vision.box_refinement_v3 import OVERLAY_PRECISION_AUDIT_SCHEMA_VERSION, resolve_precision_overlays_v3
 from phoenixguard.vision.overlay_layer_manager_v3 import OverlayLayerManagerV3
 from phoenixguard.vision.v3_overlay_contract import (
+    REQUIRED_FIELDS,
     VIEW_MODES,
+    approved_overlay_display_labels,
+    is_approved_overlay_display_label,
     normalize_v3_overlay_object,
     normalize_view_mode,
     overlay_is_visible,
@@ -410,6 +413,13 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
             "height": max(0.0, bottom - top),
             "bbox": label_box,
         }
+    canonical_label = _text(row.get("display_label") or row.get("short_label"))
+    if canonical_label:
+        original_label = _text(row.get("label"))
+        if original_label and original_label != canonical_label:
+            row.setdefault("raw_label", original_label)
+        row["label"] = canonical_label
+        row["short_label"] = canonical_label
     if not compact:
         return row
     keep_keys = (
@@ -424,13 +434,23 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
         "side",
         "direction",
         "action",
+        "source_agent",
+        "source_version",
+        "broker_source_lock_id",
+        "frame_id",
+        "sequence_id",
+        "chart_transform_id",
         "bbox",
         "bounds",
         "bounds_rect",
         "truth_score",
         "confidence",
         "label",
+        "raw_label",
+        "raw_display_label",
         "display_label",
+        "display_label_status",
+        "unmapped_display_label",
         "short_label",
         "layer",
         "role",
@@ -439,6 +459,15 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
         "label_hidden",
         "label_anchor",
         "label_bounds",
+        "points",
+        "line_points",
+        "touch_points",
+        "trendline_role",
+        "trendline_validation",
+        "skill_gate",
+        "replay_sequence",
+        "replay_action",
+        "story",
         "parent_overlay_id",
         "parent_type",
         "nesting_depth",
@@ -448,10 +477,19 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
         "z_index",
         "coordinate_mode",
         "anchor_type",
+        "anchor_candles",
+        "lifecycle_state",
+        "ttl_ms",
+        "reason",
         "precision_rejected",
         "precision_rejection_reason",
     )
-    return {key: row[key] for key in keep_keys if row.get(key) not in (None, "", [], {})}
+    required_keep = set(REQUIRED_FIELDS)
+    return {
+        key: row[key]
+        for key in keep_keys
+        if key in row and (key in required_keep or row.get(key) not in (None, "", [], {}))
+    }
 
 
 def _zone_bbox(zone: Mapping[str, Any]) -> list[float]:
@@ -542,7 +580,7 @@ def _signal_thesis_overlay_objects(
             "OPPOSING_FORCE",
             invalidation_zone or entry_zone,
             overlay_side=opposite,
-            label=f"{opposite} BLOCKED",
+            label="OPPOSING FORCE",
             layer="supply_demand",
             role="countertrend_block",
         ),
@@ -552,13 +590,15 @@ def _signal_thesis_overlay_objects(
     return overlays
 
 
-def _overlay_visible_for_mode(overlay: Mapping[str, Any], mode: str) -> bool:
+def _overlay_visible_for_mode(overlay: Mapping[str, Any], mode: str, *, now_ms: int | float | None = None) -> bool:
     if bool(overlay.get("precision_rejected", False)):
         return False
     normalized_mode = normalize_view_mode(mode)
     if normalized_mode == "CLEAN_LIVE" and overlay.get("visible_default") is False:
         return False
-    return overlay_is_visible(overlay, normalized_mode)
+    created_at_ms = _float(overlay.get("created_at_ms"), 0.0)
+    effective_now_ms = now_ms if created_at_ms > 0.0 else None
+    return overlay_is_visible(overlay, normalized_mode, now_ms=effective_now_ms)
 
 
 def _overlay_is_frame_aligned(overlay: Mapping[str, Any], frame_id: int) -> bool:
@@ -586,6 +626,41 @@ def _overlay_artifact_alignment(
         f"overlay artifact frame {artifact_frame_id} does not match overlay object frame {overlay_object_frame_id}",
         artifact_frame_id,
     )
+
+
+def _surface_signatures_match(session: Mapping[str, Any]) -> bool:
+    display_signature = _text(
+        session.get("last_display_surface_signature")
+        or session.get("last_window_surface_signature")
+        or session.get("display_surface_signature")
+    )
+    overlay_signature = _text(
+        session.get("overlay_source_window_signature")
+        or session.get("last_window_surface_signature")
+        or session.get("last_study_surface_signature")
+    )
+    return bool(display_signature and overlay_signature and display_signature == overlay_signature)
+
+
+def _display_only_overlay_authority_locked(
+    session: Mapping[str, Any],
+    *,
+    overlay_object_frame_id: int = 0,
+    source_block_reason: str = "",
+) -> bool:
+    if source_block_reason:
+        return False
+    display_frame = _int(session.get("frame_index") or session.get("chart_frame_id") or session.get("display_frame_id"))
+    has_display_artifact = bool(session.get("last_display_window_path") or session.get("last_window_path") or session.get("last_frame_path"))
+    if display_frame > 0 and overlay_object_frame_id > 0 and display_frame == overlay_object_frame_id and has_display_artifact:
+        return True
+    if not (bool(session.get("display_snapshot_only_v3")) or bool(session.get("display_fast_path_v3"))):
+        return False
+    if _surface_signatures_match(session):
+        return True
+    overlay_frame = max(_int(session.get("overlay_frame_id")), _int(session.get("full_overlay_frame_id")))
+    has_overlay_artifact = bool(session.get("last_overlay_path") or session.get("last_full_overlay_path"))
+    return bool(overlay_frame > 0 and display_frame > 0 and has_overlay_artifact and has_display_artifact)
 
 
 def _mode_visible_layers(mode: str) -> list[str]:
@@ -849,8 +924,49 @@ def _overlay_layout_payload(
         "hidden_for_budget": hidden_count,
         "rendered_count": rendered_count,
         "duplicate_count": _int(report.get("duplicate_boxes")),
+        "duplicate_now_hidden": _int(report.get("duplicate_now_hidden")),
         "current_candle_label_hidden": active_mode == "CLEAN_LIVE",
         "diagnostics_overlap_allowed": active_mode in {"DIAGNOSTICS", "DEBUG", "INSPECTOR"},
+    }
+
+
+def _overlay_vocabulary_payload(
+    all_overlays: Sequence[Mapping[str, Any]],
+    rendered_overlays: Sequence[Mapping[str, Any]],
+    *,
+    active_mode: str,
+) -> dict[str, Any]:
+    approved_labels = list(approved_overlay_display_labels())
+    approved_tokens = {str(label).strip().upper().replace(" ", "_") for label in approved_labels}
+    unknown_terms: list[str] = []
+    remapped_labels: list[dict[str, str]] = []
+    visible_unapproved: list[str] = []
+    for row in all_overlays:
+        raw_label = _text(row.get("unmapped_display_label") or row.get("raw_display_label"))
+        display_label = _text(row.get("display_label") or row.get("short_label"))
+        status = _text(row.get("display_label_status"))
+        if status == "unmapped" and raw_label and raw_label not in unknown_terms:
+            unknown_terms.append(raw_label)
+        if status == "remapped" and raw_label and display_label and raw_label != display_label:
+            item = {"raw": raw_label, "display": display_label}
+            if item not in remapped_labels:
+                remapped_labels.append(item)
+    visible_label_rows = [row for row in rendered_overlays if row.get("label_hidden") is not True and row.get("label_hidden") != "true"]
+    for row in visible_label_rows:
+        display_label = _text(row.get("display_label") or row.get("label"))
+        if display_label and not is_approved_overlay_display_label(display_label) and display_label not in visible_unapproved:
+            visible_unapproved.append(display_label)
+    return {
+        "schema_version": "PG_OVERLAY_VOCABULARY_AUDIT_V3",
+        "active_mode": active_mode,
+        "approved_label_count": len(approved_labels),
+        "approved_labels": approved_labels,
+        "approved_label_tokens": sorted(approved_tokens),
+        "visible_labels": [_text(row.get("display_label") or row.get("label")) for row in visible_label_rows if _text(row.get("display_label") or row.get("label"))],
+        "visible_unapproved_labels": visible_unapproved,
+        "dictionary_coverage_ok": not visible_unapproved,
+        "unknown_or_unmapped_terms": unknown_terms,
+        "labels_remapped": remapped_labels,
     }
 
 
@@ -916,6 +1032,9 @@ def _compact_tracking_summary(tracking: Mapping[str, Any]) -> dict[str, Any]:
         "overlay_truth_audit",
         "phoenixguard_report",
         "pipeline_timing",
+        "projection",
+        "historical_structure",
+        "angle_vectors",
         "signal_thesis_v3",
         "smart_money_context",
         "structure_boxes",
@@ -952,6 +1071,9 @@ def _compact_latest_signal(signal: Mapping[str, Any]) -> dict[str, Any]:
         "overlay_instructions",
         "overlay_truth_audit",
         "pipeline_timing",
+        "projection",
+        "historical_structure",
+        "angle_vectors",
         "probability",
         "signal_thesis_v3",
         "smart_money_context",
@@ -1014,6 +1136,74 @@ def _compact_model_council_result(result: Mapping[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _compact_performance_trace_v3(trace: Mapping[str, Any]) -> dict[str, Any]:
+    timing = _mapping(trace.get("timing_trace"))
+    visual_health = _mapping(trace.get("visual_health"))
+    keep_timing_keys = {
+        "schema_version",
+        "frame_id",
+        "frame_age_ms",
+        "overlay_age_ms",
+        "model_vote_age_ms",
+        "packet_age_ms",
+        "frontend_render_age_ms",
+        "state_publish_age_ms",
+        "overlay_state_version",
+        "overlay_frame_state_version",
+        "model_state_version",
+        "display_frame_id",
+        "overlay_frame_id",
+        "overlay_frame_gap",
+        "raw_overlay_frame_gap",
+        "surface_signature_aligned",
+        "display_only_authority_locked",
+        "frame_gap_status",
+        "stale_status",
+        "stale_flags",
+        "freshness_score",
+        "source",
+    }
+    compact = {
+        "schema_version": trace.get("schema_version"),
+        "session_id": trace.get("session_id"),
+        "generated_epoch": trace.get("generated_epoch"),
+        "frame_id": trace.get("frame_id"),
+        "state_version": trace.get("state_version"),
+        "overlay_state_version": trace.get("overlay_state_version"),
+        "overlay_frame_state_version": trace.get("overlay_frame_state_version"),
+        "display_frame": _compact_scalar_and_selected(
+            _mapping(trace.get("display_frame")),
+            {"frame_id", "age_ms", "url"},
+        ),
+        "overlay_state": _compact_scalar_and_selected(
+            _mapping(trace.get("overlay_state")),
+            {"frame_id", "age_ms", "fresh", "overlay_state_version", "overlay_frame_state_version"},
+        ),
+        "model_state": _compact_scalar_and_selected(
+            _mapping(trace.get("model_state")),
+            {"frame_id", "age_ms", "fresh", "models_awake", "models_total", "queue_depth"},
+        ),
+        "frontend_state": _compact_scalar_and_selected(
+            _mapping(trace.get("frontend_state")),
+            {"age_ms", "fresh"},
+        ),
+        "metrics": dict(_mapping(trace.get("metrics"))),
+        "timing_trace": _compact_scalar_and_selected(timing, keep_timing_keys),
+        "visual_health": _compact_scalar_and_selected(
+            visual_health,
+            {"status", "frame_age_ms", "overlay_age_ms", "model_vote_age_ms", "packet_age_ms", "frontend_render_age_ms", "stale_flags"},
+        ),
+        "adaptive_performance": _compact_scalar_and_selected(
+            _mapping(trace.get("adaptive_performance")),
+            {"schema_version", "profile", "reasons", "rule"},
+        ),
+    }
+    stale_status = timing.get("stale_status") or visual_health.get("status")
+    if stale_status:
+        compact["stale_status"] = stale_status
+    return compact
+
+
 def _compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
     keep_keys = (
         "session_id",
@@ -1040,6 +1230,11 @@ def _compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
         "model_vote_frame_id",
         "model_capture_epoch",
         "source_capture_id",
+        "last_window_surface_signature",
+        "last_display_surface_signature",
+        "last_study_surface_signature",
+        "overlay_source_window_signature",
+        "overlay_source_study_signature",
         "capture_count",
         "frame_index",
         "state_version",
@@ -1100,6 +1295,125 @@ def _compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _compact_live_poll_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
+    selected = {
+        "session_id",
+        "name",
+        "market",
+        "window_query",
+        "layout_profile",
+        "effective_layout_profile",
+        "capture_interval_sec",
+        "rl_track_interval_sec",
+        "status",
+        "tracking_enabled",
+        "created_at",
+        "updated_at",
+        "last_capture_at",
+        "last_capture_started_epoch",
+        "last_capture_epoch",
+        "display_frame_id",
+        "display_capture_epoch",
+        "display_published_epoch",
+        "chart_frame_id",
+        "overlay_frame_id",
+        "full_overlay_frame_id",
+        "model_vote_frame_id",
+        "model_capture_epoch",
+        "source_capture_id",
+        "last_window_surface_signature",
+        "last_display_surface_signature",
+        "last_study_surface_signature",
+        "overlay_source_window_signature",
+        "overlay_source_study_signature",
+        "capture_count",
+        "frame_index",
+        "state_version",
+        "decision_version",
+        "decision_valid_until_epoch",
+        "locked_window",
+        "locked_title",
+        "manual_focus_region",
+        "focus_selector",
+        "execution_controls",
+        "broker_source",
+        "broker_source_lock",
+        "broker_surface",
+        "broker_execution_state",
+        "last_frame_path",
+        "last_window_path",
+        "last_display_window_path",
+        "last_chart_path",
+        "last_display_chart_path",
+        "last_overlay_path",
+        "last_full_overlay_path",
+    }
+    compact = {key: session.get(key) for key in selected if key in session}
+    latest_signal = _mapping(session.get("latest_signal"))
+    compact["latest_signal"] = _compact_scalar_and_selected(
+        latest_signal,
+        {
+            "session_id",
+            "signal_id",
+            "side",
+            "action",
+            "execution_action",
+            "confidence",
+            "status",
+            "final_state",
+            "lane",
+            "execution_lane",
+            "symbol",
+            "pair",
+            "timeframe",
+            "published_epoch",
+            "signal_age_sec",
+            "broker_source",
+            "broker_source_lock",
+            "promotion_failure_audit_v3",
+        },
+    )
+    tracking = _mapping(session.get("tracking_summary"))
+    compact["tracking_summary"] = _compact_scalar_and_selected(
+        tracking,
+        {
+            "session_id",
+            "detected_market",
+            "detected_timeframe",
+            "status",
+            "frame_index",
+            "capture_count",
+            "display_frame_id",
+            "last_capture_epoch",
+            "broker_source",
+            "broker_source_lock",
+            "broker_surface",
+            "pipeline_timing",
+        },
+    )
+    model_result = _mapping(session.get("model_council_result"))
+    if model_result:
+        compact["model_council_result"] = _compact_scalar_and_selected(
+            model_result,
+            {
+                "packet_id",
+                "state",
+                "final_state",
+                "side",
+                "final_side",
+                "lane",
+                "execution_lane",
+                "score",
+                "confidence",
+                "actionable",
+                "denied_at",
+                "next_required",
+                "promotion_failure_audit_v3",
+            },
+        )
+    return compact
+
+
 def build_live_state_v3(
     session_payload: Mapping[str, Any],
     *,
@@ -1114,8 +1428,10 @@ def build_live_state_v3(
     now_epoch: float | None = None,
     artifact_probe: Callable[[str], Path | str] | None = None,
     overlay_mode: str = "CLEAN_LIVE",
+    compact_public: bool = False,
 ) -> dict[str, Any]:
     now_value = float(now_epoch if now_epoch is not None else time.time())
+    now_ms = int(now_value * 1000.0)
     requested_overlay_mode = _text(overlay_mode, "CLEAN_LIVE")
     active_overlay_mode = normalize_view_mode(requested_overlay_mode)
     visible_layers = _mode_visible_layers(active_overlay_mode)
@@ -1141,6 +1457,15 @@ def build_live_state_v3(
         overlay_artifact=display_overlay_artifact,
         overlay_object_frame_id=registry.frame_id,
     )
+    overlay_authority_locked = bool(
+        not overlay_artifact_aligned
+        and _display_only_overlay_authority_locked(
+            session,
+            overlay_object_frame_id=registry.frame_id,
+            source_block_reason=source_block_reason,
+        )
+    )
+    overlay_render_alignment_ok = bool(overlay_artifact_aligned or overlay_authority_locked)
     current_side = _text(
         _mapping(session.get("latest_signal")).get("action")
         or _mapping(session.get("latest_signal")).get("side")
@@ -1188,32 +1513,33 @@ def build_live_state_v3(
             current_side=current_side,
             frame_id=registry.frame_id,
         )
-    layer_manager = OverlayLayerManagerV3(active_overlay_mode)
+    layer_manager = OverlayLayerManagerV3(active_overlay_mode, now_ms=now_ms)
     clean_overlays_only = str(os.getenv("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "0") or "0").strip().lower() not in {
         "0",
         "false",
         "off",
         "no",
     }
+    clean_mode_prefilter = bool(clean_overlays_only and active_overlay_mode == "CLEAN_LIVE")
     thesis_overlays = [] if source_block_reason else _signal_thesis_overlay_objects(
         signal_thesis,
         frame_id=registry.frame_id,
         sequence_id=registry.sequence_context.sequence_id,
         chart_transform_id=str(chart_transform["chart_transform_id"]),
     )
-    if overlay_artifact_aligned:
+    if overlay_render_alignment_ok:
         overlay_source = [
             overlay
             for overlay in precision_overlays
-            if (not clean_overlays_only or _overlay_visible_for_mode(overlay, "CLEAN_LIVE"))
-            and _overlay_visible_for_mode(overlay, active_overlay_mode)
+            if (not clean_mode_prefilter or _overlay_visible_for_mode(overlay, "CLEAN_LIVE", now_ms=now_ms))
+            and _overlay_visible_for_mode(overlay, active_overlay_mode, now_ms=now_ms)
             and _overlay_is_frame_aligned(overlay, registry.frame_id)
         ]
         overlay_source.extend(
             overlay
             for overlay in thesis_overlays
-            if (not clean_overlays_only or _overlay_visible_for_mode(overlay, "CLEAN_LIVE"))
-            and _overlay_visible_for_mode(overlay, active_overlay_mode)
+            if (not clean_mode_prefilter or _overlay_visible_for_mode(overlay, "CLEAN_LIVE", now_ms=now_ms))
+            and _overlay_visible_for_mode(overlay, active_overlay_mode, now_ms=now_ms)
             and _overlay_is_frame_aligned(overlay, registry.frame_id)
         )
     else:
@@ -1235,12 +1561,13 @@ def build_live_state_v3(
         renderable_count=renderable_overlay_count,
         active_mode=active_overlay_mode,
     )
-    if overlay_artifact_mismatch_reason and renderable_overlay_count == 0:
+    if overlay_artifact_mismatch_reason and renderable_overlay_count == 0 and not overlay_authority_locked:
         reason_if_empty = overlay_artifact_mismatch_reason
     overlay_mode_payload["reason_if_empty"] = reason_if_empty
     overlay_mode_payload["artifact_frame_id"] = overlay_artifact_frame_id
     overlay_mode_payload["overlay_object_frame_id"] = registry.frame_id
-    overlay_mode_payload["artifact_frame_aligned"] = overlay_artifact_aligned
+    overlay_mode_payload["artifact_frame_aligned"] = overlay_render_alignment_ok
+    overlay_mode_payload["artifact_authority_locked"] = overlay_authority_locked
     overlays_payload = {
         "count": renderable_overlay_count,
         "total_count": total_overlay_count,
@@ -1249,8 +1576,11 @@ def build_live_state_v3(
         "rejected_count": rejected_overlay_count,
         "artifact_frame_id": overlay_artifact_frame_id,
         "overlay_object_frame_id": registry.frame_id,
-        "artifact_frame_aligned": overlay_artifact_aligned,
+        "artifact_frame_aligned": overlay_render_alignment_ok,
+        "artifact_authority_locked": overlay_authority_locked,
         "artifact_mismatch_reason": overlay_artifact_mismatch_reason,
+        "unknown_or_unmapped_terms": [],
+        "vocabulary": {},
         "objects": overlays,
     }
     sequence_context = registry.sequence_context.as_dict()
@@ -1290,6 +1620,13 @@ def build_live_state_v3(
         hidden_count=hidden_overlay_count,
         active_mode=active_overlay_mode,
     )
+    overlay_vocabulary = _overlay_vocabulary_payload(
+        [*precision_overlays, *thesis_overlays],
+        overlays,
+        active_mode=active_overlay_mode,
+    )
+    overlays_payload["unknown_or_unmapped_terms"] = overlay_vocabulary["unknown_or_unmapped_terms"]
+    overlays_payload["vocabulary"] = overlay_vocabulary
     prediction_overlay = prediction_overlay_config()
     live_visual_state = {
         "schema_version": LIVE_STATE_SCHEMA_VERSION,
@@ -1302,10 +1639,14 @@ def build_live_state_v3(
         "visible_layers": visible_layers,
         "overlay_count": total_overlay_count,
         "renderable_count": renderable_overlay_count,
+        "hidden_count": hidden_overlay_count,
+        "rejected_count": rejected_overlay_count,
         "overlay_artifact_frame_id": overlay_artifact_frame_id,
         "overlay_object_frame_id": registry.frame_id,
-        "overlay_artifact_frame_aligned": overlay_artifact_aligned,
+        "overlay_artifact_frame_aligned": overlay_render_alignment_ok,
+        "overlay_artifact_authority_locked": overlay_authority_locked,
         "reason_if_empty": reason_if_empty,
+        "unknown_or_unmapped_terms": overlay_vocabulary["unknown_or_unmapped_terms"],
         "visible_mode": active_overlay_mode,
         "overlay_mode": dict(overlay_mode_payload),
         "overlay_mode_name": active_overlay_mode,
@@ -1350,6 +1691,7 @@ def build_live_state_v3(
         "overlay_layer_manager_v3": layer_manager.as_dict(),
         "overlay_precision_audit": precision_audit,
         "overlay_layout": overlay_layout,
+        "overlay_vocabulary": overlay_vocabulary,
         "prediction_overlay": prediction_overlay,
         "two_candle_study": two_candle_study,
         "lstm_contribution": lstm_contribution,
@@ -1357,6 +1699,7 @@ def build_live_state_v3(
         "frame_timing_trace_v3": frame_timing,
         "frame_timing": frame_timing,
         "overlay_state_version": frame_timing["overlay_state_version"],
+        "overlay_frame_state_version": frame_timing.get("overlay_frame_state_version", ""),
         "model_state_version": frame_timing["model_state_version"],
         "frame_age_ms": frame_timing["frame_age_ms"],
         "overlay_age_ms": frame_timing["overlay_age_ms"],
@@ -1396,6 +1739,7 @@ def build_live_state_v3(
             "full_broker_surface_visible": bool(surface_frame["exists"]),
             "overlay_contract_ok": bool(visual_health.get("overlay", {}).get("contract_ok", False)) if isinstance(visual_health.get("overlay"), Mapping) else False,
         },
+        "provider_status": dict(_mapping(session.get("live_state_provider_status"))),
         "shooter": _shooter_summary(session_id, shooter_state),
         "shooter_state": dict(shooter_state or {}),
         "frontend_heartbeat": dict(frontend_heartbeat or {}),
@@ -1423,13 +1767,15 @@ def build_live_state_v3(
         "overlay_layer_manager_v3": live_visual_state["overlay_layer_manager_v3"],
         "overlay_precision_audit": live_visual_state["overlay_precision_audit"],
         "overlay_layout": live_visual_state["overlay_layout"],
+        "overlay_vocabulary": live_visual_state["overlay_vocabulary"],
         "prediction_overlay": live_visual_state["prediction_overlay"],
         "two_candle_study": live_visual_state["two_candle_study"],
         "lstm_contribution": live_visual_state["lstm_contribution"],
         "visual_plane": live_visual_state["visual_plane"],
         "frame_timing_trace_v3": live_visual_state["frame_timing_trace_v3"],
         "overlay_state_version": live_visual_state["overlay_state_version"],
-        "performance_trace_v3": live_visual_state["performance_trace_v3"],
+        "overlay_frame_state_version": live_visual_state["overlay_frame_state_version"],
+        "performance_trace_v3": _compact_performance_trace_v3(_mapping(live_visual_state.get("performance_trace_v3"))),
         "overlays": live_visual_state["overlays"],
         "market_objects": {
             "active_count": live_visual_state["market_objects"]["active_count"],
@@ -1440,16 +1786,24 @@ def build_live_state_v3(
         "signal_thesis_v3": live_visual_state["signal_thesis_v3"],
         "packets": live_visual_state["packets"],
         "visual_health": live_visual_state["visual_health"],
+        "provider_status": live_visual_state["provider_status"],
         "shooter": live_visual_state["shooter"],
     }
-    public_session = _compact_session_payload(session)
-    public_session.update(live_visual_state)
-    public_session["tracking_summary"] = _compact_tracking_summary(_mapping(live_visual_state.get("tracking_summary")))
-    public_session["latest_signal"] = _compact_latest_signal(_mapping(live_visual_state.get("latest_signal")))
-    public_session["model_council_result"] = _compact_model_council_result(_mapping(session.get("model_council_result")))
-    public_session["live_visual_state"] = compact_live_visual_state
-    public_session.setdefault("tracking_summary", _compact_tracking_summary(_mapping(session.get("tracking_summary"))))
-    public_session.setdefault("latest_signal", _compact_latest_signal(_mapping(session.get("latest_signal"))))
+    if compact_public:
+        public_session = _compact_live_poll_session_payload(session)
+        public_session.update(compact_live_visual_state)
+        public_session["live_visual_state"] = compact_live_visual_state
+        public_session.setdefault("tracking_summary", _mapping(public_session.get("tracking_summary")))
+        public_session.setdefault("latest_signal", _mapping(public_session.get("latest_signal")))
+    else:
+        public_session = _compact_session_payload(session)
+        public_session.update(live_visual_state)
+        public_session["tracking_summary"] = _compact_tracking_summary(_mapping(live_visual_state.get("tracking_summary")))
+        public_session["latest_signal"] = _compact_latest_signal(_mapping(live_visual_state.get("latest_signal")))
+        public_session["model_council_result"] = _compact_model_council_result(_mapping(session.get("model_council_result")))
+        public_session["live_visual_state"] = compact_live_visual_state
+        public_session.setdefault("tracking_summary", _compact_tracking_summary(_mapping(session.get("tracking_summary"))))
+        public_session.setdefault("latest_signal", _compact_latest_signal(_mapping(session.get("latest_signal"))))
     return public_session
 
 
@@ -1464,7 +1818,13 @@ def build_live_state_v3_from_tracker_service(
     frontend_heartbeat_loader: Callable[[str], Mapping[str, Any] | None] | None = None,
     now_epoch: float | None = None,
     overlay_mode: str = "CLEAN_LIVE",
+    compact_public: bool = False,
 ) -> dict[str, Any]:
+    degraded_sources: list[dict[str, str]] = []
+
+    def mark_degraded(source: str, exc: Exception) -> None:
+        degraded_sources.append({"source": source, "error": f"{type(exc).__name__}: {exc}"})
+
     snapshot_getter = getattr(tracker_service, "get_session_snapshot", None)
     if callable(snapshot_getter):
         session = snapshot_getter(session_id)
@@ -1486,15 +1846,19 @@ def build_live_state_v3_from_tracker_service(
             continue
         try:
             artifacts[kind] = tracker_service.latest_artifact_path(session_id, kind)
-        except Exception:
+        except Exception as exc:
+            if kind in {"window", "chart", "overlay", "full-overlay"}:
+                mark_degraded(f"artifact:{kind}", exc)
             pass
     try:
         study_packet = tracker_service.latest_model_council_study_packet(session_id)
-    except Exception:
+    except Exception as exc:
+        mark_degraded("model_council_study_packet", exc)
         study_packet = _mapping(session.get("model_council_study_packet"))
     try:
         execution_packet = tracker_service.latest_model_council_packet(session_id)
-    except Exception:
+    except Exception as exc:
+        mark_degraded("model_council_execution_packet", exc)
         fallback_execution_packet = _mapping(session.get("model_council_packet") or session.get("execution_packet"))
         execution_packet = _current_execution_packet(
             fallback_execution_packet,
@@ -1503,20 +1867,29 @@ def build_live_state_v3_from_tracker_service(
     model_health = dict(model_health_builder(session)) if model_health_builder else {}
     try:
         shooter_state = dict(shooter_state_loader(session_id)) if shooter_state_loader else {}
-    except Exception:
+    except Exception as exc:
+        mark_degraded("shooter_state", exc)
         shooter_state = {}
     try:
         active_objects = list(active_object_loader(session_id)) if active_object_loader else []
-    except Exception:
+    except Exception as exc:
+        mark_degraded("active_objects", exc)
         active_objects = []
     try:
         registry_entries = list(registry_loader(session_id)) if registry_loader else []
-    except Exception:
+    except Exception as exc:
+        mark_degraded("registry_entries", exc)
         registry_entries = []
     try:
         frontend_heartbeat = dict(frontend_heartbeat_loader(session_id)) if frontend_heartbeat_loader else {}
-    except Exception:
+    except Exception as exc:
+        mark_degraded("frontend_heartbeat", exc)
         frontend_heartbeat = {}
+    session["live_state_provider_status"] = {
+        "ok": not degraded_sources,
+        "degraded": bool(degraded_sources),
+        "degraded_sources": degraded_sources,
+    }
     return build_live_state_v3(
         session,
         artifacts=artifacts,
@@ -1529,6 +1902,7 @@ def build_live_state_v3_from_tracker_service(
         frontend_heartbeat=frontend_heartbeat,
         now_epoch=now_epoch,
         overlay_mode=overlay_mode,
+        compact_public=compact_public,
     )
 
 

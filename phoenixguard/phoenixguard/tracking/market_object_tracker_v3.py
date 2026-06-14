@@ -26,11 +26,14 @@ except Exception:
         "RETEST_BOX": "trigger_zones",
         "CONTINUATION_BOX": "trigger_zones",
         "SNIPER_ENTRY_BOX": "trigger_zones",
-        "TARGET_ZONE_BOX": "trigger_zones",
-        "INVALIDATION_BOX": "trigger_zones",
+        "TARGET_ZONE_BOX": "target_zones",
+        "INVALIDATION_BOX": "invalidation",
         "SUPPLY_ZONE": "supply_demand",
         "DEMAND_ZONE": "supply_demand",
         "OPPOSING_FORCE": "supply_demand",
+        "SUPPORT_TRENDLINE": "supply_demand",
+        "RESISTANCE_TRENDLINE": "supply_demand",
+        "INNER_TRENDLINE": "local_swings",
         "ANGLE_VECTOR": "active_council_decision",
         "PREDICTION_PATH": "active_council_decision",
         "PROGRESSION_PATH": "historical_replay",
@@ -46,6 +49,9 @@ except Exception:
         "SUPPLY_ZONE": "supply",
         "DEMAND_ZONE": "demand",
         "OPPOSING_FORCE": "opposing_force",
+        "SUPPORT_TRENDLINE": "support_trendline",
+        "RESISTANCE_TRENDLINE": "resistance_trendline",
+        "INNER_TRENDLINE": "inner_trendline",
         "ANGLE_VECTOR": "angle",
         "PREDICTION_PATH": "prediction",
     }
@@ -85,6 +91,12 @@ except Exception:
             return "RETEST_BOX"
         if role_value in {"pullback", "reclaim"}:
             return "PULLBACK_BOX"
+        if role_value in {"support_trend", "support_trendline", "support_line"}:
+            return "SUPPORT_TRENDLINE"
+        if role_value in {"resistance_trend", "resistance_trendline", "resistance_line"}:
+            return "RESISTANCE_TRENDLINE"
+        if role_value in {"inner_trend", "inner_trendline", "inner_line"}:
+            return "INNER_TRENDLINE"
         if role_value in {"support", "demand"}:
             return "DEMAND_ZONE"
         if role_value in {"resistance", "supply"}:
@@ -264,6 +276,216 @@ def _raw_bbox(raw: Mapping[str, Any]) -> list[float] | None:
         if bbox is not None:
             return bbox
     return None
+
+
+def _point_pair_bounds(points: Sequence[Any]) -> list[float] | None:
+    return normalize_bounds(points)
+
+
+def _point_box(point: Any, *, pad: float = 5.0) -> list[float] | None:
+    if not isinstance(point, Sequence) or isinstance(point, (str, bytes, bytearray)) or len(point) < 2:
+        return None
+    x = _float(point[0], float("nan"))
+    y = _float(point[1], float("nan"))
+    if x != x or y != y:
+        return None
+    return [x - pad, y - pad, x + pad, y + pad]
+
+
+def _line_y_at(first: Sequence[float], second: Sequence[float], x: float) -> float:
+    x0 = float(first[0])
+    y0 = float(first[1])
+    x1 = float(second[0])
+    y1 = float(second[1])
+    if abs(x1 - x0) <= 1e-6:
+        return (y0 + y1) * 0.5
+    ratio = (float(x) - x0) / (x1 - x0)
+    return y0 + ratio * (y1 - y0)
+
+
+def _candle_line_rows(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, float]]:
+    rows: list[dict[str, float]] = []
+    for index, candle in enumerate(candles):
+        bbox = _raw_bbox(candle)
+        if bbox is None:
+            continue
+        left, top, right, bottom = [float(value) for value in bbox[:4]]
+        center_x = _float(candle.get("center_x"), (left + right) * 0.5)
+        center_y = _float(candle.get("center_y"), (top + bottom) * 0.5)
+        rows.append(
+            {
+                "index": float(index),
+                "left": left,
+                "top": top,
+                "right": right,
+                "bottom": bottom,
+                "center_x": center_x,
+                "center_y": center_y,
+            }
+        )
+    rows.sort(key=lambda item: item["center_x"])
+    return rows
+
+
+def _pivot_rows(rows: Sequence[Mapping[str, float]], *, role: str, window: int = 2) -> list[dict[str, float]]:
+    pivots: list[dict[str, float]] = []
+    if len(rows) < 2:
+        return pivots
+    for index, row in enumerate(rows):
+        left = max(0, index - window)
+        right = min(len(rows), index + window + 1)
+        neighbors = rows[left:right]
+        if role == "support":
+            value = float(row.get("bottom", 0.0))
+            if value >= max(float(item.get("bottom", 0.0)) for item in neighbors) - 1e-6:
+                pivots.append(dict(row))
+        elif role == "resistance":
+            value = float(row.get("top", 0.0))
+            if value <= min(float(item.get("top", 0.0)) for item in neighbors) + 1e-6:
+                pivots.append(dict(row))
+    if len(pivots) >= 2:
+        return pivots
+    ranked = sorted(
+        rows,
+        key=lambda item: float(item.get("bottom" if role == "support" else "top", 0.0)),
+        reverse=role == "support",
+    )
+    for row in ranked:
+        if not pivots or abs(float(row.get("center_x", 0.0)) - float(pivots[0].get("center_x", 0.0))) > 8.0:
+            pivots.append(dict(row))
+        if len(pivots) >= 2:
+            break
+    return sorted(pivots, key=lambda item: item["center_x"])
+
+
+def _validated_trendline(
+    rows: Sequence[Mapping[str, float]],
+    *,
+    role: str,
+    local_only: bool = False,
+) -> dict[str, Any] | None:
+    scoped = list(rows[-min(10, len(rows)) :]) if local_only else list(rows)
+    if len(scoped) < 2:
+        return None
+    pivots = _pivot_rows(scoped, role=role, window=1 if local_only else 2)
+    if len(pivots) < 2:
+        return None
+    tolerance = max(
+        2.0,
+        min(
+            8.0,
+            sum(max(1.0, float(row.get("bottom", 0.0)) - float(row.get("top", 0.0))) for row in scoped)
+            / max(1, len(scoped))
+            * 0.28,
+        ),
+    )
+    best: dict[str, Any] | None = None
+    for first_index in range(0, len(pivots) - 1):
+        for second_index in range(first_index + 1, len(pivots)):
+            first = pivots[first_index]
+            second = pivots[second_index]
+            if abs(float(second["center_x"]) - float(first["center_x"])) < 16.0:
+                continue
+            first_point = [
+                float(first["center_x"]),
+                float(first["bottom" if role == "support" else "top"]),
+            ]
+            second_point = [
+                float(second["center_x"]),
+                float(second["bottom" if role == "support" else "top"]),
+            ]
+            anchor_start = int(min(first["index"], second["index"]))
+            anchor_end = int(max(first["index"], second["index"]))
+            crossed = False
+            touches = 0
+            for row in scoped:
+                row_index = int(row["index"])
+                if row_index < anchor_start or row_index > int(scoped[-1]["index"]):
+                    continue
+                line_y = _line_y_at(first_point, second_point, float(row["center_x"]))
+                if role == "support":
+                    distance = float(row["bottom"]) - line_y
+                    if distance > tolerance:
+                        crossed = True
+                        break
+                    if abs(distance) <= tolerance * 1.4:
+                        touches += 1
+                else:
+                    distance = line_y - float(row["top"])
+                    if distance > tolerance:
+                        crossed = True
+                        break
+                    if abs(distance) <= tolerance * 1.4:
+                        touches += 1
+            if crossed:
+                continue
+            last_x = float(scoped[-1]["center_x"])
+            end_point = [last_x, _line_y_at(first_point, second_point, last_x)]
+            score = (abs(float(second["center_x"]) - float(first["center_x"])) * 0.01) + touches
+            candidate = {
+                "role": role,
+                "points": [first_point, end_point],
+                "touch_points": [first_point, second_point],
+                "anchor_candles": [anchor_start, anchor_end],
+                "touch_count": int(max(2, touches)),
+                "confidence": _clip01(0.58 + min(0.30, touches * 0.06)),
+                "trendline_validation": "first_two_touches_no_candle_cross",
+                "skill_gate": "TRENDLINE_NO_CANDLE_CROSS_V1",
+                "_score": score,
+            }
+            if best is None or float(candidate["_score"]) > float(best.get("_score", 0.0)):
+                best = candidate
+    if best is None:
+        return None
+    best.pop("_score", None)
+    return best
+
+
+def _derive_trendline_overlays(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    rows = _candle_line_rows(candles)
+    if len(rows) < 4:
+        return []
+    overlays: list[dict[str, Any]] = []
+    for role, overlay_type, label in (
+        ("support", "SUPPORT_TRENDLINE", "SUPPORT TRENDLINE"),
+        ("resistance", "RESISTANCE_TRENDLINE", "RESISTANCE TRENDLINE"),
+    ):
+        candidate = _validated_trendline(rows, role=role, local_only=False)
+        if candidate:
+            overlays.append(
+                {
+                    **candidate,
+                    "type": overlay_type,
+                    "label": label,
+                    "display_label": label,
+                    "direction": "BUY" if role == "support" else "SELL",
+                    "role": f"{role}_trendline",
+                    "trendline_role": role,
+                    "anchor_type": "LINE",
+                    "bounds": _point_pair_bounds(candidate["points"]),
+                    "visible_modes": ["GLOBAL", "LOCAL", "SUPPLY_DEMAND", "PATH", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+                    "lifecycle_state": "ACTIVE",
+                }
+            )
+    latest_direction = "support" if float(rows[-1]["center_y"]) <= float(rows[max(0, len(rows) - 4)]["center_y"]) else "resistance"
+    inner = _validated_trendline(rows, role=latest_direction, local_only=True)
+    if inner:
+        overlays.append(
+            {
+                **inner,
+            "type": "INNER_TRENDLINE",
+            "label": "INNER TRENDLINE",
+            "display_label": "INNER TRENDLINE",
+            "direction": "BUY" if latest_direction == "support" else "SELL",
+            "role": "inner_trendline",
+                "trendline_role": latest_direction,
+                "anchor_type": "LINE",
+                "bounds": _point_pair_bounds(inner["points"]),
+                "visible_modes": ["LOCAL", "PATH", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+                "lifecycle_state": "ACTIVE",
+            }
+        )
+    return [row for row in overlays if normalize_bounds(row.get("bounds")) is not None]
 
 
 @dataclass(frozen=True)
@@ -561,6 +783,26 @@ class _RegistryBuilder:
             side=latest_candle.get("direction"),
         )
 
+        for index, trendline in enumerate(_derive_trendline_overlays(candles)):
+            object_type = normalize_overlay_type(
+                trendline.get("type"),
+                layer=trendline.get("layer"),
+                role=trendline.get("role"),
+                side=trendline.get("direction"),
+            )
+            add_object(
+                trendline,
+                object_type=object_type,
+                source_path=f"tracking_summary.trendlines_v3[{index}]",
+                source_key=trendline.get("trendline_role", index),
+                label=_text(trendline.get("label"), object_type.replace("_", " ")),
+                role=_text(trendline.get("role"), TYPE_ROLE_MAP.get(object_type, "")),
+                layer=TYPE_LAYER_MAP.get(object_type, "diagnostics"),
+                side=trendline.get("direction"),
+                reason="Validated wick trendline from tracked candles.",
+                lifecycle_state=_text(trendline.get("lifecycle_state"), "ACTIVE"),
+            )
+
         for index, box in enumerate(_sequence_of_mappings(tracking.get("structure_boxes"))):
             key = str(box.get("key") or box.get("role") or "").lower()
             label_lower = str(box.get("label") or "").lower()
@@ -582,6 +824,56 @@ class _RegistryBuilder:
                 layer=TYPE_LAYER_MAP[object_type],
                 side=box.get("direction"),
             )
+            structure_key = box.get("key", index)
+            structure_label = _text(box.get("label") or box.get("key"), object_type.replace("_", " "))
+            structure_side = _upper_side(box.get("direction", signal.get("action")))
+            micro_specs = (
+                ("sniper_window", "SNIPER_ENTRY_BOX", "sniper", f"SNIPER {structure_side}"),
+                ("trigger_window", "RETEST_BOX", "trigger", f"TRIGGER {structure_side}"),
+                ("target_window", "TARGET_ZONE_BOX", "target", f"{structure_side} TARGET"),
+                ("target_bbox", "TARGET_ZONE_BOX", "target", f"{structure_side} TARGET"),
+            )
+            for field_name, micro_type, micro_role, micro_label in micro_specs:
+                if normalize_bounds(box.get(field_name)) is None:
+                    continue
+                add_object(
+                    {
+                        **box,
+                        "bbox": box.get(field_name),
+                        "label": micro_label,
+                        "role": micro_role,
+                        "visible_modes": ["CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"],
+                        "parent_label": structure_label,
+                    },
+                    object_type=micro_type,
+                    source_path=f"tracking_summary.structure_boxes[{index}].{field_name}",
+                    source_key=structure_key,
+                    label=micro_label,
+                    role=micro_role,
+                    layer=TYPE_LAYER_MAP[micro_type],
+                    side=box.get("direction"),
+                )
+            if box.get("invalidation_y") is not None:
+                base_bbox = _raw_bbox(box)
+                if base_bbox is not None:
+                    invalidation_y = _float(box.get("invalidation_y"), base_bbox[3])
+                    add_object(
+                        {
+                            **box,
+                            "bbox": [base_bbox[0], invalidation_y - 2.0, base_bbox[2], invalidation_y + 2.0],
+                            "label": f"{structure_side} INVALIDATION",
+                            "role": "invalidation",
+                            "visible_modes": ["CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"],
+                            "parent_label": structure_label,
+                        },
+                        object_type="INVALIDATION_BOX",
+                        source_path=f"tracking_summary.structure_boxes[{index}].invalidation_y",
+                        source_key=structure_key,
+                        label=f"{structure_side} INVALIDATION",
+                        role="invalidation",
+                        layer=TYPE_LAYER_MAP["INVALIDATION_BOX"],
+                        side=box.get("direction"),
+                    )
 
         for index, box in enumerate(_sequence_of_mappings(tracking.get("historical_structure"))):
             label = _text(box.get("label"), f"history {index + 1}")
@@ -598,6 +890,75 @@ class _RegistryBuilder:
                 side=box.get("direction"),
                 lifecycle_state="HISTORICAL",
             )
+            history_key = box.get("key", index)
+            history_side = _upper_side(box.get("direction", signal.get("action")))
+            replay_specs = (
+                ("sniper_window", "REPLAY_ENTRY", "replay_entry", "WOULD HAVE ENTERED"),
+                ("trigger_window", "RETEST_BOX", "replay_trigger", "TRIGGER"),
+                ("target_window", "REPLAY_EXIT", "replay_exit", "WOULD HAVE EXITED"),
+                ("target_bbox", "REPLAY_EXIT", "replay_exit", "WOULD HAVE EXITED"),
+            )
+            emitted_replay_fields: set[str] = set()
+            for field_name, replay_type, replay_role, replay_label in replay_specs:
+                if field_name in emitted_replay_fields:
+                    continue
+                replay_bounds = normalize_bounds(box.get(field_name))
+                if replay_bounds is None:
+                    if field_name == "sniper_window":
+                        replay_bounds = _point_box(box.get("start_point"))
+                    elif field_name in {"target_window", "target_bbox"}:
+                        replay_bounds = _point_box(box.get("end_point"))
+                if replay_bounds is None:
+                    continue
+                emitted_replay_fields.add(field_name)
+                add_object(
+                    {
+                        **box,
+                        "bbox": replay_bounds,
+                        "label": replay_label,
+                        "display_label": replay_label,
+                        "role": replay_role,
+                        "visible_modes": ["FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+                        "parent_label": label,
+                        "replay_sequence": int(_float(box.get("sequence_index"), index + 1)),
+                        "replay_action": replay_role,
+                    },
+                    object_type=replay_type,
+                    source_path=f"tracking_summary.historical_structure[{index}].{field_name}",
+                    source_key=history_key,
+                    label=replay_label,
+                    role=replay_role,
+                    layer="historical_replay",
+                    side=history_side,
+                    lifecycle_state="HISTORICAL",
+                )
+                if field_name == "target_window":
+                    emitted_replay_fields.add("target_bbox")
+            if box.get("invalidation_y") is not None:
+                base_bbox = _raw_bbox(box)
+                if base_bbox is not None:
+                    invalidation_y = _float(box.get("invalidation_y"), base_bbox[3])
+                    add_object(
+                        {
+                            **box,
+                            "bbox": [base_bbox[0], invalidation_y - 2.0, base_bbox[2], invalidation_y + 2.0],
+                            "label": "INVALID",
+                            "display_label": "INVALID",
+                            "role": "replay_invalidation",
+                            "visible_modes": ["FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+                            "parent_label": label,
+                            "replay_sequence": int(_float(box.get("sequence_index"), index + 1)),
+                            "replay_action": "invalidation",
+                        },
+                        object_type="INVALIDATION_BOX",
+                        source_path=f"tracking_summary.historical_structure[{index}].invalidation_y",
+                        source_key=history_key,
+                        label="INVALID",
+                        role="replay_invalidation",
+                        layer="historical_replay",
+                        side=history_side,
+                        lifecycle_state="HISTORICAL",
+                    )
 
         for index, zone in enumerate(_sequence_of_mappings(tracking.get("support_resistance_zones"))):
             role = str(zone.get("role") or "").lower()

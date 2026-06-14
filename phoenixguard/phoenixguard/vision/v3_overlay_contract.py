@@ -45,6 +45,7 @@ DEFAULTABLE_REQUIRED_FIELDS: frozenset[str] = frozenset(
 )
 
 OVERLAY_TYPES: tuple[str, ...] = (
+    "CHART_BOUNDS",
     "CURRENT_CANDLE",
     "IMPULSE_BOX",
     "PULLBACK_BOX",
@@ -56,15 +57,40 @@ OVERLAY_TYPES: tuple[str, ...] = (
     "SUPPLY_ZONE",
     "DEMAND_ZONE",
     "OPPOSING_FORCE",
+    "SUPPORT_TRENDLINE",
+    "RESISTANCE_TRENDLINE",
+    "INNER_TRENDLINE",
     "ANGLE_VECTOR",
     "PROGRESSION_PATH",
     "PREDICTION_PATH",
     "REPLAY_ENTRY",
     "REPLAY_EXIT",
+    "MODEL_COUNCIL_MARKER",
+    "REGIME_MARKER",
+    "MARKET_PLAY_MARKER",
+    "PRICE_LOCATION_MARKER",
+    "TWO_CANDLE_STUDY",
+    "LSTM_STUDY",
     "BROKER_CONTROL",
     "DEBUG_RAW_DETECTION",
+    "REJECTED_OVERLAY",
+    "STALE_OVERLAY",
+    "TRANSFORM_DEBUG",
+    "SCENE_GRAPH_DEBUG",
+    "LABEL_COLLISION_DEBUG",
 )
 V3_OVERLAY_TYPES = OVERLAY_TYPES
+
+DIAGNOSTIC_OVERLAY_TYPES: frozenset[str] = frozenset(
+    {
+        "DEBUG_RAW_DETECTION",
+        "REJECTED_OVERLAY",
+        "STALE_OVERLAY",
+        "TRANSFORM_DEBUG",
+        "SCENE_GRAPH_DEBUG",
+        "LABEL_COLLISION_DEBUG",
+    }
+)
 
 PREDICTION_OVERLAY_DISABLED_TYPES: frozenset[str] = frozenset(
     {
@@ -108,6 +134,89 @@ VIEW_MODES: tuple[str, ...] = (
     "INSPECTOR",
 )
 V3_VISIBLE_MODES = VIEW_MODES
+DIAGNOSTIC_VIEW_MODES: frozenset[str] = frozenset({"DIAGNOSTICS", "DEBUG", "INSPECTOR"})
+LIVE_VIEW_MODES: frozenset[str] = frozenset(set(VIEW_MODES) - DIAGNOSTIC_VIEW_MODES)
+
+APPROVED_OVERLAY_DISPLAY_LABELS: tuple[str, ...] = (
+    "BROKER SURFACE",
+    "CHART BOUNDS",
+    "PLOT AREA",
+    "PRICE AXIS",
+    "TIME AXIS",
+    "RIGHT ORDER PANEL",
+    "TOP ASSET TABS",
+    "BROKER CONTROL",
+    "CANDLES",
+    "CURRENT",
+    "NOW",
+    "MAJOR STRUCTURE",
+    "GLOBAL STRUCTURE",
+    "LOCAL STRUCTURE",
+    "MAJOR SWING HIGH",
+    "MAJOR SWING LOW",
+    "LOCAL SWING HIGH",
+    "LOCAL SWING LOW",
+    "IMPULSE",
+    "PULLBACK",
+    "RETEST",
+    "CONTINUATION",
+    "PROGRESSION PATH",
+    "ANGLE VECTOR",
+    "SUPPORT TRENDLINE",
+    "RESISTANCE TRENDLINE",
+    "INNER TRENDLINE",
+    "SUPPLY",
+    "DEMAND",
+    "SUPPLY ZONE",
+    "DEMAND ZONE",
+    "SUPPORT",
+    "RESISTANCE",
+    "OPPOSING",
+    "OPPOSING FORCE",
+    "SNIPER",
+    "SNIPER BUY",
+    "SNIPER SELL",
+    "TRIGGER",
+    "CONSERVATIVE TRIGGER",
+    "TARGET",
+    "INVALID",
+    "INVALIDATION",
+    "PATH",
+    "REPLAY ENTRY",
+    "REPLAY EXIT",
+    "HISTORICAL PROGRESSION",
+    "WOULD HAVE ENTERED",
+    "WOULD HAVE EXITED",
+    "MEMORY MATCH",
+    "TWO CANDLE STUDY",
+    "LSTM STUDY",
+    "MODEL COUNCIL MARKER",
+    "REGIME MARKER",
+    "MARKET PLAY MARKER",
+    "PRICE LOCATION MARKER",
+    "DEBUG RAW DETECTION",
+    "REJECTED OVERLAY",
+    "STALE OVERLAY",
+    "TRANSFORM DEBUG",
+    "SCENE GRAPH DEBUG",
+    "LABEL COLLISION DEBUG",
+)
+
+LEGACY_DISPLAY_LABEL_ALIASES: dict[str, str] = {
+    "CURRENT_CANDLE_BOX": "NOW",
+    "CURRENT_CANDLE": "NOW",
+    "TARGET_ZONE_BOX": "TARGET",
+    "TARGET_ZONE": "TARGET",
+    "SNIPER_ENTRY_BOX": "SNIPER",
+    "SNIPER_ENTRY": "SNIPER",
+    "TRIGGER_ZONE_BOX": "TRIGGER",
+    "TRIGGER_ZONE": "TRIGGER",
+    "INVALIDATION_BOX": "INVALID",
+    "INVALIDATION_ZONE": "INVALID",
+    "CONT": "CONTINUATION",
+    "P": "PATH",
+    "T": "TRIGGER",
+}
 
 VIEW_MODE_ALIASES: dict[str, str] = {
     "ALL": "INSPECTOR",
@@ -180,10 +289,10 @@ VIEW_MODE_ALIASES: dict[str, str] = {
 
 MODE_VISIBLE_MODE_COMPATIBILITY: dict[str, set[str]] = {
     "CHART_BOUNDS": {"CHART_BOUNDS", "CLEAN_LIVE", "GLOBAL", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "INSPECTOR"},
-    "CANDLES": {"CANDLES", "CLEAN_LIVE", "GLOBAL", "LOCAL", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"},
+    "CANDLES": {"CANDLES", "CLEAN_LIVE", "LOCAL", "ACTIVE_CONTEXT", "INSPECTOR"},
     "GLOBAL": {"GLOBAL", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "INSPECTOR"},
     "LOCAL": {"LOCAL", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "INSPECTOR"},
-    "SUPPLY_DEMAND": {"SUPPLY_DEMAND", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"},
+    "SUPPLY_DEMAND": {"SUPPLY_DEMAND", "CLEAN_LIVE", "GLOBAL", "LOCAL", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "INSPECTOR"},
     "TRIGGER": {"TRIGGER", "CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"},
     "TARGET": {"TARGET", "CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"},
     "INVALIDATION": {"INVALIDATION", "TARGET", "CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"},
@@ -208,7 +317,33 @@ MODE_VISIBLE_MODE_COMPATIBILITY: dict[str, set[str]] = {
         "PREDICTION",
         "INSPECTOR",
     },
-    "REPLAY": {"REPLAY", "FULL_HISTORY_READ", "PATH", "SUPPLY_DEMAND", "INSPECTOR"},
+    "REPLAY": {
+        "REPLAY",
+        "FULL_HISTORY_READ",
+        "PATH",
+        "SUPPLY_DEMAND",
+        "GLOBAL",
+        "LOCAL",
+        "TRIGGER",
+        "TARGET",
+        "INVALIDATION",
+        "ACTIVE_CONTEXT",
+        "INSPECTOR",
+    },
+    "ACTIVE_CONTEXT": {
+        "ACTIVE_CONTEXT",
+        "CLEAN_LIVE",
+        "GLOBAL",
+        "LOCAL",
+        "SUPPLY_DEMAND",
+        "TRIGGER",
+        "TARGET",
+        "INVALIDATION",
+        "PATH",
+        "COUNCIL",
+        "TWO_CANDLE_STUDY",
+        "LSTM_STUDY",
+    },
     "BROKER": {"BROKER", "CALIBRATION", "INSPECTOR"},
     "DIAGNOSTICS": {"DIAGNOSTICS", "DEBUG", "INSPECTOR"},
 }
@@ -261,15 +396,26 @@ LIFECYCLE_STATES: tuple[str, ...] = (
 V3_LIFECYCLE_STATES = LIFECYCLE_STATES
 
 TYPE_ALIASES: dict[str, str] = {
+    "CHART_BOUNDS": "CHART_BOUNDS",
+    "CHART_BOUND": "CHART_BOUNDS",
+    "BOUNDS": "CHART_BOUNDS",
+    "RECENT_CANDLE": "CURRENT_CANDLE",
+    "RECENT_CANDLES": "CURRENT_CANDLE",
     "SNIPER": "SNIPER_ENTRY_BOX",
     "SNIPER_ENTRY": "SNIPER_ENTRY_BOX",
     "SNIPER_ENTRY_BOX": "SNIPER_ENTRY_BOX",
+    "PRIMARY": "RETEST_BOX",
+    "PRIMARY_TRIGGER": "RETEST_BOX",
+    "TRIGGER_PRIMARY": "RETEST_BOX",
     "TARGET": "TARGET_ZONE_BOX",
     "TARGET_ZONE": "TARGET_ZONE_BOX",
     "TARGET_ZONE_BOX": "TARGET_ZONE_BOX",
     "INVALIDATION": "INVALIDATION_BOX",
     "INVALIDATION_BOX": "INVALIDATION_BOX",
     "HISTORICAL_PROGRESSION": "PROGRESSION_PATH",
+    "HISTORICAL_REPLAY": "PROGRESSION_PATH",
+    "HISTORY_REPLAY": "PROGRESSION_PATH",
+    "FULL_HISTORY_REPLAY": "PROGRESSION_PATH",
     "PROGRESSION": "PROGRESSION_PATH",
     "PROGRESSION_PATH": "PROGRESSION_PATH",
     "PREDICTION": "PREDICTION_PATH",
@@ -282,8 +428,12 @@ TYPE_ALIASES: dict[str, str] = {
     "SYNTHETIC_CANDLE_PROJECTION": "PREDICTION_PATH",
     "REPLAY_ENTRY": "REPLAY_ENTRY",
     "REPLAY_EXIT": "REPLAY_EXIT",
+    "WOULD_HAVE_ENTERED": "REPLAY_ENTRY",
+    "WOULD_HAVE_EXITED": "REPLAY_EXIT",
+    "MEMORY_MATCH": "PROGRESSION_PATH",
     "TRIGGER": "RETEST_BOX",
     "TRIGGER_ZONE": "RETEST_BOX",
+    "CONSERVATIVE_TRIGGER": "RETEST_BOX",
     "RETEST": "RETEST_BOX",
     "RETEST_BOX": "RETEST_BOX",
     "PULLBACK": "PULLBACK_BOX",
@@ -294,19 +444,55 @@ TYPE_ALIASES: dict[str, str] = {
     "IMPULSE_BOX": "IMPULSE_BOX",
     "CURRENT_CANDLE": "CURRENT_CANDLE",
     "CANDLE": "CURRENT_CANDLE",
+    "NOW": "CURRENT_CANDLE",
+    "MAJOR_SWING": "IMPULSE_BOX",
+    "MAJOR_SWINGS": "IMPULSE_BOX",
+    "GLOBAL_SWING": "IMPULSE_BOX",
+    "GLOBAL_SWINGS": "IMPULSE_BOX",
+    "LOCAL_SWING": "PULLBACK_BOX",
+    "LOCAL_SWINGS": "PULLBACK_BOX",
+    "MINOR_SWING": "PULLBACK_BOX",
+    "MINOR_SWINGS": "PULLBACK_BOX",
+    "SUPPORT": "DEMAND_ZONE",
+    "SUPPORT_ZONE": "DEMAND_ZONE",
+    "RESISTANCE": "SUPPLY_ZONE",
+    "RESISTANCE_ZONE": "SUPPLY_ZONE",
+    "SUPPORT_TREND": "SUPPORT_TRENDLINE",
+    "SUPPORT_TRENDLINE": "SUPPORT_TRENDLINE",
+    "SUPPORT_LINE": "SUPPORT_TRENDLINE",
+    "RESISTANCE_TREND": "RESISTANCE_TRENDLINE",
+    "RESISTANCE_TRENDLINE": "RESISTANCE_TRENDLINE",
+    "RESISTANCE_LINE": "RESISTANCE_TRENDLINE",
+    "INNER_TREND": "INNER_TRENDLINE",
+    "INNER_TRENDLINE": "INNER_TRENDLINE",
+    "INNER_LINE": "INNER_TRENDLINE",
+    "TRENDLINE": "INNER_TRENDLINE",
     "SUPPLY": "SUPPLY_ZONE",
     "SUPPLY_ZONE": "SUPPLY_ZONE",
     "DEMAND": "DEMAND_ZONE",
     "DEMAND_ZONE": "DEMAND_ZONE",
+    "OPPOSING": "OPPOSING_FORCE",
     "OPPOSING_FORCE": "OPPOSING_FORCE",
     "ANGLE": "ANGLE_VECTOR",
     "ANGLE_VECTOR": "ANGLE_VECTOR",
+    "MODEL_COUNCIL_MARKER": "MODEL_COUNCIL_MARKER",
+    "REGIME_MARKER": "REGIME_MARKER",
+    "MARKET_PLAY_MARKER": "MARKET_PLAY_MARKER",
+    "PRICE_LOCATION_MARKER": "PRICE_LOCATION_MARKER",
+    "TWO_CANDLE_STUDY": "TWO_CANDLE_STUDY",
+    "LSTM_STUDY": "LSTM_STUDY",
     "BROKER_CONTROL": "BROKER_CONTROL",
     "DEBUG": "DEBUG_RAW_DETECTION",
     "DEBUG_RAW_DETECTION": "DEBUG_RAW_DETECTION",
+    "REJECTED_OVERLAY": "REJECTED_OVERLAY",
+    "STALE_OVERLAY": "STALE_OVERLAY",
+    "TRANSFORM_DEBUG": "TRANSFORM_DEBUG",
+    "SCENE_GRAPH_DEBUG": "SCENE_GRAPH_DEBUG",
+    "LABEL_COLLISION_DEBUG": "LABEL_COLLISION_DEBUG",
 }
 
 TYPE_LAYER_MAP: dict[str, str] = {
+    "CHART_BOUNDS": "chart_bounds",
     "CURRENT_CANDLE": "recent_candles",
     "IMPULSE_BOX": "major_swings",
     "PULLBACK_BOX": "local_swings",
@@ -318,18 +504,35 @@ TYPE_LAYER_MAP: dict[str, str] = {
     "SUPPLY_ZONE": "supply_demand",
     "DEMAND_ZONE": "supply_demand",
     "OPPOSING_FORCE": "supply_demand",
+    "SUPPORT_TRENDLINE": "supply_demand",
+    "RESISTANCE_TRENDLINE": "supply_demand",
+    "INNER_TRENDLINE": "local_swings",
     "ANGLE_VECTOR": "prediction_path",
     "PROGRESSION_PATH": "historical_replay",
     "PREDICTION_PATH": "prediction_path",
     "REPLAY_ENTRY": "historical_replay",
     "REPLAY_EXIT": "historical_replay",
+    "MODEL_COUNCIL_MARKER": "active_council_decision",
+    "REGIME_MARKER": "active_council_decision",
+    "MARKET_PLAY_MARKER": "active_council_decision",
+    "PRICE_LOCATION_MARKER": "active_council_decision",
+    "TWO_CANDLE_STUDY": "active_council_decision",
+    "LSTM_STUDY": "active_council_decision",
     "BROKER_CONTROL": "broker_controls",
     "DEBUG_RAW_DETECTION": "diagnostics",
+    "REJECTED_OVERLAY": "diagnostics",
+    "STALE_OVERLAY": "diagnostics",
+    "TRANSFORM_DEBUG": "diagnostics",
+    "SCENE_GRAPH_DEBUG": "diagnostics",
+    "LABEL_COLLISION_DEBUG": "diagnostics",
 }
 
 SEMANTIC_LAYER_LOCK_TYPES: set[str] = {
     "TARGET_ZONE_BOX",
     "INVALIDATION_BOX",
+    "SUPPORT_TRENDLINE",
+    "RESISTANCE_TRENDLINE",
+    "INNER_TRENDLINE",
     "ANGLE_VECTOR",
     "PREDICTION_PATH",
 }
@@ -396,8 +599,8 @@ LAYER_ALIASES: dict[str, str] = {
     "PATHS": "prediction_path",
     "PREDICTION": "prediction_path",
     "PREDICTION_PATH": "prediction_path",
-    "PROGRESSION": "prediction_path",
-    "PROGRESSION_PATH": "prediction_path",
+    "PROGRESSION": "historical_replay",
+    "PROGRESSION_PATH": "historical_replay",
     "COUNCIL": "active_council_decision",
     "ACTIVE_COUNCIL": "active_council_decision",
     "ACTIVE_COUNCIL_DECISION": "active_council_decision",
@@ -421,6 +624,7 @@ LAYER_ALIASES: dict[str, str] = {
 }
 
 OVERLAY_TYPE_PRIORITY: dict[str, int] = {
+    "CHART_BOUNDS": 105,
     "CURRENT_CANDLE": 100,
     "SNIPER_ENTRY_BOX": 95,
     "RETEST_BOX": 90,
@@ -430,6 +634,9 @@ OVERLAY_TYPE_PRIORITY: dict[str, int] = {
     "OPPOSING_FORCE": 78,
     "SUPPLY_ZONE": 72,
     "DEMAND_ZONE": 72,
+    "SUPPORT_TRENDLINE": 68,
+    "RESISTANCE_TRENDLINE": 68,
+    "INNER_TRENDLINE": 66,
     "ANGLE_VECTOR": 62,
     "PREDICTION_PATH": 60,
     "IMPULSE_BOX": 50,
@@ -437,11 +644,23 @@ OVERLAY_TYPE_PRIORITY: dict[str, int] = {
     "PROGRESSION_PATH": 34,
     "REPLAY_ENTRY": 32,
     "REPLAY_EXIT": 32,
+    "MODEL_COUNCIL_MARKER": 58,
+    "REGIME_MARKER": 56,
+    "MARKET_PLAY_MARKER": 56,
+    "PRICE_LOCATION_MARKER": 56,
+    "TWO_CANDLE_STUDY": 44,
+    "LSTM_STUDY": 42,
     "BROKER_CONTROL": 20,
     "DEBUG_RAW_DETECTION": 1,
+    "REJECTED_OVERLAY": 1,
+    "STALE_OVERLAY": 1,
+    "TRANSFORM_DEBUG": 1,
+    "SCENE_GRAPH_DEBUG": 1,
+    "LABEL_COLLISION_DEBUG": 1,
 }
 
 TYPE_ROLE_MAP: dict[str, str] = {
+    "CHART_BOUNDS": "chart_bounds",
     "CURRENT_CANDLE": "current_candle",
     "IMPULSE_BOX": "impulse",
     "PULLBACK_BOX": "pullback",
@@ -453,11 +672,27 @@ TYPE_ROLE_MAP: dict[str, str] = {
     "SUPPLY_ZONE": "supply",
     "DEMAND_ZONE": "demand",
     "OPPOSING_FORCE": "opposing_force",
+    "SUPPORT_TRENDLINE": "support_trendline",
+    "RESISTANCE_TRENDLINE": "resistance_trendline",
+    "INNER_TRENDLINE": "inner_trendline",
     "ANGLE_VECTOR": "angle",
     "PROGRESSION_PATH": "history",
     "PREDICTION_PATH": "prediction",
+    "REPLAY_ENTRY": "replay_entry",
+    "REPLAY_EXIT": "replay_exit",
+    "MODEL_COUNCIL_MARKER": "model_council_marker",
+    "REGIME_MARKER": "regime_marker",
+    "MARKET_PLAY_MARKER": "market_play_marker",
+    "PRICE_LOCATION_MARKER": "price_location_marker",
+    "TWO_CANDLE_STUDY": "two_candle_study",
+    "LSTM_STUDY": "lstm_study",
     "BROKER_CONTROL": "broker_control",
     "DEBUG_RAW_DETECTION": "debug",
+    "REJECTED_OVERLAY": "diagnostic",
+    "STALE_OVERLAY": "diagnostic",
+    "TRANSFORM_DEBUG": "diagnostic",
+    "SCENE_GRAPH_DEBUG": "diagnostic",
+    "LABEL_COLLISION_DEBUG": "diagnostic",
 }
 
 
@@ -468,6 +703,19 @@ def _canonical_token(value: Any, default: str = "") -> str:
     while "__" in normalized:
         normalized = normalized.replace("__", "_")
     return normalized.strip("_")
+
+
+def approved_overlay_display_labels() -> tuple[str, ...]:
+    return APPROVED_OVERLAY_DISPLAY_LABELS
+
+
+def _approved_display_label_by_token() -> dict[str, str]:
+    return {_canonical_token(label): label for label in APPROVED_OVERLAY_DISPLAY_LABELS}
+
+
+def is_approved_overlay_display_label(label: Any) -> bool:
+    token = _canonical_token(label)
+    return bool(token and token in _approved_display_label_by_token())
 
 
 def normalize_view_mode(mode: Any) -> str:
@@ -502,43 +750,77 @@ def is_known_view_mode(mode: Any) -> bool:
 
 MODE_ALLOWED_TYPES: dict[str, set[str]] = {
     "CLEAN_LIVE": {
+        "CHART_BOUNDS",
         "CURRENT_CANDLE",
         "SNIPER_ENTRY_BOX",
         "RETEST_BOX",
-        "CONTINUATION_BOX",
         "TARGET_ZONE_BOX",
         "INVALIDATION_BOX",
         "SUPPLY_ZONE",
         "DEMAND_ZONE",
         "OPPOSING_FORCE",
+        "MODEL_COUNCIL_MARKER",
     },
     "CHART_BOUNDS": set(OVERLAY_TYPES),
-    "CANDLES": {"CURRENT_CANDLE"},
-    "GLOBAL": {"IMPULSE_BOX", "ANGLE_VECTOR", "PROGRESSION_PATH", "SUPPLY_ZONE", "DEMAND_ZONE"},
-    "LOCAL": {"PULLBACK_BOX", "RETEST_BOX", "CONTINUATION_BOX", "SNIPER_ENTRY_BOX", "SUPPLY_ZONE", "DEMAND_ZONE"},
-    "SUPPLY_DEMAND": {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"},
-    "TRIGGER": {"RETEST_BOX", "CONTINUATION_BOX", "SNIPER_ENTRY_BOX", "CURRENT_CANDLE"},
-    "TARGET": {"TARGET_ZONE_BOX", "INVALIDATION_BOX", "OPPOSING_FORCE"},
-    "INVALIDATION": {"INVALIDATION_BOX", "OPPOSING_FORCE"},
-    "PATH": {"ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"},
-    "COUNCIL": {
-        "CURRENT_CANDLE",
-        "SNIPER_ENTRY_BOX",
+    "CANDLES": {"CHART_BOUNDS", "CURRENT_CANDLE"},
+    "GLOBAL": {
+        "CHART_BOUNDS",
+        "IMPULSE_BOX",
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+        "ANGLE_VECTOR",
+        "PROGRESSION_PATH",
+        "SUPPLY_ZONE",
+        "DEMAND_ZONE",
+    },
+    "LOCAL": {
+        "CHART_BOUNDS",
+        "PULLBACK_BOX",
         "RETEST_BOX",
         "CONTINUATION_BOX",
+        "SNIPER_ENTRY_BOX",
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+        "INNER_TRENDLINE",
+        "SUPPLY_ZONE",
+        "DEMAND_ZONE",
+    },
+    "SUPPLY_DEMAND": {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE"},
+    "TRIGGER": {"RETEST_BOX", "SNIPER_ENTRY_BOX"},
+    "TARGET": {"TARGET_ZONE_BOX", "INVALIDATION_BOX", "OPPOSING_FORCE"},
+    "INVALIDATION": {"INVALIDATION_BOX", "OPPOSING_FORCE"},
+    "PATH": {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"},
+    "COUNCIL": {
+        "MODEL_COUNCIL_MARKER",
+        "REGIME_MARKER",
+        "MARKET_PLAY_MARKER",
+        "PRICE_LOCATION_MARKER",
+    },
+    "TWO_CANDLE_STUDY": {"TWO_CANDLE_STUDY"},
+    "LSTM_STUDY": {"LSTM_STUDY"},
+    "ACTIVE_CONTEXT": set(OVERLAY_TYPES) - DIAGNOSTIC_OVERLAY_TYPES - {"BROKER_CONTROL", "PREDICTION_PATH"},
+    "FULL_HISTORY_READ": set(OVERLAY_TYPES) - DIAGNOSTIC_OVERLAY_TYPES - {"BROKER_CONTROL", "PREDICTION_PATH"},
+    "REPLAY": {
+        "CHART_BOUNDS",
+        "IMPULSE_BOX",
+        "PULLBACK_BOX",
+        "CONTINUATION_BOX",
+        "SNIPER_ENTRY_BOX",
+        "RETEST_BOX",
         "TARGET_ZONE_BOX",
         "INVALIDATION_BOX",
+        "PROGRESSION_PATH",
+        "REPLAY_ENTRY",
+        "REPLAY_EXIT",
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+        "INNER_TRENDLINE",
+        "ANGLE_VECTOR",
         "SUPPLY_ZONE",
         "DEMAND_ZONE",
         "OPPOSING_FORCE",
-        "ANGLE_VECTOR",
     },
-    "TWO_CANDLE_STUDY": {"CURRENT_CANDLE", "SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX", "OPPOSING_FORCE"},
-    "LSTM_STUDY": {"CURRENT_CANDLE", "SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX"},
-    "ACTIVE_CONTEXT": set(OVERLAY_TYPES) - {"DEBUG_RAW_DETECTION", "BROKER_CONTROL", "PREDICTION_PATH"},
-    "FULL_HISTORY_READ": set(OVERLAY_TYPES) - {"BROKER_CONTROL", "DEBUG_RAW_DETECTION", "PREDICTION_PATH"},
-    "REPLAY": {"PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "ANGLE_VECTOR", "SUPPLY_ZONE", "DEMAND_ZONE"},
-    "PREDICTION": {"SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX", "OPPOSING_FORCE"},
+    "PREDICTION": {"CHART_BOUNDS", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX", "OPPOSING_FORCE"},
     "BROKER": {"BROKER_CONTROL"},
     "CALIBRATION": {"BROKER_CONTROL", "DEBUG_RAW_DETECTION"},
     "DIAGNOSTICS": set(OVERLAY_TYPES),
@@ -594,7 +876,7 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
     },
     "GLOBAL": {
         "chart_bounds": True,
-        "recent_candles": True,
+        "recent_candles": False,
         "major_swings": True,
         "local_swings": False,
         "supply_demand": True,
@@ -623,8 +905,8 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
         "diagnostics": False,
     },
     "SUPPLY_DEMAND": {
-        "chart_bounds": True,
-        "recent_candles": True,
+        "chart_bounds": False,
+        "recent_candles": False,
         "major_swings": False,
         "local_swings": False,
         "supply_demand": True,
@@ -638,12 +920,72 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
         "diagnostics": False,
     },
     "TRIGGER": {
-        "chart_bounds": True,
-        "recent_candles": True,
+        "chart_bounds": False,
+        "recent_candles": False,
         "major_swings": False,
-        "local_swings": True,
+        "local_swings": False,
         "supply_demand": False,
         "trigger_zones": True,
+        "target_zones": False,
+        "invalidation": False,
+        "prediction_path": False,
+        "active_council_decision": False,
+        "historical_replay": False,
+        "broker_controls": False,
+        "diagnostics": False,
+    },
+    "TARGET": {
+        "chart_bounds": False,
+        "recent_candles": False,
+        "major_swings": False,
+        "local_swings": False,
+        "supply_demand": True,
+        "trigger_zones": False,
+        "target_zones": True,
+        "invalidation": True,
+        "prediction_path": False,
+        "active_council_decision": False,
+        "historical_replay": False,
+        "broker_controls": False,
+        "diagnostics": False,
+    },
+    "INVALIDATION": {
+        "chart_bounds": False,
+        "recent_candles": False,
+        "major_swings": False,
+        "local_swings": False,
+        "supply_demand": True,
+        "trigger_zones": False,
+        "target_zones": False,
+        "invalidation": True,
+        "prediction_path": False,
+        "active_council_decision": False,
+        "historical_replay": False,
+        "broker_controls": False,
+        "diagnostics": False,
+    },
+    "PATH": {
+        "chart_bounds": False,
+        "recent_candles": False,
+        "major_swings": False,
+        "local_swings": True,
+        "supply_demand": True,
+        "trigger_zones": False,
+        "target_zones": True,
+        "invalidation": True,
+        "prediction_path": False,
+        "active_council_decision": False,
+        "historical_replay": True,
+        "broker_controls": False,
+        "diagnostics": False,
+    },
+    "COUNCIL": {
+        "chart_bounds": False,
+        "recent_candles": False,
+        "major_swings": False,
+        "local_swings": False,
+        "supply_demand": False,
+        "trigger_zones": False,
         "target_zones": False,
         "invalidation": False,
         "prediction_path": False,
@@ -652,75 +994,15 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
         "broker_controls": False,
         "diagnostics": False,
     },
-    "TARGET": {
-        "chart_bounds": True,
-        "recent_candles": True,
+    "TWO_CANDLE_STUDY": {
+        "chart_bounds": False,
+        "recent_candles": False,
         "major_swings": False,
         "local_swings": False,
-        "supply_demand": True,
-        "trigger_zones": False,
-        "target_zones": True,
-        "invalidation": True,
-        "prediction_path": False,
-        "active_council_decision": True,
-        "historical_replay": False,
-        "broker_controls": False,
-        "diagnostics": False,
-    },
-    "INVALIDATION": {
-        "chart_bounds": True,
-        "recent_candles": True,
-        "major_swings": False,
-        "local_swings": False,
-        "supply_demand": True,
+        "supply_demand": False,
         "trigger_zones": False,
         "target_zones": False,
-        "invalidation": True,
-        "prediction_path": False,
-        "active_council_decision": True,
-        "historical_replay": False,
-        "broker_controls": False,
-        "diagnostics": False,
-    },
-    "PATH": {
-        "chart_bounds": True,
-        "recent_candles": True,
-        "major_swings": True,
-        "local_swings": True,
-        "supply_demand": False,
-        "trigger_zones": False,
-        "target_zones": True,
-        "invalidation": True,
-        "prediction_path": False,
-        "active_council_decision": True,
-        "historical_replay": True,
-        "broker_controls": False,
-        "diagnostics": False,
-    },
-    "COUNCIL": {
-        "chart_bounds": True,
-        "recent_candles": True,
-        "major_swings": False,
-        "local_swings": True,
-        "supply_demand": True,
-        "trigger_zones": True,
-        "target_zones": True,
-        "invalidation": True,
-        "prediction_path": False,
-        "active_council_decision": True,
-        "historical_replay": False,
-        "broker_controls": False,
-        "diagnostics": False,
-    },
-    "TWO_CANDLE_STUDY": {
-        "chart_bounds": True,
-        "recent_candles": True,
-        "major_swings": False,
-        "local_swings": True,
-        "supply_demand": False,
-        "trigger_zones": True,
-        "target_zones": True,
-        "invalidation": True,
+        "invalidation": False,
         "prediction_path": False,
         "active_council_decision": True,
         "historical_replay": False,
@@ -728,12 +1010,12 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
         "diagnostics": False,
     },
     "LSTM_STUDY": {
-        "chart_bounds": True,
-        "recent_candles": True,
+        "chart_bounds": False,
+        "recent_candles": False,
         "major_swings": False,
-        "local_swings": True,
+        "local_swings": False,
         "supply_demand": False,
-        "trigger_zones": True,
+        "trigger_zones": False,
         "target_zones": False,
         "invalidation": False,
         "prediction_path": False,
@@ -753,13 +1035,13 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
         "invalidation": True,
         "prediction_path": False,
         "active_council_decision": True,
-        "historical_replay": False,
+        "historical_replay": True,
         "broker_controls": False,
         "diagnostics": False,
     },
     "FULL_HISTORY_READ": {
         "chart_bounds": True,
-        "recent_candles": True,
+        "recent_candles": False,
         "major_swings": True,
         "local_swings": True,
         "supply_demand": True,
@@ -778,9 +1060,9 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
         "major_swings": True,
         "local_swings": True,
         "supply_demand": True,
-        "trigger_zones": False,
-        "target_zones": False,
-        "invalidation": False,
+        "trigger_zones": True,
+        "target_zones": True,
+        "invalidation": True,
         "prediction_path": False,
         "active_council_decision": True,
         "historical_replay": True,
@@ -789,7 +1071,7 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
     },
     "PREDICTION": {
         "chart_bounds": True,
-        "recent_candles": True,
+        "recent_candles": False,
         "major_swings": False,
         "local_swings": False,
         "supply_demand": True,
@@ -1081,7 +1363,17 @@ def normalize_bounds(value: Any) -> list[float] | None:
         return None
     xs = [point[0] for point in points]
     ys = [point[1] for point in points]
-    bbox = normalize_bbox([min(xs), min(ys), max(xs), max(ys)])
+    left = min(xs)
+    right = max(xs)
+    top = min(ys)
+    bottom = max(ys)
+    if right <= left:
+        left -= 3.0
+        right += 3.0
+    if bottom <= top:
+        top -= 3.0
+        bottom += 3.0
+    bbox = normalize_bbox([left, top, right, bottom])
     return [float(item) for item in bbox] if bbox is not None else None
 
 
@@ -1090,11 +1382,27 @@ def _raw_bounds(raw: Mapping[str, Any]) -> tuple[list[float] | None, str]:
         bounds = normalize_bounds(raw.get(key))
         if bounds is not None:
             return bounds, "BOX"
-    for key in ("anchors", "points", "path"):
+    for key in ("line_points", "anchors", "points", "path"):
         bounds = normalize_bounds(raw.get(key))
         if bounds is not None:
             return bounds, "POLYGON"
     return None, "BOX"
+
+
+def _normalize_overlay_points(value: Any) -> list[list[float]]:
+    points: list[list[float]] = []
+    for item in _sequence(value):
+        if isinstance(item, Mapping):
+            x = _float(item.get("x", item.get("left", item.get("center_x", float("nan")))), float("nan"))
+            y = _float(item.get("y", item.get("top", item.get("center_y", float("nan")))), float("nan"))
+        elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)) and len(item) >= 2:
+            x = _float(item[0], float("nan"))
+            y = _float(item[1], float("nan"))
+        else:
+            continue
+        if math.isfinite(x) and math.isfinite(y):
+            points.append([round(float(x), 6), round(float(y), 6)])
+    return points
 
 
 def normalize_overlay_type(raw: Any, *, layer: Any = "", role: Any = "", side: Any = "") -> str:
@@ -1103,6 +1411,12 @@ def normalize_overlay_type(raw: Any, *, layer: Any = "", role: Any = "", side: A
         return TYPE_ALIASES[normalized]
     layer_value = _normalized_layer_value(layer) or str(layer or "").strip().lower()
     role_value = str(role or "").strip().lower()
+    if role_value in {"support_trend", "support_trendline", "support_line", "trendline_support"}:
+        return "SUPPORT_TRENDLINE"
+    if role_value in {"resistance_trend", "resistance_trendline", "resistance_line", "trendline_resistance"}:
+        return "RESISTANCE_TRENDLINE"
+    if role_value in {"inner_trend", "inner_trendline", "inner_line", "micro_trendline", "local_trendline"}:
+        return "INNER_TRENDLINE"
     if role_value in {"sniper", "entry", "aggressive_sniper", "sniper_entry"}:
         return "SNIPER_ENTRY_BOX"
     if role_value in {"target", "buy_target", "sell_target"}:
@@ -1228,37 +1542,103 @@ def overlay_type_priority(overlay_type: Any) -> int:
 def short_label_for_overlay(overlay_type: Any, side: Any = "", label: Any = "") -> str:
     overlay_type_value = normalize_overlay_type(overlay_type)
     side_value = _normalize_side(side)
+    raw_label_token = _canonical_token(label)
     if overlay_type_value == "CURRENT_CANDLE":
         return "NOW"
+    if overlay_type_value == "CHART_BOUNDS":
+        return "CHART BOUNDS"
     if overlay_type_value == "SNIPER_ENTRY_BOX":
         return f"SNIPER {side_value}" if side_value != "HOLD" else "SNIPER"
     if overlay_type_value == "RETEST_BOX":
         return "TRIGGER"
     if overlay_type_value == "CONTINUATION_BOX":
-        return "CONT"
+        return "CONTINUATION"
     if overlay_type_value == "TARGET_ZONE_BOX":
         return "TARGET"
     if overlay_type_value == "INVALIDATION_BOX":
         return "INVALID"
     if overlay_type_value == "SUPPLY_ZONE":
+        if raw_label_token in {"RESISTANCE", "RESISTANCE_ZONE"}:
+            return "RESISTANCE"
         return "SUPPLY"
     if overlay_type_value == "DEMAND_ZONE":
+        if raw_label_token in {"SUPPORT", "SUPPORT_ZONE"}:
+            return "SUPPORT"
         return "DEMAND"
     if overlay_type_value == "OPPOSING_FORCE":
-        return "OPPOSING"
+        return "OPPOSING FORCE"
+    if overlay_type_value == "SUPPORT_TRENDLINE":
+        return "SUPPORT TRENDLINE"
+    if overlay_type_value == "RESISTANCE_TRENDLINE":
+        return "RESISTANCE TRENDLINE"
+    if overlay_type_value == "INNER_TRENDLINE":
+        return "INNER TRENDLINE"
+    if overlay_type_value == "ANGLE_VECTOR":
+        return "ANGLE VECTOR"
     if overlay_type_value == "IMPULSE_BOX":
         return "IMPULSE"
     if overlay_type_value == "PULLBACK_BOX":
         return "PULLBACK"
+    if overlay_type_value == "REPLAY_ENTRY":
+        return "REPLAY ENTRY"
+    if overlay_type_value == "REPLAY_EXIT":
+        return "REPLAY EXIT"
     if overlay_type_value == "PREDICTION_PATH":
         return "PATH"
     if overlay_type_value == "PROGRESSION_PATH":
-        return "HISTORY"
+        return "HISTORICAL PROGRESSION"
+    if overlay_type_value == "MODEL_COUNCIL_MARKER":
+        return "MODEL COUNCIL MARKER"
+    if overlay_type_value == "REGIME_MARKER":
+        return "REGIME MARKER"
+    if overlay_type_value == "MARKET_PLAY_MARKER":
+        return "MARKET PLAY MARKER"
+    if overlay_type_value == "PRICE_LOCATION_MARKER":
+        return "PRICE LOCATION MARKER"
+    if overlay_type_value == "TWO_CANDLE_STUDY":
+        return "TWO CANDLE STUDY"
+    if overlay_type_value == "LSTM_STUDY":
+        return "LSTM STUDY"
     if overlay_type_value == "BROKER_CONTROL":
         return abbreviate_label(str(label or "BROKER"), max_words=2)
     if overlay_type_value == "DEBUG_RAW_DETECTION":
-        return "DEBUG"
+        return "DEBUG RAW DETECTION"
+    if overlay_type_value == "REJECTED_OVERLAY":
+        return "REJECTED OVERLAY"
+    if overlay_type_value == "STALE_OVERLAY":
+        return "STALE OVERLAY"
+    if overlay_type_value == "TRANSFORM_DEBUG":
+        return "TRANSFORM DEBUG"
+    if overlay_type_value == "SCENE_GRAPH_DEBUG":
+        return "SCENE GRAPH DEBUG"
+    if overlay_type_value == "LABEL_COLLISION_DEBUG":
+        return "LABEL COLLISION DEBUG"
     return abbreviate_label(str(label or overlay_type_value.replace("_", " ")), max_words=2)
+
+
+def normalize_overlay_display_label(label: Any, overlay_type: Any, side: Any = "") -> tuple[str, str, str]:
+    fallback = short_label_for_overlay(overlay_type, side, label)
+    fallback_token = _canonical_token(fallback)
+    approved = _approved_display_label_by_token()
+    canonical_fallback = approved.get(fallback_token, fallback)
+    raw_text = _text(label)
+    raw_token = _canonical_token(raw_text)
+    normalized_type = normalize_overlay_type(overlay_type)
+    if not raw_token:
+        return canonical_fallback, "canonical", ""
+    if raw_token in approved:
+        if raw_token in {"NOW", "CURRENT"} and normalized_type != "CURRENT_CANDLE":
+            return canonical_fallback, "remapped", raw_text
+        return approved[raw_token], "approved", ""
+    alias = LEGACY_DISPLAY_LABEL_ALIASES.get(raw_token)
+    if alias:
+        alias_token = _canonical_token(alias)
+        if alias_token == "SNIPER":
+            return canonical_fallback, "remapped", raw_text
+        return approved.get(alias_token, alias.replace("_", " ")), "remapped", raw_text
+    if normalized_type in DIAGNOSTIC_OVERLAY_TYPES:
+        return canonical_fallback, "unmapped", raw_text
+    return canonical_fallback, "remapped", raw_text
 
 
 def _missing_strict_fields(raw: Mapping[str, Any]) -> list[str]:
@@ -1337,7 +1717,18 @@ def normalize_v3_overlay_object(
         else raw.get("source_indices") or raw.get("candle_indices") or raw.get("candles")
     )
     label = _text(raw.get("label") or raw.get("key") or overlay_type.replace("_", " "))
-    display_label = _text(raw.get("short_label") or raw.get("display_label"), short_label_for_overlay(overlay_type, side, label))
+    raw_display_label = _text(
+        raw.get("raw_display_label")
+        or raw.get("short_label")
+        or raw.get("display_label")
+        or raw.get("label")
+        or raw.get("key")
+    )
+    display_label, display_label_status, unmapped_display_label = normalize_overlay_display_label(
+        raw_display_label,
+        overlay_type,
+        side,
+    )
     confidence = _clip01(raw.get("confidence", raw.get("truth_score", 0.0)))
     truth_score = _clip01(raw.get("truth_score", confidence))
     resolved_layer = overlay_layer_name(overlay_type, raw.get("layer") or raw.get("_layer"))
@@ -1368,14 +1759,46 @@ def normalize_v3_overlay_object(
         "ttl_ms": _normalize_ttl_ms(raw, overlay_type, lifecycle),
         "reason": _text(raw.get("reason") or raw.get("message") or raw.get("summary") or f"{overlay_type} tracked from market object"),
         "label": label,
+        "raw_display_label": raw_display_label,
         "display_label": display_label,
         "short_label": display_label,
+        "display_label_status": display_label_status,
+        "unmapped_display_label": unmapped_display_label,
         "layer": resolved_layer,
         "role": _text(raw.get("role") or role, TYPE_ROLE_MAP.get(overlay_type, "")),
         "visible_default": bool(raw.get("visible_default", overlay_type in MODE_ALLOWED_TYPES["CLEAN_LIVE"])),
         "created_at_ms": int(_float(raw.get("created_at_ms"), 0.0)),
         "z_index": int(_float(raw.get("z_index"), overlay_type_priority(overlay_type))),
     }
+    geometry_points = _normalize_overlay_points(
+        raw.get("line_points")
+        or raw.get("points")
+        or raw.get("path")
+        or raw.get("anchors")
+    )
+    line_geometry_types = {
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+        "INNER_TRENDLINE",
+        "ANGLE_VECTOR",
+        "PROGRESSION_PATH",
+        "PREDICTION_PATH",
+    }
+    if geometry_points and overlay_type in line_geometry_types:
+        row["points"] = geometry_points
+        row["line_points"] = geometry_points
+        row["anchor_type"] = "POLYGON"
+    for key in (
+        "trendline_role",
+        "touch_points",
+        "replay_sequence",
+        "replay_action",
+        "story",
+        "parent_label",
+    ):
+        value = raw.get(key)
+        if value not in (None, "", [], {}):
+            row[key] = value
     return row
 
 
@@ -1717,8 +2140,13 @@ def validate_overlay_payload(overlays: Sequence[Mapping[str, Any]]) -> dict[str,
 
 __all__ = [
     "ANCHOR_TYPES",
+    "APPROVED_OVERLAY_DISPLAY_LABELS",
     "COORDINATE_MODES",
+    "DIAGNOSTIC_OVERLAY_TYPES",
+    "DIAGNOSTIC_VIEW_MODES",
+    "LIVE_VIEW_MODES",
     "LIFECYCLE_STATES",
+    "LEGACY_DISPLAY_LABEL_ALIASES",
     "MODE_ALLOWED_TYPES",
     "OVERLAY_LAYER_ORDER",
     "OVERLAY_TYPES",
@@ -1739,11 +2167,14 @@ __all__ = [
     "V3_VISIBLE_MODES",
     "VIEW_MODES",
     "abbreviate_label",
+    "approved_overlay_display_labels",
     "is_known_coordinate_mode",
     "is_known_overlay_type",
     "is_known_view_mode",
+    "is_approved_overlay_display_label",
     "layout_overlay_labels",
     "normalize_bounds",
+    "normalize_overlay_display_label",
     "normalize_overlay_type",
     "normalize_v3_overlay_object",
     "normalize_view_mode",

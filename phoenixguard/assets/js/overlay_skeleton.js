@@ -65,7 +65,7 @@
     // Prepare geometries for deterministic label placement using priority and nudging
     const objs = Array.isArray(overlays) ? overlays.slice(0) : [];
     const layerWeights = (OverlayPlacementModule && OverlayPlacementModule.layerWeights) || (window && window.OverlayPlacement && window.OverlayPlacement.layerWeights) || {
-      broker_controls: 5, active_council_decision: 4, trigger_zones: 3, target_level: 3, major_swings: 2.5,
+      broker_controls: 5, active_council_decision: 4, trigger_zones: 3, target_zones: 3, invalidation: 3, prediction_path: 2.5, major_swings: 2.5,
       supply_demand: 2, local_swings: 2, recent_candles: 1.5, historical_replay: 1, diagnostics: 0.5
     };
 
@@ -172,22 +172,23 @@
           if(!opts.labelMode || opts.labelMode!=='semantic') return null;
           const s = (o.semantic || o.label || o.role || o.type || '').toString().toLowerCase();
           const classHint = (o.cls || o.class || o.category || '').toString().toLowerCase();
-          if(/pullback|pull back|pull-back/.test(s) || /pullback|pull back|pull-back/.test(classHint)) return 'Pullback';
-          if(/continuation|continue/.test(s) || /continuation/.test(classHint)) return 'Continuation';
-          if(/rest|resting|pause|consolidat/.test(s) || /rest|pause|consolidat/.test(classHint)) return 'Resting';
-          if(/buy|long/.test(s) || /buy|long/.test(classHint)) return 'Buy';
-          if(/sell|short/.test(s) || /sell|short/.test(classHint)) return 'Sell';
-          if(/support/.test(s) || /support/.test(classHint)) return 'Support';
-          if(/resistance/.test(s) || /resist/.test(classHint)) return 'Resistance';
-          if(/target|takeprofit|tp/.test(s)) return 'Target';
+          if(o.display_label) return String(o.display_label).toUpperCase();
+          if(/support.*trend|trend.*support/.test(s) || /support.*trend|trend.*support/.test(classHint)) return 'SUPPORT TRENDLINE';
+          if(/resistance.*trend|trend.*resistance/.test(s) || /resistance.*trend|trend.*resistance/.test(classHint)) return 'RESISTANCE TRENDLINE';
+          if(/inner.*trend|micro.*trend|local.*trend/.test(s) || /inner.*trend|micro.*trend|local.*trend/.test(classHint)) return 'INNER TRENDLINE';
+          if(/pullback|pull back|pull-back/.test(s) || /pullback|pull back|pull-back/.test(classHint)) return 'PULLBACK';
+          if(/continuation|continue/.test(s) || /continuation/.test(classHint)) return 'CONTINUATION';
+          if(/rest|resting|pause|consolidat/.test(s) || /rest|pause|consolidat/.test(classHint)) return 'RETEST';
+          if(/buy|long/.test(s) || /buy|long/.test(classHint)) return 'SNIPER BUY';
+          if(/sell|short/.test(s) || /sell|short/.test(classHint)) return 'SNIPER SELL';
+          if(/support/.test(s) || /support/.test(classHint)) return 'SUPPORT';
+          if(/resistance/.test(s) || /resist/.test(classHint)) return 'RESISTANCE';
+          if(/target|takeprofit|tp/.test(s)) return 'TARGET';
           if(/trigger|entry|reclaim|cancel|invalidate/.test(s)){
-            if(/reclaim/.test(s)) return 'Reclaim Trigger';
-            if(/cancel|invalidate/.test(s)) return 'Cancel/Invalidate';
-            return 'Trigger';
+            if(/cancel|invalidate/.test(s)) return 'INVALID';
+            return 'TRIGGER';
           }
-          // fallback to id/overlay_id with capitalization
-          const id = (o.id || o.overlay_id || o.label || '').toString();
-          return id ? id.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase()) : 'Overlay';
+          return 'DEBUG RAW DETECTION';
         }
         try{
           if (OverlayPlacementModule && typeof OverlayPlacementModule.computePriority === 'function'){

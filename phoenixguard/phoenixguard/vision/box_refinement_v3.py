@@ -8,6 +8,7 @@ from phoenixguard.vision.v3_overlay_contract import (
     OVERLAY_TYPE_PRIORITY,
     layout_overlay_labels,
     normalize_bounds,
+    normalize_overlay_display_label,
     normalize_v3_overlay_object,
     normalize_view_mode,
     overlay_layer_name,
@@ -31,6 +32,9 @@ MARKET_OVERLAY_TYPES = {
     "SUPPLY_ZONE",
     "DEMAND_ZONE",
     "OPPOSING_FORCE",
+    "SUPPORT_TRENDLINE",
+    "RESISTANCE_TRENDLINE",
+    "INNER_TRENDLINE",
     "ANGLE_VECTOR",
     "PROGRESSION_PATH",
     "PREDICTION_PATH",
@@ -40,7 +44,17 @@ MARKET_OVERLAY_TYPES = {
 
 ZONE_TYPES = {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"}
 ACTIONABLE_TYPES = {"SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"}
-SEQUENCE_TYPES = {"IMPULSE_BOX", "PULLBACK_BOX", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"}
+SEQUENCE_TYPES = {
+    "IMPULSE_BOX",
+    "PULLBACK_BOX",
+    "SUPPORT_TRENDLINE",
+    "RESISTANCE_TRENDLINE",
+    "INNER_TRENDLINE",
+    "PROGRESSION_PATH",
+    "REPLAY_ENTRY",
+    "REPLAY_EXIT",
+}
+CURRENT_CANDLE_LIVE_MODES = {"CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT", "DIAGNOSTICS", "DEBUG", "INSPECTOR"}
 NEST_PARENT_TYPES = {
     "IMPULSE_BOX",
     "PULLBACK_BOX",
@@ -61,6 +75,9 @@ NEST_CHILD_TYPES = {
     "DEMAND_ZONE",
     "OPPOSING_FORCE",
     "PREDICTION_PATH",
+    "SUPPORT_TRENDLINE",
+    "RESISTANCE_TRENDLINE",
+    "INNER_TRENDLINE",
     "PROGRESSION_PATH",
     "REPLAY_ENTRY",
     "REPLAY_EXIT",
@@ -200,26 +217,7 @@ def _clip_or_snap_to_plot(box: Sequence[Any], plot: Sequence[Any], *, thin: bool
     clipped = _intersection(box, plot)
     if clipped is not None:
         return clipped
-    source = normalize_bounds(box)
-    target = normalize_bounds(plot)
-    if source is None or target is None:
-        return None
-    x0 = min(max(source[0], target[0]), target[2])
-    x1 = min(max(source[2], target[0]), target[2])
-    if x1 <= x0:
-        width = min(max(_box_width(source), 8.0), max(8.0, _box_width(target) * 0.12))
-        center = min(max((source[0] + source[2]) * 0.5, target[0] + width * 0.5), target[2] - width * 0.5)
-        x0 = center - width * 0.5
-        x1 = center + width * 0.5
-    y_center = min(max((source[1] + source[3]) * 0.5, target[1]), target[3])
-    if source[3] <= target[1]:
-        y_center = target[1]
-    elif source[1] >= target[3]:
-        y_center = target[3]
-    height = 4.0 if thin else min(max(_box_height(source), 8.0), max(8.0, _box_height(target) * 0.08))
-    y0 = min(max(y_center - height * 0.5, target[1]), target[3] - height)
-    y1 = y0 + height
-    return _clamp_box([x0, y0, x1, y1], target)
+    return None
 
 
 def _bounds_for_overlay(row: Mapping[str, Any], scene: Mapping[str, Any]) -> tuple[list[float] | None, list[float] | None, str]:
@@ -330,6 +328,72 @@ def _mark_rejected(row: Mapping[str, Any], reason: str) -> dict[str, Any]:
     output["display_label"] = short_label_for_overlay(output.get("type"), output.get("side"), output.get("label"))
     output["short_label"] = output["display_label"]
     return output
+
+
+def _without_modes(row: Mapping[str, Any], blocked_modes: set[str]) -> list[str]:
+    modes = [str(item).upper() for item in _sequence(row.get("visible_modes"))]
+    return [mode for mode in modes if mode not in blocked_modes]
+
+
+def _only_modes(row: Mapping[str, Any], allowed_modes: set[str], default_modes: Sequence[str]) -> list[str]:
+    modes: list[str] = []
+    for item in _sequence(row.get("visible_modes")):
+        normalized = normalize_view_mode(item)
+        if normalized in allowed_modes and normalized not in modes:
+            modes.append(normalized)
+    return modes or list(default_modes)
+
+
+def _historical_current_marker(row: Mapping[str, Any]) -> bool:
+    haystack = " ".join(
+        str(row.get(key) or "")
+        for key in ("layer", "role", "source_agent", "reason", "label", "raw_display_label", "lifecycle_state")
+    ).lower()
+    return any(token in haystack for token in ("history", "historical", "replay", "memory"))
+
+
+def _map_current_marker_to_history(row: dict[str, Any]) -> None:
+    row["type"] = "PROGRESSION_PATH"
+    row["layer"] = "historical_replay"
+    row["lifecycle_state"] = "HISTORICAL"
+    row["visible_default"] = False
+    row["visible_modes"] = ["FULL_HISTORY_READ", "REPLAY", "INSPECTOR"]
+    row["display_label"] = "HISTORICAL PROGRESSION"
+    row["short_label"] = "HISTORICAL PROGRESSION"
+    row["role"] = "history"
+    row.setdefault("precision_flags", []).append("duplicate_now_mapped_to_history")
+
+
+def _apply_current_candle_policy(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    output = [dict(row) for row in rows]
+    current_rows = [
+        row
+        for row in sorted(output, key=_priority, reverse=True)
+        if str(row.get("type") or "") == "CURRENT_CANDLE" and not row.get("precision_rejected")
+    ]
+    historical_rows = [row for row in current_rows if _historical_current_marker(row)]
+    live_rows = [row for row in current_rows if not _historical_current_marker(row)]
+    duplicates_hidden = 0
+    for row in historical_rows:
+        duplicates_hidden += 1
+        _map_current_marker_to_history(row)
+    for index, row in enumerate(live_rows):
+        if index == 0:
+            row["visible_modes"] = _only_modes(
+                row,
+                CURRENT_CANDLE_LIVE_MODES,
+                ["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT", "INSPECTOR"],
+            )
+            row["display_label"] = "NOW"
+            row["short_label"] = "NOW"
+            continue
+        duplicates_hidden += 1
+        row["visible_default"] = False
+        row["visible_modes"] = ["DIAGNOSTICS", "DEBUG", "INSPECTOR"]
+        row["label_hidden"] = True
+        row["label_anchor"] = "hidden"
+        row.setdefault("precision_flags", []).append("duplicate_now_hidden_from_live")
+    return output, duplicates_hidden
 
 
 def _suppress_duplicates(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], int]:
@@ -553,7 +617,9 @@ def resolve_precision_overlays_v3(
     normalized_mode = normalize_view_mode(mode)
     scene = _scene_payload(scene_graph)
     plot_chart = normalize_bounds(scene.get("plot_area_chart_bounds") or scene.get("chart_region_chart_bounds") or [0, 0, 1000, 700]) or [0.0, 0.0, 1000.0, 700.0]
-    scene_frame = int(_float(scene.get("frame_id"), float(frame_id or 0)))
+    scene_frame = int(_float(scene.get("frame_id"), 0.0))
+    if scene_frame <= 0 and frame_id is not None:
+        scene_frame = int(_float(frame_id, 0.0))
     normalized: list[dict[str, Any]] = []
     missing_transform = 0
     stale_frame = 0
@@ -562,12 +628,27 @@ def resolve_precision_overlays_v3(
     outside = 0
     for index, raw in enumerate(overlays):
         try:
-            row = normalize_v3_overlay_object(raw, strict=False, fallback_index=index, frame_id=frame_id)
+            source_frame = raw.get("frame_id", raw.get("frame_index"))
+            row = normalize_v3_overlay_object(
+                raw,
+                strict=False,
+                fallback_index=index,
+                frame_id=frame_id if source_frame in (None, "") else None,
+            )
         except Exception:
             continue
         row["layer"] = overlay_layer_name(row.get("type"), row.get("layer"))
-        row["display_label"] = short_label_for_overlay(row.get("type"), row.get("side"), row.get("label"))
-        row["short_label"] = row["display_label"]
+        raw_display_label = _text(row.get("raw_display_label") or row.get("display_label") or row.get("label"))
+        display_label, display_label_status, unmapped_display_label = normalize_overlay_display_label(
+            raw_display_label,
+            row.get("type"),
+            row.get("side"),
+        )
+        row["raw_display_label"] = raw_display_label
+        row["display_label"] = display_label
+        row["short_label"] = display_label
+        row["display_label_status"] = display_label_status
+        row["unmapped_display_label"] = unmapped_display_label
         row["z_index"] = int(_float(row.get("z_index"), OVERLAY_TYPE_PRIORITY.get(str(row.get("type") or ""), 0)))
         row.setdefault("precision_flags", [])
         source_agent = str(row.get("source_agent") or "").lower()
@@ -604,9 +685,20 @@ def resolve_precision_overlays_v3(
             row["precision_space"] = _space
         normalized.append(row)
 
-    suppressed, duplicate_count = _suppress_duplicates(normalized)
+    if scene_frame:
+        stale_frame = sum(
+            1
+            for row in normalized
+            if int(_float(row.get("frame_id"), scene_frame)) != scene_frame
+        )
+    current_policy, duplicate_now_hidden = _apply_current_candle_policy(normalized)
+    suppressed, duplicate_count = _suppress_duplicates(current_policy)
     nested, nesting_report = _apply_overlay_nesting(suppressed)
-    budgeted = _apply_clean_live_budget(nested, str(current_side or "").upper())
+    budgeted = (
+        _apply_clean_live_budget(nested, str(current_side or "").upper())
+        if normalized_mode == "CLEAN_LIVE"
+        else [dict(row) for row in nested]
+    )
     budgeted = _apply_render_budget(budgeted, normalized_mode)
     laid_out = layout_overlay_labels(budgeted, chart_bounds=plot_chart)
     for row in laid_out:
@@ -623,6 +715,7 @@ def resolve_precision_overlays_v3(
         "unanchored_boxes": 0,
         "oversized_boxes": 0,
         "duplicate_boxes": duplicate_count,
+        "duplicate_now_hidden": duplicate_now_hidden,
         "label_collisions": label_collisions,
         "outside_plot_area": rendered_outside,
         "stale_frame_id": stale_frame,
@@ -636,7 +729,13 @@ def resolve_precision_overlays_v3(
         frame_id=scene_frame,
         overlay_count=len(laid_out),
         rendered_count=len(rendered),
-        rejected_count=len([row for row in laid_out if row.get("precision_rejected") or row.get("visible_default") is False]),
+        rejected_count=len(
+            [
+                row
+                for row in laid_out
+                if row.get("precision_rejected") or (normalized_mode == "CLEAN_LIVE" and row.get("visible_default") is False)
+            ]
+        ),
         precision_report=precision_report,
     )
     return laid_out, audit.as_dict()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi.testclient import TestClient
 
@@ -433,6 +433,57 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
     assert "market_object_registry" not in compact
 
 
+def test_live_state_v3_direct_read_skips_legacy_registry_when_v3_sources_exist(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    mobile_app._LIVE_STATE_V3_CACHE.clear()
+    mobile_app._LIVE_STATE_REGISTRY_CACHE.clear()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    session_dir.mkdir(parents=True)
+    now_epoch = time.time()
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "status": "running",
+                "tracking_enabled": True,
+                "capture_count": 1,
+                "frame_index": 1,
+                "last_capture_epoch": now_epoch,
+                "tracking_summary": {
+                    "tracked_candles": [
+                        {
+                            "track_id": "candle-1",
+                            "bbox": [10, 20, 30, 80],
+                            "direction": "up",
+                            "confidence": 0.9,
+                        }
+                    ]
+                },
+                "latest_signal": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_registry_load(*_args: Any, **_kwargs: Any) -> list[Mapping[str, Any]]:
+        raise AssertionError("legacy registry loader should not be used for V3 session overlays")
+
+    monkeypatch.setattr(mobile_app, "load_recent_market_objects", fail_registry_load)
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?compact=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider_status"]["direct_registry_source"] == "skipped_session_v3_overlay_sources"
+    assert payload["provider_status"]["direct_registry_entries"] == 0
+
+
 def test_live_state_v3_direct_read_invalidates_cache_when_display_state_advances(
     monkeypatch: Any,
     tmp_path: Path,
@@ -498,6 +549,244 @@ def test_live_state_v3_direct_read_invalidates_cache_when_display_state_advances
     second_payload = second_response.json()
     assert second_payload["broker_surface_frame"]["frame_id"] == 2
     assert second_payload["artifacts"]["window"]["path"] == str(second_window)
+
+
+def test_performance_trace_v3_uses_direct_display_state_fast_path(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    mobile_app._LIVE_STATE_V3_CACHE.clear()
+    mobile_app._LIVE_STATE_REGISTRY_CACHE.clear()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    artifact_dir = session_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    window = artifact_dir / "000002_window.jpg"
+    window.write_bytes(b"window")
+    now_epoch = time.time()
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "status": "running",
+                "tracking_enabled": True,
+                "capture_count": 1,
+                "frame_index": 1,
+                "display_frame_id": 1,
+                "overlay_frame_id": 1,
+                "model_vote_frame_id": 1,
+                "display_published_epoch": now_epoch - 20.0,
+                "last_capture_epoch": now_epoch - 20.0,
+                "last_window_path": str(window),
+                "overlay_source_window_signature": "display",
+                "tracking_summary": {},
+                "latest_signal": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "display_state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "display_frame_id": 2,
+                "display_capture_epoch": now_epoch,
+                "display_published_epoch": now_epoch,
+                "last_display_window_path": str(window),
+                "last_display_surface_signature": "display",
+                "last_window_surface_signature": "display",
+                "overlay_source_window_signature": "old-surface",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/performance/trace/v3/pocket-live-8788")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["frame_id"] == 2
+    assert payload["display_frame"]["frame_id"] == 2
+    assert payload["display_frame"]["age_ms"] < 2500
+    assert payload["timing_trace"]["frame_gap_status"] in {"ALIGNED", "AUTHORITY_LOCKED"}
+    assert payload["timing_trace"]["surface_signature_aligned"] is True
+    assert payload["display_frame"]["url"] == str(window)
+
+
+def test_performance_trace_v3_uses_compact_display_state_without_session_json(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    mobile_app._LIVE_STATE_V3_CACHE.clear()
+    mobile_app._LIVE_STATE_REGISTRY_CACHE.clear()
+    mobile_app._DIRECT_PERFORMANCE_TRACE_CACHE.clear()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    artifact_dir = session_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    window = artifact_dir / "000022_window.jpg"
+    overlay = artifact_dir / "000002_overlay.png"
+    window.write_bytes(b"window")
+    overlay.write_bytes(b"overlay")
+    now_epoch = time.time()
+    (session_dir / "display_state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "display_frame_id": 22,
+                "capture_count": 22,
+                "frame_index": 2,
+                "chart_frame_id": 2,
+                "overlay_frame_id": 2,
+                "model_vote_frame_id": 2,
+                "display_capture_epoch": now_epoch,
+                "display_published_epoch": now_epoch,
+                "last_capture_epoch": now_epoch,
+                "last_capture_started_epoch": now_epoch,
+                "last_display_window_path": str(window),
+                "last_overlay_path": str(overlay),
+                "last_display_surface_signature": "display",
+                "last_window_surface_signature": "display",
+                "overlay_source_window_signature": "studied",
+                "display_snapshot_only_v3": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/performance/trace/v3/pocket-live-8788")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["frame_id"] == 22
+    assert payload["display_frame"]["url"] == str(window)
+    assert payload["model_state"]["models_awake"] == 7
+    assert payload["timing_trace"]["display_only_authority_locked"] is True
+    assert payload["timing_trace"]["frame_gap_status"] == "AUTHORITY_LOCKED"
+
+
+def test_performance_trace_v3_reuses_short_direct_cache_on_read_race(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    monkeypatch.setenv("PHOENIXGUARD_PERFORMANCE_TRACE_DIRECT_ONLY", "1")
+    monkeypatch.setenv("PHOENIXGUARD_DIRECT_PERFORMANCE_TRACE_CACHE_TTL_SEC", "5")
+    mobile_app._LIVE_STATE_V3_CACHE.clear()
+    mobile_app._LIVE_STATE_REGISTRY_CACHE.clear()
+    mobile_app._DIRECT_PERFORMANCE_TRACE_CACHE.clear()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    artifact_dir = session_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    window = artifact_dir / "000010_window.jpg"
+    window.write_bytes(b"window")
+    now_epoch = time.time()
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "status": "running",
+                "tracking_enabled": True,
+                "capture_count": 10,
+                "frame_index": 10,
+                "display_frame_id": 10,
+                "overlay_frame_id": 10,
+                "model_vote_frame_id": 10,
+                "display_published_epoch": now_epoch,
+                "last_capture_epoch": now_epoch,
+                "last_window_path": str(window),
+                "tracking_summary": {},
+                "latest_signal": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app())
+    first_response = client.get("/v1/mobile/performance/trace/v3/pocket-live-8788")
+    assert first_response.status_code == 200
+    assert "direct_trace_cache_reused_v3" not in first_response.json()
+
+    monkeypatch.setattr(mobile_app, "_direct_window_tracker_session_snapshot", lambda _session_id: None)
+    second_response = client.get("/v1/mobile/performance/trace/v3/pocket-live-8788")
+
+    assert second_response.status_code == 200
+    payload = second_response.json()
+    assert payload["frame_id"] == 10
+    assert payload["direct_trace_cache_reused_v3"]["reason"] == "direct_snapshot_read_race"
+
+
+def test_performance_trace_v3_treats_locked_display_overlay_as_authority_locked(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    mobile_app._LIVE_STATE_V3_CACHE.clear()
+    mobile_app._LIVE_STATE_REGISTRY_CACHE.clear()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    artifact_dir = session_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    window = artifact_dir / "000300_window.jpg"
+    overlay = artifact_dir / "000001_overlay.png"
+    window.write_bytes(b"window")
+    overlay.write_bytes(b"overlay")
+    now_epoch = time.time()
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "status": "running",
+                "tracking_enabled": True,
+                "capture_count": 300,
+                "frame_index": 300,
+                "display_frame_id": 300,
+                "overlay_frame_id": 1,
+                "model_vote_frame_id": 300,
+                "display_published_epoch": now_epoch,
+                "last_capture_epoch": now_epoch,
+                "last_window_path": str(window),
+                "last_overlay_path": str(overlay),
+                "overlay_source_window_signature": "studied-surface",
+                "tracking_summary": {},
+                "latest_signal": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "display_state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "display_frame_id": 320,
+                "display_capture_epoch": now_epoch,
+                "display_published_epoch": now_epoch,
+                "last_display_window_path": str(window),
+                "last_display_surface_signature": "current-display",
+                "last_window_surface_signature": "current-display",
+                "display_snapshot_only_v3": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/performance/trace/v3/pocket-live-8788")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["timing_trace"]["raw_overlay_frame_gap"] == 319
+    assert payload["timing_trace"]["overlay_frame_gap"] == 0
+    assert payload["timing_trace"]["frame_gap_status"] == "AUTHORITY_LOCKED"
+    assert payload["timing_trace"]["display_only_authority_locked"] is True
 
 
 def test_model_council_latest_state_endpoint_returns_non_executable_study_packet() -> None:

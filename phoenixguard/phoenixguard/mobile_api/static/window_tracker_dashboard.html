@@ -933,7 +933,7 @@
       background: rgba(242, 200, 102, 0.075);
       box-shadow: inset 0 0 24px rgba(242, 200, 102, 0.10), 0 0 20px rgba(242, 200, 102, 0.12);
       pointer-events: auto;
-      transition: background-color 150ms ease, border-color 150ms ease, transform 150ms ease;
+      transition: background-color 120ms ease, border-color 120ms ease;
     }
 
     .surface-hotspot[hidden] {
@@ -975,6 +975,21 @@
       background: rgba(99, 224, 154, 0.055);
     }
 
+    .surface-hotspot.layer-target-zones {
+      border-color: rgba(77, 185, 255, 0.70);
+      background: rgba(77, 185, 255, 0.050);
+    }
+
+    .surface-hotspot.layer-invalidation {
+      border-color: rgba(255, 101, 79, 0.72);
+      background: rgba(255, 101, 79, 0.045);
+    }
+
+    .surface-hotspot.layer-prediction-path {
+      border-color: rgba(175, 137, 255, 0.66);
+      background: rgba(175, 137, 255, 0.045);
+    }
+
     .surface-hotspot.layer-active-council-decision {
       border-color: rgba(255, 255, 255, 0.78);
       background: rgba(255, 255, 255, 0.07);
@@ -991,6 +1006,56 @@
       border-color: rgba(180, 190, 204, 0.40);
       background: rgba(180, 190, 204, 0.035);
       box-shadow: none;
+    }
+
+    .surface-line-svg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      overflow: visible;
+      pointer-events: none;
+    }
+
+    .surface-trendline {
+      fill: none;
+      stroke: rgba(242, 200, 102, 0.78);
+      stroke-width: 2.1;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      vector-effect: non-scaling-stroke;
+      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.74));
+    }
+
+    .surface-trendline.trendline-support {
+      stroke: rgba(99, 224, 154, 0.88);
+    }
+
+    .surface-trendline.trendline-resistance {
+      stroke: rgba(255, 101, 79, 0.86);
+    }
+
+    .surface-trendline.trendline-inner {
+      stroke: rgba(107, 200, 255, 0.82);
+      stroke-dasharray: 8 5;
+    }
+
+    .surface-trendline.trendline-history {
+      stroke: rgba(242, 200, 102, 0.58);
+      stroke-dasharray: 7 5;
+    }
+
+    .surface-hotspot.surface-line-hotspot {
+      min-width: 18px;
+      min-height: 18px;
+      border-color: transparent;
+      background: transparent;
+      box-shadow: none;
+    }
+
+    .surface-hotspot.surface-line-hotspot:hover {
+      background: rgba(242, 200, 102, 0.055);
+      border-color: rgba(242, 200, 102, 0.32);
     }
 
     .surface-hotspot.buy.layer-broker-controls {
@@ -1011,7 +1076,7 @@
     .surface-hotspot:hover {
       background: rgba(242, 200, 102, 0.16);
       border-color: var(--gold);
-      transform: scale(1.01);
+      transform: none;
     }
 
     .surface-hotspot span {
@@ -1032,6 +1097,18 @@
       text-transform: uppercase;
       letter-spacing: 0.08em;
       opacity: 0.82;
+    }
+
+    .surface-hotspot.label-hidden span {
+      display: none;
+    }
+
+    .surface-hotspot.edge-left span {
+      left: 0;
+    }
+
+    .surface-hotspot.edge-top span {
+      top: 4px;
     }
 
     .inspector-module {
@@ -2258,8 +2335,17 @@
             <span>Overlay</span>
             <select id="overlay-mode-select" aria-label="Overlay mode">
               <option value="clean_live">Clean Live</option>
+              <option value="global">Global</option>
+              <option value="local">Local</option>
+              <option value="supply_demand">Supply/Demand</option>
+              <option value="triggers">Triggers</option>
+              <option value="targets">Targets</option>
+              <option value="invalidation">Invalidation</option>
+              <option value="path">Path</option>
               <option value="active_context">Active Context</option>
               <option value="council_layers">Council Layers</option>
+              <option value="full_history_read">Full History</option>
+              <option value="broker">Broker</option>
               <option value="two_candle_study">Two-Candle Study</option>
               <option value="lstm_study">LSTM Study</option>
               <option value="deep_debug">Deep Debug</option>
@@ -2587,17 +2673,24 @@
     const state = {
       session: null,
       route: "live",
-      overlayMode: "clean_live",
+      overlayMode: "active_context",
       mode: "overlay",
       refreshTimer: null,
+      heartbeatTimer: null,
       stream: null,
       streamConnected: false,
       telemetryCache: null,
       lastTelemetryFetchMs: 0,
+      lastStreamHydrationMs: 0,
+      streamHydrationRequestId: 0,
       commandPaletteOpen: false,
       commandPaletteIndex: 0,
       inspectorMode: localStorage.getItem("phoenixguard.inspector.mode") || "compact",
       busy: false,
+      liveRefreshBusy: false,
+      streamHydrationBusy: false,
+      slowRefreshBusy: false,
+      lastBaseRefreshMs: 0,
       pendingMemoryAction: null,
       pendingMemoryLabel: "",
       pendingMemoryStartedAt: 0,
@@ -2609,6 +2702,9 @@
         local_swings: true,
         supply_demand: true,
         trigger_zones: true,
+        target_zones: true,
+        invalidation: true,
+        prediction_path: false,
         active_council_decision: true,
         historical_replay: false,
         broker_controls: true,
@@ -2628,11 +2724,19 @@
         overlayFrameGap: 0,
         visibleArtifactKind: "",
         visibleFrameKey: "",
+        pendingImageToken: "",
+        identityKey: "",
+        identityChanged: false,
+        overlayLocks: new Map(),
         viewportSignature: "",
         viewportRequestId: 0,
+        lastHeartbeatSignature: "",
+        lastHeartbeatSentMs: 0,
         failedArtifactKeys: new Set(),
       },
     };
+    const DASHBOARD_REFRESH_INTERVAL_MS = 250;
+    const STREAM_LIVE_STATE_HYDRATION_MS = 1000;
 
     const $ = (id) => document.getElementById(id);
 
@@ -2907,6 +3011,236 @@
       els.surfaceCaption.textContent = [modeLabel, planeLabel, marketLabel || "market pending", memoryLabel].join(" | ");
     }
 
+    function identityToken(value, fallback = "") {
+      const text = String(value ?? "").trim();
+      return text ? text.toUpperCase() : fallback;
+    }
+
+    function normalizedBoxKey(values) {
+      if (!Array.isArray(values) || values.length < 4) {
+        return "";
+      }
+      return values.slice(0, 4).map((value) => {
+        const number = Number(value);
+        if (!Number.isFinite(number)) {
+          return "";
+        }
+        return Math.abs(number) <= 1.0001 ? number.toFixed(4) : number.toFixed(1);
+      }).join(",");
+    }
+
+    function sessionInstrumentContext(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const tracking = objectOrEmpty(session.tracking_summary || liveState.tracking_summary);
+      const signal = objectOrEmpty(session.latest_signal || liveState.latest_signal);
+      const result = objectOrEmpty(session.model_council_result || signal.model_council_result || tracking.model_council_result);
+      return objectOrEmpty(
+        liveState.instrument_context
+        || liveState.instrument
+        || session.instrument_context
+        || signal.instrument_context
+        || tracking.instrument_context
+        || result.instrument_context
+      );
+    }
+
+    function sessionSymbolContext(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const tracking = objectOrEmpty(session.tracking_summary || liveState.tracking_summary);
+      const signal = objectOrEmpty(session.latest_signal || liveState.latest_signal);
+      const result = objectOrEmpty(session.model_council_result || signal.model_council_result || tracking.model_council_result);
+      return objectOrEmpty(
+        liveState.symbol_context
+        || session.symbol_context
+        || signal.symbol_context
+        || tracking.symbol_context
+        || result.symbol_context
+      );
+    }
+
+    function instrumentInvalidationKey(instrument = {}) {
+      const stateKey = identityToken(instrument.instrument_context_state || instrument.identity_state, "");
+      const invalidated = Boolean(instrument.invalidated) || stateKey.includes("INVALID");
+      return invalidated
+        ? identityToken(instrument.invalidation_reason || stateKey, "INVALIDATED")
+        : "ACTIVE";
+    }
+
+    function surfacePairKey(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const instrument = sessionInstrumentContext(session);
+      const symbolContext = sessionSymbolContext(session);
+      const tracking = objectOrEmpty(session.tracking_summary || liveState.tracking_summary);
+      const signal = objectOrEmpty(session.latest_signal || liveState.latest_signal);
+      const market = identityToken(
+        instrument.display_symbol
+        || instrument.symbol
+        || instrument.market
+        || symbolContext.display_symbol
+        || symbolContext.symbol
+        || signal.market
+        || signal.symbol
+        || tracking.detected_market
+        || session.market,
+        "MARKET_PENDING",
+      );
+      const ocr = identityToken(instrument.ocr_symbol || symbolContext.ocr_symbol || signal.ocr_symbol || tracking.ocr_symbol, market);
+      const timeframe = identityToken(
+        instrument.timeframe
+        || symbolContext.timeframe
+        || signal.focus_timeframe
+        || signal.timeframe
+        || tracking.detected_timeframe
+        || session.timeframe,
+        "TF_PENDING",
+      );
+      return `${market}|${timeframe}|${ocr}|${instrumentInvalidationKey(instrument)}`;
+    }
+
+    function surfaceIdentityKey(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const tracking = objectOrEmpty(session.tracking_summary || liveState.tracking_summary);
+      const instrument = sessionInstrumentContext(session);
+      const symbolContext = sessionSymbolContext(session);
+      const manualFocus = objectOrEmpty(session.manual_focus_region || liveState.manual_focus_region);
+      const chartRegion = objectOrEmpty(tracking.chart_region || tracking.display_region || liveState.plot_area);
+      const descriptor = objectOrEmpty(session.locked_window || session.descriptor || liveState.locked_window);
+      const brokerSurface = objectOrEmpty(session.broker_surface || liveState.broker_surface);
+      const capturePlane = objectOrEmpty(brokerSurface.capture_plane);
+      const focusKey = normalizedBoxKey(manualFocus.normalized_bbox || manualFocus.bbox);
+      const chartKey = normalizedBoxKey(chartRegion.pixel_bbox || chartRegion.bbox || objectOrEmpty(chartRegion.bounds).bbox);
+      const hwnd = identityToken(descriptor.hwnd || descriptor.window_handle || session.locked_hwnd, "");
+      const title = identityToken(session.locked_title || descriptor.title || session.window_query, "WINDOW_PENDING");
+      const plane = [
+        capturePlane.source || "",
+        capturePlane.width || "",
+        capturePlane.height || "",
+      ].join("x");
+      const instrumentKey = [
+        identityToken(instrument.instrument_id || instrument.symbol_id || symbolContext.symbol_id, "INSTRUMENT_LOCKED"),
+        instrumentInvalidationKey(instrument),
+      ].join("@");
+      return [
+        identityToken(session.session_id || SESSION_ID, SESSION_ID),
+        surfacePairKey(session),
+        hwnd || title,
+        focusKey || "FOCUS_PENDING",
+        chartKey || "CHART_PENDING",
+        identityToken(plane, "PLANE_PENDING"),
+        instrumentKey,
+      ].join("|");
+    }
+
+    function applySurfaceIdentity(session = {}) {
+      const nextKey = surfaceIdentityKey(session);
+      const previousKey = state.surface.identityKey || "";
+      const changed = Boolean(previousKey && nextKey && previousKey !== nextKey);
+      state.surface.identityChanged = changed;
+      if (changed) {
+        state.surface.lastStaticLayerHash = "";
+        state.surface.viewportSignature = "";
+        state.surface.visibleFrameKey = "";
+        state.surface.pendingImageToken = "";
+        state.surface.failedArtifactKeys.clear();
+      }
+      state.surface.identityKey = nextKey;
+      return nextKey;
+    }
+
+    function cloneOverlayLockBox(box, index) {
+      const copy = {...box, _index: index, _overlayLock: true, locked: true};
+      ["bbox", "bounds", "center", "pixel_bbox", "sniper_window", "trigger_window", "target_window", "target_bbox", "points", "line_points", "touch_points"].forEach((key) => {
+        if (Array.isArray(copy[key])) {
+          copy[key] = copy[key].map((item) => Array.isArray(item) ? item.slice() : item);
+        }
+      });
+      copy.source = copy.source || "frontend_overlay_lock";
+      return copy;
+    }
+
+    function pruneOverlayLocks(limit = 8) {
+      while (state.surface.overlayLocks.size > limit) {
+        const firstKey = state.surface.overlayLocks.keys().next().value;
+        if (!firstKey) {
+          break;
+        }
+        state.surface.overlayLocks.delete(firstKey);
+      }
+    }
+
+    function rememberOverlayLock(identityKey, boxes, session = {}) {
+      if (!identityKey || !Array.isArray(boxes) || boxes.length === 0) {
+        return;
+      }
+      if (!backendOverlayFrameAligned(session)) {
+        return;
+      }
+      const overlayFrame = Math.max(overlayObjectFrame(session), overlayArtifactFrame(session), newestDisplayFrame(session));
+      state.surface.overlayLocks.set(identityKey, {
+        identityKey,
+        pairKey: surfacePairKey(session),
+        backendMode: backendOverlayMode(state.overlayMode),
+        savedAtMs: Math.round(performance.now()),
+        frameId: overlayFrame,
+        displayFrameId: newestDisplayFrame(session),
+        overlayStateVersion: currentOverlayStateVersion(session),
+        boxes: boxes.map((box, index) => cloneOverlayLockBox(box, index)),
+      });
+      pruneOverlayLocks();
+    }
+
+    function currentOverlayLock(session = {}) {
+      const identityKey = surfaceIdentityKey(session);
+      const lock = state.surface.overlayLocks.get(identityKey);
+      if (!lock || !Array.isArray(lock.boxes) || lock.boxes.length === 0) {
+        return null;
+      }
+      if (clean(lock.pairKey, "") !== surfacePairKey(session)) {
+        state.surface.overlayLocks.delete(identityKey);
+        return null;
+      }
+      if (clean(lock.backendMode, "CLEAN_LIVE").toUpperCase() !== backendOverlayMode(state.overlayMode)) {
+        state.surface.overlayLocks.delete(identityKey);
+        return null;
+      }
+      const currentVersion = currentOverlayStateVersion(session);
+      if (currentVersion && lock.overlayStateVersion && currentVersion !== lock.overlayStateVersion) {
+        state.surface.overlayLocks.delete(identityKey);
+        return null;
+      }
+      const currentFrame = Math.max(overlayObjectFrame(session), overlayArtifactFrame(session));
+      if (currentFrame > 0 && lock.frameId > 0 && currentFrame !== lock.frameId) {
+        state.surface.overlayLocks.delete(identityKey);
+        return null;
+      }
+      const displayFrame = newestDisplayFrame(session);
+      if (
+        displayFrame > 0
+        && lock.displayFrameId > 0
+        && displayFrame !== lock.displayFrameId
+        && !overlaySurfaceMatchesDisplay(session)
+        && !displayOnlyOverlayAuthorityLocked(session)
+      ) {
+        state.surface.overlayLocks.delete(identityKey);
+        return null;
+      }
+      if (!backendOverlayFrameAligned(session)) {
+        state.surface.overlayLocks.delete(identityKey);
+        return null;
+      }
+      return lock;
+    }
+
+    function lockedOverlayBoxes(session = {}) {
+      const lock = currentOverlayLock(session);
+      if (!lock) return [];
+      return lock.boxes.map((box, index) => cloneOverlayLockBox(box, index));
+    }
+
+    function hasLockedOverlayForSession(session = {}) {
+      return lockedOverlayBoxes(session).length > 0;
+    }
+
     function frameNumber(value) {
       const number = Number(value);
       return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
@@ -2927,22 +3261,143 @@
       return match ? frameNumber(match[1]) : 0;
     }
 
+    function artifactPathSignature(path) {
+      const text = clean(path, "");
+      const match = text.match(/(?:^|[\\/])\d{1,12}_([^\\/]+?)_(?:window|chart|overlay|full_overlay|decision)(?:\.|$)/i)
+        || text.match(/^\d{1,12}_([^_\\/]+)/);
+      return match ? clean(match[1], "") : "";
+    }
+
+    function displaySurfaceSignature(session = {}) {
+      const fastPath = objectOrEmpty(session.display_fast_path_v3);
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      return clean(
+        session.last_display_surface_signature
+        || fastPath.surface_signature
+        || liveState.last_display_surface_signature
+        || artifactPathSignature(session.last_display_window_path || session.last_window_path || session.last_frame_path),
+        "",
+      );
+    }
+
+    function overlaySourceSurfaceSignature(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      return clean(session.overlay_source_window_signature || liveState.overlay_source_window_signature, "");
+    }
+
+    function overlaySurfaceMatchesDisplay(session = {}) {
+      const displaySignature = displaySurfaceSignature(session);
+      const overlaySignature = overlaySourceSurfaceSignature(session);
+      return Boolean(displaySignature && overlaySignature && displaySignature === overlaySignature);
+    }
+
+    function displayOnlyOverlayAuthorityLocked(session = {}) {
+      const displayOnly = Boolean(session.display_snapshot_only_v3 || session.display_fast_path_v3);
+      if (!displayOnly) {
+        return false;
+      }
+      const overlayFrame = Math.max(overlayObjectFrame(session), overlayArtifactFrame(session));
+      const authorityFrame = Math.max(
+        frameNumber(session.frame_index),
+        frameNumber(session.chart_frame_id),
+        frameNumber(session.model_vote_frame_id),
+      );
+      const displayArtifact = clean(session.last_display_window_path || session.last_window_path || session.last_frame_path, "");
+      const overlayArtifact = clean(session.last_full_overlay_path || session.last_overlay_path, "");
+      if (overlayFrame > 0 && displayArtifact && overlayArtifact) {
+        return true;
+      }
+      return Boolean(overlayFrame > 0 && authorityFrame > 0 && overlayFrame === authorityFrame);
+    }
+
     function overlayArtifactFrame(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const overlaysPayload = objectOrEmpty(session.overlays || liveState.overlays);
+      const modePayload = objectOrEmpty(session.overlay_mode || liveState.overlay_mode);
       return Math.max(
         artifactPathFrame(session.last_overlay_path),
         artifactPathFrame(session.last_full_overlay_path),
         frameNumber(session.overlay_frame_id),
         frameNumber(session.full_overlay_frame_id),
+        frameNumber(session.overlay_artifact_frame_id),
+        frameNumber(liveState.overlay_artifact_frame_id),
+        frameNumber(overlaysPayload.artifact_frame_id),
+        frameNumber(modePayload.artifact_frame_id),
       );
+    }
+
+    function overlayObjectFrame(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const overlaysPayload = objectOrEmpty(session.overlays || liveState.overlays);
+      const modePayload = objectOrEmpty(session.overlay_mode || liveState.overlay_mode);
+      return Math.max(
+        frameNumber(session.overlay_object_frame_id),
+        frameNumber(liveState.overlay_object_frame_id),
+        frameNumber(overlaysPayload.overlay_object_frame_id),
+        frameNumber(modePayload.overlay_object_frame_id),
+        frameNumber(overlaysPayload.frame_id),
+      );
+    }
+
+    function currentOverlayStateVersion(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const timing = objectOrEmpty(session.frame_timing_trace_v3 || liveState.frame_timing_trace_v3);
+      return clean(session.overlay_state_version || liveState.overlay_state_version || timing.overlay_state_version, "");
+    }
+
+    function currentOverlayFrameStateVersion(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const timing = objectOrEmpty(session.frame_timing_trace_v3 || liveState.frame_timing_trace_v3);
+      return clean(session.overlay_frame_state_version || liveState.overlay_frame_state_version || timing.overlay_frame_state_version, "");
+    }
+
+    function explicitBoolean(values) {
+      for (const value of values) {
+        if (value === true || value === false) {
+          return value;
+        }
+      }
+      return null;
+    }
+
+    function backendOverlayFrameAligned(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const overlaysPayload = objectOrEmpty(session.overlays || liveState.overlays);
+      const modePayload = objectOrEmpty(session.overlay_mode || liveState.overlay_mode);
+      const explicitArtifactAligned = explicitBoolean([
+        session.overlay_artifact_frame_aligned,
+        liveState.overlay_artifact_frame_aligned,
+        overlaysPayload.artifact_frame_aligned,
+        modePayload.artifact_frame_aligned,
+      ]);
+      const explicitAuthorityLocked = explicitBoolean([
+        session.overlay_artifact_authority_locked,
+        liveState.overlay_artifact_authority_locked,
+        overlaysPayload.artifact_authority_locked,
+        modePayload.artifact_authority_locked,
+      ]);
+      if (explicitAuthorityLocked === true) {
+        return true;
+      }
+      if (explicitArtifactAligned === false) {
+        return false;
+      }
+      const displayFrame = newestDisplayFrame(session);
+      const overlayFrame = Math.max(overlayObjectFrame(session), overlayArtifactFrame(session));
+      if (displayFrame > 0 && overlayFrame > 0 && overlayFrame < displayFrame) {
+        return overlaySurfaceMatchesDisplay(session) || displayOnlyOverlayAuthorityLocked(session);
+      }
+      return true;
     }
 
     function artifactFrameKey(kind, session = state.session || {}) {
       const normalized = clean(kind, "artifact").toLowerCase();
       const projection = currentMemoryProjection(session);
+      const windowPath = clean(session.last_display_window_path || session.last_window_path || session.last_frame_path, "");
       const pathKey = clean(
         normalized === "overlay" ? session.last_overlay_path
           : normalized === "full-overlay" ? session.last_full_overlay_path
-              : normalized === "window" ? (session.last_display_window_path || session.last_window_path || session.last_frame_path)
+              : normalized === "window" ? windowPath
               : normalized === "chart" ? session.last_chart_path
                 : normalized === "memory-reference" ? (projection.reference_image_path || session.last_memory_reference_path)
                   : normalized === "projection" ? (projection.projection_image_path || session.last_projection_path)
@@ -2962,8 +3417,9 @@
         projection.generated_epoch || projection.generated_at || projection.status || projection.mode,
         "",
       );
+      const windowArtifactFrame = artifactPathFrame(windowPath);
       const frameKey = normalized === "window"
-        ? Math.max(newestDisplayFrame(session), artifactPathFrame(session.last_display_window_path || session.last_window_path || session.last_frame_path))
+        ? (windowArtifactFrame || newestDisplayFrame(session))
         : normalized === "overlay"
           ? Math.max(artifactPathFrame(session.last_overlay_path), frameNumber(session.overlay_frame_id))
           : normalized === "full-overlay"
@@ -2977,10 +3433,6 @@
         ? ""
         : clean(session.source_capture_id, "");
       return [normalized, frameKey, projectionVersion, captureKey, pathKey].filter(Boolean).join("|");
-    }
-
-    function artifactUrl(kind, session = state.session || {}) {
-      return `${sessionUrl()}/artifacts/latest-${encodeURIComponent(kind)}?v=${encodeURIComponent(artifactFrameKey(kind, session))}`;
     }
 
     function artifactPayload(kind, session = state.session || {}) {
@@ -3006,6 +3458,25 @@
         return session.last_chart_path || fromArtifact;
       }
       return fromArtifact;
+    }
+
+    function artifactFileNameFromPath(path) {
+      const text = clean(path, "");
+      if (!text || /^https?:\/\//i.test(text)) {
+        return "";
+      }
+      const name = text.split(/[\\/]/).filter(Boolean).pop() || "";
+      return /^[A-Za-z0-9._-]+$/.test(name) ? name : "";
+    }
+
+    function artifactUrl(kind, session = state.session || {}) {
+      const sourcePath = artifactSourcePath(kind, session);
+      const fileName = artifactFileNameFromPath(sourcePath);
+      const version = encodeURIComponent(artifactFrameKey(kind, session));
+      if (fileName) {
+        return `${sessionUrl()}/artifacts/files/${encodeURIComponent(fileName)}?v=${version}`;
+      }
+      return `${sessionUrl()}/artifacts/latest-${encodeURIComponent(kind)}?v=${version}`;
     }
 
     function artifactFailureKey(kind, session = state.session || {}) {
@@ -3036,12 +3507,131 @@
       return Boolean(currentSrc && image.dataset.loadedSrc !== currentSrc);
     }
 
+    function surfaceImageReady(image) {
+      return Boolean(
+        image
+        && image.complete
+        && Number(image.naturalWidth || 0) > 0
+        && Number(image.naturalHeight || 0) > 0
+        && (image.currentSrc || image.src || image.getAttribute("src") || "")
+      );
+    }
+
+    function surfaceImageLoading(image) {
+      const src = clean(image && image.getAttribute ? image.getAttribute("src") : "", "");
+      return Boolean(
+        image
+        && src
+        && !surfaceImageReady(image)
+        && clean(image.dataset ? image.dataset.surfaceToken : "", "")
+      );
+    }
+
+    function pendingSurfaceImage() {
+      const images = [els.overlayImg, els.rawImg];
+      return images.find((image) => {
+        if (!surfaceImageLoading(image)) {
+          return false;
+        }
+        const token = clean(image.dataset.surfaceToken, "");
+        return !state.surface.pendingImageToken || token === state.surface.pendingImageToken;
+      }) || null;
+    }
+
+    function pendingSurfaceImageMatches(image, artifactKind, visibleKind, usesFullOverlay) {
+      if (!image || !image.dataset) {
+        return false;
+      }
+      return clean(image.dataset.surfaceArtifactKind, "") === clean(artifactKind, "")
+        && clean(image.dataset.surfaceVisibleKind, "") === clean(visibleKind, "")
+        && image.dataset.surfaceUsesFullOverlay === (usesFullOverlay ? "1" : "0");
+    }
+
+    function commitSurfaceImage(image) {
+      if (!image || !surfaceImageReady(image)) {
+        return false;
+      }
+      const token = clean(image.dataset.surfaceToken, "");
+      if (token && state.surface.pendingImageToken && token !== state.surface.pendingImageToken) {
+        return false;
+      }
+      const visibleKind = clean(image.dataset.surfaceVisibleKind, "");
+      if (!visibleKind) {
+        return false;
+      }
+      const other = image === els.overlayImg ? els.rawImg : els.overlayImg;
+      state.surfaceUsesFullOverlay = image.dataset.surfaceUsesFullOverlay === "1";
+      state.surface.visibleArtifactKind = visibleKind;
+      state.surface.visibleFrameKey = clean(image.dataset.surfaceFrameKey, "");
+      image.classList.add("visible");
+      other.classList.remove("visible");
+      els.placeholder.style.display = "none";
+      if (image.dataset.surfaceSourceChanged === "1") {
+        if (!hasLockedOverlayForSession(state.session || {}) || state.surface.identityChanged) {
+          els.hotspotLayer.innerHTML = "";
+        }
+        state.surface.lastStaticLayerHash = "";
+        image.dataset.surfaceSourceChanged = "0";
+      }
+      state.surface.pendingImageToken = "";
+      updateSurfaceCaption();
+      refreshSurfaceViewportIfNeeded(true);
+      renderHotspots();
+      return true;
+    }
+
+    function requestSurfaceImage(image, artifactKind, visibleKind, url, frameKey, usesFullOverlay) {
+      let targetImage = image;
+      const token = [artifactKind, visibleKind, frameKey, url].join("|");
+      const pending = pendingSurfaceImage();
+      if (pending && !state.surface.identityChanged) {
+        const pendingCommitted = commitSurfaceImage(pending);
+        if (pendingCommitted) {
+          return {changed: false, committed: true};
+        }
+        if (pendingSurfaceImageMatches(pending, artifactKind, visibleKind, usesFullOverlay)) {
+          return {changed: false, committed: false};
+        }
+        if (!surfaceHasImage()) {
+          return {changed: false, committed: false};
+        }
+      }
+      if (image.classList.contains("visible") && image.getAttribute("src") !== url) {
+        targetImage = image === els.overlayImg ? els.rawImg : els.overlayImg;
+        targetImage.classList.remove("visible");
+      }
+      if (surfaceImageLoading(targetImage) && !state.surface.identityChanged) {
+        return {
+          changed: false,
+          committed: commitSurfaceImage(targetImage),
+        };
+      }
+      state.surface.pendingImageToken = token;
+      targetImage.dataset.surfaceToken = token;
+      targetImage.dataset.surfaceArtifactKind = artifactKind;
+      targetImage.dataset.surfaceVisibleKind = visibleKind;
+      targetImage.dataset.surfaceFrameKey = frameKey;
+      targetImage.dataset.surfaceUsesFullOverlay = usesFullOverlay ? "1" : "0";
+      const changed = setImageSource(targetImage, url);
+      if (changed) {
+        targetImage.dataset.surfaceSourceChanged = "1";
+      }
+      return {
+        changed,
+        committed: commitSurfaceImage(targetImage),
+      };
+    }
+
     function visibleSurfaceArtifactKind(image) {
+      const artifactKind = clean(image && image.dataset ? image.dataset.surfaceArtifactKind : "", "");
+      if (artifactKind) {
+        return artifactKind;
+      }
       const visibleKind = String(state.surface.visibleArtifactKind || "");
       if (image === els.overlayImg) {
         return visibleKind === "full-overlay" ? "full-overlay" : "overlay";
       }
-      if (visibleKind === "window" || visibleKind === "window-fallback") {
+      if (visibleKind === "window" || visibleKind === "window-fallback" || visibleKind === "window-locked-overlay") {
         return "window";
       }
       if (visibleKind === "chart" || visibleKind === "chart-fallback") {
@@ -3056,6 +3646,9 @@
         return;
       }
       state.surface.failedArtifactKeys.add(artifactFailureKey(kind, state.session || {}));
+      if (image && image.dataset && image.dataset.surfaceToken === state.surface.pendingImageToken) {
+        state.surface.pendingImageToken = "";
+      }
       image.classList.remove("visible");
       renderSurface();
     }
@@ -3070,6 +3663,10 @@
         || overlaysPayload.count
         || 0
       );
+    }
+
+    function backendObjectOverlayReady(session = {}) {
+      return backendRenderableOverlayCount(session) > 0;
     }
 
     function overlayArtifactIsStale(session = {}) {
@@ -3093,12 +3690,20 @@
       const displayEpoch = Number(session.display_capture_epoch || session.last_capture_epoch || 0);
       const frameGap = displayFrame > 0 && overlayFrame > 0 ? displayFrame - overlayFrame : 0;
       const epochGap = displayEpoch > 0 && modelEpoch > 0 ? displayEpoch - modelEpoch : 0;
-      state.surface.overlayFrameGap = Math.max(0, frameGap);
-      state.surface.overlayAgeSec = Math.max(0, epochGap);
+      const signatureAligned = overlaySurfaceMatchesDisplay(session);
+      const authorityLocked = displayOnlyOverlayAuthorityLocked(session);
+      state.surface.overlayFrameGap = (signatureAligned || authorityLocked) ? 0 : Math.max(0, frameGap);
+      state.surface.overlayAgeSec = (signatureAligned || authorityLocked) ? 0 : Math.max(0, epochGap);
+      if (!backendOverlayFrameAligned(session)) {
+        return true;
+      }
+      if ((signatureAligned || authorityLocked) && renderableCount > 0) {
+        return false;
+      }
       if (renderableCount > 0 && (staleStatus === "PASS" || (Number.isFinite(overlayAgeMs) && overlayAgeMs > 0 && overlayAgeMs <= 8000))) {
         return false;
       }
-      return frameGap > 1 || epochGap > 1.2;
+      return frameGap > 0 || epochGap > 1.2;
     }
 
     async function jsonRequest(url, options = {}) {
@@ -3125,8 +3730,17 @@
       const normalized = clean(mode, "clean_live").toLowerCase();
       const map = {
         clean_live: "CLEAN_LIVE",
+        global: "GLOBAL",
+        local: "LOCAL",
+        supply_demand: "SUPPLY_DEMAND",
+        triggers: "TRIGGER",
+        targets: "TARGET",
+        invalidation: "INVALIDATION",
+        path: "PATH",
         active_context: "ACTIVE_CONTEXT",
         council_layers: "COUNCIL",
+        full_history_read: "FULL_HISTORY_READ",
+        broker: "BROKER",
         two_candle_study: "TWO_CANDLE_STUDY",
         lstm_study: "LSTM_STUDY",
         deep_debug: "DIAGNOSTICS",
@@ -3144,7 +3758,14 @@
       if (!livePayload || typeof livePayload !== "object") {
         return basePayload;
       }
-      return {
+      const nestedLivePayload = objectOrEmpty(livePayload.live_visual_state || livePayload.live_state_v3);
+      const payloadHasOverlayAuthority = Boolean(
+        livePayload.overlay_state_version
+        || livePayload.overlay_frame_state_version
+        || nestedLivePayload.overlay_state_version
+        || nestedLivePayload.overlay_frame_state_version
+      );
+      const merged = {
         ...basePayload,
         ...livePayload,
         latest_signal: {
@@ -3157,11 +3778,26 @@
         },
         live_visual_state: livePayload.live_visual_state || livePayload,
       };
+      if (!payloadHasOverlayAuthority) {
+        ["frame_id", "frame_index", "chart_frame_id", "overlay_state_version", "overlay_frame_state_version"].forEach((key) => {
+          if (basePayload[key] !== undefined) {
+            merged[key] = basePayload[key];
+          }
+        });
+        if (basePayload.live_visual_state || basePayload.live_state_v3) {
+          merged.live_visual_state = basePayload.live_visual_state || basePayload.live_state_v3;
+        }
+      }
+      return merged;
     }
 
     async function mergeSelectedLiveState(basePayload = {}) {
+      const requestedBackendMode = backendOverlayMode(state.overlayMode);
       try {
         const livePayload = await jsonRequest(liveVisualStateUrl(state.overlayMode));
+        if (requestedBackendMode !== backendOverlayMode(state.overlayMode)) {
+          return basePayload;
+        }
         return mergeLiveVisualState(basePayload, livePayload);
       } catch (_err) {
         return basePayload;
@@ -3169,13 +3805,39 @@
     }
 
     async function refreshLiveVisualStateForMode(mode = state.overlayMode) {
-      if (!state.session || state.busy) {
+      if (!state.session) {
         return;
       }
+      const requestedBackendMode = backendOverlayMode(mode);
       try {
         const livePayload = await jsonRequest(liveVisualStateUrl(mode));
+        if (requestedBackendMode !== backendOverlayMode(state.overlayMode)) {
+          return;
+        }
         renderSession(await enrichSessionTelemetry(mergeLiveVisualState(state.session, livePayload)));
       } catch (_err) {
+      }
+    }
+
+    function applyCachedTelemetry(payload = {}) {
+      const enriched = payload || {};
+      if (state.telemetryCache) {
+        enriched.model_council_health = state.telemetryCache;
+        enriched.runtime_telemetry = state.telemetryCache.runtime_telemetry || state.telemetryCache.telemetry || enriched.runtime_telemetry || {};
+      }
+      return enriched;
+    }
+
+    function renderSessionImmediate(payload = {}) {
+      const merged = mergeLiveVisualState(state.session || {}, payload || {});
+      renderSession(applyCachedTelemetry(merged));
+    }
+
+    async function hydrateAndRenderSession(payload = {}, requestId = 0) {
+      const merged = await mergeSelectedLiveState(payload || {});
+      const enriched = await enrichSessionTelemetry(merged);
+      if (!requestId || requestId === state.streamHydrationRequestId) {
+        renderSession(enriched);
       }
     }
 
@@ -4012,8 +4674,19 @@
 
     function toggleLayer(key) {
       state.layers[key] = !state.layers[key];
+      state.surface.lastStaticLayerHash = "";
       updateLayerControls();
       renderHotspots();
+      refreshLiveVisualStateForMode(state.overlayMode);
+    }
+
+    function clearModeScopedOverlayDom() {
+      state.surface.lastStaticLayerHash = "";
+      state.surface.lastHeartbeatSignature = "";
+      state.surface.visibleFrameKey = state.surface.visibleFrameKey || "";
+      if (els.hotspotLayer) {
+        els.hotspotLayer.innerHTML = "";
+      }
     }
 
     function applyOverlayPreset(mode) {
@@ -4021,12 +4694,120 @@
         clean_live: {
           chart_bounds: true,
           recent_candles: true,
-          major_swings: true,
+          major_swings: false,
           local_swings: false,
           supply_demand: true,
           trigger_zones: true,
+          target_zones: true,
+          invalidation: true,
+          prediction_path: false,
           active_council_decision: true,
           historical_replay: false,
+          broker_controls: false,
+          diagnostics: false,
+        },
+        global: {
+          chart_bounds: true,
+          recent_candles: false,
+          major_swings: true,
+          local_swings: false,
+          supply_demand: true,
+          trigger_zones: false,
+          target_zones: false,
+          invalidation: false,
+          prediction_path: false,
+          active_council_decision: false,
+          historical_replay: true,
+          broker_controls: false,
+          diagnostics: false,
+        },
+        local: {
+          chart_bounds: true,
+          recent_candles: true,
+          major_swings: true,
+          local_swings: true,
+          supply_demand: true,
+          trigger_zones: true,
+          target_zones: false,
+          invalidation: false,
+          prediction_path: false,
+          active_council_decision: false,
+          historical_replay: false,
+          broker_controls: false,
+          diagnostics: false,
+        },
+        supply_demand: {
+          chart_bounds: false,
+          recent_candles: false,
+          major_swings: false,
+          local_swings: false,
+          supply_demand: true,
+          trigger_zones: false,
+          target_zones: false,
+          invalidation: false,
+          prediction_path: false,
+          active_council_decision: false,
+          historical_replay: false,
+          broker_controls: false,
+          diagnostics: false,
+        },
+        triggers: {
+          chart_bounds: false,
+          recent_candles: false,
+          major_swings: false,
+          local_swings: false,
+          supply_demand: false,
+          trigger_zones: true,
+          target_zones: false,
+          invalidation: false,
+          prediction_path: false,
+          active_council_decision: false,
+          historical_replay: false,
+          broker_controls: false,
+          diagnostics: false,
+        },
+        targets: {
+          chart_bounds: false,
+          recent_candles: false,
+          major_swings: false,
+          local_swings: false,
+          supply_demand: true,
+          trigger_zones: false,
+          target_zones: true,
+          invalidation: true,
+          prediction_path: false,
+          active_council_decision: false,
+          historical_replay: false,
+          broker_controls: false,
+          diagnostics: false,
+        },
+        invalidation: {
+          chart_bounds: false,
+          recent_candles: false,
+          major_swings: false,
+          local_swings: false,
+          supply_demand: true,
+          trigger_zones: false,
+          target_zones: false,
+          invalidation: true,
+          prediction_path: false,
+          active_council_decision: false,
+          historical_replay: false,
+          broker_controls: false,
+          diagnostics: false,
+        },
+        path: {
+          chart_bounds: false,
+          recent_candles: false,
+          major_swings: false,
+          local_swings: true,
+          supply_demand: true,
+          trigger_zones: false,
+          target_zones: true,
+          invalidation: true,
+          prediction_path: false,
+          active_council_decision: false,
+          historical_replay: true,
           broker_controls: false,
           diagnostics: false,
         },
@@ -4037,42 +4818,84 @@
           local_swings: true,
           supply_demand: true,
           trigger_zones: true,
+          target_zones: true,
+          invalidation: true,
+          prediction_path: false,
           active_council_decision: true,
           historical_replay: false,
           broker_controls: false,
           diagnostics: false,
         },
         council_layers: {
-          chart_bounds: true,
-          recent_candles: true,
-          major_swings: true,
-          local_swings: true,
-          supply_demand: true,
-          trigger_zones: true,
+          chart_bounds: false,
+          recent_candles: false,
+          major_swings: false,
+          local_swings: false,
+          supply_demand: false,
+          trigger_zones: false,
+          target_zones: false,
+          invalidation: false,
+          prediction_path: false,
           active_council_decision: true,
           historical_replay: false,
           broker_controls: false,
           diagnostics: false,
         },
-        two_candle_study: {
+        full_history_read: {
           chart_bounds: true,
-          recent_candles: true,
-          major_swings: false,
+          recent_candles: false,
+          major_swings: true,
           local_swings: true,
-          supply_demand: false,
+          supply_demand: true,
           trigger_zones: true,
+          target_zones: true,
+          invalidation: true,
+          prediction_path: false,
+          active_council_decision: true,
+          historical_replay: true,
+          broker_controls: false,
+          diagnostics: false,
+        },
+        broker: {
+          chart_bounds: false,
+          recent_candles: false,
+          major_swings: false,
+          local_swings: false,
+          supply_demand: false,
+          trigger_zones: false,
+          target_zones: false,
+          invalidation: false,
+          prediction_path: false,
+          active_council_decision: false,
+          historical_replay: false,
+          broker_controls: true,
+          diagnostics: false,
+        },
+        two_candle_study: {
+          chart_bounds: false,
+          recent_candles: false,
+          major_swings: false,
+          local_swings: false,
+          supply_demand: false,
+          trigger_zones: false,
+          target_zones: false,
+          invalidation: false,
+          prediction_path: false,
           active_council_decision: true,
           historical_replay: false,
           broker_controls: false,
           diagnostics: false,
         },
         lstm_study: {
-          chart_bounds: true,
-          recent_candles: true,
+          chart_bounds: false,
+          recent_candles: false,
           major_swings: false,
-          local_swings: true,
+          local_swings: false,
           supply_demand: false,
-          trigger_zones: true,
+          trigger_zones: false,
+          target_zones: false,
+          invalidation: false,
+          prediction_path: false,
           active_council_decision: true,
           historical_replay: false,
           broker_controls: false,
@@ -4085,6 +4908,9 @@
           local_swings: true,
           supply_demand: true,
           trigger_zones: true,
+          target_zones: true,
+          invalidation: true,
+          prediction_path: true,
           active_council_decision: true,
           historical_replay: true,
           broker_controls: true,
@@ -4097,6 +4923,9 @@
           local_swings: false,
           supply_demand: false,
           trigger_zones: false,
+          target_zones: false,
+          invalidation: false,
+          prediction_path: false,
           active_council_decision: false,
           historical_replay: false,
           broker_controls: true,
@@ -4104,11 +4933,14 @@
         },
         replay: {
           chart_bounds: true,
-          recent_candles: true,
+          recent_candles: false,
           major_swings: true,
           local_swings: true,
           supply_demand: true,
           trigger_zones: true,
+          target_zones: true,
+          invalidation: true,
+          prediction_path: false,
           active_council_decision: true,
           historical_replay: true,
           broker_controls: false,
@@ -4120,6 +4952,7 @@
       if (els.overlayModeSelect) {
         els.overlayModeSelect.value = state.overlayMode;
       }
+      clearModeScopedOverlayDom();
       updateLayerControls();
       renderHotspots();
       refreshLiveVisualStateForMode(state.overlayMode);
@@ -4697,6 +5530,153 @@
       });
     }
 
+    function overlayVisibleModes(row = {}) {
+      const modes = Array.isArray(row.visible_modes)
+        ? row.visible_modes
+        : Array.isArray(row.modes)
+          ? row.modes
+          : Array.isArray(row.visible_in_modes)
+            ? row.visible_in_modes
+            : [];
+      return modes.map((mode) => clean(mode, "").toUpperCase()).filter(Boolean);
+    }
+
+    function overlayModeAllows(row = {}, activeMode = backendOverlayMode(state.overlayMode)) {
+      const modes = overlayVisibleModes(row);
+      if (!modes.length) {
+        return true;
+      }
+      const mode = clean(activeMode, "CLEAN_LIVE").toUpperCase();
+      if (modes.includes(mode) || modes.includes("ALL")) {
+        return true;
+      }
+      if (mode === "DIAGNOSTICS" && (modes.includes("DEBUG") || modes.includes("INSPECTOR"))) {
+        return true;
+      }
+      if (mode === "REPLAY" && (modes.includes("FULL_HISTORY_READ") || modes.includes("PATH"))) {
+        return true;
+      }
+      return false;
+    }
+
+    function overlayTypeAllowedInMode(row = {}, activeMode = backendOverlayMode(state.overlayMode)) {
+      const type = clean(row.type || row.overlay_type || row.kind, "").toUpperCase();
+      if (!type || diagnosticsViewActive()) {
+        return true;
+      }
+      const allowedByMode = {
+        CLEAN_LIVE: new Set(["CURRENT_CANDLE", "OPPOSING_FORCE", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX", "MODEL_COUNCIL_MARKER"]),
+        CHART_BOUNDS: new Set(["CHART_BOUNDS"]),
+        CANDLES: new Set(["CHART_BOUNDS", "CURRENT_CANDLE"]),
+        GLOBAL: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "SUPPLY_ZONE", "DEMAND_ZONE"]),
+        LOCAL: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "PULLBACK_BOX", "RETEST_BOX", "CONTINUATION_BOX", "SNIPER_ENTRY_BOX", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "SUPPLY_ZONE", "DEMAND_ZONE"]),
+        SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE"]),
+        TRIGGER: new Set(["RETEST_BOX", "SNIPER_ENTRY_BOX"]),
+        TARGET: new Set(["TARGET_ZONE_BOX", "INVALIDATION_BOX", "OPPOSING_FORCE"]),
+        INVALIDATION: new Set(["INVALIDATION_BOX", "OPPOSING_FORCE"]),
+        PATH: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"]),
+        COUNCIL: new Set(["MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER"]),
+        TWO_CANDLE_STUDY: new Set(["TWO_CANDLE_STUDY"]),
+        LSTM_STUDY: new Set(["LSTM_STUDY"]),
+        ACTIVE_CONTEXT: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY", "LSTM_STUDY"]),
+        FULL_HISTORY_READ: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY", "LSTM_STUDY"]),
+        REPLAY: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"]),
+        BROKER: new Set(["BROKER_CONTROL"]),
+        CALIBRATION: new Set(["BROKER_CONTROL", "DEBUG_RAW_DETECTION"]),
+      };
+      const allowed = allowedByMode[clean(activeMode, "CLEAN_LIVE").toUpperCase()];
+      return !allowed || allowed.has(type);
+    }
+
+    function applyFrontendOverlayModeBudget(boxes = [], activeMode = backendOverlayMode(state.overlayMode)) {
+      const mode = clean(activeMode, "CLEAN_LIVE").toUpperCase();
+      const budgetByMode = {
+        CLEAN_LIVE: 10,
+        SUPPLY_DEMAND: 18,
+        TRIGGER: 18,
+        TARGET: 16,
+        INVALIDATION: 10,
+        PATH: 24,
+        ACTIVE_CONTEXT: 30,
+        FULL_HISTORY_READ: 80,
+        REPLAY: 80,
+      };
+      const budget = Number(budgetByMode[mode] || 0);
+      const output = boxes.slice(0, budget > 0 ? budget : boxes.length).map((box) => ({...box}));
+      if (mode !== "CLEAN_LIVE") {
+        return output;
+      }
+      let visibleLabelCount = 0;
+      output.forEach((box) => {
+        const type = clean(box.type || box.overlay_type || box.kind, "").toUpperCase();
+        if (type === "CURRENT_CANDLE") {
+          box.label_hidden = true;
+          box.label_anchor = "hidden";
+          return;
+        }
+        const labelHidden = box.label_hidden === true || box.label_hidden === "true";
+        if (labelHidden) {
+          return;
+        }
+        visibleLabelCount += 1;
+        if (visibleLabelCount > 6) {
+          box.label_hidden = true;
+          box.label_anchor = "hidden";
+        }
+      });
+      return output;
+    }
+
+    function payloadOverlayMode(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      return clean(session.active_mode || liveState.active_mode || objectOrEmpty(session.overlay_mode || liveState.overlay_mode).active, "").toUpperCase();
+    }
+
+    function payloadMatchesSelectedOverlayMode(session = {}) {
+      const payloadMode = payloadOverlayMode(session);
+      return !payloadMode || payloadMode === backendOverlayMode(state.overlayMode);
+    }
+
+    function overlayLayerEnabled(row = {}) {
+      const layer = String(row._layer || row.layer || "").trim();
+      return !layer || state.layers[layer] !== false;
+    }
+
+    function overlayRenderableInCurrentView(row = {}, options = {}) {
+      if (!row || typeof row !== "object") {
+        return false;
+      }
+      if (row.precision_rejected === true) {
+        return false;
+      }
+      const activeMode = backendOverlayMode(state.overlayMode);
+      const trustBackendMode = Boolean(options.trustBackendMode);
+      const ignoreVisibleModes = Boolean(options.ignoreVisibleModes);
+      const rowType = clean(row.type || row.overlay_type || row.kind, "").toUpperCase();
+      if (!overlayTypeAllowedInMode(row, activeMode)) {
+        return false;
+      }
+      const currentCandleLiveModes = new Set(["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT"]);
+      if (!diagnosticsViewActive() && rowType === "CURRENT_CANDLE") {
+        if (!currentCandleLiveModes.has(activeMode)) {
+          return false;
+        }
+        if (row.visible_default === false) {
+          return false;
+        }
+      }
+      if (!trustBackendMode && !ignoreVisibleModes && !overlayModeAllows(row, activeMode) && !diagnosticsViewActive()) {
+        return false;
+      }
+      if (!overlayLayerEnabled(row) && !diagnosticsViewActive()) {
+        return false;
+      }
+      if (!trustBackendMode && !diagnosticsViewActive() && activeMode === "CLEAN_LIVE" && row.visible_default === false) {
+        return false;
+      }
+      return true;
+    }
+
     function getBoxes(session) {
       const tracking = session.tracking_summary || {};
       const signal = session.latest_signal || {};
@@ -4706,20 +5686,35 @@
       const memoryProjection = currentMemoryProjection(session);
       const brokerSurface = session.broker_surface || {};
       const boxes = [];
+      const visibleKind = clean(state.surface.visibleArtifactKind, "");
+      const rawFallbackVisible = state.mode === "overlay" && (visibleKind === "window-fallback" || visibleKind === "chart-fallback");
+      const payloadModeMatches = payloadMatchesSelectedOverlayMode(session);
+      const bridgeSelectedModeWhileHydrating = !diagnosticsViewActive() && !payloadModeMatches;
       const backendOverlayObjects = []
         .concat(Array.isArray(session.overlay_objects) ? session.overlay_objects : [])
         .concat(Array.isArray(liveState.overlay_objects) ? liveState.overlay_objects : [])
         .concat(Array.isArray(overlayPayload.objects) ? overlayPayload.objects : []);
+      const overlayFrameReady = backendOverlayFrameAligned(session);
+      const backendObjectsAvailable = backendOverlayObjects.length > 0 && backendObjectOverlayReady(session);
+      if (!diagnosticsViewActive() && (rawFallbackVisible || (!backendObjectsAvailable && state.surface.overlayStale) || (!backendObjectsAvailable && !overlayFrameReady))) {
+        return [];
+      }
+      const trustBackendMode = !diagnosticsViewActive() && payloadModeMatches;
       const seenOverlayIds = new Set();
       backendOverlayObjects.forEach((overlay, index) => {
         if (!overlay || typeof overlay !== "object" || !Array.isArray(overlay.bbox)) {
           return;
         }
-        const overlayId = clean(overlay.overlay_id || overlay.id || overlay.object_id || `backend_${index}`, `backend_${index}`);
-        if (seenOverlayIds.has(overlayId)) {
+        if (!overlayRenderableInCurrentView(overlay, {trustBackendMode, ignoreVisibleModes: bridgeSelectedModeWhileHydrating})) {
           return;
         }
-        seenOverlayIds.add(overlayId);
+        const overlayId = clean(overlay.overlay_id || overlay.id || overlay.object_id || `backend_${index}`, `backend_${index}`);
+        const overlayLayer = clean(overlay.layer || "diagnostics", "diagnostics");
+        const overlayDedupKey = [overlayId, overlayLayer, normalizedBoxKey(overlay.bbox)].join("|");
+        if (seenOverlayIds.has(overlayDedupKey)) {
+          return;
+        }
+        seenOverlayIds.add(overlayDedupKey);
         const coordinateMode = clean(overlay.coordinate_mode, "CHART_IMAGE_SPACE").toUpperCase();
         const brokerSurfaceSpace = coordinateMode.includes("FULL_BROKER_SURFACE") || coordinateMode.includes("WINDOW_SPACE");
         const chartSpace = !brokerSurfaceSpace && (coordinateMode.includes("CHART") || coordinateMode.includes("PLOT_AREA"));
@@ -4728,7 +5723,7 @@
           key: overlayId,
           label: overlay.display_label || overlay.label || overlay.type || `Overlay ${index + 1}`,
           direction: overlay.side || overlay.direction || "HOLD",
-          _layer: overlay.layer || "diagnostics",
+          _layer: overlayLayer,
           _space: chartSpace ? "chart" : "window",
           _coordinateMode: coordinateMode,
           _index: boxes.length,
@@ -4736,6 +5731,23 @@
         });
       });
       if (boxes.length) {
+        const activeMode = backendOverlayMode(state.overlayMode);
+        const renderableBoxes = applyFrontendOverlayModeBudget(
+          boxes.filter((box) => overlayRenderableInCurrentView(box, {trustBackendMode, ignoreVisibleModes: bridgeSelectedModeWhileHydrating})),
+          activeMode,
+        );
+        if (renderableBoxes.length) {
+          if (trustBackendMode) {
+            rememberOverlayLock(surfaceIdentityKey(session), renderableBoxes, session);
+          }
+          return renderableBoxes;
+        }
+      }
+      const lockedBoxes = lockedOverlayBoxes(session);
+      if (lockedBoxes.length) {
+        return lockedBoxes;
+      }
+      if (!diagnosticsViewActive()) {
         return boxes;
       }
       const addExecutionBox = (key, box) => {
@@ -4766,9 +5778,10 @@
           addExecutionBox(key, box);
         }
       });
-      if (Array.isArray(overlayGeometry.boxes) && overlayGeometry.boxes.length) {
+      const legacyFallbackAllowed = diagnosticsViewActive() || (overlayFrameReady && !state.surface.overlayStale);
+      if (legacyFallbackAllowed && Array.isArray(overlayGeometry.boxes) && overlayGeometry.boxes.length) {
         overlayGeometry.boxes.forEach((box) => {
-          if (box && Array.isArray(box.bbox)) {
+          if (box && Array.isArray(box.bbox) && overlayRenderableInCurrentView(box)) {
             boxes.push({
               ...box,
               key: box.key || box.label || `geometry_${boxes.length + 1}`,
@@ -4781,9 +5794,9 @@
         });
         return boxes;
       }
-      if (Array.isArray(tracking.structure_boxes)) {
+      if (legacyFallbackAllowed && Array.isArray(tracking.structure_boxes)) {
         tracking.structure_boxes.forEach((box, index) => {
-          if (box && Array.isArray(box.bbox)) {
+          if (box && Array.isArray(box.bbox) && overlayRenderableInCurrentView(box)) {
             const key = String(box.key || "").toLowerCase();
             const row = {...box, _index: boxes.length, _layer: key === "global" ? "major_swings" : "local_swings", _space: "chart"};
             boxes.push(row);
@@ -4791,9 +5804,9 @@
           }
         });
       }
-      if (Array.isArray(tracking.historical_structure)) {
+      if (legacyFallbackAllowed && Array.isArray(tracking.historical_structure)) {
         tracking.historical_structure.forEach((box, index) => {
-          if (box && Array.isArray(box.bbox)) {
+          if (box && Array.isArray(box.bbox) && overlayRenderableInCurrentView(box)) {
             const row = {
               ...box,
               key: box.key || `history_${index + 1}`,
@@ -4807,9 +5820,9 @@
           }
         });
       }
-      if (Array.isArray(tracking.support_resistance_zones)) {
+      if (legacyFallbackAllowed && Array.isArray(tracking.support_resistance_zones)) {
         tracking.support_resistance_zones.forEach((zone, index) => {
-          if (zone && Array.isArray(zone.bbox)) {
+          if (zone && Array.isArray(zone.bbox) && overlayRenderableInCurrentView(zone)) {
             boxes.push({
               ...zone,
               key: zone.key || `${zone.role || "level"}_${index + 1}`,
@@ -4829,16 +5842,27 @@
       if (!source || typeof source !== "object") {
         return;
       }
+      if (!overlayRenderableInCurrentView(source)) {
+        return;
+      }
       const direction = clean(source.direction || source.action || "", "HOLD").toUpperCase();
       const specs = [
-        ["sniper_window", "SNIPER", "sniper"],
-        ["trigger_window", "TRIGGER", "trigger"],
+        ["sniper_window", "SNIPER", "sniper", layer],
+        ["trigger_window", "TRIGGER", "trigger", layer],
+        ["target_window", "TARGET", "target", "target_zones"],
+        ["target_bbox", "TARGET", "target", "target_zones"],
       ];
-      specs.forEach(([field, label, role]) => {
+      const seenMicroKeys = new Set();
+      specs.forEach(([field, label, role, targetLayer]) => {
         const bbox = source[field];
         if (!Array.isArray(bbox) || bbox.length < 4) {
           return;
         }
+        const microKey = `${role}:${normalizedBoxKey(bbox)}`;
+        if (seenMicroKeys.has(microKey)) {
+          return;
+        }
+        seenMicroKeys.add(microKey);
         boxes.push({
           key: `${parentKey}_${role}`,
           label: `${label} ${direction}`,
@@ -4856,12 +5880,28 @@
           smart_money: source.smart_money || {},
           smc_tags: source.smc_tags || [],
           smc_score: source.smc_score,
-          _layer: layer,
+          _layer: targetLayer || layer,
           _space: space,
           _micro: true,
           _index: boxes.length,
         });
       });
+      const invalidationY = Number(source.invalidation_y);
+      if (Number.isFinite(invalidationY) && Array.isArray(source.bbox) && source.bbox.length >= 4) {
+        boxes.push({
+          key: `${parentKey}_invalidation`,
+          label: `INVALIDATION ${direction}`,
+          direction,
+          confidence: source.confidence,
+          bbox: [source.bbox[0], invalidationY - 2, source.bbox[2], invalidationY + 2],
+          role: "invalidation",
+          parent_label: source.label || source.key || parentKey,
+          _layer: "invalidation",
+          _space: space,
+          _micro: true,
+          _index: boxes.length,
+        });
+      }
     }
 
     function inspectBox(index, session) {
@@ -5030,52 +6070,53 @@
       const hasWindow = artifactAvailable("window", session);
       const overlayAvailable = hasOverlay || hasFullOverlay;
       const overlayStale = wantsOverlay && overlayAvailable && overlayArtifactIsStale(session);
-      state.surfaceUsesFullOverlay = false;
+      const overlayLockUsable = wantsOverlay && hasLockedOverlayForSession(session);
+      const backendOverlayReady = wantsOverlay && backendObjectOverlayReady(session);
+      const useLockedWindowOverlayPlane = wantsOverlay
+        && hasWindow
+        && (overlayLockUsable || backendOverlayReady);
       state.surface.overlayStale = overlayStale;
-      state.surface.visibleArtifactKind = "";
-      state.surface.visibleFrameKey = "";
       let imageSourceChanged = false;
+      let imageCommitted = false;
 
-      els.overlayImg.classList.remove("visible");
-      els.rawImg.classList.remove("visible");
+      function useSurfaceImage(image, artifactKind, visibleKind, usesFullOverlay) {
+        const result = requestSurfaceImage(
+          image,
+          artifactKind,
+          visibleKind,
+          artifactUrl(artifactKind, session),
+          artifactFrameKey(artifactKind, session),
+          usesFullOverlay,
+        );
+        imageSourceChanged = result.changed || imageSourceChanged;
+        imageCommitted = result.committed || imageCommitted;
+      }
 
-      if (wantsOverlay && overlayAvailable && !overlayStale) {
-        const kind = hasFullOverlay ? "full-overlay" : "overlay";
-        imageSourceChanged = setImageSource(els.overlayImg, artifactUrl(kind, session)) || imageSourceChanged;
-        state.surfaceUsesFullOverlay = kind === "full-overlay";
-        state.surface.visibleArtifactKind = kind;
-        state.surface.visibleFrameKey = artifactFrameKey(kind, session);
-        els.overlayImg.classList.add("visible");
-        els.placeholder.style.display = "none";
-      } else if (hasWindow) {
-        imageSourceChanged = setImageSource(els.rawImg, artifactUrl("window", session)) || imageSourceChanged;
-        state.surfaceUsesFullOverlay = true;
-        state.surface.visibleArtifactKind = wantsOverlay ? "window-fallback" : "window";
-        state.surface.visibleFrameKey = artifactFrameKey("window", session);
-        els.rawImg.classList.add("visible");
-        els.placeholder.style.display = "none";
-      } else if (hasChart) {
-        imageSourceChanged = setImageSource(els.rawImg, artifactUrl("chart", session)) || imageSourceChanged;
-        state.surface.visibleArtifactKind = wantsOverlay && overlayStale ? "chart-fallback" : "chart";
-        state.surface.visibleFrameKey = artifactFrameKey("chart", session);
-        els.rawImg.classList.add("visible");
-        els.placeholder.style.display = "none";
+      if (useLockedWindowOverlayPlane) {
+        useSurfaceImage(els.rawImg, "window", "window-locked-overlay", true);
       } else if (wantsOverlay && hasFullOverlay && !overlayStale) {
-        imageSourceChanged = setImageSource(els.overlayImg, artifactUrl("full-overlay", session)) || imageSourceChanged;
-        state.surfaceUsesFullOverlay = true;
-        state.surface.visibleArtifactKind = "full-overlay";
-        state.surface.visibleFrameKey = artifactFrameKey("full-overlay", session);
-        els.overlayImg.classList.add("visible");
-        els.placeholder.style.display = "none";
+        const kind = "full-overlay";
+        useSurfaceImage(els.overlayImg, kind, kind, true);
+      } else if (wantsOverlay && hasOverlay && !overlayStale) {
+        useSurfaceImage(els.overlayImg, "overlay", "overlay", false);
+      } else if (hasWindow) {
+        useSurfaceImage(els.rawImg, "window", wantsOverlay ? "window-fallback" : "window", true);
+      } else if (hasChart) {
+        useSurfaceImage(els.rawImg, "chart", wantsOverlay && overlayStale ? "chart-fallback" : "chart", false);
       } else {
+        state.surface.pendingImageToken = "";
+        state.surfaceUsesFullOverlay = false;
+        state.surface.visibleArtifactKind = "";
+        state.surface.visibleFrameKey = "";
+        els.overlayImg.classList.remove("visible");
+        els.rawImg.classList.remove("visible");
         els.placeholder.style.display = "grid";
       }
-      refreshSurfaceViewportIfNeeded(true);
-      if (imageSourceChanged) {
-        els.hotspotLayer.innerHTML = "";
-        state.surface.lastStaticLayerHash = "";
-      } else {
+      if (!imageSourceChanged && !imageCommitted) {
+        refreshSurfaceViewportIfNeeded(true);
         renderHotspots();
+      } else if (imageSourceChanged && !imageCommitted && !surfaceHasImage()) {
+        els.placeholder.style.display = "grid";
       }
     }
     function renderPredictionImages() {
@@ -5090,9 +6131,10 @@
       const memoryImg = $("prediction-memory-img");
       const overlayImg = $("prediction-overlay-img");
       const diagnosticsActive = diagnosticsViewActive();
-      const hasChart = Boolean(session.last_chart_path || "");
-      const hasMemory = Boolean(memoryProjection.reference_image_path || "");
-      const hasProjection = diagnosticsActive && Boolean(memoryProjection.projection_image_path || "");
+      const surfaceCriticalLoad = !surfaceHasImage() && Boolean(pendingSurfaceImage());
+      const hasChart = !surfaceCriticalLoad && Boolean(session.last_chart_path || "");
+      const hasMemory = !surfaceCriticalLoad && Boolean(memoryProjection.reference_image_path || "");
+      const hasProjection = !surfaceCriticalLoad && diagnosticsActive && Boolean(memoryProjection.projection_image_path || "");
       const memoryName = clean(memoryProjection.reference_image_name || topMatch.image_name, "memory fit");
       const retrievalPayload = memoryProjection.memory_retrieval || {};
       const pendingMode = state.pendingMemoryAction;
@@ -5377,7 +6419,201 @@
     }
 
     function isStaticOverlayLayer(layer) {
-      return ["chart_bounds", "major_swings", "supply_demand", "historical_replay", "broker_controls"].includes(String(layer || ""));
+      return ["chart_bounds", "major_swings", "supply_demand", "target_zones", "invalidation", "historical_replay", "broker_controls"].includes(String(layer || ""));
+    }
+
+    function isLineOverlay(box = {}) {
+      const type = clean(box.type || box.overlay_type || box.kind, "").toUpperCase();
+      if (["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "PREDICTION_PATH"].includes(type)) {
+        return true;
+      }
+      const anchorType = clean(box.anchor_type, "").toUpperCase();
+      return ["LINE", "POLYGON", "POINTS"].includes(anchorType)
+        && (Array.isArray(box.line_points) || Array.isArray(box.points) || Array.isArray(box.path) || Array.isArray(box.anchors));
+    }
+
+    function trendlineClassName(box = {}) {
+      const type = clean(box.type || box.overlay_type || box.kind, "").toUpperCase();
+      if (type === "SUPPORT_TRENDLINE") return "trendline-support";
+      if (type === "RESISTANCE_TRENDLINE") return "trendline-resistance";
+      if (type === "INNER_TRENDLINE") return "trendline-inner";
+      if (["PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"].includes(type) || clean(box.layer || box._layer, "") === "historical_replay") return "trendline-history";
+      const role = clean(box.trendline_role || box.role, "").toLowerCase();
+      if (role.includes("support")) return "trendline-support";
+      if (role.includes("resistance")) return "trendline-resistance";
+      return "";
+    }
+
+    function rawLinePoints(box = {}) {
+      const source = Array.isArray(box.line_points)
+        ? box.line_points
+        : Array.isArray(box.points)
+          ? box.points
+          : Array.isArray(box.path)
+            ? box.path
+            : Array.isArray(box.anchors)
+              ? box.anchors
+              : [];
+      return source
+        .map((point) => Array.isArray(point) && point.length >= 2 ? [Number(point[0]), Number(point[1])] : null)
+        .filter((point) => point && point.every(Number.isFinite));
+    }
+
+    function resolveLinePoints(box, tracking, image) {
+      const points = rawLinePoints(box);
+      if (points.length < 2) {
+        return null;
+      }
+      const mapped = [];
+      points.forEach((point) => {
+        const maxCoord = Math.max(Math.abs(point[0]), Math.abs(point[1]));
+        const delta = maxCoord <= 1.0001 ? 0.0001 : 1;
+        const pointBounds = resolveBoxBounds(
+          {
+            ...box,
+            bbox: [point[0], point[1], point[0] + delta, point[1] + delta],
+          },
+          tracking,
+          image,
+        );
+        if (pointBounds) {
+          mapped.push({
+            x: Math.max(0, Math.min(100, pointBounds.left)),
+            y: Math.max(0, Math.min(100, pointBounds.top)),
+          });
+        }
+      });
+      if (mapped.length < 2) {
+        return null;
+      }
+      const xs = mapped.map((point) => point.x);
+      const ys = mapped.map((point) => point.y);
+      return {
+        points: mapped,
+        bounds: {
+          left: Math.max(0, Math.min(...xs)),
+          top: Math.max(0, Math.min(...ys)),
+          width: Math.max(1, Math.min(100, Math.max(...xs) - Math.min(...xs))),
+          height: Math.max(1, Math.min(100, Math.max(...ys) - Math.min(...ys))),
+        },
+      };
+    }
+
+    function renderLineOverlay(box, index, layer, direction, label, labelHidden, staticLayer, tracking, image) {
+      const line = resolveLinePoints(box, tracking, image);
+      if (!line) {
+        return false;
+      }
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("viewBox", "0 0 100 100");
+      svg.setAttribute("preserveAspectRatio", "none");
+      svg.classList.add("surface-line-svg");
+      svg.dataset.layer = layer;
+      svg.dataset.staticLayer = staticLayer ? "true" : "false";
+      const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      polyline.setAttribute("points", line.points.map((point) => `${point.x.toFixed(3)},${point.y.toFixed(3)}`).join(" "));
+      polyline.classList.add("surface-trendline");
+      const semanticClass = trendlineClassName(box);
+      if (semanticClass) {
+        polyline.classList.add(semanticClass);
+      }
+      const tone = colorClass(direction);
+      if (tone) {
+        polyline.classList.add(tone);
+      }
+      svg.appendChild(polyline);
+      els.hotspotLayer.appendChild(svg);
+
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `surface-hotspot surface-line-hotspot ${layerClassName(layer)} ${colorClass(direction)}${labelHidden ? " label-hidden" : ""}`;
+      if (line.bounds.left < 2) {
+        button.classList.add("edge-left");
+      }
+      if (line.bounds.top < 4) {
+        button.classList.add("edge-top");
+      }
+      button.dataset.layer = layer;
+      button.dataset.staticLayer = staticLayer ? "true" : "false";
+      button.dataset.overlayShape = "line";
+      button.style.left = `${Math.max(0, Math.min(99.5, line.bounds.left))}%`;
+      button.style.top = `${Math.max(0, Math.min(99.5, line.bounds.top))}%`;
+      button.style.width = `${Math.max(1, Math.min(100, line.bounds.width))}%`;
+      button.style.height = `${Math.max(1, Math.min(100, line.bounds.height))}%`;
+      button.setAttribute("aria-label", `Inspect ${label}`);
+      button.innerHTML = labelHidden ? "" : `<span>${escapeHtml(label)}</span>`;
+      button.addEventListener("click", () => select("box", String(index)));
+      els.hotspotLayer.appendChild(button);
+      return true;
+    }
+
+    function publishFrontendHeartbeat(session = {}, renderMeta = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const nowMs = Date.now();
+      const visibleOverlayCount = Number(renderMeta.visibleOverlayCount ?? els.hotspotLayer.querySelectorAll(".surface-hotspot").length) || 0;
+      const frameId = Math.max(
+        frameNumber(liveState.frame_id),
+        frameNumber(session.frame_id),
+        frameNumber(session.frame_index),
+        frameNumber(session.chart_frame_id),
+        overlayObjectFrame(session),
+      );
+      const size = surfaceImageSize();
+      const payload = {
+        session_id: clean(session.session_id || SESSION_ID, SESSION_ID),
+        surface_id: "dashboard",
+        route: state.route,
+        overlay_mode: backendOverlayMode(state.overlayMode),
+        surface_mode: state.mode,
+        frame_id: frameId,
+        rendered_frame_id: frameId,
+        overlay_state_version: currentOverlayStateVersion(session),
+        overlay_frame_state_version: currentOverlayFrameStateVersion(session),
+        state_version: clean(liveState.state_version || session.state_version || session.decision_version, ""),
+        overlay_count: backendRenderableOverlayCount(session),
+        visible_overlay_count: visibleOverlayCount,
+        frontend_loaded_ms: nowMs,
+        frontend_overlay_drawn_ms: nowMs,
+        overlay_draw_ms: Number(renderMeta.overlayDrawMs || state.surface.lastOverlayRenderMs || 0),
+        viewport: {
+          width: Number(els.surfaceStage.clientWidth || 0),
+          height: Number(els.surfaceStage.clientHeight || 0),
+          scroll_left: Number(els.surfaceStage.scrollLeft || 0),
+          scroll_top: Number(els.surfaceStage.scrollTop || 0),
+          zoom: Number(state.surface.zoom || 1),
+          zoom_mode: clean(state.surface.zoomMode, "manual"),
+        },
+        render_size: {
+          width: size ? Number(size.width || 0) : 0,
+          height: size ? Number(size.height || 0) : 0,
+          canvas_width: Number(els.surfaceCanvas.clientWidth || 0),
+          canvas_height: Number(els.surfaceCanvas.clientHeight || 0),
+        },
+        full_broker_surface_visible: Boolean(state.surfaceUsesFullOverlay),
+        frontend_state_version: clean(state.surface.visibleFrameKey || state.surface.viewportSignature, ""),
+        sent_at_ms: nowMs,
+      };
+      const signature = [
+        payload.session_id,
+        payload.route,
+        payload.overlay_mode,
+        payload.surface_mode,
+        payload.rendered_frame_id,
+        payload.overlay_state_version,
+        payload.visible_overlay_count,
+        payload.frontend_state_version,
+      ].join("|");
+      if (signature === state.surface.lastHeartbeatSignature && nowMs - Number(state.surface.lastHeartbeatSentMs || 0) < 500) {
+        return;
+      }
+      state.surface.lastHeartbeatSignature = signature;
+      state.surface.lastHeartbeatSentMs = nowMs;
+      window.fetch("/v1/mobile/frontend/heartbeat/v3", {
+        method: "POST",
+        cache: "no-store",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload),
+      }).catch(() => {});
     }
 
     function renderHotspots() {
@@ -5386,25 +6622,45 @@
       const tracking = session.tracking_summary || {};
       const overlayGeometry = tracking.overlay_geometry || ((session.latest_signal || {}).overlay_geometry || {});
       const visibleImage = els.overlayImg.classList.contains("visible") ? els.overlayImg : els.rawImg;
-      const hasImage = visibleImage.classList.contains("visible");
+      const hasImage = visibleImage.classList.contains("visible")
+        && (Number(visibleImage.naturalWidth || 0) > 0 || Number(visibleImage.clientWidth || 0) > 0)
+        && (Number(visibleImage.naturalHeight || 0) > 0 || Number(visibleImage.clientHeight || 0) > 0);
       const overlayCatchingUp = state.mode === "overlay" && Boolean(state.surface.overlayStale);
       const boxes = getBoxes(session);
       const staticVisibility = JSON.stringify({
         chart_bounds: state.layers.chart_bounds,
         major_swings: state.layers.major_swings,
         supply_demand: state.layers.supply_demand,
+        target_zones: state.layers.target_zones,
+        invalidation: state.layers.invalidation,
+        prediction_path: state.layers.prediction_path,
         historical_replay: state.layers.historical_replay,
         broker_controls: state.layers.broker_controls,
       });
-      const staticSignature = `${overlayGeometry.static_layer_hash || ""}:${staticVisibility}:${state.mode}:${Boolean(state.surfaceUsesFullOverlay)}:${state.surface.visibleFrameKey || ""}:${overlayCatchingUp ? "catching-up" : "ready"}`;
+      const staticSignature = [
+        overlayGeometry.static_layer_hash || "",
+        staticVisibility,
+        backendOverlayMode(state.overlayMode),
+        currentOverlayStateVersion(session),
+        currentOverlayFrameStateVersion(session),
+        state.mode,
+        Boolean(state.surfaceUsesFullOverlay),
+        state.surface.visibleFrameKey || "",
+        overlayCatchingUp ? "catching-up" : "ready",
+      ].join(":");
       const reuseStaticLayers = Boolean(overlayGeometry.static_layer_hash) && staticSignature === state.surface.lastStaticLayerHash;
       if (reuseStaticLayers) {
         Array.from(els.hotspotLayer.querySelectorAll('[data-static-layer="false"]')).forEach((node) => node.remove());
       } else {
         els.hotspotLayer.innerHTML = "";
       }
-      if (!hasImage || boxes.length === 0) {
+      if (!hasImage) {
         state.surface.lastOverlayRenderMs = performance.now() - startedAt;
+        return;
+      }
+      if (boxes.length === 0) {
+        state.surface.lastOverlayRenderMs = performance.now() - startedAt;
+        publishFrontendHeartbeat(session, {visibleOverlayCount: 0, overlayDrawMs: state.surface.lastOverlayRenderMs});
         return;
       }
       boxes.forEach((box, index) => {
@@ -5432,7 +6688,13 @@
             return;
           }
         }
-        if (!state.layers[layer]) {
+        if (state.layers[layer] === false) {
+          return;
+        }
+        const label = clean(box.label || box.key, `Box ${index + 1}`);
+        const direction = clean(box.direction || box.action || "", "");
+        const labelHidden = box.label_hidden === true || box.label_hidden === "true";
+        if (isLineOverlay(box) && renderLineOverlay(box, index, layer, direction, label, labelHidden, staticLayer, tracking, visibleImage)) {
           return;
         }
         const bounds = resolveBoxBounds(box, tracking, visibleImage);
@@ -5440,10 +6702,14 @@
           return;
         }
         const button = document.createElement("button");
-        const label = clean(box.label || box.key, `Box ${index + 1}`);
-        const direction = clean(box.direction || box.action || "", "");
         button.type = "button";
-        button.className = `surface-hotspot ${layerClassName(layer)} ${colorClass(direction)}`;
+        button.className = `surface-hotspot ${layerClassName(layer)} ${colorClass(direction)}${labelHidden ? " label-hidden" : ""}`;
+        if (bounds.left < 2) {
+          button.classList.add("edge-left");
+        }
+        if (bounds.top < 4) {
+          button.classList.add("edge-top");
+        }
         button.dataset.layer = layer;
         button.dataset.staticLayer = staticLayer ? "true" : "false";
         button.style.left = `${Math.max(0, Math.min(99.5, bounds.left))}%`;
@@ -5451,12 +6717,16 @@
         button.style.width = `${Math.max(1, Math.min(100, bounds.width))}%`;
         button.style.height = `${Math.max(1, Math.min(100, bounds.height))}%`;
         button.setAttribute("aria-label", `Inspect ${label}`);
-        button.innerHTML = `<span>${escapeHtml(label)}</span>`;
+        button.innerHTML = labelHidden ? "" : `<span>${escapeHtml(label)}</span>`;
         button.addEventListener("click", () => select("box", String(index)));
         els.hotspotLayer.appendChild(button);
       });
       state.surface.lastStaticLayerHash = staticSignature;
       state.surface.lastOverlayRenderMs = performance.now() - startedAt;
+      publishFrontendHeartbeat(session, {
+        visibleOverlayCount: els.hotspotLayer.querySelectorAll(".surface-hotspot").length,
+        overlayDrawMs: state.surface.lastOverlayRenderMs,
+      });
     }
 
     function renderTraderRead(session = {}) {
@@ -5791,6 +7061,7 @@
 
     function renderSession(payload) {
       state.session = payload || {};
+      applySurfaceIdentity(state.session);
       const signal = payload.latest_signal || {};
       const tracking = payload.tracking_summary || {};
       const focus = payload.focus_selector || {};
@@ -5930,16 +7201,48 @@
     }
 
     async function refreshSession() {
-      if (state.busy) {
+      if (state.busy || state.liveRefreshBusy) {
         return;
       }
+      if (!surfaceHasImage() && pendingSurfaceImage()) {
+        return;
+      }
+      let startedSlowRefresh = false;
       state.busy = true;
+      state.liveRefreshBusy = true;
+      const requestedOverlayMode = state.overlayMode;
+      const requestedBackendMode = backendOverlayMode(requestedOverlayMode);
       try {
-        const [basePayload, livePayload] = await Promise.all([
-          jsonRequest(sessionUrl()),
-          jsonRequest(liveVisualStateUrl(state.overlayMode)).catch(() => null),
-        ]);
-        const merged = livePayload ? mergeLiveVisualState(basePayload, livePayload) : basePayload;
+        let livePayload = await jsonRequest(liveVisualStateUrl(requestedOverlayMode)).catch(() => null);
+        if (requestedBackendMode !== backendOverlayMode(state.overlayMode)) {
+          livePayload = null;
+        }
+        if (livePayload) {
+          const immediatePayload = mergeLiveVisualState(state.session || {session_id: SESSION_ID}, livePayload);
+          renderSession(immediatePayload);
+          enrichSessionTelemetry({...immediatePayload})
+            .then((enriched) => {
+              if (requestedBackendMode === backendOverlayMode(state.overlayMode)) {
+                renderSession(enriched);
+              }
+            })
+            .catch(() => {});
+        }
+        const nowMs = Date.now();
+        if (state.slowRefreshBusy || (nowMs - Number(state.lastBaseRefreshMs || 0) < 2000)) {
+          return;
+        }
+        state.slowRefreshBusy = true;
+        startedSlowRefresh = true;
+        state.lastBaseRefreshMs = nowMs;
+        const basePayload = await jsonRequest(sessionUrl()).catch(() => null);
+        const merged = livePayload ? mergeLiveVisualState(basePayload || {session_id: SESSION_ID}, livePayload) : basePayload;
+        if (!merged) {
+          throw new Error("canonical live state unavailable");
+        }
+        if (requestedBackendMode !== backendOverlayMode(state.overlayMode)) {
+          return;
+        }
         renderSession(await enrichSessionTelemetry(merged));
       } catch (error) {
         renderSession({
@@ -5963,6 +7266,10 @@
         });
       } finally {
         state.busy = false;
+        state.liveRefreshBusy = false;
+        if (startedSlowRefresh) {
+          state.slowRefreshBusy = false;
+        }
       }
     }
 
@@ -6068,11 +7375,28 @@
         source.addEventListener("open", () => {
           state.streamConnected = true;
         });
-        source.addEventListener("SESSION_UPDATE", async (event) => {
+        source.addEventListener("SESSION_UPDATE", (event) => {
           state.streamConnected = true;
           try {
             const payload = JSON.parse(event.data);
-            renderSession(await enrichSessionTelemetry(await mergeSelectedLiveState(payload)));
+            renderSessionImmediate(payload);
+            const nowMs = Date.now();
+            if (
+              !state.liveRefreshBusy
+              && !state.streamHydrationBusy
+              && !(pendingSurfaceImage() && !surfaceHasImage())
+              && nowMs - Number(state.lastStreamHydrationMs || 0) >= STREAM_LIVE_STATE_HYDRATION_MS
+            ) {
+              state.lastStreamHydrationMs = nowMs;
+              const requestId = Number(state.streamHydrationRequestId || 0) + 1;
+              state.streamHydrationRequestId = requestId;
+              state.streamHydrationBusy = true;
+              hydrateAndRenderSession(payload, requestId)
+                .catch(() => {})
+                .finally(() => {
+                  state.streamHydrationBusy = false;
+                });
+            }
           } catch (_err) {
           }
         });
@@ -6317,16 +7641,14 @@
     els.surfaceStage.addEventListener("pointercancel", stopSurfacePan);
     els.overlayImg.addEventListener("load", () => {
       els.overlayImg.dataset.loadedSrc = els.overlayImg.currentSrc || els.overlayImg.src || "";
-      refreshSurfaceViewportIfNeeded(true);
-      renderHotspots();
+      commitSurfaceImage(els.overlayImg);
     });
     els.overlayImg.addEventListener("error", () => {
       handleSurfaceImageError(els.overlayImg);
     });
     els.rawImg.addEventListener("load", () => {
       els.rawImg.dataset.loadedSrc = els.rawImg.currentSrc || els.rawImg.src || "";
-      refreshSurfaceViewportIfNeeded(true);
-      renderHotspots();
+      commitSurfaceImage(els.rawImg);
     });
     els.rawImg.addEventListener("error", () => {
       handleSurfaceImageError(els.rawImg);
@@ -6337,15 +7659,22 @@
     });
 
     setMode("overlay");
-    applyOverlayPreset("clean_live");
+    applyOverlayPreset("active_context");
     applyRoute(routeFromLocation(), false);
     updateLayerControls();
     refreshSession();
     connectSessionStream();
     state.refreshTimer = window.setInterval(() => {
-      if (!state.streamConnected) {
-        refreshSession();
+      refreshSession();
+    }, DASHBOARD_REFRESH_INTERVAL_MS);
+    state.heartbeatTimer = window.setInterval(() => {
+      if (!state.session) {
+        return;
       }
+      publishFrontendHeartbeat(state.session, {
+        visibleOverlayCount: els.hotspotLayer.querySelectorAll(".surface-hotspot").length,
+        overlayDrawMs: state.surface.lastOverlayRenderMs,
+      });
     }, 1000);
   </script>
 </body>
