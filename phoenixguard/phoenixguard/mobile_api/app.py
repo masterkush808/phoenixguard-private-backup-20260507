@@ -1583,9 +1583,11 @@ def create_app(
             "ttl_ms",
             "reason",
             "source_agent",
+            "source_version",
             "source_path",
             "source_key",
             "broker_source_lock_id",
+            "anchor_candles",
             "parent_overlay_id",
             "parent_type",
             "parent_label",
@@ -1602,11 +1604,38 @@ def create_app(
 
         def compact_overlay_object(value: object) -> dict[str, object]:
             row = _mapping_to_plain_dict(value)
+
+            def compact_anchor_candles() -> list[int]:
+                raw_anchors = row.get("anchor_candles")
+                if isinstance(raw_anchors, Sequence) and not isinstance(raw_anchors, (str, bytes, bytearray)):
+                    anchors: list[int] = []
+                    for item in raw_anchors:
+                        try:
+                            anchors.append(int(float(item)))
+                        except Exception:
+                            continue
+                    return sorted(set(anchors))
+                candidates: list[int] = []
+                for key in ("source_key", "track_id", "replay_sequence"):
+                    text = str(row.get(key) or "").strip()
+                    if not text:
+                        continue
+                    if re.fullmatch(r"\d+(?:\.0+)?", text):
+                        candidates.append(int(float(text)))
+                        continue
+                    if key in {"source_key", "replay_sequence"}:
+                        candidates.extend(int(match) for match in re.findall(r"\d+", text))
+                source_path = str(row.get("source_path") or "").strip()
+                if source_path:
+                    candidates.extend(int(match) for match in re.findall(r"\[(\d+)\]", source_path))
+                return sorted(set(value for value in candidates if value >= 0))
+
             compact_row = {
                 key: row.get(key)
                 for key in overlay_object_fields
                 if row.get(key) not in (None, "", [], {})
             }
+            compact_row.setdefault("anchor_candles", compact_anchor_candles())
             bounds = row.get("bounds") or row.get("bbox")
             if bounds not in (None, "", [], {}):
                 compact_row.setdefault("bounds", bounds)

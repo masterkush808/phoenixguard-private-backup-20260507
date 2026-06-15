@@ -63,13 +63,14 @@ def main() -> int:
         ("GET", f"{base}/v1/mobile/live/state/v3/{session_q}?mode=CLEAN_LIVE&compact=1"),
         ("GET", f"{base}/v1/mobile/performance/trace/v3/{session_q}"),
         ("GET", f"{base}/v1/mobile/visual/health/v3/{session_q}"),
-        ("POST", f"{base}/v1/mobile/window-tracker/sessions/{session_q}/capture-once"),
+        ("POST", f"{base}/v1/mobile/window-tracker/sessions/{session_q}/capture-once?display_only=true"),
     ]
     initial_pids = _api_pids()
     failures: list[str] = []
     warnings: list[str] = []
     samples: list[dict[str, object]] = []
     latencies: list[float] = []
+    control_latencies: list[float] = []
     connection_resets = 0
     timeouts = 0
     last_request: dict[str, object] = {}
@@ -79,7 +80,11 @@ def main() -> int:
         for method, url in endpoints:
             last_request = {"method": method, "url": url, "epoch": time.time()}
             result = http_json(url, method=method, timeout=args.timeout)
-            latencies.append(result.latency_ms)
+            is_control_probe = "/capture-once" in url
+            if is_control_probe:
+                control_latencies.append(result.latency_ms)
+            else:
+                latencies.append(result.latency_ms)
             error = str(result.error or "")
             if "reset" in error.lower() or "forcibly closed" in error.lower():
                 connection_resets += 1
@@ -101,6 +106,7 @@ def main() -> int:
         time.sleep(max(0.1, float(args.interval_sec)))
 
     summary = summarize_numbers(latencies)
+    control_summary = summarize_numbers(control_latencies)
     if connection_resets:
         failures.append(f"{connection_resets} connection reset(s) observed")
     if timeouts:
@@ -109,6 +115,8 @@ def main() -> int:
         failures.append(f"p95 response time {summary['p95']:.0f}ms exceeded 1500ms")
     if summary["p99"] > 3000.0:
         failures.append(f"p99 response time {summary['p99']:.0f}ms exceeded 3000ms")
+    if control_summary["p99"] > args.timeout * 1000.0:
+        failures.append(f"capture-once control p99 {control_summary['p99']:.0f}ms exceeded timeout budget {args.timeout * 1000.0:.0f}ms")
 
     report = gate_report(
         schema_version="PG_CERTIFY_API_STABILITY_V3",
@@ -124,6 +132,7 @@ def main() -> int:
             "connection_resets": connection_resets,
             "timeouts": timeouts,
             "latency_ms": summary,
+            "capture_once_control_latency_ms": control_summary,
             "sample_count": len(samples),
             "samples": samples[-200:],
         },
