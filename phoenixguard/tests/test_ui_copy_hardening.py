@@ -160,6 +160,15 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "function renderLineOverlay" in dashboard
     assert "surface-line-svg" in dashboard
     assert "surface-line-hotspot" in dashboard
+    assert "function overlayDisplayState" in dashboard
+    assert "function overlayVisualWeight" in dashboard
+    assert "function applyOverlayDisplayStyle" in dashboard
+    assert "function applyOverlayLabelPosition" in dashboard
+    assert "display-ghosted" in dashboard
+    assert "display-inspector-only-label" in dashboard
+    assert "dataset.displayState" in dashboard
+    assert "dataset.visualWeight" in dashboard
+    assert "INSPECTOR_ONLY_LABEL" in dashboard
     assert "SUPPORT_TRENDLINE" in dashboard
     assert "RESISTANCE_TRENDLINE" in dashboard
     assert "INNER_TRENDLINE" in dashboard
@@ -167,7 +176,7 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "function payloadMatchesSelectedOverlayMode" in dashboard
     assert ".surface-hotspot.label-hidden span" in dashboard
     assert "const labelHidden = box.label_hidden === true || box.label_hidden === \"true\";" in dashboard
-    assert 'button.innerHTML = labelHidden ? "" : `<span>${escapeHtml(label)}</span>`;' in dashboard
+    assert 'button.innerHTML = effectiveLabelHidden ? "" : `<span>${escapeHtml(label)}</span>`;' in dashboard
     assert 'global: "GLOBAL"' in dashboard
     assert 'local: "LOCAL"' in dashboard
     assert 'supply_demand: "SUPPLY_DEMAND"' in dashboard

@@ -188,6 +188,31 @@ def main() -> int:
             except Exception:
                 page.select_option("#overlay-mode-select", select_value, timeout=int(args.timeout * 1000.0))
             page.wait_for_timeout(2000)
+            page.evaluate(
+                """async (selectValue) => {
+                  if (typeof refreshSession === "function") await refreshSession();
+                  if (typeof setMode === "function") setMode("overlay");
+                  if (typeof applyOverlayPreset === "function") applyOverlayPreset(selectValue);
+                  if (typeof refreshLiveVisualStateForMode === "function") {
+                    await refreshLiveVisualStateForMode(selectValue);
+                  }
+                  const select = document.querySelector("#overlay-mode-select");
+                  if (select) {
+                    select.value = selectValue;
+                    select.dispatchEvent(new Event("change", {bubbles: true}));
+                  }
+                  if (typeof renderSurface === "function") renderSurface();
+                  await new Promise((resolve) => setTimeout(resolve, 1500));
+                  if (typeof commitSurfaceImage === "function") {
+                    const overlay = document.querySelector("#surface-overlay");
+                    const raw = document.querySelector("#surface-raw");
+                    if (overlay) commitSurfaceImage(overlay);
+                    if (raw) commitSurfaceImage(raw);
+                  }
+                  if (typeof renderHotspots === "function") renderHotspots();
+                }""",
+                select_value,
+            )
             try:
                 page.wait_for_function(
                     """({selectValue, expectedRenderable}) => {

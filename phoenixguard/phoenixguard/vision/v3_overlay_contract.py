@@ -1627,6 +1627,21 @@ def normalize_v3_overlay_object(
         "replay_action",
         "story",
         "parent_label",
+        "display_state",
+        "visual_weight",
+        "geometry_visible",
+        "label_visible",
+        "inspector_visible",
+        "label_mode",
+        "label_lane",
+        "representation_reason",
+        "style",
+        "group_id",
+        "group_type",
+        "group_bounds",
+        "summary_label",
+        "expand_on_hover",
+        "expand_on_click",
     ):
         value = raw.get(key)
         if value not in (None, "", [], {}):

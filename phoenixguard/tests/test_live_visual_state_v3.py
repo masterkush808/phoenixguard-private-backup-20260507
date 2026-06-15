@@ -298,6 +298,11 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
     assert state["overlays"]["hidden_count"] >= 0
     assert state["overlays"]["rejected_count"] >= 0
     assert state["overlays"]["objects"] == state["overlay_objects"]
+    assert state["overlay_ledger_v3"]["schema_version"] == "PG_OVERLAY_LEDGER_V3"
+    assert state["overlays"]["ledger"] == state["overlay_ledger_v3"]
+    assert state["overlay_ledger_v3"]["ledger_count"] >= state["renderable_count"]
+    assert isinstance(state["overlay_ledger_v3"]["display_state_counts"], dict)
+    assert state["live_visual_state"]["vlm_context_skeleton_v3"]["overlay_story"]["ledger"]["schema_version"] == "PG_OVERLAY_LEDGER_V3"
     thesis_overlays = [
         overlay for overlay in state["overlay_objects"]
         if str(overlay.get("overlay_id", "")).startswith("thesis_")
@@ -325,9 +330,26 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
             "visible_modes",
             "ttl_ms",
             "reason",
+            "display_state",
+            "visual_weight",
+            "geometry_visible",
+            "label_visible",
+            "inspector_visible",
+            "label_mode",
+            "style",
         }.issubset(overlay_object)
         assert overlay_object["bounds_rect"]["width"] > 0
         assert isinstance(overlay_object["bounds"], list)
+        assert overlay_object["display_state"] in {
+            "FULL",
+            "COMPACT",
+            "GHOSTED",
+            "ICON_ONLY",
+            "GROUPED",
+            "NESTED",
+            "INSPECTOR_ONLY_LABEL",
+            "FOCUS_EXPANDED",
+        }
     assert state["sequence_context"]["schema_version"] == "PG_SEQUENCE_CONTEXT_V3"
     assert state["sequence_context"]["placeholder"] is True
     assert state["sequence_context"]["tracked_objects"]

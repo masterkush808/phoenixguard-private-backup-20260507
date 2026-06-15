@@ -932,8 +932,9 @@
       border-radius: 4px;
       background: rgba(242, 200, 102, 0.075);
       box-shadow: inset 0 0 24px rgba(242, 200, 102, 0.10), 0 0 20px rgba(242, 200, 102, 0.12);
+      opacity: var(--overlay-opacity, 0.82);
       pointer-events: auto;
-      transition: background-color 120ms ease, border-color 120ms ease;
+      transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
     }
 
     .surface-hotspot[hidden] {
@@ -1008,6 +1009,39 @@
       box-shadow: none;
     }
 
+    .surface-hotspot.display-full,
+    .surface-hotspot.display-focus-expanded {
+      opacity: var(--overlay-opacity, 0.96);
+      border-width: var(--overlay-border-width, 1.4px);
+    }
+
+    .surface-hotspot.display-compact {
+      opacity: var(--overlay-opacity, 0.74);
+      border-width: var(--overlay-border-width, 1px);
+    }
+
+    .surface-hotspot.display-grouped {
+      opacity: var(--overlay-opacity, 0.68);
+      border-width: var(--overlay-border-width, 1px);
+      box-shadow: inset 0 0 0 1px rgba(242, 200, 102, 0.12);
+    }
+
+    .surface-hotspot.display-nested {
+      opacity: var(--overlay-opacity, 0.64);
+      border-style: dashed;
+      border-width: var(--overlay-border-width, 1px);
+      box-shadow: none;
+    }
+
+    .surface-hotspot.display-ghosted,
+    .surface-hotspot.display-icon-only,
+    .surface-hotspot.display-inspector-only-label {
+      opacity: var(--overlay-opacity, 0.42);
+      border-style: dotted;
+      border-width: var(--overlay-border-width, 1px);
+      box-shadow: none;
+    }
+
     .surface-line-svg {
       position: absolute;
       inset: 0;
@@ -1076,6 +1110,7 @@
     .surface-hotspot:hover {
       background: rgba(242, 200, 102, 0.16);
       border-color: var(--gold);
+      opacity: 1;
       transform: none;
     }
 
@@ -1100,6 +1135,26 @@
     }
 
     .surface-hotspot.label-hidden span {
+      display: none;
+    }
+
+    .surface-hotspot.display-compact span,
+    .surface-hotspot.display-nested span,
+    .surface-hotspot.display-grouped span {
+      max-width: min(160px, 28vw);
+      padding: 4px 6px;
+      font-size: 8px;
+      opacity: 0.78;
+    }
+
+    .surface-hotspot.display-full span,
+    .surface-hotspot.display-focus-expanded span {
+      opacity: 0.94;
+    }
+
+    .surface-hotspot.display-ghosted span,
+    .surface-hotspot.display-icon-only span,
+    .surface-hotspot.display-inspector-only-label span {
       display: none;
     }
 
@@ -5427,6 +5482,7 @@
         if (type === "CURRENT_CANDLE") {
           box.label_hidden = true;
           box.label_anchor = "hidden";
+          box.label_visible = false;
           return;
         }
         const labelHidden = box.label_hidden === true || box.label_hidden === "true";
@@ -5436,7 +5492,11 @@
         visibleLabelCount += 1;
         if (visibleLabelCount > 18) {
           box.label_hidden = true;
-          box.label_anchor = "hidden";
+          box.label_anchor = "inspector";
+          box.label_visible = false;
+          box.geometry_visible = true;
+          box.inspector_visible = true;
+          box.display_state = box.display_state || "INSPECTOR_ONLY_LABEL";
         }
       });
       return output;
@@ -6249,6 +6309,114 @@
       return "";
     }
 
+    function overlayDisplayState(box = {}) {
+      const allowed = new Set(["FULL", "COMPACT", "GHOSTED", "ICON_ONLY", "GROUPED", "NESTED", "INSPECTOR_ONLY_LABEL", "FOCUS_EXPANDED"]);
+      const raw = clean(box.display_state, "COMPACT").toUpperCase();
+      return allowed.has(raw) ? raw : "COMPACT";
+    }
+
+    function overlayDisplayClassName(displayState) {
+      return `display-${clean(displayState, "COMPACT").toLowerCase().replace(/_/g, "-")}`;
+    }
+
+    function overlayVisualWeight(box = {}) {
+      const raw = Number(box.visual_weight ?? objectOrEmpty(box.style).visual_weight ?? 0.55);
+      if (!Number.isFinite(raw)) {
+        return 0.55;
+      }
+      return Math.max(0.05, Math.min(1, raw));
+    }
+
+    function overlayLabelHiddenByDisplayState(box = {}) {
+      const displayState = overlayDisplayState(box);
+      return ["GHOSTED", "ICON_ONLY", "INSPECTOR_ONLY_LABEL"].includes(displayState)
+        || box.label_visible === false
+        || box.label_visible === "false";
+    }
+
+    function overlayStyleVars(box = {}) {
+      const style = objectOrEmpty(box.style);
+      const displayState = overlayDisplayState(box);
+      const weight = overlayVisualWeight(box);
+      const opacityFallback = {
+        FULL: 0.94,
+        FOCUS_EXPANDED: 1,
+        COMPACT: 0.74,
+        GROUPED: 0.68,
+        NESTED: 0.64,
+        GHOSTED: 0.42,
+        ICON_ONLY: 0.36,
+        INSPECTOR_ONLY_LABEL: 0.40,
+      }[displayState] ?? 0.72;
+      const borderFallback = {
+        FULL: 1.45,
+        FOCUS_EXPANDED: 1.7,
+        COMPACT: 1,
+        GROUPED: 1,
+        NESTED: 0.95,
+        GHOSTED: 0.8,
+        ICON_ONLY: 0.75,
+        INSPECTOR_ONLY_LABEL: 0.75,
+      }[displayState] ?? 1;
+      return {
+        opacity: Math.max(0.18, Math.min(1, Number(style.opacity ?? opacityFallback) || opacityFallback)),
+        borderWidth: Math.max(0.5, Math.min(2, Number(style.border_width ?? borderFallback) || borderFallback)),
+        fillOpacity: Math.max(0, Math.min(0.16, Number(style.fill_opacity ?? (0.03 + weight * 0.04)) || 0.04)),
+      };
+    }
+
+    function applyOverlayDisplayStyle(node, box = {}, displayState = overlayDisplayState(box)) {
+      const styleVars = overlayStyleVars(box);
+      node.classList.add(overlayDisplayClassName(displayState));
+      node.dataset.displayState = displayState;
+      node.dataset.visualWeight = overlayVisualWeight(box).toFixed(2);
+      node.dataset.labelLane = clean(box.label_lane || box.label_anchor, "");
+      node.style.setProperty("--overlay-opacity", String(styleVars.opacity));
+      node.style.setProperty("--overlay-border-width", `${styleVars.borderWidth}px`);
+      node.style.setProperty("--overlay-fill-opacity", String(styleVars.fillOpacity));
+    }
+
+    function overlayLineStrokeWidth(box = {}) {
+      const displayState = overlayDisplayState(box);
+      const weight = overlayVisualWeight(box);
+      if (displayState === "FULL" || displayState === "FOCUS_EXPANDED") {
+        return Math.max(2, Math.min(3.2, 1.8 + weight));
+      }
+      if (displayState === "GHOSTED" || displayState === "INSPECTOR_ONLY_LABEL") {
+        return 1.25;
+      }
+      return Math.max(1.4, Math.min(2.4, 1.3 + weight));
+    }
+
+    function resolveOverlayLabelBounds(box, tracking, image) {
+      const labelBounds = objectOrEmpty(box.label_bounds);
+      const raw = Array.isArray(labelBounds.bbox)
+        ? labelBounds.bbox
+        : Array.isArray(box.label_bounds)
+          ? box.label_bounds
+          : [];
+      if (raw.length < 4) {
+        return null;
+      }
+      return resolveBoxBounds({...box, bbox: raw, bounds: raw}, tracking, image);
+    }
+
+    function applyOverlayLabelPosition(button, box, tracking, image, renderedBounds) {
+      const span = button.querySelector("span");
+      if (!span || !renderedBounds) {
+        return;
+      }
+      const labelBounds = resolveOverlayLabelBounds(box, tracking, image);
+      if (!labelBounds) {
+        return;
+      }
+      const width = Math.max(0.5, Number(renderedBounds.width || 0.5));
+      const height = Math.max(0.5, Number(renderedBounds.height || 0.5));
+      span.style.left = `${((labelBounds.left - renderedBounds.left) / width) * 100}%`;
+      span.style.top = `${((labelBounds.top - renderedBounds.top) / height) * 100}%`;
+      span.dataset.labelLane = clean(box.label_lane || box.label_anchor, "");
+    }
+
     function rawLinePoints(box = {}) {
       const source = Array.isArray(box.line_points)
         ? box.line_points
@@ -6309,15 +6477,20 @@
       if (!line) {
         return false;
       }
+      const displayState = overlayDisplayState(box);
+      const effectiveLabelHidden = labelHidden || overlayLabelHiddenByDisplayState(box);
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.setAttribute("viewBox", "0 0 100 100");
       svg.setAttribute("preserveAspectRatio", "none");
       svg.classList.add("surface-line-svg");
       svg.dataset.layer = layer;
       svg.dataset.staticLayer = staticLayer ? "true" : "false";
+      svg.dataset.displayState = displayState;
       const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
       polyline.setAttribute("points", line.points.map((point) => `${point.x.toFixed(3)},${point.y.toFixed(3)}`).join(" "));
       polyline.classList.add("surface-trendline");
+      polyline.style.opacity = String(overlayStyleVars(box).opacity);
+      polyline.style.strokeWidth = `${overlayLineStrokeWidth(box)}px`;
       const semanticClass = trendlineClassName(box);
       if (semanticClass) {
         polyline.classList.add(semanticClass);
@@ -6331,7 +6504,8 @@
 
       const button = document.createElement("button");
       button.type = "button";
-      button.className = `surface-hotspot surface-line-hotspot ${layerClassName(layer)} ${colorClass(direction)}${labelHidden ? " label-hidden" : ""}`;
+      button.className = `surface-hotspot surface-line-hotspot ${layerClassName(layer)} ${colorClass(direction)}${effectiveLabelHidden ? " label-hidden" : ""}`;
+      applyOverlayDisplayStyle(button, box, displayState);
       if (line.bounds.left < 2) {
         button.classList.add("edge-left");
       }
@@ -6345,8 +6519,10 @@
       button.style.top = `${Math.max(0, Math.min(99.5, line.bounds.top))}%`;
       button.style.width = `${Math.max(1, Math.min(100, line.bounds.width))}%`;
       button.style.height = `${Math.max(1, Math.min(100, line.bounds.height))}%`;
-      button.setAttribute("aria-label", `Inspect ${label}`);
-      button.innerHTML = labelHidden ? "" : `<span>${escapeHtml(label)}</span>`;
+      button.setAttribute("aria-label", `Inspect ${label} ${displayState}`);
+      button.title = `${label} - ${displayState} - ${overlayVisualWeight(box).toFixed(2)}`;
+      button.innerHTML = effectiveLabelHidden ? "" : `<span>${escapeHtml(label)}</span>`;
+      applyOverlayLabelPosition(button, box, tracking, image, line.bounds);
       button.addEventListener("click", () => select("box", String(index)));
       els.hotspotLayer.appendChild(button);
       return true;
@@ -6499,7 +6675,9 @@
         const label = clean(box.label || box.key, `Box ${index + 1}`);
         const direction = clean(box.direction || box.action || "", "");
         const labelHidden = box.label_hidden === true || box.label_hidden === "true";
-        if (isLineOverlay(box) && renderLineOverlay(box, index, layer, direction, label, labelHidden, staticLayer, tracking, visibleImage)) {
+        const displayState = overlayDisplayState(box);
+        const effectiveLabelHidden = labelHidden || overlayLabelHiddenByDisplayState(box);
+        if (isLineOverlay(box) && renderLineOverlay(box, index, layer, direction, label, effectiveLabelHidden, staticLayer, tracking, visibleImage)) {
           return;
         }
         const bounds = resolveBoxBounds(box, tracking, visibleImage);
@@ -6508,7 +6686,8 @@
         }
         const button = document.createElement("button");
         button.type = "button";
-        button.className = `surface-hotspot ${layerClassName(layer)} ${colorClass(direction)}${labelHidden ? " label-hidden" : ""}`;
+        button.className = `surface-hotspot ${layerClassName(layer)} ${colorClass(direction)}${effectiveLabelHidden ? " label-hidden" : ""}`;
+        applyOverlayDisplayStyle(button, box, displayState);
         if (bounds.left < 2) {
           button.classList.add("edge-left");
         }
@@ -6521,8 +6700,10 @@
         button.style.top = `${Math.max(0, Math.min(99.5, bounds.top))}%`;
         button.style.width = `${Math.max(1, Math.min(100, bounds.width))}%`;
         button.style.height = `${Math.max(1, Math.min(100, bounds.height))}%`;
-        button.setAttribute("aria-label", `Inspect ${label}`);
-        button.innerHTML = labelHidden ? "" : `<span>${escapeHtml(label)}</span>`;
+        button.setAttribute("aria-label", `Inspect ${label} ${displayState}`);
+        button.title = `${label} - ${displayState} - ${overlayVisualWeight(box).toFixed(2)}`;
+        button.innerHTML = effectiveLabelHidden ? "" : `<span>${escapeHtml(label)}</span>`;
+        applyOverlayLabelPosition(button, box, tracking, visibleImage, bounds);
         button.addEventListener("click", () => select("box", String(index)));
         els.hotspotLayer.appendChild(button);
       });

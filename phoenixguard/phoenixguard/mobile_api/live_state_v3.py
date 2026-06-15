@@ -464,6 +464,21 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
         "label_hidden",
         "label_anchor",
         "label_bounds",
+        "display_state",
+        "visual_weight",
+        "geometry_visible",
+        "label_visible",
+        "inspector_visible",
+        "label_mode",
+        "label_lane",
+        "representation_reason",
+        "style",
+        "group_id",
+        "group_type",
+        "group_bounds",
+        "summary_label",
+        "expand_on_hover",
+        "expand_on_click",
         "points",
         "line_points",
         "touch_points",
@@ -989,6 +1004,67 @@ def _overlay_vocabulary_payload(
         "dictionary_coverage_ok": not visible_unapproved,
         "unknown_or_unmapped_terms": unknown_terms,
         "labels_remapped": remapped_labels,
+    }
+
+
+def _overlay_ledger_payload(
+    all_overlays: Sequence[Mapping[str, Any]],
+    rendered_overlays: Sequence[Mapping[str, Any]],
+    *,
+    active_mode: str,
+) -> dict[str, Any]:
+    rendered_ids = {
+        _text(row.get("overlay_id") or row.get("id") or row.get("object_id"))
+        for row in rendered_overlays
+        if _text(row.get("overlay_id") or row.get("id") or row.get("object_id"))
+    }
+    rows: list[dict[str, Any]] = []
+    display_counts: dict[str, int] = {}
+    rejected_count = 0
+    for index, row in enumerate(all_overlays):
+        overlay_id = _text(row.get("overlay_id") or row.get("id") or row.get("object_id"), f"overlay-{index}")
+        if row.get("precision_rejected"):
+            rejected_count += 1
+            continue
+        display_state = _text(row.get("display_state"), "COMPACT").upper()
+        display_counts[display_state] = display_counts.get(display_state, 0) + 1
+        chart_visible = overlay_id in rendered_ids
+        label_visible = bool(chart_visible and row.get("label_hidden") is not True and row.get("label_visible") is not False)
+        rows.append(
+            {
+                "overlay_id": overlay_id,
+                "object_id": _text(row.get("object_id")),
+                "track_id": _text(row.get("track_id")),
+                "type": _text(row.get("type")),
+                "layer": _text(row.get("layer")),
+                "display_label": _text(row.get("display_label") or row.get("label")),
+                "display_state": display_state,
+                "visual_weight": round(_float(row.get("visual_weight"), 0.0), 3),
+                "semantic_family": _text(_mapping(row.get("style")).get("semantic_family")),
+                "source_agent": _text(row.get("source_agent")),
+                "truth_score": row.get("truth_score"),
+                "chart_visible": chart_visible,
+                "geometry_visible": bool(chart_visible and row.get("geometry_visible") is not False),
+                "label_visible": label_visible,
+                "inspector_visible": bool(row.get("inspector_visible") is not False),
+                "label_lane": _text(row.get("label_lane") or row.get("label_anchor")),
+                "parent_overlay_id": _text(row.get("parent_overlay_id")),
+                "group_id": _text(row.get("group_id")),
+                "reason": _text(row.get("representation_reason") or row.get("reason")),
+            }
+        )
+    rows.sort(key=lambda item: (bool(item["chart_visible"]), _float(item.get("visual_weight"), 0.0)), reverse=True)
+    return {
+        "schema_version": "PG_OVERLAY_LEDGER_V3",
+        "active_mode": active_mode,
+        "valid_count": len(rows),
+        "ledger_count": len(rows),
+        "chart_visible_geometry_count": len([row for row in rows if row["geometry_visible"]]),
+        "label_visible_count": len([row for row in rows if row["label_visible"]]),
+        "inspector_visible_count": len([row for row in rows if row["inspector_visible"]]),
+        "rejected_count": rejected_count,
+        "display_state_counts": display_counts,
+        "objects": rows,
     }
 
 
@@ -1641,8 +1717,14 @@ def build_live_state_v3(
         overlays,
         active_mode=active_overlay_mode,
     )
+    overlay_ledger = _overlay_ledger_payload(
+        precision_overlays,
+        overlays,
+        active_mode=active_overlay_mode,
+    )
     overlays_payload["unknown_or_unmapped_terms"] = overlay_vocabulary["unknown_or_unmapped_terms"]
     overlays_payload["vocabulary"] = overlay_vocabulary
+    overlays_payload["ledger"] = overlay_ledger
     prediction_overlay = prediction_overlay_config()
     live_visual_state = {
         "schema_version": LIVE_STATE_SCHEMA_VERSION,
@@ -1711,6 +1793,7 @@ def build_live_state_v3(
         "overlay_precision_audit": precision_audit,
         "overlay_layout": overlay_layout,
         "overlay_vocabulary": overlay_vocabulary,
+        "overlay_ledger_v3": overlay_ledger,
         "prediction_overlay": prediction_overlay,
         "two_candle_study": two_candle_study,
         "lstm_contribution": lstm_contribution,
@@ -1791,6 +1874,7 @@ def build_live_state_v3(
         "overlay_precision_audit": live_visual_state["overlay_precision_audit"],
         "overlay_layout": live_visual_state["overlay_layout"],
         "overlay_vocabulary": live_visual_state["overlay_vocabulary"],
+        "overlay_ledger_v3": live_visual_state["overlay_ledger_v3"],
         "prediction_overlay": live_visual_state["prediction_overlay"],
         "two_candle_study": live_visual_state["two_candle_study"],
         "lstm_contribution": live_visual_state["lstm_contribution"],

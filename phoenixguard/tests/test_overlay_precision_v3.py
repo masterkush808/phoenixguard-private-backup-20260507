@@ -168,6 +168,123 @@ def test_precision_resolver_can_run_directly_on_overlay_contract_objects(tmp_pat
     assert resolved[0]["bounds"][2] - resolved[0]["bounds"][0] < 300
 
 
+def test_precision_resolver_assigns_display_state_and_visual_weight(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
+    overlays = [
+        {
+            "overlay_id": "sniper-buy-display",
+            "object_id": "sniper-buy-display",
+            "track_id": "sniper-buy-display",
+            "type": "SNIPER_ENTRY_BOX",
+            "side": "BUY",
+            "source_agent": "test",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [500, 300, 570, 348],
+            "truth_score": 0.92,
+            "confidence": 0.92,
+            "visible_modes": ["CLEAN_LIVE", "TRIGGER", "INSPECTOR"],
+            "ttl_ms": 30000,
+            "reason": "anchored sniper buy",
+            "label": "SNIPER BUY",
+            "parent_label": "local pullback",
+            "touch_points": [[520, 326], [548, 332]],
+        },
+        {
+            "overlay_id": "demand-context-display",
+            "object_id": "demand-context-display",
+            "track_id": "demand-context-display",
+            "type": "DEMAND_ZONE",
+            "side": "BUY",
+            "source_agent": "test",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [440, 410, 680, 500],
+            "truth_score": 0.71,
+            "confidence": 0.71,
+            "visible_modes": ["CLEAN_LIVE", "SUPPLY_DEMAND", "INSPECTOR"],
+            "ttl_ms": 30000,
+            "reason": "anchored demand context",
+            "label": "DEMAND",
+            "touch_points": [[520, 456], [560, 462]],
+            "anchor_candles": [10, 11],
+        },
+    ]
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="CLEAN_LIVE",
+        current_side="BUY",
+        frame_id=14494,
+    )
+    by_id = {row["overlay_id"]: row for row in resolved}
+
+    assert audit["rendered_count"] == 2
+    assert by_id["sniper-buy-display"]["display_state"] == "FULL"
+    assert by_id["sniper-buy-display"]["visual_weight"] >= 0.95
+    assert by_id["sniper-buy-display"]["geometry_visible"] is True
+    assert by_id["sniper-buy-display"]["label_visible"] is True
+    assert by_id["sniper-buy-display"]["style"]["label_mode"] == "full"
+    assert by_id["demand-context-display"]["display_state"] in {"COMPACT", "NESTED"}
+    assert by_id["demand-context-display"]["geometry_visible"] is True
+    assert by_id["demand-context-display"]["inspector_visible"] is True
+    assert "visible_label_count" in audit["precision_report"]
+
+
+def test_crowded_valid_overlays_keep_geometry_when_labels_move_to_inspector(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
+    overlays = []
+    for index in range(24):
+        left = 60 + (index % 6) * 92
+        top = 95 + (index // 6) * 72
+        overlays.append(
+            {
+                "overlay_id": f"pullback-{index}",
+                "object_id": f"pullback-{index}",
+                "track_id": f"pullback-{index}",
+                "type": "PULLBACK_BOX",
+                "side": "BUY",
+                "source_agent": "test",
+                "frame_id": 14494,
+                "sequence_id": "seq",
+                "chart_transform_id": "ct",
+                "coordinate_mode": "CHART_IMAGE_SPACE",
+                "anchor_type": "BOX",
+                "bounds": [left, top, left + 70, top + 44],
+                "truth_score": 0.66,
+                "confidence": 0.66,
+                "visible_modes": ["CLEAN_LIVE", "LOCAL", "FULL_HISTORY_READ", "INSPECTOR"],
+                "ttl_ms": 30000,
+                "reason": "crowded pullback context",
+                "label": "PULLBACK",
+            }
+        )
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="CLEAN_LIVE",
+        current_side="BUY",
+        frame_id=14494,
+    )
+    inspector_only = [row for row in resolved if row.get("display_state") == "INSPECTOR_ONLY_LABEL"]
+
+    assert audit["rendered_count"] == 24
+    assert inspector_only
+    assert all(row["geometry_visible"] is True for row in inspector_only)
+    assert all(row["label_visible"] is False for row in inspector_only)
+    assert audit["precision_report"]["inspector_only_label_count"] >= 1
+
+
 def test_precision_resolver_rejects_floating_unanchored_live_zone(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]

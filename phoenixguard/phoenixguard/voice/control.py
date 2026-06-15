@@ -202,7 +202,7 @@ def _help_response(snapshot: Mapping[str, Any]) -> str:
     )
 
 
-def _status_response(snapshot: Mapping[str, Any]) -> str:
+def _status_response(snapshot: Mapping[str, Any], config: VoiceConfig = VOICE) -> str:
     return (
         f"{snapshot.get('greeting', 'Hello')}. Voice is {'on' if snapshot.get('voice_enabled', False) else 'off'}, "
         f"listening is {'active' if snapshot.get('listening_enabled', False) else 'paused'}, "
