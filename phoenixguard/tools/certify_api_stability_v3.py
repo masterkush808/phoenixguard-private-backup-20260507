@@ -60,7 +60,7 @@ def main() -> int:
     session_q = quote_session(args.session)
     endpoints = [
         ("GET", f"{base}/v1/mobile/health"),
-        ("GET", f"{base}/v1/mobile/live/state/v3/{session_q}"),
+        ("GET", f"{base}/v1/mobile/live/state/v3/{session_q}?mode=CLEAN_LIVE&compact=1"),
         ("GET", f"{base}/v1/mobile/performance/trace/v3/{session_q}"),
         ("GET", f"{base}/v1/mobile/visual/health/v3/{session_q}"),
         ("POST", f"{base}/v1/mobile/window-tracker/sessions/{session_q}/capture-once"),

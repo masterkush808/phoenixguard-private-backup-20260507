@@ -44,9 +44,14 @@ def main() -> int:
     stale_frame_run = 0
     stale_overlay_run = 0
     frame_ids: set[int] = set()
+    live_url = f"{base}/v1/mobile/live/state/v3/{session_q}?mode=CLEAN_LIVE&compact=1"
+
+    warmup = http_json(live_url, timeout=args.timeout)
+    if not warmup.ok:
+        warnings.append(f"warmup_live_state_failed={warmup.error or warmup.status}")
 
     while time.time() < deadline:
-        live = http_json(f"{base}/v1/mobile/live/state/v3/{session_q}", timeout=args.timeout)
+        live = http_json(live_url, timeout=args.timeout)
         heartbeat = http_json(f"{base}/v1/mobile/frontend/heartbeat/v3?session_id={session_q}", timeout=min(args.timeout, 3.0))
         response_times.append(live.latency_ms)
         if not live.ok:

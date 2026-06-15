@@ -105,6 +105,13 @@ try:
 except ValueError:
     _LIVE_STATE_REGISTRY_CACHE_TTL_SEC = 5.0
 try:
+    _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC = max(
+        0.0,
+        float(os.getenv("PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC", "300.0") or "300.0"),
+    )
+except ValueError:
+    _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC = 300.0
+try:
     _LIVE_STATE_REGISTRY_MAX_LINES = max(
         50,
         int(float(os.getenv("PHOENIXGUARD_LIVE_STATE_REGISTRY_MAX_LINES", "2000") or "2000")),
@@ -113,6 +120,7 @@ except ValueError:
     _LIVE_STATE_REGISTRY_MAX_LINES = 2000
 _LIVE_STATE_V3_CACHE_LOCK = threading.Lock()
 _LIVE_STATE_V3_CACHE: dict[tuple[str, str, str, bool], tuple[float, dict[str, object]]] = {}
+_COMPACT_LIVE_STATE_RESPONSE_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, object]]] = {}
 _LIVE_STATE_REGISTRY_CACHE: dict[str, tuple[float, list[Mapping[str, Any]], list[Mapping[str, Any]]]] = {}
 _DIRECT_PERFORMANCE_TRACE_CACHE_LOCK = threading.Lock()
 _DIRECT_PERFORMANCE_TRACE_CACHE: dict[str, tuple[float, dict[str, object]]] = {}
@@ -278,18 +286,20 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
     )
     if compact_public:
         context_fields = (
-            "tracking_summary.structure_boxes",
-            "tracking_summary.historical_structure",
-            "tracking_summary.support_resistance_zones",
-            "tracking_summary.projection",
-            "tracking_summary.angle_vectors",
-            "tracking_summary.trendlines_v3",
-            "latest_signal.signal_id",
-            "latest_signal.published_epoch",
-            "model_council_result.packet_id",
-            "model_council_study_packet.packet_id",
-            "model_council_packet.packet_id",
-            "execution_packet.packet_id",
+            "session_id",
+            "window_query",
+            "locked_title",
+            "locked_window.hwnd",
+            "manual_focus_region.normalized_bbox",
+            "tracking_summary.detected_market",
+            "tracking_summary.detected_timeframe",
+            "latest_signal.symbol",
+            "latest_signal.pair",
+            "latest_signal.timeframe",
+            "broker_source.lock_id",
+            "broker_source.status",
+            "broker_source_lock.lock_id",
+            "broker_source_lock.status",
         )
         context_signature = _json_field_cache_signature(
             session_path,
@@ -299,8 +309,7 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
         if not _direct_session_path_has_v3_overlay_sources(session_path):
             registry_signature = f"|registry={_path_cache_signature(_direct_market_registry_path(session_id))}"
         return (
-            f"compact=1|display={display_signature}"
-            f"|context={context_signature}"
+            f"compact=1|context={context_signature}"
             f"{registry_signature}"
         )
     session_signature = _json_field_cache_signature(
@@ -337,6 +346,25 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
         ),
     )
     return f"session={session_signature}|display={display_signature}"
+
+
+def _compact_live_state_response_cache_signature(session_id: str) -> str:
+    display_path = _direct_window_tracker_display_state_path(session_id)
+    return _json_field_cache_signature(
+        display_path,
+        (
+            "session_id",
+            "window_query",
+            "locked_title",
+            "locked_window.hwnd",
+            "manual_focus_region.normalized_bbox",
+            "tracking_summary.detected_market",
+            "tracking_summary.detected_timeframe",
+            "latest_signal.symbol",
+            "latest_signal.pair",
+            "latest_signal.timeframe",
+        ),
+    )
 
 
 def _mapping_to_plain_dict(value: Any) -> dict[str, object]:
@@ -473,7 +501,11 @@ def _direct_window_tracker_session_snapshot(session_id: str) -> dict[str, object
     return payload
 
 
-def _direct_window_tracker_display_snapshot(session_id: str) -> dict[str, object] | None:
+def _direct_window_tracker_display_snapshot(
+    session_id: str,
+    *,
+    require_overlay_model: bool = True,
+) -> dict[str, object] | None:
     if str(os.getenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "1") or "1").strip().lower() in {
         "0",
         "false",
@@ -492,17 +524,29 @@ def _direct_window_tracker_display_snapshot(session_id: str) -> dict[str, object
         return None
     payload = dict(cast(Mapping[str, object], raw))
     display_frame = int(_epoch_float(payload.get("display_frame_id"), 0.0))
-    overlay_frame = int(_epoch_float(payload.get("overlay_frame_id") or payload.get("full_overlay_frame_id"), 0.0))
-    model_frame = int(_epoch_float(payload.get("model_vote_frame_id"), 0.0))
+    frame_index = int(_epoch_float(payload.get("frame_index") or payload.get("chart_frame_id"), 0.0))
+    raw_overlay_frame = int(_epoch_float(payload.get("overlay_frame_id") or payload.get("full_overlay_frame_id"), 0.0))
+    raw_model_frame = int(_epoch_float(payload.get("model_vote_frame_id"), 0.0))
+    if require_overlay_model and (raw_overlay_frame <= 0 or raw_model_frame <= 0):
+        return None
+    overlay_frame = int(
+        _epoch_float(raw_overlay_frame or frame_index, 0.0)
+    )
+    model_frame = int(_epoch_float(raw_model_frame or frame_index or overlay_frame, 0.0))
     display_window = str(
         payload.get("last_display_window_path") or payload.get("last_window_path") or payload.get("last_frame_path") or ""
     ).strip()
-    if display_frame <= 0 or overlay_frame <= 0 or model_frame <= 0 or not display_window:
+    if display_frame <= 0 or not display_window:
         return None
     payload["session_id"] = requested_session_id
     payload["tracking_enabled"] = True
     payload["status"] = "running"
     payload["display_frame_id"] = display_frame
+    if overlay_frame > 0:
+        payload["overlay_frame_id"] = overlay_frame
+        payload["full_overlay_frame_id"] = overlay_frame
+    if model_frame > 0:
+        payload["model_vote_frame_id"] = model_frame
     payload.setdefault("frame_index", max(overlay_frame, model_frame))
     payload.setdefault("capture_count", display_frame)
     payload.setdefault("chart_frame_id", max(overlay_frame, model_frame))
@@ -1076,6 +1120,8 @@ def create_app(
 ) -> FastAPI:
     resolved_voice_config = voice_config or VOICE
     configure_tracing("phoenixguard-mobile-api", service_version="1.0.0")
+    with _LIVE_STATE_V3_CACHE_LOCK:
+        _COMPACT_LIVE_STATE_RESPONSE_CACHE.clear()
     app = FastAPI(
         title="PhoenixGuard Mobile API",
         version="1.0.0",
@@ -1496,18 +1542,213 @@ def create_app(
                 },
             )
 
+        overlay_object_fields = {
+            "overlay_id",
+            "id",
+            "object_id",
+            "track_id",
+            "type",
+            "side",
+            "layer",
+            "role",
+            "display_label",
+            "short_label",
+            "label",
+            "label_hidden",
+            "label_visible",
+            "label_anchor",
+            "label_lane",
+            "label_bounds",
+            "display_state",
+            "visual_weight",
+            "style",
+            "visible_modes",
+            "visible_default",
+            "bbox",
+            "bounds",
+            "coordinate_mode",
+            "anchor_type",
+            "line_points",
+            "points",
+            "path",
+            "anchors",
+            "start_point",
+            "end_point",
+            "truth_score",
+            "confidence",
+            "frame_id",
+            "sequence_id",
+            "chart_transform_id",
+            "lifecycle_state",
+            "ttl_ms",
+            "reason",
+            "source_agent",
+            "source_path",
+            "source_key",
+            "broker_source_lock_id",
+            "parent_overlay_id",
+            "parent_type",
+            "parent_label",
+            "nesting_depth",
+            "nesting_role",
+            "group_id",
+            "group_type",
+            "replay_sequence",
+            "replay_action",
+            "story",
+            "trendline_role",
+            "semantic_family",
+        }
+
+        def compact_overlay_object(value: object) -> dict[str, object]:
+            row = _mapping_to_plain_dict(value)
+            compact_row = {
+                key: row.get(key)
+                for key in overlay_object_fields
+                if row.get(key) not in (None, "", [], {})
+            }
+            bounds = row.get("bounds") or row.get("bbox")
+            if bounds not in (None, "", [], {}):
+                compact_row.setdefault("bounds", bounds)
+                compact_row.setdefault("bbox", bounds)
+            return compact_row
+
+        def compact_overlay_objects(value: object) -> list[object]:
+            if not isinstance(value, list):
+                return []
+            return [compact_overlay_object(item) for item in value if isinstance(item, Mapping)]
+
+        def compact_overlays_payload(value: object) -> dict[str, object]:
+            overlays = _mapping_to_plain_dict(value)
+            objects = compact_overlay_objects(overlays.get("objects"))
+            output = compact_mapping(
+                overlays,
+                {
+                    "requested_mode",
+                    "active_mode",
+                    "visible_layers",
+                    "overlay_count",
+                    "renderable_count",
+                    "hidden_count",
+                    "rejected_count",
+                    "reason_if_empty",
+                    "unknown_or_unmapped_terms",
+                    "overlay_state_version",
+                    "overlay_frame_state_version",
+                    "precision_audit",
+                    "warnings",
+                },
+            )
+            if objects:
+                output["objects"] = objects
+            else:
+                output["objects"] = []
+            return output
+
         compact = cast(dict[str, object], _compact_session_payload(live_state))
+        for scalar_key in (
+            "schema_version",
+            "session_id",
+            "name",
+            "status",
+            "tracking_enabled",
+            "frame_id",
+            "display_frame_id",
+            "chart_frame_id",
+            "overlay_frame_id",
+            "full_overlay_frame_id",
+            "model_vote_frame_id",
+            "capture_count",
+            "frame_index",
+            "state_version",
+            "decision_version",
+            "overlay_state_version",
+            "overlay_frame_state_version",
+            "requested_mode",
+            "active_mode",
+            "overlay_count",
+            "renderable_count",
+            "hidden_count",
+            "rejected_count",
+            "reason_if_empty",
+        ):
+            value = live_state.get(scalar_key)
+            if value not in (None, "", [], {}):
+                compact[scalar_key] = value
+        for status_key in (
+            "provider_status",
+            "shooter_state",
+            "model_state",
+            "visual_health_v3",
+            "frame_timing_trace_v3",
+            "frame_timing",
+            "performance_trace_v3",
+            "frontend_heartbeat",
+        ):
+            value = live_state.get(status_key)
+            if isinstance(value, Mapping):
+                compact[status_key] = _mapping_to_plain_dict(value)
+            elif value not in (None, "", [], {}):
+                compact[status_key] = value
+        shooter_payload = live_state.get("shooter")
+        if isinstance(shooter_payload, Mapping):
+            compact["shooter"] = compact_mapping(
+                shooter_payload,
+                {
+                    "available",
+                    "state",
+                    "status",
+                    "mode",
+                    "armed",
+                    "will_click",
+                    "next_required",
+                    "reason",
+                    "last_error",
+                    "started_epoch",
+                    "updated_epoch",
+                    "poll_interval_sec",
+                },
+            )
         live_visual_state = live_state.get("live_visual_state")
         if isinstance(live_visual_state, Mapping):
-            compact.update(cast(Mapping[str, object], live_visual_state))
-            compact["live_visual_state"] = dict(live_visual_state)
+            compact_visual = cast(dict[str, object], _compact_session_payload(cast(Mapping[str, object], live_visual_state)))
+            visual_overlays = live_visual_state.get("overlays")
+            if isinstance(visual_overlays, Mapping):
+                compact_visual["overlays"] = compact_overlays_payload(visual_overlays)
+                objects = compact_visual["overlays"].get("objects") if isinstance(compact_visual["overlays"], Mapping) else None
+                if isinstance(objects, list):
+                    compact_visual["overlay_objects"] = objects
+            compact.update(compact_visual)
         overlays = compact.get("overlays")
         if isinstance(overlays, Mapping):
-            objects = overlays.get("objects")
+            compact_overlays = compact_overlays_payload(overlays)
+            compact["overlays"] = compact_overlays
+            objects = compact_overlays.get("objects")
             if isinstance(objects, list):
                 compact["overlay_objects"] = objects
         if "overlay_objects" not in compact and isinstance(live_state.get("overlay_objects"), list):
-            compact["overlay_objects"] = cast(list[object], live_state["overlay_objects"])
+            compact["overlay_objects"] = compact_overlay_objects(live_state["overlay_objects"])
+        frame_timing = _mapping_to_plain_dict(compact.get("frame_timing_trace_v3") or compact.get("frame_timing"))
+        display_frame_id = int(_epoch_float(frame_timing.get("display_frame_id") or compact.get("display_frame_id"), 0.0))
+        overlay_frame_id = int(
+            _epoch_float(
+                frame_timing.get("overlay_frame_id")
+                or compact.get("overlay_frame_id")
+                or compact.get("full_overlay_frame_id"),
+                0.0,
+            )
+        )
+        model_vote_frame_id = int(
+            _epoch_float(frame_timing.get("model_vote_frame_id") or compact.get("model_vote_frame_id"), 0.0)
+        )
+        if display_frame_id > 0:
+            compact["frame_id"] = display_frame_id
+            compact["display_frame_id"] = display_frame_id
+        if overlay_frame_id > 0:
+            compact["overlay_frame_id"] = overlay_frame_id
+            compact["full_overlay_frame_id"] = overlay_frame_id
+        if model_vote_frame_id > 0:
+            compact["model_vote_frame_id"] = model_vote_frame_id
         packets = compact.get("packets")
         if isinstance(packets, Mapping):
             study = packets.get("study")
@@ -1598,6 +1839,90 @@ def create_app(
             compact.pop(heavy_key, None)
         return compact
 
+    def _refresh_compact_cached_live_state(
+        cached_live_state: Mapping[str, object],
+        requested_session_id: str,
+        *,
+        now_epoch: float,
+    ) -> dict[str, object]:
+        refreshed = dict(cached_live_state)
+        display_snapshot = _direct_window_tracker_display_snapshot(
+            requested_session_id,
+            require_overlay_model=False,
+        )
+        if display_snapshot is None:
+            return refreshed
+        display_payload = dict(display_snapshot)
+        overlays_payload = _mapping_to_plain_dict(refreshed.get("overlays"))
+        overlay_objects_raw = overlays_payload.get("objects")
+        if not isinstance(overlay_objects_raw, list):
+            overlay_objects_raw = refreshed.get("overlay_objects")
+        overlay_objects = [
+            cast(Mapping[str, Any], row)
+            for row in overlay_objects_raw
+            if isinstance(row, Mapping)
+        ] if isinstance(overlay_objects_raw, list) else []
+        model_health = _live_model_health_summary(cast(Mapping[str, object], display_payload))
+        frontend_heartbeat = latest_frontend_heartbeat(requested_session_id)
+        frame_timing = build_frame_timing_trace_v3(
+            cast(Mapping[str, Any], display_payload),
+            overlays=overlay_objects,
+            model_health=cast(Mapping[str, Any], model_health),
+            frontend_heartbeat=frontend_heartbeat,
+            now_epoch=now_epoch,
+        )
+        performance_state = {
+            "session_id": requested_session_id,
+            "frame_id": int(
+                display_payload.get("display_frame_id")
+                or display_payload.get("frame_index")
+                or display_payload.get("capture_count")
+                or refreshed.get("frame_id")
+                or 0
+            ),
+            "state_version": int(display_payload.get("state_version") or refreshed.get("state_version") or 0),
+            "tracking_summary": _mapping_to_plain_dict(
+                refreshed.get("tracking_summary") or display_payload.get("tracking_summary")
+            ),
+            "latest_signal": _mapping_to_plain_dict(refreshed.get("latest_signal") or display_payload.get("latest_signal")),
+            "model_health": model_health,
+            "frame_timing_trace_v3": frame_timing,
+            "frame_timing": frame_timing,
+            "broker_surface": _mapping_to_plain_dict(refreshed.get("broker_surface")),
+            "frontend_heartbeat": frontend_heartbeat,
+        }
+        performance_trace = build_performance_trace_v3(performance_state, now_epoch=now_epoch)
+        refreshed["frame_id"] = performance_state["frame_id"]
+        refreshed["display_frame_id"] = frame_timing.get("display_frame_id", performance_state["frame_id"])
+        refreshed["overlay_frame_id"] = frame_timing.get("overlay_frame_id", refreshed.get("overlay_frame_id"))
+        refreshed["model_vote_frame_id"] = frame_timing.get("model_vote_frame_id", refreshed.get("model_vote_frame_id"))
+        refreshed["frame_timing_trace_v3"] = frame_timing
+        refreshed["frame_timing"] = frame_timing
+        refreshed["performance_trace_v3"] = performance_trace
+        refreshed["visual_health_v3"] = performance_trace.get("visual_health", refreshed.get("visual_health_v3"))
+        refreshed["frontend_heartbeat"] = dict(frontend_heartbeat or {})
+        provider = {
+            **_mapping_to_plain_dict(refreshed.get("provider_status")),
+            "compact_cache_reused_v3": True,
+            "compact_cache_refreshed_epoch": now_epoch,
+        }
+        refreshed["provider_status"] = provider
+        live_visual_state = refreshed.get("live_visual_state")
+        if isinstance(live_visual_state, Mapping):
+            live_visual = dict(cast(Mapping[str, object], live_visual_state))
+            live_visual["frame_id"] = refreshed["frame_id"]
+            live_visual["display_frame_id"] = refreshed["display_frame_id"]
+            live_visual["overlay_frame_id"] = refreshed["overlay_frame_id"]
+            live_visual["model_vote_frame_id"] = refreshed["model_vote_frame_id"]
+            live_visual["frame_timing_trace_v3"] = frame_timing
+            live_visual["frame_timing"] = frame_timing
+            live_visual["performance_trace_v3"] = performance_trace
+            live_visual["visual_health_v3"] = refreshed["visual_health_v3"]
+            live_visual["frontend_heartbeat"] = refreshed["frontend_heartbeat"]
+            live_visual["provider_status"] = provider
+            refreshed["live_visual_state"] = live_visual
+        return refreshed
+
     def build_live_state_v3_for_session(
         session_id: str,
         overlay_mode: str = "CLEAN_LIVE",
@@ -1616,7 +1941,14 @@ def create_app(
             with _LIVE_STATE_V3_CACHE_LOCK:
                 cached = _LIVE_STATE_V3_CACHE.get(cache_key)
                 if cached and now_epoch - cached[0] <= _LIVE_STATE_V3_CACHE_TTL_SEC:
-                    return dict(cached[1])
+                    cached_live_state = dict(cached[1])
+                    if compact_public:
+                        return _refresh_compact_cached_live_state(
+                            cached_live_state,
+                            requested_session_id,
+                            now_epoch=now_epoch,
+                        )
+                    return cached_live_state
 
         def store_live_state_cache(live_state: Mapping[str, object]) -> None:
             if not cache_enabled:
@@ -1706,17 +2038,47 @@ def create_app(
 
     @app.get("/v1/mobile/live/state/v3/{session_id}")
     def live_state_v3_for_session(session_id: str, mode: str = "CLEAN_LIVE", compact: bool = False) -> dict[str, object]:
+        if compact:
+            requested_session_id = str(session_id or "").strip() or resolve_window_tracker_dashboard_session_id(None)
+            active_mode = normalize_view_mode(mode)
+            cache_signature = _compact_live_state_response_cache_signature(requested_session_id)
+            cache_key = (requested_session_id, active_mode, cache_signature)
+            now_epoch = time.time()
+            if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
+                with _LIVE_STATE_V3_CACHE_LOCK:
+                    cached = _COMPACT_LIVE_STATE_RESPONSE_CACHE.get(cache_key)
+                    if cached and now_epoch - cached[0] <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
+                        return _refresh_compact_cached_live_state(
+                            dict(cached[1]),
+                            requested_session_id,
+                            now_epoch=now_epoch,
+                        )
+            live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=True)
+            compact_response = compact_live_state_response(live_state)
+            if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
+                with _LIVE_STATE_V3_CACHE_LOCK:
+                    for stale_key in [
+                        key
+                        for key in _COMPACT_LIVE_STATE_RESPONSE_CACHE
+                        if key[0] == requested_session_id and key[1] == active_mode and key != cache_key
+                    ]:
+                        _COMPACT_LIVE_STATE_RESPONSE_CACHE.pop(stale_key, None)
+                    _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_response))
+            return compact_response
         live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=compact)
-        return compact_live_state_response(live_state) if compact else live_state
+        return live_state
 
     @app.get("/v1/mobile/live/state/v3")
     def live_state_v3(session_id: str | None = None, mode: str = "CLEAN_LIVE", compact: bool = False) -> dict[str, object]:
+        if compact:
+            requested_session_id = session_id or resolve_window_tracker_dashboard_session_id(None)
+            return live_state_v3_for_session(requested_session_id, mode=mode, compact=True)
         live_state = build_live_state_v3_for_session(
             session_id or resolve_window_tracker_dashboard_session_id(None),
             overlay_mode=mode,
             compact_public=compact,
         )
-        return compact_live_state_response(live_state) if compact else live_state
+        return live_state
 
     def _performance_trace_overlay_count(trace: Mapping[str, object] | None) -> int:
         if not isinstance(trace, Mapping):
@@ -1793,6 +2155,7 @@ def create_app(
             "frontend_heartbeat": frontend_heartbeat,
         }
         trace = cast(dict[str, object], build_performance_trace_v3(live_state, now_epoch=now_epoch))
+        trace["frame_id"] = int(frame_timing.get("display_frame_id") or live_state["frame_id"] or 0)
         _store_direct_performance_trace_cache(requested_session_id, trace, now_epoch=now_epoch)
         return trace
 
@@ -1807,6 +2170,28 @@ def create_app(
             except Exception:
                 canonical_trace = None
             if canonical_trace is not None and _performance_trace_overlay_count(canonical_trace) > 0:
+                direct_frame_id = int(
+                    direct_trace.get("frame_id")
+                    or _mapping_to_plain_dict(direct_trace.get("display_frame")).get("frame_id")
+                    or 0
+                )
+                canonical_frame_id = int(
+                    canonical_trace.get("frame_id")
+                    or _mapping_to_plain_dict(canonical_trace.get("display_frame")).get("frame_id")
+                    or 0
+                )
+                if direct_frame_id > canonical_frame_id:
+                    canonical_trace = dict(canonical_trace)
+                    canonical_trace["frame_id"] = direct_frame_id
+                    direct_display = _mapping_to_plain_dict(direct_trace.get("display_frame"))
+                    if direct_display:
+                        canonical_trace["display_frame"] = direct_display
+                    direct_timing = _mapping_to_plain_dict(direct_trace.get("timing_trace"))
+                    if direct_timing:
+                        canonical_trace["timing_trace"] = direct_timing
+                    direct_visual = _mapping_to_plain_dict(direct_trace.get("visual_health"))
+                    if direct_visual:
+                        canonical_trace["visual_health"] = direct_visual
                 _store_direct_performance_trace_cache(session_id, canonical_trace, now_epoch=time.time())
                 return canonical_trace
             return direct_trace
@@ -2891,7 +3276,7 @@ def create_app(
 
     @app.get("/v1/mobile/visual/health/v3/{session_id}")
     def visual_health_v3_for_session(session_id: str) -> dict[str, object]:
-        live_state = build_live_state_v3_for_session(session_id)
+        live_state = live_state_v3_for_session(session_id, mode="CLEAN_LIVE", compact=True)
         visual_health_payload = _mapping_to_plain_dict(live_state.get("visual_health_v3") or live_state.get("visual_health"))
         heartbeat = latest_frontend_heartbeat(str(live_state.get("session_id", session_id) or session_id))
         realtime = build_visual_realtime_health(
