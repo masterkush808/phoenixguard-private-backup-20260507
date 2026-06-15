@@ -1666,6 +1666,7 @@ def create_app(
             "overlay_frame_state_version",
             "requested_mode",
             "active_mode",
+            "visible_layers",
             "overlay_count",
             "renderable_count",
             "hidden_count",
@@ -1677,6 +1678,7 @@ def create_app(
                 compact[scalar_key] = value
         for status_key in (
             "provider_status",
+            "overlay_mode",
             "shooter_state",
             "model_state",
             "visual_health_v3",
