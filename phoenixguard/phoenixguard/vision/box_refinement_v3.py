@@ -56,6 +56,7 @@ DISPLAY_STATES = {
     "FOCUS_EXPANDED",
 }
 TRENDLINE_TYPES = {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"}
+ALWAYS_LABEL_TYPES = ZONE_TYPES | TRENDLINE_TYPES
 HISTORY_TYPES = {"PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"}
 STRUCTURE_TYPES = {"IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX"}
 EXECUTION_FOCUS_TYPES = {"SNIPER_ENTRY_BOX", "RETEST_BOX", "TARGET_ZONE_BOX"}
@@ -585,14 +586,14 @@ def _style_for_display_state(row: Mapping[str, Any], display_state: str, visual_
         "INSPECTOR_ONLY_LABEL": 0.018,
     }
     border_by_state = {
-        "FULL": 1.45,
-        "FOCUS_EXPANDED": 1.70,
-        "COMPACT": 1.00,
-        "GROUPED": 0.95,
-        "NESTED": 0.90,
-        "GHOSTED": 0.80,
-        "ICON_ONLY": 0.75,
-        "INSPECTOR_ONLY_LABEL": 0.75,
+        "FULL": 1.90,
+        "FOCUS_EXPANDED": 2.15,
+        "COMPACT": 1.45,
+        "GROUPED": 1.45,
+        "NESTED": 1.35,
+        "GHOSTED": 1.05,
+        "ICON_ONLY": 0.95,
+        "INSPECTOR_ONLY_LABEL": 0.95,
     }
     label_mode = {
         "FULL": "full",
@@ -635,10 +636,10 @@ def _display_state_for_row(row: Mapping[str, Any], mode: str, current_side: str)
     if _text(row.get("parent_overlay_id")) or _float(row.get("nesting_depth"), 0.0) > 0.0:
         return "NESTED", max(0.42, min(0.68, truth * 0.38 + 0.28)), "nested child overlay remains visible inside parent context"
     if overlay_type in ZONE_TYPES:
-        state = "COMPACT" if truth >= 0.62 else "GHOSTED"
-        return state, max(0.34, min(0.68, truth * 0.44 + 0.22)), "supply-demand context uses proportional visual weight"
+        state = "COMPACT" if truth >= 0.35 else "GHOSTED"
+        return state, max(0.46, min(0.76, truth * 0.42 + 0.34)), "supply-demand context stays readable with proportional visual weight"
     if overlay_type in TRENDLINE_TYPES:
-        return "COMPACT", max(0.45, min(0.72, truth * 0.40 + 0.30)), "support-resistance trendline stays separate from zones"
+        return "COMPACT", max(0.54, min(0.80, truth * 0.42 + 0.36)), "support-resistance trendline stays separate from zones"
     if overlay_type in STRUCTURE_TYPES:
         return "COMPACT", max(0.38, min(0.64, truth * 0.38 + 0.24)), "structure overlay remains readable without dominating active execution"
     if overlay_type in HISTORY_TYPES:
@@ -708,8 +709,17 @@ def _apply_adaptive_label_policy(rows: Sequence[Mapping[str, Any]], mode: str) -
         overlay_type = str(row.get("type") or "")
         label = _text(row.get("display_label") or row.get("short_label") or row.get("label"))
         hidden_by_state = display_state in {"GHOSTED", "ICON_ONLY", "INSPECTOR_ONLY_LABEL"}
-        hidden_by_budget = index not in keep_indexes and index in {candidate[2] for candidate in candidates}
-        long_low_weight_label = len(label) > 24 and _float(row.get("visual_weight"), 0.0) < 0.75
+        label_priority_type = overlay_type in ALWAYS_LABEL_TYPES
+        hidden_by_budget = (
+            not label_priority_type
+            and index not in keep_indexes
+            and index in {candidate[2] for candidate in candidates}
+        )
+        long_low_weight_label = (
+            not label_priority_type
+            and len(label) > 24
+            and _float(row.get("visual_weight"), 0.0) < 0.75
+        )
         if overlay_type == "CURRENT_CANDLE" and normalize_view_mode(mode) == "CLEAN_LIVE":
             row["label_hidden"] = True
             row["label_anchor"] = "hidden"

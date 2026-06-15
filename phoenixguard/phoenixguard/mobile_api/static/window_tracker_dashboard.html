@@ -928,10 +928,10 @@
       min-width: 28px;
       min-height: 28px;
       padding: 0;
-      border: 1px solid rgba(242, 200, 102, 0.80);
+      border: 1.25px solid rgba(242, 200, 102, 0.88);
       border-radius: 4px;
       background: rgba(242, 200, 102, 0.075);
-      box-shadow: inset 0 0 24px rgba(242, 200, 102, 0.10), 0 0 20px rgba(242, 200, 102, 0.12);
+      box-shadow: inset 0 0 24px rgba(242, 200, 102, 0.12), 0 0 20px rgba(242, 200, 102, 0.16);
       opacity: var(--overlay-opacity, 0.82);
       pointer-events: auto;
       transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
@@ -966,9 +966,23 @@
     }
 
     .surface-hotspot.layer-supply-demand {
-      border-color: rgba(242, 200, 102, 0.54);
+      border-color: rgba(242, 200, 102, 0.76);
       background: rgba(242, 200, 102, 0.045);
-      box-shadow: inset 0 0 16px rgba(242, 200, 102, 0.08);
+      box-shadow: inset 0 0 16px rgba(242, 200, 102, 0.11), 0 0 14px rgba(242, 200, 102, 0.08);
+    }
+
+    .surface-hotspot.layer-supply-demand.buy,
+    .surface-hotspot.layer-supply-demand[data-semantic-family="buy"] {
+      border-color: rgba(80, 239, 157, 0.94);
+      background: rgba(80, 239, 157, 0.050);
+      box-shadow: inset 0 0 16px rgba(80, 239, 157, 0.11), 0 0 14px rgba(80, 239, 157, 0.10);
+    }
+
+    .surface-hotspot.layer-supply-demand.sell,
+    .surface-hotspot.layer-supply-demand[data-semantic-family="sell"] {
+      border-color: rgba(255, 135, 82, 0.94);
+      background: rgba(255, 135, 82, 0.052);
+      box-shadow: inset 0 0 16px rgba(255, 135, 82, 0.11), 0 0 14px rgba(255, 135, 82, 0.10);
     }
 
     .surface-hotspot.layer-trigger-zones {
@@ -1012,24 +1026,24 @@
     .surface-hotspot.display-full,
     .surface-hotspot.display-focus-expanded {
       opacity: var(--overlay-opacity, 0.96);
-      border-width: var(--overlay-border-width, 1.4px);
+      border-width: var(--overlay-border-width, 1.9px);
     }
 
     .surface-hotspot.display-compact {
       opacity: var(--overlay-opacity, 0.74);
-      border-width: var(--overlay-border-width, 1px);
+      border-width: var(--overlay-border-width, 1.45px);
     }
 
     .surface-hotspot.display-grouped {
       opacity: var(--overlay-opacity, 0.68);
-      border-width: var(--overlay-border-width, 1px);
+      border-width: var(--overlay-border-width, 1.45px);
       box-shadow: inset 0 0 0 1px rgba(242, 200, 102, 0.12);
     }
 
     .surface-hotspot.display-nested {
       opacity: var(--overlay-opacity, 0.64);
       border-style: dashed;
-      border-width: var(--overlay-border-width, 1px);
+      border-width: var(--overlay-border-width, 1.35px);
       box-shadow: none;
     }
 
@@ -1038,7 +1052,7 @@
     .surface-hotspot.display-inspector-only-label {
       opacity: var(--overlay-opacity, 0.42);
       border-style: dotted;
-      border-width: var(--overlay-border-width, 1px);
+      border-width: var(--overlay-border-width, 1.05px);
       box-shadow: none;
     }
 
@@ -1053,24 +1067,24 @@
 
     .surface-trendline {
       fill: none;
-      stroke: rgba(242, 200, 102, 0.78);
-      stroke-width: 2.1;
+      stroke: rgba(242, 200, 102, 0.92);
+      stroke-width: 2.55;
       stroke-linecap: round;
       stroke-linejoin: round;
       vector-effect: non-scaling-stroke;
-      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.74));
+      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.86)) drop-shadow(0 0 4px rgba(242, 200, 102, 0.14));
     }
 
     .surface-trendline.trendline-support {
-      stroke: rgba(99, 224, 154, 0.88);
+      stroke: rgba(80, 239, 157, 0.98);
     }
 
     .surface-trendline.trendline-resistance {
-      stroke: rgba(255, 101, 79, 0.86);
+      stroke: rgba(255, 104, 79, 0.98);
     }
 
     .surface-trendline.trendline-inner {
-      stroke: rgba(107, 200, 255, 0.82);
+      stroke: rgba(111, 211, 255, 0.96);
       stroke-dasharray: 8 5;
     }
 
@@ -1117,21 +1131,33 @@
     .surface-hotspot span {
       position: absolute;
       left: -1px;
-      top: -25px;
-      max-width: min(220px, 34vw);
-      padding: 5px 7px;
+      top: -21px;
+      max-width: min(150px, 26vw);
+      padding: 3px 5px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      border: 1px solid rgba(242, 200, 102, 0.32);
+      border: 1px solid rgba(242, 200, 102, 0.44);
       border-radius: 4px;
-      background: rgba(8, 8, 6, 0.86);
+      background: rgba(8, 8, 6, 0.90);
       color: var(--gold);
       font-family: var(--mono);
-      font-size: 9px;
+      font-size: 7.5px;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
-      opacity: 0.82;
+      letter-spacing: 0.05em;
+      opacity: 0.90;
+    }
+
+    .surface-hotspot.layer-supply-demand.buy span,
+    .surface-hotspot.layer-supply-demand[data-semantic-family="buy"] span {
+      border-color: rgba(80, 239, 157, 0.42);
+      color: rgb(158, 255, 205);
+    }
+
+    .surface-hotspot.layer-supply-demand.sell span,
+    .surface-hotspot.layer-supply-demand[data-semantic-family="sell"] span {
+      border-color: rgba(255, 135, 82, 0.44);
+      color: rgb(255, 190, 150);
     }
 
     .surface-hotspot.label-hidden span {
@@ -1141,15 +1167,15 @@
     .surface-hotspot.display-compact span,
     .surface-hotspot.display-nested span,
     .surface-hotspot.display-grouped span {
-      max-width: min(160px, 28vw);
-      padding: 4px 6px;
-      font-size: 8px;
-      opacity: 0.78;
+      max-width: min(122px, 22vw);
+      padding: 2px 5px;
+      font-size: 7px;
+      opacity: 0.86;
     }
 
     .surface-hotspot.display-full span,
     .surface-hotspot.display-focus-expanded span {
-      opacity: 0.94;
+      opacity: 0.96;
     }
 
     .surface-hotspot.display-ghosted span,
@@ -6327,6 +6353,12 @@
       return Math.max(0.05, Math.min(1, raw));
     }
 
+    function overlaySemanticFamily(box = {}) {
+      const style = objectOrEmpty(box.style);
+      const raw = clean(style.semantic_family || box.semantic_family || "", "").toLowerCase();
+      return raw.replace(/[^a-z0-9_-]/g, "");
+    }
+
     function overlayLabelHiddenByDisplayState(box = {}) {
       const displayState = overlayDisplayState(box);
       return ["GHOSTED", "ICON_ONLY", "INSPECTOR_ONLY_LABEL"].includes(displayState)
@@ -6349,25 +6381,32 @@
         INSPECTOR_ONLY_LABEL: 0.40,
       }[displayState] ?? 0.72;
       const borderFallback = {
-        FULL: 1.45,
-        FOCUS_EXPANDED: 1.7,
-        COMPACT: 1,
-        GROUPED: 1,
-        NESTED: 0.95,
-        GHOSTED: 0.8,
-        ICON_ONLY: 0.75,
-        INSPECTOR_ONLY_LABEL: 0.75,
-      }[displayState] ?? 1;
+        FULL: 1.9,
+        FOCUS_EXPANDED: 2.15,
+        COMPACT: 1.45,
+        GROUPED: 1.45,
+        NESTED: 1.35,
+        GHOSTED: 1.05,
+        ICON_ONLY: 0.95,
+        INSPECTOR_ONLY_LABEL: 0.95,
+      }[displayState] ?? 1.35;
       return {
         opacity: Math.max(0.18, Math.min(1, Number(style.opacity ?? opacityFallback) || opacityFallback)),
-        borderWidth: Math.max(0.5, Math.min(2, Number(style.border_width ?? borderFallback) || borderFallback)),
+        borderWidth: Math.max(0.75, Math.min(3, Number(style.border_width ?? borderFallback) || borderFallback)),
         fillOpacity: Math.max(0, Math.min(0.16, Number(style.fill_opacity ?? (0.03 + weight * 0.04)) || 0.04)),
       };
     }
 
     function applyOverlayDisplayStyle(node, box = {}, displayState = overlayDisplayState(box)) {
       const styleVars = overlayStyleVars(box);
+      const semanticFamily = overlaySemanticFamily(box);
       node.classList.add(overlayDisplayClassName(displayState));
+      if (semanticFamily) {
+        node.classList.add(`semantic-${semanticFamily}`);
+        node.dataset.semanticFamily = semanticFamily;
+      } else {
+        delete node.dataset.semanticFamily;
+      }
       node.dataset.displayState = displayState;
       node.dataset.visualWeight = overlayVisualWeight(box).toFixed(2);
       node.dataset.labelLane = clean(box.label_lane || box.label_anchor, "");
@@ -6380,12 +6419,12 @@
       const displayState = overlayDisplayState(box);
       const weight = overlayVisualWeight(box);
       if (displayState === "FULL" || displayState === "FOCUS_EXPANDED") {
-        return Math.max(2, Math.min(3.2, 1.8 + weight));
+        return Math.max(2.55, Math.min(3.8, 2.25 + weight));
       }
       if (displayState === "GHOSTED" || displayState === "INSPECTOR_ONLY_LABEL") {
-        return 1.25;
+        return 1.65;
       }
-      return Math.max(1.4, Math.min(2.4, 1.3 + weight));
+      return Math.max(1.95, Math.min(3.15, 1.75 + weight));
     }
 
     function resolveOverlayLabelBounds(box, tracking, image) {
