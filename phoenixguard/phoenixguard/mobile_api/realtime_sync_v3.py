@@ -17,6 +17,8 @@ VISUAL_HEALTH_SCHEMA_VERSION = "PG_VISUAL_HEALTH_V3"
 DEFAULT_HEARTBEAT_STORE_DIR = Path(".codex_runtime") / "frontend_heartbeat_v3"
 _HEARTBEAT_WRITE_LOCKS: dict[Path, Lock] = {}
 _HEARTBEAT_WRITE_LOCKS_GUARD = Lock()
+_HEARTBEAT_MEMORY_CACHE: dict[Path, dict[str, Any]] = {}
+_HEARTBEAT_MEMORY_CACHE_GUARD = Lock()
 
 
 def _heartbeat_write_lock(path: Path) -> Lock:
@@ -27,6 +29,36 @@ def _heartbeat_write_lock(path: Path) -> Lock:
             lock = Lock()
             _HEARTBEAT_WRITE_LOCKS[key] = lock
         return lock
+
+
+def _remember_heartbeat(path: Path, heartbeat: Mapping[str, Any]) -> None:
+    cached = dict(heartbeat)
+    cached["path"] = str(path)
+    with _HEARTBEAT_MEMORY_CACHE_GUARD:
+        _HEARTBEAT_MEMORY_CACHE[path.absolute()] = cached
+
+
+def _forget_heartbeat(path: Path) -> None:
+    with _HEARTBEAT_MEMORY_CACHE_GUARD:
+        _HEARTBEAT_MEMORY_CACHE.pop(path.absolute(), None)
+
+
+def _cached_heartbeat(path: Path, *, max_age_sec: float = 30.0) -> dict[str, Any] | None:
+    with _HEARTBEAT_MEMORY_CACHE_GUARD:
+        cached = _HEARTBEAT_MEMORY_CACHE.get(path.absolute())
+        if cached is None:
+            return None
+        heartbeat = dict(cached)
+    received_at_ms = _float(heartbeat.get("received_at_ms"), 0.0)
+    if received_at_ms <= 0.0:
+        return None
+    age_sec = max(0.0, (time.time() * 1000.0 - received_at_ms) / 1000.0)
+    if age_sec > max_age_sec:
+        _forget_heartbeat(path)
+        return None
+    heartbeat["path"] = str(path)
+    heartbeat.setdefault("write_status", "MEMORY_FALLBACK")
+    return heartbeat
 
 
 def _now_iso_from_ms(now_ms: int | float | None = None) -> str:
@@ -113,25 +145,30 @@ def record_frontend_heartbeat(
         store_dir=store_dir,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat["path"] = str(path)
     with _heartbeat_write_lock(path):
         tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
         try:
             tmp_path.write_text(json.dumps(heartbeat, indent=2, sort_keys=True), encoding="utf-8")
-            for attempt in range(5):
+            replace_error = ""
+            for attempt in range(12):
                 try:
                     os.replace(tmp_path, path)
+                    _remember_heartbeat(path, heartbeat)
                     break
-                except PermissionError:
-                    if attempt >= 4:
-                        raise
-                    time.sleep(0.02 * float(attempt + 1))
+                except PermissionError as exc:
+                    replace_error = str(exc)
+                    time.sleep(min(0.25, 0.02 * float(attempt + 1)))
+            else:
+                heartbeat["write_status"] = "DEGRADED_MEMORY_ONLY"
+                heartbeat["write_error"] = replace_error or "heartbeat file replace permission denied"
+                _remember_heartbeat(path, heartbeat)
         finally:
             try:
                 if tmp_path.exists():
                     tmp_path.unlink()
             except OSError:
                 pass
-    heartbeat["path"] = str(path)
     return heartbeat
 
 
@@ -143,20 +180,21 @@ def latest_frontend_heartbeat(
 ) -> dict[str, Any] | None:
     path = _heartbeat_path(session_id, surface_id=surface_id, store_dir=store_dir)
     if not path.exists():
-        return None
+        return _cached_heartbeat(path)
     try:
         if path.stat().st_size <= 0:
-            return None
+            return _cached_heartbeat(path)
     except OSError:
-        return None
+        return _cached_heartbeat(path)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        return _cached_heartbeat(path)
     if not isinstance(payload, Mapping):
-        return None
+        return _cached_heartbeat(path)
     heartbeat = dict(cast(Mapping[str, Any], payload))
     heartbeat["path"] = str(path)
+    _remember_heartbeat(path, heartbeat)
     return heartbeat
 
 
@@ -180,6 +218,7 @@ def prune_frontend_heartbeats(
         if age_sec > max_age_sec:
             try:
                 path.unlink()
+                _forget_heartbeat(path)
                 removed += 1
             except OSError:
                 pass

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import time
 
+from phoenixguard.mobile_api import realtime_sync_v3
 from phoenixguard.mobile_api.realtime_sync_v3 import (
     FRONTEND_HEARTBEAT_SCHEMA_VERSION,
     build_frontend_sync_status,
@@ -68,6 +70,33 @@ def test_record_frontend_heartbeat_uses_unique_temp_files_under_concurrency(tmp_
     assert sorted(written) == list(range(40))
     assert latest_frontend_heartbeat("pocket-live-8788", surface_id="dashboard", store_dir=tmp_path) is not None
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_record_frontend_heartbeat_falls_back_to_memory_when_replace_is_locked(tmp_path, monkeypatch) -> None:
+    def locked_replace(_source, _target) -> None:
+        raise PermissionError("simulated locked heartbeat target")
+
+    monkeypatch.setattr(realtime_sync_v3.os, "replace", locked_replace)
+    heartbeat = record_frontend_heartbeat(
+        {
+            "session_id": "locked-heartbeat",
+            "surface_id": "dashboard",
+            "route": "/dashboard",
+            "frame_id": 99,
+            "rendered_frame_id": 99,
+            "overlay_count": 7,
+        },
+        store_dir=tmp_path,
+        now_ms=time.time() * 1000.0,
+    )
+
+    assert heartbeat["write_status"] == "DEGRADED_MEMORY_ONLY"
+    assert heartbeat["frame_id"] == 99
+    assert not list(tmp_path.glob("*.tmp"))
+    loaded = latest_frontend_heartbeat("locked-heartbeat", surface_id="dashboard", store_dir=tmp_path)
+    assert loaded is not None
+    assert loaded["frame_id"] == 99
+    assert loaded["overlay_count"] == 7
 
 
 def test_build_frontend_sync_status_flags_mismatch(tmp_path) -> None:
