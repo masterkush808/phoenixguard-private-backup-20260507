@@ -36,7 +36,7 @@ DEFAULT_LAYER_VISIBILITY: dict[str, bool] = {
     "invalidation": True,
     "prediction_path": False,
     "active_council_decision": True,
-    "historical_replay": False,
+    "historical_replay": True,
     "broker_controls": False,
     "diagnostics": False,
 }
@@ -699,7 +699,10 @@ def _apply_live_default_visibility(boxes: Sequence[Mapping[str, Any]], active_si
     for row in rows:
         layer = str(row.get("layer", "") or "")
         key = str(row.get("key", "") or "").strip().lower()
-        row["visible_default"] = layer in {"chart_bounds", "recent_candles", "active_council_decision"} or key == "current"
+        row["visible_default"] = (
+            layer in {"chart_bounds", "recent_candles", "active_council_decision", "historical_replay"}
+            or key == "current"
+        )
 
     supply_rows = [row for row in rows if str(row.get("layer", "") or "") == "supply_demand"]
     supports = [row for row in supply_rows if str(row.get("role", row.get("kind", "")) or "").lower() in {"support", "demand"}]

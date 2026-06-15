@@ -73,6 +73,55 @@ def test_overlay_broker_panel_is_not_accepted_as_chart_zone() -> None:
     assert panel_only is None
 
 
+def test_overlay_geometry_tightens_micro_windows_and_level_lines_against_exclusions() -> None:
+    prepared = prepare_overlay_geometry(
+        {
+            "structure_boxes": [
+                {
+                    "key": "current",
+                    "label": "CURRENT",
+                    "direction": "SELL",
+                    "bbox": [880, 140, 1160, 420],
+                    "start_point": [890, 390],
+                    "end_point": [1138, 210],
+                    "sniper_window": [40, 176, 1180, 252],
+                    "trigger_window": [32, 292, 1190, 366],
+                    "confidence": 0.83,
+                }
+            ],
+            "support_resistance_zones": [
+                {
+                    "key": "wide_resistance",
+                    "role": "resistance",
+                    "label": "WIDE RESISTANCE",
+                    "bbox": [120, 156, 1080, 232],
+                    "line_y": 194,
+                    "line_x0": 0,
+                    "line_x1": 1180,
+                    "confidence": 0.76,
+                }
+            ],
+        },
+        {"action": "SELL"},
+        chart_size=[1200, 700],
+        broker_exclusion_boxes=[[1040, 0, 1200, 700]],
+    )
+
+    current = next(box for box in prepared["tracking_summary"]["structure_boxes"] if box["key"] == "current")
+    sniper = current["sniper_window"]
+    trigger = current["trigger_window"]
+    assert sniper[2] - sniper[0] <= 1200 * 0.22 + 1
+    assert trigger[2] - trigger[0] <= 1200 * 0.22 + 1
+    assert sniper[2] <= 1040
+    assert trigger[2] <= 1040
+
+    zone = prepared["tracking_summary"]["support_resistance_zones"][0]
+    assert zone["bbox"][2] <= 1040
+    assert zone["line_x0"] == zone["bbox"][0]
+    assert zone["line_x1"] == zone["bbox"][2]
+    assert zone["visible_default"] is True
+
+
 def test_overlay_rejects_box_area_above_layer_max() -> None:
     oversized = {
         "key": "support_fullscreen",
@@ -142,7 +191,7 @@ def test_overlay_zone_requires_structural_anchor() -> None:
     )
 
 
-def test_overlay_active_live_view_hides_historical_replay_by_default() -> None:
+def test_overlay_active_live_view_shows_historical_replay_by_default() -> None:
     prepared = prepare_overlay_geometry(
         {
             "tracked_candles": [
@@ -167,10 +216,10 @@ def test_overlay_active_live_view_hides_historical_replay_by_default() -> None:
     geometry = prepared["overlay_geometry"]
     historical = [box for box in geometry["boxes"] if box["layer"] == "historical_replay"]
 
-    assert DEFAULT_LAYER_VISIBILITY["historical_replay"] is False
-    assert geometry["layer_visibility"]["historical_replay"] is False
+    assert DEFAULT_LAYER_VISIBILITY["historical_replay"] is True
+    assert geometry["layer_visibility"]["historical_replay"] is True
     assert historical
-    assert all(box["visible_default"] is False for box in historical)
+    assert all(box["visible_default"] is True for box in historical)
 
 
 def test_overlay_cancel_line_stays_near_trigger_zone_not_full_chart(monkeypatch: Any) -> None:
@@ -247,6 +296,57 @@ def test_live_overlay_does_not_draw_prediction_path(monkeypatch: Any) -> None:
     }
 
     adapter._render_overlay(image, [0, 0, 320, 220], tracking_summary, {"action": "SELL"})  # noqa: SLF001
+
+
+def test_live_overlay_renderer_honors_visible_default_for_hidden_layers(monkeypatch: Any) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    image = Image.new("RGB", (320, 220), (8, 12, 18))
+    canvas = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    hidden_zone = {
+        "key": "hidden_support",
+        "role": "support",
+        "bbox": [40, 140, 220, 168],
+        "line_y": 154,
+        "line_x0": 40,
+        "line_x1": 220,
+        "confidence": 0.8,
+        "visible_default": False,
+    }
+
+    before = canvas.tobytes()
+    adapter._draw_support_resistance_layer(  # noqa: SLF001
+        draw,
+        [hidden_zone],
+        chart_box=[0, 0, 320, 220],
+        offset=(0, 0),
+        font=_overlay_font(12),
+        require_visible_default=True,
+    )
+    assert canvas.tobytes() == before
+
+    def fail_structure_draw(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("hidden structure boxes must not be rendered in live mode")
+
+    monkeypatch.setattr(adapter, "_draw_structure_box", fail_structure_draw)
+    adapter._render_overlay(  # noqa: SLF001
+        image,
+        [0, 0, 320, 220],
+        {
+            "tracked_candles": [],
+            "support_resistance_zones": [hidden_zone],
+            "structure_boxes": [
+                {
+                    "key": "local",
+                    "layer": "local_swings",
+                    "bbox": [30, 60, 260, 190],
+                    "visible_default": False,
+                }
+            ],
+            "overlay_geometry": {"layer_visibility": {"supply_demand": True, "local_swings": True}},
+        },
+        {"action": "HOLD"},
+    )
 
 
 def test_overlay_geometry_keeps_prediction_zones_out_of_live_boxes() -> None:
@@ -402,7 +502,7 @@ def test_dashboard_exposes_layer_controls_latency_and_nonblocking_health() -> No
         "diagnostics",
     ):
         assert layer_name in dashboard_html
-    assert "historical_replay: false" in dashboard_html
+    assert "historical_replay: true" in dashboard_html
     assert "latency-pipeline" in dashboard_html
     assert "latency-overlay" in dashboard_html
     assert "model-health-panel" in dashboard_html

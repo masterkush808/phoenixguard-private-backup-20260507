@@ -5,14 +5,28 @@ import json
 import os
 from pathlib import Path
 import re
+from threading import Lock
 import time
 from typing import Any, Mapping, cast
+from uuid import uuid4
 
 
 FRONTEND_HEARTBEAT_SCHEMA_VERSION = "PG_FRONTEND_HEARTBEAT_V3"
 VISUAL_HEALTH_SCHEMA_VERSION = "PG_VISUAL_HEALTH_V3"
 
 DEFAULT_HEARTBEAT_STORE_DIR = Path(".codex_runtime") / "frontend_heartbeat_v3"
+_HEARTBEAT_WRITE_LOCKS: dict[Path, Lock] = {}
+_HEARTBEAT_WRITE_LOCKS_GUARD = Lock()
+
+
+def _heartbeat_write_lock(path: Path) -> Lock:
+    key = path.absolute()
+    with _HEARTBEAT_WRITE_LOCKS_GUARD:
+        lock = _HEARTBEAT_WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = Lock()
+            _HEARTBEAT_WRITE_LOCKS[key] = lock
+        return lock
 
 
 def _now_iso_from_ms(now_ms: int | float | None = None) -> str:
@@ -99,9 +113,24 @@ def record_frontend_heartbeat(
         store_dir=store_dir,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    tmp_path.write_text(json.dumps(heartbeat, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp_path, path)
+    with _heartbeat_write_lock(path):
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(json.dumps(heartbeat, indent=2, sort_keys=True), encoding="utf-8")
+            for attempt in range(5):
+                try:
+                    os.replace(tmp_path, path)
+                    break
+                except PermissionError:
+                    if attempt >= 4:
+                        raise
+                    time.sleep(0.02 * float(attempt + 1))
+        finally:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
     heartbeat["path"] = str(path)
     return heartbeat
 

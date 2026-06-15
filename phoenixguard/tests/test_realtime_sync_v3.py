@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 from phoenixguard.mobile_api.realtime_sync_v3 import (
     FRONTEND_HEARTBEAT_SCHEMA_VERSION,
     build_frontend_sync_status,
@@ -41,6 +43,31 @@ def test_record_and_load_frontend_heartbeat(tmp_path) -> None:
     assert loaded is not None
     assert loaded["frame_id"] == 12
     assert loaded["overlay_count"] == 4
+
+
+def test_record_frontend_heartbeat_uses_unique_temp_files_under_concurrency(tmp_path) -> None:
+    def write_heartbeat(frame_id: int) -> int:
+        heartbeat = record_frontend_heartbeat(
+            {
+                "session_id": "pocket-live-8788",
+                "surface_id": "dashboard",
+                "route": "/dashboard",
+                "frame_id": frame_id,
+                "rendered_frame_id": frame_id,
+                "chart_transform_id": f"ct_{frame_id}",
+                "overlay_count": frame_id % 5,
+            },
+            store_dir=tmp_path,
+            now_ms=1_000_000 + frame_id,
+        )
+        return int(heartbeat["frame_id"])
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        written = list(pool.map(write_heartbeat, range(40)))
+
+    assert sorted(written) == list(range(40))
+    assert latest_frontend_heartbeat("pocket-live-8788", surface_id="dashboard", store_dir=tmp_path) is not None
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_build_frontend_sync_status_flags_mismatch(tmp_path) -> None:
