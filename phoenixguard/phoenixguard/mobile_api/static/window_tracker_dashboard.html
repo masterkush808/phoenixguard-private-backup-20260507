@@ -928,10 +928,10 @@
       min-width: 28px;
       min-height: 28px;
       padding: 0;
-      border: 1.25px solid rgba(242, 200, 102, 0.88);
+      border: 1.70px solid rgba(242, 200, 102, 0.92);
       border-radius: 4px;
       background: rgba(242, 200, 102, 0.075);
-      box-shadow: inset 0 0 24px rgba(242, 200, 102, 0.12), 0 0 20px rgba(242, 200, 102, 0.16);
+      box-shadow: inset 0 0 24px rgba(242, 200, 102, 0.14), 0 0 20px rgba(242, 200, 102, 0.20);
       opacity: var(--overlay-opacity, 0.82);
       pointer-events: auto;
       transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
@@ -966,23 +966,27 @@
     }
 
     .surface-hotspot.layer-supply-demand {
-      border-color: rgba(242, 200, 102, 0.76);
+      border-color: rgba(242, 200, 102, 0.90);
       background: rgba(242, 200, 102, 0.045);
-      box-shadow: inset 0 0 16px rgba(242, 200, 102, 0.11), 0 0 14px rgba(242, 200, 102, 0.08);
+      box-shadow: inset 0 0 16px rgba(242, 200, 102, 0.14), 0 0 14px rgba(242, 200, 102, 0.12);
     }
 
     .surface-hotspot.layer-supply-demand.buy,
-    .surface-hotspot.layer-supply-demand[data-semantic-family="buy"] {
-      border-color: rgba(80, 239, 157, 0.94);
-      background: rgba(80, 239, 157, 0.050);
-      box-shadow: inset 0 0 16px rgba(80, 239, 157, 0.11), 0 0 14px rgba(80, 239, 157, 0.10);
+    .surface-hotspot.layer-supply-demand.semantic-demand,
+    .surface-hotspot.layer-supply-demand[data-semantic-family="buy"],
+    .surface-hotspot.layer-supply-demand[data-semantic-family="demand"] {
+      border-color: rgba(42, 255, 155, 0.98);
+      background: rgba(42, 255, 155, 0.058);
+      box-shadow: inset 0 0 18px rgba(42, 255, 155, 0.14), 0 0 18px rgba(42, 255, 155, 0.16);
     }
 
     .surface-hotspot.layer-supply-demand.sell,
-    .surface-hotspot.layer-supply-demand[data-semantic-family="sell"] {
-      border-color: rgba(255, 135, 82, 0.94);
-      background: rgba(255, 135, 82, 0.052);
-      box-shadow: inset 0 0 16px rgba(255, 135, 82, 0.11), 0 0 14px rgba(255, 135, 82, 0.10);
+    .surface-hotspot.layer-supply-demand.semantic-supply,
+    .surface-hotspot.layer-supply-demand[data-semantic-family="sell"],
+    .surface-hotspot.layer-supply-demand[data-semantic-family="supply"] {
+      border-color: rgba(255, 89, 72, 0.98);
+      background: rgba(255, 89, 72, 0.056);
+      box-shadow: inset 0 0 18px rgba(255, 89, 72, 0.14), 0 0 18px rgba(255, 89, 72, 0.16);
     }
 
     .surface-hotspot.layer-trigger-zones {
@@ -1026,24 +1030,24 @@
     .surface-hotspot.display-full,
     .surface-hotspot.display-focus-expanded {
       opacity: var(--overlay-opacity, 0.96);
-      border-width: var(--overlay-border-width, 1.9px);
+      border-width: var(--overlay-border-width, 2.45px);
     }
 
     .surface-hotspot.display-compact {
       opacity: var(--overlay-opacity, 0.74);
-      border-width: var(--overlay-border-width, 1.45px);
+      border-width: var(--overlay-border-width, 2.05px);
     }
 
     .surface-hotspot.display-grouped {
       opacity: var(--overlay-opacity, 0.68);
-      border-width: var(--overlay-border-width, 1.45px);
+      border-width: var(--overlay-border-width, 1.95px);
       box-shadow: inset 0 0 0 1px rgba(242, 200, 102, 0.12);
     }
 
     .surface-hotspot.display-nested {
       opacity: var(--overlay-opacity, 0.64);
       border-style: dashed;
-      border-width: var(--overlay-border-width, 1.35px);
+      border-width: var(--overlay-border-width, 1.80px);
       box-shadow: none;
     }
 
@@ -1052,7 +1056,7 @@
     .surface-hotspot.display-inspector-only-label {
       opacity: var(--overlay-opacity, 0.42);
       border-style: dotted;
-      border-width: var(--overlay-border-width, 1.05px);
+      border-width: var(--overlay-border-width, 1.30px);
       box-shadow: none;
     }
 
@@ -1067,29 +1071,29 @@
 
     .surface-trendline {
       fill: none;
-      stroke: rgba(242, 200, 102, 0.92);
-      stroke-width: 2.55;
+      stroke: rgba(242, 200, 102, 0.96);
+      stroke-width: 3.05;
       stroke-linecap: round;
       stroke-linejoin: round;
       vector-effect: non-scaling-stroke;
-      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.86)) drop-shadow(0 0 4px rgba(242, 200, 102, 0.14));
+      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.92)) drop-shadow(0 0 5px rgba(242, 200, 102, 0.22));
     }
 
     .surface-trendline.trendline-support {
-      stroke: rgba(80, 239, 157, 0.98);
+      stroke: rgba(42, 255, 155, 1);
     }
 
     .surface-trendline.trendline-resistance {
-      stroke: rgba(255, 104, 79, 0.98);
+      stroke: rgba(255, 89, 72, 1);
     }
 
     .surface-trendline.trendline-inner {
-      stroke: rgba(111, 211, 255, 0.96);
+      stroke: rgba(86, 205, 255, 0.98);
       stroke-dasharray: 8 5;
     }
 
     .surface-trendline.trendline-history {
-      stroke: rgba(242, 200, 102, 0.58);
+      stroke: rgba(242, 200, 102, 0.70);
       stroke-dasharray: 7 5;
     }
 
@@ -1131,33 +1135,55 @@
     .surface-hotspot span {
       position: absolute;
       left: -1px;
-      top: -21px;
-      max-width: min(150px, 26vw);
-      padding: 3px 5px;
+      top: -18px;
+      max-width: min(132px, 23vw);
+      padding: 2px 4px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      border: 1px solid rgba(242, 200, 102, 0.44);
+      border: 1px solid rgba(242, 200, 102, 0.52);
       border-radius: 4px;
-      background: rgba(8, 8, 6, 0.90);
+      background: rgba(8, 8, 6, 0.94);
       color: var(--gold);
       font-family: var(--mono);
-      font-size: 7.5px;
+      font-size: 6.75px;
+      font-weight: 800;
+      line-height: 1.08;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
-      opacity: 0.90;
+      letter-spacing: 0.035em;
+      opacity: 0.94;
+      text-shadow: 0 0 5px rgba(0, 0, 0, 0.96);
     }
 
     .surface-hotspot.layer-supply-demand.buy span,
-    .surface-hotspot.layer-supply-demand[data-semantic-family="buy"] span {
-      border-color: rgba(80, 239, 157, 0.42);
-      color: rgb(158, 255, 205);
+    .surface-hotspot.layer-supply-demand.semantic-demand span,
+    .surface-hotspot.layer-supply-demand[data-semantic-family="buy"] span,
+    .surface-hotspot.layer-supply-demand[data-semantic-family="demand"] span {
+      border-color: rgba(42, 255, 155, 0.62);
+      color: rgb(171, 255, 214);
     }
 
     .surface-hotspot.layer-supply-demand.sell span,
-    .surface-hotspot.layer-supply-demand[data-semantic-family="sell"] span {
-      border-color: rgba(255, 135, 82, 0.44);
-      color: rgb(255, 190, 150);
+    .surface-hotspot.layer-supply-demand.semantic-supply span,
+    .surface-hotspot.layer-supply-demand[data-semantic-family="sell"] span,
+    .surface-hotspot.layer-supply-demand[data-semantic-family="supply"] span {
+      border-color: rgba(255, 89, 72, 0.64);
+      color: rgb(255, 198, 183);
+    }
+
+    .surface-hotspot.semantic-support span {
+      border-color: rgba(42, 255, 155, 0.58);
+      color: rgb(171, 255, 214);
+    }
+
+    .surface-hotspot.semantic-resistance span {
+      border-color: rgba(255, 89, 72, 0.60);
+      color: rgb(255, 198, 183);
+    }
+
+    .surface-hotspot.semantic-inner span {
+      border-color: rgba(86, 205, 255, 0.56);
+      color: rgb(184, 235, 255);
     }
 
     .surface-hotspot.label-hidden span {
@@ -1167,10 +1193,10 @@
     .surface-hotspot.display-compact span,
     .surface-hotspot.display-nested span,
     .surface-hotspot.display-grouped span {
-      max-width: min(122px, 22vw);
-      padding: 2px 5px;
-      font-size: 7px;
-      opacity: 0.86;
+      max-width: min(112px, 20vw);
+      padding: 2px 4px;
+      font-size: 6.25px;
+      opacity: 0.90;
     }
 
     .surface-hotspot.display-full span,
@@ -6381,18 +6407,18 @@
         INSPECTOR_ONLY_LABEL: 0.40,
       }[displayState] ?? 0.72;
       const borderFallback = {
-        FULL: 1.9,
-        FOCUS_EXPANDED: 2.15,
-        COMPACT: 1.45,
-        GROUPED: 1.45,
-        NESTED: 1.35,
-        GHOSTED: 1.05,
-        ICON_ONLY: 0.95,
-        INSPECTOR_ONLY_LABEL: 0.95,
+        FULL: 2.45,
+        FOCUS_EXPANDED: 2.70,
+        COMPACT: 2.05,
+        GROUPED: 1.95,
+        NESTED: 1.80,
+        GHOSTED: 1.30,
+        ICON_ONLY: 1.15,
+        INSPECTOR_ONLY_LABEL: 1.15,
       }[displayState] ?? 1.35;
       return {
         opacity: Math.max(0.18, Math.min(1, Number(style.opacity ?? opacityFallback) || opacityFallback)),
-        borderWidth: Math.max(0.75, Math.min(3, Number(style.border_width ?? borderFallback) || borderFallback)),
+        borderWidth: Math.max(1.05, Math.min(4.2, Number(style.border_width ?? borderFallback) || borderFallback)),
         fillOpacity: Math.max(0, Math.min(0.16, Number(style.fill_opacity ?? (0.03 + weight * 0.04)) || 0.04)),
       };
     }
@@ -6419,12 +6445,12 @@
       const displayState = overlayDisplayState(box);
       const weight = overlayVisualWeight(box);
       if (displayState === "FULL" || displayState === "FOCUS_EXPANDED") {
-        return Math.max(2.55, Math.min(3.8, 2.25 + weight));
+        return Math.max(3.05, Math.min(4.4, 2.75 + weight));
       }
       if (displayState === "GHOSTED" || displayState === "INSPECTOR_ONLY_LABEL") {
-        return 1.65;
+        return 2.05;
       }
-      return Math.max(1.95, Math.min(3.15, 1.75 + weight));
+      return Math.max(2.45, Math.min(3.75, 2.18 + weight));
     }
 
     function resolveOverlayLabelBounds(box, tracking, image) {

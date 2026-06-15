@@ -543,9 +543,19 @@ def _mode_emphasizes_type(mode: str, overlay_type: str, layer: str) -> bool:
 def _semantic_style_family(row: Mapping[str, Any]) -> str:
     overlay_type = str(row.get("type") or "")
     side = str(row.get("side") or "").upper()
-    if overlay_type in {"DEMAND_ZONE", "SUPPORT_TRENDLINE"} or side == "BUY":
+    if overlay_type == "DEMAND_ZONE":
+        return "demand"
+    if overlay_type == "SUPPLY_ZONE":
+        return "supply"
+    if overlay_type == "SUPPORT_TRENDLINE":
+        return "support"
+    if overlay_type == "RESISTANCE_TRENDLINE":
+        return "resistance"
+    if overlay_type == "INNER_TRENDLINE":
+        return "inner"
+    if side == "BUY":
         return "buy"
-    if overlay_type in {"SUPPLY_ZONE", "RESISTANCE_TRENDLINE"} or side == "SELL":
+    if side == "SELL":
         return "sell"
     if overlay_type in {"RETEST_BOX", "SNIPER_ENTRY_BOX", "CONTINUATION_BOX"}:
         return "trigger"
@@ -586,14 +596,14 @@ def _style_for_display_state(row: Mapping[str, Any], display_state: str, visual_
         "INSPECTOR_ONLY_LABEL": 0.018,
     }
     border_by_state = {
-        "FULL": 1.90,
-        "FOCUS_EXPANDED": 2.15,
-        "COMPACT": 1.45,
-        "GROUPED": 1.45,
-        "NESTED": 1.35,
-        "GHOSTED": 1.05,
-        "ICON_ONLY": 0.95,
-        "INSPECTOR_ONLY_LABEL": 0.95,
+        "FULL": 2.45,
+        "FOCUS_EXPANDED": 2.70,
+        "COMPACT": 2.05,
+        "GROUPED": 1.95,
+        "NESTED": 1.80,
+        "GHOSTED": 1.30,
+        "ICON_ONLY": 1.15,
+        "INSPECTOR_ONLY_LABEL": 1.15,
     }
     label_mode = {
         "FULL": "full",
