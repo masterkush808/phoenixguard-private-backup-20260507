@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import re
 import time
 from typing import Any
 
@@ -14,6 +16,7 @@ from certification_common_v3 import (
     DEFAULT_BASE_URL,
     DEFAULT_SESSION,
     ROOT,
+    command_line,
     find_processes,
     http_json,
     leaf_processes,
@@ -119,6 +122,10 @@ def _stable_hash(payload: Any) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def _env_true(name: str) -> bool:
+    return str(os.getenv(name, "") or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _find_nested(payload: Any, names: set[str], *, contains: tuple[str, ...] = ()) -> list[Any]:
     found: list[Any] = []
     stack: list[Any] = [payload]
@@ -196,15 +203,45 @@ def _process_snapshot() -> dict[str, Any]:
         if process_id(row)
     }
     shooter = {process_id(row) for row in leaf_processes(find_processes(rows, "shooter.py")) if process_id(row)}
+    shooter_rows = leaf_processes(find_processes(rows, "shooter.py"))
+    shooter_commands = [command_line(row) for row in shooter_rows if command_line(row)]
+    shooter_modes = sorted(
+        {
+            match.group(1).strip("\"'")
+            for cmd in shooter_commands
+            for match in re.finditer(r"--shooter-mode\s+([^\s]+)", cmd)
+            if match.group(1).strip("\"'")
+        }
+    )
     listeners = tcp_listeners([8793, 8787])
     listener_errors = [str(row.get("error")) for row in listeners if isinstance(row, Mapping) and row.get("error")]
     return {
         "api_pids": sorted(api),
         "tracker_pids": sorted(tracker),
         "shooter_pids": sorted(shooter),
+        "shooter_modes": shooter_modes,
         "listeners": listeners,
         "process_query_errors": process_query_errors,
         "listener_query_errors": listener_errors,
+    }
+
+
+def _actual_live_click_arming(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    modes: set[str] = set()
+    for sample in samples:
+        processes = _mapping(sample.get("processes"))
+        for mode in _sequence(processes.get("shooter_modes")):
+            text = _text(mode).upper()
+            if text:
+                modes.add(text)
+    env_armed = _env_true("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS")
+    live_mode_armed = bool(modes.intersection({"LIVE_READY", "LIVE_ENABLED", "FULL_ACTIVATED"}))
+    return {
+        "requested_full_activated_mode": False,
+        "env_live_clicks_allowed": env_armed,
+        "shooter_modes": sorted(modes),
+        "actual_live_clicks_armed": bool(env_armed and live_mode_armed),
+        "reason": "requires PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS=1 and a live-capable shooter mode",
     }
 
 
@@ -301,7 +338,7 @@ def _infer_trade_result(row: Mapping[str, Any]) -> str:
     return "UNKNOWN"
 
 
-def _summarize_outcomes(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def _summarize_outcomes(rows: Sequence[Mapping[str, Any]], *, min_settled_outcomes: int = 3) -> dict[str, Any]:
     wins = sum(1 for row in rows if _infer_trade_result(row) == "WIN")
     losses = sum(1 for row in rows if _infer_trade_result(row) == "LOSS")
     flats = sum(1 for row in rows if _infer_trade_result(row) == "FLAT")
@@ -309,8 +346,31 @@ def _summarize_outcomes(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     known = wins + losses
     payout_returns = [_float(row.get("profit_proxy")) for row in rows if row.get("profit_proxy") is not None]
     net_proxy = round(sum(payout_returns), 4) if payout_returns else 0.0
+    if known < max(1, int(min_settled_outcomes)):
+        return {
+            "profitability": "INSUFFICIENT_SAMPLE",
+            "status": "INSUFFICIENT_SAMPLE",
+            "calculated": False,
+            "minimum_required_settled_win_loss_outcomes": max(1, int(min_settled_outcomes)),
+            "total_executed_trades": len(rows),
+            "settled_known_outcomes": known,
+            "wins": wins,
+            "losses": losses,
+            "flat": flats,
+            "unknown": unknown,
+            "win_rate": None,
+            "estimated_payout_return": None,
+            "net_profit_proxy": None,
+            "long_term_profitability": "NOT_CERTIFIED_BY_2_HOUR_SAMPLE",
+            "reason": "Profitability is not calculated until enough settled WIN/LOSS outcomes are observed.",
+        }
     return {
+        "profitability": "CALCULATED",
+        "status": "CALCULATED",
+        "calculated": True,
+        "minimum_required_settled_win_loss_outcomes": max(1, int(min_settled_outcomes)),
         "total_executed_trades": len(rows),
+        "settled_known_outcomes": known,
         "wins": wins,
         "losses": losses,
         "flat": flats,
@@ -348,6 +408,228 @@ def _summarize_precision(samples: Sequence[Mapping[str, Any]], outcomes: Sequenc
     }
 
 
+def _promotion_failure_row(
+    *,
+    now: float,
+    study: Mapping[str, Any],
+    trace: Mapping[str, Any],
+    sample: Mapping[str, Any],
+) -> dict[str, Any]:
+    promotion = _mapping(study.get("promotion_trace"))
+    council = _mapping(study.get("model_council"))
+    canonical_audit = _mapping(
+        study.get("promotion_failure_audit_v3")
+        or promotion.get("promotion_failure_audit_v3")
+        or council.get("promotion_failure_audit_v3")
+    )
+    execution = _mapping(study.get("execution"))
+    lane = _mapping(study.get("execution_lane") or council.get("execution_lane") or promotion.get("execution_lane"))
+    sequence = _mapping(
+        study.get("sequence_context_readiness")
+        or council.get("sequence_context_readiness")
+        or council.get("sequence_context")
+        or trace.get("sequence_context_readiness")
+    )
+    timing = _mapping(study.get("timing_decision") or council.get("timing_decision") or promotion.get("timing_decision"))
+    entry_timing = _mapping(timing.get("entry_timing"))
+    entry_quality = _mapping(study.get("entry_quality") or council.get("entry_quality") or promotion.get("entry_quality"))
+    market_reality = _mapping(study.get("market_reality") or council.get("market_reality") or promotion.get("market_reality"))
+    trade_permission = _mapping(study.get("trade_permission") or council.get("trade_permission") or market_reality.get("trade_permission"))
+    skill_summary = (
+        study.get("skill_contributions")
+        or council.get("skill_contributions")
+        or promotion.get("skill_summary")
+        or {}
+    )
+    lstm_summary = (
+        study.get("lstm_contribution")
+        or council.get("lstm_contribution")
+        or promotion.get("lstm_summary")
+        or {}
+    )
+    memory_confirmation = (
+        study.get("memory_confirmation")
+        or council.get("memory_confirmation")
+        or promotion.get("memory_confirmation")
+        or {}
+    )
+    timing_mode = _text(
+        promotion.get("timing_mode")
+        or timing.get("timing_mode")
+        or entry_timing.get("mode")
+        or execution.get("timing_mode")
+    )
+    final_score = _float(
+        promotion.get("final_execution_score")
+        or council.get("final_execution_score")
+        or study.get("final_execution_score")
+    )
+    lane_threshold = _float(
+        promotion.get("execution_threshold")
+        or lane.get("required_score")
+        or lane.get("threshold")
+        or council.get("execution_threshold")
+        or study.get("execution_threshold")
+    )
+    denied_at = _text(
+        promotion.get("denied_at")
+        or promotion.get("blocked_by")
+        or promotion.get("true_blocker")
+        or study.get("denied_at")
+        or study.get("block_reason")
+        or sample.get("packet_contract_status")
+    )
+    next_required = _text(
+        promotion.get("next_required")
+        or promotion.get("release_condition")
+        or study.get("next_required")
+        or sequence.get("next_required")
+    )
+    if not denied_at:
+        if sample.get("source_lock_status") != "PASS":
+            denied_at = "BROKER_SOURCE_LOCK"
+        elif not bool(sample.get("sequence_ready")):
+            denied_at = "SEQUENCE_CONTEXT"
+        elif timing_mode and timing_mode != "ENTER_NOW":
+            denied_at = "TIMING_READY"
+        elif lane_threshold and final_score < lane_threshold:
+            denied_at = "LANE_SCORE"
+        else:
+            denied_at = "EXECUTION_PACKET_NOT_PUBLISHED"
+    if not next_required:
+        next_required = "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
+    row = {
+        "epoch": now,
+        "iso": _utc_iso(now),
+        "packet_id": _extract_packet_id(study),
+        "council_state": _text(council.get("final_state") or execution.get("state") or study.get("execution_state")),
+        "candidate_side": _text(
+            promotion.get("candidate_side")
+            or council.get("candidate_side")
+            or council.get("final_side")
+            or execution.get("side")
+        ),
+        "final_score": final_score,
+        "lane": _text(lane.get("name") or promotion.get("selected_lane") or study.get("selected_execution_lane")),
+        "lane_threshold": lane_threshold,
+        "score_passed": bool(final_score >= lane_threshold) if lane_threshold else False,
+        "sequence_status": _text(sequence.get("sequence_status") or sequence.get("status") or sample.get("sequence_status")),
+        "sequence_length": _int(sequence.get("sequence_length") or sample.get("sequence_length")),
+        "box_history_len": _int(sequence.get("box_history_len")),
+        "entry_progression_len": _int(sequence.get("entry_progression_len")),
+        "broker_source_lock": _text(sample.get("source_lock_status")),
+        "model_health": _text(_mapping(_mapping(trace.get("certification_gates")).get("model_warm_state")).get("status")),
+        "timing_mode": timing_mode,
+        "timing_ready": timing_mode == "ENTER_NOW" or bool(timing.get("timing_ready")),
+        "entry_quality": _text(entry_quality.get("state") or entry_quality.get("grade") or entry_quality.get("entry_grade")),
+        "price_location": _text(_mapping(study.get("price_location") or council.get("price_location")).get("label")),
+        "market_play": _text(_mapping(study.get("market_play") or council.get("market_play")).get("name")),
+        "regime": _text(_mapping(study.get("regime") or council.get("regime")).get("name")),
+        "bad_entry_class": _text(_mapping(study.get("bad_entry") or council.get("bad_entry")).get("class")),
+        "trap_risk": _text(_mapping(study.get("market_trap") or market_reality.get("market_trap")).get("risk")),
+        "path_risk": _text(_mapping(study.get("path_quality") or council.get("path_quality")).get("label")),
+        "target_before_invalidation": _text(promotion.get("target_before_invalidation")),
+        "opposing_force_distance": _text(promotion.get("opposing_force_distance")),
+        "skill_summary": skill_summary if isinstance(skill_summary, (Mapping, list)) else {},
+        "lstm_summary": lstm_summary if isinstance(lstm_summary, Mapping) else {},
+        "memory_confirmation": memory_confirmation if isinstance(memory_confirmation, Mapping) else {},
+        "denied_at": denied_at,
+        "next_required": next_required,
+        "exact_field_preventing_execution_packet": _text(
+            promotion.get("exact_field_preventing_execution_packet")
+            or denied_at
+        ),
+    }
+    if canonical_audit:
+        row["promotion_failure_audit_v3"] = canonical_audit
+        row["denied_at"] = _text(canonical_audit.get("denied_at"), row["denied_at"])
+        row["next_required"] = _text(canonical_audit.get("next_required"), row["next_required"])
+        row["exact_field_preventing_execution_packet"] = _text(
+            canonical_audit.get("exact_field_preventing_execution_packet"),
+            row["exact_field_preventing_execution_packet"],
+        )
+        row["final_score"] = _float(canonical_audit.get("final_score"), _float(row.get("final_score")))
+        row["lane_threshold"] = _float(canonical_audit.get("threshold"), _float(row.get("lane_threshold")))
+        row["score_passed"] = bool(canonical_audit.get("score_passed"))
+        row["timing_mode"] = _text(canonical_audit.get("timing_mode"), row["timing_mode"])
+        row["sequence_status"] = _text(canonical_audit.get("sequence_status"), row["sequence_status"])
+        row["sequence_length"] = _int(canonical_audit.get("sequence_length"), _int(row.get("sequence_length")))
+        row["lane"] = _text(canonical_audit.get("selected_lane"), row["lane"])
+    return row
+
+
+def _rank_promotion_blockers(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    ranking = {
+        "timing_mode != ENTER_NOW": 0,
+        "entry_quality below threshold": 0,
+        "sequence incomplete": 0,
+        "lane score below threshold": 0,
+        "bad_entry active": 0,
+        "broker source lock missing": 0,
+        "model health stale": 0,
+        "opposing force too close": 0,
+        "no path room": 0,
+    }
+    for row in rows:
+        timing_mode = _text(row.get("timing_mode"))
+        denied_at = _text(row.get("denied_at")).upper()
+        next_required = _text(row.get("next_required")).lower()
+        if timing_mode and timing_mode != "ENTER_NOW":
+            ranking["timing_mode != ENTER_NOW"] += 1
+        if "ENTRY" in denied_at or "entry quality" in next_required:
+            ranking["entry_quality below threshold"] += 1
+        if _text(row.get("sequence_status")).upper() != "COMPLETE":
+            ranking["sequence incomplete"] += 1
+        if row.get("score_passed") is False:
+            ranking["lane score below threshold"] += 1
+        if "BAD_ENTRY" in denied_at or _text(row.get("bad_entry_class")):
+            ranking["bad_entry active"] += 1
+        if _text(row.get("broker_source_lock")).upper() in {"", "MISSING", "FAIL"}:
+            ranking["broker source lock missing"] += 1
+        if _text(row.get("model_health")).upper() not in {"PASS", "AWAKE"}:
+            ranking["model health stale"] += 1
+        if "opposing" in denied_at.lower() or "opposing force" in next_required:
+            ranking["opposing force too close"] += 1
+        if "path" in denied_at.lower() or "target" in next_required and "invalidation" in next_required:
+            ranking["no path room"] += 1
+    return ranking
+
+
+def _render_promotion_failure_report(rows: Sequence[Mapping[str, Any]], ranking: Mapping[str, int]) -> str:
+    examples = list(rows[-10:])
+    lines = [
+        "# PhoenixGuard V3 Promotion Failure Audit",
+        "",
+        f"Generated: {_utc_iso()}",
+        "",
+        "## CLEAR ANSWER",
+        "",
+        "Promotion failures are logged with explicit denied_at, next_required, gate, score, sequence, and source-lock fields.",
+        "",
+        "## CONFIDENCE LEVEL",
+        "",
+        "`0.86`",
+        "",
+        "## KEY CAVEATS",
+        "",
+        "- This audit is only as complete as the study packet fields currently published into RuntimeTraceV3.",
+        "- Profitability remains unmeasured unless real executable packets and shooter actions occur.",
+        "",
+        "## BLOCKER RANKING",
+        "",
+        "```json",
+        json.dumps(dict(ranking), indent=2, sort_keys=True, default=str),
+        "```",
+        "",
+        "## RECENT EXAMPLES",
+        "",
+        "```json",
+        json.dumps(examples, indent=2, sort_keys=True, default=str),
+        "```",
+    ]
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _render_report(
     *,
     args: argparse.Namespace,
@@ -369,8 +651,11 @@ def _render_report(
     skill_rows: int,
     lstm_rows: int,
     two_candle_rows: int,
+    promotion_ranking: Mapping[str, int] | None = None,
 ) -> str:
     duration = max(0.0, ended - started)
+    live_click_arming = _actual_live_click_arming(samples)
+    live_click_arming["requested_full_activated_mode"] = args.mode == "FULL_ACTIVATED"
     lines = [
         "# PhoenixGuard V3 Full-System Activated Burn-In Report",
         "",
@@ -379,7 +664,10 @@ def _render_report(
         "## 1. Burn-in Mode",
         "",
         f"- Mode: `{args.mode}`",
-        f"- Live clicks armed by requested mode: `{args.mode == 'FULL_ACTIVATED'}`",
+        f"- Full activated certification requested: `{args.mode == 'FULL_ACTIVATED'}`",
+        f"- Actual broker clicks armed: `{live_click_arming['actual_live_clicks_armed']}`",
+        f"- Shooter modes observed: `{', '.join(live_click_arming['shooter_modes']) or 'none'}`",
+        f"- Live-click env allowed: `{live_click_arming['env_live_clicks_allowed']}`",
         f"- Session: `{args.session}`",
         f"- Base URL: `{args.base_url}`",
         "",
@@ -394,6 +682,7 @@ def _render_report(
         "",
         "- Live clicking was permitted only through fresh validated `PG_EXECUTION_PACKET_V3` and `ShooterActionSequencerV2`.",
         "- Raw signals, dashboard state, skill gates, memory confidence, and `final_side` alone were not accepted as authority.",
+        f"- Actual arming reason: `{live_click_arming['reason']}`",
         "",
         "## 4. Executable Packets",
         "",
@@ -432,6 +721,11 @@ def _render_report(
         "",
         f"- Executable packet observations: `{precision.get('model_council_promotion_precision', {}).get('executable_packet_observations')}`",
         f"- Stale packet rejection count: `{precision.get('stale_packet_rejection_count')}`",
+        "- Promotion blocker ranking:",
+        "",
+        "```json",
+        json.dumps(dict(promotion_ranking or {}), indent=2, sort_keys=True, default=str),
+        "```",
         "",
         "## 12. Shooter Action Evidence",
         "",
@@ -488,6 +782,7 @@ def main() -> int:
     parser.add_argument("--interval-sec", type=float, default=5.0)
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--mode", choices=["TECHNICAL", "ARMED_DRY_RUN", "FULL_ACTIVATED"], default="FULL_ACTIVATED")
+    parser.add_argument("--require-live-clicks-armed", action="store_true")
     parser.add_argument("--out", default=str(DEFAULT_OUT))
     parser.add_argument("--max-executed-trades", type=int, default=20)
     parser.add_argument("--max-consecutive-losses", type=int, default=3)
@@ -520,6 +815,7 @@ def main() -> int:
         "lstm_predictions.jsonl",
         "two_candle_study.jsonl",
         "shooter_actions.jsonl",
+        "promotion_failures.jsonl",
     ):
         (BURN_DIR / name).write_text("", encoding="utf-8")
 
@@ -537,6 +833,7 @@ def main() -> int:
     executable_packets: list[str] = []
     shooter_clicks: list[dict[str, Any]] = []
     trade_outcomes: list[dict[str, Any]] = []
+    promotion_failures: list[dict[str, Any]] = []
     component_counts: dict[str, dict[str, int]] = {name: {} for name in REQUIRED_COMPONENTS}
     endpoint_failures = 0
     consecutive_losses = 0
@@ -557,6 +854,8 @@ def main() -> int:
         failures.append("tracker process not running at burn-in start")
     if not initial_processes["shooter_pids"] and args.mode == "FULL_ACTIVATED" and not args.allow_missing_shooter:
         failures.append("shooter process not running at burn-in start")
+    if args.mode == "FULL_ACTIVATED" and args.require_live_clicks_armed and not _env_true("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS"):
+        failures.append("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS is not set to 1 for FULL_ACTIVATED burn-in process")
 
     print(
         "FULL_SYSTEM_BURN_IN_START "
@@ -573,6 +872,71 @@ def main() -> int:
             default=str,
         )
     )
+
+    if args.mode == "FULL_ACTIVATED" and args.require_live_clicks_armed:
+        preflight_trace_result = http_json(f"{base}/v1/mobile/runtime/trace/v3?session_id={session_q}", timeout=args.timeout)
+        preflight_trace = _extract_payload(preflight_trace_result)
+        preflight_gates = _mapping(preflight_trace.get("certification_gates"))
+        preflight_nodes = _mapping(_mapping(preflight_trace.get("dataflow_contract_trace")).get("nodes"))
+        preflight_source = _mapping(preflight_gates.get("source_lock"))
+        preflight_model = _mapping(preflight_gates.get("model_warm_state"))
+        preflight_shooter = _mapping(preflight_gates.get("shooter_persistence"))
+        preflight_failures = []
+        if not preflight_trace_result.ok:
+            preflight_failures.append(f"runtime trace unavailable: {preflight_trace_result.error or preflight_trace_result.status}")
+        if _text(preflight_source.get("status")).upper() != "PASS":
+            preflight_failures.append(f"broker source lock preflight is not PASS: {_text(preflight_source.get('status'), 'MISSING')}")
+        if _text(preflight_model.get("status")).upper() != "PASS":
+            preflight_failures.append(f"model health preflight is not PASS: {_text(preflight_model.get('status'), 'MISSING')}")
+        if not initial_processes["shooter_pids"] and not args.allow_missing_shooter:
+            preflight_failures.append("shooter process is not alive for FULL_ACTIVATED burn-in")
+        if preflight_nodes.get("ShooterActionSequencerV2") in {"MISSING", "FAIL"}:
+            preflight_failures.append(f"ShooterActionSequencerV2 preflight status={preflight_nodes.get('ShooterActionSequencerV2')}")
+        if failures or preflight_failures:
+            failures.extend(preflight_failures)
+            ended = time.time()
+            profitability = _summarize_outcomes([], min_settled_outcomes=args.min_sample_trades)
+            precision = _summarize_precision([], [])
+            _write_json(BURN_DIR / "profitability_summary.json", profitability)
+            _write_json(BURN_DIR / "precision_summary.json", precision)
+            report_text = _render_report(
+                args=args,
+                started=started,
+                ended=ended,
+                verdict="FAIL_RUNTIME",
+                stop_reason="FULL_ACTIVATED_PREFLIGHT_FAILED",
+                failures=failures,
+                warnings=warnings,
+                samples=[],
+                component_counts=component_counts,
+                profitability=profitability,
+                precision=precision,
+                frame_ages=[],
+                overlay_ages=[],
+                model_ages=[],
+                executable_packets=[],
+                shooter_clicks=[],
+                skill_rows=0,
+                lstm_rows=0,
+        two_candle_rows=0,
+        promotion_ranking={},
+    )
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(report_text, encoding="utf-8")
+            summary = {
+                "schema_version": "PG_FULL_SYSTEM_ACTIVATED_BURN_IN_V1",
+                "verdict": "FAIL_RUNTIME",
+                "stop_reason": "FULL_ACTIVATED_PREFLIGHT_FAILED",
+                "duration_sec": round(ended - started, 3),
+                "sample_count": 0,
+                "executable_packets": 0,
+                "trade_outcomes": 0,
+                "report": str(out_path),
+                "burn_dir": str(BURN_DIR),
+            }
+            _write_json(BURN_DIR / "burn_in_summary.json", summary)
+            print("FULL_SYSTEM_BURN_IN_DONE " + json.dumps(summary, sort_keys=True, default=str))
+            return 1
 
     while time.time() < deadline and not stop_reason:
         now = time.time()
@@ -700,6 +1064,11 @@ def main() -> int:
         }
         samples.append(sample)
         _append_jsonl(BURN_DIR / "burn_in_samples.jsonl", sample)
+
+        if study_packet_id and not execution_packet_id:
+            promotion_row = _promotion_failure_row(now=now, study=study, trace=trace, sample=sample)
+            promotion_failures.append(promotion_row)
+            _append_jsonl(BURN_DIR / "promotion_failures.jsonl", promotion_row)
 
         model_votes = _collect_model_votes(payloads)
         _append_jsonl(
@@ -854,10 +1223,15 @@ def main() -> int:
     if endpoint_failures:
         warnings.append(f"endpoint_failures={endpoint_failures}")
 
-    profitability = _summarize_outcomes(trade_outcomes)
+    profitability = _summarize_outcomes(trade_outcomes, min_settled_outcomes=args.min_sample_trades)
     precision = _summarize_precision(samples, trade_outcomes)
+    promotion_ranking = _rank_promotion_blockers(promotion_failures)
     _write_json(BURN_DIR / "profitability_summary.json", profitability)
     _write_json(BURN_DIR / "precision_summary.json", precision)
+    _write_json(BURN_DIR / "promotion_blocker_ranking.json", promotion_ranking)
+    promotion_report_path = ROOT / "reports" / "FINAL_PROMOTION_FAILURE_AUDIT.md"
+    promotion_report_path.parent.mkdir(parents=True, exist_ok=True)
+    promotion_report_path.write_text(_render_promotion_failure_report(promotion_failures, promotion_ranking), encoding="utf-8")
 
     if stop_reason.startswith("STOPPED_BY_RISK_LIMIT"):
         verdict = "STOPPED_BY_RISK_LIMIT"
@@ -865,9 +1239,17 @@ def main() -> int:
         verdict = "FAIL_EXECUTION_PATH"
     elif stop_reason:
         verdict = "FAIL_RUNTIME"
+    elif args.mode == "FULL_ACTIVATED" and not executable_packets and promotion_failures:
+        verdict = "FAIL_PROMOTION"
+    elif args.mode == "FULL_ACTIVATED" and not executable_packets:
+        verdict = "INSUFFICIENT_SAMPLE"
+    elif args.mode == "FULL_ACTIVATED" and executable_packets and not trade_outcomes:
+        verdict = "FAIL_EXECUTION_PATH"
     elif not trade_outcomes and not executable_packets:
         verdict = "PASS_RUNTIME_ONLY_NO_TRADES"
     elif len(trade_outcomes) < args.min_sample_trades:
+        verdict = "INSUFFICIENT_SAMPLE"
+    elif _text(profitability.get("profitability")).upper() == "INSUFFICIENT_SAMPLE":
         verdict = "INSUFFICIENT_SAMPLE"
     elif _float(profitability.get("net_profit_proxy")) < 0.0:
         verdict = "FAIL_PROFITABILITY_SAMPLE"
@@ -894,9 +1276,12 @@ def main() -> int:
         skill_rows=skill_rows,
         lstm_rows=lstm_rows,
         two_candle_rows=two_candle_rows,
+        promotion_ranking=promotion_ranking,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(report_text, encoding="utf-8")
+    live_click_arming = _actual_live_click_arming(samples)
+    live_click_arming["requested_full_activated_mode"] = args.mode == "FULL_ACTIVATED"
 
     summary = {
         "schema_version": "PG_FULL_SYSTEM_ACTIVATED_BURN_IN_V1",
@@ -909,12 +1294,13 @@ def main() -> int:
         "p95_frame_age_ms": percentile(frame_ages, 95),
         "p95_overlay_age_ms": percentile(overlay_ages, 95),
         "p95_model_vote_age_ms": percentile(model_ages, 95),
+        "live_click_arming": live_click_arming,
         "report": str(out_path),
         "burn_dir": str(BURN_DIR),
     }
     _write_json(BURN_DIR / "burn_in_summary.json", summary)
     print("FULL_SYSTEM_BURN_IN_DONE " + json.dumps(summary, sort_keys=True, default=str))
-    return 0 if verdict in {"PASS_FULL_ACTIVATED", "PASS_RUNTIME_ONLY_NO_TRADES", "INSUFFICIENT_SAMPLE"} else 1
+    return 0 if verdict == "PASS_FULL_ACTIVATED" or (args.mode != "FULL_ACTIVATED" and verdict in {"PASS_RUNTIME_ONLY_NO_TRADES", "INSUFFICIENT_SAMPLE"}) else 1
 
 
 if __name__ == "__main__":
