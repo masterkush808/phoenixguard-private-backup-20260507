@@ -18,8 +18,9 @@ from certification_common_v3 import (
 )
 
 
-def _age_ms(epoch: float) -> float:
-    return max(0.0, (time.time() - float(epoch or 0.0)) * 1000.0) if epoch else 0.0
+def _age_ms(epoch: float, *, now_epoch: float | None = None) -> float:
+    observed_epoch = time.time() if now_epoch is None else now_epoch
+    return max(0.0, (observed_epoch - float(epoch or 0.0)) * 1000.0) if epoch else 0.0
 
 
 def main() -> int:
@@ -42,9 +43,10 @@ def main() -> int:
     advanced_count = 0
     connection_failures = 0
     previous_frame = 0
+    live_url = f"{base}/v1/mobile/live/state/v3/{session_q}?mode=CLEAN_LIVE&compact=1"
 
     for index in range(max(1, int(args.count))):
-        before = http_json(f"{base}/v1/mobile/live/state/v3/{session_q}", timeout=args.poll_timeout)
+        before = http_json(live_url, timeout=args.poll_timeout)
         before_fields = extract_frame_fields(before.payload if isinstance(before.payload, dict) else {})
         response = http_json(
             f"{base}/v1/mobile/window-tracker/sessions/{session_q}/capture-once",
@@ -55,7 +57,8 @@ def main() -> int:
         if not response.ok:
             connection_failures += 1
         api_alive = http_json(f"{base}/v1/mobile/health", timeout=args.poll_timeout)
-        after_live = http_json(f"{base}/v1/mobile/live/state/v3/{session_q}", timeout=args.poll_timeout)
+        after_live = http_json(live_url, timeout=args.poll_timeout)
+        after_live_observed_epoch = time.time()
         perf = http_json(f"{base}/v1/mobile/performance/trace/v3/{session_q}", timeout=args.poll_timeout)
         payload = response.payload if isinstance(response.payload, dict) else {}
         capture_result = payload.get("capture_once_result") if isinstance(payload.get("capture_once_result"), dict) else {}
@@ -85,7 +88,7 @@ def main() -> int:
             float(after_fields.get("display_capture_epoch") or 0.0),
             float(after_fields.get("display_published_epoch") or 0.0),
         )
-        display_age = _age_ms(display_epoch)
+        display_age = _age_ms(display_epoch, now_epoch=after_live_observed_epoch)
         timing = (perf.payload or {}).get("timing_trace", {}) if isinstance(perf.payload, dict) else {}
         model_age = float(timing.get("model_vote_age_ms") or 0.0) if isinstance(timing, dict) else 0.0
         sample = {

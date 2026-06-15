@@ -3723,7 +3723,7 @@
       let targetImage = image;
       const token = [artifactKind, visibleKind, frameKey, url].join("|");
       const pending = pendingSurfaceImage();
-      if (pending && !state.surface.identityChanged) {
+      if (pending) {
         const pendingCommitted = commitSurfaceImage(pending);
         if (pendingCommitted) {
           return {changed: false, committed: true};
@@ -3739,7 +3739,7 @@
         targetImage = image === els.overlayImg ? els.rawImg : els.overlayImg;
         targetImage.classList.remove("visible");
       }
-      if (surfaceImageLoading(targetImage) && !state.surface.identityChanged) {
+      if (surfaceImageLoading(targetImage)) {
         return {
           changed: false,
           committed: commitSurfaceImage(targetImage),

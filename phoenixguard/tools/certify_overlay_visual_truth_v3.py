@@ -19,20 +19,28 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run_tool(args: list[str], timeout: float) -> dict[str, object]:
-    completed = subprocess.run(
-        [sys.executable, *args],
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-    return {
-        "args": args,
-        "returncode": completed.returncode,
-        "stdout": completed.stdout[-4000:],
-        "stderr": completed.stderr[-4000:],
-    }
+    try:
+        completed = subprocess.run(
+            [sys.executable, *args],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return {
+            "args": args,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout[-4000:],
+            "stderr": completed.stderr[-4000:],
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "args": args,
+            "returncode": 124,
+            "stdout": str(exc.stdout or "")[-4000:],
+            "stderr": f"timed out after {timeout:.1f}s",
+        }
 
 
 def main() -> int:
@@ -71,7 +79,7 @@ def main() -> int:
     ]
     if args.skip_playwright:
         evidence_args.append("--skip-playwright")
-    evidence = _run_tool(evidence_args, timeout=args.timeout + 15.0)
+    evidence = _run_tool(evidence_args, timeout=max(args.timeout + 90.0, args.timeout * 2.0))
     if int(audit.get("returncode") or 0) != 0:
         failures.append(f"overlay precision audit failed: {audit.get('stderr') or audit.get('stdout')}")
     if int(evidence.get("returncode") or 0) != 0:

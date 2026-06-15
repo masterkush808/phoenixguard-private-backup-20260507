@@ -864,6 +864,33 @@ def _suppress_duplicates(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[s
     return kept + rejected, duplicate_count
 
 
+def _separate_nested_sibling_bounds(loser: Sequence[float], winner: Sequence[float]) -> list[float] | None:
+    loser_box = normalize_bounds(loser)
+    winner_box = normalize_bounds(winner)
+    if loser_box is None or winner_box is None:
+        return None
+    gap = 2.0
+    min_width = 10.0
+    min_height = 8.0
+    candidates = [
+        [loser_box[0], loser_box[1], min(loser_box[2], winner_box[0] - gap), loser_box[3]],
+        [max(loser_box[0], winner_box[2] + gap), loser_box[1], loser_box[2], loser_box[3]],
+        [loser_box[0], loser_box[1], loser_box[2], min(loser_box[3], winner_box[1] - gap)],
+        [loser_box[0], max(loser_box[1], winner_box[3] + gap), loser_box[2], loser_box[3]],
+    ]
+    valid = [
+        box
+        for box in candidates
+        if _box_width(box) >= min_width
+        and _box_height(box) >= min_height
+        and _box_area(box) >= max(80.0, _box_area(loser_box) * 0.06)
+    ]
+    if not valid:
+        return None
+    valid.sort(key=_box_area, reverse=True)
+    return [round(float(value), 3) for value in valid[0]]
+
+
 def _apply_overlay_nesting(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
     output = [dict(row) for row in rows]
     by_overlay_id: dict[str, dict[str, Any]] = {
@@ -933,17 +960,46 @@ def _apply_overlay_nesting(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict
             parent_row["contains_nested_overlays"] = True
             parent_row.setdefault("precision_flags", []).append("nest_parent")
 
-    by_parent: dict[str, list[list[float]]] = {}
+    by_parent: dict[str, list[tuple[dict[str, Any], list[float]]]] = {}
     for row in output:
         parent_id = _text(row.get("parent_overlay_id"))
         bounds = normalize_bounds(row.get("bounds"))
-        if parent_id and bounds is not None:
-            by_parent.setdefault(parent_id, []).append(bounds)
+        if parent_id and bounds is not None and row.get("visible_default") is not False:
+            by_parent.setdefault(parent_id, []).append((row, bounds))
     for siblings in by_parent.values():
-        for index, first in enumerate(siblings):
-            for second in siblings[index + 1 :]:
-                if rectangles_overlap(first, second, padding=1.0) and _iou(first, second) > 0.72:
-                    collisions += 1
+        for index, (first_row, first_bounds) in enumerate(siblings):
+            for other_index in range(index + 1, len(siblings)):
+                second_row, second_bounds = siblings[other_index]
+                if not (rectangles_overlap(first_bounds, second_bounds, padding=1.0) and _iou(first_bounds, second_bounds) > 0.72):
+                    continue
+                if _priority(first_row) >= _priority(second_row):
+                    winner_row, winner_bounds = first_row, first_bounds
+                    loser_row, loser_bounds = second_row, second_bounds
+                    loser_index = other_index
+                else:
+                    winner_row, winner_bounds = second_row, second_bounds
+                    loser_row, loser_bounds = first_row, first_bounds
+                    loser_index = index
+                separated = _separate_nested_sibling_bounds(loser_bounds, winner_bounds)
+                if separated is not None:
+                    loser_row["bounds"] = separated
+                    loser_row["bbox"] = list(separated)
+                    loser_row["tight_bounds"] = list(separated)
+                    loser_row.setdefault("precision_flags", []).append(
+                        f"nested_sibling_separated_from_{_text(winner_row.get('type'), 'overlay').lower()}"
+                    )
+                    siblings[loser_index] = (loser_row, separated)
+                    tightened += 1
+                    continue
+                loser_row["visible_default"] = False
+                loser_row["visible_modes"] = ["DIAGNOSTICS", "DEBUG", "INSPECTOR"]
+                loser_row["display_state"] = "INSPECTOR_ONLY_LABEL"
+                loser_row["label_hidden"] = True
+                loser_row["label_anchor"] = "hidden"
+                loser_row.setdefault("precision_flags", []).append(
+                    f"nested_sibling_demoted_under_{_text(winner_row.get('type'), 'overlay').lower()}"
+                )
+                siblings[loser_index] = (loser_row, loser_bounds)
     return output, {
         "nested_overlays": nested,
         "nested_children_tightened": tightened,
