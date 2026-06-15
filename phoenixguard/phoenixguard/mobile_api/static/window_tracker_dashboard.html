@@ -928,10 +928,10 @@
       min-width: 28px;
       min-height: 28px;
       padding: 0;
-      border: 1.70px solid rgba(242, 200, 102, 0.92);
+      border: 2.15px solid rgba(242, 200, 102, 0.96);
       border-radius: 4px;
       background: rgba(242, 200, 102, 0.075);
-      box-shadow: inset 0 0 24px rgba(242, 200, 102, 0.14), 0 0 20px rgba(242, 200, 102, 0.20);
+      box-shadow: inset 0 0 24px rgba(242, 200, 102, 0.16), 0 0 20px rgba(242, 200, 102, 0.24);
       opacity: var(--overlay-opacity, 0.82);
       pointer-events: auto;
       transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
@@ -966,27 +966,27 @@
     }
 
     .surface-hotspot.layer-supply-demand {
-      border-color: rgba(242, 200, 102, 0.90);
+      border-color: rgba(242, 200, 102, 0.96);
       background: rgba(242, 200, 102, 0.045);
-      box-shadow: inset 0 0 16px rgba(242, 200, 102, 0.14), 0 0 14px rgba(242, 200, 102, 0.12);
+      box-shadow: inset 0 0 16px rgba(242, 200, 102, 0.16), 0 0 14px rgba(242, 200, 102, 0.18);
     }
 
     .surface-hotspot.layer-supply-demand.buy,
     .surface-hotspot.layer-supply-demand.semantic-demand,
     .surface-hotspot.layer-supply-demand[data-semantic-family="buy"],
     .surface-hotspot.layer-supply-demand[data-semantic-family="demand"] {
-      border-color: rgba(42, 255, 155, 0.98);
-      background: rgba(42, 255, 155, 0.058);
-      box-shadow: inset 0 0 18px rgba(42, 255, 155, 0.14), 0 0 18px rgba(42, 255, 155, 0.16);
+      border-color: rgba(35, 246, 199, 1);
+      background: rgba(35, 246, 199, 0.058);
+      box-shadow: inset 0 0 18px rgba(35, 246, 199, 0.15), 0 0 18px rgba(35, 246, 199, 0.18);
     }
 
     .surface-hotspot.layer-supply-demand.sell,
     .surface-hotspot.layer-supply-demand.semantic-supply,
     .surface-hotspot.layer-supply-demand[data-semantic-family="sell"],
     .surface-hotspot.layer-supply-demand[data-semantic-family="supply"] {
-      border-color: rgba(255, 89, 72, 0.98);
-      background: rgba(255, 89, 72, 0.056);
-      box-shadow: inset 0 0 18px rgba(255, 89, 72, 0.14), 0 0 18px rgba(255, 89, 72, 0.16);
+      border-color: rgba(255, 132, 72, 1);
+      background: rgba(255, 132, 72, 0.056);
+      box-shadow: inset 0 0 18px rgba(255, 132, 72, 0.15), 0 0 18px rgba(255, 132, 72, 0.18);
     }
 
     .surface-hotspot.layer-trigger-zones {
@@ -1072,23 +1072,23 @@
     .surface-trendline {
       fill: none;
       stroke: rgba(242, 200, 102, 0.96);
-      stroke-width: 3.05;
+      stroke-width: 3.45;
       stroke-linecap: round;
       stroke-linejoin: round;
       vector-effect: non-scaling-stroke;
-      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.92)) drop-shadow(0 0 5px rgba(242, 200, 102, 0.22));
+      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.94)) drop-shadow(0 0 6px rgba(242, 200, 102, 0.30));
     }
 
     .surface-trendline.trendline-support {
-      stroke: rgba(42, 255, 155, 1);
+      stroke: rgba(35, 246, 199, 1);
     }
 
     .surface-trendline.trendline-resistance {
-      stroke: rgba(255, 89, 72, 1);
+      stroke: rgba(255, 132, 72, 1);
     }
 
     .surface-trendline.trendline-inner {
-      stroke: rgba(86, 205, 255, 0.98);
+      stroke: rgba(96, 211, 255, 1);
       stroke-dasharray: 8 5;
     }
 
@@ -1135,9 +1135,9 @@
     .surface-hotspot span {
       position: absolute;
       left: -1px;
-      top: -18px;
-      max-width: min(132px, 23vw);
-      padding: 2px 4px;
+      top: -16px;
+      max-width: min(118px, 20vw);
+      padding: 2px 3px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -1146,11 +1146,11 @@
       background: rgba(8, 8, 6, 0.94);
       color: var(--gold);
       font-family: var(--mono);
-      font-size: 6.75px;
+      font-size: 6.15px;
       font-weight: 800;
       line-height: 1.08;
       text-transform: uppercase;
-      letter-spacing: 0.035em;
+      letter-spacing: 0.025em;
       opacity: 0.94;
       text-shadow: 0 0 5px rgba(0, 0, 0, 0.96);
     }
@@ -1159,16 +1159,16 @@
     .surface-hotspot.layer-supply-demand.semantic-demand span,
     .surface-hotspot.layer-supply-demand[data-semantic-family="buy"] span,
     .surface-hotspot.layer-supply-demand[data-semantic-family="demand"] span {
-      border-color: rgba(42, 255, 155, 0.62);
-      color: rgb(171, 255, 214);
+      border-color: rgba(35, 246, 199, 0.82);
+      color: rgb(158, 255, 231);
     }
 
     .surface-hotspot.layer-supply-demand.sell span,
     .surface-hotspot.layer-supply-demand.semantic-supply span,
     .surface-hotspot.layer-supply-demand[data-semantic-family="sell"] span,
     .surface-hotspot.layer-supply-demand[data-semantic-family="supply"] span {
-      border-color: rgba(255, 89, 72, 0.64);
-      color: rgb(255, 198, 183);
+      border-color: rgba(255, 132, 72, 0.84);
+      color: rgb(255, 214, 174);
     }
 
     .surface-hotspot.semantic-support span {
@@ -1193,9 +1193,9 @@
     .surface-hotspot.display-compact span,
     .surface-hotspot.display-nested span,
     .surface-hotspot.display-grouped span {
-      max-width: min(112px, 20vw);
-      padding: 2px 4px;
-      font-size: 6.25px;
+      max-width: min(102px, 18vw);
+      padding: 2px 3px;
+      font-size: 5.75px;
       opacity: 0.90;
     }
 
@@ -6407,18 +6407,22 @@
         INSPECTOR_ONLY_LABEL: 0.40,
       }[displayState] ?? 0.72;
       const borderFallback = {
-        FULL: 2.45,
-        FOCUS_EXPANDED: 2.70,
-        COMPACT: 2.05,
-        GROUPED: 1.95,
-        NESTED: 1.80,
-        GHOSTED: 1.30,
-        ICON_ONLY: 1.15,
-        INSPECTOR_ONLY_LABEL: 1.15,
+        FULL: 3.10,
+        FOCUS_EXPANDED: 3.35,
+        COMPACT: 2.75,
+        GROUPED: 2.55,
+        NESTED: 2.35,
+        GHOSTED: 1.65,
+        ICON_ONLY: 1.45,
+        INSPECTOR_ONLY_LABEL: 1.45,
       }[displayState] ?? 1.35;
+      const requestedBorder = Number(style.border_width);
+      const resolvedBorder = Number.isFinite(requestedBorder)
+        ? Math.max(requestedBorder, borderFallback)
+        : borderFallback;
       return {
         opacity: Math.max(0.18, Math.min(1, Number(style.opacity ?? opacityFallback) || opacityFallback)),
-        borderWidth: Math.max(1.05, Math.min(4.2, Number(style.border_width ?? borderFallback) || borderFallback)),
+        borderWidth: Math.max(1.30, Math.min(4.8, resolvedBorder)),
         fillOpacity: Math.max(0, Math.min(0.16, Number(style.fill_opacity ?? (0.03 + weight * 0.04)) || 0.04)),
       };
     }
@@ -6445,12 +6449,12 @@
       const displayState = overlayDisplayState(box);
       const weight = overlayVisualWeight(box);
       if (displayState === "FULL" || displayState === "FOCUS_EXPANDED") {
-        return Math.max(3.05, Math.min(4.4, 2.75 + weight));
+        return Math.max(3.45, Math.min(4.9, 3.15 + weight));
       }
       if (displayState === "GHOSTED" || displayState === "INSPECTOR_ONLY_LABEL") {
-        return 2.05;
+        return 2.40;
       }
-      return Math.max(2.45, Math.min(3.75, 2.18 + weight));
+      return Math.max(2.90, Math.min(4.2, 2.55 + weight));
     }
 
     function resolveOverlayLabelBounds(box, tracking, image) {

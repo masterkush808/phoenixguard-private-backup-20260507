@@ -596,14 +596,14 @@ def _style_for_display_state(row: Mapping[str, Any], display_state: str, visual_
         "INSPECTOR_ONLY_LABEL": 0.018,
     }
     border_by_state = {
-        "FULL": 2.45,
-        "FOCUS_EXPANDED": 2.70,
-        "COMPACT": 2.05,
-        "GROUPED": 1.95,
-        "NESTED": 1.80,
-        "GHOSTED": 1.30,
-        "ICON_ONLY": 1.15,
-        "INSPECTOR_ONLY_LABEL": 1.15,
+        "FULL": 3.10,
+        "FOCUS_EXPANDED": 3.35,
+        "COMPACT": 2.75,
+        "GROUPED": 2.55,
+        "NESTED": 2.35,
+        "GHOSTED": 1.65,
+        "ICON_ONLY": 1.45,
+        "INSPECTOR_ONLY_LABEL": 1.45,
     }
     label_mode = {
         "FULL": "full",
