@@ -19,6 +19,15 @@ def _write_boxes(path: Path, *, buy: bool = True, sell: bool = True, layout_id: 
         "expiry_time_field": {"x": 0.5, "y": 0.2},
         "expiry_plus": {"x": 0.6, "y": 0.2},
         "expiry_minus": {"x": 0.4, "y": 0.2},
+        "hourly_plus": {"x": 0.60, "y": 0.24},
+        "hourly_input": {"x": 0.60, "y": 0.28},
+        "hourly_minus": {"x": 0.60, "y": 0.32},
+        "minute_plus": {"x": 0.64, "y": 0.24},
+        "minute_input": {"x": 0.64, "y": 0.28},
+        "minute_minus": {"x": 0.64, "y": 0.32},
+        "second_plus": {"x": 0.68, "y": 0.24},
+        "second_input": {"x": 0.68, "y": 0.28},
+        "second_minus": {"x": 0.68, "y": 0.32},
         "broker_focus_area": {"x": 0.3, "y": 0.3},
     }
     if buy:
@@ -57,6 +66,36 @@ def test_uncalibrated_buy_sell_buttons_are_rejected(tmp_path: Path) -> None:
     assert result.code == NOT_USER_CALIBRATED
     assert "buy_button" in result.uncalibrated_targets
     assert "sell_button" in result.uncalibrated_targets
+
+
+def test_missing_split_seconds_input_is_rejected(tmp_path: Path) -> None:
+    boxes = tmp_path / "808_shooter_boxes.json"
+    _write_boxes(boxes)
+    payload = json.loads(boxes.read_text(encoding="utf-8"))
+    payload.pop("second_input")
+    boxes.write_text(json.dumps(payload), encoding="utf-8")
+    manifest = build_manifest(boxes, profile_id="default", layout_id="desktop")
+
+    result = validate_profile_layout(manifest, "default", "desktop")
+
+    assert result.accepted is False
+    assert result.code == NOT_USER_CALIBRATED
+    assert "second_input" in result.uncalibrated_targets
+
+
+def test_plural_seconds_input_alias_is_calibrated(tmp_path: Path) -> None:
+    boxes = tmp_path / "808_shooter_boxes.json"
+    _write_boxes(boxes)
+    payload = json.loads(boxes.read_text(encoding="utf-8"))
+    payload["seconds_input"] = payload.pop("second_input")
+    boxes.write_text(json.dumps(payload), encoding="utf-8")
+
+    manifest = build_manifest(boxes, profile_id="default", layout_id="desktop")
+    result = validate_profile_layout(manifest, "default", "desktop")
+
+    second_record = manifest["profiles"]["default"]["layouts"]["desktop"]["required_targets"]["second_input"]
+    assert result.accepted is True
+    assert second_record["source_key"] == "seconds_input"
 
 
 def test_layout_mismatch_is_rejected(tmp_path: Path) -> None:

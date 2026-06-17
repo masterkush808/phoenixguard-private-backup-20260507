@@ -41,7 +41,23 @@ def test_import_v3_runtime_components() -> None:
 def test_required_calibration_targets_present() -> None:
     boxes = json.loads((ROOT / "808_shooter_boxes.json").read_text(encoding="utf-8"))
     points = boxes.get("points") if isinstance(boxes.get("points"), dict) else boxes
-    for target in ("broker_screen", "time_button", "hourly_input", "minute_input", "buy_icon", "sell_icon", "final_screen"):
+    for target in (
+        "broker_screen",
+        "time_button",
+        "time_input",
+        "hourly_plus",
+        "hourly_input",
+        "hourly_minus",
+        "minute_plus",
+        "minute_input",
+        "minute_minus",
+        "second_plus",
+        "second_input",
+        "second_minus",
+        "buy_icon",
+        "sell_icon",
+        "final_screen",
+    ):
         assert target in points
     assert (ROOT / "user_calibration_manifest.json").exists()
 

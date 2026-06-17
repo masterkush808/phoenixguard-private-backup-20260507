@@ -37,7 +37,7 @@ DISPLAY_QUALITY_PROFILES: dict[str, dict[str, Any]] = {
 OVERLAY_RENDER_BUDGETS: dict[str, int] = {
     "CLEAN_LIVE": 48,
     "CHART_BOUNDS": 8,
-    "CANDLES": 12,
+    "CANDLES": 120,
     "GLOBAL": 18,
     "LOCAL": 20,
     "SUPPLY_DEMAND": 18,

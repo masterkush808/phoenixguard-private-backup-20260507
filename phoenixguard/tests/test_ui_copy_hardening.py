@@ -113,8 +113,8 @@ def test_tracker_dashboard_exposes_next_two_candle_forecast() -> None:
     assert "high_frequency_forecast" in dashboard
     assert "microForecastHeadline" in dashboard
     assert "Two-Candle Study" in dashboard
-    assert "LSTM Study" not in dashboard
-    assert "overlay-lstm-study" not in dashboard
+    assert "LSTM Study" in dashboard
+    assert "overlay-lstm-study" in dashboard
     assert "TEXT_AND_BANDS_ONLY" in dashboard
     assert "do_not_render_synthetic_candles" in dashboard
     assert "/v1/mobile/live/state/v3/" in dashboard
@@ -231,6 +231,53 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "frameNumber(session.full_overlay_frame_id)" in dashboard
     assert "frameNumber(overlaysPayload.artifact_frame_id)" in dashboard
     assert "renderSessionImmediate(payload);" in dashboard
+
+
+def test_tracker_dashboard_chart_artifacts_do_not_reuse_candle_green_red_palette() -> None:
+    dashboard = (_REPO / "phoenixguard" / "mobile_api" / "static" / "window_tracker_dashboard.html").read_text(
+        encoding="utf-8"
+    )
+    overlay_editor_css = (
+        _REPO / "phoenixguard" / "mobile_api" / "static" / "floating_windows" / "overlay_editor.css"
+    ).read_text(encoding="utf-8")
+
+    assert "--overlay-demand-rgb: 78, 210, 255;" in dashboard
+    assert "--overlay-supply-rgb: 248, 202, 92;" in dashboard
+    assert "--overlay-trigger-rgb: 185, 154, 255;" in dashboard
+    assert ".surface-trendline.trendline-support {\n      stroke: rgba(var(--overlay-demand-rgb), 0.98);" in dashboard
+    assert ".surface-trendline.trendline-resistance {\n      stroke: rgba(var(--overlay-supply-rgb), 0.98);" in dashboard
+    assert ".surface-hotspot.sell.layer-trigger-zones {\n      border-color: rgba(var(--overlay-trigger-rgb), 0.72);" in dashboard
+    assert ".surface-hotspot.buy.layer-broker-controls {\n      border-color: rgba(var(--overlay-demand-rgb), 0.86);" in dashboard
+    assert ".surface-hotspot.sell.layer-broker-controls {\n      border-color: rgba(var(--overlay-supply-rgb), 0.86);" in dashboard
+    assert ".overlay-editor" in overlay_editor_css
+
+
+def test_tracker_dashboard_exposes_floating_overlay_editor() -> None:
+    dashboard = (_REPO / "phoenixguard" / "mobile_api" / "static" / "window_tracker_dashboard.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "overlay-editor" in dashboard
+    assert "overlay-editor-open" in dashboard
+    assert "/v1/mobile/window-tracker/assets/floating-windows/overlay_editor.css" in dashboard
+    assert "OVERLAY_EDITOR_STORAGE_KEY" in dashboard
+    assert "OVERLAY_LAYER_KEYS" in dashboard
+    assert "phoenixguard.overlay.editor.v1" in dashboard
+    assert "data-overlay-setting=\"opacityScale\"" in dashboard
+    assert "data-overlay-setting=\"borderScale\"" in dashboard
+    assert "data-overlay-setting=\"lineScale\"" in dashboard
+    assert "data-overlay-setting=\"labelScale\"" in dashboard
+    assert "data-overlay-setting=\"labelOffset\"" not in dashboard
+    assert "data-overlay-color=\"demand\"" in dashboard
+    assert "data-overlay-layer-control=\"trendlines\"" in dashboard
+    assert "function applyOverlayEditorSettings" in dashboard
+    assert "function applySavedOverlayLayerState" in dashboard
+    assert "function saveOverlayEditorSettings" in dashboard
+    assert "function beginOverlayEditorDrag" in dashboard
+    assert "panelLocked" in dashboard
+    assert "state.overlayEditor.layers = Object.fromEntries" in dashboard
+    assert "applySavedOverlayLayerState();" in dashboard
+    assert "renderHotspots();" in dashboard
 
 
 def test_compare_desk_images_default_to_uncropped_contained_views() -> None:

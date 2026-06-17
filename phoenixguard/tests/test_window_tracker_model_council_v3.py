@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from copy import deepcopy
+import time
 from typing import Any, Mapping
 
 from PIL import Image
@@ -10,6 +11,7 @@ from phoenixguard.execution.packet_v3 import build_execution_packet_v3
 from phoenixguard.execution.packet_v3 import validate_execution_packet_v3
 from phoenixguard.execution.sequence_context import resolve_sequence_context
 from phoenixguard.decision.model_council_v3 import ModelCouncilV3
+import phoenixguard.mobile_api.window_tracker as window_tracker_module
 from phoenixguard.mobile_api.window_tracker import ContinuousWindowTrackerService
 
 
@@ -53,6 +55,382 @@ def _service(tmp_path: Path, execution_backend: _FakeExecutionBackend) -> Contin
         "amount_lock": {"policy": "PRESERVE_VISIBLE_AMOUNT", "verified": True},
     }
     return service
+
+
+def _complete_sequence_context(*, sequence_id: str = "seq_pocket-live-8788_20") -> dict[str, Any]:
+    return {
+        "sequence_id": sequence_id,
+        "session_id": "pocket-live-8788",
+        "sequence_index": 7,
+        "frame_start": 1,
+        "frame_end": 20,
+        "sequence_length": 64,
+        "frames_received": 64,
+        "frames_used": 64,
+        "candle_count": 64,
+        "timeframe": "M5",
+        "sequence_signature": f"seqsig-{sequence_id}",
+        "sequence_confidence": 0.95,
+        "global_direction": "SELL",
+        "local_direction": "SELL",
+        "current_phase": "PULLBACK",
+        "progression_score": 0.88,
+        "progression": [{"stage": "impulse", "direction": "SELL"}],
+        "motifs": ["impulse", "pullback"],
+        "box_history": [{"type": "IMPULSE_BOX", "bounds": [0.1, 0.2, 0.3, 0.4]}],
+        "angle_vectors": [[-1.0, 0.0]],
+        "sniper_zones": [{"type": "SNIPER_SELL", "bounds": [0.2, 0.25, 0.3, 0.35]}],
+        "target_zones": [{"type": "TARGET", "bounds": [0.1, 0.4, 0.2, 0.5]}],
+        "invalidation_zones": [{"type": "INVALIDATION", "bounds": [0.4, 0.1, 0.5, 0.2]}],
+        "sequence_status": "COMPLETE",
+        "frame_range": [1, 20],
+        "candle_range": [1, 64],
+        "frames_dropped": 0,
+        "sequence_age_ms": 50,
+        "packet_age_ms": 100,
+        "decision_age_ms": 80,
+        "model_vote_age_ms": 60,
+        "entry_progression": {"steps": [{"type": "TRIGGER", "index": 1}]},
+        "tracking_summary": {"global_direction": "SELL", "local_direction": "SELL"},
+        "sequence_history": [{"type": "IMPULSE_BOX", "bounds": [0.1, 0.2, 0.3, 0.4]}],
+    }
+
+
+def test_signal_thesis_countertrend_block_downgrades_public_council_state(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    execution_backend = _FakeExecutionBackend()
+    service = _service(tmp_path, execution_backend)
+    now = time.time()
+    packet = build_execution_packet_v3(
+        packet_id="pgpkt-countertrend-blocked",
+        session_id="pocket-live-8788",
+        symbol="EUR/GBP OTC",
+        timeframe="M5",
+        frame_id=20,
+        capture_count=21,
+        state_version=120,
+        side="SELL",
+        expiry_seconds=600,
+        input_frame_hash="frame-countertrend",
+        created_epoch=now,
+        valid_until_epoch=now + 30.0,
+        live_integrity={
+            "is_live": True,
+            "frame_advancing": True,
+            "capture_advancing": True,
+            "state_advancing": True,
+            "source": "model_council",
+            "cache_status": "fresh",
+            "input_frame_hash": "frame-countertrend",
+            "previous_frame_hash": "frame-prev",
+            "packet_age_ms": 10,
+        },
+        model_council={"final_state": "EXECUTABLE", "final_side": "SELL"},
+        runtime_model_health={"all_required_models_awake": True, "council_status": "AWAKE"},
+        sequence_context=_complete_sequence_context(sequence_id="seq_countertrend_blocked"),
+    )
+    study_packet: dict[str, Any] = {
+        "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
+        "packet_id": "pgpkt-countertrend-blocked",
+        "packet_type": "STUDY_PACKET",
+        "session_id": "pocket-live-8788",
+        "created_epoch": now,
+        "created_epoch_sec": now,
+        "valid_until_epoch": now + 30.0,
+        "valid_until_epoch_sec": now + 30.0,
+        "execution": {"enabled": True, "state": "EXECUTABLE", "side": "SELL"},
+        "model_council": {"final_state": "EXECUTABLE", "final_side": "SELL"},
+        "promotion_trace": {
+            "packet_id": "pgpkt-countertrend-blocked",
+            "candidate_id": "pgcand-countertrend",
+            "candidate_stage": "EXECUTION_PACKET_PUBLISHED",
+            "promotion_result": "EXECUTABLE_PACKET_CREATED",
+            "packet_result": "PG_EXECUTION_PACKET_V3_PUBLISHED",
+            "timing_mode": "ENTER_NOW",
+            "final_score": 1.0,
+            "threshold": 0.5,
+        },
+    }
+    result = {
+        "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
+        "packet_id": "pgpkt-countertrend-blocked",
+        "packet_type": "STUDY_PACKET",
+        "execution": {"enabled": True, "state": "EXECUTABLE", "side": "SELL"},
+        "model_council": {"final_state": "EXECUTABLE", "final_side": "SELL"},
+        "promotion_trace": dict(study_packet["promotion_trace"]),
+        "model_council_study_packet": study_packet,
+        "study_packet": study_packet,
+        "execution_packet": packet,
+        "model_council_packet": packet,
+        "instrument_context": packet["instrument_context"],
+        "execution_lane": {"name": "HIGH_FREQUENCY_TWO_CANDLE", "accepted": True},
+    }
+
+    class _FakeCouncil:
+        def evaluate(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return dict(result)
+
+    monkeypatch.setattr(service, "_model_council_for_session", lambda _session_id: _FakeCouncil())
+    monkeypatch.setattr(
+        window_tracker_module,
+        "update_signal_thesis_v3",
+        lambda *_args, **_kwargs: {
+            "schema_version": "PG_SIGNAL_THESIS_V3",
+            "active": True,
+            "countertrend_blocked": True,
+            "side": "BUY",
+            "effective_side": "BUY",
+            "raw_read_side": "SELL",
+            "thesis_id": "pgthesis-active-buy",
+        },
+    )
+
+    published = service._publish_model_council_v3_state(
+        payload={"session_id": "pocket-live-8788"},
+        tracking_summary={},
+        latest_signal={},
+        frame_index=20,
+        capture_count=21,
+        input_frame_hash="frame-countertrend",
+        capture_started_epoch=now,
+    )
+
+    assert "execution_packet" not in published
+    assert "model_council_packet" not in published
+    assert published["execution"]["enabled"] is False
+    assert published["model_council"]["final_state"] == "WATCHING"
+    assert published["model_council"]["final_side"] is None
+    assert published["promotion_trace"]["candidate_stage"] == "CANDIDATE_STABLE"
+    assert published["promotion_trace"]["packet_result"] == "STUDY_PACKET_PUBLISHED"
+    assert published["promotion_trace"]["attempted_side"] == "SELL"
+    visible_study = published["model_council_study_packet"]
+    assert visible_study["execution"]["enabled"] is False
+    assert visible_study["model_council"]["final_state"] == "WATCHING"
+    assert visible_study["block_reason"] == "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK"
+
+
+def test_model_council_packet_uses_publication_epoch_not_capture_start(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    execution_backend = _FakeExecutionBackend()
+    service = _service(tmp_path, execution_backend)
+    capture_started = 1000.0
+    publication_epoch = capture_started + 30.0
+    seen_now_epoch: list[float] = []
+
+    class _FakeCouncil:
+        def evaluate(self, snapshot: Mapping[str, Any], *, now_epoch: float | None = None) -> dict[str, Any]:
+            assert now_epoch is not None
+            seen_now_epoch.append(float(now_epoch))
+            packet = build_execution_packet_v3(
+                packet_id="pgpkt-publication-epoch",
+                session_id=str(snapshot["session_id"]),
+                symbol="EUR/GBP OTC",
+                timeframe="M5",
+                frame_id=20,
+                capture_count=21,
+                state_version=120,
+                side="BUY",
+                expiry_seconds=300,
+                input_frame_hash="frame-publication-epoch",
+                created_epoch=float(now_epoch),
+                valid_until_epoch=float(now_epoch) + 8.0,
+                live_integrity={
+                    "is_live": True,
+                    "frame_advancing": True,
+                    "capture_advancing": True,
+                    "state_advancing": True,
+                    "source": "model_council",
+                    "cache_status": "fresh",
+                    "input_frame_hash": "frame-publication-epoch",
+                    "previous_frame_hash": "frame-prev",
+                    "packet_age_ms": 10,
+                },
+                model_council={"final_state": "EXECUTABLE", "final_side": "BUY"},
+                runtime_model_health={"all_required_models_awake": True, "council_status": "AWAKE"},
+                sequence_context={
+                    "sequence_id": "seq_pocket-live-8788_20",
+                    "session_id": "pocket-live-8788",
+                    "timeframe": "M5",
+                    "sequence_signature": "seqsig-publication-epoch",
+                    "sequence_status": "COMPLETE",
+                    "sequence_length": 50,
+                    "frames_used": 50,
+                    "sequence_confidence": 0.95,
+                    "box_history": [{"type": "IMPULSE_BOX", "bounds": [0.1, 0.2, 0.3, 0.4]}],
+                    "progression": [{"type": "IMPULSE_BOX", "index": 1}],
+                    "entry_progression": {"steps": [{"type": "TRIGGER", "index": 1}]},
+                },
+            )
+            study_packet = {
+                "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
+                "packet_id": packet["packet_id"],
+                "packet_type": "STUDY_PACKET",
+                "session_id": packet["session_id"],
+                "created_epoch": float(now_epoch),
+                "created_epoch_sec": float(now_epoch),
+                "valid_until_epoch": float(now_epoch) + 20.0,
+                "valid_until_epoch_sec": float(now_epoch) + 20.0,
+                "execution": {"enabled": True, "state": "EXECUTABLE", "side": "BUY"},
+                "model_council": {"final_state": "EXECUTABLE", "final_side": "BUY"},
+                "promotion_trace": {
+                    "packet_id": packet["packet_id"],
+                    "packet_result": "PG_EXECUTION_PACKET_V3_PUBLISHED",
+                    "promotion_result": "EXECUTABLE_PACKET_CREATED",
+                    "timing_mode": "ENTER_NOW",
+                    "final_score": 1.0,
+                    "threshold": 0.7,
+                },
+            }
+            return {
+                "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
+                "packet_id": packet["packet_id"],
+                "packet_type": "STUDY_PACKET",
+                "execution": {"enabled": True, "state": "EXECUTABLE", "side": "BUY"},
+                "model_council": {"final_state": "EXECUTABLE", "final_side": "BUY"},
+                "promotion_trace": dict(study_packet["promotion_trace"]),
+                "model_council_study_packet": study_packet,
+                "study_packet": study_packet,
+                "execution_packet": packet,
+                "model_council_packet": packet,
+                "instrument_context": packet["instrument_context"],
+                "execution_lane": {"name": "HIGH_FREQUENCY_TWO_CANDLE", "accepted": True},
+            }
+
+    monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: publication_epoch)
+    monkeypatch.setattr(service, "_model_council_for_session", lambda _session_id: _FakeCouncil())
+    monkeypatch.setattr(
+        window_tracker_module,
+        "update_signal_thesis_v3",
+        lambda *_args, **_kwargs: {"schema_version": "PG_SIGNAL_THESIS_V3", "active": False},
+    )
+
+    published = service._publish_model_council_v3_state(
+        payload={"session_id": "pocket-live-8788"},
+        tracking_summary={"detected_market": "EUR/GBP OTC", "detected_timeframe": "M5"},
+        latest_signal={},
+        frame_index=20,
+        capture_count=21,
+        input_frame_hash="frame-publication-epoch",
+        capture_started_epoch=capture_started,
+    )
+
+    packet = published["model_council_packet"]
+    assert seen_now_epoch == [publication_epoch]
+    assert packet["created_epoch"] == publication_epoch
+    assert packet["valid_until_epoch"] == publication_epoch + 8.0
+    assert packet["packet_validation"]["ok"] is True
+
+
+def test_study_packet_resolver_demotes_executable_claim_without_execution_packet() -> None:
+    now = time.time()
+    study = window_tracker_module._model_council_study_packet_from_payload(
+        {
+            "session_id": "pocket-live-8788",
+            "model_council_study_packet": {
+                "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
+                "packet_id": "pgpkt-study-only-exec-claim",
+                "packet_type": "STUDY_PACKET",
+                "session_id": "pocket-live-8788",
+                "created_epoch": now,
+                "created_epoch_sec": now,
+                "valid_until_epoch": now + 30.0,
+                "valid_until_epoch_sec": now + 30.0,
+                "execution": {"enabled": True, "state": "EXECUTABLE", "side": "SELL"},
+                "model_council": {"final_state": "EXECUTABLE", "final_side": "SELL"},
+                "promotion_trace": {
+                    "promotion_result": "EXECUTABLE_PACKET_CREATED",
+                    "packet_result": "PG_EXECUTION_PACKET_V3_PUBLISHED",
+                    "timing_mode": "ENTER_NOW",
+                },
+            },
+        }
+    )
+
+    assert study["packet_type"] == "STUDY_PACKET"
+    assert study["execution"]["enabled"] is False
+    assert study["execution"]["state"] == "WATCHING"
+    assert study["model_council"]["final_state"] == "WATCHING"
+    assert study["promotion_trace"]["packet_result"] == "STUDY_PACKET_PUBLISHED"
+    assert study["promotion_trace"]["denied_at"] == "EXECUTION_PACKET_NOT_CURRENT_AFTER_PUBLICATION"
+    assert study["promotion_failure_audit_v3"]["denied_at"] == "EXECUTION_PACKET_NOT_CURRENT_AFTER_PUBLICATION"
+    assert study["promotion_failure_audit_v3"]["exact_field_preventing_execution_packet"] == "current_execution_packet"
+
+
+def test_tracker_publish_demotes_executable_study_result_without_execution_packet(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    execution_backend = _FakeExecutionBackend()
+    service = _service(tmp_path, execution_backend)
+    now = time.time()
+    study_packet: dict[str, Any] = {
+        "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
+        "packet_id": "pgpkt-study-only-exec-claim",
+        "packet_type": "STUDY_PACKET",
+        "session_id": "pocket-live-8788",
+        "created_epoch": now,
+        "created_epoch_sec": now,
+        "valid_until_epoch": now + 30.0,
+        "valid_until_epoch_sec": now + 30.0,
+        "execution": {"enabled": True, "state": "EXECUTABLE", "side": "SELL"},
+        "model_council": {"final_state": "EXECUTABLE", "final_side": "SELL"},
+        "promotion_trace": {
+            "packet_id": "pgpkt-study-only-exec-claim",
+            "candidate_id": "pgcand-study-only",
+            "candidate_stage": "EXECUTION_PACKET_PUBLISHED",
+            "promotion_result": "EXECUTABLE_PACKET_CREATED",
+            "packet_result": "PG_EXECUTION_PACKET_V3_PUBLISHED",
+            "timing_mode": "ENTER_NOW",
+            "final_score": 1.0,
+            "threshold": 0.7,
+        },
+    }
+    result = {
+        "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
+        "packet_id": "pgpkt-study-only-exec-claim",
+        "packet_type": "STUDY_PACKET",
+        "execution": {"enabled": True, "state": "EXECUTABLE", "side": "SELL"},
+        "model_council": {"final_state": "EXECUTABLE", "final_side": "SELL"},
+        "promotion_trace": dict(study_packet["promotion_trace"]),
+        "model_council_study_packet": study_packet,
+        "study_packet": study_packet,
+    }
+
+    class _FakeCouncil:
+        def evaluate(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return dict(result)
+
+    monkeypatch.setattr(service, "_model_council_for_session", lambda _session_id: _FakeCouncil())
+    monkeypatch.setattr(
+        window_tracker_module,
+        "update_signal_thesis_v3",
+        lambda *_args, **_kwargs: {"schema_version": "PG_SIGNAL_THESIS_V3", "active": False},
+    )
+
+    published = service._publish_model_council_v3_state(
+        payload={"session_id": "pocket-live-8788"},
+        tracking_summary={},
+        latest_signal={},
+        frame_index=20,
+        capture_count=21,
+        input_frame_hash="frame-study-only",
+        capture_started_epoch=now,
+    )
+
+    assert "execution_packet" not in published
+    assert "model_council_packet" not in published
+    assert published["execution"]["enabled"] is False
+    assert published["execution"]["state"] == "WATCHING"
+    assert published["model_council"]["final_state"] == "WATCHING"
+    assert published["promotion_trace"]["packet_result"] == "STUDY_PACKET_PUBLISHED"
+    assert published["promotion_trace"]["denied_at"] == "EXECUTION_PACKET_NOT_CURRENT_AFTER_PUBLICATION"
+    assert published["promotion_failure_audit_v3"]["denied_at"] == "EXECUTION_PACKET_NOT_CURRENT_AFTER_PUBLICATION"
+    assert published["promotion_failure_audit_v3"]["exact_field_preventing_execution_packet"] == "current_execution_packet"
+    assert published["model_council_study_packet"]["execution"]["enabled"] is False
 
 
 def test_tracker_live_backend_refuses_raw_signal_without_model_council_packet(tmp_path: Path) -> None:
@@ -446,6 +824,66 @@ def test_locked_surface_fallback_is_broker_click_safe_when_profile_is_proven(tmp
     assert context["broker_click_safe"] is True
 
 
+def test_broker_source_lock_profile_is_click_safe_without_identity_fallback(tmp_path: Path) -> None:
+    execution_backend = _FakeExecutionBackend()
+    service = _service(tmp_path, execution_backend)
+
+    snapshot = service._build_model_council_v3_snapshot(
+        payload={
+            "session_id": "pocket-live-8788",
+            "execution_controls": {
+                "live_execution_enabled": True,
+                "execution_mode": "live",
+                "allow_locked_surface_identity_fallback": False,
+            },
+            "manual_focus_region": {"enabled": True, "normalized_bbox": [0.02, 0.06, 0.76, 0.94]},
+            "locked_window": {"hwnd": 123, "title": "Pocket Option", "bbox": [0, 0, 640, 420], "width": 640, "height": 420},
+            "broker_surface": {
+                "controls_ready": True,
+                "broker_surface_hash": "surface-a",
+            },
+            "broker_source_lock": {
+                "valid": True,
+                "status": "VALID",
+                "reason_codes": ["BROKER_SOURCE_LOCKED"],
+                "viewport_fingerprint": "vp:640x420",
+                "broker_control_fingerprint": "ctrl:locked",
+                "broker_pixel_fingerprint": "px:locked",
+            },
+            "broker_source": {
+                "lock_id": "vp:640x420",
+                "valid": True,
+                "status": "VALID",
+                "study_source_only": False,
+                "broker_click_safe": True,
+            },
+        },
+        tracking_summary={
+            "detected_market": "",
+            "detected_timeframe": "M5",
+            "market_context": {
+                "dominant_side": "BUY",
+                "inside_valid_trigger_zone": True,
+                "opposing_force_distance_ok": True,
+            },
+        },
+        latest_signal={"candidate_action": "BUY", "confidence": 0.7},
+        frame_index=10,
+        capture_count=11,
+        input_frame_hash="frame-a",
+        capture_started_epoch=1000.0,
+    )
+
+    context = snapshot["instrument_context"]
+    assert context["identity_state"] == "IDENTITY_LOCKED_BY_USER_PROFILE"
+    assert context["display_symbol"] == "BROKER_LOCKED_ACTIVE_CHART"
+    assert context["broker_click_safe"] is True
+    assert context["instrument_context_state"] == "BROKER_CLICK_SAFE"
+    assert context["source"] == "broker_source_lock_profile"
+    assert context["evidence"]["window_handle_stable"] is True
+    assert context["evidence"]["broker_surface_hash_stable"] is True
+
+
 def test_actionable_broker_timing_becomes_model_council_execution_evidence(tmp_path: Path) -> None:
     execution_backend = _FakeExecutionBackend()
     service = _service(tmp_path, execution_backend)
@@ -455,6 +893,7 @@ def test_actionable_broker_timing_becomes_model_council_execution_evidence(tmp_p
             "live_execution_enabled": True,
             "execution_mode": "live",
             "allow_locked_surface_identity_fallback": True,
+            "swing_fallback_enabled": True,
         },
         "manual_focus_region": {"enabled": True, "pixel_bbox": [10, 20, 600, 380]},
         "locked_window": {"hwnd": 123, "title": "Pocket Option", "bbox": [0, 0, 640, 420], "width": 640, "height": 420},
@@ -526,6 +965,7 @@ def test_near_trigger_kernel_candidate_becomes_model_council_execution_evidence(
             "live_execution_enabled": True,
             "execution_mode": "live",
             "allow_locked_surface_identity_fallback": True,
+            "swing_fallback_enabled": True,
         },
         "manual_focus_region": {"enabled": True, "pixel_bbox": [10, 20, 600, 380]},
         "locked_window": {"hwnd": 123, "title": "Pocket Option", "bbox": [0, 0, 640, 420], "width": 640, "height": 420},

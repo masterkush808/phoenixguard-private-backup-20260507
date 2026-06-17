@@ -1,0 +1,221 @@
+.overlay-editor-fab {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 70;
+  min-height: 38px;
+  padding: 9px 12px;
+  border: 1px solid rgba(107, 200, 255, 0.34);
+  background: rgba(7, 12, 16, 0.88);
+  color: var(--ice);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.34);
+}
+
+.overlay-editor-fab[hidden] {
+  display: none;
+}
+
+.overlay-editor {
+  position: fixed;
+  right: 18px;
+  top: 78px;
+  z-index: 72;
+  width: min(380px, calc(100vw - 24px));
+  max-height: min(78svh, 760px);
+  display: none;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid rgba(107, 200, 255, 0.24);
+  border-radius: 8px;
+  background: rgba(6, 10, 13, 0.94);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.56);
+  backdrop-filter: blur(16px);
+}
+
+.overlay-editor.open {
+  display: grid;
+}
+
+.overlay-editor.locked .overlay-editor-head {
+  cursor: default;
+}
+
+.overlay-editor-head,
+.overlay-editor-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.overlay-editor-head {
+  cursor: move;
+  user-select: none;
+}
+
+.overlay-editor-foot {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 0;
+}
+
+.overlay-editor-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.overlay-editor-title strong {
+  font-size: 11px;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.overlay-editor-title span,
+.overlay-editor-status {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+  text-transform: uppercase;
+}
+
+.overlay-editor-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.overlay-editor-actions button,
+.overlay-editor-foot button {
+  min-height: 30px;
+  padding: 7px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--muted);
+  font-size: 10px;
+  font-family: var(--mono);
+  text-transform: uppercase;
+}
+
+.overlay-editor-actions button.primary,
+.overlay-editor-foot button.primary {
+  color: #d8f2ff;
+  border-color: rgba(107, 200, 255, 0.34);
+  background: rgba(107, 200, 255, 0.10);
+}
+
+.overlay-editor-actions button.locked {
+  color: var(--gold);
+  border-color: rgba(242, 200, 102, 0.38);
+  background: rgba(242, 200, 102, 0.10);
+}
+
+.overlay-editor-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.overlay-editor-section {
+  display: grid;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.overlay-editor-section:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.overlay-editor-section h3 {
+  margin: 0;
+  font-size: 10px;
+  color: var(--gold);
+  font-family: var(--mono);
+  text-transform: uppercase;
+}
+
+.overlay-control-row {
+  display: grid;
+  grid-template-columns: minmax(104px, 1fr) minmax(132px, 1.2fr) 48px;
+  gap: 8px;
+  align-items: center;
+  min-height: 28px;
+}
+
+.overlay-control-row label,
+.overlay-check-row label,
+.overlay-color-row label {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+  text-transform: uppercase;
+}
+
+.overlay-control-row output {
+  color: var(--ice);
+  font-size: 10px;
+  font-family: var(--mono);
+  text-align: right;
+}
+
+.overlay-control-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--ice);
+}
+
+.overlay-check-grid,
+.overlay-color-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.overlay-check-row,
+.overlay-color-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 30px;
+  padding: 5px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.overlay-check-row input {
+  accent-color: var(--ice);
+}
+
+.overlay-color-row input[type="color"] {
+  width: 30px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+}
+
+@media (max-width: 760px) {
+  .overlay-editor {
+    inset: auto 12px 12px 12px;
+    width: auto;
+    max-height: min(82svh, 680px);
+  }
+
+  .overlay-control-row {
+    grid-template-columns: minmax(92px, 1fr) minmax(112px, 1.1fr) 44px;
+  }
+}

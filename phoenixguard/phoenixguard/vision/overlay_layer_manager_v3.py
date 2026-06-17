@@ -20,6 +20,7 @@ OVERLAY_LAYER_MANAGER_SCHEMA_VERSION = "PG_OVERLAY_LAYER_MANAGER_V3"
 @dataclass(frozen=True)
 class OverlayLayerManagerV3:
     mode: str = "CLEAN_LIVE"
+    now_ms: int | float | None = None
 
     def normalized_mode(self) -> str:
         value = normalize_view_mode(self.mode)
@@ -38,7 +39,15 @@ class OverlayLayerManagerV3:
         )
 
     def resolve(self, overlays: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-        rows = [dict(row) for row in overlays if overlay_is_visible(row, self.normalized_mode())]
+        def visible(row: Mapping[str, Any]) -> bool:
+            try:
+                created_at_ms = float(row.get("created_at_ms") or 0.0)
+            except (TypeError, ValueError):
+                created_at_ms = 0.0
+            effective_now_ms = self.now_ms if created_at_ms > 0.0 else None
+            return overlay_is_visible(row, self.normalized_mode(), now_ms=effective_now_ms)
+
+        rows = [dict(row) for row in overlays if visible(row)]
         budget = int(OVERLAY_RENDER_BUDGETS.get(self.normalized_mode(), len(rows)))
         return sorted(rows, key=self.overlay_sort_key)[:budget]
 

@@ -455,7 +455,10 @@ def build_instrument_context(
         source = str(row.get("identity_source", "snapshot") or "snapshot")
     elif lock_state in {IDENTITY_USER_LOCKED, IDENTITY_PROFILE_LOCKED} and display_symbol:
         identity_state = lock_state
-        source = "user_lock" if lock_state == IDENTITY_USER_LOCKED else "profile_lock"
+        source = str(
+            identity_lock.get("source")
+            or ("user_lock" if lock_state == IDENTITY_USER_LOCKED else "profile_lock")
+        )
     elif ocr_symbol or observed_symbol:
         identity_state = IDENTITY_CONFIRMED
         display_symbol = display_symbol or ocr_symbol or observed_symbol

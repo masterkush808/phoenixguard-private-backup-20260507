@@ -45,6 +45,7 @@ def rehearse_execution(
     now_epoch: float | None = None,
     estimated_execution_latency_ms: float = 230.0,
     require_broker_click_safe: bool = True,
+    max_packet_age_seconds: float = 2.0,
 ) -> dict[str, Any]:
     now = time.time() if now_epoch is None else float(now_epoch)
     execution = _mapping(packet.get("execution"))
@@ -53,7 +54,13 @@ def rehearse_execution(
     side = _side(execution.get("side"))
     expiry_seconds = int(_float(execution.get("expiry_seconds"), _float(time_sequence.get("target_seconds"), 0.0)))
     coordinate_report = build_coordinate_report(boxes, window_bounds, side=side, expiry_seconds=expiry_seconds)
-    constitution = evaluate_execution_constitution(packet, decision, now_epoch=now, first_read_confirmed=True)
+    constitution = evaluate_execution_constitution(
+        packet,
+        decision,
+        now_epoch=now,
+        first_read_confirmed=True,
+        max_packet_age_seconds=max_packet_age_seconds,
+    )
     latest = _mapping(latest_packet)
     latest_side = _side(_mapping(latest.get("execution")).get("side")) if latest else side
     latest_council_side = _side(_mapping(latest.get("model_council")).get("final_side")) if latest else side

@@ -4,7 +4,8 @@ param(
     [int]$Port = $(if ($env:PHOENIXGUARD_MOBILE_API_PORT) { [int]$env:PHOENIXGUARD_MOBILE_API_PORT } else { 8793 }),
     [string]$SessionId = $(if ($env:PHOENIXGUARD_TRACKER_SESSION_ID) { $env:PHOENIXGUARD_TRACKER_SESSION_ID } else { 'pocket-live-8788' }),
     [string]$BrokerWindowQuery = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_QUERY) { $env:PHOENIXGUARD_BROKER_WINDOW_QUERY } else { 'Pocket Option' }),
-    [string]$FocusRegion = $(if ($env:PHOENIXGUARD_TRACKER_FOCUS_REGION) { $env:PHOENIXGUARD_TRACKER_FOCUS_REGION } else { '0.02,0.06,0.76,0.94' }),
+    [int]$BrokerWindowHwnd = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_HWND) { [int]$env:PHOENIXGUARD_BROKER_WINDOW_HWND } else { 0 }),
+    [string]$FocusRegion = $(if ($env:PHOENIXGUARD_TRACKER_FOCUS_REGION) { $env:PHOENIXGUARD_TRACKER_FOCUS_REGION } else { '0.03,0.13,0.87,0.96' }),
     [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 1.0 }),
     [switch]$NoOpenDashboard,
     [switch]$NoWaitForLock
@@ -31,6 +32,7 @@ $env:PHOENIXGUARD_MOBILE_API_HOST = $ApiHost
 $env:PHOENIXGUARD_MOBILE_API_PORT = "$Port"
 $env:PHOENIXGUARD_TRACKER_SESSION_ID = $SessionId
 $env:PHOENIXGUARD_BROKER_WINDOW_QUERY = $BrokerWindowQuery
+$env:PHOENIXGUARD_BROKER_WINDOW_HWND = "$BrokerWindowHwnd"
 $env:PHOENIXGUARD_TRACKER_FOCUS_REGION = $FocusRegion
 $env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC = "$CaptureIntervalSec"
 
@@ -43,6 +45,10 @@ $launcherArgs = @(
     '--focus-region', $FocusRegion,
     '--capture-interval', "$CaptureIntervalSec"
 )
+
+if ($BrokerWindowHwnd -gt 0) {
+    $launcherArgs += @('--window-hwnd', "$BrokerWindowHwnd")
+}
 
 if ($NoOpenDashboard) {
     $launcherArgs += '--no-open-dashboard'

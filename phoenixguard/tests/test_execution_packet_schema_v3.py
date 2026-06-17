@@ -14,6 +14,7 @@ from phoenixguard.execution.packet_v3 import (
     resolve_expiry_seconds,
     validate_execution_packet_v3,
 )
+import phoenixguard.execution.packet_v3 as packet_v3
 from tests.support.v3_packet_samples import complete_sequence_context_v3
 
 
@@ -98,10 +99,51 @@ def test_execution_packet_schema_v3_valid() -> None:
     assert payload["instrument_context"]["identity_state"] == "IDENTITY_CONFIRMED"
     assert payload["instrument_context"]["display_symbol"] == "EUR/GBP OTC"
     assert payload["instrument_context"]["ocr_symbol"] == ""
+
+
+def test_execution_packet_publication_age_overrides_source_frame_age(monkeypatch) -> None:
+    monkeypatch.setattr(packet_v3, "now_epoch", lambda: NOW)
+
+    payload = build_execution_packet_v3(
+        packet_id="pgpkt-age-contract",
+        session_id="pocket-live-8788",
+        symbol="EUR/GBP OTC",
+        timeframe="M5",
+        frame_id=5438,
+        capture_count=5440,
+        state_version=99182,
+        created_epoch=NOW - 0.2,
+        valid_until_epoch=NOW + 2.0,
+        side="BUY",
+        expiry_seconds=300,
+        live_integrity={
+            "is_live": True,
+            "frame_advancing": True,
+            "capture_advancing": True,
+            "state_advancing": True,
+            "source": "model_council",
+            "cache_status": "fresh",
+            "input_frame_hash": "abc123",
+            "previous_frame_hash": "def456",
+            "packet_age_ms": 45_000,
+        },
+        model_council={"final_state": "EXECUTABLE", "final_side": "BUY"},
+        runtime_model_health={"all_required_models_awake": True, "council_status": "AWAKE"},
+        sequence_context=complete_sequence_context_v3(
+            sequence_id="seq-pgpkt-age-contract",
+            session_id="pocket-live-8788",
+            side="BUY",
+        ),
+    )
+
+    assert payload["live_integrity"]["packet_age_ms"] == 200
+    assert payload["live_integrity"]["source_frame_age_ms"] == 45_000
+    result = validate_execution_packet_v3(payload, now_epoch=NOW, expected_session_id="pocket-live-8788")
+    assert result.accepted is True
     assert payload["instrument_context"]["timeframe"] == "M5"
     assert payload["instrument_context"]["paper_safe"] is True
     assert payload["symbol_context"]["display_symbol"] == "EUR/GBP OTC"
-    assert payload["provenance"]["sequence_id"] == "seq-pgpkt-test-001"
+    assert payload["provenance"]["sequence_id"] == "seq-pgpkt-age-contract"
     assert payload["model_council"]["sequence_context"]["schema_version"] == "PG_SEQUENCE_CONTEXT_V3"
 
 
@@ -165,6 +207,24 @@ def test_expiry_field_resolution_consistent() -> None:
     assert resolve_expiry_seconds(mismatched) is None
     assert result.rejected is True
     assert "INVALID_OR_MISSING_EXPIRY_SECONDS" in result.reason_codes
+
+
+def test_fallback_expiry_source_rejected_for_execution_packet() -> None:
+    payload = _packet(expiry_source="timeframe_fallback")
+
+    result = validate_execution_packet_v3(payload, now_epoch=NOW)
+
+    assert result.rejected is True
+    assert "FALLBACK_EXPIRY_SOURCE" in result.reason_codes
+
+
+def test_nested_fallback_expiry_source_rejected_for_execution_packet() -> None:
+    payload = _packet(execution={"expiry_source": "operator_fallback(--expiry)"})
+
+    result = validate_execution_packet_v3(payload, now_epoch=NOW)
+
+    assert result.rejected is True
+    assert "FALLBACK_EXPIRY_SOURCE" in result.reason_codes
 
 
 def test_trade_permission_denied_rejects_executable_packet() -> None:
@@ -317,6 +377,13 @@ def test_packet_age_ms_uses_seconds_epoch_correctly() -> None:
     payload = _packet(created_epoch_sec=NOW - 1.25, created_epoch=NOW - 1.25)
 
     assert packet_age_ms(payload, now_epoch=NOW) == 1250
+
+
+def test_execution_packet_exposes_explicit_ttl_seconds() -> None:
+    payload = _packet()
+
+    assert round(float(payload["ttl_sec"]), 3) == 2.2
+    assert round(float(payload["valid_for_seconds"]), 3) == 2.2
 
 
 def test_invalid_side_enum_rejected() -> None:

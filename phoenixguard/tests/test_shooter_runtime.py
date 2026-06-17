@@ -27,6 +27,50 @@ def test_extract_signal_payload_unwraps_latest_signal() -> None:
     assert shooter._extract_signal_payload({"latest_signal": signal}) == signal
 
 
+def test_ocr_read_time_region_uses_visual_template_without_tesseract(monkeypatch: pytest.MonkeyPatch) -> None:
+    shooter = _load_shooter()
+    Image = pytest.importorskip("PIL.Image")
+    cv2 = pytest.importorskip("cv2")
+    np = pytest.importorskip("numpy")
+
+    image_array = np.zeros((40, 156, 3), dtype=np.uint8)
+    image_array[:] = (32, 38, 58)
+    cv2.putText(
+        image_array,
+        "00:10:00",
+        (12, 27),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA,
+    )
+    image = Image.fromarray(image_array, "RGB")
+
+    monkeypatch.setattr(shooter, "has_ocr", False)
+    monkeypatch.setattr(shooter, "pytesseract", None)
+    monkeypatch.setattr(shooter, "get_window_rect", lambda _hwnd: shooter.RECT(0, 0, 200, 100))
+    monkeypatch.setattr(shooter.pyautogui, "screenshot", lambda region=None: image)
+
+    assert shooter.ocr_read_time_region(1, {"time_input": {"x": 0.5, "y": 0.5}}) == 600
+
+
+def test_confirmed_expiry_cache_is_target_and_window_scoped() -> None:
+    shooter = _load_shooter()
+
+    with shooter._confirmed_expiry_cache_lock:
+        shooter._confirmed_expiry_cache.clear()
+    rect = shooter.RECT(0, 0, 1000, 800)
+    shifted_rect = shooter.RECT(200, 0, 1200, 800)
+
+    shooter._remember_confirmed_expiry(11, rect, 600, source="test")
+
+    assert shooter._get_cached_confirmed_expiry(11, rect, 600) == 600
+    assert shooter._get_cached_confirmed_expiry(11, rect, 900) is None
+    assert shooter._get_cached_confirmed_expiry(12, rect, 600) is None
+    assert shooter._get_cached_confirmed_expiry(11, shifted_rect, 600) is None
+
+
 def test_parse_trade_signal_accepts_explicit_execution_action_payload() -> None:
     shooter = _load_shooter()
 

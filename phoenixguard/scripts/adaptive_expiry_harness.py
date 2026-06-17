@@ -22,6 +22,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 SHOOTER_PATH = ROOT / "shooter.py"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 if not SHOOTER_PATH.exists():
     print("Cannot locate 'shooter.py' at expected path:", SHOOTER_PATH)
     sys.exit(2)
@@ -51,7 +53,13 @@ samples: List[Tuple[str, Dict[str, Any]]] = [
 args = SimpleNamespace(adaptive_verbose=True)
 
 for name, payload in samples:
-    chosen = _choose(payload, 59, args)
-    print(f"{name}: chosen={chosen}s payload_sample={json.dumps({'signal_id': payload.get('signal_id')}, ensure_ascii=False)}")
+    try:
+        chosen = _choose(payload, 59, args)
+        status = {"status": "ok", "chosen": chosen}
+    except ValueError as exc:
+        if "strict expiry selection requires explicit PhoenixGuard expiry_seconds" not in str(exc):
+            raise
+        status = {"status": "strict_rejected", "chosen": None, "reason": str(exc)}
+    print(f"{name}: {json.dumps({**status, 'signal_id': payload.get('signal_id')}, ensure_ascii=False)}")
 
 print("Harness complete.")

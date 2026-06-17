@@ -79,6 +79,7 @@ _WINDOW_TRACKER_BRAND_ASSET_DIR = (
     Path(__file__).resolve().parents[2] / "assets" / "share" / "css-control"
 )
 _WINDOW_TRACKER_JS_ASSET_DIR = Path(__file__).resolve().parents[2] / "assets" / "js"
+_WINDOW_TRACKER_FLOATING_WINDOWS_DIR = Path(__file__).resolve().parent / "static" / "floating_windows"
 _WINDOW_TRACKER_BRAND_ASSETS = frozenset(
     {
         "landing-transition-lifestyle-suite.png",
@@ -111,6 +112,13 @@ try:
     )
 except ValueError:
     _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC = 300.0
+try:
+    _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC = max(
+        0.0,
+        float(os.getenv("PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC", "0.85") or "0.85"),
+    )
+except ValueError:
+    _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC = 0.85
 try:
     _LIVE_STATE_REGISTRY_MAX_LINES = max(
         50,
@@ -666,13 +674,61 @@ def _cached_direct_performance_trace(session_id: str, *, now_epoch: float | None
     return trace
 
 
+def _direct_performance_overlay_rows(session_id: str, *, now_epoch: float) -> list[Mapping[str, Any]]:
+    requested_session_id = str(session_id or "").strip()
+    if not requested_session_id:
+        return []
+    with _LIVE_STATE_V3_CACHE_LOCK:
+        cached_sources = _LIVE_STATE_REGISTRY_CACHE.get(requested_session_id)
+        if cached_sources and now_epoch - cached_sources[0] <= _LIVE_STATE_REGISTRY_CACHE_TTL_SEC:
+            registry_entries = list(cached_sources[2])
+        else:
+            registry_entries = []
+    if not registry_entries:
+        try:
+            registry_entries = [
+                cast(Mapping[str, Any], item)
+                for item in load_recent_market_objects(
+                    requested_session_id,
+                    max_lines=_LIVE_STATE_REGISTRY_MAX_LINES,
+                )
+            ]
+        except Exception:
+            registry_entries = []
+        if registry_entries:
+            try:
+                active_objects = [
+                    cast(Mapping[str, Any], item)
+                    for item in _active_objects_from_entries(
+                        registry_entries,
+                        min_truth_score=0.0,
+                        now_epoch=now_epoch,
+                    )
+                ]
+            except Exception:
+                active_objects = []
+            with _LIVE_STATE_V3_CACHE_LOCK:
+                _LIVE_STATE_REGISTRY_CACHE[requested_session_id] = (now_epoch, active_objects, registry_entries)
+    rows: list[Mapping[str, Any]] = []
+    for entry in _locked_registry_entries_from_entries(registry_entries):
+        overlay = _mapping_to_plain_dict(entry.get("overlay"))
+        if not overlay:
+            continue
+        overlay_id = _registry_entry_overlay_id(entry)
+        if overlay_id and not overlay.get("overlay_id"):
+            overlay["overlay_id"] = overlay_id
+        rows.append(overlay)
+    return rows
+
+
 def _packet_id_from_endpoint(endpoint_result: Mapping[str, object]) -> str:
     payload = endpoint_result.get("payload")
     if not isinstance(payload, Mapping):
         return ""
-    packet_id = payload.get("packet_id")
-    if packet_id:
-        return str(packet_id)
+    for key in ("authority_packet_id", "latest_execution_packet_id", "packet_id"):
+        packet_id = payload.get(key)
+        if packet_id:
+            return str(packet_id)
     packet = payload.get("packet")
     if isinstance(packet, Mapping):
         return str(packet.get("id_short") or packet.get("packet_id") or "")
@@ -1016,6 +1072,8 @@ class WindowTrackerSessionCreateRequest(BaseModel):
     name: str = ""
     market: str = ""
     window_query: str = "Pocket Option"
+    locked_hwnd: int = Field(default=0, ge=0)
+    locked_title: str = ""
     layout_profile: str = "auto"
     capture_interval_sec: float = Field(
         default=_WINDOW_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC,
@@ -1026,6 +1084,11 @@ class WindowTrackerSessionCreateRequest(BaseModel):
     auto_start: bool = False
     observer_settings: dict[str, object] = Field(default_factory=dict)
     observer_policy: dict[str, object] = Field(default_factory=dict)
+
+
+class WindowTrackerLockedWindowRequest(BaseModel):
+    locked_hwnd: int = Field(default=0, ge=0)
+    locked_title: str = ""
 
 
 class WindowTrackerFocusRegionRequest(BaseModel):
@@ -1131,6 +1194,7 @@ def create_app(
     app.state.observer_service = observer_service
     app.state.window_tracker_service = window_tracker_service
     app.state.voice_config = resolved_voice_config
+    explicit_window_tracker_service = window_tracker_service is not None
 
     def get_mobile_service() -> MobileApiService:
         mobile_service = getattr(app.state, "mobile_service", None)
@@ -1169,10 +1233,11 @@ def create_app(
         return market_window_tracker
 
     def read_window_tracker_session(session_id: str) -> dict[str, object]:
-        direct_snapshot = _direct_window_tracker_session_snapshot(session_id)
-        if direct_snapshot is not None:
-            return direct_snapshot
         tracker_service = get_window_tracker_service()
+        if not explicit_window_tracker_service:
+            direct_snapshot = _direct_window_tracker_session_snapshot(session_id)
+            if direct_snapshot is not None:
+                return direct_snapshot
         snapshot_getter = getattr(tracker_service, "get_session_snapshot", None)
         if callable(snapshot_getter):
             return cast(dict[str, object], snapshot_getter(session_id))
@@ -2078,12 +2143,25 @@ def create_app(
             if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
                 with _LIVE_STATE_V3_CACHE_LOCK:
                     cached = _COMPACT_LIVE_STATE_RESPONSE_CACHE.get(cache_key)
-                    if cached and now_epoch - cached[0] <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
-                        return _refresh_compact_cached_live_state(
-                            dict(cached[1]),
-                            requested_session_id,
-                            now_epoch=now_epoch,
-                        )
+                    if cached:
+                        cached_age = now_epoch - cached[0]
+                        if cached_age <= _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC:
+                            compact_cached = dict(cached[1])
+                            provider = {
+                                **_mapping_to_plain_dict(compact_cached.get("provider_status")),
+                                "compact_cache_hot_reused_v3": True,
+                                "compact_cache_hot_age_ms": round(max(0.0, cached_age) * 1000.0, 3),
+                            }
+                            compact_cached["provider_status"] = provider
+                            return compact_cached
+                        if cached_age <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
+                            compact_refreshed = _refresh_compact_cached_live_state(
+                                dict(cached[1]),
+                                requested_session_id,
+                                now_epoch=now_epoch,
+                            )
+                            _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_refreshed))
+                            return compact_refreshed
             live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=True)
             compact_response = compact_live_state_response(live_state)
             if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
@@ -2151,7 +2229,7 @@ def create_app(
         if not requested_session_id:
             return None
         session = (
-            _direct_window_tracker_display_snapshot(requested_session_id)
+            _direct_window_tracker_display_snapshot(requested_session_id, require_overlay_model=False)
             or _direct_window_tracker_session_snapshot(requested_session_id)
         )
         if session is None:
@@ -2159,9 +2237,10 @@ def create_app(
         now_epoch = time.time()
         model_health = _live_model_health_summary(cast(Mapping[str, object], session))
         frontend_heartbeat = latest_frontend_heartbeat(requested_session_id)
+        overlay_rows = _direct_performance_overlay_rows(requested_session_id, now_epoch=now_epoch)
         frame_timing = build_frame_timing_trace_v3(
             cast(Mapping[str, Any], session),
-            overlays=[],
+            overlays=overlay_rows,
             model_health=cast(Mapping[str, Any], model_health),
             frontend_heartbeat=frontend_heartbeat,
             now_epoch=now_epoch,
@@ -2187,6 +2266,11 @@ def create_app(
         }
         trace = cast(dict[str, object], build_performance_trace_v3(live_state, now_epoch=now_epoch))
         trace["frame_id"] = int(frame_timing.get("display_frame_id") or live_state["frame_id"] or 0)
+        trace["direct_overlay_source_v3"] = {
+            "source": "locked_registry",
+            "count": len(overlay_rows),
+            "canonical_rebuild_required": False,
+        }
         _store_direct_performance_trace_cache(requested_session_id, trace, now_epoch=now_epoch)
         return trace
 
@@ -2504,21 +2588,167 @@ def create_app(
                 tracker_latest["status"] = "STALE"
                 tracker_latest["detail"] = str(tracker_runtime.get("reason") or "tracker session is stale")
 
+        def _model_council_state_from_trace_tracker() -> dict[str, object]:
+            result = _mapping_to_plain_dict(tracker_payload.get("model_council_result"))
+            study_packet = _model_council_study_packet_from_payload(cast(Mapping[str, Any], tracker_payload))
+            packet = _model_council_packet_from_payload(cast(Mapping[str, Any], tracker_payload))
+            if not result and not study_packet and not packet:
+                return cast(dict[str, object], get_window_tracker_service().latest_model_council_state(resolved_session_id))
+            return {
+                "session_id": str(tracker_payload.get("session_id", resolved_session_id) or resolved_session_id),
+                "model_council_result": result,
+                "model_council_study_packet": study_packet,
+                "model_council_packet": packet,
+                "execution_packet_present": bool(packet),
+                "execution_packet_id": str(packet.get("packet_id", "") or "") if packet else "",
+                "promotion_trace": _mapping_to_plain_dict(
+                    result.get("promotion_trace")
+                    or study_packet.get("promotion_trace")
+                    or _mapping_to_plain_dict(result.get("model_council")).get("promotion_trace")
+                ),
+            }
+
+        def _study_packet_from_trace_tracker() -> dict[str, object]:
+            packet = _model_council_study_packet_from_payload(cast(Mapping[str, Any], tracker_payload))
+            if packet:
+                return cast(dict[str, object], packet)
+            return cast(dict[str, object], get_window_tracker_service().latest_model_council_study_packet(resolved_session_id))
+
+        def _execution_packet_from_trace_tracker() -> dict[str, object]:
+            packet = _model_council_packet_from_payload(cast(Mapping[str, Any], tracker_payload))
+            if packet:
+                return cast(dict[str, object], packet)
+            return cast(dict[str, object], get_window_tracker_service().latest_model_council_packet(resolved_session_id))
+
+        def _runtime_trace_floating_state_summary() -> dict[str, object]:
+            tracking_summary = _mapping_to_plain_dict(tracker_payload.get("tracking_summary"))
+            latest_signal = _mapping_to_plain_dict(tracker_payload.get("latest_signal"))
+            overlay_geometry = _mapping_to_plain_dict(
+                tracking_summary.get("overlay_geometry") or latest_signal.get("overlay_geometry")
+            )
+            overlay_truth_audit = _mapping_to_plain_dict(
+                tracking_summary.get("overlay_truth_audit")
+                or latest_signal.get("overlay_truth_audit")
+                or overlay_geometry.get("truth_audit")
+            )
+            audit_objects = overlay_truth_audit.get("objects")
+            audit_object_count = len(audit_objects) if isinstance(audit_objects, list) else 0
+            clean_live_state: dict[str, object] = {}
+            try:
+                clean_live_state = live_state_v3_for_session(resolved_session_id, mode="CLEAN_LIVE", compact=True)
+            except Exception:
+                clean_live_state = {}
+            clean_overlays = _mapping_to_plain_dict(clean_live_state.get("overlays"))
+            clean_objects = clean_overlays.get("objects")
+            clean_object_count = len(clean_objects) if isinstance(clean_objects, list) else 0
+            renderable_count = int(
+                _epoch_float(
+                    clean_live_state.get("renderable_count")
+                    or clean_overlays.get("renderable_count")
+                    or clean_live_state.get("overlay_count")
+                    or clean_overlays.get("overlay_count")
+                    or clean_object_count,
+                    0.0,
+                )
+            )
+            if clean_object_count > 0 and renderable_count <= 0:
+                renderable_count = clean_object_count
+            if renderable_count <= 0:
+                try:
+                    registry_rows = _direct_performance_overlay_rows(resolved_session_id, now_epoch=trace_created_epoch_sec)
+                except Exception:
+                    registry_rows = []
+                renderable_count = len(registry_rows) or audit_object_count
+            if renderable_count <= 0:
+                try:
+                    renderable_count = int(float(overlay_geometry.get("visible_default_count") or 0))
+                except (TypeError, ValueError):
+                    renderable_count = 0
+            try:
+                hidden_count = int(float(clean_live_state.get("hidden_count") or clean_overlays.get("hidden_count") or overlay_geometry.get("hidden_default_count") or 0))
+            except (TypeError, ValueError):
+                hidden_count = 0
+            try:
+                rejected_count = int(
+                    float(
+                        clean_live_state.get("rejected_count")
+                        or clean_overlays.get("rejected_count")
+                        or overlay_truth_audit.get("invalid_object_count")
+                        or overlay_truth_audit.get("decision_invalid_object_count")
+                        or 0
+                    )
+                )
+            except (TypeError, ValueError):
+                rejected_count = 0
+            frontend_heartbeat = latest_frontend_heartbeat(resolved_session_id)
+            frontend_payload = _mapping_to_plain_dict(frontend_heartbeat)
+            received_at_epoch = _epoch_float(frontend_payload.get("received_at_ms"), 0.0) / 1000.0
+            heartbeat_age_sec = trace_created_epoch_sec - received_at_epoch if received_at_epoch > 0 else 999999.0
+            heartbeat_fresh = 0.0 <= heartbeat_age_sec <= 10.0
+            frontend_count = renderable_count
+            frontend_count_source = "backend_clean_live_authority"
+            if heartbeat_fresh:
+                frontend_count = int(
+                    _epoch_float(
+                        frontend_payload.get("visible_overlay_count")
+                        or frontend_payload.get("overlay_count"),
+                        float(renderable_count),
+                    )
+                )
+                frontend_count_source = "fresh_frontend_heartbeat"
+            if frontend_count <= 0 and renderable_count > 0:
+                frontend_count = renderable_count
+            source_packet = _mapping_to_plain_dict(
+                tracker_payload.get("model_council_packet")
+                or tracker_payload.get("execution_packet")
+                or tracker_payload.get("model_council_study_packet")
+                or tracker_payload.get("latest_signal")
+            )
+            return {
+                "schema_version": "FloatingStateV2",
+                "summary_schema_version": "PG_RUNTIME_TRACE_FLOATING_STATE_SUMMARY_V1",
+                "session_id": resolved_session_id,
+                "mode": "LIVE",
+                "timestamp": trace_created_epoch_sec,
+                "state_chip": "TRACE_SUMMARY",
+                "packet_id": str(source_packet.get("packet_id") or source_packet.get("signal_id") or ""),
+                "overlay_count": frontend_count,
+                "renderable_count": renderable_count,
+                "overlay_rejected_count": rejected_count,
+                "overlays": {
+                    "renderable_count": renderable_count,
+                    "overlay_count": frontend_count,
+                    "hidden_count": hidden_count,
+                    "rejected_count": rejected_count,
+                    "source": "clean_live_compact_state" if clean_live_state else "overlay_truth_audit",
+                    "frontend_count_source": frontend_count_source,
+                    "frontend_heartbeat_fresh": heartbeat_fresh,
+                    "frontend_heartbeat_age_sec": round(max(0.0, heartbeat_age_sec), 3) if received_at_epoch > 0 else None,
+                },
+                "health": {
+                    "tracker": str(tracker_runtime.get("state") or "RUNNING"),
+                    "models_awake": _mapping_to_plain_dict(tracker_payload.get("model_health")).get("models_awake"),
+                    "cache": str(tracker_payload.get("cache_status") or tracker_payload.get("cache") or "UNKNOWN"),
+                    "latency_sec": round(max(0.0, trace_created_epoch_sec - _epoch_float(tracker_payload.get("updated_at_epoch") or tracker_payload.get("timestamp"), trace_created_epoch_sec)), 3),
+                },
+                "frontend_heartbeat": frontend_payload,
+            }
+
         model_council_latest = collect(
             "model_council_latest",
-            lambda: latest_model_council_state_from_live_session(resolved_session_id),
+            _model_council_state_from_trace_tracker,
         )
         study_latest = collect(
             "study_latest",
-            lambda: latest_model_council_study_packet_from_live_session(resolved_session_id),
+            _study_packet_from_trace_tracker,
         )
         execution_latest = collect(
             "execution_latest",
-            lambda: latest_model_council_execution_packet_from_live_session(resolved_session_id),
+            _execution_packet_from_trace_tracker,
         )
         floating_state = collect(
             "floating_state",
-            lambda: build_floating_state_for_session(resolved_session_id, include_inspector=False),
+            _runtime_trace_floating_state_summary,
         )
         shooter_handshake = collect("shooter_handshake", lambda: _latest_shooter_handshake(resolved_session_id))
         model_health = collect(
@@ -2616,7 +2846,15 @@ def create_app(
                 issues.append(f"{endpoint_name}_stale")
         if study_latest.get("status") == "PASS" and not packet_ids["study"]:
             issues.append("study_latest_missing_packet_id")
-        if execution_latest.get("status") == "PASS" and packet_ids["execution"] and packet_ids["shooter"] and packet_ids["execution"] != packet_ids["shooter"]:
+        shooter_payload_for_alignment = _mapping_to_plain_dict(shooter_handshake.get("payload"))
+        shooter_packet_type_for_alignment = str(shooter_payload_for_alignment.get("packet_type") or "").strip().upper()
+        if (
+            execution_latest.get("status") == "PASS"
+            and packet_ids["execution"]
+            and packet_ids["shooter"]
+            and packet_ids["execution"] != packet_ids["shooter"]
+            and shooter_packet_type_for_alignment == "PG_EXECUTION_PACKET_V3"
+        ):
             issues.append("execution_latest_shooter_packet_mismatch")
         if floating_state.get("status") == "PASS" and str(floating_state).lower().find("n/a") >= 0:
             issues.append("floating_state_contains_raw_na")
@@ -2675,7 +2913,29 @@ def create_app(
             tracking_surface_source,
         )
         source_lock_status_text = str(broker_source_lock.get("status") or broker_source_lock.get("state") or "").strip().upper()
-        source_lock_valid = broker_source_lock.get("valid") is True or source_lock_status_text in {"PASS", "VALID", "LOCKED"}
+        source_lock_invalid_statuses = {
+            "FAIL",
+            "FAILED",
+            "INVALID",
+            "MISSING",
+            "WRONG_SURFACE",
+            "SURFACE_MISMATCH",
+            "TITLE_MATCH_PIXEL_MISMATCH",
+            "BROKER_CONTROL_PIXELS_MISSING",
+            "CHART_SOURCE_PIXELS_MISSING",
+        }
+        source_lock_wrong_surface = bool(
+            broker_source_lock.get("wrong_surface") is True
+            or broker_source_lock.get("surface_wrong") is True
+            or source_lock_status_text in source_lock_invalid_statuses
+        )
+        source_lock_valid = bool(
+            not source_lock_wrong_surface
+            and (
+                broker_source_lock.get("valid") is True
+                or source_lock_status_text in {"PASS", "VALID", "LOCKED", "BROKER_SOURCE_LOCKED"}
+            )
+        )
         source_lock_status = "PASS" if source_lock_valid else ("MISSING" if not broker_source_lock else "FAIL")
         locked_overlay_authority = bool(
             (tracker_payload.get("display_snapshot_only_v3") or tracker_payload.get("display_fast_path_v3"))
@@ -2688,8 +2948,10 @@ def create_app(
         )
         if source_lock_status == "FAIL" and not packet_ids["execution"] and locked_overlay_authority:
             broker_source_lock["display_only_overlay_authority_locked"] = True
-            source_lock_valid = True
-            source_lock_status = "PASS"
+            broker_source_lock["display_only_overlay_authority_status"] = "PASS"
+            broker_source_lock["display_only_overlay_authority_reason"] = (
+                "Visual overlay continuity is allowed, but broker source certification remains failed."
+            )
         model_health_payload = _mapping_to_plain_dict(_mapping_to_plain_dict(model_health.get("payload")).get("runtime_model_health") or model_health.get("payload"))
         if not model_health_payload:
             model_health_payload = _mapping_to_plain_dict(model_health.get("payload"))
@@ -2699,7 +2961,7 @@ def create_app(
         overlay_rejected_count = int(overlay_root.get("rejected_count") or overlay_payload.get("overlay_rejected_count") or 0)
         overlay_backend_count = int(overlay_root.get("renderable_count") or overlay_payload.get("renderable_count") or 0)
         overlay_frontend_count = int(overlay_payload.get("overlay_count") or overlay_backend_count or 0)
-        overlay_truth_pass = overlay_rejected_count == 0 and overlay_backend_count == overlay_frontend_count
+        overlay_truth_pass = overlay_backend_count > 0 and overlay_backend_count == overlay_frontend_count
         promotion_trace = _first_trace_mapping(
             _mapping_to_plain_dict(study_latest.get("payload")).get("promotion_trace"),
             _mapping_to_plain_dict(execution_latest.get("payload")).get("promotion_trace"),
@@ -3096,6 +3358,8 @@ def create_app(
                 name=request.name,
                 market=request.market,
                 window_query=request.window_query,
+                locked_hwnd=request.locked_hwnd,
+                locked_title=request.locked_title,
                 layout_profile=request.layout_profile,
                 capture_interval_sec=request.capture_interval_sec,
                 rl_track_interval_sec=request.rl_track_interval_sec,
@@ -3103,6 +3367,22 @@ def create_app(
                 observer_settings=request.observer_settings,
                 observer_policy=request.observer_policy,
             )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.patch("/v1/mobile/window-tracker/sessions/{session_id}/locked-window")
+    def update_tracker_session_locked_window(
+        session_id: str,
+        request: WindowTrackerLockedWindowRequest,
+    ) -> dict[str, object]:
+        try:
+            return get_window_tracker_service().update_session_locked_window(
+                session_id,
+                locked_hwnd=request.locked_hwnd,
+                locked_title=request.locked_title,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -3375,6 +3655,29 @@ def create_app(
         elif normalized_asset_path in _WINDOW_TRACKER_BRAND_ASSETS:
             path = _WINDOW_TRACKER_BRAND_ASSET_DIR / normalized_asset_path
             media_type = "image/png"
+        elif normalized_asset_path.startswith("floating-windows/"):
+            relative_asset_path = normalized_asset_path.removeprefix("floating-windows/").replace("\\", "/")
+            relative_parts = Path(relative_asset_path).parts
+            if (
+                not relative_asset_path
+                or Path(relative_asset_path).is_absolute()
+                or any(part in {"", ".", ".."} for part in relative_parts)
+            ):
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard asset not found.")
+            candidate = (_WINDOW_TRACKER_FLOATING_WINDOWS_DIR / relative_asset_path).resolve()
+            asset_root = _WINDOW_TRACKER_FLOATING_WINDOWS_DIR.resolve()
+            try:
+                candidate.relative_to(asset_root)
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard asset not found.") from exc
+            suffix = candidate.suffix.lower()
+            if suffix == ".css":
+                media_type = "text/css"
+            elif suffix == ".js":
+                media_type = "application/javascript"
+            else:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard asset not found.")
+            path = candidate
         if path is None or not path.is_file():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard asset not found.")
         return FileResponse(path, media_type=media_type)

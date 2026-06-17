@@ -56,6 +56,16 @@ def test_compact_session_payload_preserves_v3_authority_packets_and_sequence(mon
         "created_epoch": 99.0,
         "valid_until_epoch": 120.0,
         "valid_until_epoch_sec": 120.0,
+        "execution": {
+            "enabled": True,
+            "state": "EXECUTABLE",
+            "side": "SELL",
+            "expiry_seconds": 600,
+        },
+        "model_council": {
+            "final_state": "EXECUTABLE",
+            "final_side": "SELL",
+        },
     }
     compact = _compact_session_payload(
         {
@@ -113,6 +123,49 @@ def test_compact_session_payload_drops_expired_execution_authority(monkeypatch) 
             "broker_execution_state": {
                 "status": "external_shooter_required",
                 "side": "BUY",
+                "lane": "MODEL_COUNCIL_PACKET_V3",
+                "actionable": True,
+            },
+        }
+    )
+
+    assert "model_council_packet" not in compact
+    assert "execution_packet" not in compact
+    assert compact["broker_execution_state"]["status"] == "blocked_by_runtime"
+    assert compact["broker_execution_state"]["side"] == "HOLD"
+
+
+def test_compact_session_payload_drops_demoted_execution_authority(monkeypatch) -> None:
+    monkeypatch.setattr("phoenixguard.mobile_api.live_state_v3.time.time", lambda: 150.0)
+    demoted_packet = {
+        "schema_version": "PG_EXECUTION_PACKET_V3",
+        "packet_type": "PG_EXECUTION_PACKET_V3",
+        "packet_id": "exec-demoted",
+        "created_epoch": 149.0,
+        "valid_until_epoch": 180.0,
+        "valid_until_epoch_sec": 180.0,
+        "execution": {
+            "enabled": False,
+            "state": "WATCHING",
+            "side": None,
+            "expiry_seconds": 600,
+        },
+        "model_council": {
+            "final_state": "WATCHING",
+            "final_side": None,
+        },
+    }
+
+    compact = _compact_session_payload(
+        {
+            "session_id": "pocket-live-8788",
+            "status": "running",
+            "tracking_enabled": True,
+            "model_council_packet": demoted_packet,
+            "execution_packet": demoted_packet,
+            "broker_execution_state": {
+                "status": "external_shooter_required",
+                "side": "SELL",
                 "lane": "MODEL_COUNCIL_PACKET_V3",
                 "actionable": True,
             },

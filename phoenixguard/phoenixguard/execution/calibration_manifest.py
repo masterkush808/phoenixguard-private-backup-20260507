@@ -13,12 +13,19 @@ USER_CALIBRATED = "USER_CALIBRATED"
 NOT_USER_CALIBRATED = "NOT_USER_CALIBRATED"
 
 REQUIRED_TARGETS: tuple[str, ...] = (
+    "broker_focus_area",
+    "expiry_time_field",
+    "hourly_plus",
+    "hourly_input",
+    "hourly_minus",
+    "minute_plus",
+    "minute_input",
+    "minute_minus",
+    "second_plus",
+    "second_input",
+    "second_minus",
     "buy_button",
     "sell_button",
-    "expiry_time_field",
-    "expiry_plus",
-    "expiry_minus",
-    "broker_focus_area",
 )
 
 OPTIONAL_TARGETS: tuple[str, ...] = (
@@ -33,9 +40,18 @@ OPTIONAL_TARGETS: tuple[str, ...] = (
 TARGET_ALIASES: dict[str, tuple[str, ...]] = {
     "buy_button": ("buy_button", "buy_icon"),
     "sell_button": ("sell_button", "sell_icon"),
-    "expiry_time_field": ("expiry_time_field", "time_box", "time_button", "time_input", "hourly_input", "minute_input"),
-    "expiry_plus": ("expiry_plus", "time_adjustment_plus", "hourly_plus", "minute_plus"),
-    "expiry_minus": ("expiry_minus", "time_adjustment_minus", "hourly_minus", "minute_minus"),
+    "expiry_time_field": ("expiry_time_field", "time_input", "time_button", "time_box"),
+    "hourly_plus": ("hourly_plus", "hour_plus", "hours_plus", "expiry_plus", "time_adjustment_plus", "hour_up"),
+    "hourly_input": ("hourly_input", "hour_input", "hours_input"),
+    "hourly_minus": ("hourly_minus", "hour_minus", "hours_minus", "expiry_minus", "time_adjustment_minus", "hour_down"),
+    "minute_plus": ("minute_plus", "minutely_plus", "minutes_plus", "minute_up"),
+    "minute_input": ("minute_input", "minutely_input", "minutes_input"),
+    "minute_minus": ("minute_minus", "minutely_minus", "minutes_minus", "minute_down"),
+    "second_plus": ("second_plus", "seconds_plus", "second_up"),
+    "second_input": ("second_input", "seconds_input"),
+    "second_minus": ("second_minus", "seconds_minus", "second_down"),
+    "expiry_plus": ("expiry_plus", "time_adjustment_plus", "hourly_plus"),
+    "expiry_minus": ("expiry_minus", "time_adjustment_minus", "hourly_minus"),
     "amount_field": ("amount_field", "amount_box", "stake_amount", "investment_amount", "amount_input"),
     "broker_focus_area": ("broker_focus_area", "broker_screen", "final_screen"),
     "chart_area": ("chart_area", "chart", "chart_region"),

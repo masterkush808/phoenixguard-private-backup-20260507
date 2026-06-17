@@ -1,0 +1,43 @@
+# Copy this file to `phoenixguard.vm-monitor.env.ps1` on the Windows VM.
+# Keep this monitor in an interactive Windows user session so the tracker can
+# see the broker window and the shooter can click the desktop.
+
+$env:PHOENIXGUARD_PROFILE = 'FINAL_LIVE'
+
+# Bind to 127.0.0.1 when the tracker and shooter both run on the VM.
+# Use 0.0.0.0 only behind a private firewall, VPN, or authenticated tunnel.
+$env:PHOENIXGUARD_MONITOR_BIND_HOST = '127.0.0.1'
+$env:PHOENIXGUARD_MONITOR_BASE_HOST = '127.0.0.1'
+$env:PHOENIXGUARD_MOBILE_API_PORT = '8793'
+
+$env:PHOENIXGUARD_TRACKER_SESSION_ID = 'pocket-live-8788'
+$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC = '1.0'
+$env:PHOENIXGUARD_TRACKER_WAIT_FOR_LOCK = '1'
+$env:PHOENIXGUARD_TRACKER_OPEN_DASHBOARD = '0'
+
+$env:PHOENIXGUARD_SHOOTER_ENABLED = '1'
+$env:PHOENIXGUARD_SHOOTER_POLL_SEC = '1.0'
+$env:PHOENIXGUARD_SHOOTER_MIN_CONFIDENCE = '0.50'
+$env:PHOENIXGUARD_SHOOTER_MAX_SIGNAL_AGE_SEC = '8'
+$env:PHOENIXGUARD_SHOOTER_COOLDOWN_SEC = '1200'
+$env:PHOENIXGUARD_EXECUTION_COOLDOWN_SEC = '1200'
+
+# Optional launch smoke test. When enabled, the monitor calls the tracker
+# demo execution endpoint once after the locked tracker is running.
+$env:PHOENIXGUARD_STARTUP_TEST_TRADE_ENABLED = '0'
+$env:PHOENIXGUARD_STARTUP_TEST_TRADE_SIDE = 'AUTO'
+$env:PHOENIXGUARD_STARTUP_TEST_TRADE_EXPIRY_SEC = '180'
+$env:PHOENIXGUARD_STARTUP_TEST_TRADE_READY_TIMEOUT_SEC = '120'
+$env:PHOENIXGUARD_STARTUP_TEST_TRADE_MAX_SIGNAL_AGE_SEC = '8'
+$env:PHOENIXGUARD_LIVE_FULL_MEMORY_REPORT = '1'
+
+$env:PHOENIXGUARD_MONITOR_HEALTH_TIMEOUT_SEC = '90'
+$env:PHOENIXGUARD_MONITOR_HEALTH_INTERVAL_SEC = '10'
+$env:PHOENIXGUARD_MONITOR_UNHEALTHY_RESTARTS_AFTER = '6'
+$env:PHOENIXGUARD_MONITOR_RESTART_DELAY_SEC = '5'
+
+# Defaults are under the project root if these are left blank.
+$env:PHOENIXGUARD_MONITOR_STATUS_FILE = ''
+$env:PHOENIXGUARD_TRACKER_STATUS_FILE = ''
+$env:PHOENIXGUARD_DATA_DIR = ''
+$env:PHOENIXGUARD_LOGS_DIR = ''

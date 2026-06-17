@@ -1,0 +1,26 @@
+name: Golden visual regression
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  golden-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run golden test
+        env:
+          UPDATE_GOLDEN: ${{ env.UPDATE_GOLDEN }}
+        run: |
+          python -m pytest tests/test_visual_golden.py -q

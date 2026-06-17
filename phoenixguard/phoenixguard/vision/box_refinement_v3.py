@@ -525,10 +525,31 @@ def _mode_emphasizes_type(mode: str, overlay_type: str, layer: str) -> bool:
         return overlay_type in {"SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX"}
     if normalized_mode == "TARGET":
         return overlay_type in {"TARGET_ZONE_BOX", "OPPOSING_FORCE"}
+    if normalized_mode in {"BROKER", "CALIBRATION"}:
+        return overlay_type == "BROKER_CONTROL"
     if normalized_mode == "GLOBAL":
         return overlay_type in {"IMPULSE_BOX", "PROGRESSION_PATH"} or layer == "major_swings"
     if normalized_mode == "LOCAL":
         return overlay_type in {"PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "CURRENT_CANDLE"}
+    if normalized_mode == "COUNCIL":
+        return overlay_type in {
+            "MODEL_COUNCIL_MARKER",
+            "REGIME_MARKER",
+            "MARKET_PLAY_MARKER",
+            "PRICE_LOCATION_MARKER",
+            "TWO_CANDLE_STUDY",
+            "LSTM_STUDY",
+            "SNIPER_ENTRY_BOX",
+            "RETEST_BOX",
+            "TARGET_ZONE_BOX",
+            "SUPPLY_ZONE",
+            "DEMAND_ZONE",
+            "OPPOSING_FORCE",
+        }
+    if normalized_mode == "TWO_CANDLE_STUDY":
+        return overlay_type == "TWO_CANDLE_STUDY"
+    if normalized_mode == "LSTM_STUDY":
+        return overlay_type == "LSTM_STUDY"
     if normalized_mode in {"FULL_HISTORY_READ", "REPLAY"}:
         return overlay_type in HISTORY_TYPES | STRUCTURE_TYPES | EXECUTION_FOCUS_TYPES | ZONE_TYPES | TRENDLINE_TYPES
     if normalized_mode == "PATH":
@@ -596,14 +617,14 @@ def _style_for_display_state(row: Mapping[str, Any], display_state: str, visual_
         "INSPECTOR_ONLY_LABEL": 0.018,
     }
     border_by_state = {
-        "FULL": 3.10,
-        "FOCUS_EXPANDED": 3.35,
-        "COMPACT": 2.75,
-        "GROUPED": 2.55,
-        "NESTED": 2.35,
-        "GHOSTED": 1.65,
-        "ICON_ONLY": 1.45,
-        "INSPECTOR_ONLY_LABEL": 1.45,
+        "FULL": 2.75,
+        "FOCUS_EXPANDED": 2.95,
+        "COMPACT": 2.35,
+        "GROUPED": 2.15,
+        "NESTED": 1.95,
+        "GHOSTED": 1.35,
+        "ICON_ONLY": 1.20,
+        "INSPECTOR_ONLY_LABEL": 1.20,
     }
     label_mode = {
         "FULL": "full",
@@ -659,6 +680,7 @@ def _display_state_for_row(row: Mapping[str, Any], mode: str, current_side: str)
 
 
 def _apply_display_metadata(rows: Sequence[Mapping[str, Any]], mode: str, current_side: str) -> list[dict[str, Any]]:
+    normalized_mode = normalize_view_mode(mode)
     output: list[dict[str, Any]] = []
     for raw in rows:
         row = dict(raw)
@@ -685,6 +707,10 @@ def _apply_display_metadata(rows: Sequence[Mapping[str, Any]], mode: str, curren
             row.setdefault("group_type", "LOCAL_STRUCTURE_GROUP")
             children = len(_sequence(row.get("child_overlay_ids")))
             row.setdefault("summary_label", f"{children} CHILD OVERLAYS")
+        if normalized_mode == "CANDLES" and str(row.get("type") or "") == "CURRENT_CANDLE":
+            row["label_hidden"] = True
+            row["label_anchor"] = "hidden"
+            row["label_visible"] = False
         output.append(row)
     return output
 
@@ -801,13 +827,24 @@ def _map_current_marker_to_history(row: dict[str, Any]) -> None:
     row.setdefault("precision_flags", []).append("duplicate_now_mapped_to_history")
 
 
-def _apply_current_candle_policy(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+def _apply_current_candle_policy(rows: Sequence[Mapping[str, Any]], mode: str = "CLEAN_LIVE") -> tuple[list[dict[str, Any]], int]:
     output = [dict(row) for row in rows]
+    normalized_mode = normalize_view_mode(mode)
     current_rows = [
         row
         for row in sorted(output, key=_priority, reverse=True)
         if str(row.get("type") or "") == "CURRENT_CANDLE" and not row.get("precision_rejected")
     ]
+    if normalized_mode == "CANDLES":
+        for index, row in enumerate(current_rows):
+            row["visible_modes"] = _only_modes(row, {"CANDLES", "INSPECTOR", "DEBUG", "DIAGNOSTICS"}, ["CANDLES", "INSPECTOR"])
+            row["display_label"] = "NOW" if index == 0 else "CANDLES"
+            row["short_label"] = row["display_label"]
+            row["label_hidden"] = True
+            row["label_anchor"] = "hidden"
+            row["label_visible"] = False
+            row["geometry_visible"] = True
+        return output, 0
     historical_rows = [row for row in current_rows if _historical_current_marker(row)]
     live_rows = [row for row in current_rows if not _historical_current_marker(row)]
     duplicates_hidden = 0
@@ -826,7 +863,7 @@ def _apply_current_candle_policy(rows: Sequence[Mapping[str, Any]]) -> tuple[lis
             continue
         duplicates_hidden += 1
         row["visible_default"] = False
-        row["visible_modes"] = ["DIAGNOSTICS", "DEBUG", "INSPECTOR"]
+        row["visible_modes"] = _only_modes(row, {"CANDLES", "DIAGNOSTICS", "DEBUG", "INSPECTOR"}, ["CANDLES", "INSPECTOR"])
         row["label_hidden"] = True
         row["label_anchor"] = "hidden"
         row.setdefault("precision_flags", []).append("duplicate_now_hidden_from_live")
@@ -1126,6 +1163,13 @@ def resolve_precision_overlays_v3(
     normalized_mode = normalize_view_mode(mode)
     scene = _scene_payload(scene_graph)
     plot_chart = normalize_bounds(scene.get("plot_area_chart_bounds") or scene.get("chart_region_chart_bounds") or [0, 0, 1000, 700]) or [0.0, 0.0, 1000.0, 700.0]
+    label_layout_bounds = plot_chart
+    if normalized_mode in {"BROKER", "CALIBRATION"}:
+        label_layout_bounds = (
+            normalize_bounds(scene.get("broker_surface_bounds"))
+            or normalize_bounds(scene.get("right_order_panel_bounds"))
+            or plot_chart
+        )
     scene_frame = int(_float(scene.get("frame_id"), 0.0))
     if scene_frame <= 0 and frame_id is not None:
         scene_frame = int(_float(frame_id, 0.0))
@@ -1206,7 +1250,7 @@ def resolve_precision_overlays_v3(
             for row in normalized
             if int(_float(row.get("frame_id"), scene_frame)) != scene_frame
         )
-    current_policy, duplicate_now_hidden = _apply_current_candle_policy(normalized)
+    current_policy, duplicate_now_hidden = _apply_current_candle_policy(normalized, normalized_mode)
     suppressed, duplicate_count = _suppress_duplicates(current_policy)
     nested, nesting_report = _apply_overlay_nesting(suppressed)
     anchored, floating_rejected = _reject_unanchored_floating_boxes(nested)
@@ -1217,9 +1261,9 @@ def resolve_precision_overlays_v3(
     )
     budgeted = _apply_render_budget(budgeted, normalized_mode)
     represented = _apply_display_metadata(budgeted, normalized_mode, str(current_side or "").upper())
-    laid_out = layout_overlay_labels(represented, chart_bounds=plot_chart)
+    laid_out = layout_overlay_labels(represented, chart_bounds=label_layout_bounds)
     for row in laid_out:
-        if row.get("type") == "CURRENT_CANDLE" and normalized_mode == "CLEAN_LIVE":
+        if row.get("type") == "CURRENT_CANDLE" and normalized_mode in {"CLEAN_LIVE", "CANDLES"}:
             row["label_hidden"] = True
             row["label_anchor"] = "hidden"
             row["label_visible"] = False

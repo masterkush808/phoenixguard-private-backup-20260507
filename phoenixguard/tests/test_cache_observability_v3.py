@@ -392,6 +392,18 @@ def test_dashboard_asset_route_rejects_encoded_path_traversal() -> None:
     assert response.status_code == 404
 
 
+def test_dashboard_asset_route_serves_floating_window_stylesheet() -> None:
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/window-tracker/assets/floating-windows/overlay_editor.css")
+    traversal = client.get("/v1/mobile/window-tracker/assets/floating-windows/%2e%2e/window_tracker_dashboard.html")
+
+    assert response.status_code == 200
+    assert "text/css" in response.headers["content-type"]
+    assert ".overlay-editor" in response.text
+    assert traversal.status_code == 404
+
+
 def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypatch: Any, tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
@@ -835,12 +847,18 @@ def test_model_council_latest_state_endpoint_returns_non_executable_study_packet
     assert alias.json()["promotion_trace"]["blocked_by"] == "candidate_flip_count"
 
 
-def test_model_council_latest_study_packet_endpoints_return_visibility_packet() -> None:
+def test_model_council_latest_study_packet_endpoints_return_visibility_packet(monkeypatch: Any) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
+    now = time.time()
     study_packet = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "pgpkt-study-visible",
         "packet_type": "STUDY_PACKET",
         "session_id": "pocket-live-8788",
+        "created_epoch": now,
+        "created_epoch_sec": now,
+        "valid_until_epoch": now + 30.0,
+        "valid_until_epoch_sec": now + 30.0,
         "execution": {"enabled": False, "state": "PREPARING", "side": "SELL"},
         "model_council": {"final_state": "PREPARING", "final_side": "SELL"},
         "promotion_trace": {

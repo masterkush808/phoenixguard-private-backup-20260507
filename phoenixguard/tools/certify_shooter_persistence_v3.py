@@ -8,6 +8,7 @@ import time
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
     DEFAULT_SESSION,
+    ROOT,
     command_line,
     find_processes,
     gate_report,
@@ -19,15 +20,25 @@ from certification_common_v3 import (
 )
 
 
-HANDSHAKE_PATH = Path(".codex_runtime") / "shooter_runtime" / "shooter_handshake.json"
+HANDSHAKE_PATHS = (
+    ROOT / ".codex_runtime" / "shooter_handshake.json",
+    ROOT / ".codex_runtime" / "shooter_runtime" / "shooter_handshake.json",
+)
 
 
-def _load_handshake() -> dict[str, object]:
-    try:
-        payload = json.loads(HANDSHAKE_PATH.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {}
-    except Exception:
-        return {}
+def _load_handshake() -> tuple[dict[str, object], str]:
+    candidates: list[tuple[float, dict[str, object], str]] = []
+    for path in HANDSHAKE_PATHS:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                candidates.append((float(path.stat().st_mtime), payload, str(path)))
+        except Exception:
+            continue
+    if not candidates:
+        return {}, ""
+    _, payload, path_text = max(candidates, key=lambda row: row[0])
+    return payload, path_text
 
 
 def main() -> int:
@@ -62,7 +73,7 @@ def main() -> int:
     deadline = time.time() + max(1.0, float(args.duration_sec))
     while time.time() < deadline and not failures:
         rows = leaf_processes(find_processes(python_processes(), "shooter.py"))
-        handshake = _load_handshake()
+        handshake, handshake_path = _load_handshake()
         alive = bool(initial_pid and any(process_id(row) == initial_pid for row in rows))
         sample = {
             "epoch": time.time(),
@@ -70,6 +81,7 @@ def main() -> int:
             "pid": initial_pid,
             "process_count": len(rows),
             "handshake": handshake,
+            "handshake_path": handshake_path,
         }
         samples.append(sample)
         if not alive and not args.allow_missing:
@@ -99,8 +111,8 @@ def main() -> int:
             "initial_processes": initial_rows,
             "sample_count": len(samples),
             "samples": samples[-300:],
-            "handshake_path": str(HANDSHAKE_PATH),
-            "launch_command": 'python shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.05 --max-signal-age 8 --preferred-source tracker --require-preferred-source --window-query "The Most Innovative Trading Platform" --shooter-mode LIVE_READY --no-auto-open --record-action-evidence',
+            "handshake_paths": [str(path) for path in HANDSHAKE_PATHS],
+            "launch_command": 'python shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20 --max-signal-age 8 --preferred-source tracker --require-preferred-source --window-query "The Most Innovative Trading Platform" --shooter-mode LIVE_READY --no-auto-open --record-action-evidence',
         },
     )
     out = write_report("gate8_shooter_persistence_v3.json", report)

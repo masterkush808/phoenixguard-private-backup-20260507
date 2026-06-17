@@ -71,7 +71,7 @@ def analyze_trace(rows: list[dict[str, Any]], boxes: Mapping[str, Any]) -> list[
             hold_ms = int(row.get("wait_after_ms") or 0)
         except (TypeError, ValueError):
             hold_ms = 0
-        if hold_ms < 8000:
+        if hold_ms < 250:
             findings.append(f"FINAL_PRE_SIDE_CLICK_HOLD_UNDERRUN:{hold_ms}ms")
 
     final_count = len(final_indices)

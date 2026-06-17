@@ -231,7 +231,13 @@ def record_live_ready(
     record["clicked"] = bool(clicked)
     record["live_ready_reason"] = str(reason or "")
     if rehearsal is not None:
-        record["execution_rehearsal"] = dict(rehearsal)
+        rehearsal_payload = dict(rehearsal)
+        record["execution_rehearsal"] = rehearsal_payload
+        action_sequence = rehearsal_payload.get("action_sequence")
+        if isinstance(action_sequence, Mapping):
+            record["action_sequence"] = dict(action_sequence)
+            record["action_sequence_overall"] = str(action_sequence.get("overall") or "")
+            record["action_sequence_reason"] = str(action_sequence.get("reason") or "")
     record_path = append_jsonl(path or LIVE_READY_LOG, record)
     return ShooterModeResult(mode, True, True, str(reason or "LIVE_READY_RECORDED"), str(record_path))
 

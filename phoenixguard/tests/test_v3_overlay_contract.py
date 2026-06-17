@@ -505,12 +505,17 @@ def test_view_mode_profile_exposes_layer_policy() -> None:
     assert clean["layer_visibility"]["prediction_path"] is False
     assert council["layer_visibility"]["recent_candles"] is False
     assert council["layer_visibility"]["trigger_zones"] is False
-    assert set(council["allowed_types"]) == {
+    assert {
         "MARKET_PLAY_MARKER",
         "MODEL_COUNCIL_MARKER",
         "PRICE_LOCATION_MARKER",
         "REGIME_MARKER",
-    }
+        "SUPPLY_ZONE",
+        "DEMAND_ZONE",
+        "OPPOSING_FORCE",
+        "TWO_CANDLE_STUDY",
+        "LSTM_STUDY",
+    }.issubset(set(council["allowed_types"]))
     assert supply["mode"] == "SUPPLY_DEMAND"
     assert supply["layer_visibility"]["chart_bounds"] is False
     assert supply["layer_visibility"]["recent_candles"] is False

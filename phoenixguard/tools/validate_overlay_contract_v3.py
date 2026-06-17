@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -9,80 +10,26 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from phoenixguard.vision.v3_overlay_contract import (
+    COORDINATE_MODES,
+    OVERLAY_TYPES,
+    REQUIRED_FIELDS,
+    VIEW_MODES,
+    is_approved_overlay_display_label,
+    validate_v3_overlay_object,
+)
+
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8793"
 DEFAULT_SESSION = "pocket-live-8788"
 
-REQUIRED_FIELDS = (
-    "overlay_id",
-    "object_id",
-    "track_id",
-    "type",
-    "side",
-    "source_agent",
-    "frame_id",
-    "sequence_id",
-    "chart_transform_id",
-    "coordinate_mode",
-    "anchor_type",
-    "bounds",
-    "truth_score",
-    "confidence",
-    "lifecycle_state",
-    "visible_modes",
-    "ttl_ms",
-    "reason",
-)
-ALLOWED_TYPES = {
-    "CURRENT_CANDLE",
-    "IMPULSE_BOX",
-    "PULLBACK_BOX",
-    "RETEST_BOX",
-    "CONTINUATION_BOX",
-    "SNIPER_ENTRY_BOX",
-    "TARGET_ZONE_BOX",
-    "INVALIDATION_BOX",
-    "SUPPLY_ZONE",
-    "DEMAND_ZONE",
-    "OPPOSING_FORCE",
-    "ANGLE_VECTOR",
-    "PROGRESSION_PATH",
-    "PREDICTION_PATH",
-    "REPLAY_ENTRY",
-    "REPLAY_EXIT",
-    "BROKER_CONTROL",
-    "DEBUG_RAW_DETECTION",
-}
-ALLOWED_MODES = {
-    "CLEAN_LIVE",
-    "GLOBAL",
-    "LOCAL",
-    "SUPPLY_DEMAND",
-    "TRIGGER",
-    "TARGET",
-    "PATH",
-    "COUNCIL",
-    "ACTIVE_CONTEXT",
-    "FULL_HISTORY_READ",
-    "REPLAY",
-    "PREDICTION",
-    "BROKER",
-    "CALIBRATION",
-    "DIAGNOSTICS",
-    "DEBUG",
-    "INSPECTOR",
-}
-ALLOWED_COORDINATE_MODES = {
-    "CHART_IMAGE_SPACE",
-    "CHART_NORMALIZED",
-    "FULL_BROKER_SURFACE",
-    "WINDOW_SPACE",
-    "PLOT_AREA_NORMALIZED",
-    "BROKER_WINDOW_SPACE",
-    "NORMALIZED_CHART_SPACE",
-    "NORMALIZED_WINDOW_SPACE",
-    "SCREEN_SPACE",
-}
+ALLOWED_TYPES = set(OVERLAY_TYPES)
+ALLOWED_MODES = set(VIEW_MODES)
+ALLOWED_COORDINATE_MODES = set(COORDINATE_MODES)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -118,6 +65,11 @@ def _write_text(path: Path, content: str) -> None:
 
 
 def _to_overlay_list(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    direct_overlays = _mapping(payload.get("overlays"))
+    if direct_overlays:
+        rows = _sequence(direct_overlays.get("objects"))
+        if rows:
+            return [dict(row) for row in rows if isinstance(row, Mapping)]
     for key in ("overlay_objects", "overlays"):
         rows = _sequence(payload.get(key))
         if rows:
@@ -155,7 +107,7 @@ def _to_overlay_list(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def load_overlays(base_url: str, session_id: str, timeout: float, input_path: str | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def load_overlays(base_url: str, session_id: str, timeout: float, input_path: str | None = None, mode: str = "DIAGNOSTICS") -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if input_path:
         raw = json.loads(Path(input_path).read_text(encoding="utf-8"))
         payload = dict(raw) if isinstance(raw, Mapping) else {"overlay_objects": raw}
@@ -163,10 +115,12 @@ def load_overlays(base_url: str, session_id: str, timeout: float, input_path: st
 
     base = base_url.rstrip("/")
     session_q = urllib.parse.quote(session_id, safe="")
-    live = _http_json(f"{base}/v1/mobile/live/state/v3/{session_q}", timeout)
+    mode_q = urllib.parse.quote(mode, safe="")
+    live_url = f"{base}/v1/mobile/live/state/v3/{session_q}?mode={mode_q}&compact=1"
+    live = _http_json(live_url, timeout)
     if live.get("ok"):
         overlays = _to_overlay_list(_mapping(live.get("payload")))
-        return overlays, {"source": "live_state_v3", "endpoint": f"{base}/v1/mobile/live/state/v3/{session_q}", "endpoint_status": live.get("status")}
+        return overlays, {"source": "live_state_v3", "mode": mode, "endpoint": live_url, "endpoint_status": live.get("status")}
 
     registry = _http_json(f"{base}/v1/mobile/registry/sessions/{session_q}/active?min_truth_score=0.0", timeout)
     overlays = _to_overlay_list(_mapping(registry.get("payload")))
@@ -212,7 +166,14 @@ def _valid_bounds(value: Any) -> bool:
 def validate_overlay(overlay: Mapping[str, Any], index: int) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
+    contract_result = validate_v3_overlay_object(overlay)
+    for issue in contract_result.errors:
+        errors.append(f"{issue.field}: {issue.reason}")
     for field in REQUIRED_FIELDS:
+        if field == "anchor_candles" and isinstance(overlay.get(field), Sequence) and not isinstance(overlay.get(field), (str, bytes, bytearray)):
+            continue
+        if field in {"source_version", "broker_source_lock_id"} and field in overlay and overlay.get(field) in ("", None):
+            continue
         if overlay.get(field) in (None, "", [], {}):
             errors.append(f"missing required field: {field}")
     typ = str(overlay.get("type") or "")
@@ -238,6 +199,14 @@ def validate_overlay(overlay: Mapping[str, Any], index: int) -> dict[str, Any]:
             errors.append(f"invalid visible_modes: {', '.join(invalid)}")
     if overlay.get("bbox") and not overlay.get("bounds"):
         warnings.append("legacy bbox present but V3 bounds missing")
+    label_hidden = overlay.get("label_hidden") is True or str(overlay.get("label_hidden") or "").lower() == "true"
+    if not label_hidden:
+        display_label = str(overlay.get("display_label") or "").strip()
+        public_label = str(overlay.get("label") or "").strip()
+        if display_label and not is_approved_overlay_display_label(display_label):
+            errors.append(f"display_label not approved: {display_label}")
+        if public_label and not is_approved_overlay_display_label(public_label):
+            errors.append(f"public label not approved: {public_label}")
     return {
         "index": index,
         "overlay_id": str(overlay.get("overlay_id") or overlay.get("id") or f"overlay_{index}"),
@@ -304,13 +273,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--session", "--session-id", dest="session_id", default=DEFAULT_SESSION)
     parser.add_argument("--timeout", type=float, default=15.0)
+    parser.add_argument("--mode", default="DIAGNOSTICS", help="Live-state overlay mode to validate when --input is not used.")
     parser.add_argument("--input", help="Optional JSON file containing live_state, overlay_objects, overlays, or registry payload.")
     parser.add_argument("--out-json", default="reports/FINAL_OVERLAY_CONTRACT_REPORT.json")
     parser.add_argument("--out-md", default="reports/FINAL_OVERLAY_CONTRACT_REPORT.md")
     parser.add_argument("--soft", action="store_true", help="Always exit 0 after writing reports.")
     args = parser.parse_args(argv)
 
-    overlays, source = load_overlays(args.base_url, args.session_id, args.timeout, args.input)
+    overlays, source = load_overlays(args.base_url, args.session_id, args.timeout, args.input, args.mode)
     summary = validate_contract(overlays)
     verdict = "PASS" if summary["ok"] else "FAIL"
     report = {

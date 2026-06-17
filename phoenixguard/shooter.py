@@ -17,6 +17,7 @@ It performs real UI clicks on the Pocket Option order panel.
 import argparse
 import ctypes
 from dataclasses import replace
+from functools import lru_cache
 import hashlib
 import io
 import json
@@ -89,6 +90,29 @@ try:
 except Exception:
     has_ocr = False
 
+
+def _configure_tesseract_runtime() -> None:
+    if not has_ocr or pytesseract is None:
+        return
+    candidates = [
+        os.getenv("TESSERACT_CMD", ""),
+        str(Path(os.getenv("LOCALAPPDATA", "")) / "Programs" / "Tesseract-OCR" / "tesseract.exe"),
+        str(Path(os.getenv("ProgramFiles", "")) / "Tesseract-OCR" / "tesseract.exe"),
+        str(Path(os.getenv("ProgramFiles(x86)", "")) / "Tesseract-OCR" / "tesseract.exe"),
+    ]
+    for candidate in candidates:
+        path = Path(str(candidate).strip())
+        if path.is_file():
+            try:
+                pytesseract.pytesseract.tesseract_cmd = str(path)
+                os.environ.setdefault("TESSERACT_CMD", str(path))
+            except Exception:
+                pass
+            return
+
+
+_configure_tesseract_runtime()
+
 # Disable PyAutoGUI failsafe corner abort for smoother automation.
 pyautogui.FAILSAFE = True
 
@@ -101,6 +125,8 @@ LOGGER = logging.getLogger("shooter")
 _SHOOTER_RUNTIME_DIR = Path(__file__).resolve().parent / ".codex_runtime"
 _SHOOTER_HANDSHAKE_PATH = _SHOOTER_RUNTIME_DIR / "shooter_handshake.json"
 _last_action_sequence_result: Optional[ActionSequenceResult] = None
+_confirmed_expiry_cache_lock = threading.Lock()
+_confirmed_expiry_cache: Dict[str, Any] = {}
 # File logger for detailed debugging (rotates to limit disk usage)
 try:
     _file_handler = RotatingFileHandler("shooter_debug.log", maxBytes=2_000_000, backupCount=5)
@@ -156,9 +182,16 @@ DEFAULT_TRACKER_STUDY_INTERVAL_SEC = 3.0
 DEFAULT_TRACKER_MIN_STUDY_INTERVAL_SEC = 0.5
 DEFAULT_TRACKER_MAX_STUDY_INTERVAL_SEC = 10.0
 DEFAULT_SIGNAL_POLL_SECONDS = 0.05
+DEFAULT_LIVE_DISABLED_SIGNAL_POLL_SECONDS = 0.50
 DEFAULT_MAX_SIGNAL_AGE_SECONDS = 8.0
 DEFAULT_MODEL_COUNCIL_FETCH_TIMEOUT_SECONDS = 12.0
+DEFAULT_LIVE_API_FETCH_TIMEOUT_SECONDS = 0.75
+DEFAULT_PRE_CLICK_CONFIRMATION_TIMEOUT_SECONDS = 1.0
 DEFAULT_TRACKER_SESSION_FETCH_INTERVAL_SECONDS = 2.0
+DEFAULT_EXECUTION_PACKET_FETCH_INTERVAL_SECONDS = 0.75
+DEFAULT_ENDPOINT_PACKET_FETCH_TIMEOUT_SECONDS = 0.75
+DEFAULT_STUDY_PACKET_FETCH_INTERVAL_SECONDS = 12.0
+DEFAULT_STUDY_ENDPOINT_PACKET_FETCH_TIMEOUT_SECONDS = 0.25
 DEFAULT_FLOATING_PREVIEW_INTERVAL_SECONDS = 2.0
 STUDY_PACKET_FALLBACK_TTL_SECONDS = DEFAULT_MAX_SIGNAL_AGE_SECONDS
 SAFETY_LOCKOUT_SECONDS = 20 * 60
@@ -348,6 +381,7 @@ ENTRY_LOCATION_PULLBACK_EVENTS = {
 TEST_SIGNAL_EXPIRY_SECONDS = 30
 TEST_SIGNAL_TIMEOUT_SECONDS = 30
 TEST_SIGNAL_POLL_INTERVAL = 0.5
+DEFAULT_STARTUP_PRIME_EXPIRY_SECONDS = 600
 
 _BUY_SIDE_ALIASES = {"BUY", "CALL", "UP", "LONG", "BULL", "BULLISH"}
 _SELL_SIDE_ALIASES = {"SELL", "PUT", "DOWN", "SHORT", "BEAR", "BEARISH"}
@@ -996,7 +1030,7 @@ def _resolve_next_study_seconds(payload: Dict[str, Any]) -> Optional[float]:
 def fetch_tracker_session_snapshot(
     base_url: str,
     session_id: str,
-    timeout: float = DEFAULT_MODEL_COUNCIL_FETCH_TIMEOUT_SECONDS,
+    timeout: float = DEFAULT_LIVE_API_FETCH_TIMEOUT_SECONDS,
 ) -> Optional[Dict[str, Any]]:
     try:
         url = f"{base_url.rstrip('/')}/v1/mobile/window-tracker/sessions/{urllib.parse.quote(session_id)}"
@@ -1093,7 +1127,8 @@ class FloatingStatusBox:
     def __init__(self, session_id: str, base_url: str = "") -> None:
         self._session_id = session_id
         self._base_url = str(base_url or "").rstrip("/")
-        self._enabled = has_tkinter and tk is not None and ttk is not None
+        status_box_env = str(os.getenv("PHOENIXGUARD_SHOOTER_STATUS_BOX", "1") or "1").strip().lower()
+        self._enabled = has_tkinter and tk is not None and ttk is not None and status_box_env not in {"0", "false", "no", "off"}
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
         self._preview_lock = threading.Lock()
@@ -2300,12 +2335,13 @@ def prepare_pocket_option_window(
     allow_active_fallback: bool = True,
 ) -> Optional[int]:
     """Find the broker window, optionally opening Pocket Option before failing."""
-    hwnd = find_pocket_option_window(
-        window_query,
-        preferred_hwnd=preferred_hwnd,
-        allow_active_fallback=allow_active_fallback,
-        quiet=auto_open,
-    )
+    find_kwargs: Dict[str, Any] = {
+        "allow_active_fallback": allow_active_fallback,
+        "quiet": auto_open,
+    }
+    if preferred_hwnd is not None:
+        find_kwargs["preferred_hwnd"] = preferred_hwnd
+    hwnd = find_pocket_option_window(window_query, **find_kwargs)
     if hwnd is not None:
         return hwnd
 
@@ -2317,12 +2353,10 @@ def prepare_pocket_option_window(
 
     deadline = time.time() + max(1.0, float(open_timeout))
     while time.time() < deadline:
-        hwnd = find_pocket_option_window(
-            window_query,
-            preferred_hwnd=preferred_hwnd,
-            allow_active_fallback=False,
-            quiet=True,
-        )
+        retry_kwargs: Dict[str, Any] = {"allow_active_fallback": False, "quiet": True}
+        if preferred_hwnd is not None:
+            retry_kwargs["preferred_hwnd"] = preferred_hwnd
+        hwnd = find_pocket_option_window(window_query, **retry_kwargs)
         if hwnd is not None:
             LOGGER.info("Pocket Option broker window ready after auto-open.")
             return hwnd
@@ -2445,19 +2479,128 @@ def rect_bounds(rect: RECT) -> Tuple[int, int, int, int]:
     return rect.left, rect.top, rect.right, rect.bottom
 
 
+def _rect_matches_cached_expiry(current: RECT, cached_bounds: Any, *, tolerance_px: int = 40) -> bool:
+    if not isinstance(cached_bounds, (list, tuple)) or len(cached_bounds) != 4:
+        return False
+    current_bounds = rect_bounds(current)
+    try:
+        cached = tuple(int(value) for value in cached_bounds)
+    except Exception:
+        return False
+    return all(abs(int(now) - int(was)) <= int(tolerance_px) for now, was in zip(current_bounds, cached))
+
+
+def _get_cached_confirmed_expiry(hwnd: int, rect: Optional[RECT], target_seconds: int, *, max_age_sec: float = 900.0) -> Optional[int]:
+    if rect is None or int(target_seconds) <= 0:
+        return None
+    now = time.time()
+    with _confirmed_expiry_cache_lock:
+        cached = dict(_confirmed_expiry_cache)
+    if int(cached.get("hwnd") or 0) != int(hwnd):
+        return None
+    try:
+        cached_seconds = int(cached.get("seconds") or 0)
+        cached_epoch = float(cached.get("epoch") or 0.0)
+    except Exception:
+        return None
+    if cached_seconds != int(target_seconds):
+        return None
+    if cached_epoch <= 0.0 or now - cached_epoch > float(max_age_sec):
+        return None
+    if not _rect_matches_cached_expiry(rect, cached.get("rect")):
+        return None
+    return cached_seconds
+
+
+def _remember_confirmed_expiry(hwnd: int, rect: Optional[RECT], seconds: int, *, source: str = "") -> None:
+    if rect is None or int(seconds) <= 0:
+        return
+    with _confirmed_expiry_cache_lock:
+        _confirmed_expiry_cache.clear()
+        _confirmed_expiry_cache.update(
+            {
+                "hwnd": int(hwnd),
+                "seconds": int(seconds),
+                "epoch": time.time(),
+                "rect": list(rect_bounds(rect)),
+                "source": str(source or "confirmed"),
+            }
+        )
+
+
 _MANIFEST_TARGET_TO_RUNTIME_BOXES: Dict[str, Tuple[str, ...]] = {
-    "buy_button": ("buy_icon",),
-    "sell_button": ("sell_icon",),
-    "expiry_time_field": ("time_button", "time_input", "expiry_time_field"),
+    "buy_button": ("buy_button", "buy_icon"),
+    "sell_button": ("sell_button", "sell_icon"),
+    "expiry_time_field": ("time_button", "time_input", "time_box", "expiry_time_field"),
     "expiry_plus": ("hourly_plus", "expiry_plus"),
     "expiry_minus": ("hourly_minus", "expiry_minus"),
-    "broker_focus_area": ("broker_screen",),
+    "hourly_minus": ("hourly_minus", "hour_minus", "hours_minus"),
+    "hourly_plus": ("hourly_plus", "hour_plus", "hours_plus"),
+    "hourly_input": ("hourly_input", "hour_input", "hours_input"),
+    "minute_minus": ("minute_minus", "minutely_minus", "minutes_minus"),
+    "minute_plus": ("minute_plus", "minutely_plus", "minutes_plus"),
+    "minute_input": ("minute_input", "minutely_input", "minutes_input"),
+    "second_minus": ("second_minus", "seconds_minus"),
+    "second_plus": ("second_plus", "seconds_plus"),
+    "second_input": ("second_input", "seconds_input", "second_field", "seconds_field"),
+    "time_3": ("time_3", "time_preset_3"),
+    "time_15": ("time_15", "time_preset_15"),
+    "time_30": ("time_30", "time_preset_30"),
+    "time_60": ("time_60", "time_preset_60"),
+    "time_120": ("time_120", "time_preset_120"),
+    "time_180": ("time_180", "time_preset_180"),
+    "time_300": ("time_300", "time_preset_300"),
+    "time_1800": ("time_1800", "time_preset_1800"),
+    "time_3600": ("time_3600", "time_preset_3600"),
+    "time_14400": ("time_14400", "time_preset_14400"),
+    "broker_focus_area": ("broker_screen", "broker_focus_area"),
     "chart_area": ("final_screen",),
     "confirmation_button": ("confirmation_button",),
     "confirmation_area": ("confirmation_area",),
     "position_area": ("position_area",),
     "open_position_area": ("open_position_area",),
 }
+
+_MANIFEST_RUNTIME_TARGET_PRIORITY: Dict[str, Tuple[str, ...]] = {
+    "buy_button": ("buy_button", "buy_icon"),
+    "sell_button": ("sell_button", "sell_icon"),
+    "expiry_time_field": ("time_input", "time_button", "time_box", "expiry_time_field"),
+    "expiry_plus": ("hourly_plus", "expiry_plus"),
+    "expiry_minus": ("hourly_minus", "expiry_minus"),
+    "broker_focus_area": ("broker_screen", "broker_focus_area", "final_screen"),
+    "chart_area": ("final_screen", "chart_area"),
+    "hourly_minus": ("hourly_minus", "hour_minus", "hours_minus", "expiry_minus"),
+    "hourly_plus": ("hourly_plus", "hour_plus", "hours_plus", "expiry_plus"),
+    "hourly_input": ("hourly_input", "hour_input", "hours_input"),
+    "minute_minus": ("minute_minus", "minutely_minus", "minutes_minus", "minute_down"),
+    "minute_plus": ("minute_plus", "minutely_plus", "minutes_plus", "minute_up"),
+    "minute_input": ("minute_input", "minutely_input", "minutes_input"),
+    "second_minus": ("second_minus", "seconds_minus", "second_down"),
+    "second_plus": ("second_plus", "seconds_plus", "second_up"),
+    "second_input": ("second_input", "seconds_input", "second_field", "seconds_field"),
+}
+
+_MANIFEST_SOURCE_TIMING_KEYS: Tuple[str, ...] = (
+    "hourly_minus",
+    "hourly_plus",
+    "hourly_input",
+    "minute_minus",
+    "minute_plus",
+    "minute_input",
+    "second_minus",
+    "second_plus",
+    "second_input",
+    "time_3",
+    "time_15",
+    "time_30",
+    "time_60",
+    "time_120",
+    "time_180",
+    "time_300",
+    "time_1800",
+    "time_3600",
+    "time_14400",
+)
 
 
 def _manifest_point(record: Mapping[str, Any]) -> Optional[Dict[str, float]]:
@@ -2473,6 +2616,68 @@ def _manifest_point(record: Mapping[str, Any]) -> Optional[Dict[str, float]]:
     if str(record.get("status") or "").strip().upper() != "USER_CALIBRATED":
         return None
     return {"x": float(x), "y": float(y)}
+
+
+def _runtime_box_point(record: Mapping[str, Any]) -> Optional[Dict[str, float]]:
+    x = _coerce_finite_float(record.get("x"))
+    y = _coerce_finite_float(record.get("y"))
+    if x is None or y is None or not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+        return None
+    return {"x": float(x), "y": float(y)}
+
+
+def _manifest_runtime_point(
+    manifest_target: str,
+    record: Mapping[str, Any],
+    source_boxes: Mapping[str, Mapping[str, Any]],
+) -> tuple[Optional[Dict[str, float]], str, str]:
+    manifest_point = _manifest_point(record)
+    if manifest_point is None:
+        return None, "", ""
+
+    source_key = str(record.get("source_key") or "").strip()
+    source_candidates: List[str] = []
+    if source_key:
+        source_candidates.append(source_key)
+    source_candidates.extend(_MANIFEST_RUNTIME_TARGET_PRIORITY.get(manifest_target, (manifest_target,)))
+    seen: set[str] = set()
+    for candidate in source_candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        source_record = source_boxes.get(candidate)
+        if not isinstance(source_record, Mapping):
+            continue
+        source_point = _runtime_box_point(source_record)
+        if source_point is not None:
+            return source_point, candidate, "user_calibration_manifest_runtime_artifact"
+    return manifest_point, source_key, "user_calibration_manifest"
+
+
+def _manifest_source_boxes(manifest_path: Path, layout: Mapping[str, Any]) -> Dict[str, Mapping[str, Any]]:
+    candidates: List[Path] = []
+    source_path = str(layout.get("source_boxes_path") or "").strip()
+    if source_path:
+        candidate = Path(source_path)
+        candidates.append(candidate if candidate.is_absolute() else manifest_path.parent / candidate)
+    runtime_artifacts = layout.get("runtime_artifacts")
+    if isinstance(runtime_artifacts, Sequence) and not isinstance(runtime_artifacts, (str, bytes, bytearray)):
+        for artifact in runtime_artifacts:
+            text = str(artifact or "").strip()
+            if not text:
+                continue
+            candidate = Path(text)
+            candidates.append(candidate if candidate.is_absolute() else manifest_path.parent / candidate)
+    for candidate in candidates:
+        if not candidate.exists() or candidate.suffix.lower() != ".json":
+            continue
+        try:
+            parsed = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(parsed, Mapping):
+            return {str(key): cast(Mapping[str, Any], value) for key, value in parsed.items() if isinstance(value, Mapping)}
+    return {}
 
 
 def _first_manifest_layout(manifest: Mapping[str, Any]) -> Optional[Tuple[str, str, Mapping[str, Any]]]:
@@ -2520,13 +2725,18 @@ def _load_manifest_runtime_boxes(manifest_path: Path) -> Optional[Dict[str, Dict
         if isinstance(value, Mapping):
             records.update(dict(value))
 
+    source_boxes = _manifest_source_boxes(manifest_path, layout)
     runtime: Dict[str, Dict[str, Any]] = {}
     marked_targets: List[str] = []
     for manifest_target, runtime_keys in _MANIFEST_TARGET_TO_RUNTIME_BOXES.items():
         record = records.get(manifest_target)
         if not isinstance(record, Mapping):
             continue
-        point = _manifest_point(cast(Mapping[str, Any], record))
+        point, resolved_source_key, point_source = _manifest_runtime_point(
+            manifest_target,
+            cast(Mapping[str, Any], record),
+            source_boxes,
+        )
         if point is None:
             continue
         marked_targets.append(manifest_target)
@@ -2534,13 +2744,45 @@ def _load_manifest_runtime_boxes(manifest_path: Path) -> Optional[Dict[str, Dict
             runtime[runtime_key] = {
                 "x": point["x"],
                 "y": point["y"],
-                "calibration_source": "user_calibration_manifest",
+                "calibration_source": point_source,
                 "manifest_profile": profile_id,
                 "manifest_layout": layout_id,
                 "manifest_target": manifest_target,
-                "manifest_source_key": str(record.get("source_key") or ""),
+                "manifest_source_key": resolved_source_key,
                 "locked": True,
             }
+
+    supplemented_targets: List[str] = []
+    for runtime_key in _MANIFEST_SOURCE_TIMING_KEYS:
+        if runtime_key in runtime:
+            continue
+        source_record: Mapping[str, Any] | None = None
+        point: Optional[Dict[str, float]] = None
+        resolved_source_key = ""
+        for candidate in _MANIFEST_RUNTIME_TARGET_PRIORITY.get(runtime_key, (runtime_key,)):
+            candidate_record = source_boxes.get(candidate)
+            if not isinstance(candidate_record, Mapping):
+                continue
+            candidate_point = _runtime_box_point(candidate_record)
+            if candidate_point is None:
+                continue
+            source_record = candidate_record
+            point = candidate_point
+            resolved_source_key = str(candidate)
+            break
+        if source_record is None or point is None:
+            continue
+        runtime[runtime_key] = {
+            "x": point["x"],
+            "y": point["y"],
+            "calibration_source": "user_calibration_manifest_runtime_artifact",
+            "manifest_profile": profile_id,
+            "manifest_layout": layout_id,
+            "manifest_target": runtime_key,
+            "manifest_source_key": resolved_source_key or runtime_key,
+            "locked": True,
+        }
+        supplemented_targets.append(runtime_key)
 
     runtime["capabilities"] = {
         "authoritative_manifest": True,
@@ -2548,10 +2790,21 @@ def _load_manifest_runtime_boxes(manifest_path: Path) -> Optional[Dict[str, Dict
         "manifest_profile": profile_id,
         "manifest_layout": layout_id,
         "marked_targets": marked_targets,
+        "supplemented_runtime_targets": sorted(supplemented_targets),
         "runtime_targets": sorted(key for key in runtime.keys() if key != "capabilities"),
         "legacy_box_fallback_allowed": False,
     }
-    required_runtime = {"buy_icon", "sell_icon", "time_button"}
+    required_runtime = {
+        "buy_button",
+        "buy_icon",
+        "sell_button",
+        "sell_icon",
+        "time_button",
+        "time_input",
+        "hourly_input",
+        "minute_input",
+        "second_input",
+    }
     missing_runtime = sorted(key for key in required_runtime if key not in runtime)
     if missing_runtime:
         runtime["capabilities"]["invalid_reason"] = f"missing_runtime_targets:{','.join(missing_runtime)}"
@@ -2648,11 +2901,12 @@ def calibrate_boxes(hwnd: int) -> None:
     Full sequence for comprehensive expiry control:
     1. broker_screen - click to remove robot behavior
     2. time_button - open time picker
-    3-5. hourly controls: minus, plus, typing input
-    6-8. minute controls: minus, plus, typing input
-    9-10. buy_icon and sell_icon
-    11-14. preset buttons: time_30, time_60, time_120, time_300
-    15. final_screen - exit calibration
+    3-5. hourly controls: plus, typing input, minus
+    6-8. minute controls: plus, typing input, minus
+    9-11. second controls: plus, typing input, minus
+    12-13. buy_icon and sell_icon
+    14-17. preset buttons: time_30, time_60, time_120, time_300
+    18. final_screen - exit calibration
     
     NOTE: Amount is not calibrated or changed; PhoenixGuard preserves the broker's visible amount.
     """
@@ -2663,12 +2917,15 @@ def calibrate_boxes(hwnd: int) -> None:
     points = [
         "broker_screen",
         "time_button",
-        "hourly_minus",
         "hourly_plus",
         "hourly_input",
-        "minute_minus",
+        "hourly_minus",
         "minute_plus",
         "minute_input",
+        "minute_minus",
+        "second_plus",
+        "second_input",
+        "second_minus",
         "buy_icon",
         "sell_icon",
         "time_30",
@@ -2795,21 +3052,35 @@ def validate_calibration(boxes: Dict[str, Dict[str, Any]], rect: RECT) -> bool:
         {"buy_icon", "buy_button"},
         {"sell_icon", "sell_button"},
         {"broker_screen", "broker_focus_area"},
-        {"hourly_plus", "expiry_plus"},
-        {"hourly_minus", "expiry_minus"},
+        {"hourly_plus", "hour_plus", "hours_plus", "expiry_plus", "time_adjustment_plus", "hour_up"},
+        {"hourly_input", "hour_input", "hours_input"},
+        {"hourly_minus", "hour_minus", "hours_minus", "expiry_minus", "time_adjustment_minus", "hour_down"},
+        {"minute_plus", "minutely_plus", "minutes_plus", "minute_up"},
+        {"minute_input", "minutely_input", "minutes_input"},
+        {"minute_minus", "minutely_minus", "minutes_minus", "minute_down"},
+        {"second_plus", "seconds_plus", "second_up"},
+        {"second_input", "seconds_input", "second_field", "seconds_field"},
+        {"second_minus", "seconds_minus", "second_down"},
     )
 
     def _same_allowed_alias_group(a: str, b: str) -> bool:
         return any(a in group and b in group for group in allowed_alias_groups)
 
+    rel_points: Dict[str, Tuple[float, float]] = {}
     for name, rel in boxes.items():
         if name == "capabilities":
             continue
         if not isinstance(rel, Mapping):
             LOGGER.error("Calibration point %s is malformed: %s", name, rel)
             return False
-        x = left + int(w * float(rel.get("x", 0.0)))
-        y = top + int(h * float(rel.get("y", 0.0)))
+        rel_x = _coerce_finite_float(rel.get("x"))
+        rel_y = _coerce_finite_float(rel.get("y"))
+        if rel_x is None or rel_y is None:
+            LOGGER.error("Calibration point %s has invalid coordinates: %s", name, rel)
+            return False
+        rel_points[str(name)] = (float(rel_x), float(rel_y))
+        x = left + int(w * rel_x)
+        y = top + int(h * rel_y)
         if x < left or x > right or y < top or y > bottom:
             LOGGER.error("Calibration point %s out of broker bounds: (%s,%s)", name, x, y)
             return False
@@ -2828,35 +3099,468 @@ def validate_calibration(boxes: Dict[str, Dict[str, Any]], rect: RECT) -> bool:
                 )
                 return False
         seen.append((name, x, y))
+    layout_ok, layout_reason = _calibration_layout_reason(rel_points)
+    if not layout_ok:
+        LOGGER.error("Calibration invalid: %s", layout_reason)
+        return False
     return True
 
 
+def _calibration_layout_reason(rel_points: Mapping[str, Tuple[float, float]]) -> Tuple[bool, str]:
+    def first(*keys: str) -> Optional[Tuple[float, float]]:
+        for key in keys:
+            point = rel_points.get(key)
+            if point is not None:
+                return point
+        return None
+
+    buy = first("buy_icon", "buy_button")
+    sell = first("sell_icon", "sell_button")
+    time_field = first("time_button", "time_input", "time_box", "expiry_time_field")
+    if buy is not None and sell is not None and buy[1] >= sell[1] - 0.012:
+        return False, "CALIBRATION_LAYOUT_INVALID:buy_not_above_sell"
+    if time_field is not None:
+        if not (0.64 <= time_field[0] <= 0.985 and 0.08 <= time_field[1] <= 0.39):
+            return False, "CALIBRATION_LAYOUT_INVALID:time_field_outside_right_order_panel"
+        if buy is not None and time_field[1] >= buy[1] - 0.045:
+            return False, "CALIBRATION_LAYOUT_INVALID:time_not_above_trade_buttons"
+    split_keys = (
+        "hourly_plus",
+        "hour_plus",
+        "hours_plus",
+        "hourly_input",
+        "hour_input",
+        "hours_input",
+        "hourly_minus",
+        "hour_minus",
+        "hours_minus",
+        "minute_plus",
+        "minutely_plus",
+        "minutes_plus",
+        "minute_input",
+        "minutely_input",
+        "minutes_input",
+        "minute_minus",
+        "minutely_minus",
+        "minutes_minus",
+        "second_plus",
+        "seconds_plus",
+        "second_input",
+        "seconds_input",
+        "second_field",
+        "seconds_field",
+        "second_minus",
+        "seconds_minus",
+    )
+    for key in split_keys:
+        point = rel_points.get(key)
+        if point is None:
+            continue
+        if not (0.48 <= point[0] <= 0.925 and 0.16 <= point[1] <= 0.48):
+            return False, f"CALIBRATION_LAYOUT_INVALID:{key}:popup_control_outside_time_panel"
+        if time_field is not None:
+            if point[1] <= time_field[1] + 0.003:
+                return False, f"CALIBRATION_LAYOUT_INVALID:{key}:popup_control_not_below_time_field"
+            if point[0] >= time_field[0] + 0.015:
+                return False, f"CALIBRATION_LAYOUT_INVALID:{key}:popup_control_not_left_of_time_field"
+        if buy is not None and point[1] >= buy[1] - 0.060:
+            return False, f"CALIBRATION_LAYOUT_INVALID:{key}:popup_control_inside_trade_button_band"
+    return True, "CALIBRATION_LAYOUT_VALID"
+
+
+def _binary_content_bbox(mask: Any) -> Optional[Tuple[int, int, int, int]]:
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    try:
+        if getattr(mask, "ndim", 0) != 2:
+            return None
+        ys, xs = np.where(mask > 0)
+        if ys.size == 0 or xs.size == 0:
+            return None
+        return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=1)
+def _expiry_digit_template_bank() -> Dict[str, List[Any]]:
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return {}
+    fonts = (
+        cv2.FONT_HERSHEY_SIMPLEX,
+        cv2.FONT_HERSHEY_DUPLEX,
+        cv2.FONT_HERSHEY_COMPLEX_SMALL,
+        cv2.FONT_HERSHEY_TRIPLEX,
+    )
+    font_scales = (0.58, 0.72, 0.86, 1.00, 1.18)
+    thicknesses = (1, 2, 3)
+    bank: Dict[str, List[Any]] = {}
+    for label in "0123456789":
+        variants: List[Any] = []
+        for font in fonts:
+            for font_scale in font_scales:
+                for thickness in thicknesses:
+                    (text_width, text_height), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+                    canvas = np.zeros(
+                        (
+                            max(28, text_height + baseline + 14),
+                            max(24, text_width + 16),
+                        ),
+                        dtype=np.uint8,
+                    )
+                    origin = (
+                        max(6, (canvas.shape[1] - text_width) // 2),
+                        max(text_height + 4, (canvas.shape[0] + text_height) // 2 - baseline // 2),
+                    )
+                    cv2.putText(canvas, label, origin, font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+                    bbox = _binary_content_bbox(canvas)
+                    if bbox is None:
+                        continue
+                    x0, y0, x1, y1 = bbox
+                    cropped = canvas[max(0, y0 - 1): min(canvas.shape[0], y1 + 1), max(0, x0 - 1): min(canvas.shape[1], x1 + 1)]
+                    if getattr(cropped, "size", 0):
+                        variants.append((cropped > 0).astype(np.uint8))
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+
+            font_paths = (
+                "C:/Windows/Fonts/segoeui.ttf",
+                "C:/Windows/Fonts/segoeuib.ttf",
+                "C:/Windows/Fonts/arial.ttf",
+                "C:/Windows/Fonts/arialbd.ttf",
+                "C:/Windows/Fonts/calibri.ttf",
+                "C:/Windows/Fonts/calibrib.ttf",
+                "C:/Windows/Fonts/tahoma.ttf",
+                "C:/Windows/Fonts/tahomabd.ttf",
+                "C:/Windows/Fonts/verdana.ttf",
+                "C:/Windows/Fonts/verdanab.ttf",
+            )
+            for font_path in font_paths:
+                if not Path(font_path).exists():
+                    continue
+                for size in range(10, 27):
+                    try:
+                        pil_font = ImageFont.truetype(font_path, size=size)
+                    except Exception:
+                        continue
+                    scratch = Image.new("L", (44, 44), 0)
+                    draw = ImageDraw.Draw(scratch)
+                    text_bbox = draw.textbbox((0, 0), label, font=pil_font)
+                    text_width = int(text_bbox[2] - text_bbox[0])
+                    text_height = int(text_bbox[3] - text_bbox[1])
+                    canvas = Image.new("L", (max(24, text_width + 16), max(28, text_height + 14)), 0)
+                    draw = ImageDraw.Draw(canvas)
+                    draw.text(
+                        (
+                            (canvas.width - text_width) // 2 - int(text_bbox[0]),
+                            (canvas.height - text_height) // 2 - int(text_bbox[1]),
+                        ),
+                        label,
+                        fill=255,
+                        font=pil_font,
+                    )
+                    arr = np.asarray(canvas, dtype=np.uint8)
+                    bbox = _binary_content_bbox(arr)
+                    if bbox is None:
+                        continue
+                    x0, y0, x1, y1 = bbox
+                    cropped = arr[max(0, y0 - 1): min(arr.shape[0], y1 + 1), max(0, x0 - 1): min(arr.shape[1], x1 + 1)]
+                    if getattr(cropped, "size", 0):
+                        variants.append((cropped > 0).astype(np.uint8))
+        except Exception:
+            pass
+        bank[label] = variants
+    return bank
+
+
+def _score_expiry_digit(mask: Any) -> Tuple[str, float]:
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return "", 0.0
+    try:
+        normalized = (mask > 0).astype(np.uint8)
+        if int(np.sum(normalized > 0)) < 8:
+            return "", 0.0
+    except Exception:
+        return "", 0.0
+
+    best_label = ""
+    best_score = 0.0
+    second_best = 0.0
+    for label, templates in _expiry_digit_template_bank().items():
+        label_best = 0.0
+        for template in templates:
+            resized = cv2.resize(
+                normalized.astype(np.uint8),
+                (int(template.shape[1]), int(template.shape[0])),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            predicted = resized > 0
+            expected = template > 0
+            intersection = float(np.logical_and(predicted, expected).sum())
+            predicted_area = float(max(1, predicted.sum()))
+            expected_area = float(max(1, expected.sum()))
+            union = float(max(1.0, np.logical_or(predicted, expected).sum()))
+            precision = intersection / predicted_area
+            recall = intersection / expected_area
+            harmonic = 0.0 if (precision + recall) <= 1e-9 else (2.0 * precision * recall / (precision + recall))
+            iou = intersection / union
+            score = 0.56 * harmonic + 0.44 * iou
+            if score > label_best:
+                label_best = score
+        if label_best > best_score:
+            second_best = best_score
+            best_label = label
+            best_score = label_best
+        elif label_best > second_best:
+            second_best = label_best
+    margin = max(0.0, best_score - second_best)
+    confidence = max(0.0, min(1.0, 0.74 * best_score + 0.36 * margin))
+    return best_label, confidence
+
+
+def _read_expiry_seconds_from_time_crop(image: Any) -> Optional[int]:
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return None
+    try:
+        arr = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        if arr.ndim != 3 or arr.size == 0:
+            return None
+        hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        mask = np.where(
+            ((hsv[:, :, 1] <= 120) & (hsv[:, :, 2] >= 120)) | (gray >= 130),
+            255,
+            0,
+        ).astype(np.uint8)
+        digit_mask = mask.copy()
+        digit_mask[: int(round(digit_mask.shape[0] * 0.28)), :] = 0
+        digit_mask[int(round(digit_mask.shape[0] * 0.88)) :, :] = 0
+        digit_mask[:, int(round(digit_mask.shape[1] * 0.76)) :] = 0
+        contours, _hier = cv2.findContours(digit_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        components: List[Tuple[int, int, int, int]] = []
+        for contour in contours:
+            cx, cy, box_w, box_h = cv2.boundingRect(contour)
+            if box_h < 7 or box_w < 2:
+                continue
+            if box_h > max(42, int(digit_mask.shape[0] * 0.76)) or box_w > max(30, int(digit_mask.shape[1] * 0.24)):
+                continue
+            if box_w >= max(13, int(round(box_h * 1.28))):
+                split_count = max(2, min(3, int(round(float(box_w) / max(7.0, float(box_h) * 0.78)))))
+                for split_index in range(split_count):
+                    sx0 = int(round(cx + box_w * split_index / split_count))
+                    sx1 = int(round(cx + box_w * (split_index + 1) / split_count))
+                    if sx1 - sx0 >= 2:
+                        components.append((int(sx0), int(cy), int(sx1), int(cy + box_h)))
+            else:
+                components.append((int(cx), int(cy), int(cx + box_w), int(cy + box_h)))
+        if len(components) < 6:
+            return None
+        components.sort(key=lambda row: row[0])
+        if len(components) > 6:
+            components = components[:6]
+        digits: List[str] = []
+        confidences: List[float] = []
+        for cx0, cy0, cx1, cy1 in components[:6]:
+            crop = digit_mask[max(0, cy0 - 1): min(digit_mask.shape[0], cy1 + 1), max(0, cx0 - 1): min(digit_mask.shape[1], cx1 + 1)]
+            label, confidence = _score_expiry_digit((crop > 0).astype(np.uint8))
+            if not label.isdigit():
+                return None
+            digits.append(label)
+            confidences.append(confidence)
+        if len(digits) != 6:
+            return None
+        average_confidence = float(np.mean(np.asarray(confidences, dtype=np.float32))) if confidences else 0.0
+        if average_confidence < 0.48:
+            return None
+        raw = "".join(digits)
+        hours = int(raw[0:2])
+        minutes = int(raw[2:4])
+        seconds = int(raw[4:6])
+        if hours > 24 or minutes > 59 or seconds > 59:
+            return None
+        return int(hours * 3600 + minutes * 60 + seconds)
+    except Exception:
+        return None
+
+
+def _read_time_region_by_template(hwnd: int, boxes: Dict[str, Dict[str, Any]]) -> Optional[int]:
+    rect = get_window_rect(hwnd)
+    if rect is None:
+        return None
+    window_left, window_top, window_right, window_bottom = rect_bounds(rect)
+    target_names = ("time_input", "expiry_time_field", "time_button", "time_box")
+
+    def _bounded_region(center_x: int, center_y: int, left_pad: int, top_pad: int, right_pad: int, bottom_pad: int) -> Optional[Tuple[int, int, int, int]]:
+        crop_left = max(window_left, int(center_x) - int(left_pad))
+        crop_top = max(window_top, int(center_y) - int(top_pad))
+        crop_right = min(window_right, int(center_x) + int(right_pad))
+        crop_bottom = min(window_bottom, int(center_y) + int(bottom_pad))
+        width = crop_right - crop_left
+        height = crop_bottom - crop_top
+        if width < 24 or height < 12:
+            return None
+        return crop_left, crop_top, width, height
+
+    seen_centers: set[Tuple[int, int]] = set()
+    candidates: List[int] = []
+    for target_name in target_names:
+        rel = boxes.get(target_name)
+        if not isinstance(rel, Mapping):
+            continue
+        rel_x = _coerce_finite_float(rel.get("x"))
+        rel_y = _coerce_finite_float(rel.get("y"))
+        if rel_x is None or rel_y is None:
+            continue
+        x, y = rel_to_abs(rect, rel_x, rel_y)
+        center_key = (int(round(x)), int(round(y)))
+        if center_key in seen_centers:
+            continue
+        seen_centers.add(center_key)
+        for region in (
+            _bounded_region(x, y, 86, 28, 70, 12),
+            _bounded_region(x, y, 96, 30, 76, 16),
+            _bounded_region(x, y, 110, 34, 90, 22),
+        ):
+            if region is None:
+                continue
+            try:
+                image = pyautogui.screenshot(region=region)
+            except Exception:
+                continue
+            parsed = _read_expiry_seconds_from_time_crop(image)
+            if parsed is not None:
+                candidates.append(int(parsed))
+    if not candidates:
+        return None
+    counts: Dict[int, int] = {}
+    first_seen: Dict[int, int] = {}
+    for index, parsed in enumerate(candidates):
+        counts[parsed] = counts.get(parsed, 0) + 1
+        first_seen.setdefault(parsed, index)
+    return max(counts, key=lambda value: (counts[value], -first_seen[value]))
+
+
 def ocr_read_time_region(hwnd: int, boxes: Dict[str, Dict[str, Any]]) -> Optional[int]:
+    visual_seconds = _read_time_region_by_template(hwnd, boxes)
+    if visual_seconds is not None:
+        return visual_seconds
     if not has_ocr or pytesseract is None:
         return None
     rect = get_window_rect(hwnd)
     if rect is None:
         return None
-    left, top, right, bottom = rect_bounds(rect)
-    # Try to capture a small region around the calibrated time control.
-    rel = boxes.get("time_box") or boxes.get("time_button")
-    if not rel:
-        return None
-    x, y = rel_to_abs(rect, rel["x"], rel["y"])
-    # grab a small box centered at (x,y)
-    left = max(left, x - 80)
-    top = max(top, y - 18)
-    right = min(right, x + 80)
-    bottom = min(bottom, y + 18)
-    img = pyautogui.screenshot(region=(left, top, right - left, bottom - top))
+    window_left, window_top, window_right, window_bottom = rect_bounds(rect)
+    target_names = ("time_input", "expiry_time_field", "time_button", "time_box")
+    ocr_config = "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789:"
+    exhaustive_ocr = str(os.getenv("PHOENIXGUARD_EXHAUSTIVE_TIME_OCR", "") or "").strip().lower() in {"1", "true", "yes", "on"}
+    fast_ocr = str(os.getenv("PHOENIXGUARD_FAST_TIME_OCR", "1") or "1").strip().lower() not in {"0", "false", "no", "off"}
     try:
-        txt_raw = pytesseract.image_to_string(img, config='--psm 7')
-        txt = txt_raw if isinstance(txt_raw, str) else str(txt_raw)
-        parsed = _parse_visible_time_seconds(txt)
-        if parsed is not None:
-            return int(parsed)
-    except Exception:
-        return None
+        default_timeout = "0.32" if fast_ocr and not exhaustive_ocr else "0.85"
+        ocr_timeout = max(0.15, min(2.0, float(os.getenv("PHOENIXGUARD_TIME_OCR_TIMEOUT_SEC", default_timeout) or default_timeout)))
+    except ValueError:
+        ocr_timeout = 0.32 if fast_ocr and not exhaustive_ocr else 0.85
+    try:
+        default_budget = "0.95" if fast_ocr and not exhaustive_ocr else "4.0"
+        ocr_budget_sec = max(0.25, min(8.0, float(os.getenv("PHOENIXGUARD_TIME_OCR_BUDGET_SEC", default_budget) or default_budget)))
+    except ValueError:
+        ocr_budget_sec = 0.95 if fast_ocr and not exhaustive_ocr else 4.0
+    deadline = time.perf_counter() + (ocr_budget_sec if not exhaustive_ocr else max(ocr_budget_sec, 4.0))
+
+    def _bounded_region(center_x: int, center_y: int, left_pad: int, top_pad: int, right_pad: int, bottom_pad: int) -> Optional[Tuple[int, int, int, int]]:
+        crop_left = max(window_left, int(center_x) - int(left_pad))
+        crop_top = max(window_top, int(center_y) - int(top_pad))
+        crop_right = min(window_right, int(center_x) + int(right_pad))
+        crop_bottom = min(window_bottom, int(center_y) + int(bottom_pad))
+        width = crop_right - crop_left
+        height = crop_bottom - crop_top
+        if width < 24 or height < 12:
+            return None
+        return crop_left, crop_top, width, height
+
+    def _image_variants(img: Any) -> List[Any]:
+        try:
+            from PIL import ImageEnhance, ImageOps
+
+            gray = ImageOps.grayscale(img)
+            width, height = gray.size
+            scaled = gray.resize((max(1, width * 4), max(1, height * 4)))
+            contrast = ImageEnhance.Contrast(scaled).enhance(2.2)
+            threshold = contrast.point(lambda px: 255 if int(px) > 145 else 0)
+            if exhaustive_ocr:
+                return [contrast, threshold, scaled, img]
+            if fast_ocr:
+                return [threshold, contrast]
+            return [contrast, threshold]
+        except Exception:
+            return [img]
+
+    seen_centers: set[Tuple[int, int]] = set()
+    for target_name in target_names:
+        rel = boxes.get(target_name)
+        if not isinstance(rel, Mapping):
+            continue
+        rel_x = _coerce_finite_float(rel.get("x"))
+        rel_y = _coerce_finite_float(rel.get("y"))
+        if rel_x is None or rel_y is None:
+            continue
+        x, y = rel_to_abs(rect, rel_x, rel_y)
+        center_key = (int(round(x)), int(round(y)))
+        if center_key in seen_centers:
+            continue
+        seen_centers.add(center_key)
+        regions = [
+            _bounded_region(x, y, 86, 28, 70, 12),
+            _bounded_region(x, y, 96, 30, 76, 16),
+            _bounded_region(x, y, 110, 34, 90, 22),
+        ]
+        if not exhaustive_ocr:
+            regions = regions[:1]
+        parsed_candidates: List[int] = []
+        for region in regions:
+            if region is None:
+                continue
+            if not exhaustive_ocr and time.perf_counter() >= deadline:
+                break
+            try:
+                img = pyautogui.screenshot(region=region)
+            except Exception:
+                continue
+            for variant in _image_variants(img):
+                if not exhaustive_ocr and time.perf_counter() >= deadline:
+                    break
+                try:
+                    try:
+                        txt_raw = pytesseract.image_to_string(variant, config=ocr_config, timeout=ocr_timeout)
+                    except TypeError:
+                        if not exhaustive_ocr:
+                            continue
+                        txt_raw = pytesseract.image_to_string(variant, config=ocr_config)
+                    txt = txt_raw if isinstance(txt_raw, str) else str(txt_raw)
+                    parsed = _parse_visible_time_seconds(txt)
+                    if parsed is not None:
+                        parsed_candidates.append(int(parsed))
+                except Exception:
+                    continue
+        if parsed_candidates:
+            counts: Dict[int, int] = {}
+            first_seen: Dict[int, int] = {}
+            for index, parsed in enumerate(parsed_candidates):
+                counts[parsed] = counts.get(parsed, 0) + 1
+                first_seen.setdefault(parsed, index)
+            return max(counts, key=lambda value: (counts[value], -first_seen[value]))
+        if not exhaustive_ocr and fast_ocr and time.perf_counter() >= deadline:
+            return None
     return None
 
 
@@ -3762,6 +4466,58 @@ def _v3_packet_identity(packet: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _v3_live_read_identity_from_tracker(tracker_snapshot: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(tracker_snapshot, Mapping):
+        return {}
+    latest_signal = _v3_mapping(tracker_snapshot.get("latest_signal"))
+    tracking_summary = _v3_mapping(tracker_snapshot.get("tracking_summary"))
+    live_integrity = _v3_mapping(latest_signal.get("live_integrity") or tracking_summary.get("live_integrity"))
+    frame_id = _first_visible_value(
+        tracker_snapshot.get("display_frame_id"),
+        tracker_snapshot.get("frame_id"),
+        tracker_snapshot.get("frame_index"),
+        tracker_snapshot.get("chart_frame_id"),
+        tracker_snapshot.get("overlay_frame_id"),
+        tracker_snapshot.get("full_overlay_frame_id"),
+    )
+    return {
+        "session_id": str(tracker_snapshot.get("session_id") or "").strip(),
+        "symbol": str(
+            tracker_snapshot.get("symbol")
+            or latest_signal.get("symbol")
+            or latest_signal.get("market")
+            or tracking_summary.get("detected_market")
+            or ""
+        ).strip(),
+        "timeframe": str(
+            tracker_snapshot.get("timeframe")
+            or latest_signal.get("timeframe")
+            or latest_signal.get("focus_timeframe")
+            or tracking_summary.get("detected_timeframe")
+            or ""
+        ).strip(),
+        "frame_id": _v3_packet_counter({"frame_id": frame_id}, "frame_id"),
+        "capture_count": _v3_packet_counter(tracker_snapshot, "capture_count"),
+        "state_version": _v3_packet_counter(
+            {
+                "state_version": _first_visible_value(
+                    tracker_snapshot.get("state_version"),
+                    tracker_snapshot.get("decision_version"),
+                    latest_signal.get("state_version"),
+                    tracking_summary.get("state_version"),
+                )
+            },
+            "state_version",
+        ),
+        "input_frame_hash": str(
+            live_integrity.get("input_frame_hash")
+            or latest_signal.get("input_frame_hash")
+            or tracking_summary.get("input_frame_hash")
+            or ""
+        ).strip(),
+    }
+
+
 def _v3_base_decision(packet: Optional[Mapping[str, Any]], now: Optional[float] = None) -> Dict[str, Any]:
     timestamp = float(time.time() if now is None else now)
     side = _v3_packet_side(packet) if isinstance(packet, Mapping) else None
@@ -3945,6 +4701,8 @@ def _v3_runtime_integrity_check(
         return False, "RUNTIME_INTEGRITY: PAYLOAD_MISSING"
     if str(packet.get("schema_version") or "").strip() != PG_EXECUTION_PACKET_SCHEMA_V3:
         return False, "RUNTIME_INTEGRITY: NON_V3_PACKET"
+    if str(packet.get("packet_type") or "").strip() != PG_EXECUTION_PACKET_SCHEMA_V3:
+        return False, "RUNTIME_INTEGRITY: PACKET_TYPE_NOT_EXECUTION"
 
     session_id = str(packet.get("session_id") or "").strip()
     symbol = str(packet.get("symbol") or "").strip()
@@ -3987,15 +4745,31 @@ def _v3_runtime_integrity_check(
     if created is None or created <= 0.0:
         return False, "RUNTIME_INTEGRITY: CREATED_EPOCH_MISSING"
     age = _v3_packet_age_seconds(packet, timestamp)
-    max_age = max(0.05, float(max_packet_age_seconds))
+    packet_ttl = _v3_display_packet_ttl_seconds(packet) or 0.0
+    max_age = max(0.05, float(max_packet_age_seconds), float(packet_ttl))
     if age is None or age > max_age:
         return False, "RUNTIME_INTEGRITY: PACKET_STALE"
 
     return True, "RUNTIME_INTEGRITY: PASS"
 
 
-def _v3_store_second_read_baseline(state: Dict[str, Any], packet: Mapping[str, Any], now: float) -> None:
-    baseline = _v3_packet_identity(packet)
+def _v3_second_read_identity(packet: Mapping[str, Any], tracker_snapshot: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    identity = _v3_packet_identity(packet)
+    live_identity = _v3_live_read_identity_from_tracker(tracker_snapshot)
+    for key in ("frame_id", "capture_count", "state_version", "input_frame_hash"):
+        value = live_identity.get(key)
+        if value not in (None, ""):
+            identity[key] = value
+    return identity
+
+
+def _v3_store_second_read_baseline(
+    state: Dict[str, Any],
+    packet: Mapping[str, Any],
+    now: float,
+    tracker_snapshot: Optional[Mapping[str, Any]] = None,
+) -> None:
+    baseline = _v3_second_read_identity(packet, tracker_snapshot)
     baseline["seen_at"] = float(now)
     state["v3_second_live_read_baseline"] = baseline
 
@@ -4019,31 +4793,106 @@ def _v3_counters_advanced(current: Mapping[str, Any], previous: Mapping[str, Any
     return advanced
 
 
-def _v3_gate1_second_live_read(state: Dict[str, Any], packet: Mapping[str, Any], now: Optional[float] = None) -> Tuple[bool, str]:
+def _v3_backend_live_read_confirmed(
+    packet: Mapping[str, Any],
+    tracker_snapshot: Optional[Mapping[str, Any]],
+) -> bool:
+    if not isinstance(tracker_snapshot, Mapping):
+        return False
+    live_integrity = _v3_mapping(packet.get("live_integrity"))
+    if _coerce_signal_bool(live_integrity.get("is_live")) is not True:
+        return False
+    for live_key in ("frame_advancing", "capture_advancing", "state_advancing"):
+        if _coerce_signal_bool(live_integrity.get(live_key)) is not True:
+            return False
+    if str(live_integrity.get("cache_status") or "").strip().lower() != "fresh":
+        return False
+    if str(live_integrity.get("source") or "").strip().lower() not in {"model_council", "model-council"}:
+        return False
+    packet_hash = _v3_live_hash(packet)
+    tracker_identity = _v3_live_read_identity_from_tracker(tracker_snapshot)
+    tracker_hash = str(tracker_identity.get("input_frame_hash") or "").strip()
+    if not packet_hash or not tracker_hash or packet_hash != tracker_hash:
+        return False
+    for key in ("session_id", "symbol", "timeframe"):
+        packet_value = str(packet.get(key) or "").strip()
+        tracker_value = str(tracker_identity.get(key) or "").strip()
+        if packet_value and tracker_value and packet_value != tracker_value:
+            return False
+    for key in ("frame_id", "capture_count", "state_version"):
+        if _v3_packet_counter(tracker_identity, key) is None:
+            return False
+    return True
+
+
+def _v3_backend_confirmed_packet_ready(packet: Mapping[str, Any], timestamp: float) -> bool:
+    if not bool(packet.get("_backend_confirmed_execution_packet") or packet.get("_leased_execution_packet")):
+        return False
+    live_integrity = _v3_mapping(packet.get("live_integrity"))
+    if _coerce_signal_bool(live_integrity.get("is_live")) is not True:
+        return False
+    for live_key in ("frame_advancing", "capture_advancing", "state_advancing"):
+        if _coerce_signal_bool(live_integrity.get(live_key)) is not True:
+            return False
+    if str(live_integrity.get("cache_status") or "").strip().lower() != "fresh":
+        return False
+    if str(live_integrity.get("source") or "").strip().lower() not in {"model_council", "model-council"}:
+        return False
+    if not _v3_live_hash(packet):
+        return False
+    if _v3_packet_side(packet) not in {"BUY", "SELL"}:
+        return False
+    for key in ("frame_id", "capture_count", "state_version"):
+        parsed = _v3_packet_counter(packet, key)
+        if parsed is None or parsed <= 0:
+            return False
+    valid_until = _v3_display_packet_valid_until_epoch(packet)
+    if valid_until is None or valid_until <= timestamp:
+        return False
+    return True
+
+
+def _v3_gate1_second_live_read(
+    state: Dict[str, Any],
+    packet: Mapping[str, Any],
+    now: Optional[float] = None,
+    tracker_snapshot: Optional[Mapping[str, Any]] = None,
+) -> Tuple[bool, str]:
     timestamp = float(time.time() if now is None else now)
-    identity = _v3_packet_identity(packet)
+    identity = _v3_second_read_identity(packet, tracker_snapshot)
+    if _v3_backend_live_read_confirmed(packet, tracker_snapshot):
+        identity["seen_at"] = timestamp
+        state["v3_second_live_read_baseline"] = dict(identity)
+        state["v3_second_live_read_confirmed"] = dict(identity)
+        return True, "SECOND_READ_PASS"
+    if _v3_backend_confirmed_packet_ready(packet, timestamp):
+        identity["seen_at"] = timestamp
+        identity["confirmation_source"] = str(packet.get("_backend_execution_packet_source") or "backend_confirmed_packet")
+        state["v3_second_live_read_baseline"] = dict(identity)
+        state["v3_second_live_read_confirmed"] = dict(identity)
+        return True, "SECOND_READ_PASS"
     baseline = state.get("v3_second_live_read_baseline")
     if not isinstance(baseline, Mapping):
-        _v3_store_second_read_baseline(state, packet, timestamp)
+        _v3_store_second_read_baseline(state, packet, timestamp, tracker_snapshot)
         return False, "WAITING_SECOND_LIVE_READ"
 
     baseline_seen_at = _coerce_finite_float(baseline.get("seen_at"))
     if baseline_seen_at is None or (timestamp - float(baseline_seen_at)) > V3_SECOND_READ_BASELINE_MAX_AGE_SECONDS:
-        _v3_store_second_read_baseline(state, packet, timestamp)
+        _v3_store_second_read_baseline(state, packet, timestamp, tracker_snapshot)
         return False, "WAITING_SECOND_LIVE_READ_STALE_BASELINE_RESET"
 
     for key in ("session_id", "symbol", "timeframe"):
         if str(identity.get(key) or "") != str(baseline.get(key) or ""):
-            _v3_store_second_read_baseline(state, packet, timestamp)
+            _v3_store_second_read_baseline(state, packet, timestamp, tracker_snapshot)
             return False, f"WAITING_SECOND_LIVE_READ_CONTEXT_RESET_{key.upper()}"
 
     current_side = _normalize_trade_side(identity.get("side"))
     baseline_side = _normalize_trade_side(baseline.get("side"))
     if current_side not in {"BUY", "SELL"}:
-        _v3_store_second_read_baseline(state, packet, timestamp)
+        _v3_store_second_read_baseline(state, packet, timestamp, tracker_snapshot)
         return False, "WAITING_SECOND_LIVE_READ_NO_EXECUTION_SIDE"
     if baseline_side != current_side:
-        _v3_store_second_read_baseline(state, packet, timestamp)
+        _v3_store_second_read_baseline(state, packet, timestamp, tracker_snapshot)
         return False, "WAITING_SECOND_LIVE_READ_SIDE_CHANGED"
 
     if not _v3_counters_advanced(identity, baseline):
@@ -4230,25 +5079,54 @@ def _v3_box_has_point(boxes: Mapping[str, Any], key: str) -> bool:
     return _coerce_finite_float(value.get("x")) is not None and _coerce_finite_float(value.get("y")) is not None
 
 
+def _v3_box_has_any_point(boxes: Mapping[str, Any], *keys: str) -> bool:
+    return any(_v3_box_has_point(boxes, key) for key in keys)
+
+
+def _v3_calibration_layout_check(boxes: Mapping[str, Any]) -> Tuple[bool, str]:
+    rel_points: Dict[str, Tuple[float, float]] = {}
+    for key, value in boxes.items():
+        if key == "capabilities" or not isinstance(value, Mapping):
+            continue
+        rel_x = _coerce_finite_float(value.get("x"))
+        rel_y = _coerce_finite_float(value.get("y"))
+        if rel_x is not None and rel_y is not None:
+            rel_points[str(key)] = (float(rel_x), float(rel_y))
+    return _calibration_layout_reason(rel_points)
+
+
 def _v3_calibration_check(boxes: Mapping[str, Any], packet: Mapping[str, Any]) -> Tuple[bool, str]:
     if any("amount" in str(key).strip().lower() for key in boxes.keys()):
         return False, "CALIBRATION_AMOUNT_CONTROL_FORBIDDEN"
-    if not _v3_box_has_point(boxes, "buy_icon"):
+    if not _v3_box_has_any_point(boxes, "buy_icon", "buy_button"):
         return False, "CALIBRATION_MISSING_BUY_CONTROL"
-    if not _v3_box_has_point(boxes, "sell_icon"):
+    if not _v3_box_has_any_point(boxes, "sell_icon", "sell_button"):
         return False, "CALIBRATION_MISSING_SELL_CONTROL"
-    if not (_v3_box_has_point(boxes, "time_button") or _v3_box_has_point(boxes, "time_box")):
+    if not (
+        _v3_box_has_any_point(boxes, "time_input", "expiry_time_field", "time_button", "time_box")
+    ):
         return False, "CALIBRATION_MISSING_TIME_CONTROL"
+    layout_ok, layout_reason = _v3_calibration_layout_check(boxes)
+    if not layout_ok:
+        return False, layout_reason
 
     expiry = _v3_packet_expiry_seconds(packet)
     exact_keys = (f"time_{expiry}", f"time_preset_{expiry}")
     has_exact_preset = any(_v3_box_has_point(boxes, key) for key in exact_keys)
-    has_combined_time_input = _v3_box_has_point(boxes, "time_input") or _v3_box_has_point(boxes, "time_box")
-    has_split_typed_time = _v3_box_has_point(boxes, "hourly_input") and _v3_box_has_point(boxes, "minute_input")
+    has_combined_time_input = (
+        _v3_box_has_any_point(boxes, "time_input", "time_box", "expiry_time_field", "time_button")
+    )
+    has_split_typed_time = (
+        _v3_box_has_any_point(boxes, "hourly_input", "hour_input", "hours_input")
+        and _v3_box_has_any_point(boxes, "minute_input", "minutely_input", "minutes_input")
+        and _v3_box_has_any_point(boxes, "second_input", "seconds_input", "second_field", "seconds_field")
+    )
     has_typed_time = has_combined_time_input or has_split_typed_time
-    has_stepper_time = all(
-        _v3_box_has_point(boxes, key)
-        for key in ("hourly_minus", "hourly_plus", "minute_minus", "minute_plus")
+    has_stepper_time = (
+        _v3_box_has_any_point(boxes, "hourly_minus", "hour_minus", "hours_minus", "expiry_minus")
+        and _v3_box_has_any_point(boxes, "hourly_plus", "hour_plus", "hours_plus", "expiry_plus")
+        and _v3_box_has_any_point(boxes, "minute_minus", "minutely_minus", "minutes_minus")
+        and _v3_box_has_any_point(boxes, "minute_plus", "minutely_plus", "minutes_plus")
     )
     if not (has_exact_preset or has_typed_time or has_stepper_time):
         return False, "CALIBRATION_MISSING_TIME_SEQUENCE_CONTROLS"
@@ -4261,7 +5139,7 @@ def _v3_calibration_check(boxes: Mapping[str, Any], packet: Mapping[str, Any]) -
         if "type_time" in actions and not has_typed_time:
             return False, "CALIBRATION_MISSING_TIME_FIELD_INPUTS"
         if any(action.startswith("verify_time") for action in actions) and not (
-            _v3_box_has_point(boxes, "time_box") or _v3_box_has_point(boxes, "time_button")
+            _v3_box_has_any_point(boxes, "time_input", "expiry_time_field", "time_box", "time_button")
         ):
             return False, "CALIBRATION_MISSING_TIME_VERIFICATION_REGION"
     return True, "CALIBRATION_VALID"
@@ -4383,12 +5261,13 @@ def _v3_apply_shooter_mode(
         bounds = _v3_window_bounds(hwnd)
         if bounds is None:
             return shooter_modes.ShooterModeResult(resolved_mode, False, False, f"{resolved_mode.value}_WINDOW_RECT_MISSING")
+        max_packet_age_seconds = float(options.get("max_packet_age_seconds") or DEFAULT_MAX_SIGNAL_AGE_SECONDS)
         constitution = evaluate_execution_constitution(
             packet,
             decision,
             now_epoch=timestamp,
             first_read_confirmed=str(decision.get("gate_1_second_read") or "").upper() == "PASS",
-            max_packet_age_seconds=DEFAULT_MAX_SIGNAL_AGE_SECONDS,
+            max_packet_age_seconds=max_packet_age_seconds,
         )
         if not constitution.ok:
             reason = f"{resolved_mode.value}_CONSTITUTION_BLOCKED:{constitution.reason}"
@@ -4417,6 +5296,7 @@ def _v3_apply_shooter_mode(
             latest_packet=packet,
             now_epoch=timestamp,
             require_broker_click_safe=True,
+            max_packet_age_seconds=max_packet_age_seconds,
         )
         if not bool(rehearsal.get("ready")):
             reason = f"{resolved_mode.value}_REHEARSAL_BLOCKED:{rehearsal.get('reason')}"
@@ -4507,6 +5387,7 @@ def _evaluate_v3_shooter_decision(
     state: Dict[str, Any],
     boxes: Mapping[str, Any],
     *,
+    tracker_snapshot: Optional[Mapping[str, Any]] = None,
     expected_session_id: Optional[str] = None,
     expected_symbol: Optional[str] = None,
     expected_timeframe: Optional[str] = None,
@@ -4538,7 +5419,7 @@ def _evaluate_v3_shooter_decision(
         decision["gate_1_second_read"] = "BLOCKED_DUPLICATE"
         return _v3_fail_decision(decision, reason="DUPLICATE_PACKET_NOT_REFIRED")
 
-    gate1_ok, gate1_reason = _v3_gate1_second_live_read(state, packet, timestamp)
+    gate1_ok, gate1_reason = _v3_gate1_second_live_read(state, packet, timestamp, tracker_snapshot)
     decision["gate_1_second_read"] = "PASS" if gate1_ok else "WAIT"
     if not gate1_ok:
         return _v3_fail_decision(decision, reason=gate1_reason)
@@ -4554,6 +5435,24 @@ def _evaluate_v3_shooter_decision(
     decision["gate_3_model_council"] = "PASS" if gate3_ok else "FAIL"
     if not gate3_ok:
         return _v3_fail_decision(decision, reason=gate3_reason)
+
+    packet_validation = validate_execution_packet_v3(
+        packet,
+        expected_session_id=expected_session_id,
+        expected_symbol=expected_symbol,
+        expected_timeframe=expected_timeframe,
+        now_epoch=timestamp,
+        require_executable=True,
+        require_broker_click_safe_identity=False,
+    )
+    decision["packet_validation"] = "PASS" if packet_validation.ok else "FAIL"
+    if not packet_validation.ok:
+        runtime_integrity = "RUNTIME_INTEGRITY" if "RUNTIME_INTEGRITY" in packet_validation.categories else None
+        return _v3_fail_decision(
+            decision,
+            reason=f"PACKET_VALIDATION:{packet_validation.first_reason}",
+            runtime_integrity=runtime_integrity,
+        )
 
     calibration_ok, calibration_reason = _v3_calibration_check(boxes, packet)
     decision["calibration"] = "VALID" if calibration_ok else "INVALID"
@@ -4638,6 +5537,8 @@ def _extract_model_council_packet(payload: Dict[str, Any], *, now: Optional[floa
     def current_execution_packet(candidate: Mapping[str, Any], source: str) -> Optional[Dict[str, Any]]:
         if str(candidate.get("schema_version") or "").strip() != PG_EXECUTION_PACKET_SCHEMA_V3:
             return None
+        if str(candidate.get("packet_type") or "").strip() != PG_EXECUTION_PACKET_SCHEMA_V3:
+            return None
         valid_until = _coerce_finite_float(candidate.get("valid_until_epoch_sec") or candidate.get("valid_until_epoch"))
         if valid_until is None or valid_until <= timestamp:
             LOGGER.debug(
@@ -4648,7 +5549,23 @@ def _extract_model_council_packet(payload: Dict[str, Any], *, now: Optional[floa
                 timestamp,
             )
             return None
-        return cast(Dict[str, Any], dict(candidate))
+        validation = validate_execution_packet_v3(
+            candidate,
+            now_epoch=timestamp,
+            require_executable=True,
+        )
+        if not validation.ok or validation.side not in {"BUY", "SELL"} or validation.expiry_seconds is None:
+            LOGGER.debug(
+                "Ignoring non-executable V3 packet from %s: packet_id=%s reason=%s",
+                source,
+                candidate.get("packet_id"),
+                validation.first_reason,
+            )
+            return None
+        packet = dict(candidate)
+        packet["_backend_confirmed_execution_packet"] = True
+        packet["_backend_execution_packet_source"] = source
+        return cast(Dict[str, Any], packet)
 
     packet = current_execution_packet(payload, "root")
     if packet is not None:
@@ -4666,7 +5583,59 @@ def _extract_model_council_packet(payload: Dict[str, Any], *, now: Optional[floa
             packet = current_execution_packet(nested, key)
             if packet is not None:
                 return packet
-    return None
+
+    # Runtime trace wraps endpoint payloads several layers deep. The shooter
+    # still accepts only a validated PG_EXECUTION_PACKET_V3, but this prevents a
+    # short execution/latest timeout from making the calibrated click path miss
+    # an already-promoted packet.
+    priority_keys = (
+        "payload",
+        "execution_packet",
+        "model_council_packet",
+        "latest_execution_packet",
+        "latest_model_council_packet",
+        "latest_packet",
+        "packet",
+        "execution_latest",
+        "endpoints",
+        "dataflow",
+        "trace",
+    )
+    seen: set[int] = set()
+
+    def scan_nested(value: Any, source: str, depth: int = 0) -> Optional[Dict[str, Any]]:
+        if depth > 8:
+            return None
+        if isinstance(value, Mapping):
+            marker = id(value)
+            if marker in seen:
+                return None
+            seen.add(marker)
+            packet_candidate = current_execution_packet(value, source)
+            if packet_candidate is not None:
+                return packet_candidate
+            for child_key in priority_keys:
+                child = value.get(child_key)
+                if isinstance(child, (Mapping, list)):
+                    packet_candidate = scan_nested(child, f"{source}.{child_key}", depth + 1)
+                    if packet_candidate is not None:
+                        return packet_candidate
+            for child_key, child in value.items():
+                if child_key in priority_keys:
+                    continue
+                if isinstance(child, (Mapping, list)):
+                    packet_candidate = scan_nested(child, f"{source}.{child_key}", depth + 1)
+                    if packet_candidate is not None:
+                        return packet_candidate
+        elif isinstance(value, list):
+            for idx, child in enumerate(value[:32]):
+                if isinstance(child, (Mapping, list)):
+                    packet_candidate = scan_nested(child, f"{source}[{idx}]", depth + 1)
+                    if packet_candidate is not None:
+                        return packet_candidate
+        return None
+
+    return scan_nested(payload, "runtime_trace")
 
 
 def _first_visible_value(*values: Any) -> Any:
@@ -4962,6 +5931,7 @@ def fetch_latest_model_council_packet(
     paths = (
         f"/v1/mobile/model-council/sessions/{session_q}/execution/latest",
         f"/v1/mobile/model-council/execution/latest?session_id={session_q}",
+        f"/v1/mobile/runtime/trace/v3?session_id={session_q}",
     )
     for path in paths:
         try:
@@ -5044,6 +6014,9 @@ def _write_shooter_handshake(
         council = _v3_mapping(packet_payload.get("model_council"))
         promotion = _v3_mapping(packet_payload.get("promotion_trace"))
         lane_context = _v3_execution_lane_context(packet_payload, council, promotion)
+        tracker_execution_packet = _extract_model_council_packet(tracker_payload, now=time.time()) if tracker_payload else None
+        authority_packet_id = _v3_packet_id(tracker_execution_packet) if isinstance(tracker_execution_packet, Mapping) else ""
+        validation_packet_id = str(decision.get("packet_id") or packet_payload.get("packet_id") or "").strip()
         packet_type = str(
             packet_payload.get("packet_type")
             or ("PG_EXECUTION_PACKET_V3" if str(packet_payload.get("schema_version") or "") == PG_EXECUTION_PACKET_SCHEMA_V3 else "")
@@ -5066,10 +6039,13 @@ def _write_shooter_handshake(
                 and bool(int(preferred_window_hwnd or 0))
                 and int(selected_window_hwnd or 0) == int(preferred_window_hwnd or 0)
             ),
-            "packet_seen": bool(decision.get("packet_id")),
-            "packet_id": decision.get("packet_id"),
+            "packet_seen": bool(authority_packet_id or validation_packet_id),
+            "packet_id": authority_packet_id or validation_packet_id,
+            "authority_packet_id": authority_packet_id,
+            "validation_packet_id": validation_packet_id,
+            "packet_under_validation_id": validation_packet_id if validation_packet_id != authority_packet_id else "",
             "packet_type": packet_type or decision.get("packet_type") or "MISSING",
-            "execution_packet_present": packet_type == "PG_EXECUTION_PACKET_V3",
+            "execution_packet_present": bool(authority_packet_id) or packet_type == "PG_EXECUTION_PACKET_V3",
             "study_packet_present": packet_type == "STUDY_PACKET",
             "execution_state": decision.get("execution_state") or execution.get("state") or council.get("final_state"),
             "side": decision.get("side") or execution.get("side") or council.get("final_side"),
@@ -5126,6 +6102,31 @@ def _v3_live_broker_clicks_explicitly_enabled() -> bool:
     return str(os.getenv(LIVE_BROKER_CLICK_ENV, "") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _shooter_endpoint_probes_enabled() -> bool:
+    return str(os.getenv("PHOENIXGUARD_SHOOTER_ENDPOINT_PROBES", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _shooter_execution_endpoint_listener_enabled() -> bool:
+    raw = os.getenv("PHOENIXGUARD_SHOOTER_EXECUTION_ENDPOINT_LISTENER")
+    if raw is None:
+        raw = os.getenv("PHOENIXGUARD_SHOOTER_ENDPOINT_PROBES", "1")
+    return str(raw or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _shooter_study_endpoint_probes_enabled() -> bool:
+    raw = os.getenv("PHOENIXGUARD_SHOOTER_STUDY_ENDPOINT_PROBES")
+    if raw is None:
+        raw = os.getenv("PHOENIXGUARD_SHOOTER_ENDPOINT_PROBES", "0")
+    return str(raw or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _live_step_screenshots_enabled(*, record_action_evidence: bool, live_behavior_validation: bool, skip_side_click: bool) -> bool:
+    if live_behavior_validation or skip_side_click:
+        return bool(record_action_evidence or live_behavior_validation)
+    screenshot_env = str(os.getenv("PHOENIXGUARD_LIVE_STEP_SCREENSHOTS", "") or "").strip().lower()
+    return bool(record_action_evidence and screenshot_env in {"1", "true", "yes", "on"})
+
+
 def execute_v3_packet_trade(
     hwnd: int,
     boxes: Dict[str, Dict[str, Any]],
@@ -5179,7 +6180,25 @@ def execute_v3_packet_trade(
     if time_button_wait_override_ms is not None and int(time_button_wait_override_ms) > 0:
         timing_profile = replace(timing_profile, time_button_after_click_wait_ms=int(time_button_wait_override_ms))
     packet_id = _v3_packet_id(packet) or f"packet_{int(time.time() * 1000)}"
-    evidence_enabled = bool(record_action_evidence or live_behavior_validation)
+    rect_for_expiry_cache = get_window_rect(hwnd)
+    cached_expiry = _get_cached_confirmed_expiry(hwnd, rect_for_expiry_cache, int(expiry))
+    if cached_expiry is not None:
+        LOGGER.info("V3 sequencer: using confirmed broker expiry cache=%ss for packet_id=%s", cached_expiry, packet_id)
+
+    def time_reader(read_hwnd: int, read_boxes: Mapping[str, Any]) -> Optional[int]:
+        if cached_expiry is not None and int(cached_expiry) == int(expiry):
+            return int(cached_expiry)
+        return ocr_read_time_region(read_hwnd, cast(Dict[str, Dict[str, Any]], dict(read_boxes)))
+
+    evidence_enabled = _live_step_screenshots_enabled(
+        record_action_evidence=bool(record_action_evidence),
+        live_behavior_validation=bool(live_behavior_validation),
+        skip_side_click=bool(skip_side_click),
+    )
+    if record_action_evidence and not evidence_enabled:
+        LOGGER.info(
+            "V3 live action trace is enabled without step screenshots; set PHOENIXGUARD_LIVE_STEP_SCREENSHOTS=1 for full screenshot capture."
+        )
     evidence_recorder = ActionEvidenceRecorder(
         _SHOOTER_RUNTIME_DIR / "action_evidence",
         enabled=evidence_enabled,
@@ -5197,12 +6216,14 @@ def execute_v3_packet_trade(
         is_foreground_window=is_window_foreground,
         timing_profile=timing_profile,
         evidence_recorder=evidence_recorder,
-        ocr_reader=ocr_read_time_region if has_ocr else None,
+        ocr_reader=time_reader,
         status_callback=action_status_callback,
         logger=LOGGER,
     )
     result = sequencer.execute(packet, side=side, expiry_seconds=int(expiry), skip_side_click=bool(skip_side_click))
     _last_action_sequence_result = result
+    if result.overall in {"PASS", "PASS_TIME_ONLY"} and result.expiry_status != "UNVERIFIED_ABORT":
+        _remember_confirmed_expiry(hwnd, get_window_rect(hwnd), int(expiry), source=str(result.method or "sequencer"))
     LOGGER.info(
         "V3 action sequencer result: overall=%s reason=%s method=%s expiry_status=%s steps=%s",
         result.overall,
@@ -6616,7 +7637,7 @@ def resolve_and_set_expiry(hwnd: int, boxes: Dict[str, Dict[str, Any]], expiry: 
                 type_text_slowly(str(int(minutes)), interval_sec=0.04)
                 time.sleep(0.15)
                 
-                press_key("enter")
+                press_key("esc")
                 time.sleep(0.22)
                 if _verified_or_unknown("hourly+minute typing"):
                     LOGGER.info("resolver: set via hourly+minute typing: %dh %dm (%ds total)", hours, minutes, expiry)
@@ -6842,6 +7863,91 @@ def _build_calibration_test_packet(
     }
 
 
+def _fetch_live_startup_prime_expiry(base_url: str, session_id: str, *, fallback_seconds: int = DEFAULT_STARTUP_PRIME_EXPIRY_SECONDS) -> int:
+    session_q = urllib.parse.quote(str(session_id or ""))
+    base = str(base_url or DEFAULT_BASE_URL).rstrip("/")
+    paths = (
+        f"/v1/mobile/live/state/v3/{session_q}?mode=BROKER",
+        f"/v1/mobile/window-tracker/sessions/{session_q}",
+    )
+
+    def read_json(path: str) -> Optional[Dict[str, Any]]:
+        try:
+            with urllib.request.urlopen(f"{base}{path}", timeout=1.0) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+            return payload if isinstance(payload, dict) else None
+        except Exception:
+            return None
+
+    def candidates(payload: Mapping[str, Any]) -> List[Any]:
+        broker_execution = payload.get("broker_execution_state")
+        execution_controls = payload.get("execution_controls")
+        if not isinstance(broker_execution, Mapping):
+            broker_execution = {}
+        if not isinstance(execution_controls, Mapping):
+            execution_controls = {}
+        return [
+            execution_controls.get("high_frequency_expiry_seconds"),
+            broker_execution.get("expiry_seconds"),
+            payload.get("expiry_seconds"),
+        ]
+
+    for path in paths:
+        payload = read_json(path)
+        if not payload:
+            continue
+        for raw in candidates(payload):
+            parsed = _parse_expiry_seconds_value(raw)
+            if parsed is not None and int(parsed) > 0:
+                return int(parsed)
+    return int(fallback_seconds or DEFAULT_STARTUP_PRIME_EXPIRY_SECONDS)
+
+
+def _prime_live_ready_expiry_cache(
+    args: argparse.Namespace,
+    *,
+    hwnd: int,
+    boxes: Dict[str, Dict[str, Any]],
+    shooter_mode: shooter_modes.ShooterMode,
+) -> bool:
+    if shooter_mode not in {shooter_modes.ShooterMode.LIVE_READY, shooter_modes.ShooterMode.LIVE_BEHAVIOR_VALIDATION}:
+        return False
+    if not _v3_live_broker_clicks_explicitly_enabled():
+        LOGGER.info("startup_expiry_prime: skipped because %s is not enabled", LIVE_BROKER_CLICK_ENV)
+        return False
+    forced_expiry = _parse_expiry_seconds_value(getattr(args, "expiry", None))
+    expiry = int(forced_expiry or _fetch_live_startup_prime_expiry(str(getattr(args, "base_url", DEFAULT_BASE_URL)), str(getattr(args, "session_id", ""))))
+    if expiry <= 0:
+        expiry = DEFAULT_STARTUP_PRIME_EXPIRY_SECONDS
+    packet = _build_calibration_test_packet(
+        session_id=str(getattr(args, "session_id", "")),
+        side="BUY",
+        expiry_seconds=int(expiry),
+        signal_id="startup_expiry_prime",
+        base_url=str(getattr(args, "base_url", DEFAULT_BASE_URL)),
+    )
+    packet["source"] = "live_ready_startup_expiry_prime"
+    packet["packet_id"] = f"startup_expiry_prime_{int(time.time() * 1000)}"
+    LOGGER.info("startup_expiry_prime: priming broker expiry=%ss before listening for execution packets", expiry)
+    ok = execute_v3_packet_trade(
+        hwnd,
+        boxes,
+        packet,
+        allow_live_clicks=True,
+        broker_timing_profile_path=str(getattr(args, "broker_speed_profile", DEFAULT_BROKER_TIMING_PROFILE_FILE)),
+        action_speed=str(getattr(args, "action_speed", "balanced")),
+        record_action_evidence=False,
+        live_behavior_validation=False,
+        session_id=str(getattr(args, "session_id", "")),
+        skip_side_click=True,
+    )
+    if ok:
+        LOGGER.info("startup_expiry_prime: confirmed broker expiry=%ss; shooter packet path is warmed", expiry)
+    else:
+        LOGGER.warning("startup_expiry_prime: unable to confirm expiry before listening; shooter will still verify on packet")
+    return bool(ok)
+
+
 def _run_startup_test_entry(
     args: argparse.Namespace,
     *,
@@ -7011,6 +8117,27 @@ def run_signal_loop(args: argparse.Namespace) -> int:
     """
     global automatic_trigger_enabled
     shooter_mode = shooter_modes.resolve_shooter_mode(getattr(args, "shooter_mode", None))
+    if shooter_mode.value == "LIVE_DISABLED":
+        try:
+            disabled_poll_floor = max(
+                0.5,
+                float(
+                    os.getenv(
+                        "PHOENIXGUARD_LIVE_DISABLED_SHOOTER_MIN_POLL_SEC",
+                        str(DEFAULT_LIVE_DISABLED_SIGNAL_POLL_SECONDS),
+                    )
+                    or str(DEFAULT_LIVE_DISABLED_SIGNAL_POLL_SECONDS)
+                ),
+            )
+        except ValueError:
+            disabled_poll_floor = DEFAULT_LIVE_DISABLED_SIGNAL_POLL_SECONDS
+        if float(getattr(args, "poll", DEFAULT_SIGNAL_POLL_SECONDS) or DEFAULT_SIGNAL_POLL_SECONDS) < disabled_poll_floor:
+            LOGGER.info(
+                "LIVE_DISABLED poll floor applied: %.3fs -> %.3fs to protect tracker/API display latency.",
+                float(getattr(args, "poll", DEFAULT_SIGNAL_POLL_SECONDS) or DEFAULT_SIGNAL_POLL_SECONDS),
+                disabled_poll_floor,
+            )
+            args.poll = disabled_poll_floor
     preferred_window_hwnd = int(getattr(args, "window_hwnd", 0) or 0) or None
 
     try:
@@ -7059,9 +8186,15 @@ def run_signal_loop(args: argparse.Namespace) -> int:
     state = _three_gate_load_state()
     last_tracker_snapshot: Optional[Dict[str, Any]] = None
     last_tracker_fetch_ts = 0.0
+    last_execution_packet_fetch_ts = 0.0
+    last_study_packet_fetch_ts = 0.0
+    leased_execution_packet: Optional[Dict[str, Any]] = None
     last_waiting_log_ts = 0.0
     last_non_actionable_status = ""
     live_validation_actions_completed = 0
+    disabled_snapshot_only = shooter_mode.value == "LIVE_DISABLED"
+    execution_endpoint_listener_enabled = _shooter_execution_endpoint_listener_enabled()
+    study_endpoint_probes_enabled = _shooter_study_endpoint_probes_enabled()
 
     status_box = FloatingStatusBox(args.session_id, args.base_url)
     status_box.start()
@@ -7094,6 +8227,13 @@ def run_signal_loop(args: argparse.Namespace) -> int:
         )
     elif bool(getattr(args, "test_signal", False)):
         LOGGER.warning("startup_test_entry: skipped until a valid broker window is visible.")
+    elif hwnd is not None:
+        _prime_live_ready_expiry_cache(
+            args,
+            hwnd=hwnd,
+            boxes=cast(Dict[str, Dict[str, Any]], dict(boxes)),
+            shooter_mode=shooter_mode,
+        )
 
     try:
         while True:
@@ -7110,18 +8250,68 @@ def run_signal_loop(args: argparse.Namespace) -> int:
 
                 tracker_snapshot = last_tracker_snapshot
                 fetch_started = time.time()
+                max_signal_age_seconds = float(getattr(args, "max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS))
                 payload = _extract_model_council_packet(tracker_snapshot, now=now) if isinstance(tracker_snapshot, dict) else None
                 study_payload: Optional[Dict[str, Any]] = None
+                if isinstance(payload, dict) and payload:
+                    leased_execution_packet = dict(payload)
                 if not isinstance(payload, dict) or not payload:
                     if isinstance(tracker_snapshot, dict):
                         study_payload = _current_or_synthesized_model_council_study_packet(
                             tracker_snapshot,
                             now=now,
-                            max_packet_age_seconds=float(getattr(args, "max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS)),
+                            max_packet_age_seconds=max_signal_age_seconds,
                         )
-                if not isinstance(payload, dict) or not payload:
-                    if not isinstance(study_payload, dict):
-                        payload = fetch_latest_model_council_packet(args.base_url, args.session_id)
+                has_tracker_execution_packet = isinstance(payload, dict) and bool(payload)
+                if not has_tracker_execution_packet:
+                    # The execution endpoint is a first-class packet listener. The lease keeps
+                    # a just-validated packet alive only through its own explicit TTL.
+                    if (
+                        execution_endpoint_listener_enabled
+                        and not disabled_snapshot_only
+                        and (now - last_execution_packet_fetch_ts) >= DEFAULT_EXECUTION_PACKET_FETCH_INTERVAL_SECONDS
+                    ):
+                        last_execution_packet_fetch_ts = now
+                        endpoint_payload = fetch_latest_model_council_packet(
+                            args.base_url,
+                            args.session_id,
+                            timeout=DEFAULT_ENDPOINT_PACKET_FETCH_TIMEOUT_SECONDS,
+                        )
+                        if isinstance(endpoint_payload, dict) and endpoint_payload:
+                            endpoint_ok, endpoint_reason = _v3_runtime_integrity_check(
+                                endpoint_payload,
+                                expected_session_id=args.session_id,
+                                now=time.time(),
+                                max_packet_age_seconds=max_signal_age_seconds,
+                            )
+                            if endpoint_ok:
+                                payload = endpoint_payload
+                                study_payload = None
+                                leased_execution_packet = dict(endpoint_payload)
+                            else:
+                                LOGGER.debug(
+                                    "Discarding endpoint V3 execution packet: packet_id=%s reason=%s",
+                                    _v3_packet_id(endpoint_payload),
+                                    endpoint_reason,
+                                )
+                    if not isinstance(payload, dict) and isinstance(leased_execution_packet, dict):
+                        lease_ok, lease_reason = _v3_runtime_integrity_check(
+                            leased_execution_packet,
+                            expected_session_id=args.session_id,
+                            now=time.time(),
+                            max_packet_age_seconds=max_signal_age_seconds,
+                        )
+                        if lease_ok:
+                            payload = dict(leased_execution_packet)
+                            payload["_leased_execution_packet"] = True
+                            study_payload = None
+                        else:
+                            LOGGER.debug(
+                                "Dropping leased V3 execution packet: packet_id=%s reason=%s",
+                                _v3_packet_id(leased_execution_packet),
+                                lease_reason,
+                            )
+                            leased_execution_packet = None
                 signal_fetch_latency = max(0.0, time.time() - fetch_started)
                 if payload is not None:
                     payload["_fetch_latency_sec"] = signal_fetch_latency
@@ -7130,16 +8320,18 @@ def run_signal_loop(args: argparse.Namespace) -> int:
 
                 gate2_ok, gate2_reason, lock_remaining = _v3_gate2_trade_discipline(state, time.time())
                 if not isinstance(payload, dict) or not payload:
-                    if not isinstance(study_payload, dict):
-                        study_fetch_timeout = max(
-                            DEFAULT_MODEL_COUNCIL_FETCH_TIMEOUT_SECONDS,
-                            min(15.0, float(getattr(args, "max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS)) * 1.5),
-                        )
+                    if (
+                        not isinstance(study_payload, dict)
+                        and study_endpoint_probes_enabled
+                        and not disabled_snapshot_only
+                        and (now - last_study_packet_fetch_ts) >= DEFAULT_STUDY_PACKET_FETCH_INTERVAL_SECONDS
+                    ):
+                        last_study_packet_fetch_ts = now
                         study_payload = fetch_latest_model_council_study_packet(
                             args.base_url,
                             args.session_id,
-                            timeout=study_fetch_timeout,
-                            max_packet_age_seconds=float(getattr(args, "max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS)),
+                            timeout=DEFAULT_STUDY_ENDPOINT_PACKET_FETCH_TIMEOUT_SECONDS,
+                            max_packet_age_seconds=max_signal_age_seconds,
                         )
                     if isinstance(study_payload, dict):
                         study_payload["_fetch_latency_sec"] = signal_fetch_latency
@@ -7180,10 +8372,77 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                     payload,
                     state,
                     boxes,
+                    tracker_snapshot=tracker_snapshot if isinstance(tracker_snapshot, dict) else None,
                     expected_session_id=args.session_id,
                     now=now,
                     max_packet_age_seconds=float(getattr(args, "max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS)),
                 )
+                if bool(decision.get("will_click")):
+                    with automatic_trigger_lock:
+                        trigger_enabled = automatic_trigger_enabled
+                    if not trigger_enabled:
+                        decision["will_click"] = False
+                        decision["reason"] = "AUTOMATIC_TRIGGER_DISABLED"
+                    elif hwnd is None or get_window_rect(hwnd) is None:
+                        resolved_hwnd = prepare_pocket_option_window(
+                            args.window_query,
+                            preferred_hwnd=preferred_window_hwnd,
+                            auto_open=bool(getattr(args, "auto_open_broker", False)),
+                            broker_url=str(getattr(args, "broker_url", DEFAULT_BROKER_URL)),
+                            allow_active_fallback=False,
+                        )
+                        if resolved_hwnd is None:
+                            decision["will_click"] = False
+                            decision["reason"] = "WAITING_FOR_BROKER_WINDOW"
+                            status_box.update_action(
+                                {
+                                    "phase": "WAITING_FOR_BROKER_WINDOW",
+                                    "step": "broker window not visible",
+                                    "packet_id": decision.get("packet_id"),
+                                }
+                            )
+                        else:
+                            hwnd = int(resolved_hwnd)
+                            if not activate_window(hwnd):
+                                decision["will_click"] = False
+                                decision["reason"] = "BROKER_WINDOW_ACTIVATION_FAILED"
+                                hwnd = None
+                            else:
+                                rect = get_window_rect(hwnd)
+                                if rect is None or not validate_calibration(boxes, rect):
+                                    decision["will_click"] = False
+                                    decision["reason"] = "CALIBRATION_INVALID_FOR_CURRENT_BROKER_WINDOW"
+                                    hwnd = None
+                                elif not preview_shown:
+                                    show_box_preview(hwnd, boxes)
+                                    preview_shown = True
+
+                    if bool(decision.get("will_click")):
+                        pre_click_packet = (
+                            _extract_model_council_packet(tracker_snapshot, now=time.time())
+                            if isinstance(tracker_snapshot, dict)
+                            else None
+                        )
+                        if not isinstance(pre_click_packet, dict) and bool(payload.get("_leased_execution_packet")):
+                            pre_click_packet = payload
+                        if not isinstance(pre_click_packet, dict) and execution_endpoint_listener_enabled:
+                            pre_click_packet = fetch_latest_model_council_packet(
+                                args.base_url,
+                                args.session_id,
+                                timeout=DEFAULT_PRE_CLICK_CONFIRMATION_TIMEOUT_SECONDS,
+                            )
+                        pre_click_ok, pre_click_reason = _v3_pre_click_confirmation(
+                            payload,
+                            pre_click_packet,
+                            expected_session_id=args.session_id,
+                            now=time.time(),
+                            max_packet_age_seconds=float(getattr(args, "max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS)),
+                        )
+                        if not pre_click_ok:
+                            decision["will_click"] = False
+                            decision["reason"] = pre_click_reason
+                            LOGGER.info("Pre-click confirmation blocked packet_id=%s reason=%s", decision.get("packet_id"), pre_click_reason)
+
                 _v3_log_final_decision(decision)
                 _write_shooter_handshake(
                     session_id=args.session_id,
@@ -7218,67 +8477,6 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                     time.sleep(float(args.poll))
                     continue
 
-                with automatic_trigger_lock:
-                    trigger_enabled = automatic_trigger_enabled
-                if not trigger_enabled:
-                    if now - last_waiting_log_ts >= 1.0:
-                        LOGGER.info("Automatic trigger disabled: V3 packet %s is ready but not clicked", decision.get("packet_id"))
-                        last_waiting_log_ts = now
-                    time.sleep(float(args.poll))
-                    continue
-
-                if hwnd is None or get_window_rect(hwnd) is None:
-                    resolved_hwnd = prepare_pocket_option_window(
-                        args.window_query,
-                        preferred_hwnd=preferred_window_hwnd,
-                        auto_open=bool(getattr(args, "auto_open_broker", False)),
-                        broker_url=str(getattr(args, "broker_url", DEFAULT_BROKER_URL)),
-                        allow_active_fallback=False,
-                    )
-                    if resolved_hwnd is None:
-                        if now - last_waiting_log_ts >= 2.0:
-                            LOGGER.info("Executable packet is ready, but the broker window is not visible; waiting.")
-                            last_waiting_log_ts = now
-                        status_box.update_action(
-                            {
-                                "phase": "WAITING_FOR_BROKER_WINDOW",
-                                "step": "broker window not visible",
-                                "packet_id": decision.get("packet_id"),
-                            }
-                        )
-                        time.sleep(float(args.poll))
-                        continue
-                    hwnd = int(resolved_hwnd)
-                    if not activate_window(hwnd):
-                        hwnd = None
-                        time.sleep(float(args.poll))
-                        continue
-                    rect = get_window_rect(hwnd)
-                    if rect is None or not validate_calibration(boxes, rect):
-                        LOGGER.error("Executable packet blocked: calibration invalid or missing for the current broker window.")
-                        hwnd = None
-                        time.sleep(float(args.poll))
-                        continue
-                    if not preview_shown:
-                        show_box_preview(hwnd, boxes)
-                        preview_shown = True
-
-                pre_click_packet = fetch_latest_model_council_packet(args.base_url, args.session_id)
-                pre_click_ok, pre_click_reason = _v3_pre_click_confirmation(
-                    payload,
-                    pre_click_packet,
-                    expected_session_id=args.session_id,
-                    now=time.time(),
-                    max_packet_age_seconds=float(getattr(args, "max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS)),
-                )
-                if not pre_click_ok:
-                    decision["will_click"] = False
-                    decision["reason"] = pre_click_reason
-                    _v3_log_final_decision(decision)
-                    LOGGER.info("Pre-click confirmation blocked packet_id=%s reason=%s", decision.get("packet_id"), pre_click_reason)
-                    time.sleep(float(args.poll))
-                    continue
-
                 LOGGER.info("V3 READY: %s", decision.get("reason"))
                 LOGGER.info(
                     "PROCESSING V3 PACKET IN %s: side=%s expiry=%ss packet_id=%s",
@@ -7310,6 +8508,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                         "action_speed": str(getattr(args, "action_speed", "balanced") or "balanced"),
                         "record_action_evidence": bool(getattr(args, "record_action_evidence", False)),
                         "session_id": str(args.session_id),
+                        "max_packet_age_seconds": float(getattr(args, "max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS)),
                         "time_button_wait_override_ms": (
                             max(1, int(float(getattr(args, "calibration_test_time_fill_wait", 0) or 0) * 1000))
                             if float(getattr(args, "calibration_test_time_fill_wait", 0) or 0) > 0
@@ -7321,6 +8520,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                 if _last_action_sequence_result is not None:
                     status_box.update_action(_last_action_sequence_result.as_dict())
                 if mode_result.recorded:
+                    leased_execution_packet = None
                     state.pop("v3_second_live_read_baseline", None)
                     log_decision(payload, "accept", mode_result.reason, 1.0)
                     LOGGER.info("%s complete: packet_id=%s record=%s", shooter_mode.value, decision.get("packet_id"), mode_result.record_path)
@@ -7381,11 +8581,16 @@ def build_parser() -> argparse.ArgumentParser:
     manual.set_defaults(mode="manual")
 
     signal = sub.add_parser("signal", help="Follow Model Council V3 packets and auto-click executable trades.")
-    signal.add_argument("--session-id", required=True, help="Model Council session id")
+    signal.add_argument("--session-id", default="", help="Model Council session id")
     signal.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Mobile API base URL")
     signal.add_argument("--poll", type=float, default=DEFAULT_SIGNAL_POLL_SECONDS, help="Signal poll interval seconds")
     signal.add_argument("--cooldown", type=float, default=DEFAULT_TRADE_COOLDOWN_SECONDS, help="Min seconds between clicks")
-    signal.add_argument("--expiry", type=int, default=DEFAULT_EXPIRY_FALLBACK_SECONDS, help="Fallback/manual expiry")
+    signal.add_argument(
+        "--expiry",
+        type=int,
+        default=0,
+        help="Manual expiry override for legacy diagnostics and CALIBRATION_TEST only; production V3 packets must carry expiry.",
+    )
     signal.add_argument(
         "--window-hwnd",
         type=int,
@@ -7639,6 +8844,10 @@ def main() -> int:
         return run_manual(args)
 
     if args.mode == "signal":
+        if bool(getattr(args, "adaptive_test", False)):
+            return run_adaptive_test(args)
+        if not str(getattr(args, "session_id", "") or "").strip():
+            parser.error("signal requires --session-id unless --adaptive-test is used")
         return run_signal_loop(args)
 
     parser.print_help()

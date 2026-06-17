@@ -171,7 +171,12 @@ def evaluate_execution_constitution(
     valid_until = _float(packet.get("valid_until_epoch"), 0.0)
     live = _mapping(packet.get("live_integrity"))
     packet_age_ms = _float(live.get("packet_age_ms"), -1.0)
-    packet_age = packet_age_ms / 1000.0 if packet_age_ms >= 0.0 else max(0.0, now - created) if created > 0.0 else max_packet_age_seconds + 1.0
+    if created > 0.0:
+        packet_age = max(0.0, now - created)
+    elif packet_age_ms >= 0.0:
+        packet_age = packet_age_ms / 1000.0
+    else:
+        packet_age = max_packet_age_seconds + 1.0
     if created <= 0.0 or valid_until <= now or packet_age > max(0.05, float(max_packet_age_seconds)):
         violations.append("NO_STALE_PACKET_CAN_EXECUTE")
 

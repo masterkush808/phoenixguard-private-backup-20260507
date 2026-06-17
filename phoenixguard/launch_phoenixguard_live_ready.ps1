@@ -3,7 +3,7 @@ param(
     [string]$BrokerWindowQuery = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_QUERY) { $env:PHOENIXGUARD_BROKER_WINDOW_QUERY } else { 'The Most Innovative Trading Platform' }),
     [int]$BrokerWindowHwnd = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_HWND) { [int]$env:PHOENIXGUARD_BROKER_WINDOW_HWND } else { 0 }),
     [string]$SessionId = $(if ($env:PHOENIXGUARD_TRACKER_SESSION_ID) { $env:PHOENIXGUARD_TRACKER_SESSION_ID } else { 'pocket-live-8788' }),
-    [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 0.5 }),
+    [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 1.0 }),
     [int]$WarmupSeconds = 20,
     [switch]$NoBrowser,
     [switch]$SkipPreview,
@@ -210,7 +210,7 @@ function Start-LiveReadyShooter {
         'Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned',
         "cd '$escapedRoot'",
         "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='1'",
-        ".\.venv\Scripts\python.exe 'shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll 0.05 --max-signal-age 8 --preferred-source tracker --require-preferred-source --min-confidence 0.2 --window-query '$escapedBrokerWindowQuery'$windowHwndArg --shooter-mode LIVE_READY --broker-speed-profile 'config/shooter_broker_timing_profile.json' --action-speed balanced --no-auto-open --record-action-evidence"
+        ".\.venv\Scripts\python.exe 'shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll 0.05 --max-signal-age 30 --preferred-source tracker --require-preferred-source --min-confidence 0.2 --window-query '$escapedBrokerWindowQuery'$windowHwndArg --shooter-mode LIVE_READY --broker-speed-profile 'config/shooter_broker_timing_profile.json' --action-speed balanced --no-auto-open --record-action-evidence"
     ) -join '; '
 
     Start-Process powershell -ArgumentList @(
@@ -246,7 +246,13 @@ $env:PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH = '320'
 $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT = '1'
 $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC = '0.5'
 $env:PHOENIXGUARD_FAST_FOCUS_PREVIEW = '1'
-$runtimeDir = Join-Path -Path $PSScriptRoot -ChildPath '.codex_runtime'
+$runtimeDir = if ($env:PHOENIXGUARD_RUNTIME_DIR) {
+    $env:PHOENIXGUARD_RUNTIME_DIR
+} elseif ($env:LOCALAPPDATA) {
+    Join-Path -Path $env:LOCALAPPDATA -ChildPath 'PhoenixGuard\codex_runtime'
+} else {
+    Join-Path -Path $PSScriptRoot -ChildPath '.codex_runtime'
+}
 if (-not (Test-Path -LiteralPath $runtimeDir)) {
     New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 }
@@ -353,6 +359,7 @@ Write-Host "Launching full V3 tracker and Model Council stack; shooter arms only
 $launchArgs = @{
     CaptureIntervalSec = $CaptureIntervalSec
     BrokerWindowQuery = $BrokerWindowQuery
+    BrokerWindowHwnd = $BrokerWindowHwnd
     Profile = 'TRACKER_PLUS_COUNCIL'
     ShooterMode = 'LIVE_DISABLED'
     RecordActionEvidence = $false
@@ -415,6 +422,13 @@ if (-not $DisableShooter) {
         throw "Shooter arming refused: runtime authority gate failed ($($authoritySnapshot.reason)). Tracker remains running without shooter."
     }
     Write-Host "Runtime authority: PASS sequence=$($authoritySnapshot.sequence_context) study=$($authoritySnapshot.study_packet) execution=$($authoritySnapshot.execution_packet) instrument=$($authoritySnapshot.instrument_state)"
+
+    Write-Host ""
+    Write-Host "Shooter arming gate: broker source lock"
+    & $pythonPath 'tools\certify_broker_source_lock_v3.py' --base-url $baseUrl --session $SessionId
+    if ($LASTEXITCODE -ne 0) {
+        throw "Shooter arming refused: broker source lock gate failed. Tracker remains running without shooter."
+    }
 
     Write-Host ""
     Write-Host "Shooter arming gate: fresh tracker frame"

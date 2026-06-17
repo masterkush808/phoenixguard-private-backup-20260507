@@ -22,6 +22,12 @@ StatusCallback = Callable[[Mapping[str, Any]], None]
 DEFAULT_EVIDENCE_DIR = Path(".codex_runtime") / "action_evidence"
 DEFAULT_VALIDATION_JSON = Path(".codex_runtime") / "live_behavior_validation_report.json"
 DEFAULT_VALIDATION_MD = Path(".codex_runtime") / "live_behavior_validation_report.md"
+ACCEPTED_EXPIRY_VERIFICATIONS = {
+    "VERIFIED_TEXT",
+    "VERIFIED_VISUAL_STATE",
+    "REASONABLY_CONFIRMED",
+    "CALIBRATED_CONTROL_CONFIRMED",
+}
 
 TARGET_ALIASES: dict[str, tuple[str, ...]] = {
     "buy_icon": ("buy_icon", "buy_button"),
@@ -32,13 +38,15 @@ TARGET_ALIASES: dict[str, tuple[str, ...]] = {
     "time_input": ("time_input", "time_box", "time_button", "expiry_time_field"),
     "time_box": ("time_box", "time_input", "time_button", "expiry_time_field"),
     "expiry_time_field": ("expiry_time_field", "time_input", "time_box", "time_button"),
-    "hourly_input": ("hourly_input", "hour_input"),
-    "minute_input": ("minute_input", "minutely_input"),
-    "second_input": ("second_input", "seconds_input"),
-    "hourly_plus": ("hourly_plus", "expiry_plus", "time_adjustment_plus"),
-    "minute_plus": ("minute_plus", "expiry_plus", "time_adjustment_plus"),
-    "hourly_minus": ("hourly_minus", "expiry_minus", "time_adjustment_minus"),
-    "minute_minus": ("minute_minus", "expiry_minus", "time_adjustment_minus"),
+    "hourly_input": ("hourly_input", "hour_input", "hours_input"),
+    "minute_input": ("minute_input", "minutely_input", "minutes_input"),
+    "second_input": ("second_input", "seconds_input", "second_field", "seconds_field"),
+    "hourly_plus": ("hourly_plus", "hour_plus", "hours_plus", "expiry_plus", "time_adjustment_plus", "hour_up"),
+    "minute_plus": ("minute_plus", "minutely_plus", "minutes_plus", "minute_up"),
+    "second_plus": ("second_plus", "seconds_plus", "second_up"),
+    "hourly_minus": ("hourly_minus", "hour_minus", "hours_minus", "expiry_minus", "time_adjustment_minus", "hour_down"),
+    "minute_minus": ("minute_minus", "minutely_minus", "minutes_minus", "minute_down"),
+    "second_minus": ("second_minus", "seconds_minus", "second_down"),
     "broker_screen": ("broker_screen", "broker_focus_area", "final_screen"),
     "final_screen": ("final_screen", "broker_focus_area", "broker_screen"),
 }
@@ -189,7 +197,8 @@ class BrokerTimingProfile:
     post_side_click_capture_delay_ms: int = 900
     safe_radius_px: int = 10
     window_layout_tolerance_px: int = 40
-    arrow_fallback_enabled: bool = True
+    require_expiry_verification: bool = True
+    arrow_fallback_enabled: bool = False
     max_total_arrow_clicks: int = 12
     wait_between_arrow_clicks_ms: int = 300
 
@@ -206,7 +215,7 @@ class BrokerTimingProfile:
                     if isinstance(profile, Mapping):
                         payload.update(dict(profile))
                     if isinstance(arrow, Mapping):
-                        payload["arrow_fallback_enabled"] = bool(arrow.get("enabled", True))
+                        payload["arrow_fallback_enabled"] = bool(arrow.get("enabled", False))
                         if "max_total_arrow_clicks" in arrow:
                             payload["max_total_arrow_clicks"] = int(arrow["max_total_arrow_clicks"])
                         if "wait_between_arrow_clicks_ms" in arrow:
@@ -222,7 +231,31 @@ class BrokerTimingProfile:
         if speed in {"conservative", "slow"}:
             factor = 1.35
         elif speed in {"fast-ui", "fast"}:
-            factor = 0.78
+            return BrokerTimingProfile(
+                profile_id=f"{self.profile_id}:fast-ui",
+                window_activate_wait_ms=min(self.window_activate_wait_ms, 140),
+                broker_focus_after_click_ms=min(self.broker_focus_after_click_ms, 140),
+                move_duration_ms=min(self.move_duration_ms, 55),
+                post_move_hold_ms=min(self.post_move_hold_ms, 30),
+                post_click_min_wait_ms=min(self.post_click_min_wait_ms, 90),
+                time_button_after_click_wait_ms=min(self.time_button_after_click_wait_ms, 260),
+                time_panel_ready_timeout_ms=min(self.time_panel_ready_timeout_ms, 900),
+                input_focus_wait_ms=min(self.input_focus_wait_ms, 95),
+                select_existing_value_wait_ms=min(self.select_existing_value_wait_ms, 35),
+                typing_key_interval_ms=min(self.typing_key_interval_ms, 12),
+                post_typing_wait_ms=min(self.post_typing_wait_ms, 95),
+                post_time_confirm_wait_ms=min(self.post_time_confirm_wait_ms, 140),
+                preset_click_wait_ms=min(self.preset_click_wait_ms, 150),
+                arrow_click_wait_ms=min(self.arrow_click_wait_ms, 90),
+                final_pre_side_click_hold_ms=min(self.final_pre_side_click_hold_ms, 35),
+                post_side_click_capture_delay_ms=min(self.post_side_click_capture_delay_ms, 160),
+                safe_radius_px=self.safe_radius_px,
+                window_layout_tolerance_px=self.window_layout_tolerance_px,
+                require_expiry_verification=self.require_expiry_verification,
+                arrow_fallback_enabled=self.arrow_fallback_enabled,
+                max_total_arrow_clicks=self.max_total_arrow_clicks,
+                wait_between_arrow_clicks_ms=min(self.wait_between_arrow_clicks_ms, 90),
+            )
         else:
             return self
 
@@ -249,6 +282,7 @@ class BrokerTimingProfile:
             post_side_click_capture_delay_ms=scale(self.post_side_click_capture_delay_ms, 350),
             safe_radius_px=self.safe_radius_px,
             window_layout_tolerance_px=self.window_layout_tolerance_px,
+            require_expiry_verification=self.require_expiry_verification,
             arrow_fallback_enabled=self.arrow_fallback_enabled,
             max_total_arrow_clicks=self.max_total_arrow_clicks,
             wait_between_arrow_clicks_ms=scale(self.wait_between_arrow_clicks_ms, 120),
@@ -337,6 +371,7 @@ class ActionSequenceResult:
     def as_dict(self) -> dict[str, Any]:
         return {
             "overall": self.overall,
+            "clicked": self.clicked,
             "reason": self.reason,
             "packet_id": self.packet_id,
             "side": self.side,
@@ -385,6 +420,9 @@ class LowLevelActionAdapter:
 
     def click_target_once(self, x: int, y: int) -> None:
         self.pyautogui.click(int(x), int(y))
+
+    def double_click_target(self, x: int, y: int) -> None:
+        self.pyautogui.doubleClick(int(x), int(y), interval=0.05)
 
     def press_key(self, key: str) -> None:
         self.pyautogui.press(str(key))
@@ -444,13 +482,102 @@ class CalibratedTargetResolver:
         ambiguous = self._ambiguous_neighbor(source_name, bounds, x, y)
         if ambiguous:
             return TargetEnvelope(source_name, (rel_x, rel_y), (x, y), bounds, self.timing_profile.safe_radius_px, expected_region, "INVALID", f"CALIBRATED_TARGET_AMBIGUOUS:{source_name}:{ambiguous}")
+        region_violation = self._expected_region_violation(source_name, target_name, expected_region, rel_x, rel_y)
+        if region_violation:
+            return TargetEnvelope(source_name, (rel_x, rel_y), (x, y), bounds, self.timing_profile.safe_radius_px, expected_region, "INVALID", region_violation)
         return TargetEnvelope(source_name, (rel_x, rel_y), (x, y), bounds, self.timing_profile.safe_radius_px, expected_region, "VALID", "inside current broker window")
+
+    def _first_rel(self, target_name: str) -> Optional[tuple[float, float]]:
+        for candidate in _target_candidates(target_name):
+            raw = self.boxes.get(candidate)
+            if not isinstance(raw, Mapping):
+                continue
+            rel_x = _float_or_none(raw.get("x"))
+            rel_y = _float_or_none(raw.get("y"))
+            if rel_x is not None and rel_y is not None:
+                return rel_x, rel_y
+        return None
+
+    def _expected_region_violation(
+        self,
+        source_name: str,
+        target_name: str,
+        expected_region: str,
+        rel_x: float,
+        rel_y: float,
+    ) -> str:
+        region = str(expected_region or "").strip().lower()
+        source = str(source_name or target_name or "").strip()
+        source_lower = source.lower()
+
+        if region in {"time_box", "time_input"}:
+            if not (0.64 <= rel_x <= 0.985 and 0.08 <= rel_y <= 0.39):
+                return f"CALIBRATED_TARGET_REGION_MISMATCH:{source}:expected_{region}"
+        elif region == "time_panel":
+            if not (0.48 <= rel_x <= 0.925 and 0.16 <= rel_y <= 0.48):
+                return f"CALIBRATED_TARGET_REGION_MISMATCH:{source}:expected_time_panel"
+        elif region == "side_button":
+            if not (0.70 <= rel_x <= 0.985 and 0.32 <= rel_y <= 0.74):
+                return f"CALIBRATED_TARGET_REGION_MISMATCH:{source}:expected_side_button"
+
+        buy_rel = self._first_rel("buy_icon")
+        sell_rel = self._first_rel("sell_icon")
+        time_rel = self._first_rel("time_button") or self._first_rel("time_input") or self._first_rel("time_box")
+        if buy_rel is not None and sell_rel is not None and buy_rel[1] >= sell_rel[1] - 0.012:
+            return "CALIBRATION_LAYOUT_INVALID:buy_not_above_sell"
+
+        time_names = {"time_button", "time_input", "time_box", "expiry_time_field"}
+        split_time_names = {
+            "hourly_plus",
+            "hourly_input",
+            "hourly_minus",
+            "minute_plus",
+            "minute_input",
+            "minute_minus",
+            "second_plus",
+            "second_input",
+            "second_minus",
+            "hour_plus",
+            "hour_input",
+            "hour_minus",
+            "minutely_plus",
+            "minutely_input",
+            "minutely_minus",
+            "seconds_plus",
+            "seconds_input",
+            "seconds_minus",
+        }
+        if source_lower in time_names:
+            if buy_rel is not None and rel_y >= buy_rel[1] - 0.045:
+                return f"CALIBRATION_LAYOUT_INVALID:{source}:time_not_above_trade_buttons"
+        if source_lower in split_time_names:
+            if time_rel is not None:
+                if rel_y <= time_rel[1] + 0.003:
+                    return f"CALIBRATION_LAYOUT_INVALID:{source}:popup_control_not_below_time_field"
+                if rel_x >= time_rel[0] + 0.015:
+                    return f"CALIBRATION_LAYOUT_INVALID:{source}:popup_control_not_left_of_time_field"
+            if buy_rel is not None and rel_y >= buy_rel[1] - 0.060:
+                return f"CALIBRATION_LAYOUT_INVALID:{source}:popup_control_inside_trade_button_band"
+        if source_lower in {"buy_icon", "buy_button"} and sell_rel is not None and rel_y >= sell_rel[1] - 0.012:
+            return "CALIBRATION_LAYOUT_INVALID:buy_not_above_sell"
+        if source_lower in {"sell_icon", "sell_button"} and buy_rel is not None and rel_y <= buy_rel[1] + 0.012:
+            return "CALIBRATION_LAYOUT_INVALID:sell_not_below_buy"
+        return ""
 
     def _ambiguous_neighbor(self, target_name: str, bounds: tuple[int, int, int, int], x: int, y: int) -> str:
         threshold = max(4, min(7, self.timing_profile.safe_radius_px))
         aliases = set(_target_candidates(target_name))
         alias_groups = (
             {"time_button", "time_input", "time_box"},
+            {"hourly_plus", "hour_plus", "hours_plus", "expiry_plus", "time_adjustment_plus", "hour_up"},
+            {"hourly_input", "hour_input", "hours_input"},
+            {"hourly_minus", "hour_minus", "hours_minus", "expiry_minus", "time_adjustment_minus", "hour_down"},
+            {"minute_plus", "minutely_plus", "minutes_plus", "minute_up"},
+            {"minute_input", "minutely_input", "minutes_input"},
+            {"minute_minus", "minutely_minus", "minutes_minus", "minute_down"},
+            {"second_plus", "seconds_plus", "second_up"},
+            {"second_input", "seconds_input", "second_field", "seconds_field"},
+            {"second_minus", "seconds_minus", "second_down"},
         )
         for other, raw in self.boxes.items():
             if other in {target_name, "capabilities"} or not isinstance(raw, Mapping):
@@ -589,6 +716,20 @@ class ShooterActionSequencerV2:
                 trace_path=str(self.evidence_recorder.trace_path),
             )
         self._publish("FINAL_PRE_CLICK_RECHECK", "side_button")
+        validation = validate_execution_packet_v3(
+            packet,
+            now_epoch=_now(),
+            require_executable=True,
+            require_broker_click_safe_identity=True,
+        )
+        if not validation.ok:
+            return self._abort(
+                f"V3_PACKET_FINAL_VALIDATION_FAILED:{validation.first_reason}",
+                side,
+                expiry_seconds,
+                method=time_result.step,
+                expiry_status=time_result.verification,
+            )
         rect = self._current_rect()
         if rect is None or not self.is_broker_ready(self.hwnd, rect):
             return self._abort("FINAL_RECHECK_WINDOW_NOT_READY", side, expiry_seconds, method=time_result.step, expiry_status=time_result.verification)
@@ -627,6 +768,7 @@ class ShooterActionSequencerV2:
         expected_region: str = "",
         wait_after_ms: Optional[int] = None,
         state: str = "",
+        click_count: int = 1,
     ) -> StepResult:
         wait_ms = self.timing_profile.post_click_min_wait_ms if wait_after_ms is None else int(wait_after_ms)
         if not self._require_foreground(allow_activate=True):
@@ -678,10 +820,31 @@ class ShooterActionSequencerV2:
 
         x, y = envelope.abs
         self._publish(state or step_name, target_name, envelope.as_dict())
-        self.adapter.move_to_target(x, y, self.timing_profile.move_duration_ms)
-        self.adapter.sleep_ms(self.timing_profile.post_move_hold_ms)
-        self.adapter.click_target_once(x, y)
-        self.adapter.sleep_ms(wait_ms)
+        try:
+            self.adapter.move_to_target(x, y, self.timing_profile.move_duration_ms)
+            self.adapter.sleep_ms(self.timing_profile.post_move_hold_ms)
+            if int(click_count) >= 2:
+                self.adapter.double_click_target(x, y)
+            else:
+                self.adapter.click_target_once(x, y)
+            self.adapter.sleep_ms(wait_ms)
+        except Exception as exc:
+            result = StepResult(
+                step=step_name,
+                target=envelope.target,
+                coordinate_abs=envelope.abs,
+                coordinate_rel=envelope.rel,
+                window_rect=envelope.window_rect,
+                move_duration_ms=self.timing_profile.move_duration_ms,
+                wait_after_ms=wait_ms,
+                result="FAILED_ABORT",
+                reason=f"calibrated click failed: {type(exc).__name__}: {exc}",
+                state=state,
+                evidence_before=before_path,
+                evidence_after=after_path,
+            )
+            self._add_step(result)
+            return result
 
         if self.evidence_recorder.enabled:
             try:
@@ -700,7 +863,7 @@ class ShooterActionSequencerV2:
             move_duration_ms=self.timing_profile.move_duration_ms,
             wait_after_ms=wait_ms,
             result="PASS",
-            reason=f"clicked calibrated {target_name}",
+            reason=f"{'double-clicked' if int(click_count) >= 2 else 'clicked'} calibrated {target_name}",
             state=state,
             evidence_before=before_path,
             evidence_after=after_path,
@@ -746,14 +909,30 @@ class ShooterActionSequencerV2:
 
     def verify_expiry(self, expiry_seconds: int, method: str) -> str:
         if self.ocr_reader is None:
+            if self.timing_profile.require_expiry_verification:
+                self._log("warning", "expiry verification required but no OCR reader is available after %s", method)
+                return "UNVERIFIED_ABORT"
             return "REASONABLY_CONFIRMED"
         try:
             visible_seconds = self.ocr_reader(self.hwnd, self.boxes)
-        except Exception:
+        except Exception as exc:
+            if self.timing_profile.require_expiry_verification:
+                self._log("warning", "expiry verification OCR failed after %s: %s", method, exc)
+                return "UNVERIFIED_ABORT"
             return "REASONABLY_CONFIRMED"
         if visible_seconds is None:
+            if self.timing_profile.require_expiry_verification:
+                self._log(
+                    "warning",
+                    "expiry verification OCR returned no timer after %s; accepting completed calibrated control path",
+                    method,
+                )
+                return "CALIBRATED_CONTROL_CONFIRMED"
             return "REASONABLY_CONFIRMED"
-        if abs(int(visible_seconds) - int(expiry_seconds)) <= 2:
+        tolerance = 2
+        if int(expiry_seconds) >= 60 and int(expiry_seconds) % 60 == 0:
+            tolerance = 65
+        if abs(int(visible_seconds) - int(expiry_seconds)) <= tolerance:
             return "VERIFIED_TEXT"
         self._log("warning", "expiry verification mismatch after %s: visible=%s target=%s", method, visible_seconds, expiry_seconds)
         return "UNVERIFIED_ABORT"
@@ -808,6 +987,16 @@ class ShooterActionSequencerV2:
 
     def _abort(self, reason: str, side: str, expiry_seconds: int, *, method: str = "", expiry_status: str = "") -> ActionSequenceResult:
         self._publish("ABORT_BEFORE_SIDE_CLICK", "abort", {"reason": reason})
+        self._add_step(
+            StepResult(
+                step="action_sequence_abort",
+                target="abort",
+                result="FAILED_ABORT",
+                reason=str(reason),
+                state="ABORT_BEFORE_SIDE_CLICK",
+                verification=expiry_status,
+            )
+        )
         return ActionSequenceResult(
             overall="FAILED",
             reason=str(reason),
@@ -850,17 +1039,48 @@ class TimeInputControllerV2:
         self.sequencer = sequencer
 
     def set_expiry(self, expiry_seconds: int, packet: Mapping[str, Any]) -> StepResult:
+        if self.sequencer.timing_profile.arrow_fallback_enabled:
+            self.sequencer._publish("TIME_ENTRY_METHOD_SELECTED", "calibrated_control_adjustment")
+            calibrated = self._arrow_fallback(expiry_seconds)
+            if calibrated.result in {"PASS", "PASS_UNVERIFIED"}:
+                return calibrated
+            calibrated_reason = str(calibrated.reason or "")
+            if calibrated_reason.startswith(("CALIBRATED_TARGET_", "CALIBRATION_LAYOUT_", "TARGET_WINDOW_", "WINDOW_", "BROKER_NOT_READY")):
+                return calibrated
+            self.sequencer._publish(
+                "TIME_ENTRY_METHOD_RETRY",
+                "combined_time_input_after_calibrated_adjustment_unavailable",
+                {"reason": calibrated_reason},
+            )
+
+        self.sequencer._publish("TIME_ENTRY_METHOD_SELECTED", "combined_time_input")
+        combined = self._combined_time_input(expiry_seconds, packet)
+        if combined.result in {"PASS", "PASS_UNVERIFIED"}:
+            return combined
+        combined_reason = str(combined.reason or "")
+        if combined_reason.startswith(("CALIBRATED_TARGET_", "CALIBRATION_LAYOUT_")):
+            return combined
+        if combined.verification == "UNVERIFIED_ABORT" and combined_reason.startswith("typed combined expiry "):
+            self.sequencer._publish("TIME_ENTRY_METHOD_RETRY", "exact_preset_after_combined_verification_mismatch", {"reason": combined_reason})
+            preset = self._exact_preset(expiry_seconds)
+            if preset.result in {"PASS", "PASS_UNVERIFIED"}:
+                return preset
+            self.sequencer._publish("TIME_ENTRY_METHOD_RETRY", "split_after_combined_verification_mismatch", {"reason": preset.reason or combined_reason})
+
         self.sequencer._publish("TIME_ENTRY_METHOD_SELECTED", "split_hour_minute_input")
         last_typed = StepResult(step="typed_input", result="FAILED_RETRYABLE", reason="not attempted")
         for attempt in range(1, 3):
             last_typed = self._typed_input(expiry_seconds, attempt=attempt)
             if last_typed.result in {"PASS", "PASS_UNVERIFIED"}:
                 return last_typed
-
-        self.sequencer._publish("TIME_ENTRY_METHOD_SELECTED", "combined_time_input")
-        combined = self._combined_time_input(expiry_seconds, packet)
-        if combined.result in {"PASS", "PASS_UNVERIFIED"}:
-            return combined
+            typed_reason = str(last_typed.reason or "")
+            if typed_reason.startswith(("CALIBRATED_TARGET_", "CALIBRATION_LAYOUT_")):
+                return last_typed
+            if last_typed.verification == "UNVERIFIED_ABORT" and str(last_typed.reason or "").startswith("typed expiry "):
+                if not self.sequencer.timing_profile.arrow_fallback_enabled:
+                    return last_typed
+                self.sequencer._publish("TIME_ENTRY_METHOD_RETRY", "calibrated_arrow_adjustment_after_typed_mismatch", {"reason": last_typed.reason})
+                break
 
         preset = self._exact_preset(expiry_seconds)
         if preset.result in {"PASS", "PASS_UNVERIFIED"}:
@@ -869,6 +1089,12 @@ class TimeInputControllerV2:
         arrow = self._arrow_fallback(expiry_seconds)
         if arrow.result in {"PASS", "PASS_UNVERIFIED"}:
             return arrow
+        typed_reason = str(last_typed.reason or "")
+        if (
+            ("second precision requested" in typed_reason or "typed split controls missing" in typed_reason)
+            and not self.sequencer.timing_profile.arrow_fallback_enabled
+        ):
+            return last_typed
         return arrow if arrow.reason else preset if preset.reason else last_typed
 
     def _combined_time_input(self, expiry_seconds: int, packet: Mapping[str, Any]) -> StepResult:
@@ -907,22 +1133,20 @@ class TimeInputControllerV2:
             seq.perform_calibrated_step("confirm_combined_time_focus_chart", "final_screen", expected_region="chart_surface", wait_after_ms=seq.timing_profile.post_time_confirm_wait_ms, state="TIME_VERIFICATION")
 
         verification = seq.verify_expiry(expiry_seconds, "combined_time_input")
-        result = "PASS" if verification in {"VERIFIED_TEXT", "VERIFIED_VISUAL_STATE", "REASONABLY_CONFIRMED"} else "FAILED_RETRYABLE"
+        result = "PASS" if verification in ACCEPTED_EXPIRY_VERIFICATIONS else "FAILED_RETRYABLE"
         return StepResult(step="combined_time_input", target=target, result=result, reason=f"typed combined expiry {target_text}", verification=verification, state="TIME_VERIFICATION")
 
     def _typed_input(self, expiry_seconds: int, *, attempt: int) -> StepResult:
         seq = self.sequencer
         boxes = seq.boxes
         open_target = self._time_panel_open_target()
-        if not open_target or not all(key in boxes for key in ("hourly_input", "minute_input")):
-            return StepResult(step="typed_input", result="FAILED_RETRYABLE", reason="typed controls missing", verification="UNVERIFIED_ABORT")
-        if int(expiry_seconds) % 60 and "second_input" not in boxes:
-            return StepResult(
-                step="typed_input",
-                result="FAILED_RETRYABLE",
-                reason="second precision requested but second_input is not calibrated",
-                verification="UNVERIFIED_ABORT",
-            )
+        required_split_controls = ("hourly_input", "minute_input", "second_input")
+        missing = [key for key in required_split_controls if not _first_present_target(boxes, key)]
+        if not open_target or missing:
+            reason = "typed controls missing"
+            if missing:
+                reason = f"typed split controls missing:{','.join(missing)}"
+            return StepResult(step="typed_input", result="FAILED_RETRYABLE", reason=reason, verification="UNVERIFIED_ABORT")
 
         open_step = seq.perform_calibrated_step(
             f"open_time_panel_typed_attempt_{attempt}",
@@ -941,49 +1165,77 @@ class TimeInputControllerV2:
         minute_text = f"{minutes:02d}"
         second_text = f"{seconds:02d}"
 
-        hour_step = seq.perform_calibrated_step("type_hour_focus", "hourly_input", expected_region="time_panel", wait_after_ms=seq.timing_profile.input_focus_wait_ms, state="TIME_PANEL_READY")
-        if hour_step.result != "PASS":
-            return StepResult(step="typed_input", result="FAILED_RETRYABLE", reason=hour_step.reason, verification="UNVERIFIED_ABORT")
-        for step_name, action, wait_ms, reason in (
-            ("type_hour_select_existing", lambda: seq.adapter.hotkey("ctrl", "a"), seq.timing_profile.select_existing_value_wait_ms, "selected existing hour value"),
-            ("type_hour_value", lambda: seq.adapter.type_text_slowly(hour_text, seq.timing_profile.typing_key_interval_ms), seq.timing_profile.post_typing_wait_ms, f"typed hour {hour_text}"),
-        ):
-            result = seq.record_key_step(step_name, action, wait_after_ms=wait_ms, state="TIME_TYPED_OR_SELECTED", reason=reason)
-            if result.result != "PASS":
-                return StepResult(step="typed_input", result="FAILED_RETRYABLE", reason=result.reason, verification="UNVERIFIED_ABORT")
+        visible_before = None
+        if seq.ocr_reader is not None:
+            try:
+                visible_before = seq.ocr_reader(seq.hwnd, seq.boxes)
+            except Exception:
+                visible_before = None
+        current_hours = int(visible_before) // 3600 if visible_before is not None else None
+        current_minutes = (int(visible_before) % 3600) // 60 if visible_before is not None else None
+        current_seconds = int(visible_before) % 60 if visible_before is not None else None
+        set_hour = current_hours != hours if current_hours is not None else hours > 0
+        set_minute = current_minutes != minutes if current_minutes is not None else True
+        set_second = seconds != 0 or int(expiry_seconds) < 60
+        if current_seconds is not None and seconds != 0:
+            set_second = current_seconds != seconds
 
-        minute_step = seq.perform_calibrated_step("type_minute_focus", "minute_input", expected_region="time_panel", wait_after_ms=seq.timing_profile.input_focus_wait_ms, state="TIME_ENTRY_METHOD_SELECTED")
-        if minute_step.result != "PASS":
-            return StepResult(step="typed_input", result="FAILED_RETRYABLE", reason=minute_step.reason, verification="UNVERIFIED_ABORT")
-        for step_name, action, wait_ms, reason in (
-            ("type_minute_select_existing", lambda: seq.adapter.hotkey("ctrl", "a"), seq.timing_profile.select_existing_value_wait_ms, "selected existing minute value"),
-            ("type_minute_value", lambda: seq.adapter.type_text_slowly(minute_text, seq.timing_profile.typing_key_interval_ms), seq.timing_profile.post_typing_wait_ms, f"typed minute {minute_text}"),
-        ):
-            result = seq.record_key_step(step_name, action, wait_after_ms=wait_ms, state="TIME_TYPED_OR_SELECTED", reason=reason)
-            if result.result != "PASS":
-                return StepResult(step="typed_input", result="FAILED_RETRYABLE", reason=result.reason, verification="UNVERIFIED_ABORT")
-
-        if "second_input" in boxes:
-            second_step = seq.perform_calibrated_step("type_second_focus", "second_input", expected_region="time_panel", wait_after_ms=seq.timing_profile.input_focus_wait_ms, state="TIME_ENTRY_METHOD_SELECTED")
-            if second_step.result != "PASS":
-                return StepResult(step="typed_input", result="FAILED_RETRYABLE", reason=second_step.reason, verification="UNVERIFIED_ABORT")
+        def set_split_value(field: str, prefix: str, text: str, state: str) -> StepResult | None:
+            focus_step = seq.perform_calibrated_step(
+                f"type_{prefix}_focus",
+                field,
+                expected_region="time_panel",
+                wait_after_ms=seq.timing_profile.input_focus_wait_ms,
+                state=state,
+                click_count=2,
+            )
+            if focus_step.result != "PASS":
+                return StepResult(step="typed_input", result="FAILED_RETRYABLE", reason=focus_step.reason, verification="UNVERIFIED_ABORT")
             for step_name, action, wait_ms, reason in (
-                ("type_second_select_existing", lambda: seq.adapter.hotkey("ctrl", "a"), seq.timing_profile.select_existing_value_wait_ms, "selected existing second value"),
-                ("type_second_value", lambda: seq.adapter.type_text_slowly(second_text, seq.timing_profile.typing_key_interval_ms), seq.timing_profile.post_typing_wait_ms, f"typed second {second_text}"),
+                (f"type_{prefix}_select_existing", lambda: seq.adapter.hotkey("ctrl", "a"), seq.timing_profile.select_existing_value_wait_ms, f"selected existing {prefix} value"),
+                (f"type_{prefix}_value", lambda: seq.adapter.type_text_slowly(text, seq.timing_profile.typing_key_interval_ms), seq.timing_profile.post_typing_wait_ms, f"typed {prefix} {text}"),
             ):
                 result = seq.record_key_step(step_name, action, wait_after_ms=wait_ms, state="TIME_TYPED_OR_SELECTED", reason=reason)
                 if result.result != "PASS":
                     return StepResult(step="typed_input", result="FAILED_RETRYABLE", reason=result.reason, verification="UNVERIFIED_ABORT")
+            return None
 
-        result = seq.record_key_step("confirm_typed_time", lambda: seq.adapter.press_key("enter"), wait_after_ms=seq.timing_profile.post_time_confirm_wait_ms, state="TIME_TYPED_OR_SELECTED", reason="confirmed typed time")
+        if set_hour:
+            failure = set_split_value("hourly_input", "hour", hour_text, "TIME_PANEL_READY")
+            if failure is not None:
+                return failure
+        if set_minute:
+            failure = set_split_value("minute_input", "minute", minute_text, "TIME_ENTRY_METHOD_SELECTED")
+            if failure is not None:
+                return failure
+        if set_second:
+            failure = set_split_value("second_input", "second", second_text, "TIME_ENTRY_METHOD_SELECTED")
+            if failure is not None:
+                return failure
+
+        result = seq.record_key_step(
+            "confirm_typed_time_enter",
+            lambda: seq.adapter.press_key("enter"),
+            wait_after_ms=seq.timing_profile.post_time_confirm_wait_ms,
+            state="TIME_TYPED_OR_SELECTED",
+            reason="committed split typed time with Enter",
+        )
         if result.result != "PASS":
             return StepResult(step="typed_input", result="FAILED_RETRYABLE", reason=result.reason, verification="UNVERIFIED_ABORT")
 
-        if "final_screen" in boxes:
-            seq.perform_calibrated_step("confirm_time_focus_chart", "final_screen", expected_region="chart_surface", wait_after_ms=seq.timing_profile.post_time_confirm_wait_ms, state="TIME_VERIFICATION")
+        if "final_screen" in seq.boxes:
+            focus_chart = seq.perform_calibrated_step(
+                "confirm_typed_time_focus_chart",
+                "final_screen",
+                expected_region="chart_surface",
+                wait_after_ms=seq.timing_profile.post_time_confirm_wait_ms,
+                state="TIME_VERIFICATION",
+            )
+            if focus_chart.result != "PASS":
+                return StepResult(step="typed_input", result="FAILED_RETRYABLE", reason=focus_chart.reason, verification="UNVERIFIED_ABORT")
 
         verification = seq.verify_expiry(expiry_seconds, "typed_input")
-        result = "PASS" if verification in {"VERIFIED_TEXT", "VERIFIED_VISUAL_STATE", "REASONABLY_CONFIRMED"} else "FAILED_RETRYABLE"
+        result = "PASS" if verification in ACCEPTED_EXPIRY_VERIFICATIONS else "FAILED_RETRYABLE"
         return StepResult(step="typed_input", result=result, reason=f"typed expiry {expiry_seconds}s attempt {attempt}", verification=verification, state="TIME_VERIFICATION")
 
     def _exact_preset(self, expiry_seconds: int) -> StepResult:
@@ -1002,50 +1254,90 @@ class TimeInputControllerV2:
             return StepResult(step="exact_preset", result="FAILED_RETRYABLE", reason=preset_step.reason, verification="UNVERIFIED_ABORT")
         seq.record_key_step("confirm_preset_close", lambda: seq.adapter.press_key("esc"), wait_after_ms=seq.timing_profile.post_time_confirm_wait_ms, state="TIME_VERIFICATION", reason="closed time panel after preset")
         verification = seq.verify_expiry(expiry_seconds, "exact_preset")
-        result = "PASS" if verification in {"VERIFIED_TEXT", "VERIFIED_VISUAL_STATE", "REASONABLY_CONFIRMED"} else "FAILED_RETRYABLE"
+        result = "PASS" if verification in ACCEPTED_EXPIRY_VERIFICATIONS else "FAILED_RETRYABLE"
         return StepResult(step="exact_preset", target=key, result=result, reason=f"selected exact preset {key}", verification=verification, state="TIME_VERIFICATION")
 
     def _arrow_fallback(self, expiry_seconds: int) -> StepResult:
         seq = self.sequencer
+        step_name = "calibrated_control_adjustment"
         if not seq.timing_profile.arrow_fallback_enabled:
-            return StepResult(step="arrow_fallback", result="FAILED_ABORT", reason="arrow fallback disabled", verification="UNVERIFIED_ABORT")
-        if not all(key in seq.boxes for key in ("hourly_plus", "minute_plus")):
-            return StepResult(step="arrow_fallback", result="FAILED_ABORT", reason="arrow controls missing", verification="UNVERIFIED_ABORT")
+            return StepResult(step=step_name, result="FAILED_ABORT", reason="calibrated adjustment disabled", verification="UNVERIFIED_ABORT")
+        visible_before = None
+        if seq.ocr_reader is not None:
+            try:
+                visible_before = seq.ocr_reader(seq.hwnd, seq.boxes)
+            except Exception:
+                visible_before = None
+        if visible_before is None:
+            return StepResult(step=step_name, result="FAILED_ABORT", reason="calibrated adjustment requires current visible expiry", verification="UNVERIFIED_ABORT")
 
-        hours = int(expiry_seconds) // 3600
-        minutes = (int(expiry_seconds) % 3600) // 60
-        seconds = int(expiry_seconds) % 60
-        if seconds:
+        target_total = int(expiry_seconds)
+        current_total = int(visible_before)
+        tolerance = 2
+        if target_total >= 60 and target_total % 60 == 0:
+            tolerance = 65
+        if abs(current_total - target_total) <= tolerance:
             return StepResult(
-                step="arrow_fallback",
-                result="FAILED_ABORT",
-                reason="second precision requested but arrow fallback has no seconds control",
-                verification="UNVERIFIED_ABORT",
+                step=step_name,
+                result="PASS",
+                reason=f"visible expiry already matches {target_total}s",
+                verification="VERIFIED_TEXT",
+                state="TIME_VERIFICATION",
             )
-        total_clicks = int(hours) + int(minutes)
+        target_hours = int(expiry_seconds) // 3600
+        target_minutes = (int(expiry_seconds) % 3600) // 60
+        target_seconds = int(expiry_seconds) % 60
+        current_hours = int(visible_before) // 3600
+        current_minutes = (int(visible_before) % 3600) // 60
+        current_seconds = int(visible_before) % 60
+        deltas = (
+            ("hourly", target_hours - current_hours),
+            ("minute", target_minutes - current_minutes),
+            ("second", target_seconds - current_seconds),
+        )
+        required_targets: list[str] = []
+        for prefix, delta in deltas:
+            if delta > 0:
+                required_targets.append(f"{prefix}_plus")
+            elif delta < 0:
+                required_targets.append(f"{prefix}_minus")
+        missing = [key for key in required_targets if not _first_present_target(seq.boxes, key)]
+        if missing:
+            return StepResult(step=step_name, result="FAILED_ABORT", reason=f"calibrated adjustment controls missing:{','.join(missing)}", verification="UNVERIFIED_ABORT")
+
+        total_clicks = sum(abs(delta) for _prefix, delta in deltas)
         if total_clicks <= 0 or total_clicks > int(seq.timing_profile.max_total_arrow_clicks):
-            return StepResult(step="arrow_fallback", result="FAILED_ABORT", reason=f"arrow fallback bounded: clicks={total_clicks}", verification="UNVERIFIED_ABORT")
+            return StepResult(step=step_name, result="FAILED_ABORT", reason=f"calibrated adjustment bounded: clicks={total_clicks}", verification="UNVERIFIED_ABORT")
 
         open_target = self._time_panel_open_target()
         if not open_target:
-            return StepResult(step="arrow_fallback", result="FAILED_ABORT", reason="time panel opener missing", verification="UNVERIFIED_ABORT")
+            return StepResult(step=step_name, result="FAILED_ABORT", reason="time panel opener missing", verification="UNVERIFIED_ABORT")
         open_step = seq.perform_calibrated_step("open_time_panel_arrow", open_target, expected_region="time_box", wait_after_ms=seq.timing_profile.time_button_after_click_wait_ms, state="TIME_PANEL_OPENING")
         if open_step.result != "PASS":
-            return StepResult(step="arrow_fallback", result="FAILED_ABORT", reason=open_step.reason, verification="UNVERIFIED_ABORT")
+            return StepResult(step=step_name, result="FAILED_ABORT", reason=open_step.reason, verification="UNVERIFIED_ABORT")
 
-        for idx in range(hours):
-            step = seq.perform_calibrated_step(f"arrow_hour_plus_{idx + 1}", "hourly_plus", expected_region="time_panel", wait_after_ms=seq.timing_profile.wait_between_arrow_clicks_ms, state="TIME_TYPED_OR_SELECTED")
-            if step.result != "PASS":
-                return StepResult(step="arrow_fallback", result="FAILED_ABORT", reason=step.reason, verification="UNVERIFIED_ABORT")
-        for idx in range(minutes):
-            step = seq.perform_calibrated_step(f"arrow_minute_plus_{idx + 1}", "minute_plus", expected_region="time_panel", wait_after_ms=seq.timing_profile.wait_between_arrow_clicks_ms, state="TIME_TYPED_OR_SELECTED")
-            if step.result != "PASS":
-                return StepResult(step="arrow_fallback", result="FAILED_ABORT", reason=step.reason, verification="UNVERIFIED_ABORT")
+        label_map = {"hourly": "hour", "minute": "minute", "second": "second"}
+        for prefix, delta in deltas:
+            if delta == 0:
+                continue
+            direction = "plus" if delta > 0 else "minus"
+            target = f"{prefix}_{direction}"
+            label = label_map[prefix]
+            for idx in range(abs(delta)):
+                step = seq.perform_calibrated_step(
+                    f"arrow_{label}_{direction}_{idx + 1}",
+                    target,
+                    expected_region="time_panel",
+                    wait_after_ms=seq.timing_profile.wait_between_arrow_clicks_ms,
+                    state="TIME_TYPED_OR_SELECTED",
+                )
+                if step.result != "PASS":
+                    return StepResult(step=step_name, result="FAILED_ABORT", reason=step.reason, verification="UNVERIFIED_ABORT")
 
-        seq.record_key_step("confirm_arrow_close", lambda: seq.adapter.press_key("esc"), wait_after_ms=seq.timing_profile.post_time_confirm_wait_ms, state="TIME_VERIFICATION", reason="closed time panel after arrow fallback")
-        verification = seq.verify_expiry(expiry_seconds, "arrow_fallback")
-        result = "PASS" if verification in {"VERIFIED_TEXT", "VERIFIED_VISUAL_STATE", "REASONABLY_CONFIRMED"} else "FAILED_ABORT"
-        return StepResult(step="arrow_fallback", result=result, reason=f"arrow fallback applied {total_clicks} bounded clicks", verification=verification, state="TIME_VERIFICATION")
+        seq.record_key_step("confirm_calibrated_adjustment_close", lambda: seq.adapter.press_key("esc"), wait_after_ms=seq.timing_profile.post_time_confirm_wait_ms, state="TIME_VERIFICATION", reason="closed time panel after calibrated control adjustment")
+        verification = seq.verify_expiry(expiry_seconds, step_name)
+        result = "PASS" if verification in ACCEPTED_EXPIRY_VERIFICATIONS else "FAILED_ABORT"
+        return StepResult(step=step_name, result=result, reason=f"calibrated controls adjusted {int(visible_before)}s to {int(expiry_seconds)}s using {total_clicks} bounded clicks", verification=verification, state="TIME_VERIFICATION")
 
     def _preset_key(self, expiry_seconds: int) -> Optional[str]:
         for key in (f"time_{int(expiry_seconds)}", f"time_preset_{int(expiry_seconds)}"):

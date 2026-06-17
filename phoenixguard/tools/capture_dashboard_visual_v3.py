@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
+import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -12,6 +15,41 @@ from typing import Any, Mapping
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8793"
 DEFAULT_SESSION = "pocket-live-8788"
+DEFAULT_MAX_CAPTURE_SETS = 6
+HEAVY_ARTIFACT_KINDS = {"chart", "overlay", "full-overlay"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except Exception:
+        return int(default)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(str(raw).strip())
+    except Exception:
+        return float(default)
+
+
+def _resolve_max_capture_sets(value: int | None = None) -> int:
+    if value is None:
+        value = _env_int("PHOENIXGUARD_DASHBOARD_CAPTURE_MAX_SETS", DEFAULT_MAX_CAPTURE_SETS)
+    return max(0, int(value))
 
 
 def _http_bytes(url: str, timeout: float) -> dict[str, Any]:
@@ -134,7 +172,12 @@ def _capture_with_playwright(url: str, output_png: Path, timeout_ms: int, width:
                   };
                 }"""
             )
-            page.screenshot(path=str(output_png), full_page=True)
+            try:
+                client = page.context.new_cdp_session(page)
+                shot = client.send("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True, "fromSurface": True})
+                output_png.write_bytes(base64.b64decode(str(shot.get("data") or "")))
+            except Exception:
+                page.screenshot(path=str(output_png), full_page=True, timeout=timeout_ms, animations="disabled")
             browser.close()
         metrics = _image_metrics(output_png)
         return {
@@ -150,7 +193,67 @@ def _capture_with_playwright(url: str, output_png: Path, timeout_ms: int, width:
         return {"ok": False, "method": "playwright", "reason": str(exc), "path": str(output_png)}
 
 
-def build_capture(base_url: str, session_id: str, timeout: float, out_dir: Path, width: int, height: int, skip_playwright: bool) -> dict[str, Any]:
+def _capture_bundle_groups(out_dir: Path, session_id: str) -> dict[str, list[Path]]:
+    pattern = re.compile(
+        rf"^(?:dashboard|latest_.+?)_{re.escape(session_id)}_(\d{{8}}_\d{{6}})\.(?:png|html|bin|jpg|jpeg|webp)$",
+        re.IGNORECASE,
+    )
+    groups: dict[str, list[Path]] = {}
+    if not out_dir.exists():
+        return groups
+    for path in out_dir.iterdir():
+        if not path.is_file():
+            continue
+        match = pattern.match(path.name)
+        if match is None:
+            continue
+        groups.setdefault(match.group(1), []).append(path)
+    return groups
+
+
+def prune_capture_evidence(out_dir: Path, session_id: str, *, max_capture_sets: int | None = None) -> dict[str, Any]:
+    max_sets = _resolve_max_capture_sets(max_capture_sets)
+    groups = _capture_bundle_groups(out_dir, session_id)
+    stamps = sorted(groups)
+    retention = {
+        "enabled": max_sets > 0,
+        "max_capture_sets": max_sets,
+        "existing_capture_sets": len(stamps),
+        "retained_capture_sets": min(len(stamps), max_sets) if max_sets > 0 else len(stamps),
+        "removed_files": 0,
+        "removed_bytes": 0,
+        "errors": [],
+    }
+    if max_sets <= 0 or len(stamps) <= max_sets:
+        return retention
+
+    remove_stamps = stamps[: max(0, len(stamps) - max_sets)]
+    retained = set(stamps[len(remove_stamps):])
+    retention["retained_stamps"] = sorted(retained)
+    for stamp in remove_stamps:
+        for path in groups.get(stamp, []):
+            try:
+                size = int(path.stat().st_size)
+                path.unlink()
+                retention["removed_files"] = int(retention["removed_files"]) + 1
+                retention["removed_bytes"] = int(retention["removed_bytes"]) + size
+            except Exception as exc:
+                retention["errors"].append({"path": str(path), "error": str(exc)})
+    retention["removed_mb"] = round(float(retention["removed_bytes"]) / (1024.0 * 1024.0), 3)
+    return retention
+
+
+def build_capture(
+    base_url: str,
+    session_id: str,
+    timeout: float,
+    out_dir: Path,
+    width: int,
+    height: int,
+    skip_playwright: bool,
+    *,
+    max_capture_sets: int | None = None,
+) -> dict[str, Any]:
     base = base_url.rstrip("/")
     session_q = urllib.parse.quote(session_id, safe="")
     stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -165,9 +268,19 @@ def build_capture(base_url: str, session_id: str, timeout: float, out_dir: Path,
         dashboard_html_path.write_bytes(dashboard["body"])
 
     artifacts: dict[str, Any] = {}
+    include_heavy_artifacts = _env_bool("PHOENIXGUARD_DASHBOARD_CAPTURE_HEAVY_ARTIFACTS", False)
+    artifact_timeout = max(1.0, min(float(timeout), _env_float("PHOENIXGUARD_DASHBOARD_ARTIFACT_TIMEOUT_SEC", 8.0)))
     for kind in ("window", "chart", "overlay", "full-overlay"):
+        if kind in HEAVY_ARTIFACT_KINDS and not include_heavy_artifacts:
+            artifacts[kind] = {
+                "ok": True,
+                "skipped": True,
+                "reason": "heavy_artifact_download_disabled",
+                "bytes": 0,
+            }
+            continue
         url = f"{base}/v1/mobile/window-tracker/sessions/{session_q}/artifacts/latest-{kind}"
-        row = _http_bytes(url, timeout)
+        row = _http_bytes(url, artifact_timeout)
         body = row.pop("body", b"")
         if body:
             suffix = ".png" if "image" in str(row.get("content_type") or "") or kind != "html" else ".bin"
@@ -203,6 +316,9 @@ def build_capture(base_url: str, session_id: str, timeout: float, out_dir: Path,
             hard_mismatches.append("dashboard screenshot did not render DOM hotspots or the full-overlay artifact")
     for kind in ("window", "chart"):
         row = artifacts.get(kind, {})
+        if row.get("skipped"):
+            warnings.append(f"latest {kind} artifact download skipped: {row.get('reason')}")
+            continue
         if not row.get("ok") or int(row.get("bytes") or 0) <= 0:
             hard_mismatches.append(f"latest {kind} artifact missing")
         elif row.get("metrics") and row["metrics"].get("nonblank") is False:
@@ -211,6 +327,10 @@ def build_capture(base_url: str, session_id: str, timeout: float, out_dir: Path,
         warnings.append("live state endpoint unavailable during capture")
     if not visual.get("ok"):
         warnings.append("visual health endpoint unavailable during capture")
+
+    retention = prune_capture_evidence(out_dir, session_id, max_capture_sets=max_capture_sets)
+    if retention.get("errors"):
+        warnings.append(f"evidence retention had {len(retention['errors'])} cleanup error(s)")
 
     verdict = "PASS" if not hard_mismatches else "FAIL"
     return {
@@ -226,6 +346,7 @@ def build_capture(base_url: str, session_id: str, timeout: float, out_dir: Path,
         "artifacts": artifacts,
         "live_state": {"ok": live.get("ok"), "status": live.get("status"), "payload": live.get("payload")},
         "visual_health": {"ok": visual.get("ok"), "status": visual.get("status"), "payload": visual.get("payload")},
+        "evidence_retention": retention,
         "hard_mismatches": hard_mismatches,
         "warnings": warnings,
     }
@@ -240,6 +361,7 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         f"- Verdict: {report['verdict']}",
         f"- Screenshot: {report['capture'].get('path') or 'not captured'}",
         f"- Dashboard HTML: {report['dashboard_html'].get('path') or 'not captured'}",
+        f"- Evidence retention: keep {report.get('evidence_retention', {}).get('max_capture_sets', 'default')} capture set(s), removed {report.get('evidence_retention', {}).get('removed_files', 0)} file(s)",
         "",
         "## Artifacts",
         "",
@@ -274,10 +396,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--width", type=int, default=1440)
     parser.add_argument("--height", type=int, default=900)
     parser.add_argument("--skip-playwright", action="store_true")
+    parser.add_argument(
+        "--max-capture-sets",
+        type=int,
+        default=None,
+        help="Keep only the newest N timestamped dashboard evidence bundles in --out-dir. Set 0 to disable pruning.",
+    )
     parser.add_argument("--soft", action="store_true", help="Always exit 0 after writing reports.")
     args = parser.parse_args(argv)
 
-    report = build_capture(args.base_url, args.session_id, args.timeout, Path(args.out_dir), args.width, args.height, args.skip_playwright)
+    report = build_capture(
+        args.base_url,
+        args.session_id,
+        args.timeout,
+        Path(args.out_dir),
+        args.width,
+        args.height,
+        args.skip_playwright,
+        max_capture_sets=args.max_capture_sets,
+    )
     _write_json(Path(args.out_json), report)
     _write_text(Path(args.out_md), _render_markdown(report))
     print(json.dumps({"verdict": report["verdict"], "hard_mismatches": report["hard_mismatches"], "out_json": args.out_json, "out_md": args.out_md, "screenshot": report["capture"].get("path")}, indent=2))

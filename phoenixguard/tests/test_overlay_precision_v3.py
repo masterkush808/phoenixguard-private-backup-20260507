@@ -67,6 +67,34 @@ def _session(tmp_path: Path) -> dict[str, Any]:
     }
 
 
+def _install_visible_candles(session: dict[str, Any], count: int = 8) -> list[dict[str, Any]]:
+    candles: list[dict[str, Any]] = []
+    for index in range(count):
+        left = 660 + index * 24
+        right = left + 10
+        wick_top = 470 - (index % 3) * 9
+        wick_bottom = 610 + (index % 4) * 10
+        body_top = wick_top + 18 + (index % 2) * 5
+        body_bottom = wick_bottom - 14 - (index % 3) * 4
+        direction = "BUY" if index % 2 else "SELL"
+        candles.append(
+            {
+                "index": index,
+                "track_id": f"visible-candle-{index}",
+                "bbox": [left, body_top, right, body_bottom],
+                "wick_top": wick_top,
+                "wick_bottom": wick_bottom,
+                "center_x": (left + right) / 2,
+                "center_y": (body_top + body_bottom) / 2,
+                "direction": direction,
+                "confidence": 0.91,
+            }
+        )
+    session["tracking_summary"]["tracked_candles"] = candles
+    session["tracking_summary"]["visible_candle_count"] = count
+    return candles
+
+
 def test_broker_scene_graph_locks_plot_area_inside_full_window(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(
@@ -130,6 +158,126 @@ def test_live_state_respects_requested_granular_overlay_mode(tmp_path: Path) -> 
         row.get("layer") in {"target_zones", "supply_demand", "prediction_path"}
         for row in state["overlay_objects"]
     )
+
+
+def test_candles_mode_renders_every_visible_candle_box(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    candles = _install_visible_candles(session, count=8)
+
+    state = build_live_state_v3(session, overlay_mode="CANDLES", now_epoch=120.0)
+    candle_overlays = [row for row in state["overlay_objects"] if row.get("type") == "CURRENT_CANDLE"]
+
+    assert state["active_mode"] == "CANDLES"
+    assert state["overlay_layer_manager_v3"]["active_budget"] == 120
+    assert len(candle_overlays) == len(candles)
+    assert state["reason_if_empty"] == ""
+    assert all(row.get("layer") == "recent_candles" for row in candle_overlays)
+    assert all(row.get("label_hidden") is True for row in candle_overlays)
+    assert all(row.get("geometry_visible") is not False for row in candle_overlays)
+    assert all(row.get("bounds_rect", {}).get("exists") is True for row in candle_overlays)
+    assert {tuple(row.get("anchor_candles") or []) for row in candle_overlays} == {
+        (index,) for index in range(len(candles))
+    }
+
+
+def test_two_candle_and_lstm_modes_render_anchored_study_overlays(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    candles = _install_visible_candles(session, count=8)
+    session["latest_signal"].update(
+        {
+            "two_candle_study": {
+                "schema_version": "PG_TWO_CANDLE_STUDY_V3",
+                "display_as": "TEXT_AND_BANDS_ONLY",
+                "do_not_render_synthetic_candles": True,
+                "summary": "Study anchored to the latest two visible candles.",
+                "confidence": 0.66,
+                "side": "SELL",
+            },
+            "lstm_contribution": {
+                "schema_version": "PG_LSTM_CANDLE_SEQUENCE_CONTRIBUTION_V3",
+                "skill": "LSTM_CANDLE_SEQUENCE",
+                "fresh": True,
+                "blocker": False,
+                "contribution": 0.48,
+                "side": "SELL",
+            },
+        }
+    )
+
+    two_candle_state = build_live_state_v3(session, overlay_mode="TWO_CANDLE_STUDY", now_epoch=120.0)
+    two_candle_overlays = [row for row in two_candle_state["overlay_objects"] if row.get("type") == "TWO_CANDLE_STUDY"]
+    assert two_candle_state["active_mode"] == "TWO_CANDLE_STUDY"
+    assert len(two_candle_overlays) == 1
+    assert two_candle_overlays[0]["anchor_candles"] == [len(candles) - 2, len(candles) - 1]
+    assert two_candle_overlays[0]["bounds_rect"]["exists"] is True
+    assert two_candle_overlays[0]["layer"] == "active_council_decision"
+
+    lstm_state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
+    lstm_overlays = [row for row in lstm_state["overlay_objects"] if row.get("type") == "LSTM_STUDY"]
+    assert lstm_state["active_mode"] == "LSTM_STUDY"
+    assert len(lstm_overlays) == 1
+    assert lstm_overlays[0]["anchor_candles"] == list(range(len(candles)))
+    assert lstm_overlays[0]["bounds_rect"]["exists"] is True
+    assert lstm_overlays[0]["layer"] == "active_council_decision"
+
+
+def test_council_mode_renders_active_marker_from_chart_context(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    candles = _install_visible_candles(session, count=5)
+    session["model_council_result"] = {
+        "execution": {"enabled": False, "state": "WATCHING", "side": "SELL"},
+        "model_council": {
+            "final_state": "WATCHING",
+            "final_side": "SELL",
+            "arbitration_reason": "wait for wick retest confirmation",
+        },
+        "promotion_trace": {"next_required": "latest candle retest"},
+    }
+
+    state = build_live_state_v3(session, overlay_mode="COUNCIL", now_epoch=120.0)
+    council_markers = [row for row in state["overlay_objects"] if row.get("type") == "MODEL_COUNCIL_MARKER"]
+
+    assert state["active_mode"] == "COUNCIL"
+    assert state["reason_if_empty"] == ""
+    assert len(council_markers) == 1
+    assert council_markers[0]["layer"] == "active_council_decision"
+    assert council_markers[0]["anchor_candles"] == [len(candles) - 1]
+    assert council_markers[0]["bounds_rect"]["exists"] is True
+
+
+def test_broker_mode_emits_locked_control_overlays_on_broker_surface(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    session["broker_surface"]["execution_boxes"].update(
+        {
+            "order_panel": {"bbox": [1620, 180, 1840, 610], "confidence": 0.94, "locked": True},
+            "time_field": {"bbox": [1655, 210, 1813, 255], "confidence": 0.91, "locked": True},
+            "amount_field": {"bbox": [1655, 286, 1813, 330], "confidence": 0.88, "locked": True},
+        }
+    )
+
+    broker_state = build_live_state_v3(session, overlay_mode="BROKER", now_epoch=110.0)
+    clean_state = build_live_state_v3(session, overlay_mode="CLEAN_LIVE", now_epoch=110.0)
+    labels = {row["display_label"] for row in broker_state["overlay_objects"]}
+    source_keys = {row["source_key"] for row in broker_state["overlay_objects"]}
+
+    assert broker_state["renderable_count"] >= 6
+    assert all(row["type"] == "BROKER_CONTROL" for row in broker_state["overlay_objects"])
+    assert all(row["layer"] == "broker_controls" for row in broker_state["overlay_objects"])
+    assert all(row["coordinate_mode"] == "FULL_BROKER_SURFACE" for row in broker_state["overlay_objects"])
+    assert {
+        "BROKER SURFACE",
+        "RIGHT ORDER PANEL",
+        "TIME BUTTON",
+        "AMOUNT FIELD",
+        "BUY BUTTON",
+        "SELL BUTTON",
+    }.issubset(labels)
+    assert {"broker_screen", "right_order_panel", "time_button", "amount_field", "buy_icon", "sell_icon"}.issubset(source_keys)
+    assert broker_state["overlay_vocabulary"]["dictionary_coverage_ok"] is True
+    assert broker_state["unknown_or_unmapped_terms"] == []
+    buy = next(row for row in broker_state["overlay_objects"] if row["source_key"] == "buy_icon")
+    assert buy["label_bounds"]["left"] >= 1600
+    assert all(row["type"] != "BROKER_CONTROL" for row in clean_state["overlay_objects"])
 
 
 def test_precision_resolver_can_run_directly_on_overlay_contract_objects(tmp_path: Path) -> None:

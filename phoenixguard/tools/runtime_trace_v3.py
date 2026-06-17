@@ -97,6 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     if dataflow_nodes:
         print(
             "Dataflow: "
+            f"source={_text(dataflow_nodes.get('BrokerSourceLockV3'), 'UNKNOWN')} "
             f"tracker={_text(dataflow_nodes.get('LatestFrameBufferV3'), 'UNKNOWN')} "
             f"sequence={_text(dataflow_nodes.get('SequenceContextV3'), 'UNKNOWN')} "
             f"council={_text(dataflow_nodes.get('ModelCouncilV3'), 'UNKNOWN')} "

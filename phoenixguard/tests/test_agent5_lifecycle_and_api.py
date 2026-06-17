@@ -25,3 +25,13 @@ def test_merge_and_promotion(tmp_path):
     promote_lifecycle(session, stale_seconds=0)
     entries_after = load_market_objects(session)
     assert any(e.get("lifecycle_state") == "STALE" for e in entries_after)
+
+
+def test_query_active_objects_filters_entries_past_ttl(tmp_path):
+    session = "test-session-lifecycle-ttl"
+    merge_market_objects(session, [{"id": "ttl-old", "bbox": [0, 0, 10, 10], "confidence": 0.9}])
+    time.sleep(0.01)
+
+    active = query_active_objects(session, min_truth_score=0.0, stale_seconds=0)
+
+    assert active == []

@@ -306,6 +306,116 @@ def test_runtime_trace_v3_contains_all_core_nodes() -> None:
     assert "sequence_context" in payload["certification_gates"]
 
 
+def test_runtime_trace_uses_nested_broker_surface_source_lock() -> None:
+    class FakeTracker:
+        def get_session(self, session_id: str) -> dict[str, object]:
+            return {
+                "session_id": session_id,
+                "status": "running",
+                "cache_status": "fresh",
+                "model_health": {"models_awake": 7, "models_total": 7},
+                "broker_surface": {
+                    "broker_source_lock": {
+                        "valid": True,
+                        "status": "VALID",
+                        "lock_id": "broker-surface-lock-001",
+                    },
+                },
+            }
+
+        def list_sessions(self, limit: int = 1) -> list[dict[str, object]]:
+            return [self.get_session("pocket-live-8788")]
+
+        def latest_model_council_state(self, session_id: str) -> dict[str, object]:
+            return {"session_id": session_id, "final_state": "WATCHING", "final_side": "BUY"}
+
+        def latest_model_council_study_packet(self, session_id: str) -> dict[str, object]:
+            return _study_packet(session_id=session_id)
+
+        def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
+            raise KeyError("no executable")
+
+    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    payload = client.get("/v1/mobile/runtime/trace/v3?session_id=pocket-live-8788").json()
+
+    assert payload["dataflow_contract_trace"]["nodes"]["BrokerSourceLockV3"] == "PASS"
+    assert payload["certification_gates"]["source_lock"]["status"] == "PASS"
+    assert payload["certification_gates"]["source_lock"]["evidence"]["lock_id"] == "broker-surface-lock-001"
+
+
+def test_runtime_trace_does_not_certify_display_only_overlay_authority_as_broker_source_lock() -> None:
+    class FakeTracker:
+        def get_session(self, session_id: str) -> dict[str, object]:
+            return {
+                "session_id": session_id,
+                "status": "running",
+                "cache_status": "fresh",
+                "display_snapshot_only_v3": True,
+                "last_overlay_path": "000001_stale_overlay.png",
+                "model_health": {"models_awake": 7, "models_total": 7},
+                "tracking_summary": {
+                    "broker_source_lock": {
+                        "valid": False,
+                        "wrong_surface": True,
+                        "status": "TITLE_MATCH_PIXEL_MISMATCH",
+                        "lock_id": "title-only-edge-window",
+                    },
+                },
+            }
+
+        def list_sessions(self, limit: int = 1) -> list[dict[str, object]]:
+            return [self.get_session("pocket-live-8788")]
+
+        def latest_model_council_state(self, session_id: str) -> dict[str, object]:
+            return {"session_id": session_id, "final_state": "WATCHING", "final_side": "BUY"}
+
+        def latest_model_council_study_packet(self, session_id: str) -> dict[str, object]:
+            return _study_packet(session_id=session_id)
+
+        def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
+            raise KeyError("no executable")
+
+    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    payload = client.get("/v1/mobile/runtime/trace/v3?session_id=pocket-live-8788").json()
+
+    evidence = payload["certification_gates"]["source_lock"]["evidence"]
+    assert payload["dataflow_contract_trace"]["nodes"]["BrokerSourceLockV3"] == "FAIL"
+    assert payload["certification_gates"]["source_lock"]["status"] == "FAIL"
+    assert payload["certification_gates"]["source_lock"]["passed"] is False
+    assert evidence["display_only_overlay_authority_locked"] is True
+    assert evidence["display_only_overlay_authority_status"] == "PASS"
+
+
+def test_runtime_trace_does_not_synthesize_missing_broker_source_lock() -> None:
+    class FakeTracker:
+        def get_session(self, session_id: str) -> dict[str, object]:
+            return {
+                "session_id": session_id,
+                "status": "running",
+                "cache_status": "fresh",
+                "model_health": {"models_awake": 7, "models_total": 7},
+            }
+
+        def list_sessions(self, limit: int = 1) -> list[dict[str, object]]:
+            return [self.get_session("pocket-live-8788")]
+
+        def latest_model_council_state(self, session_id: str) -> dict[str, object]:
+            return {"session_id": session_id, "final_state": "WATCHING", "final_side": "BUY"}
+
+        def latest_model_council_study_packet(self, session_id: str) -> dict[str, object]:
+            return _study_packet(session_id=session_id)
+
+        def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
+            raise KeyError("no executable")
+
+    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    payload = client.get("/v1/mobile/runtime/trace/v3?session_id=pocket-live-8788").json()
+
+    assert payload["dataflow_contract_trace"]["nodes"]["BrokerSourceLockV3"] == "MISSING"
+    assert payload["certification_gates"]["source_lock"]["status"] == "MISSING"
+    assert payload["certification_gates"]["source_lock"]["evidence"] == {}
+
+
 def test_runtime_trace_detects_stale_study_packet() -> None:
     class FakeTracker:
         def get_session(self, session_id: str) -> dict[str, object]:

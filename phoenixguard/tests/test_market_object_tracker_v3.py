@@ -282,6 +282,33 @@ def test_trendline_derivation_emits_valid_downtrend_resistance_only_when_clean()
     assert all(row["significant_close"] is False for row in resistance)
 
 
+def test_trendline_derivation_uses_two_wick_anchors_before_extension() -> None:
+    uptrend = []
+    for index in range(8):
+        left = 10 + index * 36
+        wick_bottom = 220 - index * 10
+        uptrend.append(
+            {
+                "bbox": [left, wick_bottom - 46, left + 10, wick_bottom - 16],
+                "wick_top": wick_bottom - 58,
+                "wick_bottom": wick_bottom,
+                "center_x": left + 5,
+                "center_y": wick_bottom - 31,
+            }
+        )
+
+    overlays = _derive_trendline_overlays(uptrend)
+    trendline = next(row for row in overlays if row["type"].endswith("_TRENDLINE"))
+
+    assert trendline["touch_count"] >= 2
+    assert len(trendline["touch_points"]) >= 2
+    assert trendline["line_points"][:2] == trendline["touch_points"][:2]
+    assert trendline["anchor_candles"] == [0, 1]
+    assert trendline["line_obstruction_count"] == 0
+    assert trendline["significant_close"] is False
+    assert trendline["trendline_validation"] == "wick_anchor_no_obstruction_no_significant_close"
+
+
 def test_market_object_tracker_v3_preserves_first_seen_frame() -> None:
     tracker = MarketObjectTrackerV3()
     first = _sample_payload()

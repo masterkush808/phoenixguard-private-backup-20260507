@@ -60,7 +60,7 @@ def main() -> int:
         failures.append(f"tracker process does not include expected session id {args.session}")
     if not shooter_processes and not args.allow_missing_shooter:
         failures.append("shooter process is not running")
-        corrections.append('Start shooter with: python shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.05 --max-signal-age 8 --preferred-source tracker --require-preferred-source --window-query "The Most Innovative Trading Platform" --shooter-mode LIVE_READY --no-auto-open --record-action-evidence')
+        corrections.append('Start shooter with: python shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20 --max-signal-age 8 --preferred-source tracker --require-preferred-source --window-query "The Most Innovative Trading Platform" --shooter-mode LIVE_READY --no-auto-open --record-action-evidence')
     if len(shooter_processes) > 1:
         failures.append(f"expected at most one shooter process, found {len(shooter_processes)}")
     if shooter_processes:

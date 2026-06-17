@@ -45,6 +45,17 @@ RUNTIME_INTEGRITY = RUNTIME_INTEGRITY_CATEGORY
 SCHEMA_INTEGRITY = "SCHEMA"
 MODEL_COUNCIL = "MODEL_COUNCIL"
 AMBIGUOUS_TOP_LEVEL_TIME_FIELDS = frozenset(("timestamp", "valid_until", "age", "latency", "time"))
+FALLBACK_EXPIRY_SOURCES = frozenset(
+    (
+        "fallback",
+        "fallback_derived",
+        "derived_fallback",
+        "timeframe_fallback",
+        "default",
+        "derived_default",
+        "operator_fallback",
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -201,6 +212,13 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return bool(value)
+
+
+def _is_fallback_expiry_source(value: Any) -> bool:
+    text = _clean_str(value).lower()
+    if not text:
+        return False
+    return text in FALLBACK_EXPIRY_SOURCES or "fallback" in text
 
 
 def _first_clean_text(*values: Any) -> str:
@@ -413,8 +431,11 @@ def build_execution_packet_v3(
         if valid_until_epoch_sec is not None or valid_until_epoch is not None
         else created + max(0.1, float(valid_for_seconds))
     )
+    ttl_seconds = max(0.1, float(valid_until) - float(created))
     live = dict(live_integrity or {})
     live_proof_present = bool(live)
+    source_frame_age_ms = _int(live.get("packet_age_ms"), 0)
+    publication_packet_age_ms = max(0, int(round((now_epoch() - created) * 1000.0)))
     resolved_input_frame_hash = str(input_frame_hash or live.get("input_frame_hash", ""))
     resolved_previous_frame_hash = str(previous_frame_hash or live.get("previous_frame_hash", ""))
     resolved_instrument_context = build_instrument_context(
@@ -514,6 +535,8 @@ def build_execution_packet_v3(
         "valid_until_epoch_sec": valid_until,
         "created_epoch": created,
         "valid_until_epoch": valid_until,
+        "ttl_sec": ttl_seconds,
+        "valid_for_seconds": ttl_seconds,
         "provenance": provenance,
         "instrument_context": resolved_instrument_context,
         "symbol_context": resolved_symbol_context,
@@ -537,7 +560,8 @@ def build_execution_packet_v3(
             ),
             "input_frame_hash": resolved_input_frame_hash,
             "previous_frame_hash": resolved_previous_frame_hash,
-            "packet_age_ms": live.get("packet_age_ms", max(0, int(round((now_epoch() - created) * 1000.0)))),
+            "packet_age_ms": publication_packet_age_ms,
+            "source_frame_age_ms": source_frame_age_ms,
         },
         "execution": {
             "enabled": True,
@@ -859,6 +883,16 @@ def validate_execution_packet_v3(
         add("EXECUTION_SIDE_MODEL_COUNCIL_MISMATCH", MODEL_COUNCIL, "execution.side must match model_council.final_side.")
     if expiry is None and require_executable:
         add("INVALID_OR_MISSING_EXPIRY_SECONDS", "EXECUTION", "execution.expiry_seconds and time_sequence target must match.")
+    for source in (
+        packet.get("expiry_source"),
+        execution.get("expiry_source"),
+        council.get("expiry_source"),
+        _mapping(packet.get("timing")).get("expiry_source"),
+        _mapping(packet.get("execution_timing")).get("expiry_source"),
+    ):
+        if _is_fallback_expiry_source(source):
+            add("FALLBACK_EXPIRY_SOURCE", "EXECUTION", "Executable packets must not use fallback-derived expiry.")
+            break
     if execution.get("amount_action") != "DO_NOT_CHANGE_AMOUNT":
         add("AMOUNT_ACTION_NOT_LOCKED", "EXECUTION", "execution.amount_action must be DO_NOT_CHANGE_AMOUNT.")
     time_sequence = _mapping(execution.get("time_sequence"))

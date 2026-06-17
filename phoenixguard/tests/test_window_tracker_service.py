@@ -19,6 +19,7 @@ import phoenixguard.mobile_api.window_tracker as window_tracker_module
 from phoenixguard.memory.memory_ingest import MemoryEntry
 from phoenixguard.mobile_api.app import create_app
 from phoenixguard.mobile_api.window_tracker import (
+    CaptureSurfaceUnavailableError,
     ContinuousWindowTrackerService,
     PocketOptionBrokerExecutionBackend,
     PhoenixGuardWindowTrackingAdapter,
@@ -109,6 +110,27 @@ def _synthetic_full_pocket_option_gui(*, width: int = 1920, height: int = 1017) 
     draw.text((buy_box[0] + 40, buy_box[1] + 14), "BUY", fill=(255, 255, 255))
     draw.text((sell_box[0] + 40, sell_box[1] + 14), "SELL", fill=(255, 255, 255))
     return image
+
+
+def test_tracker_translates_locked_broker_controls_into_chart_exclusions() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    surface = Image.new("RGB", (1000, 600), color=(18, 24, 34))
+    boxes = adapter._chart_space_broker_exclusion_boxes(  # noqa: SLF001
+        surface,
+        [0, 0, 1000, 600],
+        session_payload={
+            "_study_focus_region": {"pixel_bbox": [50, 40, 1050, 640]},
+            "broker_surface": {
+                "capture_plane": {"width": 1200, "height": 800},
+                "execution_boxes": {
+                    "buy_button": {"bbox": [900, 200, 980, 260]},
+                },
+            },
+        },
+    )
+
+    assert boxes
+    assert any(box[0] <= 850 <= box[2] and box[1] <= 160 <= box[3] for box in boxes)
 
 
 def test_model_council_study_packet_synthesizes_fresh_when_stored_packet_is_stale(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -424,6 +446,41 @@ class _FakeCaptureBackend:
         index = min(self.capture_calls, len(self.images) - 1)
         self.capture_calls += 1
         return self.images[index].copy()
+
+
+class _FastVisibleOnlyCaptureBackend(_FakeCaptureBackend):
+    def __init__(self, image: Image.Image) -> None:
+        super().__init__([image])
+        self.fast_capture_calls = 0
+
+    def _capture_window_imagegrab(self, descriptor: Mapping[str, Any]) -> Image.Image:
+        _ = descriptor
+        self.fast_capture_calls += 1
+        return self.images[0].copy()
+
+    def _looks_blank(self, image: Image.Image) -> bool:
+        _ = image
+        return False
+
+    def _looks_browser_content_blank(self, image: Image.Image) -> bool:
+        _ = image
+        return False
+
+    def capture_window(self, descriptor: Mapping[str, Any]) -> Image.Image:
+        _ = descriptor
+        raise AssertionError("display-only heartbeat should use fast visible capture first")
+
+
+class _FailingFastVisibleCaptureBackend(_FastVisibleOnlyCaptureBackend):
+    def _capture_window_imagegrab(self, descriptor: Mapping[str, Any]) -> Image.Image:
+        _ = descriptor
+        self.fast_capture_calls += 1
+        raise CaptureSurfaceUnavailableError("fast visible unavailable")
+
+    def capture_window(self, descriptor: Mapping[str, Any]) -> Image.Image:
+        _ = descriptor
+        self.capture_calls += 1
+        return self.images[0].copy()
 
 
 class _ListedWindowCaptureBackend:
@@ -854,30 +911,31 @@ def _artifact_frame_from_name(path: Any) -> int:
 def test_windows_capture_backend_prefers_printwindow_for_pocket_option_browser_windows(monkeypatch: Any) -> None:
     backend = WindowsWindowCaptureBackend()
     calls: list[str] = []
-    browser_image = Image.new("RGB", (120, 80), color=(20, 30, 40))
+    broker_image = _synthetic_full_pocket_option_gui(width=1200, height=760)
 
     def capture_with_imagegrab(descriptor: Mapping[str, Any]) -> Image.Image:
         calls.append(f"grab:{descriptor.get('title', '')}")
-        return browser_image.copy()
+        return broker_image.copy()
 
     def capture_with_printwindow(hwnd: int, descriptor: Mapping[str, Any]) -> Image.Image:
         _ = descriptor
         calls.append(f"print:{hwnd}")
-        return Image.new("RGB", (120, 80), color=(90, 100, 110))
+        return broker_image.copy()
 
     monkeypatch.setattr(backend, "_is_windows", lambda: True)
     monkeypatch.setattr(backend, "_capture_window_imagegrab", capture_with_imagegrab)
     monkeypatch.setattr(backend, "_capture_window_printwindow", capture_with_printwindow)
+    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", lambda hwnd: True)
 
     captured = backend.capture_window(
         {
             "hwnd": 101,
             "title": "The Most Innovative Trading Platform - Microsoft Edge",
-            "bbox": [0, 0, 120, 80],
+            "bbox": [0, 0, 1200, 760],
         }
     )
 
-    assert captured.size == (120, 80)
+    assert captured.size == (1200, 760)
     assert calls == ["print:101"]
 
 
@@ -902,6 +960,7 @@ def test_windows_capture_backend_falls_back_when_pocket_option_canvas_is_blank(m
     monkeypatch.setattr(backend, "_is_windows", lambda: True)
     monkeypatch.setattr(backend, "_capture_window_imagegrab", capture_with_imagegrab)
     monkeypatch.setattr(backend, "_capture_window_printwindow", capture_with_printwindow)
+    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", lambda hwnd: True)
 
     captured = backend.capture_window(
         {
@@ -914,6 +973,105 @@ def test_windows_capture_backend_falls_back_when_pocket_option_canvas_is_blank(m
     assert captured.size == (1200, 760)
     assert calls == ["print:101", "grab:The Most Innovative Trading Platform - Microsoft Edge"]
     assert np.asarray(captured, dtype=np.uint8).std() > 3.0
+
+
+def test_windows_capture_backend_accepts_pocket_chart_study_pixels(monkeypatch: Any) -> None:
+    backend = WindowsWindowCaptureBackend()
+    calls: list[str] = []
+    chart_image = _synthetic_chart_surface("buy", width=1200, height=760)
+
+    def capture_with_imagegrab(descriptor: Mapping[str, Any]) -> Image.Image:
+        calls.append(f"grab:{descriptor.get('title', '')}")
+        return chart_image.copy()
+
+    def capture_with_printwindow(hwnd: int, descriptor: Mapping[str, Any]) -> Image.Image:
+        _ = descriptor
+        calls.append(f"print:{hwnd}")
+        return chart_image.copy()
+
+    monkeypatch.setattr(backend, "_is_windows", lambda: True)
+    monkeypatch.setattr(backend, "_capture_window_imagegrab", capture_with_imagegrab)
+    monkeypatch.setattr(backend, "_capture_window_printwindow", capture_with_printwindow)
+    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", lambda hwnd: False)
+
+    captured = backend.capture_window(
+        {
+            "hwnd": 101,
+            "title": "The Most Innovative Trading Platform - Microsoft Edge",
+            "bbox": [0, 0, 1200, 760],
+        }
+    )
+
+    assert captured.size == (1200, 760)
+    assert calls == ["print:101"]
+
+
+def test_windows_capture_backend_does_not_grab_wrong_foreground_for_pocket_option(monkeypatch: Any) -> None:
+    backend = WindowsWindowCaptureBackend()
+    calls: list[str] = []
+
+    def capture_with_imagegrab(descriptor: Mapping[str, Any]) -> Image.Image:
+        calls.append(f"grab:{descriptor.get('title', '')}")
+        return _synthetic_full_pocket_option_gui(width=1200, height=760)
+
+    def capture_with_printwindow(hwnd: int, descriptor: Mapping[str, Any]) -> Image.Image:
+        _ = descriptor
+        calls.append(f"print:{hwnd}")
+        return Image.new("RGB", (1200, 760), color=(36, 36, 36))
+
+    monkeypatch.setattr(backend, "_is_windows", lambda: True)
+    monkeypatch.setattr(backend, "_capture_window_imagegrab", capture_with_imagegrab)
+    monkeypatch.setattr(backend, "_capture_window_printwindow", capture_with_printwindow)
+    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", lambda hwnd: False)
+
+    with pytest.raises(RuntimeError, match="broker/chart surface"):
+        backend.capture_window(
+            {
+                "hwnd": 101,
+                "title": "The Most Innovative Trading Platform - Microsoft Edge",
+                "bbox": [0, 0, 1200, 760],
+            }
+        )
+
+    assert calls == ["print:101"]
+
+
+def test_tracker_capture_surface_unavailable_preserves_overlay_authority(tmp_path: Path) -> None:
+    class _UnavailableCaptureBackend(_FakeCaptureBackend):
+        def capture_window(self, descriptor: Mapping[str, Any]) -> Image.Image:
+            _ = descriptor
+            raise window_tracker_module.CaptureSurfaceUnavailableError(
+                "Pocket Option capture did not include the broker/chart surface."
+            )
+
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_UnavailableCaptureBackend([_synthetic_broker_window()]),
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+    session_id = str(tracker.create_session(session_id="pocket-live")["session_id"])
+    _focus_session_without_preview(tracker, session_id)
+    payload = tracker.load_session_payload(session_id)
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    payload["frame_index"] = 11
+    payload["overlay_frame_id"] = 11
+    existing_overlay = tmp_path / "existing_overlay.png"
+    _surface().save(existing_overlay)
+    payload["last_overlay_path"] = str(existing_overlay)
+    _write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+
+    captured = tracker._capture_and_analyze(session_id, force=True)
+    refreshed = tracker.get_session(session_id)
+
+    assert captured is False
+    assert refreshed["tracking_enabled"] is True
+    assert refreshed["status"] != "error"
+    assert refreshed["frame_index"] == 11
+    assert refreshed["overlay_frame_id"] == 11
+    assert refreshed["last_overlay_path"] == str(existing_overlay)
+    assert refreshed["latest_signal"]["status"] == "waiting_for_broker_surface"
+    assert refreshed["tracking_summary"]["source_capture_status"] == "WAITING_FOR_SOURCE_PIXELS"
 
 
 def test_tradingview_window_query_matches_compact_visible_tab_title() -> None:
@@ -3059,6 +3217,37 @@ def test_model_council_packet_lookup_ignores_expired_execution_packet(monkeypatc
     ) == {}
 
 
+def test_model_council_packet_lookup_rejects_demoted_execution_root_without_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: 150.0)
+    demoted_root = {
+        "schema_version": "PG_EXECUTION_PACKET_V3",
+        "packet_type": "PG_EXECUTION_PACKET_V3",
+        "packet_id": "pgpkt-demoted-study",
+        "created_epoch": 149.0,
+        "created_epoch_sec": 149.0,
+        "valid_until_epoch": 180.0,
+        "valid_until_epoch_sec": 180.0,
+        "execution": {
+            "enabled": False,
+            "state": "WATCHING",
+            "side": None,
+            "expiry_seconds": 600,
+        },
+        "model_council": {
+            "final_state": "WATCHING",
+            "final_side": None,
+        },
+        "promotion_trace": {
+            "packet_result": "STUDY_PACKET_PUBLISHED",
+            "denied_at": "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK",
+        },
+    }
+
+    assert _model_council_packet_from_payload({"model_council_result": demoted_root}) == {}
+
+
 def test_public_session_payload_does_not_block_non_executable_missing_signal_id(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
 
@@ -3303,8 +3492,8 @@ def test_tracker_live_mode_writes_fresh_hot_overlays_by_default(tmp_path: Path, 
         root_dir=tmp_path,
         capture_backend=_FakeCaptureBackend(
             [
-                _surface(width=1280, height=720),
-                _surface(color=(35, 42, 58), width=1280, height=720),
+                _synthetic_chart_surface("buy", width=1280, height=720),
+                _synthetic_chart_surface("buy", width=1280, height=720),
             ]
         ),
         tracking_adapter=_FakeTrackingAdapter("BUY"),
@@ -3342,8 +3531,8 @@ def test_tracker_forced_hot_artifact_reuse_reports_old_overlay_frame(
         root_dir=tmp_path,
         capture_backend=_FakeCaptureBackend(
             [
-                _surface(width=1280, height=720),
-                _surface(color=(35, 42, 58), width=1280, height=720),
+                _synthetic_chart_surface("buy", width=1280, height=720),
+                _synthetic_chart_surface("buy", width=1280, height=720),
             ]
         ),
         tracking_adapter=_FakeTrackingAdapter("BUY"),
@@ -3453,6 +3642,109 @@ def test_tracker_capture_once_display_only_does_not_schedule_study_worker(tmp_pa
         assert str(session["session_id"]) not in tracker._active_studies
 
 
+def test_tracker_capture_once_display_only_returns_busy_when_snapshot_in_flight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeTrackingAdapter("BUY")
+    backend = _FakeCaptureBackend([_surface(width=1280, height=720)])
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=adapter,
+    )
+
+    session = tracker.create_session(session_id="pocket-live")
+    tracker.set_focus_region(str(session["session_id"]), [0.10, 0.10, 0.88, 0.86], source="test")
+    payload = tracker.load_session_payload(str(session["session_id"]))
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0")
+    backend.capture_calls = 0
+    adapter.calls = 0
+    with tracker._lock:
+        tracker._display_snapshot_started_epoch[str(session["session_id"])] = time.time()
+
+    result = tracker.capture_once(str(session["session_id"]), display_only=True)
+
+    capture_result = cast(Mapping[str, Any], result["capture_once_result"])
+    assert capture_result["ok"] is True
+    assert capture_result["status"] == "busy"
+    assert capture_result["display_busy"] is True
+    assert backend.capture_calls == 0
+    assert adapter.calls == 0
+
+
+def test_tracker_display_only_busy_is_single_flight_until_stale_reset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _FakeTrackingAdapter("BUY")
+    backend = _FakeCaptureBackend([_surface(width=1280, height=720)])
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=adapter,
+    )
+
+    session = tracker.create_session(session_id="pocket-live")
+    tracker.set_focus_region(str(session["session_id"]), [0.10, 0.10, 0.88, 0.86], source="test")
+    payload = tracker.load_session_payload(str(session["session_id"]))
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_SNAPSHOT_STALE_RESET_SEC", "30")
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0")
+    backend.capture_calls = 0
+    adapter.calls = 0
+    with tracker._lock:
+        tracker._display_snapshot_started_epoch[str(session["session_id"])] = time.time() - 5.0
+
+    result = tracker.capture_once(str(session["session_id"]), display_only=True)
+
+    capture_result = cast(Mapping[str, Any], result["capture_once_result"])
+    assert capture_result["status"] == "busy"
+    assert capture_result["display_busy"] is True
+    assert result["display_snapshot_busy_v3"] is True
+    assert float(result["display_snapshot_busy_age_sec"]) >= 5.0
+    assert backend.capture_calls == 0
+    assert adapter.calls == 0
+
+
+def test_tracker_display_only_stale_inflight_resets_as_emergency_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeTrackingAdapter("BUY")
+    backend = _FakeCaptureBackend([_surface(width=1280, height=720)])
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=adapter,
+    )
+
+    session = tracker.create_session(session_id="pocket-live")
+    tracker.set_focus_region(str(session["session_id"]), [0.10, 0.10, 0.88, 0.86], source="test")
+    payload = tracker.load_session_payload(str(session["session_id"]))
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_SNAPSHOT_STALE_RESET_SEC", "5")
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0")
+    backend.capture_calls = 0
+    adapter.calls = 0
+    with tracker._lock:
+        tracker._display_snapshot_started_epoch[str(session["session_id"])] = time.time() - 10.0
+
+    result = tracker.capture_once(str(session["session_id"]), display_only=True)
+
+    capture_result = cast(Mapping[str, Any], result["capture_once_result"])
+    assert capture_result["ok"] is True
+    assert capture_result["status"] == "captured"
+    assert capture_result["display_busy"] is False
+    assert backend.capture_calls == 1
+    event_log = tracker.session_dir(str(session["session_id"])) / "events.jsonl"
+    assert "display_snapshot_stale_reset" in event_log.read_text(encoding="utf-8")
+
+
 def test_tracker_display_only_refresh_does_not_replace_authority_frame(tmp_path: Path) -> None:
     adapter = _FakeTrackingAdapter("BUY")
     tracker = ContinuousWindowTrackerService(
@@ -3493,12 +3785,221 @@ def test_tracker_display_only_refresh_does_not_replace_authority_frame(tmp_path:
     assert str(refreshed["last_window_path"]) == authority_window_path
     assert str(refreshed["last_chart_path"]) == authority_chart_path
     assert Path(str(refreshed["last_display_window_path"])).exists()
+    assert str(refreshed["last_display_surface_signature"])
     assert str(cast(Mapping[str, Any], refreshed["latest_signal"]).get("signal_id") or "") == authority_signal_id
 
     display_state = json.loads((tracker.session_dir(str(session["session_id"])) / "display_state.json").read_text(encoding="utf-8"))
-    assert "capture_count" not in display_state
+    assert display_state["capture_count"] == authority_capture_count
+    assert display_state["frame_index"] == authority_frame_index
+    assert display_state["last_chart_path"] == authority_chart_path
+    assert display_state["last_overlay_path"] == studied["last_overlay_path"]
+    assert display_state["last_full_overlay_path"] == studied["last_full_overlay_path"]
+    assert display_state["overlay_frame_id"] == studied["overlay_frame_id"]
+    assert display_state["model_vote_frame_id"] == studied["model_vote_frame_id"]
     assert "last_window_path" not in display_state
     assert "last_frame_path" not in display_state
+
+
+def test_tracker_display_only_records_signature_without_moving_overlay_authority(tmp_path: Path) -> None:
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend(
+            [
+                _synthetic_chart_surface("buy", width=1280, height=720),
+                _synthetic_chart_surface("buy", width=1280, height=720),
+            ]
+        ),
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    session = tracker.create_session(session_id="pocket-shadow")
+    tracker.set_focus_region(str(session["session_id"]), [0.10, 0.10, 0.88, 0.86], source="test")
+    payload = tracker.load_session_payload(str(session["session_id"]))
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    controls = dict(payload["execution_controls"])
+    controls.update({"live_execution_enabled": False, "execution_mode": "shadow"})
+    payload["execution_controls"] = controls
+    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+
+    _allow_next_capture(tracker, str(session["session_id"]))
+    studied = tracker.capture_once(str(session["session_id"]))
+    refreshed = tracker.capture_once(str(session["session_id"]), display_only=True)
+
+    assert str(studied["overlay_source_window_signature"])
+    assert str(refreshed["last_display_surface_signature"])
+    assert refreshed["overlay_source_window_signature"] == studied["overlay_source_window_signature"]
+    assert int(refreshed["overlay_frame_id"]) == int(studied["overlay_frame_id"])
+    assert int(refreshed["display_frame_id"]) > int(studied["display_frame_id"])
+    display_state = json.loads((tracker.session_dir(str(session["session_id"])) / "display_state.json").read_text(encoding="utf-8"))
+    assert display_state["overlay_source_window_signature"] == studied["overlay_source_window_signature"]
+    assert display_state["last_study_surface_signature"] == studied["last_study_surface_signature"]
+    display_state["display_frame_id"] = int(refreshed["display_frame_id"]) + 10
+    display_state["overlay_source_window_signature"] = "stale-surface"
+    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "display_state.json", display_state)
+    merged = tracker.get_session_snapshot(str(session["session_id"]))
+    assert merged["overlay_source_window_signature"] == studied["overlay_source_window_signature"]
+    assert merged["last_display_surface_signature"] == display_state["last_display_surface_signature"]
+
+
+def test_tracker_display_only_reuses_identical_surface_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    surface = _surface(width=1280, height=720)
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend([surface, surface.copy()]),
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    session = tracker.create_session(session_id="pocket-live")
+    tracker.set_focus_region(str(session["session_id"]), [0.10, 0.10, 0.88, 0.86], source="test")
+    payload = tracker.load_session_payload(str(session["session_id"]))
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_IDENTICAL_SURFACE", "1")
+
+    first = tracker.capture_once(str(session["session_id"]), display_only=True)
+    second = tracker.capture_once(str(session["session_id"]), display_only=True)
+
+    assert int(second["display_frame_id"]) > int(first["display_frame_id"])
+    assert second["last_display_window_path"] == first["last_display_window_path"]
+    assert Path(str(second["last_display_window_path"])).exists()
+    assert second["display_fast_path_v3"]["reused_window_path"] is True
+
+
+def test_tracker_display_only_prefers_validated_fast_visible_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _FastVisibleOnlyCaptureBackend(_synthetic_full_pocket_option_gui(width=1280, height=720))
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    session = tracker.create_session(session_id="pocket-live")
+    session_id = str(session["session_id"])
+    _focus_session_without_preview(tracker, session_id)
+    payload = tracker.load_session_payload(session_id)
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    _write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1")
+
+    result = tracker.capture_once(session_id, display_only=True)
+
+    assert result["capture_once_result"]["ok"] is True
+    assert backend.fast_capture_calls == 1
+    assert backend.capture_calls == 0
+    assert Path(str(result["last_display_window_path"])).exists()
+
+
+def test_tracker_display_only_blocks_native_capture_fallback_when_fast_visible_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _FailingFastVisibleCaptureBackend(_synthetic_full_pocket_option_gui(width=1280, height=720))
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    session = tracker.create_session(session_id="pocket-live")
+    session_id = str(session["session_id"])
+    _focus_session_without_preview(tracker, session_id)
+    payload = tracker.load_session_payload(session_id)
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    _write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1")
+    monkeypatch.delenv("PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK", raising=False)
+
+    result = tracker.capture_once(session_id, display_only=True)
+
+    assert result["capture_once_result"]["ok"] is False
+    assert backend.fast_capture_calls == 1
+    assert backend.capture_calls == 0
+
+
+def test_tracker_display_only_reuse_only_heartbeat_skips_capture_after_locked_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _FakeCaptureBackend([_surface(width=1280, height=720)])
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    session = tracker.create_session(session_id="pocket-live")
+    session_id = str(session["session_id"])
+    tracker.set_focus_region(session_id, [0.10, 0.10, 0.88, 0.86], source="test")
+    payload = tracker.load_session_payload(session_id)
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    _write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "1")
+
+    first = tracker.capture_once(session_id, display_only=True)
+    backend.capture_calls = 0
+    second = tracker.capture_once(session_id, display_only=True)
+
+    assert backend.capture_calls == 0
+    assert int(second["display_frame_id"]) > int(first["display_frame_id"])
+    assert second["last_display_window_path"] == first["last_display_window_path"]
+    assert second["display_fast_path_v3"]["reuse_only_heartbeat"] is True
+    assert second["display_reuse_only_heartbeat_v3"]["window_path"] == first["last_display_window_path"]
+
+
+def test_tracker_display_only_busy_reuses_last_display_heartbeat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _FakeCaptureBackend([_surface(width=1280, height=720)])
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    session = tracker.create_session(session_id="pocket-live")
+    tracker.set_focus_region(str(session["session_id"]), [0.10, 0.10, 0.88, 0.86], source="test")
+    payload = tracker.load_session_payload(str(session["session_id"]))
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_BUSY_REUSE_HEARTBEAT", "1")
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0")
+
+    first = tracker.capture_once(str(session["session_id"]), display_only=True)
+    first_path = str(first["last_display_window_path"])
+    first_display = int(first["display_frame_id"])
+    backend.capture_calls = 0
+    with tracker._lock:
+        tracker._display_snapshot_started_epoch[str(session["session_id"])] = 1000.0
+
+    now_values = iter([1002.0, 1009.0])
+
+    def queued_request_then_write_epoch() -> float:
+        return next(now_values, 1009.0)
+
+    monkeypatch.setattr(window_tracker_module, "_now_epoch", queued_request_then_write_epoch)
+
+    second = tracker.capture_once(str(session["session_id"]), display_only=True)
+
+    assert backend.capture_calls == 0
+    assert int(second["display_frame_id"]) > first_display
+    assert second["last_display_window_path"] == first_path
+    assert second["display_snapshot_busy_v3"] is True
+    assert second["display_published_epoch"] == 1009.0
+    assert second["display_busy_reuse_heartbeat_v3"]["published_epoch"] == 1009.0
+    assert second["display_busy_reuse_heartbeat_v3"]["window_path"] == first_path
 
 
 def test_tracker_prunes_stale_artifact_groups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3524,6 +4025,40 @@ def test_tracker_prunes_stale_artifact_groups(tmp_path: Path, monkeypatch: pytes
     }
     assert len(remaining_groups) == 24
     assert "000001_abcdef12" not in remaining_groups
+    assert "000030_abcdef12" in remaining_groups
+
+
+def test_tracker_prune_preserves_session_referenced_artifact_groups(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(window_tracker_module, "_TRACKER_ARTIFACT_RETENTION_FRAMES", 2)
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend([_surface(width=1280, height=720)]),
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+    artifact_dir = tmp_path / "sessions" / "prune-test" / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    protected_window = artifact_dir / "000001_abcdef12_window.png"
+    protected_overlay = artifact_dir / "000001_abcdef12_overlay.png"
+    for index in range(1, 31):
+        stem = f"{index:06d}_abcdef12"
+        for suffix in ("window.png", "chart.png", "overlay.png", "full_overlay.png", "decision.json"):
+            (artifact_dir / f"{stem}_{suffix}").write_text("x", encoding="utf-8")
+    _write_json_atomic(
+        artifact_dir.parent / "session.json",
+        {
+            "last_window_path": str(protected_window),
+            "last_overlay_path": str(protected_overlay),
+        },
+    )
+
+    tracker._prune_session_artifacts(artifact_dir)
+
+    remaining_groups = {
+        "_".join(path.name.split("_", 2)[:2])
+        for path in artifact_dir.iterdir()
+        if path.is_file()
+    }
+    assert "000001_abcdef12" in remaining_groups
     assert "000030_abcdef12" in remaining_groups
 
 
@@ -3675,7 +4210,8 @@ def test_tracker_full_window_focus_derives_chart_study_plane_for_overlays(tmp_pa
     assert study_plane["height"] < selected_plane["height"]
     assert focus_region["source"] == "auto_full_window_chart_plane"
     assert int(focus_bbox[2]) <= int(full_gui.width * 0.88)
-    assert payload["broker_surface"]["control_visibility"]["buy_visible"] is True
+    assert payload["broker_surface"]["scan_skipped"] is True
+    assert payload["broker_surface"]["scan_skip_reason"] == "live_execution_disabled"
     with Image.open(str(payload["last_chart_path"])) as chart_image:
         assert chart_image.size == (study_plane["width"], study_plane["height"])
     with Image.open(str(payload["last_full_overlay_path"])) as full_overlay_image:
@@ -3723,6 +4259,50 @@ def test_tracker_accepts_tradingview_visible_chart_as_study_source(tmp_path: Pat
     assert broker_surface["sell_button"] == {}
     assert broker_execution_state["status"] not in {"armed", "ready_to_click"}
     assert payload["latest_signal"]["status"] != "waiting_for_broker_surface"
+
+
+def test_tracker_accepts_pocket_chart_as_shadow_study_source(tmp_path: Path) -> None:
+    chart = _synthetic_chart_surface("buy", width=1280, height=720)
+    backend = _ListedWindowCaptureBackend(
+        [
+            {
+                "hwnd": 707,
+                "title": "The Most Innovative Trading Platform - Microsoft Edge",
+                "bbox": [0, 0, 1280, 720],
+                "width": 1280,
+                "height": 720,
+            }
+        ],
+        image=chart,
+    )
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    session = tracker.create_session(session_id="pocket-shadow-study", window_query="The Most Innovative Trading Platform")
+    tracker.set_focus_region(str(session["session_id"]), [0.0, 0.0, 1.0, 1.0], source="test")
+    tracker.update_session_controls(str(session["session_id"]), live_execution_enabled=False, execution_mode="shadow")
+
+    payload = tracker.capture_once(str(session["session_id"]))
+
+    tracking_summary = cast(dict[str, Any], payload["tracking_summary"])
+    broker_source_lock = cast(dict[str, Any], tracking_summary["broker_source_lock"])
+    broker_source = cast(dict[str, Any], tracking_summary["broker_source"])
+    broker_surface = cast(dict[str, Any], payload["broker_surface"])
+    broker_execution_state = cast(dict[str, Any], payload["broker_execution_state"])
+    assert payload["status"] != "waiting_for_broker_surface"
+    assert broker_source_lock["valid"] is True
+    assert broker_source_lock["reason_codes"] == ["CHART_STUDY_SOURCE_LOCKED"]
+    assert broker_source_lock["surface_guard"]["reason_codes"] == ["CHART_SOURCE_PIXELS_CONFIRMED"]
+    assert broker_source["valid"] is True
+    assert broker_source["wrong_surface"] is False
+    assert broker_source["study_source_only"] is True
+    assert broker_source["broker_click_safe"] is False
+    assert broker_surface["study_source_only"] is True
+    assert broker_surface["broker_click_safe"] is False
+    assert broker_execution_state["status"] not in {"armed", "ready_to_click"}
 
 
 def test_tracker_scenario_generation_runs_when_enabled(tmp_path: Path) -> None:
@@ -3957,6 +4537,137 @@ def test_tracker_reacquires_same_browser_family_when_pocket_option_title_drifts(
     assert Path(str(refreshed["last_overlay_path"])).exists()
 
 
+def test_tracker_ignores_wrong_saved_pocket_option_hwnd_and_reacquires_broker(tmp_path: Path) -> None:
+    backend = _ListedWindowCaptureBackend(
+        [
+            {
+                "hwnd": 7001,
+                "title": "Meet - wyv-yqxq-zjf and 27 more pages - Personal - Microsoft Edge",
+                "bbox": [0, 0, 1280, 720],
+                "width": 1280,
+                "height": 720,
+            },
+            {
+                "hwnd": 8801,
+                "title": "The Most Innovative Trading Platform and 28 more pages - Personal - Microsoft Edge",
+                "bbox": [80, 60, 2018, 1098],
+                "width": 1938,
+                "height": 1038,
+            },
+        ],
+        image=_surface(width=1938, height=1038),
+    )
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    session = tracker.create_session(session_id="pocket-live", window_query="Pocket Option")
+    tracker.set_focus_region(str(session["session_id"]), [0.03, 0.09, 0.99, 0.99], source="test")
+    session_path = tmp_path / "sessions" / "pocket-live" / "session.json"
+    payload = json.loads(session_path.read_text(encoding="utf-8"))
+    payload["locked_window"] = dict(backend.windows[0])
+    payload["locked_title"] = str(backend.windows[0]["title"])
+    payload["last_chart_path"] = ""
+    payload["last_overlay_path"] = ""
+    payload["last_display_chart_path"] = ""
+    session_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+    _allow_next_capture(tracker, str(session["session_id"]))
+    refreshed = tracker.capture_once(str(session["session_id"]))
+
+    assert refreshed["last_error"] == ""
+    assert refreshed["locked_window"]["hwnd"] == 8801
+    assert "The Most Innovative Trading Platform" in refreshed["locked_window"]["title"]
+    assert refreshed["latest_signal"]["action"] == "BUY"
+    assert Path(str(refreshed["last_overlay_path"])).exists()
+
+
+def test_tracker_create_session_persists_requested_broker_hwnd(tmp_path: Path) -> None:
+    backend = _ListedWindowCaptureBackend(
+        [
+            {
+                "hwnd": 592668,
+                "title": "The Most Innovative Trading Platform - Personal - Microsoft Edge",
+                "bbox": [80, 60, 2018, 1098],
+                "width": 1938,
+                "height": 1038,
+            }
+        ],
+        image=_surface(width=1938, height=1038),
+    )
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    session = tracker.create_session(
+        session_id="pocket-live",
+        window_query="The Most Innovative Trading Platform",
+        locked_hwnd=592668,
+    )
+
+    locked = cast(dict[str, Any], session["locked_window"])
+    assert locked["hwnd"] == 592668
+    assert locked["width"] == 1938
+    assert session["locked_title"] == "The Most Innovative Trading Platform - Personal - Microsoft Edge"
+
+
+def test_tracker_http_surface_updates_reused_session_locked_hwnd(tmp_path: Path) -> None:
+    backend = _ListedWindowCaptureBackend(
+        [
+            {
+                "hwnd": 525544,
+                "title": "The Most Innovative Trading Platform and 29 more pages - Personal - Microsoft Edge",
+                "bbox": [0, 0, 1280, 720],
+                "width": 1280,
+                "height": 720,
+            },
+            {
+                "hwnd": 592668,
+                "title": "The Most Innovative Trading Platform - Personal - Microsoft Edge",
+                "bbox": [80, 60, 2018, 1098],
+                "width": 1938,
+                "height": 1038,
+            },
+        ],
+        image=_surface(width=1938, height=1038),
+    )
+    tracker_service = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+    app = create_app(window_tracker_service=tracker_service)
+    client = TestClient(app)
+
+    create_response = client.post(
+        "/v1/mobile/window-tracker/sessions",
+        json={
+            "session_id": "pocket-live",
+            "window_query": "The Most Innovative Trading Platform",
+            "locked_hwnd": 525544,
+        },
+    )
+    assert create_response.status_code == 201
+    assert create_response.json()["locked_window"]["hwnd"] == 525544
+
+    update_response = client.patch(
+        "/v1/mobile/window-tracker/sessions/pocket-live/locked-window",
+        json={
+            "locked_hwnd": 592668,
+            "locked_title": "The Most Innovative Trading Platform",
+        },
+    )
+    assert update_response.status_code == 200
+    payload = update_response.json()
+    assert payload["locked_window"]["hwnd"] == 592668
+    assert payload["locked_window"]["width"] == 1938
+    assert payload["locked_title"] == "The Most Innovative Trading Platform - Personal - Microsoft Edge"
+
+
 def test_tracker_reacquires_visible_window_when_locked_handle_is_minimized(tmp_path: Path) -> None:
     backend = _ListedWindowCaptureBackend(
         [
@@ -4107,15 +4818,28 @@ def test_tracker_dashboard_fits_selected_surface_without_width_only_crop() -> No
     assert "stageWidth / size.width" in dashboard_html
     assert "full selected plane fitted" in dashboard_html
     assert "full broker window fitted" in dashboard_html
-    assert "artifactUrl(\"full-overlay\", session)" in dashboard_html
-    assert "state.surfaceUsesFullOverlay = true" in dashboard_html
+    assert 'const kind = "full-overlay";' in dashboard_html
+    assert 'state.surfaceUsesFullOverlay = image.dataset.surfaceUsesFullOverlay === "1";' in dashboard_html
     assert "mode-overlay" in dashboard_html
     assert "Signal Overlay" in dashboard_html
     assert "mode-raw" in dashboard_html
     assert "Locked Surface" in dashboard_html
-    assert "if (wantsOverlay && overlayAvailable && !overlayStale)" in dashboard_html
-    assert "else if ((wantsOverlay && overlayStale && hasWindow) || (!wantsOverlay && hasWindow))" in dashboard_html
+    assert "function surfaceIdentityKey(session = {})" in dashboard_html
+    assert "function overlaySurfaceMatchesDisplay(session = {})" in dashboard_html
+    assert "function displayOnlyOverlayAuthorityLocked(session = {})" in dashboard_html
+    assert "const displayArtifact = clean(session.last_display_window_path" in dashboard_html
+    assert "overlayFrame > 0 && displayArtifact && overlayArtifact" in dashboard_html
+    assert "overlay_source_window_signature" in dashboard_html
+    assert "overlayLocks: new Map()" in dashboard_html
+    assert "const overlayLockUsable = wantsOverlay && hasLockedOverlayForSession(session);" in dashboard_html
+    assert "const useLockedWindowOverlayPlane = wantsOverlay" in dashboard_html
+    assert 'useSurfaceImage(els.rawImg, "window", "window-locked-overlay", true);' in dashboard_html
+    assert "if (wantsOverlay && hasFullOverlay && !overlayStale)" in dashboard_html
+    assert "function backendOverlayFrameAligned(session = {})" in dashboard_html
+    assert "displayOnlyOverlayAuthorityLocked(session)" in dashboard_html
+    assert "rawFallbackVisible || state.surface.overlayStale || !overlayFrameReady" in dashboard_html
     assert "else if (hasChart)" in dashboard_html
+    assert "DASHBOARD_REFRESH_INTERVAL_MS = 250" in dashboard_html
 
 
 def test_memory_precision_allows_aggressive_stacked_primary_when_counter_is_probe() -> None:
@@ -4157,12 +4881,16 @@ def test_full_local_launcher_has_one_final_live_profile_and_keeps_broker_auto_op
     launcher = (Path(__file__).resolve().parents[1] / "start_phoenixguard_full_local.ps1").read_text(encoding="utf-8")
 
     assert "FINAL_LIVE" in launcher
-    assert "$shooterMode = 'LIVE_READY'" in launcher
+    assert "[string]$ShooterMode" in launcher
+    assert "else { 'LIVE_READY' }" in launcher
     assert "PAPER_EXECUTION" not in launcher
     legacy_calibration_profile = "CALIBRATION" + "_TEST_ONLY"
     assert legacy_calibration_profile not in launcher
     assert "PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS" in launcher
-    assert "$liveClickArm = '1'" in launcher
+    assert "BrokerWindowHwnd" in launcher
+    assert "PHOENIXGUARD_BROKER_WINDOW_HWND" in launcher
+    assert "--window-hwnd" in launcher
+    assert "$liveClickArm = if ($ShooterMode -eq 'LIVE_READY'" in launcher
     assert "--shooter-mode" in launcher
     assert "--no-auto-open" in launcher
 
@@ -4437,15 +5165,27 @@ def test_pocket_option_execution_backend_detects_narrow_real_gui_order_panel() -
     assert payload["sell_button"]["bbox"][0] > 1600
 
 
-def test_pocket_option_execution_backend_uses_calibrated_box_map_on_full_window() -> None:
+def test_pocket_option_execution_backend_rejects_blank_calibrated_box_map_fallback() -> None:
     backend = PocketOptionBrokerExecutionBackend()
     payload = backend.read_surface(Image.new("RGB", (1938, 1038), (20, 20, 20)))
 
+    assert payload["controls_ready"] is False
+    assert payload["buy_button"] == {}
+    assert payload["sell_button"] == {}
+    assert payload["expiry_lock"]["field_ready"] is False
+
+
+def test_pocket_option_execution_backend_anchors_time_field_to_calibrated_box_map_on_real_panel() -> None:
+    backend = PocketOptionBrokerExecutionBackend()
+    full_gui = _synthetic_full_pocket_option_gui()
+    payload = backend.read_surface(full_gui)
+
     assert payload["controls_ready"] is True
-    assert payload["buy_button"]["source"] == "shooter_box_map"
-    assert payload["sell_button"]["source"] == "shooter_box_map"
-    assert payload["amount_lock"]["verified"] is True
-    assert payload["expiry_lock"]["field_ready"] is True
+    assert payload["time_field"]["source"] == "shooter_box_map_time_field"
+    time_center = PocketOptionBrokerExecutionBackend._bbox_center(payload["time_field"]["bbox"])
+    assert time_center is not None
+    assert abs(time_center[0] - int(round(full_gui.width * 0.91125))) <= 3
+    assert abs(time_center[1] - int(round(full_gui.height * 0.26685))) <= 3
 
 
 def test_pocket_option_execution_backend_reads_broker_identity_from_header_adapter() -> None:
@@ -4835,7 +5575,7 @@ def test_tracker_execution_controls_default_to_shadow_fixed_amount(tmp_path: Pat
     assert controls["allow_countertrend_scalp"] is False
     assert controls["trade_profile"] == "HIGH_FREQUENCY"
     assert controls["high_frequency_enabled"] is True
-    assert controls["swing_fallback_enabled"] is True
+    assert controls["swing_fallback_enabled"] is False
     assert int(controls["high_frequency_expiry_seconds"]) == 600
     assert float(session["capture_interval_sec"]) == 1.0
     assert float(controls["min_capture_interval_sec"]) == 0.5
@@ -4855,6 +5595,117 @@ def test_tracker_execution_controls_default_to_shadow_fixed_amount(tmp_path: Pat
     assert updated["execution_controls"]["fixed_amount"] == "preserve"
     assert updated["execution_controls"]["amount_policy"] == "preserve_visible_broker_amount"
     assert updated["broker_execution_state"]["status"] == "armed"
+
+
+def test_high_frequency_cycle_keeps_active_candidate_side_when_forecasts_disagree() -> None:
+    cycle = window_tracker_module._build_high_frequency_candle_cycle_context(
+        signal={
+            "execution_action": "SELL",
+            "two_candle_study": {
+                "status": "READY",
+                "primary_pressure": "BUY",
+                "confidence": 0.62,
+                "next_candle_forecast": {"direction": "SELL", "confidence": 0.58},
+                "second_next_candle_forecast": {"direction": "BUY", "confidence": 0.52},
+            },
+        },
+        tracking={},
+        controls={"trade_profile": "HIGH_FREQUENCY", "high_frequency_enabled": True},
+        symbol="EUR/JPY OTC",
+        timeframe="M5",
+        now_epoch=1781643301.0,
+    )
+
+    assert cycle["ready"] is False
+    assert cycle["candidate_side"] == "SELL"
+    assert cycle["active_candidate_side"] == "SELL"
+    assert cycle["pressure_side"] == "BUY"
+    assert cycle["forecast_side"] == "HOLD"
+    assert cycle["forecast_agreement"] is False
+
+
+def test_high_frequency_cycle_does_not_let_hold_mask_candidate_side() -> None:
+    cycle = window_tracker_module._build_high_frequency_candle_cycle_context(
+        signal={
+            "execution_action": "HOLD",
+            "candidate_action": "SELL",
+            "two_candle_study": {
+                "status": "READY",
+                "primary_pressure": "SELL",
+                "confidence": 0.62,
+                "next_candle_forecast": {"direction": "BUY", "confidence": 0.58},
+                "second_next_candle_forecast": {"direction": "SELL", "confidence": 0.52},
+            },
+        },
+        tracking={},
+        controls={"trade_profile": "HIGH_FREQUENCY", "high_frequency_enabled": True},
+        symbol="EUR/JPY OTC",
+        timeframe="M5",
+        now_epoch=1781643301.0,
+    )
+
+    assert cycle["ready"] is False
+    assert cycle["candidate_side"] == "SELL"
+    assert cycle["active_candidate_side"] == "SELL"
+    assert cycle["pressure_side"] == "SELL"
+    assert cycle["forecast_side"] == "HOLD"
+
+
+def test_high_frequency_cycle_forecast_agreement_overrides_candidate_only_when_ready() -> None:
+    cycle = window_tracker_module._build_high_frequency_candle_cycle_context(
+        signal={
+            "execution_action": "SELL",
+            "two_candle_study": {
+                "status": "READY",
+                "primary_pressure": "BUY",
+                "confidence": 0.64,
+                "next_candle_forecast": {"direction": "BUY", "confidence": 0.64},
+                "second_next_candle_forecast": {"direction": "BUY", "confidence": 0.62},
+            },
+        },
+        tracking={},
+        controls={"trade_profile": "HIGH_FREQUENCY", "high_frequency_enabled": True},
+        symbol="EUR/JPY OTC",
+        timeframe="M5",
+        now_epoch=1781643301.0,
+    )
+
+    assert cycle["ready"] is True
+    assert cycle["side"] == "BUY"
+    assert cycle["candidate_side"] == "BUY"
+    assert cycle["active_candidate_side"] == "SELL"
+    assert cycle["forecast_side"] == "BUY"
+    assert cycle["forecast_agreement"] is True
+
+
+def test_tracker_disabled_execution_skips_broker_surface_scan(tmp_path: Path) -> None:
+    execution_backend = _CountingIdentityExecutionBackend()
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend([_synthetic_broker_window()]),
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+        execution_backend=execution_backend,
+    )
+    session_id = str(tracker.create_session(session_id="pocket-shadow")["session_id"])
+    _focus_session_without_preview(tracker, session_id)
+    payload = tracker.load_session_payload(session_id)
+    controls = dict(payload["execution_controls"])
+    controls.update({"live_execution_enabled": False, "execution_mode": "shadow"})
+    payload["execution_controls"] = controls
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    _write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+
+    _allow_next_capture(tracker, session_id)
+    result = tracker.capture_once(session_id)
+
+    broker_surface = cast(dict[str, Any], result["broker_surface"])
+    broker_execution_state = cast(dict[str, Any], result["broker_execution_state"])
+    assert execution_backend.read_count == 0
+    assert broker_execution_state["status"] == "disabled"
+    assert broker_surface["scan_skipped"] is True
+    assert broker_surface["scan_skip_reason"] == "live_execution_disabled"
+    assert str(broker_surface["broker_surface_hash"])
 
 
 def test_tracker_emergency_stop_disables_live_execution_and_writes_event_log(tmp_path: Path) -> None:
@@ -5099,7 +5950,49 @@ def test_tracker_live_execution_persists_blocked_click_diagnostics(tmp_path: Pat
     assert state["active_trade"] == {}
 
 
-def test_expiry_verification_accepts_locked_click_plan_when_ocr_is_weak() -> None:
+def test_expiry_verification_blocks_locked_click_plan_assumption_by_default() -> None:
+    clicks = [
+        {
+            "name": "quick_m5",
+            "diagnostic": {
+                "sent_input": True,
+                "owned_by_expected_window": True,
+                "cursor_landed_in_target": True,
+            },
+        },
+        {
+            "name": "minute_plus",
+            "diagnostic": {
+                "sent_input": True,
+                "owned_by_expected_window": True,
+                "cursor_landed_in_target": True,
+            },
+        },
+    ]
+
+    verification = PocketOptionBrokerExecutionBackend._assume_expiry_from_locked_click_plan(
+        target_seconds=900,
+        verification={
+            "status": "mismatch",
+            "matches": False,
+            "target_seconds": 900,
+            "visible_seconds": 660,
+            "visible_text": "00:11:00",
+            "confidence": 0.60,
+            "source": "time_field_ocr",
+        },
+        clicks=clicks,
+        geometry={"source": "visual_popup_shortcut_grid"},
+    )
+
+    assert verification["matches"] is False
+    assert verification["visible_text"] == "00:11:00"
+    assert verification["assumption_blocked"] is True
+    assert verification["assumption_block_reason"] == "emergency expiry assumption is disabled"
+
+
+def test_expiry_verification_allows_locked_click_plan_only_when_emergency_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_ALLOW_EMERGENCY_EXPIRY_ASSUMPTION", "1")
     clicks = [
         {
             "name": "quick_m5",
@@ -5642,7 +6535,7 @@ def test_tracker_blocks_live_execution_when_timeframe_identity_is_required(tmp_p
     assert "Model Council V3 executable packet required" in result["broker_execution_state"]["message"]
 
 
-def test_tracker_allows_locked_surface_identity_fallback_for_live_execution(tmp_path: Path) -> None:
+def test_tracker_blocks_locked_surface_identity_fallback_for_live_execution(tmp_path: Path) -> None:
     execution_backend = _IdentityExecutionBackend(market="", timeframe="", market_confidence=0.0, timeframe_confidence=0.0)
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path,
@@ -5662,6 +6555,7 @@ def test_tracker_allows_locked_surface_identity_fallback_for_live_execution(tmp_
             "require_market_identity": True,
             "require_timeframe_identity": True,
             "allow_locked_surface_identity_fallback": True,
+            "swing_fallback_enabled": True,
         }
     )
     payload["execution_controls"] = controls
@@ -5671,10 +6565,9 @@ def test_tracker_allows_locked_surface_identity_fallback_for_live_execution(tmp_
     result = tracker.capture_once(str(session["session_id"]))
 
     assert execution_backend.clicks == []
-    assert result["broker_execution_state"]["status"] == "external_shooter_required"
-    assert result["broker_execution_state"]["side"] == "BUY"
-    assert result["broker_execution_state"]["lane"] == "MODEL_COUNCIL_PACKET_V3"
-    assert result["model_council_packet"]["schema_version"] == "PG_EXECUTION_PACKET_V3"
+    assert result["broker_execution_state"]["status"] == "blocked_by_runtime"
+    assert "Model Council V3 executable packet required" in result["broker_execution_state"]["message"]
+    assert "model_council_packet" not in result or result["model_council_packet"].get("schema_version") != "PG_EXECUTION_PACKET_V3"
 
 
 def test_tracker_live_execution_waits_after_blocked_click_attempt(tmp_path: Path) -> None:
@@ -5822,6 +6715,45 @@ def test_real_tracking_adapter_reads_buy_pressure_from_uptrend_surface() -> None
     assert max(float(cast(Sequence[Any], segment["bbox"])[2]) for segment in history) > result.chart_image.width * 0.55
     assert result.latest_signal["action"] == "BUY"
     assert "BUY" in str(result.latest_signal["setup"])
+
+
+def test_real_tracking_adapter_reuses_cached_locked_shadow_selectors(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    image = _synthetic_chart_surface("buy")
+
+    def fail_detector(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("cached locked shadow study must not rescan selectors")
+
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", fail_detector)
+    monkeypatch.setattr(adapter, "_detect_market_selector", fail_detector)
+    monkeypatch.setattr(adapter, "_detect_chart_bbox", fail_detector)
+
+    result = adapter.study(
+        image,
+        session_payload={
+            "execution_controls": {"live_execution_enabled": False, "execution_mode": "shadow"},
+            "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
+            "locked_window": {"hwnd": 123, "title": "Pocket Option"},
+            "tracking_summary": {
+                "detected_timeframe": "M5",
+                "timeframe_confidence": 0.93,
+                "detected_market": "EUR/JPY OTC",
+                "market_confidence": 0.91,
+                "chart_region": {"pixel_bbox": [0, 0, image.width, image.height], "confidence": 0.90},
+            },
+            "latest_signal": {
+                "focus_timeframe": "M5",
+                "focus_timeframe_confidence": 0.93,
+                "market": "EUR/JPY OTC",
+                "market_confidence": 0.91,
+            },
+        },
+    )
+
+    stages = [str(row.get("stage", "")) for row in result.tracking_summary["study_stage_timings"]]
+    assert "cached_chart_bbox" in stages
+    assert result.tracking_summary["detected_timeframe"] == "M5"
+    assert result.latest_signal["market"] == "EUR/JPY OTC"
 
 
 def test_real_tracking_adapter_excludes_broker_order_panel_from_chart_bbox() -> None:

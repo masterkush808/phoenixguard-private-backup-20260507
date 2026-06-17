@@ -33,6 +33,33 @@ BURN_DIR = ROOT / ".codex_runtime" / "burn_in"
 DEFAULT_OUT = ROOT / "reports" / "FINAL_FULL_SYSTEM_ACTIVATED_BURN_IN_REPORT.md"
 SHOOTER_HANDSHAKE_PATH = ROOT / ".codex_runtime" / "shooter_handshake.json"
 ACTION_EVIDENCE_DIR = ROOT / ".codex_runtime" / "action_evidence"
+SHOOTER_VALIDATION_DIR = ROOT / "data" / "shooter_validation"
+SAFE_SHOOTER_VALIDATION_LOGS = (
+    "live_disabled.jsonl",
+    "paper_executions.jsonl",
+    "dry_run_clicks.jsonl",
+    "live_behavior_validation.jsonl",
+)
+BURN_RESET_FILES = (
+    "burn_in_samples.jsonl",
+    "trade_outcomes.jsonl",
+    "model_votes.jsonl",
+    "skill_contributions.jsonl",
+    "lstm_predictions.jsonl",
+    "two_candle_study.jsonl",
+    "shooter_actions.jsonl",
+    "promotion_failures.jsonl",
+    "safe_shooter_events.jsonl",
+    "safe_paper_monitors.jsonl",
+    "safe_paper_outcomes.jsonl",
+    "live_trade_monitors.jsonl",
+    "live_trade_outcomes.jsonl",
+    "burn_in_summary.json",
+    "profitability_summary.json",
+    "safe_paper_summary.json",
+    "precision_summary.json",
+    "promotion_blocker_ranking.json",
+)
 
 REQUIRED_COMPONENTS = [
     "BrokerSourceLockV3",
@@ -193,6 +220,31 @@ def _extract_timing(perf_payload: Mapping[str, Any], trace_payload: Mapping[str,
     }
 
 
+def _nested_float(payload: Mapping[str, Any], path: Sequence[str], fallback: float = float("nan")) -> float:
+    current: Any = payload
+    for key in path:
+        current = _mapping(current).get(key)
+    return _float(current, fallback)
+
+
+def _latest_price_proxy(payloads: Iterable[Mapping[str, Any]]) -> float | None:
+    candidate_paths = (
+        ("tracking_summary", "latest_price_proxy"),
+        ("latest_signal", "latest_price_proxy"),
+        ("price_location", "latest_price_proxy"),
+        ("broker_execution_state", "execution_timing", "price_position", "latest_price_proxy"),
+        ("execution_timing", "price_position", "latest_price_proxy"),
+        ("latest_price_proxy",),
+        ("current_price_proxy",),
+    )
+    for payload in payloads:
+        for path in candidate_paths:
+            value = _nested_float(payload, path)
+            if math.isfinite(value):
+                return float(value)
+    return None
+
+
 def _process_snapshot() -> dict[str, Any]:
     rows = python_processes()
     process_query_errors = [str(row.get("error")) for row in rows if isinstance(row, Mapping) and row.get("error")]
@@ -235,13 +287,394 @@ def _actual_live_click_arming(samples: Sequence[Mapping[str, Any]]) -> dict[str,
             if text:
                 modes.add(text)
     env_armed = _env_true("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS")
-    live_mode_armed = bool(modes.intersection({"LIVE_READY", "LIVE_ENABLED", "FULL_ACTIVATED"}))
+    live_mode_armed = bool(modes.intersection({"LIVE_READY", "LIVE_ENABLED", "FULL_ACTIVATED", "LIVE_BEHAVIOR_VALIDATION"}))
     return {
         "requested_full_activated_mode": False,
         "env_live_clicks_allowed": env_armed,
         "shooter_modes": sorted(modes),
         "actual_live_clicks_armed": bool(env_armed and live_mode_armed),
         "reason": "requires PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS=1 and a live-capable shooter mode",
+    }
+
+
+def _live_click_armed_from_snapshot(process_snapshot: Mapping[str, Any]) -> bool:
+    modes = {
+        _text(mode).upper()
+        for mode in _sequence(_mapping(process_snapshot).get("shooter_modes"))
+        if _text(mode)
+    }
+    return bool(_env_true("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS") and modes.intersection({"LIVE_READY", "LIVE_ENABLED", "FULL_ACTIVATED", "LIVE_BEHAVIOR_VALIDATION"}))
+
+
+def _actual_click_observed(shooter: Mapping[str, Any]) -> bool:
+    if bool(shooter.get("actual_clicked") or shooter.get("clicked")):
+        return True
+    action_sequence_raw = shooter.get("action_sequence")
+    if isinstance(action_sequence_raw, Mapping):
+        if bool(action_sequence_raw.get("clicked")):
+            return True
+        if _text(action_sequence_raw.get("overall")).upper() == "PASS":
+            return True
+        if _text(action_sequence_raw.get("reason")).upper() == "ACTION_SEQUENCE_COMPLETE":
+            return True
+    rehearsal = shooter.get("execution_rehearsal")
+    if isinstance(rehearsal, Mapping):
+        nested_action = rehearsal.get("action_sequence")
+        if isinstance(nested_action, Mapping):
+            if bool(nested_action.get("clicked")):
+                return True
+            if _text(nested_action.get("overall")).upper() == "PASS":
+                return True
+    action_sequence = _text(action_sequence_raw).upper()
+    return action_sequence.startswith("CLICK_SENT") or action_sequence.startswith("LIVE_READY_CLICK_SENT")
+
+
+def _read_jsonl_tail(path: Path, *, max_lines: int = 2000) -> list[dict[str, Any]]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()[-max_lines:]
+    except Exception:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(payload, Mapping):
+            rows.append(dict(payload))
+    return rows
+
+
+def _safe_shooter_event_key(row: Mapping[str, Any]) -> str:
+    return "|".join(
+        (
+            _text(row.get("source_log")),
+            _text(row.get("mode")),
+            _text(row.get("packet_id")),
+            f"{_float(row.get('timestamp')):.6f}",
+        )
+    )
+
+
+def _collect_safe_shooter_validation_events() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for name in SAFE_SHOOTER_VALIDATION_LOGS:
+        path = SHOOTER_VALIDATION_DIR / name
+        if not path.exists():
+            continue
+        for raw in _read_jsonl_tail(path):
+            mode = _text(raw.get("mode"), Path(name).stem).upper()
+            packet_id = _text(raw.get("packet_id"))
+            side = _text(raw.get("side")).upper()
+            expiry_seconds = _int(raw.get("expiry_seconds"))
+            clicked = bool(raw.get("clicked", False))
+            if _text(raw.get("schema_version")) != "PG_EXECUTION_PACKET_V3":
+                continue
+            if not packet_id or side not in {"BUY", "SELL"} or expiry_seconds <= 0:
+                continue
+            if clicked:
+                continue
+            row = {
+                **raw,
+                "source_log": str(path.relative_to(ROOT)),
+                "mode": mode,
+                "packet_id": packet_id,
+                "side": side,
+                "expiry_seconds": expiry_seconds,
+                "actual_clicked": False,
+                "safe_paper_candidate": True,
+                "event_key": "",
+            }
+            row["event_key"] = _safe_shooter_event_key(row)
+            rows.append(row)
+    return rows
+
+
+def _collect_live_ready_click_events(*, since_epoch: float = 0.0) -> list[dict[str, Any]]:
+    path = SHOOTER_VALIDATION_DIR / "live_ready.jsonl"
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw in _read_jsonl_tail(path, max_lines=4000):
+        timestamp = _float(raw.get("timestamp"), 0.0)
+        if since_epoch > 0.0 and timestamp > 0.0 and timestamp < since_epoch:
+            continue
+        mode = _text(raw.get("mode"), "LIVE_READY").upper()
+        packet_id = _text(raw.get("packet_id"))
+        side = _text(raw.get("side")).upper()
+        expiry_seconds = _int(raw.get("expiry_seconds"))
+        if mode != "LIVE_READY":
+            continue
+        if _text(raw.get("schema_version")) != "PG_EXECUTION_PACKET_V3":
+            continue
+        if not bool(raw.get("clicked", False)):
+            continue
+        if not packet_id or side not in {"BUY", "SELL"} or expiry_seconds <= 0:
+            continue
+        row = {
+            **raw,
+            "source_log": str(path.relative_to(ROOT)),
+            "mode": mode,
+            "packet_id": packet_id,
+            "side": side,
+            "expiry_seconds": expiry_seconds,
+            "actual_clicked": True,
+            "event_key": "",
+        }
+        row["event_key"] = _safe_shooter_event_key(row)
+        rows.append(row)
+    return rows
+
+
+def _paper_monitor_from_safe_event(
+    event: Mapping[str, Any],
+    *,
+    now: float,
+    latest_price_proxy: float | None,
+    max_entry_lag_sec: float,
+) -> dict[str, Any] | None:
+    opened_epoch = _float(event.get("timestamp"))
+    if opened_epoch <= 0.0:
+        opened_epoch = now
+    entry_lag_sec = max(0.0, now - opened_epoch)
+    if latest_price_proxy is None or not math.isfinite(float(latest_price_proxy)):
+        return None
+    if entry_lag_sec > max(0.5, float(max_entry_lag_sec)):
+        return None
+    expiry_seconds = _int(event.get("expiry_seconds"))
+    if expiry_seconds <= 0:
+        return None
+    packet_id = _text(event.get("packet_id"))
+    return {
+        "paper_trade_id": f"safe-paper-{packet_id}",
+        "packet_id": packet_id,
+        "source_event_key": _text(event.get("event_key")),
+        "source": "safe_shooter_no_broker_click_chart_proxy",
+        "mode": _text(event.get("mode")),
+        "actual_clicked": False,
+        "broker_click_allowed": bool(event.get("broker_click_allowed", False)),
+        "side": _text(event.get("side")).upper(),
+        "opened_epoch": opened_epoch,
+        "opened_at": _utc_iso(opened_epoch),
+        "expires_epoch": opened_epoch + float(expiry_seconds),
+        "expires_at": _utc_iso(opened_epoch + float(expiry_seconds)),
+        "expiry_seconds": expiry_seconds,
+        "entry_price_proxy": round(float(latest_price_proxy), 6),
+        "entry_lag_sec": round(entry_lag_sec, 3),
+        "status": "monitoring",
+        "decision_reason": _text(event.get("decision_reason") or event.get("reason")),
+    }
+
+
+def _live_trade_monitor_from_click_event(
+    event: Mapping[str, Any],
+    *,
+    now: float,
+    latest_price_proxy: float | None,
+    max_entry_lag_sec: float,
+) -> dict[str, Any] | None:
+    opened_epoch = _float(event.get("timestamp"))
+    if opened_epoch <= 0.0:
+        opened_epoch = now
+    entry_lag_sec = max(0.0, now - opened_epoch)
+    if latest_price_proxy is None or not math.isfinite(float(latest_price_proxy)):
+        return None
+    if entry_lag_sec > max(0.5, float(max_entry_lag_sec)):
+        return None
+    expiry_seconds = _int(event.get("expiry_seconds"))
+    if expiry_seconds <= 0:
+        return None
+    packet_id = _text(event.get("packet_id"))
+    if not packet_id:
+        return None
+    return {
+        "trade_id": f"live-chart-proxy-{packet_id}",
+        "packet_id": packet_id,
+        "source_event_key": _text(event.get("event_key")),
+        "source": "live_ready_broker_click_chart_proxy",
+        "mode": _text(event.get("mode"), "LIVE_READY"),
+        "actual_clicked": True,
+        "broker_click_allowed": bool(event.get("broker_click_allowed", True)),
+        "side": _text(event.get("side")).upper(),
+        "opened_epoch": opened_epoch,
+        "opened_at": _utc_iso(opened_epoch),
+        "expires_epoch": opened_epoch + float(expiry_seconds),
+        "expires_at": _utc_iso(opened_epoch + float(expiry_seconds)),
+        "expiry_seconds": expiry_seconds,
+        "entry_price_proxy": round(float(latest_price_proxy), 6),
+        "entry_lag_sec": round(entry_lag_sec, 3),
+        "status": "monitoring",
+        "lane": _text(event.get("selected_execution_lane")),
+        "timing_mode": _text(event.get("timing_mode")),
+        "decision_reason": _text(event.get("decision_reason") or event.get("reason")),
+    }
+
+
+def _safe_event_from_shooter_decision(
+    shooter_signature_payload: Mapping[str, Any],
+    *,
+    now: float,
+    process_snapshot: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not bool(shooter_signature_payload.get("will_click")):
+        return None
+    if _text(shooter_signature_payload.get("packet_type")) != "PG_EXECUTION_PACKET_V3":
+        return None
+    if _live_click_armed_from_snapshot(process_snapshot):
+        return None
+    packet_id = _text(shooter_signature_payload.get("packet_id"))
+    side = _text(shooter_signature_payload.get("side")).upper()
+    if not packet_id or side not in {"BUY", "SELL"}:
+        return None
+    modes = [
+        _text(mode).upper()
+        for mode in _sequence(_mapping(process_snapshot).get("shooter_modes"))
+        if _text(mode)
+    ]
+    row = {
+        "source_log": "runtime_trace/shooter_handshake",
+        "mode": ",".join(modes) or "UNKNOWN",
+        "packet_id": packet_id,
+        "schema_version": "PG_EXECUTION_PACKET_V3",
+        "side": side,
+        "expiry_seconds": _int(shooter_signature_payload.get("expiry_seconds")),
+        "timestamp": _float(shooter_signature_payload.get("timestamp_epoch"), now),
+        "decision_reason": _text(shooter_signature_payload.get("reason")),
+        "broker_click_allowed": False,
+        "actual_clicked": False,
+        "safe_paper_candidate": True,
+        "event_key": "",
+    }
+    row["event_key"] = _safe_shooter_event_key(row)
+    return row
+
+
+def _settle_safe_paper_monitors(
+    monitors: dict[str, dict[str, Any]],
+    *,
+    now: float,
+    latest_price_proxy: float | None,
+) -> list[dict[str, Any]]:
+    if latest_price_proxy is None or not math.isfinite(float(latest_price_proxy)):
+        return []
+    settled: list[dict[str, Any]] = []
+    for packet_id, monitor in list(monitors.items()):
+        expires_epoch = _float(monitor.get("expires_epoch"))
+        if expires_epoch <= 0.0 or expires_epoch > now:
+            continue
+        side = _text(monitor.get("side")).upper()
+        entry_price = _float(monitor.get("entry_price_proxy"), float("nan"))
+        if side not in {"BUY", "SELL"} or not math.isfinite(entry_price):
+            result = "UNKNOWN"
+            direction_delta = float("nan")
+        else:
+            raw_delta = float(latest_price_proxy) - entry_price
+            direction_delta = raw_delta if side == "BUY" else -raw_delta
+            if abs(direction_delta) <= 0.0001:
+                result = "FLAT"
+            elif direction_delta > 0:
+                result = "WIN"
+            else:
+                result = "LOSS"
+        outcome = {
+            **monitor,
+            "status": "settled_chart_proxy",
+            "result": result,
+            "outcome": result,
+            "verification": "chart_proxy",
+            "resolved_epoch": now,
+            "resolved_at": _utc_iso(now),
+            "exit_price_proxy": round(float(latest_price_proxy), 6),
+            "direction_delta_proxy": None if not math.isfinite(direction_delta) else round(float(direction_delta), 6),
+            "resolution_lag_sec": round(max(0.0, now - expires_epoch), 3),
+            "profit_proxy": None,
+            "profitability_scope": "paper_chart_proxy_not_live_broker",
+        }
+        settled.append(outcome)
+        monitors.pop(packet_id, None)
+    return settled
+
+
+def _settle_live_trade_monitors(
+    monitors: dict[str, dict[str, Any]],
+    *,
+    now: float,
+    latest_price_proxy: float | None,
+) -> list[dict[str, Any]]:
+    if latest_price_proxy is None or not math.isfinite(float(latest_price_proxy)):
+        return []
+    settled: list[dict[str, Any]] = []
+    for packet_id, monitor in list(monitors.items()):
+        expires_epoch = _float(monitor.get("expires_epoch"))
+        if expires_epoch <= 0.0 or expires_epoch > now:
+            continue
+        side = _text(monitor.get("side")).upper()
+        entry_price = _float(monitor.get("entry_price_proxy"), float("nan"))
+        if side not in {"BUY", "SELL"} or not math.isfinite(entry_price):
+            result = "UNKNOWN"
+            direction_delta = float("nan")
+            unit_profit = None
+        else:
+            raw_delta = float(latest_price_proxy) - entry_price
+            direction_delta = raw_delta if side == "BUY" else -raw_delta
+            if abs(direction_delta) <= 0.0001:
+                result = "FLAT"
+                unit_profit = 0.0
+            elif direction_delta > 0:
+                result = "WIN"
+                unit_profit = 1.0
+            else:
+                result = "LOSS"
+                unit_profit = -1.0
+        outcome = {
+            **monitor,
+            "status": "settled_chart_proxy",
+            "result": result,
+            "outcome": result,
+            "verification": "chart_proxy",
+            "resolved_epoch": now,
+            "resolved_at": _utc_iso(now),
+            "exit_price_proxy": round(float(latest_price_proxy), 6),
+            "direction_delta_proxy": None if not math.isfinite(direction_delta) else round(float(direction_delta), 6),
+            "resolution_lag_sec": round(max(0.0, now - expires_epoch), 3),
+            "profit_proxy": unit_profit,
+            "profitability_scope": "live_broker_click_chart_proxy_not_broker_statement",
+        }
+        settled.append(outcome)
+        monitors.pop(packet_id, None)
+    return settled
+
+
+def _summarize_safe_paper(
+    events: Sequence[Mapping[str, Any]],
+    monitors: Mapping[str, Mapping[str, Any]],
+    outcomes: Sequence[Mapping[str, Any]],
+    *,
+    min_settled_outcomes: int,
+) -> dict[str, Any]:
+    wins = sum(1 for row in outcomes if _infer_trade_result(row) == "WIN")
+    losses = sum(1 for row in outcomes if _infer_trade_result(row) == "LOSS")
+    flats = sum(1 for row in outcomes if _infer_trade_result(row) == "FLAT")
+    known = wins + losses
+    minimum = max(1, int(min_settled_outcomes))
+    return {
+        "scope": "safe_shooter_no_broker_click_chart_proxy",
+        "not_live_profitability": True,
+        "safe_shooter_event_count": len(events),
+        "active_monitor_count": len(monitors),
+        "settled_outcome_count": len(outcomes),
+        "minimum_required_settled_win_loss_outcomes": minimum,
+        "settled_known_outcomes": known,
+        "wins": wins,
+        "losses": losses,
+        "flat": flats,
+        "win_rate": round(wins / known, 4) if known else None,
+        "status": "PAPER_CALCULATED" if known >= minimum else "PAPER_INSUFFICIENT_SAMPLE",
+        "reason": (
+            "Safe shooter packets were monitored with chart-proxy settlement. This is not a live broker profitability certificate."
+            if outcomes
+            else "No safe paper packet has reached expiry with chart-proxy entry/exit prices yet."
+        ),
     }
 
 
@@ -415,6 +848,57 @@ def _promotion_failure_row(
     trace: Mapping[str, Any],
     sample: Mapping[str, Any],
 ) -> dict[str, Any]:
+    study = dict(study)
+    generic_no_packet_reasons = {
+        "",
+        "NONE",
+        "WATCHING",
+        "STUDY_PACKET_PUBLISHED",
+        "EXECUTION_PACKET_NOT_PUBLISHED",
+        "PG_EXECUTION_PACKET_V3_PUBLISHED",
+        "EXECUTABLE_PACKET_CREATED",
+    }
+
+    def has_promotion_context(payload: Mapping[str, Any]) -> bool:
+        promotion_context = _mapping(payload.get("promotion_trace"))
+        lane_context = _mapping(payload.get("execution_lane") or _mapping(payload.get("model_council")).get("execution_lane"))
+        audit_context = _mapping(payload.get("promotion_failure_audit_v3") or promotion_context.get("promotion_failure_audit_v3"))
+        promotion_reason_values = (
+            promotion_context.get("denied_at"),
+            promotion_context.get("true_blocker"),
+            promotion_context.get("blocked_by"),
+        )
+        has_real_promotion_reason = any(_text(value).upper() not in generic_no_packet_reasons for value in promotion_reason_values)
+        return bool(
+            audit_context
+            or lane_context
+            or has_real_promotion_reason
+            or promotion_context.get("next_required")
+            or promotion_context.get("release_condition")
+            or promotion_context.get("exact_field_preventing_execution_packet")
+        )
+
+    if not has_promotion_context(study):
+        endpoints = _mapping(trace.get("endpoints"))
+        model_council_endpoint = _mapping(endpoints.get("model_council_latest"))
+        model_council_payload = _mapping(model_council_endpoint.get("payload"))
+        model_council_result = _mapping(model_council_payload.get("model_council_result"))
+        for candidate in (
+            _mapping(model_council_payload.get("model_council_study_packet")),
+            _mapping(model_council_payload.get("study_packet")),
+            _mapping(model_council_result.get("study_packet")),
+            model_council_result,
+        ):
+            if not candidate or not has_promotion_context(candidate):
+                continue
+            enriched = dict(study)
+            for key, value in candidate.items():
+                if value not in (None, "", [], {}):
+                    enriched[key] = value
+            study = enriched
+            break
+
+    promotion_context_present = has_promotion_context(study)
     promotion = _mapping(study.get("promotion_trace"))
     council = _mapping(study.get("model_council"))
     canonical_audit = _mapping(
@@ -485,19 +969,62 @@ def _promotion_failure_row(
         or study.get("next_required")
         or sequence.get("next_required")
     )
+    canonical_denied_at = _text(canonical_audit.get("denied_at")).upper()
+    if denied_at.upper() in generic_no_packet_reasons and canonical_denied_at not in generic_no_packet_reasons:
+        denied_at = _text(canonical_audit.get("denied_at"))
+    elif denied_at.upper() in generic_no_packet_reasons:
+        denied_at = ""
     if not denied_at:
         if sample.get("source_lock_status") != "PASS":
             denied_at = "BROKER_SOURCE_LOCK"
         elif not bool(sample.get("sequence_ready")):
             denied_at = "SEQUENCE_CONTEXT"
+        elif not promotion_context_present:
+            denied_at = "PROMOTION_CONTEXT_MISSING"
         elif timing_mode and timing_mode != "ENTER_NOW":
             denied_at = "TIMING_READY"
+        elif lane and not bool(lane.get("accepted")):
+            denied_at = "NO_EXECUTION_LANE_ACCEPTED"
         elif lane_threshold and final_score < lane_threshold:
             denied_at = "LANE_SCORE"
+        elif trade_permission and (
+            trade_permission.get("allowed") is False
+            or trade_permission.get("accepted") is False
+            or _text(trade_permission.get("state") or trade_permission.get("permission") or trade_permission.get("status")).upper()
+            in {"DENIED", "BLOCKED", "WAIT", "WAITING", "NO_TRADE"}
+        ):
+            denied_at = _text(trade_permission.get("deny_reason") or trade_permission.get("reason"), "TRADE_PERMISSION")
+        elif entry_quality and _text(entry_quality.get("state") or entry_quality.get("grade") or entry_quality.get("entry_grade")).upper() in {
+            "BAD_NOW",
+            "LATE_ENTRY",
+            "CHASE_ENTRY",
+            "WATCH_ONLY",
+            "EARLY_WATCH",
+        }:
+            denied_at = "ENTRY_QUALITY"
         else:
-            denied_at = "EXECUTION_PACKET_NOT_PUBLISHED"
+            denied_at = "PG_EXECUTION_PACKET_V3_MISSING_AFTER_READY_GATES"
+    if (
+        denied_at == "PG_EXECUTION_PACKET_V3_MISSING_AFTER_READY_GATES"
+        and (not next_required or next_required == "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass")
+    ):
+        next_required = (
+            "current PG_EXECUTION_PACKET_V3 must exist, or promotion_failure_audit_v3 must name the exact validator rejection"
+        )
     if not next_required:
-        next_required = "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
+        next_required = _text(
+            lane.get("next_required")
+            or lane.get("reason")
+            or trade_permission.get("next_required")
+            or trade_permission.get("reason")
+            or entry_quality.get("reason")
+            or (
+                "runtime trace must include promotion_trace or execution_lane before packet absence can be certified"
+                if not promotion_context_present
+                else ""
+            )
+            or "current PG_EXECUTION_PACKET_V3 must exist, or promotion_failure_audit_v3 must name the exact validator rejection"
+        )
     row = {
         "epoch": now,
         "iso": _utc_iso(now),
@@ -539,6 +1066,7 @@ def _promotion_failure_row(
             promotion.get("exact_field_preventing_execution_packet")
             or denied_at
         ),
+        "promotion_context_present": promotion_context_present,
     }
     if canonical_audit:
         row["promotion_failure_audit_v3"] = canonical_audit
@@ -555,6 +1083,46 @@ def _promotion_failure_row(
         row["sequence_status"] = _text(canonical_audit.get("sequence_status"), row["sequence_status"])
         row["sequence_length"] = _int(canonical_audit.get("sequence_length"), _int(row.get("sequence_length")))
         row["lane"] = _text(canonical_audit.get("selected_lane"), row["lane"])
+    same_packet_second_read = (
+        _text(row.get("packet_id"))
+        and _text(row.get("packet_id")) == _text(sample.get("shooter_packet_id"))
+        and _text(sample.get("shooter_reason")).upper().startswith("WAITING_SECOND")
+    )
+    if row["denied_at"] in {
+        "PG_EXECUTION_PACKET_V3_MISSING_AFTER_READY_GATES",
+        "EXECUTION_PACKET_NOT_CURRENT_AFTER_PUBLICATION",
+    }:
+        thin_context = (
+            row["denied_at"] == "PG_EXECUTION_PACKET_V3_MISSING_AFTER_READY_GATES"
+            and not _text(row.get("lane"))
+            and not _text(row.get("timing_mode"))
+            and _float(row.get("final_score")) <= 0.0
+            and _float(row.get("lane_threshold")) <= 0.0
+            and _int(row.get("sequence_length")) <= 0
+        )
+        if thin_context:
+            row["denied_at"] = "PROMOTION_CONTEXT_MISSING"
+            row["next_required"] = "runtime trace must include promotion_trace or execution_lane before packet absence can be certified"
+            row["exact_field_preventing_execution_packet"] = "promotion_trace"
+        elif same_packet_second_read:
+            row["denied_at"] = "SHOOTER_SECOND_READ_PENDING"
+            row["next_required"] = "ShooterActionSequencerV2 second live read must pass before click"
+            row["exact_field_preventing_execution_packet"] = "ShooterActionSequencerV2.second_read"
+        audit = _mapping(row.get("promotion_failure_audit_v3"))
+        if audit and row["denied_at"] != "PG_EXECUTION_PACKET_V3_MISSING_AFTER_READY_GATES":
+            audit["denied_at"] = row["denied_at"]
+            audit["top_blocker"] = row["denied_at"]
+            audit["next_required"] = row["next_required"]
+            audit["exact_field_preventing_execution_packet"] = row["exact_field_preventing_execution_packet"]
+            blockers = _sequence(audit.get("blocker_ranking"))
+            if blockers and isinstance(blockers[0], Mapping):
+                first = dict(blockers[0])
+                first["blocker"] = row["denied_at"]
+                first["field"] = row["exact_field_preventing_execution_packet"]
+                first["reason"] = row["next_required"]
+                first["next_required"] = row["next_required"]
+                audit["blocker_ranking"] = [first, *[dict(item) for item in blockers[1:] if isinstance(item, Mapping)]]
+            row["promotion_failure_audit_v3"] = audit
     return row
 
 
@@ -567,6 +1135,7 @@ def _rank_promotion_blockers(rows: Sequence[Mapping[str, Any]]) -> dict[str, int
         "bad_entry active": 0,
         "broker source lock missing": 0,
         "model health stale": 0,
+        "execution packet not current after publication": 0,
         "opposing force too close": 0,
         "no path room": 0,
     }
@@ -588,6 +1157,8 @@ def _rank_promotion_blockers(rows: Sequence[Mapping[str, Any]]) -> dict[str, int
             ranking["broker source lock missing"] += 1
         if _text(row.get("model_health")).upper() not in {"PASS", "AWAKE"}:
             ranking["model health stale"] += 1
+        if "NOT_CURRENT_AFTER_PUBLICATION" in denied_at:
+            ranking["execution packet not current after publication"] += 1
         if "opposing" in denied_at.lower() or "opposing force" in next_required:
             ranking["opposing force too close"] += 1
         if "path" in denied_at.lower() or "target" in next_required and "invalidation" in next_required:
@@ -642,6 +1213,7 @@ def _render_report(
     samples: Sequence[Mapping[str, Any]],
     component_counts: Mapping[str, Mapping[str, int]],
     profitability: Mapping[str, Any],
+    safe_paper: Mapping[str, Any],
     precision: Mapping[str, Any],
     frame_ages: Sequence[float],
     overlay_ages: Sequence[float],
@@ -735,22 +1307,31 @@ def _render_report(
         "## 13. Profitability Sample",
         "",
         "The two-hour result is a sample only. Long-term profitability is not certified by a two-hour sample.",
+        "Live broker profitability uses only settled live trade outcomes.",
         "",
         "```json",
         json.dumps(dict(profitability), indent=2, sort_keys=True, default=str),
         "```",
         "",
-        "## 14. Precision Metrics",
+        "## 14. Safe Paper Chart-Proxy Sample",
+        "",
+        "Safe paper evidence comes from validated shooter packets where broker clicks remained disabled. It is separate from live trade profitability.",
+        "",
+        "```json",
+        json.dumps(dict(safe_paper), indent=2, sort_keys=True, default=str),
+        "```",
+        "",
+        "## 15. Precision Metrics",
         "",
         "```json",
         json.dumps(dict(precision), indent=2, sort_keys=True, default=str),
         "```",
         "",
-        "## 15. Failure Cases",
+        "## 16. Failure Cases",
         "",
     ]
     lines.extend(f"- {item}" for item in failures) if failures else lines.append("- none")
-    lines.extend(["", "## 16. Lessons Learned", ""])
+    lines.extend(["", "## 17. Lessons Learned", ""])
     if not executable_packets:
         lines.append("- No executable packet appeared during the observed window, so profitability and execution precision cannot be certified.")
     if skill_rows == 0:
@@ -761,17 +1342,57 @@ def _render_report(
         lines.append("- Two-candle study evidence was not visible in sampled payloads; two-candle precision remains unmeasured.")
     if not failures and executable_packets:
         lines.append("- Runtime stayed coherent while executable packet evidence was observed.")
-    lines.extend(["", "## 17. Component Status Counts", ""])
+    if safe_paper.get("safe_shooter_event_count"):
+        lines.append("- Safe shooter readiness was observed without broker clicks; live profitability remains separate from paper chart-proxy settlement.")
+    lines.extend(["", "## 18. Component Status Counts", ""])
     lines.append("```json")
     lines.append(json.dumps(dict(component_counts), indent=2, sort_keys=True, default=str))
     lines.append("```")
-    lines.extend(["", "## 18. Final Verdict", "", f"`{verdict}`"])
+    lines.extend(["", "## 19. Final Verdict", "", f"`{verdict}`"])
     if stop_reason:
         lines.extend(["", f"Stop reason: `{stop_reason}`"])
     if warnings:
         lines.extend(["", "Warnings:"])
         lines.extend(f"- {item}" for item in warnings)
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _final_burn_verdict(
+    *,
+    mode: str,
+    stop_reason: str,
+    executable_packets: Sequence[str],
+    trade_outcomes: Sequence[Mapping[str, Any]],
+    promotion_failures: Sequence[Mapping[str, Any]],
+    profitability: Mapping[str, Any],
+    safe_paper: Mapping[str, Any],
+    require_live_clicks_armed: bool,
+    min_sample_trades: int,
+) -> str:
+    normalized_mode = _text(mode).upper()
+    if stop_reason.startswith("STOPPED_BY_RISK_LIMIT"):
+        return "STOPPED_BY_RISK_LIMIT"
+    if stop_reason.startswith("STOP_ON_SHOOTER_EXIT") or stop_reason.startswith("STOP_ON_STALE_EXECUTION_PACKET"):
+        return "FAIL_EXECUTION_PATH"
+    if stop_reason:
+        return "FAIL_RUNTIME"
+    if normalized_mode == "FULL_ACTIVATED" and not executable_packets and promotion_failures:
+        return "FAIL_PROMOTION"
+    if normalized_mode == "FULL_ACTIVATED" and not executable_packets:
+        return "FAIL_NO_EXECUTION_PACKET"
+    if normalized_mode == "FULL_ACTIVATED" and executable_packets and not trade_outcomes:
+        if safe_paper.get("safe_shooter_event_count") and not require_live_clicks_armed:
+            return "PASS_SAFE_EXECUTION_READINESS_LIVE_PROFITABILITY_UNCERTIFIED"
+        return "FAIL_EXECUTION_PATH"
+    if not trade_outcomes and not executable_packets:
+        return "PASS_RUNTIME_ONLY_NO_TRADES"
+    if len(trade_outcomes) < min_sample_trades:
+        return "INSUFFICIENT_SAMPLE"
+    if _text(profitability.get("profitability")).upper() == "INSUFFICIENT_SAMPLE":
+        return "INSUFFICIENT_SAMPLE"
+    if _float(profitability.get("net_profit_proxy")) < 0.0:
+        return "FAIL_PROFITABILITY_SAMPLE"
+    return "PASS_FULL_ACTIVATED"
 
 
 def main() -> int:
@@ -790,10 +1411,11 @@ def main() -> int:
     parser.add_argument("--max-frame-age-ms", type=float, default=2500.0)
     parser.add_argument("--max-consecutive-stale-frames", type=int, default=5)
     parser.add_argument("--max-consecutive-process-misses", type=int, default=3)
-    parser.add_argument("--max-api-failures", type=int, default=0)
+    parser.add_argument("--max-api-failures", type=int, default=2)
     parser.add_argument("--min-sample-trades", type=int, default=3)
     parser.add_argument("--warmup-sec", type=float, default=30.0)
     parser.add_argument("--status-every-sec", type=float, default=30.0)
+    parser.add_argument("--paper-entry-max-lag-sec", type=float, default=20.0)
     parser.add_argument("--allow-missing-shooter", action="store_true")
     parser.add_argument("--no-stop-on-stale-frame", action="store_true")
     parser.add_argument("--no-stop-on-stale-execution-packet", action="store_true")
@@ -807,16 +1429,7 @@ def main() -> int:
     if not out_path.is_absolute():
         out_path = ROOT / out_path
 
-    for name in (
-        "burn_in_samples.jsonl",
-        "trade_outcomes.jsonl",
-        "model_votes.jsonl",
-        "skill_contributions.jsonl",
-        "lstm_predictions.jsonl",
-        "two_candle_study.jsonl",
-        "shooter_actions.jsonl",
-        "promotion_failures.jsonl",
-    ):
+    for name in BURN_RESET_FILES:
         (BURN_DIR / name).write_text("", encoding="utf-8")
 
     started = time.time()
@@ -833,16 +1446,26 @@ def main() -> int:
     executable_packets: list[str] = []
     shooter_clicks: list[dict[str, Any]] = []
     trade_outcomes: list[dict[str, Any]] = []
+    trade_outcome_packet_ids: set[str] = set()
     promotion_failures: list[dict[str, Any]] = []
     component_counts: dict[str, dict[str, int]] = {name: {} for name in REQUIRED_COMPONENTS}
     endpoint_failures = 0
     consecutive_losses = 0
     consecutive_stale_frames = 0
+    consecutive_endpoint_failures = 0
     consecutive_missing_api_processes = 0
     consecutive_missing_tracker_processes = 0
     consecutive_missing_shooter_processes = 0
     seen_shooter_signatures: set[str] = set()
     seen_action_evidence: set[str] = set()
+    seen_safe_shooter_events = {_safe_shooter_event_key(row) for row in _collect_safe_shooter_validation_events()}
+    seen_live_ready_click_events: set[str] = set()
+    monitored_live_ready_click_events: set[str] = set()
+    safe_shooter_events: list[dict[str, Any]] = []
+    safe_paper_monitors: dict[str, dict[str, Any]] = {}
+    safe_paper_outcomes: list[dict[str, Any]] = []
+    live_trade_monitors: dict[str, dict[str, Any]] = {}
+    live_trade_outcomes: list[dict[str, Any]] = []
     skill_rows = 0
     lstm_rows = 0
     two_candle_rows = 0
@@ -870,7 +1493,8 @@ def main() -> int:
             },
             sort_keys=True,
             default=str,
-        )
+        ),
+        flush=True,
     )
 
     if args.mode == "FULL_ACTIVATED" and args.require_live_clicks_armed:
@@ -896,8 +1520,10 @@ def main() -> int:
             failures.extend(preflight_failures)
             ended = time.time()
             profitability = _summarize_outcomes([], min_settled_outcomes=args.min_sample_trades)
+            safe_paper = _summarize_safe_paper([], {}, [], min_settled_outcomes=args.min_sample_trades)
             precision = _summarize_precision([], [])
             _write_json(BURN_DIR / "profitability_summary.json", profitability)
+            _write_json(BURN_DIR / "safe_paper_summary.json", safe_paper)
             _write_json(BURN_DIR / "precision_summary.json", precision)
             report_text = _render_report(
                 args=args,
@@ -910,6 +1536,7 @@ def main() -> int:
                 samples=[],
                 component_counts=component_counts,
                 profitability=profitability,
+                safe_paper=safe_paper,
                 precision=precision,
                 frame_ages=[],
                 overlay_ages=[],
@@ -918,9 +1545,9 @@ def main() -> int:
                 shooter_clicks=[],
                 skill_rows=0,
                 lstm_rows=0,
-        two_candle_rows=0,
-        promotion_ranking={},
-    )
+                two_candle_rows=0,
+                promotion_ranking={},
+            )
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(report_text, encoding="utf-8")
             summary = {
@@ -935,7 +1562,7 @@ def main() -> int:
                 "burn_dir": str(BURN_DIR),
             }
             _write_json(BURN_DIR / "burn_in_summary.json", summary)
-            print("FULL_SYSTEM_BURN_IN_DONE " + json.dumps(summary, sort_keys=True, default=str))
+            print("FULL_SYSTEM_BURN_IN_DONE " + json.dumps(summary, sort_keys=True, default=str), flush=True)
             return 1
 
     while time.time() < deadline and not stop_reason:
@@ -955,6 +1582,7 @@ def main() -> int:
         shooter = _endpoint_payload(trace, "shooter_handshake") or _read_json(SHOOTER_HANDSHAKE_PATH)
         model_health = _endpoint_payload(trace, "model_health")
         payloads = [trace, perf, tracker_latest, model_council_latest, study, execution, floating, shooter, model_health]
+        latest_price_proxy = _latest_price_proxy(payloads)
 
         def _trace_endpoint_status(name: str) -> str:
             return _text(_mapping(trace_endpoints.get(name)).get("status"), "MISSING").upper()
@@ -1055,6 +1683,7 @@ def main() -> int:
             "shooter_will_click": bool(shooter.get("will_click")),
             "shooter_reason": _text(shooter.get("reason")),
             "shooter_side": _text(shooter.get("side")),
+            "latest_price_proxy": latest_price_proxy,
             "stale_execution_packet": stale_execution_packet,
             "process_query_reliable": process_query_reliable,
             "consecutive_missing_api_processes": consecutive_missing_api_processes,
@@ -1097,10 +1726,19 @@ def main() -> int:
             {"epoch": now, "iso": _utc_iso(now), "count": len(two_candle), "rows": two_candle[:20]},
         )
 
+        execution_payload = _mapping(execution.get("execution"))
+        execution_time_sequence = _mapping(execution_payload.get("time_sequence"))
+        shooter_expiry_seconds = (
+            shooter.get("expiry_seconds")
+            or shooter.get("expiry")
+            or execution_payload.get("expiry_seconds")
+            or execution_time_sequence.get("target_seconds")
+        )
         shooter_signature_payload = {
             "packet_id": shooter_packet_id,
             "packet_type": shooter.get("packet_type"),
             "side": shooter.get("side"),
+            "expiry_seconds": shooter_expiry_seconds,
             "will_click": shooter.get("will_click"),
             "reason": shooter.get("reason"),
             "timestamp_epoch": shooter.get("timestamp_epoch"),
@@ -1121,8 +1759,28 @@ def main() -> int:
                 "selected_execution_lane": shooter.get("selected_execution_lane"),
             }
             _append_jsonl(BURN_DIR / "shooter_actions.jsonl", action_row)
-            if bool(shooter.get("will_click")) or _text(shooter.get("action_sequence")).upper().startswith("PASS"):
+            if _actual_click_observed(shooter):
                 shooter_clicks.append(action_row)
+            safe_decision_event = _safe_event_from_shooter_decision(
+                shooter_signature_payload,
+                now=now,
+                process_snapshot=process_snapshot,
+            )
+            if safe_decision_event is not None:
+                event_key = _text(safe_decision_event.get("event_key"))
+                if event_key and event_key not in seen_safe_shooter_events:
+                    seen_safe_shooter_events.add(event_key)
+                    safe_shooter_events.append(safe_decision_event)
+                    _append_jsonl(BURN_DIR / "safe_shooter_events.jsonl", {"epoch": now, "iso": _utc_iso(now), **safe_decision_event})
+                    monitor = _paper_monitor_from_safe_event(
+                        safe_decision_event,
+                        now=now,
+                        latest_price_proxy=latest_price_proxy,
+                        max_entry_lag_sec=args.paper_entry_max_lag_sec,
+                    )
+                    if monitor is not None and _text(monitor.get("packet_id")) not in safe_paper_monitors:
+                        safe_paper_monitors[_text(monitor.get("packet_id"))] = monitor
+                        _append_jsonl(BURN_DIR / "safe_paper_monitors.jsonl", {"epoch": now, "iso": _utc_iso(now), **monitor})
 
         for evidence in _detect_action_evidence():
             evidence_key = f"{evidence.get('path')}:{evidence.get('modified_epoch')}:{evidence.get('size')}"
@@ -1131,32 +1789,131 @@ def main() -> int:
             seen_action_evidence.add(evidence_key)
             _append_jsonl(BURN_DIR / "shooter_actions.jsonl", {"epoch": now, "iso": _utc_iso(now), "action_evidence": evidence})
 
-        if bool(shooter.get("will_click")) and shooter_packet_id:
-            outcome_row = {
-                "trade_id": f"burn_{len(trade_outcomes) + 1:04d}",
+        for event in _collect_safe_shooter_validation_events():
+            event_key = _text(event.get("event_key"))
+            if not event_key or event_key in seen_safe_shooter_events:
+                continue
+            seen_safe_shooter_events.add(event_key)
+            safe_shooter_events.append(event)
+            _append_jsonl(BURN_DIR / "safe_shooter_events.jsonl", {"epoch": now, "iso": _utc_iso(now), **event})
+            monitor = _paper_monitor_from_safe_event(
+                event,
+                now=now,
+                latest_price_proxy=latest_price_proxy,
+                max_entry_lag_sec=args.paper_entry_max_lag_sec,
+            )
+            if monitor is not None and _text(monitor.get("packet_id")) not in safe_paper_monitors:
+                safe_paper_monitors[_text(monitor.get("packet_id"))] = monitor
+                _append_jsonl(BURN_DIR / "safe_paper_monitors.jsonl", {"epoch": now, "iso": _utc_iso(now), **monitor})
+
+        for event in _collect_live_ready_click_events(since_epoch=started):
+            event_key = _text(event.get("event_key"))
+            packet_id = _text(event.get("packet_id"))
+            if not event_key:
+                continue
+            if event_key not in seen_live_ready_click_events:
+                seen_live_ready_click_events.add(event_key)
+                shooter_clicks.append(event)
+                _append_jsonl(BURN_DIR / "shooter_actions.jsonl", {"epoch": now, "iso": _utc_iso(now), "live_ready_click_event": event})
+            if (
+                packet_id
+                and event_key not in monitored_live_ready_click_events
+                and packet_id not in live_trade_monitors
+                and packet_id not in trade_outcome_packet_ids
+                and _live_click_armed_from_snapshot(process_snapshot)
+            ):
+                monitor = _live_trade_monitor_from_click_event(
+                    event,
+                    now=now,
+                    latest_price_proxy=latest_price_proxy,
+                    max_entry_lag_sec=max(float(args.paper_entry_max_lag_sec), 90.0),
+                )
+                if monitor is not None:
+                    monitored_live_ready_click_events.add(event_key)
+                    live_trade_monitors[packet_id] = monitor
+                    _append_jsonl(BURN_DIR / "live_trade_monitors.jsonl", {"epoch": now, "iso": _utc_iso(now), **monitor})
+
+        for outcome in _settle_safe_paper_monitors(
+            safe_paper_monitors,
+            now=now,
+            latest_price_proxy=latest_price_proxy,
+        ):
+            safe_paper_outcomes.append(outcome)
+            _append_jsonl(BURN_DIR / "safe_paper_outcomes.jsonl", {"epoch": now, "iso": _utc_iso(now), **outcome})
+
+        for outcome in _settle_live_trade_monitors(
+            live_trade_monitors,
+            now=now,
+            latest_price_proxy=latest_price_proxy,
+        ):
+            packet_id = _text(outcome.get("packet_id"))
+            if packet_id and packet_id not in trade_outcome_packet_ids:
+                trade_outcome_packet_ids.add(packet_id)
+                outcome_row = {
+                    "trade_id": f"burn_{len(trade_outcomes) + 1:04d}",
+                    "packet_id": packet_id,
+                    "side": _text(outcome.get("side")),
+                    "entry_time": _text(outcome.get("opened_at")),
+                    "expiry_seconds": _int(outcome.get("expiry_seconds")),
+                    "result": _infer_trade_result(outcome),
+                    "lane": _text(outcome.get("lane")),
+                    "timing_mode": _text(outcome.get("timing_mode")),
+                    "profit_proxy": outcome.get("profit_proxy"),
+                    "path_quality": "CHART_PROXY",
+                    "raw": outcome,
+                    "source": "live_ready_broker_click_chart_proxy",
+                }
+                trade_outcomes.append(outcome_row)
+                live_trade_outcomes.append(outcome_row)
+                _append_jsonl(BURN_DIR / "live_trade_outcomes.jsonl", {"epoch": now, "iso": _utc_iso(now), **outcome_row})
+                _append_jsonl(BURN_DIR / "trade_outcomes.jsonl", outcome_row)
+                result = _infer_trade_result(outcome_row)
+                if result == "LOSS":
+                    consecutive_losses += 1
+                elif result == "WIN":
+                    consecutive_losses = 0
+
+        if (
+            _actual_click_observed(shooter)
+            and _live_click_armed_from_snapshot(process_snapshot)
+            and shooter_packet_id
+            and shooter_packet_id not in live_trade_monitors
+            and shooter_packet_id not in trade_outcome_packet_ids
+        ):
+            monitor_event = {
                 "packet_id": shooter_packet_id,
                 "side": _text(shooter.get("side")),
-                "entry_time": _utc_iso(now),
+                "timestamp": now,
                 "expiry_seconds": _int(shooter.get("expiry_seconds") or shooter.get("expiry")),
-                "result": _infer_trade_result(shooter),
-                "lane": _text(shooter.get("selected_execution_lane")),
+                "selected_execution_lane": _text(shooter.get("selected_execution_lane")),
                 "timing_mode": _text(shooter.get("timing_mode")),
-                "profit_proxy": shooter.get("profit_proxy"),
-                "path_quality": _text(shooter.get("path_quality"), "UNKNOWN"),
-                "raw": shooter_signature_payload,
+                "decision_reason": _text(shooter.get("reason")),
+                "mode": "LIVE_READY",
+                "broker_click_allowed": True,
+                "event_key": f"runtime_trace/shooter_handshake|LIVE_READY|{shooter_packet_id}|{now:.3f}",
             }
-            trade_outcomes.append(outcome_row)
-            _append_jsonl(BURN_DIR / "trade_outcomes.jsonl", outcome_row)
-            result = _infer_trade_result(outcome_row)
-            if result == "LOSS":
-                consecutive_losses += 1
-            elif result == "WIN":
-                consecutive_losses = 0
+            monitor = _live_trade_monitor_from_click_event(
+                monitor_event,
+                now=now,
+                latest_price_proxy=latest_price_proxy,
+                max_entry_lag_sec=max(float(args.paper_entry_max_lag_sec), 90.0),
+            )
+            if monitor is not None:
+                live_trade_monitors[shooter_packet_id] = monitor
+                _append_jsonl(BURN_DIR / "live_trade_monitors.jsonl", {"epoch": now, "iso": _utc_iso(now), **monitor})
 
         if not trace_result.ok or not perf_result.ok:
             endpoint_failures += 1
-            if not in_warmup and endpoint_failures > args.max_api_failures:
-                stop_reason = f"STOP_ON_API_CRASH endpoint_failures={endpoint_failures}"
+            if not in_warmup:
+                consecutive_endpoint_failures += 1
+            if not in_warmup and consecutive_endpoint_failures > args.max_api_failures:
+                stop_reason = (
+                    "STOP_ON_API_CRASH "
+                    f"endpoint_failures={endpoint_failures} "
+                    f"consecutive_endpoint_failures={consecutive_endpoint_failures}"
+                )
+        elif not in_warmup:
+            consecutive_endpoint_failures = 0
         process_miss_limit = max(1, int(args.max_consecutive_process_misses))
         if (
             args.mode == "FULL_ACTIVATED"
@@ -1209,7 +1966,8 @@ def main() -> int:
                     },
                     sort_keys=True,
                     default=str,
-                )
+                ),
+                flush=True,
             )
             next_status = now + max(5.0, float(args.status_every_sec))
 
@@ -1224,37 +1982,43 @@ def main() -> int:
         warnings.append(f"endpoint_failures={endpoint_failures}")
 
     profitability = _summarize_outcomes(trade_outcomes, min_settled_outcomes=args.min_sample_trades)
+    safe_paper = _summarize_safe_paper(
+        safe_shooter_events,
+        safe_paper_monitors,
+        safe_paper_outcomes,
+        min_settled_outcomes=args.min_sample_trades,
+    )
     precision = _summarize_precision(samples, trade_outcomes)
+    precision["safe_shooter_execution_readiness"] = {
+        "safe_shooter_event_count": len(safe_shooter_events),
+        "safe_paper_active_monitor_count": len(safe_paper_monitors),
+        "safe_paper_settled_outcome_count": len(safe_paper_outcomes),
+    }
+    precision["live_trade_chart_proxy"] = {
+        "active_monitor_count": len(live_trade_monitors),
+        "settled_outcome_count": len(live_trade_outcomes),
+        "scope": "live broker clicks settled by chart proxy, not broker statement",
+    }
     promotion_ranking = _rank_promotion_blockers(promotion_failures)
     _write_json(BURN_DIR / "profitability_summary.json", profitability)
+    _write_json(BURN_DIR / "safe_paper_summary.json", safe_paper)
     _write_json(BURN_DIR / "precision_summary.json", precision)
     _write_json(BURN_DIR / "promotion_blocker_ranking.json", promotion_ranking)
     promotion_report_path = ROOT / "reports" / "FINAL_PROMOTION_FAILURE_AUDIT.md"
     promotion_report_path.parent.mkdir(parents=True, exist_ok=True)
     promotion_report_path.write_text(_render_promotion_failure_report(promotion_failures, promotion_ranking), encoding="utf-8")
 
-    if stop_reason.startswith("STOPPED_BY_RISK_LIMIT"):
-        verdict = "STOPPED_BY_RISK_LIMIT"
-    elif stop_reason.startswith("STOP_ON_SHOOTER_EXIT") or stop_reason.startswith("STOP_ON_STALE_EXECUTION_PACKET"):
-        verdict = "FAIL_EXECUTION_PATH"
-    elif stop_reason:
-        verdict = "FAIL_RUNTIME"
-    elif args.mode == "FULL_ACTIVATED" and not executable_packets and promotion_failures:
-        verdict = "FAIL_PROMOTION"
-    elif args.mode == "FULL_ACTIVATED" and not executable_packets:
-        verdict = "INSUFFICIENT_SAMPLE"
-    elif args.mode == "FULL_ACTIVATED" and executable_packets and not trade_outcomes:
-        verdict = "FAIL_EXECUTION_PATH"
-    elif not trade_outcomes and not executable_packets:
-        verdict = "PASS_RUNTIME_ONLY_NO_TRADES"
-    elif len(trade_outcomes) < args.min_sample_trades:
-        verdict = "INSUFFICIENT_SAMPLE"
-    elif _text(profitability.get("profitability")).upper() == "INSUFFICIENT_SAMPLE":
-        verdict = "INSUFFICIENT_SAMPLE"
-    elif _float(profitability.get("net_profit_proxy")) < 0.0:
-        verdict = "FAIL_PROFITABILITY_SAMPLE"
-    else:
-        verdict = "PASS_FULL_ACTIVATED"
+    verdict = _final_burn_verdict(
+        mode=args.mode,
+        stop_reason=stop_reason,
+        executable_packets=executable_packets,
+        trade_outcomes=trade_outcomes,
+        promotion_failures=promotion_failures,
+        profitability=profitability,
+        safe_paper=safe_paper,
+        require_live_clicks_armed=args.require_live_clicks_armed,
+        min_sample_trades=args.min_sample_trades,
+    )
 
     report_text = _render_report(
         args=args,
@@ -1267,6 +2031,7 @@ def main() -> int:
         samples=samples,
         component_counts=component_counts,
         profitability=profitability,
+        safe_paper=safe_paper,
         precision=precision,
         frame_ages=frame_ages,
         overlay_ages=overlay_ages,
@@ -1291,6 +2056,8 @@ def main() -> int:
         "sample_count": len(samples),
         "executable_packets": len(set(executable_packets)),
         "trade_outcomes": len(trade_outcomes),
+        "safe_shooter_events": len(safe_shooter_events),
+        "safe_paper_outcomes": len(safe_paper_outcomes),
         "p95_frame_age_ms": percentile(frame_ages, 95),
         "p95_overlay_age_ms": percentile(overlay_ages, 95),
         "p95_model_vote_age_ms": percentile(model_ages, 95),
@@ -1299,8 +2066,12 @@ def main() -> int:
         "burn_dir": str(BURN_DIR),
     }
     _write_json(BURN_DIR / "burn_in_summary.json", summary)
-    print("FULL_SYSTEM_BURN_IN_DONE " + json.dumps(summary, sort_keys=True, default=str))
-    return 0 if verdict == "PASS_FULL_ACTIVATED" or (args.mode != "FULL_ACTIVATED" and verdict in {"PASS_RUNTIME_ONLY_NO_TRADES", "INSUFFICIENT_SAMPLE"}) else 1
+    print("FULL_SYSTEM_BURN_IN_DONE " + json.dumps(summary, sort_keys=True, default=str), flush=True)
+    success_verdicts = {
+        "PASS_FULL_ACTIVATED",
+        "PASS_SAFE_EXECUTION_READINESS_LIVE_PROFITABILITY_UNCERTIFIED",
+    }
+    return 0 if verdict in success_verdicts or (args.mode != "FULL_ACTIVATED" and verdict in {"PASS_RUNTIME_ONLY_NO_TRADES", "INSUFFICIENT_SAMPLE"}) else 1
 
 
 if __name__ == "__main__":

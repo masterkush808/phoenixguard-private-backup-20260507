@@ -20,7 +20,8 @@ param(
     [double]$CalibrationTestTimeFillWaitSeconds = $(if ($env:PHOENIXGUARD_CALIBRATION_TEST_TIME_FILL_WAIT_SECONDS) { [double]$env:PHOENIXGUARD_CALIBRATION_TEST_TIME_FILL_WAIT_SECONDS } else { 0.0 }),
     [switch]$CalibrationTestTimeOnly,
     [string]$BrokerWindowQuery = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_QUERY) { $env:PHOENIXGUARD_BROKER_WINDOW_QUERY } else { 'Pocket Option' }),
-    [string]$TrackerFocusRegion = $(if ($env:PHOENIXGUARD_TRACKER_FOCUS_REGION) { $env:PHOENIXGUARD_TRACKER_FOCUS_REGION } else { '0.02,0.06,0.76,0.94' }),
+    [int]$BrokerWindowHwnd = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_HWND) { [int]$env:PHOENIXGUARD_BROKER_WINDOW_HWND } else { 0 }),
+    [string]$TrackerFocusRegion = $(if ($env:PHOENIXGUARD_TRACKER_FOCUS_REGION) { $env:PHOENIXGUARD_TRACKER_FOCUS_REGION } else { '0.03,0.13,0.87,0.96' }),
     [switch]$NoBrowser,
     [switch]$NoStatusLoop,
     [switch]$NoKillExisting
@@ -48,14 +49,22 @@ if (-not (Test-Path -LiteralPath $pythonPath)) {
     throw "Python executable not found at '$pythonPath'."
 }
 
-$statusPath = Join-Path -Path $PSScriptRoot -ChildPath '.codex_runtime\tracker_status.json'
-$runtimeDir = Join-Path -Path $PSScriptRoot -ChildPath '.codex_runtime'
+$defaultRuntimeDir = if ($env:PHOENIXGUARD_RUNTIME_DIR) {
+    $env:PHOENIXGUARD_RUNTIME_DIR
+} elseif ($env:LOCALAPPDATA) {
+    Join-Path -Path $env:LOCALAPPDATA -ChildPath 'PhoenixGuard\codex_runtime'
+} else {
+    Join-Path -Path $PSScriptRoot -ChildPath '.codex_runtime'
+}
+$runtimeDir = $defaultRuntimeDir
+$statusPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
 $trackerStdoutPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stdout.log'
 $trackerStderrPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stderr.log'
 $baseUrl = "http://$ApiHost`:$ApiPort"
 $dashboardUrl = "$baseUrl/dashboard/live/$SessionId"
 $finalLaunchProfile = 'FINAL_LIVE'
 $env:PHOENIXGUARD_PROFILE = $finalLaunchProfile
+$env:PHOENIXGUARD_BROKER_WINDOW_HWND = "$BrokerWindowHwnd"
 $env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL = if ($env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL) { $env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL } else { '0' }
 $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS = if ($env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS) { $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS } else { '1' }
 $env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N = if ($env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N) { $env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N } else { '300' }
@@ -73,7 +82,6 @@ if (-not $env:PHOENIXGUARD_TRACKER_STATUS_FILE) {
     $env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
 }
 
-$shooterMode = 'LIVE_READY'
 $launchShooter = @('FULL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED') -contains $Profile
 $startupTestSignal = $false
 $brokerClickPath = if ($ShooterMode -eq 'LIVE_READY') { 'EXPLICIT_LIVE_READY' } elseif ($ShooterMode -eq 'LIVE_BEHAVIOR_VALIDATION') { 'EXPLICIT_LIVE_BEHAVIOR_VALIDATION' } elseif ($ShooterMode -eq 'CALIBRATION_TEST') { 'CALIBRATION_TEST' } else { 'DISABLED' }
@@ -102,10 +110,11 @@ function Start-TrackerChildProcess {
     $escapedSessionId = $SessionId.Replace("'", "''")
     $escapedBrokerWindowQuery = $BrokerWindowQuery.Replace("'", "''")
     $escapedTrackerFocusRegion = $TrackerFocusRegion.Replace("'", "''")
+    $trackerWindowHwndArg = if ($BrokerWindowHwnd -gt 0) { " -BrokerWindowHwnd $BrokerWindowHwnd" } else { "" }
     $trackerCommand = @(
         'Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned',
         "cd '$escapedRoot'",
-        ".\start_phoenixguard_24_7_tracker.ps1 -ApiHost '$escapedApiHost' -Port $ApiPort -SessionId '$escapedSessionId' -BrokerWindowQuery '$escapedBrokerWindowQuery' -FocusRegion '$escapedTrackerFocusRegion' -CaptureIntervalSec $CaptureIntervalSec -NoOpenDashboard"
+        ".\start_phoenixguard_24_7_tracker.ps1 -ApiHost '$escapedApiHost' -Port $ApiPort -SessionId '$escapedSessionId' -BrokerWindowQuery '$escapedBrokerWindowQuery'$trackerWindowHwndArg -FocusRegion '$escapedTrackerFocusRegion' -CaptureIntervalSec $CaptureIntervalSec -NoOpenDashboard"
     ) -join '; '
 
     Start-Process powershell -ArgumentList @(
@@ -222,7 +231,9 @@ try {
     if ($session -and $launchShooter) {
         Write-Host "Starting shooter against $baseUrl in $ShooterMode mode"
         $explicitLiveArm = [string]$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS
-        $liveClickArm = '1'
+        $liveClickArm = if ($ShooterMode -eq 'LIVE_READY' -or $ShooterMode -eq 'LIVE_BEHAVIOR_VALIDATION') { '1' } else { '0' }
+        $disabledShooterPollFloor = if ($env:PHOENIXGUARD_LIVE_DISABLED_SHOOTER_MIN_POLL_SEC) { [double]$env:PHOENIXGUARD_LIVE_DISABLED_SHOOTER_MIN_POLL_SEC } else { 0.50 }
+        $effectiveShooterPollSec = if ($ShooterMode -eq 'LIVE_DISABLED') { [Math]::Max([double]$ShooterPollSec, [double]$disabledShooterPollFloor) } else { [double]$ShooterPollSec }
         $escapedRoot = $PSScriptRoot.Replace("'", "''")
         $escapedSessionId = $SessionId.Replace("'", "''")
         $escapedBaseUrl = $baseUrl.Replace("'", "''")
@@ -234,11 +245,12 @@ try {
         $calibrationWaitArg = if ($startupTestSignal -and $CalibrationTestTimeFillWaitSeconds -gt 0) { " --calibration-test-time-fill-wait $CalibrationTestTimeFillWaitSeconds" } else { '' }
         $calibrationTimeOnlyArg = if ($startupTestSignal -and $CalibrationTestTimeOnly) { ' --calibration-test-time-only' } else { '' }
         $actionEvidenceArg = if ($RecordActionEvidence -or $ShooterMode -eq 'LIVE_BEHAVIOR_VALIDATION') { ' --record-action-evidence' } else { '' }
+        $windowHwndArg = if ($BrokerWindowHwnd -gt 0) { " --window-hwnd $BrokerWindowHwnd" } else { '' }
         $shooterCommand = @(
             'Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned',
             "cd '$escapedRoot'",
             "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='$liveClickArm'",
-            ".\.venv\Scripts\python.exe 'shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll $ShooterPollSec --max-signal-age 8 --preferred-source tracker --require-preferred-source --min-confidence $ShooterMinConfidence --window-query '$escapedBrokerWindowQuery' --shooter-mode $ShooterMode --broker-speed-profile '$escapedBrokerSpeedProfile' --action-speed $ActionSpeed --no-auto-open$actionEvidenceArg$startupTestArg$calibrationExpiryArg$calibrationSideArg$calibrationWaitArg$calibrationTimeOnlyArg"
+            ".\.venv\Scripts\python.exe 'shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll $effectiveShooterPollSec --max-signal-age 30 --preferred-source tracker --require-preferred-source --min-confidence $ShooterMinConfidence --window-query '$escapedBrokerWindowQuery'$windowHwndArg --shooter-mode $ShooterMode --broker-speed-profile '$escapedBrokerSpeedProfile' --action-speed $ActionSpeed --no-auto-open$actionEvidenceArg$startupTestArg$calibrationExpiryArg$calibrationSideArg$calibrationWaitArg$calibrationTimeOnlyArg"
         ) -join '; '
         Start-Process powershell -ArgumentList @(
             '-NoExit',

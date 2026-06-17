@@ -21,6 +21,37 @@ def _now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
 
+def _epoch_from_value(value: Any) -> float:
+    if value in (None, ""):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        text = str(value).strip()
+        if not text:
+            return 0.0
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return float(parsed.timestamp())
+    except Exception:
+        return 0.0
+
+
+def _entry_last_seen_epoch(entry: Mapping[str, Any]) -> float:
+    overlay = entry.get("overlay") if isinstance(entry.get("overlay"), Mapping) else {}
+    for key in ("last_seen_at", "updated_at", "timestamp", "created_at"):
+        epoch = _epoch_from_value(entry.get(key))
+        if epoch > 0.0:
+            return epoch
+    if isinstance(overlay, Mapping):
+        for key in ("last_seen_at", "updated_at", "timestamp", "created_at"):
+            epoch = _epoch_from_value(overlay.get(key))
+            if epoch > 0.0:
+                return epoch
+    return 0.0
+
+
 def _bbox_iou(a: Sequence[float], b: Sequence[float]) -> float:
     """Compute IoU for [x1,y1,x2,y2] boxes. Returns 0.0 on error."""
     try:
@@ -211,8 +242,15 @@ def load_recent_market_objects(session_id: str, *, max_lines: int = 2000) -> lis
     return entries
 
 
-def _active_objects_from_entries(entries: Sequence[Mapping[str, Any]], *, min_truth_score: float) -> list[Mapping[str, Any]]:
+def _active_objects_from_entries(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    min_truth_score: float,
+    stale_seconds: int = DEFAULT_STALE_SECONDS,
+    now_epoch: float | None = None,
+) -> list[Mapping[str, Any]]:
     active: list[Mapping[str, Any]] = []
+    now = time.time() if now_epoch is None else float(now_epoch)
     # take the latest entry for each overlay_id
     latest_by_overlay: dict[str, Mapping[str, Any]] = {}
     for e in entries:
@@ -224,6 +262,9 @@ def _active_objects_from_entries(entries: Sequence[Mapping[str, Any]], *, min_tr
             latest_by_overlay[oid] = e
 
     for e in latest_by_overlay.values():
+        last_seen_epoch = _entry_last_seen_epoch(e)
+        if last_seen_epoch > 0.0 and now - last_seen_epoch > float(stale_seconds):
+            continue
         try:
             truth = float(e.get("truth_score") or (e.get("overlay") or {}).get("truth_score") or (e.get("overlay") or {}).get("confidence") or 0.0)
         except Exception:
@@ -380,14 +421,14 @@ def promote_lifecycle(session_id: str, *, stale_seconds: int = DEFAULT_STALE_SEC
             continue
 
 
-def query_active_objects(session_id: str, *, min_truth_score: float = 0.55) -> list[Mapping[str, Any]]:
+def query_active_objects(session_id: str, *, min_truth_score: float = 0.55, stale_seconds: int = DEFAULT_STALE_SECONDS) -> list[Mapping[str, Any]]:
     entries = load_market_objects(session_id)
     if not entries:
         for candidate in _registry_session_candidates(session_id)[1:]:
             entries = load_market_objects(candidate)
             if entries:
                 break
-    return _active_objects_from_entries(entries, min_truth_score=float(min_truth_score))
+    return _active_objects_from_entries(entries, min_truth_score=float(min_truth_score), stale_seconds=int(stale_seconds))
 
 
 def query_recent_active_objects(
@@ -395,6 +436,7 @@ def query_recent_active_objects(
     *,
     min_truth_score: float = 0.55,
     max_lines: int = 2000,
+    stale_seconds: int = DEFAULT_STALE_SECONDS,
 ) -> list[Mapping[str, Any]]:
     entries = load_recent_market_objects(session_id, max_lines=max_lines)
-    return _active_objects_from_entries(entries, min_truth_score=float(min_truth_score))
+    return _active_objects_from_entries(entries, min_truth_score=float(min_truth_score), stale_seconds=int(stale_seconds))

@@ -37,6 +37,19 @@ def _bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _first_mapping(*values: Any) -> dict[str, Any]:
+    for value in values:
+        candidate = _mapping(value)
+        if candidate:
+            return candidate
+    return {}
+
+
+def _source_valid(payload: Mapping[str, Any]) -> bool:
+    status = _text(payload.get("status")).upper()
+    return _bool(payload.get("valid"), status in {"VALID", "OK", "PASS", "LOCKED"})
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Certify PhoenixGuard V3 broker-source lock on the live state.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
@@ -57,11 +70,34 @@ def main() -> int:
     session_lock = _mapping(session_payload.get("broker_source_lock"))
     tracking = _mapping(session_payload.get("tracking_summary"))
     tracking_lock = _mapping(tracking.get("broker_source_lock"))
+    latest_signal = _mapping(session_payload.get("latest_signal"))
+    session_surface = _mapping(session_payload.get("broker_surface"))
+    tracking_surface = _mapping(tracking.get("broker_surface"))
+    live_surface = _mapping(live_payload.get("broker_surface"))
+    explicit_source_lock = _first_mapping(
+        session_lock,
+        _mapping(session_payload.get("broker_source")),
+        tracking_lock,
+        _mapping(tracking.get("broker_source")),
+        _mapping(latest_signal.get("broker_source_lock")),
+        _mapping(latest_signal.get("broker_source")),
+        _mapping(session_surface.get("broker_source_lock")),
+        _mapping(session_surface.get("broker_source")),
+        _mapping(tracking_surface.get("broker_source_lock")),
+        _mapping(tracking_surface.get("broker_source")),
+        _mapping(live_payload.get("broker_source_lock")),
+        _mapping(live_surface.get("broker_source_lock")),
+        _mapping(live_surface.get("broker_source")),
+    )
 
     if not live.ok:
         failures.append(f"live state endpoint failed: {live.error or live.status}")
     if not session.ok:
         failures.append(f"session endpoint failed: {session.error or session.status}")
+    if not explicit_source_lock:
+        failures.append("session/live payload did not expose explicit broker_source_lock or raw broker_source evidence")
+    elif not _source_valid(explicit_source_lock):
+        failures.append(f"explicit broker source lock is not valid: {explicit_source_lock}")
     if not broker_source:
         failures.append("live state did not publish broker_source")
     else:
@@ -80,7 +116,7 @@ def main() -> int:
                 failures.append(f"broker_source.{key} is false")
 
     if not session_lock and not tracking_lock:
-        warnings.append("session payload did not expose raw broker_source_lock; live broker_source summary is still present")
+        warnings.append("raw broker_source_lock is not top-level; using nested explicit broker-source evidence")
 
     report = gate_report(
         schema_version="PG_CERTIFY_BROKER_SOURCE_LOCK_V3",
@@ -93,8 +129,11 @@ def main() -> int:
             "live": live.as_dict(),
             "session_endpoint": session.as_dict(),
             "broker_source": broker_source,
+            "explicit_source_lock": explicit_source_lock,
             "session_broker_source_lock": session_lock,
             "tracking_broker_source_lock": tracking_lock,
+            "session_broker_surface": session_surface,
+            "tracking_broker_surface": tracking_surface,
         },
     )
     out = write_report("gate11_broker_source_lock_v3.json", report)

@@ -730,6 +730,19 @@ def build_sequence_context_v3(
             tracking=tracking,
             signal=signal,
         )
+    if progression_score < _SEQUENCE_CONTEXT_MIN_CONFIDENCE:
+        structural_confidence = 0.0
+        if sequence_length >= _SEQUENCE_CONTEXT_COMPLETE_MIN_LENGTH and frames_used >= sequence_length and frames_received >= frames_used:
+            structural_confidence += 0.2
+        if historical_structure:
+            structural_confidence += min(0.3, 0.18 + (0.04 * min(len(historical_structure), 3)))
+        if progression_steps:
+            structural_confidence += min(0.25, 0.13 + (0.04 * min(len(progression_steps), 3)))
+        if entry_progression:
+            structural_confidence += 0.2
+        if global_direction or local_direction:
+            structural_confidence += 0.07
+        progression_score = max(progression_score, _clip01(structural_confidence, 0.0))
     complete = (
         sequence_length >= _SEQUENCE_CONTEXT_COMPLETE_MIN_LENGTH
         and frames_used >= sequence_length

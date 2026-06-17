@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
 from pathlib import Path
@@ -84,15 +85,10 @@ def _live_fast_display_heartbeat(
     session: dict[str, Any],
     *,
     last_heartbeat_epoch: float,
+    script_dir: Path | None = None,
 ) -> float:
     """Keep the broker display buffer fresh while the study worker is busy."""
-    controls = session.get("execution_controls", {})
-    if not isinstance(controls, dict):
-        controls = {}
-    live_mode = bool(controls.get("live_execution_enabled", False)) or str(
-        controls.get("execution_mode", "shadow") or "shadow"
-    ).strip().lower() == "live"
-    if not live_mode or not bool(session.get("tracking_enabled", False)):
+    if not bool(session.get("tracking_enabled", False)):
         return last_heartbeat_epoch
     enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", "1") or "1").strip().lower()
     if enabled in {"0", "false", "off", "no"}:
@@ -104,10 +100,21 @@ def _live_fast_display_heartbeat(
     now = time.time()
     if now - float(last_heartbeat_epoch or 0.0) < interval_sec:
         return last_heartbeat_epoch
+    resolved_script_dir = script_dir or Path(__file__).resolve().parent
+    file_thread_enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "1") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+    if file_thread_enabled and _display_state_has_locked_window(resolved_script_dir, session_id):
+        return now
+    if _live_fast_display_file_heartbeat(resolved_script_dir, session_id, now_epoch=now):
+        return now
     try:
-        timeout_sec = max(1, int(float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC", "3") or "3")))
+        timeout_sec = max(0.2, float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC", "0.35") or "0.35"))
     except ValueError:
-        timeout_sec = 3
+        timeout_sec = 0.35
     try:
         _request_json(
             base_url,
@@ -138,6 +145,14 @@ def _parse_focus_region(raw: str | None) -> list[float] | None:
     if right <= left or bottom <= top:
         return None
     return [left, top, right, bottom]
+
+
+def _parse_positive_int(raw: Any) -> int:
+    try:
+        value = int(str(raw or "").strip() or "0")
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
 
 
 def _stop_process(proc: subprocess.Popen[str], *, timeout_sec: float = 8.0) -> None:
@@ -191,6 +206,173 @@ def _default_live_runtime_dir(script_dir: Path, leaf: str) -> Path:
     if local_app_data:
         return Path(local_app_data) / "PhoenixGuard" / "codex_runtime" / leaf
     return script_dir / ".codex_runtime" / leaf
+
+
+def _slugify_session_id(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(value or "")).strip("._").lower() or "session"
+
+
+def _live_data_dir(script_dir: Path) -> Path:
+    return Path(os.getenv("PHOENIXGUARD_DATA_DIR") or _default_live_runtime_dir(script_dir, "data_live"))
+
+
+def _display_state_path(script_dir: Path, session_id: str) -> Path:
+    return _live_data_dir(script_dir) / "mobile_api" / "window_tracker" / "sessions" / _slugify_session_id(session_id) / "display_state.json"
+
+
+def _session_dir(script_dir: Path, session_id: str) -> Path:
+    return _live_data_dir(script_dir) / "mobile_api" / "window_tracker" / "sessions" / _slugify_session_id(session_id)
+
+
+def _quarantine_stale_session_on_boot(script_dir: Path, session_id: str) -> bool:
+    enabled = str(os.getenv("PHOENIXGUARD_RESET_STALE_TRACKER_SESSION_ON_BOOT", "1") or "1").strip().lower()
+    if enabled in {"0", "false", "off", "no"}:
+        return False
+    try:
+        stale_after_sec = max(
+            30.0,
+            float(os.getenv("PHOENIXGUARD_RESET_STALE_TRACKER_SESSION_AGE_SEC", "300") or "300"),
+        )
+    except ValueError:
+        stale_after_sec = 300.0
+    session_path = _session_dir(script_dir, session_id)
+    session_json = session_path / "session.json"
+    if not session_json.exists():
+        return False
+    try:
+        payload = json.loads(session_json.read_text(encoding="utf-8"))
+        last_capture_epoch = float(dict(payload).get("last_capture_epoch") or 0.0) if isinstance(payload, dict) else 0.0
+    except Exception:
+        last_capture_epoch = 0.0
+    if last_capture_epoch <= 0.0 or time.time() - last_capture_epoch <= stale_after_sec:
+        return False
+    target = session_path.with_name(f"{session_path.name}_stale_{time.strftime('%Y%m%d_%H%M%S')}")
+    try:
+        session_path.replace(target)
+        print(f"Quarantined stale tracker session '{session_id}' -> {target}", flush=True)
+        return True
+    except Exception as exc:
+        print(f"WARNING: stale tracker session quarantine skipped: {exc}", flush=True)
+        return False
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
+    try:
+        tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True), encoding="utf-8")
+        tmp_path.replace(path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _live_fast_display_file_heartbeat(script_dir: Path, session_id: str, *, now_epoch: float) -> bool:
+    enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "1") or "1").strip().lower()
+    if enabled in {"0", "false", "off", "no"}:
+        return False
+    path = _display_state_path(script_dir, session_id)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(raw, dict):
+        return False
+    current = dict(raw)
+    window_path = str(
+        current.get("last_display_window_path")
+        or current.get("last_window_path")
+        or current.get("last_frame_path")
+        or ""
+    ).strip()
+    if not window_path:
+        return False
+    try:
+        previous_frame = int(float(current.get("display_frame_id") or 0))
+    except (TypeError, ValueError):
+        previous_frame = 0
+    if previous_frame <= 0:
+        return False
+    next_frame = previous_frame + 1
+    current["session_id"] = str(session_id)
+    current.pop("last_capture_epoch", None)
+    current.pop("last_capture_started_epoch", None)
+    current["display_frame_id"] = next_frame
+    current["display_published_epoch"] = float(now_epoch)
+    current["last_display_published_epoch"] = float(now_epoch)
+    current["last_display_window_path"] = window_path
+    current["display_snapshot_only_v3"] = True
+    current["display_fast_path_v3"] = {
+        "schema_version": "PG_DISPLAY_FAST_PATH_V3",
+        "reason": "supervisor_file_reuse_heartbeat",
+        "display_frame_id": next_frame,
+        "capture_count": int(float(current.get("capture_count") or current.get("frame_index") or next_frame)),
+        "capture_epoch": float(current.get("display_capture_epoch") or current.get("last_display_capture_epoch") or now_epoch),
+        "published_epoch": float(now_epoch),
+        "window_path": window_path,
+        "surface_signature": str(current.get("last_display_surface_signature") or current.get("last_window_surface_signature") or ""),
+        "reused_window_path": True,
+        "reuse_only_heartbeat": True,
+    }
+    current["display_reuse_only_heartbeat_v3"] = {
+        "schema_version": "PG_DISPLAY_REUSE_ONLY_HEARTBEAT_V1",
+        "display_frame_id": next_frame,
+        "published_epoch": float(now_epoch),
+        "window_path": window_path,
+    }
+    try:
+        _write_json_atomic(path, current)
+    except Exception:
+        return False
+    return True
+
+
+def _display_state_has_locked_window(script_dir: Path, session_id: str) -> bool:
+    try:
+        raw = json.loads(_display_state_path(script_dir, session_id).read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(raw, dict):
+        return False
+    try:
+        display_frame_id = int(float(raw.get("display_frame_id") or 0))
+    except (TypeError, ValueError):
+        display_frame_id = 0
+    return bool(
+        display_frame_id > 0
+        and str(raw.get("last_display_window_path") or raw.get("last_window_path") or raw.get("last_frame_path") or "").strip()
+    )
+
+
+def _start_live_fast_display_file_heartbeat_thread(script_dir: Path, session_id: str) -> threading.Event | None:
+    enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "1") or "1").strip().lower()
+    if enabled in {"0", "false", "off", "no"}:
+        return None
+    stop_event = threading.Event()
+
+    def _run() -> None:
+        last_epoch = 0.0
+        while not stop_event.is_set():
+            try:
+                interval_sec = max(0.2, float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC", "0.5") or "0.5"))
+            except ValueError:
+                interval_sec = 0.5
+            now_epoch = time.time()
+            if now_epoch - last_epoch >= interval_sec:
+                if _live_fast_display_file_heartbeat(script_dir, session_id, now_epoch=now_epoch):
+                    last_epoch = now_epoch
+            stop_event.wait(min(0.2, max(0.05, interval_sec / 2.0)))
+
+    thread = threading.Thread(
+        target=_run,
+        name=f"phoenixguard-display-heartbeat-{_slugify_session_id(session_id)}",
+        daemon=True,
+    )
+    thread.start()
+    return stop_event
 
 
 def _launch_mobile_api(script_dir: Path, host: str, port: int) -> subprocess.Popen[str]:
@@ -418,8 +600,10 @@ def _ensure_session(
     capture_interval_sec: float,
     wait_for_lock: bool,
     window_query: str,
+    window_hwnd: int,
     focus_region: list[float] | None,
 ) -> dict[str, Any]:
+    locked_hwnd = _parse_positive_int(window_hwnd)
     try:
         session = _request_json(base_url, f"/v1/mobile/window-tracker/sessions/{session_id}", timeout=30)
     except Exception:
@@ -437,7 +621,23 @@ def _ensure_session(
                 "signal_cooldown_sec": 8.0,
             },
         }
+        if locked_hwnd > 0:
+            create_payload["locked_hwnd"] = locked_hwnd
+            create_payload["locked_title"] = window_query or "Pocket Option"
         session = _request_json(base_url, "/v1/mobile/window-tracker/sessions", method="POST", payload=create_payload, timeout=30)
+    if locked_hwnd > 0:
+        locked = session.get("locked_window", {})
+        current_hwnd = 0
+        if isinstance(locked, dict):
+            current_hwnd = _parse_positive_int(locked.get("hwnd"))
+        if current_hwnd != locked_hwnd:
+            session = _request_json(
+                base_url,
+                f"/v1/mobile/window-tracker/sessions/{session_id}/locked-window",
+                method="PATCH",
+                payload={"locked_hwnd": locked_hwnd, "locked_title": window_query or "Pocket Option"},
+                timeout=30,
+            )
 
     live_execution_enabled = str(os.getenv("PHOENIXGUARD_LIVE_EXECUTION_ENABLED", "1") or "1").strip().lower() in {
         "1",
@@ -493,11 +693,12 @@ def main() -> int:
     parser.add_argument("--host", default=os.getenv("PHOENIXGUARD_MOBILE_API_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("PHOENIXGUARD_MOBILE_API_PORT", "8793")))
     parser.add_argument("--session-id", default=os.getenv("PHOENIXGUARD_TRACKER_SESSION_ID", "pocket-live-8788"))
-    parser.add_argument("--capture-interval", type=float, default=float(os.getenv("PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC", "0.5")))
+    parser.add_argument("--capture-interval", type=float, default=float(os.getenv("PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC", "1.0")))
     parser.add_argument("--window-query", default=os.getenv("PHOENIXGUARD_BROKER_WINDOW_QUERY", "Pocket Option"))
+    parser.add_argument("--window-hwnd", type=int, default=_parse_positive_int(os.getenv("PHOENIXGUARD_BROKER_WINDOW_HWND", "0")))
     parser.add_argument(
         "--focus-region",
-        default=os.getenv("PHOENIXGUARD_TRACKER_FOCUS_REGION", "0.02,0.06,0.76,0.94"),
+        default=os.getenv("PHOENIXGUARD_TRACKER_FOCUS_REGION", "0.03,0.13,0.87,0.96"),
         help="Normalized chart focus box as left,top,right,bottom. Use empty string to require manual dashboard lock.",
     )
     parser.add_argument("--health-timeout", type=int, default=int(os.getenv("PHOENIXGUARD_TRACKER_HEALTH_TIMEOUT_SEC", "60")))
@@ -513,9 +714,19 @@ def main() -> int:
     script_dir = Path(__file__).resolve().parent
     os.environ.setdefault("PHOENIXGUARD_DATA_DIR", str(_default_live_runtime_dir(script_dir, "data_live")))
     os.environ.setdefault("PHOENIXGUARD_LOGS_DIR", str(_default_live_runtime_dir(script_dir, "logs_live")))
-    os.environ.setdefault("PHOENIXGUARD_LIVE_STATE_CACHE_TTL_SEC", "0.25")
+    os.environ.setdefault("PHOENIXGUARD_LIVE_STATE_CACHE_TTL_SEC", "5.0")
     os.environ.setdefault("PHOENIXGUARD_FRONTEND_HEARTBEAT_STALE_SEC", "8.0")
     os.environ.setdefault("PHOENIXGUARD_CAPTURE_ONCE_FAST_DISPLAY", "1")
+    os.environ.setdefault("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1")
+    os.environ.setdefault("PHOENIXGUARD_DISPLAY_REUSE_IDENTICAL_SURFACE", "1")
+    os.environ.setdefault("PHOENIXGUARD_DISPLAY_BUSY_REUSE_HEARTBEAT", "1")
+    os.environ.setdefault("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "1")
+    os.environ.setdefault("PHOENIXGUARD_DISPLAY_SNAPSHOT_STALE_RESET_SEC", "30.0")
+    os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_POLL_SEC", "0.50")
+    os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC", "0.35")
+    os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "1")
+    os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "1")
+    os.environ.setdefault("PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB", "0")
     os.environ.setdefault("PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL", "0")
     os.environ.setdefault("PHOENIXGUARD_LIVE_WINDOW_JPEG", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_WINDOW_JPEG_QUALITY", "78")
@@ -532,6 +743,7 @@ def main() -> int:
     consecutive_session_read_failures = 0
     session: dict[str, Any] = {}
     api_proc: subprocess.Popen[str] | None = None
+    file_heartbeat_stop = _start_live_fast_display_file_heartbeat_thread(script_dir, args.session_id)
 
     try:
         if args.open_dashboard:
@@ -541,6 +753,7 @@ def main() -> int:
                 pass
 
         while True:
+            _quarantine_stale_session_on_boot(script_dir, args.session_id)
             api_proc = _launch_mobile_api(script_dir, args.host, args.port)
             print(f"Launching mobile API on {base_url} (PID {api_proc.pid})")
 
@@ -558,11 +771,12 @@ def main() -> int:
                 session = _ensure_session(
                     base_url,
                     args.session_id,
-                    args.capture_interval,
-                    args.wait_for_lock,
-                    args.window_query,
-                    configured_focus_region,
-                )
+                args.capture_interval,
+                args.wait_for_lock,
+                args.window_query,
+                args.window_hwnd,
+                configured_focus_region,
+            )
             except Exception as exc:
                 _stop_process(api_proc)
                 consecutive_restart_count += 1
@@ -692,8 +906,15 @@ def main() -> int:
 
             last_fast_display_heartbeat_epoch = 0.0
             while True:
-                for _ in range(10):
-                    time.sleep(1.0)
+                try:
+                    heartbeat_poll_sec = max(
+                        0.05,
+                        float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_POLL_SEC", "0.25") or "0.25"),
+                    )
+                except ValueError:
+                    heartbeat_poll_sec = 0.25
+                for _ in range(max(1, int(round(10.0 / heartbeat_poll_sec)))):
+                    time.sleep(heartbeat_poll_sec)
                     if api_proc.poll() is not None:
                         break
                     last_fast_display_heartbeat_epoch = _live_fast_display_heartbeat(
@@ -701,6 +922,7 @@ def main() -> int:
                         args.session_id,
                         session,
                         last_heartbeat_epoch=last_fast_display_heartbeat_epoch,
+                        script_dir=script_dir,
                     )
                 if api_proc.poll() is not None:
                     consecutive_restart_count += 1
@@ -824,6 +1046,8 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if file_heartbeat_stop is not None:
+            file_heartbeat_stop.set()
         try:
             if session:
                 _write_status_file(status_path, {

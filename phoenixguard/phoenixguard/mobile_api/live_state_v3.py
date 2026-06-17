@@ -263,10 +263,28 @@ def _current_execution_packet(packet: Any, *, now_epoch: float) -> dict[str, Any
         return {}
     packet_type = _text(payload.get("packet_type")).upper()
     schema_version = _text(payload.get("schema_version")).upper()
-    if packet_type != "PG_EXECUTION_PACKET_V3" and schema_version != "PG_EXECUTION_PACKET_V3":
+    if packet_type != "PG_EXECUTION_PACKET_V3" or schema_version != "PG_EXECUTION_PACKET_V3":
         return {}
     valid_until = _execution_packet_valid_until(payload)
-    return payload if valid_until > float(now_epoch) else {}
+    if valid_until <= float(now_epoch):
+        return {}
+    execution = _mapping(payload.get("execution"))
+    council = _mapping(payload.get("model_council"))
+    execution_side = _text(execution.get("side")).upper()
+    final_side = _text(council.get("final_side")).upper()
+    if execution_side not in {"BUY", "SELL"} or final_side not in {"BUY", "SELL"}:
+        return {}
+    if execution_side != final_side:
+        return {}
+    if execution.get("enabled") is not True:
+        return {}
+    if _text(execution.get("state")).upper() != "EXECUTABLE":
+        return {}
+    if _text(council.get("final_state")).upper() != "EXECUTABLE":
+        return {}
+    if _int(execution.get("expiry_seconds"), 0) <= 0:
+        return {}
+    return payload
 
 
 def _model_council_summary(session: Mapping[str, Any], study_packet: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -543,6 +561,172 @@ def _zone_bbox(zone: Mapping[str, Any]) -> list[float]:
     return [left, top, right, bottom]
 
 
+def _bounds_list(value: Any) -> list[float]:
+    raw = value
+    if isinstance(value, Mapping):
+        raw = value.get("bbox") or value.get("pixel_bbox") or value.get("bounds") or value.get("normalized_bbox")
+        if isinstance(raw, Mapping):
+            raw = raw.get("bbox")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)) or len(raw) < 4:
+        return []
+    x0, y0, x1, y1 = [_float(raw[index]) for index in range(4)]
+    left, right = sorted((x0, x1))
+    top, bottom = sorted((y0, y1))
+    if right <= left or bottom <= top:
+        return []
+    return [left, top, right, bottom]
+
+
+def _broker_control_source(
+    session: Mapping[str, Any],
+    aliases: Sequence[str],
+) -> tuple[list[float], dict[str, Any]]:
+    tracking = _mapping(session.get("tracking_summary"))
+    surfaces = [
+        _mapping(session.get("broker_surface")),
+        _mapping(tracking.get("broker_surface")),
+    ]
+    for surface in surfaces:
+        execution_boxes = _mapping(surface.get("execution_boxes"))
+        for alias in aliases:
+            for source in (_mapping(execution_boxes.get(alias)), _mapping(surface.get(alias))):
+                if not source:
+                    continue
+                if "visible" in source and not _bool(source.get("visible"), True):
+                    continue
+                if "locked" in source and not _bool(source.get("locked"), True):
+                    continue
+                bounds = _bounds_list(source)
+                if bounds:
+                    return bounds, source
+    return [], {}
+
+
+def _broker_control_overlay_objects(
+    session: Mapping[str, Any],
+    *,
+    scene_graph: Mapping[str, Any],
+    frame_id: int,
+    sequence_id: str,
+    chart_transform_id: str,
+    broker_source_lock_id: str,
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    surface_bounds = _bounds_list(scene_graph.get("broker_surface_bounds"))
+    if not surface_bounds or surface_bounds[2] - surface_bounds[0] < 100.0 or surface_bounds[3] - surface_bounds[1] < 100.0:
+        return []
+    definitions: tuple[dict[str, Any], ...] = (
+        {
+            "source_key": "broker_screen",
+            "label": "BROKER SURFACE",
+            "role": "broker_screen",
+            "scene_key": "broker_surface_bounds",
+            "confidence": 0.92,
+        },
+        {
+            "source_key": "right_order_panel",
+            "label": "RIGHT ORDER PANEL",
+            "role": "right_order_panel",
+            "scene_key": "right_order_panel_bounds",
+            "aliases": ("order_panel", "right_order_panel"),
+            "confidence": 0.92,
+        },
+        {
+            "source_key": "time_button",
+            "label": "TIME BUTTON",
+            "role": "time_button",
+            "aliases": ("time_button", "time_input", "time_box", "time_field", "expiry_time_field"),
+            "confidence": 0.86,
+        },
+        {
+            "source_key": "amount_field",
+            "label": "AMOUNT FIELD",
+            "role": "amount_field",
+            "aliases": ("amount_field", "amount_input", "amount_box", "stake_amount"),
+            "confidence": 0.84,
+        },
+        {
+            "source_key": "buy_icon",
+            "label": "BUY BUTTON",
+            "role": "buy_icon",
+            "aliases": ("buy_icon", "buy_button"),
+            "confidence": 0.90,
+        },
+        {
+            "source_key": "sell_icon",
+            "label": "SELL BUTTON",
+            "role": "sell_icon",
+            "aliases": ("sell_icon", "sell_button"),
+            "confidence": 0.90,
+        },
+    )
+    overlays: list[dict[str, Any]] = []
+    for index, definition in enumerate(definitions):
+        bounds = _bounds_list(scene_graph.get(str(definition.get("scene_key")))) if definition.get("scene_key") else []
+        source_row: dict[str, Any] = {}
+        if not bounds:
+            bounds, source_row = _broker_control_source(
+                session,
+                tuple(str(item) for item in definition.get("aliases", ())),
+            )
+        elif definition.get("aliases"):
+            source_bounds, source_row = _broker_control_source(
+                session,
+                tuple(str(item) for item in definition.get("aliases", ())),
+            )
+            if source_bounds:
+                bounds = source_bounds
+        if not bounds:
+            continue
+        confidence = max(0.01, min(1.0, _float(source_row.get("confidence"), _float(definition.get("confidence"), 0.85))))
+        source_key = _text(definition.get("source_key"), f"broker_control_{index}")
+        label = _text(definition.get("label"), "BROKER CONTROL")
+        raw = {
+            "overlay_id": f"broker_control_{source_key}_{frame_id}",
+            "object_id": f"broker_control_{source_key}",
+            "track_id": f"broker_control_{source_key}",
+            "type": "BROKER_CONTROL",
+            "side": "HOLD",
+            "source_agent": "broker_scene_graph_v3",
+            "source_key": source_key,
+            "broker_source_lock_id": broker_source_lock_id,
+            "frame_id": frame_id,
+            "sequence_id": sequence_id,
+            "chart_transform_id": chart_transform_id,
+            "coordinate_mode": "FULL_BROKER_SURFACE",
+            "anchor_type": "BROKER_SURFACE",
+            "bounds": bounds,
+            "truth_score": confidence,
+            "confidence": confidence,
+            "lifecycle_state": "CONFIRMED",
+            "visible_modes": ["BROKER", "CALIBRATION", "INSPECTOR"],
+            "visible_default": False,
+            "ttl_ms": 30000,
+            "created_at_ms": now_ms,
+            "reason": f"{label.lower()} locked on broker source",
+            "label": label,
+            "display_label": label,
+            "short_label": label,
+            "layer": "broker_controls",
+            "role": _text(definition.get("role"), "broker_control"),
+            "z_index": 30 + index,
+        }
+        try:
+            overlays.append(
+                normalize_v3_overlay_object(
+                    raw,
+                    strict=False,
+                    frame_id=frame_id,
+                    sequence_id=sequence_id,
+                    chart_transform_id=chart_transform_id,
+                    fallback_index=index,
+                )
+            )
+        except Exception:
+            continue
+    return overlays
+
+
 def _signal_thesis_overlay_objects(
     thesis: Mapping[str, Any],
     *,
@@ -625,6 +809,234 @@ def _signal_thesis_overlay_objects(
         if candidate is not None:
             overlays.append(candidate)
     return overlays
+
+
+def _tracked_candle_rows(session: Mapping[str, Any]) -> list[dict[str, Any]]:
+    tracking = _mapping(session.get("tracking_summary"))
+    signal = _mapping(session.get("latest_signal"))
+    rows = _sequence_of_mappings(tracking.get("tracked_candles"))
+    if rows:
+        return rows
+    return _sequence_of_mappings(signal.get("tracked_candles"))
+
+
+def _union_box(boxes: Sequence[Sequence[Any]]) -> list[float]:
+    normalized = [_bounds_list(box) for box in boxes]
+    usable = [box for box in normalized if box]
+    if not usable:
+        return []
+    return [
+        min(box[0] for box in usable),
+        min(box[1] for box in usable),
+        max(box[2] for box in usable),
+        max(box[3] for box in usable),
+    ]
+
+
+def _pad_box(bounds: Sequence[Any], pad_x: float = 4.0, pad_y: float = 6.0) -> list[float]:
+    box = _bounds_list(bounds)
+    if not box:
+        return []
+    return [box[0] - pad_x, box[1] - pad_y, box[2] + pad_x, box[3] + pad_y]
+
+
+def _study_anchor_box(session: Mapping[str, Any], *, candle_count: int = 2) -> tuple[list[float], list[int]]:
+    candles = _tracked_candle_rows(session)
+    if candles:
+        count = max(1, min(int(candle_count), len(candles)))
+        selected = candles[-count:]
+        bounds = _union_box([_bounds_list(row) for row in selected])
+        if bounds:
+            first_index = max(0, len(candles) - count)
+            return _pad_box(bounds), list(range(first_index, len(candles)))
+    thesis = _first_mapping(
+        session.get("signal_thesis_v3"),
+        _mapping(session.get("latest_signal")).get("signal_thesis_v3"),
+        _mapping(session.get("tracking_summary")).get("signal_thesis_v3"),
+    )
+    for key in ("entry_zone", "target_zone", "invalidation_zone"):
+        bounds = _zone_bbox(_mapping(thesis.get(key)))
+        if bounds:
+            return _pad_box(bounds), []
+    tracking = _mapping(session.get("tracking_summary"))
+    for source in (
+        _mapping(tracking.get("current_box")),
+        *(_sequence_of_mappings(tracking.get("structure_boxes"))[-1:]),
+    ):
+        bounds = _bounds_list(source)
+        if bounds:
+            return _pad_box(bounds), []
+    return [], []
+
+
+def _study_overlay_objects(
+    session: Mapping[str, Any],
+    two_candle: Mapping[str, Any],
+    lstm: Mapping[str, Any],
+    *,
+    active_mode: str,
+    frame_id: int,
+    sequence_id: str,
+    chart_transform_id: str,
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    signal = _mapping(session.get("latest_signal"))
+    tracking = _mapping(session.get("tracking_summary"))
+    fallback_side = _text(signal.get("execution_action") or signal.get("action") or tracking.get("local_direction"), "HOLD").upper()
+    overlays: list[dict[str, Any]] = []
+
+    def add_study(
+        *,
+        overlay_type: str,
+        payload: Mapping[str, Any],
+        label: str,
+        mode: str,
+        candle_count: int,
+        fallback_confidence: float,
+        fallback_reason: str,
+    ) -> None:
+        if not payload and active_mode != mode:
+            return
+        bounds, anchor_candles = _study_anchor_box(session, candle_count=candle_count)
+        if not bounds:
+            return
+        confidence = max(0.05, min(1.0, _float(payload.get("confidence") or payload.get("contribution"), fallback_confidence)))
+        side = _text(payload.get("side") or payload.get("direction") or payload.get("direction_bias") or fallback_side, "HOLD").upper()
+        if side not in {"BUY", "SELL", "HOLD"}:
+            side = "HOLD"
+        raw = {
+            "overlay_id": f"{overlay_type.lower()}_{frame_id}",
+            "object_id": f"{overlay_type.lower()}_{frame_id}",
+            "track_id": f"{overlay_type.lower()}_study",
+            "type": overlay_type,
+            "side": side,
+            "source_agent": "live_state_v3_study_overlay",
+            "source_key": _text(payload.get("schema_version") or payload.get("skill") or mode, mode),
+            "frame_id": frame_id,
+            "sequence_id": sequence_id,
+            "chart_transform_id": chart_transform_id,
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "CANDLES" if anchor_candles else "BOX",
+            "anchor_candles": anchor_candles,
+            "bounds": bounds,
+            "truth_score": confidence,
+            "confidence": confidence,
+            "lifecycle_state": "ACTIVE",
+            "visible_modes": [mode, "COUNCIL", "INSPECTOR"],
+            "visible_default": False,
+            "ttl_ms": 12000,
+            "created_at_ms": now_ms,
+            "reason": _text(payload.get("summary") or payload.get("reason"), fallback_reason),
+            "label": label,
+            "display_label": label,
+            "short_label": label,
+            "layer": "active_council_decision",
+            "role": mode.lower(),
+            "label_anchor": "top",
+            "label_hidden": False,
+            "z_index": 74 if overlay_type == "TWO_CANDLE_STUDY" else 72,
+            "structural_anchor": True,
+            "source_rule": "study_overlay_anchored_to_visible_candles",
+        }
+        try:
+            overlays.append(
+                normalize_v3_overlay_object(
+                    raw,
+                    strict=False,
+                    frame_id=frame_id,
+                    sequence_id=sequence_id,
+                    chart_transform_id=chart_transform_id,
+                    fallback_index=len(overlays),
+                )
+            )
+        except Exception:
+            overlays.append(raw)
+
+    add_study(
+        overlay_type="TWO_CANDLE_STUDY",
+        payload=two_candle,
+        label="TWO CANDLE STUDY",
+        mode="TWO_CANDLE_STUDY",
+        candle_count=2,
+        fallback_confidence=0.58,
+        fallback_reason="Two-candle study anchored to the latest visible candles.",
+    )
+    add_study(
+        overlay_type="LSTM_STUDY",
+        payload=lstm,
+        label="LSTM STUDY",
+        mode="LSTM_STUDY",
+        candle_count=8,
+        fallback_confidence=0.50,
+        fallback_reason="LSTM sequence contribution anchored to the latest visible candle window.",
+    )
+    return overlays
+
+
+def _council_overlay_objects(
+    session: Mapping[str, Any],
+    study_packet: Mapping[str, Any] | None,
+    *,
+    frame_id: int,
+    sequence_id: str,
+    chart_transform_id: str,
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    bounds, anchor_candles = _study_anchor_box(session, candle_count=1)
+    if not bounds:
+        return []
+    council = _model_council_summary(session, study_packet)
+    side = _text(council.get("side"), "HOLD").upper()
+    if side not in {"BUY", "SELL", "HOLD"}:
+        side = "HOLD"
+    confidence = max(0.35, min(1.0, _float(council.get("confidence"), _float(_mapping(session.get("latest_signal")).get("effective_confidence"), 0.62))))
+    raw = {
+        "overlay_id": f"model_council_marker_{frame_id}",
+        "object_id": f"model_council_marker_{frame_id}",
+        "track_id": "model_council_marker",
+        "type": "MODEL_COUNCIL_MARKER",
+        "side": side,
+        "source_agent": "live_state_v3_council_overlay",
+        "source_key": _text(council.get("state"), "COUNCIL"),
+        "frame_id": frame_id,
+        "sequence_id": sequence_id,
+        "chart_transform_id": chart_transform_id,
+        "coordinate_mode": "CHART_IMAGE_SPACE",
+        "anchor_type": "CANDLES" if anchor_candles else "BOX",
+        "anchor_candles": anchor_candles,
+        "bounds": bounds,
+        "truth_score": confidence,
+        "confidence": confidence,
+        "lifecycle_state": "ACTIVE",
+        "visible_modes": ["COUNCIL", "ACTIVE_CONTEXT", "INSPECTOR"],
+        "visible_default": False,
+        "ttl_ms": 12000,
+        "created_at_ms": now_ms,
+        "reason": _text(council.get("summary"), "Model council marker anchored to the active chart read."),
+        "label": "MODEL COUNCIL MARKER",
+        "display_label": "MODEL COUNCIL MARKER",
+        "short_label": "MODEL COUNCIL MARKER",
+        "layer": "active_council_decision",
+        "role": "model_council",
+        "label_anchor": "right",
+        "label_hidden": False,
+        "z_index": 76,
+        "structural_anchor": True,
+        "source_rule": "council_overlay_anchored_to_current_candle",
+    }
+    try:
+        return [
+            normalize_v3_overlay_object(
+                raw,
+                strict=False,
+                frame_id=frame_id,
+                sequence_id=sequence_id,
+                chart_transform_id=chart_transform_id,
+                fallback_index=0,
+            )
+        ]
+    except Exception:
+        return [raw]
 
 
 def _overlay_visible_for_mode(overlay: Mapping[str, Any], mode: str, *, now_ms: int | float | None = None) -> bool:
@@ -1327,6 +1739,9 @@ def _compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
         "full_overlay_frame_id",
         "model_vote_frame_id",
         "model_capture_epoch",
+        "model_council_update_pending",
+        "model_council_pending_frame_id",
+        "model_council_pending_capture_epoch",
         "source_capture_id",
         "last_window_surface_signature",
         "last_display_surface_signature",
@@ -1569,6 +1984,7 @@ def build_live_state_v3(
         or _mapping(session.get("latest_signal")).get("side")
         or _mapping(session.get("latest_signal")).get("execution_action")
     ).upper()
+    two_candle_study, lstm_contribution = _two_candle_and_lstm_payloads(session)
     raw_overlays = _combine_overlays(
         registry,
         active_objects=active_objects,
@@ -1586,7 +2002,35 @@ def build_live_state_v3(
         sequence_id=registry.sequence_context.sequence_id,
         chart_transform_id=str(chart_transform["chart_transform_id"]),
     )
-    precision_input_overlays = raw_overlays + thesis_overlays
+    study_overlays = [] if source_block_reason else _study_overlay_objects(
+        session,
+        two_candle_study,
+        lstm_contribution,
+        active_mode=active_overlay_mode,
+        frame_id=registry.frame_id,
+        sequence_id=registry.sequence_context.sequence_id,
+        chart_transform_id=str(chart_transform["chart_transform_id"]),
+        now_ms=now_ms,
+    )
+    council_overlays = [] if source_block_reason else _council_overlay_objects(
+        session,
+        study_packet or _mapping(session.get("model_council_study_packet")),
+        frame_id=registry.frame_id,
+        sequence_id=registry.sequence_context.sequence_id,
+        chart_transform_id=str(chart_transform["chart_transform_id"]),
+        now_ms=now_ms,
+    )
+    broker_control_modes = {"BROKER", "CALIBRATION"}
+    broker_control_overlays = [] if source_block_reason or active_overlay_mode not in broker_control_modes else _broker_control_overlay_objects(
+        session,
+        scene_graph=scene_graph,
+        frame_id=registry.frame_id,
+        sequence_id=registry.sequence_context.sequence_id,
+        chart_transform_id=str(chart_transform["chart_transform_id"]),
+        broker_source_lock_id=_text(broker_source.get("lock_id")),
+        now_ms=now_ms,
+    )
+    precision_input_overlays = raw_overlays + thesis_overlays + study_overlays + council_overlays + broker_control_overlays
     if source_block_reason:
         precision_overlays = []
         precision_audit = {
@@ -1699,7 +2143,6 @@ def build_live_state_v3(
     surface_frame = artifact_refs["window"]
     chart_frame = artifact_refs["chart"]
     broker_surface_payload = _broker_surface_summary(session, surface_frame, frame_timing, now_epoch=now_value)
-    two_candle_study, lstm_contribution = _two_candle_and_lstm_payloads(session)
     execution_packet_payload = (
         _current_execution_packet(execution_packet, now_epoch=now_value)
         or _current_execution_packet(session.get("model_council_packet"), now_epoch=now_value)
@@ -1713,7 +2156,7 @@ def build_live_state_v3(
         active_mode=active_overlay_mode,
     )
     overlay_vocabulary = _overlay_vocabulary_payload(
-        [*precision_overlays, *thesis_overlays],
+        [*precision_overlays, *thesis_overlays, *study_overlays, *council_overlays],
         overlays,
         active_mode=active_overlay_mode,
     )

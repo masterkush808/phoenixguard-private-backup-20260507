@@ -20,7 +20,8 @@ def build_locked_tracker_controls(
     execution_mode: str = "live",
     require_market_identity: bool = True,
     require_timeframe_identity: bool = True,
-    allow_locked_surface_identity_fallback: bool = True,
+    allow_locked_surface_identity_fallback: bool = False,
+    swing_fallback_enabled: bool = False,
     broker_surface_cache_sec: float = 30.0,
     adaptive_timer_enabled: bool = True,
     min_capture_interval_sec: float = 0.5,
@@ -43,7 +44,7 @@ def build_locked_tracker_controls(
         "trade_profile": "HIGH_FREQUENCY",
         "execution_profile": "HIGH_FREQUENCY",
         "high_frequency_enabled": True,
-        "swing_fallback_enabled": True,
+        "swing_fallback_enabled": bool(swing_fallback_enabled),
         "continuous_model_feed_enabled": True,
         "high_frequency_timeframe": "M5",
         "high_frequency_horizon_candles": 2,
@@ -132,6 +133,13 @@ def tracker_session_runtime_state(
         max(float(decision_stale_grace_sec), capture_interval * 4.0, observed_pipeline_latency, observed_freshness_window * 0.25),
     )
     last_capture_epoch = _float(session_payload.get("last_capture_epoch") or session_payload.get("last_capture_started_epoch"), 0.0)
+    display_published_epoch = _float(
+        session_payload.get("display_published_epoch") or session_payload.get("last_display_published_epoch"),
+        0.0,
+    )
+    display_only_authority = bool(session_payload.get("display_snapshot_only_v3") or session_payload.get("display_fast_path_v3"))
+    if display_only_authority and display_published_epoch > last_capture_epoch:
+        last_capture_epoch = display_published_epoch
     decision_valid_until_epoch = _float(session_payload.get("decision_valid_until_epoch"), 0.0)
     capture_age_sec = max(0.0, now - last_capture_epoch) if last_capture_epoch > 0.0 else 0.0
     decision_age_sec = max(0.0, now - decision_valid_until_epoch) if decision_valid_until_epoch > 0.0 else 0.0

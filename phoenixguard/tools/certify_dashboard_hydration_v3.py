@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -21,6 +22,16 @@ if str(ROOT / "tools") not in sys.path:
 from capture_dashboard_visual_v3 import build_capture  # noqa: E402
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except Exception:
+        return int(default)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Certify PhoenixGuard V3 dashboard canonical hydration.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
@@ -30,12 +41,21 @@ def main() -> int:
     parser.add_argument("--width", type=int, default=1440)
     parser.add_argument("--height", type=int, default=900)
     parser.add_argument("--skip-playwright", action="store_true")
+    parser.add_argument(
+        "--max-capture-sets",
+        type=int,
+        default=_env_int("PHOENIXGUARD_DASHBOARD_HYDRATION_MAX_CAPTURE_SETS", 3),
+        help="Keep only the newest N dashboard hydration evidence bundles. Set 0 to disable pruning.",
+    )
     args = parser.parse_args()
 
     failures: list[str] = []
     warnings: list[str] = []
     samples: list[dict[str, object]] = []
+    retention_samples: list[dict[str, object]] = []
     out_dir = ROOT / "reports" / "certification" / "dashboard_hydration"
+    if args.skip_playwright:
+        failures.append("--skip-playwright is non-certifying for dashboard hydration")
 
     for index in range(max(1, int(args.count))):
         report = build_capture(
@@ -46,6 +66,17 @@ def main() -> int:
             args.width,
             args.height,
             args.skip_playwright,
+            max_capture_sets=args.max_capture_sets,
+        )
+        retention = report.get("evidence_retention") if isinstance(report.get("evidence_retention"), dict) else {}
+        retention_samples.append(
+            {
+                "index": index + 1,
+                "max_capture_sets": retention.get("max_capture_sets"),
+                "removed_files": retention.get("removed_files"),
+                "removed_mb": retention.get("removed_mb", 0.0),
+                "errors": retention.get("errors", []),
+            }
         )
         ready = ((report.get("capture") or {}).get("ready_state") or {}) if isinstance(report.get("capture"), dict) else {}
         live_payload = ((report.get("live_state") or {}).get("payload") or {}) if isinstance(report.get("live_state"), dict) else {}
@@ -83,6 +114,12 @@ def main() -> int:
             "session_id": args.session,
             "base_url": args.base_url,
             "checks": int(args.count),
+            "evidence_retention_policy": {
+                "out_dir": str(out_dir),
+                "max_capture_sets": int(args.max_capture_sets),
+                "disabled": int(args.max_capture_sets) <= 0,
+                "retention_samples": retention_samples,
+            },
             "samples": samples,
         },
     )

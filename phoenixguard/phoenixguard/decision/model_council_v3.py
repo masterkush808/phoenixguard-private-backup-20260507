@@ -31,6 +31,7 @@ MATURITY_STAGES = (
     "EXECUTABLE_PACKET",
 )
 MODEL_COUNCIL_STUDY_SCHEMA_VERSION = "PG_MODEL_COUNCIL_STUDY_V3"
+PROMOTION_FAILURE_AUDIT_SCHEMA_VERSION = "PG_PROMOTION_FAILURE_AUDIT_V3"
 COUNCIL_STATES = {
     "NO_SETUP",
     "BUY_OBSERVATION",
@@ -122,6 +123,14 @@ def _side(value: Any) -> str:
         return "BUY"
     if text in {"SELL", "BEAR", "BEARISH", "DOWN", "PUT"}:
         return "SELL"
+    return "HOLD"
+
+
+def _first_trade_side(*values: Any) -> str:
+    for value in values:
+        side = _side(value)
+        if side in {"BUY", "SELL"}:
+            return side
     return "HOLD"
 
 
@@ -974,7 +983,13 @@ def _resolve_execution_lane(
     hf_cycle = _mapping(snapshot.get("high_frequency_candle_cycle"))
     hf_requested = bool(_bool(hf_cycle.get("enabled")) or lane_hint in {"HIGH_FREQUENCY_TWO_CANDLE", "HIGH_FREQUENCY", "HFT"})
     if hf_requested:
-        hf_side = _side(hf_cycle.get("side") or hf_cycle.get("candidate_side") or execution_timing.get("side") or side)
+        hf_side = _first_trade_side(
+            hf_cycle.get("side"),
+            hf_cycle.get("candidate_side"),
+            hf_cycle.get("active_candidate_side"),
+            execution_timing.get("side"),
+            side,
+        )
         hf_score = max(lane_score, _clip01(hf_cycle.get("confidence"), 0.0))
         hf_required = thresholds.get("HIGH_FREQUENCY_TWO_CANDLE", execution_threshold)
         hf_ready = bool(_bool(hf_cycle.get("ready")) and _bool(hf_cycle.get("current_candle_closed")))
@@ -1380,6 +1395,132 @@ def _non_executable_release_state(
     return "WATCHING"
 
 
+def _promotion_exact_field(blocker: str, sequence: Mapping[str, Any], instrument_context: Mapping[str, Any]) -> str:
+    blocker_upper = _upper(blocker)
+    if blocker_upper == "SEQUENCE_CONTEXT":
+        failed_module = str(sequence.get("failed_module") or "").strip()
+        return failed_module or "sequence_context"
+    if blocker_upper.startswith("INSTRUMENT_CONTEXT"):
+        if "BROKER_CLICK_SAFE" in blocker_upper or not bool(instrument_context.get("broker_click_safe")):
+            return "instrument_context.broker_click_safe"
+        return "instrument_context"
+    if blocker_upper in {"MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING", "MISSING_TIME_SEQUENCE"}:
+        return "timing.expiry_seconds"
+    if "TIMING" in blocker_upper or blocker_upper.startswith("CURRENT_CANDLE"):
+        return "timing_mode"
+    if blocker_upper in {"NO_EXECUTION_LANE_ACCEPTED", "LANE_SCORE_BELOW_THRESHOLD"}:
+        return "execution_lane"
+    if blocker_upper.startswith("PG_EXECUTION_PACKET_V3") or blocker_upper == "EXECUTION_PACKET_NOT_CURRENT_AFTER_PUBLICATION":
+        return "current_execution_packet"
+    if blocker_upper in {"FLIP_FLOP_CONTAINED", "CANDIDATE_MATURITY", "CANDIDATE_SIDE"}:
+        return "trade_candidate_queue.active_candidate"
+    if "PERMISSION" in blocker_upper:
+        return "trade_permission"
+    if "TRAP" in blocker_upper or "BAD_ENTRY" in blocker_upper:
+        return "market_trap"
+    return blocker_upper.lower() or "promotion_trace.denied_at"
+
+
+def build_promotion_failure_audit_v3(
+    *,
+    packet_id: str = "",
+    candidate_id: str = "",
+    promotion_trace: Mapping[str, Any],
+    sequence_context_readiness: Mapping[str, Any] | None = None,
+    execution_lane: Mapping[str, Any] | None = None,
+    final_score: float = 0.0,
+    threshold: float = 0.0,
+    timing_mode: str = "",
+    instrument_context: Mapping[str, Any] | None = None,
+    packet_result: str = "",
+    extra_source_fields: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    promotion = _mapping(promotion_trace)
+    sequence = _mapping(sequence_context_readiness or promotion.get("sequence_context_readiness"))
+    lane = _mapping(execution_lane or promotion.get("execution_lane"))
+    instrument = _mapping(instrument_context)
+    denied_at = _upper(
+        promotion.get("denied_at")
+        or promotion.get("true_blocker")
+        or promotion.get("blocked_by")
+        or promotion.get("promotion_result")
+        or "EXECUTION_PACKET_NOT_PUBLISHED"
+    )
+    next_required = str(
+        promotion.get("next_required")
+        or promotion.get("release_condition")
+        or sequence.get("next_required")
+        or lane.get("next_required")
+        or "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
+    ).strip()
+    release_condition = str(promotion.get("release_condition") or next_required).strip()
+    score = float(final_score)
+    score_threshold = float(threshold)
+    mode = _upper(timing_mode or promotion.get("timing_mode"))
+    blockers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(blocker: str, *, field: str = "", reason: str = "", weight: float = 1.0) -> None:
+        label = _upper(blocker or "EXECUTION_PACKET_NOT_PUBLISHED")
+        if not label or label == "NONE" or label in seen:
+            return
+        seen.add(label)
+        blockers.append(
+            {
+                "rank": len(blockers) + 1,
+                "blocker": label,
+                "field": field or _promotion_exact_field(label, sequence, instrument),
+                "reason": str(reason or next_required or label),
+                "weight": round(float(weight), 4),
+                "next_required": next_required,
+            }
+        )
+
+    add(denied_at, reason=next_required, weight=1.0)
+    if sequence and not bool(sequence.get("ready")):
+        add("SEQUENCE_CONTEXT", field=str(sequence.get("failed_module") or "sequence_context"), reason=str(sequence.get("next_required") or next_required), weight=0.92)
+    if mode and mode != "ENTER_NOW":
+        add(f"TIMING_MODE_{mode}", field="timing_mode", reason=next_required, weight=0.88)
+    if score_threshold > 0.0 and score < score_threshold:
+        add("LANE_SCORE_BELOW_THRESHOLD", field="final_execution_score", reason=f"final_score={score:.4f} < threshold={score_threshold:.4f}", weight=0.82)
+    if lane and not bool(lane.get("accepted")):
+        add("NO_EXECUTION_LANE_ACCEPTED", field="execution_lane.accepted", reason=str(lane.get("reason") or lane.get("next_required") or next_required), weight=0.8)
+    if instrument and not bool(instrument.get("broker_click_safe")) and denied_at.startswith("INSTRUMENT_CONTEXT"):
+        add("INSTRUMENT_CONTEXT_NOT_BROKER_CLICK_SAFE", field="instrument_context.broker_click_safe", reason=next_required, weight=0.95)
+
+    if not blockers:
+        add("EXECUTION_PACKET_NOT_PUBLISHED", field="promotion_trace.packet_result", reason=next_required, weight=0.5)
+    for index, row in enumerate(blockers, start=1):
+        row["rank"] = index
+
+    top = blockers[0]
+    return {
+        "schema_version": PROMOTION_FAILURE_AUDIT_SCHEMA_VERSION,
+        "packet_id": str(packet_id or promotion.get("packet_id") or ""),
+        "candidate_id": str(candidate_id or promotion.get("candidate_id") or ""),
+        "packet_result": _upper(packet_result or promotion.get("packet_result") or "STUDY_PACKET_PUBLISHED"),
+        "promotion_result": str(promotion.get("promotion_result") or ""),
+        "denied_at": denied_at,
+        "top_blocker": top["blocker"],
+        "exact_field_preventing_execution_packet": top["field"],
+        "next_required": next_required,
+        "release_condition": release_condition,
+        "final_score": round(score, 4),
+        "threshold": round(score_threshold, 4),
+        "score_passed": bool(score_threshold > 0.0 and score >= score_threshold),
+        "timing_mode": mode,
+        "sequence_ready": bool(sequence.get("ready")) if sequence else None,
+        "sequence_status": str(sequence.get("sequence_status") or sequence.get("status") or ""),
+        "sequence_length": _int(sequence.get("sequence_length"), 0),
+        "selected_lane": str(lane.get("name") or promotion.get("selected_lane") or ""),
+        "lane_accepted": bool(lane.get("accepted")) if lane else None,
+        "instrument_context_state": str(instrument.get("instrument_context_state") or instrument.get("identity_state_v2") or ""),
+        "instrument_context_broker_click_safe": bool(instrument.get("broker_click_safe")) if instrument else None,
+        "blocker_ranking": blockers,
+        "source_fields": dict(extra_source_fields or {}),
+    }
+
+
 def _packet_base(snapshot: Mapping[str, Any], now: float) -> dict[str, Any]:
     session_id = str(snapshot.get("session_id") or "pocket-live-8788")
     instrument_context = _mapping(snapshot.get("instrument_context"))
@@ -1580,7 +1721,8 @@ def evaluate_model_council_v3(
     lane_effective_entry_quality_ok = bool(entry_quality_ok or execution_lane.get("lane_entry_quality_ok"))
     lane_effective_timing_ready = bool(timing_ready or execution_lane.get("lane_timing_ready"))
     lane_effective_mature = bool(mature or execution_lane.get("lane_maturity_ok"))
-    final_score_passed = lane_score >= execution_threshold
+    lane_required_score = _float(execution_lane.get("required_score"), execution_threshold)
+    final_score_passed = lane_score >= lane_required_score
     angle = _mapping(market.get("angle_context") or snapshot.get("angle_context") or snapshot.get("angle_features"))
     current_candle = _current_candle_acceptance(snapshot, market, candidate_side)
     current_candle_ok = bool(current_candle.get("entry_allowed"))
@@ -1894,7 +2036,6 @@ def evaluate_model_council_v3(
         + permission_adjustment
     )
     final_execution_score = _clip01(raw_council_score + market_reality_adjustment)
-    lane_required_score = _float(execution_lane.get("required_score"), execution_threshold)
     final_score_passed = final_execution_score >= lane_required_score
     stable = preliminary_stable
     permission_hard_block = bool(permission_denied_effective and not permission_prepare_allowed)
@@ -2387,6 +2528,7 @@ def evaluate_model_council_v3(
             "play_reasoning": final_reasoning_decision,
         },
     }
+    study_packet_valid_for_seconds = _float(snapshot.get("study_packet_valid_for_seconds"), 20.0)
     study_packet = {
         "schema_version": MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
         "packet_id": base["packet_id"],
@@ -2399,8 +2541,8 @@ def evaluate_model_council_v3(
         "state_version": base["state_version"],
         "created_epoch": current_now,
         "created_epoch_sec": current_now,
-        "valid_until_epoch": current_now + _float(snapshot.get("study_packet_valid_for_seconds"), 8.0),
-        "valid_until_epoch_sec": current_now + _float(snapshot.get("study_packet_valid_for_seconds"), 8.0),
+        "valid_until_epoch": current_now + study_packet_valid_for_seconds,
+        "valid_until_epoch_sec": current_now + study_packet_valid_for_seconds,
         "execution": execution,
         "model_council": council,
         "block_reason": block_reason,
@@ -2461,6 +2603,38 @@ def evaluate_model_council_v3(
     council["frames_used"] = sequence_context_payload["frames_used"]
     council["sequence_status"] = sequence_context_payload["sequence_status"]
     council["sequence_confidence"] = sequence_context_payload["sequence_confidence"]
+
+    def _refresh_promotion_failure_audit() -> dict[str, Any]:
+        audit = build_promotion_failure_audit_v3(
+            packet_id=base["packet_id"],
+            candidate_id=active_candidate_id,
+            promotion_trace=promotion_trace,
+            sequence_context_readiness=sequence_readiness,
+            execution_lane=execution_lane,
+            final_score=final_execution_score,
+            threshold=lane_required_score,
+            timing_mode=timing_mode,
+            instrument_context=instrument_context,
+            packet_result=str(promotion_trace.get("packet_result") or study_packet.get("packet_result") or "STUDY_PACKET_PUBLISHED"),
+            extra_source_fields={
+                "release_state": promotion_trace.get("release_state"),
+                "non_executable_state": promotion_trace.get("non_executable_state"),
+                "blocked_by": promotion_trace.get("blocked_by"),
+                "true_blocker": promotion_trace.get("true_blocker"),
+            },
+        )
+        promotion_trace["promotion_failure_audit_v3"] = audit
+        council["promotion_failure_audit_v3"] = audit
+        council["promotion_trace"] = promotion_trace
+        study_packet["promotion_failure_audit_v3"] = audit
+        study_packet["promotion_trace"] = promotion_trace
+        result["promotion_failure_audit_v3"] = audit
+        result["promotion_trace"] = promotion_trace
+        result["model_council"] = council
+        result["study_packet"] = study_packet
+        result["model_council_study_packet"] = study_packet
+        return audit
+
     if not bool(sequence_readiness.get("ready")):
         executable = False
         block_reason = "SEQUENCE_CONTEXT"
@@ -2495,6 +2669,8 @@ def evaluate_model_council_v3(
         result["promotion_trace"] = promotion_trace
         result["study_packet"] = study_packet
         result["model_council_study_packet"] = study_packet
+    if not executable:
+        _refresh_promotion_failure_audit()
     if executable:
         packet = build_execution_packet_v3(
             packet_id=base["packet_id"],
@@ -2600,11 +2776,107 @@ def evaluate_model_council_v3(
             result["model_council_study_packet"] = study_packet
             result["block_reason"] = validation.first_reason
             result["packet_validation"] = validation.as_dict()
+            _refresh_promotion_failure_audit()
         else:
             packet["contributors"] = result["contributors"]
             result["execution_packet"] = packet
             result["model_council_packet"] = packet
             result["packet_validation"] = validation.as_dict()
+    if not _mapping(result.get("execution_packet") or result.get("model_council_packet")):
+        no_packet_reason = str(
+            promotion_trace.get("true_blocker")
+            or promotion_trace.get("denied_at")
+            or block_reason
+            or "EXECUTION_PACKET_NOT_PUBLISHED"
+        ).strip().upper()
+        if not no_packet_reason or no_packet_reason == "NONE":
+            no_packet_reason = "EXECUTION_PACKET_NOT_PUBLISHED"
+        derived_no_packet_next_required = ""
+        if no_packet_reason in {"EXECUTION_PACKET_NOT_PUBLISHED", "WATCHING", "STUDY_PACKET_PUBLISHED"}:
+            if not context_ok or not bool(execution_lane.get("accepted")):
+                no_packet_reason = "NO_EXECUTION_LANE_ACCEPTED"
+                derived_no_packet_next_required = lane_release_requirements
+            elif not lane_effective_mature:
+                no_packet_reason = "CANDIDATE_MATURITY"
+                derived_no_packet_next_required = "candidate_stage=CANDIDATE_STABLE/PREPARING"
+            elif not stable:
+                no_packet_reason = "CANDIDATE_STABILITY"
+                derived_no_packet_next_required = f"dominance_margin >= {min_dominance_margin:.2f}"
+            elif not lane_effective_timing_ready or timing_mode != "ENTER_NOW":
+                no_packet_reason = f"TIMING_MODE_{timing_mode or 'NOT_READY'}"
+                derived_no_packet_next_required = f"timing_mode=ENTER_NOW; {timing_decision['entry_timing']['next_condition']}"
+            elif not timing_has_explicit_expiry:
+                no_packet_reason = "MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING"
+                derived_no_packet_next_required = "timing.expiry_seconds explicit and execution.time_sequence target exists"
+            elif not final_score_passed:
+                no_packet_reason = "LANE_SCORE_BELOW_THRESHOLD"
+                derived_no_packet_next_required = (
+                    f"final_score={final_execution_score:.4f} >= threshold={lane_required_score:.4f} "
+                    f"for selected_lane={execution_lane.get('name', 'execution lane')}"
+                )
+            elif final_state and final_state != "EXECUTABLE":
+                no_packet_reason = str(final_state).strip().upper()
+                derived_no_packet_next_required = str(next_required or release_condition or "continue study")
+        raw_no_packet_next_required = str(promotion_trace.get("next_required") or next_required or "").strip()
+        if (
+            not raw_no_packet_next_required
+            or raw_no_packet_next_required.lower() == "none"
+            or raw_no_packet_next_required == "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
+        ):
+            no_packet_next_required = str(
+                derived_no_packet_next_required
+                or "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
+            ).strip()
+        else:
+            no_packet_next_required = raw_no_packet_next_required
+        if not no_packet_next_required or no_packet_next_required.lower() == "none":
+            no_packet_next_required = "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
+        result_execution = _mapping(result.get("execution") or execution)
+        result_execution.update(
+            {
+                "enabled": False,
+                "state": "WATCHING"
+                if str(result_execution.get("state") or "").strip().upper() == "EXECUTABLE"
+                else str(result_execution.get("state") or final_state or "WATCHING").strip().upper(),
+            }
+        )
+        if result_execution["state"] == "EXECUTABLE":
+            result_execution["state"] = "WATCHING"
+        result["execution"] = result_execution
+        council["final_state"] = (
+            "WATCHING" if str(council.get("final_state") or "").strip().upper() == "EXECUTABLE" else council.get("final_state", "WATCHING")
+        )
+        council["true_blocker"] = no_packet_reason
+        council["denied_at"] = no_packet_reason
+        council["next_required"] = no_packet_next_required
+        council["release_condition"] = str(promotion_trace.get("release_condition") or release_condition or no_packet_next_required)
+        promotion_trace.update(
+            {
+                "denied_at": no_packet_reason,
+                "blocked_by": no_packet_reason,
+                "true_blocker": no_packet_reason,
+                "next_required": no_packet_next_required,
+                "release_condition": council["release_condition"],
+                "packet_result": "STUDY_PACKET_PUBLISHED",
+            }
+        )
+        if str(promotion_trace.get("promotion_result") or "").strip().upper() == "EXECUTABLE_PACKET_CREATED":
+            promotion_trace["promotion_result"] = str(council.get("final_state") or "WATCHING").strip().upper()
+        council["promotion_trace"] = promotion_trace
+        study_packet["execution"] = dict(result_execution)
+        study_packet["model_council"] = council
+        study_packet["promotion_trace"] = promotion_trace
+        study_packet["true_blocker"] = no_packet_reason
+        study_packet["denied_at"] = no_packet_reason
+        study_packet["next_required"] = no_packet_next_required
+        study_packet["release_condition"] = council["release_condition"]
+        study_packet["packet_result"] = "STUDY_PACKET_PUBLISHED"
+        result["model_council"] = council
+        result["promotion_trace"] = promotion_trace
+        result["study_packet"] = study_packet
+        result["model_council_study_packet"] = study_packet
+        result["packet_result"] = "STUDY_PACKET_PUBLISHED"
+        result["execution_packet_present"] = False
     return result
 
 

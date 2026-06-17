@@ -282,6 +282,24 @@ def _point_pair_bounds(points: Sequence[Any]) -> list[float] | None:
     return normalize_bounds(points)
 
 
+def _first_finite_number(raw: Mapping[str, Any], keys: Sequence[str], default: float) -> float:
+    for key in keys:
+        if key not in raw:
+            continue
+        value = _float(raw.get(key), float("nan"))
+        if value == value and value not in (float("inf"), -float("inf")):
+            return value
+    return float(default)
+
+
+def _bounds_from_first_key(raw: Mapping[str, Any], keys: Sequence[str]) -> list[float] | None:
+    for key in keys:
+        bounds = normalize_bounds(raw.get(key))
+        if bounds is not None:
+            return bounds
+    return None
+
+
 def _point_box(point: Any, *, pad: float = 5.0) -> list[float] | None:
     if not isinstance(point, Sequence) or isinstance(point, (str, bytes, bytearray)) or len(point) < 2:
         return None
@@ -309,16 +327,54 @@ def _candle_line_rows(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, fl
         bbox = _raw_bbox(candle)
         if bbox is None:
             continue
-        left, top, right, bottom = [float(value) for value in bbox[:4]]
+        left, box_top, right, box_bottom = [float(value) for value in bbox[:4]]
+        body_box = _bounds_from_first_key(candle, ("body_bbox", "body_bounds", "body_pixel_bbox", "body_box"))
+        body_top = float(body_box[1]) if body_box else box_top
+        body_bottom = float(body_box[3]) if body_box else box_bottom
+        wick_box = _bounds_from_first_key(candle, ("wick_bbox", "wick_bounds", "wick_pixel_bbox", "wick_box"))
+        wick_top_default = float(wick_box[1]) if wick_box else box_top
+        wick_bottom_default = float(wick_box[3]) if wick_box else box_bottom
+        wick_top = _first_finite_number(
+            candle,
+            (
+                "wick_top",
+                "wick_y1",
+                "high_y",
+                "top_wick_y",
+                "upper_wick_y",
+                "upper_wick_top",
+                "high_price_y",
+                "wick_high",
+            ),
+            wick_top_default,
+        )
+        wick_bottom = _first_finite_number(
+            candle,
+            (
+                "wick_bottom",
+                "wick_y2",
+                "low_y",
+                "bottom_wick_y",
+                "lower_wick_y",
+                "lower_wick_bottom",
+                "low_price_y",
+                "wick_low",
+            ),
+            wick_bottom_default,
+        )
+        wick_top = min(wick_top, box_top, body_top)
+        wick_bottom = max(wick_bottom, box_bottom, body_bottom)
         center_x = _float(candle.get("center_x"), (left + right) * 0.5)
-        center_y = _float(candle.get("center_y"), (top + bottom) * 0.5)
+        center_y = _float(candle.get("center_y"), (body_top + body_bottom) * 0.5)
         rows.append(
             {
                 "index": float(index),
                 "left": left,
-                "top": top,
+                "top": wick_top,
                 "right": right,
-                "bottom": bottom,
+                "bottom": wick_bottom,
+                "body_top": body_top,
+                "body_bottom": body_bottom,
                 "center_x": center_x,
                 "center_y": center_y,
             }
@@ -417,13 +473,15 @@ def _validated_trendline(
                 line_y = _line_y_at(first_point, second_point, float(row["center_x"]))
                 top = float(row["top"])
                 bottom = float(row["bottom"])
+                body_top = float(row.get("body_top", top))
+                body_bottom = float(row.get("body_bottom", bottom))
                 center_y = float(row.get("center_y", (top + bottom) * 0.5))
                 if role == "support":
                     wick_distance = bottom - line_y
-                    body_break_distance = center_y - line_y
+                    body_break_distance = max(center_y - line_y, body_bottom - line_y)
                 else:
                     wick_distance = line_y - top
-                    body_break_distance = line_y - center_y
+                    body_break_distance = max(line_y - center_y, line_y - body_top)
                 if anchor_start < row_index < anchor_end and wick_distance > touch_tolerance:
                     line_obstruction_count += 1
                     break
@@ -449,12 +507,16 @@ def _validated_trendline(
             if local_only and close_distance_norm > 2.25:
                 continue
             end_point = [last_x, latest_line_y]
+            line_points = [first_point, second_point]
+            if abs(last_x - float(second_point[0])) > 1e-6:
+                line_points.append(end_point)
             touches = max(2, len(touch_indices))
             body_cross_fraction = body_cross_count / max(1, evaluated_after_anchor)
             score = (anchor_dx * 0.012) + touches + (0.75 / max(0.35, close_distance_norm + 0.35) if local_only else 0.0)
             candidate = {
                 "role": role,
-                "points": [first_point, end_point],
+                "points": line_points,
+                "line_points": line_points,
                 "touch_points": [first_point, second_point],
                 "anchor_candles": [anchor_start, anchor_end],
                 "touch_count": int(touches),
@@ -827,17 +889,33 @@ class _RegistryBuilder:
             )
 
         latest_index = len(candles) - 1
-        latest_candle = candles[latest_index]
-        add_object(
-            latest_candle,
-            object_type="CURRENT_CANDLE",
-            source_path=f"tracking_summary.tracked_candles[{latest_index}]",
-            source_key=latest_candle.get("track_id", latest_index),
-            label="CURRENT CANDLE",
-            role="current_candle",
-            layer="recent_candles",
-            side=latest_candle.get("direction"),
-        )
+        for candle_index, candle in enumerate(candles):
+            latest = candle_index == latest_index
+            candle_modes = ["CANDLES", "INSPECTOR"]
+            if latest:
+                candle_modes = ["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT", "INSPECTOR"]
+            candle_row = {
+                **candle,
+                "visible_modes": candle_modes,
+                "label": "CURRENT CANDLE" if latest else "CANDLES",
+                "display_label": "NOW" if latest else "CANDLES",
+                "label_hidden": not latest,
+                "label_anchor": "hidden" if not latest else "top",
+                "visible_default": latest,
+                "z_index": 120 if latest else 48 + candle_index,
+                "anchor_type": "CANDLE",
+                "anchor_candles": [candle_index],
+            }
+            add_object(
+                candle_row,
+                object_type="CURRENT_CANDLE",
+                source_path=f"tracking_summary.tracked_candles[{candle_index}]",
+                source_key=candle.get("track_id", candle_index),
+                label="CURRENT CANDLE" if latest else "CANDLES",
+                role="current_candle" if latest else "visible_candle",
+                layer="recent_candles",
+                side=candle.get("direction"),
+            )
 
         for index, trendline in enumerate(_derive_trendline_overlays(candles)):
             object_type = normalize_overlay_type(

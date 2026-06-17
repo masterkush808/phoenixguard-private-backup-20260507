@@ -222,6 +222,7 @@ _HIGH_FREQUENCY_HORIZON_CANDLES = 2
 _HIGH_FREQUENCY_FIXED_EXPIRY_SEC = 10 * 60
 _HIGH_FREQUENCY_ENTRY_GRACE_SEC = 45.0
 _HIGH_FREQUENCY_MIN_CONFIDENCE = 0.44
+_CALIBRATED_SHOOTER_PACKET_VALID_SEC = 60.0
 _EXECUTION_DEFAULT_COOLDOWN_SEC = float(_HIGH_FREQUENCY_FIXED_EXPIRY_SEC)
 _EXECUTION_DEFAULT_EXPIRY_SEC = 300
 _EXECUTION_MIN_LIVE_EXPIRY_SEC = 60
@@ -461,6 +462,117 @@ def _compact_live_nested_payload(value: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _compact_selected_mapping(value: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
+    return {
+        key: value.get(key)
+        for key in keys
+        if value.get(key) not in (None, "", [], {})
+    }
+
+
+def _compact_persisted_council_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    selected = {
+        "accepted_lanes",
+        "candidate_id",
+        "candidate_stage",
+        "denied_at",
+        "entry_quality",
+        "execution",
+        "execution_lane",
+        "execution_threshold",
+        "final_execution_score",
+        "final_side",
+        "final_state",
+        "instrument_context",
+        "lane_accepted",
+        "lstm_contribution",
+        "market_play",
+        "market_reality",
+        "memory_confirmation",
+        "next_required",
+        "non_executable_state",
+        "packet_result",
+        "pair_profile",
+        "price_location",
+        "promotion_failure_audit_v3",
+        "promotion_trace",
+        "reasoning_arbitration",
+        "regime",
+        "release_condition",
+        "release_state",
+        "score",
+        "sequence_context",
+        "sequence_context_readiness",
+        "selected_execution_lane",
+        "side",
+        "skill_contributions",
+        "state",
+        "symbol_context",
+        "timing_decision",
+        "trade_permission",
+        "true_blocker",
+        "two_candle_study",
+    }
+    payload = _compact_selected_mapping(value, selected)
+    return _compact_live_nested_payload(payload)
+
+
+def _compact_persisted_study_packet(value: Mapping[str, Any]) -> dict[str, Any]:
+    selected = {
+        "block_reason",
+        "candidate_id",
+        "candidate_stage",
+        "created_epoch",
+        "created_epoch_sec",
+        "denied_at",
+        "entry_quality",
+        "execution",
+        "execution_lane",
+        "execution_state",
+        "execution_threshold",
+        "final_score",
+        "instrument_context",
+        "lock_reason",
+        "locked_previous_story",
+        "lstm_contribution",
+        "market_play",
+        "market_reality",
+        "memory_confirmation",
+        "next_required",
+        "packet_id",
+        "packet_result",
+        "packet_type",
+        "price_location",
+        "promotion_failure_audit_v3",
+        "promotion_trace",
+        "regime",
+        "release_condition",
+        "schema_version",
+        "selected_execution_lane",
+        "sequence_context",
+        "sequence_context_readiness",
+        "session_id",
+        "side",
+        "signal_thesis_v3",
+        "skill_contributions",
+        "symbol",
+        "symbol_context",
+        "timeframe",
+        "timing_decision",
+        "trade_permission",
+        "true_blocker",
+        "ttl_sec",
+        "two_candle_study",
+        "valid_until_epoch",
+        "valid_until_epoch_sec",
+    }
+    payload = _compact_selected_mapping(value, selected)
+    council = value.get("model_council")
+    if isinstance(council, Mapping):
+        payload["model_council"] = _compact_persisted_council_payload(cast(Mapping[str, Any], council))
+    return _compact_live_nested_payload(payload)
+
+
 def _compact_persisted_model_council_result(value: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(value)
     for key in (
@@ -476,7 +588,7 @@ def _compact_persisted_model_council_result(value: Mapping[str, Any]) -> dict[st
         payload.pop(key, None)
     council = payload.get("model_council")
     if isinstance(council, Mapping):
-        payload["model_council"] = _compact_live_nested_payload(cast(Mapping[str, Any], council))
+        payload["model_council"] = _compact_persisted_council_payload(cast(Mapping[str, Any], council))
     payload["study_packet_present"] = bool(
         value.get("model_council_study_packet")
         or value.get("study_packet")
@@ -501,6 +613,12 @@ def _compact_session_persisted_payload(payload: Mapping[str, Any]) -> dict[str, 
     result = compact.get("model_council_result")
     if isinstance(result, Mapping):
         compact["model_council_result"] = _compact_persisted_model_council_result(cast(Mapping[str, Any], result))
+    council = compact.get("model_council")
+    if isinstance(council, Mapping):
+        compact["model_council"] = _compact_persisted_council_payload(cast(Mapping[str, Any], council))
+    study_packet = compact.get("model_council_study_packet")
+    if isinstance(study_packet, Mapping):
+        compact["model_council_study_packet"] = _compact_persisted_study_packet(cast(Mapping[str, Any], study_packet))
     return compact
 
 
@@ -614,17 +732,37 @@ def _build_high_frequency_candle_cycle_context(
         second_forecast = dict(forecast_rows[1])
     next_side, next_confidence = _forecast_direction_and_confidence(next_forecast)
     second_side, second_confidence = _forecast_direction_and_confidence(second_forecast)
-    pressure_side = _upper_action(
-        high_frequency.get("primary_pressure")
-        or two_candle_study.get("primary_pressure")
-        or signal.get("candidate_action")
-        or signal.get("action"),
-        fallback="HOLD",
+
+    def first_trade_side(*values: Any) -> str:
+        for value in values:
+            side_value = _upper_action(value, fallback="HOLD")
+            if side_value in {"BUY", "SELL"}:
+                return side_value
+        return "HOLD"
+
+    active_candidate_side = first_trade_side(
+        signal.get("execution_action"),
+        signal.get("candidate_action"),
+        signal.get("action"),
+        signal.get("side"),
+        tracking.get("candidate_side"),
+        tracking.get("execution_action"),
+        tracking.get("action"),
     )
-    if pressure_side not in {"BUY", "SELL"}:
-        pressure_side = "HOLD"
+    pressure_side = first_trade_side(
+        high_frequency.get("primary_pressure"),
+        two_candle_study.get("primary_pressure"),
+        signal.get("candidate_action"),
+        signal.get("action"),
+    )
     agreement_side = next_side if next_side in {"BUY", "SELL"} and next_side == second_side else "HOLD"
-    side = agreement_side if agreement_side in {"BUY", "SELL"} else pressure_side
+    side = (
+        agreement_side
+        if agreement_side in {"BUY", "SELL"}
+        else active_candidate_side
+        if active_candidate_side in {"BUY", "SELL"}
+        else pressure_side
+    )
     forecast_confidence = max(
         _clip01(high_frequency.get("confidence") or 0.0),
         _clip01(two_candle_study.get("confidence") or 0.0),
@@ -683,6 +821,7 @@ def _build_high_frequency_candle_cycle_context(
         "candidate_side": side if side in {"BUY", "SELL"} else "HOLD",
         "forecast_side": agreement_side,
         "pressure_side": pressure_side,
+        "active_candidate_side": active_candidate_side,
         "confidence": round(float(forecast_confidence), 4),
         "min_confidence": round(float(min_confidence), 4),
         "timeframe": timeframe_label,
@@ -3161,12 +3300,32 @@ def _model_council_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, 
         valid_until = packet_valid_until(packet)
         return valid_until > now_epoch
 
+    def packet_is_executable(packet: Mapping[str, Any]) -> bool:
+        if packet.get("schema_version") != PG_EXECUTION_PACKET_SCHEMA_VERSION:
+            return False
+        if str(packet.get("packet_type") or "").strip() != PG_EXECUTION_PACKET_SCHEMA_VERSION:
+            return False
+        if not packet_is_current(packet):
+            return False
+        try:
+            validation = validate_execution_packet_v3(
+                packet,
+                now_epoch=now_epoch,
+                require_executable=True,
+            )
+        except Exception:
+            LOGGER.debug("Rejected malformed Model Council execution packet.", exc_info=True)
+            return False
+        if not validation.ok:
+            return False
+        return validation.side in {"BUY", "SELL"} and validation.expiry_seconds is not None
+
     def walk(candidate: Any, depth: int = 0) -> dict[str, Any]:
         if depth > 4 or not isinstance(candidate, Mapping):
             return {}
         row = _mapping_to_dict(candidate)
         if row.get("schema_version") == PG_EXECUTION_PACKET_SCHEMA_VERSION:
-            return row if packet_is_current(row) else {}
+            return row if packet_is_executable(row) else {}
         for key in (
             "model_council_packet",
             "execution_packet",
@@ -3202,6 +3361,7 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
         _float_or(latest_signal.get("pipeline_latency_sec"), 0.0) * 3.0,
         _float_or(pipeline_timing.get("pipeline_latency_sec"), 0.0) * 3.0,
     )
+    current_execution_packet = _model_council_packet_from_payload(payload)
 
     def packet_valid_until(packet: Mapping[str, Any]) -> float:
         direct = _float_or(packet.get("valid_until_epoch") or packet.get("valid_until_epoch_sec"), 0.0)
@@ -3217,6 +3377,330 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
             return False
         return True
 
+    generic_no_packet_reasons = {
+        "",
+        "NONE",
+        "WATCHING",
+        "STUDY_PACKET_PUBLISHED",
+        "EXECUTION_PACKET_NOT_PUBLISHED",
+        "PG_EXECUTION_PACKET_V3_PUBLISHED",
+        "EXECUTABLE_PACKET_CREATED",
+    }
+
+    def _upper_text(value: Any) -> str:
+        return str(value or "").strip().upper()
+
+    def _derive_no_current_packet_reason(
+        *,
+        row: Mapping[str, Any],
+        execution: Mapping[str, Any],
+        council: Mapping[str, Any],
+        promotion_trace: Mapping[str, Any],
+    ) -> tuple[str, str, dict[str, Any], dict[str, Any], float, float, str]:
+        lane = _mapping_to_dict(
+            row.get("execution_lane")
+            or council.get("execution_lane")
+            or promotion_trace.get("execution_lane")
+        )
+        sequence = _mapping_to_dict(
+            row.get("sequence_context_readiness")
+            or council.get("sequence_context_readiness")
+            or council.get("sequence_context")
+            or promotion_trace.get("sequence_context_readiness")
+        )
+        timing = _mapping_to_dict(
+            row.get("timing_decision")
+            or council.get("timing_decision")
+            or promotion_trace.get("timing_decision")
+        )
+        entry_timing = _mapping_to_dict(timing.get("entry_timing"))
+        entry_quality = _mapping_to_dict(
+            row.get("entry_quality")
+            or council.get("entry_quality")
+            or promotion_trace.get("entry_quality")
+        )
+        trade_permission = _mapping_to_dict(
+            row.get("trade_permission")
+            or council.get("trade_permission")
+            or promotion_trace.get("trade_permission")
+        )
+        timing_mode = _upper_text(
+            promotion_trace.get("timing_mode")
+            or row.get("timing_mode")
+            or entry_timing.get("mode")
+            or execution.get("timing_mode")
+        )
+        final_score = _float_or(
+            promotion_trace.get("final_execution_score")
+            or council.get("final_execution_score")
+            or row.get("final_execution_score")
+            or row.get("final_score"),
+            0.0,
+        )
+        threshold = _float_or(
+            promotion_trace.get("execution_threshold")
+            or lane.get("required_score")
+            or lane.get("threshold")
+            or council.get("execution_threshold")
+            or row.get("execution_threshold")
+            or row.get("threshold"),
+            0.0,
+        )
+        entry_quality_label = _upper_text(
+            entry_quality.get("state")
+            or entry_quality.get("grade")
+            or entry_quality.get("entry_grade")
+        )
+        final_state = _upper_text(council.get("final_state") or execution.get("state"))
+        has_promotion_evidence = bool(
+            lane
+            or sequence
+            or timing
+            or entry_quality
+            or trade_permission
+            or timing_mode
+            or final_score > 0.0
+            or threshold > 0.0
+            or final_state not in {"", "WATCHING"}
+        )
+
+        if not has_promotion_evidence:
+            return (
+                "PROMOTION_CONTEXT_MISSING",
+                "runtime trace must include promotion_trace or execution_lane before packet absence can be certified",
+                sequence,
+                lane,
+                final_score,
+                threshold,
+                timing_mode,
+            )
+
+        if sequence and sequence.get("ready") is False:
+            return (
+                "SEQUENCE_CONTEXT",
+                str(sequence.get("next_required") or "sequence context must be complete before packet publication"),
+                sequence,
+                lane,
+                final_score,
+                threshold,
+                timing_mode,
+            )
+        if lane and lane.get("accepted") is False:
+            return (
+                "NO_EXECUTION_LANE_ACCEPTED",
+                str(lane.get("next_required") or lane.get("reason") or "execution_lane.accepted must be true"),
+                sequence,
+                lane,
+                final_score,
+                threshold,
+                timing_mode,
+            )
+        if timing_mode and timing_mode != "ENTER_NOW":
+            return (
+                f"TIMING_MODE_{timing_mode}",
+                str(
+                    entry_timing.get("next_condition")
+                    or timing.get("next_required")
+                    or "timing_mode must be ENTER_NOW"
+                ),
+                sequence,
+                lane,
+                final_score,
+                threshold,
+                timing_mode,
+            )
+        if promotion_trace.get("timing_has_explicit_expiry") is False:
+            return (
+                "MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING",
+                "timing.expiry_seconds must be explicit before PG_EXECUTION_PACKET_V3 can be current",
+                sequence,
+                lane,
+                final_score,
+                threshold,
+                timing_mode,
+            )
+        if threshold > 0.0 and final_score < threshold:
+            return (
+                "LANE_SCORE_BELOW_THRESHOLD",
+                f"final_score={final_score:.4f} >= threshold={threshold:.4f}",
+                sequence,
+                lane,
+                final_score,
+                threshold,
+                timing_mode,
+            )
+        permission_state = _upper_text(
+            trade_permission.get("state")
+            or trade_permission.get("permission")
+            or trade_permission.get("status")
+        )
+        if (
+            trade_permission.get("allowed") is False
+            or trade_permission.get("accepted") is False
+            or permission_state in {"DENIED", "BLOCKED", "WAIT", "WAITING", "NO_TRADE"}
+        ):
+            return (
+                "TRADE_PERMISSION_DENIED",
+                str(trade_permission.get("deny_reason") or trade_permission.get("reason") or "trade permission must clear"),
+                sequence,
+                lane,
+                final_score,
+                threshold,
+                timing_mode,
+            )
+        if entry_quality_label in {"BAD_NOW", "LATE_ENTRY", "CHASE_ENTRY", "WATCH_ONLY", "EARLY_WATCH"}:
+            return (
+                "ENTRY_QUALITY",
+                str(entry_quality.get("reason") or "entry quality must clear before packet publication"),
+                sequence,
+                lane,
+                final_score,
+                threshold,
+                timing_mode,
+            )
+        publish_claim = _upper_text(
+            promotion_trace.get("release_state")
+            or promotion_trace.get("packet_result")
+            or promotion_trace.get("promotion_result")
+            or row.get("release_state")
+            or row.get("packet_result")
+        )
+        if publish_claim in {
+            "EXECUTION_PACKET_PUBLISHED",
+            "PG_EXECUTION_PACKET_V3_PUBLISHED",
+            "EXECUTABLE_PACKET_CREATED",
+        }:
+            prior_audit = _mapping_to_dict(
+                row.get("promotion_failure_audit_v3")
+                or promotion_trace.get("promotion_failure_audit_v3")
+                or council.get("promotion_failure_audit_v3")
+            )
+            prior_blocker = _upper_text(
+                promotion_trace.get("true_blocker")
+                or promotion_trace.get("blocked_by")
+                or promotion_trace.get("denied_at")
+                or row.get("true_blocker")
+                or row.get("denied_at")
+                or prior_audit.get("top_blocker")
+                or prior_audit.get("denied_at")
+            )
+            if prior_blocker.startswith("SHOOTER_SECOND_READ"):
+                return (
+                    "SHOOTER_SECOND_READ_PENDING",
+                    "ShooterActionSequencerV2 second live read must pass before click; expired packets remain rejected.",
+                    sequence,
+                    lane,
+                    final_score,
+                    threshold,
+                    timing_mode,
+                )
+            if packet_valid_until(row) <= now_epoch:
+                return (
+                    "EXECUTION_PACKET_EXPIRED_BEFORE_SHOOTER_CONFIRMATION",
+                    "Published PG_EXECUTION_PACKET_V3 expired before calibrated shooter confirmation; wait for the next fresh qualified read.",
+                    sequence,
+                    lane,
+                    final_score,
+                    threshold,
+                    timing_mode,
+                )
+            return (
+                "EXECUTION_PACKET_NOT_CURRENT_AFTER_PUBLICATION",
+                (
+                    "published PG_EXECUTION_PACKET_V3 must remain current through API and shooter handoff; "
+                    "current payload must include the valid execution_packet or the exact expiry/runtime rejection"
+                ),
+                sequence,
+                lane,
+                final_score,
+                threshold,
+                timing_mode,
+            )
+        if final_state and final_state not in {"WATCHING", "EXECUTABLE"}:
+            return (
+                final_state,
+                str(promotion_trace.get("next_required") or row.get("next_required") or "model council state must become executable"),
+                sequence,
+                lane,
+                final_score,
+                threshold,
+                timing_mode,
+            )
+        return (
+            "PG_EXECUTION_PACKET_V3_MISSING_AFTER_READY_GATES",
+            "current PG_EXECUTION_PACKET_V3 must exist, or packet validation must attach the exact rejection before study-only publication",
+            sequence,
+            lane,
+            final_score,
+            threshold,
+            timing_mode,
+        )
+
+    def _attach_demoted_packet_audit(
+        *,
+        row: dict[str, Any],
+        execution: dict[str, Any],
+        council: dict[str, Any],
+        promotion_trace: dict[str, Any],
+        reason: str,
+        next_required: str,
+        sequence: Mapping[str, Any],
+        lane: Mapping[str, Any],
+        final_score: float,
+        threshold: float,
+        timing_mode: str,
+    ) -> None:
+        release_condition = str(
+            promotion_trace.get("release_condition")
+            or row.get("release_condition")
+            or next_required
+        )
+        council["true_blocker"] = reason
+        council["denied_at"] = reason
+        council["next_required"] = next_required
+        council["release_condition"] = release_condition
+        promotion_trace.update(
+            {
+                "denied_at": reason,
+                "blocked_by": reason,
+                "true_blocker": reason,
+                "next_required": next_required,
+                "release_condition": release_condition,
+                "packet_result": "STUDY_PACKET_PUBLISHED",
+            }
+        )
+        audit = build_promotion_failure_audit_v3(
+            packet_id=str(row.get("packet_id") or promotion_trace.get("packet_id") or ""),
+            candidate_id=str(row.get("candidate_id") or promotion_trace.get("candidate_id") or ""),
+            promotion_trace=promotion_trace,
+            sequence_context_readiness=sequence,
+            execution_lane=lane,
+            final_score=final_score,
+            threshold=threshold,
+            timing_mode=timing_mode,
+            instrument_context=_mapping_to_dict(row.get("instrument_context")),
+            packet_result="STUDY_PACKET_PUBLISHED",
+            extra_source_fields={
+                "api_normalizer": "demoted_missing_current_execution_packet",
+                "release_state": promotion_trace.get("release_state"),
+                "non_executable_state": promotion_trace.get("non_executable_state"),
+                "blocked_by": reason,
+                "true_blocker": reason,
+            },
+        )
+        promotion_trace["promotion_failure_audit_v3"] = audit
+        council["promotion_failure_audit_v3"] = audit
+        council["promotion_trace"] = promotion_trace
+        row["execution"] = execution
+        row["model_council"] = council
+        row["promotion_trace"] = promotion_trace
+        row["promotion_failure_audit_v3"] = audit
+        row["true_blocker"] = reason
+        row["denied_at"] = reason
+        row["next_required"] = next_required
+        row["release_condition"] = release_condition
+        row["packet_result"] = "STUDY_PACKET_PUBLISHED"
+
     def normalize(packet: Mapping[str, Any]) -> dict[str, Any]:
         row = _mapping_to_dict(packet)
         if not row:
@@ -3231,6 +3715,69 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
             row["valid_until_epoch"] = created + study_ttl_sec
             row["valid_until_epoch_sec"] = row["valid_until_epoch"]
             row["ttl_sec"] = study_ttl_sec
+        if not current_execution_packet:
+            execution = _mapping_to_dict(row.get("execution"))
+            council = _mapping_to_dict(row.get("model_council"))
+            promotion_trace = _mapping_to_dict(row.get("promotion_trace"))
+            execution_state = str(execution.get("state") or "").strip().upper()
+            council_state = str(council.get("final_state") or "").strip().upper()
+            claims_executable = (
+                bool(execution.get("enabled"))
+                or execution_state == "EXECUTABLE"
+                or council_state == "EXECUTABLE"
+                or str(promotion_trace.get("packet_result") or "").strip().upper() == "PG_EXECUTION_PACKET_V3_PUBLISHED"
+                or str(promotion_trace.get("promotion_result") or "").strip().upper() == "EXECUTABLE_PACKET_CREATED"
+            )
+            reason = _upper_text(
+                promotion_trace.get("true_blocker")
+                or promotion_trace.get("denied_at")
+                or row.get("true_blocker")
+                or row.get("denied_at")
+            )
+            reason_is_generic = reason in generic_no_packet_reasons
+            if claims_executable or reason_is_generic:
+                (
+                    reason,
+                    next_required,
+                    sequence,
+                    lane,
+                    final_score,
+                    threshold,
+                    timing_mode,
+                ) = _derive_no_current_packet_reason(
+                    row=row,
+                    execution=execution,
+                    council=council,
+                    promotion_trace=promotion_trace,
+                )
+                execution["enabled"] = False
+                execution["state"] = "WATCHING" if execution_state == "EXECUTABLE" else (execution_state or "WATCHING")
+                if execution["state"] == "EXECUTABLE":
+                    execution["state"] = "WATCHING"
+                council["final_state"] = "WATCHING" if council_state == "EXECUTABLE" else (council_state or "WATCHING")
+                if str(promotion_trace.get("promotion_result") or "").strip().upper() == "EXECUTABLE_PACKET_CREATED":
+                    promotion_trace["promotion_result"] = council["final_state"]
+                _attach_demoted_packet_audit(
+                    row=row,
+                    execution=execution,
+                    council=council,
+                    promotion_trace=promotion_trace,
+                    reason=reason,
+                    next_required=next_required,
+                    sequence=sequence,
+                    lane=lane,
+                    final_score=final_score,
+                    threshold=threshold,
+                    timing_mode=timing_mode,
+                )
+                row["packet_type"] = "STUDY_PACKET"
+                if str(row.get("schema_version") or "").strip() == PG_EXECUTION_PACKET_SCHEMA_VERSION:
+                    row["schema_version"] = "PG_MODEL_COUNCIL_STUDY_V3"
+                row["created_epoch"] = now_epoch
+                row["created_epoch_sec"] = now_epoch
+                row["valid_until_epoch"] = now_epoch + study_ttl_sec
+                row["valid_until_epoch_sec"] = now_epoch + study_ttl_sec
+                row["ttl_sec"] = study_ttl_sec
         return row
 
     def walk(candidate: Any, depth: int = 0) -> dict[str, Any]:
@@ -5340,6 +5887,97 @@ class PocketOptionBrokerExecutionBackend:
             min(int(image_height), cy + half_h),
         ]
 
+    @staticmethod
+    def _bbox_center_rel(row: Mapping[str, Any], *, image_width: int, image_height: int) -> tuple[float, float] | None:
+        bbox = cast(Sequence[Any], row.get("bbox", []))
+        if len(bbox) < 4:
+            return None
+        try:
+            x0, y0, x1, y1 = [float(value) for value in bbox[:4]]
+        except (TypeError, ValueError):
+            return None
+        if x1 <= x0 or y1 <= y0 or image_width <= 0 or image_height <= 0:
+            return None
+        return ((x0 + x1) * 0.5 / float(image_width), (y0 + y1) * 0.5 / float(image_height))
+
+    @staticmethod
+    def _mean_rgb(arr: ArrayND, bbox: Sequence[int]) -> tuple[float, float, float]:
+        if len(bbox) < 4:
+            return 0.0, 0.0, 0.0
+        height, width = int(arr.shape[0]), int(arr.shape[1])
+        x0, y0, x1, y1 = [int(round(float(value))) for value in bbox[:4]]
+        x0 = max(0, min(width - 1, x0))
+        x1 = max(x0 + 1, min(width, x1))
+        y0 = max(0, min(height - 1, y0))
+        y1 = max(y0 + 1, min(height, y1))
+        roi = arr[y0:y1, x0:x1]
+        if roi.size == 0:
+            return 0.0, 0.0, 0.0
+        rgb = np.asarray(roi, dtype=np.float32).reshape(-1, 3)
+        values = np.mean(rgb, axis=0)
+        return float(values[0]), float(values[1]), float(values[2])
+
+    @classmethod
+    def _looks_like_calibrated_trade_button(cls, arr: ArrayND, row: Mapping[str, Any], side: str) -> bool:
+        bbox = cls._normalized_bbox(row.get("bbox", []))
+        if not bbox:
+            return False
+        red, green, blue = cls._mean_rgb(arr, bbox)
+        side_text = str(side or "").strip().upper()
+        if side_text == "BUY":
+            return bool(green >= 95.0 and green >= red + 18.0 and green >= blue + 12.0)
+        if side_text == "SELL":
+            return bool(red >= 120.0 and red >= green + 28.0 and red >= blue + 18.0)
+        return False
+
+    @classmethod
+    def _calibrated_time_field_from_box_map(
+        cls,
+        image_width: int,
+        image_height: int,
+        *,
+        buy: Mapping[str, Any],
+        sell: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if int(image_width) < _SHOOTER_BOX_FALLBACK_MIN_WIDTH or int(image_height) < _SHOOTER_BOX_FALLBACK_MIN_HEIGHT:
+            return {}
+        if not buy or not sell:
+            return {}
+        boxes = cls._shooter_box_map()
+        point = boxes.get("time_button") or boxes.get("time_input") or boxes.get("time_box")
+        if not point:
+            return {}
+        rel_x = float(point.get("x", 0.0))
+        rel_y = float(point.get("y", 0.0))
+        if not (0.64 <= rel_x <= 0.985 and 0.08 <= rel_y <= 0.39):
+            return {}
+        buy_rel = cls._bbox_center_rel(buy, image_width=image_width, image_height=image_height)
+        sell_rel = cls._bbox_center_rel(sell, image_width=image_width, image_height=image_height)
+        if buy_rel is None or sell_rel is None:
+            return {}
+        if buy_rel[1] >= sell_rel[1] - 0.012:
+            return {}
+        if rel_y >= buy_rel[1] - 0.045:
+            return {}
+        buy_bbox = cls._normalized_bbox(buy.get("bbox", []))
+        sell_bbox = cls._normalized_bbox(sell.get("bbox", []))
+        button_widths = [box[2] - box[0] for box in (buy_bbox, sell_bbox) if box]
+        button_heights = [box[3] - box[1] for box in (buy_bbox, sell_bbox) if box]
+        box_w = int(round(max(112.0, min(190.0, float(max(button_widths or [image_width * 0.075]))))))
+        box_h = int(round(max(30.0, min(58.0, float(max(button_heights or [image_height * 0.040])) * 0.72))))
+        return {
+            "bbox": cls._point_box(
+                image_width=image_width,
+                image_height=image_height,
+                rel_x=rel_x,
+                rel_y=rel_y,
+                box_w=box_w,
+                box_h=box_h,
+            ),
+            "confidence": 0.86,
+            "source": "shooter_box_map_time_field",
+        }
+
     @classmethod
     def _shooter_box_button_fallback(cls, image_width: int, image_height: int) -> dict[str, dict[str, Any]]:
         if int(image_width) < _SHOOTER_BOX_FALLBACK_MIN_WIDTH or int(image_height) < _SHOOTER_BOX_FALLBACK_MIN_HEIGHT:
@@ -5371,6 +6009,20 @@ class PocketOptionBrokerExecutionBackend:
             "sell": build_button("sell_icon", "SELL"),
         }
 
+    @classmethod
+    def _shooter_box_button_fallback_if_visible(cls, arr: ArrayND) -> dict[str, dict[str, Any]]:
+        height, width = int(arr.shape[0]), int(arr.shape[1])
+        candidates = cls._shooter_box_button_fallback(width, height)
+        buy = _mapping_to_dict(candidates.get("buy", {}))
+        sell = _mapping_to_dict(candidates.get("sell", {}))
+        if not buy or not sell:
+            return {}
+        if not cls._looks_like_calibrated_trade_button(arr, buy, "BUY"):
+            return {}
+        if not cls._looks_like_calibrated_trade_button(arr, sell, "SELL"):
+            return {}
+        return {"buy": buy, "sell": sell}
+
     def read_surface(self, image: Image.Image) -> dict[str, Any]:
         surface = image.convert("RGB")
         arr = np.asarray(surface, dtype=np.uint8)
@@ -5379,12 +6031,17 @@ class PocketOptionBrokerExecutionBackend:
         buy = self._find_button(arr, "BUY")
         sell = self._find_button(arr, "SELL")
         if not buy or not sell:
-            fallback_buttons = self._shooter_box_button_fallback(int(arr.shape[1]), int(arr.shape[0]))
+            fallback_buttons = self._shooter_box_button_fallback_if_visible(arr)
             if fallback_buttons:
                 buy = buy or fallback_buttons.get("buy", {})
                 sell = sell or fallback_buttons.get("sell", {})
         amount_field = self._derive_amount_field(arr.shape[1], arr.shape[0], buy, sell)
-        time_field = self._derive_time_field(arr.shape[1], arr.shape[0], amount_field)
+        time_field = self._calibrated_time_field_from_box_map(
+            int(arr.shape[1]),
+            int(arr.shape[0]),
+            buy=buy,
+            sell=sell,
+        ) or self._derive_time_field(arr.shape[1], arr.shape[0], amount_field)
         control_visibility = self._control_visibility_payload(
             image_width=int(arr.shape[1]),
             image_height=int(arr.shape[0]),
@@ -15870,9 +16527,39 @@ class ContinuousWindowTrackerService:
             payload.get("broker_surface")
             or _mapping_to_dict(payload.get("broker_execution_state", {})).get("broker_surface", {})
         )
+        broker_source_lock = _mapping_to_dict(
+            signal.get("broker_source_lock")
+            or tracking.get("broker_source_lock")
+            or payload.get("broker_source_lock")
+            or previous_broker_surface.get("broker_source_lock")
+        )
+        broker_source_summary = _mapping_to_dict(
+            signal.get("broker_source")
+            or tracking.get("broker_source")
+            or payload.get("broker_source")
+            or previous_broker_surface.get("broker_source")
+        )
+        broker_source_study_only = (
+            _broker_source_lock_is_study_only(broker_source_lock)
+            if broker_source_lock
+            else bool(broker_source_summary.get("study_source_only", False))
+        )
+        broker_source_click_safe = bool(
+            broker_source_summary.get("broker_click_safe", False)
+            or (bool(broker_source_lock.get("valid", False)) and not broker_source_study_only)
+        )
+        broker_source_lock_id = str(
+            broker_source_summary.get("lock_id")
+            or broker_source_lock.get("viewport_fingerprint")
+            or broker_source_lock.get("broker_control_fingerprint")
+            or broker_source_lock.get("broker_pixel_fingerprint")
+            or ""
+        ).strip()
         viewport_hash = _instrument_viewport_hash(payload)
         broker_surface_hash = str(
             previous_broker_surface.get("broker_surface_hash")
+            or broker_source_lock.get("broker_control_fingerprint")
+            or broker_source_lock.get("broker_pixel_fingerprint")
             or previous_instrument_context.get("broker_surface_hash")
             or ""
         )
@@ -15897,13 +16584,59 @@ class ContinuousWindowTrackerService:
         existing_lock_rect = list(cast(Sequence[Any], instrument_identity_lock.get("window_rect", [])))
         existing_lock_needs_v2_evidence = bool(
             instrument_identity_lock
-            and str(instrument_identity_lock.get("source", "") or "").strip() == "locked_surface_profile"
+            and str(instrument_identity_lock.get("source", "") or "").strip()
+            in {"locked_surface_profile", "broker_source_lock_profile"}
             and not (
                 str(instrument_identity_lock.get("window_handle", "") or "").strip()
                 and len(existing_lock_rect) >= 4
                 and str(instrument_identity_lock.get("calibration_layout_id", "") or "").strip()
             )
         )
+        manual_focus_region = _mapping_to_dict(payload.get("manual_focus_region"))
+        focus_selector = _mapping_to_dict(payload.get("focus_selector"))
+        locked_surface_selected = bool(
+            manual_focus_region.get("enabled")
+            or manual_focus_region.get("locked")
+            or manual_focus_region.get("pixel_bbox")
+            or manual_focus_region.get("normalized_bbox")
+            or str(focus_selector.get("status", "") or "").strip().lower() in {"selected", "locked", "ready"}
+        )
+        if (
+            (not instrument_identity_lock or existing_lock_needs_v2_evidence)
+            and not symbol
+            and timeframe
+            and viewport_hash
+            and broker_surface_hash
+            and window_handle
+            and len(window_rect) >= 4
+            and calibration_layout_id
+            and broker_source_click_safe
+            and locked_surface_selected
+        ):
+            instrument_identity_lock = {
+                "user_symbol": "BROKER_LOCKED_ACTIVE_CHART",
+                "session_id": str(payload.get("session_id", "")),
+                "timeframe": timeframe,
+                "viewport_hash": viewport_hash,
+                "broker_surface_hash": broker_surface_hash,
+                "window_handle": window_handle,
+                "window_rect": window_rect,
+                "calibration_layout_id": calibration_layout_id,
+                "expected_calibration_layout_id": calibration_layout_id,
+                "broker_source_lock_id": broker_source_lock_id,
+                "broker_click_safe": True,
+                "window_handle_stable": True,
+                "window_rect_stable": True,
+                "viewport_hash_stable": True,
+                "broker_surface_hash_stable": True,
+                "calibration_layout_match": True,
+                "session_active": bool(str(payload.get("session_id", "")).strip()),
+                "packet_fresh": True,
+                "models_awake": True,
+                "profile_mismatch": False,
+                "visual_continuity_frames": 2,
+                "source": "broker_source_lock_profile",
+            }
         if (
             (not instrument_identity_lock or existing_lock_needs_v2_evidence)
             and not symbol
@@ -15911,7 +16644,6 @@ class ContinuousWindowTrackerService:
             and viewport_hash
             and bool(execution_controls.get("allow_locked_surface_identity_fallback", False))
         ):
-            manual_focus_region = _mapping_to_dict(payload.get("manual_focus_region"))
             focus_locked = bool(
                 manual_focus_region.get("enabled")
                 or manual_focus_region.get("locked")
@@ -16284,7 +17016,7 @@ class ContinuousWindowTrackerService:
             "live_integrity": live_integrity,
             "created_epoch": float(capture_started_epoch),
             "now_epoch": float(capture_started_epoch),
-            "packet_valid_for_seconds": 8.0,
+            "packet_valid_for_seconds": _CALIBRATED_SHOOTER_PACKET_VALID_SEC,
             "study_packet_valid_for_seconds": max(
                 _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC,
                 _float_or(signal.get("freshness_window_sec") or tracking.get("freshness_window_sec"), 0.0),
@@ -16462,8 +17194,9 @@ class ContinuousWindowTrackerService:
             input_frame_hash=input_frame_hash,
             capture_started_epoch=capture_started_epoch,
         )
+        publication_epoch = _now_epoch()
         council = self._model_council_for_session(session_id)
-        result = council.evaluate(snapshot, now_epoch=float(capture_started_epoch))
+        result = council.evaluate(snapshot, now_epoch=publication_epoch)
         result_payload = _mapping_to_dict(result)
         packet = _model_council_packet_from_payload(result_payload)
         study_packet = _mapping_to_dict(
@@ -16473,7 +17206,7 @@ class ContinuousWindowTrackerService:
             packet["packet_validation"] = validate_execution_packet_v3(
                 packet,
                 expected_session_id=session_id,
-                now_epoch=float(capture_started_epoch),
+                now_epoch=publication_epoch,
                 require_executable=True,
             ).as_dict()
         session_key = _slugify(session_id, "tracker-session")
@@ -16489,14 +17222,19 @@ class ContinuousWindowTrackerService:
             model_council_result=result_payload,
             execution_packet=packet,
             study_packet=study_packet,
-            now_epoch=float(capture_started_epoch),
+            now_epoch=publication_epoch,
         )
         replacement_thesis = _mapping_to_dict(signal_thesis.get("replaced_by"))
         if replacement_thesis:
             signal_thesis = replacement_thesis
         countertrend_packet_blocked = bool(packet and thesis_blocks_countertrend(signal_thesis, packet))
         if countertrend_packet_blocked:
-            attempted_side = _upper_action(packet.get("side"), fallback="HOLD")
+            attempted_side = _upper_action(resolve_v3_packet_side(packet), fallback="HOLD")
+            thesis_block_state = "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK"
+            thesis_next_required = "active thesis invalidation before opposite execution"
+            thesis_release_condition = "confirmed invalidation or pair/timeframe switch"
+            result_payload["schema_version"] = "PG_MODEL_COUNCIL_STUDY_V3"
+            result_payload["packet_type"] = "STUDY_PACKET"
             result_payload.pop("execution_packet", None)
             result_payload.pop("model_council_packet", None)
             packet = {}
@@ -16506,7 +17244,7 @@ class ContinuousWindowTrackerService:
                     "enabled": False,
                     "state": "WATCHING",
                     "side": None,
-                    "blocked_by": "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK",
+                    "blocked_by": thesis_block_state,
                     "countertrend_blocked": True,
                     "attempted_side": attempted_side,
                 }
@@ -16515,6 +17253,15 @@ class ContinuousWindowTrackerService:
             council_payload = _mapping_to_dict(result_payload.get("model_council"))
             council_payload.update(
                 {
+                    "final_state": "WATCHING",
+                    "final_side": None,
+                    "release_state": thesis_block_state,
+                    "non_executable_state": thesis_block_state,
+                    "blocked_by": thesis_block_state,
+                    "true_blocker": thesis_block_state,
+                    "denied_at": thesis_block_state,
+                    "candidate_stage": "CANDIDATE_STABLE",
+                    "maturity_stage": "WATCH_ONLY_THESIS_PROTECTED",
                     "countertrend_blocked": True,
                     "countertrend_block_reason": (
                         f"Active {signal_thesis.get('side')} thesis is still valid; "
@@ -16523,19 +17270,23 @@ class ContinuousWindowTrackerService:
                     "active_signal_thesis_id": signal_thesis.get("thesis_id"),
                     "effective_trade_side": signal_thesis.get("effective_side") or signal_thesis.get("side"),
                     "raw_read_side": signal_thesis.get("raw_read_side"),
-                    "next_required": "active thesis invalidation before opposite execution",
-                    "release_condition": "confirmed invalidation or pair/timeframe switch",
+                    "next_required": thesis_next_required,
+                    "release_condition": thesis_release_condition,
                 }
             )
             result_payload["model_council"] = council_payload
             promotion_trace = _mapping_to_dict(result_payload.get("promotion_trace"))
             promotion_trace.update(
                 {
-                    "blocked_by": "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK",
-                    "true_blocker": "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK",
-                    "denied_at": "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK",
-                    "next_required": "active thesis invalidation before opposite execution",
-                    "release_condition": "confirmed invalidation or pair/timeframe switch",
+                    "blocked_by": thesis_block_state,
+                    "true_blocker": thesis_block_state,
+                    "denied_at": thesis_block_state,
+                    "release_state": thesis_block_state,
+                    "non_executable_state": thesis_block_state,
+                    "candidate_stage": "CANDIDATE_STABLE",
+                    "promotion_result": "WATCHING",
+                    "next_required": thesis_next_required,
+                    "release_condition": thesis_release_condition,
                     "active_signal_thesis_id": signal_thesis.get("thesis_id"),
                     "attempted_side": attempted_side,
                     "effective_trade_side": signal_thesis.get("effective_side") or signal_thesis.get("side"),
@@ -16585,15 +17336,31 @@ class ContinuousWindowTrackerService:
             council_payload["promotion_trace"] = promotion_trace
             result_payload["promotion_trace"] = promotion_trace
             result_payload["promotion_failure_audit_v3"] = audit
-            result_payload["block_reason"] = "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK"
+            result_payload["block_reason"] = thesis_block_state
             result_payload["packet_result"] = "STUDY_PACKET_PUBLISHED"
+            result_payload["release_state"] = thesis_block_state
+            result_payload["non_executable_state"] = thesis_block_state
+            result_payload["denied_at"] = thesis_block_state
+            result_payload["next_required"] = thesis_next_required
+            result_payload["release_condition"] = thesis_release_condition
+            result_payload["execution_packet_present"] = False
             if study_packet:
+                study_packet["execution"] = execution_payload
                 study_packet["promotion_trace"] = promotion_trace
                 study_packet["promotion_failure_audit_v3"] = audit
-                study_packet["block_reason"] = "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK"
-                study_packet["next_required"] = "active thesis invalidation before opposite execution"
-                study_packet["release_condition"] = "confirmed invalidation or pair/timeframe switch"
+                study_packet["block_reason"] = thesis_block_state
+                study_packet["true_blocker"] = thesis_block_state
+                study_packet["denied_at"] = thesis_block_state
+                study_packet["release_state"] = thesis_block_state
+                study_packet["non_executable_state"] = thesis_block_state
+                study_packet["candidate_stage"] = "CANDIDATE_STABLE"
+                study_packet["packet_result"] = "STUDY_PACKET_PUBLISHED"
+                study_packet["next_required"] = thesis_next_required
+                study_packet["release_condition"] = thesis_release_condition
                 study_packet["model_council"] = council_payload
+                study_packet["reason"] = str(council_payload.get("countertrend_block_reason") or "")
+                result_payload["study_packet"] = study_packet
+                result_payload["model_council_study_packet"] = study_packet
             signal_thesis = {
                 **signal_thesis,
                 "countertrend_packet_blocked": True,
@@ -16609,6 +17376,51 @@ class ContinuousWindowTrackerService:
             payload["signal_thesis_v3"] = _mapping_to_dict(signal_thesis)
         if study_packet:
             study_packet["signal_thesis_v3"] = _mapping_to_dict(signal_thesis)
+        if not packet and study_packet:
+            result_payload["schema_version"] = "PG_MODEL_COUNCIL_STUDY_V3"
+            result_payload["packet_type"] = "STUDY_PACKET"
+            result_payload.pop("execution_packet", None)
+            result_payload.pop("model_council_packet", None)
+            normalized_study_packet = _model_council_study_packet_from_payload(
+                {
+                    **result_payload,
+                    "model_council_study_packet": study_packet,
+                    "study_packet": study_packet,
+                }
+            )
+            if normalized_study_packet:
+                study_packet = normalized_study_packet
+                result_payload["study_packet"] = study_packet
+                result_payload["model_council_study_packet"] = study_packet
+                result_payload["execution"] = _mapping_to_dict(study_packet.get("execution"))
+                result_payload["model_council"] = _mapping_to_dict(study_packet.get("model_council"))
+                result_payload["promotion_trace"] = _mapping_to_dict(study_packet.get("promotion_trace"))
+                result_payload["promotion_failure_audit_v3"] = _mapping_to_dict(
+                    study_packet.get("promotion_failure_audit_v3")
+                    or _mapping_to_dict(study_packet.get("promotion_trace")).get("promotion_failure_audit_v3")
+                    or _mapping_to_dict(study_packet.get("model_council")).get("promotion_failure_audit_v3")
+                )
+                result_payload["packet_result"] = "STUDY_PACKET_PUBLISHED"
+                result_payload["execution_packet_present"] = False
+        if not packet and not study_packet:
+            result_payload["schema_version"] = "PG_MODEL_COUNCIL_STUDY_V3"
+            result_payload["packet_type"] = "STUDY_PACKET"
+            result_payload.pop("execution_packet", None)
+            result_payload.pop("model_council_packet", None)
+            execution_payload = _mapping_to_dict(result_payload.get("execution"))
+            execution_payload["enabled"] = False
+            if str(execution_payload.get("state") or "").strip().upper() == "EXECUTABLE":
+                execution_payload["state"] = "WATCHING"
+            result_payload["execution"] = execution_payload
+            council_payload = _mapping_to_dict(result_payload.get("model_council"))
+            if str(council_payload.get("final_state") or "").strip().upper() == "EXECUTABLE":
+                council_payload["final_state"] = "WATCHING"
+            promotion_trace = _mapping_to_dict(result_payload.get("promotion_trace"))
+            promotion_trace["packet_result"] = "STUDY_PACKET_PUBLISHED"
+            result_payload["model_council"] = council_payload
+            result_payload["promotion_trace"] = promotion_trace
+            result_payload["packet_result"] = "STUDY_PACKET_PUBLISHED"
+            result_payload["execution_packet_present"] = False
         latest_signal["model_council_result"] = result_payload
         latest_signal["model_council"] = _mapping_to_dict(result_payload.get("model_council"))
         latest_signal["signal_thesis_v3"] = _mapping_to_dict(signal_thesis)
@@ -16632,6 +17444,9 @@ class ContinuousWindowTrackerService:
             tracking_summary["symbol_context"] = symbol_context
         if packet:
             packet["signal_thesis_v3"] = _mapping_to_dict(signal_thesis)
+            result_payload["model_council_packet"] = packet
+            result_payload["execution_packet"] = packet
+            result_payload["execution_packet_present"] = True
             latest_signal["model_council_packet"] = packet
             latest_signal["execution_packet"] = packet
             tracking_summary["model_council_packet"] = packet
@@ -17262,6 +18077,39 @@ class ContinuousWindowTrackerService:
         payloads.sort(key=lambda item: str(item.get("updated_at", "") or ""), reverse=True)
         return payloads[: max(1, int(limit))]
 
+    def _locked_window_payload_from_hwnd(
+        self,
+        locked_hwnd: int,
+        *,
+        locked_title: str = "",
+        window_query: str = "",
+    ) -> tuple[dict[str, Any], str]:
+        try:
+            hwnd = max(0, int(locked_hwnd or 0))
+        except (TypeError, ValueError):
+            hwnd = 0
+        if hwnd <= 0:
+            return {}, ""
+        title = str(locked_title or window_query or "").strip()
+        try:
+            visible_windows = list(self.capture_backend.list_windows(None))
+        except Exception:
+            visible_windows = []
+        for row in visible_windows:
+            try:
+                if int(row.get("hwnd", 0) or 0) != hwnd:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            descriptor = dict(row)
+            if title and not str(descriptor.get("title", "") or "").strip():
+                descriptor["title"] = title
+            return descriptor, str(descriptor.get("title", "") or title)
+        descriptor = {"hwnd": hwnd}
+        if title:
+            descriptor["title"] = title
+        return descriptor, title
+
     def create_session(
         self,
         *,
@@ -17269,6 +18117,8 @@ class ContinuousWindowTrackerService:
         name: str = "",
         market: str = "",
         window_query: str = "Pocket Option",
+        locked_hwnd: int = 0,
+        locked_title: str = "",
         layout_profile: str = "manual_focus_only",
         capture_interval_sec: float = _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC,
         rl_track_interval_sec: float = 30.0,
@@ -17282,6 +18132,11 @@ class ContinuousWindowTrackerService:
             if existing:
                 return self._public_session_payload(existing)
 
+            locked_window, resolved_locked_title = self._locked_window_payload_from_hwnd(
+                locked_hwnd,
+                locked_title=locked_title,
+                window_query=window_query,
+            )
             payload: dict[str, Any] = {
                 "session_id": normalized_session_id,
                 "name": str(name or normalized_session_id),
@@ -17301,8 +18156,8 @@ class ContinuousWindowTrackerService:
                 "last_error": "",
                 "capture_count": 0,
                 "frame_index": 0,
-                "locked_window": {},
-                "locked_title": "",
+                "locked_window": locked_window,
+                "locked_title": resolved_locked_title,
                 "manual_focus_region": {
                     "enabled": False,
                     "normalized_bbox": [],
@@ -17349,6 +18204,30 @@ class ContinuousWindowTrackerService:
         if auto_start:
             return self.start_session(normalized_session_id)
         return self.get_session(normalized_session_id)
+
+    def update_session_locked_window(
+        self,
+        session_id: str,
+        *,
+        locked_hwnd: int = 0,
+        locked_title: str = "",
+    ) -> dict[str, Any]:
+        with self._lock:
+            payload = self._require_session(session_id)
+            locked_window, resolved_locked_title = self._locked_window_payload_from_hwnd(
+                locked_hwnd,
+                locked_title=locked_title,
+                window_query=str(payload.get("window_query", "") or ""),
+            )
+            payload["locked_window"] = locked_window
+            payload["locked_title"] = resolved_locked_title
+            payload["updated_at"] = _now_iso()
+            self._resolved_window_cache.pop(str(payload["session_id"]), None)
+            self._save_session(payload)
+            worker = self._workers.get(str(payload["session_id"]))
+            if worker is not None:
+                worker.capture_now_evt.set()
+        return self.get_session(str(payload["session_id"]))
 
     def get_session(self, session_id: str) -> dict[str, Any]:
         payload = self._require_session(session_id)
@@ -21775,8 +22654,11 @@ class ContinuousWindowTrackerService:
                 visual_ready_payload["chart_frame_id"] = chart_artifact_frame_id
                 visual_ready_payload["overlay_frame_id"] = overlay_artifact_frame_id
                 visual_ready_payload["full_overlay_frame_id"] = full_overlay_artifact_frame_id
-                visual_ready_payload["model_vote_frame_id"] = frame_index
-                visual_ready_payload["model_capture_epoch"] = capture_started_epoch
+                visual_ready_payload.setdefault("model_vote_frame_id", visual_ready_payload.get("frame_index") or 0)
+                visual_ready_payload.setdefault("model_capture_epoch", visual_ready_payload.get("last_capture_started_epoch") or 0.0)
+                visual_ready_payload["model_council_update_pending"] = True
+                visual_ready_payload["model_council_pending_frame_id"] = frame_index
+                visual_ready_payload["model_council_pending_capture_epoch"] = capture_started_epoch
                 visual_ready_payload["source_capture_id"] = (
                     f"{payload.get('session_id', session_id)}:{capture_count}:{frame_index}:"
                     f"{int(capture_started_epoch * 1000.0)}"
@@ -21794,11 +22676,36 @@ class ContinuousWindowTrackerService:
                 visual_ready_payload["last_overlay_path"] = str(overlay_path)
                 visual_ready_payload["tracking_summary"] = tracking_summary
                 visual_ready_payload["latest_signal"] = latest_signal
-                visual_ready_payload.pop("model_council_result", None)
-                visual_ready_payload.pop("model_council", None)
-                visual_ready_payload.pop("model_council_study_packet", None)
-                visual_ready_payload.pop("model_council_packet", None)
-                visual_ready_payload.pop("execution_packet", None)
+                locked_study_packet = _mapping_to_dict(visual_ready_payload.get("model_council_study_packet"))
+                if locked_study_packet:
+                    pending_lock_ttl_sec = max(
+                        2.0,
+                        _float_or(os.getenv("PHOENIXGUARD_PENDING_STUDY_LOCK_TTL_SEC"), 30.0),
+                    )
+                    existing_valid_until = _float_or(
+                        locked_study_packet.get("valid_until_epoch_sec") or locked_study_packet.get("valid_until_epoch"),
+                        0.0,
+                    )
+                    locked_valid_until = max(existing_valid_until, visual_ready_epoch + pending_lock_ttl_sec)
+                    locked_study_packet["valid_until_epoch"] = locked_valid_until
+                    locked_study_packet["valid_until_epoch_sec"] = locked_valid_until
+                    locked_study_packet["ttl_sec"] = max(
+                        _float_or(locked_study_packet.get("ttl_sec"), 0.0),
+                        locked_valid_until - _float_or(
+                            locked_study_packet.get("created_epoch_sec") or locked_study_packet.get("created_epoch"),
+                            visual_ready_epoch,
+                        ),
+                    )
+                    locked_study_packet["locked_previous_story"] = True
+                    locked_study_packet["lock_reason"] = "model_council_update_pending"
+                    visual_ready_payload["model_council_study_packet"] = locked_study_packet
+                    tracking_summary["model_council_study_packet"] = locked_study_packet
+                    latest_signal["model_council_study_packet"] = locked_study_packet
+                    locked_model_result = _mapping_to_dict(visual_ready_payload.get("model_council_result"))
+                    if locked_model_result:
+                        locked_model_result["model_council_study_packet"] = locked_study_packet
+                        locked_model_result["study_packet"] = locked_study_packet
+                        visual_ready_payload["model_council_result"] = locked_model_result
                 self._save_session(visual_ready_payload)
             self._write_session_event_log(
                 str(payload["session_id"]),
@@ -22044,6 +22951,9 @@ class ContinuousWindowTrackerService:
             visual_payload["full_overlay_frame_id"] = full_overlay_artifact_frame_id
             visual_payload["model_vote_frame_id"] = frame_index
             visual_payload["model_capture_epoch"] = capture_started_epoch
+            visual_payload["model_council_update_pending"] = False
+            visual_payload.pop("model_council_pending_frame_id", None)
+            visual_payload.pop("model_council_pending_capture_epoch", None)
             visual_payload["source_capture_id"] = (
                 f"{payload.get('session_id', session_id)}:{capture_count}:{frame_index}:"
                 f"{int(capture_started_epoch * 1000.0)}"

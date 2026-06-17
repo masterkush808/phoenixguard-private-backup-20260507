@@ -34,6 +34,10 @@ class FakeAdapter:
         self.actions.append(("click_target_once", (int(x), int(y))))
         self.clicks.append((int(x), int(y)))
 
+    def double_click_target(self, x: int, y: int) -> None:
+        self.actions.append(("double_click_target", (int(x), int(y))))
+        self.clicks.append((int(x), int(y)))
+
     def press_key(self, key: str) -> None:
         self.actions.append(("press_key", (str(key),)))
         self.keys.append(str(key))
@@ -51,12 +55,19 @@ class FakeAdapter:
         return str(path)
 
 
+class FailingClickAdapter(FakeAdapter):
+    def click_target_once(self, x: int, y: int) -> None:
+        super().click_target_once(x, y)
+        raise RuntimeError("os input rejected")
+
+
 def _boxes(**overrides: Mapping[str, float]) -> dict[str, dict[str, float]]:
     boxes: dict[str, dict[str, float]] = {
         "broker_screen": {"x": 0.40, "y": 0.50},
         "time_button": {"x": 0.80, "y": 0.20},
         "hourly_input": {"x": 0.70, "y": 0.28},
         "minute_input": {"x": 0.74, "y": 0.28},
+        "second_input": {"x": 0.78, "y": 0.28},
         "hourly_plus": {"x": 0.70, "y": 0.24},
         "minute_plus": {"x": 0.74, "y": 0.24},
         "time_300": {"x": 0.76, "y": 0.36},
@@ -245,6 +256,7 @@ def _sequencer(
             post_time_confirm_wait_ms=1,
             final_pre_side_click_hold_ms=1,
             post_side_click_capture_delay_ms=1,
+            require_expiry_verification=False,
         ),
         evidence_recorder=ActionEvidenceRecorder(tmp_path, enabled=False, packet_id="exec-test"),
         ocr_reader=None,
@@ -260,25 +272,25 @@ def test_type_first_time_path_and_side_click_after_time(tmp_path: Path) -> None:
     assert result.overall == "PASS"
     assert result.method == "typed_input"
     assert result.expiry_status == "REASONABLY_CONFIRMED"
-    assert adapter.typed == ["00", "05"]
+    assert adapter.typed == ["05"]
     step_names = [step.step for step in result.steps]
     assert step_names.index("type_minute_value") < step_names.index("final_side_click")
     assert step_names.index("final_pre_side_click_hold") < step_names.index("final_side_click")
     assert result.steps[-1].target == "buy_icon"
 
 
-def test_split_time_panel_preferred_when_split_controls_exist(tmp_path: Path) -> None:
+def test_combined_time_input_preferred_when_editable_time_field_exists(tmp_path: Path) -> None:
     sequencer, adapter = _sequencer(tmp_path, boxes=_combined_boxes())
     packet = _packet("SELL", 6300)
     packet["execution"]["time_sequence"]["target_text"] = "01:45:00"
     result = sequencer.execute(packet)
 
     assert result.overall == "PASS"
-    assert result.method == "typed_input"
-    assert adapter.typed == ["01", "45"]
+    assert result.method == "combined_time_input"
+    assert adapter.typed == ["01:45:00"]
     step_names = [step.step for step in result.steps]
-    assert "open_time_panel_typed_attempt_1" in step_names
-    assert step_names.index("type_minute_value") < step_names.index("final_side_click")
+    assert "focus_combined_time_input" in step_names
+    assert step_names.index("type_combined_time_value") < step_names.index("final_side_click")
     assert result.steps[-1].target == "sell_icon"
 
 
@@ -286,6 +298,7 @@ def test_combined_time_input_fallback_when_split_controls_missing(tmp_path: Path
     boxes = _combined_boxes()
     boxes.pop("hourly_input")
     boxes.pop("minute_input")
+    boxes.pop("second_input")
     sequencer, adapter = _sequencer(tmp_path, boxes=boxes)
     packet = _packet("SELL", 6300)
     packet["execution"]["time_sequence"]["target_text"] = "01:45:00"
@@ -301,17 +314,50 @@ def test_time_panel_opens_from_middle_time_input_when_available(tmp_path: Path) 
     sequencer, _adapter = _sequencer(tmp_path, boxes=_combined_boxes())
     result = sequencer.execute(_packet("BUY", 300))
 
-    open_step = next(step for step in result.steps if step.step == "open_time_panel_typed_attempt_1")
+    open_step = next(step for step in result.steps if step.step == "focus_combined_time_input")
     assert open_step.target == "time_input"
 
 
+def test_calibrated_click_failure_aborts_without_runtime_escape(tmp_path: Path) -> None:
+    sequencer, _adapter = _sequencer(tmp_path, adapter=FailingClickAdapter())
+
+    result = sequencer.perform_calibrated_step("open_time_panel", "time_button", expected_region="time_box", wait_after_ms=1)
+
+    assert result.result == "FAILED_ABORT"
+    assert "calibrated click failed" in result.reason
+
+
+def test_time_button_must_be_in_right_order_panel_time_region(tmp_path: Path) -> None:
+    boxes = _boxes(time_button={"x": 0.90, "y": 0.43})
+    sequencer, adapter = _sequencer(tmp_path, boxes=boxes)
+
+    result = sequencer.perform_calibrated_step("open_time_panel", "time_button", expected_region="time_box", wait_after_ms=1)
+
+    assert result.result == "FAILED_ABORT"
+    assert result.reason.startswith("CALIBRATED_TARGET_REGION_MISMATCH:time_button:expected_time_box")
+    assert adapter.clicks == []
+
+
+def test_split_time_input_must_live_in_opened_time_panel(tmp_path: Path) -> None:
+    boxes = _boxes(second_input={"x": 0.88, "y": 0.30})
+    sequencer, adapter = _sequencer(tmp_path, boxes=boxes)
+
+    result = sequencer.execute(_packet("BUY", 3661))
+
+    assert result.overall == "FAILED"
+    assert "second_input" in result.reason
+    assert "popup_control_not_left_of_time_field" in result.reason
+    assert "final_side_click" not in [step.step for step in result.steps]
+    assert (900, 368) not in adapter.clicks
+
+
 def test_time_input_and_time_button_can_share_middle_box_point(tmp_path: Path) -> None:
-    boxes = _combined_boxes(time_button={"x": 0.82, "y": 0.28}, time_input={"x": 0.82, "y": 0.28})
+    boxes = _combined_boxes(time_button={"x": 0.82, "y": 0.20}, time_input={"x": 0.82, "y": 0.20})
     sequencer, adapter = _sequencer(tmp_path, boxes=boxes)
     result = sequencer.execute(_packet("BUY", 300))
 
     assert result.overall == "PASS"
-    open_step = next(step for step in result.steps if step.step == "open_time_panel_typed_attempt_1")
+    open_step = next(step for step in result.steps if step.step == "focus_combined_time_input")
     assert open_step.target == "time_input"
 
 
@@ -322,19 +368,150 @@ def test_typed_input_sets_seconds_when_calibrated(tmp_path: Path) -> None:
 
     assert result.overall == "PASS"
     assert adapter.typed == ["01", "01", "01"]
+    assert ("double_click_target", (780, 224)) in adapter.actions
     step_names = [step.step for step in result.steps]
-    assert step_names.index("type_second_value") < step_names.index("confirm_typed_time")
+    assert step_names.index("type_second_value") < step_names.index("confirm_typed_time_enter")
+
+
+def test_typed_input_accepts_plural_seconds_calibration_alias(tmp_path: Path) -> None:
+    boxes = _boxes()
+    boxes["seconds_input"] = boxes.pop("second_input")
+    sequencer, adapter = _sequencer(tmp_path, boxes=boxes)
+
+    result = sequencer.execute(_packet("BUY", 3661))
+
+    assert result.overall == "PASS"
+    assert result.method == "typed_input"
+    assert adapter.typed == ["01", "01", "01"]
+    second_step = next(step for step in result.steps if step.step == "type_second_focus")
+    assert second_step.target == "seconds_input"
 
 
 def test_second_precision_expiry_aborts_without_seconds_capable_control(tmp_path: Path) -> None:
     boxes = _boxes()
     boxes.pop("time_300", None)
+    boxes.pop("time_input", None)
+    boxes.pop("time_box", None)
+    boxes.pop("expiry_time_field", None)
+    boxes.pop("second_input")
     sequencer, _adapter = _sequencer(tmp_path, boxes=boxes)
     result = sequencer.execute(_packet("SELL", 61))
 
     assert result.overall == "FAILED"
-    assert "second precision requested" in result.reason
+    assert "typed split controls missing:second_input" in result.reason
     assert "final_side_click" not in [step.step for step in result.steps]
+
+
+def test_combined_mismatch_retries_split_time_fields(tmp_path: Path) -> None:
+    profile = BrokerTimingProfile(
+        window_activate_wait_ms=1,
+        broker_focus_after_click_ms=1,
+        move_duration_ms=1,
+        post_move_hold_ms=1,
+        post_click_min_wait_ms=1,
+        time_button_after_click_wait_ms=1,
+        input_focus_wait_ms=1,
+        select_existing_value_wait_ms=1,
+        typing_key_interval_ms=1,
+        post_typing_wait_ms=1,
+        post_time_confirm_wait_ms=1,
+        final_pre_side_click_hold_ms=1,
+        post_side_click_capture_delay_ms=1,
+        require_expiry_verification=True,
+    )
+    sequencer, adapter = _sequencer(tmp_path, boxes=_combined_boxes(), timing_profile=profile)
+    readings = [60, 0, 3661]
+    sequencer.ocr_reader = lambda _hwnd, _boxes_arg: readings.pop(0)
+    packet = _packet("BUY", 3661)
+    packet["execution"]["time_sequence"]["target_text"] = "01:01:01"
+
+    result = sequencer.execute(packet)
+
+    assert result.overall == "PASS"
+    assert result.method == "typed_input"
+    assert adapter.typed == ["01:01:01", "01", "01", "01"]
+    assert "focus_combined_time_input" in [step.step for step in result.steps]
+    assert "type_second_focus" in [step.step for step in result.steps]
+
+
+def test_visible_timer_uses_primary_calibrated_adjustment(tmp_path: Path) -> None:
+    profile = BrokerTimingProfile(
+        arrow_fallback_enabled=True,
+        max_total_arrow_clicks=36,
+        wait_between_arrow_clicks_ms=1,
+        window_activate_wait_ms=1,
+        broker_focus_after_click_ms=1,
+        move_duration_ms=1,
+        post_move_hold_ms=1,
+        post_click_min_wait_ms=1,
+        time_button_after_click_wait_ms=1,
+        input_focus_wait_ms=1,
+        select_existing_value_wait_ms=1,
+        typing_key_interval_ms=1,
+        post_typing_wait_ms=1,
+        post_time_confirm_wait_ms=1,
+        final_pre_side_click_hold_ms=1,
+        post_side_click_capture_delay_ms=1,
+        require_expiry_verification=True,
+    )
+    boxes = _combined_boxes(
+        hourly_minus={"x": 0.70, "y": 0.32},
+        minute_minus={"x": 0.74, "y": 0.32},
+        second_plus={"x": 0.78, "y": 0.24},
+        second_minus={"x": 0.78, "y": 0.32},
+    )
+    sequencer, adapter = _sequencer(tmp_path, boxes=boxes, timing_profile=profile)
+    readings = [14400, 600]
+    sequencer.ocr_reader = lambda _hwnd, _boxes_arg: readings.pop(0)
+    packet = _packet("BUY", 600)
+    packet["execution"]["time_sequence"]["target_text"] = "00:10:00"
+
+    result = sequencer.execute(packet)
+
+    step_names = [step.step for step in result.steps]
+    assert result.overall == "PASS"
+    assert result.method == "calibrated_control_adjustment"
+    assert result.expiry_status == "VERIFIED_TEXT"
+    assert adapter.typed == []
+    assert "arrow_hour_minus_1" in step_names
+    assert "arrow_hour_minus_4" in step_names
+    assert "arrow_minute_plus_10" in step_names
+    assert "final_side_click" in step_names
+
+
+def test_combined_time_ocr_no_read_uses_completed_calibrated_control_path(tmp_path: Path) -> None:
+    profile = BrokerTimingProfile(
+        window_activate_wait_ms=1,
+        broker_focus_after_click_ms=1,
+        move_duration_ms=1,
+        post_move_hold_ms=1,
+        post_click_min_wait_ms=1,
+        time_button_after_click_wait_ms=1,
+        input_focus_wait_ms=1,
+        select_existing_value_wait_ms=1,
+        typing_key_interval_ms=1,
+        post_typing_wait_ms=1,
+        post_time_confirm_wait_ms=1,
+        final_pre_side_click_hold_ms=1,
+        post_side_click_capture_delay_ms=1,
+        require_expiry_verification=True,
+    )
+    sequencer, adapter = _sequencer(tmp_path, boxes=_combined_boxes(), timing_profile=profile)
+    sequencer.ocr_reader = lambda _hwnd, _boxes_arg: None
+    packet = _packet("BUY", 600)
+    packet["execution"]["time_sequence"]["target_text"] = "00:10:00"
+
+    result = sequencer.execute(packet)
+
+    step_names = [step.step for step in result.steps]
+    assert result.overall == "PASS"
+    assert result.method == "combined_time_input"
+    assert result.expiry_status == "CALIBRATED_CONTROL_CONFIRMED"
+    assert adapter.typed == ["00:10:00"]
+    assert "type_hour_focus" not in step_names
+    assert "type_minute_focus" not in step_names
+    assert "type_second_focus" not in step_names
+    assert "final_side_click" in step_names
 
 
 def test_action_aborts_if_target_window_not_foreground(tmp_path: Path) -> None:
@@ -385,6 +562,7 @@ def test_exact_preset_fallback_when_typed_controls_missing(tmp_path: Path) -> No
     boxes = _boxes()
     boxes.pop("hourly_input")
     boxes.pop("minute_input")
+    boxes.pop("second_input")
     sequencer, adapter = _sequencer(tmp_path, boxes=boxes)
     result = sequencer.execute(_packet("BUY", 300))
 
@@ -423,14 +601,35 @@ def test_manifest_authoritative_boxes_use_combined_time_without_legacy_split_tar
 
 def test_arrow_fallback_bounded_aborts_before_side_click(tmp_path: Path) -> None:
     boxes = _boxes()
-    for key in ("hourly_input", "minute_input", "time_300"):
+    for key in ("hourly_input", "minute_input", "second_input", "time_300"):
         boxes.pop(key)
-    sequencer, _adapter = _sequencer(tmp_path, boxes=boxes)
+    sequencer, _adapter = _sequencer(
+        tmp_path,
+        boxes=boxes,
+        timing_profile=BrokerTimingProfile(
+            arrow_fallback_enabled=True,
+            require_expiry_verification=False,
+            window_activate_wait_ms=1,
+            broker_focus_after_click_ms=1,
+            move_duration_ms=1,
+            post_move_hold_ms=1,
+            post_click_min_wait_ms=1,
+            time_button_after_click_wait_ms=1,
+            input_focus_wait_ms=1,
+            select_existing_value_wait_ms=1,
+            typing_key_interval_ms=1,
+            post_typing_wait_ms=1,
+            post_time_confirm_wait_ms=1,
+            final_pre_side_click_hold_ms=1,
+            post_side_click_capture_delay_ms=1,
+        ),
+    )
+    sequencer.ocr_reader = lambda _hwnd, _boxes_arg: 0
     result = sequencer.execute(_packet("BUY", 900))
 
     assert result.overall == "FAILED"
     assert result.state == "ABORT_BEFORE_SIDE_CLICK"
-    assert "arrow fallback bounded" in result.reason
+    assert "calibrated adjustment bounded" in result.reason
     assert "final_side_click" not in [step.step for step in result.steps]
 
 
@@ -464,6 +663,7 @@ def test_all_live_actions_go_through_low_level_adapter(tmp_path: Path) -> None:
             "sleep_ms",
             "move_to_target",
             "click_target_once",
+            "double_click_target",
             "press_key",
             "hotkey",
             "type_text_slowly",
@@ -511,9 +711,11 @@ def test_broker_timing_profile_loaded() -> None:
     profile = BrokerTimingProfile.from_file(Path("config") / "shooter_broker_timing_profile.json")
 
     assert profile.profile_id == "pocket_option_edge_local_v1"
-    assert profile.time_button_after_click_wait_ms == 5000
-    assert profile.final_pre_side_click_hold_ms == 8000
-    assert profile.max_total_arrow_clicks == 12
+    assert profile.time_button_after_click_wait_ms == 900
+    assert profile.final_pre_side_click_hold_ms == 500
+    assert profile.require_expiry_verification is True
+    assert profile.arrow_fallback_enabled is True
+    assert profile.max_total_arrow_clicks == 36
 
 
 def test_time_typing_primary_path(tmp_path: Path) -> None:
@@ -523,14 +725,28 @@ def test_time_typing_primary_path(tmp_path: Path) -> None:
 
     assert result.overall == "PASS"
     assert result.method == "typed_input"
-    assert adapter.typed == ["00", "05"]
+    assert adapter.typed == ["05"]
     assert "final_side_click" in [step.step for step in result.steps]
+
+
+def test_fast_ui_profile_keeps_live_action_waits_bounded() -> None:
+    profile = BrokerTimingProfile().with_speed("fast-ui")
+
+    assert profile.window_activate_wait_ms <= 140
+    assert profile.move_duration_ms <= 55
+    assert profile.time_button_after_click_wait_ms <= 260
+    assert profile.input_focus_wait_ms <= 95
+    assert profile.post_typing_wait_ms <= 95
+    assert profile.post_time_confirm_wait_ms <= 140
+    assert profile.final_pre_side_click_hold_ms <= 35
+    assert profile.post_side_click_capture_delay_ms <= 160
 
 
 def test_exact_preset_fallback(tmp_path: Path) -> None:
     boxes = _boxes()
     boxes.pop("hourly_input")
     boxes.pop("minute_input")
+    boxes.pop("second_input")
     sequencer, adapter = _sequencer(tmp_path, boxes=boxes)
 
     result = sequencer.execute(_packet("BUY", 300))
@@ -543,16 +759,80 @@ def test_exact_preset_fallback(tmp_path: Path) -> None:
 
 def test_arrow_fallback_bounded(tmp_path: Path) -> None:
     boxes = _boxes()
-    for key in ("hourly_input", "minute_input", "time_300"):
+    for key in ("hourly_input", "minute_input", "second_input", "time_300"):
+        boxes.pop(key)
+    sequencer, _adapter = _sequencer(
+        tmp_path,
+        boxes=boxes,
+        timing_profile=BrokerTimingProfile(
+            arrow_fallback_enabled=True,
+            require_expiry_verification=False,
+            window_activate_wait_ms=1,
+            broker_focus_after_click_ms=1,
+            move_duration_ms=1,
+            post_move_hold_ms=1,
+            post_click_min_wait_ms=1,
+            time_button_after_click_wait_ms=1,
+            input_focus_wait_ms=1,
+            select_existing_value_wait_ms=1,
+            typing_key_interval_ms=1,
+            post_typing_wait_ms=1,
+            post_time_confirm_wait_ms=1,
+            final_pre_side_click_hold_ms=1,
+            post_side_click_capture_delay_ms=1,
+        ),
+    )
+
+    sequencer.ocr_reader = lambda _hwnd, _boxes_arg: 0
+    result = sequencer.execute(_packet("BUY", 900))
+
+    assert result.overall == "FAILED"
+    assert result.state == "ABORT_BEFORE_SIDE_CLICK"
+    assert "calibrated adjustment bounded" in result.reason
+    assert "final_side_click" not in [step.step for step in result.steps]
+
+
+def test_arrow_fallback_disabled_by_default_blocks_before_side_click(tmp_path: Path) -> None:
+    boxes = _boxes()
+    for key in ("hourly_input", "minute_input", "second_input", "time_300"):
         boxes.pop(key)
     sequencer, _adapter = _sequencer(tmp_path, boxes=boxes)
 
     result = sequencer.execute(_packet("BUY", 900))
 
     assert result.overall == "FAILED"
-    assert result.state == "ABORT_BEFORE_SIDE_CLICK"
-    assert "arrow fallback bounded" in result.reason
+    assert result.reason == "typed split controls missing:hourly_input,minute_input,second_input"
     assert "final_side_click" not in [step.step for step in result.steps]
+
+
+def test_required_expiry_verification_blocks_missing_ocr_before_side_click(tmp_path: Path) -> None:
+    sequencer, adapter = _sequencer(
+        tmp_path,
+        timing_profile=BrokerTimingProfile(
+            require_expiry_verification=True,
+            window_activate_wait_ms=1,
+            broker_focus_after_click_ms=1,
+            move_duration_ms=1,
+            post_move_hold_ms=1,
+            post_click_min_wait_ms=1,
+            time_button_after_click_wait_ms=1,
+            input_focus_wait_ms=1,
+            select_existing_value_wait_ms=1,
+            typing_key_interval_ms=1,
+            post_typing_wait_ms=1,
+            post_time_confirm_wait_ms=1,
+            final_pre_side_click_hold_ms=1,
+            post_side_click_capture_delay_ms=1,
+        ),
+    )
+
+    result = sequencer.execute(_packet("BUY", 300))
+
+    assert result.overall == "FAILED"
+    assert result.state == "ABORT_BEFORE_SIDE_CLICK"
+    assert result.expiry_status == "UNVERIFIED_ABORT"
+    assert "final_side_click" not in [step.step for step in result.steps]
+    assert (900, 368) not in adapter.clicks
 
 
 def test_abort_before_side_click_if_time_unconfirmed(tmp_path: Path) -> None:

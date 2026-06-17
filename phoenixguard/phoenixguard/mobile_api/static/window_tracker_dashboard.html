@@ -26,6 +26,15 @@
       --mono: "Cascadia Code", "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
       --display: "Segoe UI Variable Display", "Segoe UI", Inter, system-ui, sans-serif;
       --shadow: 0 30px 90px rgba(0, 0, 0, 0.52);
+      --overlay-demand-rgb: 78, 210, 255;
+      --overlay-supply-rgb: 248, 202, 92;
+      --overlay-trigger-rgb: 185, 154, 255;
+      --overlay-target-rgb: 77, 185, 255;
+      --overlay-invalid-rgb: 245, 215, 120;
+      --overlay-council-rgb: 255, 255, 255;
+      --overlay-label-scale: 1;
+      --overlay-label-opacity: 1;
+      --overlay-label-max: 86px;
     }
 
     * {
@@ -891,7 +900,10 @@
     .surface-canvas img {
       width: 100%;
       height: auto;
-      display: none;
+      display: block;
+      position: absolute;
+      inset: 0;
+      opacity: 0;
       background: #090c0c;
       -webkit-user-drag: none;
       -webkit-user-select: none;
@@ -902,7 +914,8 @@
     }
 
     .surface-canvas img.visible {
-      display: block;
+      position: relative;
+      opacity: 1;
     }
 
     .surface-placeholder {
@@ -928,11 +941,11 @@
       min-width: 28px;
       min-height: 28px;
       padding: 0;
-      border: 2.15px solid rgba(242, 200, 102, 0.96);
+      border: 2.05px solid rgba(242, 200, 102, 0.82);
       border-radius: 4px;
-      background: rgba(242, 200, 102, 0.075);
-      box-shadow: inset 0 0 24px rgba(242, 200, 102, 0.16), 0 0 20px rgba(242, 200, 102, 0.24);
-      opacity: var(--overlay-opacity, 0.82);
+      background: rgba(242, 200, 102, 0.052);
+      box-shadow: inset 0 0 0 1px rgba(242, 200, 102, 0.12), inset 0 0 18px rgba(242, 200, 102, 0.13), 0 0 16px rgba(242, 200, 102, 0.18);
+      opacity: var(--overlay-opacity, 0.76);
       pointer-events: auto;
       transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease;
     }
@@ -966,42 +979,42 @@
     }
 
     .surface-hotspot.layer-supply-demand {
-      border-color: rgba(242, 200, 102, 0.96);
+      border-color: rgba(242, 200, 102, 1);
       background: rgba(242, 200, 102, 0.045);
-      box-shadow: inset 0 0 16px rgba(242, 200, 102, 0.16), 0 0 14px rgba(242, 200, 102, 0.18);
+      box-shadow: inset 0 0 0 1px rgba(242, 200, 102, 0.28), inset 0 0 18px rgba(242, 200, 102, 0.20), 0 0 16px rgba(242, 200, 102, 0.26);
     }
 
     .surface-hotspot.layer-supply-demand.buy,
     .surface-hotspot.layer-supply-demand.semantic-demand,
     .surface-hotspot.layer-supply-demand[data-semantic-family="buy"],
     .surface-hotspot.layer-supply-demand[data-semantic-family="demand"] {
-      border-color: rgba(35, 246, 199, 1);
-      background: rgba(35, 246, 199, 0.058);
-      box-shadow: inset 0 0 18px rgba(35, 246, 199, 0.15), 0 0 18px rgba(35, 246, 199, 0.18);
+      border-color: rgba(var(--overlay-demand-rgb), 0.98);
+      background: rgba(var(--overlay-demand-rgb), 0.050);
+      box-shadow: inset 0 0 0 1px rgba(var(--overlay-demand-rgb), 0.26), inset 0 0 18px rgba(var(--overlay-demand-rgb), 0.12), 0 0 18px rgba(var(--overlay-demand-rgb), 0.18);
     }
 
     .surface-hotspot.layer-supply-demand.sell,
     .surface-hotspot.layer-supply-demand.semantic-supply,
     .surface-hotspot.layer-supply-demand[data-semantic-family="sell"],
     .surface-hotspot.layer-supply-demand[data-semantic-family="supply"] {
-      border-color: rgba(255, 132, 72, 1);
-      background: rgba(255, 132, 72, 0.056);
-      box-shadow: inset 0 0 18px rgba(255, 132, 72, 0.15), 0 0 18px rgba(255, 132, 72, 0.18);
+      border-color: rgba(var(--overlay-supply-rgb), 0.98);
+      background: rgba(var(--overlay-supply-rgb), 0.052);
+      box-shadow: inset 0 0 0 1px rgba(var(--overlay-supply-rgb), 0.26), inset 0 0 18px rgba(var(--overlay-supply-rgb), 0.13), 0 0 18px rgba(var(--overlay-supply-rgb), 0.19);
     }
 
     .surface-hotspot.layer-trigger-zones {
-      border-color: rgba(99, 224, 154, 0.62);
-      background: rgba(99, 224, 154, 0.055);
+      border-color: rgba(var(--overlay-trigger-rgb), 0.72);
+      background: rgba(var(--overlay-trigger-rgb), 0.052);
     }
 
     .surface-hotspot.layer-target-zones {
-      border-color: rgba(77, 185, 255, 0.70);
-      background: rgba(77, 185, 255, 0.050);
+      border-color: rgba(var(--overlay-target-rgb), 0.70);
+      background: rgba(var(--overlay-target-rgb), 0.050);
     }
 
     .surface-hotspot.layer-invalidation {
-      border-color: rgba(255, 101, 79, 0.72);
-      background: rgba(255, 101, 79, 0.045);
+      border-color: rgba(var(--overlay-invalid-rgb), 0.72);
+      background: rgba(var(--overlay-invalid-rgb), 0.042);
     }
 
     .surface-hotspot.layer-prediction-path {
@@ -1010,8 +1023,8 @@
     }
 
     .surface-hotspot.layer-active-council-decision {
-      border-color: rgba(255, 255, 255, 0.78);
-      background: rgba(255, 255, 255, 0.07);
+      border-color: rgba(var(--overlay-council-rgb), 0.78);
+      background: rgba(var(--overlay-council-rgb), 0.07);
       box-shadow: 0 0 18px rgba(242, 200, 102, 0.14);
     }
 
@@ -1030,24 +1043,24 @@
     .surface-hotspot.display-full,
     .surface-hotspot.display-focus-expanded {
       opacity: var(--overlay-opacity, 0.96);
-      border-width: var(--overlay-border-width, 2.45px);
+      border-width: var(--overlay-border-width, 2.75px);
     }
 
     .surface-hotspot.display-compact {
       opacity: var(--overlay-opacity, 0.74);
-      border-width: var(--overlay-border-width, 2.05px);
+      border-width: var(--overlay-border-width, 2.35px);
     }
 
     .surface-hotspot.display-grouped {
       opacity: var(--overlay-opacity, 0.68);
-      border-width: var(--overlay-border-width, 1.95px);
+      border-width: var(--overlay-border-width, 2.15px);
       box-shadow: inset 0 0 0 1px rgba(242, 200, 102, 0.12);
     }
 
     .surface-hotspot.display-nested {
       opacity: var(--overlay-opacity, 0.64);
       border-style: dashed;
-      border-width: var(--overlay-border-width, 1.80px);
+      border-width: var(--overlay-border-width, 1.95px);
       box-shadow: none;
     }
 
@@ -1056,7 +1069,7 @@
     .surface-hotspot.display-inspector-only-label {
       opacity: var(--overlay-opacity, 0.42);
       border-style: dotted;
-      border-width: var(--overlay-border-width, 1.30px);
+      border-width: var(--overlay-border-width, 1.35px);
       box-shadow: none;
     }
 
@@ -1072,23 +1085,23 @@
     .surface-trendline {
       fill: none;
       stroke: rgba(242, 200, 102, 0.96);
-      stroke-width: 3.45;
+      stroke-width: 3.65;
       stroke-linecap: round;
       stroke-linejoin: round;
       vector-effect: non-scaling-stroke;
-      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.94)) drop-shadow(0 0 6px rgba(242, 200, 102, 0.30));
+      filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.94)) drop-shadow(0 0 6px rgba(242, 200, 102, 0.28));
     }
 
     .surface-trendline.trendline-support {
-      stroke: rgba(35, 246, 199, 1);
+      stroke: rgba(var(--overlay-demand-rgb), 0.98);
     }
 
     .surface-trendline.trendline-resistance {
-      stroke: rgba(255, 132, 72, 1);
+      stroke: rgba(var(--overlay-supply-rgb), 0.98);
     }
 
     .surface-trendline.trendline-inner {
-      stroke: rgba(96, 211, 255, 1);
+      stroke: rgba(var(--overlay-trigger-rgb), 0.98);
       stroke-dasharray: 8 5;
     }
 
@@ -1111,18 +1124,18 @@
     }
 
     .surface-hotspot.buy.layer-broker-controls {
-      border-color: rgba(99, 224, 154, 0.86);
-      background: rgba(99, 224, 154, 0.075);
+      border-color: rgba(var(--overlay-demand-rgb), 0.86);
+      background: rgba(var(--overlay-demand-rgb), 0.070);
     }
 
     .surface-hotspot.sell.layer-broker-controls {
-      border-color: rgba(255, 101, 79, 0.86);
-      background: rgba(255, 101, 79, 0.075);
+      border-color: rgba(var(--overlay-supply-rgb), 0.86);
+      background: rgba(var(--overlay-supply-rgb), 0.072);
     }
 
     .surface-hotspot.sell.layer-trigger-zones {
-      border-color: rgba(255, 101, 79, 0.62);
-      background: rgba(255, 101, 79, 0.055);
+      border-color: rgba(var(--overlay-trigger-rgb), 0.72);
+      background: rgba(var(--overlay-trigger-rgb), 0.052);
     }
 
     .surface-hotspot:hover {
@@ -1135,23 +1148,23 @@
     .surface-hotspot span {
       position: absolute;
       left: -1px;
-      top: -16px;
-      max-width: min(118px, 20vw);
-      padding: 2px 3px;
+      top: var(--overlay-label-top, -14px);
+      max-width: min(var(--overlay-label-max, 86px), 15vw);
+      padding: 1px 2px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      border: 1px solid rgba(242, 200, 102, 0.52);
+      border: 1px solid rgba(242, 200, 102, 0.62);
       border-radius: 4px;
-      background: rgba(8, 8, 6, 0.94);
+      background: rgba(8, 8, 6, 0.92);
       color: var(--gold);
       font-family: var(--mono);
-      font-size: 6.15px;
-      font-weight: 800;
-      line-height: 1.08;
+      font-size: calc(4.65px * var(--overlay-label-scale, 1));
+      font-weight: 700;
+      line-height: 1.05;
       text-transform: uppercase;
-      letter-spacing: 0.025em;
-      opacity: 0.94;
+      letter-spacing: 0;
+      opacity: calc(0.88 * var(--overlay-label-opacity, 1));
       text-shadow: 0 0 5px rgba(0, 0, 0, 0.96);
     }
 
@@ -1159,31 +1172,33 @@
     .surface-hotspot.layer-supply-demand.semantic-demand span,
     .surface-hotspot.layer-supply-demand[data-semantic-family="buy"] span,
     .surface-hotspot.layer-supply-demand[data-semantic-family="demand"] span {
-      border-color: rgba(35, 246, 199, 0.82);
-      color: rgb(158, 255, 231);
+      border-color: rgba(var(--overlay-demand-rgb), 0.88);
+      background: rgba(4, 24, 36, 0.96);
+      color: rgb(var(--overlay-demand-rgb));
     }
 
     .surface-hotspot.layer-supply-demand.sell span,
     .surface-hotspot.layer-supply-demand.semantic-supply span,
     .surface-hotspot.layer-supply-demand[data-semantic-family="sell"] span,
     .surface-hotspot.layer-supply-demand[data-semantic-family="supply"] span {
-      border-color: rgba(255, 132, 72, 0.84);
-      color: rgb(255, 214, 174);
+      border-color: rgba(var(--overlay-supply-rgb), 0.90);
+      background: rgba(34, 27, 8, 0.96);
+      color: rgb(var(--overlay-supply-rgb));
     }
 
     .surface-hotspot.semantic-support span {
-      border-color: rgba(42, 255, 155, 0.58);
-      color: rgb(171, 255, 214);
+      border-color: rgba(var(--overlay-demand-rgb), 0.62);
+      color: rgb(var(--overlay-demand-rgb));
     }
 
     .surface-hotspot.semantic-resistance span {
-      border-color: rgba(255, 89, 72, 0.60);
-      color: rgb(255, 198, 183);
+      border-color: rgba(var(--overlay-supply-rgb), 0.62);
+      color: rgb(var(--overlay-supply-rgb));
     }
 
     .surface-hotspot.semantic-inner span {
-      border-color: rgba(86, 205, 255, 0.56);
-      color: rgb(184, 235, 255);
+      border-color: rgba(var(--overlay-trigger-rgb), 0.62);
+      color: rgb(var(--overlay-trigger-rgb));
     }
 
     .surface-hotspot.label-hidden span {
@@ -1193,15 +1208,19 @@
     .surface-hotspot.display-compact span,
     .surface-hotspot.display-nested span,
     .surface-hotspot.display-grouped span {
-      max-width: min(102px, 18vw);
-      padding: 2px 3px;
-      font-size: 5.75px;
-      opacity: 0.90;
+      max-width: min(calc(var(--overlay-label-max, 86px) * 0.86), 13vw);
+      padding: 1px 2px;
+      font-size: calc(4.25px * var(--overlay-label-scale, 1));
+      opacity: calc(0.84 * var(--overlay-label-opacity, 1));
     }
 
     .surface-hotspot.display-full span,
     .surface-hotspot.display-focus-expanded span {
-      opacity: 0.96;
+      opacity: calc(0.96 * var(--overlay-label-opacity, 1));
+    }
+
+    body.overlay-labels-hover .surface-hotspot:not(:hover) span {
+      opacity: 0;
     }
 
     .surface-hotspot.display-ghosted span,
@@ -2289,6 +2308,7 @@
     }
 
   </style>
+  <link rel="stylesheet" href="/v1/mobile/window-tracker/assets/floating-windows/overlay_editor.css">
 </head>
 <body>
   <div class="scene-stack" aria-hidden="true">
@@ -2446,6 +2466,7 @@
             <span>Overlay</span>
             <select id="overlay-mode-select" aria-label="Overlay mode">
               <option value="clean_live">Clean Live</option>
+              <option value="candles">Candles</option>
               <option value="global">Global</option>
               <option value="local">Local</option>
               <option value="supply_demand">Supply/Demand</option>
@@ -2458,6 +2479,7 @@
               <option value="full_history_read">Full History</option>
               <option value="broker">Broker</option>
               <option value="two_candle_study">Two-Candle Study</option>
+              <option value="lstm_study">LSTM Study</option>
               <option value="deep_debug">Deep Debug</option>
               <option value="calibration">Calibration</option>
               <option value="replay">Replay</option>
@@ -2524,10 +2546,12 @@
                 <button class="layer-toggle active" id="layer-trendlines" type="button" data-layer-toggle="trendlines">Trendlines</button>
                 <button class="layer-toggle active" id="layer-trigger-zones" type="button" data-layer-toggle="trigger_zones">Triggers</button>
                 <button class="layer-toggle" id="overlay-two-candle-study" type="button">Two-Candle Study</button>
+                <button class="layer-toggle" id="overlay-lstm-study" type="button">LSTM Study</button>
                 <button class="layer-toggle active" id="layer-council-decision" type="button" data-layer-toggle="active_council_decision">SMC/Council</button>
                 <button class="layer-toggle active" id="layer-historical-replay" type="button" data-layer-toggle="historical_replay">Replay</button>
                 <button class="layer-toggle active" id="layer-broker-controls" type="button" data-layer-toggle="broker_controls">Broker</button>
                 <button class="layer-toggle" id="layer-diagnostics" type="button" data-layer-toggle="diagnostics">Diagnostics</button>
+                <button class="layer-toggle active" id="overlay-editor-open" type="button">Editor</button>
               </div>
             </div>
           </div>
@@ -2772,8 +2796,203 @@
     </div>
   </div>
 
+  <button class="overlay-editor-fab" id="overlay-editor-fab" type="button" hidden>Overlay Editor</button>
+  <section class="overlay-editor open" id="overlay-editor" role="dialog" aria-label="Overlay editor">
+    <div class="overlay-editor-head">
+      <div class="overlay-editor-title">
+        <strong>Overlay Editor</strong>
+        <span id="overlay-editor-status">Live edits active</span>
+      </div>
+      <div class="overlay-editor-actions">
+        <button id="overlay-editor-lock" type="button">Lock</button>
+        <button class="primary" id="overlay-editor-save" type="button">Save</button>
+        <button id="overlay-editor-close" type="button">Hide</button>
+      </div>
+    </div>
+    <div class="overlay-editor-body">
+      <section class="overlay-editor-section" aria-label="Overlay strength">
+        <h3>Strength</h3>
+        <div class="overlay-control-row">
+          <label for="overlay-edit-opacity">Opacity</label>
+          <input id="overlay-edit-opacity" type="range" min="0.20" max="1.25" step="0.01" data-overlay-setting="opacityScale">
+          <output data-overlay-output="opacityScale">100%</output>
+        </div>
+        <div class="overlay-control-row">
+          <label for="overlay-edit-border">Box Line</label>
+          <input id="overlay-edit-border" type="range" min="0.45" max="1.80" step="0.01" data-overlay-setting="borderScale">
+          <output data-overlay-output="borderScale">100%</output>
+        </div>
+        <div class="overlay-control-row">
+          <label for="overlay-edit-line">Trendline</label>
+          <input id="overlay-edit-line" type="range" min="0.40" max="2.20" step="0.01" data-overlay-setting="lineScale">
+          <output data-overlay-output="lineScale">100%</output>
+        </div>
+        <div class="overlay-control-row">
+          <label for="overlay-edit-fill">Fill</label>
+          <input id="overlay-edit-fill" type="range" min="0" max="2.20" step="0.01" data-overlay-setting="fillScale">
+          <output data-overlay-output="fillScale">100%</output>
+        </div>
+      </section>
+
+      <section class="overlay-editor-section" aria-label="Overlay labels">
+        <h3>Labels</h3>
+        <div class="overlay-control-row">
+          <label for="overlay-edit-label-scale">Size</label>
+          <input id="overlay-edit-label-scale" type="range" min="0.60" max="1.85" step="0.01" data-overlay-setting="labelScale">
+          <output data-overlay-output="labelScale">100%</output>
+        </div>
+        <div class="overlay-control-row">
+          <label for="overlay-edit-label-opacity">Opacity</label>
+          <input id="overlay-edit-label-opacity" type="range" min="0.10" max="1.20" step="0.01" data-overlay-setting="labelOpacity">
+          <output data-overlay-output="labelOpacity">100%</output>
+        </div>
+        <div class="overlay-control-row">
+          <label for="overlay-edit-label-width">Width</label>
+          <input id="overlay-edit-label-width" type="range" min="48" max="180" step="1" data-overlay-setting="labelMaxWidth">
+          <output data-overlay-output="labelMaxWidth">86px</output>
+        </div>
+        <div class="overlay-check-grid">
+          <div class="overlay-check-row">
+            <label for="overlay-edit-hide-labels">Hide all</label>
+            <input id="overlay-edit-hide-labels" type="checkbox" data-overlay-setting="hideLabels">
+          </div>
+          <div class="overlay-check-row">
+            <label for="overlay-edit-hover-labels">Hover labels</label>
+            <input id="overlay-edit-hover-labels" type="checkbox" data-overlay-setting="labelsOnHover">
+          </div>
+        </div>
+      </section>
+
+      <section class="overlay-editor-section" aria-label="Overlay colors">
+        <h3>Colors</h3>
+        <div class="overlay-color-grid">
+          <div class="overlay-color-row"><label for="overlay-color-demand">Demand</label><input id="overlay-color-demand" type="color" data-overlay-color="demand"></div>
+          <div class="overlay-color-row"><label for="overlay-color-supply">Supply</label><input id="overlay-color-supply" type="color" data-overlay-color="supply"></div>
+          <div class="overlay-color-row"><label for="overlay-color-trigger">Trigger</label><input id="overlay-color-trigger" type="color" data-overlay-color="trigger"></div>
+          <div class="overlay-color-row"><label for="overlay-color-target">Target</label><input id="overlay-color-target" type="color" data-overlay-color="target"></div>
+          <div class="overlay-color-row"><label for="overlay-color-invalid">Invalid</label><input id="overlay-color-invalid" type="color" data-overlay-color="invalid"></div>
+          <div class="overlay-color-row"><label for="overlay-color-council">Council</label><input id="overlay-color-council" type="color" data-overlay-color="council"></div>
+        </div>
+      </section>
+
+      <section class="overlay-editor-section" aria-label="Overlay layers">
+        <h3>Layers</h3>
+        <div class="overlay-check-grid">
+          <div class="overlay-check-row"><label for="overlay-layer-chart">Chart</label><input id="overlay-layer-chart" type="checkbox" data-overlay-layer-control="chart_bounds"></div>
+          <div class="overlay-check-row"><label for="overlay-layer-candles">Candles</label><input id="overlay-layer-candles" type="checkbox" data-overlay-layer-control="recent_candles"></div>
+          <div class="overlay-check-row"><label for="overlay-layer-major">Major</label><input id="overlay-layer-major" type="checkbox" data-overlay-layer-control="major_swings"></div>
+          <div class="overlay-check-row"><label for="overlay-layer-local">Local</label><input id="overlay-layer-local" type="checkbox" data-overlay-layer-control="local_swings"></div>
+          <div class="overlay-check-row"><label for="overlay-layer-sd">S/D</label><input id="overlay-layer-sd" type="checkbox" data-overlay-layer-control="supply_demand"></div>
+          <div class="overlay-check-row"><label for="overlay-layer-trends">Trends</label><input id="overlay-layer-trends" type="checkbox" data-overlay-layer-control="trendlines"></div>
+          <div class="overlay-check-row"><label for="overlay-layer-triggers">Triggers</label><input id="overlay-layer-triggers" type="checkbox" data-overlay-layer-control="trigger_zones"></div>
+          <div class="overlay-check-row"><label for="overlay-layer-targets">Targets</label><input id="overlay-layer-targets" type="checkbox" data-overlay-layer-control="target_zones"></div>
+          <div class="overlay-check-row"><label for="overlay-layer-council">Council</label><input id="overlay-layer-council" type="checkbox" data-overlay-layer-control="active_council_decision"></div>
+          <div class="overlay-check-row"><label for="overlay-layer-broker">Broker</label><input id="overlay-layer-broker" type="checkbox" data-overlay-layer-control="broker_controls"></div>
+        </div>
+      </section>
+    </div>
+    <div class="overlay-editor-foot">
+      <span class="overlay-editor-status" id="overlay-editor-saved">Visual edits apply live</span>
+      <button id="overlay-editor-reset" type="button">Reset</button>
+    </div>
+  </section>
+
   <script>
     const SESSION_ID = __SESSION_ID_JSON__;
+    const OVERLAY_LAYER_KEYS = Object.freeze([
+      "chart_bounds",
+      "recent_candles",
+      "major_swings",
+      "local_swings",
+      "supply_demand",
+      "trendlines",
+      "trigger_zones",
+      "target_zones",
+      "invalidation",
+      "prediction_path",
+      "active_council_decision",
+      "historical_replay",
+      "broker_controls",
+      "diagnostics",
+    ]);
+    const OVERLAY_EDITOR_STORAGE_KEY = "phoenixguard.overlay.editor.v1";
+    const OVERLAY_EDITOR_DEFAULTS = Object.freeze({
+      panelOpen: true,
+      opacityScale: 1,
+      borderScale: 1,
+      lineScale: 1,
+      fillScale: 1,
+      labelScale: 1,
+      labelOpacity: 1,
+      labelMaxWidth: 86,
+      hideLabels: false,
+      labelsOnHover: false,
+      layers: {},
+      panelX: null,
+      panelY: null,
+      panelLocked: false,
+      colors: {
+        demand: "#4ed2ff",
+        supply: "#f8ca5c",
+        trigger: "#b99aff",
+        target: "#4db9ff",
+        invalid: "#f5d778",
+        council: "#ffffff",
+      },
+    });
+
+    function boundedSetting(value, fallback, min, max) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) {
+        return fallback;
+      }
+      return Math.max(min, Math.min(max, number));
+    }
+
+    function normalizeHexColor(value, fallback) {
+      const text = String(value || "").trim();
+      return /^#[0-9a-f]{6}$/i.test(text) ? text.toLowerCase() : fallback;
+    }
+
+    function loadOverlayEditorSettings() {
+      let saved = {};
+      try {
+        saved = JSON.parse(localStorage.getItem(OVERLAY_EDITOR_STORAGE_KEY) || "{}") || {};
+      } catch (_err) {
+        saved = {};
+      }
+      const savedColors = saved && typeof saved.colors === "object" ? saved.colors : {};
+      const savedLayers = saved && typeof saved.layers === "object" ? saved.layers : {};
+      return {
+        panelOpen: saved.panelOpen !== false,
+        opacityScale: boundedSetting(saved.opacityScale, OVERLAY_EDITOR_DEFAULTS.opacityScale, 0.20, 1.25),
+        borderScale: boundedSetting(saved.borderScale, OVERLAY_EDITOR_DEFAULTS.borderScale, 0.45, 1.80),
+        lineScale: boundedSetting(saved.lineScale, OVERLAY_EDITOR_DEFAULTS.lineScale, 0.40, 2.20),
+        fillScale: boundedSetting(saved.fillScale, OVERLAY_EDITOR_DEFAULTS.fillScale, 0, 2.20),
+        labelScale: boundedSetting(saved.labelScale, OVERLAY_EDITOR_DEFAULTS.labelScale, 0.60, 1.85),
+        labelOpacity: boundedSetting(saved.labelOpacity, OVERLAY_EDITOR_DEFAULTS.labelOpacity, 0.10, 1.20),
+        labelMaxWidth: boundedSetting(saved.labelMaxWidth, OVERLAY_EDITOR_DEFAULTS.labelMaxWidth, 48, 180),
+        hideLabels: saved.hideLabels === true,
+        labelsOnHover: saved.labelsOnHover === true,
+        panelX: saved.panelX == null ? null : boundedSetting(saved.panelX, 18, 0, 10000),
+        panelY: saved.panelY == null ? null : boundedSetting(saved.panelY, 78, 0, 10000),
+        panelLocked: saved.panelLocked === true,
+        layers: Object.fromEntries(
+          OVERLAY_LAYER_KEYS
+            .filter((key) => typeof savedLayers[key] === "boolean")
+            .map((key) => [key, Boolean(savedLayers[key])])
+        ),
+        colors: {
+          demand: normalizeHexColor(savedColors.demand, OVERLAY_EDITOR_DEFAULTS.colors.demand),
+          supply: normalizeHexColor(savedColors.supply, OVERLAY_EDITOR_DEFAULTS.colors.supply),
+          trigger: normalizeHexColor(savedColors.trigger, OVERLAY_EDITOR_DEFAULTS.colors.trigger),
+          target: normalizeHexColor(savedColors.target, OVERLAY_EDITOR_DEFAULTS.colors.target),
+          invalid: normalizeHexColor(savedColors.invalid, OVERLAY_EDITOR_DEFAULTS.colors.invalid),
+          council: normalizeHexColor(savedColors.council, OVERLAY_EDITOR_DEFAULTS.colors.council),
+        },
+      };
+    }
+
     const state = {
       session: null,
       route: "live",
@@ -2789,6 +3008,9 @@
       streamHydrationRequestId: 0,
       commandPaletteOpen: false,
       commandPaletteIndex: 0,
+      overlayEditor: loadOverlayEditorSettings(),
+      overlayEditorDrag: {active: false},
+      overlayEditorSaved: true,
       inspectorMode: localStorage.getItem("phoenixguard.inspector.mode") || "compact",
       busy: false,
       liveRefreshBusy: false,
@@ -2840,7 +3062,7 @@
         failedArtifactKeys: new Set(),
       },
     };
-    const DASHBOARD_REFRESH_INTERVAL_MS = 250;
+    const DASHBOARD_REFRESH_INTERVAL_MS = 1000;
     const STREAM_LIVE_STATE_HYDRATION_MS = 1000;
 
     const $ = (id) => document.getElementById(id);
@@ -2905,6 +3127,16 @@
       layerTrendlines: $("layer-trendlines"),
       layerTriggerZones: $("layer-trigger-zones"),
       overlayTwoCandle: $("overlay-two-candle-study"),
+      overlayLstm: $("overlay-lstm-study"),
+      overlayEditor: $("overlay-editor"),
+      overlayEditorFab: $("overlay-editor-fab"),
+      overlayEditorClose: $("overlay-editor-close"),
+      overlayEditorSave: $("overlay-editor-save"),
+      overlayEditorLock: $("overlay-editor-lock"),
+      overlayEditorReset: $("overlay-editor-reset"),
+      overlayEditorStatus: $("overlay-editor-status"),
+      overlayEditorSaved: $("overlay-editor-saved"),
+      overlayEditorOpen: $("overlay-editor-open"),
       layerCouncilDecision: $("layer-council-decision"),
       layerHistoricalReplay: $("layer-historical-replay"),
       layerBrokerControls: $("layer-broker-controls"),
@@ -3247,6 +3479,10 @@
         state.surface.visibleFrameKey = "";
         state.surface.pendingImageToken = "";
         state.surface.failedArtifactKeys.clear();
+        state.surface.overlayLocks.clear();
+        if (els.hotspotLayer) {
+          els.hotspotLayer.innerHTML = "";
+        }
       }
       state.surface.identityKey = nextKey;
       return nextKey;
@@ -3537,7 +3773,21 @@
       const captureKey = ["window", "overlay", "full-overlay", "chart"].includes(normalized)
         ? ""
         : clean(session.source_capture_id, "");
-      return [normalized, frameKey, projectionVersion, captureKey, pathKey].filter(Boolean).join("|");
+      return [normalized, frameKey, projectionVersion, captureKey, compactArtifactVersionKey(pathKey)].filter(Boolean).join("|");
+    }
+
+    function compactArtifactVersionKey(path) {
+      const text = clean(path, "");
+      if (!text) {
+        return "";
+      }
+      const fileName = artifactFileNameFromPath(text);
+      if (fileName) {
+        return fileName;
+      }
+      const frame = artifactPathFrame(text);
+      const signature = artifactPathSignature(text);
+      return [frame || "", signature || ""].filter(Boolean).join("@");
     }
 
     function artifactPayload(kind, session = state.session || {}) {
@@ -3869,6 +4119,7 @@
       const normalized = clean(mode, "clean_live").toLowerCase();
       const map = {
         clean_live: "CLEAN_LIVE",
+        candles: "CANDLES",
         global: "GLOBAL",
         local: "LOCAL",
         supply_demand: "SUPPLY_DEMAND",
@@ -3882,6 +4133,7 @@
         full_history_read: "FULL_HISTORY_READ",
         broker: "BROKER",
         two_candle_study: "TWO_CANDLE_STUDY",
+        lstm_study: "LSTM_STUDY",
         deep_debug: "DIAGNOSTICS",
         calibration: "CALIBRATION",
         replay: "REPLAY",
@@ -4003,6 +4255,325 @@
 
     function tone(action) {
       return colorClass(action);
+    }
+
+    function hexToRgbText(hex) {
+      const normalized = normalizeHexColor(hex, "#ffffff").slice(1);
+      const value = Number.parseInt(normalized, 16);
+      const r = (value >> 16) & 255;
+      const g = (value >> 8) & 255;
+      const b = value & 255;
+      return `${r}, ${g}, ${b}`;
+    }
+
+    function formatOverlayEditorValue(key, value) {
+      if (key === "labelMaxWidth") {
+        return `${Math.round(Number(value) || 0)}px`;
+      }
+      return `${Math.round((Number(value) || 0) * 100)}%`;
+    }
+
+    function syncOverlayLayerEditorControls() {
+      document.querySelectorAll("[data-overlay-layer-control]").forEach((input) => {
+        const key = input.getAttribute("data-overlay-layer-control") || "";
+        if (input instanceof HTMLInputElement) {
+          input.checked = Boolean(state.layers[key]);
+        }
+      });
+    }
+
+    function applySavedOverlayLayerState() {
+      const savedLayers = state.overlayEditor && typeof state.overlayEditor.layers === "object"
+        ? state.overlayEditor.layers
+        : {};
+      if (!savedLayers || Object.keys(savedLayers).length === 0) {
+        return;
+      }
+      OVERLAY_LAYER_KEYS.forEach((key) => {
+        if (typeof savedLayers[key] === "boolean") {
+          state.layers[key] = savedLayers[key];
+        }
+      });
+      updateLayerControls();
+    }
+
+    function syncOverlayEditorControls() {
+      const settings = state.overlayEditor || loadOverlayEditorSettings();
+      document.querySelectorAll("[data-overlay-setting]").forEach((input) => {
+        const key = input.getAttribute("data-overlay-setting") || "";
+        if (!(input instanceof HTMLInputElement) || !(key in settings)) {
+          return;
+        }
+        if (input.type === "checkbox") {
+          input.checked = Boolean(settings[key]);
+        } else {
+          input.value = String(settings[key]);
+        }
+      });
+      document.querySelectorAll("[data-overlay-output]").forEach((output) => {
+        const key = output.getAttribute("data-overlay-output") || "";
+        if (key in settings) {
+          output.textContent = formatOverlayEditorValue(key, settings[key]);
+        }
+      });
+      document.querySelectorAll("[data-overlay-color]").forEach((input) => {
+        const key = input.getAttribute("data-overlay-color") || "";
+        if (input instanceof HTMLInputElement && key in settings.colors) {
+          input.value = settings.colors[key];
+        }
+      });
+      syncOverlayLayerEditorControls();
+    }
+
+    function setOverlayEditorSaved(saved) {
+      state.overlayEditorSaved = Boolean(saved);
+      if (els.overlayEditorSaved) {
+        els.overlayEditorSaved.textContent = saved ? "Saved to this frontend" : "Visual edits apply live";
+      }
+      if (els.overlayEditorStatus) {
+        els.overlayEditorStatus.textContent = saved ? "Saved preset loaded" : "Live edits active";
+      }
+    }
+
+    function overlayEditorBoundsFor(x, y) {
+      if (!els.overlayEditor) {
+        return {x: 18, y: 78};
+      }
+      const margin = 8;
+      const rect = els.overlayEditor.getBoundingClientRect();
+      const width = rect.width || 380;
+      const height = rect.height || 520;
+      const maxX = Math.max(margin, window.innerWidth - width - margin);
+      const maxY = Math.max(margin, window.innerHeight - Math.min(height, window.innerHeight - margin * 2) - margin);
+      return {
+        x: Math.max(margin, Math.min(maxX, Number(x) || margin)),
+        y: Math.max(margin, Math.min(maxY, Number(y) || margin)),
+      };
+    }
+
+    function applyOverlayEditorPosition() {
+      if (!els.overlayEditor) {
+        return;
+      }
+      const settings = state.overlayEditor || {};
+      if (settings.panelX == null || settings.panelY == null) {
+        els.overlayEditor.style.left = "";
+        els.overlayEditor.style.top = "";
+        els.overlayEditor.style.right = "";
+        return;
+      }
+      const next = overlayEditorBoundsFor(settings.panelX, settings.panelY);
+      state.overlayEditor.panelX = next.x;
+      state.overlayEditor.panelY = next.y;
+      els.overlayEditor.style.left = `${next.x}px`;
+      els.overlayEditor.style.top = `${next.y}px`;
+      els.overlayEditor.style.right = "auto";
+    }
+
+    function beginOverlayEditorDrag(event) {
+      if (!els.overlayEditor || state.overlayEditor.panelLocked || event.button !== 0) {
+        return;
+      }
+      const target = event.target instanceof Element ? event.target : null;
+      if (target && target.closest("button, input, select, textarea, label")) {
+        return;
+      }
+      const rect = els.overlayEditor.getBoundingClientRect();
+      state.overlayEditorDrag = {
+        active: true,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        panelX: rect.left,
+        panelY: rect.top,
+      };
+      try {
+        els.overlayEditor.setPointerCapture(event.pointerId);
+      } catch (_err) {
+      }
+      event.preventDefault();
+    }
+
+    function moveOverlayEditorDrag(event) {
+      const drag = state.overlayEditorDrag || {};
+      if (!drag.active || drag.pointerId !== event.pointerId) {
+        return;
+      }
+      const next = overlayEditorBoundsFor(
+        Number(drag.panelX || 0) + event.clientX - Number(drag.startX || 0),
+        Number(drag.panelY || 0) + event.clientY - Number(drag.startY || 0),
+      );
+      state.overlayEditor.panelX = next.x;
+      state.overlayEditor.panelY = next.y;
+      applyOverlayEditorPosition();
+      setOverlayEditorSaved(false);
+    }
+
+    function endOverlayEditorDrag(event) {
+      const drag = state.overlayEditorDrag || {};
+      if (!drag.active || drag.pointerId !== event.pointerId) {
+        return;
+      }
+      state.overlayEditorDrag = {active: false};
+      try {
+        els.overlayEditor.releasePointerCapture(event.pointerId);
+      } catch (_err) {
+      }
+    }
+
+    function applyOverlayEditorSettings(options = {}) {
+      const settings = state.overlayEditor || loadOverlayEditorSettings();
+      const root = document.documentElement;
+      root.style.setProperty("--overlay-demand-rgb", hexToRgbText(settings.colors.demand));
+      root.style.setProperty("--overlay-supply-rgb", hexToRgbText(settings.colors.supply));
+      root.style.setProperty("--overlay-trigger-rgb", hexToRgbText(settings.colors.trigger));
+      root.style.setProperty("--overlay-target-rgb", hexToRgbText(settings.colors.target));
+      root.style.setProperty("--overlay-invalid-rgb", hexToRgbText(settings.colors.invalid));
+      root.style.setProperty("--overlay-council-rgb", hexToRgbText(settings.colors.council));
+      root.style.setProperty("--overlay-label-scale", String(settings.labelScale));
+      root.style.setProperty("--overlay-label-opacity", String(settings.labelOpacity));
+      root.style.setProperty("--overlay-label-max", `${Math.round(settings.labelMaxWidth)}px`);
+      document.body.classList.toggle("overlay-labels-hover", Boolean(settings.labelsOnHover));
+      if (els.overlayEditor) {
+        els.overlayEditor.classList.toggle("open", Boolean(settings.panelOpen));
+        els.overlayEditor.classList.toggle("locked", Boolean(settings.panelLocked));
+        applyOverlayEditorPosition();
+      }
+      if (els.overlayEditorFab) {
+        els.overlayEditorFab.hidden = Boolean(settings.panelOpen);
+      }
+      if (els.overlayEditorOpen) {
+        els.overlayEditorOpen.classList.toggle("active", Boolean(settings.panelOpen));
+        els.overlayEditorOpen.setAttribute("aria-pressed", settings.panelOpen ? "true" : "false");
+      }
+      if (els.overlayEditorLock) {
+        els.overlayEditorLock.classList.toggle("locked", Boolean(settings.panelLocked));
+        els.overlayEditorLock.textContent = settings.panelLocked ? "Unlock" : "Lock";
+        els.overlayEditorLock.setAttribute("aria-pressed", settings.panelLocked ? "true" : "false");
+      }
+      syncOverlayEditorControls();
+      if (options.render !== false && els.hotspotLayer) {
+        state.surface.lastStaticLayerHash = "";
+        renderHotspots();
+      }
+    }
+
+    function mutateOverlayEditorSetting(key, value) {
+      if (key in OVERLAY_EDITOR_DEFAULTS.colors) {
+        state.overlayEditor.colors[key] = normalizeHexColor(value, OVERLAY_EDITOR_DEFAULTS.colors[key]);
+      } else if (key === "hideLabels" || key === "labelsOnHover" || key === "panelOpen" || key === "panelLocked") {
+        state.overlayEditor[key] = Boolean(value);
+      } else if (key in state.overlayEditor) {
+        const bounds = {
+          opacityScale: [0.20, 1.25],
+          borderScale: [0.45, 1.80],
+          lineScale: [0.40, 2.20],
+          fillScale: [0, 2.20],
+          labelScale: [0.60, 1.85],
+          labelOpacity: [0.10, 1.20],
+          labelMaxWidth: [48, 180],
+          panelX: [0, 10000],
+          panelY: [0, 10000],
+        }[key] || [0, 2];
+        state.overlayEditor[key] = boundedSetting(value, OVERLAY_EDITOR_DEFAULTS[key] ?? 1, bounds[0], bounds[1]);
+      }
+      setOverlayEditorSaved(false);
+      applyOverlayEditorSettings({render: true});
+    }
+
+    function saveOverlayEditorSettings() {
+      try {
+        state.overlayEditor.layers = Object.fromEntries(OVERLAY_LAYER_KEYS.map((key) => [key, Boolean(state.layers[key])]));
+        state.overlayEditor.panelOpen = false;
+        localStorage.setItem(OVERLAY_EDITOR_STORAGE_KEY, JSON.stringify(state.overlayEditor));
+        setOverlayEditorSaved(true);
+        applyOverlayEditorSettings({render: false});
+      } catch (_err) {
+        if (els.overlayEditorSaved) {
+          els.overlayEditorSaved.textContent = "Save failed";
+        }
+      }
+    }
+
+    function resetOverlayEditorSettings() {
+      state.overlayEditor = loadOverlayEditorSettings();
+      state.overlayEditor = JSON.parse(JSON.stringify(OVERLAY_EDITOR_DEFAULTS));
+      setOverlayEditorSaved(false);
+      applyOverlayEditorSettings({render: true});
+    }
+
+    function initializeOverlayEditor() {
+      applyOverlayEditorSettings({render: false});
+      document.querySelectorAll("[data-overlay-setting]").forEach((input) => {
+        input.addEventListener("input", () => {
+          if (!(input instanceof HTMLInputElement)) {
+            return;
+          }
+          const key = input.getAttribute("data-overlay-setting") || "";
+          mutateOverlayEditorSetting(key, input.type === "checkbox" ? input.checked : input.value);
+        });
+        input.addEventListener("change", () => {
+          if (!(input instanceof HTMLInputElement)) {
+            return;
+          }
+          const key = input.getAttribute("data-overlay-setting") || "";
+          mutateOverlayEditorSetting(key, input.type === "checkbox" ? input.checked : input.value);
+        });
+      });
+      document.querySelectorAll("[data-overlay-color]").forEach((input) => {
+        input.addEventListener("input", () => {
+          if (input instanceof HTMLInputElement) {
+            mutateOverlayEditorSetting(input.getAttribute("data-overlay-color") || "", input.value);
+          }
+        });
+      });
+      document.querySelectorAll("[data-overlay-layer-control]").forEach((input) => {
+        input.addEventListener("change", () => {
+          if (!(input instanceof HTMLInputElement)) {
+            return;
+          }
+          const key = input.getAttribute("data-overlay-layer-control") || "";
+          if (!key) {
+            return;
+          }
+          state.layers[key] = input.checked;
+          state.overlayEditor.layers = {
+            ...(state.overlayEditor.layers || {}),
+            [key]: input.checked,
+          };
+          setOverlayEditorSaved(false);
+          state.surface.lastStaticLayerHash = "";
+          updateLayerControls();
+          renderHotspots();
+        });
+      });
+      const editorHead = els.overlayEditor ? els.overlayEditor.querySelector(".overlay-editor-head") : null;
+      if (editorHead) {
+        editorHead.addEventListener("pointerdown", beginOverlayEditorDrag);
+      }
+      if (els.overlayEditor) {
+        els.overlayEditor.addEventListener("pointermove", moveOverlayEditorDrag);
+        els.overlayEditor.addEventListener("pointerup", endOverlayEditorDrag);
+        els.overlayEditor.addEventListener("pointercancel", endOverlayEditorDrag);
+      }
+      if (els.overlayEditorFab) {
+        els.overlayEditorFab.addEventListener("click", () => mutateOverlayEditorSetting("panelOpen", true));
+      }
+      if (els.overlayEditorOpen) {
+        els.overlayEditorOpen.addEventListener("click", () => mutateOverlayEditorSetting("panelOpen", !Boolean(state.overlayEditor.panelOpen)));
+      }
+      if (els.overlayEditorLock) {
+        els.overlayEditorLock.addEventListener("click", () => mutateOverlayEditorSetting("panelLocked", !Boolean(state.overlayEditor.panelLocked)));
+      }
+      if (els.overlayEditorClose) {
+        els.overlayEditorClose.addEventListener("click", () => mutateOverlayEditorSetting("panelOpen", false));
+      }
+      if (els.overlayEditorSave) {
+        els.overlayEditorSave.addEventListener("click", saveOverlayEditorSettings);
+      }
+      if (els.overlayEditorReset) {
+        els.overlayEditorReset.addEventListener("click", resetOverlayEditorSettings);
+      }
     }
 
     function percent(value, fallback = 0) {
@@ -4809,6 +5380,15 @@
         els.overlayTwoCandle.classList.toggle("active", state.overlayMode === "two_candle_study");
         els.overlayTwoCandle.setAttribute("aria-pressed", state.overlayMode === "two_candle_study" ? "true" : "false");
       }
+      if (els.overlayLstm) {
+        els.overlayLstm.classList.toggle("active", state.overlayMode === "lstm_study");
+        els.overlayLstm.setAttribute("aria-pressed", state.overlayMode === "lstm_study" ? "true" : "false");
+      }
+      if (els.overlayEditorOpen) {
+        els.overlayEditorOpen.classList.toggle("active", Boolean(state.overlayEditor?.panelOpen));
+        els.overlayEditorOpen.setAttribute("aria-pressed", state.overlayEditor?.panelOpen ? "true" : "false");
+      }
+      syncOverlayLayerEditorControls();
     }
 
     function toggleLayer(key) {
@@ -4851,6 +5431,7 @@
       };
       const presets = {
         clean_live: layerPreset("chart_bounds", "recent_candles", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
+        candles: layerPreset("chart_bounds", "recent_candles"),
         global: layerPreset("chart_bounds", "major_swings", "historical_replay"),
         local: layerPreset("chart_bounds", "recent_candles", "local_swings", "trigger_zones"),
         supply_demand: layerPreset("supply_demand"),
@@ -4860,10 +5441,11 @@
         invalidation: layerPreset("supply_demand"),
         path: layerPreset("prediction_path", "historical_replay"),
         active_context: layerPreset("chart_bounds", "recent_candles", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
-        council_layers: layerPreset("active_council_decision", "supply_demand"),
+        council_layers: layerPreset("recent_candles", "active_council_decision", "supply_demand", "trigger_zones", "target_zones"),
         full_history_read: layerPreset("chart_bounds", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
         broker: layerPreset("broker_controls"),
-        two_candle_study: layerPreset("active_council_decision"),
+        two_candle_study: layerPreset("recent_candles", "active_council_decision"),
+        lstm_study: layerPreset("recent_candles", "active_council_decision"),
         deep_debug: layerPreset(...allLayerKeys),
         calibration: layerPreset("broker_controls", "diagnostics"),
         replay: layerPreset("chart_bounds", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
@@ -5497,9 +6079,10 @@
         TARGET: new Set(["TARGET_ZONE_BOX", "OPPOSING_FORCE"]),
         INVALIDATION: new Set(["OPPOSING_FORCE"]),
         PATH: new Set(["ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"]),
-        COUNCIL: new Set(["MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER"]),
+        COUNCIL: new Set(["CURRENT_CANDLE", "SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY", "LSTM_STUDY"]),
         TWO_CANDLE_STUDY: new Set(["TWO_CANDLE_STUDY"]),
-        ACTIVE_CONTEXT: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY"]),
+        LSTM_STUDY: new Set(["LSTM_STUDY"]),
+        ACTIVE_CONTEXT: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY", "LSTM_STUDY"]),
         FULL_HISTORY_READ: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY"]),
         REPLAY: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"]),
         BROKER: new Set(["BROKER_CONTROL"]),
@@ -5513,12 +6096,16 @@
       const mode = clean(activeMode, "CLEAN_LIVE").toUpperCase();
       const budgetByMode = {
         CLEAN_LIVE: 48,
+        CANDLES: 140,
         SUPPLY_DEMAND: 18,
         TRENDLINES: 8,
         TRIGGER: 18,
         TARGET: 16,
         INVALIDATION: 10,
         PATH: 24,
+        COUNCIL: 36,
+        TWO_CANDLE_STUDY: 12,
+        LSTM_STUDY: 12,
         ACTIVE_CONTEXT: 64,
         FULL_HISTORY_READ: 80,
         REPLAY: 80,
@@ -6226,12 +6813,45 @@
       if (!imageWidth || !imageHeight) {
         return null;
       }
-      const pixelBoundsToPercent = (left, top, right, bottom) => ({
-        left: (left / imageWidth) * 100,
-        top: (top / imageHeight) * 100,
-        width: Math.max(0.5, ((right - left) / imageWidth) * 100),
-        height: Math.max(0.5, ((bottom - top) / imageHeight) * 100),
-      });
+      const percentBounds = (left, top, width, height) => {
+        if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+          return null;
+        }
+        const right = left + width;
+        const bottom = top + height;
+        const clippedLeft = Math.max(0, Math.min(100, left));
+        const clippedTop = Math.max(0, Math.min(100, top));
+        const clippedRight = Math.max(0, Math.min(100, right));
+        const clippedBottom = Math.max(0, Math.min(100, bottom));
+        const clippedWidth = clippedRight - clippedLeft;
+        const clippedHeight = clippedBottom - clippedTop;
+        if (clippedWidth <= 0 || clippedHeight <= 0) {
+          return null;
+        }
+        const originalArea = Math.max(0.0001, width * height);
+        const clippedArea = clippedWidth * clippedHeight;
+        if (clippedArea / originalArea < 0.35) {
+          return null;
+        }
+        return {
+          left: clippedLeft,
+          top: clippedTop,
+          width: Math.max(0.5, clippedWidth),
+          height: Math.max(0.5, clippedHeight),
+        };
+      };
+      const normalizedBoundsToPercent = (left, top, right, bottom) => percentBounds(
+        left * 100,
+        top * 100,
+        Math.max(0, (right - left) * 100),
+        Math.max(0, (bottom - top) * 100),
+      );
+      const pixelBoundsToPercent = (left, top, right, bottom) => percentBounds(
+        (left / imageWidth) * 100,
+        (top / imageHeight) * 100,
+        ((right - left) / imageWidth) * 100,
+        ((bottom - top) / imageHeight) * 100,
+      );
       const sceneBounds = (key) => {
         const values = Array.isArray(sceneGraph[key]) ? sceneGraph[key].map(Number) : [];
         return values.length >= 4 && values.every(Number.isFinite) && values[2] > values[0] && values[3] > values[1]
@@ -6247,12 +6867,7 @@
       const maxValue = Math.max(...bbox.map(Math.abs));
       if (maxValue <= 1.0001) {
         if (brokerSurfaceSpace) {
-          return {
-            left: bbox[0] * 100,
-            top: bbox[1] * 100,
-            width: Math.max(0.5, (bbox[2] - bbox[0]) * 100),
-            height: Math.max(0.5, (bbox[3] - bbox[1]) * 100),
-          };
+          return normalizedBoundsToPercent(bbox[0], bbox[1], bbox[2], bbox[3]);
         }
         const fullOverlayBounds = plotNormalized
           ? sceneBounds("plot_area_bounds")
@@ -6265,12 +6880,7 @@
           return normalizedInPixelBounds(chartPlaneBounds);
         }
         if (chartNormalized || coordinateMode.includes("CHART") || plotNormalized) {
-          return {
-            left: bbox[0] * 100,
-            top: bbox[1] * 100,
-            width: Math.max(0.5, (bbox[2] - bbox[0]) * 100),
-            height: Math.max(0.5, (bbox[3] - bbox[1]) * 100),
-          };
+          return normalizedBoundsToPercent(bbox[0], bbox[1], bbox[2], bbox[3]);
         }
         const focusRegion = tracking.focus_region || {};
         const focus = state.surfaceUsesFullOverlay
@@ -6284,20 +6894,15 @@
           const right = Number(focus[2]);
           const bottom = Number(focus[3]);
           if ([left, top, right, bottom].every(Number.isFinite) && right > left && bottom > top) {
-            return {
-              left: (left + bbox[0] * (right - left)) * 100,
-              top: (top + bbox[1] * (bottom - top)) * 100,
-              width: Math.max(0.5, (bbox[2] - bbox[0]) * (right - left) * 100),
-              height: Math.max(0.5, (bbox[3] - bbox[1]) * (bottom - top) * 100),
-            };
+            return normalizedBoundsToPercent(
+              left + bbox[0] * (right - left),
+              top + bbox[1] * (bottom - top),
+              left + bbox[2] * (right - left),
+              top + bbox[3] * (bottom - top),
+            );
           }
         }
-        return {
-          left: bbox[0] * 100,
-          top: bbox[1] * 100,
-          width: Math.max(0.5, (bbox[2] - bbox[0]) * 100),
-          height: Math.max(0.5, (bbox[3] - bbox[1]) * 100),
-        };
+        return normalizedBoundsToPercent(bbox[0], bbox[1], bbox[2], bbox[3]);
       }
       const region = tracking.chart_region || tracking.display_region || {};
       const chartFullBounds = sceneBounds("chart_region_bounds");
@@ -6323,12 +6928,7 @@
       const y0 = bbox[1] + offsetY;
       const x1 = bbox[2] + offsetX;
       const y1 = bbox[3] + offsetY;
-      return {
-        left: (x0 / imageWidth) * 100,
-        top: (y0 / imageHeight) * 100,
-        width: Math.max(0.5, ((x1 - x0) / imageWidth) * 100),
-        height: Math.max(0.5, ((y1 - y0) / imageHeight) * 100),
-      };
+      return pixelBoundsToPercent(x0, y0, x1, y1);
     }
 
     function layerClassName(layer) {
@@ -6396,6 +6996,7 @@
       const style = objectOrEmpty(box.style);
       const displayState = overlayDisplayState(box);
       const weight = overlayVisualWeight(box);
+      const editor = state.overlayEditor || OVERLAY_EDITOR_DEFAULTS;
       const opacityFallback = {
         FULL: 0.94,
         FOCUS_EXPANDED: 1,
@@ -6407,23 +7008,25 @@
         INSPECTOR_ONLY_LABEL: 0.40,
       }[displayState] ?? 0.72;
       const borderFallback = {
-        FULL: 3.10,
-        FOCUS_EXPANDED: 3.35,
-        COMPACT: 2.75,
-        GROUPED: 2.55,
-        NESTED: 2.35,
-        GHOSTED: 1.65,
-        ICON_ONLY: 1.45,
-        INSPECTOR_ONLY_LABEL: 1.45,
-      }[displayState] ?? 1.35;
+        FULL: 2.75,
+        FOCUS_EXPANDED: 2.95,
+        COMPACT: 2.35,
+        GROUPED: 2.15,
+        NESTED: 1.95,
+        GHOSTED: 1.35,
+        ICON_ONLY: 1.20,
+        INSPECTOR_ONLY_LABEL: 1.20,
+      }[displayState] ?? 1.20;
       const requestedBorder = Number(style.border_width);
       const resolvedBorder = Number.isFinite(requestedBorder)
-        ? Math.max(requestedBorder, borderFallback)
+        ? Math.max(1.05, Math.min(requestedBorder, borderFallback + 0.25))
         : borderFallback;
+      const baseOpacity = Math.max(0.18, Math.min(1, Number(style.opacity ?? opacityFallback) || opacityFallback));
+      const baseFill = Math.max(0, Math.min(0.16, Number(style.fill_opacity ?? (0.03 + weight * 0.04)) || 0.04));
       return {
-        opacity: Math.max(0.18, Math.min(1, Number(style.opacity ?? opacityFallback) || opacityFallback)),
-        borderWidth: Math.max(1.30, Math.min(4.8, resolvedBorder)),
-        fillOpacity: Math.max(0, Math.min(0.16, Number(style.fill_opacity ?? (0.03 + weight * 0.04)) || 0.04)),
+        opacity: Math.max(0.04, Math.min(1, baseOpacity * Number(editor.opacityScale || 1))),
+        borderWidth: Math.max(0.35, Math.min(6.0, resolvedBorder * Number(editor.borderScale || 1))),
+        fillOpacity: Math.max(0, Math.min(0.34, baseFill * Number(editor.fillScale || 1))),
       };
     }
 
@@ -6448,13 +7051,16 @@
     function overlayLineStrokeWidth(box = {}) {
       const displayState = overlayDisplayState(box);
       const weight = overlayVisualWeight(box);
+      const editor = state.overlayEditor || OVERLAY_EDITOR_DEFAULTS;
+      let width = 0;
       if (displayState === "FULL" || displayState === "FOCUS_EXPANDED") {
-        return Math.max(3.45, Math.min(4.9, 3.15 + weight));
+        width = Math.max(2.80, Math.min(3.95, 2.65 + weight * 0.75));
+      } else if (displayState === "GHOSTED" || displayState === "INSPECTOR_ONLY_LABEL") {
+        width = 1.95;
+      } else {
+        width = Math.max(2.35, Math.min(3.55, 2.15 + weight * 0.65));
       }
-      if (displayState === "GHOSTED" || displayState === "INSPECTOR_ONLY_LABEL") {
-        return 2.40;
-      }
-      return Math.max(2.90, Math.min(4.2, 2.55 + weight));
+      return Math.max(0.55, Math.min(8.0, width * Number(editor.lineScale || 1)));
     }
 
     function resolveOverlayLabelBounds(box, tracking, image) {
@@ -6547,7 +7153,7 @@
         return false;
       }
       const displayState = overlayDisplayState(box);
-      const effectiveLabelHidden = labelHidden || overlayLabelHiddenByDisplayState(box);
+      const effectiveLabelHidden = labelHidden || overlayLabelHiddenByDisplayState(box) || Boolean(state.overlayEditor?.hideLabels);
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.setAttribute("viewBox", "0 0 100 100");
       svg.setAttribute("preserveAspectRatio", "none");
@@ -6745,7 +7351,7 @@
         const direction = clean(box.direction || box.action || "", "");
         const labelHidden = box.label_hidden === true || box.label_hidden === "true";
         const displayState = overlayDisplayState(box);
-        const effectiveLabelHidden = labelHidden || overlayLabelHiddenByDisplayState(box);
+        const effectiveLabelHidden = labelHidden || overlayLabelHiddenByDisplayState(box) || Boolean(state.overlayEditor?.hideLabels);
         if (isLineOverlay(box) && renderLineOverlay(box, index, layer, direction, label, effectiveLabelHidden, staticLayer, tracking, visibleImage)) {
           return;
         }
@@ -7531,7 +8137,13 @@
     els.panCenter.addEventListener("click", centerSurface);
     els.zoomSlider.addEventListener("input", () => setSurfaceZoom(Number(els.zoomSlider.value)));
     els.layerChartBounds.addEventListener("click", () => toggleLayer("chart_bounds"));
-    els.layerRecentCandles.addEventListener("click", () => toggleLayer("recent_candles"));
+    els.layerRecentCandles.addEventListener("click", () => {
+      if (state.overlayMode === "candles") {
+        toggleLayer("recent_candles");
+      } else {
+        applyOverlayPreset("candles");
+      }
+    });
     els.layerMajorSwings.addEventListener("click", () => toggleLayer("major_swings"));
     els.layerLocalSwings.addEventListener("click", () => toggleLayer("local_swings"));
     els.layerSupplyDemand.addEventListener("click", () => toggleLayer("supply_demand"));
@@ -7539,6 +8151,9 @@
     els.layerTriggerZones.addEventListener("click", () => toggleLayer("trigger_zones"));
     if (els.overlayTwoCandle) {
       els.overlayTwoCandle.addEventListener("click", () => applyOverlayPreset("two_candle_study"));
+    }
+    if (els.overlayLstm) {
+      els.overlayLstm.addEventListener("click", () => applyOverlayPreset("lstm_study"));
     }
     els.layerCouncilDecision.addEventListener("click", () => toggleLayer("active_council_decision"));
     els.layerHistoricalReplay.addEventListener("click", () => toggleLayer("historical_replay"));
@@ -7714,11 +8329,14 @@
     });
     window.addEventListener("resize", () => {
       refreshSurfaceViewportIfNeeded(true, true);
+      applyOverlayEditorPosition();
       renderHotspots();
     });
 
+    initializeOverlayEditor();
     setMode("overlay");
     applyOverlayPreset("clean_live");
+    applySavedOverlayLayerState();
     applyRoute(routeFromLocation(), false);
     updateLayerControls();
     refreshSession();

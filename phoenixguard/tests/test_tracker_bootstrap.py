@@ -22,7 +22,8 @@ def test_build_locked_tracker_controls_uses_safe_tracking_defaults() -> None:
     assert controls["execution_mode"] == "live"
     assert controls["require_market_identity"] is True
     assert controls["require_timeframe_identity"] is True
-    assert controls["allow_locked_surface_identity_fallback"] is True
+    assert controls["allow_locked_surface_identity_fallback"] is False
+    assert controls["swing_fallback_enabled"] is False
     assert controls["adaptive_timer_enabled"] is True
     assert controls["trade_profile"] == "HIGH_FREQUENCY"
     assert controls["high_frequency_expiry_seconds"] == 600
@@ -65,6 +66,24 @@ def test_tracker_session_runtime_state_marks_old_capture_stale() -> None:
     assert state["status"] == "STALE"
     assert state["stale"] is True
     assert "last_capture_epoch" in state["reason"]
+
+
+def test_tracker_session_runtime_state_accepts_display_only_authority_heartbeat() -> None:
+    state = tracker_session_runtime_state(
+        {
+            "tracking_enabled": True,
+            "status": "running",
+            "capture_interval_sec": 0.5,
+            "last_capture_epoch": 100.0,
+            "display_published_epoch": 199.5,
+            "display_snapshot_only_v3": True,
+        },
+        now_epoch=200.0,
+        max_capture_staleness_sec=30.0,
+    )
+
+    assert state["status"] == "FRESH"
+    assert state["stale"] is False
 
 
 def test_tracker_session_runtime_state_allows_slow_live_pipeline_window() -> None:
@@ -148,6 +167,130 @@ def test_tracker_status_file_write_failure_does_not_raise(monkeypatch, tmp_path:
     assert tracker_launcher._write_status_file(status_path, {"status": "running"}) is False
     assert not status_path.exists()
     assert list(tmp_path.glob("tracker_status.json.*.tmp")) == []
+
+
+def test_quarantine_stale_session_on_boot(monkeypatch, tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.json").write_text(
+        json.dumps({"session_id": "pocket-live-8788", "last_capture_epoch": 100.0}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHOENIXGUARD_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(tracker_launcher.time, "time", lambda: 1000.0)
+
+    assert tracker_launcher._quarantine_stale_session_on_boot(tmp_path, "pocket-live-8788") is True
+    assert not session_dir.exists()
+    assert list(session_dir.parent.glob("pocket-live-8788_stale_*"))
+
+
+def test_live_fast_display_heartbeat_runs_in_shadow_mode(monkeypatch) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    def _fake_request_json(
+        base_url: str,
+        path: str,
+        *,
+        method: str = "GET",
+        payload: dict | None = None,
+        timeout: int = 30,
+    ) -> dict:
+        del payload, timeout
+        calls.append((base_url, method, path))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(tracker_launcher, "_request_json", _fake_request_json)
+    monkeypatch.setattr(tracker_launcher.time, "time", lambda: 100.0)
+    monkeypatch.delenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "0")
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "0")
+
+    next_epoch = tracker_launcher._live_fast_display_heartbeat(
+        "http://127.0.0.1:8793",
+        "pocket-live-8788",
+        {
+            "tracking_enabled": True,
+            "execution_controls": {
+                "live_execution_enabled": False,
+                "execution_mode": "shadow",
+            },
+        },
+        last_heartbeat_epoch=0.0,
+    )
+
+    assert next_epoch == 100.0
+    assert calls == [
+        (
+            "http://127.0.0.1:8793",
+            "POST",
+            "/v1/mobile/window-tracker/sessions/pocket-live-8788/capture-once?display_only=1",
+        )
+    ]
+
+
+def test_live_fast_display_heartbeat_prefers_display_state_file(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+    data_dir = tmp_path / "data"
+    state_path = (
+        data_dir
+        / "mobile_api"
+        / "window_tracker"
+        / "sessions"
+        / "pocket-live-8788"
+        / "display_state.json"
+    )
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "display_frame_id": 4,
+                "display_capture_epoch": 99.0,
+                "display_published_epoch": 99.0,
+                "last_display_window_path": "window.jpg",
+                "overlay_frame_id": 2,
+                "model_vote_frame_id": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHOENIXGUARD_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "0")
+    monkeypatch.setattr(tracker_launcher, "_request_json", lambda *args, **kwargs: calls.append("called"))
+    monkeypatch.setattr(tracker_launcher.time, "time", lambda: 100.0)
+
+    next_epoch = tracker_launcher._live_fast_display_heartbeat(
+        "http://127.0.0.1:8793",
+        "pocket-live-8788",
+        {"tracking_enabled": True},
+        last_heartbeat_epoch=0.0,
+        script_dir=tmp_path,
+    )
+
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert next_epoch == 100.0
+    assert calls == []
+    assert payload["display_frame_id"] == 5
+    assert payload["display_published_epoch"] == 100.0
+    assert payload["display_fast_path_v3"]["reason"] == "supervisor_file_reuse_heartbeat"
+
+
+def test_live_fast_display_heartbeat_respects_disable_env(monkeypatch) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr(tracker_launcher, "_request_json", lambda *args, **kwargs: calls.append("called"))
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", "0")
+
+    next_epoch = tracker_launcher._live_fast_display_heartbeat(
+        "http://127.0.0.1:8793",
+        "pocket-live-8788",
+        {"tracking_enabled": True},
+        last_heartbeat_epoch=44.0,
+    )
+
+    assert next_epoch == 44.0
+    assert calls == []
 
 
 def test_resolve_python_launcher_unwraps_windows_venv_redirector(monkeypatch, tmp_path: Path) -> None:

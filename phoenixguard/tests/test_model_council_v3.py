@@ -6,6 +6,7 @@ from typing import Any
 from phoenixguard.decision.model_council_v3 import (
     MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
     PG_EXECUTION_PACKET_SCHEMA_VERSION,
+    PROMOTION_FAILURE_AUDIT_SCHEMA_VERSION,
     ModelCouncilV3,
     validate_execution_packet_v3,
 )
@@ -221,6 +222,31 @@ def test_high_frequency_two_candle_lane_publishes_fixed_600s_packet() -> None:
     assert hf_cycle["uses_unseen_future_candles"] is False
 
 
+def test_high_frequency_open_candle_does_not_report_false_side_mismatch() -> None:
+    council = ModelCouncilV3()
+    snapshot = _high_frequency_snapshot("SELL", frame_id=220)
+    snapshot["high_frequency_candle_cycle"].update(
+        {
+            "ready": False,
+            "side": "HOLD",
+            "candidate_side": "SELL",
+            "active_candidate_side": "SELL",
+            "forecast_side": "SELL",
+            "current_candle_closed": False,
+            "forecast_agreement": True,
+            "swing_fallback_enabled": False,
+            "reason": "Current M5 candle is still open.",
+        }
+    )
+
+    result = council.evaluate(snapshot, now_epoch=NOW)
+    lane = result["model_council"]["execution_lane"]
+
+    assert lane["accepted"] is False
+    assert "CURRENT_M5_CANDLE_NOT_CLOSED" in lane["blockers"]
+    assert "TWO_CANDLE_SIDE_MISMATCH" not in lane["blockers"]
+
+
 def test_model_council_resets_stability_on_symbol_switch() -> None:
     council = ModelCouncilV3()
     council.evaluate(_strong_snapshot("BUY", frame_id=300), now_epoch=NOW)
@@ -266,6 +292,15 @@ def _assert_non_executable_release_fields(result: dict[str, Any]) -> None:
         assert trace[field] not in (None, "", "N/A", "MISSING")
     assert trace["denied_at"] not in {"CONTEXT", "WATCHING", "N/A", "MISSING"}
     assert trace["next_required"] not in {"CONTEXT", "WATCHING", "N/A", "MISSING"}
+    audit = result["study_packet"]["promotion_failure_audit_v3"]
+    assert audit["schema_version"] == PROMOTION_FAILURE_AUDIT_SCHEMA_VERSION
+    assert audit == result["promotion_trace"]["promotion_failure_audit_v3"]
+    assert audit == result["model_council"]["promotion_failure_audit_v3"]
+    assert audit["denied_at"] == trace["denied_at"]
+    assert audit["top_blocker"] == trace["denied_at"]
+    assert audit["exact_field_preventing_execution_packet"]
+    assert audit["next_required"] == trace["next_required"]
+    assert audit["blocker_ranking"][0]["blocker"] == trace["denied_at"]
 
 
 def _permission_denied_result() -> dict[str, Any]:
@@ -711,6 +746,21 @@ def test_every_non_executable_state_has_next_required() -> None:
         _assert_non_executable_release_fields(result)
 
 
+def test_every_non_executable_study_packet_has_promotion_failure_audit() -> None:
+    results = [
+        ModelCouncilV3().evaluate(_strong_snapshot("BUY", frame_id=100), now_epoch=NOW),
+        _permission_denied_result(),
+        _broker_click_unsafe_result(),
+    ]
+
+    for result in results:
+        audit = result["study_packet"]["promotion_failure_audit_v3"]
+        assert audit["schema_version"] == PROMOTION_FAILURE_AUDIT_SCHEMA_VERSION
+        assert audit["packet_result"] == "STUDY_PACKET_PUBLISHED"
+        assert audit["denied_at"] == result["promotion_trace"]["denied_at"]
+        assert audit["blocker_ranking"][0]["blocker"] == result["promotion_trace"]["denied_at"]
+
+
 def test_sequence_context_blocker_reports_exact_rejected_fields() -> None:
     snapshot = _strong_snapshot("SELL", frame_id=100)
     snapshot.update(
@@ -737,6 +787,9 @@ def test_sequence_context_blocker_reports_exact_rejected_fields() -> None:
     assert readiness["minimum_required_sequence_length"] == 50
     assert readiness["minimum_required_box_history_len"] == 1
     assert readiness["minimum_required_progression_len"] == 1
+    audit = result["study_packet"]["promotion_failure_audit_v3"]
+    assert audit["top_blocker"] == "SEQUENCE_CONTEXT"
+    assert audit["exact_field_preventing_execution_packet"] == "model_council_resolver"
     assert {row["field"] for row in readiness["blocking_failures"]} >= {
         "sequence_status",
         "sequence_length",
@@ -812,6 +865,28 @@ def test_sequence_context_promotes_tracked_candle_history_when_live_snapshot_mar
     assert len(context.box_history) == 20
     assert len(context.progression) == 20
     assert context.entry_progression["source"] == "sequence_context_memory_compression"
+    assert readiness["ready"] is True
+
+
+def test_sequence_context_derives_confidence_from_tracked_structure_when_score_missing() -> None:
+    snapshot = _strong_snapshot("BUY", frame_id=150)
+    snapshot.pop("sequence_confidence")
+    snapshot.pop("confidence", None)
+    snapshot["sequence_status"] = "PARTIAL_SEQUENCE"
+    snapshot["historical_structure"] = [
+        {"key": "demand_1", "label": "DEMAND", "direction": "BUY", "bbox": [20, 240, 220, 320]},
+        {"key": "pullback_1", "label": "PULLBACK", "direction": "BUY", "bbox": [240, 220, 410, 300]},
+    ]
+    snapshot["progression"] = [
+        {"stage": "impulse", "direction": "BUY"},
+        {"stage": "pullback", "direction": "BUY"},
+    ]
+
+    context = build_sequence_context_v3(snapshot)
+    readiness = sequence_context_readiness_report(context)
+
+    assert context.sequence_status == "COMPLETE"
+    assert context.sequence_confidence >= 0.75
     assert readiness["ready"] is True
 
 
