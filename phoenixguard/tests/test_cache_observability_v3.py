@@ -404,6 +404,43 @@ def test_dashboard_asset_route_serves_floating_window_stylesheet() -> None:
     assert traversal.status_code == 404
 
 
+def test_overlay_editor_settings_hard_save_and_dashboard_embed(monkeypatch: Any, tmp_path: Path) -> None:
+    settings_path = tmp_path / "floating_windows" / "overlay_editor_settings.json"
+    monkeypatch.setattr(mobile_app, "_WINDOW_TRACKER_FLOATING_WINDOWS_DIR", settings_path.parent)
+    monkeypatch.setattr(mobile_app, "_WINDOW_TRACKER_OVERLAY_EDITOR_SETTINGS_PATH", settings_path)
+    client = TestClient(create_app())
+
+    save = client.post(
+        "/v1/mobile/window-tracker/floating-windows/overlay-editor/settings",
+        json={
+            "schemaVersion": 2,
+            "opacityScale": 0.72,
+            "lineScale": 1.34,
+            "labelMaxWidth": 126,
+            "layers": {"trendlines": False},
+            "colors": {"demand": "#123abc", "supply": "#not-real"},
+        },
+    )
+    read_back = client.get("/v1/mobile/window-tracker/floating-windows/overlay-editor/settings")
+    dashboard = client.get("/dashboard/live/pocket-live-8788")
+
+    assert save.status_code == 200
+    assert read_back.status_code == 200
+    assert dashboard.status_code == 200
+    assert settings_path.is_file()
+    settings = read_back.json()
+    assert settings["profileSaved"] is True
+    assert settings["opacityScale"] == 0.72
+    assert settings["lineScale"] == 1.34
+    assert settings["labelMaxWidth"] == 126
+    assert settings["layers"] == {}
+    assert settings["colors"]["demand"] == "#123abc"
+    assert settings["colors"]["supply"] == "#f8ca5c"
+    assert '"opacityScale": 0.72' in dashboard.text
+    assert '"demand": "#123abc"' in dashboard.text
+    assert "id=\"overlay-editor-open\" type=\"button\" hidden" in dashboard.text
+
+
 def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypatch: Any, tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)

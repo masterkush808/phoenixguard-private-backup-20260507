@@ -259,10 +259,19 @@ def test_tracker_dashboard_exposes_floating_overlay_editor() -> None:
 
     assert "overlay-editor" in dashboard
     assert "overlay-editor-open" in dashboard
+    assert "id=\"overlay-editor-open\" type=\"button\" hidden" in dashboard
+    assert "id=\"overlay-editor\" role=\"dialog\" aria-label=\"Overlay editor\" hidden" in dashboard
     assert "/v1/mobile/window-tracker/assets/floating-windows/overlay_editor.css" in dashboard
+    assert "const OVERLAY_EDITOR_HARDSAVED_SETTINGS = __OVERLAY_EDITOR_SETTINGS_JSON__;" in dashboard
+    assert "OVERLAY_EDITOR_SAVE_ENDPOINT" in dashboard
+    assert "OVERLAY_EDITOR_SCHEMA_VERSION = 2" in dashboard
+    assert "OVERLAY_EDITOR_ENABLED" in dashboard
+    assert "OVERLAY_EDITOR_QUERY.get(\"overlay_editor\")" in dashboard
+    assert "OVERLAY_EDITOR_MIGRATE_LOCAL" in dashboard
     assert "OVERLAY_EDITOR_STORAGE_KEY" in dashboard
     assert "OVERLAY_LAYER_KEYS" in dashboard
-    assert "phoenixguard.overlay.editor.v1" in dashboard
+    assert "phoenixguard.overlay.editor.v2" in dashboard
+    assert "phoenixguard.overlay.editor.v1" not in dashboard
     assert "data-overlay-setting=\"opacityScale\"" in dashboard
     assert "data-overlay-setting=\"borderScale\"" in dashboard
     assert "data-overlay-setting=\"lineScale\"" in dashboard
@@ -271,12 +280,15 @@ def test_tracker_dashboard_exposes_floating_overlay_editor() -> None:
     assert "data-overlay-color=\"demand\"" in dashboard
     assert "data-overlay-layer-control=\"trendlines\"" in dashboard
     assert "function applyOverlayEditorSettings" in dashboard
-    assert "function applySavedOverlayLayerState" in dashboard
-    assert "function saveOverlayEditorSettings" in dashboard
+    assert "function hardSaveOverlayEditorSettings" in dashboard
+    assert "function migrateLocalOverlayEditorSettingsToBackend" in dashboard
+    assert "if (!OVERLAY_EDITOR_ENABLED)" in dashboard
+    assert "async function saveOverlayEditorSettings" in dashboard
     assert "function beginOverlayEditorDrag" in dashboard
     assert "panelLocked" in dashboard
-    assert "state.overlayEditor.layers = Object.fromEntries" in dashboard
-    assert "applySavedOverlayLayerState();" in dashboard
+    assert "persistedSettings.schemaVersion = OVERLAY_EDITOR_SCHEMA_VERSION" in dashboard
+    assert "state.overlayEditor.layers = Object.fromEntries" not in dashboard
+    assert "applySavedOverlayLayerState" not in dashboard
     assert "renderHotspots();" in dashboard
 
 

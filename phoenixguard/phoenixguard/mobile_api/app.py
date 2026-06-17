@@ -80,6 +80,10 @@ _WINDOW_TRACKER_BRAND_ASSET_DIR = (
 )
 _WINDOW_TRACKER_JS_ASSET_DIR = Path(__file__).resolve().parents[2] / "assets" / "js"
 _WINDOW_TRACKER_FLOATING_WINDOWS_DIR = Path(__file__).resolve().parent / "static" / "floating_windows"
+_WINDOW_TRACKER_OVERLAY_EDITOR_SETTINGS_PATH = (
+    _WINDOW_TRACKER_FLOATING_WINDOWS_DIR / "overlay_editor_settings.json"
+)
+_OVERLAY_EDITOR_SETTINGS_SCHEMA_VERSION = 2
 _WINDOW_TRACKER_BRAND_ASSETS = frozenset(
     {
         "landing-transition-lifestyle-suite.png",
@@ -1167,10 +1171,82 @@ class VoiceCommandRequest(BaseModel):
     tracker_session_id: str | None = None
 
 
+def _bounded_overlay_editor_number(raw: object, fallback: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return fallback
+    if not (minimum <= value <= maximum):
+        return max(minimum, min(maximum, value))
+    return value
+
+
+def _overlay_editor_hex(raw: object, fallback: str) -> str:
+    text = str(raw or "").strip().lower()
+    return text if re.fullmatch(r"#[0-9a-f]{6}", text) else fallback
+
+
+def _sanitize_overlay_editor_settings(raw: Mapping[str, object] | None, *, profile_saved: bool = False) -> dict[str, object]:
+    payload = raw if isinstance(raw, Mapping) else {}
+    raw_colors = payload.get("colors")
+    colors = cast(Mapping[str, object], raw_colors) if isinstance(raw_colors, Mapping) else {}
+    return {
+        "schemaVersion": _OVERLAY_EDITOR_SETTINGS_SCHEMA_VERSION,
+        "profileSaved": bool(profile_saved or payload.get("profileSaved") is True),
+        "panelOpen": bool(payload.get("panelOpen") is True),
+        "opacityScale": _bounded_overlay_editor_number(payload.get("opacityScale"), 1.0, 0.20, 1.25),
+        "borderScale": _bounded_overlay_editor_number(payload.get("borderScale"), 1.0, 0.45, 1.80),
+        "lineScale": _bounded_overlay_editor_number(payload.get("lineScale"), 1.0, 0.40, 2.20),
+        "fillScale": _bounded_overlay_editor_number(payload.get("fillScale"), 1.0, 0.0, 2.20),
+        "labelScale": _bounded_overlay_editor_number(payload.get("labelScale"), 1.0, 0.60, 1.85),
+        "labelOpacity": _bounded_overlay_editor_number(payload.get("labelOpacity"), 1.0, 0.10, 1.20),
+        "labelMaxWidth": _bounded_overlay_editor_number(payload.get("labelMaxWidth"), 86.0, 48.0, 180.0),
+        "hideLabels": bool(payload.get("hideLabels") is True),
+        "labelsOnHover": bool(payload.get("labelsOnHover") is True),
+        "panelX": None
+        if payload.get("panelX") is None
+        else _bounded_overlay_editor_number(payload.get("panelX"), 18.0, 0.0, 10000.0),
+        "panelY": None
+        if payload.get("panelY") is None
+        else _bounded_overlay_editor_number(payload.get("panelY"), 78.0, 0.0, 10000.0),
+        "panelLocked": bool(payload.get("panelLocked") is True),
+        "layers": {},
+        "colors": {
+            "demand": _overlay_editor_hex(colors.get("demand"), "#4ed2ff"),
+            "supply": _overlay_editor_hex(colors.get("supply"), "#f8ca5c"),
+            "trigger": _overlay_editor_hex(colors.get("trigger"), "#b99aff"),
+            "target": _overlay_editor_hex(colors.get("target"), "#4db9ff"),
+            "invalid": _overlay_editor_hex(colors.get("invalid"), "#f5d778"),
+            "council": _overlay_editor_hex(colors.get("council"), "#ffffff"),
+        },
+    }
+
+
+def _read_overlay_editor_settings() -> dict[str, object]:
+    try:
+        raw = json.loads(_WINDOW_TRACKER_OVERLAY_EDITOR_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _sanitize_overlay_editor_settings({}, profile_saved=False)
+    if not isinstance(raw, Mapping):
+        return _sanitize_overlay_editor_settings({}, profile_saved=False)
+    return _sanitize_overlay_editor_settings(cast(Mapping[str, object], raw), profile_saved=True)
+
+
+def _write_overlay_editor_settings(raw: Mapping[str, object]) -> dict[str, object]:
+    settings = _sanitize_overlay_editor_settings(raw, profile_saved=True)
+    settings["savedAtEpoch"] = time.time()
+    _WINDOW_TRACKER_FLOATING_WINDOWS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_path = _WINDOW_TRACKER_OVERLAY_EDITOR_SETTINGS_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(settings, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(_WINDOW_TRACKER_OVERLAY_EDITOR_SETTINGS_PATH)
+    return settings
+
+
 def _render_window_tracker_dashboard(session_id: str) -> str:
     template = _WINDOW_TRACKER_DASHBOARD_TEMPLATE.read_text(encoding="utf-8")
     return (
         template.replace("__SESSION_ID_JSON__", json.dumps(str(session_id)))
+        .replace("__OVERLAY_EDITOR_SETTINGS_JSON__", json.dumps(_read_overlay_editor_settings()))
         .replace("__SESSION_LABEL__", str(session_id))
     )
 
@@ -3703,6 +3779,17 @@ def create_app(
         if not demo_path.is_file():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard asset not found.")
         return HTMLResponse(demo_path.read_text(encoding="utf-8"))
+
+    @app.get("/v1/mobile/window-tracker/floating-windows/overlay-editor/settings")
+    def get_overlay_editor_settings() -> dict[str, object]:
+        return _read_overlay_editor_settings()
+
+    @app.post("/v1/mobile/window-tracker/floating-windows/overlay-editor/settings")
+    def save_overlay_editor_settings(payload: dict[str, object] = Body(...)) -> dict[str, object]:
+        if not isinstance(payload, Mapping):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Overlay editor settings must be an object.")
+        settings = _write_overlay_editor_settings(cast(Mapping[str, object], payload))
+        return {"status": "saved", "settings": settings}
 
     @app.get("/v1/mobile/window-tracker/dashboard", response_class=HTMLResponse)
     def window_tracker_dashboard_default() -> HTMLResponse:

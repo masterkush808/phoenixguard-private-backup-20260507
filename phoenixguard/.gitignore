@@ -65,3 +65,8 @@ data/kdf_salt.bin
 data/voice_profiles/
 data/personalization_profiles.json
 data/voice_runtime_state.json
+
+# Local reference/library material and generated operator exports
+book knowledge/
+docs/phoenixguard_v3_operator_view_guide.pdf
+phoenixguard/mobile_api/static/floating_windows/overlay_editor_settings.json

@@ -2551,7 +2551,7 @@
                 <button class="layer-toggle active" id="layer-historical-replay" type="button" data-layer-toggle="historical_replay">Replay</button>
                 <button class="layer-toggle active" id="layer-broker-controls" type="button" data-layer-toggle="broker_controls">Broker</button>
                 <button class="layer-toggle" id="layer-diagnostics" type="button" data-layer-toggle="diagnostics">Diagnostics</button>
-                <button class="layer-toggle active" id="overlay-editor-open" type="button">Editor</button>
+                <button class="layer-toggle active" id="overlay-editor-open" type="button" hidden>Editor</button>
               </div>
             </div>
           </div>
@@ -2797,7 +2797,7 @@
   </div>
 
   <button class="overlay-editor-fab" id="overlay-editor-fab" type="button" hidden>Overlay Editor</button>
-  <section class="overlay-editor open" id="overlay-editor" role="dialog" aria-label="Overlay editor">
+  <section class="overlay-editor open" id="overlay-editor" role="dialog" aria-label="Overlay editor" hidden>
     <div class="overlay-editor-head">
       <div class="overlay-editor-title">
         <strong>Overlay Editor</strong>
@@ -2899,6 +2899,8 @@
 
   <script>
     const SESSION_ID = __SESSION_ID_JSON__;
+    const OVERLAY_EDITOR_HARDSAVED_SETTINGS = __OVERLAY_EDITOR_SETTINGS_JSON__;
+    const OVERLAY_EDITOR_SAVE_ENDPOINT = "/v1/mobile/window-tracker/floating-windows/overlay-editor/settings";
     const OVERLAY_LAYER_KEYS = Object.freeze([
       "chart_bounds",
       "recent_candles",
@@ -2915,7 +2917,17 @@
       "broker_controls",
       "diagnostics",
     ]);
-    const OVERLAY_EDITOR_STORAGE_KEY = "phoenixguard.overlay.editor.v1";
+    const OVERLAY_EDITOR_SCHEMA_VERSION = 2;
+    const OVERLAY_EDITOR_STORAGE_KEY = "phoenixguard.overlay.editor.v2";
+    const OVERLAY_EDITOR_QUERY = new URLSearchParams(window.location.search);
+    const OVERLAY_EDITOR_ENABLED = (() => {
+      const value = clean(OVERLAY_EDITOR_QUERY.get("overlay_editor") || OVERLAY_EDITOR_QUERY.get("editor") || "", "").toLowerCase();
+      return ["1", "true", "yes", "on"].includes(value);
+    })();
+    const OVERLAY_EDITOR_MIGRATE_LOCAL = (() => {
+      const value = clean(OVERLAY_EDITOR_QUERY.get("migrate_overlay_settings") || "", "").toLowerCase();
+      return ["1", "true", "yes", "on"].includes(value);
+    })();
     const OVERLAY_EDITOR_DEFAULTS = Object.freeze({
       panelOpen: true,
       opacityScale: 1,
@@ -2955,16 +2967,33 @@
     }
 
     function loadOverlayEditorSettings() {
-      let saved = {};
+      let localSaved = {};
       try {
-        saved = JSON.parse(localStorage.getItem(OVERLAY_EDITOR_STORAGE_KEY) || "{}") || {};
+        localSaved = JSON.parse(localStorage.getItem(OVERLAY_EDITOR_STORAGE_KEY) || "{}") || {};
       } catch (_err) {
-        saved = {};
+        localSaved = {};
       }
+      if (localSaved.schemaVersion !== OVERLAY_EDITOR_SCHEMA_VERSION) {
+        localSaved = {};
+      }
+      const hardSaved = OVERLAY_EDITOR_HARDSAVED_SETTINGS && typeof OVERLAY_EDITOR_HARDSAVED_SETTINGS === "object"
+        && OVERLAY_EDITOR_HARDSAVED_SETTINGS.schemaVersion === OVERLAY_EDITOR_SCHEMA_VERSION
+        ? OVERLAY_EDITOR_HARDSAVED_SETTINGS
+        : {};
+      const hardSavedReady = hardSaved.profileSaved === true;
+      const localSavedReady = localSaved.schemaVersion === OVERLAY_EDITOR_SCHEMA_VERSION;
+      const saved = OVERLAY_EDITOR_MIGRATE_LOCAL && localSavedReady
+        ? localSaved
+        : hardSavedReady
+          ? hardSaved
+          : localSavedReady
+            ? localSaved
+            : {};
       const savedColors = saved && typeof saved.colors === "object" ? saved.colors : {};
-      const savedLayers = saved && typeof saved.layers === "object" ? saved.layers : {};
       return {
-        panelOpen: saved.panelOpen !== false,
+        schemaVersion: OVERLAY_EDITOR_SCHEMA_VERSION,
+        profileSaved: saved.profileSaved === true || (OVERLAY_EDITOR_MIGRATE_LOCAL && localSavedReady),
+        panelOpen: OVERLAY_EDITOR_ENABLED && saved.panelOpen !== false,
         opacityScale: boundedSetting(saved.opacityScale, OVERLAY_EDITOR_DEFAULTS.opacityScale, 0.20, 1.25),
         borderScale: boundedSetting(saved.borderScale, OVERLAY_EDITOR_DEFAULTS.borderScale, 0.45, 1.80),
         lineScale: boundedSetting(saved.lineScale, OVERLAY_EDITOR_DEFAULTS.lineScale, 0.40, 2.20),
@@ -2977,11 +3006,7 @@
         panelX: saved.panelX == null ? null : boundedSetting(saved.panelX, 18, 0, 10000),
         panelY: saved.panelY == null ? null : boundedSetting(saved.panelY, 78, 0, 10000),
         panelLocked: saved.panelLocked === true,
-        layers: Object.fromEntries(
-          OVERLAY_LAYER_KEYS
-            .filter((key) => typeof savedLayers[key] === "boolean")
-            .map((key) => [key, Boolean(savedLayers[key])])
-        ),
+        layers: {},
         colors: {
           demand: normalizeHexColor(savedColors.demand, OVERLAY_EDITOR_DEFAULTS.colors.demand),
           supply: normalizeHexColor(savedColors.supply, OVERLAY_EDITOR_DEFAULTS.colors.supply),
@@ -4282,21 +4307,6 @@
       });
     }
 
-    function applySavedOverlayLayerState() {
-      const savedLayers = state.overlayEditor && typeof state.overlayEditor.layers === "object"
-        ? state.overlayEditor.layers
-        : {};
-      if (!savedLayers || Object.keys(savedLayers).length === 0) {
-        return;
-      }
-      OVERLAY_LAYER_KEYS.forEach((key) => {
-        if (typeof savedLayers[key] === "boolean") {
-          state.layers[key] = savedLayers[key];
-        }
-      });
-      updateLayerControls();
-    }
-
     function syncOverlayEditorControls() {
       const settings = state.overlayEditor || loadOverlayEditorSettings();
       document.querySelectorAll("[data-overlay-setting]").forEach((input) => {
@@ -4424,6 +4434,7 @@
     function applyOverlayEditorSettings(options = {}) {
       const settings = state.overlayEditor || loadOverlayEditorSettings();
       const root = document.documentElement;
+      const editorEnabled = Boolean(OVERLAY_EDITOR_ENABLED);
       root.style.setProperty("--overlay-demand-rgb", hexToRgbText(settings.colors.demand));
       root.style.setProperty("--overlay-supply-rgb", hexToRgbText(settings.colors.supply));
       root.style.setProperty("--overlay-trigger-rgb", hexToRgbText(settings.colors.trigger));
@@ -4435,16 +4446,18 @@
       root.style.setProperty("--overlay-label-max", `${Math.round(settings.labelMaxWidth)}px`);
       document.body.classList.toggle("overlay-labels-hover", Boolean(settings.labelsOnHover));
       if (els.overlayEditor) {
-        els.overlayEditor.classList.toggle("open", Boolean(settings.panelOpen));
+        els.overlayEditor.hidden = !editorEnabled;
+        els.overlayEditor.classList.toggle("open", editorEnabled && Boolean(settings.panelOpen));
         els.overlayEditor.classList.toggle("locked", Boolean(settings.panelLocked));
         applyOverlayEditorPosition();
       }
       if (els.overlayEditorFab) {
-        els.overlayEditorFab.hidden = Boolean(settings.panelOpen);
+        els.overlayEditorFab.hidden = !editorEnabled || Boolean(settings.panelOpen);
       }
       if (els.overlayEditorOpen) {
-        els.overlayEditorOpen.classList.toggle("active", Boolean(settings.panelOpen));
-        els.overlayEditorOpen.setAttribute("aria-pressed", settings.panelOpen ? "true" : "false");
+        els.overlayEditorOpen.hidden = !editorEnabled;
+        els.overlayEditorOpen.classList.toggle("active", editorEnabled && Boolean(settings.panelOpen));
+        els.overlayEditorOpen.setAttribute("aria-pressed", editorEnabled && settings.panelOpen ? "true" : "false");
       }
       if (els.overlayEditorLock) {
         els.overlayEditorLock.classList.toggle("locked", Boolean(settings.panelLocked));
@@ -4481,11 +4494,31 @@
       applyOverlayEditorSettings({render: true});
     }
 
-    function saveOverlayEditorSettings() {
+    async function hardSaveOverlayEditorSettings(persistedSettings) {
+      const response = await fetch(OVERLAY_EDITOR_SAVE_ENDPOINT, {
+        method: "POST",
+        headers: {"Content-Type": "application/json", "Accept": "application/json"},
+        cache: "no-store",
+        body: JSON.stringify(persistedSettings),
+      });
+      if (!response.ok) {
+        throw new Error(`Overlay editor save failed: ${response.status}`);
+      }
+      const payload = await response.json();
+      return payload && payload.settings && typeof payload.settings === "object"
+        ? payload.settings
+        : persistedSettings;
+    }
+
+    async function saveOverlayEditorSettings() {
       try {
-        state.overlayEditor.layers = Object.fromEntries(OVERLAY_LAYER_KEYS.map((key) => [key, Boolean(state.layers[key])]));
         state.overlayEditor.panelOpen = false;
-        localStorage.setItem(OVERLAY_EDITOR_STORAGE_KEY, JSON.stringify(state.overlayEditor));
+        const {layers: _liveLayers, ...persistedSettings} = state.overlayEditor;
+        persistedSettings.schemaVersion = OVERLAY_EDITOR_SCHEMA_VERSION;
+        persistedSettings.profileSaved = true;
+        const hardSavedSettings = await hardSaveOverlayEditorSettings(persistedSettings);
+        localStorage.setItem(OVERLAY_EDITOR_STORAGE_KEY, JSON.stringify(persistedSettings));
+        state.overlayEditor = {...hardSavedSettings, layers: {}};
         setOverlayEditorSaved(true);
         applyOverlayEditorSettings({render: false});
       } catch (_err) {
@@ -4495,15 +4528,44 @@
       }
     }
 
+    async function migrateLocalOverlayEditorSettingsToBackend() {
+      if (!OVERLAY_EDITOR_MIGRATE_LOCAL || state.overlayEditor?.profileSaved !== true) {
+        return;
+      }
+      try {
+        const {layers: _liveLayers, ...persistedSettings} = state.overlayEditor;
+        persistedSettings.schemaVersion = OVERLAY_EDITOR_SCHEMA_VERSION;
+        persistedSettings.profileSaved = true;
+        persistedSettings.panelOpen = false;
+        const hardSavedSettings = await hardSaveOverlayEditorSettings(persistedSettings);
+        state.overlayEditor = {...hardSavedSettings, layers: {}};
+        localStorage.setItem(OVERLAY_EDITOR_STORAGE_KEY, JSON.stringify(persistedSettings));
+        setOverlayEditorSaved(true);
+        applyOverlayEditorSettings({render: false});
+      } catch (_err) {
+        if (els.overlayEditorSaved) {
+          els.overlayEditorSaved.textContent = "Migration save failed";
+        }
+      }
+    }
+
     function resetOverlayEditorSettings() {
-      state.overlayEditor = loadOverlayEditorSettings();
+      try {
+        localStorage.removeItem(OVERLAY_EDITOR_STORAGE_KEY);
+      } catch (_err) {
+      }
       state.overlayEditor = JSON.parse(JSON.stringify(OVERLAY_EDITOR_DEFAULTS));
+      state.overlayEditor.schemaVersion = OVERLAY_EDITOR_SCHEMA_VERSION;
       setOverlayEditorSaved(false);
       applyOverlayEditorSettings({render: true});
     }
 
     function initializeOverlayEditor() {
       applyOverlayEditorSettings({render: false});
+      migrateLocalOverlayEditorSettingsToBackend();
+      if (!OVERLAY_EDITOR_ENABLED) {
+        return;
+      }
       document.querySelectorAll("[data-overlay-setting]").forEach((input) => {
         input.addEventListener("input", () => {
           if (!(input instanceof HTMLInputElement)) {
@@ -4537,10 +4599,6 @@
             return;
           }
           state.layers[key] = input.checked;
-          state.overlayEditor.layers = {
-            ...(state.overlayEditor.layers || {}),
-            [key]: input.checked,
-          };
           setOverlayEditorSaved(false);
           state.surface.lastStaticLayerHash = "";
           updateLayerControls();
@@ -7008,24 +7066,25 @@
         INSPECTOR_ONLY_LABEL: 0.40,
       }[displayState] ?? 0.72;
       const borderFallback = {
-        FULL: 2.75,
-        FOCUS_EXPANDED: 2.95,
-        COMPACT: 2.35,
-        GROUPED: 2.15,
-        NESTED: 1.95,
-        GHOSTED: 1.35,
-        ICON_ONLY: 1.20,
-        INSPECTOR_ONLY_LABEL: 1.20,
-      }[displayState] ?? 1.20;
+        FULL: 3.10,
+        FOCUS_EXPANDED: 3.35,
+        COMPACT: 2.75,
+        GROUPED: 2.55,
+        NESTED: 2.35,
+        GHOSTED: 1.65,
+        ICON_ONLY: 1.45,
+        INSPECTOR_ONLY_LABEL: 1.45,
+      }[displayState] ?? 1.35;
       const requestedBorder = Number(style.border_width);
       const resolvedBorder = Number.isFinite(requestedBorder)
-        ? Math.max(1.05, Math.min(requestedBorder, borderFallback + 0.25))
+        ? Math.max(requestedBorder, borderFallback)
         : borderFallback;
       const baseOpacity = Math.max(0.18, Math.min(1, Number(style.opacity ?? opacityFallback) || opacityFallback));
       const baseFill = Math.max(0, Math.min(0.16, Number(style.fill_opacity ?? (0.03 + weight * 0.04)) || 0.04));
+      const baseBorderWidth = Math.max(1.30, Math.min(4.8, resolvedBorder));
       return {
         opacity: Math.max(0.04, Math.min(1, baseOpacity * Number(editor.opacityScale || 1))),
-        borderWidth: Math.max(0.35, Math.min(6.0, resolvedBorder * Number(editor.borderScale || 1))),
+        borderWidth: Math.max(0.35, Math.min(8.0, baseBorderWidth * Number(editor.borderScale || 1))),
         fillOpacity: Math.max(0, Math.min(0.34, baseFill * Number(editor.fillScale || 1))),
       };
     }
@@ -7054,11 +7113,11 @@
       const editor = state.overlayEditor || OVERLAY_EDITOR_DEFAULTS;
       let width = 0;
       if (displayState === "FULL" || displayState === "FOCUS_EXPANDED") {
-        width = Math.max(2.80, Math.min(3.95, 2.65 + weight * 0.75));
+        width = Math.max(3.45, Math.min(4.9, 3.15 + weight));
       } else if (displayState === "GHOSTED" || displayState === "INSPECTOR_ONLY_LABEL") {
-        width = 1.95;
+        width = 2.40;
       } else {
-        width = Math.max(2.35, Math.min(3.55, 2.15 + weight * 0.65));
+        width = Math.max(2.90, Math.min(4.2, 2.55 + weight));
       }
       return Math.max(0.55, Math.min(8.0, width * Number(editor.lineScale || 1)));
     }
@@ -8336,7 +8395,6 @@
     initializeOverlayEditor();
     setMode("overlay");
     applyOverlayPreset("clean_live");
-    applySavedOverlayLayerState();
     applyRoute(routeFromLocation(), false);
     updateLayerControls();
     refreshSession();
