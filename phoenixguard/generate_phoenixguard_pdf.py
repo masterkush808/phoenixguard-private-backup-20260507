@@ -236,7 +236,7 @@ def _build_pdf(markdown_text: str) -> None:
     )
     story.append(Spacer(1, 0.18 * inch))
     cover_rows = [
-        ["Generated", "2026-06-11"],
+        ["Generated", "2026-06-21"],
         ["Canonical runtime", "PhoenixGuard V3 / FINAL_LIVE"],
         ["Production launcher", "launch_phoenixguard_live_ready.ps1"],
         ["Primary authority", "PG_EXECUTION_PACKET_V3"],

@@ -1,6 +1,6 @@
 # PhoenixGuard Complete System Blueprint
 
-Generated: 2026-06-11
+Generated: 2026-06-21
 
 Runtime profile: PhoenixGuard V3 / FINAL_LIVE
 
@@ -8,7 +8,7 @@ Primary launcher: `launch_phoenixguard_live_ready.ps1`
 
 Primary execution authority: `PG_EXECUTION_PACKET_V3`
 
-Document source: repository code, V3 language constitution, runtime maps, API routes, tests, launch scripts, and architecture documents present in this workspace.
+Architecture baseline: final V3 hardening checkpoint `final-v3-architecture-20260621`, README developer runbook commit, runtime code, V3 language constitution, API routes, tests, burn tools, launch scripts, and architecture documents present in this workspace.
 
 ---
 
@@ -19,6 +19,45 @@ PhoenixGuard is a local-first chart intelligence and execution-control workstati
 The system is built around one strict doctrine: observation is not execution. Raw BUY or SELL signals, legacy `action` fields, old skill gate outputs, memory confidence, dashboard displays, and study packets are all diagnostic or advisory. The only valid path into live broker action is a fresh `PG_EXECUTION_PACKET_V3` consumed by `shooter.py` and executed through `ShooterActionSequencerV2` using calibrated screen targets.
 
 The architecture is intentionally layered. The live tracker produces state. Vision modules and chart transforms produce structure. Memory and simulation modules provide historical and synthetic context. Decision modules score market reality, price location, regimes, scenarios, timing, and model-council maturity. Execution modules validate the packet contract and preserve the broker amount. Runtime modules provide cache integrity, observability, model warm-state checks, instrument locks, and certification. The FastAPI mobile API exposes dashboards, state, packets, health, and control endpoints.
+
+## 2026-06-21 Final V3 Hardening Upgrade
+
+This update records the architecture after the confirmed final V3 hardening burn and Git checkpoint. The important change is not a new execution shortcut. The important change is that the existing V3 authority chain was tightened around freshness, entry evidence, model contribution control, storage growth, and developer operation.
+
+The upgraded architecture keeps the same doctrine:
+
+```text
+Observation != Study != Execution.
+Only a fresh validated PG_EXECUTION_PACKET_V3 can reach ShooterActionSequencerV2.
+```
+
+The final V3 upgrades wired into the repository are:
+
+- Developer runbook first: `README.md` now starts with the exact safe restart, cleanup, launch, dashboard, runtime-read, and tracker start/stop commands.
+- Canonical launcher retained: `launch_phoenixguard_live_ready.ps1` remains the safe live entrypoint; `-DisableShooter` is the read-only developer mode.
+- Freshness bridge added: tracker writes a compact `display_state.json` beside `session.json` so dashboard/API reads can advance when the study worker is busy.
+- Direct read cache tightened: live-state cache signatures include display artifact fields, frame ids, surface signatures, and overlay/model frame ids so stale dashboard data is invalidated when the displayed frame advances.
+- Hot artifact freshness fixed: live chart, overlay, and full-overlay artifacts are overwritten as fresh latest artifacts under the hot path instead of reusing old overlay frames.
+- Entry allowance evidence added: every allowed entry package can produce broker and overlay screenshots marked on the latest candle now point. Blocked `ENTER_NOW` observations can also be captured separately.
+- Entry burn forensic tool added: `tools/run_entry_allowance_burn.py` polls live/council/performance endpoints in parallel, captures entry evidence, scores future outcomes, produces manifests, galleries, progression sheets, and final reports.
+- Model-strength control layer added: `phoenixguard/mobile_api/model_strength.py`, the dashboard strength control, and `/model-strength` endpoints convert saved settings into execution controls.
+- AI contribution weights made explicit: Model Council now accepts `ai_contribution_strengths`, `model_strength_profile`, and execution lane thresholds and records them in council output and packets.
+- Two-candle execution made controllable: `two_candle_execution_allowed` can keep high-frequency/two-candle reads study-only unless deliberately enabled.
+- Storage growth bounded: overlay geometry dumps are off by default and pruned when enabled; tracker event logs are bounded; decision artifacts are compacted unless full artifact persistence is explicitly enabled.
+- Heavy Qwen sidecar removed from the final live dependency path: the default voice brain bundle is `phoenixguard-voice-brain-local`, avoiding a CPU-heavy Qwen process in the live tracker stack.
+- Commercial API boundary added: `phoenixguard/business/*` and its FastAPI route registration support licensing/onboarding mock flows, but they are outside live broker execution authority.
+
+The upgraded architecture therefore has two complementary loops:
+
+```text
+Live authority loop:
+Broker window -> tracker -> Model Council -> STUDY_PACKET or PG_EXECUTION_PACKET_V3 -> shooter validation -> calibrated action
+
+Hardening evidence loop:
+Live/council/performance endpoints -> entry evidence screenshots -> progression gallery -> outcome scoring -> forensic report
+```
+
+The second loop measures whether the first loop is fresh, alive, and behaving correctly. It never creates execution authority.
 
 ## What The System Does
 
@@ -84,9 +123,12 @@ Everything outside this chain is support, diagnostics, legacy compatibility, tes
 | Execution contract | `phoenixguard/execution/packet_v3.py`, `phoenixguard/execution/v3_language.py`, `phoenixguard/runtime/cache_v3.py` | Defines canonical schema vocabulary, packet construction, validation, cache integrity, TTL, side agreement, sequence context, and runtime integrity. |
 | Shooter | `shooter.py`, `phoenixguard/execution/shooter_action_sequencer.py`, `phoenixguard/execution/shooter_modes.py` | Reads only V3 packets, validates shooter gates, preserves visible amount, sets expiry/time, clicks calibrated BUY/SELL targets, and records evidence. |
 | API and dashboard | `phoenixguard/mobile_api/app.py`, `phoenixguard/mobile_api/static/window_tracker_dashboard.html`, `assets/js/*` | Exposes health, live state, packet, tracker, floating-state, artifact, registry, visual, dashboard, stream, and control endpoints. |
+| Model-strength controls | `phoenixguard/mobile_api/model_strength.py`, `phoenixguard/mobile_api/static/floating_windows/model_strength_*` | Saves developer-tuned model floors, AI contribution weights, lane thresholds, timing controls, risk controls, overlay controls, and study-only execution toggles. |
+| Entry evidence and hardening burn | `tools/run_entry_allowance_burn.py`, tracker entry-evidence capture in `window_tracker.py` | Captures broker and overlay screenshots for allowed entry packages, marks the latest candle, scores outcome horizons, and produces forensic galleries/reports. |
 | Runtime and observability | `phoenixguard/runtime/*`, `phoenixguard/tracing.py`, `tools/*` | Provides model warm-state, cache validation, telemetry, atomic writes, freshness, certification, traces, and diagnostics. |
 | Simulation and training | `phoenixguard/simulation/*`, `phoenixguard/training/*`, `train_*.py`, `scripts/*` | Creates synthetic and replay scenarios, paper execution, event backtests, LoRA/adapters, clean splits, sequence manifests, and model exports. |
 | Mobile and voice | `mobile/android/*`, `phoenixguard/voice/*` | Provides Android observer UI and voice-command control layers for tracker status, capture, start/stop, interval updates, and command routing. |
+| Commercial boundary | `phoenixguard/business/*` | Provides business, license, billing, command, and onboarding API support while remaining outside packet execution authority. |
 
 ## Primary Dataflow
 
@@ -94,41 +136,97 @@ The live system has one preferred dataflow:
 
 1. The launcher starts the mobile API, tracker, optional model-council daemon, dashboard, and shooter.
 2. The tracker locks the target window and captures a frame.
-3. The tracker validates the captured surface and derives chart geometry, candle rows, overlays, zones, projections, market object registry, and timing state.
+3. The tracker validates the captured surface and derives chart geometry, candle rows, overlays, zones, projections, market object registry, display state, and timing state.
 4. Vision and tracking modules enrich the frame with object, overlay, broker-source, and chart-transform truth.
-5. Decision modules derive market reality, regime, price location, scenario consensus, smart-money context, and timing readiness.
-6. Model Council V3 evaluates the snapshot and produces a study packet or an executable packet candidate.
-7. `packet_v3.py` builds and validates `PG_EXECUTION_PACKET_V3`.
-8. The FastAPI app exposes latest study and execution packets.
-9. `shooter.py` fetches the execution packet endpoint and rejects absent, stale, malformed, non-executable, or contradictory packets.
-10. Shooter gate 1 requires a second live read. Gate 2 enforces trade discipline and cooldowns. Gate 3 confirms model council, side, timing sequence, calibration, and runtime integrity.
-11. `ShooterActionSequencerV2` activates the broker window, sets time, performs final pre-click recheck, and clicks BUY or SELL only.
-12. The runtime writes handshake, floating state, evidence, telemetry, traces, and outcome memory.
+5. Display-state and hot-artifact writes publish the freshest broker/chart/overlay references for dashboard and API readers.
+6. Decision modules derive market reality, regime, price location, scenario consensus, smart-money context, model-strength controls, and timing readiness.
+7. Model Council V3 evaluates the snapshot and produces a study packet or an executable packet candidate.
+8. `packet_v3.py` builds and validates `PG_EXECUTION_PACKET_V3`.
+9. The FastAPI app exposes latest study and execution packets.
+10. If an allowed entry package appears, the tracker can capture entry evidence on both the broker window and overlay window at the latest candle.
+11. `shooter.py` fetches the execution packet endpoint and rejects absent, stale, malformed, non-executable, or contradictory packets.
+12. Shooter gate 1 requires a second live read. Gate 2 enforces trade discipline and cooldowns. Gate 3 confirms model council, side, timing sequence, calibration, and runtime integrity.
+13. `ShooterActionSequencerV2` activates the broker window, sets time, performs final pre-click recheck, and clicks BUY or SELL only.
+14. The runtime writes handshake, floating state, evidence, telemetry, traces, outcome memory, and bounded event logs.
 
 ## Production Launch Setup
 
-The project treats `launch_phoenixguard_live_ready.ps1` as the production launcher. It is referenced by `phoenixguard/V3_CANONICAL_MANIFEST.json` as the FINAL_LIVE entrypoint. The README documents the clean launch pattern:
+The project treats `launch_phoenixguard_live_ready.ps1` as the production launcher. It is referenced by `phoenixguard/V3_CANONICAL_MANIFEST.json` as the FINAL_LIVE entrypoint. The README now begins with the developer runbook because safe launch and safe shutdown are part of the architecture.
+
+Safe developer startup begins at the repository root:
 
 ```powershell
-Set-Location "c:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard"
+Set-Location "C:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard"
+Set-ExecutionPolicy -Scope Process Bypass -Force
 .\.venv\Scripts\Activate.ps1
-.\launch_phoenixguard_live_ready.ps1
 ```
 
-Read-only launch is available with:
+The safe restart sequence first requests tracker stop/emergency-stop through the API if it is alive, then kills PhoenixGuard processes launched from the repo or known runtime entrypoints, then backs up and clears runtime/cache state:
 
 ```powershell
-.\launch_phoenixguard_live_ready.ps1 -DisableShooter
-```
+$base = "http://127.0.0.1:8793"
+$session = "pocket-live-8788"
+$root = (Get-Location).Path
 
-Before relaunching a strict runtime, the project expects V3 cleanup and integrity checks:
+try { Invoke-RestMethod -Method Post "$base/v1/mobile/window-tracker/sessions/$session/emergency-stop" -TimeoutSec 5 } catch {}
+try { Invoke-RestMethod -Method Post "$base/v1/mobile/window-tracker/sessions/$session/stop" -TimeoutSec 5 } catch {}
 
-```powershell
+Get-CimInstance Win32_Process |
+    Where-Object {
+        $_.ProcessId -ne $PID -and
+        $_.CommandLine -and
+        (
+            $_.CommandLine -like "*$root*" -or
+            $_.CommandLine -match "shooter\.py|start_phoenixguard|launch_phoenixguard|window_tracker|uvicorn.*phoenixguard"
+        )
+    } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+Start-Sleep -Seconds 3
 python .\tools\clean_v3_runtime_state.py --apply
-python .\tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
-python .\tools\trace_sequence_context_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
+```
+
+The final live dashboard stack is launched with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser
+```
+
+The dashboard URL is:
+
+```text
+http://127.0.0.1:8793/dashboard/live/pocket-live-8788
+```
+
+Read-only developer launch is available with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser -DisableShooter
+```
+
+After launch, the developer read commands are:
+
+```powershell
+$base = "http://127.0.0.1:8793"
+$session = "pocket-live-8788"
+
+Invoke-RestMethod "$base/v1/mobile/live/state/v3/$session?mode=CLEAN_LIVE" | ConvertTo-Json -Depth 12
+Invoke-RestMethod "$base/v1/mobile/performance/trace/v3/$session" | ConvertTo-Json -Depth 12
+Invoke-RestMethod "$base/v1/mobile/runtime/trace/v3?session_id=$session" | ConvertTo-Json -Depth 16
+
+python .\tools\runtime_trace_v3.py --base-url $base --session $session --timeout 20
+python .\tools\trace_sequence_context_v3.py --base-url $base --session $session --timeout 20
 python .\tools\verify_v3_integrity.py
 ```
+
+The API-only fallback for backend debugging is:
+
+```powershell
+$env:PYTHONPATH = (Get-Location).Path
+python -m uvicorn phoenixguard.mobile_api.app:create_app --factory --host 127.0.0.1 --port 8793 --log-level info
+```
+
+That fallback is not the full production launch path and should not be treated as live-ready by itself.
 
 ## Repository Structure
 
@@ -138,6 +236,8 @@ python .\tools\verify_v3_integrity.py
 | `phoenixguard/vision` | Image preprocessing, broker source lock, chart segmentation, overlay schema, V3 overlay contract, transforms, rendering, and object registry support. |
 | `phoenixguard/tracking` | V3 market object tracker and sequence-context bridge for overlays and registry state. |
 | `phoenixguard/mobile_api` | FastAPI app, mobile service, observer service, continuous window tracker, live-state builder, dashboard, and real-time frontend sync. |
+| `phoenixguard/mobile_api/model_strength.py` | Sanitizes and persists model-strength settings, converts them into execution controls, AI contribution strengths, lane thresholds, and profile metadata. |
+| `phoenixguard/business` | Business, license, billing, command, and onboarding API support registered into the FastAPI app but isolated from live packet authority. |
 | `phoenixguard/decision` | Market reasoning, Model Council, RL, regression, ensemble, skill gates, scenarios, market memory, price location, regime, and outcome feedback. |
 | `phoenixguard/execution` | Execution language, packet schema, governor, timing, sequence context, calibration manifest, shooter sequencing, shooter modes, and floating-state reducer. |
 | `phoenixguard/runtime` | Local ensemble runtime, model council daemon, adaptive runtime, LoRA adapters, cache V3, telemetry, certification, instrument context, security, and atomic performance utilities. |
@@ -146,7 +246,7 @@ python .\tools\verify_v3_integrity.py
 | `phoenixguard/training` | CV model training and sequence auxiliary-head support. |
 | `phoenixguard/voice` | Voice command parsing, local/remote tracker control, voice bundles, console UI, and local voice runtime. |
 | `mobile/android` | Kotlin Android mobile observer client and UI model. |
-| `tools` | Runtime tracing, certification, visual evidence capture, V3 cleanup, diagnostics, overlay validation, performance reports, and integrity checks. |
+| `tools` | Runtime tracing, certification, entry-allowance burn capture, visual evidence capture, V3 cleanup, diagnostics, overlay validation, performance reports, and integrity checks. |
 | `scripts` | Dataset splitting, sequence teacher manifests, inference exports, signal replay, calibration manifest building, and contradiction queue export. |
 | `docs` | Architecture, frontend, tracker, share, scenario, vision, runtime, and deployment documentation. |
 
@@ -164,6 +264,16 @@ PhoenixGuard uses three separate authority levels:
 
 The live stack uses frame counters, capture counters, `state_version`, packet ids, TTL, hashes, heartbeat records, and cache metadata to prove that a decision belongs to the current live frame rather than stale memory or an old endpoint response.
 
+The 2026-06-21 hardening adds an explicit display-state bridge:
+
+- `session.json` remains the canonical full tracker payload.
+- `display_state.json` carries compact latest-display fields for fast API/dashboard reads.
+- Live-state cache signatures include display frame ids, chart frame ids, overlay frame ids, model-vote frame ids, latest artifact paths, and surface signatures.
+- Performance trace can distinguish the raw overlay frame gap from a display-authority-locked state.
+- Hot latest artifacts are overwritten as fresh latest artifacts instead of quietly reusing stale overlay frames.
+
+This bridge is important because the study worker can take longer than the display heartbeat. The dashboard must keep seeing fresh broker progression while the deeper study pipeline completes. Display freshness still does not create execution authority; it only prevents stale UI reads.
+
 ### Side Semantics
 
 The V3 language constitution separates side vocabulary:
@@ -174,6 +284,64 @@ The V3 language constitution separates side vocabulary:
 - `execution.side`: the only side that can reach broker action.
 
 The packet validator requires final side and execution side to agree. Generic `side` is display shorthand only.
+
+### Model Strength Profile
+
+The final V3 architecture includes a developer-controlled model-strength profile. It is stored in:
+
+```text
+phoenixguard/mobile_api/static/floating_windows/model_strength_settings.json
+```
+
+It is normalized by `phoenixguard/mobile_api/model_strength.py` and applied through tracker execution controls. The profile covers:
+
+- Model confidence floor.
+- Execution threshold.
+- Overlay confidence floor.
+- AI contribution strengths for market intelligence, decision kernel, smart money, memory projection, LSTM sequence, scenario engine, and high-frequency logic.
+- Execution lane thresholds.
+- Timing controls.
+- Memory and identity controls.
+- Risk controls.
+- Entry controls.
+- Opposing-force reaction controls.
+- Structure and overlay generation controls.
+- Observer controls.
+- Runtime controls.
+- Scenario controls.
+
+Model Council records these controls in council output and execution packets. This makes the runtime auditable: a packet can be studied with the exact strength profile that shaped its score.
+
+### Entry Allowance Evidence
+
+The tracker now captures entry evidence when an allowed entry package appears. The capture marks the latest candle now point, not an old zone or historical candle. It stores both:
+
+- Overlay evidence image.
+- Broker-window evidence image.
+
+The evidence payload includes sequence number, frame id, side, chart point, window point, artifact freshness, source mode, packet id, candidate id, final score, threshold, timing mode, and whether the capture was an allowed entry or a blocked `ENTER_NOW` observation.
+
+The burn tool can retain these images across a hardening run and generate:
+
+- `entry_sequence_manifest.json`
+- `entry_gallery.html`
+- `allowed_entry_broker_progression.jpg`
+- `allowed_entry_overlay_progression.jpg`
+- `final_report.md`
+- `analysis_summary.json`
+
+This is the visual proof layer for the operator. It allows a developer to inspect exactly what PhoenixGuard considered an entry at the moment the packet allowed it.
+
+### Storage Governance
+
+The final V3 architecture treats storage growth as a production risk. The tracker is a live reader and predictor, not an unlimited recorder. The hardening adds these guards:
+
+- `tools/clean_v3_runtime_state.py --apply` backs up and clears stale runtime/cache state while preserving calibration files.
+- Overlay geometry dumps are disabled by default through `PHOENIXGUARD_OVERLAY_GEOMETRY_DUMPS=0`.
+- When overlay geometry dumps are enabled, they are pruned by file count, age, and size.
+- Tracker event logs are bounded by `PHOENIXGUARD_TRACKER_EVENT_LOG_MAX_MB` and tail-line retention.
+- Decision artifacts are compact by default unless `PHOENIXGUARD_FULL_DECISION_ARTIFACTS=1` is explicitly set.
+- Entry evidence has retention controls for normal live operation, while burn runs can deliberately retain evidence for forensic study.
 
 ## Capture And Window Tracker Design
 
@@ -189,6 +357,9 @@ Key design responsibilities:
 - Publishes `session.json`, display state, preview images, event logs, latest chart/window artifacts, and live dashboard state.
 - Sends snapshots into `ModelCouncilV3`.
 - Exposes worker health, capture count, frame timing, state freshness, and study/execution packet endpoints through the API service.
+- Captures entry-allowance evidence when an allowed execution package appears.
+- Writes compact display-state files so API reads stay fresh while deeper study is compiling.
+- Compacts persisted decision artifacts unless full persistence is deliberately enabled.
 
 ### Tracker Techniques Used
 
@@ -203,6 +374,37 @@ Key design responsibilities:
 - Atomic session writes and display-state merge.
 - Adaptive capture intervals and worker watchdogs.
 - Visual overlay rendering for live dashboard and evidence images.
+- Entry marker selection that prefers `NOW` or latest tracked candle evidence.
+- Broker and overlay evidence annotation at the live entry candle.
+- Bounded event log retention.
+
+### Final V3 Tracker Freshness Design
+
+The final tracker design separates three kinds of freshness:
+
+| Freshness Type | Purpose | Files / Fields |
+| --- | --- | --- |
+| Display freshness | Proves the broker surface is still updating even if the study worker is busy. | `display_state.json`, `display_frame_id`, `last_display_window_path`, display surface signatures. |
+| Study freshness | Proves overlays, model vote, sequence, and council evidence belong to a current analysis pass. | `overlay_frame_id`, `model_vote_frame_id`, `state_version`, `model_council_result`. |
+| Execution freshness | Proves the packet can still reach shooter validation. | packet TTL, valid-until timestamp, runtime integrity, cache state, sequence context. |
+
+The dashboard may show display freshness quickly. The shooter cannot execute from display freshness alone. It still requires execution freshness.
+
+### Entry Evidence Capture Path
+
+The entry evidence capture is implemented inside the tracker so it can access the current broker window image, overlay image, focus region, Model Council packet, latest signal, and tracking summary in one place. The capture flow is:
+
+```text
+Model Council publishes executable packet
+-> tracker checks entry allowance
+-> tracker resolves latest candle marker
+-> tracker annotates overlay image
+-> tracker annotates broker window image
+-> tracker writes evidence metadata
+-> burn tool can collect and score the evidence sequence
+```
+
+This is intentionally evidence-only. It does not click and it does not bypass shooter validation.
 
 ## Vision Layer
 
@@ -307,6 +509,50 @@ Default execution lane thresholds include:
 | `LOCAL_BREAKDOWN_CONTINUATION` | 0.74 |
 | `HISTORY_MATCHED_CONTINUATION` | 0.76 |
 | `MOMENTUM_ACCEPTANCE_ENTRY` | 0.82 |
+
+The final V3 hardening adds explicit model-strength and execution-lane controls to the council snapshot. The council now accepts and publishes:
+
+- `ai_contribution_strengths`
+- `ai_strength_multiplier`
+- `model_strength_profile`
+- `execution_lane_thresholds`
+- `lane_thresholds`
+- `base_council_score`
+- `raw_council_score`
+- adjusted LSTM raw/effective contribution
+
+The default AI contribution strengths are:
+
+| Contributor | Default Strength |
+| --- | --- |
+| `market_intelligence` | 1.0 |
+| `decision_kernel` | 1.0 |
+| `smart_money` | 1.0 |
+| `memory_projection` | 1.0 |
+| `lstm_sequence` | 1.0 |
+| `scenario_engine` | 1.0 |
+| `high_frequency` | 1.0 |
+
+The saved final V3 model-strength profile can deliberately downweight high-frequency/two-candle execution while still allowing it to explain the read. This is why `two_candle_execution_allowed` exists. When it is false, the high-frequency lane can remain visible as a study contributor without becoming an execution lane.
+
+This makes the council more inspectable. A final packet or study packet can be audited with both its market evidence and the profile that shaped model contribution.
+
+### Promotion Failure And Opportunity Audit
+
+When the council does not publish an executable packet, the live trace must explain why. The runtime carries promotion fields such as:
+
+- promotion result
+- blocked by
+- denied at
+- true blocker
+- next required condition
+- release condition
+- execution lane accepted or rejected
+- timing mode
+- final score and threshold
+- sequence context readiness
+
+The burn tool counts these blockers across long runs. In the final hardening run, this was used to separate early opportunities from mature opportunities and prove that a missing packet was a reasoned wait, not a silent failure.
 
 ### Skill Gates
 
@@ -415,13 +661,41 @@ Important endpoint groups:
 | `/v1/mobile/floating/state` | FloatingStateV2 truth for operator display. |
 | `/v1/mobile/shooter/handshake` | Latest shooter handshake and wait/action state. |
 | `/v1/mobile/runtime/trace/v3` | End-to-end runtime trace across tracker, council, packet, shooter, floating state, cache, and calibration. |
+| `/v1/mobile/performance/trace/v3` | Frame timing, display freshness, overlay gap, model vote freshness, and stale-frame diagnostics. |
 | `/v1/mobile/window-tracker/sessions` | Create, list, inspect, start, stop, and control tracker sessions. |
 | `/v1/mobile/window-tracker/dashboard/{session_id}` | Live dashboard. |
 | `/v1/mobile/window-tracker/sessions/{session_id}/stream` | Server-sent event stream for session updates. |
 | `/v1/mobile/visual/health/v3` | Visual health and overlay/frontend truth checks. |
 | `/v1/mobile/registry/sessions/{session_id}/active` | Current active market object registry. |
+| `/v1/mobile/window-tracker/floating-windows/model-strength/settings` | Read and save model-strength profile settings. |
+| `/v1/mobile/window-tracker/floating-windows/model-strength` | Developer model-strength control window. |
 
 The dashboard consumes tracker state and shows market context, overlays, study maps, timing lock rows, packet state, shooter state, and visual health. It is diagnostic and operational, not direct execution authority.
+
+The final dashboard removes unnecessary backend-secret-facing controls from the normal user surface and keeps developer-strength controls separate. The dashboard should prioritize:
+
+- live broker chart and overlays
+- current public read
+- study packet or execution packet state
+- active thesis and next required condition
+- visual health and freshness
+- shooter state when armed
+
+Deep debug, calibration, settings, and backend diagnostics belong in developer tools, not the regular user-facing read.
+
+### Frontend Freshness Contract
+
+The dashboard is allowed to poll fast and render fresh display frames. It must not infer execution permission from rendered overlays. The current frontend/backend contract is:
+
+```text
+Dashboard reads live state/performance trace
+-> render overlays and public read
+-> send frontend heartbeat
+-> backend compares displayed frame and overlay state
+-> visual health reports ALIVE, STALE, REJECT, or degraded state
+```
+
+This keeps stale-data detection explicit. If the frontend is behind, PhoenixGuard reports it; it does not pretend that an old frame is current.
 
 ## Mobile Observer
 
@@ -447,6 +721,8 @@ The voice package provides a local and remote command layer for runtime control 
 | `phoenixguard/voice/agent.py` | Provides local voice agent runtime and stack status. |
 
 Voice commands control workflow and diagnostics. They do not bypass packet validation or shooter gates.
+
+The final V3 runtime no longer depends on a heavyweight Qwen sidecar as an always-awake live component. The default voice brain bundle is `phoenixguard-voice-brain-local`. This keeps the final live stack lighter on CPU and avoids confusing fallback narratives with real model reasoning. Any future VLM/Qwen-style component must remain a reasoning/report layer that consumes PhoenixGuard JSON and returns explanation; it must not become packet authority.
 
 ## Training And Local Model Runtime
 
@@ -474,6 +750,36 @@ PhoenixGuard uses a local model training/runtime stack rather than depending onl
 | `byol` | buy specialist |
 
 The runtime supports CPU/GPU model selection, saved bundle discovery, ONNX/export metadata paths, temperatures, thresholds, adapter activation, and cache-aware prediction.
+
+### Live Reasoning And VLM Boundary
+
+PhoenixGuard can feed structured JSON into explanation or VLM-style layers. That JSON may include overlays, trendlines, zones, model votes, market reality, memory context, sequence context, study packet fields, and execution-packet fields. The explanation layer may produce a user-facing story about:
+
+- what happened historically
+- what the current chart is doing
+- what PhoenixGuard believes is likely next
+- why it is waiting, allowing, or rejecting
+- what condition would invalidate the thesis
+
+The final architecture keeps this layer non-authoritative. The explanatory report can shape operator understanding, but it cannot extract hidden data into execution, create a side click, or override `PG_EXECUTION_PACKET_V3`.
+
+The public dashboard read should display the distilled PhoenixGuard report and active thesis. The deeper reasoning fields belong in traces, reports, and developer inspection tools.
+
+## Business And Commercial API Boundary
+
+`phoenixguard/business/*` adds a commercial boundary for customer records, licenses, mock billing, connector registration, device heartbeats, entitlements, releases, and command exchange. `phoenixguard/mobile_api/app.py` registers those routes into the FastAPI app.
+
+This is a business/control-plane layer, not a trading authority layer. Its rules are:
+
+- It can authenticate users or devices.
+- It can issue or revoke entitlements.
+- It can deliver releases or connector commands.
+- It can support onboarding and customer lifecycle workflows.
+- It cannot publish `PG_EXECUTION_PACKET_V3`.
+- It cannot bypass tracker source lock, Model Council, packet validation, or shooter gates.
+- It cannot click the broker.
+
+This separation allows PhoenixGuard to become shareable or license-aware without weakening the core live safety doctrine.
 
 ## Continual Adaptation And Adapters
 
@@ -505,6 +811,40 @@ Runtime integrity is enforced by multiple modules:
 | `phoenixguard/tracing.py` | OpenTelemetry setup and FastAPI instrumentation. |
 
 The default tracing endpoint is `http://localhost:4318/v1/traces`. Tracing can be disabled with `PHOENIXGUARD_TRACING_DISABLED=1`.
+
+### Performance Trace And Stale Data Prevention
+
+`/v1/mobile/performance/trace/v3` is now central to production readiness. It reports:
+
+- display frame id
+- overlay frame id
+- model vote frame id
+- raw overlay frame gap
+- authority-locked overlay frame gap
+- frame age
+- overlay age
+- model vote age
+- frontend heartbeat alignment
+- stale flags
+- backpressure state
+- surface signature alignment
+
+The direct performance path reads merged session and display state so it can keep dashboard freshness visible without hiding stale overlay conditions. This is the fix that prevents the dashboard from appearing alive while studying an old frame.
+
+### Storage And Cache Control
+
+The final V3 architecture deliberately avoids unbounded growth during one-second polling:
+
+| Growth Source | Control |
+| --- | --- |
+| Runtime cache and old artifacts | `tools/clean_v3_runtime_state.py --apply` moves stale runtime/cache paths into `_archive/runtime_backup`. |
+| Overlay geometry dumps | Disabled by default; optional pruning by max files, max MB, and max age. |
+| Event logs | Tracker JSONL logs are bounded by MB and tail-line count. |
+| Decision payload persistence | Compact by default through `PHOENIXGUARD_FULL_DECISION_ARTIFACTS=0`. |
+| Entry screenshots | Pruned in normal runtime and intentionally retained only for burn/forensic runs. |
+| Hardening studies | Kept under `%LOCALAPPDATA%\PhoenixGuard\hardening_studies` and intended to be cleaned between burns unless needed as evidence. |
+
+This means PhoenixGuard can poll every second without acting like a permanent recorder.
 
 ## Security And State Protection
 
@@ -549,8 +889,40 @@ The test suite is broad and aligned with the architecture.
 | Memory, RL, and sequence | `tests/test_memory_sequence_retrieval.py`, `tests/test_rl_runtime_integration.py`, `tests/test_sequence_projection.py`, `tests/test_sequence_teacher_manifest.py` |
 | Simulation | `tests/test_simulation_replay_stack.py`, `tests/test_simulation_paper_execution.py`, `tests/test_simulation_event_backtesting.py`, `tests/test_adversarial_market_simulator.py` |
 | Voice and mobile API | `tests/test_voice_api.py`, `tests/test_voice_command_router.py`, `tests/test_mobile_api_service.py`, `tests/test_mobile_observer_service.py` |
+| Final V3 hardening | `tests/test_entry_allowance_burn.py`, `tests/test_model_strength_controls.py`, `tests/test_cache_observability_v3.py`, `tests/test_window_tracker_service.py` |
+| Business boundary | `tests/test_business_api.py`, `tests/test_business_commands.py`, `tests/test_business_commercial_api.py`, `tests/test_business_integration_mock_api.py` |
 
 Certification tools under `tools/` cover API stability, process topology, dashboard hydration, capture worker, live speed, model warm state, broker source lock, overlay truth, shooter persistence, wrong-surface rejection, and V3 burn-in.
+
+The final hardening validation used:
+
+```powershell
+python -m py_compile phoenixguard\mobile_api\app.py phoenixguard\mobile_api\window_tracker.py phoenixguard\mobile_api\model_strength.py phoenixguard\decision\model_council_v3.py phoenixguard\vision\overlay_geometry.py tools\run_entry_allowance_burn.py
+python -m pytest -q tests\test_entry_allowance_burn.py tests\test_model_strength_controls.py tests\test_cache_observability_v3.py
+python -m pytest -q tests\test_voice_bundles.py tests\test_voice_command_router.py
+python -m pytest -q tests\test_business_api.py tests\test_business_commands.py tests\test_business_commercial_api.py tests\test_business_integration_mock_api.py
+```
+
+The corrected four-hour hardening burn retained 108 allowed entry events, 108 broker screenshots, 108 overlay screenshots, no blocked `ENTER_NOW` evidence in that run, full progression sheets, and a final report. The burn did not prove long-term profitability; it proved that the runtime stayed alive, evidence was fresh, entries were visually auditable, and packet promotion behavior could be studied.
+
+### Entry-Allowance Burn Command
+
+The hardening burn tool is:
+
+```powershell
+python .\tools\run_entry_allowance_burn.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --duration-sec 14400 --interval-sec 1 --timeout 20
+```
+
+The important output artifacts are:
+
+- `entry_sequence_manifest.json`
+- `entry_gallery.html`
+- `allowed_entry_broker_progression.jpg`
+- `allowed_entry_overlay_progression.jpg`
+- `analysis_summary.json`
+- `final_report.md`
+
+Each entry image must mark the latest entry candle at the time the packet allowed the entry. Marking an old zone or historical candle is considered failed evidence.
 
 ## Deployment And Sharing
 
@@ -587,6 +959,10 @@ The quick tunnel path can publish the local API/dashboard when public browser ac
 | `.codex_runtime/vm_monitor_status.json` | VM monitor status. |
 | `.codex_runtime/action_evidence` | Shooter evidence artifacts. |
 | `data/mobile_api/window_tracker/sessions/<session_id>/session.json` | Tracker session state. |
+| `data/mobile_api/window_tracker/sessions/<session_id>/display_state.json` | Compact latest display state for fresh dashboard/API reads. |
+| `data/mobile_api/window_tracker/sessions/<session_id>/entry_evidence` | Runtime entry evidence captures when enabled. |
+| `%LOCALAPPDATA%\PhoenixGuard\hardening_studies` | Burn-in reports, entry screenshots, progression sheets, galleries, and summaries. |
+| `phoenixguard/mobile_api/static/floating_windows/model_strength_settings.json` | Saved model-strength profile and execution-control tuning. |
 | `data/mobile_api/observer/sessions/<session_id>` | Observer session bundles and latest signal diagnostics. |
 | `tests/fixtures/visual_regression` | Visual regression baselines. |
 | `reports` | Launch, trace, validation, and certification reports when generated. |
@@ -696,9 +1072,16 @@ Unsafe extension points include direct `action` execution, raw observer signal e
 | `time_sequence` | Explicit expiry/time-setting sequence for shooter. |
 | `source lock` | Proof that the captured surface is the intended broker/chart, not a dashboard or wrong app. |
 | `overlay contract` | Rules for valid overlay types, coordinates, layers, ids, and modes. |
+| `display_state.json` | Compact latest-display payload used to keep dashboard reads fresh while study work is busy. |
+| `model_strength_profile` | Saved developer profile controlling model floors, lane thresholds, AI contribution weights, risk, timing, and overlay behavior. |
+| `entry allowance evidence` | Broker and overlay screenshots captured at the exact latest candle when an allowed entry packet appears. |
+| `hot artifact` | Latest chart/overlay/full-overlay file intended to be overwritten with fresh live state rather than archived as every-frame history. |
+| `hardening burn` | Timed live study run that measures uptime, freshness, packet behavior, entry evidence, outcomes, latency, and storage behavior. |
 
 ## Final Blueprint Summary
 
-PhoenixGuard is a layered V3 architecture for live chart intelligence and controlled execution. It combines computer vision, chart geometry, memory retrieval, model ensembles, reinforcement learning, conformal/regression forecasting, scenario search, market-reality checks, smart-money context, schema validation, runtime telemetry, and calibrated UI automation.
+PhoenixGuard is a layered V3 architecture for live chart intelligence and controlled execution. It combines computer vision, chart geometry, memory retrieval, model ensembles, reinforcement learning, conformal/regression forecasting, scenario search, market-reality checks, smart-money context, model-strength controls, schema validation, runtime telemetry, entry-evidence capture, burn-in forensics, and calibrated UI automation.
 
 The design is strongest where it is strict: the system does not let a model, dashboard, raw side, or old signal directly click. It requires a current frame, source lock, Model Council maturity, executable V3 packet, cache/freshness proof, instrument identity, valid timing sequence, calibrated targets, shooter discipline gates, and final pre-click confirmation. This is the core blueprint of how PhoenixGuard is built, what it does, how it does it, and why the architecture is shaped the way it is.
+
+The 2026-06-21 final V3 upgrade makes that design more production-ready by adding a developer-first runbook, compact display-state freshness, model-strength tuning, bounded storage, explicit no-Qwen-heavy live dependency, entry package screenshot evidence, and a burn tool that proves whether live packets were fresh and visually correct. The architecture is now not only packet-safe; it is inspectable, replayable, and easier to operate without losing the plot during long live runs.
