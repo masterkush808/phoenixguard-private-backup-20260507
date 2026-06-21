@@ -1,3 +1,145 @@
+# PhoenixGuard Developer Read First
+
+This is the safe local runbook for the final V3 architecture. Run all commands
+from PowerShell at the repo root:
+
+```powershell
+Set-Location "C:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard"
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\.venv\Scripts\Activate.ps1
+```
+
+## Fast Safe Restart
+
+Use this when you want to stop stale sessions/processes, clear runtime cache, and
+start the live dashboard without any floating editor window.
+
+```powershell
+$base = "http://127.0.0.1:8793"
+$session = "pocket-live-8788"
+$root = (Get-Location).Path
+
+# Ask the running tracker to stop first if the API is alive.
+try { Invoke-RestMethod -Method Post "$base/v1/mobile/window-tracker/sessions/$session/emergency-stop" -TimeoutSec 5 } catch {}
+try { Invoke-RestMethod -Method Post "$base/v1/mobile/window-tracker/sessions/$session/stop" -TimeoutSec 5 } catch {}
+
+# Kill PhoenixGuard processes launched from this repo or known runtime entrypoints.
+Get-CimInstance Win32_Process |
+    Where-Object {
+        $_.ProcessId -ne $PID -and
+        $_.CommandLine -and
+        (
+            $_.CommandLine -like "*$root*" -or
+            $_.CommandLine -match "shooter\.py|start_phoenixguard|launch_phoenixguard|window_tracker|uvicorn.*phoenixguard"
+        )
+    } |
+    ForEach-Object {
+        Write-Host "Stopping PID $($_.ProcessId): $($_.Name)"
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+
+Start-Sleep -Seconds 3
+
+# Back up and clear stale runtime/cache state. This preserves calibration files.
+python .\tools\clean_v3_runtime_state.py --apply
+if ($LASTEXITCODE -ne 0) { throw "Runtime cleanup failed. Launch aborted." }
+
+# Canonical final V3 live launch. -NoBrowser prevents popup/editor launch.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser
+```
+
+Open the dashboard after launch:
+
+```text
+http://127.0.0.1:8793/dashboard/live/pocket-live-8788
+```
+
+## Read The PhoenixGuard State
+
+Use these after launch to confirm freshness, trace integrity, and what the
+current PhoenixGuard read says.
+
+```powershell
+$base = "http://127.0.0.1:8793"
+$session = "pocket-live-8788"
+
+# Public live read used by the dashboard.
+Invoke-RestMethod "$base/v1/mobile/live/state/v3/$session?mode=CLEAN_LIVE" |
+    ConvertTo-Json -Depth 12
+
+# Backend/frontend timing and stale-frame diagnosis.
+Invoke-RestMethod "$base/v1/mobile/performance/trace/v3/$session" |
+    ConvertTo-Json -Depth 12
+
+# Full V3 runtime trace: source lock, frame buffer, sequence, council, packet, shooter gates.
+Invoke-RestMethod "$base/v1/mobile/runtime/trace/v3?session_id=$session" |
+    ConvertTo-Json -Depth 16
+
+# CLI summaries for quick pass/fail reads.
+python .\tools\runtime_trace_v3.py --base-url $base --session $session --timeout 20
+python .\tools\trace_sequence_context_v3.py --base-url $base --session $session --timeout 20
+python .\tools\verify_v3_integrity.py
+```
+
+`verify_v3_integrity.py` should report `Overall: PASS` before you treat the
+runtime as production-ready.
+
+## Start Or Stop Only The Tracker Session
+
+When the API is already running and you only need to restart the tracker:
+
+```powershell
+$base = "http://127.0.0.1:8793"
+$session = "pocket-live-8788"
+
+Invoke-RestMethod -Method Post "$base/v1/mobile/window-tracker/sessions/$session/stop"
+Invoke-RestMethod -Method Post "$base/v1/mobile/window-tracker/sessions/$session/start"
+```
+
+Create the default session manually if it does not exist:
+
+```powershell
+$body = @{
+    session_id = "pocket-live-8788"
+    name = "Pocket Option Live"
+    window_query = "Pocket Option"
+    layout_profile = "auto"
+    capture_interval_sec = 1.0
+    auto_start = $true
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post "$base/v1/mobile/window-tracker/sessions" `
+    -ContentType "application/json" `
+    -Body $body
+```
+
+## API-Only Developer Fallback
+
+Use this only for debugging the backend API. It does not arm the full production
+launcher flow or shooter process.
+
+```powershell
+$env:PYTHONPATH = (Get-Location).Path
+python -m uvicorn phoenixguard.mobile_api.app:create_app --factory --host 127.0.0.1 --port 8793 --log-level info
+```
+
+## File To Launch Safely
+
+For normal developer work, use:
+
+```text
+launch_phoenixguard_live_ready.ps1
+```
+
+That file is the canonical final V3 live launcher. It starts the mobile API,
+creates/starts the `pocket-live-8788` tracker session, keeps the dashboard on the
+final V3 path, and only enables shooter behavior through the packet-gated live
+stack. Use `-DisableShooter` for read-only development:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser -DisableShooter
+```
+
 # PhoenixGuard V3
 
 PhoenixGuard V3 is a `FINAL_LIVE` chart-intelligence workstation. The live path is
