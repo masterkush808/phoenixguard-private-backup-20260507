@@ -63,6 +63,15 @@ DEFAULT_EXECUTION_LANE_THRESHOLDS = {
     "HISTORY_MATCHED_CONTINUATION": 0.76,
     "MOMENTUM_ACCEPTANCE_ENTRY": 0.82,
 }
+DEFAULT_AI_CONTRIBUTION_STRENGTHS = {
+    "market_intelligence": 1.0,
+    "decision_kernel": 1.0,
+    "smart_money": 1.0,
+    "memory_projection": 1.0,
+    "lstm_sequence": 1.0,
+    "scenario_engine": 1.0,
+    "high_frequency": 1.0,
+}
 LANE_SOFT_PERMISSION_REASONS = {
     "ENTRY_QUALITY_BELOW_ACCEPTABLE",
 }
@@ -537,6 +546,24 @@ def _lane_thresholds(snapshot: Mapping[str, Any]) -> dict[str, float]:
     return thresholds
 
 
+def _ai_contribution_strengths(snapshot: Mapping[str, Any]) -> dict[str, float]:
+    controls = _mapping(snapshot.get("execution_controls"))
+    supplied = _mapping(snapshot.get("ai_contribution_strengths") or controls.get("ai_contribution_strengths"))
+    strengths = dict(DEFAULT_AI_CONTRIBUTION_STRENGTHS)
+    for name, value in supplied.items():
+        key = str(name or "").strip().lower()
+        if key in strengths:
+            strengths[key] = max(0.0, min(2.0, _float(value, strengths[key])))
+    return strengths
+
+
+def _ai_strength_multiplier(strengths: Mapping[str, float]) -> float:
+    values = [_float(strengths.get(key), 1.0) for key in DEFAULT_AI_CONTRIBUTION_STRENGTHS]
+    if not values:
+        return 1.0
+    return max(0.0, min(2.0, sum(values) / len(values)))
+
+
 def _nested_bool(*containers: Mapping[str, Any], names: Sequence[str]) -> bool:
     for container in containers:
         for name in names:
@@ -983,6 +1010,14 @@ def _resolve_execution_lane(
     hf_cycle = _mapping(snapshot.get("high_frequency_candle_cycle"))
     hf_requested = bool(_bool(hf_cycle.get("enabled")) or lane_hint in {"HIGH_FREQUENCY_TWO_CANDLE", "HIGH_FREQUENCY", "HFT"})
     if hf_requested:
+        controls = _mapping(snapshot.get("execution_controls"))
+        model_strength_profile = _mapping(snapshot.get("model_strength_profile") or controls.get("model_strength_profile"))
+        two_candle_execution_allowed_raw = _first_visible_value(
+            snapshot.get("two_candle_execution_allowed"),
+            controls.get("two_candle_execution_allowed"),
+            model_strength_profile.get("two_candle_execution_allowed"),
+        )
+        two_candle_execution_allowed = True if two_candle_execution_allowed_raw is None else _bool(two_candle_execution_allowed_raw)
         hf_side = _first_trade_side(
             hf_cycle.get("side"),
             hf_cycle.get("candidate_side"),
@@ -1020,7 +1055,11 @@ def _resolve_execution_lane(
             hf_blockers.append("CURRENT_CANDLE_NOT_ACCEPTED")
         if hf_score < hf_required:
             hf_blockers.append("LANE_SCORE_BELOW_THRESHOLD")
+        if not two_candle_execution_allowed:
+            hf_blockers.append("TWO_CANDLE_STUDY_ONLY")
         hf_accepted = bool(
+            two_candle_execution_allowed
+            and
             hf_structure_ok
             and path_ok
             and not trap_active
@@ -1050,7 +1089,7 @@ def _resolve_execution_lane(
             "high_frequency_candle_cycle": hf_cycle,
         }
         lane_rows.append(hf_row)
-        if hf_accepted or hf_cycle.get("swing_fallback_enabled") is False:
+        if two_candle_execution_allowed and (hf_accepted or hf_cycle.get("swing_fallback_enabled") is False):
             return {
                 "name": hf_row["name"],
                 "accepted": bool(hf_row["accepted"]),
@@ -1595,6 +1634,12 @@ def evaluate_model_council_v3(
     packet_identity_validation = validate_instrument_context(instrument_context, mode=packet_identity_mode)
     market_context = _mapping(market.get("market_context"))
     two_candle_study = _mapping(snapshot.get("two_candle_study") or _mapping(snapshot.get("decision_kernel")).get("two_candle_study"))
+    ai_contribution_strengths = _ai_contribution_strengths(snapshot)
+    ai_strength_multiplier = _ai_strength_multiplier(ai_contribution_strengths)
+    model_strength_profile = _mapping(
+        snapshot.get("model_strength_profile")
+        or _mapping(snapshot.get("execution_controls")).get("model_strength_profile")
+    )
     lstm_contribution = _mapping(
         snapshot.get("lstm_contribution")
         or two_candle_study.get("lstm_contribution")
@@ -1602,11 +1647,22 @@ def evaluate_model_council_v3(
     )
     skill_contributions = []
     if lstm_contribution:
+        lstm_strength = ai_contribution_strengths.get("lstm_sequence", 1.0)
+        lstm_raw_contribution = _clip01(lstm_contribution.get("contribution"), 0.0)
+        lstm_effective_contribution = _clip01(lstm_raw_contribution * lstm_strength, 0.0)
+        lstm_contribution = {
+            **lstm_contribution,
+            "raw_contribution": round(lstm_raw_contribution, 4),
+            "effective_contribution": round(lstm_effective_contribution, 4),
+            "strength": round(float(lstm_strength), 4),
+        }
         skill_contributions.append(
             {
                 "skill": "LSTM_CANDLE_SEQUENCE",
                 "side": _side(lstm_contribution.get("side")),
-                "contribution": round(_clip01(lstm_contribution.get("contribution"), 0.0), 4),
+                "contribution": round(lstm_effective_contribution, 4),
+                "raw_contribution": round(lstm_raw_contribution, 4),
+                "strength": round(float(lstm_strength), 4),
                 "confidence": round(_clip01(lstm_contribution.get("confidence"), 0.0), 4),
                 "fresh": bool(lstm_contribution.get("fresh", False)),
                 "blocker": False,
@@ -1694,7 +1750,8 @@ def evaluate_model_council_v3(
         and _bool(market_context.get("opposing_force_distance_ok"))
     )
     side_ok = candidate_side in {"BUY", "SELL"}
-    raw_council_score = max(buy_score, sell_score) if side_ok else 0.0
+    base_council_score = max(buy_score, sell_score) if side_ok else 0.0
+    raw_council_score = _clip01(base_council_score * ai_strength_multiplier)
     trap_penalty = -0.12 if trap_active else 0.0
     path_risk_adjustment = 0.03 if opposing_force_ok else -0.08
     flip_flop_penalty = -0.05 if flip_flop_contained else (-0.02 if flip_flop else 0.0)
@@ -2306,6 +2363,8 @@ def evaluate_model_council_v3(
             if blocked_by != "NONE"
             else promotion_result
         ),
+        "base_council_score": round(float(base_council_score), 4),
+        "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
         "raw_council_score": round(float(raw_council_score), 4),
         "market_reality_adjustment": round(float(market_reality_adjustment), 4),
         "final_execution_score": round(float(final_execution_score), 4),
@@ -2337,6 +2396,9 @@ def evaluate_model_council_v3(
         "reasoning_price_location": final_reasoning_decision.get("price_location"),
         "reasoning_coherence_score": reasoning_arbitration.get("coherence_score"),
         "bad_entry_filter": bad_entry_filter,
+        "ai_contribution_strengths": ai_contribution_strengths,
+        "model_strength_profile": model_strength_profile,
+        "lane_thresholds": _lane_thresholds(snapshot),
     }
     council_scores = {
         "global": round(float(_clip01(market.get("global_score"), raw_council_score)), 4),
@@ -2383,6 +2445,8 @@ def evaluate_model_council_v3(
         "disagreement_score": round(float(disagreement_score), 4),
         "council_scores": council_scores,
         "reality_adjustments": reality_adjustments,
+        "base_council_score": round(float(base_council_score), 4),
+        "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
         "raw_council_score": round(float(raw_council_score), 4),
         "final_execution_score": round(float(final_execution_score), 4),
         "execution_threshold": round(float(execution_threshold), 4),
@@ -2411,6 +2475,9 @@ def evaluate_model_council_v3(
             else ("STABLE_EXECUTABLE" if executable else "STUDYING")
         ),
         "contributors_are_diagnostic": True,
+        "ai_contribution_strengths": ai_contribution_strengths,
+        "model_strength_profile": model_strength_profile,
+        "lane_thresholds": _lane_thresholds(snapshot),
         "skill_contributions": skill_contributions,
         "two_candle_study": two_candle_study,
         "lstm_contribution": lstm_contribution,
@@ -2471,6 +2538,11 @@ def evaluate_model_council_v3(
         "final_score": round(float(final_execution_score), 4),
         "execution_threshold": round(float(execution_threshold), 4),
         "threshold": round(float(lane_required_score), 4),
+        "base_council_score": round(float(base_council_score), 4),
+        "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
+        "lane_thresholds": _lane_thresholds(snapshot),
+        "ai_contribution_strengths": ai_contribution_strengths,
+        "model_strength_profile": model_strength_profile,
         "market_context": market_context,
         "two_candle_study": two_candle_study,
         "lstm_contribution": lstm_contribution,
@@ -2516,6 +2588,8 @@ def evaluate_model_council_v3(
         "block_reason": block_reason,
         "contributors": {
             "contributors_are_diagnostic": True,
+            "ai_contribution_strengths": ai_contribution_strengths,
+            "model_strength_profile": model_strength_profile,
             "skill_gates": _diagnostic_skill_gates(snapshot),
             "skill_contributions": skill_contributions,
             "lstm_candle_sequence": lstm_contribution,
@@ -2563,10 +2637,15 @@ def evaluate_model_council_v3(
         "instrument_context_state": instrument_context_state,
         "execution_lane": execution_lane,
         "selected_execution_lane": execution_lane.get("name"),
+        "lane_thresholds": _lane_thresholds(snapshot),
+        "ai_contribution_strengths": ai_contribution_strengths,
+        "model_strength_profile": model_strength_profile,
         "missed_opportunity": missed_opportunity,
         "trade_candidate_queue": trade_candidate_queue,
         "council_scores": council_scores,
         "reality_adjustments": reality_adjustments,
+        "base_council_score": round(float(base_council_score), 4),
+        "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
         "two_candle_study": two_candle_study,
         "lstm_contribution": lstm_contribution,
         "skill_contributions": skill_contributions,
@@ -2715,6 +2794,9 @@ def evaluate_model_council_v3(
         packet["two_candle_study"] = two_candle_study
         packet["lstm_contribution"] = lstm_contribution
         packet["skill_contributions"] = skill_contributions
+        packet["ai_contribution_strengths"] = ai_contribution_strengths
+        packet["model_strength_profile"] = model_strength_profile
+        packet["lane_thresholds"] = _lane_thresholds(snapshot)
         packet["model_role_outputs"] = model_role_outputs
         packet["reasoning_arbitration"] = reasoning_arbitration
         packet["bad_entry_filter"] = bad_entry_filter

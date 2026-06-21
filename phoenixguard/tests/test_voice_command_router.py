@@ -16,7 +16,7 @@ class _StubConfig:
     forbid_cpu_offload_for_heavy_models = True
     wake_word_bundle_name = "openwakeword-local"
     speech_to_text_bundle_name = "whisper-large-v3-local"
-    brain_bundle_name = "qwen3-8b-instruct-local"
+    brain_bundle_name = "phoenixguard-voice-brain-local"
     speech_bundle_name = "openvoice-v2-local"
 
 

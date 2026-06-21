@@ -16,6 +16,7 @@ __pycache__/
 venv/
 env/
 ENV/
+node_modules/
 
 # Runtime/capture/debug output
 .codex_runtime/

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PhoenixGuard Model Strength</title>
+  <style>
+    :root {
+      --ice: #8fe7ff;
+      --gold: #f2c866;
+      --muted: #8ea4b8;
+      --text: #eef6ff;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    html,
+    body {
+      min-height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #05090d;
+      color: var(--text);
+      font-family: Inter, Segoe UI, Arial, sans-serif;
+    }
+  </style>
+  <link rel="stylesheet" href="/v1/mobile/window-tracker/assets/floating-windows/overlay_editor.css">
+  <script src="/v1/mobile/window-tracker/assets/floating-windows/model_strength_controls.js?v=model-strength-advanced-v1"></script>
+</head>
+<body class="model-strength-standalone">
+  <script>
+    const query = new URLSearchParams(window.location.search);
+    const SESSION_ID = query.get("session_id") || "pocket-live-8788";
+    const SAVE_ENDPOINT = "/v1/mobile/window-tracker/floating-windows/model-strength/settings";
+
+    function patchControls(body) {
+      return fetch(`/v1/mobile/window-tracker/sessions/${encodeURIComponent(SESSION_ID)}/controls`, {
+        method: "PATCH",
+        headers: {"Content-Type": "application/json", "Accept": "application/json"},
+        cache: "no-store",
+        body: JSON.stringify(body),
+      }).then((response) => response.ok ? response.json() : Promise.reject(new Error(String(response.status))));
+    }
+
+    function showBootError() {
+      document.body.innerHTML = '<div style="margin:12px;padding:12px;border:1px solid rgba(255,255,255,.14);border-radius:6px;color:#eef6ff;background:#11100d;font:12px Consolas,monospace;">Model strength controls failed to load.</div>';
+    }
+
+    function boot(settings) {
+      const factory = window.PhoenixGuardModelStrengthControls;
+      if (!factory || typeof factory.create !== "function") {
+        showBootError();
+        return;
+      }
+      factory.create({
+        document,
+        standalone: true,
+        sessionId: SESSION_ID,
+        hardSavedSettings: settings,
+        saveEndpoint: SAVE_ENDPOINT,
+        patchControls,
+      });
+    }
+
+    fetch(SAVE_ENDPOINT, {cache: "no-store", headers: {"Accept": "application/json"}})
+      .then((response) => response.ok ? response.text().then((text) => text ? JSON.parse(text) : {}) : {})
+      .catch(() => ({}))
+      .then(boot);
+  </script>
+</body>
+</html>

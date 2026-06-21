@@ -35,7 +35,7 @@ def _write_manifest(bundle_dir: Path, payload: dict[str, object]) -> None:
 def test_resolve_local_voice_stack_reads_local_bundle_manifests(tmp_path: Path) -> None:
     wake_dir = tmp_path / "models" / "voice" / "wake_word" / "openwakeword-local"
     stt_dir = tmp_path / "models" / "voice" / "speech_to_text" / "whisper-large-v3-local"
-    brain_dir = tmp_path / "models" / "voice" / "brain" / "qwen3-8b-instruct-local"
+    brain_dir = tmp_path / "models" / "voice" / "brain" / "phoenixguard-voice-brain-local"
     speech_dir = tmp_path / "models" / "voice" / "speech" / "openvoice-v2-local"
 
     wake_dir.mkdir(parents=True, exist_ok=True)
@@ -73,14 +73,14 @@ def test_resolve_local_voice_stack_reads_local_bundle_manifests(tmp_path: Path) 
     _write_manifest(
         brain_dir,
         {
-            "name": "qwen3-8b-instruct-local",
+            "name": "phoenixguard-voice-brain-local",
             "runtime": "llama.cpp",
             "storage_format": "safetensors",
             "load_policy": "gpu_only",
             "weights": ["model.safetensors"],
             "config_files": ["config.json"],
             "memory_map": True,
-            "metadata": {"family": "qwen3", "tool_use": True},
+            "metadata": {"family": "phoenixguard-voice-brain", "tool_use": True},
         },
     )
     _write_manifest(
@@ -99,40 +99,40 @@ def test_resolve_local_voice_stack_reads_local_bundle_manifests(tmp_path: Path) 
     config = VoiceConfig(project_root=tmp_path)
     stack = resolve_local_voice_stack(config)
 
-    assert stack.brain.name == "qwen3-8b-instruct-local"
+    assert stack.brain.name == "phoenixguard-voice-brain-local"
     assert stack.speech.storage_format == "safetensors"
     assert stack.speech_to_text.memory_map is True
     assert stack.total_weight_bytes >= stack.brain.total_weight_bytes
 
 
 def test_resolve_local_voice_bundle_rejects_remote_manifest_fields(tmp_path: Path) -> None:
-    bundle_dir = tmp_path / "models" / "voice" / "brain" / "qwen3-remote"
+    bundle_dir = tmp_path / "models" / "voice" / "brain" / "remote-brain"
     _write_safetensors(bundle_dir / "model.safetensors")
     _write_manifest(
         bundle_dir,
         {
-            "name": "qwen3-remote",
+            "name": "remote-brain",
             "runtime": "llama.cpp",
             "storage_format": "safetensors",
             "load_policy": "gpu_only",
             "weights": ["model.safetensors"],
             "memory_map": True,
-            "repo_id": "Qwen/Qwen3-8B",
+            "repo_id": "Example/Remote-Brain",
         },
     )
 
     with pytest.raises(VoiceBundleValidationError, match="remote field 'repo_id'"):
-        resolve_local_voice_bundle(tmp_path / "models" / "voice", "brain", "qwen3-remote")
+        resolve_local_voice_bundle(tmp_path / "models" / "voice", "brain", "remote-brain")
 
 
 def test_resolve_local_voice_bundle_requires_safetensors_for_heavy_models(tmp_path: Path) -> None:
-    bundle_dir = tmp_path / "models" / "voice" / "brain" / "qwen3-gguf"
+    bundle_dir = tmp_path / "models" / "voice" / "brain" / "local-gguf-brain"
     (bundle_dir / "model.gguf").parent.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "model.gguf").write_bytes(b"gguf")
     _write_manifest(
         bundle_dir,
         {
-            "name": "qwen3-gguf",
+            "name": "local-gguf-brain",
             "runtime": "llama.cpp",
             "storage_format": "gguf",
             "load_policy": "gpu_only",
@@ -142,4 +142,4 @@ def test_resolve_local_voice_bundle_requires_safetensors_for_heavy_models(tmp_pa
     )
 
     with pytest.raises(VoiceBundleValidationError, match="must use safetensors"):
-        resolve_local_voice_bundle(tmp_path / "models" / "voice", "brain", "qwen3-gguf")
+        resolve_local_voice_bundle(tmp_path / "models" / "voice", "brain", "local-gguf-brain")

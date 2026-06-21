@@ -1,0 +1,124 @@
+{
+  "aiStrengths": {
+    "decision_kernel": 1.2,
+    "high_frequency": 0.65,
+    "lstm_sequence": 0.75,
+    "market_intelligence": 1.2,
+    "memory_projection": 0.9,
+    "scenario_engine": 0.85,
+    "smart_money": 1.05
+  },
+  "councilControls": {
+    "flip_flop_release_candidate_flips": 2.0,
+    "flip_flop_release_stable_reads": 2.0,
+    "min_dominance_margin": 0.18,
+    "opportunity_capture_min_score": 0.9,
+    "opportunity_capture_stable_reads": 3.0,
+    "packet_valid_for_seconds": 60.0,
+    "reversal_capture_min_dominance": 0.18,
+    "study_packet_valid_for_seconds": 300.0
+  },
+  "entryControls": {
+    "allow_live_momentum_entries": true,
+    "max_primary_target_candles": 36.0,
+    "min_live_momentum_alignment": 3.0,
+    "min_live_momentum_score": 0.54,
+    "min_live_momentum_visible_candles": 8.0,
+    "min_location_sniper_target_candles": 3.0,
+    "min_primary_target_candles": 10.0
+  },
+  "executionThreshold": 0.7,
+  "laneThresholds": {
+    "FAILED_RETEST_ENTRY": 0.72,
+    "HIGH_FREQUENCY_TWO_CANDLE": 0.5,
+    "HISTORY_MATCHED_CONTINUATION": 0.76,
+    "LOCAL_BREAKDOWN_CONTINUATION": 0.74,
+    "MOMENTUM_ACCEPTANCE_ENTRY": 0.82,
+    "SNIPER_ZONE_ENTRY": 0.7
+  },
+  "memoryIdentityControls": {
+    "allow_locked_surface_identity_fallback": false,
+    "auto_memory_projection": true,
+    "broker_surface_cache_sec": 30.0,
+    "live_momentum_memory_advisory": true,
+    "min_market_confidence": 0.42,
+    "min_timeframe_confidence": 0.42,
+    "require_market_identity": true,
+    "require_memory_projection": true,
+    "require_timeframe_identity": false
+  },
+  "modelConfidenceFloor": 0.55,
+  "observerControls": {
+    "min_actionable_confidence": 0.58,
+    "min_thesis_confidence": 0.46,
+    "rl_track_interval_sec": 30.0,
+    "signal_cooldown_sec": 8.0
+  },
+  "opposingForceControls": {
+    "allow_opposing_force_reactions": true,
+    "max_opposing_force_reaction_distance": 0.1,
+    "min_opposing_force_reaction_alignment": 3.0,
+    "min_opposing_force_reaction_entry_score": 0.54,
+    "min_opposing_force_reaction_risk": 0.72,
+    "min_opposing_force_reaction_score": 0.68
+  },
+  "overlayConfidenceFloor": 0.0,
+  "overlayGenerationControls": {
+    "debug_depth": 6.0,
+    "fuse_timeframe_overlays": false,
+    "history_depth": 8.0,
+    "label_density": 10.0,
+    "min_conf_global": 0.42,
+    "min_conf_latest": 0.5,
+    "projection_focus": 0.35
+  },
+  "panelLocked": true,
+  "panelOpen": false,
+  "profileSaved": true,
+  "riskControls": {
+    "cooldown_sec": 600.0,
+    "execution_window_sec": 600.0,
+    "loss_guard_enabled": true,
+    "loss_guard_max_consecutive_losses": 2.0,
+    "loss_guard_pause_sec": 2700.0,
+    "loss_guard_window_sec": 5400.0,
+    "max_executions_per_window": 1.0
+  },
+  "runtimeControls": {
+    "conformal_max_interval_pct": 0.4,
+    "consensus_threshold": 0.82,
+    "gates_pass_minimum": 9.0,
+    "recall_boost_threshold": 0.85,
+    "recall_veto_threshold": 0.87,
+    "risk_max_pct": 2.0,
+    "risk_min_pct": 0.5,
+    "use_macro_local_alignment_gate": true,
+    "use_memory_ambiguity_penalty": true,
+    "use_opposition_strength_gate": true
+  },
+  "scenarioControls": {
+    "allow_location_sniper_entries": false,
+    "continuous_model_feed_enabled": true,
+    "high_frequency_enabled": true,
+    "scenario_generation_enabled": false,
+    "swing_fallback_enabled": false,
+    "two_candle_execution_allowed": false
+  },
+  "schemaVersion": 2,
+  "structureControls": {
+    "live_max_tracked_candles": 64.0,
+    "smart_money_max_liquidity_pools": 8.0,
+    "support_resistance_max_significant_zones": 8.0,
+    "support_resistance_max_total_zones": 8.0,
+    "support_resistance_max_zones_per_role": 4.0
+  },
+  "timingControls": {
+    "adaptive_timer_enabled": true,
+    "high_frequency_entry_grace_sec": 45.0,
+    "high_frequency_expiry_seconds": 600.0,
+    "high_frequency_horizon_candles": 2.0,
+    "max_capture_interval_sec": 10.0,
+    "min_capture_interval_sec": 0.5,
+    "phoenix_report_interval_sec": 20.0
+  }
+}

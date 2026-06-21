@@ -1338,6 +1338,70 @@
       line-height: 1.35;
     }
 
+    .detail-rows.box-visual-detail {
+      display: grid;
+      gap: 10px;
+      overflow: hidden;
+      padding: 0 14px 14px;
+    }
+
+    .box-crop-card {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .box-crop-frame {
+      position: relative;
+      width: 100%;
+      min-height: 128px;
+      max-height: 250px;
+      overflow: hidden;
+      border: 1px solid rgba(143, 231, 255, 0.22);
+      border-radius: 6px;
+      background: #05090d;
+      contain: strict;
+    }
+
+    .box-crop-frame img {
+      position: absolute;
+      max-width: none;
+      max-height: none;
+      user-select: none;
+      pointer-events: none;
+    }
+
+    .box-crop-frame::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border: 1px solid rgba(242, 200, 102, 0.38);
+      box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.38);
+      pointer-events: none;
+    }
+
+    .box-crop-placeholder {
+      display: grid;
+      min-height: 136px;
+      place-items: center;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 6px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.025);
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .box-crop-summary {
+      margin: 0;
+      color: #e5dfcf;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
     .lower-grid {
       display: grid;
       grid-template-columns: minmax(260px, 0.85fr) minmax(240px, 0.72fr) minmax(320px, 0.95fr) minmax(360px, 1.15fr);
@@ -2070,17 +2134,54 @@
     }
 
     .select-control select {
+      appearance: none;
+      -webkit-appearance: none;
       min-height: 34px;
       min-width: 160px;
       border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: var(--radius);
-      background: rgba(255, 255, 255, 0.045);
+      background-color: rgba(18, 17, 15, 0.98);
+      background-image:
+        linear-gradient(45deg, transparent 50%, #f5f0e4 50%),
+        linear-gradient(135deg, #f5f0e4 50%, transparent 50%);
+      background-position:
+        calc(100% - 15px) 14px,
+        calc(100% - 10px) 14px;
+      background-repeat: no-repeat;
+      background-size: 5px 5px;
       color: var(--text);
+      color-scheme: dark;
       font-family: var(--mono);
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: 0.04em;
-      padding: 7px 9px;
+      padding: 7px 32px 7px 9px;
+    }
+
+    .select-control select::-ms-expand {
+      display: none;
+    }
+
+    .select-control select:focus {
+      outline: 1px solid rgba(143, 231, 255, 0.42);
+      outline-offset: 2px;
+      border-color: rgba(143, 231, 255, 0.35);
+    }
+
+    .select-control select option {
+      background: #11100d;
+      color: #f5f0e4;
+      font-family: var(--mono);
+    }
+
+    .select-control select option:checked {
+      background: #173548;
+      color: #ffffff;
+    }
+
+    .select-control select option:hover {
+      background: #1f2e36;
+      color: #ffffff;
     }
 
     .command-button,
@@ -2309,6 +2410,7 @@
 
   </style>
   <link rel="stylesheet" href="/v1/mobile/window-tracker/assets/floating-windows/overlay_editor.css">
+  <script src="/v1/mobile/window-tracker/assets/floating-windows/model_strength_controls.js?v=model-strength-advanced-v1"></script>
 </head>
 <body>
   <div class="scene-stack" aria-hidden="true">
@@ -2350,10 +2452,6 @@
         <button type="button" class="workspace-link" data-route="chart">Chart</button>
         <button type="button" class="workspace-link" data-route="council">Council</button>
         <button type="button" class="workspace-link" data-route="replay">Replay</button>
-        <button type="button" class="workspace-link" data-route="simulation">Simulation</button>
-        <button type="button" class="workspace-link" data-route="calibration">Calibration</button>
-        <button type="button" class="workspace-link" data-route="diagnostics">Diagnostics</button>
-        <button type="button" class="workspace-link" data-route="settings">Settings</button>
       </nav>
 
       <section class="signal-deck" aria-label="Signal overview">
@@ -2456,10 +2554,6 @@
               <option value="chart">Chart</option>
               <option value="council">Council</option>
               <option value="replay">Replay</option>
-              <option value="simulation">Simulation</option>
-              <option value="calibration">Calibration</option>
-              <option value="diagnostics">Diagnostics</option>
-              <option value="settings">Settings</option>
             </select>
           </label>
           <label class="select-control">
@@ -2480,8 +2574,6 @@
               <option value="broker">Broker</option>
               <option value="two_candle_study">Two-Candle Study</option>
               <option value="lstm_study">LSTM Study</option>
-              <option value="deep_debug">Deep Debug</option>
-              <option value="calibration">Calibration</option>
               <option value="replay">Replay</option>
             </select>
           </label>
@@ -2550,8 +2642,8 @@
                 <button class="layer-toggle active" id="layer-council-decision" type="button" data-layer-toggle="active_council_decision">SMC/Council</button>
                 <button class="layer-toggle active" id="layer-historical-replay" type="button" data-layer-toggle="historical_replay">Replay</button>
                 <button class="layer-toggle active" id="layer-broker-controls" type="button" data-layer-toggle="broker_controls">Broker</button>
-                <button class="layer-toggle" id="layer-diagnostics" type="button" data-layer-toggle="diagnostics">Diagnostics</button>
                 <button class="layer-toggle active" id="overlay-editor-open" type="button" hidden>Editor</button>
+                <button class="layer-toggle active" id="model-strength-open" type="button">Strength</button>
               </div>
             </div>
           </div>
@@ -2901,6 +2993,8 @@
     const SESSION_ID = __SESSION_ID_JSON__;
     const OVERLAY_EDITOR_HARDSAVED_SETTINGS = __OVERLAY_EDITOR_SETTINGS_JSON__;
     const OVERLAY_EDITOR_SAVE_ENDPOINT = "/v1/mobile/window-tracker/floating-windows/overlay-editor/settings";
+    const MODEL_STRENGTH_HARDSAVED_SETTINGS = __MODEL_STRENGTH_SETTINGS_JSON__;
+    const MODEL_STRENGTH_SAVE_ENDPOINT = "/v1/mobile/window-tracker/floating-windows/model-strength/settings";
     const OVERLAY_LAYER_KEYS = Object.freeze([
       "chart_bounds",
       "recent_candles",
@@ -2920,7 +3014,14 @@
     const OVERLAY_EDITOR_SCHEMA_VERSION = 2;
     const OVERLAY_EDITOR_STORAGE_KEY = "phoenixguard.overlay.editor.v2";
     const OVERLAY_EDITOR_QUERY = new URLSearchParams(window.location.search);
+    const MODEL_STRENGTH_QUERY_ACTIVE = (() => {
+      const value = clean(OVERLAY_EDITOR_QUERY.get("model_strength") || OVERLAY_EDITOR_QUERY.get("strength_window") || "", "").toLowerCase();
+      return ["1", "true", "yes", "on"].includes(value);
+    })();
     const OVERLAY_EDITOR_ENABLED = (() => {
+      if (MODEL_STRENGTH_QUERY_ACTIVE) {
+        return false;
+      }
       const value = clean(OVERLAY_EDITOR_QUERY.get("overlay_editor") || OVERLAY_EDITOR_QUERY.get("editor") || "", "").toLowerCase();
       return ["1", "true", "yes", "on"].includes(value);
     })();
@@ -3036,6 +3137,7 @@
       overlayEditor: loadOverlayEditorSettings(),
       overlayEditorDrag: {active: false},
       overlayEditorSaved: true,
+      modelStrength: MODEL_STRENGTH_HARDSAVED_SETTINGS,
       inspectorMode: localStorage.getItem("phoenixguard.inspector.mode") || "compact",
       busy: false,
       liveRefreshBusy: false,
@@ -3091,6 +3193,11 @@
     const STREAM_LIVE_STATE_HYDRATION_MS = 1000;
 
     const $ = (id) => document.getElementById(id);
+    const on = (target, eventName, handler, options) => {
+      if (target && typeof target.addEventListener === "function") {
+        target.addEventListener(eventName, handler, options);
+      }
+    };
 
     const els = {
       trackerToggle: $("tracker-toggle"),
@@ -3162,6 +3269,7 @@
       overlayEditorStatus: $("overlay-editor-status"),
       overlayEditorSaved: $("overlay-editor-saved"),
       overlayEditorOpen: $("overlay-editor-open"),
+      modelStrengthOpen: $("model-strength-open"),
       layerCouncilDecision: $("layer-council-decision"),
       layerHistoricalReplay: $("layer-historical-replay"),
       layerBrokerControls: $("layer-broker-controls"),
@@ -3889,6 +3997,19 @@
       return `${sessionUrl()}/artifacts/latest-${encodeURIComponent(kind)}?v=${version}`;
     }
 
+    function latestArtifactUrl(kind, session = state.session || {}) {
+      const version = encodeURIComponent(artifactFrameKey(kind, session));
+      return `${sessionUrl()}/artifacts/latest-${encodeURIComponent(kind)}?v=${version}`;
+    }
+
+    function predictionArtifactUrl(kind, session = state.session || {}) {
+      const normalizedKind = String(kind || "").toLowerCase();
+      if (normalizedKind === "chart") {
+        return latestArtifactUrl("chart", session);
+      }
+      return artifactUrl(kind, session);
+    }
+
     function artifactFailureKey(kind, session = state.session || {}) {
       return `${kind}|${artifactFrameKey(kind, session)}`;
     }
@@ -4065,6 +4186,35 @@
       }
       image.classList.remove("visible");
       renderSurface();
+    }
+
+    function showPredictionImage(image, kind, session = state.session || {}) {
+      if (!image || !kind) {
+        return false;
+      }
+      image.dataset.predictionArtifactKind = kind;
+      image.dataset.predictionFrameKey = artifactFrameKey(kind, session);
+      setImageSource(image, predictionArtifactUrl(kind, session));
+      image.classList.remove("prediction-img-hidden");
+      image.classList.add("prediction-img-visible");
+      return true;
+    }
+
+    function hidePredictionImage(image) {
+      if (!image) {
+        return;
+      }
+      image.classList.remove("prediction-img-visible");
+      image.classList.add("prediction-img-hidden");
+    }
+
+    function handlePredictionImageError(image) {
+      const kind = clean(image && image.dataset ? image.dataset.predictionArtifactKind : "", "");
+      const frameKey = clean(image && image.dataset ? image.dataset.predictionFrameKey : "", "");
+      if (kind && frameKey) {
+        state.surface.failedArtifactKeys.add(`${kind}|${frameKey}`);
+      }
+      hidePredictionImage(image);
     }
 
     function backendRenderableOverlayCount(session = {}) {
@@ -4634,6 +4784,42 @@
       }
     }
 
+    let modelStrengthControls = null;
+
+    function initializeModelStrengthControls() {
+      const factory = window.PhoenixGuardModelStrengthControls;
+      const openFallback = () => {
+        const url = `/v1/mobile/window-tracker/floating-windows/model-strength?session_id=${encodeURIComponent(SESSION_ID)}`;
+        window.open(url, "phoenixguard_model_strength", "width=382,height=640,resizable=yes,scrollbars=no,noopener");
+      };
+      if (!factory || typeof factory.createDashboardBridge !== "function") {
+        if (els.modelStrengthOpen) {
+          els.modelStrengthOpen.hidden = false;
+          on(els.modelStrengthOpen, "click", openFallback);
+        }
+        return null;
+      }
+      modelStrengthControls = factory.createDashboardBridge({
+        document,
+        sessionId: SESSION_ID,
+        hardSavedSettings: MODEL_STRENGTH_HARDSAVED_SETTINGS,
+        saveEndpoint: MODEL_STRENGTH_SAVE_ENDPOINT,
+        onSettingsChange: (settings) => {
+          state.modelStrength = settings || {};
+          if (state.surface) {
+            state.surface.lastStaticLayerHash = "";
+          }
+          if (els.hotspotLayer) {
+            renderHotspots();
+          }
+        },
+      });
+      if (MODEL_STRENGTH_QUERY_ACTIVE && modelStrengthControls && typeof modelStrengthControls.open === "function") {
+        window.setTimeout(() => modelStrengthControls.open(), 350);
+      }
+      return modelStrengthControls;
+    }
+
     function percent(value, fallback = 0) {
       const number = Number(value);
       if (!Number.isFinite(number)) {
@@ -4999,10 +5185,6 @@
           `Models ${clean((telemetry.model_health || {}).awake_count || (telemetry.health || {}).awake_count, "--")}`,
         ].join(" | ");
       }
-    }
-
-    function objectOrEmpty(value) {
-      return value && typeof value === "object" && !Array.isArray(value) ? value : {};
     }
 
     function renderRealityTelemetry(payload = {}, telemetry = {}) {
@@ -5694,16 +5876,20 @@
       applyInspectorMode(next);
     }
 
-    function setInspector({eyebrow, title, stateLabel, summary, rows = [], stateTone = "hold"}) {
+    function setInspector({eyebrow, title, stateLabel, summary, rows = [], stateTone = "hold", contentHtml = "", contentClass = "", hideSummary = false}) {
       applyInspectorMode(state.inspectorMode);
       els.inspectorPanel.dataset.tone = stateTone;
       els.inspectorEyebrow.textContent = clean(eyebrow, "Detail");
       els.inspectorTitle.textContent = clean(title, "Selected Detail");
       els.inspectorState.textContent = clean(stateLabel, "Live");
-      els.inspectorSummary.textContent = clean(summary, "No detail available yet.");
-      els.inspectorRows.innerHTML = rows.length
-        ? rows.map((item) => row(item[0], item[1], item[2])).join("")
-        : row("State", "Waiting for live tracker data.");
+      els.inspectorSummary.hidden = Boolean(hideSummary);
+      els.inspectorSummary.textContent = hideSummary ? "" : clean(summary, "No detail available yet.");
+      els.inspectorRows.className = `detail-rows ${clean(contentClass, "")}`.trim();
+      els.inspectorRows.innerHTML = contentHtml
+        ? contentHtml
+        : rows.length
+          ? rows.map((item) => row(item[0], item[1], item[2])).join("")
+          : row("State", "Waiting for live tracker data.");
       els.inspectorUpdated.textContent = new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
     }
 
@@ -6466,6 +6652,111 @@
       });
     }
 
+    function expandPercentCrop(bounds, image) {
+      if (!bounds || !image) {
+        return null;
+      }
+      const imageWidth = Number(image.naturalWidth || 0);
+      const imageHeight = Number(image.naturalHeight || 0);
+      const rawLeft = Number(bounds.left || 0);
+      const rawTop = Number(bounds.top || 0);
+      const rawWidth = Number(bounds.width || 0);
+      const rawHeight = Number(bounds.height || 0);
+      if (!imageWidth || !imageHeight || ![rawLeft, rawTop, rawWidth, rawHeight].every(Number.isFinite) || rawWidth <= 0 || rawHeight <= 0) {
+        return null;
+      }
+      const padX = Math.max(0.8, Math.min(5.5, rawWidth * 0.10));
+      const padY = Math.max(0.8, Math.min(5.5, rawHeight * 0.12));
+      let left = Math.max(0, rawLeft - padX);
+      let top = Math.max(0, rawTop - padY);
+      let right = Math.min(100, rawLeft + rawWidth + padX);
+      let bottom = Math.min(100, rawTop + rawHeight + padY);
+      let width = Math.max(0.5, right - left);
+      let height = Math.max(0.5, bottom - top);
+      const centerX = left + width / 2;
+      const centerY = top + height / 2;
+      const pixelAspect = () => (width * imageWidth) / Math.max(1, height * imageHeight);
+      const minAspect = 0.88;
+      const maxAspect = 2.25;
+      const aspect = pixelAspect();
+      if (aspect < minAspect) {
+        width = Math.min(100, (minAspect * height * imageHeight) / imageWidth);
+        left = Math.max(0, Math.min(100 - width, centerX - width / 2));
+      } else if (aspect > maxAspect) {
+        height = Math.min(100, (width * imageWidth) / (maxAspect * imageHeight));
+        top = Math.max(0, Math.min(100 - height, centerY - height / 2));
+      }
+      right = Math.min(100, left + width);
+      bottom = Math.min(100, top + height);
+      return {
+        left,
+        top,
+        width: Math.max(0.5, right - left),
+        height: Math.max(0.5, bottom - top),
+      };
+    }
+
+    function boxAbstract(box, context) {
+      const story = clean(box.story, "");
+      const candleCount = clean(box.candle_count, "");
+      const role = clean(box.role || box.box_type || box.kind, "");
+      const readableLayer = clean(box._layer, "structure").replace(/_/g, " ");
+      const side = clean(box.direction, context.direction).toUpperCase();
+      const candlePhrase = candleCount && candleCount !== "--"
+        ? ` across ${candleCount} candle${String(candleCount) === "1" ? "" : "s"}`
+        : "";
+      if (context.isExecution) {
+        return "Locked broker control crop. Keep it visible and aligned before any live execution path can use it.";
+      }
+      if (context.isHistory) {
+        return story || `${side} historical pressure${candlePhrase} inside this replay leg.`;
+      }
+      if (context.isMemoryFuture) {
+        return `${side} memory projection zone from the current best-fit replay path.`;
+      }
+      if (box._micro) {
+        return `${side} ${clean(role, "micro")} window inside ${clean(box.parent_label, "the selected structure")}.`;
+      }
+      if (context.isFuture) {
+        return `${side} planned zone projected from the current candle path and visible history.`;
+      }
+      const thesis = clean(context.signal.action, "HOLD").toUpperCase();
+      const structure = clean(role || readableLayer, "overlay region");
+      const globalLocal = `${clean(context.tracking.global_direction, "HOLD")}/${clean(context.tracking.local_direction, "HOLD")}`;
+      return `${structure} crop inside the live chart read. Current thesis ${thesis}; global/local ${globalLocal}.`;
+    }
+
+    function boxCropContentHtml(box, tracking, abstractText) {
+      const image = activeSurfaceImage();
+      const source = clean(image && (image.currentSrc || image.src || image.getAttribute("src")), "");
+      const resolved = image && surfaceImageReady(image) ? resolveBoxBounds(box, tracking, image) : null;
+      const crop = resolved ? expandPercentCrop(resolved, image) : null;
+      if (!source || !crop || !image) {
+        return `
+          <div class="box-crop-card">
+            <div class="box-crop-placeholder">Surface crop pending</div>
+            <p class="box-crop-summary">${escapeHtml(abstractText)}</p>
+          </div>
+        `;
+      }
+      const imageWidth = Number(image.naturalWidth || 1);
+      const imageHeight = Number(image.naturalHeight || 1);
+      const cropPixelWidth = Math.max(1, (crop.width / 100) * imageWidth);
+      const cropPixelHeight = Math.max(1, (crop.height / 100) * imageHeight);
+      const imgWidth = 10000 / crop.width;
+      const imgHeight = 10000 / crop.height;
+      const imgLeft = -(crop.left / crop.width) * 100;
+      const imgTop = -(crop.top / crop.height) * 100;
+      return `
+        <div class="box-crop-card">
+          <div class="box-crop-frame" style="aspect-ratio:${cropPixelWidth.toFixed(2)} / ${cropPixelHeight.toFixed(2)};">
+            <img src="${escapeHtml(source)}" alt="" aria-hidden="true" style="width:${imgWidth.toFixed(4)}%;height:${imgHeight.toFixed(4)}%;left:${imgLeft.toFixed(4)}%;top:${imgTop.toFixed(4)}%;">
+          </div>
+          <p class="box-crop-summary">${escapeHtml(abstractText)}</p>
+        </div>
+      `;
+    }
+
     function inspectBox(index, session) {
       const signal = session.latest_signal || {};
       const tracking = session.tracking_summary || {};
@@ -6485,79 +6776,30 @@
       const isFuture = box._layer === "trigger_zones" || key.includes("future");
       const isMemoryFuture = key.includes("memory_");
       const isExecution = box._layer === "broker_controls";
-      const control = tracking.global_local_control || signal.global_local_control || {};
-      const mapTiming = tracking.map_timing || signal.map_timing || {};
-      const executionTiming = tracking.execution_timing || signal.execution_timing || (session.broker_execution_state || {}).execution_timing || {};
-      const opposingZone = executionTiming.opposing_force_zone || {};
-      const entryAreaZone = executionTiming.entry_area_zone || {};
-      const plan = box.sniper_target_plan || {};
-      const executionState = session.broker_execution_state || {};
-      const lastResult = executionState.last_result || {};
-      const expiryVerification = lastResult.expiry_verification || {};
-      const tradeVerification = lastResult.trade_verification || {};
-      const smc = box.smart_money || {};
-      const entryLevel = smc.entry_level || {};
-      const targetLevel = smc.target_level || {};
+      const abstractText = boxAbstract(box, {
+        isExecution,
+        isHistory,
+        isMemoryFuture,
+        isFuture,
+        direction,
+        signal,
+        tracking,
+      });
       setInspector({
         eyebrow: isExecution ? "Execution Lock" : isHistory ? "History Leg" : isMemoryFuture ? "Memory Projection" : isFuture ? "Future Zone" : "Overlay Box",
         title: label,
         stateLabel: clean(direction, "HOLD"),
         stateTone: tone(direction),
-        summary: isExecution
-          ? `This locked broker control is part of the execution path. It must stay visible and owned by the locked window before any live click is allowed.`
-          : isHistory
-          ? clean(box.story, "This historical leg is part of the left-to-right market story on the selected plane.")
-          : isMemoryFuture
-          ? "This future zone comes from the active PhoenixGuard memory-fit projection, not from the generic placeholder projection layer."
-          : box._micro
-          ? `This is the ${clean(box.role, "micro")} window inside ${clean(box.parent_label, "the active object box")}. PhoenixGuard separates sniper watch, trigger confirmation, target, and invalidation from the same detected structure.`
-          : isFuture
-          ? `This future zone is projected from the full visible history and current candle behavior. It is a planned area, not a guaranteed outcome.`
-          : `This overlay region is part of the live chart structure read. The PhoenixGuard engine uses it to relate surface context, candle behavior, and the current ${clean(signal.action, "HOLD")} thesis.`,
-        rows: [
-          ["Key", clean(box.key, label)],
-          ["Layer", clean(box._layer, "structure")],
-          ["Bounds", Array.isArray(box.bbox) ? box.bbox.map((value) => Number(value).toFixed(2)).join(", ") : "--"],
-          ["Center", Array.isArray(box.center) ? box.center.map((value) => Number(value).toFixed(0)).join(", ") : "--"],
-          ["Source", clean(box.source, "--")],
-          ["Locked", box.locked == null ? "--" : String(Boolean(box.locked))],
-          ["Visible", box.visible == null ? "--" : String(Boolean(box.visible))],
-          ["Leg Direction", clean(box.direction, direction)],
-          ["Leg Candles", clean(box.candle_count, "--")],
-          ["Role", clean(box.role || box.box_type || box.kind, "--")],
-          ["Parent", clean(box.parent_label, "--")],
-          ["Sniper", Array.isArray(box.sniper_window || plan.sniper) ? (box.sniper_window || plan.sniper).map((value) => Number(value).toFixed(0)).join(", ") : "--"],
-          ["Trigger", Array.isArray(box.trigger_window || plan.trigger) ? (box.trigger_window || plan.trigger).map((value) => Number(value).toFixed(0)).join(", ") : "--"],
-          ["Target", Array.isArray(box.target_window || plan.target || box.target_bbox) ? (box.target_window || plan.target || box.target_bbox).map((value) => Number(value).toFixed(0)).join(", ") : "--"],
-          ["Invalidation", Number.isFinite(Number(box.invalidation_y || plan.invalidation_y)) ? Number(box.invalidation_y || plan.invalidation_y).toFixed(0) : "--"],
-          ["Control", `${clean(box.control_scope || control.owner, "--")} ${clean(box.control_direction || control.direction, "HOLD")} | ${formatCandles(box.control_hold_candles || control.estimated_control_candles)}`],
-          ["Map Clock", mapTiming.target_reached ? "target complete" : `sniper ${formatCandles(mapTiming.candles_remaining_in_sniper_zone)} | target ${formatCandles(mapTiming.candles_to_target_from_now)}`],
-          ["Timing Class", `${clean(executionTiming.timing_class, "--")} | ${formatSeconds(executionTiming.recommended_expiry_seconds || executionTiming.expiry_seconds || 0)}`],
-          ["Entry Area", `${clean(executionTiming.history_area_label, "balanced")} | score ${Number(executionTiming.entry_area_score || 0).toFixed(2)} | ${clean(entryAreaZone.label || entryAreaZone.role, "--")}`],
-          ["Opposing Force", `${clean(opposingZone.label || opposingZone.role, "--")} | risk ${Number(executionTiming.opposing_force_risk || 0).toFixed(2)} | extreme ${Number(executionTiming.global_extreme_risk || 0).toFixed(2)}`],
-          ["SMC Score", smc.score == null ? (box.smc_score == null ? "--" : Number(box.smc_score || 0).toFixed(2)) : Number(smc.score || 0).toFixed(2)],
-          ["SMC Tags", Array.isArray(smc.tags || box.smc_tags) && (smc.tags || box.smc_tags).length ? (smc.tags || box.smc_tags).join(", ") : "--"],
-          ["Entry Level", `${clean(entryLevel.label, "--")} | ${Number(entryLevel.significance_score || entryLevel.confidence || 0).toFixed(2)}`],
-          ["Target Level", `${clean(targetLevel.label, "--")} | ${Number(targetLevel.significance_score || targetLevel.confidence || 0).toFixed(2)}`],
-          ["SMC Summary", clean(smc.summary, "--")],
-          ["Expiry", formatSeconds(mapTiming.execution_duration_seconds || signal.expiry_seconds || 0)],
-          ["Net Move", Number(box.net_move || 0).toFixed(3)],
-          ["Confidence", box.confidence == null ? "--" : Number(box.confidence || 0).toFixed(2)],
-          ["Last Click", Array.isArray(lastResult.button_point) ? lastResult.button_point.join(", ") : "--"],
-          ["Timer Verify", clean(expiryVerification.status, "--")],
-          ["Trade Verify", clean(tradeVerification.status, "--")],
-          ["Global", clean(tracking.global_direction, "HOLD")],
-          ["Local", clean(tracking.local_direction, "HOLD")],
-          ["Impulse", clean(tracking.impulse_direction, "HOLD")],
-          ["Candles", clean(tracking.visible_candle_count, "0")],
-          ["Summary", clean(signal.summary)],
-        ],
+        summary: abstractText,
+        contentHtml: boxCropContentHtml(box, tracking, abstractText),
+        contentClass: "box-visual-detail",
+        hideSummary: true,
       });
     }
 
     function normalizeRoute(raw) {
       const route = String(raw || "").trim().toLowerCase().replace(/[^a-z]/g, "");
-      return ["live", "chart", "council", "replay", "simulation", "calibration", "diagnostics", "settings"].includes(route)
+      return ["live", "chart", "council", "replay"].includes(route)
         ? route
         : "live";
     }
@@ -6592,20 +6834,16 @@
         els.workspaceSelect.value = nextRoute;
       }
       const chartOnly = nextRoute === "chart";
-      const diagnosticsHeavy = ["replay", "simulation", "diagnostics", "settings"].includes(nextRoute);
-      document.querySelector(".signal-deck")?.classList.toggle("route-hidden", nextRoute === "live" || chartOnly || nextRoute === "settings");
-      document.querySelector(".kernel-deck")?.classList.toggle("route-hidden", nextRoute !== "diagnostics");
+      const diagnosticsHeavy = nextRoute === "replay";
+      document.querySelector(".signal-deck")?.classList.toggle("route-hidden", nextRoute === "live" || chartOnly);
+      document.querySelector(".kernel-deck")?.classList.toggle("route-hidden", true);
       if (els.bottomDrawer) {
-        els.bottomDrawer.open = diagnosticsHeavy || nextRoute === "calibration";
+        els.bottomDrawer.open = diagnosticsHeavy;
       }
       if (nextRoute === "chart") {
         applyOverlayPreset("active_context");
-      } else if (nextRoute === "calibration") {
-        applyOverlayPreset("calibration");
       } else if (nextRoute === "replay") {
         applyOverlayPreset("replay");
-      } else if (nextRoute === "diagnostics") {
-        applyOverlayPreset("deep_debug");
       }
       if (updateUrl && window.history && window.history.pushState) {
         window.history.pushState({route: nextRoute}, "", routeUrl(nextRoute));
@@ -6718,30 +6956,21 @@
       });
 
       if (hasChart) {
-        setImageSource(inputImg, artifactUrl("chart", session));
-        inputImg.classList.remove("prediction-img-hidden");
-        inputImg.classList.add("prediction-img-visible");
+        showPredictionImage(inputImg, "chart", session);
       } else {
-        inputImg.classList.remove("prediction-img-visible");
-        inputImg.classList.add("prediction-img-hidden");
+        hidePredictionImage(inputImg);
       }
 
       if (hasMemory) {
-        setImageSource(memoryImg, artifactUrl("memory-reference", session));
-        memoryImg.classList.remove("prediction-img-hidden");
-        memoryImg.classList.add("prediction-img-visible");
+        showPredictionImage(memoryImg, "memory-reference", session);
       } else {
-        memoryImg.classList.remove("prediction-img-visible");
-        memoryImg.classList.add("prediction-img-hidden");
+        hidePredictionImage(memoryImg);
       }
 
       if (hasProjection) {
-        setImageSource(overlayImg, artifactUrl("projection", session));
-        overlayImg.classList.remove("prediction-img-hidden");
-        overlayImg.classList.add("prediction-img-visible");
+        showPredictionImage(overlayImg, "projection", session);
       } else {
-        overlayImg.classList.remove("prediction-img-visible");
-        overlayImg.classList.add("prediction-img-hidden");
+        hidePredictionImage(overlayImg);
       }
 
       const effectiveModeLabel = pendingMode ? pendingLabel : modeLabel;
@@ -7151,6 +7380,39 @@
       span.dataset.labelLane = clean(box.label_lane || box.label_anchor, "");
     }
 
+    function overlayConfidenceValue(box = {}) {
+      const style = objectOrEmpty(box.style);
+      const candidates = [
+        box.overlay_confidence,
+        box.confidence,
+        box.truth_score,
+        box.score,
+        style.confidence,
+        style.truth_score,
+      ];
+      for (const candidate of candidates) {
+        const number = Number(candidate);
+        if (Number.isFinite(number)) {
+          return Math.max(0, Math.min(1, number));
+        }
+      }
+      return null;
+    }
+
+    function overlayPassesModelStrengthFloor(box = {}, layer = "") {
+      const normalizedLayer = clean(layer, "").toLowerCase();
+      if (["broker_controls", "chart_bounds"].includes(normalizedLayer)) {
+        return true;
+      }
+      const settings = state.modelStrength || {};
+      const floor = boundedSetting(settings.overlayConfidenceFloor, 0, 0, 1);
+      if (floor <= 0) {
+        return true;
+      }
+      const confidence = overlayConfidenceValue(box);
+      return confidence == null || confidence >= floor;
+    }
+
     function rawLinePoints(box = {}) {
       const source = Array.isArray(box.line_points)
         ? box.line_points
@@ -7361,6 +7623,7 @@
         state.mode,
         Boolean(state.surfaceUsesFullOverlay),
         state.surface.visibleFrameKey || "",
+        boundedSetting((state.modelStrength || {}).overlayConfidenceFloor, 0, 0, 1).toFixed(3),
         overlayCatchingUp ? "catching-up" : "ready",
       ].join(":");
       const reuseStaticLayers = Boolean(overlayGeometry.static_layer_hash) && staticSignature === state.surface.lastStaticLayerHash;
@@ -7404,6 +7667,9 @@
           }
         }
         if (state.layers[layer] === false) {
+          return;
+        }
+        if (!overlayPassesModelStrengthFloor(box, layer)) {
           return;
         }
         const label = clean(box.label || box.key, `Box ${index + 1}`);
@@ -8040,10 +8306,7 @@
         {id: "open-chart", title: "Open Chart", hint: "Full surface intelligence", run: () => applyRoute("chart")},
         {id: "open-council", title: "Open Council", hint: "Model Council summary", run: () => applyRoute("council")},
         {id: "open-replay", title: "Open Replay", hint: "Forensic drawer", run: () => applyRoute("replay")},
-        {id: "open-calibration", title: "Open Calibration", hint: "Broker control validation", run: () => applyRoute("calibration")},
-        {id: "open-diagnostics", title: "Open Diagnostics", hint: "Runtime health", run: () => applyRoute("diagnostics")},
         {id: "clean-live", title: "Toggle Clean Live", hint: "Active objects only", run: () => applyOverlayPreset("clean_live")},
-        {id: "deep-debug", title: "Show Deep Debug", hint: "All overlay layers", run: () => applyOverlayPreset("deep_debug")},
         {id: "clear-focus", title: "Clear Focus", hint: "Reset broker focus region", run: () => postAction(`${sessionUrl()}/focus-region`, null, "DELETE")},
         {id: "paper-mode", title: "Paper Session", hint: "Keep execution shadowed", run: () => patchControls({live_execution_enabled: false, execution_mode: "shadow"})},
         {id: "export-packet", title: "Export Packet", hint: "Open latest packet JSON", run: () => window.open(`/v1/mobile/model-council/sessions/${encodeURIComponent(SESSION_ID)}/execution/latest`, "_blank", "noopener")},
@@ -8138,27 +8401,27 @@
     }
 
     document.querySelectorAll("[data-route]").forEach((button) => {
-      button.addEventListener("click", () => applyRoute(button.getAttribute("data-route") || "live"));
+      on(button, "click", () => applyRoute(button.getAttribute("data-route") || "live"));
     });
-    els.workspaceSelect.addEventListener("change", () => applyRoute(els.workspaceSelect.value));
-    els.overlayModeSelect.addEventListener("change", () => applyOverlayPreset(els.overlayModeSelect.value));
+    on(els.workspaceSelect, "change", () => applyRoute(els.workspaceSelect.value));
+    on(els.overlayModeSelect, "change", () => applyOverlayPreset(els.overlayModeSelect.value));
     if (els.inspectorToggle) {
-      els.inspectorToggle.addEventListener("click", cycleInspectorMode);
+      on(els.inspectorToggle, "click", cycleInspectorMode);
       applyInspectorMode(state.inspectorMode);
     }
-    els.commandPaletteButton.addEventListener("click", openCommandPalette);
-    els.commandPaletteInput.addEventListener("input", () => {
+    on(els.commandPaletteButton, "click", openCommandPalette);
+    on(els.commandPaletteInput, "input", () => {
       state.commandPaletteIndex = 0;
       renderCommandPalette();
     });
-    els.commandPaletteList.addEventListener("click", (event) => {
+    on(els.commandPaletteList, "click", (event) => {
       const target = event.target instanceof Element ? event.target.closest("[data-command]") : null;
       if (target) {
         executeCommand(target.getAttribute("data-command") || "");
       }
     });
-    els.commandPaletteInput.addEventListener("keydown", (event) => {
-      const items = Array.from(els.commandPaletteList.querySelectorAll("[data-command]"));
+    on(els.commandPaletteInput, "keydown", (event) => {
+      const items = els.commandPaletteList ? Array.from(els.commandPaletteList.querySelectorAll("[data-command]")) : [];
       if (event.key === "ArrowDown") {
         event.preventDefault();
         state.commandPaletteIndex = Math.min(state.commandPaletteIndex + 1, Math.max(0, items.length - 1));
@@ -8169,7 +8432,7 @@
         renderCommandPalette();
       } else if (event.key === "Enter") {
         event.preventDefault();
-        const item = els.commandPaletteList.querySelectorAll("[data-command]")[state.commandPaletteIndex];
+        const item = items[state.commandPaletteIndex];
         if (item) {
           executeCommand(item.getAttribute("data-command") || "");
         }
@@ -8177,95 +8440,91 @@
         closeCommandPalette();
       }
     });
-    els.commandPaletteOverlay.addEventListener("click", (event) => {
+    on(els.commandPaletteOverlay, "click", (event) => {
       if (event.target === els.commandPaletteOverlay) {
         closeCommandPalette();
       }
     });
-    window.addEventListener("popstate", () => applyRoute(routeFromLocation(), false));
+    on(window, "popstate", () => applyRoute(routeFromLocation(), false));
 
-    els.modeOverlay.addEventListener("click", () => setMode("overlay"));
-    els.modeRaw.addEventListener("click", () => setMode("raw"));
-    els.zoomOut.addEventListener("click", () => setSurfaceZoom(state.surface.zoom - 0.1));
-    els.zoomIn.addEventListener("click", () => setSurfaceZoom(state.surface.zoom + 0.1));
-    els.zoomFit.addEventListener("click", fitSurface);
-    els.zoomActual.addEventListener("click", () => {
+    on(els.modeOverlay, "click", () => setMode("overlay"));
+    on(els.modeRaw, "click", () => setMode("raw"));
+    on(els.zoomOut, "click", () => setSurfaceZoom(state.surface.zoom - 0.1));
+    on(els.zoomIn, "click", () => setSurfaceZoom(state.surface.zoom + 0.1));
+    on(els.zoomFit, "click", fitSurface);
+    on(els.zoomActual, "click", () => {
       setSurfaceZoom(1);
       centerSurface();
     });
-    els.panCenter.addEventListener("click", centerSurface);
-    els.zoomSlider.addEventListener("input", () => setSurfaceZoom(Number(els.zoomSlider.value)));
-    els.layerChartBounds.addEventListener("click", () => toggleLayer("chart_bounds"));
-    els.layerRecentCandles.addEventListener("click", () => {
+    on(els.panCenter, "click", centerSurface);
+    on(els.zoomSlider, "input", () => setSurfaceZoom(Number(els.zoomSlider.value)));
+    on(els.layerChartBounds, "click", () => toggleLayer("chart_bounds"));
+    on(els.layerRecentCandles, "click", () => {
       if (state.overlayMode === "candles") {
         toggleLayer("recent_candles");
       } else {
         applyOverlayPreset("candles");
       }
     });
-    els.layerMajorSwings.addEventListener("click", () => toggleLayer("major_swings"));
-    els.layerLocalSwings.addEventListener("click", () => toggleLayer("local_swings"));
-    els.layerSupplyDemand.addEventListener("click", () => toggleLayer("supply_demand"));
-    els.layerTrendlines.addEventListener("click", () => toggleLayer("trendlines"));
-    els.layerTriggerZones.addEventListener("click", () => toggleLayer("trigger_zones"));
-    if (els.overlayTwoCandle) {
-      els.overlayTwoCandle.addEventListener("click", () => applyOverlayPreset("two_candle_study"));
-    }
-    if (els.overlayLstm) {
-      els.overlayLstm.addEventListener("click", () => applyOverlayPreset("lstm_study"));
-    }
-    els.layerCouncilDecision.addEventListener("click", () => toggleLayer("active_council_decision"));
-    els.layerHistoricalReplay.addEventListener("click", () => toggleLayer("historical_replay"));
-    els.layerBrokerControls.addEventListener("click", () => toggleLayer("broker_controls"));
-    els.layerDiagnostics.addEventListener("click", () => toggleLayer("diagnostics"));
-    els.refreshNow.addEventListener("click", () => refreshSession());
-    els.captureNow.addEventListener("click", () => postAction(`${sessionUrl()}/capture-once`));
-    els.predictNow.addEventListener("click", () => postAction(`${sessionUrl()}/predict`));
-    els.showFuture.addEventListener("click", () => postAction(`${sessionUrl()}/show-future`));
-    els.demoTrade.addEventListener("click", () => postAction(`${sessionUrl()}/demo-random-trade`, {expiry_seconds: 180}));
-    els.executionToggle.addEventListener("click", () => {
+    on(els.layerMajorSwings, "click", () => toggleLayer("major_swings"));
+    on(els.layerLocalSwings, "click", () => toggleLayer("local_swings"));
+    on(els.layerSupplyDemand, "click", () => toggleLayer("supply_demand"));
+    on(els.layerTrendlines, "click", () => toggleLayer("trendlines"));
+    on(els.layerTriggerZones, "click", () => toggleLayer("trigger_zones"));
+    on(els.overlayTwoCandle, "click", () => applyOverlayPreset("two_candle_study"));
+    on(els.overlayLstm, "click", () => applyOverlayPreset("lstm_study"));
+    on(els.layerCouncilDecision, "click", () => toggleLayer("active_council_decision"));
+    on(els.layerHistoricalReplay, "click", () => toggleLayer("historical_replay"));
+    on(els.layerBrokerControls, "click", () => toggleLayer("broker_controls"));
+    on(els.layerDiagnostics, "click", () => toggleLayer("diagnostics"));
+    on(els.refreshNow, "click", () => refreshSession());
+    on(els.captureNow, "click", () => postAction(`${sessionUrl()}/capture-once`));
+    on(els.predictNow, "click", () => postAction(`${sessionUrl()}/predict`));
+    on(els.showFuture, "click", () => postAction(`${sessionUrl()}/show-future`));
+    on(els.demoTrade, "click", () => postAction(`${sessionUrl()}/demo-random-trade`, {expiry_seconds: 180}));
+    on(els.executionToggle, "click", () => {
       const controls = (state.session && state.session.execution_controls) || {};
       patchControls({live_execution_enabled: !Boolean(controls.live_execution_enabled)});
     });
-    els.executionModeToggle.addEventListener("click", () => {
+    on(els.executionModeToggle, "click", () => {
       const controls = (state.session && state.session.execution_controls) || {};
       const nextMode = clean(controls.execution_mode, "shadow").toLowerCase() === "live" ? "shadow" : "live";
       patchControls({execution_mode: nextMode});
     });
-    els.emergencyStop.addEventListener("click", () => postAction(`${sessionUrl()}/emergency-stop`));
-    els.counterScalpToggle.addEventListener("click", () => {
+    on(els.emergencyStop, "click", () => postAction(`${sessionUrl()}/emergency-stop`));
+    on(els.counterScalpToggle, "click", () => {
       const controls = (state.session && state.session.execution_controls) || {};
       patchControls({allow_countertrend_scalp: controls.allow_countertrend_scalp !== true});
     });
-    els.scenarioToggle.addEventListener("click", () => {
+    on(els.scenarioToggle, "click", () => {
       const controls = (state.session && state.session.execution_controls) || {};
       patchControls({scenario_generation_enabled: controls.scenario_generation_enabled !== true});
     });
-    els.memoryGateToggle.addEventListener("click", () => {
+    on(els.memoryGateToggle, "click", () => {
       const controls = (state.session && state.session.execution_controls) || {};
       patchControls({require_memory_projection: controls.require_memory_projection === false});
     });
-    els.identityGateToggle.addEventListener("click", () => {
+    on(els.identityGateToggle, "click", () => {
       const controls = (state.session && state.session.execution_controls) || {};
       patchControls({require_market_identity: controls.require_market_identity === false});
     });
-    els.autoMemoryToggle.addEventListener("click", () => {
+    on(els.autoMemoryToggle, "click", () => {
       const controls = (state.session && state.session.execution_controls) || {};
       patchControls({auto_memory_projection: controls.auto_memory_projection === false});
     });
-    els.adaptiveTimerToggle.addEventListener("click", () => {
+    on(els.adaptiveTimerToggle, "click", () => {
       const controls = (state.session && state.session.execution_controls) || {};
       patchControls({adaptive_timer_enabled: controls.adaptive_timer_enabled === false});
     });
-    els.focusArm.addEventListener("click", () => postAction(`${sessionUrl()}/focus-region/arm`));
-    els.focusClear.addEventListener("click", () => postAction(`${sessionUrl()}/focus-region`, null, "DELETE"));
-    els.trackerToggle.addEventListener("click", () => {
+    on(els.focusArm, "click", () => postAction(`${sessionUrl()}/focus-region/arm`));
+    on(els.focusClear, "click", () => postAction(`${sessionUrl()}/focus-region`, null, "DELETE"));
+    on(els.trackerToggle, "click", () => {
       const running = Boolean(state.session && state.session.tracking_enabled);
       const path = running ? `${sessionUrl()}/stop` : `${sessionUrl()}/start`;
       postAction(path);
     });
 
-    window.addEventListener("keydown", (event) => {
+    on(window, "keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && String(event.key).toLowerCase() === "k") {
         event.preventDefault();
         if (state.commandPaletteOpen) {
@@ -8285,33 +8544,33 @@
       }
     });
 
-    els.signalCard.addEventListener("click", () => select("signal"));
-    els.kernelStoryCard.addEventListener("click", () => select("kernel"));
-    els.kernelBiasTile.addEventListener("click", () => select("kernel", "bias"));
-    els.kernelCandleTile.addEventListener("click", () => select("kernel", "candle"));
-    els.kernelHfTile.addEventListener("click", () => select("kernel", "hf"));
-    els.kernelModeTile.addEventListener("click", () => select("kernel", "mode"));
-    els.kernelTriggerTile.addEventListener("click", () => select("kernel", "trigger"));
-    els.kernelTargetTile.addEventListener("click", () => select("kernel", "target"));
-    els.kernelStaleTile.addEventListener("click", () => select("kernel", "stale"));
-    els.kernelEventTile.addEventListener("click", () => select("kernel", "event"));
-    els.sessionChip.addEventListener("click", () => select("session"));
-    els.metricStatusTile.addEventListener("click", () => select("metric", "status"));
-    els.metricNextTile.addEventListener("click", () => select("metric", "next"));
-    els.metricFocusTile.addEventListener("click", () => select("metric", "focus"));
-    els.metricCapturesTile.addEventListener("click", () => select("metric", "captures"));
-    els.studyGlobalCell.addEventListener("click", () => select("study", "global"));
-    els.studyLocalCell.addEventListener("click", () => select("study", "local"));
-    els.studyImpulseCell.addEventListener("click", () => select("study", "impulse"));
-    els.studySmcCell.addEventListener("click", () => select("study", "smc"));
-    els.studySrCell.addEventListener("click", () => select("study", "sr"));
-    els.studyCandlesCell.addEventListener("click", () => select("study", "candles"));
-    els.focusWindowCell.addEventListener("click", () => select("focus", "window"));
-    els.focusTimeframeCell.addEventListener("click", () => select("focus", "timeframe"));
-    els.focusSelectorCell.addEventListener("click", () => select("focus", "selector"));
-    els.focusExecutionCell.addEventListener("click", () => select("focus", "execution"));
-    els.focusErrorCell.addEventListener("click", () => select("focus", "error"));
-    els.signalPills.addEventListener("click", (event) => {
+    on(els.signalCard, "click", () => select("signal"));
+    on(els.kernelStoryCard, "click", () => select("kernel"));
+    on(els.kernelBiasTile, "click", () => select("kernel", "bias"));
+    on(els.kernelCandleTile, "click", () => select("kernel", "candle"));
+    on(els.kernelHfTile, "click", () => select("kernel", "hf"));
+    on(els.kernelModeTile, "click", () => select("kernel", "mode"));
+    on(els.kernelTriggerTile, "click", () => select("kernel", "trigger"));
+    on(els.kernelTargetTile, "click", () => select("kernel", "target"));
+    on(els.kernelStaleTile, "click", () => select("kernel", "stale"));
+    on(els.kernelEventTile, "click", () => select("kernel", "event"));
+    on(els.sessionChip, "click", () => select("session"));
+    on(els.metricStatusTile, "click", () => select("metric", "status"));
+    on(els.metricNextTile, "click", () => select("metric", "next"));
+    on(els.metricFocusTile, "click", () => select("metric", "focus"));
+    on(els.metricCapturesTile, "click", () => select("metric", "captures"));
+    on(els.studyGlobalCell, "click", () => select("study", "global"));
+    on(els.studyLocalCell, "click", () => select("study", "local"));
+    on(els.studyImpulseCell, "click", () => select("study", "impulse"));
+    on(els.studySmcCell, "click", () => select("study", "smc"));
+    on(els.studySrCell, "click", () => select("study", "sr"));
+    on(els.studyCandlesCell, "click", () => select("study", "candles"));
+    on(els.focusWindowCell, "click", () => select("focus", "window"));
+    on(els.focusTimeframeCell, "click", () => select("focus", "timeframe"));
+    on(els.focusSelectorCell, "click", () => select("focus", "selector"));
+    on(els.focusExecutionCell, "click", () => select("focus", "execution"));
+    on(els.focusErrorCell, "click", () => select("focus", "error"));
+    on(els.signalPills, "click", (event) => {
       const target = event.target instanceof Element ? event.target.closest("button") : null;
       if (target) {
         const pill = String(target.getAttribute("data-pill") || "").toLowerCase();
@@ -8324,13 +8583,13 @@
         }
       }
     });
-    els.historyList.addEventListener("click", (event) => {
+    on(els.historyList, "click", (event) => {
       const target = event.target instanceof Element ? event.target.closest("[data-history-index]") : null;
       if (target) {
         select("history", target.getAttribute("data-history-index") || "0");
       }
     });
-    els.surfaceStage.addEventListener("pointerdown", (event) => {
+    on(els.surfaceStage, "pointerdown", (event) => {
       if (!surfaceHasImage()) {
         return;
       }
@@ -8347,9 +8606,12 @@
       state.surface.startScrollLeft = els.surfaceStage.scrollLeft;
       state.surface.startScrollTop = els.surfaceStage.scrollTop;
       els.surfaceStage.classList.add("panning");
-      els.surfaceStage.setPointerCapture(event.pointerId);
+      try {
+        els.surfaceStage.setPointerCapture(event.pointerId);
+      } catch (_err) {
+      }
     });
-    els.surfaceStage.addEventListener("pointermove", (event) => {
+    on(els.surfaceStage, "pointermove", (event) => {
       if (!state.surface.dragging) {
         return;
       }
@@ -8370,29 +8632,52 @@
         }
       }
     }
-    els.surfaceStage.addEventListener("pointerup", stopSurfacePan);
-    els.surfaceStage.addEventListener("pointercancel", stopSurfacePan);
-    els.overlayImg.addEventListener("load", () => {
+    on(els.surfaceStage, "pointerup", stopSurfacePan);
+    on(els.surfaceStage, "pointercancel", stopSurfacePan);
+    on(els.overlayImg, "load", () => {
       els.overlayImg.dataset.loadedSrc = els.overlayImg.currentSrc || els.overlayImg.src || "";
       commitSurfaceImage(els.overlayImg);
+      if ((state.selected || {}).type === "box") {
+        refreshInspector();
+      }
     });
-    els.overlayImg.addEventListener("error", () => {
+    on(els.overlayImg, "error", () => {
       handleSurfaceImageError(els.overlayImg);
     });
-    els.rawImg.addEventListener("load", () => {
+    on(els.rawImg, "load", () => {
       els.rawImg.dataset.loadedSrc = els.rawImg.currentSrc || els.rawImg.src || "";
       commitSurfaceImage(els.rawImg);
+      if ((state.selected || {}).type === "box") {
+        refreshInspector();
+      }
     });
-    els.rawImg.addEventListener("error", () => {
+    on(els.rawImg, "error", () => {
       handleSurfaceImageError(els.rawImg);
     });
-    window.addEventListener("resize", () => {
-      refreshSurfaceViewportIfNeeded(true, true);
-      applyOverlayEditorPosition();
-      renderHotspots();
+    on($("prediction-input-img"), "error", (event) => {
+      handlePredictionImageError(event.currentTarget);
+    });
+    on($("prediction-memory-img"), "error", (event) => {
+      handlePredictionImageError(event.currentTarget);
+    });
+    on($("prediction-overlay-img"), "error", (event) => {
+      handlePredictionImageError(event.currentTarget);
+    });
+    let resizeFrame = 0;
+    on(window, "resize", () => {
+      if (resizeFrame) {
+        return;
+      }
+      resizeFrame = window.requestAnimationFrame(() => {
+        resizeFrame = 0;
+        refreshSurfaceViewportIfNeeded(true, true);
+        applyOverlayEditorPosition();
+        renderHotspots();
+      });
     });
 
     initializeOverlayEditor();
+    initializeModelStrengthControls();
     setMode("overlay");
     applyOverlayPreset("clean_live");
     applyRoute(routeFromLocation(), false);

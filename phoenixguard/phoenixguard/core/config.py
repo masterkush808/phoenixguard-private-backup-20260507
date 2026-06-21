@@ -302,7 +302,7 @@ class VoiceConfig:
     sensitive_data_guard_enabled: bool = field(default_factory=lambda: _env_bool('PHOENIXGUARD_VOICE_SENSITIVE_GUARD', True))
     wake_word_bundle_name: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_WAKE_WORD_BUNDLE', 'openwakeword-local'))
     speech_to_text_bundle_name: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_STT_BUNDLE', 'whisper-large-v3-local'))
-    brain_bundle_name: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_BRAIN_BUNDLE', 'qwen3-8b-instruct-local'))
+    brain_bundle_name: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_BRAIN_BUNDLE', 'phoenixguard-voice-brain-local'))
     speech_bundle_name: str = field(default_factory=lambda: _env_str('PHOENIXGUARD_VOICE_TTS_BUNDLE', 'openvoice-v2-local'))
     bundle_root: Path = field(init=False)
     profile_root: Path = field(init=False)

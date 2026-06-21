@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 import time
 from typing import Any, Mapping, Sequence, cast
 from phoenixguard.core.config import RUNTIME
@@ -87,6 +88,65 @@ def _float(value: Any, fallback: float = 0.0) -> float:
 
 def _clip01(value: Any) -> float:
     return max(0.0, min(1.0, _float(value, 0.0)))
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int) -> int:
+    try:
+        value = int(float(os.getenv(name, str(default)) or default))
+    except (TypeError, ValueError):
+        value = default
+    return max(int(minimum), int(value))
+
+
+def _env_float(name: str, default: float, minimum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(float(minimum), float(value))
+
+
+def _prune_overlay_geometry_dumps(debug_dir: Any) -> None:
+    try:
+        paths = [path for path in debug_dir.glob("overlay_geometry_*.json") if path.is_file()]
+        if not paths:
+            return
+        max_files = _env_int("PHOENIXGUARD_OVERLAY_GEOMETRY_DUMP_MAX_FILES", 80, 4)
+        max_mb = _env_float("PHOENIXGUARD_OVERLAY_GEOMETRY_DUMP_MAX_MB", 48.0, 1.0)
+        max_age_sec = _env_float("PHOENIXGUARD_OVERLAY_GEOMETRY_DUMP_MAX_AGE_SEC", 7200.0, 60.0)
+        now = time.time()
+        ordered = sorted(paths, key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+        removable: set[Any] = set()
+        for index, path in enumerate(ordered):
+            try:
+                age_sec = now - float(path.stat().st_mtime)
+            except OSError:
+                age_sec = 0.0
+            if index >= max_files or age_sec > max_age_sec:
+                removable.add(path)
+        kept = [path for path in ordered if path not in removable]
+        total_bytes = sum(path.stat().st_size for path in kept if path.exists())
+        max_bytes = int(max_mb * 1024.0 * 1024.0)
+        for path in sorted(kept, key=lambda item: item.stat().st_mtime if item.exists() else 0.0):
+            if total_bytes <= max_bytes:
+                break
+            try:
+                total_bytes -= int(path.stat().st_size)
+            except OSError:
+                pass
+            removable.add(path)
+        for path in removable:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except Exception:
+        pass
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -1080,19 +1140,21 @@ def prepare_overlay_geometry(
     tracking["overlay_geometry"] = geometry
     tracking["overlay_truth_audit"] = geometry["truth_audit"]
     signal["overlay_truth_audit"] = geometry["truth_audit"]
-    try:
+    if _env_flag("PHOENIXGUARD_OVERLAY_GEOMETRY_DUMPS", False):
         debug_dir = RUNTIME.project_root / ".codex_runtime" / "overlay_geometry_dumps"
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        frame_id = int(geometry.get("chart_transform", {}).get("frame_id") or tracking.get("frame_id") or 0)
-        dump_path = debug_dir / f"overlay_geometry_{frame_id}_{int(time.time())}.json"
-        dump = {
-            "tracking_summary": tracking,
-            "latest_signal": signal,
-            "overlay_geometry": geometry,
-        }
-        dump_path.write_text(json.dumps(dump, default=str), encoding="utf-8")
-    except Exception:
-        pass
+        try:
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            frame_id = int(geometry.get("chart_transform", {}).get("frame_id") or tracking.get("frame_id") or 0)
+            dump_path = debug_dir / f"overlay_geometry_{frame_id}_{int(time.time())}.json"
+            dump = {
+                "tracking_summary": tracking,
+                "latest_signal": signal,
+                "overlay_geometry": geometry,
+            }
+            dump_path.write_text(json.dumps(dump, default=str), encoding="utf-8")
+            _prune_overlay_geometry_dumps(debug_dir)
+        except Exception:
+            pass
     return {
         "tracking_summary": tracking,
         "latest_signal": signal,

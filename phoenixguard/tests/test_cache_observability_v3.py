@@ -125,6 +125,52 @@ def test_cache_entry_rejected_after_ttl() -> None:
     assert "cache_entry_expired" in result.reasons
 
 
+def test_live_state_compact_cache_signatures_track_display_artifacts(tmp_path: Path, monkeypatch: Any) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "tracking_enabled": True,
+                "window_query": "Pocket Option",
+                "locked_title": "Pocket Option",
+            }
+        ),
+        encoding="utf-8",
+    )
+    display_state = {
+        "session_id": "pocket-live-8788",
+        "frame_index": 10,
+        "display_frame_id": 100,
+        "chart_frame_id": 10,
+        "overlay_frame_id": 10,
+        "full_overlay_frame_id": 10,
+        "model_vote_frame_id": 10,
+        "last_display_window_path": "0010_window.jpg",
+        "last_chart_path": "hot_latest_chart.jpg",
+        "last_overlay_path": "hot_latest_overlay.jpg",
+        "last_full_overlay_path": "hot_latest_full_overlay.jpg",
+    }
+    (session_dir / "display_state.json").write_text(json.dumps(display_state), encoding="utf-8")
+
+    compact_sig_1 = mobile_app._compact_live_state_response_cache_signature("pocket-live-8788")
+    live_sig_1 = mobile_app._live_state_cache_signature("pocket-live-8788", compact_public=True)
+
+    display_state["frame_index"] = 11
+    display_state["display_frame_id"] = 101
+    display_state["last_display_window_path"] = "0011_window.jpg"
+    (session_dir / "display_state.json").write_text(json.dumps(display_state), encoding="utf-8")
+
+    compact_sig_2 = mobile_app._compact_live_state_response_cache_signature("pocket-live-8788")
+    live_sig_2 = mobile_app._live_state_cache_signature("pocket-live-8788", compact_public=True)
+
+    assert compact_sig_2 != compact_sig_1
+    assert live_sig_2 != live_sig_1
+
+
 def test_study_packet_expires_by_ttl() -> None:
     study_packet = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",

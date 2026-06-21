@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingRes
 from pydantic import BaseModel, Field
 
 from phoenixguard.core.config import RUNTIME, VOICE, VoiceConfig
+from phoenixguard.business import register_business_routes
 from phoenixguard.execution.floating_state_reducer import build_floating_state
 from phoenixguard.execution.sequence_context import sequence_context_readiness_report
 from phoenixguard.execution.v3_language import public_language_scorecard
@@ -51,6 +52,11 @@ from .live_state_v3 import (
     _compact_session_payload,
     build_live_state_v3,
     build_live_state_v3_from_tracker_service,
+)
+from .model_strength import (
+    model_strength_settings_to_execution_controls,
+    read_model_strength_settings,
+    write_model_strength_settings,
 )
 from .observer import SignalObserverService
 from .realtime_sync_v3 import (
@@ -322,6 +328,7 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
             registry_signature = f"|registry={_path_cache_signature(_direct_market_registry_path(session_id))}"
         return (
             f"compact=1|context={context_signature}"
+            f"|display={display_signature}"
             f"{registry_signature}"
         )
     session_signature = _json_field_cache_signature(
@@ -366,6 +373,21 @@ def _compact_live_state_response_cache_signature(session_id: str) -> str:
         display_path,
         (
             "session_id",
+            "frame_index",
+            "display_frame_id",
+            "chart_frame_id",
+            "overlay_frame_id",
+            "full_overlay_frame_id",
+            "model_vote_frame_id",
+            "last_display_window_path",
+            "last_chart_path",
+            "last_overlay_path",
+            "last_full_overlay_path",
+            "last_display_surface_signature",
+            "last_window_surface_signature",
+            "last_study_surface_signature",
+            "overlay_source_window_signature",
+            "overlay_source_study_signature",
             "window_query",
             "locked_title",
             "locked_window.hwnd",
@@ -1112,14 +1134,25 @@ class WindowTrackerControlUpdateRequest(BaseModel):
     allow_location_sniper_entries: bool | None = None
     trade_profile: str | None = None
     high_frequency_enabled: bool | None = None
+    two_candle_execution_allowed: bool | None = None
     swing_fallback_enabled: bool | None = None
     continuous_model_feed_enabled: bool | None = None
+    model_confidence_floor: float | None = Field(default=None, ge=0.0, le=1.0)
     high_frequency_min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     high_frequency_entry_grace_sec: float | None = Field(default=None, ge=0.0, le=180.0)
-    high_frequency_expiry_seconds: int | None = Field(default=None, ge=600, le=600)
+    high_frequency_expiry_seconds: int | None = Field(default=None, ge=60, le=3600)
+    high_frequency_horizon_candles: int | None = Field(default=None, ge=1, le=12)
+    execution_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    overlay_min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    ai_contribution_strengths: dict[str, float] | None = None
+    execution_lane_thresholds: dict[str, float] | None = None
+    model_strength_profile: dict[str, object] | None = None
+    allow_live_momentum_entries: bool | None = None
+    allow_opposing_force_reactions: bool | None = None
     scenario_generation_enabled: bool | None = None
     auto_memory_projection: bool | None = None
     require_memory_projection: bool | None = None
+    live_momentum_memory_advisory: bool | None = None
     require_market_identity: bool | None = None
     require_timeframe_identity: bool | None = None
     allow_locked_surface_identity_fallback: bool | None = None
@@ -1144,7 +1177,51 @@ class WindowTrackerControlUpdateRequest(BaseModel):
     loss_guard_max_consecutive_losses: int | None = Field(default=None, ge=1, le=10)
     loss_guard_window_sec: float | None = Field(default=None, ge=60.0, le=86400.0)
     loss_guard_pause_sec: float | None = Field(default=None, ge=60.0, le=86400.0)
+    min_primary_target_candles: int | None = Field(default=None, ge=1, le=72)
+    max_primary_target_candles: int | None = Field(default=None, ge=1, le=120)
     min_location_sniper_target_candles: int | None = Field(default=None, ge=1, le=36)
+    live_max_tracked_candles: int | None = Field(default=None, ge=8, le=256)
+    support_resistance_max_zones_per_role: int | None = Field(default=None, ge=2, le=12)
+    support_resistance_max_total_zones: int | None = Field(default=None, ge=4, le=24)
+    support_resistance_max_significant_zones: int | None = Field(default=None, ge=4, le=24)
+    smart_money_max_liquidity_pools: int | None = Field(default=None, ge=4, le=24)
+    min_live_momentum_visible_candles: int | None = Field(default=None, ge=1, le=64)
+    min_live_momentum_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_live_momentum_alignment: int | None = Field(default=None, ge=1, le=10)
+    min_opposing_force_reaction_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_opposing_force_reaction_alignment: int | None = Field(default=None, ge=1, le=10)
+    min_opposing_force_reaction_risk: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_opposing_force_reaction_entry_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_opposing_force_reaction_distance: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_dominance_margin: float | None = Field(default=None, ge=0.0, le=1.0)
+    flip_flop_release_stable_reads: int | None = Field(default=None, ge=1, le=10)
+    flip_flop_release_candidate_flips: int | None = Field(default=None, ge=0, le=10)
+    reversal_capture_min_dominance: float | None = Field(default=None, ge=0.0, le=1.0)
+    opportunity_capture_stable_reads: int | None = Field(default=None, ge=1, le=10)
+    opportunity_capture_min_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    packet_valid_for_seconds: float | None = Field(default=None, ge=1.0, le=300.0)
+    study_packet_valid_for_seconds: float | None = Field(default=None, ge=5.0, le=900.0)
+    min_conf_global: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_conf_latest: float | None = Field(default=None, ge=0.0, le=1.0)
+    history_depth: int | None = Field(default=None, ge=1, le=24)
+    label_density: int | None = Field(default=None, ge=1, le=30)
+    projection_focus: float | None = Field(default=None, ge=0.0, le=1.0)
+    debug_depth: int | None = Field(default=None, ge=0, le=24)
+    fuse_timeframe_overlays: bool | None = None
+    min_actionable_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_thesis_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    signal_cooldown_sec: float | None = Field(default=None, ge=0.0, le=300.0)
+    rl_track_interval_sec: float | None = Field(default=None, ge=0.05, le=300.0)
+    consensus_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    gates_pass_minimum: int | None = Field(default=None, ge=1, le=20)
+    conformal_max_interval_pct: float | None = Field(default=None, ge=0.0, le=1.0)
+    risk_min_pct: float | None = Field(default=None, ge=0.0, le=10.0)
+    risk_max_pct: float | None = Field(default=None, ge=0.0, le=10.0)
+    recall_boost_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    recall_veto_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    use_macro_local_alignment_gate: bool | None = None
+    use_opposition_strength_gate: bool | None = None
+    use_memory_ambiguity_penalty: bool | None = None
     phoenix_report_interval_sec: float | None = Field(default=None, ge=0.0, le=300.0)
 
 
@@ -1247,6 +1324,7 @@ def _render_window_tracker_dashboard(session_id: str) -> str:
     return (
         template.replace("__SESSION_ID_JSON__", json.dumps(str(session_id)))
         .replace("__OVERLAY_EDITOR_SETTINGS_JSON__", json.dumps(_read_overlay_editor_settings()))
+        .replace("__MODEL_STRENGTH_SETTINGS_JSON__", json.dumps(read_model_strength_settings()))
         .replace("__SESSION_LABEL__", str(session_id))
     )
 
@@ -1270,6 +1348,7 @@ def create_app(
     app.state.observer_service = observer_service
     app.state.window_tracker_service = window_tracker_service
     app.state.voice_config = resolved_voice_config
+    register_business_routes(app)
     explicit_window_tracker_service = window_tracker_service is not None
 
     def get_mobile_service() -> MobileApiService:
@@ -2305,8 +2384,8 @@ def create_app(
         if not requested_session_id:
             return None
         session = (
-            _direct_window_tracker_display_snapshot(requested_session_id, require_overlay_model=False)
-            or _direct_window_tracker_session_snapshot(requested_session_id)
+            _direct_window_tracker_session_snapshot(requested_session_id)
+            or _direct_window_tracker_display_snapshot(requested_session_id, require_overlay_model=False)
         )
         if session is None:
             return None
@@ -3791,6 +3870,37 @@ def create_app(
         settings = _write_overlay_editor_settings(cast(Mapping[str, object], payload))
         return {"status": "saved", "settings": settings}
 
+    @app.get("/v1/mobile/window-tracker/floating-windows/model-strength/settings")
+    def get_model_strength_settings() -> dict[str, object]:
+        return read_model_strength_settings()
+
+    @app.post("/v1/mobile/window-tracker/floating-windows/model-strength/settings")
+    def save_model_strength_settings(payload: dict[str, object] = Body(...)) -> dict[str, object]:
+        if not isinstance(payload, Mapping):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Model strength settings must be an object.")
+        settings = write_model_strength_settings(cast(Mapping[str, object], payload))
+        controls = model_strength_settings_to_execution_controls(settings)
+        session_id = str(
+            payload.get("session_id")
+            or payload.get("sessionId")
+            or _DEFAULT_WINDOW_TRACKER_DASHBOARD_SESSION_ID
+        )
+        applied = False
+        if session_id:
+            try:
+                get_window_tracker_service().update_session_controls(session_id, **controls)
+                applied = True
+            except KeyError:
+                applied = False
+        return {"status": "saved", "settings": settings, "controls": controls, "applied": applied}
+
+    @app.get("/v1/mobile/window-tracker/floating-windows/model-strength", response_class=HTMLResponse)
+    def get_model_strength_window() -> HTMLResponse:
+        window_path = _WINDOW_TRACKER_FLOATING_WINDOWS_DIR / "model_strength_window.html"
+        if not window_path.is_file():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model strength window not found.")
+        return HTMLResponse(window_path.read_text(encoding="utf-8"))
+
     @app.get("/v1/mobile/window-tracker/dashboard", response_class=HTMLResponse)
     def window_tracker_dashboard_default() -> HTMLResponse:
         session_id = resolve_window_tracker_dashboard_session_id()
@@ -3985,14 +4095,25 @@ def create_app(
                 allow_location_sniper_entries=request.allow_location_sniper_entries,
                 trade_profile=request.trade_profile,
                 high_frequency_enabled=request.high_frequency_enabled,
+                two_candle_execution_allowed=request.two_candle_execution_allowed,
                 swing_fallback_enabled=request.swing_fallback_enabled,
                 continuous_model_feed_enabled=request.continuous_model_feed_enabled,
+                model_confidence_floor=request.model_confidence_floor,
                 high_frequency_min_confidence=request.high_frequency_min_confidence,
                 high_frequency_entry_grace_sec=request.high_frequency_entry_grace_sec,
                 high_frequency_expiry_seconds=request.high_frequency_expiry_seconds,
+                high_frequency_horizon_candles=request.high_frequency_horizon_candles,
+                execution_threshold=request.execution_threshold,
+                overlay_min_confidence=request.overlay_min_confidence,
+                ai_contribution_strengths=request.ai_contribution_strengths,
+                execution_lane_thresholds=request.execution_lane_thresholds,
+                model_strength_profile=request.model_strength_profile,
+                allow_live_momentum_entries=request.allow_live_momentum_entries,
+                allow_opposing_force_reactions=request.allow_opposing_force_reactions,
                 scenario_generation_enabled=request.scenario_generation_enabled,
                 auto_memory_projection=request.auto_memory_projection,
                 require_memory_projection=request.require_memory_projection,
+                live_momentum_memory_advisory=request.live_momentum_memory_advisory,
                 require_market_identity=request.require_market_identity,
                 require_timeframe_identity=request.require_timeframe_identity,
                 allow_locked_surface_identity_fallback=request.allow_locked_surface_identity_fallback,
@@ -4009,7 +4130,51 @@ def create_app(
                 loss_guard_max_consecutive_losses=request.loss_guard_max_consecutive_losses,
                 loss_guard_window_sec=request.loss_guard_window_sec,
                 loss_guard_pause_sec=request.loss_guard_pause_sec,
+                min_primary_target_candles=request.min_primary_target_candles,
+                max_primary_target_candles=request.max_primary_target_candles,
                 min_location_sniper_target_candles=request.min_location_sniper_target_candles,
+                live_max_tracked_candles=request.live_max_tracked_candles,
+                support_resistance_max_zones_per_role=request.support_resistance_max_zones_per_role,
+                support_resistance_max_total_zones=request.support_resistance_max_total_zones,
+                support_resistance_max_significant_zones=request.support_resistance_max_significant_zones,
+                smart_money_max_liquidity_pools=request.smart_money_max_liquidity_pools,
+                min_live_momentum_visible_candles=request.min_live_momentum_visible_candles,
+                min_live_momentum_score=request.min_live_momentum_score,
+                min_live_momentum_alignment=request.min_live_momentum_alignment,
+                min_opposing_force_reaction_score=request.min_opposing_force_reaction_score,
+                min_opposing_force_reaction_alignment=request.min_opposing_force_reaction_alignment,
+                min_opposing_force_reaction_risk=request.min_opposing_force_reaction_risk,
+                min_opposing_force_reaction_entry_score=request.min_opposing_force_reaction_entry_score,
+                max_opposing_force_reaction_distance=request.max_opposing_force_reaction_distance,
+                min_dominance_margin=request.min_dominance_margin,
+                flip_flop_release_stable_reads=request.flip_flop_release_stable_reads,
+                flip_flop_release_candidate_flips=request.flip_flop_release_candidate_flips,
+                reversal_capture_min_dominance=request.reversal_capture_min_dominance,
+                opportunity_capture_stable_reads=request.opportunity_capture_stable_reads,
+                opportunity_capture_min_score=request.opportunity_capture_min_score,
+                packet_valid_for_seconds=request.packet_valid_for_seconds,
+                study_packet_valid_for_seconds=request.study_packet_valid_for_seconds,
+                min_conf_global=request.min_conf_global,
+                min_conf_latest=request.min_conf_latest,
+                history_depth=request.history_depth,
+                label_density=request.label_density,
+                projection_focus=request.projection_focus,
+                debug_depth=request.debug_depth,
+                fuse_timeframe_overlays=request.fuse_timeframe_overlays,
+                min_actionable_confidence=request.min_actionable_confidence,
+                min_thesis_confidence=request.min_thesis_confidence,
+                signal_cooldown_sec=request.signal_cooldown_sec,
+                rl_track_interval_sec=request.rl_track_interval_sec,
+                consensus_threshold=request.consensus_threshold,
+                gates_pass_minimum=request.gates_pass_minimum,
+                conformal_max_interval_pct=request.conformal_max_interval_pct,
+                risk_min_pct=request.risk_min_pct,
+                risk_max_pct=request.risk_max_pct,
+                recall_boost_threshold=request.recall_boost_threshold,
+                recall_veto_threshold=request.recall_veto_threshold,
+                use_macro_local_alignment_gate=request.use_macro_local_alignment_gate,
+                use_opposition_strength_gate=request.use_opposition_strength_gate,
+                use_memory_ambiguity_penalty=request.use_memory_ambiguity_penalty,
                 phoenix_report_interval_sec=request.phoenix_report_interval_sec,
             )
         except KeyError as exc:

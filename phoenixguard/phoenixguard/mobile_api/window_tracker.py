@@ -29,7 +29,12 @@ from phoenixguard.core.utils import utc_now_iso
 from phoenixguard.decision.decision_kernel import analyze_decision_kernel
 from phoenixguard.decision.high_frequency_candle_predictor import build_high_frequency_candle_forecast
 from phoenixguard.decision.lstm_candle_sequence_contributor_v3 import build_lstm_candle_sequence_contribution
-from phoenixguard.decision.model_council_v3 import ModelCouncilV3, build_promotion_failure_audit_v3
+from phoenixguard.decision.model_council_v3 import (
+    DEFAULT_AI_CONTRIBUTION_STRENGTHS,
+    DEFAULT_EXECUTION_LANE_THRESHOLDS,
+    ModelCouncilV3,
+    build_promotion_failure_audit_v3,
+)
 from phoenixguard.runtime.instrument_context import (
     build_instrument_context,
     symbol_context_from_instrument_context,
@@ -238,7 +243,7 @@ _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC = 1.0
 _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC = 300.0
 _EXECUTION_DEFAULT_MIN_CAPTURE_INTERVAL_SEC = 0.5
 _EXECUTION_DEFAULT_MAX_CAPTURE_INTERVAL_SEC = 10.0
-_TRACKER_ARTIFACT_RETENTION_FRAMES = 360
+_TRACKER_ARTIFACT_RETENTION_FRAMES = 240
 _EXECUTION_HISTORY_AREA_MIN_SAMPLE = 6
 _EXECUTION_BUY_HISTORY_HIGH_POSITION = 0.74
 _EXECUTION_BUY_HISTORY_STRETCH_POSITION = 0.88
@@ -355,6 +360,44 @@ def _float_or(value: Any, fallback: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(fallback)
+
+
+def _normalize_float_map(
+    value: Any,
+    defaults: Mapping[str, float],
+    *,
+    minimum: float,
+    maximum: float,
+) -> dict[str, float]:
+    supplied = _mapping_to_dict(value)
+    output: dict[str, float] = {}
+    for key, fallback in defaults.items():
+        output[key] = max(
+            float(minimum),
+            min(float(maximum), _float_or(supplied.get(key), float(fallback))),
+        )
+    return output
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int) -> int:
+    try:
+        value = int(float(os.getenv(name, str(default)) or default))
+    except (TypeError, ValueError):
+        value = default
+    return max(int(minimum), int(value))
+
+
+def _env_float(name: str, default: float, minimum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(float(minimum), float(value))
 
 
 def _compact_text(value: Any) -> str:
@@ -2845,6 +2888,24 @@ def _window_artifact_suffix(payload: Mapping[str, Any]) -> str:
     return ".jpg" if _live_window_jpeg_enabled(payload) else ".png"
 
 
+def _full_overlay_jpeg_enabled(payload: Mapping[str, Any]) -> bool:
+    enabled = str(os.getenv("PHOENIXGUARD_FULL_OVERLAY_JPEG", "1") or "1").strip().lower()
+    return enabled not in {"0", "false", "off", "no"}
+
+
+def _full_overlay_artifact_suffix(payload: Mapping[str, Any]) -> str:
+    return ".jpg" if _full_overlay_jpeg_enabled(payload) else ".png"
+
+
+def _chart_overlay_jpeg_enabled(payload: Mapping[str, Any]) -> bool:
+    enabled = str(os.getenv("PHOENIXGUARD_CHART_OVERLAY_JPEG", "1") or "1").strip().lower()
+    return enabled not in {"0", "false", "off", "no"}
+
+
+def _chart_overlay_artifact_suffix(payload: Mapping[str, Any]) -> str:
+    return ".jpg" if _chart_overlay_jpeg_enabled(payload) else ".png"
+
+
 def _encode_window_artifact(image: Image.Image, path: Path) -> None:
     if path.suffix.lower() in {".jpg", ".jpeg"}:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2875,6 +2936,68 @@ def _encode_window_artifact(image: Image.Image, path: Path) -> None:
             image.save(handle, format="JPEG", quality=quality, optimize=False, progressive=False)
         return
     _encode_png(image, path)
+
+
+def _encode_jpeg_artifact(
+    image: Image.Image,
+    path: Path,
+    *,
+    quality_env: str,
+    default_quality: int,
+    encoder_env: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        quality = int(os.getenv(quality_env, str(default_quality)) or str(default_quality))
+    except ValueError:
+        quality = int(default_quality)
+    quality = max(40, min(95, quality))
+    encoder = str(os.getenv(encoder_env, "cv2") or "cv2").strip().lower()
+    if encoder in {"cv2", "opencv"}:
+        try:
+            import cv2
+
+            rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            ok, buffer = cv2.imencode(
+                ".jpg",
+                bgr,
+                [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)],
+            )
+            if ok:
+                with path.open("wb", buffering=1024 * 1024) as handle:
+                    handle.write(buffer.tobytes())
+                return
+        except Exception:
+            LOGGER.debug("OpenCV JPEG encode failed for %s; falling back to PIL.", path, exc_info=True)
+    with path.open("wb", buffering=1024 * 1024) as handle:
+        image.convert("RGB").save(handle, format="JPEG", quality=quality, optimize=False, progressive=False)
+
+
+def _encode_chart_overlay_artifact(image: Image.Image, path: Path) -> None:
+    if path.suffix.lower() not in {".jpg", ".jpeg"}:
+        _encode_png(image, path)
+        return
+    _encode_jpeg_artifact(
+        image,
+        path,
+        quality_env="PHOENIXGUARD_CHART_OVERLAY_JPEG_QUALITY",
+        default_quality=82,
+        encoder_env="PHOENIXGUARD_CHART_OVERLAY_JPEG_ENCODER",
+    )
+
+
+def _encode_full_overlay_artifact(image: Image.Image, path: Path) -> None:
+    if path.suffix.lower() not in {".jpg", ".jpeg"}:
+        _encode_png(image, path)
+        return
+    _encode_jpeg_artifact(
+        image,
+        path,
+        quality_env="PHOENIXGUARD_FULL_OVERLAY_JPEG_QUALITY",
+        default_quality=74,
+        encoder_env="PHOENIXGUARD_FULL_OVERLAY_JPEG_ENCODER",
+    )
 
 
 def _compose_full_window_overlay(
@@ -3731,8 +3854,10 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
             reason = _upper_text(
                 promotion_trace.get("true_blocker")
                 or promotion_trace.get("denied_at")
+                or promotion_trace.get("blocked_by")
                 or row.get("true_blocker")
                 or row.get("denied_at")
+                or row.get("blocked_by")
             )
             reason_is_generic = reason in generic_no_packet_reasons
             if claims_executable or reason_is_generic:
@@ -4022,13 +4147,20 @@ def _default_execution_controls() -> dict[str, Any]:
         "trade_profile": _HIGH_FREQUENCY_TRADE_PROFILE,
         "execution_profile": _HIGH_FREQUENCY_TRADE_PROFILE,
         "high_frequency_enabled": True,
+        "two_candle_execution_allowed": True,
         "swing_fallback_enabled": False,
         "continuous_model_feed_enabled": True,
         "high_frequency_timeframe": _HIGH_FREQUENCY_TIMEFRAME,
         "high_frequency_horizon_candles": _HIGH_FREQUENCY_HORIZON_CANDLES,
         "high_frequency_expiry_seconds": _HIGH_FREQUENCY_FIXED_EXPIRY_SEC,
         "high_frequency_entry_grace_sec": _HIGH_FREQUENCY_ENTRY_GRACE_SEC,
+        "model_confidence_floor": _HIGH_FREQUENCY_MIN_CONFIDENCE,
         "high_frequency_min_confidence": _HIGH_FREQUENCY_MIN_CONFIDENCE,
+        "execution_threshold": 0.70,
+        "overlay_min_confidence": 0.0,
+        "ai_contribution_strengths": dict(DEFAULT_AI_CONTRIBUTION_STRENGTHS),
+        "execution_lane_thresholds": dict(DEFAULT_EXECUTION_LANE_THRESHOLDS),
+        "model_strength_profile": {},
         "max_opposing_force_reaction_distance": _EXECUTION_OPPOSING_FORCE_REACTION_MAX_DISTANCE,
         "live_momentum_memory_advisory": True,
         "scenario_generation_enabled": False,
@@ -4060,6 +4192,42 @@ def _default_execution_controls() -> dict[str, Any]:
         "support_resistance_max_total_zones": _PHOENIXGUARD_DEFAULT_SR_MAX_TOTAL_ZONES,
         "support_resistance_max_significant_zones": _PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES,
         "smart_money_max_liquidity_pools": _PHOENIXGUARD_DEFAULT_SMC_MAX_LIQUIDITY_POOLS,
+        "min_live_momentum_visible_candles": _EXECUTION_LIVE_MOMENTUM_MIN_VISIBLE_CANDLES,
+        "min_live_momentum_score": _EXECUTION_LIVE_MOMENTUM_MIN_SCORE,
+        "min_live_momentum_alignment": _EXECUTION_LIVE_MOMENTUM_MIN_ALIGNMENT,
+        "min_opposing_force_reaction_score": _EXECUTION_OPPOSING_FORCE_REACTION_MIN_SCORE,
+        "min_opposing_force_reaction_alignment": _EXECUTION_OPPOSING_FORCE_REACTION_MIN_ALIGNMENT,
+        "min_opposing_force_reaction_risk": _EXECUTION_OPPOSING_FORCE_REACTION_MIN_RISK,
+        "min_opposing_force_reaction_entry_score": _EXECUTION_OPPOSING_FORCE_REACTION_MIN_ENTRY_SCORE,
+        "min_dominance_margin": 0.18,
+        "flip_flop_release_stable_reads": 2,
+        "flip_flop_release_candidate_flips": 2,
+        "reversal_capture_min_dominance": 0.18,
+        "opportunity_capture_stable_reads": 3,
+        "opportunity_capture_min_score": 0.90,
+        "packet_valid_for_seconds": _CALIBRATED_SHOOTER_PACKET_VALID_SEC,
+        "study_packet_valid_for_seconds": _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC,
+        "min_conf_global": 0.42,
+        "min_conf_latest": 0.50,
+        "history_depth": 8,
+        "label_density": 10,
+        "projection_focus": 0.35,
+        "debug_depth": 6,
+        "fuse_timeframe_overlays": False,
+        "min_actionable_confidence": 0.58,
+        "min_thesis_confidence": 0.46,
+        "signal_cooldown_sec": 8.0,
+        "rl_track_interval_sec": 30.0,
+        "consensus_threshold": 0.82,
+        "gates_pass_minimum": 9,
+        "conformal_max_interval_pct": 0.40,
+        "risk_min_pct": 0.5,
+        "risk_max_pct": 2.0,
+        "recall_boost_threshold": 0.85,
+        "recall_veto_threshold": 0.87,
+        "use_macro_local_alignment_gate": True,
+        "use_opposition_strength_gate": True,
+        "use_memory_ambiguity_penalty": True,
         "phoenix_report_interval_sec": 20.0,
     }
 
@@ -4081,6 +4249,7 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     controls["trade_profile"] = trade_profile
     controls["execution_profile"] = trade_profile
     controls["high_frequency_enabled"] = bool(controls.get("high_frequency_enabled", True)) and trade_profile != "SWING"
+    controls["two_candle_execution_allowed"] = bool(controls.get("two_candle_execution_allowed", True))
     controls["swing_fallback_enabled"] = bool(controls.get("swing_fallback_enabled", False))
     controls["continuous_model_feed_enabled"] = bool(controls.get("continuous_model_feed_enabled", True))
     controls["high_frequency_timeframe"] = str(
@@ -4089,21 +4258,45 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     if controls["high_frequency_timeframe"] != _HIGH_FREQUENCY_TIMEFRAME:
         controls["high_frequency_timeframe"] = _HIGH_FREQUENCY_TIMEFRAME
     controls["high_frequency_horizon_candles"] = max(
-        _HIGH_FREQUENCY_HORIZON_CANDLES,
-        int(controls.get("high_frequency_horizon_candles", _HIGH_FREQUENCY_HORIZON_CANDLES) or _HIGH_FREQUENCY_HORIZON_CANDLES),
+        1,
+        min(
+            12,
+            int(controls.get("high_frequency_horizon_candles", _HIGH_FREQUENCY_HORIZON_CANDLES) or _HIGH_FREQUENCY_HORIZON_CANDLES),
+        ),
     )
     controls["high_frequency_expiry_seconds"] = max(
-        _HIGH_FREQUENCY_FIXED_EXPIRY_SEC,
-        int(controls.get("high_frequency_expiry_seconds", _HIGH_FREQUENCY_FIXED_EXPIRY_SEC) or _HIGH_FREQUENCY_FIXED_EXPIRY_SEC),
+        _EXECUTION_MIN_LIVE_EXPIRY_SEC,
+        min(
+            _EXECUTION_MAX_LIVE_EXPIRY_SEC,
+            int(controls.get("high_frequency_expiry_seconds", _HIGH_FREQUENCY_FIXED_EXPIRY_SEC) or _HIGH_FREQUENCY_FIXED_EXPIRY_SEC),
+        ),
     )
     controls["high_frequency_entry_grace_sec"] = max(
         0.0,
         float(controls.get("high_frequency_entry_grace_sec", _HIGH_FREQUENCY_ENTRY_GRACE_SEC) or 0.0),
     )
+    controls["model_confidence_floor"] = _clip01(
+        controls.get("model_confidence_floor", controls.get("high_frequency_min_confidence", _HIGH_FREQUENCY_MIN_CONFIDENCE))
+    )
     controls["high_frequency_min_confidence"] = _clip01(
         controls.get("high_frequency_min_confidence", _HIGH_FREQUENCY_MIN_CONFIDENCE)
         or _HIGH_FREQUENCY_MIN_CONFIDENCE
     )
+    controls["execution_threshold"] = _clip01(controls.get("execution_threshold", 0.70))
+    controls["overlay_min_confidence"] = _clip01(controls.get("overlay_min_confidence", 0.0))
+    controls["ai_contribution_strengths"] = _normalize_float_map(
+        controls.get("ai_contribution_strengths"),
+        DEFAULT_AI_CONTRIBUTION_STRENGTHS,
+        minimum=0.0,
+        maximum=2.0,
+    )
+    controls["execution_lane_thresholds"] = _normalize_float_map(
+        controls.get("execution_lane_thresholds") or controls.get("lane_thresholds"),
+        DEFAULT_EXECUTION_LANE_THRESHOLDS,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    controls["model_strength_profile"] = _mapping_to_dict(controls.get("model_strength_profile", {}))
     controls["live_momentum_memory_advisory"] = bool(controls.get("live_momentum_memory_advisory", True))
     controls["scenario_generation_enabled"] = bool(controls.get("scenario_generation_enabled", False))
     controls["auto_memory_projection"] = bool(controls.get("auto_memory_projection", True))
@@ -4299,6 +4492,53 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
             ),
         ),
     )
+    controls["min_dominance_margin"] = _clip01(controls.get("min_dominance_margin", 0.18))
+    controls["flip_flop_release_stable_reads"] = max(
+        1,
+        min(10, int(controls.get("flip_flop_release_stable_reads", 2) or 2)),
+    )
+    controls["flip_flop_release_candidate_flips"] = max(
+        0,
+        min(10, int(controls.get("flip_flop_release_candidate_flips", 2) or 2)),
+    )
+    controls["reversal_capture_min_dominance"] = _clip01(controls.get("reversal_capture_min_dominance", 0.18))
+    controls["opportunity_capture_stable_reads"] = max(
+        1,
+        min(10, int(controls.get("opportunity_capture_stable_reads", 3) or 3)),
+    )
+    controls["opportunity_capture_min_score"] = _clip01(controls.get("opportunity_capture_min_score", 0.90))
+    controls["packet_valid_for_seconds"] = max(
+        1.0,
+        min(300.0, float(controls.get("packet_valid_for_seconds", _CALIBRATED_SHOOTER_PACKET_VALID_SEC) or _CALIBRATED_SHOOTER_PACKET_VALID_SEC)),
+    )
+    controls["study_packet_valid_for_seconds"] = max(
+        5.0,
+        min(900.0, float(controls.get("study_packet_valid_for_seconds", _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC) or _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC)),
+    )
+    controls["min_conf_global"] = _clip01(controls.get("min_conf_global", 0.42))
+    controls["min_conf_latest"] = _clip01(controls.get("min_conf_latest", 0.50))
+    controls["history_depth"] = max(1, min(24, int(controls.get("history_depth", 8) or 8)))
+    controls["label_density"] = max(1, min(30, int(controls.get("label_density", 10) or 10)))
+    controls["projection_focus"] = _clip01(controls.get("projection_focus", 0.35))
+    controls["debug_depth"] = max(0, min(24, int(controls.get("debug_depth", 6) or 6)))
+    controls["fuse_timeframe_overlays"] = bool(controls.get("fuse_timeframe_overlays", False))
+    controls["min_actionable_confidence"] = _clip01(controls.get("min_actionable_confidence", 0.58))
+    controls["min_thesis_confidence"] = _clip01(controls.get("min_thesis_confidence", 0.46))
+    controls["signal_cooldown_sec"] = max(0.0, min(300.0, float(controls.get("signal_cooldown_sec", 8.0) or 0.0)))
+    controls["rl_track_interval_sec"] = max(0.05, min(300.0, float(controls.get("rl_track_interval_sec", 30.0) or 30.0)))
+    controls["consensus_threshold"] = _clip01(controls.get("consensus_threshold", 0.82))
+    controls["gates_pass_minimum"] = max(1, min(20, int(controls.get("gates_pass_minimum", 9) or 9)))
+    controls["conformal_max_interval_pct"] = _clip01(controls.get("conformal_max_interval_pct", 0.40))
+    controls["risk_min_pct"] = max(0.0, min(10.0, float(controls.get("risk_min_pct", 0.5) or 0.0)))
+    controls["risk_max_pct"] = max(
+        float(controls["risk_min_pct"]),
+        min(10.0, float(controls.get("risk_max_pct", 2.0) or 2.0)),
+    )
+    controls["recall_boost_threshold"] = _clip01(controls.get("recall_boost_threshold", 0.85))
+    controls["recall_veto_threshold"] = _clip01(controls.get("recall_veto_threshold", 0.87))
+    controls["use_macro_local_alignment_gate"] = bool(controls.get("use_macro_local_alignment_gate", True))
+    controls["use_opposition_strength_gate"] = bool(controls.get("use_opposition_strength_gate", True))
+    controls["use_memory_ambiguity_penalty"] = bool(controls.get("use_memory_ambiguity_penalty", True))
     controls["phoenix_report_interval_sec"] = max(0.0, float(controls.get("phoenix_report_interval_sec", 20.0) or 0.0))
     return controls
 
@@ -16292,6 +16532,21 @@ class ContinuousWindowTrackerService:
     def _event_log_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "events.jsonl"
 
+    def _prune_session_event_log(self, path: Path) -> None:
+        try:
+            max_mb = _env_float("PHOENIXGUARD_TRACKER_EVENT_LOG_MAX_MB", 24.0, 0.001)
+            keep_lines = _env_int("PHOENIXGUARD_TRACKER_EVENT_LOG_TAIL_LINES", 2000, 1)
+            max_bytes = int(max_mb * 1024.0 * 1024.0)
+            if max_bytes <= 0 or not path.exists() or path.stat().st_size <= max_bytes:
+                return
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            tail = lines[-keep_lines:]
+            tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
+            tmp_path.write_text(("\n".join(tail) + ("\n" if tail else "")), encoding="utf-8")
+            tmp_path.replace(path)
+        except Exception:
+            LOGGER.debug("Unable to prune tracker event log %s.", path, exc_info=True)
+
     def _write_session_event_log(self, session_id: str, event: str, **fields: Any) -> None:
         try:
             path = self._event_log_path(session_id)
@@ -16304,6 +16559,7 @@ class ContinuousWindowTrackerService:
             }
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row, sort_keys=True) + "\n")
+            self._prune_session_event_log(path)
         except Exception:
             LOGGER.debug("Unable to append tracker event log for %s.", session_id, exc_info=True)
 
@@ -16715,7 +16971,8 @@ class ContinuousWindowTrackerService:
         )
         signal["high_frequency_candle_cycle"] = dict(high_frequency_cycle)
         tracking["high_frequency_candle_cycle"] = dict(high_frequency_cycle)
-        if bool(high_frequency_cycle.get("ready", False)):
+        two_candle_execution_allowed = bool(execution_controls.get("two_candle_execution_allowed", False))
+        if bool(high_frequency_cycle.get("ready", False)) and two_candle_execution_allowed:
             hf_side = _upper_action(high_frequency_cycle.get("side"), fallback="HOLD")
             hf_confidence = max(
                 _clip01(high_frequency_cycle.get("confidence") or 0.0),
@@ -16990,6 +17247,25 @@ class ContinuousWindowTrackerService:
             )
         )
         sequence_confidence = max(confidence, v3_candidate_score, 0.99 if v3_candidate_active else 0.0)
+        execution_threshold = _clip01(execution_controls.get("execution_threshold", 0.70))
+        execution_lane_thresholds = _normalize_float_map(
+            execution_controls.get("execution_lane_thresholds"),
+            DEFAULT_EXECUTION_LANE_THRESHOLDS,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        ai_contribution_strengths = _normalize_float_map(
+            execution_controls.get("ai_contribution_strengths"),
+            DEFAULT_AI_CONTRIBUTION_STRENGTHS,
+            minimum=0.0,
+            maximum=2.0,
+        )
+        model_strength_profile = _mapping_to_dict(execution_controls.get("model_strength_profile", {}))
+        default_study_packet_valid_for_seconds = max(
+            _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC,
+            _float_or(signal.get("freshness_window_sec") or tracking.get("freshness_window_sec"), 0.0),
+            _float_or(signal.get("pipeline_latency_sec") or tracking.get("pipeline_latency_sec"), 0.0) * 3.0,
+        )
         snapshot: dict[str, Any] = {
             "session_id": str(payload.get("session_id", "")),
             "symbol": symbol,
@@ -17002,6 +17278,37 @@ class ContinuousWindowTrackerService:
             "instrument_context": instrument_context,
             "symbol_context": symbol_context,
             "execution_controls": execution_controls,
+            "model_confidence_floor": _clip01(
+                execution_controls.get("model_confidence_floor", _HIGH_FREQUENCY_MIN_CONFIDENCE)
+            ),
+            "high_frequency_min_confidence": _clip01(
+                execution_controls.get("high_frequency_min_confidence", _HIGH_FREQUENCY_MIN_CONFIDENCE)
+            ),
+            "execution_threshold": execution_threshold,
+            "lane_thresholds": execution_lane_thresholds,
+            "execution_lane_thresholds": execution_lane_thresholds,
+            "overlay_min_confidence": _clip01(execution_controls.get("overlay_min_confidence", 0.0)),
+            "ai_contribution_strengths": ai_contribution_strengths,
+            "model_strength_profile": model_strength_profile,
+            "min_dominance_margin": _clip01(execution_controls.get("min_dominance_margin", 0.18)),
+            "flip_flop_release_stable_reads": max(
+                1,
+                int(execution_controls.get("flip_flop_release_stable_reads", 2) or 2),
+            ),
+            "flip_flop_release_candidate_flips": max(
+                0,
+                int(execution_controls.get("flip_flop_release_candidate_flips", 2) or 2),
+            ),
+            "reversal_capture_min_dominance": _clip01(
+                execution_controls.get("reversal_capture_min_dominance", 0.18)
+            ),
+            "opportunity_capture_stable_reads": max(
+                1,
+                int(execution_controls.get("opportunity_capture_stable_reads", 3) or 3),
+            ),
+            "opportunity_capture_min_score": _clip01(
+                execution_controls.get("opportunity_capture_min_score", 0.90)
+            ),
             "execution_mode": "broker_click"
             if bool(execution_controls.get("live_execution_enabled", False))
             and str(execution_controls.get("execution_mode", "shadow") or "shadow") == "live"
@@ -17016,11 +17323,19 @@ class ContinuousWindowTrackerService:
             "live_integrity": live_integrity,
             "created_epoch": float(capture_started_epoch),
             "now_epoch": float(capture_started_epoch),
-            "packet_valid_for_seconds": _CALIBRATED_SHOOTER_PACKET_VALID_SEC,
+            "packet_valid_for_seconds": max(
+                1.0,
+                float(
+                    execution_controls.get("packet_valid_for_seconds", _CALIBRATED_SHOOTER_PACKET_VALID_SEC)
+                    or _CALIBRATED_SHOOTER_PACKET_VALID_SEC
+                ),
+            ),
             "study_packet_valid_for_seconds": max(
-                _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC,
-                _float_or(signal.get("freshness_window_sec") or tracking.get("freshness_window_sec"), 0.0),
-                _float_or(signal.get("pipeline_latency_sec") or tracking.get("pipeline_latency_sec"), 0.0) * 3.0,
+                5.0,
+                float(
+                    execution_controls.get("study_packet_valid_for_seconds", default_study_packet_valid_for_seconds)
+                    or default_study_packet_valid_for_seconds
+                ),
             ),
             "sequence_id": f"seq_{str(payload.get('session_id', '')).strip()}_{int(frame_index)}",
             "sequence_length": 50,
@@ -17711,8 +18026,273 @@ class ContinuousWindowTrackerService:
         )
         return state
 
+    def _entry_allowance_marker_point(
+        self,
+        *,
+        side: str,
+        image_size: tuple[int, int],
+        model_council_packet: Mapping[str, Any],
+        model_council_result: Mapping[str, Any],
+        latest_signal: Mapping[str, Any],
+        tracking_summary: Mapping[str, Any],
+    ) -> tuple[int, int, str]:
+        def as_mapping(value: Any) -> dict[str, Any]:
+            return _mapping_to_dict(value)
+
+        def first_number(*values: Any) -> float | None:
+            for value in values:
+                if value in (None, "", [], {}):
+                    continue
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if number == number:
+                    return number
+            return None
+
+        def bbox_center(value: Any) -> tuple[float | None, float | None]:
+            if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)) or len(value) < 4:
+                return None, None
+            try:
+                x0, y0, x1, y1 = [float(item) for item in value[:4]]
+            except (TypeError, ValueError):
+                return None, None
+            return (x0 + x1) / 2.0, (y0 + y1) / 2.0
+
+        thesis = as_mapping(latest_signal.get("signal_thesis_v3") or tracking_summary.get("signal_thesis_v3"))
+        promotion = as_mapping(model_council_result.get("promotion_trace"))
+        timing = as_mapping(promotion.get("timing_decision"))
+        candidates = [
+            as_mapping(model_council_packet),
+            as_mapping(model_council_packet.get("entry")),
+            as_mapping(model_council_packet.get("entry_zone")),
+            as_mapping(model_council_packet.get("entry_area")),
+            as_mapping(thesis.get("entry_zone")),
+            as_mapping(thesis.get("active_entry_zone")),
+            as_mapping(latest_signal.get("entry_zone")),
+            as_mapping(tracking_summary.get("entry_zone")),
+            as_mapping(tracking_summary.get("current_box")),
+            as_mapping(as_mapping(tracking_summary.get("snapshot")).get("current_box")),
+            timing,
+            promotion,
+        ]
+        for source in candidates:
+            if not source:
+                continue
+            bbox = source.get("bbox") or source.get("box") or source.get("rect") or source.get("bounds")
+            center_x, center_y = bbox_center(bbox)
+            x = first_number(source.get("center_x"), source.get("line_x"), source.get("x"), center_x)
+            y = first_number(
+                source.get("center_y"),
+                source.get("line_y"),
+                source.get("entry_y"),
+                source.get("current_y"),
+                center_y,
+            )
+            if x is None or y is None:
+                continue
+            width, height = image_size
+            return (
+                int(max(0, min(width - 1, round(x)))),
+                int(max(0, min(height - 1, round(y)))),
+                str(source.get("label") or source.get("role") or source.get("source_rule") or "entry_context"),
+            )
+        width, height = image_size
+        fallback_y = first_number(thesis.get("current_price_proxy"), latest_signal.get("current_price_proxy"))
+        y = int(round(fallback_y)) if fallback_y is not None else int(height * 0.5)
+        x = int(width * (0.72 if side == "BUY" else 0.78))
+        return (max(0, min(width - 1, x)), max(0, min(height - 1, y)), "fallback_current_price_proxy")
+
+    def _annotate_entry_allowance_image(
+        self,
+        image: Image.Image,
+        *,
+        side: str,
+        point: tuple[int, int],
+        label: str,
+    ) -> Image.Image:
+        annotated = image.convert("RGB").copy()
+        draw = ImageDraw.Draw(annotated)
+        width, height = annotated.size
+        x, y = point
+        side = _upper_action(side)
+        color: ColorRGB = (24, 210, 92) if side == "BUY" else (255, 75, 75)
+        outline: ColorRGB = (0, 0, 0)
+        arrow_len = max(56, min(120, int(height * 0.12)))
+        if side == "BUY":
+            start = (x, min(height - 8, y + arrow_len))
+            end = (x, max(8, y))
+            head = [(x, max(8, y)), (max(0, x - 16), min(height - 1, y + 30)), (min(width - 1, x + 16), min(height - 1, y + 30))]
+        else:
+            start = (x, max(8, y - arrow_len))
+            end = (x, min(height - 8, y))
+            head = [(x, min(height - 8, y)), (max(0, x - 16), max(0, y - 30)), (min(width - 1, x + 16), max(0, y - 30))]
+        for offset in (-2, -1, 0, 1, 2):
+            draw.line([(start[0] + offset, start[1]), (end[0] + offset, end[1])], fill=outline, width=8)
+        draw.line([start, end], fill=color, width=5)
+        draw.polygon(head, fill=color, outline=outline)
+        radius = 16
+        draw.ellipse([x - radius, y - radius, x + radius, y + radius], outline=outline, width=6)
+        draw.ellipse([x - radius, y - radius, x + radius, y + radius], outline=color, width=3)
+        text = f"{side} ENTRY ALLOWED"
+        if label:
+            text = f"{text} | {label[:36]}"
+        font = _overlay_font(18, bold=True)
+        try:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_w = int(bbox[2] - bbox[0])
+            text_h = int(bbox[3] - bbox[1])
+        except Exception:
+            text_w = min(width - 20, len(text) * 10)
+            text_h = 24
+        tx = max(8, min(width - text_w - 18, x - text_w // 2))
+        ty = max(8, min(height - text_h - 18, y - arrow_len - text_h - 20 if side == "BUY" else y + 28))
+        draw.rectangle([tx - 7, ty - 5, tx + text_w + 7, ty + text_h + 7], fill=(0, 0, 0), outline=color, width=2)
+        draw.text((tx, ty), text, fill=(255, 255, 255), font=font)
+        return annotated
+
+    def _prune_entry_allowance_evidence(self, evidence_dir: Path) -> None:
+        try:
+            if not evidence_dir.exists():
+                return
+            max_files = _env_int("PHOENIXGUARD_ENTRY_EVIDENCE_MAX_FILES", 240, 12)
+            max_mb = _env_float("PHOENIXGUARD_ENTRY_EVIDENCE_MAX_MB", 512.0, 32.0)
+            max_age_sec = _env_float("PHOENIXGUARD_ENTRY_EVIDENCE_MAX_AGE_SEC", 7200.0, 600.0)
+            files = [path for path in evidence_dir.iterdir() if path.is_file()]
+            if not files:
+                return
+            now_epoch = _now_epoch()
+            ordered = sorted(files, key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+            removable: set[Path] = set()
+            for index, path in enumerate(ordered):
+                try:
+                    age_sec = now_epoch - float(path.stat().st_mtime)
+                except OSError:
+                    age_sec = 0.0
+                if index >= max_files or age_sec > max_age_sec:
+                    removable.add(path)
+            kept = [path for path in ordered if path not in removable]
+            total_bytes = sum(path.stat().st_size for path in kept if path.exists())
+            max_bytes = int(max_mb * 1024.0 * 1024.0)
+            for path in sorted(kept, key=lambda item: item.stat().st_mtime if item.exists() else 0.0):
+                if total_bytes <= max_bytes:
+                    break
+                try:
+                    total_bytes -= int(path.stat().st_size)
+                except OSError:
+                    pass
+                removable.add(path)
+            for path in removable:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        except Exception:
+            LOGGER.debug("Unable to prune entry allowance evidence from %s.", evidence_dir, exc_info=True)
+
+    def _capture_entry_allowance_evidence(
+        self,
+        *,
+        session_id: str,
+        frame_index: int,
+        capture_count: int,
+        published_epoch: float,
+        window_image: Image.Image,
+        overlay_path: Path,
+        focus_meta: Mapping[str, Any],
+        model_council_packet: Mapping[str, Any],
+        model_council_result: Mapping[str, Any],
+        latest_signal: Mapping[str, Any],
+        tracking_summary: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not _env_bool("PHOENIXGUARD_ENTRY_EVIDENCE_CAPTURE", False):
+            return {}
+        side = _upper_action(
+            model_council_packet.get("side")
+            or model_council_packet.get("action")
+            or _mapping_to_dict(model_council_result.get("promotion_trace")).get("candidate_side")
+            or latest_signal.get("action"),
+            fallback="HOLD",
+        )
+        if side not in {"BUY", "SELL"}:
+            return {}
+        try:
+            overlay_image = Image.open(overlay_path).convert("RGB")
+        except Exception:
+            overlay_image = window_image.convert("RGB")
+        chart_point_x, chart_point_y, marker_source = self._entry_allowance_marker_point(
+            side=side,
+            image_size=overlay_image.size,
+            model_council_packet=model_council_packet,
+            model_council_result=model_council_result,
+            latest_signal=latest_signal,
+            tracking_summary=tracking_summary,
+        )
+        window_point = (chart_point_x, chart_point_y)
+        pixel_bbox = cast(Sequence[Any], focus_meta.get("pixel_bbox", []))
+        if len(pixel_bbox) >= 4:
+            try:
+                window_point = (int(round(float(pixel_bbox[0]) + chart_point_x)), int(round(float(pixel_bbox[1]) + chart_point_y)))
+            except (TypeError, ValueError):
+                window_point = (chart_point_x, chart_point_y)
+        label = f"frame {frame_index} {marker_source}"
+        evidence_dir = self._session_dir(session_id) / "entry_evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        stamp = int(float(published_epoch or _now_epoch()) * 1000.0)
+        stem = f"{frame_index:06d}_{stamp}_{side.lower()}_entry"
+        overlay_evidence_path = evidence_dir / f"{stem}_overlay.jpg"
+        broker_evidence_path = evidence_dir / f"{stem}_broker.jpg"
+        meta_path = evidence_dir / f"{stem}.json"
+        _encode_window_artifact(
+            self._annotate_entry_allowance_image(overlay_image, side=side, point=(chart_point_x, chart_point_y), label=label),
+            overlay_evidence_path,
+        )
+        broker_point = (
+            max(0, min(window_image.size[0] - 1, int(window_point[0]))),
+            max(0, min(window_image.size[1] - 1, int(window_point[1]))),
+        )
+        _encode_window_artifact(
+            self._annotate_entry_allowance_image(window_image, side=side, point=broker_point, label=label),
+            broker_evidence_path,
+        )
+        promotion = _mapping_to_dict(model_council_result.get("promotion_trace"))
+        timing = _mapping_to_dict(promotion.get("timing_decision"))
+        entry_now_raw = timing.get("entry_now_allowed")
+        lane_accepted_raw = promotion.get("lane_accepted")
+        evidence = {
+            "schema_version": "PG_ENTRY_ALLOWANCE_EVIDENCE_V1",
+            "session_id": session_id,
+            "frame_index": int(frame_index),
+            "capture_count": int(capture_count),
+            "published_epoch": float(published_epoch or _now_epoch()),
+            "published_at": _epoch_to_utc_iso(float(published_epoch or _now_epoch())),
+            "side": side,
+            "entry_now_allowed": bool(entry_now_raw) if entry_now_raw is not None else None,
+            "lane_accepted": bool(lane_accepted_raw) if lane_accepted_raw is not None else None,
+            "packet_id": str(model_council_packet.get("packet_id") or promotion.get("packet_id") or ""),
+            "candidate_id": str(model_council_packet.get("candidate_id") or promotion.get("candidate_id") or ""),
+            "marker_source": marker_source,
+            "chart_point": {"x": chart_point_x, "y": chart_point_y},
+            "window_point": {"x": broker_point[0], "y": broker_point[1]},
+            "overlay_evidence_path": str(overlay_evidence_path),
+            "broker_evidence_path": str(broker_evidence_path),
+            "source_overlay_path": str(overlay_path),
+        }
+        _write_json_atomic(meta_path, evidence)
+        self._prune_entry_allowance_evidence(evidence_dir)
+        return evidence
+
     def _prune_session_artifacts(self, artifact_dir: Path) -> None:
-        keep_frames = max(24, int(_TRACKER_ARTIFACT_RETENTION_FRAMES))
+        keep_frames = _env_int(
+            "PHOENIXGUARD_TRACKER_ARTIFACT_RETENTION_FRAMES",
+            _TRACKER_ARTIFACT_RETENTION_FRAMES,
+            24,
+        )
+        max_age_sec = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_MAX_AGE_SEC", 7200.0, 300.0)
+        max_mb = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_MAX_MB", 256.0, 32.0)
+        decision_keep = _env_int("PHOENIXGUARD_TRACKER_DECISION_RETENTION_FILES", 12, 1)
+        prune_interval_sec = _env_float("PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC", 30.0, 5.0)
         try:
             if not artifact_dir.exists():
                 return
@@ -17720,58 +18300,115 @@ class ContinuousWindowTrackerService:
             now_epoch = _now_epoch()
             with self._lock:
                 last_prune = float(self._last_artifact_prune_epoch.get(prune_key, 0.0) or 0.0)
-                if now_epoch - last_prune < 60.0:
+                if now_epoch - last_prune < prune_interval_sec:
                     return
                 self._last_artifact_prune_epoch[prune_key] = now_epoch
             frame_groups: dict[str, list[Path]] = {}
+            artifact_files: list[Path] = []
             for path in artifact_dir.iterdir():
                 if not path.is_file():
                     continue
+                artifact_files.append(path)
                 parts = path.name.split("_", 2)
                 if len(parts) < 3 or not parts[0].isdigit():
                     continue
                 frame_groups.setdefault(f"{parts[0]}_{parts[1]}", []).append(path)
-            if len(frame_groups) <= keep_frames:
-                return
             protected_groups: set[str] = set()
-            current_payload = _mapping_to_dict(_read_json(artifact_dir.parent / "session.json", {}))
-            for key in (
-                "last_window_path",
-                "last_frame_path",
-                "last_display_window_path",
-                "last_chart_path",
-                "last_overlay_path",
-                "last_full_overlay_path",
-                "last_decision_path",
-            ):
-                raw_path = str(current_payload.get(key, "") or "")
-                if not raw_path:
-                    continue
-                parts = Path(raw_path).name.split("_", 2)
-                if len(parts) >= 3 and parts[0].isdigit():
-                    protected_groups.add(f"{parts[0]}_{parts[1]}")
+            protected_paths: set[str] = set()
+            current_payloads = [
+                _mapping_to_dict(_read_json(artifact_dir.parent / "session.json", {})),
+                _mapping_to_dict(_read_json(artifact_dir.parent / "display_state.json", {})),
+            ]
+            for current_payload in current_payloads:
+                for key in (
+                    "last_window_path",
+                    "last_frame_path",
+                    "last_display_window_path",
+                    "last_chart_path",
+                    "last_overlay_path",
+                    "last_full_overlay_path",
+                    "last_decision_path",
+                ):
+                    raw_path = str(current_payload.get(key, "") or "")
+                    if not raw_path:
+                        continue
+                    try:
+                        protected_paths.add(str(Path(raw_path).resolve()).lower())
+                    except OSError:
+                        protected_paths.add(str(Path(raw_path)).lower())
+                    parts = Path(raw_path).name.split("_", 2)
+                    if len(parts) >= 3 and parts[0].isdigit():
+                        protected_groups.add(f"{parts[0]}_{parts[1]}")
             ordered = sorted(
                 frame_groups.items(),
                 key=lambda item: int(item[0].split("_", 1)[0]),
                 reverse=True,
             )
-            stale_groups = [(group_key, paths) for group_key, paths in ordered[keep_frames:] if group_key not in protected_groups]
+            stale_groups: list[tuple[str, list[Path]]] = []
+            for index, (group_key, paths) in enumerate(ordered):
+                newest_mtime = max((path.stat().st_mtime for path in paths if path.exists()), default=now_epoch)
+                too_old = now_epoch - float(newest_mtime) > max_age_sec
+                if (index >= keep_frames or too_old) and group_key not in protected_groups:
+                    stale_groups.append((group_key, paths))
             removed = 0
+            removed_bytes = 0
+
+            def unlink_artifact(path: Path) -> bool:
+                nonlocal removed, removed_bytes
+                try:
+                    path_key = str(path.resolve()).lower()
+                except OSError:
+                    path_key = str(path).lower()
+                if path_key in protected_paths:
+                    return False
+                try:
+                    size = int(path.stat().st_size)
+                except OSError:
+                    size = 0
+                try:
+                    path.unlink(missing_ok=True)
+                    removed += 1
+                    removed_bytes += size
+                    return True
+                except FileNotFoundError:
+                    return False
+                except Exception:
+                    LOGGER.debug("Unable to prune tracker artifact %s.", path, exc_info=True)
+                    return False
+
             for _, paths in stale_groups:
                 for path in paths:
+                    unlink_artifact(path)
+
+            decision_files = sorted(
+                [path for path in artifact_dir.glob("*_decision.json") if path.is_file()],
+                key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+                reverse=True,
+            )
+            for path in decision_files[decision_keep:]:
+                unlink_artifact(path)
+
+            max_bytes = int(max_mb * 1024.0 * 1024.0)
+            remaining_files = [path for path in artifact_dir.iterdir() if path.is_file()]
+            total_bytes = sum(path.stat().st_size for path in remaining_files if path.exists())
+            if total_bytes > max_bytes:
+                for path in sorted(remaining_files, key=lambda item: item.stat().st_mtime if item.exists() else 0.0):
+                    if total_bytes <= max_bytes:
+                        break
                     try:
-                        path.unlink(missing_ok=True)
-                        removed += 1
-                    except FileNotFoundError:
-                        continue
-                    except Exception:
-                        LOGGER.debug("Unable to prune tracker artifact %s.", path, exc_info=True)
+                        size = int(path.stat().st_size)
+                    except OSError:
+                        size = 0
+                    if unlink_artifact(path):
+                        total_bytes -= size
             if removed:
                 LOGGER.info(
-                    "Pruned %s stale tracker artifacts from %s; retained %s frame groups.",
+                    "Pruned %s tracker artifacts (%.1f MB) from %s; retained <=%s frame groups, <=%s MB.",
                     removed,
+                    removed_bytes / 1024.0 / 1024.0,
                     artifact_dir,
                     keep_frames,
+                    max_mb,
                 )
         except Exception:
             LOGGER.debug("Tracker artifact pruning failed for %s.", artifact_dir, exc_info=True)
@@ -18558,10 +19195,10 @@ class ContinuousWindowTrackerService:
         fallback_patterns = {
             "window": ["*_window.jpg", "*_window.jpeg", "*_window.png"],
             "frame": ["*_window.jpg", "*_window.jpeg", "*_window.png"],
-            "chart": ["*_chart.png"],
-            "display-chart": ["*_overlay.png", "*_chart.png"],
-            "overlay": ["*_overlay.png", "*_full_overlay.png"],
-            "full-overlay": ["*_full_overlay.png", "*_overlay.png"],
+            "chart": ["*_chart.jpg", "*_chart.jpeg", "*_chart.png"],
+            "display-chart": ["*_overlay.jpg", "*_overlay.jpeg", "*_overlay.png", "*_chart.jpg", "*_chart.jpeg", "*_chart.png"],
+            "overlay": ["*_overlay.jpg", "*_overlay.jpeg", "*_overlay.png", "*_full_overlay.jpg", "*_full_overlay.jpeg", "*_full_overlay.png"],
+            "full-overlay": ["*_full_overlay.jpg", "*_full_overlay.jpeg", "*_full_overlay.png", "*_overlay.png"],
             "decision": ["*_decision.json"],
             "memory-reference": ["*_memory_reference.png"],
             "projection": ["*_projection.png"],
@@ -19496,14 +20133,25 @@ class ContinuousWindowTrackerService:
         allow_location_sniper_entries: bool | None = None,
         trade_profile: str | None = None,
         high_frequency_enabled: bool | None = None,
+        two_candle_execution_allowed: bool | None = None,
         swing_fallback_enabled: bool | None = None,
         continuous_model_feed_enabled: bool | None = None,
+        model_confidence_floor: float | None = None,
         high_frequency_min_confidence: float | None = None,
         high_frequency_entry_grace_sec: float | None = None,
         high_frequency_expiry_seconds: int | None = None,
+        high_frequency_horizon_candles: int | None = None,
+        execution_threshold: float | None = None,
+        overlay_min_confidence: float | None = None,
+        ai_contribution_strengths: Mapping[str, float] | None = None,
+        execution_lane_thresholds: Mapping[str, float] | None = None,
+        model_strength_profile: Mapping[str, object] | None = None,
+        allow_live_momentum_entries: bool | None = None,
+        allow_opposing_force_reactions: bool | None = None,
         scenario_generation_enabled: bool | None = None,
         auto_memory_projection: bool | None = None,
         require_memory_projection: bool | None = None,
+        live_momentum_memory_advisory: bool | None = None,
         require_market_identity: bool | None = None,
         require_timeframe_identity: bool | None = None,
         allow_locked_surface_identity_fallback: bool | None = None,
@@ -19520,7 +20168,51 @@ class ContinuousWindowTrackerService:
         loss_guard_max_consecutive_losses: int | None = None,
         loss_guard_window_sec: float | None = None,
         loss_guard_pause_sec: float | None = None,
+        min_primary_target_candles: int | None = None,
+        max_primary_target_candles: int | None = None,
         min_location_sniper_target_candles: int | None = None,
+        live_max_tracked_candles: int | None = None,
+        support_resistance_max_zones_per_role: int | None = None,
+        support_resistance_max_total_zones: int | None = None,
+        support_resistance_max_significant_zones: int | None = None,
+        smart_money_max_liquidity_pools: int | None = None,
+        min_live_momentum_visible_candles: int | None = None,
+        min_live_momentum_score: float | None = None,
+        min_live_momentum_alignment: int | None = None,
+        min_opposing_force_reaction_score: float | None = None,
+        min_opposing_force_reaction_alignment: int | None = None,
+        min_opposing_force_reaction_risk: float | None = None,
+        min_opposing_force_reaction_entry_score: float | None = None,
+        max_opposing_force_reaction_distance: float | None = None,
+        min_dominance_margin: float | None = None,
+        flip_flop_release_stable_reads: int | None = None,
+        flip_flop_release_candidate_flips: int | None = None,
+        reversal_capture_min_dominance: float | None = None,
+        opportunity_capture_stable_reads: int | None = None,
+        opportunity_capture_min_score: float | None = None,
+        packet_valid_for_seconds: float | None = None,
+        study_packet_valid_for_seconds: float | None = None,
+        min_conf_global: float | None = None,
+        min_conf_latest: float | None = None,
+        history_depth: int | None = None,
+        label_density: int | None = None,
+        projection_focus: float | None = None,
+        debug_depth: int | None = None,
+        fuse_timeframe_overlays: bool | None = None,
+        min_actionable_confidence: float | None = None,
+        min_thesis_confidence: float | None = None,
+        signal_cooldown_sec: float | None = None,
+        rl_track_interval_sec: float | None = None,
+        consensus_threshold: float | None = None,
+        gates_pass_minimum: int | None = None,
+        conformal_max_interval_pct: float | None = None,
+        risk_min_pct: float | None = None,
+        risk_max_pct: float | None = None,
+        recall_boost_threshold: float | None = None,
+        recall_veto_threshold: float | None = None,
+        use_macro_local_alignment_gate: bool | None = None,
+        use_opposition_strength_gate: bool | None = None,
+        use_memory_ambiguity_penalty: bool | None = None,
         phoenix_report_interval_sec: float | None = None,
     ) -> dict[str, Any]:
         payload = self._require_session(session_id)
@@ -19541,22 +20233,57 @@ class ContinuousWindowTrackerService:
                 controls["execution_profile"] = controls["trade_profile"]
             if high_frequency_enabled is not None:
                 controls["high_frequency_enabled"] = bool(high_frequency_enabled)
+            if two_candle_execution_allowed is not None:
+                controls["two_candle_execution_allowed"] = bool(two_candle_execution_allowed)
             if swing_fallback_enabled is not None:
                 controls["swing_fallback_enabled"] = bool(swing_fallback_enabled)
             if continuous_model_feed_enabled is not None:
                 controls["continuous_model_feed_enabled"] = bool(continuous_model_feed_enabled)
+            if model_confidence_floor is not None:
+                controls["model_confidence_floor"] = _clip01(model_confidence_floor)
             if high_frequency_min_confidence is not None:
                 controls["high_frequency_min_confidence"] = _clip01(high_frequency_min_confidence)
             if high_frequency_entry_grace_sec is not None:
                 controls["high_frequency_entry_grace_sec"] = max(0.0, float(high_frequency_entry_grace_sec))
             if high_frequency_expiry_seconds is not None:
-                controls["high_frequency_expiry_seconds"] = max(_HIGH_FREQUENCY_FIXED_EXPIRY_SEC, int(high_frequency_expiry_seconds))
+                controls["high_frequency_expiry_seconds"] = max(
+                    _EXECUTION_MIN_LIVE_EXPIRY_SEC,
+                    min(_EXECUTION_MAX_LIVE_EXPIRY_SEC, int(high_frequency_expiry_seconds)),
+                )
+            if high_frequency_horizon_candles is not None:
+                controls["high_frequency_horizon_candles"] = max(1, min(12, int(high_frequency_horizon_candles)))
+            if execution_threshold is not None:
+                controls["execution_threshold"] = _clip01(execution_threshold)
+            if overlay_min_confidence is not None:
+                controls["overlay_min_confidence"] = _clip01(overlay_min_confidence)
+            if ai_contribution_strengths is not None:
+                controls["ai_contribution_strengths"] = _normalize_float_map(
+                    ai_contribution_strengths,
+                    DEFAULT_AI_CONTRIBUTION_STRENGTHS,
+                    minimum=0.0,
+                    maximum=2.0,
+                )
+            if execution_lane_thresholds is not None:
+                controls["execution_lane_thresholds"] = _normalize_float_map(
+                    execution_lane_thresholds,
+                    DEFAULT_EXECUTION_LANE_THRESHOLDS,
+                    minimum=0.0,
+                    maximum=1.0,
+                )
+            if model_strength_profile is not None:
+                controls["model_strength_profile"] = _mapping_to_dict(model_strength_profile)
+            if allow_live_momentum_entries is not None:
+                controls["allow_live_momentum_entries"] = bool(allow_live_momentum_entries)
+            if allow_opposing_force_reactions is not None:
+                controls["allow_opposing_force_reactions"] = bool(allow_opposing_force_reactions)
             if scenario_generation_enabled is not None:
                 controls["scenario_generation_enabled"] = bool(scenario_generation_enabled)
             if auto_memory_projection is not None:
                 controls["auto_memory_projection"] = bool(auto_memory_projection)
             if require_memory_projection is not None:
                 controls["require_memory_projection"] = bool(require_memory_projection)
+            if live_momentum_memory_advisory is not None:
+                controls["live_momentum_memory_advisory"] = bool(live_momentum_memory_advisory)
             if require_market_identity is not None:
                 controls["require_market_identity"] = bool(require_market_identity)
             if require_timeframe_identity is not None:
@@ -19590,8 +20317,99 @@ class ContinuousWindowTrackerService:
                 controls["loss_guard_window_sec"] = max(60.0, float(loss_guard_window_sec))
             if loss_guard_pause_sec is not None:
                 controls["loss_guard_pause_sec"] = max(60.0, float(loss_guard_pause_sec))
+            if min_primary_target_candles is not None:
+                controls["min_primary_target_candles"] = max(1, int(min_primary_target_candles))
+            if max_primary_target_candles is not None:
+                controls["max_primary_target_candles"] = max(
+                    int(controls.get("min_primary_target_candles", 1) or 1),
+                    int(max_primary_target_candles),
+                )
             if min_location_sniper_target_candles is not None:
                 controls["min_location_sniper_target_candles"] = max(1, int(min_location_sniper_target_candles))
+            if live_max_tracked_candles is not None:
+                controls["live_max_tracked_candles"] = max(8, min(256, int(live_max_tracked_candles)))
+            if support_resistance_max_zones_per_role is not None:
+                controls["support_resistance_max_zones_per_role"] = max(2, min(12, int(support_resistance_max_zones_per_role)))
+            if support_resistance_max_total_zones is not None:
+                controls["support_resistance_max_total_zones"] = max(4, min(24, int(support_resistance_max_total_zones)))
+            if support_resistance_max_significant_zones is not None:
+                controls["support_resistance_max_significant_zones"] = max(4, min(24, int(support_resistance_max_significant_zones)))
+            if smart_money_max_liquidity_pools is not None:
+                controls["smart_money_max_liquidity_pools"] = max(4, min(24, int(smart_money_max_liquidity_pools)))
+            if min_live_momentum_visible_candles is not None:
+                controls["min_live_momentum_visible_candles"] = max(1, min(64, int(min_live_momentum_visible_candles)))
+            if min_live_momentum_score is not None:
+                controls["min_live_momentum_score"] = _clip01(min_live_momentum_score)
+            if min_live_momentum_alignment is not None:
+                controls["min_live_momentum_alignment"] = max(1, min(10, int(min_live_momentum_alignment)))
+            if min_opposing_force_reaction_score is not None:
+                controls["min_opposing_force_reaction_score"] = _clip01(min_opposing_force_reaction_score)
+            if min_opposing_force_reaction_alignment is not None:
+                controls["min_opposing_force_reaction_alignment"] = max(1, min(10, int(min_opposing_force_reaction_alignment)))
+            if min_opposing_force_reaction_risk is not None:
+                controls["min_opposing_force_reaction_risk"] = _clip01(min_opposing_force_reaction_risk)
+            if min_opposing_force_reaction_entry_score is not None:
+                controls["min_opposing_force_reaction_entry_score"] = _clip01(min_opposing_force_reaction_entry_score)
+            if max_opposing_force_reaction_distance is not None:
+                controls["max_opposing_force_reaction_distance"] = _clip01(max_opposing_force_reaction_distance)
+            if min_dominance_margin is not None:
+                controls["min_dominance_margin"] = _clip01(min_dominance_margin)
+            if flip_flop_release_stable_reads is not None:
+                controls["flip_flop_release_stable_reads"] = max(1, min(10, int(flip_flop_release_stable_reads)))
+            if flip_flop_release_candidate_flips is not None:
+                controls["flip_flop_release_candidate_flips"] = max(0, min(10, int(flip_flop_release_candidate_flips)))
+            if reversal_capture_min_dominance is not None:
+                controls["reversal_capture_min_dominance"] = _clip01(reversal_capture_min_dominance)
+            if opportunity_capture_stable_reads is not None:
+                controls["opportunity_capture_stable_reads"] = max(1, min(10, int(opportunity_capture_stable_reads)))
+            if opportunity_capture_min_score is not None:
+                controls["opportunity_capture_min_score"] = _clip01(opportunity_capture_min_score)
+            if packet_valid_for_seconds is not None:
+                controls["packet_valid_for_seconds"] = max(1.0, min(300.0, float(packet_valid_for_seconds)))
+            if study_packet_valid_for_seconds is not None:
+                controls["study_packet_valid_for_seconds"] = max(5.0, min(900.0, float(study_packet_valid_for_seconds)))
+            if min_conf_global is not None:
+                controls["min_conf_global"] = _clip01(min_conf_global)
+            if min_conf_latest is not None:
+                controls["min_conf_latest"] = _clip01(min_conf_latest)
+            if history_depth is not None:
+                controls["history_depth"] = max(1, min(24, int(history_depth)))
+            if label_density is not None:
+                controls["label_density"] = max(1, min(30, int(label_density)))
+            if projection_focus is not None:
+                controls["projection_focus"] = _clip01(projection_focus)
+            if debug_depth is not None:
+                controls["debug_depth"] = max(0, min(24, int(debug_depth)))
+            if fuse_timeframe_overlays is not None:
+                controls["fuse_timeframe_overlays"] = bool(fuse_timeframe_overlays)
+            if min_actionable_confidence is not None:
+                controls["min_actionable_confidence"] = _clip01(min_actionable_confidence)
+            if min_thesis_confidence is not None:
+                controls["min_thesis_confidence"] = _clip01(min_thesis_confidence)
+            if signal_cooldown_sec is not None:
+                controls["signal_cooldown_sec"] = max(0.0, min(300.0, float(signal_cooldown_sec)))
+            if rl_track_interval_sec is not None:
+                controls["rl_track_interval_sec"] = max(0.05, min(300.0, float(rl_track_interval_sec)))
+            if consensus_threshold is not None:
+                controls["consensus_threshold"] = _clip01(consensus_threshold)
+            if gates_pass_minimum is not None:
+                controls["gates_pass_minimum"] = max(1, min(20, int(gates_pass_minimum)))
+            if conformal_max_interval_pct is not None:
+                controls["conformal_max_interval_pct"] = _clip01(conformal_max_interval_pct)
+            if risk_min_pct is not None:
+                controls["risk_min_pct"] = max(0.0, min(10.0, float(risk_min_pct)))
+            if risk_max_pct is not None:
+                controls["risk_max_pct"] = max(float(controls.get("risk_min_pct", 0.0) or 0.0), min(10.0, float(risk_max_pct)))
+            if recall_boost_threshold is not None:
+                controls["recall_boost_threshold"] = _clip01(recall_boost_threshold)
+            if recall_veto_threshold is not None:
+                controls["recall_veto_threshold"] = _clip01(recall_veto_threshold)
+            if use_macro_local_alignment_gate is not None:
+                controls["use_macro_local_alignment_gate"] = bool(use_macro_local_alignment_gate)
+            if use_opposition_strength_gate is not None:
+                controls["use_opposition_strength_gate"] = bool(use_opposition_strength_gate)
+            if use_memory_ambiguity_penalty is not None:
+                controls["use_memory_ambiguity_penalty"] = bool(use_memory_ambiguity_penalty)
             if phoenix_report_interval_sec is not None:
                 controls["phoenix_report_interval_sec"] = max(0.0, float(phoenix_report_interval_sec))
             controls["fixed_amount"] = "preserve"
@@ -22206,9 +23024,9 @@ class ContinuousWindowTrackerService:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         stem = f"{frame_index:06d}_{study_surface_signature}"
         window_path = artifact_dir / f"{stem}_window{_window_artifact_suffix(payload)}"
-        chart_path = artifact_dir / f"{stem}_chart.png"
-        overlay_path = artifact_dir / f"{stem}_overlay.png"
-        full_overlay_path = artifact_dir / f"{stem}_full_overlay.png"
+        chart_path = artifact_dir / f"{stem}_chart{_chart_overlay_artifact_suffix(payload)}"
+        overlay_path = artifact_dir / f"{stem}_overlay{_chart_overlay_artifact_suffix(payload)}"
+        full_overlay_path = artifact_dir / f"{stem}_full_overlay{_full_overlay_artifact_suffix(payload)}"
         decision_path = artifact_dir / f"{stem}_decision.json"
 
         _encode_window_artifact(window_image, window_path)
@@ -22446,40 +23264,19 @@ class ContinuousWindowTrackerService:
             )
         except ValueError:
             full_overlay_every_n = 1
-        previous_chart_raw = str(payload.get("last_chart_path", "") or "").strip()
-        previous_overlay_raw = str(payload.get("last_overlay_path", "") or "").strip()
-        previous_full_overlay_raw = str(payload.get("last_full_overlay_path", "") or "").strip()
-        previous_chart_path = Path(previous_chart_raw) if previous_chart_raw else None
-        previous_overlay_path = Path(previous_overlay_raw) if previous_overlay_raw else None
-        previous_full_overlay_path = Path(previous_full_overlay_raw) if previous_full_overlay_raw else None
-        reuse_previous_chart_overlay = bool(
-            live_minimal_artifacts
-            and frame_index % full_overlay_every_n != 0
-            and previous_chart_path is not None
-            and previous_overlay_path is not None
-            and previous_chart_path.is_file()
-            and previous_overlay_path.is_file()
-        )
-        reuse_previous_full_overlay = bool(
-            live_minimal_artifacts
-            and frame_index % full_overlay_every_n != 0
-            and previous_full_overlay_path is not None
-            and previous_full_overlay_path.is_file()
-        )
+        hot_latest_artifacts = bool(live_minimal_artifacts and frame_index % full_overlay_every_n != 0)
+        reuse_previous_chart_overlay = False
+        reuse_previous_full_overlay = False
+        if hot_latest_artifacts:
+            chart_path = artifact_dir / f"hot_latest_chart{_chart_overlay_artifact_suffix(payload)}"
+            overlay_path = artifact_dir / f"hot_latest_overlay{_chart_overlay_artifact_suffix(payload)}"
+            full_overlay_path = artifact_dir / f"hot_latest_full_overlay{_full_overlay_artifact_suffix(payload)}"
 
         if study is None:
-            if reuse_previous_chart_overlay:
-                chart_path = previous_chart_path
-                overlay_path = previous_overlay_path
-            else:
-                _encode_png(study_surface_image, chart_path)
-                _encode_png(study_surface_image, overlay_path)
-            if reuse_previous_full_overlay:
-                full_overlay_path = previous_full_overlay_path
-                full_overlay_image = window_image
-            else:
-                full_overlay_image = _compose_full_window_overlay(window_image, study_surface_image, study_focus_meta)
-                _encode_png(full_overlay_image, full_overlay_path)
+            _encode_chart_overlay_artifact(study_surface_image, chart_path)
+            _encode_chart_overlay_artifact(study_surface_image, overlay_path)
+            full_overlay_image = _compose_full_window_overlay(window_image, study_surface_image, study_focus_meta)
+            _encode_full_overlay_artifact(full_overlay_image, full_overlay_path)
             tracking_summary = _default_tracking_summary(message=error_message or "Tracker study failed.")
             tracking_summary["chart_region"] = {
                 **study_focus_meta,
@@ -22507,18 +23304,10 @@ class ContinuousWindowTrackerService:
         else:
             chart_image = study.chart_image.convert("RGB")
             overlay_image = study.overlay_image.convert("RGB")
-            if reuse_previous_chart_overlay:
-                chart_path = previous_chart_path
-                overlay_path = previous_overlay_path
-            else:
-                _encode_png(chart_image, chart_path)
-                _encode_png(overlay_image, overlay_path)
-            if reuse_previous_full_overlay:
-                full_overlay_path = previous_full_overlay_path
-                full_overlay_image = window_image
-            else:
-                full_overlay_image = _compose_full_window_overlay(window_image, overlay_image, study_focus_meta)
-                _encode_png(full_overlay_image, full_overlay_path)
+            _encode_chart_overlay_artifact(chart_image, chart_path)
+            _encode_chart_overlay_artifact(overlay_image, overlay_path)
+            full_overlay_image = _compose_full_window_overlay(window_image, overlay_image, study_focus_meta)
+            _encode_full_overlay_artifact(full_overlay_image, full_overlay_path)
             tracking_summary = dict(study.tracking_summary)
             tracking_summary["focus_region"] = dict(study_focus_meta)
             if list(cast(Sequence[Any], study_focus_meta.get("pixel_bbox", []))) != list(cast(Sequence[Any], focus_meta.get("pixel_bbox", []))):
@@ -22565,6 +23354,8 @@ class ContinuousWindowTrackerService:
             tracking_summary["artifact_integrity"].update(
                 {
                     "hot_artifacts_reused": bool(reuse_previous_chart_overlay or reuse_previous_full_overlay),
+                    "hot_artifacts_overwritten": bool(hot_latest_artifacts),
+                    "hot_artifact_policy": "OVERWRITE_LATEST_FRESH" if hot_latest_artifacts else "FRAME_ARCHIVE",
                     "chart_artifact_frame_id": chart_artifact_frame_id,
                     "overlay_artifact_frame_id": overlay_artifact_frame_id,
                     "full_overlay_artifact_frame_id": full_overlay_artifact_frame_id,
@@ -22745,6 +23536,26 @@ class ContinuousWindowTrackerService:
         if model_council_packet:
             payload["model_council_packet"] = model_council_packet
             payload["execution_packet"] = model_council_packet
+            try:
+                entry_evidence = self._capture_entry_allowance_evidence(
+                    session_id=str(payload["session_id"]),
+                    frame_index=frame_index,
+                    capture_count=capture_count,
+                    published_epoch=_now_epoch(),
+                    window_image=window_image,
+                    overlay_path=overlay_path,
+                    focus_meta=study_focus_meta,
+                    model_council_packet=model_council_packet,
+                    model_council_result=model_council_result,
+                    latest_signal=latest_signal,
+                    tracking_summary=tracking_summary,
+                )
+                if entry_evidence:
+                    payload["latest_entry_allowance_evidence"] = entry_evidence
+                    tracking_summary["latest_entry_allowance_evidence"] = entry_evidence
+                    latest_signal["latest_entry_allowance_evidence"] = entry_evidence
+            except Exception:
+                LOGGER.debug("Entry allowance evidence capture failed for session %s.", session_id, exc_info=True)
         else:
             payload.pop("model_council_packet", None)
             payload.pop("execution_packet", None)
@@ -23145,6 +23956,12 @@ class ContinuousWindowTrackerService:
         latest_signal["freshness_score"] = 1.0
         latest_signal["freshness_window_sec"] = signal_freshness_window_sec
         latest_signal["pipeline_timing"] = pipeline_timing
+        compact_decision_artifacts = not _env_bool("PHOENIXGUARD_FULL_DECISION_ARTIFACTS", False)
+        decision_model_council_result = (
+            _compact_persisted_model_council_result(model_council_result)
+            if compact_decision_artifacts
+            else model_council_result
+        )
         decision_payload = {
             "session_id": str(payload["session_id"]),
             "captured_at": capture_started_iso,
@@ -23158,8 +23975,10 @@ class ContinuousWindowTrackerService:
             "broker_surface": broker_surface,
             "broker_execution_state": broker_execution_state,
             "scenario_analysis": scenario_analysis,
-            "model_council_result": model_council_result,
-            "model_council": _mapping_to_dict(model_council_result.get("model_council")),
+            "model_council_result": decision_model_council_result,
+            "model_council": _compact_persisted_council_payload(_mapping_to_dict(model_council_result.get("model_council")))
+            if compact_decision_artifacts
+            else _mapping_to_dict(model_council_result.get("model_council")),
         }
         if model_council_study_packet:
             decision_payload["model_council_study_packet"] = model_council_study_packet
@@ -23776,6 +24595,11 @@ class ContinuousWindowTrackerService:
             prepared_payload = dict(payload)
         prepared_payload = _compact_session_persisted_payload(prepared_payload)
         _write_json_atomic(session_path, prepared_payload)
+        if any(
+            str(prepared_payload.get(key, "") or "").strip()
+            for key in ("last_display_window_path", "last_window_path", "last_chart_path", "last_overlay_path", "last_full_overlay_path")
+        ):
+            self._write_display_state(session_id, prepared_payload)
 
     def _public_session_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         public = dict(payload)

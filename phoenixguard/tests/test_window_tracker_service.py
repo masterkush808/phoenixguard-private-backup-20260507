@@ -3521,7 +3521,7 @@ def test_tracker_live_mode_writes_fresh_hot_overlays_by_default(tmp_path: Path, 
     assert result["tracking_summary"]["artifact_integrity"]["hot_artifacts_reused"] is False
 
 
-def test_tracker_forced_hot_artifact_reuse_reports_old_overlay_frame(
+def test_tracker_forced_minimal_hot_artifacts_overwrites_fresh_overlay(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
@@ -3551,14 +3551,16 @@ def test_tracker_forced_hot_artifact_reuse_reports_old_overlay_frame(
     tracker._capture_and_analyze(str(session["session_id"]))
     result = tracker.get_session(str(session["session_id"]))
 
-    old_overlay_frame = _artifact_frame_from_name(focused["last_overlay_path"])
-    assert result["last_overlay_path"] == focused["last_overlay_path"]
-    assert result["last_full_overlay_path"] == focused["last_full_overlay_path"]
-    assert int(result["frame_index"]) > old_overlay_frame
-    assert int(result["overlay_frame_id"]) == old_overlay_frame
-    assert int(result["full_overlay_frame_id"]) == old_overlay_frame
+    assert result["last_overlay_path"] != focused["last_overlay_path"]
+    assert result["last_full_overlay_path"] != focused["last_full_overlay_path"]
+    assert Path(str(result["last_overlay_path"])).name.startswith("hot_latest_overlay")
+    assert Path(str(result["last_full_overlay_path"])).name.startswith("hot_latest_full_overlay")
+    assert int(result["overlay_frame_id"]) == int(result["frame_index"])
+    assert int(result["full_overlay_frame_id"]) == int(result["frame_index"])
     assert int(result["model_vote_frame_id"]) == int(result["frame_index"])
-    assert result["tracking_summary"]["artifact_integrity"]["hot_artifacts_reused"] is True
+    assert result["tracking_summary"]["artifact_integrity"]["hot_artifacts_reused"] is False
+    assert result["tracking_summary"]["artifact_integrity"]["hot_artifacts_overwritten"] is True
+    assert result["tracking_summary"]["artifact_integrity"]["hot_artifact_policy"] == "OVERWRITE_LATEST_FRESH"
 
 
 def test_tracker_capture_once_live_fast_path_returns_fresh_display_when_worker_busy(tmp_path: Path) -> None:
@@ -4060,6 +4062,51 @@ def test_tracker_prune_preserves_session_referenced_artifact_groups(tmp_path: Pa
     }
     assert "000001_abcdef12" in remaining_groups
     assert "000030_abcdef12" in remaining_groups
+
+
+def test_tracker_prune_preserves_display_state_referenced_artifact_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(window_tracker_module, "_TRACKER_ARTIFACT_RETENTION_FRAMES", 2)
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend([_surface(width=1280, height=720)]),
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+    artifact_dir = tmp_path / "sessions" / "display-prune-test" / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    protected_display = artifact_dir / "000001_display_window.png"
+    for index in range(1, 31):
+        stem = f"{index:06d}_abcdef12"
+        for suffix in ("window.png", "chart.png", "overlay.png", "full_overlay.png", "decision.json"):
+            (artifact_dir / f"{stem}_{suffix}").write_text("x", encoding="utf-8")
+    protected_display.write_text("display", encoding="utf-8")
+    _write_json_atomic(
+        artifact_dir.parent / "display_state.json",
+        {
+            "last_display_window_path": str(protected_display),
+        },
+    )
+
+    tracker._prune_session_artifacts(artifact_dir)
+
+    assert protected_display.exists()
+
+
+def test_tracker_event_log_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_TRACKER_EVENT_LOG_MAX_MB", "0.001")
+    monkeypatch.setenv("PHOENIXGUARD_TRACKER_EVENT_LOG_TAIL_LINES", "3")
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend([_surface(width=1280, height=720)]),
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+    session_id = "event-log-prune-test"
+    for index in range(20):
+        tracker._write_session_event_log(session_id, "event", index=index, payload="x" * 200)
+
+    rows = (tracker.session_dir(session_id) / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+    assert len(rows) <= 3
+    assert any('"index": 19' in row for row in rows)
 
 
 def test_tracker_capture_rate_limiter_skips_immediate_duplicate_capture(tmp_path: Path, monkeypatch: Any) -> None:
