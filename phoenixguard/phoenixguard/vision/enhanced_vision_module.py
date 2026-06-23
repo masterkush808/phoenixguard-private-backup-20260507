@@ -195,7 +195,7 @@ class EnhancedVisionEngine:
 
         output = EnhancedVisionOutput(
             detections=ensemble_output.detections,
-            detection_confidence=np.mean([d.confidence for d in ensemble_output.detections]) if ensemble_output.detections else 0.0,
+            detection_confidence=float(np.mean([d.confidence for d in ensemble_output.detections])) if ensemble_output.detections else 0.0,
             motion_frame=motion_frame,
             motion_energy=motion_frame.motion_energy if motion_frame else 0.0,
             consolidation_score=motion_frame.consolidation_score if motion_frame else 1.0,

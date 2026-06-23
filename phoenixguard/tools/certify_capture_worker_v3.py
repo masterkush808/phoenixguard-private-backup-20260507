@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from typing import Mapping
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -21,6 +22,23 @@ from certification_common_v3 import (
 def _age_ms(epoch: float, *, now_epoch: float | None = None) -> float:
     observed_epoch = time.time() if now_epoch is None else now_epoch
     return max(0.0, (observed_epoch - float(epoch or 0.0)) * 1000.0) if epoch else 0.0
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _float_value(value: object, default: float = 0.0) -> float:
+    if not isinstance(value, (int, float, str)):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _int_value(value: object, default: int = 0) -> int:
+    return int(_float_value(value, float(default)))
 
 
 def main() -> int:
@@ -61,21 +79,21 @@ def main() -> int:
         after_live_observed_epoch = time.time()
         perf = http_json(f"{base}/v1/mobile/performance/trace/v3/{session_q}", timeout=args.poll_timeout)
         payload = response.payload if isinstance(response.payload, dict) else {}
-        capture_result = payload.get("capture_once_result") if isinstance(payload.get("capture_once_result"), dict) else {}
+        capture_result = _mapping(payload.get("capture_once_result"))
         after_fields = extract_frame_fields(after_live.payload if isinstance(after_live.payload, dict) else payload)
-        result_after = capture_result.get("after") if isinstance(capture_result.get("after"), dict) else {}
+        result_after = _mapping(capture_result.get("after"))
         if result_after:
-            result_display_frame = int(float(result_after.get("display_frame_id") or 0))
-            result_display_epoch = float(result_after.get("display_capture_epoch") or 0.0)
-            result_published_epoch = float(result_after.get("display_published_epoch") or 0.0)
-            if result_display_frame > int(after_fields.get("display_frame_id") or 0):
+            result_display_frame = _int_value(result_after.get("display_frame_id"))
+            result_display_epoch = _float_value(result_after.get("display_capture_epoch"))
+            result_published_epoch = _float_value(result_after.get("display_published_epoch"))
+            if result_display_frame > _int_value(after_fields.get("display_frame_id")):
                 after_fields["display_frame_id"] = result_display_frame
-            if result_display_epoch > float(after_fields.get("display_capture_epoch") or 0.0):
+            if result_display_epoch > _float_value(after_fields.get("display_capture_epoch")):
                 after_fields["display_capture_epoch"] = result_display_epoch
-            if result_published_epoch > float(after_fields.get("display_published_epoch") or 0.0):
+            if result_published_epoch > _float_value(after_fields.get("display_published_epoch")):
                 after_fields["display_published_epoch"] = result_published_epoch
-            result_frame_index = int(float(result_after.get("frame_index") or 0))
-            if result_frame_index > int(after_fields.get("frame_id") or 0):
+            result_frame_index = _int_value(result_after.get("frame_index"))
+            if result_frame_index > _int_value(after_fields.get("frame_id")):
                 after_fields["frame_id"] = result_frame_index
         advanced = bool(
             capture_result.get("advanced")

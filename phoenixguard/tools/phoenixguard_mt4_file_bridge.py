@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import cast
 
 
 def _default_common_files_dir() -> Path:
@@ -102,14 +103,14 @@ def _get_json(url: str, timeout: float) -> tuple[int, dict[str, object]]:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             payload = json.loads(raw) if raw.strip() else {}
-            return int(resp.status), payload if isinstance(payload, dict) else {"raw": payload}
+            return int(resp.status), cast(dict[str, object], payload) if isinstance(payload, dict) else {"raw": payload}
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
         try:
             payload = json.loads(raw) if raw.strip() else {}
         except json.JSONDecodeError:
             payload = {"detail": raw}
-        return int(exc.code), payload if isinstance(payload, dict) else {"raw": payload}
+        return int(exc.code), cast(dict[str, object], payload) if isinstance(payload, dict) else {"raw": payload}
 
 
 def _status(

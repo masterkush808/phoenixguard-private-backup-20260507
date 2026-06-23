@@ -16126,7 +16126,7 @@ def _build_heat_contour_overlay(
     return Image.fromarray(rgba, mode="RGBA")
 
 
-def sample_overlay_candle_palette(
+def _sample_overlay_candle_palette_impl(
     image: Any,
     sequence_state: Mapping[str, Any],
 ) -> dict[str, tuple[int, int, int]]:
@@ -16180,11 +16180,18 @@ def sample_overlay_candle_palette(
     }
 
 
+def sample_overlay_candle_palette(
+    image: Any,
+    sequence_state: Mapping[str, Any],
+) -> dict[str, tuple[int, int, int]]:
+    return _sample_overlay_candle_palette_impl(image, sequence_state)
+
+
 def _sample_overlay_candle_palette(  # pyright: ignore[reportUnusedFunction]
     image: Any,
     sequence_state: Mapping[str, Any],
 ) -> dict[str, tuple[int, int, int]]:
-    return sample_overlay_candle_palette(image, sequence_state)
+    return _sample_overlay_candle_palette_impl(image, sequence_state)
 
 
 def _build_heat_hotspot_overlay(

@@ -3082,6 +3082,7 @@ def evaluate_model_council_v3(
         true_blocker=true_blocker,
     )
     trade_candidate_queue_raw = market.get("trade_candidate_queue", _mapping(market_reality.get("trade_candidate_queue")))
+    trade_candidate_queue: dict[str, Any]
     if isinstance(trade_candidate_queue_raw, Mapping):
         trade_candidate_queue = dict(trade_candidate_queue_raw)
     elif isinstance(trade_candidate_queue_raw, Sequence) and not isinstance(trade_candidate_queue_raw, (str, bytes, bytearray)):

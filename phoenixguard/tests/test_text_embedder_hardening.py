@@ -3,6 +3,9 @@ from __future__ import annotations
 import sys
 import types
 from pathlib import Path
+from typing import Mapping, cast
+
+import pytest
 
 _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
@@ -28,7 +31,11 @@ class _Logger:
         return None
 
 
-def test_personalization_embedder_defaults_to_cache_only(monkeypatch) -> None:
+def _captured_kwargs(captured: Mapping[str, object]) -> Mapping[str, object]:
+    return cast(Mapping[str, object], captured["kwargs"])
+
+
+def test_personalization_embedder_defaults_to_cache_only(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     class _FakeSentenceTransformer:
@@ -53,10 +60,10 @@ def test_personalization_embedder_defaults_to_cache_only(monkeypatch) -> None:
     engine._ensure_embedder()
 
     assert captured["model_name"] == "sentence-transformers/all-MiniLM-L6-v2"
-    assert dict(captured["kwargs"])["local_files_only"] is True
+    assert _captured_kwargs(captured)["local_files_only"] is True
 
 
-def test_memory_ingest_embedder_defaults_to_cache_only(monkeypatch) -> None:
+def test_memory_ingest_embedder_defaults_to_cache_only(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     class _FakeSentenceTransformer:
@@ -77,5 +84,5 @@ def test_memory_ingest_embedder_defaults_to_cache_only(monkeypatch) -> None:
     memory_ingest._EmbedderSingleton.get()
 
     assert captured["model_name"] == "sentence-transformers/all-MiniLM-L6-v2"
-    assert dict(captured["kwargs"])["local_files_only"] is True
+    assert _captured_kwargs(captured)["local_files_only"] is True
 

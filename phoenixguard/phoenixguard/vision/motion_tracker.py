@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional, cast
 
 import cv2
 import numpy as np
@@ -73,6 +73,10 @@ class OpticalFlowTracker:
       4. Breakout detection (acceleration, motion energy increase)
       5. Chart-region isolation (motion only in candlestick area)
     """
+    flow_detector: Any
+    frame_history: list[OpticalFlowFrame]
+    prev_gray: NDArray[np.uint8] | None
+    frame_counter: int
 
     def __init__(
         self,
@@ -94,7 +98,8 @@ class OpticalFlowTracker:
         self.chart_region_roi = chart_region_roi
 
         # DIS optical flow detector
-        self.flow_detector = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
+        cv2_dynamic = cast(Any, cv2)
+        self.flow_detector = cv2_dynamic.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
         
         # Frame history
         self.frame_history: list[OpticalFlowFrame] = []
@@ -128,6 +133,7 @@ class OpticalFlowTracker:
             gray = cv2.cvtColor(frame_array, cv2.COLOR_RGB2GRAY)
         else:
             gray = frame_array
+        gray = cast(NDArray[np.uint8], np.asarray(gray, dtype=np.uint8))
 
         # Initialize previous frame
         if self.prev_gray is None:
@@ -345,7 +351,14 @@ class OpticalFlowTracker:
         hsv[..., 0] = np.uint8(179 * (flow_frame.angle + np.pi) / (2 * np.pi))
 
         # Saturation/Value based on magnitude
-        hsv[..., 2] = cv2.normalize(magnitude, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        normalized = cv2.normalize(
+            magnitude,
+            np.empty_like(magnitude, dtype=np.float32),
+            0,
+            255,
+            cv2.NORM_MINMAX,
+        )
+        hsv[..., 2] = normalized.astype(np.uint8)
 
         rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
         bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)

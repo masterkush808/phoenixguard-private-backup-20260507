@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from PIL import Image, ImageDraw
 
@@ -393,14 +393,16 @@ def test_regression_lines_anchor_to_wick_envelope_not_candle_centers() -> None:
             self.lines: list[tuple[float, float, float, float]] = []
 
         def line(self, coords: Any, **_kwargs: Any) -> None:
-            self.lines.append(tuple(float(value) for value in coords))
+            values = tuple(float(value) for value in coords)
+            assert len(values) == 4
+            self.lines.append((values[0], values[1], values[2], values[3]))
 
         def ellipse(self, *_args: Any, **_kwargs: Any) -> None:
             return None
 
     uptrend_draw = DrawSpy()
     adapter._draw_regression_line(  # noqa: SLF001
-        uptrend_draw,
+        cast(ImageDraw.ImageDraw, uptrend_draw),
         [
             {"bbox": [10, 90, 16, 130], "center_x": 13, "center_y": 110, "direction": "BUY"},
             {"bbox": [30, 70, 36, 110], "center_x": 33, "center_y": 90, "direction": "BUY"},
@@ -415,7 +417,7 @@ def test_regression_lines_anchor_to_wick_envelope_not_candle_centers() -> None:
 
     downtrend_draw = DrawSpy()
     adapter._draw_regression_line(  # noqa: SLF001
-        downtrend_draw,
+        cast(ImageDraw.ImageDraw, downtrend_draw),
         [
             {"bbox": [10, 50, 16, 90], "center_x": 13, "center_y": 70, "direction": "SELL"},
             {"bbox": [30, 70, 36, 110], "center_x": 33, "center_y": 90, "direction": "SELL"},

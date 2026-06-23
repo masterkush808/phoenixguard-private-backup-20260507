@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from typing import Mapping, cast
 
 
 def _load_bridge_module():
@@ -105,7 +106,7 @@ def test_mt4_bridge_compact_command_preserves_ea_contract() -> None:
 def test_mt4_bridge_rejects_compacted_command_that_would_fail_ea_contract() -> None:
     bridge = _load_bridge_module()
     packet = _sample_execution_packet()
-    execution = dict(packet["execution"])  # type: ignore[index]
+    execution = dict(cast(Mapping[str, object], packet["execution"]))
     execution["amount_action"] = "LOCKED"
     packet["execution"] = execution
 

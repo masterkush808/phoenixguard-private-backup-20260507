@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Mapping, cast
 
 from PIL import Image
 
@@ -11,6 +12,12 @@ if str(_REPO) not in sys.path:
 
 from phoenixguard.training.ensemble_cv_models import ChartImageDataset
 from train_sequence_aware_all import audit_alias_split_dirs, resolve_split_dirs
+
+
+def _as_int(value: object) -> int:
+    if isinstance(value, (int, float, str)):
+        return int(value)
+    raise TypeError(f"expected int-compatible value, got {type(value).__name__}")
 
 
 def _write_png(path: Path) -> None:
@@ -65,7 +72,9 @@ def test_alias_split_audit_detects_shadow_overlap(tmp_path: Path) -> None:
     alias_val_buys.write_bytes(canonical_train_buy.read_bytes())
 
     audit = audit_alias_split_dirs(clean_split_root=clean_split_root)
+    alias_counts = cast(Mapping[str, object], audit["alias_counts"])
+    cross_split_overlap = cast(Mapping[str, Mapping[str, object]], audit["cross_split_overlap"])
 
     assert bool(audit["has_shadow_aliases"]) is True
-    assert int(dict(audit["alias_counts"])["BUYS"]) == 1
-    assert int(dict(dict(audit["cross_split_overlap"])["BUYS"])["train->val"]) == 1
+    assert _as_int(alias_counts["BUYS"]) == 1
+    assert _as_int(cross_split_overlap["BUYS"]["train->val"]) == 1

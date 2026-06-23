@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Mapping
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -20,6 +21,19 @@ if str(ROOT / "tools") not in sys.path:
     sys.path.insert(0, str(ROOT / "tools"))
 
 from capture_dashboard_visual_v3 import build_capture  # noqa: E402
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _int_value(value: object, default: int = 0) -> int:
+    if not isinstance(value, (int, float, str)):
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _env_int(name: str, default: int) -> int:
@@ -68,7 +82,7 @@ def main() -> int:
             args.skip_playwright,
             max_capture_sets=args.max_capture_sets,
         )
-        retention = report.get("evidence_retention") if isinstance(report.get("evidence_retention"), dict) else {}
+        retention = _mapping(report.get("evidence_retention"))
         retention_samples.append(
             {
                 "index": index + 1,
@@ -78,18 +92,22 @@ def main() -> int:
                 "errors": retention.get("errors", []),
             }
         )
-        ready = ((report.get("capture") or {}).get("ready_state") or {}) if isinstance(report.get("capture"), dict) else {}
-        live_payload = ((report.get("live_state") or {}).get("payload") or {}) if isinstance(report.get("live_state"), dict) else {}
-        overlay_count = int(((live_payload.get("overlays") or {}).get("count") or len(live_payload.get("overlay_objects") or [])) if isinstance(live_payload, dict) else 0)
+        capture = _mapping(report.get("capture"))
+        live_state = _mapping(report.get("live_state"))
+        ready = _mapping(capture.get("ready_state"))
+        live_payload = _mapping(live_state.get("payload"))
+        overlays = _mapping(live_payload.get("overlays"))
+        overlay_objects = live_payload.get("overlay_objects")
+        overlay_count = _int_value(overlays.get("count"), len(overlay_objects) if isinstance(overlay_objects, list) else 0)
         sample = {
             "index": index + 1,
             "verdict": report.get("verdict"),
             "hard_mismatches": report.get("hard_mismatches"),
             "warnings": report.get("warnings"),
             "ready_state": ready,
-            "backend_frame_id": live_payload.get("frame_id") if isinstance(live_payload, dict) else 0,
+            "backend_frame_id": live_payload.get("frame_id"),
             "overlay_count": overlay_count,
-            "screenshot": (report.get("capture") or {}).get("path") if isinstance(report.get("capture"), dict) else "",
+            "screenshot": capture.get("path"),
         }
         samples.append(sample)
         if report.get("verdict") != "PASS":
@@ -101,7 +119,7 @@ def main() -> int:
                 failures.append(f"dashboard load #{index + 1} used legacy fallback")
             if ready.get("visible_image") is not True:
                 failures.append(f"dashboard load #{index + 1} did not show broker surface")
-            if overlay_count > 0 and int(ready.get("hotspot_count") or 0) <= 0:
+            if overlay_count > 0 and _int_value(ready.get("hotspot_count")) <= 0:
                 failures.append(f"dashboard load #{index + 1} rendered no overlays even though backend has overlays")
         time.sleep(0.3)
 

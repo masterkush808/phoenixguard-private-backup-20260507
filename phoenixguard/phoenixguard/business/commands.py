@@ -113,7 +113,7 @@ class CommandSigner:
             expected = hmac.new(self.seed, body, hashlib.sha256).digest()
             return hmac.compare_digest(signature_bytes, expected)
         try:
-            public_key: Ed25519PublicKey = private_key.public_key()
+            public_key = private_key.public_key()
             public_key.verify(signature_bytes, body)
         except InvalidSignature:
             return False

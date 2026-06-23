@@ -113,9 +113,13 @@ def referenced_files_from_text(path: Path, candidates: set[str]) -> Iterable[Pat
     return found
 
 
+def _string_items(value: object) -> list[str]:
+    return [str(item) for item in value] if isinstance(value, list) and all(isinstance(item, str) for item in value) else []
+
+
 def build_bfs(manifest: dict[str, object], files: list[Path]) -> set[Path]:
-    required = [ROOT / str(item) for item in manifest.get("required_files", []) if isinstance(item, str)]
-    required += [ROOT / str(item) for item in manifest.get("required_tests", []) if isinstance(item, str)]
+    required = [ROOT / item for item in _string_items(manifest.get("required_files"))]
+    required += [ROOT / item for item in _string_items(manifest.get("required_tests"))]
     visited: set[Path] = set()
     queue: deque[Path] = deque(path for path in required if path.exists())
     while queue:

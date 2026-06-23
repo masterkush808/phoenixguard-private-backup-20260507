@@ -35,7 +35,7 @@ def test_chart_transform_is_exposed(tmp_path):
     # best-effort cleanup: find registry file under REGISTRY_DIR environment or default
     try:
         # The registry module writes files under phoenixguard/paths.py REGISTRY_DIR; remove matching file
-        from phoenixguard.paths import REGISTRY_DIR
+        from phoenixguard.vision.market_registry import REGISTRY_DIR
         fp = os.path.join(REGISTRY_DIR, f"{session}.jsonl")
         if os.path.exists(fp):
             os.remove(fp)

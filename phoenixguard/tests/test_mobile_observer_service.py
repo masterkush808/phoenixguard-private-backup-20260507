@@ -68,7 +68,7 @@ class _FakeObserverPipelineAdapter:
         self.root = root
         self.results = [dict(item) for item in results]
         self.calls = 0
-        self.module = self
+        self.module: object = self
 
     def _build_best_play_input_snapshot(
         self,

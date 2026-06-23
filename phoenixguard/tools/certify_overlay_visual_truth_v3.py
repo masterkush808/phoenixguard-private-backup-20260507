@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Mapping
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -16,6 +17,17 @@ from certification_common_v3 import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    if value is None:
+        return default
+    if not isinstance(value, (int, float, str)):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _run_tool(args: list[str], timeout: float) -> dict[str, object]:
@@ -80,19 +92,21 @@ def main() -> int:
     if args.skip_playwright:
         evidence_args.append("--skip-playwright")
     evidence = _run_tool(evidence_args, timeout=max(args.timeout + 90.0, args.timeout * 2.0))
-    if int(audit.get("returncode") or 0) != 0:
+    if _as_int(audit.get("returncode"), 0) != 0:
         failures.append(f"overlay precision audit failed: {audit.get('stderr') or audit.get('stdout')}")
-    if int(evidence.get("returncode") or 0) != 0:
+    if _as_int(evidence.get("returncode"), 0) != 0:
         failures.append(f"visual evidence capture failed: {evidence.get('stderr') or evidence.get('stdout')}")
     audit_payload: dict[str, object] = {}
     try:
         audit_payload = json.loads(audit_out.read_text(encoding="utf-8"))
     except Exception as exc:
         failures.append(f"unable to read overlay audit output: {exc}")
-    precision = audit_payload.get("precision_report") if isinstance(audit_payload.get("precision_report"), dict) else {}
+    raw_precision = audit_payload.get("precision_report")
+    precision: Mapping[str, object] = raw_precision if isinstance(raw_precision, Mapping) else {}
     for key in ("outside_plot_area", "missing_transform", "stale_frame_id", "unanchored_boxes", "label_collisions", "nesting_collisions"):
-        if int(precision.get(key) or 0) != 0:
-            failures.append(f"{key}={precision.get(key)}")
+        count = _as_int(precision.get(key), 0)
+        if count != 0:
+            failures.append(f"{key}={count}")
 
     report = gate_report(
         schema_version="PG_CERTIFY_OVERLAY_VISUAL_TRUTH_V3",

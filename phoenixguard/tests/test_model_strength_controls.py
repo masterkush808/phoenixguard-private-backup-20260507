@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Mapping, cast
+
 from phoenixguard.mobile_api.model_strength import (
     model_strength_settings_to_execution_controls,
     sanitize_model_strength_settings,
@@ -24,15 +26,18 @@ def test_model_strength_settings_to_execution_controls_clamps_and_maps() -> None
     )
 
     controls = model_strength_settings_to_execution_controls(settings)
+    ai_strengths = cast(Mapping[str, object], controls["ai_contribution_strengths"])
+    lane_thresholds = cast(Mapping[str, object], controls["execution_lane_thresholds"])
+    profile = cast(Mapping[str, object], controls["model_strength_profile"])
 
     assert controls["model_confidence_floor"] == 1.0
     assert controls["high_frequency_min_confidence"] == 1.0
     assert controls["execution_threshold"] == 0.63
     assert controls["overlay_min_confidence"] == 0.0
-    assert controls["ai_contribution_strengths"]["lstm_sequence"] == 1.7
-    assert controls["ai_contribution_strengths"]["scenario_engine"] == 2.0
-    assert controls["execution_lane_thresholds"]["SNIPER_ZONE_ENTRY"] == 0.58
-    assert controls["execution_lane_thresholds"]["FAILED_RETEST_ENTRY"] == 0.0
+    assert ai_strengths["lstm_sequence"] == 1.7
+    assert ai_strengths["scenario_engine"] == 2.0
+    assert lane_thresholds["SNIPER_ZONE_ENTRY"] == 0.58
+    assert lane_thresholds["FAILED_RETEST_ENTRY"] == 0.0
     assert controls["high_frequency_expiry_seconds"] == 180.0
     assert controls["adaptive_timer_enabled"] is False
     assert controls["min_dominance_margin"] == 0.24
@@ -40,7 +45,7 @@ def test_model_strength_settings_to_execution_controls_clamps_and_maps() -> None
     assert controls["max_opposing_force_reaction_distance"] == 0.18
     assert controls["risk_min_pct"] == 1.1
     assert controls["risk_max_pct"] == 2.8
-    assert controls["model_strength_profile"]["profile_saved"] is True
+    assert profile["profile_saved"] is True
 
 
 def test_window_tracker_persists_model_strength_controls(tmp_path) -> None:

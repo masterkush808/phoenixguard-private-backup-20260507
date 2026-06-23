@@ -102,12 +102,16 @@ def _image_metrics(path: Path) -> dict[str, Any]:
             rgb = image.convert("RGB")
             stat = ImageStat.Stat(rgb)
             extrema = rgb.getextrema()
+            channels_nonblank = [
+                bool(isinstance(pair, tuple) and len(pair) >= 2 and pair[0] != pair[1])
+                for pair in extrema
+            ]
             return {
                 "available": True,
                 "width": int(image.width),
                 "height": int(image.height),
                 "mean": [round(float(value), 3) for value in stat.mean],
-                "nonblank": any(lo != hi for lo, hi in extrema),
+                "nonblank": any(channels_nonblank),
             }
     except Exception as exc:
         return {"available": False, "reason": str(exc)}
@@ -228,7 +232,7 @@ def main() -> int:
                       const hotspots = document.querySelectorAll(".surface-hotspot").length;
                       return selected && !legacy && !updating && hasImage && (expectedRenderable <= 0 || hotspots > 0);
                     }""",
-                    {"selectValue": select_value, "expectedRenderable": expected_renderable},
+                    arg={"selectValue": select_value, "expectedRenderable": expected_renderable},
                     timeout=int(args.timeout * 1000.0),
                 )
             except Exception:

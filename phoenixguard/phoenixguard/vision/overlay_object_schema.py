@@ -140,7 +140,8 @@ def normalize_overlay_geometry(raw: Mapping[str, Any]) -> OverlayGeometryPayload
     ]
     layer_counts = {layer: 0 for layer in OVERLAY_LAYERS}
     for box in normalized_boxes:
-        layer_counts[str(box["layer"])] += 1
+        layer = str(box.get("layer") or "debug")
+        layer_counts[layer] = layer_counts.get(layer, 0) + 1
     return {
         "version": int(raw.get("version", 4) or 4),
         "chart_bounds": (

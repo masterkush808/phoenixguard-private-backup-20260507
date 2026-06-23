@@ -53,17 +53,22 @@ def scenario_paint_output_to_overlay_objects(output: Mapping[str, Any]) -> List[
     return objs
 
 
-def enrich_overlay_with_transform(overlay: Mapping[str, Any], chart_transform: Mapping[str, Any] | None, frame_id: int | None) -> dict:
+def enrich_overlay_with_transform(
+    overlay: Mapping[str, Any],
+    chart_transform: Mapping[str, Any] | V3ChartTransform | None,
+    frame_id: int | None,
+) -> dict:
     o = dict(overlay)
-    if chart_transform and isinstance(chart_transform, Mapping):
-        # accept either a V3ChartTransform instance or dict
-        if hasattr(chart_transform, "normalized_to_chart_image"):
-            ct = chart_transform
-        else:
+    if chart_transform:
+        if isinstance(chart_transform, V3ChartTransform):
+            ct: V3ChartTransform | None = chart_transform
+        elif isinstance(chart_transform, Mapping):
             try:
                 ct = V3ChartTransform.create(chart_transform.get("chart_image_bounds") or chart_transform.get("size") or [800, 600], frame_id=frame_id)
             except Exception:
                 ct = None
+        else:
+            ct = None
         if ct is not None:
             o["chart_transform_id"] = str(ct.chart_transform_id)
             # convert normalized bbox to chart pixels if values appear normalized

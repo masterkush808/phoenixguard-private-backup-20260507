@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import importlib
 import os
 from threading import Lock
-from typing import Any, cast
+from typing import Any, Sequence, cast
 
 import numpy as np
 from PIL import Image
@@ -110,12 +110,13 @@ class OptionalGroundedParser:
                     local_files_only=local_files_only,
                     trust_remote_code=True,
                 )
-                self._florence_model = auto_causal.from_pretrained(
+                florence_model = auto_causal.from_pretrained(
                     MODELS.florence2_model,
                     local_files_only=local_files_only,
                     trust_remote_code=True,
                 ).to(self.device)
-                self._florence_model.eval()
+                florence_model.eval()
+                self._florence_model = florence_model
             except Exception as exc:
                 self._errors["florence2"] = str(exc)
 
@@ -127,11 +128,12 @@ class OptionalGroundedParser:
                     MODELS.grounding_dino_model,
                     local_files_only=local_files_only,
                 )
-                self._grounding_model = auto_grounding.from_pretrained(
+                grounding_model = auto_grounding.from_pretrained(
                     MODELS.grounding_dino_model,
                     local_files_only=local_files_only,
                 ).to(self.device)
-                self._grounding_model.eval()
+                grounding_model.eval()
+                self._grounding_model = grounding_model
             except Exception as exc:
                 self._errors["grounding_dino"] = str(exc)
 
@@ -143,11 +145,12 @@ class OptionalGroundedParser:
                     MODELS.sam2_model,
                     local_files_only=local_files_only,
                 )
-                self._sam_model = sam_model_cls.from_pretrained(
+                sam_model = sam_model_cls.from_pretrained(
                     MODELS.sam2_model,
                     local_files_only=local_files_only,
                 ).to(self.device)
-                self._sam_model.eval()
+                sam_model.eval()
+                self._sam_model = sam_model
             except Exception as exc:
                 self._errors["sam2"] = str(exc)
 
@@ -186,7 +189,9 @@ class OptionalGroundedParser:
             return ""
 
     def _grounding_dino_detect(self, image: Image.Image) -> list[dict[str, Any]]:
-        if self._grounding_model is None or self._grounding_processor is None:
+        grounding_model = self._grounding_model
+        grounding_processor = self._grounding_processor
+        if grounding_model is None or grounding_processor is None:
             return []
         try:
             prompt = (
@@ -195,12 +200,12 @@ class OptionalGroundedParser:
             )
             encoded = cast(
                 dict[str, Any],
-                self._grounding_processor(images=image, text=prompt, return_tensors="pt"),
+                grounding_processor(images=image, text=prompt, return_tensors="pt"),
             )
             encoded = _to_device_inputs(encoded, self.device)
             with torch.inference_mode():
-                outputs = self._grounding_model(**encoded)
-            post_process = getattr(self._grounding_processor, "post_process_grounded_object_detection", None)
+                outputs = grounding_model(**encoded)
+            post_process = getattr(grounding_processor, "post_process_grounded_object_detection", None)
             if not callable(post_process):
                 return []
             processed = post_process(
@@ -212,16 +217,17 @@ class OptionalGroundedParser:
             )
             if not processed:
                 return []
-            first = cast(dict[str, Any], processed[0])
-            boxes = first.get("boxes", [])
-            scores = first.get("scores", [])
-            labels = first.get("labels", [])
+            processed_items = cast(Sequence[Any], processed)
+            first = cast(dict[str, Any], processed_items[0])
+            boxes = cast(Sequence[Any], first.get("boxes", []))
+            scores = cast(Sequence[Any], first.get("scores", []))
+            labels = cast(Sequence[Any], first.get("labels", []))
             detections: list[dict[str, Any]] = []
             for box, score, label in zip(boxes, scores, labels):
                 bbox = (
                     [float(x) for x in box.detach().cpu().view(-1).tolist()]
                     if hasattr(box, "detach")
-                    else [float(x) for x in box]
+                    else [float(x) for x in cast(Sequence[Any], box)]
                 )
                 label_text = str(label)
                 detections.append(
@@ -242,7 +248,9 @@ class OptionalGroundedParser:
         image: Image.Image,
         detections: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        if self._sam_model is None or self._sam_processor is None or not detections:
+        sam_model = self._sam_model
+        sam_processor = self._sam_processor
+        if sam_model is None or sam_processor is None or not detections:
             return []
         boxes = [
             [cast(list[float], detection.get("bbox", [0.0, 0.0, 0.0, 0.0]))]
@@ -251,18 +259,21 @@ class OptionalGroundedParser:
         try:
             encoded = cast(
                 dict[str, Any],
-                self._sam_processor(image, input_boxes=boxes, return_tensors="pt"),
+                sam_processor(image, input_boxes=boxes, return_tensors="pt"),
             )
             encoded = _to_device_inputs(encoded, self.device)
             with torch.inference_mode():
-                outputs = self._sam_model(**encoded)
-            post_process = getattr(self._sam_processor, "post_process_masks", None)
+                outputs = sam_model(**encoded)
+            post_process = getattr(sam_processor, "post_process_masks", None)
             if not callable(post_process):
                 return []
-            masks = post_process(
-                outputs.pred_masks.detach().cpu(),
-                encoded.get("original_sizes"),
-                encoded.get("reshaped_input_sizes"),
+            masks = cast(
+                Sequence[Any],
+                post_process(
+                    outputs.pred_masks.detach().cpu(),
+                    encoded.get("original_sizes"),
+                    encoded.get("reshaped_input_sizes"),
+                ),
             )
             summaries: list[dict[str, Any]] = []
             for detection, mask_group in zip(detections, masks):

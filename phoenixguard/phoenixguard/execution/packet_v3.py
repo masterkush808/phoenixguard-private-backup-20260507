@@ -424,16 +424,18 @@ def build_execution_packet_v3(
     if normalized_side not in VALID_EXECUTION_SIDES:
         raise ValueError("side must be BUY or SELL")
     expiry = max(1, int(expiry_seconds))
-    created = (
-        now_epoch()
-        if created_epoch_sec is None and created_epoch is None
-        else float(created_epoch_sec if created_epoch_sec is not None else created_epoch)
-    )
-    valid_until = (
-        float(valid_until_epoch_sec if valid_until_epoch_sec is not None else valid_until_epoch)
-        if valid_until_epoch_sec is not None or valid_until_epoch is not None
-        else created + max(0.1, float(valid_for_seconds))
-    )
+    if created_epoch_sec is not None:
+        created = float(created_epoch_sec)
+    elif created_epoch is not None:
+        created = float(created_epoch)
+    else:
+        created = now_epoch()
+    if valid_until_epoch_sec is not None:
+        valid_until = float(valid_until_epoch_sec)
+    elif valid_until_epoch is not None:
+        valid_until = float(valid_until_epoch)
+    else:
+        valid_until = created + max(0.1, float(valid_for_seconds))
     ttl_seconds = max(0.1, float(valid_until) - float(created))
     live = dict(live_integrity or {})
     live_proof_present = bool(live)
@@ -608,7 +610,12 @@ def validate_execution_packet_v3(
     require_broker_click_safe_identity: bool = False,
 ) -> PacketValidationResult:
     issues: list[PacketValidationIssue] = []
-    current_now = globals()["now_epoch"]() if now is None and now_epoch is None else float(now if now is not None else now_epoch)
+    if now is not None:
+        current_now = float(now)
+    elif now_epoch is not None:
+        current_now = float(now_epoch)
+    else:
+        current_now = globals()["now_epoch"]()
 
     def add(code: str, category: str, message: str) -> None:
         issues.append(PacketValidationIssue(code=code, category=category, message=message))

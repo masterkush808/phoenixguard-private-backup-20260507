@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 from PIL import Image
 import torch
 
-from phoenixguard.training.ensemble_cv_models import EnsembleCVModels
+from phoenixguard.training.ensemble_cv_models import ChartImageDataset, EnsembleCVModels
 
 
 def _write_image(path: Path, *, color: tuple[int, int, int]) -> None:
@@ -95,11 +96,11 @@ def test_sequence_manifest_quality_filter_skips_contradictory_aux_rows(tmp_path:
     assert ensemble.sequence_manifest_filter_stats["skipped_records"] == 1
     assert ensemble.sequence_manifest_filter_stats["skip_reasons"]["contradictory"] == 1
 
-    dataset = ensemble._build_dataset(
+    dataset = cast(ChartImageDataset, ensemble._build_dataset(
         model_name="mobilenetv3",
         image_dirs=[str(buy_dir), str(sell_dir)],
         is_training=False,
-    )
+    ))
     sample_index = {Path(path).name: idx for idx, path in enumerate(dataset.samples)}
 
     contradictory_targets = dataset.sequence_label_indices[sample_index["contradictory_buy.png"]]

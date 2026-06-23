@@ -81,6 +81,18 @@ LOGGER = logging.getLogger("phoenixguard.mobile_api.window_tracker")
 _ASYNCIO_LOGGER = logging.getLogger("asyncio")
 
 
+def _safe_worker_log(level: int, message: str, *args: object, **kwargs: object) -> None:
+    stream = getattr(sys, "stderr", None)
+    if bool(getattr(stream, "closed", False)):
+        return
+    previous_raise_exceptions = logging.raiseExceptions
+    logging.raiseExceptions = False
+    try:
+        LOGGER.log(level, message, *args, **kwargs)
+    finally:
+        logging.raiseExceptions = previous_raise_exceptions
+
+
 class _AsyncioConnectionResetFilter(logging.Filter):
     """Suppress verbose ConnectionResetError tracebacks coming from asyncio proactor callbacks.
 
@@ -8452,7 +8464,8 @@ class PhoenixGuardWindowTrackingAdapter:
         )
         fast_locked_context = bool(fast_selectors and (live_execution_context or locked_study_context))
         skip_missing_live_market_selector = (
-            fast_locked_context
+            live_execution_context
+            and fast_locked_context
             and str(os.getenv("PHOENIXGUARD_LIVE_SKIP_MISSING_MARKET_SELECTOR", "1") or "").strip().lower() not in {"0", "false", "off", "no"}
         )
         previous_tracking: dict[str, Any] = {}
@@ -14013,12 +14026,19 @@ class PhoenixGuardWindowTrackingAdapter:
 
         top = ranked[0]
         top_last = top.scenario.last_candle()
+        if top_last is None:
+            base["status"] = "insufficient_data"
+            base["summary"] = "Scenario generation completed but the top path has no final candle."
+            return base
         compact: list[dict[str, Any]] = []
         for scenario in ranked[:3]:
+            scenario_last = scenario.scenario.last_candle()
+            if scenario_last is None:
+                continue
             compact.append(
                 {
                     "rank": int(scenario.rank),
-                    "direction": str(scenario.scenario.last_candle().direction),
+                    "direction": str(scenario_last.direction),
                     "probability": float(scenario.probability),
                     "cost": float(scenario.scenario.cost),
                     "transition_type": str(scenario.scenario.transition_type.value),
@@ -16472,8 +16492,8 @@ class ContinuousWindowTrackerService:
         *,
         observer_service: SignalObserverService | None = None,
         root_dir: Path | None = None,
-        capture_backend: WindowCaptureBackend | None = None,
-        tracking_adapter: WindowTrackingAdapter | None = None,
+        capture_backend: object | None = None,
+        tracking_adapter: object | None = None,
         focus_selector_backend: FocusSelectionBackend | None = None,
         execution_backend: BrokerExecutionBackend | None = None,
     ) -> None:
@@ -16481,8 +16501,8 @@ class ContinuousWindowTrackerService:
         self.root_dir = Path(root_dir or (RUNTIME.data_dir / "window_tracker"))
         self.sessions_dir = self.root_dir / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        self.capture_backend = capture_backend or WindowsWindowCaptureBackend()
-        self.tracking_adapter = tracking_adapter or PhoenixGuardWindowTrackingAdapter()
+        self.capture_backend = cast(WindowCaptureBackend, capture_backend or WindowsWindowCaptureBackend())
+        self.tracking_adapter = cast(WindowTrackingAdapter, tracking_adapter or PhoenixGuardWindowTrackingAdapter())
         self.focus_selector_backend = focus_selector_backend or WindowsNativeFocusSelectionBackend()
         self.execution_backend = execution_backend or PocketOptionBrokerExecutionBackend()
         self._lock = threading.RLock()
@@ -20523,7 +20543,7 @@ class ContinuousWindowTrackerService:
                 return
             worker.stop_evt.set()
             worker.capture_now_evt.set()
-        worker.thread.join(timeout=1.5)
+        worker.thread.join(timeout=10.0)
         with self._lock:
             self._workers.pop(session_id, None)
             self._next_capture_epoch.pop(session_id, None)
@@ -21167,7 +21187,7 @@ class ContinuousWindowTrackerService:
                     "actionable": False,
                     "reason": str(risk_gate.get("reason", "Execution risk gate blocked the entry.") or ""),
                 }
-            LOGGER.info(f"Trend-follow {execution_side} ACTIVATED - proceeding to broker execution")
+            _safe_worker_log(logging.INFO, "Trend-follow %s ACTIVATED - proceeding to broker execution", execution_side)
             return {
                 "side": execution_side,
                 "lane": "TREND_FOLLOW",
@@ -22061,11 +22081,19 @@ class ContinuousWindowTrackerService:
                         latest_signal["expiry_seconds"] = selected_expiry_seconds
                         latest_signal["required_seconds"] = selected_expiry_seconds
                 surface_identity_cache_limit = max(2.0, float(controls.get("broker_surface_cache_sec", 30.0) or 30.0))
+                previous_surface_capture_plane = _mapping_to_dict(previous_surface.get("capture_plane", {}))
+                previous_surface_source = str(previous_surface_capture_plane.get("source", "") or "").strip()
+                previous_surface_is_read = bool(
+                    previous_surface_source
+                    and previous_surface_source != "unread"
+                    and not bool(previous_surface.get("scan_skipped", False))
+                )
                 can_reuse_identity_surface = bool(
                     previous_surface
                     and previous_amount_policy == _BROKER_AMOUNT_POLICY
                     and previous_surface_age <= surface_identity_cache_limit
                     and str(previous_surface.get("broker_surface_hash", "") or "").strip()
+                    and previous_surface_is_read
                 )
                 has_model_council_context = any(
                     key in payload
@@ -22084,22 +22112,13 @@ class ContinuousWindowTrackerService:
                     and str(os.getenv("PHOENIXGUARD_FAST_SKIP_BLOCKED_BROKER_PROBE", "1") or "1").strip().lower()
                     not in {"0", "false", "off", "no"}
                 )
-                if fast_skip_blocked_probe and previous_surface:
+                if fast_skip_blocked_probe and can_reuse_identity_surface:
                     broker_surface = dict(previous_surface)
                     broker_surface["cached"] = True
                     broker_surface["cache_age_sec"] = round(float(previous_surface_age), 3)
                     broker_surface["scan_skipped"] = True
-                    broker_surface["scan_skip_reason"] = "model_council_packet_not_executable"
+                    broker_surface["scan_skip_reason"] = "cached_identity_model_council_packet_not_executable"
                     broker_surface["stale_identity_allowed"] = True
-                elif fast_skip_blocked_probe:
-                    broker_surface = _default_broker_surface_payload(
-                        message="Broker surface scan skipped until Model Council publishes an executable packet."
-                    )
-                    broker_surface["read_epoch"] = surface_now_epoch
-                    broker_surface["broker_surface_hash"] = _surface_signature(window_image)
-                    broker_surface["cached"] = False
-                    broker_surface["scan_skipped"] = True
-                    broker_surface["scan_skip_reason"] = "model_council_packet_not_executable"
                 elif can_reuse_identity_surface:
                     broker_surface = dict(previous_surface)
                     broker_surface["cached"] = True
@@ -22730,12 +22749,19 @@ class ContinuousWindowTrackerService:
 
         top = ranked[0]
         top_last = top.scenario.last_candle()
+        if top_last is None:
+            base["status"] = "insufficient_data"
+            base["summary"] = "Scenario generation completed but the top path has no final candle."
+            return base
         compact: list[dict[str, Any]] = []
         for scenario in ranked[:3]:
+            scenario_last = scenario.scenario.last_candle()
+            if scenario_last is None:
+                continue
             compact.append(
                 {
                     "rank": int(scenario.rank),
-                    "direction": str(scenario.scenario.last_candle().direction),
+                    "direction": str(scenario_last.direction),
                     "probability": float(scenario.probability),
                     "cost": float(scenario.scenario.cost),
                     "transition_type": str(scenario.scenario.transition_type.value),
@@ -22899,7 +22925,7 @@ class ContinuousWindowTrackerService:
             return True
         except CaptureSurfaceUnavailableError as exc:
             message = str(exc) or "Pocket Option capture did not include the broker/chart surface."
-            LOGGER.warning("Capture source unavailable for session %s: %s", session_id, message)
+            _safe_worker_log(logging.DEBUG, "Capture source unavailable for session %s: %s", session_id, message)
             self._mark_capture_surface_unavailable(session_id, message)
             return False
         finally:
@@ -23636,9 +23662,18 @@ class ContinuousWindowTrackerService:
                 2.0,
                 float(fast_visual_controls.get("broker_surface_cache_sec", 30.0) or 30.0),
             )
+            previous_fast_capture_plane = _mapping_to_dict(previous_fast_surface.get("capture_plane", {}))
+            previous_fast_surface_source = str(previous_fast_capture_plane.get("source", "") or "").strip()
+            previous_fast_surface_is_read = bool(
+                previous_fast_surface_source
+                and previous_fast_surface_source != "unread"
+                and not bool(previous_fast_surface.get("scan_skipped", False))
+            )
             can_reuse_identity_surface = bool(
                 previous_fast_surface
                 and str(previous_fast_surface.get("broker_surface_hash", "") or "").strip()
+                and previous_surface_age <= surface_identity_cache_limit
+                and previous_fast_surface_is_read
             )
             if bool(fast_visual_controls.get("require_market_identity", True)) and can_reuse_identity_surface:
                 fast_blocked_surface = dict(previous_fast_surface)
@@ -23652,19 +23687,31 @@ class ContinuousWindowTrackerService:
             elif bool(fast_visual_controls.get("require_market_identity", True)):
                 fast_blocked_surface = self._read_broker_surface(
                     window_image,
-                    source="fast_blocked_identity_probe",
+                    source="full_window_gui",
                     manual_focus_region=manual_focus,
                     window_query=payload.get("window_query", ""),
                 )
                 fast_blocked_surface["cached"] = False
                 fast_blocked_surface["scan_skipped"] = False
                 fast_blocked_surface["scan_skip_reason"] = ""
-            else:
-                fast_blocked_surface = previous_fast_surface or _default_broker_surface_payload()
+            elif can_reuse_identity_surface:
+                fast_blocked_surface = dict(previous_fast_surface)
+                fast_blocked_surface["cached"] = True
+                fast_blocked_surface["cache_age_sec"] = round(float(previous_surface_age), 3)
+                fast_blocked_surface["cache_limit_sec"] = round(float(surface_identity_cache_limit), 3)
+                fast_blocked_surface["cache_used_epoch"] = surface_now_epoch
                 fast_blocked_surface["scan_skipped"] = True
-                fast_blocked_surface["cached"] = bool(payload.get("broker_surface"))
-                fast_blocked_surface["cache_age_sec"] = round(float(previous_surface_age), 3) if previous_fast_surface else 0.0
                 fast_blocked_surface["scan_skip_reason"] = "market_identity_not_required_model_council_packet_not_executable"
+            else:
+                fast_blocked_surface = self._read_broker_surface(
+                    window_image,
+                    source="full_window_gui",
+                    manual_focus_region=manual_focus,
+                    window_query=payload.get("window_query", ""),
+                )
+                fast_blocked_surface["cached"] = False
+                fast_blocked_surface["scan_skipped"] = False
+                fast_blocked_surface["scan_skip_reason"] = ""
             if not _float_or(fast_blocked_surface.get("read_epoch", 0.0), 0.0):
                 fast_blocked_surface["read_epoch"] = surface_now_epoch
             fast_blocked_surface["broker_surface_hash"] = str(
@@ -24508,6 +24555,18 @@ class ContinuousWindowTrackerService:
                 str(payload.get(key, "") or "").strip()
                 for key in ("last_window_path", "last_chart_path", "last_overlay_path", "last_full_overlay_path")
             )
+            previous_focus = _public_manual_focus_region(previous.get("manual_focus_region", {}))
+            previous_focus_cleared = bool(
+                not bool(previous.get("tracking_enabled", False))
+                and not bool(previous_focus.get("enabled", False))
+                and str(previous.get("status", "") or "").strip().lower() == "awaiting_focus"
+            )
+            if previous_focus_cleared and writes_capture_artifacts and not control_write:
+                LOGGER.info(
+                    "Skipped capture artifact write for %s because focus was cleared while a capture was in flight.",
+                    session_id,
+                )
+                return
             model_payload_is_current = bool(
                 writes_capture_artifacts
                 and (

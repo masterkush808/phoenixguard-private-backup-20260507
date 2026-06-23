@@ -55,8 +55,9 @@ def migrate_v2_overlay_object(
     v3.setdefault("visible_modes", list(v3.get("visible_modes") or ["CLEAN_LIVE", "ACTIVE_CONTEXT", "REPLAY", "PREDICTION", "CALIBRATION", "DEBUG", "INSPECTOR"]))
     v3.setdefault("ttl_sec", _float(v3.get("ttl_sec") or 30.0, 30.0))
     v3.setdefault("reason", _text(v3.get("reason") or v3.get("message") or "migrated from V2 overlay behaviour"))
-    if not v3.get("bbox") and v3.get("box"):
-        v3["bbox"] = list(v3.get("box"))
+    raw_box = v3.get("box")
+    if not v3.get("bbox") and isinstance(raw_box, (list, tuple)):
+        v3["bbox"] = list(raw_box)
     return v3
 
 

@@ -135,6 +135,8 @@ def image_to_sequence_features(
     resized = image.resize((int(sequence_length), 96))
     width, height = resized.size
     pixels = resized.load()
+    if pixels is None:
+        raise RuntimeError(f"Unable to load pixels from {image_path}")
     phase_num = phase_value(phase)
     rows: list[list[float]] = []
     previous_price = 0.5
@@ -145,7 +147,10 @@ def image_to_sequence_features(
         magenta_score = 0.0
         brightness_sum = 0.0
         for y in range(height):
-            r, g, b = pixels[x, y]
+            pixel = pixels[x, y]
+            if not isinstance(pixel, tuple) or len(pixel) < 3:
+                continue
+            r, g, b = pixel[:3]
             brightness = (r + g + b) / 765.0
             saturation = (max(r, g, b) - min(r, g, b)) / 255.0
             is_market_pixel = saturation > 0.16 and brightness > 0.12

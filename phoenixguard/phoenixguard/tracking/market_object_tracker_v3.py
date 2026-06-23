@@ -119,12 +119,13 @@ except Exception:
     def normalize_v3_overlay_object(
         raw: Mapping[str, Any],
         *,
-        strict: bool = False,
+        strict: bool = True,
+        image_size: Sequence[Any] | None = None,
+        fallback_index: int = 0,
         frame_id: int | str | None = None,
         sequence_id: str = "",
         chart_transform_id: str = "",
         source_agent: str = "market_object_tracker_v3",
-        **_: Any,
     ) -> dict[str, Any]:
         bounds = normalize_bounds(raw.get("bounds", raw.get("bbox", raw.get("box", raw.get("rect")))))
         if bounds is None:

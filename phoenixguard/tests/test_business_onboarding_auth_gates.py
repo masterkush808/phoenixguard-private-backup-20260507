@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,7 +20,7 @@ def _client() -> TestClient:
 
 
 def _latest_verification_token(client: TestClient) -> str:
-    provider = client.app.state.business_email_provider
+    provider = cast(Any, client.app).state.business_email_provider
     return str(provider.sent_messages[-1]["verification_token"])
 
 

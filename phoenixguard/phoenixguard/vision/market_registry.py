@@ -131,12 +131,13 @@ def _normalize_loaded_market_entry(entry: Mapping[str, Any]) -> Mapping[str, Any
 
         # ensure bbox exists as [x1, y1, x2, y2]
         bbox = overlay.get("bbox") or overlay.get("box") or overlay.get("rect")
-        if not bbox and overlay.get("anchors") and isinstance(overlay.get("anchors"), (list, tuple)):
+        anchors = overlay.get("anchors")
+        if not bbox and anchors and isinstance(anchors, (list, tuple)):
             # anchors may be a list of point pairs [[x,y],...]
             try:
                 pts = [
                     tuple(map(float, p))
-                    for p in overlay.get("anchors")
+                    for p in anchors
                     if isinstance(p, (list, tuple)) and len(p) >= 2
                 ]
                 if pts:
@@ -163,7 +164,8 @@ def _normalize_loaded_market_entry(entry: Mapping[str, Any]) -> Mapping[str, Any
         frame_id = None
         if isinstance(chart_transform, Mapping) and chart_transform.get("frame_id") is not None:
             try:
-                frame_id = int(chart_transform.get("frame_id"))
+                raw_frame_id = chart_transform.get("frame_id")
+                frame_id = int(raw_frame_id) if isinstance(raw_frame_id, (int, float, str)) else None
             except Exception:
                 frame_id = None
         overlay = migrate_v2_overlay_object(
@@ -251,14 +253,18 @@ def _active_objects_from_entries(
 ) -> list[Mapping[str, Any]]:
     active: list[Mapping[str, Any]] = []
     now = time.time() if now_epoch is None else float(now_epoch)
-    # take the latest entry for each overlay_id
+    # Take the latest entry for each overlay_id. JSONL append order is the
+    # tie-breaker because merge writes the MERGED marker and replacement row
+    # with the same timestamp.
     latest_by_overlay: dict[str, Mapping[str, Any]] = {}
     for e in entries:
         oid = str(e.get("overlay_id") or (e.get("overlay") or {}).get("id") or "")
         if not oid:
             continue
         prev = latest_by_overlay.get(oid)
-        if prev is None or str(e.get("updated_at") or e.get("timestamp") or "") > str(prev.get("updated_at") or prev.get("timestamp") or ""):
+        current_updated = str(e.get("updated_at") or e.get("timestamp") or "")
+        previous_updated = str(prev.get("updated_at") or prev.get("timestamp") or "") if prev is not None else ""
+        if prev is None or current_updated >= previous_updated:
             latest_by_overlay[oid] = e
 
     for e in latest_by_overlay.values():
@@ -409,6 +415,8 @@ def promote_lifecycle(session_id: str, *, stale_seconds: int = DEFAULT_STALE_SEC
     for e in entries:
         try:
             last_seen = e.get("last_seen_at") or e.get("updated_at") or e.get("timestamp")
+            if not isinstance(last_seen, str) or not last_seen:
+                continue
             # parse ISO to epoch
             t = datetime.fromisoformat(last_seen.replace("Z", ""))
             age = now - t.timestamp()

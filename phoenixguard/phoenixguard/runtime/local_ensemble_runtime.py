@@ -405,6 +405,7 @@ class LocalCVEnsembleRuntime:
             onnx_path is not None
             and onnx_path.exists()
             and self._supports_onnx_runtime()
+            and ort is not None
         ):
             try:
                 session = cast(
@@ -496,10 +497,10 @@ class LocalCVEnsembleRuntime:
     ) -> dict[str, dict[str, Any]]:
         if aux_head is None or not sequence_task_values:
             return {}
-        aux_head = cast(Any, aux_head).to(features.device)
-        aux_head.eval()
+        aux_module = cast(Any, aux_head).to(features.device)
+        aux_module.eval()
         with torch.inference_mode():
-            aux_logits = cast(dict[str, Tensor], aux_head(features))
+            aux_logits = cast(dict[str, Tensor], aux_module(features))
         predictions: dict[str, dict[str, Any]] = {}
         for task_name, logits in aux_logits.items():
             values = [str(item) for item in sequence_task_values.get(task_name, [])]
@@ -964,9 +965,12 @@ class LocalCVEnsembleRuntime:
             with torch.inference_mode():
                 x_cpu = transform(image.convert("RGB")).unsqueeze(0).to(torch.float32)
                 if can_use_onnx:
+                    session = onnx_session
+                    if session is None:
+                        raise RuntimeError("ONNX runtime session was unavailable after backend selection.")
                     output_values = cast(
                         list[Any],
-                        onnx_session.run(onnx_output_names, {onnx_input_name: x_cpu.numpy()}),
+                        session.run(onnx_output_names, {onnx_input_name: x_cpu.numpy()}),
                     )
                     output_map = {
                         str(output_name): np.asarray(output_values[idx], dtype=np.float32)
@@ -1097,7 +1101,8 @@ class LocalCVEnsembleRuntime:
         route_direction = str((route_summary or {}).get("route_direction", "")).upper()
         route_strength = float(np.clip((route_summary or {}).get("route_strength", 0.0) or 0.0, 0.0, 1.0))
 
-        for row in model_outputs.values():
+        for source_row in model_outputs.values():
+            row = source_row if isinstance(source_row, dict) else dict(source_row)
             if not bool(row.get("live_enabled", False)):
                 continue
             effective_threshold = LocalCVEnsembleRuntime._resolve_effective_decision_threshold(

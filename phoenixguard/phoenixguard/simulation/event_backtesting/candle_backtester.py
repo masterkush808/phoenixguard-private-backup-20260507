@@ -212,13 +212,14 @@ def run_event_candle_backtest(
             blocked += 1
             continue
         entry_price = _close(rows[index])
+        volatility = _float(features.get("volatility"), 0.0)
         future = rows[index + 1 : index + 1 + expiry]
         metrics = track_candle_outcome(
             {
                 "side": side,
                 "entry_price": entry_price,
-                "target_price": entry_price + (1.5 * features["volatility"] if side == "BUY" else -1.5 * features["volatility"]),
-                "stop_price": entry_price - (features["volatility"] if side == "BUY" else -features["volatility"]),
+                "target_price": entry_price + (1.5 * volatility if side == "BUY" else -1.5 * volatility),
+                "stop_price": entry_price - (volatility if side == "BUY" else -volatility),
                 "dominance_score": dominance,
                 "active_trend_angle_degrees": angle,
             },

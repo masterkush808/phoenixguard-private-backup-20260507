@@ -269,16 +269,18 @@ def attach_cache_v3_metadata(
     ttl_seconds: float = DEFAULT_CACHE_TTL_SEC,
 ) -> dict[str, Any]:
     enriched = dict(payload)
-    created = (
-        float(time.time())
-        if created_epoch_sec is None and created_epoch is None
-        else float(created_epoch_sec if created_epoch_sec is not None else created_epoch)
-    )
-    valid_until = (
-        float(valid_until_epoch_sec if valid_until_epoch_sec is not None else valid_until_epoch)
-        if valid_until_epoch_sec is not None or valid_until_epoch is not None
-        else created + max(0.1, float(ttl_seconds))
-    )
+    if created_epoch_sec is not None:
+        created = float(created_epoch_sec)
+    elif created_epoch is not None:
+        created = float(created_epoch)
+    else:
+        created = float(time.time())
+    if valid_until_epoch_sec is not None:
+        valid_until = float(valid_until_epoch_sec)
+    elif valid_until_epoch is not None:
+        valid_until = float(valid_until_epoch)
+    else:
+        valid_until = created + max(0.1, float(ttl_seconds))
     enriched.update(
         {
             "schema_version": CACHE_SCHEMA_VERSION,

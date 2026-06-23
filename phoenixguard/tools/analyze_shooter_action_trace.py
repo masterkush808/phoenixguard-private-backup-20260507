@@ -48,6 +48,24 @@ def _box_targets(boxes: Mapping[str, Any]) -> set[str]:
     return {str(key) for key, value in boxes.items() if isinstance(value, Mapping) and key != "capabilities"}
 
 
+def _int_value(value: object, default: int = 0) -> int:
+    if not isinstance(value, (int, float, str)):
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_value(value: object, default: float = 0.0) -> float:
+    if not isinstance(value, (int, float, str)):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def analyze_trace(rows: list[dict[str, Any]], boxes: Mapping[str, Any]) -> list[str]:
     findings: list[str] = []
     targets = _box_targets(boxes)
@@ -100,18 +118,10 @@ def analyze_trace(rows: list[dict[str, Any]], boxes: Mapping[str, Any]) -> list[
                 if abs(old_w - new_w) > 40 or abs(old_h - new_h) > 40:
                     findings.append(f"WINDOW_MOVED_OR_RESIZED_BETWEEN_STEPS:{idx}")
             previous_window = rect_tuple
-        wait_after = row.get("wait_after_ms")
-        try:
-            wait_ms = int(wait_after)
-        except (TypeError, ValueError):
-            wait_ms = 0
+        wait_ms = _int_value(row.get("wait_after_ms"))
         if target not in {"keyboard", "timer"} and wait_ms and wait_ms < 180:
             findings.append(f"TIMING_UNDERRUN:{row.get('step')}:{wait_ms}ms")
-        ts = row.get("timestamp")
-        try:
-            ts_float = float(ts)
-        except (TypeError, ValueError):
-            ts_float = 0.0
+        ts_float = _float_value(row.get("timestamp"))
         if previous_ts and ts_float and ts_float < previous_ts:
             findings.append(f"NON_MONOTONIC_TRACE_TIMESTAMP:line{idx + 1}")
         if ts_float:

@@ -856,7 +856,9 @@ def test_side_click_once_only(tmp_path: Path) -> None:
     side_steps = [step for step in result.steps if step.step == "final_side_click"]
     assert result.overall == "PASS"
     assert len(side_steps) == 1
-    assert adapter.clicks.count(side_steps[0].coordinate_abs) == 1
+    coordinate = side_steps[0].coordinate_abs
+    assert coordinate is not None
+    assert adapter.clicks.count(coordinate) == 1
 
 
 def test_action_evidence_written(tmp_path: Path) -> None:

@@ -3190,7 +3190,7 @@
         failedArtifactKeys: new Set(),
       },
     };
-    const DASHBOARD_REFRESH_INTERVAL_MS = 1000;
+    const DASHBOARD_REFRESH_INTERVAL_MS = 250;
     const STREAM_LIVE_STATE_HYDRATION_MS = 1000;
 
     const $ = (id) => document.getElementById(id);
@@ -6452,6 +6452,7 @@
       const backendOverlayObjects = Array.isArray(overlayPayload.objects) ? overlayPayload.objects : [];
       const overlayFrameReady = backendOverlayFrameAligned(session);
       const backendObjectsAvailable = backendOverlayObjects.length > 0 && backendObjectOverlayReady(session);
+      const overlayFallbackBlocksBackendBoxes = rawFallbackVisible || state.surface.overlayStale || !overlayFrameReady;
       if (!diagnosticsViewActive() && (rawFallbackVisible || (!backendObjectsAvailable && state.surface.overlayStale) || (!backendObjectsAvailable && !overlayFrameReady))) {
         return [];
       }

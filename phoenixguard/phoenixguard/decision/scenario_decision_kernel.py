@@ -68,7 +68,10 @@ def enhance_forecast_with_scenario_consensus(
 
     # Extract top scenario
     top_scenario = ranked[0]
-    top_dir = top_scenario.scenario.last_candle().direction
+    top_last = top_scenario.scenario.last_candle()
+    if top_last is None:
+        return forecast_output
+    top_dir = top_last.direction
     top_prob = top_scenario.probability
 
     # Build paint layer

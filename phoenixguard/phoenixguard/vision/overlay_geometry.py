@@ -521,7 +521,10 @@ def _normalized_exclusion_boxes(
         clipped = clip_bbox_to_bounds(raw_box, chart_bounds)
         if clipped is None:
             continue
-        key = tuple(round(float(value), 2) for value in clipped)
+        key_values = tuple(round(float(value), 2) for value in clipped)
+        if len(key_values) != 4:
+            continue
+        key = (key_values[0], key_values[1], key_values[2], key_values[3])
         if key in seen:
             continue
         seen.add(key)

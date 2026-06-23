@@ -7,7 +7,7 @@ import hashlib
 import hmac
 import json
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from phoenixguard.execution.packet_v3 import (
     PG_EXECUTION_PACKET_SCHEMA_VERSION,
@@ -145,7 +145,8 @@ class LocalEd25519Signer:
     def __init__(self, seed: bytes, *, key_id: str = "pg-local-ed25519-test-v1") -> None:
         self.key_id = str(key_id or "pg-local-ed25519-test-v1")
         self._seed = _seed32(seed)
-        self._private_key = Ed25519PrivateKey.from_private_bytes(self._seed) if _HAS_ED25519 else None
+        private_key_cls = Ed25519PrivateKey
+        self._private_key = private_key_cls.from_private_bytes(self._seed) if _HAS_ED25519 and private_key_cls is not None else None
 
     @classmethod
     def local_test_key(cls, *, key_id: str = "pg-local-ed25519-test-v1") -> "LocalEd25519Signer":
@@ -158,11 +159,12 @@ class LocalEd25519Signer:
 
     @property
     def public_key_b64(self) -> str:
-        if self._private_key is not None:
+        serialization_module = cast(Any, serialization)
+        if self._private_key is not None and serialization_module is not None:
             public_key = self._private_key.public_key()
             raw = public_key.public_bytes(
-                encoding=serialization.Encoding.Raw,
-                format=serialization.PublicFormat.Raw,
+                encoding=serialization_module.Encoding.Raw,
+                format=serialization_module.PublicFormat.Raw,
             )
         else:
             raw = hashlib.sha256(b"local-ed25519-public:" + self._seed).digest()

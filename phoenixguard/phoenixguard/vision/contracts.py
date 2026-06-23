@@ -10,9 +10,10 @@ def normalize_overlay_object(value: Mapping[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = dict(value)
     # Ensure bbox is present as list[float]
     bbox = out.get("bbox") or out.get("box") or out.get("rect")
-    if not bbox and out.get("anchors"):
+    anchors = out.get("anchors")
+    if not bbox and isinstance(anchors, (list, tuple)):
         try:
-            pts = [tuple(map(float, p)) for p in out.get("anchors") if isinstance(p, (list, tuple)) and len(p) >= 2]
+            pts = [tuple(map(float, p)) for p in anchors if isinstance(p, (list, tuple)) and len(p) >= 2]
             if pts:
                 xs = [p[0] for p in pts]
                 ys = [p[1] for p in pts]

@@ -35,7 +35,7 @@ import time
 from datetime import datetime, timedelta
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Mapping, Protocol, Sequence, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -1210,6 +1210,17 @@ def _build_archetypes(
     return buy_entries + sell_entries
 
 
+class HNSWSearchIndexProtocol(Protocol):
+    def search(self, query: NDArray[np.float32], top_k: int = 5) -> list[tuple[str, float]]:
+        ...
+
+    def save(self, path: Path) -> None:
+        ...
+
+    def load(self, path: Path, n_entries: int) -> None:
+        ...
+
+
 # ── HNSW index wrapper ────────────────────────────────────────────────────────
 class _HNSWIndex:
     """Data Structures & Search Strategies — HNSW Hierarchical Navigable Small World graph."""
@@ -1340,7 +1351,7 @@ class MemoryBank:
 
     def __init__(self):
         self._entries: dict[str, MemoryEntry] = {}     # entry_id → MemoryEntry
-        self._index: _HNSWIndex = _HNSWIndex(SHARED_DIM)
+        self._index: HNSWSearchIndexProtocol = _HNSWIndex(SHARED_DIM)
         self._embedder: _EmbedderSingleton | None = None
         self._loaded = False
         self.n_buy = 0
@@ -1354,7 +1365,7 @@ class MemoryBank:
     # ── internal assembly (used by MemoryIngestor only) ──────────────────────
     def populate(
         self,
-        index: "_HNSWIndex",
+        index: HNSWSearchIndexProtocol,
         entries: "dict[str, MemoryEntry]",
         n_buy: int,
         n_sell: int,

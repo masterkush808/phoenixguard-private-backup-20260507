@@ -361,19 +361,36 @@ def gate_report(
     return report
 
 
+def _mapping(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _float_value(value: object, default: float = 0.0) -> float:
+    if not isinstance(value, (int, float, str)):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _int_value(value: object, default: int = 0) -> int:
+    return int(_float_value(value, float(default)))
+
+
 def extract_frame_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
-    timing = payload.get("frame_timing_trace_v3") if isinstance(payload.get("frame_timing_trace_v3"), Mapping) else {}
-    surface = payload.get("broker_surface_frame") if isinstance(payload.get("broker_surface_frame"), Mapping) else {}
+    timing = _mapping(payload.get("frame_timing_trace_v3"))
+    surface = _mapping(payload.get("broker_surface_frame"))
     return {
-        "frame_id": int(float(payload.get("frame_id") or payload.get("frame_index") or payload.get("capture_count") or 0)),
-        "display_frame_id": int(float(payload.get("display_frame_id") or surface.get("frame_id") or payload.get("frame_index") or 0)),
-        "display_capture_epoch": float(payload.get("display_capture_epoch") or surface.get("capture_epoch") or 0.0),
-        "display_published_epoch": float(payload.get("display_published_epoch") or surface.get("published_epoch") or 0.0),
-        "chart_frame_id": int(float(payload.get("chart_frame_id") or payload.get("frame_index") or 0)),
-        "overlay_frame_id": int(float(payload.get("overlay_frame_id") or payload.get("frame_index") or 0)),
-        "model_vote_frame_id": int(float(payload.get("model_vote_frame_id") or payload.get("frame_index") or 0)),
-        "model_capture_epoch": float(payload.get("model_capture_epoch") or (float(timing.get("model_capture_epoch_ms") or 0.0) / 1000.0) or 0.0),
-        "state_version": int(float(payload.get("state_version") or 0)),
+        "frame_id": _int_value(payload.get("frame_id") or payload.get("frame_index") or payload.get("capture_count") or 0),
+        "display_frame_id": _int_value(payload.get("display_frame_id") or surface.get("frame_id") or payload.get("frame_index") or 0),
+        "display_capture_epoch": _float_value(payload.get("display_capture_epoch") or surface.get("capture_epoch") or 0.0),
+        "display_published_epoch": _float_value(payload.get("display_published_epoch") or surface.get("published_epoch") or 0.0),
+        "chart_frame_id": _int_value(payload.get("chart_frame_id") or payload.get("frame_index") or 0),
+        "overlay_frame_id": _int_value(payload.get("overlay_frame_id") or payload.get("frame_index") or 0),
+        "model_vote_frame_id": _int_value(payload.get("model_vote_frame_id") or payload.get("frame_index") or 0),
+        "model_capture_epoch": _float_value(payload.get("model_capture_epoch") or (_float_value(timing.get("model_capture_epoch_ms"), 0.0) / 1000.0) or 0.0),
+        "state_version": _int_value(payload.get("state_version") or 0),
         "source_capture_id": str(payload.get("source_capture_id") or ""),
     }
 

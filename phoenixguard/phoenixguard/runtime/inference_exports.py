@@ -84,23 +84,25 @@ def _tensor_state_dict(state_dict: Mapping[str, Any]) -> dict[str, Tensor]:
 
 
 def save_state_dict_safetensors(path: str | Path, state_dict: Mapping[str, Any], *, metadata: Mapping[str, str] | None = None) -> Path:
-    if not supports_safetensors():
+    save_file = _save_safetensors_file
+    if not supports_safetensors() or save_file is None:
         raise RuntimeError("safetensors is not installed in this environment.")
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     tensors = _tensor_state_dict(state_dict)
     if not tensors:
         raise ValueError(f"No tensor values were found for safetensors export to {destination}.")
-    _save_safetensors_file(tensors, str(destination), metadata=dict(metadata or {}))
+    save_file(tensors, str(destination), metadata=dict(metadata or {}))
     return destination
 
 
 def load_state_dict_safetensors(path: str | Path, *, device: str | torch.device = "cpu") -> dict[str, Tensor]:
-    if not supports_safetensors():
+    safe_open = _safe_open_safetensors
+    if not supports_safetensors() or safe_open is None:
         raise RuntimeError("safetensors is not installed in this environment.")
     requested_device = str(torch.device(device))
     state_dict: dict[str, Tensor] = {}
-    with _safe_open_safetensors(str(Path(path)), framework="pt", device=requested_device) as handle:
+    with safe_open(str(Path(path)), framework="pt", device=requested_device) as handle:
         for key in handle.keys():
             state_dict[str(key)] = handle.get_tensor(key)
     return state_dict

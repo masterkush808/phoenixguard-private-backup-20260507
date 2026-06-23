@@ -103,7 +103,10 @@ def _image_metrics(path: Path) -> dict[str, Any]:
             image_rgb = image.convert("RGB")
             stat = ImageStat.Stat(image_rgb)
             extrema = image_rgb.getextrema()
-            channels_nonblank = [lo != hi for lo, hi in extrema]
+            channels_nonblank = [
+                bool(isinstance(pair, tuple) and len(pair) >= 2 and pair[0] != pair[1])
+                for pair in extrema
+            ]
             return {
                 "available": True,
                 "width": int(image.width),

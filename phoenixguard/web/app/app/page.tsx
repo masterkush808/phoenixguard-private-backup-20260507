@@ -80,7 +80,7 @@ export default async function PortalDashboardPage() {
 
           <ol className="activation-step-list">
             {gates.map((gate, index) => (
-              <li className={`activation-step activation-step--${gate.tone}`} key={gate.id}>
+              <li className={`activation-step activation-step--${gate.tone}`} data-testid={gate.id} key={gate.id}>
                 <span className="activation-step__marker" aria-hidden="true">
                   {gate.passed ? <CheckCircle2 size={17} /> : index + 1}
                 </span>

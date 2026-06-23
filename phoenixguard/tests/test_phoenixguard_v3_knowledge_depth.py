@@ -55,6 +55,7 @@ def test_support_resistance_depth_can_exceed_four_zones() -> None:
         268,
         388,
     ]
+    levels = [float(level) for level in levels]
 
     zones = adapter._derive_support_resistance_zones(  # noqa: SLF001
         _manual_candles(levels),

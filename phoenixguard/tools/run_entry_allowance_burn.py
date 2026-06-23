@@ -143,7 +143,7 @@ def fetch_runtime_bundle(base_url: str, session_id: str, timeout: float) -> tupl
         return futures["live"].result(), futures["council"].result(), futures["perf"].result()
 
 
-def font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+def font(size: int, bold: bool = False) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
     candidates = (
         ("C:/Windows/Fonts/segoeuib.ttf", "C:/Windows/Fonts/arialbd.ttf")
         if bold

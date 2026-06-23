@@ -1,18 +1,23 @@
 from fastapi.testclient import TestClient
-import os
 from phoenixguard.mobile_api.app import create_app
 from pathlib import Path
+from uuid import uuid4
 
 app = create_app()
 client = TestClient(app)
 
 
-def test_v3_chart_state_and_frame_endpoint():
-    # Resolve a known session from data/window_tracker
-    session_dir = Path("data/window_tracker/sessions")
-    sessions = [p.name for p in session_dir.iterdir() if p.is_dir()]
-    assert sessions, "No sessions found in data/window_tracker/sessions"
-    session_id = sessions[0]
+def test_v3_chart_state_and_frame_endpoint() -> None:
+    session_id = f"test-chart-state-{uuid4().hex}"
+    create_response = client.post(
+        "/v1/mobile/window-tracker/sessions",
+        json={
+            "session_id": session_id,
+            "window_query": "Pocket Option",
+            "capture_interval_sec": 0.5,
+        },
+    )
+    assert create_response.status_code == 201
 
     resp = client.get(f"/v1/mobile/chart/state/v3?session_id={session_id}")
     assert resp.status_code == 200

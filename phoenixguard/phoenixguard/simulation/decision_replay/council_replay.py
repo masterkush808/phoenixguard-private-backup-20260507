@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 import time
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, cast
 
 from phoenixguard.decision.model_council_v3 import ModelCouncilV3
 
@@ -15,7 +15,7 @@ CouncilCallable = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _state(payload: Mapping[str, Any]) -> str:
@@ -40,9 +40,9 @@ class CouncilReplayEngine:
         if self.evaluator is not None:
             result = dict(self.evaluator(snapshot))
         elif hasattr(self.council, "evaluate"):
-            result = dict(self.council.evaluate(snapshot, now_epoch=now_epoch if now_epoch is not None else time.time()))
+            result = dict(cast(Mapping[str, Any], self.council.evaluate(snapshot, now_epoch=now_epoch if now_epoch is not None else time.time())))
         elif callable(self.council):
-            result = dict(self.council(snapshot))
+            result = dict(cast(Mapping[str, Any], self.council(snapshot)))
         else:
             raise TypeError("CouncilReplayEngine requires a council with evaluate() or a callable evaluator.")
         votes = record_agent_votes(snapshot, result)

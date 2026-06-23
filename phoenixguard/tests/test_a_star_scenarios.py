@@ -187,10 +187,12 @@ def demo_basic_scenario_prediction():
 
     print(f"\nGenerated {len(scenarios)} scenarios:")
     for scenario in scenarios:
+        last = scenario.scenario.last_candle()
+        assert last is not None
         print(
             f"\n  Rank {scenario.rank}: "
             f"Prob={scenario.probability:.1%} | "
-            f"Dir={scenario.scenario.last_candle().direction} | "
+            f"Dir={last.direction} | "
             f"Steps={len(scenario.projected_candles)} | "
             f"Cost={scenario.scenario.cost:.3f}"
         )
@@ -265,10 +267,12 @@ def demo_integration_with_forecast():
 
     print(f"\nGenerated {len(scenarios)} scenarios from chart + forecast:")
     for scenario in scenarios:
+        last = scenario.scenario.last_candle()
+        assert last is not None
         print(f"\n  Scenario {scenario.rank}:")
         print(f"    Probability: {scenario.probability:.1%}")
         print(f"    Candles: {len(scenario.projected_candles)}")
-        print(f"    Direction: {scenario.scenario.last_candle().direction}")
+        print(f"    Direction: {last.direction}")
         print(f"    Transition: {scenario.scenario.transition_type.value}")
 
     # Convert to paint layer

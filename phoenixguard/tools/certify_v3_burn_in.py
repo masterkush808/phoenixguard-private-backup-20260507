@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from typing import Mapping
 
 from certification_common_v3 import (
     CERT_DIR,
@@ -33,6 +34,19 @@ def _load_gate_reports() -> list[dict[str, object]]:
         except Exception:
             pass
     return reports
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _float_value(value: object, default: float = 0.0) -> float:
+    if not isinstance(value, (int, float, str)):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def main() -> int:
@@ -91,14 +105,14 @@ def main() -> int:
         else:
             live_payload = live.payload if isinstance(live.payload, dict) else {}
             perf_payload = perf.payload if isinstance(perf.payload, dict) else {}
-            timing = perf_payload.get("timing_trace") if isinstance(perf_payload.get("timing_trace"), dict) else {}
-            frame_age = float(timing.get("frame_age_ms") or 0.0)
-            overlay_age = float(timing.get("overlay_age_ms") or 0.0)
-            model_age = float(timing.get("model_vote_age_ms") or 0.0)
+            timing = _mapping(perf_payload.get("timing_trace"))
+            frame_age = _float_value(timing.get("frame_age_ms"), 0.0)
+            overlay_age = _float_value(timing.get("overlay_age_ms"), 0.0)
+            model_age = _float_value(timing.get("model_vote_age_ms"), 0.0)
             frame_ages.append(frame_age)
             overlay_ages.append(overlay_age)
             model_ages.append(model_age)
-            execution_status = live_payload.get("execution_packet_status") if isinstance(live_payload.get("execution_packet_status"), dict) else {}
+            execution_status = _mapping(live_payload.get("execution_packet_status"))
             if execution_status.get("exists") and execution_status.get("fresh") is False:
                 stale_execution_packets += 1
             sample.update(

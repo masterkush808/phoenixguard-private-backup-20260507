@@ -297,7 +297,9 @@ def test_on_feedback_structures_loss_as_hold_for_learning(monkeypatch, tmp_path:
     assert "Outcome review captured and stored successfully." in status
     assert fake_rl.calls[-1]["actual_outcome"] == "HOLD"
     assert fake_rl.calls[-1]["submission_id"]
-    assert float(fake_rl.calls[-1]["operator_confidence"]) == 0.67
+    confidence = fake_rl.calls[-1]["operator_confidence"]
+    assert isinstance(confidence, (int, float, str))
+    assert float(confidence) == 0.67
 
     feed_rows = [
         json.loads(line)

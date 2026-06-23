@@ -1,3 +1,5 @@
+from typing import Mapping, cast
+
 from phoenixguard.vision.market_registry import persist_market_objects, load_market_objects
 from pathlib import Path
 
@@ -17,5 +19,6 @@ def test_market_registry_persist_and_load(tmp_path):
     # check fields
     first = entries[-2]
     assert first.get("session_id") == session_id
-    assert first.get("overlay") and first.get("overlay").get("id") == "o1"
+    overlay = cast(Mapping[str, object], first.get("overlay"))
+    assert overlay and overlay.get("id") == "o1"
     assert first.get("lifecycle_state") is not None

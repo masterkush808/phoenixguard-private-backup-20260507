@@ -1328,7 +1328,7 @@ def _render_window_tracker_dashboard(session_id: str) -> str:
 def create_app(
     service: MobileApiService | None = None,
     observer_service: SignalObserverService | None = None,
-    window_tracker_service: ContinuousWindowTrackerService | None = None,
+    window_tracker_service: object | None = None,
     voice_config: VoiceConfig | None = None,
 ) -> FastAPI:
     resolved_voice_config = voice_config or VOICE
@@ -1381,7 +1381,7 @@ def create_app(
             else:
                 market_window_tracker = _window_tracker_service(market_observer, mobile_service)
             app.state.window_tracker_service = market_window_tracker
-        return market_window_tracker
+        return cast(ContinuousWindowTrackerService, market_window_tracker)
 
     def read_window_tracker_session(session_id: str) -> dict[str, object]:
         tracker_service = get_window_tracker_service()
@@ -3604,6 +3604,22 @@ def create_app(
             media_type = "application/json"
         else:
             media_type = None
+        if suffix in {".jpg", ".jpeg"}:
+            try:
+                from io import BytesIO
+
+                from PIL import Image
+
+                with Image.open(path) as image:
+                    buffer = BytesIO()
+                    image.convert("RGB").save(buffer, format="PNG")
+                return Response(
+                    content=buffer.getvalue(),
+                    media_type="image/png",
+                    headers=dict(_NO_STORE_ARTIFACT_HEADERS),
+                )
+            except Exception:
+                media_type = "image/jpeg"
         return _safe_file_bytes_response(path, media_type=media_type)
 
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-window")
@@ -3647,6 +3663,22 @@ def create_app(
         except FileNotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         media_type = "image/jpeg" if path.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
+        if path.suffix.lower() in {".jpg", ".jpeg"}:
+            try:
+                from io import BytesIO
+
+                from PIL import Image
+
+                with Image.open(path) as image:
+                    buffer = BytesIO()
+                    image.convert("RGB").save(buffer, format="PNG")
+                return Response(
+                    content=buffer.getvalue(),
+                    media_type="image/png",
+                    headers=dict(_NO_STORE_ARTIFACT_HEADERS),
+                )
+            except Exception:
+                media_type = "image/jpeg"
         return _safe_file_bytes_response(path, media_type=media_type)
 
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/health")

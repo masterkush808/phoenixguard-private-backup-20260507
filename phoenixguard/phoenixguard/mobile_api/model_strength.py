@@ -138,6 +138,8 @@ MODEL_STRENGTH_BOOL_GROUPS: dict[str, dict[str, bool]] = {
 
 
 def _bounded_number(raw: object, fallback: float, minimum: float, maximum: float) -> float:
+    if not isinstance(raw, (int, float, str)):
+        raw = fallback
     try:
         value = float(raw)
     except (TypeError, ValueError):

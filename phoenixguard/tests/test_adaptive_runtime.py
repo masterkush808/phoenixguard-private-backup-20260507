@@ -26,10 +26,16 @@ class _DummyIndex:
     def __init__(self, sims: dict[str, float]) -> None:
         self._sims = sims
 
-    def search(self, query_embed: np.ndarray, top_k: int = 5) -> list[tuple[str, float]]:
-        _ = query_embed
+    def search(self, query: np.ndarray, top_k: int = 5) -> list[tuple[str, float]]:
+        _ = query
         ranked = sorted(self._sims.items(), key=lambda item: item[1], reverse=True)
         return ranked[:top_k]
+
+    def save(self, path: Path) -> None:
+        _ = path
+
+    def load(self, path: Path, n_entries: int) -> None:
+        _ = path, n_entries
 
 
 class _NullLogger:

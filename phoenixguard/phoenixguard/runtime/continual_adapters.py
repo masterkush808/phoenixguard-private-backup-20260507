@@ -22,6 +22,23 @@ def sanitize_adapter_name(value: str, default: str = "continual_default") -> str
     return cleaned or default
 
 
+def _conv2_size(value: Any) -> tuple[int, int]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items = [int(item) for item in value]
+        if len(items) >= 2:
+            return (items[0], items[1])
+        if len(items) == 1:
+            return (items[0], items[0])
+    if not isinstance(value, (int, float, str)):
+        raise TypeError(f"expected Conv2d scalar or 2D tuple size, got {type(value).__name__}")
+    parsed = int(value)
+    return (parsed, parsed)
+
+
+def _conv2_padding(value: Any) -> str | tuple[int, int]:
+    return value if isinstance(value, str) else _conv2_size(value)
+
+
 class _LoRAAdapterBase(nn.Module):
     def __init__(self, rank: int, alpha: float, dropout: float) -> None:
         super().__init__()
@@ -57,10 +74,10 @@ class LowRankConv2dAdapter(_LoRAAdapterBase):
         self.down = nn.Conv2d(
             in_channels=base_layer.in_channels,
             out_channels=self.rank,
-            kernel_size=base_layer.kernel_size,
-            stride=base_layer.stride,
-            padding=base_layer.padding,
-            dilation=base_layer.dilation,
+            kernel_size=_conv2_size(base_layer.kernel_size),
+            stride=_conv2_size(base_layer.stride),
+            padding=_conv2_padding(base_layer.padding),
+            dilation=_conv2_size(base_layer.dilation),
             groups=base_layer.groups,
             bias=False,
         )

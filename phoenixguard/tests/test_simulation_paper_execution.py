@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from phoenixguard.execution.packet_v3 import build_execution_packet_v3
 from phoenixguard.execution.shooter_modes import ShooterMode
@@ -179,7 +179,7 @@ def test_live_ready_demo_can_invoke_explicit_demo_click_executor(tmp_path: Path)
     engine = PaperExecutionEngine(paths)
     calls: list[dict[str, Any]] = []
 
-    def demo_click_executor(packet: dict[str, Any], rehearsal: dict[str, Any], coordinate_report: dict[str, Any]) -> dict[str, Any]:
+    def demo_click_executor(packet: Mapping[str, Any], rehearsal: Mapping[str, Any], coordinate_report: Mapping[str, Any]) -> dict[str, Any]:
         calls.append({"packet": packet, "rehearsal": rehearsal, "coordinate_report": coordinate_report})
         return {"clicked": True, "reason": "DEMO_CALLBACK_CLICKED"}
 

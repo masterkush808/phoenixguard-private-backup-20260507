@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
@@ -23,7 +24,7 @@ def _row(
     sell_recall: float,
     decision_threshold: float = 0.5,
     runtime_calibration: dict[str, object] | None = None,
-) -> dict[str, float | str | bool | dict[str, float]]:
+) -> dict[str, object]:
     return {
         "name": name,
         "role": role,
@@ -227,7 +228,7 @@ def test_cpu_selection_prioritizes_sell_specialist_before_always_on_models() -> 
     runtime.compute_device = torch.device("cpu")
     runtime.max_loaded_models = 2
     runtime.loaded_model_names = ["mobilenetv3", "simclr", "swav"]
-    runtime.model_info = {name: object() for name in runtime.loaded_model_names}
+    runtime.model_info = cast(Any, {name: object() for name in runtime.loaded_model_names})
 
     selected, summary = runtime._select_prediction_models(
         {

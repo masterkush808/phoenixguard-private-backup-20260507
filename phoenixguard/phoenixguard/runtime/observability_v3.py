@@ -472,9 +472,12 @@ def _packet_summary(payload: Mapping[str, Any], *, now_epoch: float) -> dict[str
     live_integrity = _mapping(packet.get("live_integrity") or latest.get("live_integrity"))
     created_epoch = _float(_first_present(packet.get("created_epoch"), latest.get("published_epoch"), payload.get("last_capture_epoch")), 0.0)
     valid_until_epoch = _float(_first_present(packet.get("valid_until_epoch"), latest.get("valid_until_epoch"), payload.get("decision_valid_until_epoch")), 0.0)
-    age_ms = _nonnegative_float(live_integrity.get("packet_age_ms"), 0.0)
-    if age_ms <= 0.0 and created_epoch > 0.0:
-        age_ms = max(0.0, (now_epoch - created_epoch) * 1000.0)
+    embedded_age_ms = _nonnegative_float(live_integrity.get("packet_age_ms"), 0.0)
+    if created_epoch > 0.0:
+        computed_age_ms = max(0.0, (now_epoch - created_epoch) * 1000.0)
+        age_ms = embedded_age_ms if embedded_age_ms > 0.0 and computed_age_ms > 86_400_000.0 else computed_age_ms
+    else:
+        age_ms = embedded_age_ms
     age_sec = age_ms / 1000.0 if age_ms > 0.0 else 0.0
     return {
         "packet_id": _text(packet.get("packet_id")),

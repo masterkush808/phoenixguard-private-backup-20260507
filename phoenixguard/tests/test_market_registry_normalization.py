@@ -1,9 +1,15 @@
 import json
 from pathlib import Path
+from typing import Mapping, cast
+
 from phoenixguard.vision import market_registry
 
 
-def write_jsonl(session_id: str, entries: list[dict]):
+def _overlay(value: object) -> Mapping[str, object]:
+    return cast(Mapping[str, object], value) if isinstance(value, Mapping) else {}
+
+
+def write_jsonl(session_id: str, entries: list[dict[str, object]]) -> None:
     session_file = market_registry.REGISTRY_DIR / f"{session_id}.jsonl"
     session_file.parent.mkdir(parents=True, exist_ok=True)
     with session_file.open("w", encoding="utf-8") as fh:
@@ -34,7 +40,7 @@ def test_load_market_objects_normalizes_bbox_and_truth(tmp_path):
     loaded = market_registry.load_market_objects(session_id)
     assert isinstance(loaded, list) and len(loaded) >= 3
     # find overlays by id
-    overlays = {str(e.get("overlay", {}).get("id") or ""): e.get("overlay") for e in loaded}
+    overlays = {str(_overlay(e.get("overlay")).get("id") or ""): _overlay(e.get("overlay")) for e in loaded}
     assert "a1" in overlays and overlays["a1"].get("bbox") is not None
     assert "b2" in overlays and overlays["b2"].get("bbox") == [5.0, 6.0, 55.0, 66.0]
     assert "c3" in overlays and isinstance(overlays["c3"].get("truth_score"), float)

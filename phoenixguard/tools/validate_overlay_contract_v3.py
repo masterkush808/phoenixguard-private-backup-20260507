@@ -42,6 +42,12 @@ def _sequence(value: Any) -> list[Any]:
     return []
 
 
+def _float_value(value: object) -> float:
+    if not isinstance(value, (int, float, str)):
+        raise TypeError(f"expected numeric value, got {type(value).__name__}")
+    return float(value)
+
+
 def _http_json(url: str, timeout: float) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "PhoenixGuard-V3-OverlayContract/1.0"})
     try:
@@ -138,18 +144,18 @@ def _valid_bounds(value: Any) -> bool:
             if key in value and _valid_bounds(value.get(key)):
                 return True
         try:
-            x = float(value.get("x", value.get("left")))
-            y = float(value.get("y", value.get("top")))
-            width = float(value.get("width", value.get("w")))
-            height = float(value.get("height", value.get("h")))
+            x = _float_value(value.get("x", value.get("left")))
+            y = _float_value(value.get("y", value.get("top")))
+            width = _float_value(value.get("width", value.get("w")))
+            height = _float_value(value.get("height", value.get("h")))
             return width > 0 and height > 0 and x == x and y == y
         except Exception:
             pass
         try:
-            left = float(value.get("left", value.get("x")))
-            top = float(value.get("top", value.get("y")))
-            right = float(value.get("right"))
-            bottom = float(value.get("bottom"))
+            left = _float_value(value.get("left", value.get("x")))
+            top = _float_value(value.get("top", value.get("y")))
+            right = _float_value(value.get("right"))
+            bottom = _float_value(value.get("bottom"))
             return right > left and bottom > top
         except Exception:
             return False
@@ -186,7 +192,7 @@ def validate_overlay(overlay: Mapping[str, Any], index: int) -> dict[str, Any]:
         errors.append("bounds must be [x1, y1, x2, y2] with positive width/height")
     for field in ("truth_score", "confidence"):
         try:
-            value = float(overlay.get(field))
+            value = _float_value(overlay.get(field))
             if not 0.0 <= value <= 1.0:
                 errors.append(f"{field} out of range: {value}")
         except Exception:

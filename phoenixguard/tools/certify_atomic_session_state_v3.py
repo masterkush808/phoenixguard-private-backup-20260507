@@ -67,7 +67,8 @@ def main() -> int:
         },
         previous=previous,
     )
-    prepared_result = prepared.get("session_freshness_v3") if isinstance(prepared.get("session_freshness_v3"), dict) else {}
+    raw_prepared_result = prepared.get("session_freshness_v3")
+    prepared_result = raw_prepared_result if isinstance(raw_prepared_result, dict) else {}
     if prepared_result.get("missing_fields"):
         failures.append(f"atomic writer left missing frame fields: {prepared_result.get('missing_fields')}")
     if not prepared.get("source_capture_id"):

@@ -140,7 +140,8 @@ def main() -> int:
             overlay_ttl_sec.append(0.0)
         if overlay_frame_id is None and item.get("frame_id") is not None:
             try:
-                overlay_frame_id = int(item.get("frame_id"))
+                raw_frame_id = item.get("frame_id")
+                overlay_frame_id = int(raw_frame_id) if isinstance(raw_frame_id, (int, float, str)) else None
             except Exception:
                 overlay_frame_id = None
         overlays_are_v3 = overlays_are_v3 and all(

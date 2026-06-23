@@ -24,6 +24,7 @@ from .store import (
     runtime_policy_for_plan,
 )
 from .tracker_access import (
+    TRACKER_DASHBOARD_ROUTE,
     blocked_command_response,
     evaluate_tracker_access,
     register_business_tracker_access_routes,
@@ -199,8 +200,8 @@ def register_business_routes(app: FastAPI, store: BusinessStore | None = None) -
         store=business_store,
         dashboard_route=os.getenv(
             "PHOENIXGUARD_TRACKER_DASHBOARD_URL",
-            "http://127.0.0.1:8793/dashboard/live/pocket-live-8788",
-        ).strip() or "http://127.0.0.1:8793/dashboard/live/pocket-live-8788",
+            TRACKER_DASHBOARD_ROUTE,
+        ).strip() or TRACKER_DASHBOARD_ROUTE,
     )
     configured_origins = [
         origin.strip()

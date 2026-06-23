@@ -1442,6 +1442,10 @@ class CVPatternDetector:
         except Exception:
             etag_timeout = 2.0
         download_fn = hf_hub_download
+        yolo_model_cls = YOLOModel
+        if yolo_model_cls is None:
+            self.logger.warning("ultralytics.YOLO unavailable after dependency guard")
+            return False
 
         def _load_from_downloaded_path(*, local_files_only: bool) -> bool:
             local_path = download_fn(
@@ -1452,7 +1456,7 @@ class CVPatternDetector:
                 etag_timeout=max(0.1, float(etag_timeout)),
                 local_files_only=local_files_only,
             )
-            self.model = YOLOModel(local_path)
+            self.model = yolo_model_cls(local_path)
             self.model_name = model_ref
             self.use_hf_endpoint = False
             self.hf_model_id = model_id
@@ -1566,7 +1570,7 @@ class CVPatternDetector:
             self.logger.warning("Skipping local YOLO inference because torchvision runtime probe failed")
             return []
         try:
-            res = self.model.predict(source=np.asarray(image_rgb), verbose=False, conf=0.3)
+            res = cast(Sequence[Any], self.model.predict(source=np.asarray(image_rgb), verbose=False, conf=0.3))
             out: list[dict[str, Any]] = []
             for r in res:
                 names = cast(dict[int, str], getattr(r, "names", {}))

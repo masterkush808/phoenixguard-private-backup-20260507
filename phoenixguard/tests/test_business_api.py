@@ -63,7 +63,7 @@ def _post_stripe(client: TestClient, event: dict[str, Any]) -> Any:
     payload = _stripe_payload(event)
     return client.post(
         "/v1/webhooks/stripe",
-        data=payload,
+        content=payload,
         headers={
             "Content-Type": "application/json",
             "Stripe-Signature": _stripe_signature(payload),
@@ -247,7 +247,7 @@ def test_stripe_webhook_rejects_invalid_signature() -> None:
 
     response = client.post(
         "/v1/webhooks/stripe",
-        data=payload,
+        content=payload,
         headers={"Content-Type": "application/json", "Stripe-Signature": "t=1,v1=bad"},
     )
 

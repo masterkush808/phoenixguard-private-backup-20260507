@@ -799,7 +799,7 @@ def is_known_view_mode(mode: Any) -> bool:
     normalized = _canonical_token(mode)
     return normalized in VIEW_MODES or normalized in VIEW_MODE_ALIASES
 
-MODE_ALLOWED_TYPES: dict[str, set[str]] = {
+MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
     "CLEAN_LIVE": {
         "CHART_BOUNDS",
         "CURRENT_CANDLE",
@@ -888,7 +888,7 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = {
     "DIAGNOSTICS": set(OVERLAY_TYPES),
     "DEBUG": set(OVERLAY_TYPES),
     "INSPECTOR": set(OVERLAY_TYPES),
-}
+})
 
 _ALL_OVERLAY_LAYERS: tuple[str, ...] = (
     "chart_bounds",

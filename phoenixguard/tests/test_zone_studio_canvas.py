@@ -23,7 +23,9 @@ def test_build_zone_editor_value_prefers_processed_overlay_image() -> None:
     assert isinstance(value, Image.Image)
     assert value.mode == "RGBA"
     assert value.size == (18, 12)
-    assert value.getpixel((0, 0))[:3] == (240, 90, 40)
+    pixel = value.getpixel((0, 0))
+    assert isinstance(pixel, tuple)
+    assert pixel[:3] == (240, 90, 40)
 
 
 def test_refresh_zone_canvas_rebuilds_the_current_processed_chart(monkeypatch) -> None:
@@ -61,4 +63,6 @@ def test_refresh_zone_canvas_rebuilds_the_current_processed_chart(monkeypatch) -
     assert isinstance(value, Image.Image)
     assert value.mode == "RGBA"
     assert value.size == expected_overlay.size
-    assert value.getpixel((0, 0))[:3] == (90, 180, 60)
+    pixel = value.getpixel((0, 0))
+    assert isinstance(pixel, tuple)
+    assert pixel[:3] == (90, 180, 60)

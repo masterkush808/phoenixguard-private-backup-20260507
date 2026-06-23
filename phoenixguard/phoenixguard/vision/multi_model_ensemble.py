@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import logging
 import time
+import importlib
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -96,11 +97,12 @@ class ModelRegistry:
             model = timm.create_model(model_name, pretrained=True)
             model = model.to(self.device)
             model.eval()
+            get_model_config = getattr(timm, "get_model_config", None)
 
             self.models["vit"] = {
                 "model": model,
                 "model_name": model_name,
-                "config": timm.get_model_config(model_name),
+                "config": get_model_config(model_name) if callable(get_model_config) else {},
             }
             self.model_load_status["vit"] = "loaded"
             logger.info(f"Vision Transformer {model_name} loaded on {self.device}")
@@ -113,11 +115,13 @@ class ModelRegistry:
     def register_sam_model(self, model_type: str = "vit_b") -> bool:
         """Load Segment Anything Model for chart boundary segmentation."""
         try:
-            from segment_anything import sam_model_registry, SamPredictor
+            segment_anything = importlib.import_module("segment_anything")
+            sam_model_registry = cast(Mapping[str, Any], getattr(segment_anything, "sam_model_registry"))
+            sam_predictor_cls = cast(Any, getattr(segment_anything, "SamPredictor"))
 
             sam = sam_model_registry[model_type](checkpoint=f"sam_{model_type}.pth")
             sam = sam.to(self.device)
-            predictor = SamPredictor(sam)
+            predictor = sam_predictor_cls(sam)
 
             self.models["sam"] = predictor
             self.model_load_status["sam"] = "loaded"
@@ -365,7 +369,7 @@ class MultiModelEnsemble:
                     std=[0.229, 0.224, 0.225]
                 ),
             ])
-            img_tensor = transform(img_pil).unsqueeze(0).to(self.registry.device)
+            img_tensor = cast(Any, transform(img_pil)).unsqueeze(0).to(self.registry.device)
 
             with torch.no_grad():
                 features = vit_model.forward_features(img_tensor)

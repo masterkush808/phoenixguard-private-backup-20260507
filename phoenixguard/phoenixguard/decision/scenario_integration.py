@@ -199,10 +199,13 @@ def rank_scenarios_by_ensemble_agreement(
 
     scored = []
     for scenario in scenarios:
+        last_candle = scenario.scenario.last_candle()
+        if last_candle is None:
+            continue
         alignment_score = 0.0
 
         # Match direction
-        if scenario.scenario.last_candle().direction == ensemble_decision:
+        if last_candle.direction == ensemble_decision:
             alignment_score += 0.7 * ensemble_confidence
         else:
             alignment_score -= 0.3
@@ -319,10 +322,11 @@ def enhanced_forecast_with_scenarios(
     enhanced = dict(forecast_output)  # Preserve original fields
     enhanced["scenarios"] = paint_layer
     enhanced["scenarios_raw"] = [s.to_paint_dict() for s in ranked]
+    top_last = ranked[0].scenario.last_candle() if ranked else None
     enhanced["scenario_summary"] = {
         "total_scenarios": len(ranked),
         "top_scenario_probability": ranked[0].probability if ranked else 0.0,
-        "top_scenario_direction": ranked[0].scenario.last_candle().direction if ranked else "HOLD",
+        "top_scenario_direction": top_last.direction if top_last is not None else "HOLD",
         "ensemble_agreement": ensemble_decision,
     }
 
@@ -336,6 +340,8 @@ def scenario_explanation_for_ui(scenario: ScenarioPrediction) -> str:
     Returns markdown-formatted string.
     """
     last = scenario.scenario.last_candle()
+    if last is None:
+        return f"### Scenario #{scenario.rank}\n\nNo candle sequence is available for this scenario."
     first = scenario.scenario.candle_sequence[0]
     candle_count = len(scenario.scenario.candle_sequence)
 

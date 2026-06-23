@@ -26,7 +26,7 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def _request_json(base_url: str, path: str, *, method: str = "GET", payload: dict[str, Any] | None = None, timeout: int = 30) -> dict[str, Any]:
+def _request_json(base_url: str, path: str, *, method: str = "GET", payload: dict[str, Any] | None = None, timeout: float = 30.0) -> dict[str, Any]:
     effective_timeout = float(timeout)
     if effective_timeout >= 30.0:
         try:
@@ -871,6 +871,7 @@ def main() -> int:
                             args.capture_interval,
                             False,
                             args.window_query,
+                            args.window_hwnd,
                             configured_focus_region,
                         )
                         consecutive_session_read_failures = 0

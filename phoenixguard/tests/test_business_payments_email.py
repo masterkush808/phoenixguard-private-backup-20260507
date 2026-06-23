@@ -223,7 +223,7 @@ def test_access_is_not_activated_until_verified_payment_state_is_valid() -> None
     checkout_payload = _stripe_payload(checkout_event)
     checkout = client.post(
         "/v1/webhooks/stripe",
-        data=checkout_payload,
+        content=checkout_payload,
         headers={"Stripe-Signature": _stripe_signature(checkout_payload, secret=secret)},
     )
 
@@ -234,7 +234,7 @@ def test_access_is_not_activated_until_verified_payment_state_is_valid() -> None
     paid_payload = _stripe_payload(_invoice_paid_event("evt_invoice_paid_expired"))
     paid = client.post(
         "/v1/webhooks/stripe",
-        data=paid_payload,
+        content=paid_payload,
         headers={"Stripe-Signature": _stripe_signature(paid_payload, secret=secret)},
     )
 

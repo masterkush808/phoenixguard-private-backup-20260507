@@ -8,7 +8,7 @@ import hmac
 import json
 import os
 import time
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, cast
 from urllib import error, parse, request
 
 from .auth import MOCK_STRIPE_WEBHOOK_SECRET
@@ -317,9 +317,10 @@ class BillingService:
         }
 
     def _apply_stripe_event(self, *, event_type: str, event: Mapping[str, Any]) -> dict[str, Any]:
-        data = event.get("data") if isinstance(event.get("data"), Mapping) else {}
-        obj = data.get("object") if isinstance(data, Mapping) and isinstance(data.get("object"), Mapping) else {}
-        stripe_object = dict(obj)
+        raw_data = event.get("data")
+        data = cast(Mapping[str, Any], raw_data) if isinstance(raw_data, Mapping) else {}
+        raw_object = data.get("object")
+        stripe_object = dict(cast(Mapping[str, Any], raw_object)) if isinstance(raw_object, Mapping) else {}
         if event_type in {
             "customer.subscription.created",
             "customer.subscription.updated",
@@ -518,6 +519,8 @@ def _license_status_from_subscription_status(status: str) -> str:
 
 def _datetime_from_stripe_epoch(value: object) -> datetime | None:
     if value in (None, ""):
+        return None
+    if not isinstance(value, (int, float, str)):
         return None
     try:
         return datetime.fromtimestamp(int(value), tz=UTC)
