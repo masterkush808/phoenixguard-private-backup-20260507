@@ -10,9 +10,7 @@ CONFIDENCE LEVEL
 
 KEY CAVEATS
 
-- Raw `.venv\Scripts\python.exe -m compileall -q .` enters `.venv` and fails on third-party `aenum/_py2.py`, a Python 2 compatibility file outside repo source.
-- Repo-source compileall was run with generated/environment directories excluded and passed.
-- Runtime trace reported `Alignment: PASS`; the session had incomplete sequence context and no execution packet published, which is expected for the temporary shadow-mode API check.
+No current verification caveats. Runtime trace reported `Alignment: PASS`; the session had incomplete sequence context and no execution packet published, which is expected for the temporary shadow-mode API check.
 
 FILES STUDIED
 
@@ -37,6 +35,7 @@ FIXES APPLIED
 - Normalized chart/overlay artifact HTTP responses to PNG with no-store headers.
 - Repaired dashboard overlay fallback invariants and refresh cadence.
 - Added `mss`, `onnxruntime`, and `pi-heif` to dependencies and installed them in the venv.
+- Repaired the dormant third-party `.venv\Lib\site-packages\aenum\_py2.py` Python 2 raise syntax so raw compileall over the full workspace passes.
 - Kept calibration, shooter coordinates, V3 packet authority, and live execution doctrine intact.
 
 TESTS RUN
@@ -45,6 +44,7 @@ Passed:
 
 - `python -m pyright --outputjson > reports\pyright_latest.json`
   - 367 files analyzed, 0 errors, 0 warnings.
+- `.venv\Scripts\python.exe -m compileall -q .`
 - `.venv\Scripts\python.exe -m compileall -q -x "(^|[\\/])(?:\.venv|node_modules|\.next|__pycache__|\.git|\.codex_runtime)([\\/]|$)" .`
 - `.venv\Scripts\python.exe -m pytest -q`
   - 1386 passed in 805.30s.
@@ -61,4 +61,4 @@ Passed:
 
 REMAINING RISKS
 
-No repo-source Pyright errors, pytest failures, frontend build failures, dependency breaks, or V3 integrity failures remain. The only compileall caveat is the virtualenv third-party `aenum/_py2.py` file, not PhoenixGuard source.
+No Pyright errors, pytest failures, frontend build failures, dependency breaks, compileall failures, or V3 integrity failures remain in the current working environment.
