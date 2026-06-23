@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import stat as stat_module
 import time
 import urllib.error
 import urllib.request
@@ -20,6 +23,24 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 SCHEMA_VERSION = "PG_ENTRY_ALLOWANCE_BURN_V1"
+SOFT_BLOCKED_STUDY_REASONS = {
+    "REASONING_WATCH",
+    "REASONING_WAIT_FOR_PULLBACK",
+    "REASONING_WAIT_FOR_RETEST",
+    "REASONING_WAIT_FOR_REJECTION",
+    "REASONING_WAIT_FOR_BREAK_CONFIRMATION",
+}
+HARD_BLOCKED_STUDY_TOKENS = (
+    "STALE",
+    "LATE",
+    "TRAP",
+    "BAD_ENTRY",
+    "NO_PATH",
+    "OPPOSING",
+    "SUPPORT_LOCATION_GUARD",
+    "RESISTANCE_LOCATION_GUARD",
+    "BUY_LOW_SELL_HIGH",
+)
 
 
 def utc_now() -> str:
@@ -35,9 +56,27 @@ def local_root() -> Path:
 
 def write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
-    tmp.write_text(json.dumps(dict(payload), indent=2, ensure_ascii=True, default=str), encoding="utf-8")
-    tmp.replace(path)
+    content = json.dumps(dict(payload), indent=2, ensure_ascii=True, default=str)
+    last_error: OSError | None = None
+    for attempt in range(12):
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
+        try:
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(path)
+            return
+        except OSError as exc:
+            last_error = exc
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            # Windows can briefly deny os.replace while dashboards or monitors
+            # read status.json. A bounded retry keeps long burns alive.
+            if isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in {5, 32}:
+                time.sleep(min(0.5, 0.05 * (attempt + 1)))
+                continue
+            raise
+    raise last_error or PermissionError(f"Unable to write {path}")
 
 
 def append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
@@ -286,6 +325,141 @@ def newest_local_artifact_path(values: Sequence[Any]) -> Path | None:
     if not candidates:
         return None
     return max(candidates, key=lambda path: path.stat().st_mtime if path.exists() else 0.0)
+
+
+def live_window_artifact_path(live: Mapping[str, Any]) -> Path | None:
+    broker_surface = mapping(live.get("broker_surface"))
+    broker_frame = mapping(broker_surface.get("frame"))
+    return newest_local_artifact_path(
+        [
+            live.get("last_display_window_path"),
+            live.get("last_window_path"),
+            live.get("last_frame_path"),
+            broker_frame.get("path"),
+        ]
+    )
+
+
+def file_sha256(path: Path | None) -> str:
+    if path is None:
+        return ""
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return ""
+
+
+def update_pixel_freeze_state(
+    state: dict[str, Any],
+    live: Mapping[str, Any],
+    observed_at: float,
+) -> dict[str, Any]:
+    max_static_sec = float(os.getenv("PHOENIXGUARD_BURN_MAX_STATIC_PIXEL_SEC", "30") or "30")
+    hard_static_sec = float(os.getenv("PHOENIXGUARD_BURN_HARD_STATIC_PIXEL_SEC", "180") or "180")
+    hard_static_sec = max(max_static_sec, hard_static_sec)
+    artifact_path = live_window_artifact_path(live)
+    digest = file_sha256(artifact_path)
+    frame_id = int(number(live.get("display_frame_id") or live.get("frame_id") or live.get("frame_index"), 0.0) or 0)
+    capture_count = int(number(live.get("capture_count"), 0.0) or 0)
+    artifact_sig = text(live.get("last_display_surface_signature") or live.get("last_window_surface_signature"))
+    study_sig = text(live.get("last_study_surface_signature") or live.get("overlay_source_study_signature"))
+    if not digest:
+        state.clear()
+        state.update(
+            {
+                "status": "UNKNOWN",
+                "reason": "BROKER_ARTIFACT_HASH_MISSING",
+                "path": str(artifact_path or ""),
+                "max_static_sec": max_static_sec,
+            }
+        )
+        return dict(state)
+    previous_digest = text(state.get("digest"))
+    previous_frame = int(number(state.get("last_frame_id"), frame_id) or frame_id)
+    previous_capture = int(number(state.get("last_capture_count"), capture_count) or capture_count)
+    if digest != previous_digest:
+        state.clear()
+        state.update(
+            {
+                "status": "CHANGED",
+                "digest": digest,
+                "path": str(artifact_path or ""),
+                "first_seen_epoch": observed_at,
+                "last_seen_epoch": observed_at,
+                "first_frame_id": frame_id,
+                "last_frame_id": frame_id,
+                "first_capture_count": capture_count,
+                "last_capture_count": capture_count,
+                "same_hash_sec": 0.0,
+                "frame_delta": 0,
+                "capture_delta": 0,
+                "max_static_sec": max_static_sec,
+                "hard_static_sec": hard_static_sec,
+                "refresh_recommended": False,
+                "artifact_surface_signature": artifact_sig,
+                "study_surface_signature": study_sig,
+            }
+        )
+        return dict(state)
+    first_seen = float(number(state.get("first_seen_epoch"), observed_at) or observed_at)
+    first_frame = int(number(state.get("first_frame_id"), previous_frame) or previous_frame)
+    first_capture = int(number(state.get("first_capture_count"), previous_capture) or previous_capture)
+    same_hash_sec = max(0.0, observed_at - first_seen)
+    frame_delta = max(0, frame_id - first_frame)
+    capture_delta = max(0, capture_count - first_capture)
+    state.update(
+        {
+            "status": "STATIC",
+            "digest": digest,
+            "path": str(artifact_path or ""),
+            "last_seen_epoch": observed_at,
+            "last_frame_id": frame_id,
+            "last_capture_count": capture_count,
+            "same_hash_sec": round(same_hash_sec, 3),
+            "frame_delta": frame_delta,
+            "capture_delta": capture_delta,
+            "max_static_sec": max_static_sec,
+            "hard_static_sec": hard_static_sec,
+            "artifact_surface_signature": artifact_sig,
+            "study_surface_signature": study_sig,
+        }
+    )
+    refresh_recommended = same_hash_sec > max_static_sec and (frame_delta > 0 or capture_delta > 0)
+    hard_stale = same_hash_sec > hard_static_sec and (frame_delta > 0 or capture_delta > 0)
+    state["refresh_recommended"] = bool(refresh_recommended)
+    if hard_stale:
+        state["status"] = "FROZEN"
+        state["reason"] = f"BROKER_PIXELS_FROZEN_{round(same_hash_sec, 1)}S_GT_{round(hard_static_sec, 1)}S"
+    elif refresh_recommended:
+        state["status"] = "STATIC_REFRESH"
+        state["reason"] = f"BROKER_PIXELS_STATIC_{round(same_hash_sec, 1)}S_GT_{round(max_static_sec, 1)}S"
+    else:
+        state["status"] = "STATIC"
+        state.pop("reason", None)
+    return dict(state)
+
+
+def apply_pixel_freeze_guard(sample: dict[str, Any], pixel_state: Mapping[str, Any]) -> dict[str, Any]:
+    if text(pixel_state.get("status")).upper() != "FROZEN":
+        sample["pixel_freeze"] = dict(pixel_state)
+        sample["freshness"]["pixel_freeze"] = dict(pixel_state)
+        return sample
+    freshness = dict(mapping(sample.get("freshness")))
+    reasons = [text(item) for item in sequence(freshness.get("reasons")) if text(item)]
+    reason = text(pixel_state.get("reason"), "BROKER_PIXELS_FROZEN")
+    if reason not in reasons:
+        reasons.append(reason)
+    freshness["fresh"] = False
+    freshness["reasons"] = reasons
+    freshness["pixel_freeze"] = dict(pixel_state)
+    sample["freshness"] = freshness
+    sample["pixel_freeze"] = dict(pixel_state)
+    sample["entry"] = apply_freshness_guard(mapping(sample.get("entry")), freshness)
+    return sample
 
 
 def fetch_image(base_url: str, path: str, timeout: float) -> Image.Image | None:
@@ -705,49 +879,86 @@ def prune_path_budget(
     protected_paths: set[str] | None = None,
 ) -> dict[str, Any]:
     if not path.exists():
-        return {"path": str(path), "removed": 0, "removed_mb": 0.0}
+        return {"path": str(path), "removed": 0, "removed_mb": 0.0, "scanned_files": 0, "scan_errors": 0}
     protected = set(protected_paths or set())
-    files = [p for p in path.glob(pattern) if p.is_file()]
-    if not files:
-        return {"path": str(path), "removed": 0, "removed_mb": 0.0}
+    records: list[tuple[Path, float, int]] = []
+    scan_errors = 0
+    try:
+        iterator = path.iterdir()
+    except OSError:
+        return {"path": str(path), "removed": 0, "removed_mb": 0.0, "scan_errors": 1}
+    for item in iterator:
+        if pattern != "*" and not fnmatch.fnmatch(item.name, pattern):
+            continue
+        try:
+            stat = item.stat()
+        except OSError:
+            scan_errors += 1
+            continue
+        if not stat_module.S_ISREG(stat.st_mode):
+            continue
+        records.append((item, float(stat.st_mtime), int(stat.st_size)))
+    if not records:
+        return {"path": str(path), "removed": 0, "removed_mb": 0.0, "scan_errors": scan_errors}
+    size_by_path = {item: size for item, _mtime, size in records}
+    mtime_by_path = {item: mtime for item, mtime, _size in records}
     now = time.time()
-    ordered = sorted(files, key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
+    ordered = [item for item, _mtime, _size in sorted(records, key=lambda row: row[1], reverse=True)]
     remove: set[Path] = set()
     for index, item in enumerate(ordered):
-        try:
-            age = now - item.stat().st_mtime
-        except OSError:
-            age = 0.0
+        age = now - mtime_by_path.get(item, now)
         if _path_key(item) in protected:
             continue
         if index >= max_files or age > max_age_sec:
             remove.add(item)
     kept = [item for item in ordered if item not in remove]
-    total = sum(item.stat().st_size for item in kept if item.exists())
+    total = sum(size_by_path.get(item, 0) for item in kept)
     max_bytes = int(max_mb * 1024.0 * 1024.0)
-    for item in sorted(kept, key=lambda p: p.stat().st_mtime if p.exists() else 0.0):
+    for item in sorted(kept, key=lambda p: mtime_by_path.get(p, 0.0)):
         if total <= max_bytes:
             break
         if _path_key(item) in protected:
             continue
-        try:
-            total -= item.stat().st_size
-        except OSError:
-            pass
+        total -= size_by_path.get(item, 0)
         remove.add(item)
     removed = 0
     removed_bytes = 0
     for item in remove:
-        try:
-            removed_bytes += item.stat().st_size
-        except OSError:
-            pass
+        removed_bytes += size_by_path.get(item, 0)
         try:
             item.unlink(missing_ok=True)
             removed += 1
         except OSError:
             pass
-    return {"path": str(path), "removed": removed, "removed_mb": round(removed_bytes / 1024.0 / 1024.0, 3)}
+    return {
+        "path": str(path),
+        "removed": removed,
+        "removed_mb": round(removed_bytes / 1024.0 / 1024.0, 3),
+        "scanned_files": len(records),
+        "scan_errors": scan_errors,
+    }
+
+
+def protected_allowed_entry_evidence_paths(evidence_dir: Path) -> set[str]:
+    """Protect screenshots/metadata for actual allowed entries during burn pruning."""
+    if not evidence_dir.exists():
+        return set()
+    protected: set[str] = set()
+    try:
+        iterator = evidence_dir.iterdir()
+    except OSError:
+        return protected
+    for item in iterator:
+        try:
+            item_stat = item.stat()
+        except OSError:
+            continue
+        if not stat_module.S_ISREG(item_stat.st_mode):
+            continue
+        name = item.name.lower()
+        if "_entry" in name and "blocked_enter_now" not in name:
+            protected.add(_path_key(item))
+    return protected
 
 
 def storage_guard(out_dir: Path, session_id: str) -> dict[str, Any]:
@@ -755,6 +966,8 @@ def storage_guard(out_dir: Path, session_id: str) -> dict[str, Any]:
     repo_runtime = Path.cwd() / ".codex_runtime"
     session_dir = root / "codex_runtime" / "data_live" / "mobile_api" / "window_tracker" / "sessions" / session_id
     protected = protected_session_artifact_paths(session_dir)
+    entry_evidence_dir = out_dir / "entry_evidence"
+    protected_entry_evidence = protected_allowed_entry_evidence_paths(entry_evidence_dir)
     results = {
         "at_utc": utc_now(),
         "overlay_geometry_dumps": prune_path_budget(
@@ -765,10 +978,11 @@ def storage_guard(out_dir: Path, session_id: str) -> dict[str, Any]:
             pattern="overlay_geometry_*.json",
         ),
         "entry_evidence": prune_path_budget(
-            out_dir / "entry_evidence",
+            entry_evidence_dir,
             max_mb=float(os.getenv("PHOENIXGUARD_BURN_ENTRY_EVIDENCE_MAX_MB", "768") or "768"),
             max_files=int(float(os.getenv("PHOENIXGUARD_BURN_ENTRY_EVIDENCE_MAX_FILES", "1200") or "1200")),
             max_age_sec=float(os.getenv("PHOENIXGUARD_BURN_ENTRY_EVIDENCE_MAX_AGE_SEC", "7200") or "7200"),
+            protected_paths=protected_entry_evidence,
         ),
         "raw_snapshots": prune_path_budget(
             out_dir / "raw",
@@ -778,6 +992,7 @@ def storage_guard(out_dir: Path, session_id: str) -> dict[str, Any]:
             pattern="*.json",
         ),
     }
+    results["entry_evidence"]["protected_allowed_entry_files"] = len(protected_entry_evidence)
     if os.getenv("PHOENIXGUARD_BURN_PRUNE_SESSION_ARTIFACTS", "1") != "0":
         results["session_entry_evidence"] = prune_path_budget(
             session_dir / "entry_evidence",
@@ -810,21 +1025,28 @@ def storage_guard(out_dir: Path, session_id: str) -> dict[str, Any]:
 
 def artifact_health(session_id: str) -> dict[str, Any]:
     session_dir = local_root() / "codex_runtime" / "data_live" / "mobile_api" / "window_tracker" / "sessions" / session_id
-    result = {"session_dir": str(session_dir), "artifact_count": 0, "artifact_mb": 0.0, "counts": {}}
+    result = {"session_dir": str(session_dir), "artifact_count": 0, "artifact_mb": 0.0, "counts": {}, "scan_errors": 0}
     if not session_dir.exists():
         return result
     counts: Counter[str] = Counter()
     total = 0
-    for path in session_dir.rglob("*"):
-        if path.is_file():
-            counts[path.suffix.lower() or "(none)"] += 1
+    scan_errors = 0
+    for root, _dirs, files in os.walk(session_dir):
+        for name in files:
+            path = Path(root) / name
             try:
-                total += path.stat().st_size
+                item_stat = path.stat()
             except OSError:
-                pass
+                scan_errors += 1
+                continue
+            if not stat_module.S_ISREG(item_stat.st_mode):
+                continue
+            counts[path.suffix.lower() or "(none)"] += 1
+            total += item_stat.st_size
     result["artifact_count"] = sum(counts.values())
     result["artifact_mb"] = round(total / 1024.0 / 1024.0, 3)
     result["counts"] = dict(counts)
+    result["scan_errors"] = scan_errors
     return result
 
 
@@ -841,13 +1063,15 @@ def directory_size_bytes(path: Path) -> int:
     if not path.exists():
         return 0
     total = 0
-    for child in path.rglob("*"):
-        if not child.is_file():
-            continue
-        try:
-            total += int(child.stat().st_size)
-        except OSError:
-            pass
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            child = Path(root) / name
+            try:
+                item_stat = child.stat()
+            except OSError:
+                continue
+            if stat_module.S_ISREG(item_stat.st_mode):
+                total += int(item_stat.st_size)
     return total
 
 
@@ -914,13 +1138,42 @@ def prune_hardening_studies(active_out_dir: Path) -> dict[str, Any]:
     return result
 
 
+def clear_existing_hardening_studies() -> dict[str, Any]:
+    root = local_root() / "hardening_studies"
+    result: dict[str, Any] = {
+        "path": str(root),
+        "removed": 0,
+        "removed_mb": 0.0,
+        "status": "not_present",
+    }
+    if not root.exists():
+        return result
+    removed_bytes = 0
+    for path in list(root.iterdir()):
+        if not path.is_dir() or not is_relative_to(path, root):
+            continue
+        try:
+            size = directory_size_bytes(path)
+            shutil.rmtree(path)
+            removed_bytes += size
+            result["removed"] = int(result["removed"]) + 1
+        except OSError as exc:
+            result.setdefault("errors", []).append({"path": str(path), "error": str(exc)})
+    result["removed_mb"] = round(removed_bytes / 1024.0 / 1024.0, 3)
+    result["status"] = "cleared"
+    return result
+
+
 def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str, Any]:
     promotion = mapping(council.get("promotion_trace"))
     timing = mapping(promotion.get("timing_decision"))
     lane = mapping(promotion.get("execution_lane"))
+    wave_context = mapping(promotion.get("wave_context") or lane.get("wave_context"))
     packet_present = bool(council.get("execution_packet_present") or council.get("execution_packet") or council.get("model_council_packet"))
     entry_now = bool(timing.get("entry_now_allowed"))
-    lane_accepted = bool(lane.get("accepted") or promotion.get("lane_accepted"))
+    lane_name = text(lane.get("name") or promotion.get("selected_lane") or council.get("selected_execution_lane")).upper()
+    legacy_hf_lane_rejected = lane_name == "HIGH_FREQUENCY_TWO_CANDLE"
+    lane_accepted = bool(lane.get("accepted") or promotion.get("lane_accepted")) and not legacy_hf_lane_rejected
     candidate = side(promotion.get("candidate_side") or timing.get("direction_side") or promotion.get("final_side"))
     if candidate not in {"BUY", "SELL"}:
         cycle = mapping(lane.get("high_frequency_candle_cycle") or promotion.get("high_frequency_candle_cycle"))
@@ -933,6 +1186,8 @@ def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str
         "side": candidate,
         "entry_now_allowed": entry_now,
         "lane_accepted": lane_accepted,
+        "lane_name": lane_name,
+        "legacy_hf_lane_rejected": legacy_hf_lane_rejected,
         "packet_present": packet_present,
         "execution_authorized": execution_authorized,
         "allowance_mode": "timing_entry_now",
@@ -943,7 +1198,167 @@ def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str
         "final_score": number(promotion.get("final_score") or promotion.get("final_execution_score")),
         "threshold": number(promotion.get("threshold") or promotion.get("execution_threshold")),
         "next_required": text(promotion.get("next_required") or lane.get("reason")),
+        "reasoning_state": text(promotion.get("reasoning_state") or mapping(council.get("final_reasoning_decision")).get("decision")).upper(),
+        "reasoning_execution_blocked": bool(promotion.get("reasoning_execution_blocked")),
+        "hard_bad_entry_class_active": bool(promotion.get("hard_bad_entry_class_active")),
+        "reasoning_bad_entry_class": text(promotion.get("reasoning_bad_entry_class")).upper(),
+        "market_bad_entry_class": text(promotion.get("market_bad_entry_class")).upper(),
+        "opposing_force_ok": bool(promotion.get("opposing_force_ok")),
+        "wave_phase": text(wave_context.get("phase")).upper(),
+        "wave_entry_ok": bool(wave_context.get("wave_entry_ok")),
+        "directional_location_ok": wave_context.get("directional_location_ok"),
+        "directional_location_chase_risk": bool(wave_context.get("directional_location_chase_risk")),
+        "sell_low_history_risk": bool(wave_context.get("sell_low_history_risk")),
+        "buy_high_history_risk": bool(wave_context.get("buy_high_history_risk")),
+        "entry_area_behind_price": bool(wave_context.get("entry_area_behind_price")),
+        "history_area_label": text(wave_context.get("history_area_label")).upper(),
+        "history_area_risk": number(wave_context.get("history_area_risk")),
     }
+
+
+def runtime_freshness_state(
+    live_resp: Mapping[str, Any],
+    council_resp: Mapping[str, Any],
+    perf_resp: Mapping[str, Any],
+    live: Mapping[str, Any],
+    perf: Mapping[str, Any],
+) -> dict[str, Any]:
+    max_frame_age_ms = float(os.getenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500") or "2500")
+    max_capture_age_sec = float(os.getenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "4") or "4")
+    reject_published_age_warning = os.getenv("PHOENIXGUARD_BURN_REJECT_PUBLISHED_AGE_WARNING", "1") != "0"
+    reject_capture_age_warning = os.getenv("PHOENIXGUARD_BURN_REJECT_CAPTURE_AGE_WARNING", "1") != "0"
+    timing = mapping(perf.get("timing_trace"))
+    visual = mapping(live.get("visual_health_v3") or perf.get("visual_health"))
+    stale_status = text(
+        timing.get("stale_status")
+        or live.get("stale_status")
+        or visual.get("stale_status")
+        or visual.get("status")
+    ).upper()
+    frame_age_ms = number(timing.get("frame_age_ms"))
+    published_epoch_ms = number(
+        timing.get("display_published_epoch_ms")
+        or timing.get("capture_epoch_ms")
+        or timing.get("overlay_done_ms")
+    )
+    published_age_sec = None
+    if published_epoch_ms and published_epoch_ms > 1_000_000_000_000:
+        published_age_sec = max(0.0, time.time() - (float(published_epoch_ms) / 1000.0))
+    elif number(perf.get("generated_epoch")):
+        published_age_sec = max(0.0, time.time() - float(number(perf.get("generated_epoch"), 0.0) or 0.0))
+    capture_epoch_source = ""
+    last_capture_epoch = None
+    for source_name, source_value in (
+        ("timing_trace.display_published_epoch_ms", timing.get("display_published_epoch_ms")),
+        ("timing_trace.overlay_done_ms", timing.get("overlay_done_ms")),
+        ("timing_trace.capture_epoch_ms", timing.get("capture_epoch_ms")),
+        ("timing_trace.state_published_ms", timing.get("state_published_ms")),
+    ):
+        candidate_epoch_ms = number(source_value)
+        if candidate_epoch_ms and candidate_epoch_ms > 1_000_000_000_000:
+            last_capture_epoch = float(candidate_epoch_ms) / 1000.0
+            capture_epoch_source = source_name
+            break
+    if last_capture_epoch is None:
+        for source_name, source_value in (
+            ("live.last_capture_epoch", live.get("last_capture_epoch")),
+            ("live.display_published_epoch", live.get("display_published_epoch")),
+            ("live.last_display_published_epoch", live.get("last_display_published_epoch")),
+            ("live.model_capture_epoch", live.get("model_capture_epoch")),
+            ("live.display_capture_epoch", live.get("display_capture_epoch")),
+            ("live.last_display_capture_epoch", live.get("last_display_capture_epoch")),
+            ("live.last_capture_started_epoch", live.get("last_capture_started_epoch")),
+        ):
+            candidate_epoch = number(source_value)
+            if candidate_epoch and candidate_epoch > 0:
+                last_capture_epoch = float(candidate_epoch)
+                capture_epoch_source = source_name
+                break
+    capture_age_sec = None
+    if last_capture_epoch and last_capture_epoch > 0:
+        capture_age_sec = max(0.0, time.time() - float(last_capture_epoch))
+    tracking_enabled = bool(live.get("tracking_enabled"))
+    session_status = text(live.get("status")).upper()
+    stale_flags = [text(item).upper() for item in sequence(visual.get("stale_flags")) if text(item)]
+    reasons: list[str] = []
+    if not bool(live_resp.get("ok")):
+        reasons.append("LIVE_ENDPOINT_NOT_OK")
+    if not bool(council_resp.get("ok")):
+        reasons.append("COUNCIL_ENDPOINT_NOT_OK")
+    if not bool(perf_resp.get("ok")):
+        reasons.append("PERF_ENDPOINT_NOT_OK")
+    if not tracking_enabled:
+        reasons.append("TRACKING_DISABLED")
+    if session_status not in {"RUNNING", "FRESH", "TRACKING"}:
+        reasons.append(f"SESSION_STATUS_{session_status or 'UNKNOWN'}")
+    if frame_age_ms is None:
+        reasons.append("FRAME_AGE_MISSING")
+    elif float(frame_age_ms) > max_frame_age_ms:
+        reasons.append(f"FRAME_AGE_{round(float(frame_age_ms), 1)}MS_GT_{round(max_frame_age_ms, 1)}MS")
+    published_frame_fresh = bool(
+        frame_age_ms is not None
+        and float(frame_age_ms) <= max_frame_age_ms
+        and stale_status not in {"STALE", "FAIL", "FAILED", "ERROR"}
+    )
+    published_age_warning = None
+    if published_age_sec is not None and float(published_age_sec) > max_capture_age_sec:
+        published_age_warning = f"PUBLISHED_AGE_{round(float(published_age_sec), 3)}S_GT_{round(max_capture_age_sec, 3)}S"
+        if reject_published_age_warning:
+            reasons.append(published_age_warning)
+    capture_age_warning = None
+    if capture_age_sec is None:
+        if not published_frame_fresh:
+            reasons.append("CAPTURE_AGE_MISSING")
+    elif float(capture_age_sec) > max_capture_age_sec:
+        capture_age_warning = f"CAPTURE_START_AGE_{round(float(capture_age_sec), 3)}S_GT_{round(max_capture_age_sec, 3)}S"
+        if reject_capture_age_warning or not published_frame_fresh:
+            reasons.append(f"CAPTURE_AGE_{round(float(capture_age_sec), 3)}S_GT_{round(max_capture_age_sec, 3)}S")
+    if stale_status in {"STALE", "FAIL", "FAILED", "ERROR"}:
+        reasons.append(f"STALE_STATUS_{stale_status}")
+    if stale_flags:
+        reasons.append("VISUAL_STALE_FLAGS_" + ",".join(stale_flags[:4]))
+    return {
+        "fresh": not reasons,
+        "reasons": reasons,
+        "max_frame_age_ms": max_frame_age_ms,
+        "max_capture_age_sec": max_capture_age_sec,
+        "frame_age_ms": frame_age_ms,
+        "capture_age_sec": round(float(capture_age_sec), 3) if capture_age_sec is not None else None,
+        "capture_epoch_source": capture_epoch_source,
+        "published_age_sec": round(float(published_age_sec), 3) if published_age_sec is not None else None,
+        "capture_age_warning": capture_age_warning,
+        "published_age_warning": published_age_warning,
+        "published_frame_fresh": published_frame_fresh,
+        "stale_status": stale_status,
+        "tracking_enabled": tracking_enabled,
+        "session_status": session_status,
+        "reject_published_age_warning": reject_published_age_warning,
+        "reject_capture_age_warning": reject_capture_age_warning,
+    }
+
+
+def apply_freshness_guard(entry: Mapping[str, Any], freshness: Mapping[str, Any]) -> dict[str, Any]:
+    guarded = dict(entry)
+    raw_allowed = bool(guarded.get("allowed"))
+    raw_authorized = bool(guarded.get("execution_authorized"))
+    guarded["raw_allowed_without_freshness_guard"] = raw_allowed
+    guarded["raw_execution_authorized_without_freshness_guard"] = raw_authorized
+    guarded["freshness"] = dict(freshness)
+    if bool(freshness.get("fresh")):
+        guarded["freshness_rejected"] = False
+        return guarded
+    guarded["freshness_rejected"] = bool(
+        raw_allowed
+        or raw_authorized
+        or guarded.get("entry_now_allowed")
+        or guarded.get("lane_accepted")
+        or guarded.get("packet_present")
+    )
+    guarded["allowed"] = False
+    guarded["execution_authorized"] = False
+    guarded["blocked_by"] = "STALE_RUNTIME_GUARD"
+    guarded["next_required"] = "Fresh tracker frame required before any entry package can be accepted."
+    return guarded
 
 
 def opportunity_class(entry: Mapping[str, Any], audit: Mapping[str, Any]) -> str:
@@ -960,6 +1375,109 @@ def opportunity_class(entry: Mapping[str, Any], audit: Mapping[str, Any]) -> str
     if timing.startswith("WAIT") or "WAIT" in blocked:
         return "EARLY_OPPORTUNITY"
     return "NOT_AN_OPPORTUNITY"
+
+
+def blocked_trend_aligned_study(entry: Mapping[str, Any]) -> dict[str, Any]:
+    blocked = text(entry.get("blocked_by")).upper()
+    if bool(entry.get("allowed")):
+        return {"active": False, "reason": "already_allowed"}
+    if side(entry.get("side")) not in {"BUY", "SELL"}:
+        return {"active": False, "reason": "no_trade_side"}
+    if not bool(entry.get("entry_now_allowed")) or not bool(entry.get("lane_accepted")):
+        return {"active": False, "reason": "not_enter_now_lane_accepted"}
+    if bool(entry.get("freshness_rejected")) or "STALE" in blocked:
+        return {"active": False, "reason": "freshness_or_stale_guard"}
+    if bool(entry.get("hard_bad_entry_class_active")):
+        return {"active": False, "reason": "hard_bad_entry_class"}
+    if entry.get("directional_location_ok") is False or bool(entry.get("directional_location_chase_risk")):
+        return {"active": False, "reason": "directional_location_guard"}
+    if any(token in blocked for token in HARD_BLOCKED_STUDY_TOKENS):
+        return {"active": False, "reason": f"hard_blocker:{blocked}"}
+    if blocked and blocked not in SOFT_BLOCKED_STUDY_REASONS:
+        return {"active": False, "reason": f"non_soft_blocker:{blocked}"}
+    return {
+        "active": True,
+        "reason": blocked or "SOFT_BLOCKED_ENTER_NOW",
+        "side": side(entry.get("side")),
+        "lane_name": text(entry.get("lane_name")).upper(),
+        "timing_mode": text(entry.get("timing_mode")).upper(),
+        "final_score": entry.get("final_score"),
+        "threshold": entry.get("threshold"),
+    }
+
+
+def manual_entry_rearm_decision(
+    entry: Mapping[str, Any],
+    sample: Mapping[str, Any],
+    state: dict[str, dict[str, Any]],
+    observed_at: float,
+) -> dict[str, Any]:
+    if not bool(entry.get("allowed")):
+        return {
+            "allowed": False,
+            "suppressed": False,
+            "reason": "not_allowed_entry",
+            "key": "",
+        }
+    min_sec = float(os.getenv("PHOENIXGUARD_MANUAL_ENTRY_REARM_MIN_SEC", "300") or "300")
+    min_price_px = float(os.getenv("PHOENIXGUARD_MANUAL_ENTRY_REARM_MIN_PRICE_PX", "36") or "36")
+    min_frame_delta = int(float(os.getenv("PHOENIXGUARD_MANUAL_ENTRY_REARM_MIN_FRAME_DELTA", "45") or "45"))
+    entry_side = side(entry.get("side"))
+    lane_name = text(entry.get("lane_name"), "UNKNOWN").upper()
+    candidate_id = text(entry.get("candidate_id") or entry.get("packet_id") or "candidate_unknown")
+    base_key = "|".join([candidate_id, entry_side, lane_name])
+    frame_id = int(number(mapping(sample.get("frames")).get("display_frame_id"), 0) or 0)
+    price_y = number(mapping(sample.get("price_proxy")).get("current_y"))
+    last = state.get(base_key)
+    if not last:
+        state[base_key] = {"at": observed_at, "frame": frame_id, "price_y": price_y, "generation": 1}
+        return {
+            "allowed": True,
+            "suppressed": False,
+            "reason": "first_rearmed_entry_for_candidate_lane",
+            "key": f"{base_key}|rearm=1",
+            "base_key": base_key,
+            "generation": 1,
+            "min_rearm_sec": min_sec,
+            "min_rearm_price_px": min_price_px,
+            "min_rearm_frame_delta": min_frame_delta,
+        }
+    elapsed = max(0.0, observed_at - float(number(last.get("at"), observed_at) or observed_at))
+    frame_delta = max(0, frame_id - int(number(last.get("frame"), frame_id) or frame_id))
+    last_price = number(last.get("price_y"))
+    price_delta = abs(float(price_y) - float(last_price)) if price_y is not None and last_price is not None else 0.0
+    rearmed = bool(elapsed >= min_sec and (price_delta >= min_price_px or frame_delta >= min_frame_delta))
+    if rearmed:
+        generation = int(number(last.get("generation"), 1) or 1) + 1
+        state[base_key] = {"at": observed_at, "frame": frame_id, "price_y": price_y, "generation": generation}
+        return {
+            "allowed": True,
+            "suppressed": False,
+            "reason": "candidate_rearmed_after_time_and_new_price_or_frame",
+            "key": f"{base_key}|rearm={generation}",
+            "base_key": base_key,
+            "generation": generation,
+            "elapsed_sec": round(elapsed, 3),
+            "frame_delta": frame_delta,
+            "price_delta_px": round(price_delta, 3),
+            "min_rearm_sec": min_sec,
+            "min_rearm_price_px": min_price_px,
+            "min_rearm_frame_delta": min_frame_delta,
+        }
+    return {
+        "allowed": False,
+        "suppressed": True,
+        "reason": "duplicate_candidate_lane_suppressed_until_rearm",
+        "key": f"{base_key}|rearm={int(number(last.get('generation'), 1) or 1)}",
+        "base_key": base_key,
+        "generation": int(number(last.get("generation"), 1) or 1),
+        "elapsed_sec": round(elapsed, 3),
+        "frame_delta": frame_delta,
+        "price_delta_px": round(price_delta, 3),
+        "min_rearm_sec": min_sec,
+        "min_rearm_price_px": min_price_px,
+        "min_rearm_frame_delta": min_frame_delta,
+    }
 
 
 def no_silent_failure_status(
@@ -1033,7 +1551,11 @@ def compact_sample(seq: int, live_resp: Mapping[str, Any], council_resp: Mapping
         row for row in overlays
         if "TRENDLINE" in text(mapping(row).get("type") or mapping(row).get("label") or mapping(row).get("role")).upper()
     ]
-    entry = entry_state(live, council)
+    freshness = runtime_freshness_state(live_resp, council_resp, perf_resp, live, perf)
+    entry = apply_freshness_guard(entry_state(live, council), freshness)
+    blocked_study = blocked_trend_aligned_study(entry)
+    entry["blocked_trend_aligned_study"] = bool(blocked_study.get("active"))
+    entry["blocked_trend_aligned_reason"] = text(blocked_study.get("reason"))
     opportunity = opportunity_class(entry, audit)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1059,6 +1581,7 @@ def compact_sample(seq: int, live_resp: Mapping[str, Any], council_resp: Mapping
             "status": live.get("status"),
             "tracking_enabled": live.get("tracking_enabled"),
         },
+        "freshness": freshness,
         "market_identity": market_identity,
         "entry": entry,
         "grade_a_star_audit": {
@@ -1070,6 +1593,7 @@ def compact_sample(seq: int, live_resp: Mapping[str, Any], council_resp: Mapping
                 "can_publish_execution_packet": bool(entry.get("execution_authorized")),
                 "reason": text(entry.get("next_required") or audit.get("next_required") or entry.get("blocked_by"), opportunity),
             },
+            "blocked_trend_aligned_study": blocked_study,
             "timing_decision": timing,
             "execution_lane": lane,
             "next_candle_forecast": {
@@ -1099,20 +1623,31 @@ def compact_sample(seq: int, live_resp: Mapping[str, Any], council_resp: Mapping
     }
 
 
-def score_entries(samples: list[dict[str, Any]], entries: list[dict[str, Any]]) -> dict[str, Any]:
+def score_events(
+    samples: list[dict[str, Any]],
+    entries: list[dict[str, Any]],
+    *,
+    include_blocked_trend_study: bool = False,
+) -> dict[str, Any]:
     horizons = [60, 300, 600, 900]
     scores: dict[str, Any] = {}
     for horizon in horizons:
         rows = []
         for event in entries:
-            if mapping(event.get("entry")).get("allowed") is not True:
+            entry_payload = mapping(event.get("entry"))
+            included = (
+                bool(entry_payload.get("blocked_trend_aligned_study"))
+                if include_blocked_trend_study
+                else entry_payload.get("allowed") is True
+            )
+            if not included:
                 continue
             seq = int(event.get("seq", 0) or 0)
             base = next((sample for sample in samples if int(sample.get("seq", -1)) == seq), None)
             if not base:
                 continue
             start_y = number(mapping(base.get("price_proxy")).get("current_y"))
-            entry_side = side(mapping(base.get("entry")).get("side"))
+            entry_side = side(mapping(base.get("entry")).get("side") or entry_payload.get("side"))
             if start_y is None or entry_side not in {"BUY", "SELL"}:
                 continue
             target_time = float(base.get("captured_epoch", 0.0) or 0.0) + horizon
@@ -1129,9 +1664,25 @@ def score_entries(samples: list[dict[str, Any]], entries: list[dict[str, Any]]) 
                 verdict = "correct" if delta < -3.0 else "wrong"
             else:
                 verdict = "correct" if delta > 3.0 else "wrong"
-            rows.append({"seq": seq, "side": entry_side, "start_y": start_y, "future_y": future_y, "delta_y": delta, "verdict": verdict})
+            rows.append(
+                {
+                    "seq": seq,
+                    "side": entry_side,
+                    "start_y": start_y,
+                    "future_y": future_y,
+                    "delta_y": delta,
+                    "verdict": verdict,
+                    "lane": entry_payload.get("lane_name"),
+                    "blocked_by": entry_payload.get("blocked_by"),
+                    "blocked_trend_aligned_study": bool(entry_payload.get("blocked_trend_aligned_study")),
+                }
+            )
         scores[str(horizon)] = {"counts": dict(Counter(row["verdict"] for row in rows)), "rows": rows}
     return scores
+
+
+def score_entries(samples: list[dict[str, Any]], entries: list[dict[str, Any]]) -> dict[str, Any]:
+    return score_events(samples, entries, include_blocked_trend_study=False)
 
 
 def entry_score_lookup(scores: Mapping[str, Any], seq: int) -> dict[str, Any]:
@@ -1240,9 +1791,20 @@ def write_report(out_dir: Path, samples: list[dict[str, Any]], entries: list[dic
             return 0.0
         return values[min(len(values) - 1, int(math.ceil(len(values) * 0.95)) - 1)]
     scores = score_entries(samples, entries)
+    blocked_trend_scores = score_events(samples, entries, include_blocked_trend_study=True)
     gallery_path = write_entry_gallery(out_dir, entries, scores)
     allowed_entry_events = [event for event in entries if mapping(event.get("entry")).get("allowed") is True]
     blocked_enter_now_events = [event for event in entries if bool(event.get("blocked_entry_capture"))]
+    manual_alert_events = [event for event in allowed_entry_events if bool(event.get("manual_alert_allowed"))]
+    suppressed_allowed_events = [event for event in allowed_entry_events if bool(event.get("manual_alert_suppressed"))]
+    blocked_trend_study_events = [
+        event
+        for event in entries
+        if bool(mapping(event.get("entry")).get("blocked_trend_aligned_study"))
+    ]
+    manual_alert_sample_count = sum(1 for sample in samples if bool(mapping(sample.get("entry")).get("manual_alert_allowed")))
+    suppressed_allowed_sample_count = sum(1 for sample in samples if bool(mapping(sample.get("entry")).get("manual_alert_suppressed")))
+    blocked_trend_study_sample_count = sum(1 for sample in samples if bool(mapping(sample.get("entry")).get("blocked_trend_aligned_study")))
     blocker_counts: Counter[str] = Counter()
     opportunity_counts: Counter[str] = Counter()
     component_counts: Counter[str] = Counter()
@@ -1278,8 +1840,15 @@ def write_report(out_dir: Path, samples: list[dict[str, Any]], entries: list[dic
             for name, values in latencies.items()
         },
         "entry_scores": scores,
+        "blocked_trend_aligned_scores": blocked_trend_scores,
         "storage_events": storage_events,
         "entry_gallery_path": str(gallery_path),
+        "manual_alert_event_count": len(manual_alert_events),
+        "manual_alert_sample_count": manual_alert_sample_count,
+        "suppressed_allowed_duplicate_event_count": len(suppressed_allowed_events),
+        "suppressed_allowed_duplicate_count": suppressed_allowed_sample_count,
+        "blocked_trend_aligned_study_event_count": len(blocked_trend_study_events),
+        "blocked_trend_aligned_study_sample_count": blocked_trend_study_sample_count,
         "blocker_counts": dict(blocker_counts),
         "opportunity_counts": dict(opportunity_counts),
         "component_status_counts": dict(component_counts),
@@ -1295,6 +1864,8 @@ def write_report(out_dir: Path, samples: list[dict[str, Any]], entries: list[dic
         "",
         f"Window: {duration_min:.1f} min, samples: {len(samples)}, entry events: {len(entries)}.",
         f"Allowed entry evidence events: {len(allowed_entry_events)}. Blocked ENTER_NOW evidence events: {len(blocked_enter_now_events)}.",
+        f"Manual alert allowed observations: {manual_alert_sample_count}. Suppressed duplicate allowed observations: {suppressed_allowed_sample_count}.",
+        f"Blocked trend-aligned study observations: {blocked_trend_study_sample_count}. Captured study events: {len(blocked_trend_study_events)}.",
         "",
         "## Entry Evidence",
         f"- Gallery: {gallery_path}",
@@ -1316,6 +1887,12 @@ def write_report(out_dir: Path, samples: list[dict[str, Any]], entries: list[dic
         "## Horizon Scores",
     ]
     for horizon, payload in scores.items():
+        lines.append(f"- {int(horizon) // 60} min: {payload.get('counts', {})}")
+    lines += [
+        "",
+        "## Blocked Trend-Aligned Study Scores",
+    ]
+    for horizon, payload in blocked_trend_scores.items():
         lines.append(f"- {int(horizon) // 60} min: {payload.get('counts', {})}")
     lines += [
         "",
@@ -1353,8 +1930,28 @@ def main() -> int:
         default=float(os.getenv("PHOENIXGUARD_BURN_ENTRY_EVIDENCE_MIN_SEC", "60") or "60"),
         help="Minimum seconds between screenshots for the same continuous entry-allowance episode.",
     )
+    parser.add_argument(
+        "--max-frame-age-ms",
+        type=float,
+        default=float(os.getenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500") or "2500"),
+        help="Maximum allowed tracker frame age before entry observations are hard-blocked as stale.",
+    )
+    parser.add_argument(
+        "--clear-existing",
+        dest="clear_existing",
+        action="store_true",
+        default=os.getenv("PHOENIXGUARD_BURN_CLEAR_EXISTING", "1") != "0",
+        help="Delete old hardening study folders before this burn starts.",
+    )
+    parser.add_argument(
+        "--keep-existing",
+        dest="clear_existing",
+        action="store_false",
+        help="Keep old hardening study folders before this burn starts.",
+    )
     parser.add_argument("--out-dir", default="")
     args = parser.parse_args()
+    os.environ["PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS"] = str(float(args.max_frame_age_ms))
 
     retention_age_sec = int(max(7200.0, float(args.duration_sec) + 1800.0))
     os.environ.setdefault("PHOENIXGUARD_BURN_ENTRY_EVIDENCE_MAX_AGE_SEC", str(retention_age_sec))
@@ -1362,6 +1959,12 @@ def main() -> int:
     os.environ.setdefault("PHOENIXGUARD_ENTRY_EVIDENCE_MAX_AGE_SEC", str(retention_age_sec))
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    preflight_cleanup = clear_existing_hardening_studies() if bool(args.clear_existing) and not args.out_dir else {
+        "path": str(local_root() / "hardening_studies"),
+        "status": "kept",
+        "removed": 0,
+        "removed_mb": 0.0,
+    }
     out_dir = Path(args.out_dir) if args.out_dir else local_root() / "hardening_studies" / f"entry_allowance_burn_{stamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
     samples_path = out_dir / "samples.jsonl"
@@ -1383,7 +1986,9 @@ def main() -> int:
             "storage_guard_interval_sec": args.storage_guard_interval_sec,
             "raw_every_sec": args.raw_every_sec,
             "entry_evidence_min_sec": args.entry_evidence_min_sec,
+            "max_frame_age_ms": args.max_frame_age_ms,
             "capture_blocked_enter_now": capture_blocked_enter_now,
+            "preflight_cleanup": preflight_cleanup,
             "base_url": args.base_url,
             "session_id": args.session_id,
             "out_dir": str(out_dir),
@@ -1398,19 +2003,25 @@ def main() -> int:
     seq = 0
     enter_now_observations = 0
     blocked_enter_now_evidence_count = 0
+    manual_alert_observations = 0
+    manual_alert_suppressed_observations = 0
+    blocked_trend_aligned_study_observations = 0
     last_storage = 0.0
     last_raw = 0.0
+    pixel_freeze_state: dict[str, Any] = {}
+    manual_rearm_state: dict[str, dict[str, Any]] = {}
     try:
         while time.time() < end:
             loop_started = time.time()
             seq += 1
             live_resp, council_resp, perf_resp = fetch_runtime_bundle(args.base_url, args.session_id, args.timeout_sec)
             sample = compact_sample(seq, live_resp, council_resp, perf_resp, args.session_id)
-            samples.append(sample)
-            append_jsonl(samples_path, sample)
             live = mapping(live_resp.get("json"))
             council = mapping(council_resp.get("json"))
             perf = mapping(perf_resp.get("json"))
+            pixel_state = update_pixel_freeze_state(pixel_freeze_state, live, loop_started)
+            sample = apply_pixel_freeze_guard(sample, pixel_state)
+            samples.append(sample)
             entry = mapping(sample.get("entry"))
             if args.raw_every_sec > 0 and (loop_started - last_raw >= float(args.raw_every_sec) or seq == 1):
                 raw_stamp = int(loop_started * 1000.0)
@@ -1422,8 +2033,24 @@ def main() -> int:
             if enter_now_observation:
                 enter_now_observations += 1
             allowed_observation = bool(entry.get("allowed"))
+            manual_alert = manual_entry_rearm_decision(entry, sample, manual_rearm_state, loop_started)
+            sample["entry"]["manual_alert_allowed"] = bool(manual_alert.get("allowed"))
+            sample["entry"]["manual_alert_suppressed"] = bool(manual_alert.get("suppressed"))
+            sample["entry"]["manual_alert_reason"] = text(manual_alert.get("reason"))
+            sample["entry"]["manual_alert_key"] = text(manual_alert.get("key"))
+            if bool(manual_alert.get("allowed")):
+                manual_alert_observations += 1
+            if bool(manual_alert.get("suppressed")):
+                manual_alert_suppressed_observations += 1
+            blocked_trend_aligned_observation = bool(entry.get("blocked_trend_aligned_study"))
+            if blocked_trend_aligned_observation:
+                blocked_trend_aligned_study_observations += 1
+            entry = mapping(sample.get("entry"))
+            append_jsonl(samples_path, sample)
             blocked_enter_now_observation = bool(capture_blocked_enter_now and enter_now_observation and not allowed_observation)
-            should_capture_evidence = allowed_observation or blocked_enter_now_observation
+            should_capture_evidence = bool(manual_alert.get("allowed")) or blocked_enter_now_observation
+            packet_episode_id = str(entry.get("packet_id") or "") if allowed_observation else ""
+            alert_episode_id = text(manual_alert.get("key"))
             entry_key = "|".join(
                 [
                     str(entry.get("side") or ""),
@@ -1431,6 +2058,9 @@ def main() -> int:
                     str(entry.get("allowance_mode") or ""),
                     f"allowed={bool(entry.get('allowed'))}",
                     f"packet={bool(entry.get('packet_present'))}",
+                    f"packet_id={packet_episode_id}",
+                    f"manual_alert_key={alert_episode_id}",
+                    f"blocked_trend_aligned={blocked_trend_aligned_observation}",
                     str(entry.get("blocked_by") or ""),
                 ]
             )
@@ -1458,20 +2088,30 @@ def main() -> int:
                         "error": "enter_now_evidence_not_captured",
                     }
                 event["entry_episode_key"] = entry_key
+                event["manual_alert"] = manual_alert
+                event["manual_alert_allowed"] = bool(manual_alert.get("allowed"))
+                event["manual_alert_suppressed"] = bool(manual_alert.get("suppressed"))
+                event["manual_alert_key"] = text(manual_alert.get("key"))
                 event["blocked_entry_capture"] = bool(blocked_enter_now_observation)
+                event["blocked_trend_aligned_study_capture"] = bool(blocked_trend_aligned_observation)
                 event["execution_authorized"] = bool(entry.get("execution_authorized"))
                 event["packet_present"] = bool(entry.get("packet_present"))
                 event["evidence_reason"] = (
                     "blocked_enter_now_observation"
                     if blocked_enter_now_observation
                     else (
-                        "new_entry_episode"
+                        "manual_alert_rearmed_entry"
+                        if bool(manual_alert.get("allowed"))
+                        else "new_entry_episode"
                         if first_episode_capture
                         else ("allowed_entry_observation" if float(args.entry_evidence_min_sec) <= 0 else "periodic_entry_episode_checkpoint")
                     )
                 )
                 event["entry_allowed_observations"] = entry_allowed_observations
                 event["enter_now_observations"] = enter_now_observations
+                event["manual_alert_observations"] = manual_alert_observations
+                event["manual_alert_suppressed_observations"] = manual_alert_suppressed_observations
+                event["blocked_trend_aligned_study_observations"] = blocked_trend_aligned_study_observations
                 if blocked_enter_now_observation:
                     blocked_enter_now_evidence_count += 1
                     event["blocked_enter_now_evidence_count"] = blocked_enter_now_evidence_count
@@ -1497,10 +2137,14 @@ def main() -> int:
                     "entry_allowed_observation_count": entry_allowed_observations,
                     "enter_now_observation_count": enter_now_observations,
                     "blocked_enter_now_evidence_count": blocked_enter_now_evidence_count,
+                    "manual_alert_observation_count": manual_alert_observations,
+                    "manual_alert_suppressed_observation_count": manual_alert_suppressed_observations,
+                    "blocked_trend_aligned_study_observation_count": blocked_trend_aligned_study_observations,
                     "elapsed_sec": round(time.time() - started, 3),
                     "remaining_sec": round(max(0.0, end - time.time()), 3),
                     "last_frame": mapping(sample.get("frames")).get("display_frame_id"),
                     "last_entry": entry,
+                    "last_freshness": mapping(sample.get("freshness")),
                     "last_price_y": mapping(sample.get("price_proxy")).get("current_y"),
                     "updated_at_utc": utc_now(),
                     "out_dir": str(out_dir),
@@ -1521,6 +2165,9 @@ def main() -> int:
                 "entry_allowed_observation_count": entry_allowed_observations,
                 "enter_now_observation_count": enter_now_observations,
                 "blocked_enter_now_evidence_count": blocked_enter_now_evidence_count,
+                "manual_alert_observation_count": manual_alert_observations,
+                "manual_alert_suppressed_observation_count": manual_alert_suppressed_observations,
+                "blocked_trend_aligned_study_observation_count": blocked_trend_aligned_study_observations,
                 "elapsed_sec": round(time.time() - started, 3),
                 "remaining_sec": 0.0,
                 "updated_at_utc": utc_now(),

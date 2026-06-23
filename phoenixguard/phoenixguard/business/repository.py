@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
+import hmac
 import json
 import threading
 from typing import Any, Mapping
@@ -53,6 +54,15 @@ def stable_hash(namespace: str, value: str) -> str:
     return f"sha256:{digest}"
 
 
+def secret_hash(namespace: str, value: str) -> str:
+    digest = hashlib.sha256(f"{namespace}:{str(value or '').strip()}".encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def email_verification_token_hash(value: str) -> str:
+    return secret_hash("email-verification-token", value)
+
+
 def license_key_hash(value: str) -> str:
     normalized = str(value or "").strip().upper()
     digest = hashlib.sha256(f"license-key:{normalized}".encode("utf-8")).hexdigest()
@@ -86,6 +96,18 @@ class Customer:
     status: str
     created_at: datetime
     updated_at: datetime
+    email_verified_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class EmailVerificationToken:
+    id: str
+    customer_id: str
+    token_hash: str
+    expires_at: datetime
+    created_at: datetime
+    consumed_at: datetime | None = None
+    revoked_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -245,6 +267,7 @@ class MockBusinessRepository:
         *,
         now: datetime = MOCK_NOW,
         customers: Mapping[str, Customer],
+        email_verification_tokens: Mapping[str, EmailVerificationToken] | None = None,
         risk_disclosures: Mapping[str, RiskDisclosure],
         disclosure_acceptances: Mapping[str, RiskDisclosureAcceptance] | None = None,
         billing_customers: Mapping[str, BillingCustomer],
@@ -257,6 +280,7 @@ class MockBusinessRepository:
     ) -> None:
         self._now = now
         self._customers = dict(customers)
+        self._email_verification_tokens = dict(email_verification_tokens or {})
         self._risk_disclosures = dict(risk_disclosures)
         self._disclosure_acceptances = dict(disclosure_acceptances or {})
         self._billing_customers = dict(billing_customers)
@@ -285,6 +309,7 @@ class MockBusinessRepository:
                 status="active",
                 created_at=utc_datetime(2026, 6, 1),
                 updated_at=utc_datetime(2026, 6, 1),
+                email_verified_at=utc_datetime(2026, 6, 1),
             ),
             "cus_expired": Customer(
                 id="cus_expired",
@@ -295,6 +320,7 @@ class MockBusinessRepository:
                 status="active",
                 created_at=utc_datetime(2026, 5, 1),
                 updated_at=utc_datetime(2026, 6, 1),
+                email_verified_at=utc_datetime(2026, 5, 1),
             ),
             "cus_revoked": Customer(
                 id="cus_revoked",
@@ -305,6 +331,7 @@ class MockBusinessRepository:
                 status="active",
                 created_at=utc_datetime(2026, 5, 1),
                 updated_at=utc_datetime(2026, 6, 1),
+                email_verified_at=utc_datetime(2026, 5, 1),
             ),
             "cus_unbound": Customer(
                 id="cus_unbound",
@@ -315,6 +342,7 @@ class MockBusinessRepository:
                 status="active",
                 created_at=utc_datetime(2026, 6, 10),
                 updated_at=utc_datetime(2026, 6, 10),
+                email_verified_at=utc_datetime(2026, 6, 10),
             ),
         }
         risk_disclosures = {
@@ -584,6 +612,109 @@ class MockBusinessRepository:
                 raise NotFoundError("customer_not_found")
             return replace(customer)
 
+    def find_customer_by_email(self, email: str) -> Customer | None:
+        normalized = str(email or "").strip().lower()
+        with self._lock:
+            for customer in self._customers.values():
+                if customer.email.lower() == normalized:
+                    return replace(customer)
+            return None
+
+    def create_customer(
+        self,
+        *,
+        email: str,
+        full_name: str,
+        country_code: str | None,
+        phone: str | None,
+    ) -> Customer:
+        normalized_email = str(email or "").strip().lower()
+        normalized_name = str(full_name or "").strip()
+        if not normalized_email or "@" not in normalized_email:
+            raise ConflictError("customer_email_invalid")
+        if not normalized_name:
+            raise ConflictError("customer_full_name_required")
+        with self._lock:
+            for customer in self._customers.values():
+                if customer.email.lower() == normalized_email:
+                    raise ConflictError("customer_email_already_registered")
+            customer = Customer(
+                id=deterministic_id("cus", normalized_email),
+                email=normalized_email,
+                full_name=normalized_name,
+                country_code=str(country_code).strip().upper() if country_code else None,
+                phone=str(phone).strip() if phone else None,
+                status="pending_email",
+                created_at=self._now,
+                updated_at=self._now,
+                email_verified_at=None,
+            )
+            self._customers[customer.id] = customer
+            return replace(customer)
+
+    def ensure_customer_active(self, customer_id: str) -> Customer:
+        customer = self.get_customer(customer_id)
+        if customer.status != "active" or customer.email_verified_at is None:
+            raise AuthorizationError("email_verification_required")
+        return customer
+
+    def create_email_verification_token(
+        self,
+        *,
+        customer_id: str,
+        token: str,
+        expires_at: datetime,
+    ) -> EmailVerificationToken:
+        self.get_customer(customer_id)
+        hashed = email_verification_token_hash(token)
+        with self._lock:
+            for token_record in self._email_verification_tokens.values():
+                if token_record.customer_id == customer_id and token_record.consumed_at is None:
+                    token_record.revoked_at = self._now
+            token_id = f"emv_{len(self._email_verification_tokens) + 1:06d}"
+            token_record = EmailVerificationToken(
+                id=token_id,
+                customer_id=customer_id,
+                token_hash=hashed,
+                expires_at=expires_at,
+                created_at=self._now,
+            )
+            self._email_verification_tokens[token_record.id] = token_record
+            return replace(token_record)
+
+    def consume_email_verification_token(self, token: str) -> Customer:
+        hashed = email_verification_token_hash(token)
+        with self._lock:
+            token_record: EmailVerificationToken | None = None
+            for candidate in self._email_verification_tokens.values():
+                if hmac.compare_digest(candidate.token_hash, hashed):
+                    token_record = candidate
+                    break
+            if token_record is None:
+                raise NotFoundError("email_verification_token_not_found")
+            if token_record.revoked_at is not None:
+                raise ConflictError("email_verification_token_revoked")
+            if token_record.consumed_at is not None:
+                raise ConflictError("email_verification_token_already_used")
+            if token_record.expires_at <= self._now:
+                raise AuthorizationError("email_verification_token_expired")
+            customer = self._customers.get(token_record.customer_id)
+            if customer is None:
+                raise NotFoundError("customer_not_found")
+            token_record.consumed_at = self._now
+            customer.status = "active"
+            customer.email_verified_at = customer.email_verified_at or self._now
+            customer.updated_at = self._now
+            return replace(customer)
+
+    def list_email_verification_tokens(self, customer_id: str) -> list[EmailVerificationToken]:
+        with self._lock:
+            return [
+                replace(token_record)
+                for token_record in self._email_verification_tokens.values()
+                if token_record.customer_id == customer_id
+            ]
+
     def current_disclosure(self) -> RiskDisclosure:
         with self._lock:
             candidates = [
@@ -660,6 +791,19 @@ class MockBusinessRepository:
         if license_record.customer_id != customer_id:
             raise AuthorizationError("license_not_owned")
         return license_record
+
+    def get_subscription(self, subscription_id: str) -> Subscription:
+        with self._lock:
+            subscription = self._subscriptions.get(subscription_id)
+            if subscription is None:
+                raise NotFoundError("subscription_not_found")
+            return replace(subscription)
+
+    def subscription_status_for_license(self, license_record: LicenseRecord) -> str | None:
+        if license_record.subscription_id is None:
+            return None
+        subscription = self.get_subscription(license_record.subscription_id)
+        return subscription.status
 
     def get_license_by_key(self, license_key: str) -> LicenseRecord:
         hashed = license_key_hash(license_key)

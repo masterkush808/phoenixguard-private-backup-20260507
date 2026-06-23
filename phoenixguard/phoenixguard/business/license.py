@@ -6,6 +6,7 @@ import re
 from typing import Any, Mapping
 
 from .auth import ConnectorPrincipal, MockBusinessAuthProvider, hash_connector_token
+from .commands import build_status_command, latest_command_for_context
 from .repository import (
     AuthorizationError,
     DeviceRecord,
@@ -13,6 +14,7 @@ from .repository import (
     MOCK_DISCLOSURE_VERSION,
     MockBusinessRepository,
     Mt4Account,
+    NotFoundError,
     ReleaseBuild,
     iso_datetime,
     deterministic_id,
@@ -42,6 +44,9 @@ class LicenseService:
     def repository(self) -> MockBusinessRepository:
         return self._repository
 
+    def require_active_customer(self, customer_id: str) -> None:
+        self._repository.ensure_customer_active(customer_id)
+
     def accept_disclosure(
         self,
         *,
@@ -51,6 +56,7 @@ class LicenseService:
         ip_address: str | None,
         user_agent: str | None,
     ) -> None:
+        self._repository.ensure_customer_active(customer_id)
         self._repository.accept_disclosure(
             customer_id=customer_id,
             version=version,
@@ -76,6 +82,7 @@ class LicenseService:
         mt4_account_number: str,
         label: str | None,
     ) -> dict[str, Any]:
+        self._repository.ensure_customer_active(customer_id)
         account, created = self._repository.create_or_get_broker_account(
             customer_id=customer_id,
             broker_server=broker_server,
@@ -108,6 +115,7 @@ class LicenseService:
         }
 
     def list_customer_licenses(self, *, customer_id: str) -> dict[str, Any]:
+        self._repository.ensure_customer_active(customer_id)
         licenses = self._repository.list_licenses_for_customer(customer_id)
         accepted_current_disclosure = self._repository.has_accepted_current_disclosure(customer_id)
         return {
@@ -128,6 +136,7 @@ class LicenseService:
         connector_version: str,
     ) -> dict[str, Any]:
         license_record = self._repository.get_license_by_key(license_key)
+        self._repository.ensure_customer_active(license_record.customer_id)
         device = self._repository.upsert_device(
             customer_id=license_record.customer_id,
             license_id=license_record.id,
@@ -169,6 +178,7 @@ class LicenseService:
             device_id=principal.device_id,
             connector_token_hash=hash_connector_token(principal.token),
         )
+        self._repository.ensure_customer_active(principal.customer_id)
         return ConnectorContext(
             principal=principal,
             device=device,
@@ -209,6 +219,73 @@ class LicenseService:
             license_record=context.license_record,
         )
 
+    def latest_command_for_connector(self, *, context: ConnectorContext) -> dict[str, Any]:
+        device = self._repository.update_device_last_seen(context.device.id)
+        license_record = self._repository.get_license(context.license_record.id)
+        entitlement = self.resolve_entitlement(device=device, license_record=license_record)
+        customer_id = license_record.customer_id
+        account_bound = self._repository.license_has_active_account_binding(license_record.id)
+        entitlement_status = str(entitlement["status"])
+        if entitlement_status == "grace" and entitlement.get("reason") == "ACCOUNT_NOT_BOUND":
+            command_entitlement_status = "grace"
+        elif entitlement_status not in {"active", "trialing"}:
+            command_entitlement_status = "expired"
+        else:
+            command_entitlement_status = entitlement_status
+        if command_entitlement_status == "expired":
+            return latest_command_for_context(
+                entitlement_status=command_entitlement_status,
+                license_id=license_record.id,
+                device_id=device.id,
+                account_bound=account_bound,
+                device_status=device.status,
+                update_required=entitlement.get("status") == "update_required",
+                internal_packet=None,
+            )
+        if not self._repository.has_accepted_current_disclosure(customer_id):
+            return {
+                "status": "SERVICE_UNAVAILABLE",
+                "command": build_status_command(
+                    "SERVICE_UNAVAILABLE",
+                    reason="Risk disclosure acceptance required before command delivery.",
+                ),
+            }
+        return latest_command_for_context(
+            entitlement_status=command_entitlement_status,
+            license_id=license_record.id,
+            device_id=device.id,
+            account_bound=account_bound,
+            device_status=device.status,
+            update_required=entitlement.get("status") == "update_required",
+            internal_packet=None,
+        )
+
+    def tracker_access_for_customer(self, *, customer_id: str) -> dict[str, Any]:
+        self._repository.ensure_customer_active(customer_id)
+        if not self._repository.has_accepted_current_disclosure(customer_id):
+            raise AuthorizationError("risk_disclosure_required")
+        eligible = [
+            license_record
+            for license_record in self._repository.list_licenses_for_customer(customer_id)
+            if self._is_release_eligible_license(license_record)
+        ]
+        if not eligible:
+            raise AuthorizationError("no_tracker_eligible_license")
+        license_record = eligible[0]
+        if not self._repository.license_has_active_account_binding(license_record.id):
+            raise AuthorizationError("broker_account_binding_required")
+        return {
+            "access": "granted",
+            "customer_id": customer_id,
+            "license_id": license_record.id,
+            "gates": {
+                "email_verified": True,
+                "disclosure_accepted": True,
+                "active_subscription_or_license": True,
+                "broker_account_bound": True,
+            },
+        }
+
     def resolve_entitlement(
         self,
         *,
@@ -234,6 +311,7 @@ class LicenseService:
         return payload
 
     def latest_release_for_customer(self, *, customer_id: str, channel: str = "stable") -> dict[str, Any]:
+        self._repository.ensure_customer_active(customer_id)
         licenses = self._repository.list_licenses_for_customer(customer_id)
         eligible = [
             license_record
@@ -268,6 +346,12 @@ class LicenseService:
         license_record: LicenseRecord,
     ) -> tuple[str, str | None]:
         now = self._repository.now
+        try:
+            customer = self._repository.get_customer(device.customer_id)
+        except NotFoundError:
+            return "revoked", "CUSTOMER_NOT_FOUND"
+        if customer.status != "active" or customer.email_verified_at is None:
+            return "revoked", "EMAIL_NOT_VERIFIED"
         if device.status == "revoked":
             return "revoked", "DEVICE_REVOKED"
         if license_record.status == "revoked":
@@ -305,7 +389,10 @@ class LicenseService:
         }
 
     def _is_release_eligible_license(self, license_record: LicenseRecord) -> bool:
-        if license_record.status not in {"active", "trialing", "grace"}:
+        if license_record.status not in {"active", "trialing"}:
+            return False
+        subscription_status = self._repository.subscription_status_for_license(license_record)
+        if subscription_status is not None and subscription_status not in {"active", "trialing"}:
             return False
         return not _is_expired(license_record.expires_at, self._repository.now)
 

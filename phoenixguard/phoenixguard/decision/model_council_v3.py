@@ -32,6 +32,9 @@ MATURITY_STAGES = (
 )
 MODEL_COUNCIL_STUDY_SCHEMA_VERSION = "PG_MODEL_COUNCIL_STUDY_V3"
 PROMOTION_FAILURE_AUDIT_SCHEMA_VERSION = "PG_PROMOTION_FAILURE_AUDIT_V3"
+ALLOWANCE_PACKAGE_SCHEMA_VERSION = "PG_ALLOWANCE_PACKAGE_V1"
+ALLOWANCE_PACKAGE_SWING = "SWING"
+ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW = "INTRADAY_ENTER_NOW"
 COUNCIL_STATES = {
     "NO_SETUP",
     "BUY_OBSERVATION",
@@ -56,13 +59,14 @@ COUNCIL_STATES = {
     "BLOCKED_BY_RUNTIME",
 }
 DEFAULT_EXECUTION_LANE_THRESHOLDS = {
-    "HIGH_FREQUENCY_TWO_CANDLE": 0.50,
     "SNIPER_ZONE_ENTRY": 0.70,
     "FAILED_RETEST_ENTRY": 0.72,
     "LOCAL_BREAKDOWN_CONTINUATION": 0.74,
     "HISTORY_MATCHED_CONTINUATION": 0.76,
+    "WAVE_RIDING_CONTINUATION": 0.78,
     "MOMENTUM_ACCEPTANCE_ENTRY": 0.82,
 }
+DEFAULT_HIGH_FREQUENCY_CONTRIBUTION_THRESHOLD = 0.50
 DEFAULT_AI_CONTRIBUTION_STRENGTHS = {
     "market_intelligence": 1.0,
     "decision_kernel": 1.0,
@@ -85,6 +89,32 @@ ENTRY_QUALITY_SOFT_STATES = {
     "WATCH_ONLY",
     "FORMING",
     "",
+}
+WAVE_REASONING_SOFT_WAIT_STATES = {
+    "WAIT_FOR_PULLBACK",
+    "WAIT_FOR_BREAK_CONFIRMATION",
+    "PREPARE",
+    "TRACK_CANDIDATE",
+}
+INTRADAY_ENTER_NOW_REASONING_SOFT_WAIT_STATES = WAVE_REASONING_SOFT_WAIT_STATES
+INTRADAY_ENTER_NOW_LANES = {
+    "SNIPER_ZONE_ENTRY",
+    "FAILED_RETEST_ENTRY",
+    "LOCAL_BREAKDOWN_CONTINUATION",
+    "WAVE_RIDING_CONTINUATION",
+    "MOMENTUM_ACCEPTANCE_ENTRY",
+}
+WAVE_REASONING_HARD_BAD_CLASSES = {
+    "BUY_HIGH_AFTER_IMPULSE",
+    "SELL_LOW_AFTER_DROP",
+    "LATE_CHASE",
+    "LATE_CHASE_AFTER_IMPULSE",
+    "INTO_OPPOSING_FORCE",
+    "NO_PATH_ROOM",
+    "FAKE_BREAKOUT_RISK",
+    "WICK_TRAP",
+    "DRAWDOWN_FIRST",
+    "DRAWDOWN_FIRST_EXPECTED",
 }
 
 
@@ -536,6 +566,112 @@ def _upper(value: Any, default: str = "") -> str:
     return text or default
 
 
+def _build_allowance_package_v1(
+    *,
+    candidate_side: str,
+    timing_mode: str,
+    timing_decision: Mapping[str, Any],
+    execution_lane: Mapping[str, Any],
+    final_execution_score: float,
+    lane_required_score: float,
+    executable: bool,
+    final_state: str,
+    true_blocker: str,
+    next_required: str,
+    release_state: str,
+    promotion_result: str,
+    path_class: str,
+    preferred_expiry_seconds: int,
+    final_score_passed: bool,
+    intraday_reasoning_override_allowed: bool,
+    wave_reasoning_override_allowed: bool,
+    trap_active: bool,
+    late_chase: bool,
+    opposing_force_ok: bool,
+    hard_bad_entry_class_active: bool,
+) -> dict[str, Any]:
+    entry_now_allowed = bool(_mapping(timing_decision).get("entry_now_allowed"))
+    lane_name = _upper(execution_lane.get("name"))
+    timing_mode_normalized = _upper(timing_mode or timing_decision.get("timing_mode"))
+    package_type = (
+        ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW
+        if entry_now_allowed and timing_mode_normalized == "ENTER_NOW"
+        else ALLOWANCE_PACKAGE_SWING
+    )
+    decision_accepted = bool(
+        candidate_side in {"BUY", "SELL"}
+        and bool(execution_lane.get("accepted"))
+        and final_score_passed
+        and (entry_now_allowed if package_type == ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW else True)
+    )
+    blocker = _upper(true_blocker)
+    package = {
+        "schema_version": ALLOWANCE_PACKAGE_SCHEMA_VERSION,
+        "package_type": package_type,
+        "allowance_family": "INTRADAY" if package_type == ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW else "SWING",
+        "execution_authority": PG_EXECUTION_PACKET_SCHEMA_VERSION,
+        "side": candidate_side if candidate_side in {"BUY", "SELL"} else None,
+        "accepted": decision_accepted,
+        "decision_accepted": decision_accepted,
+        "execution_ready": bool(executable),
+        "executable": bool(executable),
+        "tracking_active": bool(package_type == ALLOWANCE_PACKAGE_SWING and decision_accepted and not executable),
+        "intraday_capture_active": bool(package_type == ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW and decision_accepted),
+        "entry_now_allowed": entry_now_allowed,
+        "timing_mode": timing_mode_normalized,
+        "path_class": _upper(path_class),
+        "selected_lane": lane_name,
+        "lane_accepted": bool(execution_lane.get("accepted")),
+        "accepted_lanes": list(execution_lane.get("accepted_lanes", []))
+        if isinstance(execution_lane.get("accepted_lanes"), Sequence)
+        and not isinstance(execution_lane.get("accepted_lanes"), (str, bytes, bytearray))
+        else [],
+        "score": round(float(final_execution_score), 4),
+        "threshold": round(float(lane_required_score), 4),
+        "score_passed": bool(final_score_passed),
+        "preferred_expiry_sec": int(max(0, preferred_expiry_seconds)),
+        "final_state": _upper(final_state),
+        "promotion_result": promotion_result,
+        "release_state": release_state,
+        "true_blocker": None if blocker in {"", "NONE"} else blocker,
+        "next_required": "" if str(next_required or "").lower() == "none" else str(next_required or ""),
+        "reasoning_override_allowed": bool(intraday_reasoning_override_allowed or wave_reasoning_override_allowed),
+        "intraday_reasoning_override_allowed": bool(intraday_reasoning_override_allowed),
+        "wave_reasoning_override_allowed": bool(wave_reasoning_override_allowed),
+        "safety": {
+            "trap_clear": not trap_active,
+            "late_chase_clear": not late_chase,
+            "opposing_force_ok": bool(opposing_force_ok),
+            "hard_bad_entry_class_active": bool(hard_bad_entry_class_active),
+        },
+    }
+    return package
+
+
+def _mark_allowance_package_blocked(
+    package: dict[str, Any],
+    *,
+    block_reason: str,
+    next_required: str,
+    release_state: str,
+    final_state: str = "WATCHING",
+    promotion_result: str = "STUDY_PACKET_PUBLISHED",
+) -> dict[str, Any]:
+    package.update(
+        {
+            "execution_ready": False,
+            "executable": False,
+            "tracking_active": bool(package.get("package_type") == ALLOWANCE_PACKAGE_SWING and package.get("accepted")),
+            "final_state": _upper(final_state),
+            "promotion_result": promotion_result,
+            "release_state": release_state,
+            "true_blocker": _upper(block_reason),
+            "next_required": str(next_required or ""),
+        }
+    )
+    return package
+
+
 def _lane_thresholds(snapshot: Mapping[str, Any]) -> dict[str, float]:
     thresholds = dict(DEFAULT_EXECUTION_LANE_THRESHOLDS)
     supplied = _mapping(snapshot.get("lane_thresholds") or snapshot.get("execution_lane_thresholds"))
@@ -543,6 +679,7 @@ def _lane_thresholds(snapshot: Mapping[str, Any]) -> dict[str, float]:
         key = _upper(lane)
         if key in thresholds:
             thresholds[key] = _clip01(value, thresholds[key])
+    thresholds.pop("HIGH_FREQUENCY_TWO_CANDLE", None)
     return thresholds
 
 
@@ -734,6 +871,8 @@ def _timing_entry_mode(path_class: str, *, entry_allowed: bool, lane_name: str, 
         return "WAIT_FOR_RETEST"
     if lane_name == "LOCAL_BREAKDOWN_CONTINUATION":
         return "WAIT_FOR_BREAK_CONFIRMATION"
+    if lane_name == "WAVE_RIDING_CONTINUATION":
+        return "WAIT_FOR_BREAK_CONFIRMATION"
     if lane_name == "SNIPER_ZONE_ENTRY":
         return "WAIT_FOR_PULLBACK"
     if not current_candle_ok:
@@ -758,13 +897,462 @@ def _timing_path_class(
         return "PULLBACK_THEN_CONTINUATION"
     if lane_name == "SNIPER_ZONE_ENTRY":
         return "PULLBACK_THEN_CONTINUATION" if not current_candle_ok else "DIRECT_CONTINUATION"
-    if lane_name in {"LOCAL_BREAKDOWN_CONTINUATION", "HISTORY_MATCHED_CONTINUATION"}:
+    if lane_name in {"LOCAL_BREAKDOWN_CONTINUATION", "HISTORY_MATCHED_CONTINUATION", "WAVE_RIDING_CONTINUATION"}:
         return "DIRECT_CONTINUATION"
     if lane_name == "MOMENTUM_ACCEPTANCE_ENTRY":
         return "FAKEOUT_THEN_DIRECTION" if not current_candle_ok else "DIRECT_CONTINUATION"
     if not current_candle_ok:
         return "ADVERSE_FIRST_THEN_TARGET"
     return "DIRECT_CONTINUATION"
+
+
+def _wave_riding_context(
+    snapshot: Mapping[str, Any],
+    market: Mapping[str, Any],
+    *,
+    side: str,
+    market_context: Mapping[str, Any],
+    source_market_context: Mapping[str, Any],
+    latest_signal: Mapping[str, Any],
+    tracking: Mapping[str, Any],
+    execution_timing: Mapping[str, Any],
+    current_candle: Mapping[str, Any],
+    path_score: float,
+    opposing_force_ok: bool,
+    side_aligned: bool,
+    local_aligned: bool,
+    global_side: str,
+    local_side: str,
+    lane_score: float,
+    dominance_strengthening: bool,
+    continuation_confirmed: bool,
+    micro_break: bool,
+    retest_detected: bool,
+    failed_retest: bool,
+    history_exit_here: bool,
+    angle_ok: bool,
+    late_chase: bool,
+) -> dict[str, Any]:
+    zone_liquidity = _mapping(snapshot.get("zone_liquidity") or market.get("zone_liquidity"))
+    decision_kernel = _mapping(snapshot.get("decision_kernel") or market.get("decision_kernel"))
+    smc = _mapping(snapshot.get("smart_money_context") or tracking.get("smart_money_context") or latest_signal.get("smart_money_context"))
+    candle_phase = _upper(current_candle.get("candle_phase") or current_candle.get("phase") or current_candle.get("state"))
+    current_location = _upper(
+        market_context.get("current_location")
+        or source_market_context.get("current_location")
+        or zone_liquidity.get("current_location")
+    )
+    zone_type = _upper(zone_liquidity.get("zone_type") or zone_liquidity.get("type") or zone_liquidity.get("family"))
+    preferred_entry_area = _upper(
+        execution_timing.get("preferred_entry_area")
+        or market_context.get("preferred_entry_area")
+        or source_market_context.get("preferred_entry_area")
+        or zone_liquidity.get("preferred_entry_area")
+    )
+    entry_relation = _upper(
+        execution_timing.get("entry_area_relation")
+        or market_context.get("entry_area_relation")
+        or source_market_context.get("entry_area_relation")
+        or zone_liquidity.get("entry_area_relation")
+    )
+    significant_context = _upper(
+        execution_timing.get("significant_entry_context")
+        or execution_timing.get("significant_zone_entry_context")
+        or market_context.get("significant_entry_context")
+        or zone_liquidity.get("significant_entry_context")
+    )
+    inside_valid_trigger = _bool(market_context.get("inside_valid_trigger_zone") or zone_liquidity.get("inside_valid_trigger_zone"))
+    entry_area_near = _bool(
+        execution_timing.get("entry_area_near")
+        or market_context.get("entry_area_near")
+        or source_market_context.get("entry_area_near")
+        or inside_valid_trigger
+    )
+    entry_area_score = max(
+        _clip01(execution_timing.get("entry_area_score"), 0.0),
+        _clip01(market_context.get("entry_area_score"), 0.0),
+        _clip01(source_market_context.get("entry_area_score"), 0.0),
+        _clip01(zone_liquidity.get("strength"), 0.0) if entry_area_near else 0.0,
+        0.72 if inside_valid_trigger else 0.0,
+    )
+    clear_path_score = max(
+        _clip01(execution_timing.get("clear_path_score"), 0.0),
+        _clip01(market_context.get("clear_path_score"), 0.0),
+        _clip01(source_market_context.get("clear_path_score"), 0.0),
+        _clip01(decision_kernel.get("p_target_before_invalidation"), 0.0),
+        _clip01(path_score, 0.0),
+    )
+    p_target_before_invalidation = max(
+        _clip01(execution_timing.get("p_target_before_invalidation"), 0.0),
+        _clip01(decision_kernel.get("p_target_before_invalidation"), 0.0),
+        _clip01(snapshot.get("p_target_before_invalidation"), 0.0),
+    )
+    if p_target_before_invalidation <= 0.0:
+        p_target_before_invalidation = clear_path_score
+    p_trigger = max(
+        _clip01(execution_timing.get("p_trigger_next_1"), 0.0),
+        _clip01(execution_timing.get("p_trigger_next_3"), 0.0),
+        _clip01(decision_kernel.get("p_trigger_next_1"), 0.0),
+        _clip01(decision_kernel.get("p_trigger_next_3"), 0.0),
+    )
+    p_next_side = _side(
+        execution_timing.get("p_next_side")
+        or decision_kernel.get("p_next_side")
+        or latest_signal.get("next_side")
+        or latest_signal.get("side")
+    )
+    current_flow_continuation_ready = _nested_bool(
+        snapshot,
+        latest_signal,
+        tracking,
+        execution_timing,
+        names=("current_flow_continuation_ready", "current_flow_ready", "flow_continuation_ready"),
+    )
+    current_flow_direction_confirmed = _nested_bool(
+        snapshot,
+        latest_signal,
+        tracking,
+        execution_timing,
+        names=("current_flow_direction_confirmed", "flow_direction_confirmed", "direction_confirmed"),
+    )
+    breakout_confirmation = _nested_bool(
+        snapshot,
+        latest_signal,
+        tracking,
+        execution_timing,
+        smc,
+        names=("breakout_confirmation", "role_flip_confirmed", "break_and_retest_confirmed", "bms_confirmed", "bos_confirmed"),
+    )
+    liquidity_sweep = _nested_bool(
+        snapshot,
+        latest_signal,
+        tracking,
+        execution_timing,
+        smc,
+        names=("liquidity_sweep", "stop_hunt", "liquidity_grab", "ssl_sweep", "bsl_sweep"),
+    )
+    flow_conflicts_raw = execution_timing.get("current_flow_conflicts") or market_context.get("current_flow_conflicts") or []
+    flow_conflict_count = len(flow_conflicts_raw) if isinstance(flow_conflicts_raw, Sequence) and not isinstance(flow_conflicts_raw, (str, bytes, bytearray)) else 0
+    compression_pressure = _clip01(execution_timing.get("compression_pressure"), 0.0)
+    history_area_label = _upper(execution_timing.get("history_area_label") or market_context.get("history_area_label"))
+    history_area_risk = max(
+        _clip01(execution_timing.get("history_area_risk"), 0.0),
+        _clip01(market_context.get("history_area_risk"), 0.0),
+    )
+    history_extension_against_side = _bool(
+        execution_timing.get("history_extension_against_side")
+        or market_context.get("history_extension_against_side")
+    )
+    history_extension_stretched = _bool(
+        execution_timing.get("history_extension_stretched")
+        or market_context.get("history_extension_stretched")
+    )
+    favorable_history_reclaim = _bool(
+        execution_timing.get("favorable_history_reclaim")
+        or market_context.get("favorable_history_reclaim")
+    )
+    favorable_history_rejection = _bool(
+        execution_timing.get("favorable_history_rejection")
+        or market_context.get("favorable_history_rejection")
+    )
+
+    entry_keywords = {
+        "BUY": {"DEMAND", "SUPPORT", "LOW", "LOWER", "DISCOUNT", "PULLBACK", "RETEST", "SSL", "BUY_ZONE"},
+        "SELL": {"SUPPLY", "RESISTANCE", "HIGH", "UPPER", "PREMIUM", "PULLBACK", "RETEST", "BSL", "SELL_ZONE"},
+    }
+    opposing_keywords = {
+        "BUY": {"SUPPLY", "RESISTANCE", "HIGH", "UPPER", "PREMIUM", "BSL", "SELL_ZONE", "OPPOSING"},
+        "SELL": {"DEMAND", "SUPPORT", "LOW", "LOWER", "DISCOUNT", "SSL", "BUY_ZONE", "OPPOSING"},
+    }
+    text_context = " ".join(
+        item
+        for item in (current_location, zone_type, preferred_entry_area, entry_relation, significant_context)
+        if item
+    )
+    active_entry_context = " ".join(
+        item
+        for item in (current_location, preferred_entry_area, entry_relation, significant_context)
+        if item
+    )
+    entry_location_match = any(keyword in active_entry_context for keyword in entry_keywords.get(side, set())) or bool(
+        entry_area_near and any(keyword in zone_type for keyword in entry_keywords.get(side, set()))
+    )
+    opposing_location_match = any(keyword in text_context for keyword in opposing_keywords.get(side, set()))
+    if "MIDDLE_SAFE" in text_context:
+        opposing_location_match = False
+    if "NO_OPPOSING" in text_context or "CLEAR_PATH" in text_context:
+        opposing_location_match = False
+    if "MIDDLE_DANGER" in text_context and clear_path_score < 0.68:
+        opposing_location_match = True
+    adverse_entry_location = bool(opposing_location_match)
+    sell_low_history_risk = bool(
+        side == "SELL"
+        and not favorable_history_rejection
+        and (
+            history_area_label in {"LOWER_STUDIED_HISTORY", "STUDIED_LOW_EXTREME", "LOW_EXTREME", "LOWER_HISTORY"}
+            or history_area_risk >= 0.58
+            or history_extension_against_side
+            or history_extension_stretched
+        )
+    )
+    buy_high_history_risk = bool(
+        side == "BUY"
+        and not favorable_history_reclaim
+        and (
+            history_area_label in {"UPPER_STUDIED_HISTORY", "STUDIED_HIGH_EXTREME", "HIGH_EXTREME", "UPPER_HISTORY"}
+            or history_area_risk >= 0.58
+            or history_extension_against_side
+            or history_extension_stretched
+        )
+    )
+    entry_area_behind_price = bool(
+        (side == "SELL" and entry_relation in {"ABOVE_PRICE", "ABOVE", "MAPPED_HISTORY"} and not entry_area_near)
+        or (side == "BUY" and entry_relation in {"BELOW_PRICE", "BELOW", "MAPPED_HISTORY"} and not entry_area_near)
+    )
+    directional_location_chase_risk = bool(
+        sell_low_history_risk
+        or buy_high_history_risk
+        or adverse_entry_location
+        or entry_area_behind_price
+    )
+
+    entry_area_valid = bool(entry_area_near or entry_area_score >= 0.58 or entry_location_match)
+    near_opposing_force = bool((not opposing_force_ok) or opposing_location_match)
+    zone_timing_confirmed = bool(entry_area_near and (continuation_confirmed or dominance_strengthening))
+    reaction_confirmed = bool(
+        failed_retest
+        or retest_detected
+        or liquidity_sweep
+        or zone_timing_confirmed
+        or candle_phase in {"REJECTION", "RETEST_FAILURE", "ACTIVE_BREAKDOWN", "ACTIVE_BREAKOUT", "VALID"}
+        or _nested_bool(
+            snapshot,
+            latest_signal,
+            tracking,
+            execution_timing,
+            names=("rejection_confirmed", "reaction_confirmed", "pullback_reclaimed", "reclaim_confirmed"),
+        )
+    )
+    local_reclaim_confirmed = bool(
+        local_aligned
+        and (
+            dominance_strengthening
+            or continuation_confirmed
+            or current_flow_continuation_ready
+            or current_flow_direction_confirmed
+            or breakout_confirmation
+            or micro_break
+            or retest_detected
+        )
+    )
+    clear_path_ready = bool(
+        opposing_force_ok
+        and clear_path_score >= 0.58
+        and p_target_before_invalidation >= 0.55
+        and flow_conflict_count <= 1
+    )
+    continuation_ready = bool(
+        local_reclaim_confirmed
+        and side_aligned
+        and angle_ok
+        and not late_chase
+        and not history_exit_here
+        and not (directional_location_chase_risk and not breakout_confirmation)
+        and (
+            current_flow_continuation_ready
+            or current_flow_direction_confirmed
+            or micro_break
+            or (dominance_strengthening and entry_area_valid)
+            or (continuation_confirmed and (entry_area_valid or p_trigger >= 0.62))
+        )
+        and (
+            clear_path_ready
+            or breakout_confirmation
+            or p_trigger >= 0.62
+            or lane_score >= 0.86
+        )
+    )
+    breakout_role_flip_ready = bool(
+        breakout_confirmation
+        and local_reclaim_confirmed
+        and angle_ok
+        and not late_chase
+        and p_target_before_invalidation >= 0.52
+        and flow_conflict_count <= 1
+    )
+    directional_location_ok = bool(not directional_location_chase_risk or breakout_role_flip_ready)
+    pullback_reclaim_ready = bool(
+        entry_area_valid
+        and directional_location_ok
+        and local_reclaim_confirmed
+        and reaction_confirmed
+        and angle_ok
+        and not late_chase
+        and (clear_path_ready or p_trigger >= 0.58 or lane_score >= 0.84)
+    )
+    force_reaction_ready = bool(
+        near_opposing_force
+        and not adverse_entry_location
+        and directional_location_ok
+        and reaction_confirmed
+        and local_reclaim_confirmed
+        and (clear_path_ready or breakout_role_flip_ready)
+    )
+    strong_confluence_override = bool(
+        lane_score >= 0.88
+        and local_reclaim_confirmed
+        and angle_ok
+        and not late_chase
+        and p_target_before_invalidation >= 0.62
+        and clear_path_score >= 0.68
+        and flow_conflict_count == 0
+        and not history_exit_here
+        and directional_location_ok
+    )
+    buy_low_sell_high_ok = bool(
+        directional_location_ok
+        and (
+            entry_area_valid
+            or pullback_reclaim_ready
+            or breakout_role_flip_ready
+            or strong_confluence_override
+            or (continuation_ready and clear_path_ready and not near_opposing_force)
+        )
+    )
+    granular_entry_ok = bool(
+        local_reclaim_confirmed
+        and current_flow_continuation_ready
+        and buy_low_sell_high_ok
+        and not near_opposing_force
+        and clear_path_score >= 0.58
+    )
+
+    blockers: list[str] = []
+    if side not in {"BUY", "SELL"}:
+        blockers.append("NO_DIRECTION_CANDIDATE")
+    if local_side in {"BUY", "SELL"} and side in {"BUY", "SELL"} and local_side != side and not local_reclaim_confirmed:
+        blockers.append("LOCAL_WAVE_AGAINST_ENTRY")
+    if near_opposing_force and not (force_reaction_ready or breakout_role_flip_ready):
+        blockers.append("OPPOSING_FORCE_DECISION_UNRESOLVED")
+    if not directional_location_ok:
+        blockers.append("SELL_LOW_SUPPORT_LOCATION_GUARD" if side == "SELL" else "BUY_HIGH_RESISTANCE_LOCATION_GUARD" if side == "BUY" else "DIRECTIONAL_LOCATION_GUARD")
+    if not buy_low_sell_high_ok:
+        blockers.append("BUY_LOW_SELL_HIGH_LOCATION_NOT_READY")
+    if not clear_path_ready and not (breakout_role_flip_ready or pullback_reclaim_ready or strong_confluence_override):
+        blockers.append("WAVE_PATH_NOT_CLEAR")
+    if history_exit_here:
+        blockers.append("HISTORY_EXIT_ZONE")
+    if not angle_ok or late_chase:
+        blockers.append("ANGLE_OR_LATE_CHASE_RISK")
+    if not bool(current_candle.get("entry_allowed")):
+        blockers.append("CURRENT_CANDLE_NOT_ACCEPTED")
+    if not entry_area_valid and not continuation_ready and not breakout_role_flip_ready:
+        blockers.append("MID_RANGE_NEEDS_FLOW_PROOF")
+
+    if near_opposing_force and not (force_reaction_ready or breakout_role_flip_ready):
+        phase = "WAIT_AT_OPPOSING_FORCE"
+    elif breakout_role_flip_ready:
+        phase = "BREAKOUT_ROLE_FLIP"
+    elif pullback_reclaim_ready:
+        phase = "PULLBACK_RECLAIM"
+    elif force_reaction_ready:
+        phase = "OPPOSING_FORCE_REACTION"
+    elif continuation_ready and clear_path_ready:
+        phase = "CLEAR_PATH_CONTINUATION"
+    elif compression_pressure >= 0.55:
+        phase = "COMPRESSION_WAIT"
+    else:
+        phase = "MID_RANGE_TIMING_ONLY"
+
+    wave_entry_ok = bool(
+        side in {"BUY", "SELL"}
+        and bool(current_candle.get("entry_allowed"))
+        and not blockers
+        and (
+            pullback_reclaim_ready
+            or force_reaction_ready
+            or breakout_role_flip_ready
+            or (continuation_ready and clear_path_ready)
+            or strong_confluence_override
+        )
+    )
+    if wave_entry_ok:
+        next_required = "none"
+    elif "LOCAL_WAVE_AGAINST_ENTRY" in blockers:
+        next_required = "wait for local wave reclaim or confirmed role-flip before entry"
+    elif "OPPOSING_FORCE_DECISION_UNRESOLVED" in blockers:
+        next_required = "wait for rejection, break-and-retest, or clean continuation through opposing force"
+    elif "BUY_LOW_SELL_HIGH_LOCATION_NOT_READY" in blockers:
+        next_required = "wait for price to return to the correct buy-low/sell-high entry area"
+    elif "MID_RANGE_NEEDS_FLOW_PROOF" in blockers:
+        next_required = "wait for current-flow continuation proof before entering mid-range"
+    else:
+        next_required = "; ".join(blockers) or "wait for wave maturity"
+
+    wave_score = max(
+        0.0,
+        min(
+            1.0,
+            0.24 * clear_path_score
+            + 0.22 * entry_area_score
+            + 0.18 * (1.0 if local_reclaim_confirmed else 0.0)
+            + 0.14 * (1.0 if reaction_confirmed else 0.0)
+            + 0.12 * (1.0 if continuation_ready else 0.0)
+            + 0.10 * (1.0 if breakout_role_flip_ready else 0.0),
+        ),
+    )
+    return {
+        "contract_version": "PG_WAVE_RIDING_CONTEXT_V1",
+        "side": side if side in {"BUY", "SELL"} else "HOLD",
+        "phase": phase,
+        "wave_entry_ok": wave_entry_ok,
+        "granular_entry_ok": granular_entry_ok,
+        "wave_score": round(float(wave_score), 4),
+        "clear_path_ready": clear_path_ready,
+        "clear_path_score": round(float(clear_path_score), 4),
+        "entry_area_valid": entry_area_valid,
+        "entry_area_near": entry_area_near,
+        "entry_area_score": round(float(entry_area_score), 4),
+        "buy_low_sell_high_ok": buy_low_sell_high_ok,
+        "directional_location_ok": directional_location_ok,
+        "directional_location_chase_risk": directional_location_chase_risk,
+        "adverse_entry_location": adverse_entry_location,
+        "entry_area_behind_price": entry_area_behind_price,
+        "sell_low_history_risk": sell_low_history_risk,
+        "buy_high_history_risk": buy_high_history_risk,
+        "history_area_label": history_area_label,
+        "history_area_risk": round(float(history_area_risk), 4),
+        "history_extension_against_side": history_extension_against_side,
+        "history_extension_stretched": history_extension_stretched,
+        "near_opposing_force": near_opposing_force,
+        "opposing_force_ok": bool(opposing_force_ok),
+        "reaction_confirmed": reaction_confirmed,
+        "pullback_reclaim_ready": pullback_reclaim_ready,
+        "breakout_role_flip_ready": breakout_role_flip_ready,
+        "force_reaction_ready": force_reaction_ready,
+        "continuation_ready": continuation_ready,
+        "strong_confluence_override": strong_confluence_override,
+        "local_reclaim_confirmed": local_reclaim_confirmed,
+        "current_flow_continuation_ready": current_flow_continuation_ready,
+        "current_flow_direction_confirmed": current_flow_direction_confirmed,
+        "breakout_confirmation": breakout_confirmation,
+        "liquidity_sweep": liquidity_sweep,
+        "p_target_before_invalidation": round(float(p_target_before_invalidation), 4),
+        "p_trigger": round(float(p_trigger), 4),
+        "p_next_side": p_next_side,
+        "flow_conflict_count": flow_conflict_count,
+        "current_location": current_location,
+        "zone_type": zone_type,
+        "preferred_entry_area": preferred_entry_area,
+        "entry_area_relation": entry_relation,
+        "significant_entry_context": significant_context,
+        "local_side": local_side,
+        "global_side": global_side,
+        "side_aligned": side_aligned,
+        "local_aligned": local_aligned,
+        "blockers": blockers,
+        "next_required": next_required,
+    }
 
 
 def _permission_failed_reasons(trade_permission: Mapping[str, Any]) -> set[str]:
@@ -952,8 +1540,44 @@ def _resolve_execution_lane(
         and candidate_stable_reads >= _int(snapshot.get("opportunity_capture_stable_reads"), 3)
         and lane_score >= _float(snapshot.get("opportunity_capture_min_score"), 0.90)
     )
+    wave_context = _wave_riding_context(
+        snapshot,
+        market,
+        side=side,
+        market_context=market_context,
+        source_market_context=source_market_context,
+        latest_signal=latest_signal,
+        tracking=tracking,
+        execution_timing=execution_timing,
+        current_candle=current_candle,
+        path_score=path_score,
+        opposing_force_ok=opposing_force_ok,
+        side_aligned=side_aligned,
+        local_aligned=local_aligned,
+        global_side=global_side,
+        local_side=local_side,
+        lane_score=lane_score,
+        dominance_strengthening=dominance_strengthening,
+        continuation_confirmed=continuation_confirmed,
+        micro_break=micro_break,
+        retest_detected=retest_detected,
+        failed_retest=failed_retest,
+        history_exit_here=history_exit_here,
+        angle_ok=angle_ok,
+        late_chase=late_chase,
+    )
 
     lane_rows: list[dict[str, Any]] = []
+    hf_candle_wave_confirmed = False
+    high_frequency_contribution: dict[str, Any] = {
+        "name": "HIGH_FREQUENCY_CANDLE_CONTRIBUTION",
+        "active": False,
+        "status": "NOT_PRESENT",
+        "execution_authority": False,
+        "lane_authority": False,
+        "contributes_to": ["LOCAL_BREAKDOWN_CONTINUATION", "WAVE_RIDING_CONTINUATION"],
+        "blockers": ["HIGH_FREQUENCY_CONTEXT_NOT_PRESENT"],
+    }
 
     def add_lane(
         name: str,
@@ -964,12 +1588,14 @@ def _resolve_execution_lane(
         lane_entry_quality_ok: bool,
         lane_timing_ready: bool,
         lane_maturity_ok: bool,
+        wave_ok: bool,
     ) -> None:
         required = thresholds.get(name, execution_threshold)
         accepted = bool(
             structure_ok
             and side in {"BUY", "SELL"}
             and path_ok
+            and wave_ok
             and not trap_active
             and current_candle_ok
             and lane_score >= required
@@ -981,6 +1607,8 @@ def _resolve_execution_lane(
             blockers.append(f"{name}_STRUCTURE_NOT_READY")
         if not path_ok:
             blockers.append("PATH_RISK_OR_OPPOSING_FORCE")
+        if not wave_ok:
+            blockers.append("WAVE_CONTEXT_NOT_READY")
         if trap_active:
             blockers.append("TRAP_ACTIVE")
         if not current_candle_ok:
@@ -998,6 +1626,10 @@ def _resolve_execution_lane(
                 "actual_score": round(float(lane_score), 4),
                 "structure_ok": bool(structure_ok),
                 "path_ok": bool(path_ok),
+                "wave_ok": bool(wave_ok),
+                "wave_phase": wave_context.get("phase"),
+                "wave_score": wave_context.get("wave_score"),
+                "wave_context": wave_context,
                 "trap_ok": not trap_active,
                 "current_candle_ok": current_candle_ok,
                 "entry_quality_ok": bool(lane_entry_quality_ok),
@@ -1018,6 +1650,8 @@ def _resolve_execution_lane(
             model_strength_profile.get("two_candle_execution_allowed"),
         )
         two_candle_execution_allowed = True if two_candle_execution_allowed_raw is None else _bool(two_candle_execution_allowed_raw)
+        hf_swing_fallback_raw = hf_cycle.get("swing_fallback_enabled")
+        hf_swing_fallback_enabled = True if hf_swing_fallback_raw is None else _bool(hf_swing_fallback_raw)
         hf_side = _first_trade_side(
             hf_cycle.get("side"),
             hf_cycle.get("candidate_side"),
@@ -1026,7 +1660,15 @@ def _resolve_execution_lane(
             side,
         )
         hf_score = max(lane_score, _clip01(hf_cycle.get("confidence"), 0.0))
-        hf_required = thresholds.get("HIGH_FREQUENCY_TWO_CANDLE", execution_threshold)
+        hf_required = _clip01(
+            _first_visible_value(
+                snapshot.get("high_frequency_contribution_threshold"),
+                controls.get("high_frequency_contribution_threshold"),
+                model_strength_profile.get("high_frequency_contribution_threshold"),
+                DEFAULT_HIGH_FREQUENCY_CONTRIBUTION_THRESHOLD,
+            ),
+            DEFAULT_HIGH_FREQUENCY_CONTRIBUTION_THRESHOLD,
+        )
         hf_ready = bool(_bool(hf_cycle.get("ready")) and _bool(hf_cycle.get("current_candle_closed")))
         hf_structure_ok = bool(
             hf_ready
@@ -1057,63 +1699,68 @@ def _resolve_execution_lane(
             hf_blockers.append("LANE_SCORE_BELOW_THRESHOLD")
         if not two_candle_execution_allowed:
             hf_blockers.append("TWO_CANDLE_STUDY_ONLY")
-        hf_accepted = bool(
+        hf_local_reclaim_ok = bool(
+            side in {"BUY", "SELL"}
+            and local_aligned
+            and (
+                dominance_strengthening
+                or continuation_confirmed
+                or micro_break
+                or retest_detected
+                or structural_flow_ready
+                or mature_directional_flow_ready
+            )
+        )
+        if not hf_local_reclaim_ok:
+            hf_blockers.append("LOCAL_RECLAIM_NOT_CONFIRMED")
+        hf_wave_ok = bool(wave_context.get("granular_entry_ok") or (wave_context.get("wave_entry_ok") and hf_local_reclaim_ok))
+        if not hf_wave_ok:
+            hf_blockers.append("WAVE_CONTEXT_NOT_READY")
+        hf_wave_forming = bool(
             two_candle_execution_allowed
-            and
-            hf_structure_ok
+            and side in {"BUY", "SELL"}
+            and hf_side == side
+            and _upper(snapshot.get("timeframe")) == "M5"
+            and _bool(hf_cycle.get("forecast_agreement"))
+            and _bool(hf_cycle.get("targets_future_candle_window"))
+            and hf_local_reclaim_ok
+            and hf_wave_ok
             and path_ok
             and not trap_active
             and current_candle_ok
             and hf_score >= hf_required
         )
-        hf_row = {
-            "name": "HIGH_FREQUENCY_TWO_CANDLE",
-            "accepted": hf_accepted,
+        hf_candle_wave_confirmed = bool(hf_wave_forming and hf_structure_ok)
+        high_frequency_contribution = {
+            "name": "HIGH_FREQUENCY_CANDLE_CONTRIBUTION",
+            "active": True,
+            "status": "CONTRIBUTING" if hf_candle_wave_confirmed else "FORMING" if hf_wave_forming else "WAITING",
+            "execution_authority": False,
+            "lane_authority": False,
             "side": side if side in {"BUY", "SELL"} else "HOLD",
+            "contributes_to": ["LOCAL_BREAKDOWN_CONTINUATION", "WAVE_RIDING_CONTINUATION"],
             "reason": (
-                f"{side} accepted from the closed M5 candle boundary for the next two-candle study window."
-                if hf_accepted
-                else str(hf_cycle.get("reason") or "; ".join(hf_blockers) or "High-frequency two-candle cycle is waiting.")
+                f"{side} high-frequency candle context confirms the current wave; structural lane authority is still required."
+                if hf_candle_wave_confirmed
+                else str(hf_cycle.get("reason") or "; ".join(hf_blockers) or "High-frequency candle context is waiting.")
             ),
-            "strictness": "fixed_two_unseen_candles",
             "required_score": round(float(hf_required), 4),
             "actual_score": round(float(hf_score), 4),
             "structure_ok": bool(hf_structure_ok),
             "path_ok": bool(path_ok),
             "trap_ok": not trap_active,
             "current_candle_ok": current_candle_ok,
-            "entry_quality_ok": True,
-            "timing_ready": True,
-            "maturity_ok": True,
             "blockers": hf_blockers,
+            "local_reclaim_ok": hf_local_reclaim_ok,
+            "wave_ok": hf_wave_ok,
+            "wave_forming": hf_wave_forming,
+            "wave_confirmed": hf_candle_wave_confirmed,
+            "wave_phase": wave_context.get("phase"),
+            "wave_score": wave_context.get("wave_score"),
+            "wave_context": wave_context,
             "high_frequency_candle_cycle": hf_cycle,
+            "swing_fallback_enabled": hf_swing_fallback_enabled,
         }
-        lane_rows.append(hf_row)
-        if two_candle_execution_allowed and (hf_accepted or hf_cycle.get("swing_fallback_enabled") is False):
-            return {
-                "name": hf_row["name"],
-                "accepted": bool(hf_row["accepted"]),
-                "side": hf_row["side"],
-                "reason": hf_row["reason"],
-                "strictness": hf_row["strictness"],
-                "required_score": hf_row["required_score"],
-                "actual_score": hf_row["actual_score"],
-                "accepted_lanes": [hf_row["name"]] if hf_accepted else [],
-                "evaluated_lanes": lane_rows,
-                "blockers": hf_row.get("blockers", []),
-                "lane_entry_quality_ok": bool(hf_row.get("entry_quality_ok")),
-                "lane_timing_ready": bool(hf_row.get("timing_ready")),
-                "lane_maturity_ok": bool(hf_row.get("maturity_ok")),
-                "reversal_capture_mature": bool(lane_reversal_capture_mature),
-                "stale_dominant_overridden": bool(stale_dominant_overridden),
-                "structural_flow_ready": bool(structural_flow_ready),
-                "mature_directional_flow_ready": bool(mature_directional_flow_ready),
-                "permission_override_allowed": bool(hf_accepted),
-                "opportunity_capture_mode": bool(hf_accepted),
-                "current_candle_acceptance": current_candle,
-                "high_frequency_candle_cycle": hf_cycle,
-                "next_required": "none" if hf_accepted else hf_row["reason"],
-            }
 
     sniper_structure = bool(
         side_aligned
@@ -1131,6 +1778,7 @@ def _resolve_execution_lane(
         lane_entry_quality_ok=entry_quality_ok,
         lane_timing_ready=timing_ready,
         lane_maturity_ok=stable_for_lane,
+        wave_ok=bool(wave_context.get("wave_entry_ok") or wave_context.get("pullback_reclaim_ready")),
     )
 
     local_break_ready = bool(
@@ -1142,6 +1790,7 @@ def _resolve_execution_lane(
         and (
             micro_break
             or structural_flow_ready
+            or hf_candle_wave_confirmed
             or lane_hint in {"LOCAL_BREAKDOWN_CONTINUATION", "LIVE_MARKET_FLOW", "TREND_FOLLOW"}
         )
     )
@@ -1153,6 +1802,7 @@ def _resolve_execution_lane(
         lane_entry_quality_ok=entry_quality_ok or soft_entry_state,
         lane_timing_ready=timing_can_be_lane_ready,
         lane_maturity_ok=stable_for_lane,
+        wave_ok=bool(wave_context.get("wave_entry_ok") or wave_context.get("continuation_ready") or wave_context.get("breakout_role_flip_ready")),
     )
 
     failed_retest_ready = bool(
@@ -1171,6 +1821,38 @@ def _resolve_execution_lane(
         lane_entry_quality_ok=entry_quality_ok or soft_entry_state,
         lane_timing_ready=timing_can_be_lane_ready,
         lane_maturity_ok=stable_for_lane,
+        wave_ok=bool(wave_context.get("wave_entry_ok") or wave_context.get("force_reaction_ready") or wave_context.get("pullback_reclaim_ready")),
+    )
+
+    wave_ride_ready = bool(
+        side_aligned
+        and local_aligned
+        and angle_ok
+        and stable_for_lane
+        and not history_exit_here
+        and (
+            wave_context.get("current_flow_continuation_ready")
+            or wave_context.get("current_flow_direction_confirmed")
+            or wave_context.get("breakout_confirmation")
+            or micro_break
+            or hf_candle_wave_confirmed
+            or lane_hint in {"WAVE_RIDING_CONTINUATION", "WAVE_RIDING", "RIDE_WAVE"}
+        )
+        and (
+            wave_context.get("continuation_ready")
+            or wave_context.get("breakout_role_flip_ready")
+            or wave_context.get("pullback_reclaim_ready")
+        )
+    )
+    add_lane(
+        "WAVE_RIDING_CONTINUATION",
+        wave_ride_ready,
+        f"{side} wave accepted because the current flow has reclaimed and path remains open until opposing force.",
+        strictness="wave_riding",
+        lane_entry_quality_ok=entry_quality_ok or soft_entry_state,
+        lane_timing_ready=timing_can_be_lane_ready,
+        lane_maturity_ok=stable_for_lane,
+        wave_ok=bool(wave_context.get("wave_entry_ok")),
     )
 
     momentum_ready = bool(
@@ -1202,6 +1884,7 @@ def _resolve_execution_lane(
         lane_entry_quality_ok=entry_quality_ok or soft_entry_state,
         lane_timing_ready=timing_can_be_lane_ready,
         lane_maturity_ok=stable_for_lane,
+        wave_ok=bool(wave_context.get("wave_entry_ok") or wave_context.get("strong_confluence_override")),
     )
 
     history_ready = bool(
@@ -1222,19 +1905,28 @@ def _resolve_execution_lane(
         lane_entry_quality_ok=entry_quality_ok or soft_entry_state,
         lane_timing_ready=timing_can_be_lane_ready,
         lane_maturity_ok=stable_for_lane,
+        wave_ok=bool(wave_context.get("wave_entry_ok") or wave_context.get("continuation_ready")),
     )
 
     accepted = [lane for lane in lane_rows if lane["accepted"]]
-    selected = max(accepted, key=lambda row: float(row["actual_score"]) - float(row["required_score"])) if accepted else max(
-        lane_rows,
-        key=lambda row: (
-            int(bool(row.get("structure_ok"))),
-            float(row.get("actual_score", 0.0)) - float(row.get("required_score", 1.0)),
-        ),
+    explicit_wave_lane_requested = lane_hint in {"WAVE_RIDING_CONTINUATION", "WAVE_RIDING", "RIDE_WAVE"}
+    selected = (
+        next((lane for lane in accepted if explicit_wave_lane_requested and lane.get("name") == "WAVE_RIDING_CONTINUATION"), None)
+        or (
+            max(accepted, key=lambda row: float(row["actual_score"]) - float(row["required_score"]))
+            if accepted
+            else max(
+                lane_rows,
+                key=lambda row: (
+                    int(bool(row.get("structure_ok"))),
+                    float(row.get("actual_score", 0.0)) - float(row.get("required_score", 1.0)),
+                ),
+            )
+        )
     )
     opportunity_capture = bool(
         selected["accepted"]
-        and selected["name"] in {"LOCAL_BREAKDOWN_CONTINUATION", "FAILED_RETEST_ENTRY", "MOMENTUM_ACCEPTANCE_ENTRY"}
+        and selected["name"] in {"LOCAL_BREAKDOWN_CONTINUATION", "FAILED_RETEST_ENTRY", "MOMENTUM_ACCEPTANCE_ENTRY", "WAVE_RIDING_CONTINUATION"}
         and lane_score >= float(selected["required_score"])
         and timing_has_explicit_expiry
         and current_candle_ok
@@ -1260,6 +1952,9 @@ def _resolve_execution_lane(
         "permission_override_allowed": bool(selected["accepted"] and selected.get("entry_quality_ok")),
         "opportunity_capture_mode": opportunity_capture,
         "current_candle_acceptance": current_candle,
+        "wave_context": wave_context,
+        "high_frequency_candle_cycle": hf_cycle,
+        "high_frequency_contribution": high_frequency_contribution,
         "next_required": (
             "none"
             if selected["accepted"]
@@ -1283,9 +1978,10 @@ def _missed_opportunity_probe(
     priority = {
         "LOCAL_BREAKDOWN_CONTINUATION": 0,
         "FAILED_RETEST_ENTRY": 1,
-        "MOMENTUM_ACCEPTANCE_ENTRY": 2,
-        "HISTORY_MATCHED_CONTINUATION": 3,
-        "SNIPER_ZONE_ENTRY": 4,
+        "WAVE_RIDING_CONTINUATION": 2,
+        "MOMENTUM_ACCEPTANCE_ENTRY": 3,
+        "HISTORY_MATCHED_CONTINUATION": 4,
+        "SNIPER_ZONE_ENTRY": 5,
     }
     score_passed_lanes = [
         lane
@@ -2020,6 +2716,106 @@ def evaluate_model_council_v3(
     final_reasoning_decision = _mapping(timed_reasoning.get("final_reasoning_decision"))
     bad_entry_filter = _mapping(timed_reasoning.get("bad_entry_filter"))
     model_role_outputs = _rows(timed_reasoning.get("model_role_outputs"))
+    reasoning_decision_state = _upper(final_reasoning_decision.get("decision"))
+    reasoning_side = _side(final_reasoning_decision.get("side"))
+    reasoning_side_mismatch = bool(
+        candidate_side in {"BUY", "SELL"}
+        and reasoning_side in {"BUY", "SELL"}
+        and reasoning_side != candidate_side
+    )
+    reasoning_execution_blocked = bool(
+        reasoning_decision_state in {
+            "WATCH",
+            "WAIT_FOR_PULLBACK",
+            "WAIT_FOR_RETEST",
+            "WAIT_FOR_REJECTION",
+            "WAIT_FOR_BREAK_CONFIRMATION",
+            "ABORT",
+        }
+        or reasoning_side_mismatch
+    )
+    reasoning_block_reason = (
+        "REASONING_SIDE_MISMATCH"
+        if reasoning_side_mismatch
+        else f"REASONING_{reasoning_decision_state}"
+        if reasoning_execution_blocked
+        else ""
+    )
+    selected_wave_context = _mapping(execution_lane.get("wave_context"))
+    reasoning_bad_entry_class = _upper(bad_entry_filter.get("class"))
+    market_bad_entry_class = _upper(
+        bad_entry.get("class")
+        or bad_entry.get("bad_entry_class")
+        or bad_entry.get("reason")
+    )
+    hard_bad_entry_class_active = bool(
+        reasoning_bad_entry_class in WAVE_REASONING_HARD_BAD_CLASSES
+        or market_bad_entry_class in WAVE_REASONING_HARD_BAD_CLASSES
+    )
+    history_exit_active = _bool(
+        _mapping(snapshot.get("historical_pattern")).get("would_have_exited_here")
+        or market_context.get("history_would_exit_here")
+    )
+    wave_reasoning_override_allowed = bool(
+        lane_name == "WAVE_RIDING_CONTINUATION"
+        and bool(execution_lane.get("accepted"))
+        and reasoning_decision_state in WAVE_REASONING_SOFT_WAIT_STATES
+        and not reasoning_side_mismatch
+        and not hard_bad_entry_class_active
+        and not bool(bad_entry_filter.get("active") and _clip01(bad_entry_filter.get("severity"), 0.0) >= 0.72)
+        and not bool(bad_entry.get("detected"))
+        and not trap_active
+        and not late_chase
+        and not history_exit_active
+        and current_candle_ok
+        and opposing_force_ok
+        and path_class == "DIRECT_CONTINUATION"
+        and timing_mode == "ENTER_NOW"
+        and bool(selected_wave_context.get("wave_entry_ok"))
+        and bool(selected_wave_context.get("buy_low_sell_high_ok"))
+        and bool(selected_wave_context.get("opposing_force_ok"))
+        and (
+            bool(selected_wave_context.get("pullback_reclaim_ready"))
+            or bool(selected_wave_context.get("breakout_role_flip_ready"))
+            or bool(selected_wave_context.get("strong_confluence_override"))
+            or bool(
+                selected_wave_context.get("continuation_ready")
+                and selected_wave_context.get("clear_path_ready")
+            )
+        )
+        and (
+            bool(selected_wave_context.get("clear_path_ready"))
+            or _clip01(selected_wave_context.get("clear_path_score"), 0.0) >= 0.70
+        )
+    )
+    high_frequency_contribution_for_override = _mapping(execution_lane.get("high_frequency_contribution"))
+    high_frequency_cycle_for_override = _mapping(high_frequency_contribution_for_override.get("high_frequency_candle_cycle"))
+    high_frequency_soft_wait_only = bool(
+        high_frequency_contribution_for_override.get("active")
+        and not bool(high_frequency_contribution_for_override.get("lane_authority"))
+        and _upper(high_frequency_cycle_for_override.get("lane")) == "HIGH_FREQUENCY_TWO_CANDLE"
+    )
+    intraday_enter_now_reasoning_override_allowed = bool(
+        entry_now_allowed
+        and timing_mode == "ENTER_NOW"
+        and lane_name in INTRADAY_ENTER_NOW_LANES
+        and bool(execution_lane.get("accepted"))
+        and reasoning_decision_state in INTRADAY_ENTER_NOW_REASONING_SOFT_WAIT_STATES
+        and not high_frequency_soft_wait_only
+        and not reasoning_side_mismatch
+        and not hard_bad_entry_class_active
+        and not bool(bad_entry_filter.get("active") and _clip01(bad_entry_filter.get("severity"), 0.0) >= 0.72)
+        and not bool(bad_entry.get("detected"))
+        and not trap_active
+        and not late_chase
+        and not history_exit_active
+        and current_candle_ok
+        and opposing_force_ok
+        and path_class in {"DIRECT_CONTINUATION", "PULLBACK_THEN_CONTINUATION"}
+    )
+    if wave_reasoning_override_allowed or intraday_enter_now_reasoning_override_allowed:
+        reasoning_execution_blocked = False
+        reasoning_block_reason = ""
     permission_failed_reasons = _permission_failed_reasons(trade_permission)
     lane_permission_override = bool(
         execution_lane.get("permission_override_allowed")
@@ -2120,6 +2916,9 @@ def evaluate_model_council_v3(
         if not timing_has_explicit_expiry:
             final_state = "BLOCKED_BY_RUNTIME"
             block_reason = "MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING"
+        elif reasoning_execution_blocked:
+            final_state = "PREPARING"
+            block_reason = reasoning_block_reason
         elif not timing_decision["entry_now_allowed"] or timing_mode != "ENTER_NOW":
             final_state = "PREPARING"
             block_reason = f"TIMING_MODE_{timing_mode}"
@@ -2319,6 +3118,29 @@ def evaluate_model_council_v3(
             "flip_flop_release_allowed": flip_flop_release_allowed,
         }
     )
+    allowance_package = _build_allowance_package_v1(
+        candidate_side=candidate_side,
+        timing_mode=timing_mode,
+        timing_decision=timing_decision,
+        execution_lane=execution_lane,
+        final_execution_score=final_execution_score,
+        lane_required_score=lane_required_score,
+        executable=executable,
+        final_state=final_state,
+        true_blocker=true_blocker,
+        next_required=next_required,
+        release_state=release_state,
+        promotion_result=promotion_result,
+        path_class=path_class,
+        preferred_expiry_seconds=preferred_expiry_seconds,
+        final_score_passed=final_score_passed,
+        intraday_reasoning_override_allowed=intraday_enter_now_reasoning_override_allowed,
+        wave_reasoning_override_allowed=wave_reasoning_override_allowed,
+        trap_active=trap_active,
+        late_chase=late_chase,
+        opposing_force_ok=opposing_force_ok,
+        hard_bad_entry_class_active=hard_bad_entry_class_active,
+    )
     promotion_trace = {
         "packet_id": base["packet_id"],
         "release_state": release_state,
@@ -2356,6 +3178,14 @@ def evaluate_model_council_v3(
         "permission": permission_state,
         "permission_override_allowed": lane_permission_override,
         "market_block_override_allowed": lane_market_override,
+        "reasoning_execution_blocked": reasoning_execution_blocked,
+        "reasoning_block_reason": reasoning_block_reason,
+        "intraday_enter_now_reasoning_override_allowed": intraday_enter_now_reasoning_override_allowed,
+        "high_frequency_soft_wait_only": high_frequency_soft_wait_only,
+        "wave_reasoning_override_allowed": wave_reasoning_override_allowed,
+        "reasoning_bad_entry_class": reasoning_bad_entry_class,
+        "market_bad_entry_class": market_bad_entry_class,
+        "hard_bad_entry_class_active": hard_bad_entry_class_active,
         "denied_at": (
             true_blocker
             if true_blocker != "NONE"
@@ -2382,6 +3212,7 @@ def evaluate_model_council_v3(
         "mature_directional_flow_ready": bool(execution_lane.get("mature_directional_flow_ready")),
         "opportunity_capture_mode": bool(execution_lane.get("opportunity_capture_mode")),
         "current_candle_acceptance": execution_lane.get("current_candle_acceptance", {}),
+        "wave_context": execution_lane.get("wave_context", {}),
         "release_allowed": flip_flop_release_allowed,
         "blocked_by": blocked_by,
         "true_blocker": true_blocker,
@@ -2399,6 +3230,7 @@ def evaluate_model_council_v3(
         "ai_contribution_strengths": ai_contribution_strengths,
         "model_strength_profile": model_strength_profile,
         "lane_thresholds": _lane_thresholds(snapshot),
+        "allowance_package": allowance_package,
     }
     council_scores = {
         "global": round(float(_clip01(market.get("global_score"), raw_council_score)), 4),
@@ -2500,6 +3332,11 @@ def evaluate_model_council_v3(
         "regime_primary": _mapping(market.get("regime")).get("primary"),
         "reasoning_decision": final_reasoning_decision.get("decision"),
         "reasoning_coherence_score": reasoning_arbitration.get("coherence_score"),
+        "reasoning_execution_blocked": reasoning_execution_blocked,
+        "reasoning_block_reason": reasoning_block_reason,
+        "intraday_enter_now_reasoning_override_allowed": intraday_enter_now_reasoning_override_allowed,
+        "wave_reasoning_override_allowed": wave_reasoning_override_allowed,
+        "allowance_package": allowance_package,
     }
     council_debate = _council_debate(
         candidate_side=candidate_side,
@@ -2519,12 +3356,14 @@ def evaluate_model_council_v3(
         "side": study_side,
         "expiry_seconds": timing_expiry if executable else 0,
         "amount_action": "DO_NOT_CHANGE_AMOUNT",
+        "allowance_package_type": allowance_package["package_type"],
     }
     result: dict[str, Any] = {
         "schema_version": MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
         "packet_id": base["packet_id"],
         "packet_type": "STUDY_PACKET",
         "execution": execution,
+        "allowance_package": allowance_package,
         "model_council": council,
         "promotion_trace": promotion_trace,
         "council_scores": council_scores,
@@ -2619,6 +3458,7 @@ def evaluate_model_council_v3(
         "valid_until_epoch_sec": current_now + study_packet_valid_for_seconds,
         "execution": execution,
         "model_council": council,
+        "allowance_package": allowance_package,
         "block_reason": block_reason,
         "promotion_trace": promotion_trace,
         "reason": council["arbitration_reason"],
@@ -2703,13 +3543,17 @@ def evaluate_model_council_v3(
             },
         )
         promotion_trace["promotion_failure_audit_v3"] = audit
+        promotion_trace["allowance_package"] = allowance_package
         council["promotion_failure_audit_v3"] = audit
         council["promotion_trace"] = promotion_trace
+        council["allowance_package"] = allowance_package
         study_packet["promotion_failure_audit_v3"] = audit
         study_packet["promotion_trace"] = promotion_trace
+        study_packet["allowance_package"] = allowance_package
         result["promotion_failure_audit_v3"] = audit
         result["promotion_trace"] = promotion_trace
         result["model_council"] = council
+        result["allowance_package"] = allowance_package
         result["study_packet"] = study_packet
         result["model_council_study_packet"] = study_packet
         return audit
@@ -2729,13 +3573,24 @@ def evaluate_model_council_v3(
         promotion_trace["sequence_context_readiness"] = sequence_readiness
         promotion_trace["promotion_result"] = "STUDY_PACKET_PUBLISHED"
         promotion_trace["packet_result"] = "STUDY_PACKET_PUBLISHED"
+        _mark_allowance_package_blocked(
+            allowance_package,
+            block_reason=block_reason,
+            next_required=next_required,
+            release_state=release_state,
+            final_state="WATCHING",
+            promotion_result="STUDY_PACKET_PUBLISHED",
+        )
+        promotion_trace["allowance_package"] = allowance_package
         study_packet["denied_at"] = block_reason
         study_packet["next_required"] = next_required
         study_packet["release_condition"] = next_required
         study_packet["sequence_context_readiness"] = sequence_readiness
         study_packet["non_executable_state"] = release_state
         study_packet["block_reason"] = block_reason
+        study_packet["allowance_package"] = allowance_package
         council["final_state"] = "WATCHING"
+        council["allowance_package"] = allowance_package
         council["arbitration_reason"] = (
             f"BLOCKED_BY_SEQUENCE_CONTEXT: blocked_by={block_reason}; "
             f"failed_module={sequence_readiness.get('failed_module')}; next_required={next_required}"
@@ -2744,6 +3599,7 @@ def evaluate_model_council_v3(
             result["block_reason"] = block_reason
         result["packet_result"] = "STUDY_PACKET_PUBLISHED"
         result["execution"] = {**execution, "enabled": False, "state": "WATCHING"}
+        result["allowance_package"] = allowance_package
         result["model_council"] = council
         result["promotion_trace"] = promotion_trace
         result["study_packet"] = study_packet
@@ -2774,7 +3630,10 @@ def evaluate_model_council_v3(
             instrument_context=instrument_context,
             symbol_context=symbol_context,
             sequence_context=sequence_context_payload,
+            allowance_package=allowance_package,
         )
+        packet["allowance_package"] = allowance_package
+        packet["execution"]["allowance_package_type"] = allowance_package["package_type"]
         packet["market_reality"] = market_reality
         packet["packet_type"] = "PG_EXECUTION_PACKET_V3"
         packet["entry_quality"] = result["entry_quality"]
@@ -2821,6 +3680,14 @@ def evaluate_model_council_v3(
                 else f"runtime validation clears: {validation.first_reason}"
             )
             runtime_release_state = "INSTRUMENT_CONTEXT_WAIT" if validation.first_reason.startswith("INSTRUMENT_CONTEXT") else "WATCHING"
+            _mark_allowance_package_blocked(
+                allowance_package,
+                block_reason=validation.first_reason,
+                next_required=runtime_release_condition,
+                release_state=runtime_release_state,
+                final_state="BLOCKED_BY_RUNTIME",
+                promotion_result="BLOCKED_BY_RUNTIME",
+            )
             promotion_trace.update(
                 {
                     "release_state": runtime_release_state,
@@ -2832,6 +3699,7 @@ def evaluate_model_council_v3(
                     "release_condition": runtime_release_condition,
                     "promotion_result": "BLOCKED_BY_RUNTIME",
                     "packet_result": "STUDY_PACKET_PUBLISHED",
+                    "allowance_package": allowance_package,
                 }
             )
             council.update(
@@ -2845,13 +3713,16 @@ def evaluate_model_council_v3(
                     "release_condition": runtime_release_condition,
                     "arbitration_reason": f"BLOCKED_BY_RUNTIME: blocked_by={validation.first_reason}; next_required={runtime_release_condition}",
                     "promotion_trace": promotion_trace,
+                    "allowance_package": allowance_package,
                 }
             )
             study_packet["promotion_trace"] = promotion_trace
             study_packet["model_council"] = council
+            study_packet["allowance_package"] = allowance_package
             study_packet["true_blocker"] = validation.first_reason
             study_packet["reason"] = council["arbitration_reason"]
             result["execution"] = {**execution, "enabled": False, "state": "BLOCKED_BY_RUNTIME"}
+            result["allowance_package"] = allowance_package
             result["model_council"] = council
             result["promotion_trace"] = promotion_trace
             result["study_packet"] = study_packet
@@ -2913,6 +3784,14 @@ def evaluate_model_council_v3(
             no_packet_next_required = raw_no_packet_next_required
         if not no_packet_next_required or no_packet_next_required.lower() == "none":
             no_packet_next_required = "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
+        _mark_allowance_package_blocked(
+            allowance_package,
+            block_reason=no_packet_reason,
+            next_required=no_packet_next_required,
+            release_state=str(council.get("release_state") or release_state or "WATCHING"),
+            final_state=str(council.get("final_state") or final_state or "WATCHING"),
+            promotion_result="STUDY_PACKET_PUBLISHED",
+        )
         result_execution = _mapping(result.get("execution") or execution)
         result_execution.update(
             {
@@ -2932,6 +3811,7 @@ def evaluate_model_council_v3(
         council["denied_at"] = no_packet_reason
         council["next_required"] = no_packet_next_required
         council["release_condition"] = str(promotion_trace.get("release_condition") or release_condition or no_packet_next_required)
+        council["allowance_package"] = allowance_package
         promotion_trace.update(
             {
                 "denied_at": no_packet_reason,
@@ -2940,6 +3820,7 @@ def evaluate_model_council_v3(
                 "next_required": no_packet_next_required,
                 "release_condition": council["release_condition"],
                 "packet_result": "STUDY_PACKET_PUBLISHED",
+                "allowance_package": allowance_package,
             }
         )
         if str(promotion_trace.get("promotion_result") or "").strip().upper() == "EXECUTABLE_PACKET_CREATED":
@@ -2948,6 +3829,7 @@ def evaluate_model_council_v3(
         study_packet["execution"] = dict(result_execution)
         study_packet["model_council"] = council
         study_packet["promotion_trace"] = promotion_trace
+        study_packet["allowance_package"] = allowance_package
         study_packet["true_blocker"] = no_packet_reason
         study_packet["denied_at"] = no_packet_reason
         study_packet["next_required"] = no_packet_next_required
@@ -2955,6 +3837,7 @@ def evaluate_model_council_v3(
         study_packet["packet_result"] = "STUDY_PACKET_PUBLISHED"
         result["model_council"] = council
         result["promotion_trace"] = promotion_trace
+        result["allowance_package"] = allowance_package
         result["study_packet"] = study_packet
         result["model_council_study_packet"] = study_packet
         result["packet_result"] = "STUDY_PACKET_PUBLISHED"

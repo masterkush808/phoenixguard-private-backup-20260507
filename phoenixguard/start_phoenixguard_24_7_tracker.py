@@ -639,7 +639,7 @@ def _ensure_session(
                 timeout=30,
             )
 
-    live_execution_enabled = str(os.getenv("PHOENIXGUARD_LIVE_EXECUTION_ENABLED", "1") or "1").strip().lower() in {
+    live_execution_enabled = str(os.getenv("PHOENIXGUARD_LIVE_EXECUTION_ENABLED", "0") or "0").strip().lower() in {
         "1",
         "true",
         "yes",

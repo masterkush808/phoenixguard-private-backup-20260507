@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import time
 from pathlib import Path
@@ -19,10 +20,41 @@ PRESERVE_ROOT_FILES = {
     "shooter_3_gate_state.json",
 }
 CACHE_DIR_NAMES = {"__pycache__", ".pytest_cache"}
+SKIP_SCAN_DIR_NAMES = {
+    ".git",
+    ".venv",
+    "_archive",
+    ".codex_runtime",
+    ".hf_cache",
+    "808 Memory",
+    "book knowledge",
+    "data",
+    "data_splits",
+    "memory_bank",
+    "models",
+    "node_modules",
+    "reports",
+}
 
 
 def _timestamp() -> str:
     return time.strftime("%Y%m%d_%H%M%S")
+
+
+def _remove_tree_or_file(path: Path) -> None:
+    last_error: OSError | None = None
+    for attempt in range(8):
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+            return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(min(1.0, 0.15 * (attempt + 1)))
+    if last_error is not None:
+        raise last_error
 
 
 def move_path(path: Path, backup_root: Path, moved: list[dict[str, str]], *, reason: str, apply: bool) -> None:
@@ -49,6 +81,23 @@ def move_path(path: Path, backup_root: Path, moved: list[dict[str, str]], *, rea
         shutil.move(str(path), str(destination))
 
 
+def delete_path(path: Path, moved: list[dict[str, str]], *, reason: str, apply: bool) -> None:
+    rel = path.relative_to(ROOT)
+    moved.append(
+        {
+            "original_path": rel.as_posix(),
+            "new_path": "",
+            "reason": reason,
+            "classification": "safe to delete",
+            "applied": str(bool(apply)),
+            "action": "delete",
+        }
+    )
+    if not apply:
+        return
+    _remove_tree_or_file(path)
+
+
 def collect_runtime_paths() -> list[tuple[Path, str]]:
     paths: list[tuple[Path, str]] = []
     if RUNTIME_DIR.exists():
@@ -56,44 +105,65 @@ def collect_runtime_paths() -> list[tuple[Path, str]]:
             if child.name in PRESERVE_RUNTIME_FILES:
                 continue
             paths.append((child, "stale .codex_runtime artifact"))
-    for path in ROOT.rglob("*"):
-        if path.parts and any(part in {".git", ".venv", "_archive"} for part in path.parts):
-            continue
-        if path.name in CACHE_DIR_NAMES:
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        current = Path(dirpath)
+        dirnames[:] = [name for name in dirnames if name not in SKIP_SCAN_DIR_NAMES]
+        for dirname in list(dirnames):
+            if dirname not in CACHE_DIR_NAMES:
+                continue
+            path = current / dirname
             paths.append((path, "python/test cache directory"))
-        elif path.is_file() and path.name.startswith("shooter_debug.log"):
-            paths.append((path, "old shooter debug log"))
-        elif path.is_file() and path.name.endswith(".pyc"):
-            paths.append((path, "compiled python cache"))
+            dirnames.remove(dirname)
+        for filename in filenames:
+            path = current / filename
+            if path.name.startswith("shooter_debug.log"):
+                paths.append((path, "old shooter debug log"))
+            elif path.name.endswith(".pyc"):
+                paths.append((path, "compiled python cache"))
     return paths
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Back up and clear stale PhoenixGuard V3 runtime state.")
     parser.add_argument("--apply", action="store_true", help="Move runtime/cache files into _archive/runtime_backup.")
+    parser.add_argument("--delete", action="store_true", help="Delete stale runtime/cache files instead of archiving them.")
+    parser.add_argument("--manifest-file", default="", help="Write the planned/applied cleanup manifest to this path.")
     args = parser.parse_args()
 
     backup_root = ARCHIVE_ROOT / _timestamp()
     moved: list[dict[str, str]] = []
-    backup_root.mkdir(parents=True, exist_ok=True)
+    if not args.delete:
+        backup_root.mkdir(parents=True, exist_ok=True)
     for path, reason in collect_runtime_paths():
         if not path.exists():
             continue
         if path.is_file() and path.name in PRESERVE_ROOT_FILES:
             continue
-        move_path(path, backup_root, moved, reason=reason, apply=args.apply)
+        if args.delete:
+            delete_path(path, moved, reason=reason, apply=args.apply)
+        else:
+            move_path(path, backup_root, moved, reason=reason, apply=args.apply)
 
     log = {
         "applied": bool(args.apply),
-        "backup_root": backup_root.relative_to(ROOT).as_posix(),
+        "action": "delete" if args.delete else "archive",
+        "backup_root": "" if args.delete else backup_root.relative_to(ROOT).as_posix(),
         "preserved_runtime_files": sorted(PRESERVE_RUNTIME_FILES),
         "preserved_root_files": sorted(PRESERVE_ROOT_FILES),
+        "preserved_scan_roots": sorted(SKIP_SCAN_DIR_NAMES),
         "moved": moved,
     }
-    (backup_root / "runtime_cleanup_log.json").write_text(json.dumps(log, indent=2, sort_keys=True), encoding="utf-8")
+    if not args.delete:
+        (backup_root / "runtime_cleanup_log.json").write_text(json.dumps(log, indent=2, sort_keys=True), encoding="utf-8")
+    if args.manifest_file:
+        manifest_path = Path(args.manifest_file)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(log, indent=2, sort_keys=True), encoding="utf-8")
     print(f"Runtime cleanup {'applied' if args.apply else 'dry-run'}")
-    print(f"Backup root: {backup_root}")
-    print(f"Paths {'moved' if args.apply else 'planned'}: {len(moved)}")
+    print(f"Action: {'delete' if args.delete else 'archive'}")
+    if not args.delete:
+        print(f"Backup root: {backup_root}")
+    print(f"Paths {'deleted' if args.delete and args.apply else ('moved' if args.apply else 'planned')}: {len(moved)}")
     return 0
 
 

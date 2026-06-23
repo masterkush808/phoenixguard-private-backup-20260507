@@ -47,6 +47,105 @@ def test_entry_state_allows_only_lane_accepted_packet_present() -> None:
     assert entry["execution_authorized"] is True
 
 
+def test_runtime_freshness_prefers_fresh_published_frame_over_old_display_capture(monkeypatch) -> None:
+    now = time.time()
+    monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "4")
+    monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500")
+    live = {
+        "tracking_enabled": True,
+        "status": "running",
+        "display_capture_epoch": now - 18.0,
+    }
+    perf = {
+        "generated_epoch": now - 0.2,
+        "timing_trace": {
+            "frame_age_ms": 220,
+            "stale_status": "PASS",
+            "display_published_epoch_ms": int((now - 0.2) * 1000),
+        },
+    }
+
+    freshness = burn.runtime_freshness_state(
+        {"ok": True},
+        {"ok": True},
+        {"ok": True},
+        live,
+        perf,
+    )
+
+    assert freshness["fresh"] is True
+    assert freshness["published_frame_fresh"] is True
+    assert freshness["capture_epoch_source"] == "timing_trace.display_published_epoch_ms"
+    assert freshness["capture_age_warning"] is None
+    assert freshness["reasons"] == []
+
+
+def test_runtime_freshness_blocks_publish_epoch_lag_by_default(monkeypatch) -> None:
+    now = time.time()
+    monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "4")
+    monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500")
+    live = {
+        "tracking_enabled": True,
+        "status": "running",
+        "display_capture_epoch": now - 60.0,
+    }
+    perf = {
+        "generated_epoch": now - 12.0,
+        "timing_trace": {
+            "frame_age_ms": 380,
+            "stale_status": "PASS",
+            "display_published_epoch_ms": int((now - 12.0) * 1000),
+        },
+    }
+
+    freshness = burn.runtime_freshness_state(
+        {"ok": True},
+        {"ok": True},
+        {"ok": True},
+        live,
+        perf,
+    )
+
+    assert freshness["fresh"] is False
+    assert freshness["published_frame_fresh"] is True
+    assert freshness["published_age_warning"].startswith("PUBLISHED_AGE_")
+    assert freshness["capture_age_warning"].startswith("CAPTURE_START_AGE_")
+    assert any(reason.startswith("PUBLISHED_AGE_") for reason in freshness["reasons"])
+    assert any(reason.startswith("CAPTURE_AGE_") for reason in freshness["reasons"])
+
+
+def test_runtime_freshness_warning_relaxation_is_explicit(monkeypatch) -> None:
+    now = time.time()
+    monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "4")
+    monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500")
+    monkeypatch.setenv("PHOENIXGUARD_BURN_REJECT_PUBLISHED_AGE_WARNING", "0")
+    monkeypatch.setenv("PHOENIXGUARD_BURN_REJECT_CAPTURE_AGE_WARNING", "0")
+    live = {
+        "tracking_enabled": True,
+        "status": "running",
+        "last_capture_epoch": now - 18.0,
+    }
+    perf = {
+        "generated_epoch": now - 0.2,
+        "timing_trace": {
+            "frame_age_ms": 220,
+            "stale_status": "PASS",
+        },
+    }
+
+    freshness = burn.runtime_freshness_state(
+        {"ok": True},
+        {"ok": True},
+        {"ok": True},
+        live,
+        perf,
+    )
+
+    assert freshness["fresh"] is True
+    assert freshness["capture_age_warning"].startswith("CAPTURE_START_AGE_")
+    assert freshness["reasons"] == []
+
+
 def test_marker_point_refuses_contextual_fallback() -> None:
     live = {
         "signal_thesis_v3": {"current_price_proxy": 120},
@@ -202,6 +301,38 @@ def test_prune_path_budget_preserves_protected_latest_artifact(tmp_path: Path) -
     assert protected_file.exists()
 
 
+def test_prune_path_budget_preserves_allowed_entry_evidence(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "entry_evidence"
+    evidence_dir.mkdir()
+    allowed_overlay = evidence_dir / "000010_111111_sell_entry_overlay.jpg"
+    allowed_broker = evidence_dir / "000010_111111_sell_entry_broker.jpg"
+    allowed_meta = evidence_dir / "000010_111111_sell_entry.json"
+    blocked_overlay = evidence_dir / "000011_111112_sell_blocked_enter_now_overlay.jpg"
+    for item in (allowed_overlay, allowed_broker, allowed_meta, blocked_overlay):
+        item.write_bytes(b"x" * 1024)
+
+    old_time = time.time() - 10_000
+    import os
+
+    for item in (allowed_overlay, allowed_broker, allowed_meta, blocked_overlay):
+        os.utime(item, (old_time, old_time))
+
+    protected = burn.protected_allowed_entry_evidence_paths(evidence_dir)
+    result = burn.prune_path_budget(
+        evidence_dir,
+        max_mb=0.001,
+        max_files=0,
+        max_age_sec=1,
+        protected_paths=protected,
+    )
+
+    assert result["removed"] == 1
+    assert allowed_overlay.exists()
+    assert allowed_broker.exists()
+    assert allowed_meta.exists()
+    assert not blocked_overlay.exists()
+
+
 def test_compact_sample_includes_grade_a_star_audit() -> None:
     live_resp = {
         "ok": True,
@@ -248,6 +379,136 @@ def test_compact_sample_includes_grade_a_star_audit() -> None:
     assert sample["study_quality"]["trendline_count"] == 1
 
 
+def test_compact_sample_blocks_entry_when_runtime_is_stale() -> None:
+    live_resp = {
+        "ok": True,
+        "latency_ms": 10.0,
+        "json": {
+            "status": "running",
+            "tracking_enabled": True,
+            "display_frame_id": 77,
+            "overlay_frame_id": 77,
+            "model_vote_frame_id": 77,
+            "last_capture_epoch": time.time() - 30,
+            "signal_thesis_v3": {},
+            "visual_health_v3": {"status": "STALE", "stale_flags": ["frame_age"]},
+        },
+    }
+    council_resp = {
+        "ok": True,
+        "latency_ms": 12.0,
+        "json": {
+            "execution_packet_present": True,
+            "promotion_trace": {
+                "candidate_side": "BUY",
+                "lane_accepted": True,
+                "timing_decision": {"entry_now_allowed": True, "timing_mode": "ENTER_NOW"},
+                "execution_lane": {"accepted": True, "name": "HIGH_FREQUENCY_TWO_CANDLE"},
+            }
+        },
+    }
+    perf_resp = {
+        "ok": True,
+        "latency_ms": 8.0,
+        "json": {
+            "timing_trace": {"frame_age_ms": 30_000, "stale_status": "STALE"},
+            "model_health_summary": {"label": "7/7 awake", "queue_depth": 0},
+        },
+    }
+
+    sample = burn.compact_sample(9, live_resp, council_resp, perf_resp, "test-session")
+    entry = sample["entry"]
+
+    assert sample["freshness"]["fresh"] is False
+    assert entry["entry_now_allowed"] is True
+    assert entry["lane_accepted"] is False
+    assert entry["legacy_hf_lane_rejected"] is True
+    assert entry["packet_present"] is True
+    assert entry["raw_allowed_without_freshness_guard"] is False
+    assert entry["allowed"] is False
+    assert entry["execution_authorized"] is False
+    assert entry["freshness_rejected"] is True
+    assert entry["blocked_by"] == "STALE_RUNTIME_GUARD"
+
+
+def test_pixel_freeze_guard_blocks_executable_when_artifact_hash_is_static(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_STATIC_PIXEL_SEC", "10")
+    monkeypatch.setenv("PHOENIXGUARD_BURN_HARD_STATIC_PIXEL_SEC", "10")
+    window = tmp_path / "000001_live_window.jpg"
+    Image.new("RGB", (120, 80), (20, 30, 40)).save(window)
+    state: dict[str, object] = {}
+
+    first = burn.update_pixel_freeze_state(
+        state,
+        {"last_display_window_path": str(window), "display_frame_id": 1, "capture_count": 10},
+        1000.0,
+    )
+    second = burn.update_pixel_freeze_state(
+        state,
+        {"last_display_window_path": str(window), "display_frame_id": 40, "capture_count": 100},
+        1012.0,
+    )
+
+    sample = {
+        "freshness": {"fresh": True, "reasons": []},
+        "entry": {
+            "allowed": True,
+            "execution_authorized": True,
+            "entry_now_allowed": True,
+            "lane_accepted": True,
+            "packet_present": True,
+        },
+    }
+    guarded = burn.apply_pixel_freeze_guard(sample, second)
+
+    assert first["status"] == "CHANGED"
+    assert second["status"] == "FROZEN"
+    assert guarded["freshness"]["fresh"] is False
+    assert guarded["entry"]["allowed"] is False
+    assert guarded["entry"]["execution_authorized"] is False
+    assert guarded["entry"]["raw_allowed_without_freshness_guard"] is True
+    assert guarded["entry"]["blocked_by"] == "STALE_RUNTIME_GUARD"
+    assert guarded["freshness"]["reasons"][0].startswith("BROKER_PIXELS_FROZEN_")
+
+
+def test_pixel_static_refresh_does_not_block_before_hard_limit(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_STATIC_PIXEL_SEC", "10")
+    monkeypatch.setenv("PHOENIXGUARD_BURN_HARD_STATIC_PIXEL_SEC", "60")
+    window = tmp_path / "000001_live_window.jpg"
+    Image.new("RGB", (120, 80), (20, 30, 40)).save(window)
+    state: dict[str, object] = {}
+
+    burn.update_pixel_freeze_state(
+        state,
+        {"last_display_window_path": str(window), "display_frame_id": 1, "capture_count": 10},
+        1000.0,
+    )
+    static_refresh = burn.update_pixel_freeze_state(
+        state,
+        {"last_display_window_path": str(window), "display_frame_id": 40, "capture_count": 100},
+        1012.0,
+    )
+
+    sample = {
+        "freshness": {"fresh": True, "reasons": []},
+        "entry": {
+            "allowed": True,
+            "execution_authorized": True,
+            "entry_now_allowed": True,
+            "lane_accepted": True,
+            "packet_present": True,
+        },
+    }
+    guarded = burn.apply_pixel_freeze_guard(sample, static_refresh)
+
+    assert static_refresh["status"] == "STATIC_REFRESH"
+    assert static_refresh["refresh_recommended"] is True
+    assert guarded["freshness"]["fresh"] is True
+    assert guarded["entry"]["allowed"] is True
+    assert guarded["entry"]["execution_authorized"] is True
+    assert guarded["freshness"]["reasons"] == []
+
+
 def test_score_entries_ignores_blocked_enter_now_evidence() -> None:
     samples = [
         {
@@ -279,3 +540,116 @@ def test_score_entries_ignores_blocked_enter_now_evidence() -> None:
     one_min_rows = scores["60"]["rows"]
     assert [row["seq"] for row in one_min_rows] == [2]
     assert one_min_rows[0]["verdict"] == "correct"
+
+
+def test_score_events_tracks_blocked_trend_aligned_study_separately() -> None:
+    samples = [
+        {
+            "seq": 1,
+            "captured_epoch": 1000.0,
+            "price_proxy": {"current_y": 100.0},
+            "entry": {"side": "SELL"},
+        },
+        {
+            "seq": 3,
+            "captured_epoch": 1061.0,
+            "price_proxy": {"current_y": 120.0},
+            "entry": {"side": "SELL"},
+        },
+    ]
+    entries = [
+        {
+            "seq": 1,
+            "entry": {
+                "allowed": False,
+                "side": "SELL",
+                "blocked_trend_aligned_study": True,
+                "lane_name": "WAVE_RIDING_CONTINUATION",
+                "blocked_by": "REASONING_WATCH",
+            },
+            "blocked_entry_capture": True,
+        }
+    ]
+
+    allowed_scores = burn.score_entries(samples, entries)
+    blocked_scores = burn.score_events(samples, entries, include_blocked_trend_study=True)
+
+    assert allowed_scores["60"]["rows"] == []
+    assert blocked_scores["60"]["rows"][0]["seq"] == 1
+    assert blocked_scores["60"]["rows"][0]["verdict"] == "correct"
+    assert blocked_scores["60"]["rows"][0]["blocked_trend_aligned_study"] is True
+
+
+def test_blocked_trend_aligned_study_requires_soft_non_stale_blocker() -> None:
+    soft = burn.blocked_trend_aligned_study(
+        {
+            "allowed": False,
+            "side": "SELL",
+            "entry_now_allowed": True,
+            "lane_accepted": True,
+            "blocked_by": "REASONING_WATCH",
+            "directional_location_ok": True,
+        }
+    )
+    stale = burn.blocked_trend_aligned_study(
+        {
+            "allowed": False,
+            "side": "SELL",
+            "entry_now_allowed": True,
+            "lane_accepted": True,
+            "blocked_by": "STALE_RUNTIME_GUARD",
+            "directional_location_ok": True,
+        }
+    )
+    location_risk = burn.blocked_trend_aligned_study(
+        {
+            "allowed": False,
+            "side": "SELL",
+            "entry_now_allowed": True,
+            "lane_accepted": True,
+            "blocked_by": "REASONING_WATCH",
+            "directional_location_chase_risk": True,
+        }
+    )
+
+    assert soft["active"] is True
+    assert stale["active"] is False
+    assert location_risk["active"] is False
+
+
+def test_manual_entry_rearm_suppresses_same_candidate_until_rearmed(monkeypatch) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_MANUAL_ENTRY_REARM_MIN_SEC", "300")
+    monkeypatch.setenv("PHOENIXGUARD_MANUAL_ENTRY_REARM_MIN_PRICE_PX", "30")
+    monkeypatch.setenv("PHOENIXGUARD_MANUAL_ENTRY_REARM_MIN_FRAME_DELTA", "10")
+    state: dict[str, dict[str, object]] = {}
+    entry = {
+        "allowed": True,
+        "side": "SELL",
+        "lane_name": "SNIPER_ZONE_ENTRY",
+        "candidate_id": "cand_1",
+    }
+    first = burn.manual_entry_rearm_decision(
+        entry,
+        {"frames": {"display_frame_id": 100}, "price_proxy": {"current_y": 500.0}},
+        state,
+        1000.0,
+    )
+    duplicate = burn.manual_entry_rearm_decision(
+        entry,
+        {"frames": {"display_frame_id": 104}, "price_proxy": {"current_y": 510.0}},
+        state,
+        1020.0,
+    )
+    rearmed = burn.manual_entry_rearm_decision(
+        entry,
+        {"frames": {"display_frame_id": 115}, "price_proxy": {"current_y": 535.0}},
+        state,
+        1320.0,
+    )
+
+    assert first["allowed"] is True
+    assert first["key"].endswith("rearm=1")
+    assert duplicate["allowed"] is False
+    assert duplicate["suppressed"] is True
+    assert rearmed["allowed"] is True
+    assert rearmed["key"].endswith("rearm=2")

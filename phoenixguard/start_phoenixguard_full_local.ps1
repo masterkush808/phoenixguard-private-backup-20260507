@@ -64,6 +64,7 @@ $baseUrl = "http://$ApiHost`:$ApiPort"
 $dashboardUrl = "$baseUrl/dashboard/live/$SessionId"
 $finalLaunchProfile = 'FINAL_LIVE'
 $env:PHOENIXGUARD_PROFILE = $finalLaunchProfile
+$env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED = if ($env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED) { $env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED } else { '0' }
 $env:PHOENIXGUARD_BROKER_WINDOW_HWND = "$BrokerWindowHwnd"
 $env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL = if ($env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL) { $env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL } else { '0' }
 $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS = if ($env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS) { $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS } else { '1' }
@@ -112,13 +113,14 @@ function Start-TrackerChildProcess {
     $escapedTrackerFocusRegion = $TrackerFocusRegion.Replace("'", "''")
     $trackerWindowHwndArg = if ($BrokerWindowHwnd -gt 0) { " -BrokerWindowHwnd $BrokerWindowHwnd" } else { "" }
     $trackerCommand = @(
-        'Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned',
         "cd '$escapedRoot'",
         ".\start_phoenixguard_24_7_tracker.ps1 -ApiHost '$escapedApiHost' -Port $ApiPort -SessionId '$escapedSessionId' -BrokerWindowQuery '$escapedBrokerWindowQuery'$trackerWindowHwndArg -FocusRegion '$escapedTrackerFocusRegion' -CaptureIntervalSec $CaptureIntervalSec -NoOpenDashboard"
     ) -join '; '
 
     Start-Process powershell -ArgumentList @(
         '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
         '-Command',
         $trackerCommand
     ) -WindowStyle Hidden -PassThru -RedirectStandardOutput $trackerStdoutPath -RedirectStandardError $trackerStderrPath
@@ -131,34 +133,58 @@ if (-not $NoKillExisting) {
         '*start_phoenixguard_24_7_tracker.ps1*',
         '*start_phoenixguard_24_7_tracker.py*',
         '*shooter.py*',
-        '*phoenixguard.runtime.model_council_daemon*'
+        '*phoenixguard.runtime.model_council_daemon*',
+        '*uvicorn phoenixguard.mobile_api.app*',
+        '*phoenixguard_mt4_file_bridge.py*',
+        '*run_entry_allowance_burn.py*',
+        '*manual_entry_alert*',
+        '*business_mock*',
+        '*next dev --hostname 127.0.0.1 --port 3210*',
+        '*next start --hostname 127.0.0.1 --port 3310*',
+        '*node_modules\next\dist\server\lib\start-server.js*'
     )
     for ($cleanupAttempt = 0; $cleanupAttempt -lt 3; $cleanupAttempt++) {
-        $processRows = @(Get-CimInstance Win32_Process)
+        $processRows = @()
+        $processRowsAvailable = $false
+        try {
+            $processRows = @(Get-CimInstance Win32_Process)
+            $processRowsAvailable = $true
+        } catch {
+            Write-Warning "Process command-line scan unavailable: $($_.Exception.Message). Falling back to PhoenixGuard port cleanup only."
+        }
         $targetProcessIds = New-Object 'System.Collections.Generic.HashSet[int]'
 
-        $processRows | Where-Object {
-            $commandLine = [string]$_.CommandLine
-            $matchesTarget = $false
-            foreach ($pattern in $targetPatterns) {
-                if ($commandLine -like $pattern) {
-                    $matchesTarget = $true
-                    break
+        if ($processRowsAvailable) {
+            $processRows | Where-Object {
+                $commandLine = [string]$_.CommandLine
+                $matchesTarget = $false
+                foreach ($pattern in $targetPatterns) {
+                    if ($commandLine -like $pattern) {
+                        $matchesTarget = $true
+                        break
+                    }
                 }
+                (-not [string]::IsNullOrWhiteSpace($commandLine)) -and ([int]$_.ProcessId) -ne $currentPid -and $matchesTarget
+            } | ForEach-Object {
+                [void]$targetProcessIds.Add([int]$_.ProcessId)
             }
-            (-not [string]::IsNullOrWhiteSpace($commandLine)) -and ([int]$_.ProcessId) -ne $currentPid -and $matchesTarget
-        } | ForEach-Object {
-            [void]$targetProcessIds.Add([int]$_.ProcessId)
         }
 
         try {
-            Get-NetTCPConnection -LocalPort $ApiPort -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
-                $ownerPid = [int]$_.OwningProcess
-                if ($ownerPid -ne $currentPid) {
-                    $owner = $processRows | Where-Object { [int]$_.ProcessId -eq $ownerPid } | Select-Object -First 1
-                    $ownerCommandLine = [string]$owner.CommandLine
-                    if ($ownerCommandLine -like '*phoenixguard*' -or $ownerCommandLine -like '*start_phoenixguard_mobile_api.py*') {
-                        [void]$targetProcessIds.Add($ownerPid)
+            $cleanupPorts = @($ApiPort, 8793, 18181, 18180, 8787, 3210, 3310) | Select-Object -Unique
+            foreach ($cleanupPort in $cleanupPorts) {
+                Get-NetTCPConnection -LocalPort $cleanupPort -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
+                    $ownerPid = [int]$_.OwningProcess
+                    if ($ownerPid -ne $currentPid) {
+                        if (-not $processRowsAvailable) {
+                            [void]$targetProcessIds.Add($ownerPid)
+                        } else {
+                            $owner = $processRows | Where-Object { [int]$_.ProcessId -eq $ownerPid } | Select-Object -First 1
+                            $ownerCommandLine = [string]$owner.CommandLine
+                            if ($ownerCommandLine -like '*phoenixguard*' -or $ownerCommandLine -like '*start_phoenixguard_mobile_api.py*' -or $ownerCommandLine -like '*next*') {
+                                [void]$targetProcessIds.Add($ownerPid)
+                            }
+                        }
                     }
                 }
             }
@@ -247,13 +273,14 @@ try {
         $actionEvidenceArg = if ($RecordActionEvidence -or $ShooterMode -eq 'LIVE_BEHAVIOR_VALIDATION') { ' --record-action-evidence' } else { '' }
         $windowHwndArg = if ($BrokerWindowHwnd -gt 0) { " --window-hwnd $BrokerWindowHwnd" } else { '' }
         $shooterCommand = @(
-            'Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned',
             "cd '$escapedRoot'",
             "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='$liveClickArm'",
             ".\.venv\Scripts\python.exe 'shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll $effectiveShooterPollSec --max-signal-age 30 --preferred-source tracker --require-preferred-source --min-confidence $ShooterMinConfidence --window-query '$escapedBrokerWindowQuery'$windowHwndArg --shooter-mode $ShooterMode --broker-speed-profile '$escapedBrokerSpeedProfile' --action-speed $ActionSpeed --no-auto-open$actionEvidenceArg$startupTestArg$calibrationExpiryArg$calibrationSideArg$calibrationWaitArg$calibrationTimeOnlyArg"
         ) -join '; '
         Start-Process powershell -ArgumentList @(
             '-NoExit',
+            '-ExecutionPolicy',
+            'Bypass',
             '-Command',
             $shooterCommand
         ) -WindowStyle Hidden | Out-Null

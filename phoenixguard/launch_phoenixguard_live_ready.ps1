@@ -207,7 +207,6 @@ function Start-LiveReadyShooter {
         $windowHwndArg = " --window-hwnd $BrokerWindowHwnd"
     }
     $shooterCommand = @(
-        'Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned',
         "cd '$escapedRoot'",
         "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='1'",
         ".\.venv\Scripts\python.exe 'shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll 0.05 --max-signal-age 30 --preferred-source tracker --require-preferred-source --min-confidence 0.2 --window-query '$escapedBrokerWindowQuery'$windowHwndArg --shooter-mode LIVE_READY --broker-speed-profile 'config/shooter_broker_timing_profile.json' --action-speed balanced --no-auto-open --record-action-evidence"
@@ -215,6 +214,8 @@ function Start-LiveReadyShooter {
 
     Start-Process powershell -ArgumentList @(
         '-NoExit',
+        '-ExecutionPolicy',
+        'Bypass',
         '-Command',
         $shooterCommand
     ) -WindowStyle Hidden | Out-Null
@@ -234,6 +235,7 @@ if ($DisableShooter) {
 }
 
 $env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS = '0'
+$env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED = if ($env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED) { $env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED } else { '0' }
 $env:PHOENIXGUARD_BROKER_WINDOW_QUERY = $BrokerWindowQuery
 $env:PHOENIXGUARD_TRACKER_SESSION_ID = $SessionId
 $env:PHOENIXGUARD_DASHBOARD_ROUTE = 'live'
@@ -268,31 +270,54 @@ $targetPatterns = @(
     '*start_phoenixguard_24_7_tracker.ps1*',
     '*start_phoenixguard_24_7_tracker.py*',
     '*shooter.py*',
-    '*phoenixguard.runtime.model_council_daemon*'
+    '*phoenixguard.runtime.model_council_daemon*',
+    '*uvicorn phoenixguard.mobile_api.app*',
+    '*phoenixguard_mt4_file_bridge.py*',
+    '*run_entry_allowance_burn.py*',
+    '*manual_entry_alert*',
+    '*business_mock*',
+    '*next dev --hostname 127.0.0.1 --port 3210*',
+    '*next start --hostname 127.0.0.1 --port 3310*',
+    '*node_modules\next\dist\server\lib\start-server.js*'
 )
-$processRows = @(Get-CimInstance Win32_Process)
+$processRows = @()
+$processRowsAvailable = $false
+try {
+    $processRows = @(Get-CimInstance Win32_Process)
+    $processRowsAvailable = $true
+} catch {
+    Write-Warning "Process command-line scan unavailable: $($_.Exception.Message). Falling back to PhoenixGuard port cleanup only."
+}
 $targetProcessIds = New-Object 'System.Collections.Generic.HashSet[int]'
-$processRows | Where-Object {
-    $commandLine = [string]$_.CommandLine
-    $matchesTarget = $false
-    foreach ($pattern in $targetPatterns) {
-        if ($commandLine -like $pattern) {
-            $matchesTarget = $true
-            break
+if ($processRowsAvailable) {
+    $processRows | Where-Object {
+        $commandLine = [string]$_.CommandLine
+        $matchesTarget = $false
+        foreach ($pattern in $targetPatterns) {
+            if ($commandLine -like $pattern) {
+                $matchesTarget = $true
+                break
+            }
         }
+        (-not [string]::IsNullOrWhiteSpace($commandLine)) -and ([int]$_.ProcessId) -ne $currentPid -and $matchesTarget
+    } | ForEach-Object {
+        [void]$targetProcessIds.Add([int]$_.ProcessId)
     }
-    (-not [string]::IsNullOrWhiteSpace($commandLine)) -and ([int]$_.ProcessId) -ne $currentPid -and $matchesTarget
-} | ForEach-Object {
-    [void]$targetProcessIds.Add([int]$_.ProcessId)
 }
 try {
-    Get-NetTCPConnection -LocalPort 8793 -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
-        $ownerPid = [int]$_.OwningProcess
-        if ($ownerPid -ne $currentPid) {
-            $owner = $processRows | Where-Object { [int]$_.ProcessId -eq $ownerPid } | Select-Object -First 1
-            $ownerCommandLine = [string]$owner.CommandLine
-            if ($ownerCommandLine -like '*phoenixguard*' -or $ownerCommandLine -like '*start_phoenixguard_mobile_api.py*') {
-                [void]$targetProcessIds.Add($ownerPid)
+    foreach ($cleanupPort in @(8793, 18181, 18180, 8787, 3210, 3310)) {
+        Get-NetTCPConnection -LocalPort $cleanupPort -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
+            $ownerPid = [int]$_.OwningProcess
+            if ($ownerPid -ne $currentPid) {
+                if (-not $processRowsAvailable) {
+                    [void]$targetProcessIds.Add($ownerPid)
+                } else {
+                    $owner = $processRows | Where-Object { [int]$_.ProcessId -eq $ownerPid } | Select-Object -First 1
+                    $ownerCommandLine = [string]$owner.CommandLine
+                    if ($ownerCommandLine -like '*phoenixguard*' -or $ownerCommandLine -like '*start_phoenixguard_mobile_api.py*' -or $ownerCommandLine -like '*next*') {
+                        [void]$targetProcessIds.Add($ownerPid)
+                    }
+                }
             }
         }
     }
@@ -323,7 +348,7 @@ Write-Host "  stopped_processes=$($targetProcessIds.Count)"
 Write-Host ""
 Write-Host "Preflight: runtime cleanup"
 if (Test-Path ".\tools\clean_v3_runtime_state.py") {
-    & $pythonPath ".\tools\clean_v3_runtime_state.py" --apply
+    & $pythonPath ".\tools\clean_v3_runtime_state.py" --apply --delete
     if ($LASTEXITCODE -ne 0) {
         throw "Runtime cleanup failed. Launch aborted."
     }

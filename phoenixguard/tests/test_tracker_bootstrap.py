@@ -169,6 +169,55 @@ def test_tracker_status_file_write_failure_does_not_raise(monkeypatch, tmp_path:
     assert list(tmp_path.glob("tracker_status.json.*.tmp")) == []
 
 
+def test_launcher_defaults_to_shadow_execution_without_explicit_live_env(monkeypatch) -> None:
+    control_payloads: list[dict] = []
+
+    def _fake_request_json(
+        base_url: str,
+        path: str,
+        *,
+        method: str = "GET",
+        payload: dict | None = None,
+        timeout: int = 30,
+    ) -> dict:
+        del base_url, timeout
+        if path.endswith("/controls"):
+            assert payload is not None
+            control_payloads.append(payload)
+            return {
+                "session_id": "pocket-live-8788",
+                "status": "running",
+                "tracking_enabled": True,
+                "capture_interval_sec": payload["capture_interval_sec"],
+                "execution_controls": payload,
+                "manual_focus_region": {"enabled": True, "normalized_bbox": [0.1, 0.2, 0.8, 0.9]},
+            }
+        assert method == "GET"
+        return {
+            "session_id": "pocket-live-8788",
+            "status": "ready",
+            "tracking_enabled": False,
+            "manual_focus_region": {"enabled": True, "normalized_bbox": [0.1, 0.2, 0.8, 0.9]},
+        }
+
+    monkeypatch.delenv("PHOENIXGUARD_LIVE_EXECUTION_ENABLED", raising=False)
+    monkeypatch.setattr(tracker_launcher, "_request_json", _fake_request_json)
+
+    tracker_launcher._ensure_session(
+        "http://127.0.0.1:8793",
+        "pocket-live-8788",
+        1.0,
+        True,
+        "Pocket Option",
+        0,
+        None,
+    )
+
+    assert control_payloads
+    assert control_payloads[0]["live_execution_enabled"] is False
+    assert control_payloads[0]["execution_mode"] == "shadow"
+
+
 def test_quarantine_stale_session_on_boot(monkeypatch, tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"

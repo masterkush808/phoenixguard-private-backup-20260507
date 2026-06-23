@@ -30,6 +30,7 @@ from phoenixguard.execution.sequence_context import (
 
 EXECUTION_PACKET_SCHEMA_VERSION = "PG_EXECUTION_PACKET_V3"
 PG_EXECUTION_PACKET_SCHEMA_VERSION = EXECUTION_PACKET_SCHEMA_VERSION
+ALLOWANCE_PACKAGE_SCHEMA_VERSION = "PG_ALLOWANCE_PACKAGE_V1"
 STUDY_PACKET_SCHEMA_VERSION = "PG_MODEL_COUNCIL_STUDY_V3"
 STUDY_PACKET_TYPE = "STUDY_PACKET"
 EXECUTION_PACKET_TYPE = EXECUTION_PACKET_SCHEMA_VERSION
@@ -39,6 +40,7 @@ FRESH_CACHE_STATUS = "fresh"
 VALID_SIDE_VALUES = {member.value for member in Side}
 VALID_EXECUTION_SIDES = {"BUY", "SELL"}
 VALID_PACKET_TYPES = {member.value for member in PacketType}
+VALID_ALLOWANCE_PACKAGE_TYPES = {"SWING", "INTRADAY_ENTER_NOW"}
 MAX_REASONABLE_EPOCH_SECONDS = 10_000_000_000.0
 RUNTIME_INTEGRITY_CATEGORY = "RUNTIME_INTEGRITY"
 RUNTIME_INTEGRITY = RUNTIME_INTEGRITY_CATEGORY
@@ -416,6 +418,7 @@ def build_execution_packet_v3(
     instrument_context: Mapping[str, Any] | None = None,
     symbol_context: Mapping[str, Any] | None = None,
     sequence_context: Mapping[str, Any] | None = None,
+    allowance_package: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_side = normalize_side(side)
     if normalized_side not in VALID_EXECUTION_SIDES:
@@ -457,6 +460,11 @@ def build_execution_packet_v3(
     resolved_symbol = _clean_str(symbol or resolved_instrument_context.get("display_symbol"))
     resolved_timeframe = _clean_str(timeframe or resolved_instrument_context.get("timeframe")).upper()
     council = dict(model_council or {})
+    resolved_allowance_package = dict(allowance_package or council.get("allowance_package") or {})
+    if resolved_allowance_package:
+        resolved_allowance_package.setdefault("schema_version", ALLOWANCE_PACKAGE_SCHEMA_VERSION)
+        resolved_allowance_package.setdefault("execution_authority", EXECUTION_PACKET_SCHEMA_VERSION)
+        council.setdefault("allowance_package", resolved_allowance_package)
     resolved_sequence_context = _mapping(sequence_context)
     if resolved_sequence_context:
         council["sequence_context"] = resolved_sequence_context
@@ -521,7 +529,7 @@ def build_execution_packet_v3(
         "created_epoch_ms": int(round(created * 1000.0)),
         "valid_until_epoch_ms": int(round(valid_until * 1000.0)),
     }
-    return {
+    packet = {
         "schema_version": EXECUTION_PACKET_SCHEMA_VERSION,
         "packet_type": EXECUTION_PACKET_TYPE,
         "packet_id": str(packet_id),
@@ -578,6 +586,12 @@ def build_execution_packet_v3(
         "runtime_model_health": health,
         "block_reason": None,
     }
+    if resolved_allowance_package:
+        packet["allowance_package"] = resolved_allowance_package
+        packet["execution"]["allowance_package_type"] = _clean_str(
+            resolved_allowance_package.get("package_type")
+        )
+    return packet
 
 
 def validate_execution_packet_v3(
@@ -778,6 +792,7 @@ def validate_execution_packet_v3(
 
     execution = _mapping(packet.get("execution"))
     council = _mapping(packet.get("model_council"))
+    allowance_package = _mapping(packet.get("allowance_package") or council.get("allowance_package"))
     health = _mapping(packet.get("runtime_model_health"))
     sequence_context = _mapping(council.get("sequence_context"))
     trade_permission = _mapping(packet.get("trade_permission") or council.get("trade_permission"))
@@ -800,6 +815,16 @@ def validate_execution_packet_v3(
         add("MISSING_EXECUTION", "SCHEMA", "execution object is required.")
     if not council:
         add("MISSING_MODEL_COUNCIL", "SCHEMA", "model_council object is required.")
+    if allowance_package:
+        allowance_schema = _clean_str(allowance_package.get("schema_version"))
+        allowance_type = _enum_text(allowance_package.get("package_type"))
+        allowance_authority = _clean_str(allowance_package.get("execution_authority"))
+        if allowance_schema != ALLOWANCE_PACKAGE_SCHEMA_VERSION:
+            add("INVALID_ALLOWANCE_PACKAGE_SCHEMA", MODEL_COUNCIL, "allowance_package.schema_version is invalid.")
+        if allowance_type not in VALID_ALLOWANCE_PACKAGE_TYPES:
+            add("INVALID_ALLOWANCE_PACKAGE_TYPE", MODEL_COUNCIL, "allowance_package.package_type must be SWING or INTRADAY_ENTER_NOW.")
+        if allowance_authority and allowance_authority != EXECUTION_PACKET_SCHEMA_VERSION:
+            add("INVALID_ALLOWANCE_EXECUTION_AUTHORITY", MODEL_COUNCIL, "allowance_package.execution_authority must be PG_EXECUTION_PACKET_V3.")
     if not sequence_context:
         add("MISSING_SEQUENCE_CONTEXT", MODEL_COUNCIL, "model_council.sequence_context is required.")
     else:

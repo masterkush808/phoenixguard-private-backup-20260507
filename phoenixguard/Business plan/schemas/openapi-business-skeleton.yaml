@@ -1,0 +1,212 @@
+openapi: 3.1.0
+info:
+  title: PhoenixGuard Commercial API Skeleton
+  version: 0.1.0
+  description: >
+    Skeleton API for PhoenixGuard customer onboarding, licensing, connector command
+    delivery, billing webhooks, and admin operations.
+servers:
+  - url: https://api.phoenixguard.example.com
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    connectorToken:
+      type: http
+      scheme: bearer
+      bearerFormat: ConnectorJWT
+    webhookSignature:
+      type: apiKey
+      in: header
+      name: Stripe-Signature
+  schemas:
+    Error:
+      type: object
+      required: [error, request_id]
+      properties:
+        error:
+          type: string
+        request_id:
+          type: string
+    BrokerAccountInput:
+      type: object
+      required: [broker_server, mt4_account_number]
+      properties:
+        broker_server:
+          type: string
+        mt4_account_number:
+          type: string
+        label:
+          type: string
+    DeviceRegisterInput:
+      type: object
+      required: [license_key, device_fingerprint, connector_version]
+      properties:
+        license_key:
+          type: string
+        device_fingerprint:
+          type: string
+        device_label:
+          type: string
+        connector_version:
+          type: string
+    Entitlement:
+      type: object
+      required: [status, license_id]
+      properties:
+        status:
+          type: string
+          enum: [active, trialing, grace, expired, revoked, update_required]
+        license_id:
+          type: string
+        plan_code:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        reason:
+          type: string
+    CommandResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum:
+            - EXECUTION_PACKET
+            - NO_EXECUTION_PACKET
+            - LICENSE_EXPIRED
+            - DEVICE_REVOKED
+            - ACCOUNT_NOT_BOUND
+            - UPDATE_REQUIRED
+            - SERVICE_UNAVAILABLE
+        command:
+          type: object
+          additionalProperties: true
+
+paths:
+  /v1/public/checkout/start:
+    post:
+      summary: Start subscription checkout
+      security: []
+      responses:
+        "200":
+          description: Checkout session created
+
+  /v1/disclosures/accept:
+    post:
+      summary: Accept risk disclosure
+      responses:
+        "204":
+          description: Accepted
+
+  /v1/broker-accounts:
+    post:
+      summary: Add MT4 account binding request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BrokerAccountInput"
+      responses:
+        "201":
+          description: Broker account stored
+
+  /v1/licenses:
+    get:
+      summary: List authenticated customer's licenses
+      responses:
+        "200":
+          description: License list
+
+  /v1/device/register:
+    post:
+      summary: Register connector device
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceRegisterInput"
+      responses:
+        "201":
+          description: Device registered and connector token issued
+
+  /v1/device/heartbeat:
+    post:
+      summary: Record connector heartbeat
+      security:
+        - connectorToken: []
+      responses:
+        "204":
+          description: Heartbeat accepted
+
+  /v1/entitlements/current:
+    get:
+      summary: Resolve current connector entitlement
+      security:
+        - connectorToken: []
+      responses:
+        "200":
+          description: Current entitlement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Entitlement"
+
+  /v1/commands/latest:
+    get:
+      summary: Return latest signed execution command or status
+      security:
+        - connectorToken: []
+      responses:
+        "200":
+          description: Command or non-execution status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandResponse"
+
+  /v1/releases/latest:
+    get:
+      summary: Return latest release allowed for customer
+      responses:
+        "200":
+          description: Release manifest and signed download URL
+
+  /v1/webhooks/stripe:
+    post:
+      summary: Stripe billing webhook
+      security:
+        - webhookSignature: []
+      responses:
+        "200":
+          description: Webhook accepted
+
+  /v1/admin/customers:
+    get:
+      summary: Admin customer search
+      responses:
+        "200":
+          description: Customers
+
+  /v1/admin/licenses/{license_id}/revoke:
+    post:
+      summary: Revoke a license
+      parameters:
+        - name: license_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Revoked
+

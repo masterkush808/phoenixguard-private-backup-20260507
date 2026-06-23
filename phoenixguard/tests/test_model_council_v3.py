@@ -145,8 +145,11 @@ def _second_packet(side: str = "BUY", *, skill_pass: bool = True) -> dict[str, A
 def _high_frequency_snapshot(side: str = "BUY", *, frame_id: int = 201) -> dict[str, Any]:
     snapshot = _strong_snapshot(side, frame_id=frame_id)
     opposite = "SELL" if side == "BUY" else "BUY"
-    snapshot[f"{side.lower()}_score"] = 0.64
+    snapshot[f"{side.lower()}_score"] = 0.86
     snapshot[f"{opposite.lower()}_score"] = 0.08
+    snapshot["zone_liquidity"]["inside_valid_trigger_zone"] = False
+    snapshot["market_context"]["inside_valid_trigger_zone"] = False
+    snapshot["market_context"]["current_location"] = "MIDDLE_SAFE"
     snapshot["timing"] = {
         "state": "READY",
         "side": side,
@@ -197,14 +200,97 @@ def _high_frequency_snapshot(side: str = "BUY", *, frame_id: int = 201) -> dict[
         "candle_execution_side": side.lower(),
         "next_candle_bias": side.lower(),
         "target_horizon_candles": 2,
-        "p_target_before_invalidation": 0.64,
-        "p_trigger_next_1": 0.64,
-        "p_trigger_next_3": 0.64,
+        "p_target_before_invalidation": 0.78,
+        "p_trigger_next_1": 0.72,
+        "p_trigger_next_3": 0.70,
     }
     return snapshot
 
 
-def test_high_frequency_two_candle_lane_publishes_fixed_600s_packet() -> None:
+def _wave_riding_snapshot(
+    side: str = "BUY",
+    *,
+    frame_id: int = 230,
+    strict_high_frequency: bool = False,
+) -> dict[str, Any]:
+    snapshot = _strong_snapshot(side, frame_id=frame_id)
+    opposite = "SELL" if side == "BUY" else "BUY"
+    snapshot[f"{side.lower()}_score"] = 0.88
+    snapshot[f"{opposite.lower()}_score"] = 0.02
+    snapshot["zone_liquidity"]["inside_valid_trigger_zone"] = False
+    snapshot["market_context"].update(
+        {
+            "inside_valid_trigger_zone": False,
+            "current_location": "MIDDLE_SAFE",
+            "opposing_force_distance_ok": True,
+            "is_late_chase": False,
+            "is_steep_angle_break_risk": False,
+            "is_continuation_confirmed": True,
+        }
+    )
+    snapshot["entry_quality"] = "EARLY_WATCH"
+    snapshot["timing"] = {
+        "state": "READY",
+        "side": side,
+        "expiry_seconds": 300,
+        "target_time_text": "00:05:00",
+        "reason": "Current flow has reclaimed with clear path.",
+    }
+    snapshot["current_candle_acceptance"] = {
+        "state": "VALID",
+        "phase": "VALID",
+        "entry_allowed": True,
+        "current_candle_closed": True,
+        "close_progress": 1.0,
+    }
+    snapshot["current_candle_contract"] = dict(snapshot["current_candle_acceptance"])
+    snapshot["execution_timing"] = {
+        "state": "READY",
+        "side": side,
+        "lane": "HIGH_FREQUENCY_TWO_CANDLE" if strict_high_frequency else "WAVE_RIDING_CONTINUATION",
+        "expiry_seconds": 300,
+        "recommended_expiry_seconds": 300,
+        "current_flow_continuation_ready": True,
+        "current_flow_direction_confirmed": True,
+        "clear_path_score": 0.84,
+        "p_target_before_invalidation": 0.78,
+        "p_trigger_next_1": 0.72,
+        "current_flow_conflicts": [],
+    }
+    snapshot["decision_kernel"] = {
+        "trade_mode": "LIVE_MARKET_FLOW",
+        "state": "ACTIVE",
+        "decision": "EXECUTABLE",
+        "dominant_side": side.lower(),
+        "major_trend_side": side.lower(),
+        "candle_execution_side": side.lower(),
+        "next_candle_bias": side.lower(),
+        "p_target_before_invalidation": 0.78,
+        "p_trigger_next_1": 0.72,
+        "p_trigger_next_3": 0.70,
+    }
+    snapshot["latest_signal"] = {"entry_state": "WAIT_FOR_TRIGGER"}
+    snapshot["tracking_summary"] = {"entry_state": "WAIT_FOR_TRIGGER", "local_direction": side}
+    if strict_high_frequency:
+        snapshot["high_frequency_candle_cycle"] = {
+            "enabled": True,
+            "ready": False,
+            "lane": "HIGH_FREQUENCY_TWO_CANDLE",
+            "side": side,
+            "candidate_side": side,
+            "confidence": 0.52,
+            "current_candle_closed": False,
+            "forecast_agreement": False,
+            "targets_future_candle_window": True,
+            "swing_fallback_enabled": False,
+            "expiry_seconds": 600,
+            "horizon_candles": 2,
+            "reason": "Current M5 candle is still open.",
+        }
+    return snapshot
+
+
+def test_high_frequency_two_candle_contributes_to_local_breakdown_without_lane_authority() -> None:
     council = ModelCouncilV3()
     first = council.evaluate(_high_frequency_snapshot("BUY", frame_id=210), now_epoch=NOW)
     result = first if first.get("packet_type") == "PG_EXECUTION_PACKET_V3" else council.evaluate(
@@ -215,11 +301,119 @@ def test_high_frequency_two_candle_lane_publishes_fixed_600s_packet() -> None:
     assert result["packet_type"] == "PG_EXECUTION_PACKET_V3"
     assert result["execution"]["side"] == "BUY"
     assert result["execution"]["expiry_seconds"] == 600
-    assert result["selected_execution_lane"] == "HIGH_FREQUENCY_TWO_CANDLE"
-    hf_cycle = result["model_council"]["execution_lane"]["high_frequency_candle_cycle"]
+    assert result["selected_execution_lane"] == "LOCAL_BREAKDOWN_CONTINUATION"
+    lane = result["model_council"]["execution_lane"]
+    assert "HIGH_FREQUENCY_TWO_CANDLE" not in lane["accepted_lanes"]
+    contribution = lane["high_frequency_contribution"]
+    assert contribution["execution_authority"] is False
+    assert contribution["lane_authority"] is False
+    assert contribution["status"] == "CONTRIBUTING"
+    hf_cycle = contribution["high_frequency_candle_cycle"]
     assert hf_cycle["targets_future_candle_window"] is True
     assert hf_cycle["do_not_render_synthetic_candles"] is True
     assert hf_cycle["uses_unseen_future_candles"] is False
+
+
+def test_high_frequency_two_candle_requires_local_reclaim_confirmation() -> None:
+    snapshot = _high_frequency_snapshot("BUY", frame_id=215)
+    snapshot["local_micro_structure"]["local_side"] = "SELL"
+    snapshot["market_context"]["local_side"] = "SELL"
+    snapshot["market_context"]["is_continuation_confirmed"] = False
+    snapshot["execution_timing"]["current_flow_continuation_ready"] = False
+
+    result = ModelCouncilV3().evaluate(snapshot, now_epoch=NOW)
+    lane = result["model_council"]["execution_lane"]
+
+    assert result["execution"]["enabled"] is False
+    assert lane["accepted"] is False
+    assert lane["high_frequency_contribution"]["lane_authority"] is False
+    assert "LOCAL_RECLAIM_NOT_CONFIRMED" in lane["high_frequency_contribution"]["blockers"]
+
+
+def test_reasoning_wait_for_pullback_blocks_high_frequency_execution(monkeypatch) -> None:
+    def _wait_for_pullback_reasoning(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "arbitration": {
+                "coherence_score": 0.82,
+                "state": "WAIT_FOR_PULLBACK",
+                "side": "BUY",
+            },
+            "final_reasoning_decision": {
+                "side": "BUY",
+                "decision": "WAIT_FOR_PULLBACK",
+                "confidence": 0.82,
+                "play": "TREND_CONTINUATION",
+                "regime": "PULLBACK_PHASE_TRENDING_UP",
+                "price_location": "LOCAL_HIGH",
+                "timing_mode": "ENTER_NOW",
+                "reason": "Macro BUY remains valid, but local pullback has not reclaimed.",
+            },
+            "bad_entry_filter": {},
+            "model_role_outputs": [],
+        }
+
+    monkeypatch.setattr(
+        "phoenixguard.decision.model_council_v3.analyze_reasoning_arbitration_v3",
+        _wait_for_pullback_reasoning,
+    )
+    council = ModelCouncilV3()
+    council.evaluate(_high_frequency_snapshot("BUY", frame_id=216), now_epoch=NOW)
+    result = council.evaluate(_high_frequency_snapshot("BUY", frame_id=217), now_epoch=NOW + 0.5)
+
+    assert result["execution"]["enabled"] is False
+    assert result["packet_type"] == "STUDY_PACKET"
+    assert result["promotion_trace"]["execution_lane"]["accepted"] is True
+    assert result["selected_execution_lane"] == "LOCAL_BREAKDOWN_CONTINUATION"
+    assert result["promotion_trace"]["execution_lane"]["high_frequency_contribution"]["lane_authority"] is False
+    assert result["promotion_trace"]["true_blocker"] == "REASONING_WAIT_FOR_PULLBACK"
+    assert result["promotion_trace"]["reasoning_execution_blocked"] is True
+
+
+def test_intraday_enter_now_package_overrides_soft_pullback_wait(monkeypatch) -> None:
+    def _wait_for_pullback_reasoning(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "arbitration": {
+                "coherence_score": 0.84,
+                "state": "WAIT_FOR_PULLBACK",
+                "side": "BUY",
+            },
+            "final_reasoning_decision": {
+                "side": "BUY",
+                "decision": "WAIT_FOR_PULLBACK",
+                "confidence": 0.84,
+                "play": "TREND_CONTINUATION",
+                "regime": "PULLBACK_RECLAIM",
+                "price_location": "MIDDLE_SAFE",
+                "timing_mode": "ENTER_NOW",
+                "reason": "Swing context is waiting, but the current sniper entry is ready.",
+            },
+            "bad_entry_filter": {
+                "active": False,
+                "class": "NONE",
+                "severity": 0.0,
+                "action": "NONE",
+            },
+            "model_role_outputs": [],
+        }
+
+    monkeypatch.setattr(
+        "phoenixguard.decision.model_council_v3.analyze_reasoning_arbitration_v3",
+        _wait_for_pullback_reasoning,
+    )
+    council = ModelCouncilV3()
+    council.evaluate(_strong_snapshot("BUY", frame_id=222), now_epoch=NOW)
+    packet = council.evaluate(_strong_snapshot("BUY", frame_id=223), now_epoch=NOW + 0.5)
+
+    assert packet["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert packet["selected_execution_lane"] == "SNIPER_ZONE_ENTRY"
+    assert packet["promotion_trace"]["intraday_enter_now_reasoning_override_allowed"] is True
+    assert packet["promotion_trace"]["reasoning_execution_blocked"] is False
+    allowance = packet["allowance_package"]
+    assert allowance["schema_version"] == "PG_ALLOWANCE_PACKAGE_V1"
+    assert allowance["package_type"] == "INTRADAY_ENTER_NOW"
+    assert allowance["allowance_family"] == "INTRADAY"
+    assert allowance["entry_now_allowed"] is True
+    assert allowance["execution_ready"] is True
 
 
 def test_high_frequency_open_candle_does_not_report_false_side_mismatch() -> None:
@@ -242,9 +436,27 @@ def test_high_frequency_open_candle_does_not_report_false_side_mismatch() -> Non
     result = council.evaluate(snapshot, now_epoch=NOW)
     lane = result["model_council"]["execution_lane"]
 
-    assert lane["accepted"] is False
-    assert "CURRENT_M5_CANDLE_NOT_CLOSED" in lane["blockers"]
-    assert "TWO_CANDLE_SIDE_MISMATCH" not in lane["blockers"]
+    contribution = lane["high_frequency_contribution"]
+    assert contribution["lane_authority"] is False
+    assert contribution["status"] == "FORMING"
+    assert "CURRENT_M5_CANDLE_NOT_CLOSED" in contribution["blockers"]
+    assert "TWO_CANDLE_SIDE_MISMATCH" not in contribution["blockers"]
+
+
+def test_strict_high_frequency_failure_does_not_block_structural_lane_selection() -> None:
+    council = ModelCouncilV3()
+    council.evaluate(_wave_riding_snapshot("BUY", frame_id=230, strict_high_frequency=True), now_epoch=NOW)
+    result = council.evaluate(_wave_riding_snapshot("BUY", frame_id=231, strict_high_frequency=True), now_epoch=NOW + 0.5)
+
+    assert result["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert result["execution"]["enabled"] is True
+    assert result["selected_execution_lane"] == "LOCAL_BREAKDOWN_CONTINUATION"
+    lane = result["model_council"]["execution_lane"]
+    contribution = lane["high_frequency_contribution"]
+    assert contribution["lane_authority"] is False
+    assert contribution["status"] == "WAITING"
+    assert "HIGH_FREQUENCY_TWO_CANDLE" not in lane["accepted_lanes"]
+    assert "CURRENT_M5_CANDLE_NOT_CLOSED" in contribution["blockers"]
 
 
 def test_model_council_resets_stability_on_symbol_switch() -> None:
@@ -1007,6 +1219,12 @@ def test_execution_packet_publishes_after_all_release_conditions_pass() -> None:
     assert packet["promotion_trace"]["final_score"] >= packet["promotion_trace"]["threshold"]
     assert packet["promotion_trace"]["lane_accepted"] is True
     assert packet["promotion_trace"]["release_condition"] == "none"
+    allowance = packet["allowance_package"]
+    assert allowance["package_type"] == "INTRADAY_ENTER_NOW"
+    assert allowance["execution_authority"] == "PG_EXECUTION_PACKET_V3"
+    assert allowance["execution_ready"] is True
+    assert packet["model_council"]["allowance_package"]["package_type"] == "INTRADAY_ENTER_NOW"
+    assert packet["promotion_trace"]["allowance_package"]["package_type"] == "INTRADAY_ENTER_NOW"
 
 
 def test_true_blocker_reported_not_generic_late_chase_reason() -> None:
@@ -1070,7 +1288,7 @@ def test_timing_wait_blocks_execution_packet() -> None:
     assert result["study_packet"]["timing_decision"]["entry_now_allowed"] is False
 
 
-def test_local_breakdown_lane_can_execute_without_sniper_zone() -> None:
+def test_local_breakdown_lane_against_global_needs_reversal_proof() -> None:
     council = ModelCouncilV3()
     first = _strong_snapshot("SELL", frame_id=100)
     second = _strong_snapshot("SELL", frame_id=101)
@@ -1096,10 +1314,12 @@ def test_local_breakdown_lane_can_execute_without_sniper_zone() -> None:
     assert council.evaluate(first, now_epoch=NOW)["execution"]["enabled"] is False
     packet = council.evaluate(second, now_epoch=NOW + 0.5)
 
-    assert packet["execution"]["enabled"] is True
-    assert packet["execution"]["side"] == "SELL"
+    assert packet["execution"]["enabled"] is False
+    assert packet["packet_type"] == "STUDY_PACKET"
     assert packet["selected_execution_lane"] == "LOCAL_BREAKDOWN_CONTINUATION"
     assert packet["promotion_trace"]["lane_accepted"] is True
+    assert packet["promotion_trace"]["reasoning_execution_blocked"] is True
+    assert packet["promotion_trace"]["true_blocker"] == "REASONING_WATCH"
     assert packet["promotion_trace"]["permission_override_allowed"] is True
     assert packet["promotion_trace"]["raw_timing_ready"] is False
     assert packet["promotion_trace"]["timing_ready"] is True
@@ -1137,6 +1357,297 @@ def test_execution_timing_current_flow_feeds_local_breakdown_lane() -> None:
     assert packet["promotion_trace"]["current_candle_acceptance"]["entry_allowed"] is True
 
 
+def test_wave_riding_lane_publishes_when_current_flow_has_clear_path() -> None:
+    council = ModelCouncilV3()
+    first = _strong_snapshot("SELL", frame_id=100)
+    second = _strong_snapshot("SELL", frame_id=101)
+    for snapshot in (first, second):
+        snapshot["sell_score"] = 0.88
+        snapshot["buy_score"] = 0.02
+        snapshot["zone_liquidity"]["inside_valid_trigger_zone"] = False
+        snapshot["market_context"].update(
+            {
+                "inside_valid_trigger_zone": False,
+                "current_location": "MIDDLE_SAFE",
+                "opposing_force_distance_ok": True,
+            }
+        )
+        snapshot["entry_quality"] = "EARLY_WATCH"
+        snapshot["execution_timing"] = {
+            "state": "READY",
+            "side": "SELL",
+            "lane": "WAVE_RIDING_CONTINUATION",
+            "expiry_seconds": 300,
+            "recommended_expiry_seconds": 300,
+            "current_flow_continuation_ready": True,
+            "current_flow_direction_confirmed": True,
+            "clear_path_score": 0.84,
+            "p_target_before_invalidation": 0.78,
+            "p_trigger_next_1": 0.72,
+            "current_flow_conflicts": [],
+        }
+        snapshot["latest_signal"] = {"entry_state": "WAIT_FOR_TRIGGER"}
+        snapshot["tracking_summary"] = {"entry_state": "WAIT_FOR_TRIGGER", "local_direction": "SELL"}
+
+    council.evaluate(first, now_epoch=NOW)
+    packet = council.evaluate(second, now_epoch=NOW + 0.5)
+
+    assert packet["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert packet["execution"]["enabled"] is True
+    assert packet["selected_execution_lane"] == "WAVE_RIDING_CONTINUATION"
+    wave = packet["promotion_trace"]["wave_context"]
+    assert wave["continuation_ready"] is True
+    assert wave["clear_path_ready"] is True
+    assert wave["phase"] == "CLEAR_PATH_CONTINUATION"
+
+
+def test_clean_wave_riding_overrides_soft_reasoning_pullback_wait(monkeypatch) -> None:
+    def _soft_pullback_reasoning(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "arbitration": {
+                "coherence_score": 0.84,
+                "state": "WAIT_FOR_PULLBACK",
+                "side": "BUY",
+            },
+            "final_reasoning_decision": {
+                "side": "BUY",
+                "decision": "WAIT_FOR_PULLBACK",
+                "confidence": 0.84,
+                "play": "TREND_CONTINUATION",
+                "regime": "PULLBACK_RECLAIM",
+                "price_location": "MIDDLE_SAFE",
+                "timing_mode": "ENTER_NOW",
+                "reason": "Macro pullback wait is soft; current wave has reclaimed.",
+            },
+            "bad_entry_filter": {
+                "active": False,
+                "class": "NONE",
+                "severity": 0.0,
+                "action": "NONE",
+            },
+            "model_role_outputs": [],
+        }
+
+    monkeypatch.setattr(
+        "phoenixguard.decision.model_council_v3.analyze_reasoning_arbitration_v3",
+        _soft_pullback_reasoning,
+    )
+    council = ModelCouncilV3()
+    council.evaluate(_wave_riding_snapshot("BUY", frame_id=240), now_epoch=NOW)
+    packet = council.evaluate(_wave_riding_snapshot("BUY", frame_id=241), now_epoch=NOW + 0.5)
+
+    assert packet["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert packet["selected_execution_lane"] == "WAVE_RIDING_CONTINUATION"
+    assert packet["promotion_trace"]["wave_reasoning_override_allowed"] is True
+    assert packet["promotion_trace"]["reasoning_execution_blocked"] is False
+
+
+def test_wave_riding_does_not_override_hard_buy_high_bad_entry(monkeypatch) -> None:
+    def _buy_high_reasoning(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "arbitration": {
+                "coherence_score": 0.83,
+                "state": "WAIT_FOR_PULLBACK",
+                "side": "BUY",
+            },
+            "final_reasoning_decision": {
+                "side": "BUY",
+                "decision": "WAIT_FOR_PULLBACK",
+                "confidence": 0.83,
+                "play": "TREND_CONTINUATION",
+                "regime": "BULLISH_IMPULSE",
+                "price_location": "LOCAL_HIGH",
+                "timing_mode": "ENTER_NOW",
+                "reason": "Price is high after expansion.",
+            },
+            "bad_entry_filter": {
+                "active": True,
+                "class": "BUY_HIGH_AFTER_IMPULSE",
+                "severity": 0.82,
+                "action": "WAIT_FOR_PULLBACK",
+            },
+            "model_role_outputs": [],
+        }
+
+    monkeypatch.setattr(
+        "phoenixguard.decision.model_council_v3.analyze_reasoning_arbitration_v3",
+        _buy_high_reasoning,
+    )
+    council = ModelCouncilV3()
+    council.evaluate(_wave_riding_snapshot("BUY", frame_id=242), now_epoch=NOW)
+    result = council.evaluate(_wave_riding_snapshot("BUY", frame_id=243), now_epoch=NOW + 0.5)
+
+    assert result["packet_type"] == "STUDY_PACKET"
+    assert result["execution"]["enabled"] is False
+    assert result["promotion_trace"]["execution_lane"]["accepted"] is True
+    assert result["promotion_trace"]["wave_reasoning_override_allowed"] is False
+    assert result["promotion_trace"]["true_blocker"] == "REASONING_WAIT_FOR_PULLBACK"
+    assert result["promotion_trace"]["hard_bad_entry_class_active"] is True
+
+
+def _wave_context_from_result(result: dict[str, Any]) -> dict[str, Any]:
+    trace = result.get("promotion_trace") or {}
+    execution_lane = trace.get("execution_lane") or {}
+    return trace.get("wave_context") or execution_lane.get("wave_context") or {}
+
+
+def _apply_sell_low_support_risk(snapshot: dict[str, Any], *, role_flip: bool = False) -> None:
+    snapshot["market_context"].update(
+        {
+            "current_location": "SUPPORT_LOW_DEMAND",
+            "history_area_label": "studied_low_extreme",
+            "history_area_risk": 0.91,
+            "history_extension_against_side": not role_flip,
+            "history_extension_stretched": not role_flip,
+        }
+    )
+    snapshot["zone_liquidity"].update(
+        {
+            "zone_type": "support",
+            "inside_valid_trigger_zone": False,
+        }
+    )
+    snapshot["execution_timing"].update(
+        {
+            "history_area_label": "studied_low_extreme",
+            "history_area_risk": 0.91,
+            "history_extension_against_side": not role_flip,
+            "history_extension_stretched": not role_flip,
+            "favorable_history_rejection": False,
+            "entry_area_relation": "above_price",
+            "entry_area_near": True,
+            "entry_area_score": 1.0,
+            "breakout_confirmation": role_flip,
+            "break_and_retest_confirmed": role_flip,
+            "retest_confirmed": role_flip,
+            "current_flow_direction_confirmed": True,
+            "p_target_before_invalidation": 0.78,
+            "p_trigger_next_1": 0.75,
+        }
+    )
+    snapshot["smart_money_context"] = {
+        "breakout_confirmation": role_flip,
+        "role_flip_confirmed": role_flip,
+        "break_and_retest_confirmed": role_flip,
+    }
+
+
+def _apply_buy_high_resistance_risk(snapshot: dict[str, Any]) -> None:
+    snapshot["market_context"].update(
+        {
+            "current_location": "RESISTANCE_HIGH_SUPPLY",
+            "history_area_label": "studied_high_extreme",
+            "history_area_risk": 0.91,
+            "history_extension_against_side": True,
+            "history_extension_stretched": True,
+        }
+    )
+    snapshot["zone_liquidity"].update(
+        {
+            "zone_type": "resistance",
+            "inside_valid_trigger_zone": False,
+        }
+    )
+    snapshot["execution_timing"].update(
+        {
+            "history_area_label": "studied_high_extreme",
+            "history_area_risk": 0.91,
+            "history_extension_against_side": True,
+            "history_extension_stretched": True,
+            "favorable_history_reclaim": False,
+            "entry_area_relation": "below_price",
+            "entry_area_near": True,
+            "entry_area_score": 1.0,
+            "p_target_before_invalidation": 0.78,
+            "p_trigger_next_1": 0.75,
+        }
+    )
+
+
+def test_model_council_blocks_sell_low_support_without_role_flip() -> None:
+    council = ModelCouncilV3()
+    first = _wave_riding_snapshot("SELL", frame_id=244)
+    second = _wave_riding_snapshot("SELL", frame_id=245)
+    for snapshot in (first, second):
+        _apply_sell_low_support_risk(snapshot)
+
+    council.evaluate(first, now_epoch=NOW)
+    result = council.evaluate(second, now_epoch=NOW + 0.5)
+    wave = _wave_context_from_result(result)
+
+    assert result["packet_type"] == "STUDY_PACKET"
+    assert result["execution"]["enabled"] is False
+    assert wave["directional_location_ok"] is False
+    assert wave["sell_low_history_risk"] is True
+    assert "SELL_LOW_SUPPORT_LOCATION_GUARD" in wave["blockers"]
+
+
+def test_model_council_blocks_buy_high_resistance_without_role_flip() -> None:
+    council = ModelCouncilV3()
+    first = _wave_riding_snapshot("BUY", frame_id=246)
+    second = _wave_riding_snapshot("BUY", frame_id=247)
+    for snapshot in (first, second):
+        _apply_buy_high_resistance_risk(snapshot)
+
+    council.evaluate(first, now_epoch=NOW)
+    result = council.evaluate(second, now_epoch=NOW + 0.5)
+    wave = _wave_context_from_result(result)
+
+    assert result["packet_type"] == "STUDY_PACKET"
+    assert result["execution"]["enabled"] is False
+    assert wave["directional_location_ok"] is False
+    assert wave["buy_high_history_risk"] is True
+    assert "BUY_HIGH_RESISTANCE_LOCATION_GUARD" in wave["blockers"]
+
+
+def test_model_council_allows_confirmed_role_flip_through_support(monkeypatch) -> None:
+    def _execute_reasoning(*args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "arbitration": {
+                "coherence_score": 0.86,
+                "state": "EXECUTE",
+                "side": "SELL",
+            },
+            "final_reasoning_decision": {
+                "side": "SELL",
+                "decision": "EXECUTE",
+                "confidence": 0.86,
+                "play": "BEARISH_ROLE_FLIP_CONTINUATION",
+                "regime": "SUPPORT_BROKEN_RETESTED_AS_RESISTANCE",
+                "price_location": "ROLE_FLIP_RETEST",
+                "timing_mode": "ENTER_NOW",
+                "reason": "Former support has broken and retested as resistance.",
+            },
+            "bad_entry_filter": {
+                "active": False,
+                "class": "NONE",
+                "severity": 0.0,
+                "action": "NONE",
+            },
+            "model_role_outputs": [],
+        }
+
+    monkeypatch.setattr(
+        "phoenixguard.decision.model_council_v3.analyze_reasoning_arbitration_v3",
+        _execute_reasoning,
+    )
+    council = ModelCouncilV3()
+    first = _wave_riding_snapshot("SELL", frame_id=248)
+    second = _wave_riding_snapshot("SELL", frame_id=249)
+    for snapshot in (first, second):
+        _apply_sell_low_support_risk(snapshot, role_flip=True)
+
+    council.evaluate(first, now_epoch=NOW)
+    result = council.evaluate(second, now_epoch=NOW + 0.5)
+    wave = _wave_context_from_result(result)
+
+    assert wave["breakout_role_flip_ready"] is True
+    assert wave["directional_location_ok"] is True
+    assert "SELL_LOW_SUPPORT_LOCATION_GUARD" not in wave["blockers"]
+    assert result["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert result["execution"]["enabled"] is True
+
+
 def test_score_above_threshold_without_lane_stays_study_packet() -> None:
     council = ModelCouncilV3()
     first = _strong_snapshot("SELL", frame_id=100)
@@ -1164,7 +1675,7 @@ def test_score_above_threshold_without_lane_stays_study_packet() -> None:
     assert result["promotion_trace"]["missed_opportunity"]["future_move_confirmed"] is None
 
 
-def test_aligned_buy_structure_overrides_stale_sell_pullback_reload() -> None:
+def test_aligned_buy_structure_needs_wave_proof_before_stale_sell_reload() -> None:
     council = ModelCouncilV3()
     snapshot = _strong_snapshot("BUY", frame_id=101)
     snapshot["buy_score"] = 0.0
@@ -1193,12 +1704,14 @@ def test_aligned_buy_structure_overrides_stale_sell_pullback_reload() -> None:
 
     packet = council.evaluate(snapshot, now_epoch=NOW)
 
-    assert packet["packet_type"] == "PG_EXECUTION_PACKET_V3"
-    assert packet["execution"]["enabled"] is True
-    assert packet["execution"]["side"] == "BUY"
+    assert packet["packet_type"] == "STUDY_PACKET"
+    assert packet["execution"]["enabled"] is False
     assert packet["selected_execution_lane"] == "LOCAL_BREAKDOWN_CONTINUATION"
     assert packet["promotion_trace"]["stale_dominant_overridden"] is True
     assert packet["promotion_trace"]["execution_lane"]["reversal_capture_mature"] is True
+    assert packet["promotion_trace"]["execution_lane"]["accepted"] is False
+    assert "WAVE_CONTEXT_NOT_READY" in packet["promotion_trace"]["execution_lane"]["blockers"]
+    assert packet["promotion_trace"]["wave_context"]["phase"] == "MID_RANGE_TIMING_ONLY"
 
 
 def test_mature_high_score_directional_flow_publishes_momentum_packet() -> None:
@@ -1301,12 +1814,15 @@ def test_execution_packet_v3_contains_required_fields() -> None:
         "trade_candidate_queue",
         "council_debate",
         "promotion_trace",
+        "allowance_package",
         "block_reason",
     ):
         assert field in packet
     assert packet["schema_version"] == PG_EXECUTION_PACKET_SCHEMA_VERSION
     assert packet["packet_type"] == "PG_EXECUTION_PACKET_V3"
     assert packet["execution"]["amount_action"] == "DO_NOT_CHANGE_AMOUNT"
+    assert packet["execution"]["allowance_package_type"] == "INTRADAY_ENTER_NOW"
+    assert packet["allowance_package"]["selected_lane"] == packet["selected_execution_lane"]
     assert packet["execution"]["time_sequence"]["target_text"] == "00:05:00"
     assert packet["model_council"]["contributors_are_diagnostic"] is True
     assert packet["promotion_trace"]["promotion_result"] == "EXECUTABLE_PACKET_CREATED"

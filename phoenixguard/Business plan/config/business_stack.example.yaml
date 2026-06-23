@@ -1,0 +1,62 @@
+# PhoenixGuard Commercial Stack Example
+
+environment: production
+
+domains:
+  public_site: https://phoenixguard.example.com
+  api: https://api.phoenixguard.example.com
+  admin: https://admin.phoenixguard.example.com
+
+security:
+  packet_signature_algorithm: Ed25519
+  command_ttl_ms: 2000
+  max_clock_skew_sec: 3
+  require_disclosure_acceptance: true
+  require_active_subscription: true
+  require_broker_account_binding: true
+  require_device_binding: true
+  fail_closed_on_entitlement_error: true
+
+cloudflare:
+  tunnel_enabled: true
+  waf_enabled: true
+  rate_limiting_enabled: true
+  admin_access_required: true
+
+payments:
+  provider: stripe
+  webhook_signature_required: true
+  grace_period_days: 3
+  revoke_on_chargeback: true
+
+email:
+  provider: resend
+  signed_download_link_ttl_minutes: 60
+  from_address: support@phoenixguard.example.com
+
+storage:
+  database: postgres
+  cache_queue: redis_or_nats
+  object_storage: s3_compatible
+  secrets: cloud_secret_manager
+
+license:
+  max_devices_standard: 1
+  max_devices_pro: 2
+  account_binding_fields:
+    - mt4_account_number_hash
+    - broker_server_hash
+
+connector:
+  heartbeat_interval_sec: 30
+  command_poll_interval_ms: 200
+  status_file_names:
+    command: PhoenixGuard/mt4_execution_command.json
+    status: PhoenixGuard/mt4_bridge_status.json
+
+release_channels:
+  stable:
+    auto_update_required: false
+  security:
+    auto_update_required: true
+
