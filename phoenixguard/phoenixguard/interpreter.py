@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 
-INTERPRETER_SCHEMA = [
+INTERPRETER_SCHEMA: list[str] = [
     "schema_version",
     "setup_type",
     "structure_summary",
@@ -54,7 +54,7 @@ def _clip01(value: Any, default: float = 0.0) -> float:
 
 def _safe_mapping(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
-        return {str(key): item for key, item in value.items()}
+        return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
     return {}
 
 
@@ -109,7 +109,7 @@ def _as_text_list(value: Any) -> list[str]:
         return [text] if text else []
     if isinstance(value, list):
         items: list[str] = []
-        for row in value:
+        for row in cast(list[Any], value):
             text = str(row or "").strip()
             if text:
                 items.append(text)
@@ -226,7 +226,7 @@ def interpret(fusion: Mapping[str, Any]) -> dict[str, Any]:
         f"Plan: {trade_plan}",
     ]
 
-    machine_output = {
+    machine_output: dict[str, Any] = {
         "schema_version": "2.0",
         "setup_type": setup_type,
         "structure_summary": structure_summary,

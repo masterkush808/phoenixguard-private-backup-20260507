@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence, cast
 
 
 INSTRUMENT_CONTEXT_LOCK_SCHEMA_VERSION = "INSTRUMENT_CONTEXT_LOCK_V1"
@@ -85,7 +85,9 @@ class InstrumentContextValidation:
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
 
 
 def _clean_str(value: Any) -> str:
@@ -154,21 +156,30 @@ def _first_bool(*values: Any) -> bool | None:
 
 
 def _rect_tuple(value: Any) -> tuple[int, int, int, int] | None:
-    if isinstance(value, Mapping):
-        if all(key in value for key in ("left", "top", "right", "bottom")):
+    mapping_value = _mapping(value)
+    if mapping_value:
+        if all(key in mapping_value for key in ("left", "top", "right", "bottom")):
             try:
                 return (
-                    int(float(value["left"])),
-                    int(float(value["top"])),
-                    int(float(value["right"])),
-                    int(float(value["bottom"])),
+                    int(float(mapping_value["left"])),
+                    int(float(mapping_value["top"])),
+                    int(float(mapping_value["right"])),
+                    int(float(mapping_value["bottom"])),
                 )
             except (TypeError, ValueError):
                 return None
-        value = value.get("rect") or value.get("bbox") or value.get("window_rect")
-    if isinstance(value, (list, tuple)) and len(value) == 4:
+        value = mapping_value.get("rect") or mapping_value.get("bbox") or mapping_value.get("window_rect")
+    if isinstance(value, (list, tuple)):
+        rect_items = cast(Sequence[Any], value)
+        if len(rect_items) != 4:
+            return None
         try:
-            return tuple(int(float(item)) for item in value)  # type: ignore[return-value]
+            return (
+                int(float(rect_items[0])),
+                int(float(rect_items[1])),
+                int(float(rect_items[2])),
+                int(float(rect_items[3])),
+            )
         except (TypeError, ValueError):
             return None
     return None
@@ -726,7 +737,7 @@ def build_instrument_context(
     viewport_hash_locked = bool(viewport_hash and viewport_hash_stable)
     broker_surface_hash_locked = bool(broker_surface_hash and broker_surface_hash_stable)
     calibration_layout_locked = bool(calibration_layout_id and calibration_layout_match)
-    v2_evidence = {
+    v2_evidence: dict[str, Any] = {
         "window_handle_stable": window_handle_locked,
         "window_rect_stable": window_rect_locked,
         "window_rect_tolerance_px": int(rect_tolerance),

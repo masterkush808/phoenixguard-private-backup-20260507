@@ -1,4 +1,6 @@
 from __future__ import annotations
+from pathlib import Path
+import pytest
 
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -24,7 +26,7 @@ def test_normalize_frontend_heartbeat_requires_session() -> None:
         raise AssertionError("expected missing session_id to fail")
 
 
-def test_record_and_load_frontend_heartbeat(tmp_path) -> None:
+def test_record_and_load_frontend_heartbeat(tmp_path: Path) -> None:
     heartbeat = record_frontend_heartbeat(
         {
             "session_id": "pocket-live-8788",
@@ -47,7 +49,7 @@ def test_record_and_load_frontend_heartbeat(tmp_path) -> None:
     assert loaded["overlay_count"] == 4
 
 
-def test_record_frontend_heartbeat_uses_unique_temp_files_under_concurrency(tmp_path) -> None:
+def test_record_frontend_heartbeat_uses_unique_temp_files_under_concurrency(tmp_path: Path) -> None:
     def write_heartbeat(frame_id: int) -> int:
         heartbeat = record_frontend_heartbeat(
             {
@@ -72,8 +74,8 @@ def test_record_frontend_heartbeat_uses_unique_temp_files_under_concurrency(tmp_
     assert not list(tmp_path.glob("*.tmp"))
 
 
-def test_record_frontend_heartbeat_falls_back_to_memory_when_replace_is_locked(tmp_path, monkeypatch) -> None:
-    def locked_replace(_source, _target) -> None:
+def test_record_frontend_heartbeat_falls_back_to_memory_when_replace_is_locked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def locked_replace(_source: object, _target: object) -> None:
         raise PermissionError("simulated locked heartbeat target")
 
     monkeypatch.setattr(realtime_sync_v3.os, "replace", locked_replace)
@@ -99,7 +101,7 @@ def test_record_frontend_heartbeat_falls_back_to_memory_when_replace_is_locked(t
     assert loaded["overlay_count"] == 7
 
 
-def test_build_frontend_sync_status_flags_mismatch(tmp_path) -> None:
+def test_build_frontend_sync_status_flags_mismatch(tmp_path: Path) -> None:
     heartbeat = record_frontend_heartbeat(
         {
             "session_id": "s1",
@@ -131,7 +133,7 @@ def test_build_frontend_sync_status_flags_mismatch(tmp_path) -> None:
     assert any("overlay_count mismatch" in item for item in status["mismatches"])
 
 
-def test_visual_realtime_health_passes_when_artifacts_and_sync_match(tmp_path) -> None:
+def test_visual_realtime_health_passes_when_artifacts_and_sync_match(tmp_path: Path) -> None:
     heartbeat = record_frontend_heartbeat(
         {
             "session_id": "s2",
@@ -165,7 +167,7 @@ def test_visual_realtime_health_passes_when_artifacts_and_sync_match(tmp_path) -
     assert health["ok"] is True
 
 
-def test_prune_frontend_heartbeats(tmp_path) -> None:
+def test_prune_frontend_heartbeats(tmp_path: Path) -> None:
     record_frontend_heartbeat(
         {
             "session_id": "old",

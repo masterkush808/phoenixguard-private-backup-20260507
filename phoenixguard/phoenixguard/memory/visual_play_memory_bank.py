@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 VISUAL_PLAY_MEMORY_BANK_VERSION = "PG_VISUAL_PLAY_MEMORY_BANK_V3"
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(item) for item in value if isinstance(item, Mapping)]
+    return [_mapping(item) for item in cast(Sequence[Any], value) if isinstance(item, Mapping)]
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -151,7 +153,7 @@ class VisualPlayMemoryBank:
             scored.append((_clip01(score), memory))
 
         scored.sort(key=lambda item: item[0], reverse=True)
-        matches = []
+        matches: list[dict[str, Any]] = []
         buy_weight = 0.0
         sell_weight = 0.0
         failed_weight = 0.0
@@ -167,7 +169,7 @@ class VisualPlayMemoryBank:
                 failed_weight += score
 
         memory_vote = "BUY" if buy_weight > sell_weight + 1e-6 else "SELL" if sell_weight > buy_weight + 1e-6 else "HOLD"
-        top_similarity = matches[0]["similarity"] if matches else 0.0
+        top_similarity = _float(matches[0].get("similarity"), 0.0) if matches else 0.0
         adjustment = 0.0
         if memory_vote == resolved_side and top_similarity >= 0.62:
             adjustment = min(0.08, 0.025 + 0.055 * top_similarity)
@@ -206,7 +208,7 @@ def _memory_rows_from_snapshot(snapshot: Mapping[str, Any]) -> list[dict[str, An
     if best_matches:
         return best_matches
     if history:
-        row = {
+        row: dict[str, Any] = {
             "memory_id": history.get("best_match_id") or history.get("best_match_setup") or "history_best_match",
             "setup_type": history.get("best_match_setup"),
             "side": history.get("side") or history.get("dominant_side"),
@@ -229,7 +231,7 @@ def analyze_visual_play_memory_confirmation(
     price_location: Mapping[str, Any],
     top_k: int = 5,
 ) -> dict[str, Any]:
-    source = dict(snapshot or {})
+    source = _mapping(snapshot)
     bank = VisualPlayMemoryBank.from_rows(_memory_rows_from_snapshot(source))
     return bank.confirm(
         side=side,

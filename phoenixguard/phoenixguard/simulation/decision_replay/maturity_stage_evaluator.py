@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from phoenixguard.decision.model_council_v3 import MATURITY_STAGES
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
 
 
 def evaluate_maturity_stage(payload: Mapping[str, Any]) -> dict[str, Any]:

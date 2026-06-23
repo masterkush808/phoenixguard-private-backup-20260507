@@ -95,6 +95,10 @@ class ScenarioNode:
         return self.depth < other.depth
 
 
+def _empty_paint_annotations() -> list[dict[str, Any]]:
+    return []
+
+
 @dataclass
 class ScenarioPrediction:
     """Top-ranked scenario prediction with visualization metadata."""
@@ -102,7 +106,7 @@ class ScenarioPrediction:
     rank: int
     probability: float
     projected_candles: list[CandleState]
-    paint_annotations: list[dict[str, Any]] = field(default_factory=list)
+    paint_annotations: list[dict[str, Any]] = field(default_factory=_empty_paint_annotations)
     summary: str = ""
 
     def to_paint_dict(self) -> dict[str, Any]:
@@ -269,8 +273,6 @@ class A_StarScenarioPredictor:
                     memory_bias,
                     self.max_depth - node.depth - 1,
                 )
-                trans_prob = transition_probs.get(transition_type.value, 0.25)
-
                 child = ScenarioNode(
                     candle_sequence=new_seq,
                     depth=node.depth + 1,
@@ -394,8 +396,6 @@ class A_StarScenarioPredictor:
 
         # Favor scenarios with high forecast confidence
         path_conf = forecast_data.get("path_confidence", 0.5)
-        setup_quality = forecast_data.get("structure_trade_ready", 0.0)
-
         # Remaining cost proportional to depth & alignment with memory
         memory_alignment = memory_bias.get("alignment", 0.5)
         heur = (1.0 - path_conf * memory_alignment) * remaining_depth

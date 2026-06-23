@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 
 import sys
 from pathlib import Path
@@ -11,7 +12,7 @@ if str(_REPO) not in sys.path:
 from phoenixguard.training import ensemble_cv_models as training_mod
 
 
-def test_timm_backbone_respects_pretrained_flag(monkeypatch) -> None:
+def test_timm_backbone_respects_pretrained_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, object]] = []
 
     class _FakeModel:

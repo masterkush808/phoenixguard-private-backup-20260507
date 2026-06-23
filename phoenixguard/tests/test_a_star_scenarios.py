@@ -118,9 +118,6 @@ Integration Checkpoints:
 """
 from __future__ import annotations
 
-import json
-from typing import Any
-
 
 def demo_basic_scenario_prediction():
     """

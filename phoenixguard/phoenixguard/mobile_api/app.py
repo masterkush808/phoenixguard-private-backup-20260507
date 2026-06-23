@@ -1,4 +1,3 @@
-# pyright: reportUnusedFunction=none
 from __future__ import annotations
 
 import json
@@ -41,18 +40,17 @@ from phoenixguard.voice.live import (
 )
 
 from phoenixguard.vision.market_registry import (
-    _active_objects_from_entries,
+    active_objects_from_entries,
     load_recent_market_objects,
-    promote_lifecycle,
     query_recent_active_objects,
 )
 from phoenixguard.vision.renderer import render_overlays_on_chart
 from phoenixguard.vision.v3_overlay_contract import normalize_view_mode
 
 from .live_state_v3 import (
-    _compact_session_payload,
     build_live_state_v3,
     build_live_state_v3_from_tracker_service,
+    compact_session_payload,
 )
 from .model_strength import (
     model_strength_settings_to_execution_controls,
@@ -68,8 +66,8 @@ from .realtime_sync_v3 import (
 from .service import MobileApiService
 from .window_tracker import (
     ContinuousWindowTrackerService,
-    _model_council_packet_from_payload,
-    _model_council_study_packet_from_payload,
+    model_council_packet_from_payload,
+    model_council_study_packet_from_payload,
 )
 
 
@@ -102,41 +100,37 @@ _WINDOW_TRACKER_BRAND_ASSETS = frozenset(
 _DEFAULT_WINDOW_TRACKER_DASHBOARD_SESSION_ID = "pocket-live-8788"
 _SHOOTER_HANDSHAKE_PATH = Path(__file__).resolve().parents[2] / ".codex_runtime" / "shooter_handshake.json"
 _PUBLISHED_PACKET_FALLBACK_TTL_SEC = 8.0
-try:
-    _LIVE_STATE_V3_CACHE_TTL_SEC = max(
-        0.0,
-        float(os.getenv("PHOENIXGUARD_LIVE_STATE_CACHE_TTL_SEC", "5.0") or "5.0"),
-    )
-except ValueError:
-    _LIVE_STATE_V3_CACHE_TTL_SEC = 5.0
-try:
-    _LIVE_STATE_REGISTRY_CACHE_TTL_SEC = max(
-        0.0,
-        float(os.getenv("PHOENIXGUARD_LIVE_STATE_REGISTRY_CACHE_TTL_SEC", "5.0") or "5.0"),
-    )
-except ValueError:
-    _LIVE_STATE_REGISTRY_CACHE_TTL_SEC = 5.0
-try:
-    _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC = max(
-        0.0,
-        float(os.getenv("PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC", "300.0") or "300.0"),
-    )
-except ValueError:
-    _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC = 300.0
-try:
-    _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC = max(
-        0.0,
-        float(os.getenv("PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC", "0.85") or "0.85"),
-    )
-except ValueError:
-    _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC = 0.85
-try:
-    _LIVE_STATE_REGISTRY_MAX_LINES = max(
-        50,
-        int(float(os.getenv("PHOENIXGUARD_LIVE_STATE_REGISTRY_MAX_LINES", "2000") or "2000")),
-    )
-except ValueError:
-    _LIVE_STATE_REGISTRY_MAX_LINES = 2000
+
+
+def _env_float_at_least(name: str, default: float, minimum: float) -> float:
+    raw = os.getenv(name, str(default)) or str(default)
+    try:
+        return max(float(minimum), float(raw))
+    except ValueError:
+        return float(default)
+
+
+def _env_int_at_least(name: str, default: int, minimum: int) -> int:
+    raw = os.getenv(name, str(default)) or str(default)
+    try:
+        return max(int(minimum), int(float(raw)))
+    except ValueError:
+        return int(default)
+
+
+_LIVE_STATE_V3_CACHE_TTL_SEC = _env_float_at_least("PHOENIXGUARD_LIVE_STATE_CACHE_TTL_SEC", 5.0, 0.0)
+_LIVE_STATE_REGISTRY_CACHE_TTL_SEC = _env_float_at_least("PHOENIXGUARD_LIVE_STATE_REGISTRY_CACHE_TTL_SEC", 5.0, 0.0)
+_COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC = _env_float_at_least(
+    "PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC",
+    300.0,
+    0.0,
+)
+_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC = _env_float_at_least(
+    "PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC",
+    0.85,
+    0.0,
+)
+_LIVE_STATE_REGISTRY_MAX_LINES = _env_int_at_least("PHOENIXGUARD_LIVE_STATE_REGISTRY_MAX_LINES", 2000, 50)
 _LIVE_STATE_V3_CACHE_LOCK = threading.Lock()
 _LIVE_STATE_V3_CACHE: dict[tuple[str, str, str, bool], tuple[float, dict[str, object]]] = {}
 _COMPACT_LIVE_STATE_RESPONSE_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, object]]] = {}
@@ -148,6 +142,27 @@ _NO_STORE_ARTIFACT_HEADERS = {
     "Pragma": "no-cache",
     "Expires": "0",
 }
+_EMPTY_OBJECT_MAPPING: Mapping[str, object] = {}
+
+
+def _as_mapping(value: object) -> Mapping[str, object]:
+    return cast(Mapping[str, object], value) if isinstance(value, Mapping) else _EMPTY_OBJECT_MAPPING
+
+
+def _as_object_mapping(value: object) -> Mapping[str, object]:
+    return cast(Mapping[str, object], value) if isinstance(value, Mapping) else _EMPTY_OBJECT_MAPPING
+
+
+def _as_object_dict(value: object) -> dict[str, object] | None:
+    return cast(dict[str, object], value) if isinstance(value, dict) else None
+
+
+def _as_sequence(value: object) -> Sequence[Any]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return cast(Sequence[Any], value)
+    return ()
+
+
 _DIRECT_DISPLAY_STATE_KEYS = frozenset(
     {
         "session_id",
@@ -219,19 +234,21 @@ def _path_cache_signature(path: Path) -> str:
 
 def _json_field_cache_signature(path: Path, keys: Sequence[str]) -> str:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw: object = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return _path_cache_signature(path)
     if not isinstance(raw, Mapping):
         return _path_cache_signature(path)
-    payload = dict(cast(Mapping[str, Any], raw))
+    payload: dict[str, object] = dict(cast(Mapping[str, object], raw))
 
-    def nested_value(root: Mapping[str, Any], dotted_key: str) -> Any:
-        current: Any = root
+    def nested_value(root: Mapping[str, object], dotted_key: str) -> object:
+        current: object = root
         for part in dotted_key.split("."):
-            if not isinstance(current, Mapping):
+            current_dict = _as_object_dict(current)
+            if current_dict is None:
                 return None
-            current = current.get(part)
+            next_value: object = current_dict.get(part)
+            current = next_value
         return current
 
     selected = {key: nested_value(payload, key) for key in keys}
@@ -240,12 +257,10 @@ def _json_field_cache_signature(path: Path, keys: Sequence[str]) -> str:
 
 def _direct_session_has_v3_overlay_sources(payload: Mapping[str, Any]) -> bool:
     def mapping(value: Any) -> Mapping[str, Any]:
-        return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
+        return _as_mapping(value)
 
     def sequence(value: Any) -> Sequence[Any]:
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            return value
-        return ()
+        return _as_sequence(value)
 
     tracking = mapping(payload.get("tracking_summary"))
     signal = mapping(payload.get("latest_signal"))
@@ -402,12 +417,13 @@ def _compact_live_state_response_cache_signature(session_id: str) -> str:
     )
 
 
-def _mapping_to_plain_dict(value: Any) -> dict[str, object]:
+def _mapping_to_plain_dict(value: object) -> dict[str, object]:
     return dict(cast(Mapping[str, object], value)) if isinstance(value, Mapping) else {}
 
 
 def _registry_entry_overlay_id(entry: Mapping[str, Any]) -> str:
-    overlay = _mapping_to_plain_dict(entry.get("overlay"))
+    overlay_value: object = entry.get("overlay")
+    overlay = _mapping_to_plain_dict(overlay_value)
     return str(
         entry.get("overlay_id")
         or overlay.get("overlay_id")
@@ -515,7 +531,7 @@ def _direct_window_tracker_session_snapshot(session_id: str) -> dict[str, object
         return None
     if not bool(raw_payload.get("tracking_enabled", False)):
         return None
-    payload = cast(dict[str, object], _compact_session_payload(raw_payload))
+    payload = cast(dict[str, object], compact_session_payload(raw_payload))
     payload = _merge_direct_window_tracker_display_state(requested_session_id, payload)
     now_epoch = time.time()
     latest_signal = _mapping_to_plain_dict(payload.get("latest_signal"))
@@ -710,7 +726,7 @@ def _direct_performance_overlay_rows(session_id: str, *, now_epoch: float) -> li
     if not registry_entries:
         try:
             registry_entries = [
-                cast(Mapping[str, Any], item)
+                item
                 for item in load_recent_market_objects(
                     requested_session_id,
                     max_lines=_LIVE_STATE_REGISTRY_MAX_LINES,
@@ -721,8 +737,8 @@ def _direct_performance_overlay_rows(session_id: str, *, now_epoch: float) -> li
         if registry_entries:
             try:
                 active_objects = [
-                    cast(Mapping[str, Any], item)
-                    for item in _active_objects_from_entries(
+                    item
+                    for item in active_objects_from_entries(
                         registry_entries,
                         min_truth_score=0.0,
                         now_epoch=now_epoch,
@@ -748,13 +764,15 @@ def _packet_id_from_endpoint(endpoint_result: Mapping[str, object]) -> str:
     payload = endpoint_result.get("payload")
     if not isinstance(payload, Mapping):
         return ""
+    payload_mapping = cast(Mapping[str, object], payload)
     for key in ("authority_packet_id", "latest_execution_packet_id", "packet_id"):
-        packet_id = payload.get(key)
+        packet_id = payload_mapping.get(key)
         if packet_id:
             return str(packet_id)
-    packet = payload.get("packet")
+    packet = payload_mapping.get("packet")
     if isinstance(packet, Mapping):
-        return str(packet.get("id_short") or packet.get("packet_id") or "")
+        packet_mapping = cast(Mapping[str, object], packet)
+        return str(packet_mapping.get("id_short") or packet_mapping.get("packet_id") or "")
     return ""
 
 
@@ -867,7 +885,8 @@ def _live_model_health_summary(payload: Mapping[str, object]) -> dict[str, objec
     max_latency = 0.0
     for value in pipeline.values():
         if isinstance(value, Mapping):
-            max_latency = max(max_latency, _epoch_float(value.get("duration_ms"), 0.0))
+            row = cast(Mapping[str, object], value)
+            max_latency = max(max_latency, _epoch_float(row.get("duration_ms"), 0.0))
     roles = [
         "global_structure",
         "local_micro_structure",
@@ -988,8 +1007,9 @@ def _compact_capture_once_response(payload: Mapping[str, Any]) -> dict[str, obje
     compact: dict[str, object] = {key: payload.get(key) for key in keep_keys if key in payload}
     latest_signal = payload.get("latest_signal")
     if isinstance(latest_signal, Mapping):
+        latest_signal_row = cast(Mapping[str, object], latest_signal)
         compact["latest_signal"] = {
-            key: latest_signal.get(key)
+            key: latest_signal_row.get(key)
             for key in (
                 "action",
                 "execution_action",
@@ -1008,12 +1028,13 @@ def _compact_capture_once_response(payload: Mapping[str, Any]) -> dict[str, obje
                 "pipeline_latency_sec",
                 "signal_id",
             )
-            if key in latest_signal
+            if key in latest_signal_row
         }
     tracking_summary = payload.get("tracking_summary")
     if isinstance(tracking_summary, Mapping):
+        tracking_summary_row = cast(Mapping[str, object], tracking_summary)
         compact["tracking_summary"] = {
-            key: tracking_summary.get(key)
+            key: tracking_summary_row.get(key)
             for key in (
                 "global_direction",
                 "local_direction",
@@ -1026,14 +1047,15 @@ def _compact_capture_once_response(payload: Mapping[str, Any]) -> dict[str, obje
                 "display_region",
                 "pipeline_timing",
             )
-            if key in tracking_summary
+            if key in tracking_summary_row
         }
     broker_execution_state = payload.get("broker_execution_state")
     if isinstance(broker_execution_state, Mapping):
+        broker_execution_row = cast(Mapping[str, object], broker_execution_state)
         compact["broker_execution_state"] = {
-            key: broker_execution_state.get(key)
+            key: broker_execution_row.get(key)
             for key in ("status", "side", "lane", "message", "actionable", "enabled", "mode", "expiry_seconds")
-            if key in broker_execution_state
+            if key in broker_execution_row
         }
     return compact
 
@@ -1260,9 +1282,9 @@ def _overlay_editor_hex(raw: object, fallback: str) -> str:
 
 
 def _sanitize_overlay_editor_settings(raw: Mapping[str, object] | None, *, profile_saved: bool = False) -> dict[str, object]:
-    payload = raw if isinstance(raw, Mapping) else {}
+    payload: Mapping[str, object] = raw or {}
     raw_colors = payload.get("colors")
-    colors = cast(Mapping[str, object], raw_colors) if isinstance(raw_colors, Mapping) else {}
+    colors: Mapping[str, object] = _as_object_mapping(raw_colors)
     return {
         "schemaVersion": _OVERLAY_EDITOR_SETTINGS_SCHEMA_VERSION,
         "profileSaved": bool(profile_saved or payload.get("profileSaved") is True),
@@ -1519,8 +1541,8 @@ def create_app(
         try:
             req = urllib.request.Request(url=url, method="GET")
             with urllib.request.urlopen(req, timeout=float(timeout_sec)) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-            return dict(payload) if isinstance(payload, Mapping) else {}
+                payload: object = json.loads(resp.read().decode("utf-8"))
+            return dict(_as_object_mapping(payload))
         except (urllib.error.URLError, TimeoutError, ValueError, OSError):
             return {}
 
@@ -1537,8 +1559,8 @@ def create_app(
     def latest_model_council_state_from_live_session(session_id: str) -> dict[str, object]:
         payload = resolve_model_council_session_payload(session_id)
         result = _mapping_to_plain_dict(payload.get("model_council_result"))
-        study_packet = _model_council_study_packet_from_payload(cast(Mapping[str, Any], payload))
-        packet = _model_council_packet_from_payload(cast(Mapping[str, Any], payload))
+        study_packet = model_council_study_packet_from_payload(cast(Mapping[str, Any], payload))
+        packet = model_council_packet_from_payload(cast(Mapping[str, Any], payload))
         if not result and not study_packet and not packet:
             return cast(dict[str, object], get_window_tracker_service().latest_model_council_state(session_id))
         return {
@@ -1557,14 +1579,14 @@ def create_app(
 
     def latest_model_council_study_packet_from_live_session(session_id: str) -> dict[str, object]:
         payload = resolve_model_council_session_payload(session_id)
-        packet = _model_council_study_packet_from_payload(cast(Mapping[str, Any], payload))
+        packet = model_council_study_packet_from_payload(cast(Mapping[str, Any], payload))
         if not packet:
             packet = get_window_tracker_service().latest_model_council_study_packet(session_id)
         return cast(dict[str, object], packet)
 
     def latest_model_council_execution_packet_from_live_session(session_id: str) -> dict[str, object]:
         payload = resolve_model_council_session_payload(session_id)
-        packet = _model_council_packet_from_payload(cast(Mapping[str, Any], payload))
+        packet = model_council_packet_from_payload(cast(Mapping[str, Any], payload))
         if not packet:
             packet = get_window_tracker_service().latest_model_council_packet(session_id)
         return cast(dict[str, object], packet)
@@ -1620,16 +1642,21 @@ def create_app(
             except Exception:
                 raw_context_payload = None
             if isinstance(raw_context_payload, Mapping):
-                raw_context = cast(dict[str, object], _compact_session_payload(cast(Mapping[str, Any], raw_context_payload)))
+                raw_context = cast(dict[str, object], compact_session_payload(cast(Mapping[str, Any], raw_context_payload)))
             try:
                 raw_display = json.loads(_direct_window_tracker_display_state_path(requested_session_id).read_text(encoding="utf-8"))
             except Exception:
                 raw_display = None
-            if isinstance(raw_display, Mapping) and (
-                _epoch_float(raw_display.get("frame_index"), 0.0) > 0.0
-                and str(raw_display.get("last_display_window_path") or raw_display.get("last_window_path") or "").strip()
+            raw_display_mapping: Mapping[str, object]
+            if isinstance(raw_display, Mapping):
+                raw_display_mapping = cast(Mapping[str, object], raw_display)
+            else:
+                raw_display_mapping = {}
+            if (
+                _epoch_float(raw_display_mapping.get("frame_index"), 0.0) > 0.0
+                and str(raw_display_mapping.get("last_display_window_path") or raw_display_mapping.get("last_window_path") or "").strip()
             ):
-                raw_session = {**raw_context, **dict(cast(Mapping[str, object], raw_display))}
+                raw_session = {**raw_context, **dict(raw_display_mapping)}
             else:
                 if raw_context:
                     raw_session = raw_context
@@ -1676,7 +1703,7 @@ def create_app(
                 else:
                     try:
                         registry_entries = [
-                            cast(Mapping[str, Any], item)
+                            item
                             for item in load_recent_market_objects(
                                 requested_session_id,
                                 max_lines=_LIVE_STATE_REGISTRY_MAX_LINES,
@@ -1685,8 +1712,8 @@ def create_app(
                     except Exception:
                         registry_entries = []
                     active_objects = [
-                        cast(Mapping[str, Any], item)
-                        for item in _active_objects_from_entries(
+                        item
+                        for item in active_objects_from_entries(
                             registry_entries,
                             min_truth_score=0.0,
                             now_epoch=now_epoch,
@@ -1826,7 +1853,9 @@ def create_app(
                 raw_anchors = row.get("anchor_candles")
                 if isinstance(raw_anchors, Sequence) and not isinstance(raw_anchors, (str, bytes, bytearray)):
                     anchors: list[int] = []
-                    for item in raw_anchors:
+                    for item in cast(Sequence[object], raw_anchors):
+                        if not isinstance(item, (int, float, str)):
+                            continue
                         try:
                             anchors.append(int(float(item)))
                         except Exception:
@@ -1862,7 +1891,12 @@ def create_app(
         def compact_overlay_objects(value: object) -> list[object]:
             if not isinstance(value, list):
                 return []
-            return [compact_overlay_object(item) for item in value if isinstance(item, Mapping)]
+            items = cast(Sequence[object], value)
+            rows: list[object] = []
+            for item in items:
+                if isinstance(item, Mapping):
+                    rows.append(compact_overlay_object(cast(Mapping[str, object], item)))
+            return rows
 
         def compact_overlays_payload(value: object) -> dict[str, object]:
             overlays = _mapping_to_plain_dict(value)
@@ -1891,7 +1925,7 @@ def create_app(
                 output["objects"] = []
             return output
 
-        compact = cast(dict[str, object], _compact_session_payload(live_state))
+        compact: dict[str, object] = dict(compact_session_payload(cast(Mapping[str, Any], live_state)))
         for scalar_key in (
             "schema_version",
             "session_id",
@@ -1935,13 +1969,13 @@ def create_app(
         ):
             value = live_state.get(status_key)
             if isinstance(value, Mapping):
-                compact[status_key] = _mapping_to_plain_dict(value)
+                compact[status_key] = _mapping_to_plain_dict(cast(Mapping[str, object], value))
             elif value not in (None, "", [], {}):
                 compact[status_key] = value
         shooter_payload = live_state.get("shooter")
         if isinstance(shooter_payload, Mapping):
             compact["shooter"] = compact_mapping(
-                shooter_payload,
+                cast(Mapping[str, object], shooter_payload),
                 {
                     "available",
                     "state",
@@ -1959,17 +1993,19 @@ def create_app(
             )
         live_visual_state = live_state.get("live_visual_state")
         if isinstance(live_visual_state, Mapping):
-            compact_visual = cast(dict[str, object], _compact_session_payload(cast(Mapping[str, object], live_visual_state)))
-            visual_overlays = live_visual_state.get("overlays")
+            live_visual_mapping = cast(Mapping[str, object], live_visual_state)
+            compact_visual: dict[str, object] = dict(compact_session_payload(cast(Mapping[str, Any], live_visual_mapping)))
+            visual_overlays = live_visual_mapping.get("overlays")
             if isinstance(visual_overlays, Mapping):
-                compact_visual["overlays"] = compact_overlays_payload(visual_overlays)
-                objects = compact_visual["overlays"].get("objects") if isinstance(compact_visual["overlays"], Mapping) else None
+                compact_visual["overlays"] = compact_overlays_payload(cast(Mapping[str, object], visual_overlays))
+                compact_overlays_value = cast(Mapping[str, object], compact_visual["overlays"])
+                objects = compact_overlays_value.get("objects")
                 if isinstance(objects, list):
                     compact_visual["overlay_objects"] = objects
             compact.update(compact_visual)
         overlays = compact.get("overlays")
         if isinstance(overlays, Mapping):
-            compact_overlays = compact_overlays_payload(overlays)
+            compact_overlays = compact_overlays_payload(cast(Mapping[str, object], overlays))
             compact["overlays"] = compact_overlays
             objects = compact_overlays.get("objects")
             if isinstance(objects, list):
@@ -1999,12 +2035,13 @@ def create_app(
             compact["model_vote_frame_id"] = model_vote_frame_id
         packets = compact.get("packets")
         if isinstance(packets, Mapping):
-            study = packets.get("study")
-            execution = packets.get("execution")
+            packets_mapping = cast(Mapping[str, object], packets)
+            study = packets_mapping.get("study")
+            execution = packets_mapping.get("execution")
             if isinstance(study, Mapping):
-                compact["study_packet_status"] = dict(study)
+                compact["study_packet_status"] = dict(cast(Mapping[str, object], study))
             if isinstance(execution, Mapping):
-                compact["execution_packet_status"] = dict(execution)
+                compact["execution_packet_status"] = dict(cast(Mapping[str, object], execution))
         compact["latest_signal"] = compact_mapping(
             compact.get("latest_signal"),
             {
@@ -2093,7 +2130,7 @@ def create_app(
         *,
         now_epoch: float,
     ) -> dict[str, object]:
-        refreshed = dict(cached_live_state)
+        refreshed: dict[str, object] = dict(cached_live_state)
         display_snapshot = _direct_window_tracker_display_snapshot(
             requested_session_id,
             require_overlay_model=False,
@@ -2105,11 +2142,11 @@ def create_app(
         overlay_objects_raw = overlays_payload.get("objects")
         if not isinstance(overlay_objects_raw, list):
             overlay_objects_raw = refreshed.get("overlay_objects")
-        overlay_objects = [
-            cast(Mapping[str, Any], row)
-            for row in overlay_objects_raw
-            if isinstance(row, Mapping)
-        ] if isinstance(overlay_objects_raw, list) else []
+        overlay_objects: list[Mapping[str, Any]] = []
+        if isinstance(overlay_objects_raw, list):
+            for row in cast(Sequence[object], overlay_objects_raw):
+                if isinstance(row, Mapping):
+                    overlay_objects.append(cast(Mapping[str, Any], row))
         model_health = _live_model_health_summary(cast(Mapping[str, object], display_payload))
         frontend_heartbeat = latest_frontend_heartbeat(requested_session_id)
         frame_timing = build_frame_timing_trace_v3(
@@ -2119,7 +2156,7 @@ def create_app(
             frontend_heartbeat=frontend_heartbeat,
             now_epoch=now_epoch,
         )
-        performance_state = {
+        performance_state: dict[str, object] = {
             "session_id": requested_session_id,
             "frame_id": int(_epoch_float(
                 display_payload.get("display_frame_id")
@@ -2158,7 +2195,7 @@ def create_app(
         refreshed["provider_status"] = provider
         live_visual_state = refreshed.get("live_visual_state")
         if isinstance(live_visual_state, Mapping):
-            live_visual = dict(cast(Mapping[str, object], live_visual_state))
+            live_visual: dict[str, object] = dict(cast(Mapping[str, object], live_visual_state))
             live_visual["frame_id"] = refreshed["frame_id"]
             live_visual["display_frame_id"] = refreshed["display_frame_id"]
             live_visual["overlay_frame_id"] = refreshed["overlay_frame_id"]
@@ -2235,7 +2272,7 @@ def create_app(
             if cached_rows is not None:
                 return list(cached_rows)
             rows = [
-                cast(Mapping[str, Any], item)
+                item
                 for item in load_recent_market_objects(
                     resolved_session_id,
                     max_lines=_LIVE_STATE_REGISTRY_MAX_LINES,
@@ -2249,8 +2286,8 @@ def create_app(
             if compact_public:
                 return _locked_registry_entries_from_entries(rows)
             return [
-                cast(Mapping[str, Any], item)
-                for item in _active_objects_from_entries(
+                item
+                for item in active_objects_from_entries(
                     rows,
                     min_truth_score=0.0,
                     now_epoch=now_epoch,
@@ -2354,7 +2391,8 @@ def create_app(
                 return 0
         overlay_state = trace.get("overlay_state")
         if isinstance(overlay_state, Mapping):
-            nested_version = str(overlay_state.get("overlay_state_version") or "").strip()
+            overlay_state_mapping = cast(Mapping[str, object], overlay_state)
+            nested_version = str(overlay_state_mapping.get("overlay_state_version") or "").strip()
             nested_match = re.match(r"^ovlock_(\d+)_", nested_version)
             if nested_match:
                 try:
@@ -2371,10 +2409,13 @@ def create_app(
         )
         trace = live_state.get("performance_trace_v3")
         if isinstance(trace, Mapping):
-            return cast(dict[str, object], dict(trace))
+            return dict(cast(Mapping[str, object], trace))
         compact = live_state.get("live_visual_state")
-        if isinstance(compact, Mapping) and isinstance(compact.get("performance_trace_v3"), Mapping):
-            return cast(dict[str, object], dict(cast(Mapping[str, object], compact["performance_trace_v3"])))
+        if isinstance(compact, Mapping):
+            compact_mapping = cast(Mapping[str, object], compact)
+            performance_trace = compact_mapping.get("performance_trace_v3")
+            if isinstance(performance_trace, Mapping):
+                return dict(cast(Mapping[str, object], performance_trace))
         return None
 
     def _direct_performance_trace_v3_for_session(session_id: str) -> dict[str, object] | None:
@@ -2476,10 +2517,13 @@ def create_app(
         live_state = build_live_state_v3_for_session(session_id)
         trace = live_state.get("performance_trace_v3")
         if isinstance(trace, Mapping):
-            return cast(dict[str, object], trace)
+            return dict(cast(Mapping[str, object], trace))
         compact = live_state.get("live_visual_state")
-        if isinstance(compact, Mapping) and isinstance(compact.get("performance_trace_v3"), Mapping):
-            return cast(dict[str, object], compact["performance_trace_v3"])
+        if isinstance(compact, Mapping):
+            compact_mapping = cast(Mapping[str, object], compact)
+            performance_trace = compact_mapping.get("performance_trace_v3")
+            if isinstance(performance_trace, Mapping):
+                return dict(cast(Mapping[str, object], performance_trace))
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Performance trace not available.")
 
     @app.get("/v1/mobile/performance/trace/v3")
@@ -2542,7 +2586,7 @@ def create_app(
             payload = latest_model_council_state_from_live_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model Council state not found.") from exc
-        return cast(dict[str, object], payload)
+        return payload
 
     @app.get("/v1/mobile/model-council/latest")
     def latest_model_council_state(session_id: str | None = None) -> dict[str, object]:
@@ -2556,7 +2600,7 @@ def create_app(
             payload = latest_model_council_state_from_live_session(requested_session_id)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model Council state not found.") from exc
-        return cast(dict[str, object], payload)
+        return payload
 
     @app.get("/v1/mobile/model-council/sessions/{session_id}/study/latest")
     def latest_model_council_study_packet_for_session(session_id: str) -> dict[str, object]:
@@ -2565,7 +2609,7 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model Council study packet not found.") from exc
         _raise_if_stale_payload(cast(Mapping[str, object], packet), detail="Model Council study packet is stale.")
-        return cast(dict[str, object], packet)
+        return packet
 
     @app.get("/v1/mobile/model-council/study/latest")
     def latest_model_council_study_packet(session_id: str | None = None) -> dict[str, object]:
@@ -2580,7 +2624,7 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model Council study packet not found.") from exc
         _raise_if_stale_payload(cast(Mapping[str, object], packet), detail="Model Council study packet is stale.")
-        return cast(dict[str, object], packet)
+        return packet
 
     def build_floating_state_for_session(session_id: str | None = None, *, include_inspector: bool = False) -> dict[str, object]:
         requested_session_id = str(session_id or "").strip()
@@ -2597,16 +2641,17 @@ def create_app(
             )
             models = council_health.get("models")
             if isinstance(models, list) and models:
-                total = len(models)
+                model_rows = cast(Sequence[object], models)
+                total = len(model_rows)
                 awake = sum(
                     1
-                    for model in models
+                    for model in model_rows
                     if str(_mapping_to_plain_dict(model).get("status", "") or "").strip().upper()
                     in {"AWAKE", "RUNNING", "READY"}
                 )
             elif council_health.get("all_required_models_awake") is True:
                 required_roles = council_health.get("required_roles")
-                total = len(required_roles) if isinstance(required_roles, list) and required_roles else 7
+                total = len(cast(Sequence[object], required_roles)) if isinstance(required_roles, list) and required_roles else 7
                 awake = total
             else:
                 awake = 0
@@ -2685,7 +2730,7 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model Council executable packet not found.") from exc
         _raise_if_stale_payload(cast(Mapping[str, object], packet), detail="Model Council executable packet is stale.")
-        return cast(dict[str, object], packet)
+        return packet
 
     @app.get("/v1/mobile/model-council/execution/latest")
     def latest_model_council_execution_packet(session_id: str | None = None) -> dict[str, object]:
@@ -2700,7 +2745,7 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model Council executable packet not found.") from exc
         _raise_if_stale_payload(cast(Mapping[str, object], packet), detail="Model Council executable packet is stale.")
-        return cast(dict[str, object], packet)
+        return packet
 
     def build_runtime_trace_v3(session_id: str | None = None) -> dict[str, object]:
         requested_session_id = str(session_id or "").strip()
@@ -2745,8 +2790,8 @@ def create_app(
 
         def _model_council_state_from_trace_tracker() -> dict[str, object]:
             result = _mapping_to_plain_dict(tracker_payload.get("model_council_result"))
-            study_packet = _model_council_study_packet_from_payload(cast(Mapping[str, Any], tracker_payload))
-            packet = _model_council_packet_from_payload(cast(Mapping[str, Any], tracker_payload))
+            study_packet = model_council_study_packet_from_payload(cast(Mapping[str, Any], tracker_payload))
+            packet = model_council_packet_from_payload(cast(Mapping[str, Any], tracker_payload))
             if not result and not study_packet and not packet:
                 return cast(dict[str, object], get_window_tracker_service().latest_model_council_state(resolved_session_id))
             return {
@@ -2764,13 +2809,13 @@ def create_app(
             }
 
         def _study_packet_from_trace_tracker() -> dict[str, object]:
-            packet = _model_council_study_packet_from_payload(cast(Mapping[str, Any], tracker_payload))
+            packet = model_council_study_packet_from_payload(cast(Mapping[str, Any], tracker_payload))
             if packet:
                 return cast(dict[str, object], packet)
             return cast(dict[str, object], get_window_tracker_service().latest_model_council_study_packet(resolved_session_id))
 
         def _execution_packet_from_trace_tracker() -> dict[str, object]:
-            packet = _model_council_packet_from_payload(cast(Mapping[str, Any], tracker_payload))
+            packet = model_council_packet_from_payload(cast(Mapping[str, Any], tracker_payload))
             if packet:
                 return cast(dict[str, object], packet)
             return cast(dict[str, object], get_window_tracker_service().latest_model_council_packet(resolved_session_id))
@@ -2787,7 +2832,7 @@ def create_app(
                 or overlay_geometry.get("truth_audit")
             )
             audit_objects = overlay_truth_audit.get("objects")
-            audit_object_count = len(audit_objects) if isinstance(audit_objects, list) else 0
+            audit_object_count = len(cast(Sequence[object], audit_objects)) if isinstance(audit_objects, list) else 0
             clean_live_state: dict[str, object] = {}
             try:
                 clean_live_state = live_state_v3_for_session(resolved_session_id, mode="CLEAN_LIVE", compact=True)
@@ -2795,7 +2840,7 @@ def create_app(
                 clean_live_state = {}
             clean_overlays = _mapping_to_plain_dict(clean_live_state.get("overlays"))
             clean_objects = clean_overlays.get("objects")
-            clean_object_count = len(clean_objects) if isinstance(clean_objects, list) else 0
+            clean_object_count = len(cast(Sequence[object], clean_objects)) if isinstance(clean_objects, list) else 0
             renderable_count = int(
                 _epoch_float(
                     clean_live_state.get("renderable_count")
@@ -3032,7 +3077,7 @@ def create_app(
         def _first_trace_sequence(*values: Any) -> list[Any]:
             for value in values:
                 if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-                    rows = list(value)
+                    rows = list(cast(Sequence[Any], value))
                     if rows:
                         return rows
             return []
@@ -3686,13 +3731,14 @@ def create_app(
         try:
             tracker = get_window_tracker_service()
             # probe latest chart and overlay
-            result = {"session_id": session_id, "artifacts": {}, "registry_path": None}
+            artifacts: dict[str, dict[str, object]] = {}
+            result: dict[str, object] = {"session_id": session_id, "artifacts": artifacts, "registry_path": None}
             for kind in ("chart", "overlay", "window"):
                 try:
                     path = tracker.latest_artifact_path(session_id, kind)
-                    result["artifacts"][kind] = {"path": str(path), "exists": path.exists()}
+                    artifacts[kind] = {"path": str(path), "exists": path.exists()}
                 except FileNotFoundError:
-                    result["artifacts"][kind] = {"path": None, "exists": False}
+                    artifacts[kind] = {"path": None, "exists": False}
             worker_health = getattr(tracker, "capture_worker_health_v3", None)
             if callable(worker_health):
                 result["capture_worker_v3"] = worker_health(session_id)
@@ -3711,9 +3757,8 @@ def create_app(
     @app.get("/v1/mobile/registry/sessions/{session_id}/active")
     def get_active_registry(session_id: str, min_truth_score: float = 0.0) -> dict[str, object]:
         try:
-            active = query_recent_active_objects(session_id, min_truth_score=float(min_truth_score))
-            # best-effort: include the latest available chart_transform from the registry entries
-            chart_transform = None
+            active: list[Mapping[str, Any]] = query_recent_active_objects(session_id, min_truth_score=float(min_truth_score))
+            chart_transform: object = None
             try:
                 entries = load_recent_market_objects(session_id)
                 for e in reversed(entries or []):
@@ -3734,7 +3779,7 @@ def create_app(
             if not sid:
                 sid = resolve_window_tracker_dashboard_session_id(None)
             tracker = get_window_tracker_service()
-            artifacts = {}
+            artifacts: dict[str, dict[str, object]] = {}
             for kind in ("chart", "overlay", "window"):
                 try:
                     path = tracker.latest_artifact_path(sid, kind)
@@ -3749,14 +3794,14 @@ def create_app(
                 total = 0
                 stalled = 0
             stale = bool(stalled > 0)
-            overlay = {
+            overlay: dict[str, object] = {
                 "count": total,
                 "frame_matches_chart_frame": bool(total > 0 and not stale),
             }
-            model_health = {"all_required_models_awake": True}
+            model_health: dict[str, object] = {"all_required_models_awake": True}
             try:
                 study_packet = tracker.latest_model_council_study_packet(sid)
-                study_packet_payload = {"exists": True, "packet_id": study_packet.get("packet_id")}
+                study_packet_payload: dict[str, object] = {"exists": True, "packet_id": study_packet.get("packet_id")}
             except Exception:
                 study_packet_payload = {"exists": False}
             return {
@@ -3800,7 +3845,7 @@ def create_app(
             # convert entries to overlay dicts
             overlay_dicts: list[Mapping[str, Any]] = []
             for entry in overlays:
-                overlay = entry.get("overlay") if isinstance(entry, Mapping) else None
+                overlay = entry.get("overlay")
                 if isinstance(overlay, Mapping):
                     overlay_dicts.append(cast(Mapping[str, Any], overlay))
             png = render_overlays_on_chart(chart_path if chart_path is not None else None, overlay_dicts)
@@ -3901,9 +3946,7 @@ def create_app(
 
     @app.post("/v1/mobile/window-tracker/floating-windows/overlay-editor/settings")
     def save_overlay_editor_settings(payload: dict[str, object] = Body(...)) -> dict[str, object]:
-        if not isinstance(payload, Mapping):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Overlay editor settings must be an object.")
-        settings = _write_overlay_editor_settings(cast(Mapping[str, object], payload))
+        settings = _write_overlay_editor_settings(payload)
         return {"status": "saved", "settings": settings}
 
     @app.get("/v1/mobile/window-tracker/floating-windows/model-strength/settings")
@@ -3912,9 +3955,7 @@ def create_app(
 
     @app.post("/v1/mobile/window-tracker/floating-windows/model-strength/settings")
     def save_model_strength_settings(payload: dict[str, object] = Body(...)) -> dict[str, object]:
-        if not isinstance(payload, Mapping):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Model strength settings must be an object.")
-        settings = write_model_strength_settings(cast(Mapping[str, object], payload))
+        settings = write_model_strength_settings(payload)
         controls = model_strength_settings_to_execution_controls(settings)
         session_id = str(
             payload.get("session_id")
@@ -3969,12 +4010,25 @@ def create_app(
         """
 
         def _fingerprint(payload: Mapping[str, Any]) -> str:
-            latest_signal = payload.get("latest_signal") if isinstance(payload.get("latest_signal"), Mapping) else {}
-            tracking = payload.get("tracking_summary") if isinstance(payload.get("tracking_summary"), Mapping) else {}
-            packet = payload.get("model_council_packet") or payload.get("execution_packet")
-            if not isinstance(packet, Mapping):
-                packet = latest_signal.get("model_council_packet") if isinstance(latest_signal, Mapping) else {}
-            parts = {
+            latest_signal_raw: object = payload.get("latest_signal")
+            latest_signal: Mapping[str, object]
+            if isinstance(latest_signal_raw, Mapping):
+                latest_signal = cast(Mapping[str, object], latest_signal_raw)
+            else:
+                latest_signal = _EMPTY_OBJECT_MAPPING
+            tracking_raw: object = payload.get("tracking_summary")
+            tracking: Mapping[str, object]
+            if isinstance(tracking_raw, Mapping):
+                tracking = cast(Mapping[str, object], tracking_raw)
+            else:
+                tracking = _EMPTY_OBJECT_MAPPING
+            packet_raw: object = payload.get("model_council_packet") or payload.get("execution_packet")
+            if isinstance(packet_raw, Mapping):
+                packet_map: Mapping[str, object] = cast(Mapping[str, object], packet_raw)
+            else:
+                latest_packet: object = latest_signal.get("model_council_packet")
+                packet_map = cast(Mapping[str, object], latest_packet) if isinstance(latest_packet, Mapping) else _EMPTY_OBJECT_MAPPING
+            parts: dict[str, object] = {
                 "capture_count": payload.get("capture_count"),
                 "last_capture_epoch": payload.get("last_capture_epoch"),
                 "state_version": payload.get("state_version"),
@@ -3989,11 +4043,11 @@ def create_app(
                 "last_chart_path": payload.get("last_chart_path"),
                 "last_overlay_path": payload.get("last_overlay_path"),
                 "last_full_overlay_path": payload.get("last_full_overlay_path"),
-                "signal_id": latest_signal.get("signal_id") if isinstance(latest_signal, Mapping) else "",
-                "published_epoch": latest_signal.get("published_epoch") if isinstance(latest_signal, Mapping) else "",
-                "hf_cycle": latest_signal.get("high_frequency_candle_cycle") if isinstance(latest_signal, Mapping) else "",
-                "tracking_updated": tracking.get("published_at") if isinstance(tracking, Mapping) else "",
-                "packet_id": packet.get("packet_id") if isinstance(packet, Mapping) else "",
+                "signal_id": latest_signal.get("signal_id"),
+                "published_epoch": latest_signal.get("published_epoch"),
+                "hf_cycle": latest_signal.get("high_frequency_candle_cycle"),
+                "tracking_updated": tracking.get("published_at"),
+                "packet_id": packet_map.get("packet_id"),
             }
             return json.dumps(parts, sort_keys=True, default=str)
 
@@ -4285,5 +4339,84 @@ def create_app(
             "payload": execution_payload,
         }
 
+    app.state.mobile_api_route_handlers = (
+        health,
+        v3_chart_state,
+        v3_frame_latest_png,
+        model_council_health,
+        model_council_intelligence,
+        live_state_v3,
+        performance_trace_v3,
+        frontend_heartbeat_v3,
+        latest_frontend_heartbeat_v3,
+        latest_model_council_state_for_session,
+        latest_model_council_state,
+        latest_model_council_study_packet_for_session,
+        latest_model_council_study_packet,
+        latest_floating_state,
+        latest_floating_state_for_session,
+        latest_shooter_handshake_for_session,
+        latest_shooter_handshake,
+        latest_model_council_execution_packet_for_session,
+        latest_model_council_execution_packet,
+        runtime_trace_v3,
+        runtime_trace_v3_for_session,
+        config,
+        list_jobs,
+        get_job,
+        get_artifact,
+        create_job,
+        observer_config,
+        list_observer_sessions,
+        create_observer_session,
+        get_observer_session,
+        get_observer_latest_signal,
+        get_observer_bundle,
+        get_observer_artifact,
+        submit_observer_bundle,
+        list_tracker_windows,
+        list_tracker_sessions,
+        create_tracker_session,
+        update_tracker_session_locked_window,
+        get_tracker_session,
+        set_tracker_focus_region,
+        clear_tracker_focus_region,
+        arm_tracker_focus_region,
+        cancel_tracker_focus_region,
+        get_tracker_latest_chart,
+        get_tracker_latest_window,
+        get_tracker_artifact_file,
+        get_tracker_latest_named_artifact,
+        get_tracker_health,
+        get_active_registry,
+        visual_health_v3,
+        visual_health_v3_for_session,
+        render_registry_snapshot,
+        get_window_tracker_dashboard_asset,
+        get_legacy_window_tracker_js_asset,
+        get_overlay_demo_html,
+        get_overlay_editor_settings,
+        save_overlay_editor_settings,
+        get_model_strength_settings,
+        save_model_strength_settings,
+        get_model_strength_window,
+        window_tracker_dashboard_default,
+        window_tracker_dashboard,
+        dashboard_workspace,
+        dashboard_workspace_for_session,
+        stream_tracker_session,
+        start_tracker_session,
+        stop_tracker_session,
+        emergency_stop_tracker_session,
+        capture_tracker_session_once,
+        execute_tracker_demo_random_trade,
+        predict_tracker_session_from_memory,
+        show_future_tracker_session_from_memory,
+        update_tracker_session_controls,
+        voice_status,
+        voice_commands,
+        voice_preferences,
+        voice_command,
+    )
     instrument_fastapi_app(app)
     return app

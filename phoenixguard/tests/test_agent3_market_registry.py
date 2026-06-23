@@ -3,7 +3,7 @@ from typing import Mapping, cast
 from phoenixguard.vision.market_registry import persist_market_objects, load_market_objects
 from pathlib import Path
 
-def test_market_registry_persist_and_load(tmp_path):
+def test_market_registry_persist_and_load(tmp_path: Path):
     session_id = "test-session-xyz"
     # create demo objects
     objs = [

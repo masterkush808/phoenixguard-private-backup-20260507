@@ -25,7 +25,6 @@ def _candles(values: list[float]) -> list[dict[str, float]]:
 
 
 def _snapshot(side: str = "SELL") -> dict[str, Any]:
-    opposite = "BUY" if side == "SELL" else "SELL"
     return {
         "session_id": "reasoning-test",
         "symbol": "EURUSD_OTC",

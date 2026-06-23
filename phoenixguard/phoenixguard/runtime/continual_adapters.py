@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Sequence, cast
 
 import torch
 import torch.nn as nn
@@ -24,13 +24,13 @@ def sanitize_adapter_name(value: str, default: str = "continual_default") -> str
 
 def _conv2_size(value: Any) -> tuple[int, int]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        items = [int(item) for item in value]
+        items = [int(item) for item in cast(Sequence[Any], value)]
         if len(items) >= 2:
             return (items[0], items[1])
         if len(items) == 1:
             return (items[0], items[0])
     if not isinstance(value, (int, float, str)):
-        raise TypeError(f"expected Conv2d scalar or 2D tuple size, got {type(value).__name__}")
+        raise TypeError("expected Conv2d scalar or 2D tuple size")
     parsed = int(value)
     return (parsed, parsed)
 
@@ -192,7 +192,7 @@ def collect_adaptable_module_paths(
 ) -> list[str]:
     roots = tuple(str(item).strip() for item in (root_paths or ()) if str(item).strip())
     selected: list[str] = []
-    for path, child in module.named_modules():
+    for path, child in cast(Iterator[tuple[str, nn.Module]], module.named_modules()):
         if not path:
             continue
         if roots and not any(path == root or path.startswith(f"{root}.") for root in roots):

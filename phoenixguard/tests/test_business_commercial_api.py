@@ -5,12 +5,12 @@ import json
 from fastapi.testclient import TestClient
 
 import phoenixguard.business.store as business_store_module
-from phoenixguard.business.store import FREE_PREVIEW_PLAN_CODE, BusinessStore
+from phoenixguard.business.store import FREE_PREVIEW_PLAN_CODE, BusinessStore, set_business_store_for_test
 from phoenixguard.mobile_api.app import create_app
 
 
 def _client() -> TestClient:
-    business_store_module._BUSINESS_STORE = BusinessStore()
+    set_business_store_for_test(BusinessStore())
     return TestClient(create_app())
 
 

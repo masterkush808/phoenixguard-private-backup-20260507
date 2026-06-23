@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, cast
 
 from .replay_loader import ReplayFrame
 
@@ -10,8 +10,21 @@ from .replay_loader import ReplayFrame
 VisionAdapter = Callable[[ReplayFrame], Mapping[str, Any]]
 
 
-def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+
+
+def _empty_mapping() -> dict[str, Any]:
+    return {}
+
+
+def _int_value(value: object, default: int) -> int:
+    if not isinstance(value, (int, float, str)):
+        return int(default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def _side(value: Any) -> str:
@@ -40,8 +53,8 @@ class ReplayPacket:
     frame_hash: str
     timestamp: float
     snapshot: Mapping[str, Any]
-    vision_outputs: Mapping[str, Any] = field(default_factory=dict)
-    expected: Mapping[str, Any] = field(default_factory=dict)
+    vision_outputs: Mapping[str, Any] = field(default_factory=_empty_mapping)
+    expected: Mapping[str, Any] = field(default_factory=_empty_mapping)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -71,7 +84,11 @@ class ReplayPacketPublisher:
         self._previous_hash = ""
 
     def publish(self, frame: ReplayFrame) -> ReplayPacket:
-        vision_outputs = dict(self.vision_adapter(frame)) if self.vision_adapter else self._default_vision_outputs(frame)
+        vision_outputs = (
+            _mapping(self.vision_adapter(frame))
+            if self.vision_adapter
+            else self._default_vision_outputs(frame)
+        )
         snapshot = self._snapshot_from_frame(frame, vision_outputs)
         packet = ReplayPacket(
             frame_id=frame.frame_id,
@@ -116,7 +133,8 @@ class ReplayPacketPublisher:
             )
             entry_quality = str(_expected_value(expected, "entry_quality") or metadata.get("entry_quality") or "").upper()
             trap_value = _expected_value(expected, "trap") or metadata.get("trap")
-            trap_text = str(trap_value if not isinstance(trap_value, Mapping) else trap_value.get("label", "")).upper()
+            trap_map = _mapping(trap_value)
+            trap_text = str(trap_map.get("label", "") if trap_map else trap_value).upper()
             execution_state = str(_expected_value(expected, "execution_state") or "").upper()
             executable = execution_state in {"EXECUTABLE", "BUY_EXECUTABLE", "SELL_EXECUTABLE"}
             bad_now = "BAD" in entry_quality or bool(trap_text)
@@ -156,9 +174,9 @@ class ReplayPacketPublisher:
                 "session_id": session_id,
                 "symbol": symbol,
                 "timeframe": timeframe,
-                "frame_id": int(snapshot.get("frame_id", frame.frame_id)),
-                "capture_count": int(snapshot.get("capture_count", frame.sequence_index + 1)),
-                "state_version": int(snapshot.get("state_version", frame.sequence_index + 1)),
+                "frame_id": _int_value(snapshot.get("frame_id"), frame.frame_id),
+                "capture_count": _int_value(snapshot.get("capture_count"), frame.sequence_index + 1),
+                "state_version": _int_value(snapshot.get("state_version"), frame.sequence_index + 1),
                 "input_frame_hash": str(snapshot.get("input_frame_hash") or frame.frame_hash),
                 "previous_frame_hash": str(snapshot.get("previous_frame_hash") or self._previous_hash),
             }

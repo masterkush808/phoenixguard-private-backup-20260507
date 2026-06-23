@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from phoenixguard.runtime.instrument_context import (
     CTX_BROKER_CLICK_SAFE,
     CTX_INVALIDATED,
@@ -11,8 +13,8 @@ from phoenixguard.runtime.instrument_context import (
 )
 
 
-def _base_snapshot(**overrides):
-    snapshot = {
+def _base_snapshot(**overrides: Any) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "timeframe": "M5",
         "viewport_hash": "viewport-a",

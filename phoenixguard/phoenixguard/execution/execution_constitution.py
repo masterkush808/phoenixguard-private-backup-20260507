@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 EXECUTION_CONSTITUTION_VERSION = "PG_EXECUTION_CONSTITUTION_V1"
@@ -39,13 +39,15 @@ class ConstitutionResult:
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(cast(Mapping[str, Any], value))
 
 
 def _sequence(value: Any) -> list[Any]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return list(value)
+    return list(cast(Sequence[Any], value))
 
 
 def _text(value: Any) -> str:

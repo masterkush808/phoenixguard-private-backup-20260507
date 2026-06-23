@@ -9,7 +9,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping, Sequence, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -36,12 +36,53 @@ from phoenixguard.runtime.inference_exports import (
 )
 
 try:
-    import onnxruntime as ort
+    import onnxruntime as _ort
 except Exception:  # pragma: no cover - optional runtime dependency
-    ort = None  # type: ignore[assignment]
+    _ort = None
+
+ort: Any | None = _ort
 
 _EnsembleCVSymbols = tuple[type[Any], dict[str, Any], Any, Any, type[Any]]
 _ensemble_cv_symbols_cache: _EnsembleCVSymbols | None = None
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
+
+
+def _empty_sequence_task_values() -> dict[str, list[str]]:
+    return {}
+
+
+def _empty_runtime_calibration() -> dict[str, Any]:
+    return {}
+
+
+def _tensor_from_numpy(value: NDArray[np.float32]) -> Tensor:
+    from_numpy = cast(Callable[[NDArray[np.float32]], Tensor], getattr(torch, "from_numpy"))
+    return from_numpy(value)
+
+
+def _tensor_to_float_array(tensor: Tensor) -> NDArray[np.float32]:
+    to_numpy = cast(Callable[[], Any], getattr(tensor, "numpy"))
+    return np.asarray(to_numpy(), dtype=np.float32)
+
+
+def _sequence(value: Any) -> list[Any]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return list(cast(Sequence[Any], value))
+    return []
+
+
+def _sequence_task_values(value: Any) -> dict[str, list[str]]:
+    task_values: dict[str, list[str]] = {}
+    for task_name, raw_values in _mapping(value).items():
+        values = [str(item) for item in _sequence(raw_values)]
+        if values:
+            task_values[str(task_name)] = values
+    return task_values
 
 
 def _load_ensemble_cv_symbols() -> _EnsembleCVSymbols:
@@ -68,8 +109,8 @@ class RuntimeModelInfo:
     temperature: float = 1.0
     decision_threshold: float = 0.5
     feature_dim: int = 0
-    sequence_task_values: dict[str, list[str]] = field(default_factory=dict)
-    runtime_calibration: dict[str, Any] = field(default_factory=dict)
+    sequence_task_values: dict[str, list[str]] = field(default_factory=_empty_sequence_task_values)
+    runtime_calibration: dict[str, Any] = field(default_factory=_empty_runtime_calibration)
     export_metadata_path: Path | None = None
     backbone_weights_path: Path | None = None
     head_weights_path: Path | None = None
@@ -295,7 +336,7 @@ class LocalCVEnsembleRuntime:
             return {}
         try:
             raw = json.loads(metadata_path.read_text(encoding="utf-8"))
-            return dict(raw) if isinstance(raw, dict) else {}
+            return _mapping(raw)
         except Exception:
             return {}
 
@@ -309,7 +350,7 @@ class LocalCVEnsembleRuntime:
     def _onnx_providers(self) -> list[str]:
         if ort is None:
             return []
-        available = set(cast(list[str], ort.get_available_providers()))
+        available = {str(item) for item in _sequence(ort.get_available_providers())}
         providers: list[str] = []
         if self.compute_device.type == "cuda" and "CUDAExecutionProvider" in available:
             providers.append("CUDAExecutionProvider")
@@ -347,10 +388,10 @@ class LocalCVEnsembleRuntime:
         if not bool(lora_payload.get("enabled", False)):
             return ""
         backbone_module = ensemble._resolve_backbone_module(model)
-        target_paths = cast(list[str], lora_payload.get("target_paths", []))
-        adapter_specs = cast(dict[str, dict[str, Any]], lora_payload.get("adapter_specs", {}))
+        target_paths = [str(item) for item in _sequence(lora_payload.get("target_paths", []))]
+        adapter_specs = {str(name): _mapping(spec) for name, spec in _mapping(lora_payload.get("adapter_specs", {})).items()}
         active_adapter = sanitize_adapter_name(str(lora_payload.get("active_adapter", "continual_default")))
-        primary_spec = cast(dict[str, Any], adapter_specs.get(active_adapter, {}))
+        primary_spec = _mapping(adapter_specs.get(active_adapter, {}))
         apply_lora_adapters(
             backbone_module,
             adapter_name=active_adapter,
@@ -387,7 +428,7 @@ class LocalCVEnsembleRuntime:
         if info.backbone_weights_path is None or info.head_weights_path is None:
             raise RuntimeError(f"Inference export paths are incomplete for {info.name}.")
         export_metadata = self._load_inference_export_metadata(info.name)
-        lora_payload = cast(dict[str, Any], export_metadata.get("lora", {}))
+        lora_payload = _mapping(export_metadata.get("lora", {}))
         if bool(lora_payload.get("enabled", False)):
             self._apply_lora_payload(ensemble=ensemble, model=model, lora_payload=lora_payload)
         head = ensemble._ensure_head(info.name)
@@ -408,17 +449,14 @@ class LocalCVEnsembleRuntime:
             and ort is not None
         ):
             try:
-                session = cast(
-                    Any,
-                    ort.InferenceSession(str(onnx_path), providers=self._onnx_providers()),
-                )
+                session = ort.InferenceSession(str(onnx_path), providers=self._onnx_providers())
                 runtime["onnx_session"] = session
                 runtime["onnx_input_name"] = str(session.get_inputs()[0].name)
                 runtime["onnx_output_names"] = [str(node.name) for node in session.get_outputs()]
                 runtime["onnx_exported_adapter"] = str(info.exported_active_adapter or "")
             except Exception as exc:
                 self.logger.warning("ONNX runtime init failed for %s: %s", info.name, exc)
-        metrics = dict(export_metadata.get("evaluation_metrics", info.metrics))
+        metrics = _mapping(export_metadata.get("evaluation_metrics", info.metrics))
         if bool(lora_payload.get("enabled", False)):
             metrics["lora"] = {
                 "active_adapter": str(export_metadata.get("exported_active_adapter", "")),
@@ -439,18 +477,18 @@ class LocalCVEnsembleRuntime:
         if info.bundle_path is None:
             raise RuntimeError(f"Legacy bundle path is unavailable for {info.name}.")
         try:
-            payload = torch.load(
+            payload = _mapping(torch.load(
                 info.bundle_path,
                 map_location=self.storage_device,
                 weights_only=False,
-            )
+            ))
         except TypeError:
-            payload = torch.load(
+            payload = _mapping(torch.load(
                 info.bundle_path,
                 map_location=self.storage_device,
-            )
+            ))
         head = ensemble._ensure_head(info.name)
-        lora_payload = cast(dict[str, Any], payload.get("lora", {}))
+        lora_payload = _mapping(payload.get("lora", {}))
         if bool(lora_payload.get("enabled", False)):
             self._apply_lora_payload(ensemble=ensemble, model=model, lora_payload=lora_payload)
         model.load_state_dict(payload["backbone_state_dict"])
@@ -461,13 +499,13 @@ class LocalCVEnsembleRuntime:
             aux_head.load_state_dict(cast(dict[str, Any], payload["aux_head_state_dict"]))
             aux_head.to(self.storage_device)
             aux_head.eval()
-        runtime = {
+        runtime: dict[str, Any] = {
             "ensemble": ensemble,
             "model": model,
             "head": head,
             "aux_head": aux_head,
         }
-        metrics = dict(payload.get("evaluation_metrics", info.metrics))
+        metrics = _mapping(payload.get("evaluation_metrics", info.metrics))
         if bool(lora_payload.get("enabled", False)):
             metrics["lora"] = {
                 "active_adapter": str(lora_payload.get("active_adapter", "")),
@@ -497,7 +535,8 @@ class LocalCVEnsembleRuntime:
     ) -> dict[str, dict[str, Any]]:
         if aux_head is None or not sequence_task_values:
             return {}
-        aux_module = cast(Any, aux_head).to(features.device)
+        aux_module: Any = aux_head
+        aux_module = aux_module.to(features.device)
         aux_module.eval()
         with torch.inference_mode():
             aux_logits = cast(dict[str, Tensor], aux_module(features))
@@ -568,7 +607,7 @@ class LocalCVEnsembleRuntime:
 
             try:
                 metadata = export_metadata if has_export else self._load_saved_metadata(name)
-                metrics = dict(cast(Mapping[str, Any], metadata.get("evaluation_metrics", {})))
+                metrics = _mapping(metadata.get("evaluation_metrics", {}))
                 base_weight = self._base_weight_for_model(name, metrics)
                 aux_path = export_aux_head_path(self.model_dir, name)
                 onnx_path = export_onnx_path(self.model_dir, name)
@@ -582,12 +621,8 @@ class LocalCVEnsembleRuntime:
                     temperature=float(metadata.get("temperature", 1.0) or 1.0),
                     decision_threshold=float(metadata.get("decision_threshold", 0.5) or 0.5),
                     feature_dim=int(metadata.get("feature_dim", 0) or 0),
-                    sequence_task_values={
-                        str(task_name): [str(item) for item in cast(Sequence[Any], values)]
-                        for task_name, values in cast(Mapping[str, Sequence[Any]], metadata.get("sequence_task_values", {})).items()
-                        if isinstance(values, Sequence) and not isinstance(values, (str, bytes))
-                    },
-                    runtime_calibration=dict(cast(Mapping[str, Any], metadata.get("runtime_calibration", {}))),
+                    sequence_task_values=_sequence_task_values(metadata.get("sequence_task_values", {})),
+                    runtime_calibration=_mapping(metadata.get("runtime_calibration", {})),
                     export_metadata_path=export_meta_path if has_export else None,
                     backbone_weights_path=export_backbone_path(self.model_dir, name) if has_export else None,
                     head_weights_path=export_head_path(self.model_dir, name) if has_export else None,
@@ -723,7 +758,7 @@ class LocalCVEnsembleRuntime:
                 cast(Any, old_runtime.get("head")).to(self.storage_device)
                 aux_head = old_runtime.get("aux_head")
                 if aux_head is not None:
-                    cast(Any, aux_head).to(self.storage_device)
+                    aux_head.to(self.storage_device)
             except Exception:
                 pass
             del old_runtime
@@ -909,11 +944,11 @@ class LocalCVEnsembleRuntime:
     ) -> dict[str, Any]:
         info = self.model_info[name]
         runtime = self._ensure_model_loaded(name)
-        ensemble = cast(Any, runtime["ensemble"])
-        model = cast(Any, runtime["model"])
-        head = cast(Any, runtime["head"])
-        aux_head = cast(Any | None, runtime.get("aux_head"))
-        onnx_session = cast(Any | None, runtime.get("onnx_session"))
+        ensemble: Any = runtime["ensemble"]
+        model: Any = runtime["model"]
+        head: Any = runtime["head"]
+        aux_head: Any | None = runtime.get("aux_head")
+        onnx_session: Any | None = runtime.get("onnx_session")
         onnx_input_name = str(runtime.get("onnx_input_name", ""))
         onnx_output_names = [str(item) for item in cast(Sequence[Any], runtime.get("onnx_output_names", []))]
         exported_onnx_adapter = str(runtime.get("onnx_exported_adapter", "") or "")
@@ -958,8 +993,9 @@ class LocalCVEnsembleRuntime:
             model.eval()
             head.eval()
             if aux_head is not None:
-                aux_head = cast(Any, aux_head).to(self.compute_device)
-                aux_head.eval()
+                moved_aux_head: Any = aux_head.to(self.compute_device)
+                moved_aux_head.eval()
+                aux_head = moved_aux_head
 
         try:
             with torch.inference_mode():
@@ -977,8 +1013,8 @@ class LocalCVEnsembleRuntime:
                         for idx, output_name in enumerate(onnx_output_names)
                         if idx < len(output_values)
                     }
-                    logits = torch.from_numpy(output_map.get("logits", np.zeros((1, 2), dtype=np.float32)))
-                    features = torch.from_numpy(output_map.get("features", np.zeros((1, max(info.feature_dim, 1)), dtype=np.float32)))
+                    logits = _tensor_from_numpy(output_map.get("logits", np.zeros((1, 2), dtype=np.float32)))
+                    features = _tensor_from_numpy(output_map.get("features", np.zeros((1, max(info.feature_dim, 1)), dtype=np.float32)))
                 else:
                     x = x_cpu.to(self.compute_device)
                     features = cast(torch.Tensor, self._forward_features(model, x))
@@ -1002,10 +1038,7 @@ class LocalCVEnsembleRuntime:
                 dynamic_weight = float(info.base_weight * certainty * uncertainty_penalty * (0.90 + 0.20 * threshold_gap))
                 predicted_label = "BUY" if buy_prob >= threshold else "SELL"
                 feature_tensor = features.detach().cpu().to(torch.float32)
-                feature_array: NDArray[np.float32] = cast(
-                    NDArray[np.float32],
-                    feature_tensor.numpy(),
-                )
+                feature_array = _tensor_to_float_array(feature_tensor)
                 feature_norm = float(np.linalg.norm(feature_array, axis=1).mean())
                 sequence_tasks = self._predict_sequence_tasks(
                     aux_head=aux_head,
@@ -1042,7 +1075,7 @@ class LocalCVEnsembleRuntime:
                 model.to(self.storage_device)
                 head.to(self.storage_device)
                 if aux_head is not None:
-                    cast(Any, aux_head).to(self.storage_device)
+                    aux_head.to(self.storage_device)
             if self.compute_device.type == "cuda":
                 torch.cuda.empty_cache()
 
@@ -1170,7 +1203,7 @@ class LocalCVEnsembleRuntime:
             elif confidence_score > confirmer_score:
                 confirmer_name, confirmer_score = name, confidence_score
 
-        ensemble = {
+        ensemble: dict[str, Any] = {
             "buy_prob": buy_prob,
             "sell_prob": sell_prob,
             "predicted_label": predicted_label,
@@ -1211,21 +1244,15 @@ class LocalCVEnsembleRuntime:
         routing_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_ensemble = cls._aggregate_ensemble_view(model_outputs)
-        routing_context = routing_context or {}
-        chart_state = cast(Mapping[str, Any], routing_context.get("chart_state", {}))
-        sequence_state = cast(Mapping[str, Any], routing_context.get("sequence_state", {}))
-        grounded_chart = cast(Mapping[str, Any], routing_context.get("grounded_chart", {}))
-        memory_summary = cast(Mapping[str, Any], routing_context.get("memory_summary", {}))
-        reasoning_trace = cast(Mapping[str, Any], routing_context.get("reasoning_trace", {}))
-        market_state = cast(Mapping[str, Any], reasoning_trace.get("market_state", {}))
-        sequence_model = cast(
-            Mapping[str, Any],
-            chart_state.get("sequence_model", sequence_state.get("sequence_model", {})),
-        )
-        grounded_structure = cast(
-            Mapping[str, Any],
-            chart_state.get("grounded_structure", grounded_chart.get("structure_summary", {})),
-        )
+        routing_payload = _mapping(routing_context)
+        chart_state = _mapping(routing_payload.get("chart_state", {}))
+        sequence_state = _mapping(routing_payload.get("sequence_state", {}))
+        grounded_chart = _mapping(routing_payload.get("grounded_chart", {}))
+        memory_summary = _mapping(routing_payload.get("memory_summary", {}))
+        reasoning_trace = _mapping(routing_payload.get("reasoning_trace", {}))
+        market_state = _mapping(reasoning_trace.get("market_state", {}))
+        sequence_model = _mapping(chart_state.get("sequence_model", sequence_state.get("sequence_model", {})))
+        grounded_structure = _mapping(chart_state.get("grounded_structure", grounded_chart.get("structure_summary", {})))
 
         base_direction = str(base_ensemble.get("predicted_label", "BUY")).upper()
         base_margin = float(np.clip(base_ensemble.get("margin", 0.0), 0.0, 1.0))
@@ -1457,8 +1484,8 @@ class LocalCVEnsembleRuntime:
         adaptation_profile: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         model_outputs = {
-            str(name): dict(cast(Mapping[str, Any], row))
-            for name, row in cast(Mapping[str, Any], prediction.get("models", {})).items()
+            str(name): _mapping(row)
+            for name, row in _mapping(prediction.get("models", {})).items()
             if isinstance(row, Mapping)
         }
         if not model_outputs:
@@ -1466,7 +1493,7 @@ class LocalCVEnsembleRuntime:
         route_summary = self._apply_confusion_aware_routing(model_outputs, routing_context=routing_context)
         ensemble = self._aggregate_ensemble_view(
             model_outputs,
-            failed_models=cast(Mapping[str, str], cast(Mapping[str, Any], prediction.get("ensemble", {})).get("failed_models", self.failed_models)),
+            failed_models=cast(Mapping[str, str], _mapping(prediction.get("ensemble", {})).get("failed_models", self.failed_models)),
             adaptation_profile=adaptation_profile,
             route_summary=route_summary,
         )

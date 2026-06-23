@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import time
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence, cast
 
 from phoenixguard.decision.model_council_v3 import ModelCouncilV3
 
@@ -16,25 +16,35 @@ from .replay_packet_publisher import ReplayPacket, ReplayPacketPublisher
 CouncilEvaluator = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
 
-def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+def _empty_frames() -> list[ReplayFrame]:
+    return []
 
 
-def _call_paper_executor(executor: Any, packet: ReplayPacket, council_result: Mapping[str, Any]) -> dict[str, Any] | None:
+def _call_paper_executor(
+    executor: object | None,
+    packet: ReplayPacket,
+    council_result: Mapping[str, Any],
+) -> dict[str, Any] | None:
     if executor is None:
         return None
     record_executable = getattr(executor, "record_executable_packet", None)
     if callable(record_executable):
-        result = record_executable(dict(council_result))
-        return dict(result) if isinstance(result, Mapping) else None
+        result = cast(Callable[[dict[str, Any]], object], record_executable)(dict(council_result))
+        return dict(cast(Mapping[str, Any], result)) if isinstance(result, Mapping) else None
     for method_name in ("on_council_result", "record_decision", "execute"):
         method = getattr(executor, method_name, None)
         if callable(method):
-            result = method(packet.as_dict(), dict(council_result))
-            return dict(result) if isinstance(result, Mapping) else None
+            result = cast(Callable[[dict[str, Any], dict[str, Any]], object], method)(
+                packet.as_dict(),
+                dict(council_result),
+            )
+            return dict(cast(Mapping[str, Any], result)) if isinstance(result, Mapping) else None
     if callable(executor):
-        result = executor(packet.as_dict(), dict(council_result))
-        return dict(result) if isinstance(result, Mapping) else None
+        result = cast(Callable[[dict[str, Any], dict[str, Any]], object], executor)(
+            packet.as_dict(),
+            dict(council_result),
+        )
+        return dict(cast(Mapping[str, Any], result)) if isinstance(result, Mapping) else None
     return None
 
 
@@ -55,10 +65,10 @@ class ReplaySession:
     loader: ReplayLoader | None = None
     publisher: ReplayPacketPublisher = field(default_factory=ReplayPacketPublisher)
     council_evaluator: CouncilEvaluator | None = None
-    paper_executor: Any = None
+    paper_executor: object | None = None
     metrics: ReplayMetricsRecorder | None = None
     clock: ReplayClock | None = None
-    frames: list[ReplayFrame] = field(default_factory=list)
+    frames: list[ReplayFrame] = field(default_factory=_empty_frames)
     cursor: int = 0
 
     @classmethod
@@ -70,7 +80,16 @@ class ReplaySession:
         simulation_id: str = "sim-local",
         scenario_name: str = "",
         limit: int | None = None,
-        **kwargs: Any,
+        sleep_enabled: bool = False,
+        speed_multiplier: float = 1.0,
+        loader: ReplayLoader | None = None,
+        publisher: ReplayPacketPublisher | None = None,
+        council_evaluator: CouncilEvaluator | None = None,
+        paper_executor: object | None = None,
+        metrics: ReplayMetricsRecorder | None = None,
+        clock: ReplayClock | None = None,
+        frames: Sequence[ReplayFrame] | None = None,
+        cursor: int = 0,
     ) -> "ReplaySession":
         resolved_mode = resolve_replay_mode(mode)
         config = ReplaySessionConfig(
@@ -79,10 +98,20 @@ class ReplaySession:
             simulation_id=simulation_id,
             scenario_name=scenario_name,
             limit=limit,
-            sleep_enabled=bool(kwargs.pop("sleep_enabled", False)),
-            speed_multiplier=float(kwargs.pop("speed_multiplier", 1.0)),
+            sleep_enabled=bool(sleep_enabled),
+            speed_multiplier=float(speed_multiplier),
         )
-        return cls(config=config, **kwargs)
+        return cls(
+            config=config,
+            loader=loader,
+            publisher=publisher or ReplayPacketPublisher(),
+            council_evaluator=council_evaluator,
+            paper_executor=paper_executor,
+            metrics=metrics,
+            clock=clock,
+            frames=list(frames or []),
+            cursor=int(cursor),
+        )
 
     def prepare(self) -> None:
         self.loader = self.loader or ReplayLoader(self.config.replay_root)

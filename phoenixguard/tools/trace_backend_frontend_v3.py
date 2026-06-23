@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8793"
 DEFAULT_SESSION = "pocket-live-8788"
+
+
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _request_json(method: str, url: str, timeout: float, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -28,11 +31,12 @@ def _request_json(method: str, url: str, timeout: float, payload: Mapping[str, A
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - local operator tool
             body = response.read().decode("utf-8", errors="replace")
             parsed = json.loads(body) if body else {}
+            payload_obj = _mapping(parsed) if isinstance(parsed, Mapping) else {"value": parsed}
             return {
                 "ok": 200 <= int(response.status) < 300,
                 "status": int(response.status),
                 "latency_ms": round((time.perf_counter() - started) * 1000.0, 2),
-                "payload": parsed if isinstance(parsed, Mapping) else {"value": parsed},
+                "payload": payload_obj,
             }
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
@@ -70,10 +74,6 @@ def _request_bytes(url: str, timeout: float) -> dict[str, Any]:
         return {"ok": False, "status": int(exc.code), "latency_ms": round((time.perf_counter() - started) * 1000.0, 2), "bytes": 0, "error": str(exc)}
     except Exception as exc:
         return {"ok": False, "status": 0, "latency_ms": round((time.perf_counter() - started) * 1000.0, 2), "bytes": 0, "error": str(exc)}
-
-
-def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:

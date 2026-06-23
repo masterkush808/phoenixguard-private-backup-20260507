@@ -1,7 +1,7 @@
 import ctypes
 import importlib.util
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, NoReturn
 
 import pytest
 
@@ -38,6 +38,28 @@ def _rect(module: Any, *, width: int = 1000, height: int = 800) -> Any:
     rect.right = width
     rect.bottom = height
     return rect
+
+
+def _now_1000() -> float:
+    return 1000.0
+
+
+def _fail_if_called(message: str) -> Callable[..., NoReturn]:
+    def _raiser(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError(message)
+
+    return _raiser
+
+
+def _save_state_noop(_state: dict[str, Any]) -> None:
+    return None
+
+
+def _window_rect_reader(rect: Any) -> Callable[[int], Any]:
+    def _reader(_hwnd: int) -> Any:
+        return rect
+
+    return _reader
 
 
 def _packet(
@@ -246,7 +268,7 @@ def test_fetch_latest_model_council_packet_recovers_from_runtime_trace(
         return Response()
 
     monkeypatch.setattr(shooter.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(shooter.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(shooter.time, "time", _now_1000)
 
     recovered = shooter.fetch_latest_model_council_packet(
         "http://127.0.0.1:8793",
@@ -1017,7 +1039,7 @@ def test_v3_packet_does_not_use_legacy_parse_trade_signal(monkeypatch: pytest.Mo
     monkeypatch.setattr(
         shooter,
         "parse_trade_signal",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy parser must not run for V3 packets")),
+        _fail_if_called("legacy parser must not run for V3 packets"),
     )
 
     decision = shooter._evaluate_v3_shooter_decision(
@@ -1085,7 +1107,7 @@ def test_startup_test_entry_rejects_non_calibration_modes(monkeypatch: pytest.Mo
     args = shooter.build_parser().parse_args(
         ["signal", "--session-id", "pocket-live-8788", "--test-signal", "--shooter-mode", "LIVE_READY"]
     )
-    monkeypatch.setattr(shooter, "execute_trade", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not click")))
+    monkeypatch.setattr(shooter, "execute_trade", _fail_if_called("must not click"))
 
     clicked = shooter._run_startup_test_entry(
         args,
@@ -1114,36 +1136,49 @@ def test_startup_test_entry_runs_time_only_in_calibration_test(monkeypatch: pyte
     )
     clicks: list[tuple[str, int, dict[str, Any]]] = []
     monkeypatch.setenv("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS", "1")
-    monkeypatch.setattr(
-        shooter,
-        "generate_test_signal",
-        lambda *_args, **_kwargs: {
+
+    def _generate_test_signal(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return {
             "signal_id": "startup-test-1",
             "actionable": True,
             "execution_action": "BUY",
             "expiry_seconds": 300,
             "focus_timeframe": "M5",
             "market": "EUR/GBP OTC",
-        },
+        }
+
+    def _execute_v3_packet_trade(
+        _hwnd: int,
+        _boxes_arg: dict[str, Any],
+        packet: dict[str, Any],
+        **kwargs: Any,
+    ) -> bool:
+        execution = packet["execution"]
+        clicks.append(
+            (
+                str(execution["side"]),
+                int(execution["expiry_seconds"]),
+                kwargs,
+            )
+        )
+        return True
+
+    monkeypatch.setattr(
+        shooter,
+        "generate_test_signal",
+        _generate_test_signal,
     )
     monkeypatch.setattr(
         shooter,
         "execute_trade",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("startup test must use sequencer path")),
+        _fail_if_called("startup test must use sequencer path"),
     )
     monkeypatch.setattr(
         shooter,
         "execute_v3_packet_trade",
-        lambda _hwnd, _boxes, packet, **kwargs: clicks.append(
-            (
-                packet["execution"]["side"],
-                int(packet["execution"]["expiry_seconds"]),
-                kwargs,
-            )
-        )
-        or True,
+        _execute_v3_packet_trade,
     )
-    monkeypatch.setattr(shooter, "_three_gate_save_state", lambda _state: None)
+    monkeypatch.setattr(shooter, "_three_gate_save_state", _save_state_noop)
 
     state: dict[str, Any] = {}
     clicked = shooter._run_startup_test_entry(
@@ -1193,21 +1228,34 @@ def test_startup_calibration_test_can_force_1h45m_typed_sequence_wait(monkeypatc
     )
     observed: list[tuple[dict[str, Any], dict[str, Any]]] = []
     monkeypatch.setenv("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS", "1")
-    monkeypatch.setattr(
-        shooter,
-        "generate_test_signal",
-        lambda *_args, **_kwargs: {
+
+    def _generate_test_signal(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return {
             "signal_id": "startup-test-1",
             "actionable": True,
             "execution_action": "BUY",
             "expiry_seconds": 300,
-        },
+        }
+
+    def _execute_v3_packet_trade(
+        _hwnd: int,
+        _boxes_arg: dict[str, Any],
+        packet: dict[str, Any],
+        **kwargs: Any,
+    ) -> bool:
+        observed.append((packet, kwargs))
+        return True
+
+    monkeypatch.setattr(
+        shooter,
+        "generate_test_signal",
+        _generate_test_signal,
     )
-    monkeypatch.setattr(shooter, "execute_trade", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy click path used")))
-    monkeypatch.setattr(shooter, "execute_v3_packet_trade", lambda _hwnd, _boxes, packet, **kwargs: observed.append((packet, kwargs)) or True)
+    monkeypatch.setattr(shooter, "execute_trade", _fail_if_called("legacy click path used"))
+    monkeypatch.setattr(shooter, "execute_v3_packet_trade", _execute_v3_packet_trade)
 
     state: dict[str, Any] = {}
-    monkeypatch.setattr(shooter, "_three_gate_save_state", lambda _state: None)
+    monkeypatch.setattr(shooter, "_three_gate_save_state", _save_state_noop)
 
     clicked = shooter._run_startup_test_entry(
         args,
@@ -1241,18 +1289,26 @@ def test_startup_calibration_test_runs_time_only_when_trade_discipline_locked(mo
         ]
     )
     monkeypatch.setenv("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS", "1")
-    monkeypatch.setattr(
-        shooter,
-        "generate_test_signal",
-        lambda *_args, **_kwargs: {
+    calls: list[dict[str, Any]] = []
+
+    def _generate_test_signal(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return {
             "signal_id": "startup-test-locked",
             "actionable": True,
             "execution_action": "BUY",
             "expiry_seconds": 300,
-        },
+        }
+
+    def _execute_v3_packet_trade(*_args: object, **kwargs: Any) -> bool:
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        shooter,
+        "generate_test_signal",
+        _generate_test_signal,
     )
-    calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(shooter, "execute_v3_packet_trade", lambda *_args, **kwargs: calls.append(kwargs) or True)
+    monkeypatch.setattr(shooter, "execute_v3_packet_trade", _execute_v3_packet_trade)
     state = {"v3_locked_until": shooter.time.time() + 1200}
 
     clicked = shooter._run_startup_test_entry(
@@ -1308,22 +1364,36 @@ def test_startup_test_entry_waits_for_fresh_bias_before_calibration_click(monkey
     clicks: list[tuple[str, int]] = []
     sleeps: list[float] = []
     monkeypatch.setenv("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS", "1")
-    monkeypatch.setattr(shooter, "generate_test_signal", lambda *_args, **_kwargs: next(generated))
-    monkeypatch.setattr(shooter.time, "sleep", lambda seconds: sleeps.append(float(seconds)))
+
+    def _generate_test_signal(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return next(generated)
+
+    def _sleep(seconds: float) -> None:
+        sleeps.append(float(seconds))
+
+    def _execute_v3_packet_trade(
+        _hwnd: int,
+        _boxes_arg: dict[str, Any],
+        packet: dict[str, Any],
+        **_kwargs: object,
+    ) -> bool:
+        execution = packet["execution"]
+        clicks.append((str(execution["side"]), int(execution["expiry_seconds"])))
+        return True
+
+    monkeypatch.setattr(shooter, "generate_test_signal", _generate_test_signal)
+    monkeypatch.setattr(shooter.time, "sleep", _sleep)
     monkeypatch.setattr(
         shooter,
         "execute_trade",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("startup test must use sequencer path")),
+        _fail_if_called("startup test must use sequencer path"),
     )
     monkeypatch.setattr(
         shooter,
         "execute_v3_packet_trade",
-        lambda _hwnd, _boxes, packet, **_kwargs: clicks.append(
-            (packet["execution"]["side"], int(packet["execution"]["expiry_seconds"]))
-        )
-        or True,
+        _execute_v3_packet_trade,
     )
-    monkeypatch.setattr(shooter, "_three_gate_save_state", lambda _state: None)
+    monkeypatch.setattr(shooter, "_three_gate_save_state", _save_state_noop)
 
     state: dict[str, Any] = {}
     clicked = shooter._run_startup_test_entry(
@@ -1345,8 +1415,8 @@ def test_paper_execution_records_without_click(tmp_path: Path, monkeypatch: pyte
     record_path = tmp_path / "paper.jsonl"
     monkeypatch.setattr(shooter, "THREE_GATE_STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(shooter.shooter_modes, "PAPER_EXECUTION_LOG", record_path)
-    monkeypatch.setattr(shooter, "execute_v3_packet_trade", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not click")))
-    monkeypatch.setattr(shooter, "click_trade_button", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not click")))
+    monkeypatch.setattr(shooter, "execute_v3_packet_trade", _fail_if_called("must not click"))
+    monkeypatch.setattr(shooter, "click_trade_button", _fail_if_called("must not click"))
 
     state: dict[str, Any] = {}
     _prime_second_read(shooter, state)
@@ -1387,9 +1457,9 @@ def test_dry_run_records_click_plan_without_broker_click(tmp_path: Path, monkeyp
     rect.right = 1000
     rect.bottom = 800
     monkeypatch.setattr(shooter.shooter_modes, "DRY_RUN_CLICK_LOG", record_path)
-    monkeypatch.setattr(shooter, "get_window_rect", lambda _hwnd: rect)
-    monkeypatch.setattr(shooter, "execute_v3_packet_trade", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not click")))
-    monkeypatch.setattr(shooter, "click_trade_button", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not click")))
+    monkeypatch.setattr(shooter, "get_window_rect", _window_rect_reader(rect))
+    monkeypatch.setattr(shooter, "execute_v3_packet_trade", _fail_if_called("must not click"))
+    monkeypatch.setattr(shooter, "click_trade_button", _fail_if_called("must not click"))
 
     state: dict[str, Any] = {}
     _prime_second_read(shooter, state)
@@ -1423,7 +1493,7 @@ def test_dry_run_records_click_plan_without_broker_click(tmp_path: Path, monkeyp
 def test_v3_live_broker_click_function_defaults_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     shooter = _load_shooter()
     monkeypatch.delenv(shooter.LIVE_BROKER_CLICK_ENV, raising=False)
-    monkeypatch.setattr(shooter, "execute_trade", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not click")))
+    monkeypatch.setattr(shooter, "execute_trade", _fail_if_called("must not click"))
 
     assert shooter.execute_v3_packet_trade(1, _boxes(), _packet()) is False
 
@@ -1439,8 +1509,8 @@ def test_live_ready_blocks_without_env_even_after_gates(tmp_path: Path, monkeypa
     rect.top = 0
     rect.right = 1000
     rect.bottom = 800
-    monkeypatch.setattr(shooter, "get_window_rect", lambda _hwnd: rect)
-    monkeypatch.setattr(shooter, "execute_v3_packet_trade", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not click")))
+    monkeypatch.setattr(shooter, "get_window_rect", _window_rect_reader(rect))
+    monkeypatch.setattr(shooter, "execute_v3_packet_trade", _fail_if_called("must not click"))
 
     state: dict[str, Any] = {}
     _prime_second_read(shooter, state)
@@ -1478,8 +1548,8 @@ def test_live_ready_blocks_when_broker_identity_not_safe(tmp_path: Path, monkeyp
     rect.top = 0
     rect.right = 1000
     rect.bottom = 800
-    monkeypatch.setattr(shooter, "get_window_rect", lambda _hwnd: rect)
-    monkeypatch.setattr(shooter, "execute_v3_packet_trade", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not click")))
+    monkeypatch.setattr(shooter, "get_window_rect", _window_rect_reader(rect))
+    monkeypatch.setattr(shooter, "execute_v3_packet_trade", _fail_if_called("must not click"))
 
     state: dict[str, Any] = {}
     _prime_second_read(shooter, state)
@@ -1517,8 +1587,17 @@ def test_live_ready_clicks_only_when_env_identity_and_rehearsal_pass(tmp_path: P
     rect.top = 0
     rect.right = 1000
     rect.bottom = 800
-    monkeypatch.setattr(shooter, "get_window_rect", lambda _hwnd: rect)
-    monkeypatch.setattr(shooter, "execute_v3_packet_trade", lambda _hwnd, _boxes_arg, packet, allow_live_clicks=False: clicked.append(packet["packet_id"]) or True)
+    def _execute_v3_packet_trade(
+        _hwnd: int,
+        _boxes_arg: dict[str, Any],
+        packet: dict[str, Any],
+        allow_live_clicks: bool = False,
+    ) -> bool:
+        clicked.append(str(packet["packet_id"]))
+        return True
+
+    monkeypatch.setattr(shooter, "get_window_rect", _window_rect_reader(rect))
+    monkeypatch.setattr(shooter, "execute_v3_packet_trade", _execute_v3_packet_trade)
 
     state: dict[str, Any] = {}
     _prime_second_read(shooter, state)
@@ -1603,9 +1682,12 @@ def test_calibration_test_highlights_coordinates_without_click(tmp_path: Path, m
     rect.bottom = 800
     highlighted: list[int] = []
     monkeypatch.setattr(shooter.shooter_modes, "CALIBRATION_TEST_LOG", record_path)
-    monkeypatch.setattr(shooter, "get_window_rect", lambda _hwnd: rect)
-    monkeypatch.setattr(shooter, "show_box_preview", lambda hwnd, _boxes_arg: highlighted.append(hwnd))
-    monkeypatch.setattr(shooter, "click_trade_button", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not click")))
+    def _show_box_preview(hwnd: int, _boxes_arg: dict[str, Any]) -> None:
+        highlighted.append(hwnd)
+
+    monkeypatch.setattr(shooter, "get_window_rect", _window_rect_reader(rect))
+    monkeypatch.setattr(shooter, "show_box_preview", _show_box_preview)
+    monkeypatch.setattr(shooter, "click_trade_button", _fail_if_called("must not click"))
 
     state: dict[str, Any] = {}
     _prime_second_read(shooter, state)
@@ -1850,13 +1932,33 @@ def test_shooter_does_not_change_amount(monkeypatch: pytest.MonkeyPatch) -> None
         calls.append("set_amount")
         raise AssertionError("set_amount must not be called")
 
+    def _activate_window(_hwnd: int) -> bool:
+        return True
+
+    def _validate_calibration(_boxes_arg: dict[str, Any], _rect_arg: Any) -> bool:
+        return True
+
+    def _is_broker_ready(_hwnd: int, _rect_arg: Any) -> bool:
+        return True
+
+    def _resolve_and_set_expiry(
+        _hwnd: int,
+        _boxes_arg: dict[str, Any],
+        _expiry: int,
+        _caps: dict[str, Any],
+    ) -> bool:
+        return True
+
+    def _click_trade_button(_hwnd: int, _boxes_arg: dict[str, Any], side: str) -> None:
+        calls.append(f"click:{side}")
+
     monkeypatch.setattr(shooter, "set_amount", fail_set_amount)
-    monkeypatch.setattr(shooter, "activate_window", lambda _hwnd: True)
-    monkeypatch.setattr(shooter, "get_window_rect", lambda _hwnd: rect)
-    monkeypatch.setattr(shooter, "validate_calibration", lambda _boxes, _rect: True)
-    monkeypatch.setattr(shooter, "is_broker_ready", lambda _hwnd, _rect: True)
-    monkeypatch.setattr(shooter, "resolve_and_set_expiry", lambda _hwnd, _boxes, _expiry, _caps: True)
-    monkeypatch.setattr(shooter, "click_trade_button", lambda _hwnd, _boxes, _side: calls.append(f"click:{_side}"))
+    monkeypatch.setattr(shooter, "activate_window", _activate_window)
+    monkeypatch.setattr(shooter, "get_window_rect", _window_rect_reader(rect))
+    monkeypatch.setattr(shooter, "validate_calibration", _validate_calibration)
+    monkeypatch.setattr(shooter, "is_broker_ready", _is_broker_ready)
+    monkeypatch.setattr(shooter, "resolve_and_set_expiry", _resolve_and_set_expiry)
+    monkeypatch.setattr(shooter, "click_trade_button", _click_trade_button)
 
     assert shooter.execute_trade(1, _boxes(), "BUY", 300, 5000) is True
     assert calls == ["click:BUY"]
@@ -2037,10 +2139,14 @@ def test_runtime_integrity_accepts_canonical_epoch_sec_fields() -> None:
 def test_manual_live_click_requires_env_and_explicit_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     shooter = _load_shooter()
     monkeypatch.delenv(shooter.LIVE_BROKER_CLICK_ENV, raising=False)
+
+    def _fail_find_pocket_option_window(_query: str) -> NoReturn:
+        pytest.fail("manual mode should not touch the broker window unless explicitly armed")
+
     monkeypatch.setattr(
         shooter,
         "find_pocket_option_window",
-        lambda _query: pytest.fail("manual mode should not touch the broker window unless explicitly armed"),
+        _fail_find_pocket_option_window,
     )
     args = __import__("types").SimpleNamespace(
         allow_live_click=False,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from math import atan2, degrees, isfinite
 from statistics import mean, pstdev
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 from phoenixguard.decision.market_play_engine_v3 import analyze_market_play_v3
 from phoenixguard.decision.market_reality_engine import analyze_market_reality
@@ -64,13 +64,13 @@ ANGLE_CLASSES = {
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(item) for item in value if isinstance(item, Mapping)]
+    return [dict(cast(Mapping[str, Any], item)) for item in cast(Sequence[Any], value) if isinstance(item, Mapping)]
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -317,7 +317,7 @@ def zone_liquidity_agent(snapshot: Mapping[str, Any]) -> dict[str, Any]:
         or supplied_zone.get("conservative_trigger_zone_id")
         or ""
     )
-    valid_types = (
+    valid_types: set[str] = (
         {"DEMAND", "DEMAND_ZONE", "SNIPER_BUY", "SNIPER_BUY_ZONE", "CONSERVATIVE_BUY_TRIGGER", "CONSERVATIVE_BUY_TRIGGER_ZONE"}
         if side == "BUY"
         else {"SUPPLY", "SUPPLY_ZONE", "SNIPER_SELL", "SNIPER_SELL_ZONE", "CONSERVATIVE_SELL_TRIGGER", "CONSERVATIVE_SELL_TRIGGER_ZONE"}
@@ -883,7 +883,7 @@ def _build_play_reasoning_stack(
         market_context=market_context,
         existing_block_reason=block_reason,
     )
-    context_fields = {
+    context_fields: dict[str, Any] = {
         "regime_primary": regime["primary"],
         "regime_secondary": regime["secondary"],
         "market_play": market_play["primary_play"],
@@ -950,7 +950,7 @@ def analyze_market_intelligence(snapshot: Mapping[str, Any], *, candidate_side: 
     if can_prepare:
         execution_state = "PREPARING"
 
-    market_context = {
+    market_context: dict[str, Any] = {
         "global_side": global_agent["global_side"],
         "local_side": local_agent["local_side"],
         "dominant_side": side if side in {"BUY", "SELL"} else global_agent["global_side"],
@@ -984,7 +984,7 @@ def analyze_market_intelligence(snapshot: Mapping[str, Any], *, candidate_side: 
         market_context=market_context,
         block_reason=block_reason,
     )
-    market_context.update(play_reasoning["context_fields"])
+    market_context.update(_mapping(play_reasoning.get("context_fields")))
     market_reality = analyze_market_reality(
         snapshot,
         side=side,
@@ -1094,7 +1094,7 @@ def _candidate_side_v3(snapshot: Mapping[str, Any]) -> str:
 
 def _nearest_zone_id(zones: Sequence[Mapping[str, Any]], zone_type: str) -> str:
     normalized_type = zone_type.upper()
-    candidates = []
+    candidates: list[tuple[float, str]] = []
     for row in zones:
         row_type = str(row.get("zone_type") or row.get("type") or row.get("kind") or "").strip().upper()
         row_type = row_type.replace(" ", "_").replace("-", "_")
@@ -1207,7 +1207,7 @@ def analyze_market_intelligence_v3(input_snapshot: Mapping[str, Any] | None) -> 
         snapshot.get("dominance_state")
         or ("STRENGTHENING" if global_agent["global_side"] == local_agent["local_side"] == side else "FORMING")
     ).upper()
-    market_context = {
+    market_context: dict[str, Any] = {
         "global_side": global_agent["global_side"],
         "local_side": local_agent["local_side"],
         "dominant_side": side if side in {"BUY", "SELL"} else global_agent["global_side"],
@@ -1241,7 +1241,7 @@ def analyze_market_intelligence_v3(input_snapshot: Mapping[str, Any] | None) -> 
         market_context=market_context,
         block_reason=block_reason,
     )
-    market_context.update(play_reasoning["context_fields"])
+    market_context.update(_mapping(play_reasoning.get("context_fields")))
     market_reality = analyze_market_reality(
         snapshot,
         side=side,

@@ -85,6 +85,10 @@ def _int(value: Any, default: int = 0) -> int:
     return int(_float(value, float(default)))
 
 
+def _mapping(value: object) -> Mapping[str, Any]:
+    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
+
+
 def _slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip())[:120] or "default"
 
@@ -228,22 +232,24 @@ def prune_frontend_heartbeats(
 def _state_overlay_count(backend_state: Mapping[str, Any]) -> int:
     if isinstance(backend_state.get("overlay_objects"), list):
         return len(cast(list[Any], backend_state["overlay_objects"]))
-    overlays = backend_state.get("overlays")
-    if isinstance(overlays, Mapping) and isinstance(overlays.get("objects"), list):
+    overlays = _mapping(backend_state.get("overlays"))
+    if isinstance(overlays.get("objects"), list):
         return len(cast(list[Any], overlays["objects"]))
-    live_state = backend_state.get("live_visual_state")
-    if isinstance(live_state, Mapping) and isinstance(live_state.get("overlay_objects"), list):
+    live_state = _mapping(backend_state.get("live_visual_state"))
+    if isinstance(live_state.get("overlay_objects"), list):
         return len(cast(list[Any], live_state["overlay_objects"]))
     return 0
 
 
 def _state_chart_transform_id(backend_state: Mapping[str, Any]) -> str:
-    for source in (backend_state, backend_state.get("chart_transform"), backend_state.get("live_visual_state")):
+    sources: tuple[object, ...] = (backend_state, backend_state.get("chart_transform"), backend_state.get("live_visual_state"))
+    for source in sources:
         if isinstance(source, Mapping):
-            if _text(source.get("chart_transform_id")):
-                return _text(source.get("chart_transform_id"))
-            chart_transform = source.get("chart_transform")
-            if isinstance(chart_transform, Mapping) and _text(chart_transform.get("chart_transform_id")):
+            source_map = cast(Mapping[str, Any], source)
+            if _text(source_map.get("chart_transform_id")):
+                return _text(source_map.get("chart_transform_id"))
+            chart_transform = _mapping(source_map.get("chart_transform"))
+            if _text(chart_transform.get("chart_transform_id")):
                 return _text(chart_transform.get("chart_transform_id"))
     return ""
 
@@ -382,10 +388,10 @@ def latest_frontend_heartbeat_v3(session_id: str | None = None) -> dict[str, Any
         if not candidates:
             return {"schema_version": FRONTEND_HEARTBEAT_SCHEMA_VERSION, "status": "missing"}
         try:
-            payload = json.loads(candidates[0].read_text(encoding="utf-8"))
+            payload: object = json.loads(candidates[0].read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {"schema_version": FRONTEND_HEARTBEAT_SCHEMA_VERSION, "status": "missing"}
-        return dict(payload) if isinstance(payload, Mapping) else {"schema_version": FRONTEND_HEARTBEAT_SCHEMA_VERSION, "status": "missing"}
+        return dict(cast(Mapping[str, Any], payload)) if isinstance(payload, Mapping) else {"schema_version": FRONTEND_HEARTBEAT_SCHEMA_VERSION, "status": "missing"}
     return latest_frontend_heartbeat(session_id) or {"schema_version": FRONTEND_HEARTBEAT_SCHEMA_VERSION, "session_id": session_id, "status": "missing"}
 
 

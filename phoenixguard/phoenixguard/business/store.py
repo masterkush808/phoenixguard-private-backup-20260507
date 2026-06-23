@@ -1144,11 +1144,21 @@ class BusinessStore:
         return manifest
 
 
-_BUSINESS_STORE: BusinessStore | None = None
+_business_store: BusinessStore | None = None
 
 
 def get_business_store() -> BusinessStore:
-    global _BUSINESS_STORE
-    if _BUSINESS_STORE is None:
-        _BUSINESS_STORE = BusinessStore()
-    return _BUSINESS_STORE
+    global _business_store
+    if _business_store is None:
+        _business_store = BusinessStore()
+    return _business_store
+
+
+def set_business_store_for_test(store: BusinessStore | None = None) -> BusinessStore:
+    global _business_store
+    _business_store = store or BusinessStore()
+    return _business_store
+
+
+def reset_business_store_for_test() -> BusinessStore:
+    return set_business_store_for_test(BusinessStore())

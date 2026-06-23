@@ -1,8 +1,9 @@
 from __future__ import annotations
+import pytest
 
 import io
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence, cast
 
 import numpy as np
 from fastapi.testclient import TestClient
@@ -12,6 +13,58 @@ from phoenixguard.mobile_api.app import create_app
 from phoenixguard.mobile_api.observer import SignalObserverService
 from phoenixguard.mobile_api.service import MobileApiService
 import phoenixguard.mobile_api.observer as observer_mod
+
+
+def _build_best_play_analysis(
+    service: SignalObserverService,
+    result: Mapping[str, Any],
+    *,
+    render_config: Mapping[str, Any],
+    file_path: str,
+) -> dict[str, Any]:
+    method = cast(
+        Callable[..., dict[str, Any]],
+        getattr(service, "_build_best_play_analysis"),
+    )
+    return method(result, render_config=render_config, file_path=file_path)
+
+
+def _read_session(service: SignalObserverService, session_id: str) -> dict[str, Any]:
+    method = cast(Callable[[str], dict[str, Any]], getattr(service, "_read_session"))
+    return method(session_id)
+
+
+def _write_session(service: SignalObserverService, session_id: str, payload: Mapping[str, Any]) -> None:
+    method = cast(Callable[[str, Mapping[str, Any]], None], getattr(service, "_write_session"))
+    method(session_id, payload)
+
+
+def _build_signal_payload(
+    service: SignalObserverService,
+    session_payload: Mapping[str, Any],
+    result: Mapping[str, Any],
+    best_play: Mapping[str, Any],
+    *,
+    bundle_id: str,
+    file_path: str,
+) -> dict[str, Any]:
+    method = cast(
+        Callable[..., dict[str, Any]],
+        getattr(service, "_build_signal_payload"),
+    )
+    return method(session_payload, result, best_play, bundle_id=bundle_id, file_path=file_path)
+
+
+def _render_signal(
+    service: SignalObserverService,
+    signal: Mapping[str, Any],
+    policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    method = cast(
+        Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]],
+        getattr(service, "_render_signal"),
+    )
+    return method(signal, policy)
 
 
 def _png_bytes(color: tuple[int, int, int]) -> bytes:
@@ -183,7 +236,8 @@ def test_observer_best_play_analysis_does_not_synthesize_direction_without_snaps
     adapter.module = object()
     service = SignalObserverService(root_dir=tmp_path / "observer_no_snapshot", pipeline_adapter=adapter)
 
-    best_play = service._build_best_play_analysis(
+    best_play = _build_best_play_analysis(
+        service,
         _observer_result(action="BUY", confidence=0.92),
         render_config={},
         file_path="missing.png",
@@ -193,7 +247,7 @@ def test_observer_best_play_analysis_does_not_synthesize_direction_without_snaps
     assert best_play["recommended_direction"] == "HOLD"
 
 
-def test_observer_service_emits_entry_and_reverse_signals(tmp_path: Path, monkeypatch) -> None:
+def test_observer_service_emits_entry_and_reverse_signals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(observer_mod, "analyze_best_play", _fake_best_play_analysis)
     adapter = _FakeObserverPipelineAdapter(
         tmp_path,
@@ -236,7 +290,7 @@ def test_observer_service_emits_entry_and_reverse_signals(tmp_path: Path, monkey
     assert latest["status"] in {"ready", "watch"}
 
 
-def test_observer_latest_signal_turns_hold_when_stale(tmp_path: Path, monkeypatch) -> None:
+def test_observer_latest_signal_turns_hold_when_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(observer_mod, "analyze_best_play", _fake_best_play_analysis)
     adapter = _FakeObserverPipelineAdapter(
         tmp_path,
@@ -280,7 +334,7 @@ def test_observer_latest_signal_blocks_manual_test_signal(tmp_path: Path) -> Non
         policy={"min_actionable_confidence": 0.20, "stale_after_sec": 60.0},
     )
     session_id = str(session["session_id"])
-    payload = service._read_session(session_id)
+    payload = _read_session(service, session_id)
     payload["latest_signal"] = {
         "signal_id": "manual_test_20260516_120000",
         "action": "BUY",
@@ -296,7 +350,7 @@ def test_observer_latest_signal_blocks_manual_test_signal(tmp_path: Path) -> Non
         "test_mode": True,
         "decision_kernel": {"dominant_side": "BUY"},
     }
-    service._write_session(session_id, payload)
+    _write_session(service, session_id, payload)
 
     latest = service.latest_signal(session_id)
 
@@ -308,7 +362,7 @@ def test_observer_latest_signal_blocks_manual_test_signal(tmp_path: Path) -> Non
     assert latest["stale"] is True
 
 
-def test_observer_latest_signal_ages_iso_timestamp_without_completed_epoch(tmp_path: Path, monkeypatch) -> None:
+def test_observer_latest_signal_ages_iso_timestamp_without_completed_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = SignalObserverService(
         root_dir=tmp_path / "observer_iso_stale",
         pipeline_adapter=_FakeObserverPipelineAdapter(tmp_path, []),
@@ -319,7 +373,7 @@ def test_observer_latest_signal_ages_iso_timestamp_without_completed_epoch(tmp_p
         policy={"min_actionable_confidence": 0.20, "stale_after_sec": 10.0},
     )
     session_id = str(session["session_id"])
-    payload = service._read_session(session_id)
+    payload = _read_session(service, session_id)
     payload["latest_signal"] = {
         "signal_id": "real-but-old",
         "action": "BUY",
@@ -334,7 +388,7 @@ def test_observer_latest_signal_ages_iso_timestamp_without_completed_epoch(tmp_p
         "timestamp": "2026-05-16T12:00:00+00:00",
         "decision_kernel": {"dominant_side": "BUY"},
     }
-    service._write_session(session_id, payload)
+    _write_session(service, session_id, payload)
     monkeypatch.setattr(observer_mod.time, "time", lambda: 1778932860.0)
 
     latest = service.latest_signal(session_id)
@@ -355,7 +409,7 @@ def test_observer_signal_policy_promotes_directional_watch_without_execute_permi
         "min_directional_confidence": 0.46,
         "signal_cooldown_sec": 0.0,
     }
-    session_payload = {
+    session_payload: dict[str, Any] = {
         "market": "EURUSD",
         "policy": policy,
         "signal_history": [],
@@ -377,14 +431,15 @@ def test_observer_signal_policy_promotes_directional_watch_without_execute_permi
         "likelihoods": {"BUY": 0.76, "SELL": 0.14, "HOLD": 0.10},
     }
 
-    signal = service._build_signal_payload(
+    signal = _build_signal_payload(
+        service,
         session_payload,
         result,
         best_play,
         bundle_id="bundle-watch",
         file_path="watch.png",
     )
-    rendered = service._render_signal(signal, policy)
+    rendered = _render_signal(service, signal, policy)
 
     assert signal["actionable"] is False
     assert signal["directional_watch_ready"] is True
@@ -405,7 +460,7 @@ def test_observer_single_surface_mode_arms_signal_before_execute_permission(tmp_
         "min_directional_confidence": 0.44,
         "signal_cooldown_sec": 0.0,
     }
-    session_payload = {
+    session_payload: dict[str, Any] = {
         "market": "EURUSD",
         "policy": policy,
         "signal_history": [],
@@ -427,14 +482,15 @@ def test_observer_single_surface_mode_arms_signal_before_execute_permission(tmp_
         "likelihoods": {"BUY": 0.79, "SELL": 0.11, "HOLD": 0.10},
     }
 
-    signal = service._build_signal_payload(
+    signal = _build_signal_payload(
+        service,
         session_payload,
         result,
         best_play,
         bundle_id="bundle-arm",
         file_path="arm.png",
     )
-    rendered = service._render_signal(signal, policy)
+    rendered = _render_signal(service, signal, policy)
 
     assert signal["actionable"] is True
     assert signal["signal_armed"] is True
@@ -462,7 +518,7 @@ def test_observer_single_surface_arming_rejects_flip_flop_reversal_noise(tmp_pat
         {"base_action": "SELL", "candidate_action": "SELL"},
         {"base_action": "BUY", "candidate_action": "BUY"},
     ]
-    session_payload = {
+    session_payload: dict[str, Any] = {
         "market": "EURUSD",
         "policy": policy,
         "signal_history": history,
@@ -486,14 +542,15 @@ def test_observer_single_surface_arming_rejects_flip_flop_reversal_noise(tmp_pat
         "likelihoods": {"BUY": 0.24, "SELL": 0.54, "HOLD": 0.22},
     }
 
-    signal = service._build_signal_payload(
+    signal = _build_signal_payload(
+        service,
         session_payload,
         result,
         best_play,
         bundle_id="bundle-flip",
         file_path="flip.png",
     )
-    rendered = service._render_signal(signal, policy)
+    rendered = _render_signal(service, signal, policy)
 
     assert signal["signal_armed"] is False
     assert signal["signal_armed_reverse_guard"] is False
@@ -511,7 +568,7 @@ def test_observer_signal_policy_keeps_hold_when_gate_is_blocked(tmp_path: Path) 
         "min_directional_confidence": 0.46,
         "signal_cooldown_sec": 0.0,
     }
-    session_payload = {
+    session_payload: dict[str, Any] = {
         "market": "EURUSD",
         "policy": policy,
         "signal_history": [],
@@ -533,14 +590,15 @@ def test_observer_signal_policy_keeps_hold_when_gate_is_blocked(tmp_path: Path) 
         "likelihoods": {"BUY": 0.10, "SELL": 0.80, "HOLD": 0.10},
     }
 
-    signal = service._build_signal_payload(
+    signal = _build_signal_payload(
+        service,
         session_payload,
         result,
         best_play,
         bundle_id="bundle-hold",
         file_path="hold.png",
     )
-    rendered = service._render_signal(signal, policy)
+    rendered = _render_signal(service, signal, policy)
 
     assert signal["actionable"] is False
     assert signal["directional_watch_ready"] is False

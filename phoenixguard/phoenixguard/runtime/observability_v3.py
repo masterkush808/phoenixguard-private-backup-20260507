@@ -6,7 +6,7 @@ import math
 import os
 import time
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 from phoenixguard.runtime.cache_v3 import (
     CACHE_SCHEMA_VERSION,
@@ -74,19 +74,21 @@ def _int(value: Any, default: int = 0) -> int:
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
 
 
 def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(item) for item in value if isinstance(item, Mapping)]
+    return [_mapping(item) for item in cast(Sequence[Any], value) if isinstance(item, Mapping)]
 
 
 def _sequence_of_text(value: Any) -> list[str]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [str(item) for item in value if str(item or "").strip()]
+    return [str(item) for item in cast(Sequence[Any], value) if str(item or "").strip()]
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
@@ -280,13 +282,14 @@ def collect_compute_usage(
         try:
             import torch  # type: ignore[import-untyped]
 
-            cuda_available = bool(torch.cuda.is_available())
+            torch_module = cast(Any, torch)
+            cuda_available = bool(torch_module.cuda.is_available())
             devices: list[dict[str, Any]] = []
             if cuda_available:
-                for index in range(int(torch.cuda.device_count())):
-                    props = torch.cuda.get_device_properties(index)
-                    allocated = _nonnegative_float(torch.cuda.memory_allocated(index), 0.0)
-                    reserved = _nonnegative_float(torch.cuda.memory_reserved(index), 0.0)
+                for index in range(int(torch_module.cuda.device_count())):
+                    props: Any = torch_module.cuda.get_device_properties(index)
+                    allocated = _nonnegative_float(torch_module.cuda.memory_allocated(index), 0.0)
+                    reserved = _nonnegative_float(torch_module.cuda.memory_reserved(index), 0.0)
                     total = _nonnegative_float(getattr(props, "total_memory", 0), 0.0)
                     devices.append(
                         {
@@ -320,7 +323,7 @@ def _model_process_telemetry(row: Mapping[str, Any], *, include_process_snapshot
         process_payload.setdefault("pid", pid)
         process_payload.setdefault("available", bool(process_payload))
         return process_payload
-    explicit = {
+    explicit: dict[str, Any] = {
         "available": any(
             key in row
             for key in (
@@ -841,7 +844,7 @@ def build_model_council_health(
     daemon = dict(daemon_status or {})
     cv_loaded_models = _sequence_of_text(daemon.get("loaded_models"))
     cv_failed_models = _mapping(daemon.get("failed_models"))
-    health = {
+    health: dict[str, Any] = {
         "ok": bool(all_required_awake),
         "session_id": str(session_id or ""),
         "council_status": "AWAKE" if all_required_awake else "STALE",
@@ -882,7 +885,7 @@ def build_model_council_health_from_session(
     include_process_snapshot: bool = True,
 ) -> dict[str, Any]:
     now = _now_epoch() if now_epoch is None else float(now_epoch)
-    health_blob = _health_blob_from_payload(session_payload)
+    health_blob: dict[str, Any] = _health_blob_from_payload(session_payload)
     if not health_blob and any(
         _mapping(session_payload.get(key))
         for key in ("model_council_result", "model_council_study_packet", "study_packet", "execution_packet")
@@ -1061,7 +1064,7 @@ def append_forensic_decision_log(
 ) -> dict[str, Any]:
     now = _now_epoch() if now_epoch is None else float(now_epoch)
     packet_payload = _mapping(packet)
-    row = {
+    row: dict[str, Any] = {
         "cache_schema_version": CACHE_SCHEMA_VERSION,
         "event": "decision_cycle",
         "timestamp_epoch": now,
@@ -1127,7 +1130,7 @@ def record_paper_mode_decision(
             and _upper(execution.get("state")) == "EXECUTABLE"
             and _upper(execution.get("side")) in {"BUY", "SELL"}
         )
-    row = {
+    row: dict[str, Any] = {
         "cache_schema_version": CACHE_SCHEMA_VERSION,
         "event": "paper_mode_decision",
         "timestamp_epoch": now,
@@ -1157,7 +1160,7 @@ def record_candle_outcome_metrics(
     packet_payload = _mapping(packet)
     metric_payload = dict(metrics)
     metric_payload.setdefault("version", CANDLE_OUTCOME_TRACKER_V1)
-    row = {
+    row: dict[str, Any] = {
         "cache_schema_version": CACHE_SCHEMA_VERSION,
         "event": "candle_outcome_metrics",
         "timestamp_epoch": now,

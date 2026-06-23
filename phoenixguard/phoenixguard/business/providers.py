@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from email.message import EmailMessage
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from .packages import package_profile_for_plan
 
@@ -39,7 +39,7 @@ class ProviderStatus:
 
 
 class StripeCheckoutProvider:
-    plan_price_env = {
+    plan_price_env: dict[str, str] = {
         "hybrid-standard-6h": "STRIPE_PRICE_ID_STANDARD_6H",
         "hybrid-professional-24x7": "STRIPE_PRICE_ID_PRO_24X7",
         "hybrid-standard": "STRIPE_PRICE_ID_STANDARD_6H",
@@ -58,7 +58,7 @@ class StripeCheckoutProvider:
         self._opener = opener or urllib.request.urlopen
 
     def status(self) -> ProviderStatus:
-        missing = []
+        missing: list[str] = []
         if not self.secret_key:
             missing.append("STRIPE_SECRET_KEY")
         if not (self.plan_price_ids.get("hybrid-standard-6h") or self.price_id):
@@ -84,7 +84,7 @@ class StripeCheckoutProvider:
         profile = package_profile_for_plan(plan_code)
         normalized_plan = profile.code
         price_id = self._price_id_for_plan(normalized_plan)
-        missing = []
+        missing: list[str] = []
         if not self.secret_key:
             missing.append("STRIPE_SECRET_KEY")
         if not price_id:
@@ -96,7 +96,7 @@ class StripeCheckoutProvider:
         if missing:
             raise ProviderConfigurationError(f"Stripe checkout is not configured: missing {', '.join(missing)}.")
         runtime_limit = str(profile.daily_runtime_hours)
-        form = {
+        form: dict[str, str] = {
             "mode": "subscription",
             "line_items[0][price]": price_id,
             "line_items[0][quantity]": "1",
@@ -124,12 +124,15 @@ class StripeCheckoutProvider:
         )
         try:
             with self._opener(request, timeout=20) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                payload: object = json.loads(response.read().decode("utf-8"))
         except Exception as exc:  # pragma: no cover - network errors are environment-specific.
             raise ProviderRequestError(f"Stripe checkout request failed: {exc}") from exc
-        if not isinstance(payload, Mapping) or not payload.get("url"):
+        if not isinstance(payload, Mapping):
             raise ProviderRequestError("Stripe checkout response did not include a hosted URL.")
-        return dict(payload)
+        payload_map = cast(Mapping[str, Any], payload)
+        if not payload_map.get("url"):
+            raise ProviderRequestError("Stripe checkout response did not include a hosted URL.")
+        return dict(payload_map)
 
 
 class ResendEmailProvider:
@@ -144,7 +147,7 @@ class ResendEmailProvider:
     def status(self) -> ProviderStatus:
         if self.provider == "smtp" or (self.provider == "" and self._smtp.has_any_configuration()):
             return self._smtp.status()
-        missing = []
+        missing: list[str] = []
         if not self.api_key:
             missing.append("RESEND_API_KEY")
         if not self.from_email:
@@ -180,7 +183,7 @@ class ResendEmailProvider:
             if verification_code
             else ""
         )
-        payload = {
+        payload: dict[str, object] = {
             "from": self.from_email,
             "to": [to_email],
             "subject": "Confirm your 808Fx Standard Hybrid account",
@@ -203,12 +206,12 @@ class ResendEmailProvider:
         )
         try:
             with self._opener(request, timeout=20) as response:
-                response_payload = json.loads(response.read().decode("utf-8"))
+                response_payload: object = json.loads(response.read().decode("utf-8"))
         except Exception as exc:  # pragma: no cover - network errors are environment-specific.
             raise ProviderRequestError(f"Resend email request failed: {exc}") from exc
         if not isinstance(response_payload, Mapping):
             raise ProviderRequestError("Resend email response was not a JSON object.")
-        return dict(response_payload)
+        return dict(cast(Mapping[str, Any], response_payload))
 
 
 class SmtpEmailProvider:
@@ -228,7 +231,7 @@ class SmtpEmailProvider:
         return any([self.host, self.username, self.password, self.from_email])
 
     def status(self) -> ProviderStatus:
-        missing = []
+        missing: list[str] = []
         if not self.host:
             missing.append("SMTP_HOST")
         if not self.username:

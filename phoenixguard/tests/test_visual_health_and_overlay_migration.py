@@ -71,7 +71,7 @@ def test_model_health_not_0_0_when_visual_packet_exists() -> None:
     assert len(health["models"]) == 7
 
 
-def test_visual_health_passes_when_chart_overlay_frontend_aligned(tmp_path) -> None:
+def test_visual_health_passes_when_chart_overlay_frontend_aligned(tmp_path: Path) -> None:
     svc = ContinuousWindowTrackerService(root_dir=tmp_path / "wt")
     session_id = "vis-1"
     chart_path = tmp_path / "chart.png"

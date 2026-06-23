@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence, cast
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -11,6 +11,18 @@ def _float(value: Any, default: float = 0.0) -> float:
     if parsed != parsed or parsed in {float("inf"), float("-inf")}:
         return float(default)
     return float(parsed)
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
+
+
+def _sequence(value: Any) -> list[Any]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return list(cast(Sequence[Any], value))
+    return []
 
 
 def build_locked_tracker_controls(
@@ -74,12 +86,11 @@ def build_locked_tracker_controls(
 
 
 def tracker_focus_is_locked(session_payload: Mapping[str, Any]) -> bool:
-    manual_focus = session_payload.get("manual_focus_region", {})
-    if isinstance(manual_focus, Mapping) and bool(manual_focus.get("enabled", False)):
-        bbox = manual_focus.get("normalized_bbox", [])
-        return isinstance(bbox, list) and len(bbox) == 4
-    focus_selector = session_payload.get("focus_selector", {})
-    if isinstance(focus_selector, Mapping):
+    manual_focus = _mapping(session_payload.get("manual_focus_region", {}))
+    if bool(manual_focus.get("enabled", False)):
+        return len(_sequence(manual_focus.get("normalized_bbox", []))) == 4
+    focus_selector = _mapping(session_payload.get("focus_selector", {}))
+    if focus_selector:
         return str(focus_selector.get("status", "")).lower() in {"selected", "locked", "ready"}
     return False
 
@@ -103,12 +114,11 @@ def tracker_session_runtime_state(
     now = time.time() if now_epoch is None else float(now_epoch)
     running = tracker_session_is_running(session_payload)
     capture_interval = max(0.1, _float(session_payload.get("capture_interval_sec"), 1.0))
-    latest_signal = session_payload.get("latest_signal", {})
-    latest_signal_payload = latest_signal if isinstance(latest_signal, Mapping) else {}
-    tracking_summary = session_payload.get("tracking_summary", {})
-    tracking_summary_payload = tracking_summary if isinstance(tracking_summary, Mapping) else {}
-    pipeline_timing = latest_signal_payload.get("pipeline_timing") or tracking_summary_payload.get("pipeline_timing") or {}
-    pipeline_timing_payload = pipeline_timing if isinstance(pipeline_timing, Mapping) else {}
+    latest_signal_payload = _mapping(session_payload.get("latest_signal", {}))
+    tracking_summary_payload = _mapping(session_payload.get("tracking_summary", {}))
+    pipeline_timing_payload = _mapping(
+        latest_signal_payload.get("pipeline_timing") or tracking_summary_payload.get("pipeline_timing") or {}
+    )
     observed_pipeline_latency = max(
         _float(session_payload.get("pipeline_latency_sec"), 0.0),
         _float(latest_signal_payload.get("pipeline_latency_sec"), 0.0),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from statistics import median
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, cast
 
 
 @dataclass(frozen=True)
@@ -96,9 +96,10 @@ def _event_value(event: Mapping[str, Any], names: Sequence[str], default: int = 
             return _coerce_int(event.get(name), default)
     timing = event.get("execution_timing")
     if isinstance(timing, Mapping):
+        timing_payload = cast(Mapping[str, Any], timing)
         for name in names:
-            if name in timing:
-                return _coerce_int(timing.get(name), default)
+            if name in timing_payload:
+                return _coerce_int(timing_payload.get(name), default)
     return default
 
 

@@ -9,7 +9,7 @@ import json
 import importlib
 import os
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Mapping, Protocol, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -54,7 +54,7 @@ class PersonalizationEngine:
         try:
             raw = json.loads(self.meta_profile_path.read_text(encoding='utf-8'))
             if isinstance(raw, dict):
-                self._context_profiles = dict(raw)
+                self._context_profiles = dict(cast(Mapping[str, dict[str, Any]], raw))
         except Exception:
             self._context_profiles = {}
 

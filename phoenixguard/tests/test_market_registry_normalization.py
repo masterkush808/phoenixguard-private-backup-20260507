@@ -17,7 +17,7 @@ def write_jsonl(session_id: str, entries: list[dict[str, object]]) -> None:
             fh.write(json.dumps(e) + "\n")
 
 
-def test_load_market_objects_normalizes_bbox_and_truth(tmp_path):
+def test_load_market_objects_normalizes_bbox_and_truth(tmp_path: Path):
     session_id = "test-normalize-session"
     entries = []
     # legacy overlay using anchors

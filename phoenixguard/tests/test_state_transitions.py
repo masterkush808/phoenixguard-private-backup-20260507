@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from test_model_council_v3 import (
+from tests.test_model_council_v3 import (
     NOW,
     _assert_non_executable_release_fields,
     _broker_click_unsafe_result,

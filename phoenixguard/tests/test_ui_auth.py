@@ -13,7 +13,7 @@ if str(_REPO) not in sys.path:
 import main
 
 
-def test_ui_auth_credentials_noop_when_auth_disabled(monkeypatch) -> None:
+def test_ui_auth_credentials_noop_when_auth_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PHOENIXGUARD_SHARE_CREDENTIALS", raising=False)
     monkeypatch.delenv("PHOENIXGUARD_SHARE_USERNAME", raising=False)
     monkeypatch.delenv("PHOENIXGUARD_SHARE_PASSWORD", raising=False)
@@ -26,7 +26,7 @@ def test_ui_auth_credentials_noop_when_auth_disabled(monkeypatch) -> None:
     assert credentials == []
 
 
-def test_ui_auth_credentials_reads_multiple_pairs(monkeypatch) -> None:
+def test_ui_auth_credentials_reads_multiple_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
         "PHOENIXGUARD_SHARE_CREDENTIALS",
         "operator:StrongPass2026!,brother:BrotherPass2026!",
@@ -45,7 +45,7 @@ def test_ui_auth_credentials_reads_multiple_pairs(monkeypatch) -> None:
     ]
 
 
-def test_ui_auth_credentials_rejects_weak_passwords_when_strict(monkeypatch) -> None:
+def test_ui_auth_credentials_rejects_weak_passwords_when_strict(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PHOENIXGUARD_SHARE_CREDENTIALS", "operator:weakpass")
     monkeypatch.delenv("PHOENIXGUARD_SHARE_USERNAME", raising=False)
     monkeypatch.delenv("PHOENIXGUARD_SHARE_PASSWORD", raising=False)
@@ -57,7 +57,7 @@ def test_ui_auth_credentials_rejects_weak_passwords_when_strict(monkeypatch) -> 
         )
 
 
-def test_resolve_ui_launch_auth_uses_share_credentials_for_tunnel(monkeypatch) -> None:
+def test_resolve_ui_launch_auth_uses_share_credentials_for_tunnel(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PHOENIXGUARD_UI_REQUIRE_AUTH", "1")
     monkeypatch.setenv("PHOENIXGUARD_SHARE_CREDENTIALS", "operator:StrongPass2026!")
     monkeypatch.delenv("PHOENIXGUARD_SHARE_USERNAME", raising=False)

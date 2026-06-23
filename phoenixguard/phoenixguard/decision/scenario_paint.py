@@ -12,7 +12,7 @@ Features:
 """
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 import numpy as np
 
@@ -35,7 +35,7 @@ class ScenarioPainter:
 
     def scenarios_to_candlestick_traces(
         self,
-        scenarios: Sequence[Mapping[str, Any]],
+        scenarios: Sequence[Any],
         scenario_names: list[str] | None = None,
         opacity_mode: str = "confidence",
     ) -> list[dict[str, Any]]:
@@ -50,26 +50,33 @@ class ScenarioPainter:
         Returns:
             List of dicts compatible with plotly go.Candlestick()
         """
-        traces = []
+        traces: list[dict[str, Any]] = []
 
         for idx, scenario in enumerate(scenarios):
             if not isinstance(scenario, Mapping):
                 continue
+            scenario_map = cast(Mapping[str, Any], scenario)
 
-            rank = scenario.get("rank", idx + 1)
-            probability = scenario.get("probability", 0.5)
-            candles_data = scenario.get("candles", [])
+            rank = int(float(scenario_map.get("rank", idx + 1) or idx + 1))
+            candles_data = scenario_map.get("candles", [])
 
             if not candles_data:
                 continue
+            candles = [
+                cast(Mapping[str, Any], item)
+                for item in cast(Sequence[Any], candles_data)
+                if isinstance(item, Mapping)
+            ]
+            if not candles:
+                continue
 
             # Extract OHLCV
-            times = list(range(len(candles_data)))
-            opens = [float(c.get("o", 0.0)) for c in candles_data]
-            highs = [float(c.get("h", 0.0)) for c in candles_data]
-            lows = [float(c.get("l", 0.0)) for c in candles_data]
-            closes = [float(c.get("c", 0.0)) for c in candles_data]
-            confidences = [float(c.get("confidence", 0.5)) for c in candles_data]
+            times = list(range(len(candles)))
+            opens = [float(c.get("o", 0.0)) for c in candles]
+            highs = [float(c.get("h", 0.0)) for c in candles]
+            lows = [float(c.get("l", 0.0)) for c in candles]
+            closes = [float(c.get("c", 0.0)) for c in candles]
+            confidences = [float(c.get("confidence", 0.5)) for c in candles]
 
             # Determine opacity
             if opacity_mode == "confidence":
@@ -113,7 +120,7 @@ class ScenarioPainter:
 
     def scenarios_to_line_traces(
         self,
-        scenarios: Sequence[Mapping[str, Any]],
+        scenarios: Sequence[Any],
         line_mode: str = "close",
     ) -> list[dict[str, Any]]:
         """
@@ -128,27 +135,35 @@ class ScenarioPainter:
         Returns:
             List of line trace dicts
         """
-        traces = []
+        traces: list[dict[str, Any]] = []
 
         for idx, scenario in enumerate(scenarios):
             if not isinstance(scenario, Mapping):
                 continue
+            scenario_map = cast(Mapping[str, Any], scenario)
 
-            rank = scenario.get("rank", idx + 1)
-            candles_data = scenario.get("candles", [])
-            summary = scenario.get("summary", "")
+            rank = int(float(scenario_map.get("rank", idx + 1) or idx + 1))
+            candles_data = scenario_map.get("candles", [])
+            summary = str(scenario_map.get("summary", ""))
 
             if not candles_data:
                 continue
+            candles = [
+                cast(Mapping[str, Any], item)
+                for item in cast(Sequence[Any], candles_data)
+                if isinstance(item, Mapping)
+            ]
+            if not candles:
+                continue
 
-            times = list(range(len(candles_data)))
+            times = list(range(len(candles)))
             if line_mode == "mid":
                 values = [
                     (float(c.get("h", 0.0)) + float(c.get("l", 0.0))) / 2.0
-                    for c in candles_data
+                    for c in candles
                 ]
             else:
-                values = [float(c.get("c", 0.0)) for c in candles_data]
+                values = [float(c.get("c", 0.0)) for c in candles]
 
             color = self.branch_colors[idx % len(self.branch_colors)]
 
@@ -221,20 +236,25 @@ class ScenarioPainter:
         Returns:
             List of annotation dicts (lines and text)
         """
-        annotations = []
-        branches = tree_structure.get("branches", 1)
-        max_depth = tree_structure.get("max_depth", 1)
-        scenarios = tree_structure.get("scenarios", [])
+        annotations: list[dict[str, Any]] = []
+        branches = int(float(tree_structure.get("branches", 1) or 1))
+        max_depth = int(float(tree_structure.get("max_depth", 1) or 1))
+        scenarios_raw = tree_structure.get("scenarios", [])
+        scenarios = [
+            cast(Mapping[str, Any], item)
+            for item in cast(Sequence[Any], scenarios_raw)
+            if isinstance(item, Mapping)
+        ]
 
         # Spacing
         x_spacing = 10.0 / max(branches, 1)
         y_spacing = 10.0 / max(max_depth, 1)
 
         for scenario_idx, scenario_info in enumerate(scenarios):
-            rank = scenario_info.get("rank", scenario_idx + 1)
-            probability = scenario_info.get("probability", 0.5)
-            steps = scenario_info.get("steps", 1)
-            transition = scenario_info.get("transition_type", "unknown")
+            rank = int(float(scenario_info.get("rank", scenario_idx + 1) or scenario_idx + 1))
+            probability = float(scenario_info.get("probability", 0.5) or 0.5)
+            steps = int(float(scenario_info.get("steps", 1) or 1))
+            transition = str(scenario_info.get("transition_type", "unknown"))
 
             x_pos = base_x + (scenario_idx * x_spacing)
             y_pos = base_y + (steps * y_spacing)
@@ -279,10 +299,15 @@ class ScenarioPainter:
 
         Returns dict with trace + annotation data for emphasis.
         """
-        candles = top_scenario.get("candles", [])
-        summary = top_scenario.get("summary", "")
-        probability = top_scenario.get("probability", 0.0)
+        candles_data = top_scenario.get("candles", [])
 
+        if not candles_data:
+            return {}
+        candles = [
+            cast(Mapping[str, Any], item)
+            for item in cast(Sequence[Any], candles_data)
+            if isinstance(item, Mapping)
+        ]
         if not candles:
             return {}
 
@@ -340,7 +365,7 @@ def create_scenario_dashboard_layout(
     highlight = painter.top_scenario_highlight(top_scenario)
 
     # Layout
-    layout = {
+    layout: dict[str, Any] = {
         "title": title,
         "xaxis": {
             "title": "Time Index (Steps Ahead)",
@@ -378,7 +403,7 @@ def export_scenarios_as_json(
     """
     import json
 
-    export_data = {
+    export_data: dict[str, Any] = {
         "export_format": "phoenixguard_scenarios_v1",
         "scenario_count": len(scenarios),
         "scenarios": list(scenarios),
@@ -388,7 +413,7 @@ def export_scenarios_as_json(
 
 
 def export_scenarios_as_csv(
-    scenarios: Sequence[Mapping[str, Any]],
+    scenarios: Sequence[Any],
 ) -> str:
     """
     Export scenarios as CSV for analysis.
@@ -406,17 +431,23 @@ def export_scenarios_as_csv(
     for scenario in scenarios:
         if not isinstance(scenario, Mapping):
             continue
+        scenario_map = cast(Mapping[str, Any], scenario)
 
-        rank = scenario.get("rank", 0)
-        probability = scenario.get("probability", 0.0)
-        transition = scenario.get("transition_type", "UNKNOWN")
-        candles = scenario.get("candles", [])
+        rank = scenario_map.get("rank", 0)
+        probability = scenario_map.get("probability", 0.0)
+        transition = scenario_map.get("transition_type", "UNKNOWN")
+        candles_data = scenario_map.get("candles", [])
+        candles = [
+            cast(Mapping[str, Any], item)
+            for item in cast(Sequence[Any], candles_data)
+            if isinstance(item, Mapping)
+        ]
         steps = len(candles)
         direction = candles[-1].get("direction", "HOLD") if candles else "HOLD"
-        confidence = scenario.get("confidence", 0.0) if candles else 0.0
-        memory_align = scenario.get("memory_alignment", 0.0)
-        cost = scenario.get("cost", 0.0)
-        summary = scenario.get("summary", "").replace(",", ";")
+        confidence = scenario_map.get("confidence", 0.0) if candles else 0.0
+        memory_align = scenario_map.get("memory_alignment", 0.0)
+        cost = scenario_map.get("cost", 0.0)
+        summary = str(scenario_map.get("summary", "")).replace(",", ";")
 
         line = f"{rank},{probability:.4f},{transition},{steps},{direction},{confidence:.2f},{memory_align:.2f},{cost:.4f},\"{summary}\""
         lines.append(line)

@@ -164,10 +164,11 @@ def _save_onnx_export(
     input_size = int(MODEL_INPUT_SIZES[model_name])
     bundle = _InferenceExportModule(model, head, forward_features_fn).eval()
     example = torch.randn(1, 3, input_size, input_size, dtype=torch.float32)
+    example_args: tuple[torch.Tensor, ...] = (example,)
     destination.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(
         bundle,
-        (example,),
+        example_args,
         str(destination),
         input_names=["input"],
         output_names=["logits", "features"],

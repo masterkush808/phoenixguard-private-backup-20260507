@@ -24,6 +24,23 @@ def _direction(value: Any) -> str:
     return "HOLD"
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
+
+
+def _mapping_rows(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    rows = cast(Sequence[object], value)
+    return [
+        _mapping(item)
+        for item in rows
+        if isinstance(item, Mapping)
+    ]
+
+
 def _normalize_probabilities(probabilities: Mapping[str, Any] | None) -> dict[str, float]:
     raw = {
         "BUY": max(0.0, _clip01((probabilities or {}).get("BUY", 0.0))),
@@ -588,8 +605,8 @@ def _hold_score(combined: Mapping[str, Any], buy_play: Mapping[str, Any], sell_p
 
 
 def analyze_best_play(input_snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
-    snapshot = dict(input_snapshot or {})
-    combined = cast(Mapping[str, Any], snapshot.get("combined", {}))
+    snapshot = _mapping(input_snapshot)
+    combined = _mapping(snapshot.get("combined", {}))
     if not combined:
         return {
             "status": "empty",
@@ -602,11 +619,7 @@ def analyze_best_play(input_snapshot: Mapping[str, Any] | None) -> dict[str, Any
             "recommended_reasons": [],
         }
 
-    frames = [
-        dict(item)
-        for item in cast(Sequence[Mapping[str, Any]], snapshot.get("frames", []))
-        if isinstance(item, Mapping)
-    ]
+    frames = _mapping_rows(snapshot.get("frames"))
     family_map = {
         "BUY": _resolve_play_family("BUY", combined, frames),
         "SELL": _resolve_play_family("SELL", combined, frames),

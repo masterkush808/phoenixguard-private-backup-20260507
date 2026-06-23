@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 
 import json
 import sys
@@ -12,7 +13,7 @@ if str(_REPO) not in sys.path:
 import main
 
 
-def _configure_runtime_dirs(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
+def _configure_runtime_dirs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
     data_dir = tmp_path / "data"
     logs_dir = tmp_path / "logs"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -22,7 +23,7 @@ def _configure_runtime_dirs(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     return data_dir, logs_dir
 
 
-def test_restore_manual_inference_jobs_requeues_recoverable_rows(monkeypatch, tmp_path: Path) -> None:
+def test_restore_manual_inference_jobs_requeues_recoverable_rows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_dir, _logs_dir = _configure_runtime_dirs(monkeypatch, tmp_path)
     higher_path = tmp_path / "higher.png"
     lower_path = tmp_path / "lower.png"
@@ -62,7 +63,7 @@ def test_restore_manual_inference_jobs_requeues_recoverable_rows(monkeypatch, tm
     assert "unavailable" in rows[1]["last_error"].lower()
 
 
-def test_resume_pending_manual_inference_jobs_submits_background_recovery(monkeypatch, tmp_path: Path) -> None:
+def test_resume_pending_manual_inference_jobs_submits_background_recovery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_dir, _logs_dir = _configure_runtime_dirs(monkeypatch, tmp_path)
     original_resume_state = main._manual_inference_resume_started
     queue_path = data_dir / "manual_inference_jobs.json"
@@ -106,7 +107,7 @@ def test_resume_pending_manual_inference_jobs_submits_background_recovery(monkey
         main._manual_inference_resume_started = original_resume_state
 
 
-def test_complete_manual_inference_job_writes_result_summary(monkeypatch, tmp_path: Path) -> None:
+def test_complete_manual_inference_job_writes_result_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _configure_runtime_dirs(monkeypatch, tmp_path)
     job = main._enqueue_manual_inference_job(
         [str(tmp_path / "higher.png"), str(tmp_path / "lower.png")],

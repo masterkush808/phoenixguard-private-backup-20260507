@@ -14,7 +14,7 @@ Consensus: confidence >= 0.82 AND gates_passing >= 9 AND memory_sim >= 0.87
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Callable, cast
 import heapq
 import re
 
@@ -80,6 +80,26 @@ def _clip01(value: Any, default: float = 0.0) -> float:
     return float(np.clip(_finite_float(value, default), 0.0, 1.0))
 
 
+def _torch_tensor(data: Any, *, dtype: Any) -> torch.Tensor:
+    tensor_fn = cast(Callable[..., torch.Tensor], getattr(torch, "tensor"))
+    return tensor_fn(data, dtype=dtype)
+
+
+def _torch_sigmoid(value: Any) -> torch.Tensor:
+    sigmoid_fn = cast(Callable[[Any], torch.Tensor], getattr(torch, "sigmoid"))
+    return sigmoid_fn(value)
+
+
+def _torch_softmax(value: Any, *, dim: int) -> Any:
+    softmax_fn = cast(Callable[..., Any], getattr(torch, "softmax"))
+    return softmax_fn(value, dim=dim)
+
+
+def _torch_diag(value: Any) -> Any:
+    diag_fn = cast(Callable[[Any], Any], getattr(torch, "diag"))
+    return diag_fn(value)
+
+
 def _safe_probability_view(probs: dict[str, Any]) -> tuple[dict[str, float], str, float, float]:
     raw = np.array(
         [
@@ -119,17 +139,20 @@ class GateOutput:
 class LinearRouter(nn.Module):
     """Trainable 13->13 gate importance router (EMA updated from feedback)."""
     def __init__(self, n_gates: int = 13):
-        super().__init__()  # pyright: ignore[reportUnknownMemberType]
+        module_init = cast(Callable[[Any], None], nn.Module.__init__)
+        module_init(self)
         self.layer = nn.Linear(n_gates, n_gates, bias=False)
-        nn.init.eye_(self.layer.weight)  # pyright: ignore[reportUnknownMemberType]  # identity init = equal weight start
+        init_module = cast(Any, nn.init)
+        init_module.eye_(self.layer.weight)
 
     def forward(self, scores: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(self.layer(scores))  # pyright: ignore[reportPrivateImportUsage]
+        return _torch_sigmoid(self.layer(scores))
 
 
 class SkillGatedMoE(nn.Module):
     def __init__(self, n_features: int = 16, n_gates: int = 13):
-        super().__init__()  # pyright: ignore[reportUnknownMemberType]
+        module_init = cast(Callable[[Any], None], nn.Module.__init__)
+        module_init(self)
         self.router = nn.Sequential(
             nn.Linear(n_features, 32),
             nn.GELU(),
@@ -137,13 +160,11 @@ class SkillGatedMoE(nn.Module):
         )
 
     def route_weights(self, feat: NDArray[np.float32]) -> NDArray[np.float32]:
-        x = torch.tensor(feat, dtype=torch.float32).unsqueeze(0)  # pyright: ignore[reportPrivateImportUsage]
+        x = _torch_tensor(feat, dtype=torch.float32).unsqueeze(0)
         with torch.inference_mode():
-            w = cast(
-                NDArray[np.float32],
-                torch.softmax(self.router(x), dim=-1).squeeze(0).numpy(),  # pyright: ignore[reportPrivateImportUsage, reportUnknownMemberType]
-            )
-        return np.asarray(w, dtype=np.float32)
+            routed = cast(Any, _torch_softmax(self.router(x), dim=-1)).squeeze(0)
+            to_numpy = cast(Callable[[], Any], getattr(routed, "numpy"))
+        return np.asarray(to_numpy(), dtype=np.float32)
 
 
 class CurriculumGates:
@@ -982,7 +1003,7 @@ class CurriculumGates:
         ]
 
         # Apply trainable router weights
-        scores = torch.tensor([g.score for g in outputs], dtype=torch.float32)  # pyright: ignore[reportPrivateImportUsage]
+        scores = _torch_tensor([g.score for g in outputs], dtype=torch.float32)
         with torch.inference_mode():
             routed = self._router(scores).numpy()
         for i, g in enumerate(outputs):
@@ -1076,7 +1097,7 @@ class CurriculumGates:
         if len(self._feedback_history) >= 10:
             batch = np.array(self._feedback_history[-10:], dtype=np.float32)
             avg = np.mean(batch, axis=0)
-            grad_approx = torch.tensor(avg, dtype=torch.float32)  # pyright: ignore[reportPrivateImportUsage]
+            grad_approx = _torch_tensor(avg, dtype=torch.float32)
             with torch.no_grad():
                 w = self._router.layer.weight
-                w.copy_(0.95 * w + 0.05 * torch.diag(grad_approx))  # pyright: ignore[reportPrivateImportUsage]
+                w.copy_(0.95 * w + 0.05 * _torch_diag(grad_approx))

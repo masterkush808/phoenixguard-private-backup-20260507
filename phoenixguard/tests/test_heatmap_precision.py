@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 
 import json
 import sys
@@ -201,7 +202,7 @@ def test_heatmap_can_classify_reversal_windows() -> None:
     assert int(payload["window_counts"]["reversal"]) >= 1
 
 
-def test_heatmap_feedback_calibration_leans_into_target_path_feedback(monkeypatch, tmp_path: Path) -> None:
+def test_heatmap_feedback_calibration_leans_into_target_path_feedback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     journal_path = tmp_path / "feedback_submissions.jsonl"
     submission = {
         "submission_id": "sub_1",

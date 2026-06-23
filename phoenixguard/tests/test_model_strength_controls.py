@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pathlib import Path
 
 from typing import Mapping, cast
 
@@ -48,7 +49,7 @@ def test_model_strength_settings_to_execution_controls_clamps_and_maps() -> None
     assert profile["profile_saved"] is True
 
 
-def test_window_tracker_persists_model_strength_controls(tmp_path) -> None:
+def test_window_tracker_persists_model_strength_controls(tmp_path: Path) -> None:
     service = ContinuousWindowTrackerService(root_dir=tmp_path)
     try:
         service.create_session(session_id="model-strength-test")

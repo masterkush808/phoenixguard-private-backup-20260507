@@ -51,12 +51,16 @@ class EmailVerificationProvider(Protocol):
         ...
 
 
+def _empty_sent_messages() -> list[dict[str, Any]]:
+    return []
+
+
 @dataclass
 class CapturingEmailVerificationProvider:
     """Local/test provider that captures email verification messages in memory."""
 
     provider_name: str = "memory"
-    sent_messages: list[dict[str, Any]] = field(default_factory=list)
+    sent_messages: list[dict[str, Any]] = field(default_factory=_empty_sent_messages)
 
     def send_verification(
         self,
@@ -66,7 +70,7 @@ class CapturingEmailVerificationProvider:
         verification_token: str,
         expires_at: datetime,
     ) -> dict[str, Any]:
-        message = {
+        message: dict[str, Any] = {
             "provider": self.provider_name,
             "message_id": f"emv_{len(self.sent_messages) + 1:06d}",
             "customer_id": customer_id,

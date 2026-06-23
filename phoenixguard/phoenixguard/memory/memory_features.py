@@ -6,6 +6,12 @@ from typing import Any, Mapping, Sequence, cast
 import numpy as np
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
+
+
 def _clip01(value: Any, default: float = 0.0) -> float:
     try:
         return float(np.clip(float(value), 0.0, 1.0))
@@ -18,26 +24,12 @@ def derive_entry_progression_profile(
     *,
     sequence_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    chart_sequence_state = chart_state.get("sequence_state", {})
-    if not isinstance(chart_sequence_state, Mapping):
-        chart_sequence_state = {}
-    seq = cast(Mapping[str, Any], sequence_state or chart_sequence_state)
-
-    progression = chart_state.get("entry_progression", {})
-    if not isinstance(progression, Mapping):
-        progression = {}
-
-    sequence_model = chart_state.get("sequence_model", seq.get("sequence_model", {}))
-    if not isinstance(sequence_model, Mapping):
-        sequence_model = {}
-
-    projected_box = chart_state.get("projected_next_box", {})
-    if not isinstance(projected_box, Mapping):
-        projected_box = {}
-
-    regression = chart_state.get("memory_candle_regression", progression.get("candle_regression", {}))
-    if not isinstance(regression, Mapping):
-        regression = {}
+    chart_sequence_state = _mapping(chart_state.get("sequence_state", {}))
+    seq = _mapping(sequence_state) if sequence_state is not None else chart_sequence_state
+    progression = _mapping(chart_state.get("entry_progression", {}))
+    sequence_model = _mapping(chart_state.get("sequence_model", seq.get("sequence_model", {})))
+    projected_box = _mapping(chart_state.get("projected_next_box", {}))
+    regression = _mapping(chart_state.get("memory_candle_regression", progression.get("candle_regression", {})))
 
     continuation_probability = _clip01(
         chart_state.get("continuation_probability", seq.get("continuation_probability", 0.25)),
@@ -185,12 +177,8 @@ def _hashed_text_vector(text: str, dim: int = 16) -> list[float]:
 
 
 def infer_style_signature_from_chart_state(chart_state: Mapping[str, Any]) -> dict[str, float]:
-    entry_candle = chart_state.get("entry_candle", {})
-    if not isinstance(entry_candle, Mapping):
-        entry_candle = {}
-    projected_box = chart_state.get("projected_next_box", {})
-    if not isinstance(projected_box, Mapping):
-        projected_box = {}
+    entry_candle = _mapping(chart_state.get("entry_candle", {}))
+    projected_box = _mapping(chart_state.get("projected_next_box", {}))
     return {
         "dark_theme": 0.0,
         "mean_luma": 0.5,
@@ -215,16 +203,10 @@ def build_trajectory_signature(
     sequence_index: int = 0,
     sequence_state: Mapping[str, Any] | None = None,
 ) -> list[float]:
-    seq = sequence_state or {}
-    projected_box = chart_state.get("projected_next_box", {})
-    if not isinstance(projected_box, Mapping):
-        projected_box = {}
-    entry_candle = chart_state.get("entry_candle", {})
-    if not isinstance(entry_candle, Mapping):
-        entry_candle = {}
-    progression = chart_state.get("entry_progression", {})
-    if not isinstance(progression, Mapping):
-        progression = {}
+    seq = _mapping(sequence_state) if sequence_state is not None else {}
+    projected_box = _mapping(chart_state.get("projected_next_box", {}))
+    entry_candle = _mapping(chart_state.get("entry_candle", {}))
+    progression = _mapping(chart_state.get("entry_progression", {}))
     direction = str(chart_state.get("direction", "HOLD")).upper()
     projected_direction = str(projected_box.get("direction", direction)).upper()
     direction_code = 1.0 if direction == "BUY" else (-1.0 if direction == "SELL" else 0.0)
@@ -256,29 +238,19 @@ def build_metric_profile(
     sequence_state: Mapping[str, Any] | None = None,
     grounded_chart: Mapping[str, Any] | None = None,
 ) -> dict[str, float]:
-    chart_sequence_state = chart_state.get("sequence_state", {})
-    if not isinstance(chart_sequence_state, Mapping):
-        chart_sequence_state = {}
-    seq = cast(Mapping[str, Any], sequence_state or chart_sequence_state)
-    grounded = grounded_chart or {}
-    structure_summary = grounded.get("structure_summary", chart_state.get("grounded_structure", {}))
-    if not isinstance(structure_summary, Mapping):
-        structure_summary = {}
-    projected_box = chart_state.get("projected_next_box", {})
-    if not isinstance(projected_box, Mapping):
-        projected_box = {}
-    teaching = chart_state.get("memory_teaching", {})
-    if not isinstance(teaching, Mapping):
-        teaching = {}
-    progression = chart_state.get("entry_progression", {})
-    if not isinstance(progression, Mapping):
+    chart_sequence_state = _mapping(chart_state.get("sequence_state", {}))
+    seq = _mapping(sequence_state) if sequence_state is not None else chart_sequence_state
+    grounded = _mapping(grounded_chart) if grounded_chart is not None else {}
+    structure_summary = _mapping(grounded.get("structure_summary", chart_state.get("grounded_structure", {})))
+    projected_box = _mapping(chart_state.get("projected_next_box", {}))
+    teaching = _mapping(chart_state.get("memory_teaching", {}))
+    progression = _mapping(chart_state.get("entry_progression", {}))
+    if not progression:
         progression = derive_entry_progression_profile(chart_state, sequence_state=seq)
-    sniper_profile = chart_state.get("sniper_profile", {})
-    if not isinstance(sniper_profile, Mapping):
-        sniper_profile = {}
-    regression = chart_state.get("memory_candle_regression", progression.get("candle_regression", {}))
-    if not isinstance(regression, Mapping):
-        regression = {}
+    sniper_profile = _mapping(chart_state.get("sniper_profile", {}))
+    regression = _mapping(chart_state.get("memory_candle_regression", progression.get("candle_regression", {})))
+    sequence_model = _mapping(seq.get("sequence_model", {}))
+    artifact_summary = _mapping(grounded.get("artifact_summary", {}))
     lesson_role = str(teaching.get("lesson_role", progression.get("progression_stage", "")) or "").lower()
     direction = str(chart_state.get("direction", "HOLD")).upper()
     projected_direction = str(projected_box.get("direction", chart_state.get("projection_bias_direction", direction))).upper()
@@ -317,54 +289,42 @@ def build_metric_profile(
         "sequence_buy_pressure": _clip01(
             chart_state.get(
                 "sequence_buy_pressure",
-                cast(Mapping[str, Any], seq.get("sequence_model", {})).get("buy_pressure", 0.0)
-                if isinstance(seq.get("sequence_model", {}), Mapping)
-                else 0.0,
+                sequence_model.get("buy_pressure", 0.0),
             ),
             0.0,
         ),
         "sequence_sell_pressure": _clip01(
             chart_state.get(
                 "sequence_sell_pressure",
-                cast(Mapping[str, Any], seq.get("sequence_model", {})).get("sell_pressure", 0.0)
-                if isinstance(seq.get("sequence_model", {}), Mapping)
-                else 0.0,
+                sequence_model.get("sell_pressure", 0.0),
             ),
             0.0,
         ),
         "continuation_readiness": _clip01(
             chart_state.get(
                 "continuation_readiness",
-                cast(Mapping[str, Any], seq.get("sequence_model", {})).get("continuation_readiness", 0.0)
-                if isinstance(seq.get("sequence_model", {}), Mapping)
-                else 0.0,
+                sequence_model.get("continuation_readiness", 0.0),
             ),
             0.0,
         ),
         "reversal_pressure": _clip01(
             chart_state.get(
                 "reversal_pressure",
-                cast(Mapping[str, Any], seq.get("sequence_model", {})).get("reversal_pressure", 0.0)
-                if isinstance(seq.get("sequence_model", {}), Mapping)
-                else 0.0,
+                sequence_model.get("reversal_pressure", 0.0),
             ),
             0.0,
         ),
         "history_coherence": _clip01(
             chart_state.get(
                 "history_coherence",
-                cast(Mapping[str, Any], seq.get("sequence_model", {})).get("history_coherence", 0.0)
-                if isinstance(seq.get("sequence_model", {}), Mapping)
-                else 0.0,
+                sequence_model.get("history_coherence", 0.0),
             ),
             0.0,
         ),
         "sequence_uncertainty": _clip01(
             chart_state.get(
                 "sequence_uncertainty",
-                cast(Mapping[str, Any], seq.get("sequence_model", {})).get("uncertainty", 0.0)
-                if isinstance(seq.get("sequence_model", {}), Mapping)
-                else 0.0,
+                sequence_model.get("uncertainty", 0.0),
             ),
             0.0,
         ),
@@ -390,7 +350,7 @@ def build_metric_profile(
         ),
         "grounded_confidence": _clip01(chart_state.get("grounded_confidence", grounded.get("grounded_confidence", 0.0)), 0.0),
         "artifact_penalty": _clip01(
-            1.0 - float(cast(Mapping[str, Any], grounded.get("artifact_summary", {})).get("artifact_score", chart_state.get("artifact_score", 0.0)) or 0.0),
+            1.0 - float(artifact_summary.get("artifact_score", chart_state.get("artifact_score", 0.0)) or 0.0),
             0.0,
         ),
         "lesson_actual_entry": 1.0 if lesson_role in {"actual_entry", "entry", "sniper_entry"} else 0.0,
@@ -426,7 +386,7 @@ def build_late_interaction_tokens(
     sequence_state: Mapping[str, Any] | None = None,
     metric_profile: Mapping[str, float] | None = None,
 ) -> list[list[float]]:
-    seq = sequence_state or {}
+    seq = _mapping(sequence_state) if sequence_state is not None else {}
     style = dict(style_signature or infer_style_signature_from_chart_state(chart_state))
     metrics = dict(metric_profile or build_metric_profile(chart_state, sequence_state=sequence_state))
     combined = np.asarray(list(combined_embed or []), dtype=np.float32).reshape(-1)
@@ -450,21 +410,13 @@ def build_late_interaction_tokens(
             dtype=np.float32,
         )
 
-    projected_box = chart_state.get("projected_next_box", {})
-    if not isinstance(projected_box, Mapping):
-        projected_box = {}
-    teaching = chart_state.get("memory_teaching", {})
-    if not isinstance(teaching, Mapping):
-        teaching = {}
-    progression = chart_state.get("entry_progression", {})
-    if not isinstance(progression, Mapping):
+    projected_box = _mapping(chart_state.get("projected_next_box", {}))
+    teaching = _mapping(chart_state.get("memory_teaching", {}))
+    progression = _mapping(chart_state.get("entry_progression", {}))
+    if not progression:
         progression = derive_entry_progression_profile(chart_state, sequence_state=seq)
-    sniper_profile = chart_state.get("sniper_profile", {})
-    if not isinstance(sniper_profile, Mapping):
-        sniper_profile = {}
-    regression = chart_state.get("memory_candle_regression", progression.get("candle_regression", {}))
-    if not isinstance(regression, Mapping):
-        regression = {}
+    sniper_profile = _mapping(chart_state.get("sniper_profile", {}))
+    regression = _mapping(chart_state.get("memory_candle_regression", progression.get("candle_regression", {})))
 
     token_global = _unit_vector(combined[:32].tolist(), dim=32)
     token_state = _unit_vector(
@@ -604,7 +556,7 @@ def style_alignment_score(
     keys = [key for key in query_style.keys() if key in candidate_style]
     if not keys:
         return 0.0
-    deltas = []
+    deltas: list[float] = []
     for key in keys:
         deltas.append(abs(_clip01(query_style.get(key, 0.0), 0.0) - _clip01(candidate_style.get(key, 0.0), 0.0)))
     mean_delta = float(np.mean(np.asarray(deltas, dtype=np.float32))) if deltas else 1.0

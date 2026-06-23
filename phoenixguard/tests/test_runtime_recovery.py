@@ -98,11 +98,18 @@ def test_resume_recovered_capture_bundle_submits_background_work(monkeypatch: py
             ]
             main.capture_runtime_state["inflight_source"] = "recovered"
 
-        monkeypatch.setattr(main, "_get_background_executor", lambda: _ImmediateExecutor())
+        def _get_background_executor() -> _ImmediateExecutor:
+            return _ImmediateExecutor()
+
+        def _process_multi_timeframe_bundle(bundle: list[dict[str, object]], source: str = "hotkey") -> bool:
+            calls.append((bundle, source))
+            return True
+
+        monkeypatch.setattr(main, "_get_background_executor", _get_background_executor)
         monkeypatch.setattr(
             main,
             "_process_multi_timeframe_bundle",
-            lambda bundle, source="hotkey": calls.append((bundle, source)) or True,
+            _process_multi_timeframe_bundle,
         )
 
         main.resume_recovered_capture_bundle_if_needed()
@@ -167,7 +174,10 @@ def test_get_local_ensemble_returns_cached_runtime_without_runtime_type_name(mon
 
 
 def test_should_force_side_effect_free_council_when_saved_bundles_exist(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main, "_saved_local_ensemble_artifacts_available", lambda target_models=None: True)
+    def _saved_local_ensemble_artifacts_available(target_models: list[str] | None = None) -> bool:
+        return True
+
+    monkeypatch.setattr(main, "_saved_local_ensemble_artifacts_available", _saved_local_ensemble_artifacts_available)
 
     assert main.should_force_side_effect_free_council(
         side_effect_free=True,

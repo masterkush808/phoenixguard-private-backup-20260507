@@ -1,7 +1,9 @@
 from __future__ import annotations
+import pytest
 
 import sys
 from pathlib import Path
+from typing import Any
 
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -10,14 +12,25 @@ if str(_REPO) not in sys.path:
 
 import main
 
+Payload = dict[str, Any]
 
-def test_poll_capture_updates_returns_27_outputs_when_idle(monkeypatch) -> None:
-    monkeypatch.setattr(main, "_build_render_config", lambda **_: {})
-    monkeypatch.setattr(main, "_get_capture_runtime_snapshot", lambda: {"status_token": 1})
+
+def test_poll_capture_updates_returns_27_outputs_when_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _build_render_config(**_kwargs: object) -> Payload:
+        return {}
+
+    def _get_capture_runtime_snapshot() -> Payload:
+        return {"status_token": 1}
+
+    def _get_latest_capture_payload() -> tuple[int, None, None, str, None, None, None]:
+        return (0, None, None, "", None, None, None)
+
+    monkeypatch.setattr(main, "_build_render_config", _build_render_config)
+    monkeypatch.setattr(main, "_get_capture_runtime_snapshot", _get_capture_runtime_snapshot)
     monkeypatch.setattr(
         main,
         "_get_latest_capture_payload",
-        lambda: (0, None, None, "", None, None, None),
+        _get_latest_capture_payload,
     )
 
     result = main.poll_capture_updates(
@@ -40,15 +53,27 @@ def test_poll_capture_updates_returns_27_outputs_when_idle(monkeypatch) -> None:
     assert result[-2:] == (0, 1)
 
 
-def test_poll_capture_updates_returns_27_outputs_when_only_status_changes(monkeypatch) -> None:
-    monkeypatch.setattr(main, "_build_render_config", lambda **_: {})
-    monkeypatch.setattr(main, "_get_capture_runtime_snapshot", lambda: {"status_token": 2})
+def test_poll_capture_updates_returns_27_outputs_when_only_status_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _build_render_config(**_kwargs: object) -> Payload:
+        return {}
+
+    def _get_capture_runtime_snapshot() -> Payload:
+        return {"status_token": 2}
+
+    def _get_latest_capture_payload() -> tuple[int, None, None, str, None, None, None]:
+        return (0, None, None, "", None, None, None)
+
+    def _build_control_status_html(*_args: object, **_kwargs: object) -> str:
+        return "status-html"
+
+    monkeypatch.setattr(main, "_build_render_config", _build_render_config)
+    monkeypatch.setattr(main, "_get_capture_runtime_snapshot", _get_capture_runtime_snapshot)
     monkeypatch.setattr(
         main,
         "_get_latest_capture_payload",
-        lambda: (0, None, None, "", None, None, None),
+        _get_latest_capture_payload,
     )
-    monkeypatch.setattr(main, "build_control_status_html", lambda *_, **__: "status-html")
+    monkeypatch.setattr(main, "build_control_status_html", _build_control_status_html)
 
     result = main.poll_capture_updates(
         capture_token_state=0,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import re
-from typing import Any, Mapping
+from typing import Any
 
 from .auth import ConnectorPrincipal, MockBusinessAuthProvider, hash_connector_token
 from .commands import build_status_command, latest_command_for_context
@@ -15,7 +15,6 @@ from .repository import (
     MockBusinessRepository,
     Mt4Account,
     NotFoundError,
-    ReleaseBuild,
     iso_datetime,
     deterministic_id,
 )

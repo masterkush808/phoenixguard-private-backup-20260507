@@ -25,9 +25,6 @@ def chart_state_to_candle(chart_state: Mapping[str, Any]) -> CandleState:
     entry_candle_raw = chart_state.get("entry_candle", {})
     entry_candle = cast(dict[str, Any], entry_candle_raw if isinstance(entry_candle_raw, Mapping) else {})
 
-    projected_box_raw = chart_state.get("projected_next_box", {})
-
-    # projected_box = cast(dict[str, Any], projected_box_raw if isinstance(projected_box_raw, Mapping) else {})  # noqa: F841
     open_val = float(cast(Any, entry_candle.get("o") or 0.0))
     high_val = float(cast(Any, entry_candle.get("h") or 0.0))
     low_val = float(cast(Any, entry_candle.get("l") or 0.0))
@@ -54,15 +51,15 @@ def historical_candles_from_chart_state(
     chart_state: Mapping[str, Any], context_depth: int = 25
 ) -> list[CandleState]:
     """Extract historical context candles from chart_state."""
-    candles = []
+    candles: list[CandleState] = []
 
     recent_candles = chart_state.get("recent_candles", [])
-    if isinstance(recent_candles, (list, tuple)):
-        for idx, c in enumerate(list(recent_candles)[-context_depth:]):  # type: ignore[arg-type]
+    if isinstance(recent_candles, Sequence) and not isinstance(recent_candles, (str, bytes, bytearray)):
+        for idx, c in enumerate(list(cast(Sequence[Any], recent_candles))[-context_depth:]):
             if not isinstance(c, Mapping):
                 continue
-            c_dict = cast(dict[str, Any], c)
-            candles.append(  # type: ignore[attr-defined]
+            c_dict = cast(Mapping[str, Any], c)
+            candles.append(
                 CandleState(
                     open=float(cast(Any, c_dict.get("o") or 0.0)),
                     high=float(cast(Any, c_dict.get("h") or 0.0)),
@@ -76,7 +73,7 @@ def historical_candles_from_chart_state(
             )
 
 
-    return candles  # type: ignore[return-value]
+    return candles
 
 def memory_stats_to_bias(memory_recall: Mapping[str, Any] | None) -> dict[str, Any]:
     """Extract memory bank statistics for scenario bias."""
@@ -85,12 +82,16 @@ def memory_stats_to_bias(memory_recall: Mapping[str, Any] | None) -> dict[str, A
 
     memory_align: Any = memory_recall.get("memory_alignment", 0.5)
     memory_labels_raw: Any = memory_recall.get("memory_labels", [])
-    memory_labels: Sequence[Any] = memory_labels_raw if isinstance(memory_labels_raw, Sequence) else []  # type: ignore[assignment]
+    memory_labels: Sequence[Any] = (
+        cast(Sequence[Any], memory_labels_raw)
+        if isinstance(memory_labels_raw, Sequence) and not isinstance(memory_labels_raw, (str, bytes, bytearray))
+        else ()
+    )
     label_counts: dict[Any, int] = {}
 
     for label in memory_labels:
         count: int = label_counts.get(label, 0)
-        label_counts[label] = count + 1  # type: ignore[assignment]
+        label_counts[label] = count + 1
 
     buy_count: int = (label_counts.get("BUY", 0) or 0) + (label_counts.get("buy", 0) or 0)
     sell_count: int = (label_counts.get("SELL", 0) or 0) + (label_counts.get("sell", 0) or 0)
@@ -197,7 +198,7 @@ def rank_scenarios_by_ensemble_agreement(
     if not scenarios:
         return list(scenarios)
 
-    scored = []
+    scored: list[tuple[float, ScenarioPrediction]] = []
     for scenario in scenarios:
         last_candle = scenario.scenario.last_candle()
         if last_candle is None:
@@ -216,9 +217,8 @@ def rank_scenarios_by_ensemble_agreement(
         # Include original probability
         alignment_score += 0.1 * scenario.probability
 
-
-        scored.append((alignment_score, scenario))  # type: ignore[attr-defined]
-    scored.sort(key=lambda x: x[0], reverse=True)  # type: ignore[operator,return-value]
+        scored.append((alignment_score, scenario))
+    scored.sort(key=lambda item: item[0], reverse=True)
     return [s[1] for s in scored]
 
 
@@ -242,9 +242,9 @@ def scenarios_to_paint_layer(
 
     # Build confidence heatmap (matrix of [depth x scenario])
     max_depth = max((len(s.projected_candles) for s in scenarios), default=1)
-    heatmap = []
+    heatmap: list[list[float]] = []
     for depth in range(max_depth):
-        row = []
+        row: list[float] = []
         for scenario in scenarios:
             if depth < len(scenario.projected_candles):
                 conf = scenario.projected_candles[depth].confidence
@@ -252,9 +252,9 @@ def scenarios_to_paint_layer(
                 conf = 0.0
             row.append(conf)
 
-        heatmap.append(row)  # type: ignore[attr-defined]
+        heatmap.append(row)
     # Build tree structure (which scenarios share common ancestors)
-    tree = {
+    tree: dict[str, Any] = {
         "branches": len(scenarios),
         "max_depth": max_depth,
         "scenarios": [

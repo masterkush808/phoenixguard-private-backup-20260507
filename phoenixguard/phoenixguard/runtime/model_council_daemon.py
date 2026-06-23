@@ -10,7 +10,7 @@ import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock
-from typing import Any, cast
+from typing import Any, Mapping, Sequence, cast
 
 from PIL import Image
 import torch
@@ -36,6 +36,18 @@ _stats_lock = Lock()
 def _bump_cache_stat(key: str) -> None:
     with _stats_lock:
         _cache_stats[key] = int(_cache_stats.get(key, 0)) + 1
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
+
+
+def _sequence(value: Any) -> list[Any]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return list(cast(Sequence[Any], value))
+    return []
 
 
 def _cache_stats_snapshot() -> dict[str, int]:
@@ -72,7 +84,7 @@ def _runtime_status() -> dict[str, Any]:
             failed_models = dict(getattr(runtime, "failed_models", {}))
     stats = _cache_stats_snapshot()
     cache_total = int(stats.get("hits", 0)) + int(stats.get("misses", 0))
-    cache_payload = {
+    cache_payload: dict[str, Any] = {
         "entries": len(_prediction_cache),
         "hits": int(stats.get("hits", 0)),
         "misses": int(stats.get("misses", 0)),
@@ -216,11 +228,11 @@ class _ModelCouncilHandler(BaseHTTPRequestHandler):
         try:
             content_length = int(self.headers.get("Content-Length", "0") or "0")
             raw = self.rfile.read(content_length)
-            payload_obj = json.loads(raw.decode("utf-8")) if raw else {}
-            payload = dict(payload_obj) if isinstance(payload_obj, dict) else {}
-            adaptation_profile = cast(dict[str, Any], payload.get("adaptation_profile", {}))
-            routing_context = cast(dict[str, Any], payload.get("routing_context", {}))
-            raw_target_models = cast(list[Any], payload.get("target_models", []))
+            payload_obj: Any = json.loads(raw.decode("utf-8")) if raw else {}
+            payload = _mapping(payload_obj)
+            adaptation_profile = _mapping(payload.get("adaptation_profile", {}))
+            routing_context = _mapping(payload.get("routing_context", {}))
+            raw_target_models = _sequence(payload.get("target_models", []))
             target_models = [str(name).strip() for name in raw_target_models if str(name).strip()] or None
             max_loaded_raw = payload.get("max_loaded_models")
             max_loaded_models = int(max_loaded_raw) if isinstance(max_loaded_raw, int) else None

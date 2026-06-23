@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 from math import isfinite
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 CANDLE_OUTCOME_TRACKER_V1 = "CANDLE_OUTCOME_TRACKER_V1"
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(item) for item in value if isinstance(item, Mapping)]
+    return [dict(cast(Mapping[str, Any], item)) for item in cast(Sequence[Any], value) if isinstance(item, Mapping)]
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -129,7 +129,7 @@ def _opposing_force_price(entry: Mapping[str, Any], side: str, entry_price: floa
     zone = _mapping(entry.get("opposing_force_zone") or _mapping(entry.get("risk_context")).get("opposing_force_zone"))
     bounds = zone.get("price_bounds") or zone.get("bounds")
     if isinstance(bounds, Sequence) and not isinstance(bounds, (str, bytes, bytearray)):
-        values = [_float(item, float("nan")) for item in bounds]
+        values = [_float(item, float("nan")) for item in cast(Sequence[Any], bounds)]
         values = [item for item in values if isfinite(item)]
         if values:
             if side == "BUY":

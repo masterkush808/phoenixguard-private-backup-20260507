@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pathlib import Path
 
 import json
 
@@ -18,7 +19,7 @@ from phoenixguard.simulation.synthetic_scenarios.generator import (
 )
 
 
-def test_synthetic_scenario_generation_is_deterministic_and_dictionary_native(tmp_path) -> None:
+def test_synthetic_scenario_generation_is_deterministic_and_dictionary_native(tmp_path: Path) -> None:
     first = generate_synthetic_market_scenario("breakout_failure", seed=42, frame_count=16)
     second = generate_synthetic_market_scenario("breakout_failure", seed=42, frame_count=16)
 

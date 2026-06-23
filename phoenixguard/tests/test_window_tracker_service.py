@@ -1,4 +1,3 @@
-# pyright: reportPrivateUsage=false, reportUnknownParameterType=false, reportMissingTypeArgument=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportCallIssue=false, reportUnknownArgumentType=false, reportUnknownLambdaType=false, reportArgumentType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -8,7 +7,7 @@ import ctypes
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping, Protocol, Sequence, cast
 
 from fastapi.testclient import TestClient
 import numpy as np
@@ -25,11 +24,16 @@ from phoenixguard.mobile_api.window_tracker import (
     PhoenixGuardWindowTrackingAdapter,
     TrackingStudy,
     WindowsWindowCaptureBackend,
-    _model_council_packet_from_payload,
-    _normalize_broker_execution_state,
-    _preserve_newer_active_execution_state,
-    _write_json_atomic,
+    model_council_packet_from_payload,
+    normalize_broker_execution_state,
+    preserve_newer_active_execution_state,
+    write_json_atomic,
 )
+
+
+class _BuildSignalPayloads(Protocol):
+    def __call__(self, *args: Any, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        ...
 
 
 def _surface(color: tuple[int, int, int] = (22, 28, 38), *, width: int = 960, height: int = 540) -> Image.Image:
@@ -895,7 +899,7 @@ def _focus_session_without_preview(tracker: ContinuousWindowTrackerService, sess
     }
     payload["status"] = "ready"
     payload["updated_at"] = "2026-05-06T00:00:00+00:00"
-    _write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
 
 
 def _allow_next_capture(tracker: ContinuousWindowTrackerService, session_id: str) -> None:
@@ -1059,7 +1063,7 @@ def test_tracker_capture_surface_unavailable_preserves_overlay_authority(tmp_pat
     existing_overlay = tmp_path / "existing_overlay.png"
     _surface().save(existing_overlay)
     payload["last_overlay_path"] = str(existing_overlay)
-    _write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
 
     captured = tracker._capture_and_analyze(session_id, force=True)
     refreshed = tracker.get_session(session_id)
@@ -1126,13 +1130,7 @@ def test_window_tracker_adds_sniper_watch_before_confirmation_execute() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     chart = Image.new("RGB", (620, 420), color=(20, 26, 38))
     candles = _manual_candle_tracks([380, 356, 332, 308, 284, 260, 236, 212, 188, 164, 140, 116])
-    build_payloads = cast(
-        Callable[
-            [Image.Image, Mapping[str, Any], Sequence[Mapping[str, Any]], Mapping[str, Any]],
-            tuple[dict[str, Any], dict[str, Any]],
-        ],
-        getattr(adapter, "_build_signal_payloads"),
-    )
+    build_payloads = cast(_BuildSignalPayloads, getattr(adapter, "_build_signal_payloads"))
 
     tracking, signal = build_payloads(
         chart,
@@ -1160,13 +1158,7 @@ def test_window_tracker_projection_adds_continuous_probability_payload() -> None
         image_height=420,
         direction="BUY",
     )
-    build_payloads = cast(
-        Callable[
-            [Image.Image, Mapping[str, Any], Sequence[Mapping[str, Any]], Mapping[str, Any]],
-            tuple[dict[str, Any], dict[str, Any]],
-        ],
-        getattr(adapter, "_build_signal_payloads"),
-    )
+    build_payloads = cast(_BuildSignalPayloads, getattr(adapter, "_build_signal_payloads"))
 
     tracking, signal = build_payloads(
         chart,
@@ -1202,10 +1194,7 @@ def test_window_tracker_keeps_overlay_when_execution_timing_is_blocked() -> None
         direction="BUY",
     )
     build_payloads = cast(
-        Callable[
-            [Image.Image, Mapping[str, Any], Sequence[Mapping[str, Any]], Mapping[str, Any]],
-            tuple[dict[str, Any], dict[str, Any]],
-        ],
+        Callable[..., tuple[dict[str, Any], dict[str, Any]]],
         getattr(adapter, "_build_signal_payloads"),
     )
 
@@ -2637,10 +2626,7 @@ def test_window_tracker_builds_behavior_sequence_payload() -> None:
         direction="BUY",
     )
     build_payloads = cast(
-        Callable[
-            [Image.Image, Mapping[str, Any], Sequence[Mapping[str, Any]], Mapping[str, Any]],
-            tuple[dict[str, Any], dict[str, Any]],
-        ],
+        Callable[..., tuple[dict[str, Any], dict[str, Any]]],
         getattr(adapter, "_build_signal_payloads"),
     )
 
@@ -2677,13 +2663,7 @@ def test_window_tracker_builds_phoenixguard_live_report(monkeypatch: Any) -> Non
     )
     monkeypatch.setattr(adapter, "_get_phoenixguard_memory_bank", lambda: _StubPhoenixBank(_sample_memory_entries()))
 
-    build_payloads = cast(
-        Callable[
-            [Image.Image, Mapping[str, Any], Sequence[Mapping[str, Any]], Mapping[str, Any]],
-            tuple[dict[str, Any], dict[str, Any]],
-        ],
-        getattr(adapter, "_build_signal_payloads"),
-    )
+    build_payloads = cast(_BuildSignalPayloads, getattr(adapter, "_build_signal_payloads"))
 
     tracking, signal = build_payloads(
         chart,
@@ -2738,13 +2718,7 @@ def test_window_tracker_reuses_fresh_phoenixguard_live_report(monkeypatch: Any) 
         lambda: pytest.fail("fresh PhoenixGuard report cache should avoid memory-bank inference"),
     )
 
-    build_payloads = cast(
-        Callable[
-            [Image.Image, Mapping[str, Any], Sequence[Mapping[str, Any]], Mapping[str, Any]],
-            tuple[dict[str, Any], dict[str, Any]],
-        ],
-        getattr(adapter, "_build_signal_payloads"),
-    )
+    build_payloads = cast(_BuildSignalPayloads, getattr(adapter, "_build_signal_payloads"))
 
     tracking, signal = build_payloads(
         chart,
@@ -2776,13 +2750,7 @@ def test_window_tracker_builds_memory_projection_payload(monkeypatch: Any) -> No
     )
     monkeypatch.setattr(adapter, "_get_phoenixguard_memory_bank", lambda: _StubPhoenixBank(_sample_memory_entries()))
 
-    build_payloads = cast(
-        Callable[
-            [Image.Image, Mapping[str, Any], Sequence[Mapping[str, Any]], Mapping[str, Any]],
-            tuple[dict[str, Any], dict[str, Any]],
-        ],
-        getattr(adapter, "_build_signal_payloads"),
-    )
+    build_payloads = cast(_BuildSignalPayloads, getattr(adapter, "_build_signal_payloads"))
 
     tracking, signal = build_payloads(
         chart,
@@ -3209,7 +3177,7 @@ def test_model_council_packet_lookup_ignores_expired_execution_packet(monkeypatc
         "valid_until_epoch_sec": 120.0,
     }
 
-    assert _model_council_packet_from_payload(
+    assert model_council_packet_from_payload(
         {
             "model_council_packet": expired_packet,
             "execution_packet": expired_packet,
@@ -3245,7 +3213,7 @@ def test_model_council_packet_lookup_rejects_demoted_execution_root_without_side
         },
     }
 
-    assert _model_council_packet_from_payload({"model_council_result": demoted_root}) == {}
+    assert model_council_packet_from_payload({"model_council_result": demoted_root}) == {}
 
 
 def test_public_session_payload_does_not_block_non_executable_missing_signal_id(tmp_path: Path) -> None:
@@ -3506,7 +3474,7 @@ def test_tracker_live_mode_writes_fresh_hot_overlays_by_default(tmp_path: Path, 
     payload["execution_controls"] = controls
     payload["tracking_enabled"] = True
     payload["status"] = "running"
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     tracker._capture_and_analyze(str(session["session_id"]))
@@ -3545,7 +3513,7 @@ def test_tracker_forced_minimal_hot_artifacts_overwrites_fresh_overlay(
     payload["execution_controls"] = controls
     payload["tracking_enabled"] = True
     payload["status"] = "running"
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     tracker._capture_and_analyze(str(session["session_id"]))
@@ -3584,7 +3552,7 @@ def test_tracker_capture_once_live_fast_path_returns_fresh_display_when_worker_b
     controls = dict(payload["execution_controls"])
     controls.update({"live_execution_enabled": True, "execution_mode": "live"})
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     adapter_calls = adapter.calls
     before_display = int(payload.get("display_frame_id", 0) or 0)
@@ -3630,7 +3598,7 @@ def test_tracker_capture_once_display_only_does_not_schedule_study_worker(tmp_pa
     controls = dict(payload["execution_controls"])
     controls.update({"live_execution_enabled": True, "execution_mode": "live"})
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     adapter_calls = adapter.calls
     result = tracker.capture_once(str(session["session_id"]), display_only=True)
@@ -3661,7 +3629,7 @@ def test_tracker_capture_once_display_only_returns_busy_when_snapshot_in_flight(
     payload = tracker.load_session_payload(str(session["session_id"]))
     payload["tracking_enabled"] = True
     payload["status"] = "running"
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0")
     backend.capture_calls = 0
     adapter.calls = 0
@@ -3692,7 +3660,7 @@ def test_tracker_display_only_busy_is_single_flight_until_stale_reset(tmp_path: 
     payload = tracker.load_session_payload(str(session["session_id"]))
     payload["tracking_enabled"] = True
     payload["status"] = "running"
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_SNAPSHOT_STALE_RESET_SEC", "30")
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0")
     backend.capture_calls = 0
@@ -3728,7 +3696,7 @@ def test_tracker_display_only_stale_inflight_resets_as_emergency_recovery(
     payload = tracker.load_session_payload(str(session["session_id"]))
     payload["tracking_enabled"] = True
     payload["status"] = "running"
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_SNAPSHOT_STALE_RESET_SEC", "5")
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0")
     backend.capture_calls = 0
@@ -3769,7 +3737,7 @@ def test_tracker_display_only_refresh_does_not_replace_authority_frame(tmp_path:
     controls = dict(payload["execution_controls"])
     controls.update({"live_execution_enabled": True, "execution_mode": "live"})
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     studied = tracker.capture_once(str(session["session_id"]))
@@ -3822,7 +3790,7 @@ def test_tracker_display_only_records_signature_without_moving_overlay_authority
     controls = dict(payload["execution_controls"])
     controls.update({"live_execution_enabled": False, "execution_mode": "shadow"})
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     studied = tracker.capture_once(str(session["session_id"]))
@@ -3838,7 +3806,7 @@ def test_tracker_display_only_records_signature_without_moving_overlay_authority
     assert display_state["last_study_surface_signature"] == studied["last_study_surface_signature"]
     display_state["display_frame_id"] = int(refreshed["display_frame_id"]) + 10
     display_state["overlay_source_window_signature"] = "stale-surface"
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "display_state.json", display_state)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "display_state.json", display_state)
     merged = tracker.get_session_snapshot(str(session["session_id"]))
     assert merged["overlay_source_window_signature"] == studied["overlay_source_window_signature"]
     assert merged["last_display_surface_signature"] == display_state["last_display_surface_signature"]
@@ -3860,7 +3828,7 @@ def test_tracker_display_only_reuses_identical_surface_artifact(
     payload = tracker.load_session_payload(str(session["session_id"]))
     payload["tracking_enabled"] = True
     payload["status"] = "running"
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_IDENTICAL_SURFACE", "1")
 
     first = tracker.capture_once(str(session["session_id"]), display_only=True)
@@ -3889,7 +3857,7 @@ def test_tracker_display_only_prefers_validated_fast_visible_capture(
     payload = tracker.load_session_payload(session_id)
     payload["tracking_enabled"] = True
     payload["status"] = "running"
-    _write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1")
 
     result = tracker.capture_once(session_id, display_only=True)
@@ -3917,7 +3885,7 @@ def test_tracker_display_only_blocks_native_capture_fallback_when_fast_visible_f
     payload = tracker.load_session_payload(session_id)
     payload["tracking_enabled"] = True
     payload["status"] = "running"
-    _write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1")
     monkeypatch.delenv("PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK", raising=False)
 
@@ -3945,7 +3913,7 @@ def test_tracker_display_only_reuse_only_heartbeat_skips_capture_after_locked_ar
     payload = tracker.load_session_payload(session_id)
     payload["tracking_enabled"] = True
     payload["status"] = "running"
-    _write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "1")
 
     first = tracker.capture_once(session_id, display_only=True)
@@ -3975,7 +3943,7 @@ def test_tracker_display_only_busy_reuses_last_display_heartbeat(
     payload = tracker.load_session_payload(str(session["session_id"]))
     payload["tracking_enabled"] = True
     payload["status"] = "running"
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_BUSY_REUSE_HEARTBEAT", "1")
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0")
 
@@ -4045,7 +4013,7 @@ def test_tracker_prune_preserves_session_referenced_artifact_groups(tmp_path: Pa
         stem = f"{index:06d}_abcdef12"
         for suffix in ("window.png", "chart.png", "overlay.png", "full_overlay.png", "decision.json"):
             (artifact_dir / f"{stem}_{suffix}").write_text("x", encoding="utf-8")
-    _write_json_atomic(
+    write_json_atomic(
         artifact_dir.parent / "session.json",
         {
             "last_window_path": str(protected_window),
@@ -4079,7 +4047,7 @@ def test_tracker_prune_preserves_display_state_referenced_artifact_group(tmp_pat
         for suffix in ("window.png", "chart.png", "overlay.png", "full_overlay.png", "decision.json"):
             (artifact_dir / f"{stem}_{suffix}").write_text("x", encoding="utf-8")
     protected_display.write_text("display", encoding="utf-8")
-    _write_json_atomic(
+    write_json_atomic(
         artifact_dir.parent / "display_state.json",
         {
             "last_display_window_path": str(protected_display),
@@ -4150,7 +4118,7 @@ def test_tracker_capture_preserves_newer_tracking_enabled_state(tmp_path: Path, 
     persisted = tracker.load_session_payload(session_id)
     persisted["tracking_enabled"] = True
     persisted["status"] = "running"
-    _write_json_atomic(tracker.session_dir(session_id) / "session.json", persisted)
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", persisted)
 
     original_require = tracker._require_session
     returned_stale_once = {"value": False}
@@ -4189,7 +4157,7 @@ def test_tracker_capture_does_not_overwrite_newer_published_capture(tmp_path: Pa
     persisted["frame_index"] = 9
     persisted["last_capture_epoch"] = 2000.0
     persisted["last_capture_at"] = "1970-01-01T00:33:20+00:00"
-    _write_json_atomic(tracker.session_dir(session_id) / "session.json", persisted)
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", persisted)
 
     monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: 1500.0)
 
@@ -4222,7 +4190,7 @@ def test_tracker_study_gate_blocks_overlapping_capture(tmp_path: Path) -> None:
             assert release.wait(5.0)
             return super().study(image, session_payload=session_payload)
 
-    tracker.tracking_adapter = _BlockingTrackingAdapter("BUY")
+    setattr(tracker, "tracking_adapter", _BlockingTrackingAdapter("BUY"))
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(tracker._capture_and_analyze, session_id, force=True)
         assert started.wait(5.0)
@@ -4434,7 +4402,7 @@ def test_tracker_worker_loop_uses_adaptive_interval_without_default_floor(tmp_pa
     payload["tracking_enabled"] = True
     payload["latest_signal"] = {"status": "tracking", "action": "SELL"}
     payload["tracking_summary"] = {"chart_valid": True}
-    _write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
     clock = {"now": 1000.0}
     capture_times: list[float] = []
 
@@ -4469,7 +4437,7 @@ def test_tracker_worker_loop_uses_adaptive_interval_without_default_floor(tmp_pa
         payload["updated_at"] = payload["last_capture_at"]
         payload["latest_signal"] = {"status": "tracking", "action": "SELL"}
         payload["tracking_summary"] = {"chart_valid": True}
-        _write_json_atomic(tracker.session_dir(captured_session_id) / "session.json", payload)
+        write_json_atomic(tracker.session_dir(captured_session_id) / "session.json", payload)
         if next_count >= 2:
             stop_evt.set()
 
@@ -4482,7 +4450,7 @@ def test_tracker_worker_loop_uses_adaptive_interval_without_default_floor(tmp_pa
     monkeypatch.setattr(window_tracker_module.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(window_tracker_module.time, "time", lambda: clock["now"])
 
-    tracker._worker_loop(session_id, stop_evt, capture_now_evt)
+    tracker._worker_loop(session_id, cast(threading.Event, stop_evt), cast(threading.Event, capture_now_evt))
     payload = tracker.load_session_payload(session_id)
 
     assert int(payload["capture_count"]) >= 2
@@ -5128,7 +5096,7 @@ def test_tracker_capture_preserves_concurrent_control_updates(tmp_path: Path) ->
             assert release.wait(5.0)
             return super().study(image, session_payload=session_payload)
 
-    tracker.tracking_adapter = _BlockingTrackingAdapter("BUY")
+    setattr(tracker, "tracking_adapter", _BlockingTrackingAdapter("BUY"))
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(tracker.capture_once, str(session["session_id"]))
         assert started.wait(5.0)
@@ -5741,7 +5709,7 @@ def test_tracker_disabled_execution_skips_broker_surface_scan(tmp_path: Path) ->
     payload["execution_controls"] = controls
     payload["tracking_enabled"] = True
     payload["status"] = "running"
-    _write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
 
     _allow_next_capture(tracker, session_id)
     result = tracker.capture_once(session_id)
@@ -5769,7 +5737,7 @@ def test_tracker_emergency_stop_disables_live_execution_and_writes_event_log(tmp
     payload["execution_controls"] = controls
     payload["tracking_enabled"] = True
     payload["status"] = "running"
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     stopped = tracker.emergency_stop_session(str(session["session_id"]), reason="test stop")
 
@@ -5870,7 +5838,7 @@ def test_tracker_live_execution_uses_fixed_amount_and_fake_click_backend(tmp_pat
         }
     )
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     result = tracker.capture_once(str(session["session_id"]))
@@ -5903,7 +5871,7 @@ def test_tracker_live_execution_clicks_sell_with_swing_expiry(tmp_path: Path) ->
         }
     )
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     result = tracker.capture_once(str(session["session_id"]))
@@ -5981,7 +5949,7 @@ def test_tracker_live_execution_persists_blocked_click_diagnostics(tmp_path: Pat
         }
     )
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     result = tracker.capture_once(str(session["session_id"]))
@@ -6133,7 +6101,7 @@ def test_tracker_execution_reads_full_gui_when_chart_focus_excludes_order_panel(
         }
     )
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     result = tracker.capture_once(str(session["session_id"]))
@@ -6194,7 +6162,7 @@ def test_tracker_demo_random_trade_force_uses_signal_side_when_timing_blocks_aut
         "dominant_side": "BUY",
         "smart_money_context": {"dominant_side": "BUY"},
     }
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     result = tracker.execute_demo_random_trade(str(session["session_id"]), expiry_seconds=180, force=True)
 
@@ -6219,7 +6187,7 @@ def test_tracker_demo_random_trade_respects_twenty_minute_cooldown(tmp_path: Pat
     state = cast(dict[str, Any], payload["broker_execution_state"])
     state["active_trade"] = {}
     payload["broker_execution_state"] = state
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     second = tracker.execute_demo_random_trade(str(session["session_id"]), side="SELL", expiry_seconds=180)
 
@@ -6272,7 +6240,7 @@ def test_tracker_demo_random_trade_waits_after_blocked_expiry_adjustment(tmp_pat
 
 
 def test_broker_execution_state_normalization_clears_expired_demo_trade() -> None:
-    state = _normalize_broker_execution_state(
+    state = normalize_broker_execution_state(
         {
             "status": "clicked",
             "message": "Clicked SELL while preserving amount.",
@@ -6325,7 +6293,7 @@ def test_tracker_settles_expired_trade_with_chart_proxy_memory(tmp_path: Path) -
             "execution_timing": {"recommended_expiry_seconds": 180, "global_extreme_risk": 0.10, "opposing_force_risk": 0.12},
         },
     }
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     result = tracker.capture_once(str(session["session_id"]))
@@ -6409,7 +6377,7 @@ def test_broker_execution_state_preserves_newer_active_trade_from_concurrent_sav
         "last_result": {"status": "clicked", "side": "BUY"},
     }
 
-    merged = _preserve_newer_active_execution_state(candidate, persisted)
+    merged = preserve_newer_active_execution_state(candidate, persisted)
 
     assert merged["status"] == "monitoring"
     assert merged["active_trade"]["side"] == "BUY"
@@ -6467,7 +6435,7 @@ def test_tracker_fuses_broker_identity_before_live_execution_gate(tmp_path: Path
         }
     )
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     result = tracker.capture_once(str(session["session_id"]))
@@ -6502,7 +6470,7 @@ def test_tracker_reuses_broker_identity_when_live_packet_is_not_executable(tmp_p
         }
     )
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     first = tracker.capture_once(str(session["session_id"]))
     second = tracker.capture_once(str(session["session_id"]))
@@ -6539,7 +6507,7 @@ def test_tracker_live_execution_does_not_require_timeframe_ocr_by_default(tmp_pa
         }
     )
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     result = tracker.capture_once(str(session["session_id"]))
@@ -6572,7 +6540,7 @@ def test_tracker_blocks_live_execution_when_timeframe_identity_is_required(tmp_p
         }
     )
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     result = tracker.capture_once(str(session["session_id"]))
@@ -6606,7 +6574,7 @@ def test_tracker_blocks_locked_surface_identity_fallback_for_live_execution(tmp_
         }
     )
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     result = tracker.capture_once(str(session["session_id"]))
@@ -6638,7 +6606,7 @@ def test_tracker_live_execution_waits_after_blocked_click_attempt(tmp_path: Path
         }
     )
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     first = tracker.capture_once(str(session["session_id"]))
@@ -6671,7 +6639,7 @@ def test_tracker_live_execution_ignores_expired_demo_test_cooldown(tmp_path: Pat
             "require_market_identity": False,
         }
     )
-    state = _normalize_broker_execution_state(payload["broker_execution_state"])
+    state = normalize_broker_execution_state(payload["broker_execution_state"])
     state["cooldown_until_epoch"] = time.time() + 600.0
     state["cooldown_until"] = "future-demo-cooldown"
     state["last_result"] = {
@@ -6681,7 +6649,7 @@ def test_tracker_live_execution_ignores_expired_demo_test_cooldown(tmp_path: Pat
     state["active_trade"] = {}
     payload["execution_controls"] = controls
     payload["broker_execution_state"] = state
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     result = tracker.capture_once(str(session["session_id"]))
@@ -6713,7 +6681,7 @@ def test_tracker_blocks_live_execution_when_broker_identity_is_weak(tmp_path: Pa
         }
     )
     payload["execution_controls"] = controls
-    _write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
+    write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
     result = tracker.capture_once(str(session["session_id"]))
@@ -6728,7 +6696,7 @@ def test_window_tracker_atomic_writer_handles_concurrent_updates(tmp_path: Path)
 
     def _writer(worker_id: int) -> None:
         for sequence in range(40):
-            _write_json_atomic(
+            write_json_atomic(
                 target_path,
                 {
                     "worker_id": worker_id,

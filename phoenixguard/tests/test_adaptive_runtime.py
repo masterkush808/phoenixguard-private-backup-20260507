@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import numpy.typing as npt
 from PIL import Image
 
 
@@ -26,7 +27,7 @@ class _DummyIndex:
     def __init__(self, sims: dict[str, float]) -> None:
         self._sims = sims
 
-    def search(self, query: np.ndarray, top_k: int = 5) -> list[tuple[str, float]]:
+    def search(self, query: npt.NDArray[np.float32], top_k: int = 5) -> list[tuple[str, float]]:
         _ = query
         ranked = sorted(self._sims.items(), key=lambda item: item[1], reverse=True)
         return ranked[:top_k]

@@ -1,3 +1,4 @@
+from pathlib import Path
 from phoenixguard.vision.adapters import (
     memory_episode_match_to_historical_study,
     a_star_scenario_to_prediction_scenario,
@@ -6,7 +7,7 @@ from phoenixguard.vision.adapters import (
 from phoenixguard.vision.market_registry import merge_market_objects, load_market_objects, query_active_objects
 
 
-def test_adapters_and_merge_lifecycle(tmp_path):
+def test_adapters_and_merge_lifecycle(tmp_path: Path):
     # adapters
     mem = {"episode_id": "e1", "side": "SELL", "would_enter_at": {"frame_id": 10}}
     study = memory_episode_match_to_historical_study(mem)

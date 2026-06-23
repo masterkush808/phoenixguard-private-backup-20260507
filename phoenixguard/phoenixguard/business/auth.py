@@ -7,7 +7,7 @@ import hmac
 import json
 import os
 import time
-from typing import Mapping
+from typing import Any, Mapping, cast
 
 
 MOCK_CUSTOMER_TOKENS: dict[str, str] = {
@@ -90,7 +90,7 @@ class MockBusinessAuthProvider:
 
     def issue_customer_token(self, *, customer_id: str) -> str:
         issued_at = int(time.time())
-        payload = {
+        payload: dict[str, int | str] = {
             "cid": str(customer_id).strip(),
             "iat": issued_at,
             "exp": issued_at + self._customer_session_ttl_seconds,
@@ -143,11 +143,12 @@ class MockBusinessAuthProvider:
         if not hmac.compare_digest(expected_signature, supplied_signature):
             raise BusinessAuthError("invalid_connector_token_signature")
         try:
-            payload = json.loads(_base64url_decode(body).decode("utf-8"))
+            decoded_payload: object = json.loads(_base64url_decode(body).decode("utf-8"))
         except Exception as exc:  # pragma: no cover - defensive malformed-token guard
             raise BusinessAuthError("invalid_connector_token_payload") from exc
-        if not isinstance(payload, dict):
+        if not isinstance(decoded_payload, Mapping):
             raise BusinessAuthError("invalid_connector_token_payload")
+        payload = cast(Mapping[str, Any], decoded_payload)
         customer_id = str(payload.get("cid") or "").strip()
         license_id = str(payload.get("lid") or "").strip()
         device_id = str(payload.get("did") or "").strip()
@@ -173,11 +174,12 @@ class MockBusinessAuthProvider:
         if not hmac.compare_digest(expected_signature, supplied_signature):
             raise BusinessAuthError("invalid_customer_token_signature")
         try:
-            payload = json.loads(_base64url_decode(body).decode("utf-8"))
+            decoded_payload: object = json.loads(_base64url_decode(body).decode("utf-8"))
         except Exception as exc:  # pragma: no cover - defensive malformed-token guard
             raise BusinessAuthError("invalid_customer_token_payload") from exc
-        if not isinstance(payload, dict):
+        if not isinstance(decoded_payload, Mapping):
             raise BusinessAuthError("invalid_customer_token_payload")
+        payload = cast(Mapping[str, Any], decoded_payload)
         expires_at = int(payload.get("exp") or 0)
         if expires_at <= int(time.time()):
             raise BusinessAuthError("customer_token_expired")

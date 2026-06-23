@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, MutableMapping, cast
 
 from fastapi.testclient import TestClient
 
@@ -29,6 +29,29 @@ from phoenixguard.runtime.observability_v3 import (
     packet_health_allows_executable,
     record_paper_mode_decision,
 )
+
+
+def _compact_live_state_response_cache_signature(session_id: str) -> str:
+    fn = cast(
+        Callable[[str], str],
+        getattr(mobile_app, "_compact_live_state_response_cache_signature"),
+    )
+    return fn(session_id)
+
+
+def _live_state_cache_signature(session_id: str, *, compact_public: bool = False) -> str:
+    fn = cast(
+        Callable[..., str],
+        getattr(mobile_app, "_live_state_cache_signature"),
+    )
+    return fn(session_id, compact_public=compact_public)
+
+
+def _clear_mobile_live_state_caches(*, direct_trace: bool = False) -> None:
+    cast(MutableMapping[Any, Any], getattr(mobile_app, "_LIVE_STATE_V3_CACHE")).clear()
+    cast(MutableMapping[Any, Any], getattr(mobile_app, "_LIVE_STATE_REGISTRY_CACHE")).clear()
+    if direct_trace:
+        cast(MutableMapping[Any, Any], getattr(mobile_app, "_DIRECT_PERFORMANCE_TRACE_CACHE")).clear()
 
 
 def _cache_record(**updates: Any) -> dict[str, Any]:
@@ -156,16 +179,16 @@ def test_live_state_compact_cache_signatures_track_display_artifacts(tmp_path: P
     }
     (session_dir / "display_state.json").write_text(json.dumps(display_state), encoding="utf-8")
 
-    compact_sig_1 = mobile_app._compact_live_state_response_cache_signature("pocket-live-8788")
-    live_sig_1 = mobile_app._live_state_cache_signature("pocket-live-8788", compact_public=True)
+    compact_sig_1 = _compact_live_state_response_cache_signature("pocket-live-8788")
+    live_sig_1 = _live_state_cache_signature("pocket-live-8788", compact_public=True)
 
     display_state["frame_index"] = 11
     display_state["display_frame_id"] = 101
     display_state["last_display_window_path"] = "0011_window.jpg"
     (session_dir / "display_state.json").write_text(json.dumps(display_state), encoding="utf-8")
 
-    compact_sig_2 = mobile_app._compact_live_state_response_cache_signature("pocket-live-8788")
-    live_sig_2 = mobile_app._live_state_cache_signature("pocket-live-8788", compact_public=True)
+    compact_sig_2 = _compact_live_state_response_cache_signature("pocket-live-8788")
+    live_sig_2 = _live_state_cache_signature("pocket-live-8788", compact_public=True)
 
     assert compact_sig_2 != compact_sig_1
     assert live_sig_2 != live_sig_1
@@ -491,8 +514,7 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
     data_dir = tmp_path / "data"
     monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
     monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
-    mobile_app._LIVE_STATE_V3_CACHE.clear()
-    mobile_app._LIVE_STATE_REGISTRY_CACHE.clear()
+    _clear_mobile_live_state_caches()
     session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
     session_dir.mkdir(parents=True)
     (session_dir / "session.json").write_text(
@@ -535,8 +557,7 @@ def test_live_state_v3_direct_read_skips_legacy_registry_when_v3_sources_exist(
     data_dir = tmp_path / "data"
     monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
     monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
-    mobile_app._LIVE_STATE_V3_CACHE.clear()
-    mobile_app._LIVE_STATE_REGISTRY_CACHE.clear()
+    _clear_mobile_live_state_caches()
     session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
     session_dir.mkdir(parents=True)
     now_epoch = time.time()
@@ -586,8 +607,7 @@ def test_live_state_v3_direct_read_invalidates_cache_when_display_state_advances
     data_dir = tmp_path / "data"
     monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
     monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
-    mobile_app._LIVE_STATE_V3_CACHE.clear()
-    mobile_app._LIVE_STATE_REGISTRY_CACHE.clear()
+    _clear_mobile_live_state_caches()
     session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
     artifact_dir = session_dir / "artifacts"
     artifact_dir.mkdir(parents=True)
@@ -653,8 +673,7 @@ def test_performance_trace_v3_uses_direct_display_state_fast_path(
     data_dir = tmp_path / "data"
     monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
     monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
-    mobile_app._LIVE_STATE_V3_CACHE.clear()
-    mobile_app._LIVE_STATE_REGISTRY_CACHE.clear()
+    _clear_mobile_live_state_caches()
     session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
     artifact_dir = session_dir / "artifacts"
     artifact_dir.mkdir(parents=True)
@@ -718,9 +737,7 @@ def test_performance_trace_v3_uses_compact_display_state_without_session_json(
     data_dir = tmp_path / "data"
     monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
     monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
-    mobile_app._LIVE_STATE_V3_CACHE.clear()
-    mobile_app._LIVE_STATE_REGISTRY_CACHE.clear()
-    mobile_app._DIRECT_PERFORMANCE_TRACE_CACHE.clear()
+    _clear_mobile_live_state_caches(direct_trace=True)
     session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
     artifact_dir = session_dir / "artifacts"
     artifact_dir.mkdir(parents=True)
@@ -775,9 +792,7 @@ def test_performance_trace_v3_reuses_short_direct_cache_on_read_race(
     monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
     monkeypatch.setenv("PHOENIXGUARD_PERFORMANCE_TRACE_DIRECT_ONLY", "1")
     monkeypatch.setenv("PHOENIXGUARD_DIRECT_PERFORMANCE_TRACE_CACHE_TTL_SEC", "5")
-    mobile_app._LIVE_STATE_V3_CACHE.clear()
-    mobile_app._LIVE_STATE_REGISTRY_CACHE.clear()
-    mobile_app._DIRECT_PERFORMANCE_TRACE_CACHE.clear()
+    _clear_mobile_live_state_caches(direct_trace=True)
     session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
     artifact_dir = session_dir / "artifacts"
     artifact_dir.mkdir(parents=True)
@@ -809,7 +824,10 @@ def test_performance_trace_v3_reuses_short_direct_cache_on_read_race(
     assert first_response.status_code == 200
     assert "direct_trace_cache_reused_v3" not in first_response.json()
 
-    monkeypatch.setattr(mobile_app, "_direct_window_tracker_session_snapshot", lambda _session_id: None)
+    def _direct_window_tracker_session_snapshot(_session_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(mobile_app, "_direct_window_tracker_session_snapshot", _direct_window_tracker_session_snapshot)
     second_response = client.get("/v1/mobile/performance/trace/v3/pocket-live-8788")
 
     assert second_response.status_code == 200
@@ -825,8 +843,7 @@ def test_performance_trace_v3_treats_locked_display_overlay_as_authority_locked(
     data_dir = tmp_path / "data"
     monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
     monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
-    mobile_app._LIVE_STATE_V3_CACHE.clear()
-    mobile_app._LIVE_STATE_REGISTRY_CACHE.clear()
+    _clear_mobile_live_state_caches()
     session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
     artifact_dir = session_dir / "artifacts"
     artifact_dir.mkdir(parents=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -9,7 +10,7 @@ import main
 
 
 def test_signal_overview_keeps_decimal_confidence_snippets_intact() -> None:
-    result = { # pyright: ignore[reportUnknownVariableType]
+    result: dict[str, Any] = {
         "action": "BUY",
         "confidence": 0.643,
         "decision_state": "PROJECTED",
@@ -39,7 +40,7 @@ def test_signal_overview_keeps_decimal_confidence_snippets_intact() -> None:
 
 
 def test_signal_overview_prefers_execution_action_over_headline_bias() -> None:
-    result = { # pyright: ignore[reportUnknownVariableType]
+    result: dict[str, Any] = {
         "action": "BUY",
         "headline_action": "BUY",
         "execution_action": "HOLD",
@@ -71,7 +72,7 @@ def test_signal_overview_prefers_execution_action_over_headline_bias() -> None:
 
 
 def test_signal_overview_uses_reference_operator_labels() -> None:
-    result = { # pyright: ignore[reportUnknownVariableType]
+    result: dict[str, Any] = {
         "action": "BUY",
         "confidence": 0.742,
         "decision_state": "PROJECTED",

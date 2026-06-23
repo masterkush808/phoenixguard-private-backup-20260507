@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 
 MARKET_PLAY_ENGINE_VERSION = "PG_MARKET_PLAY_ENGINE_V3"
@@ -28,7 +28,7 @@ MARKET_PLAY_CLASSES = {
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _float(value: Any, default: float = 0.0) -> float:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 SEQUENCE_CONTEXT_COMPLETE_MIN_LENGTH = 50
@@ -95,23 +95,24 @@ class SequenceContextV3:
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(cast(Mapping[str, Any], value))
 
 
 def _sequence(value: Any) -> list[Any]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return list(value)
+    return list(cast(Sequence[Any], value))
 
 
-def _float(value: Any, default: float = 0.0) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return float(default)
-    if parsed != parsed or parsed in {float("inf"), float("-inf") }:
-        return float(default)
-    return float(parsed)
+def _mapping_rows(value: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in _sequence(value):
+        row = _mapping(item)
+        if row:
+            rows.append(row)
+    return rows
 
 
 def _int(value: Any, default: int = 0) -> int:
@@ -179,7 +180,7 @@ def _tracked_candle_history_from_snapshot(snapshot: Mapping[str, Any]) -> list[d
         if not row:
             continue
         side = _candle_side(row.get("direction") or row.get("side") or row.get("color"))
-        payload = {
+        payload: dict[str, Any] = {
             "key": str(row.get("key") or row.get("track_id") or f"tracked_candle_{index}"),
             "label": str(row.get("label") or f"C{index} {side}"),
             "source": "tracked_candles",
@@ -300,8 +301,9 @@ def _sequence_context_candidates(packet: Mapping[str, Any]) -> list[dict[str, An
         node: Any = packet
         for key in path:
             node = _mapping(node).get(key)
-        if isinstance(node, Mapping) and node:
-            candidates.append(dict(node))
+        candidate = _mapping(node)
+        if candidate:
+            candidates.append(candidate)
     return candidates
 
 
@@ -325,19 +327,19 @@ def _normalize_sequence_context(row: Mapping[str, Any], *, synthesize_signature:
     normalized["local_direction"] = _upper(normalized.get("local_direction"))
     normalized["current_phase"] = str(normalized.get("current_phase") or normalized.get("sequence_phase") or "progression").strip()
     normalized["progression_score"] = _clip01(normalized.get("progression_score", 0.0), 0.0)
-    normalized["progression"] = [dict(item) for item in _sequence(normalized.get("progression")) if isinstance(item, Mapping)]
+    normalized["progression"] = _mapping_rows(normalized.get("progression"))
     normalized["motifs"] = list(_sequence(normalized.get("motifs")))
-    normalized["box_history"] = [dict(item) for item in _sequence(normalized.get("box_history")) if isinstance(item, Mapping)]
+    normalized["box_history"] = _mapping_rows(normalized.get("box_history"))
     normalized["angle_vectors"] = list(_sequence(normalized.get("angle_vectors")))
-    normalized["sniper_zones"] = [dict(item) for item in _sequence(normalized.get("sniper_zones")) if isinstance(item, Mapping)]
-    normalized["target_zones"] = [dict(item) for item in _sequence(normalized.get("target_zones")) if isinstance(item, Mapping)]
-    normalized["invalidation_zones"] = [dict(item) for item in _sequence(normalized.get("invalidation_zones")) if isinstance(item, Mapping)]
+    normalized["sniper_zones"] = _mapping_rows(normalized.get("sniper_zones"))
+    normalized["target_zones"] = _mapping_rows(normalized.get("target_zones"))
+    normalized["invalidation_zones"] = _mapping_rows(normalized.get("invalidation_zones"))
     normalized["sequence_status"] = str(
         normalized.get("sequence_status") or normalized.get("status") or "PARTIAL_SEQUENCE"
     ).strip().upper()
     normalized["entry_progression"] = _mapping(normalized.get("entry_progression"))
     normalized["tracking_summary"] = _mapping(normalized.get("tracking_summary"))
-    normalized["sequence_history"] = [dict(item) for item in _sequence(normalized.get("sequence_history")) if isinstance(item, Mapping)]
+    normalized["sequence_history"] = _mapping_rows(normalized.get("sequence_history"))
     normalized["frame_range"] = (
         _int(_sequence(normalized.get("frame_range"))[:1][0] if _sequence(normalized.get("frame_range")) else normalized.get("frame_start"), 0),
         _int(_sequence(normalized.get("frame_range"))[1] if len(_sequence(normalized.get("frame_range"))) > 1 else normalized.get("frame_end"), 0),
@@ -476,7 +478,7 @@ def sequence_context_readiness_report(
         if isinstance(value, str):
             return value in {"", "MISSING"}
         if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            return len(value) == 0
+            return len(cast(Sequence[Any], value)) == 0
         return False
 
     missing_fields = [
@@ -530,7 +532,7 @@ def sequence_context_readiness_report(
 
 
 def resolve_sequence_context(packet: Mapping[str, Any]) -> SequenceContextV3:
-    if not isinstance(packet, Mapping) or not packet:
+    if not packet:
         raise ValueError("sequence context missing")
     candidates = [_normalize_sequence_context(candidate, synthesize_signature=False) for candidate in _sequence_context_candidates(packet)]
     candidates = [candidate for candidate in candidates if candidate]
@@ -614,7 +616,7 @@ def build_sequence_context_v3(
         or tracking.get("entry_progression")
         or signal.get("entry_progression")
     )
-    historical_structure = _structure_boxes_from_snapshot(snapshot)
+    historical_structure: list[dict[str, Any]] = _structure_boxes_from_snapshot(snapshot)
     v3_execution_candidate = _mapping(snapshot.get("v3_execution_candidate"))
     if not historical_structure and bool(v3_execution_candidate.get("active")):
         candidate_side = _upper(
@@ -634,24 +636,18 @@ def build_sequence_context_v3(
                 "story": "Explicit V3 execution candidate supplied sequence fallback evidence.",
             }
         ]
-    projection = _mapping(snapshot.get("projection") or chart_state.get("projected_next_box") or signal.get("projected_next_box"))
-    support_resistance = _mapping(
-        snapshot.get("support_resistance_context")
-        or tracking.get("support_resistance_context")
-        or signal.get("support_resistance_context")
-    )
     zones = _zone_list(snapshot, "support_resistance_zones")
     sniper_zones = [zone for zone in zones if str(zone.get("kind") or zone.get("label") or "").lower().find("sniper") >= 0]
     target_zones = [zone for zone in zones if str(zone.get("kind") or zone.get("label") or "").lower().find("target") >= 0]
     invalidation_zones = [zone for zone in zones if str(zone.get("kind") or zone.get("label") or "").lower().find("invalidation") >= 0]
     angle_vectors = _sequence(snapshot.get("angle_vectors") or chart_state.get("angle_vectors") or signal.get("angle_vectors") or sequence_model.get("angle_vectors"))
-    motifs = _sequence(snapshot.get("motifs") or chart_state.get("motifs") or entry_progression.get("motifs"))
+    motifs: list[Any] = _sequence(snapshot.get("motifs") or chart_state.get("motifs") or entry_progression.get("motifs"))
     if not motifs:
-        motifs = [item.get("story", "") for item in historical_structure if isinstance(item, Mapping) and item.get("story")]
-    progression_steps = _sequence(snapshot.get("progression") or chart_state.get("progression") or sequence_state.get("progression"))
+        motifs = [str(item.get("story") or "") for item in historical_structure if item.get("story")]
+    progression_steps: list[Any] = _sequence(snapshot.get("progression") or chart_state.get("progression") or sequence_state.get("progression"))
     if not progression_steps:
-        progression_steps = historical_structure
-    sequence_history = _sequence(snapshot.get("sequence_history") or chart_state.get("sequence_history") or tracking.get("sequence_history"))
+        progression_steps = list(historical_structure)
+    sequence_history: list[Any] = _sequence(snapshot.get("sequence_history") or chart_state.get("sequence_history") or tracking.get("sequence_history"))
     candle_count = _int(snapshot.get("candle_count") or chart_state.get("recent_candle_count") or tracking.get("visible_candle_count") or len(_sequence(tracking.get("tracked_candles", []))), 0)
     sequence_index = _int(snapshot.get("sequence_index") or sequence_state.get("sequence_index") or packet_data.get("sequence_index") or len(historical_structure), 0)
     frames_used = _int(snapshot.get("frames_used") or packet_data.get("frames_used") or snapshot.get("capture_count") or packet_data.get("capture_count"), 0)
@@ -801,9 +797,9 @@ def build_sequence_context_v3(
         local_direction=local_direction,
         current_phase=current_phase,
         progression_score=progression_score,
-        progression=tuple(dict(item) for item in progression_steps if isinstance(item, Mapping)),
+        progression=tuple(_mapping_rows(progression_steps)),
         motifs=tuple(motifs),
-        box_history=tuple(dict(item) for item in historical_structure),
+        box_history=tuple(historical_structure),
         angle_vectors=tuple(angle_vectors),
         sniper_zones=tuple(sniper_zones),
         target_zones=tuple(target_zones),
@@ -818,7 +814,7 @@ def build_sequence_context_v3(
         model_vote_age_ms=model_vote_age_ms,
         entry_progression=dict(entry_progression),
         tracking_summary=dict(tracking),
-        sequence_history=tuple(dict(item) for item in sequence_history if isinstance(item, Mapping)),
+        sequence_history=tuple(_mapping_rows(sequence_history)),
     )
 
 

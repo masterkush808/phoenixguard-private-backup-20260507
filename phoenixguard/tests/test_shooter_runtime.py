@@ -1,6 +1,5 @@
 import ctypes
 import importlib.util
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -47,10 +46,16 @@ def test_ocr_read_time_region_uses_visual_template_without_tesseract(monkeypatch
     )
     image = Image.fromarray(image_array, "RGB")
 
+    def _get_window_rect(_hwnd: int) -> Any:
+        return shooter.RECT(0, 0, 200, 100)
+
+    def _screenshot(region: object | None = None) -> Any:
+        return image
+
     monkeypatch.setattr(shooter, "has_ocr", False)
     monkeypatch.setattr(shooter, "pytesseract", None)
-    monkeypatch.setattr(shooter, "get_window_rect", lambda _hwnd: shooter.RECT(0, 0, 200, 100))
-    monkeypatch.setattr(shooter.pyautogui, "screenshot", lambda region=None: image)
+    monkeypatch.setattr(shooter, "get_window_rect", _get_window_rect)
+    monkeypatch.setattr(shooter.pyautogui, "screenshot", _screenshot)
 
     assert shooter.ocr_read_time_region(1, {"time_input": {"x": 0.5, "y": 0.5}}) == 600
 
@@ -617,7 +622,10 @@ def test_prepare_pocket_option_window_auto_opens_before_failing(monkeypatch: pyt
 def test_explicit_window_query_miss_does_not_use_active_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     shooter = _load_shooter()
 
-    monkeypatch.setattr(shooter, "list_visible_windows", lambda query=None: [])
+    def _list_visible_windows(query: str | None = None) -> list[tuple[int, str, str]]:
+        return []
+
+    monkeypatch.setattr(shooter, "list_visible_windows", _list_visible_windows)
 
     class FakeUser32:
         def GetForegroundWindow(self) -> int:

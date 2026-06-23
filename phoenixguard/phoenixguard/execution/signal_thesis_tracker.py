@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 SIGNAL_THESIS_SCHEMA_VERSION = "PG_SIGNAL_THESIS_V3"
@@ -19,19 +19,24 @@ _GENERIC_SYMBOL_KEYS = {
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(cast(Mapping[str, Any], value))
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        return []
-    return [dict(item) for item in value if isinstance(item, Mapping)]
+    rows: list[dict[str, Any]] = []
+    for item in _sequence(value):
+        row = _mapping(item)
+        if row:
+            rows.append(row)
+    return rows
 
 
 def _sequence(value: Any) -> list[Any]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return list(value)
+    return list(cast(Sequence[Any], value))
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -283,7 +288,6 @@ def _candidate_from_payloads(
     council = _mapping(result.get("model_council"))
     execution = _mapping(result.get("execution"))
     trace = _mapping(result.get("promotion_trace") or council.get("promotion_trace"))
-    market_context = _mapping(result.get("market_context") or snapshot.get("market_context"))
     signal = _mapping(snapshot.get("latest_signal"))
     tracking = _mapping(snapshot.get("tracking_summary"))
     timing = _first_mapping(

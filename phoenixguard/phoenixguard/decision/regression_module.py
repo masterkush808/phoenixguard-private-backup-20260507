@@ -173,7 +173,6 @@ class ImageFusionRegressor:
         structure_setup = str(chart_state.get("structure_setup", "none")).lower()
         path_clarity = float(np.clip(chart_state.get("path_clarity", 0.0), 0.0, 1.0))
         box_sequence_agreement = float(np.clip(chart_state.get("box_sequence_agreement", 0.0), 0.0, 1.0))
-        projection_alignment = float(np.clip(chart_state.get("projection_alignment", 0.0), 0.0, 1.0))
         projected_box = cast(dict[str, Any], chart_state.get("projected_next_box", {}))
         projected_box_type = str(projected_box.get("box_type", "balance")).lower()
         projected_box_direction = str(projected_box.get("direction", direction)).upper()
@@ -649,7 +648,7 @@ def _conformal_interval(returns: NDArray[np.float32], alpha: float = 0.05) -> tu
     if returns.size < 4:
         return float(np.quantile(returns, alpha)), float(np.quantile(returns, 1 - alpha))
     try:
-        from mapie.regression import MapieRegressor  # type: ignore
+        from mapie.regression import MapieRegressor
         from sklearn.linear_model import Ridge
         X = np.arange(len(returns)).reshape(-1, 1).astype(np.float64)
         y = returns.astype(np.float64)

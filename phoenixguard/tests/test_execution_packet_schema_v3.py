@@ -1,10 +1,11 @@
 from __future__ import annotations
+import pytest
 
 from copy import deepcopy
+from typing import Any, cast
 
 from phoenixguard.execution.packet_v3 import (
     MODEL_COUNCIL,
-    PG_EXECUTION_PACKET_SCHEMA_VERSION,
     RUNTIME_INTEGRITY,
     SCHEMA_INTEGRITY,
     build_execution_packet_v3,
@@ -21,7 +22,10 @@ from tests.support.v3_packet_samples import complete_sequence_context_v3
 NOW = 1_800_000_000.0
 
 
-def _packet(**overrides):
+Payload = dict[str, Any]
+
+
+def _packet(**overrides: Any) -> Payload:
     payload = build_execution_packet_v3(
         packet_id="pgpkt-test-001",
         session_id="pocket-live-8788",
@@ -73,10 +77,10 @@ def _packet(**overrides):
     return payload
 
 
-def _deep_update(target, updates):
+def _deep_update(target: Payload, updates: Payload) -> None:
     for key, value in updates.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):
-            _deep_update(target[key], value)
+            _deep_update(cast(Payload, target[key]), cast(Payload, value))
         else:
             target[key] = value
 
@@ -101,8 +105,11 @@ def test_execution_packet_schema_v3_valid() -> None:
     assert payload["instrument_context"]["ocr_symbol"] == ""
 
 
-def test_execution_packet_publication_age_overrides_source_frame_age(monkeypatch) -> None:
-    monkeypatch.setattr(packet_v3, "now_epoch", lambda: NOW)
+def test_execution_packet_publication_age_overrides_source_frame_age(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _now_epoch() -> float:
+        return NOW
+
+    monkeypatch.setattr(packet_v3, "now_epoch", _now_epoch)
 
     payload = build_execution_packet_v3(
         packet_id="pgpkt-age-contract",

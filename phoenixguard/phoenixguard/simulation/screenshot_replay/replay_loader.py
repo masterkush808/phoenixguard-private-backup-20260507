@@ -5,14 +5,18 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, cast
 
 
 SUPPORTED_FRAME_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
 
 
-def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+
+
+def _empty_mapping() -> dict[str, Any]:
+    return {}
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -22,7 +26,7 @@ def _read_json(path: Path) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
-    return dict(payload) if isinstance(payload, Mapping) else {}
+    return _mapping(payload)
 
 
 def _frame_number(path: Path, fallback: int) -> int:
@@ -51,7 +55,7 @@ def _lookup(table: Mapping[str, Any], frame_id: int, path: Path) -> dict[str, An
     for key in keys:
         value = table.get(key)
         if isinstance(value, Mapping):
-            return dict(value)
+            return dict(cast(Mapping[str, Any], value))
     return {}
 
 
@@ -62,9 +66,9 @@ class ReplayFrame:
     sequence_index: int
     timestamp: float = 0.0
     frame_interval_seconds: float = 0.0
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-    labels: Mapping[str, Any] = field(default_factory=dict)
-    expected: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=_empty_mapping)
+    labels: Mapping[str, Any] = field(default_factory=_empty_mapping)
+    expected: Mapping[str, Any] = field(default_factory=_empty_mapping)
     frame_hash: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -112,7 +116,7 @@ class ReplayLoader:
         for index, path in enumerate(files):
             frame_id = _frame_number(path, index + 1)
             sidecar = _read_json(path.with_suffix(".json"))
-            metadata = {
+            metadata: dict[str, Any] = {
                 **scenario_metadata,
                 **_lookup(frame_metadata, frame_id, path),
                 **sidecar,

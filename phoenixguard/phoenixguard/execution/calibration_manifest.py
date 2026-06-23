@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, cast
 
 MANIFEST_FILENAME = "user_calibration_manifest.json"
 SOURCE_BOXES_FILENAME = "808_shooter_boxes.json"
@@ -36,6 +36,17 @@ OPTIONAL_TARGETS: tuple[str, ...] = (
     "position_area",
     "open_position_area",
 )
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
+
+
+def _empty_details() -> dict[str, Any]:
+    return {}
+
 
 TARGET_ALIASES: dict[str, tuple[str, ...]] = {
     "buy_button": ("buy_button", "buy_icon"),
@@ -71,7 +82,7 @@ class ValidationResult:
     uncalibrated_targets: tuple[str, ...] = ()
     profile_id: str | None = None
     layout_id: str | None = None
-    details: Mapping[str, Any] = field(default_factory=dict)
+    details: Mapping[str, Any] = field(default_factory=_empty_details)
 
 
 def load_manifest(path: str | Path) -> dict[str, Any]:
@@ -80,14 +91,14 @@ def load_manifest(path: str | Path) -> dict[str, Any]:
         raise FileNotFoundError(f"Calibration manifest not found: {manifest_path}")
     with manifest_path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
-    if not isinstance(payload, dict):
+    if not isinstance(payload, Mapping):
         raise ValueError(f"Calibration manifest must be a JSON object: {manifest_path}")
-    return payload
+    return _mapping(payload)
 
 
 def _finite_float(value: object) -> float | None:
     try:
-        parsed = float(value)  # type: ignore[arg-type]
+        parsed = float(cast(Any, value))
     except (TypeError, ValueError):
         return None
     if parsed != parsed:
@@ -161,49 +172,56 @@ def validate_profile_layout(
         manifest = (
             load_manifest(manifest_or_path)
             if isinstance(manifest_or_path, (str, Path))
-            else dict(manifest_or_path)
+            else _mapping(manifest_or_path)
         )
     except FileNotFoundError as exc:
         return ValidationResult(False, "MISSING_MANIFEST", str(exc), profile_id=profile_id, layout_id=layout_id)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return ValidationResult(False, "INVALID_MANIFEST", str(exc), profile_id=profile_id, layout_id=layout_id)
 
-    profiles = manifest.get("profiles")
-    if not isinstance(profiles, Mapping):
+    raw_profiles = manifest.get("profiles")
+    if not isinstance(raw_profiles, Mapping):
         return ValidationResult(False, "INVALID_MANIFEST", "Manifest has no profiles object.", profile_id=profile_id, layout_id=layout_id)
+    profiles = _mapping(raw_profiles)
 
-    profile = profiles.get(profile_id)
-    if not isinstance(profile, Mapping):
+    raw_profile = profiles.get(profile_id)
+    if not isinstance(raw_profile, Mapping):
         return ValidationResult(False, "UNKNOWN_PROFILE", f"Unknown calibration profile: {profile_id}", profile_id=profile_id, layout_id=layout_id)
+    profile = _mapping(raw_profile)
 
-    layouts = profile.get("layouts")
-    if not isinstance(layouts, Mapping):
+    raw_layouts = profile.get("layouts")
+    if not isinstance(raw_layouts, Mapping):
         return ValidationResult(False, "INVALID_PROFILE", f"Profile has no layouts object: {profile_id}", profile_id=profile_id, layout_id=layout_id)
+    layouts = _mapping(raw_layouts)
 
-    layout = layouts.get(layout_id)
-    if not isinstance(layout, Mapping):
+    raw_layout = layouts.get(layout_id)
+    if not isinstance(raw_layout, Mapping):
         return ValidationResult(False, "LAYOUT_MISMATCH", f"Calibration layout mismatch: {layout_id}", profile_id=profile_id, layout_id=layout_id)
+    layout = _mapping(raw_layout)
 
-    required_records = layout.get("required_targets")
-    if not isinstance(required_records, Mapping):
+    raw_required_records = layout.get("required_targets")
+    if not isinstance(raw_required_records, Mapping):
         return ValidationResult(False, "INVALID_LAYOUT", f"Layout has no required_targets object: {layout_id}", profile_id=profile_id, layout_id=layout_id)
+    required_records = _mapping(raw_required_records)
 
     missing: list[str] = []
     uncalibrated: list[str] = []
     invalid_points: list[str] = []
     for target in REQUIRED_TARGETS:
-        record = required_records.get(target)
-        if not isinstance(record, Mapping):
+        raw_record = required_records.get(target)
+        if not isinstance(raw_record, Mapping):
             missing.append(target)
             uncalibrated.append(target)
             continue
+        record = _mapping(raw_record)
         if record.get("status") != USER_CALIBRATED or record.get("marked") is not True:
             uncalibrated.append(target)
             continue
-        point = record.get("point")
-        if not isinstance(point, Mapping):
+        raw_point = record.get("point")
+        if not isinstance(raw_point, Mapping):
             invalid_points.append(target)
             continue
+        point = _mapping(raw_point)
         x = _finite_float(point.get("x"))
         y = _finite_float(point.get("y"))
         if x is None or y is None:
@@ -242,25 +260,29 @@ def list_uncalibrated_artifacts(
     profile_id: str | None = None,
     layout_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    manifest = load_manifest(manifest_or_path) if isinstance(manifest_or_path, (str, Path)) else dict(manifest_or_path)
+    manifest = load_manifest(manifest_or_path) if isinstance(manifest_or_path, (str, Path)) else _mapping(manifest_or_path)
     artifacts: list[dict[str, Any]] = []
-    profiles = manifest.get("profiles", {})
-    if not isinstance(profiles, Mapping):
+    raw_profiles = manifest.get("profiles", {})
+    if not isinstance(raw_profiles, Mapping):
         return artifacts
+    profiles = _mapping(raw_profiles)
 
-    for current_profile_id, profile in profiles.items():
+    for current_profile_id, raw_profile in profiles.items():
         if profile_id is not None and current_profile_id != profile_id:
             continue
-        if not isinstance(profile, Mapping):
+        if not isinstance(raw_profile, Mapping):
             continue
-        layouts = profile.get("layouts", {})
-        if not isinstance(layouts, Mapping):
+        profile = _mapping(raw_profile)
+        raw_layouts = profile.get("layouts", {})
+        if not isinstance(raw_layouts, Mapping):
             continue
-        for current_layout_id, layout in layouts.items():
+        layouts = _mapping(raw_layouts)
+        for current_layout_id, raw_layout in layouts.items():
             if layout_id is not None and current_layout_id != layout_id:
                 continue
-            if not isinstance(layout, Mapping):
+            if not isinstance(raw_layout, Mapping):
                 continue
+            layout = _mapping(raw_layout)
             for target in _uncalibrated_targets(layout):
                 artifacts.append(
                     {
@@ -312,16 +334,16 @@ def write_manifest(manifest: Mapping[str, Any], path: str | Path) -> Path:
 def _read_json_object(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
-    if not isinstance(payload, dict):
+    if not isinstance(payload, Mapping):
         raise ValueError(f"Calibration JSON must be an object: {path}")
-    return payload
+    return _mapping(payload)
 
 
 def _extract_source_points(payload: Mapping[str, Any]) -> Mapping[str, Any]:
     nested = payload.get("calibration_points")
     if isinstance(nested, Mapping):
-        return nested
-    return payload
+        return _mapping(nested)
+    return _mapping(payload)
 
 
 def _target_record(target: str, source_points: Mapping[str, Any], *, required: bool) -> dict[str, Any]:
@@ -337,7 +359,7 @@ def _target_record(target: str, source_points: Mapping[str, Any], *, required: b
 
     point = source_points.get(source_key)
     if not _is_marked_point(point):
-        point_mapping = dict(point) if isinstance(point, Mapping) else {}
+        point_mapping = _mapping(point)
         return {
             "status": NOT_USER_CALIBRATED,
             "marked": False,
@@ -345,7 +367,7 @@ def _target_record(target: str, source_points: Mapping[str, Any], *, required: b
             "source_key": source_key,
             "point": point_mapping or None,
         }
-    point_mapping = dict(point) if isinstance(point, Mapping) else {}
+    point_mapping = _mapping(point)
     x = _finite_float(point_mapping.get("x"))
     y = _finite_float(point_mapping.get("y"))
     if x is None or y is None:
@@ -371,21 +393,23 @@ def _find_source_key(target: str, source_points: Mapping[str, Any]) -> str | Non
 def _is_marked_point(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
-    x = _finite_float(value.get("x"))
-    y = _finite_float(value.get("y"))
+    point = _mapping(value)
+    x = _finite_float(point.get("x"))
+    y = _finite_float(point.get("y"))
     if x is None or y is None:
         return False
     return 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0
 
 
 def _uncalibrated_targets(layout: Mapping[str, Any]) -> list[str]:
-    records = layout.get("required_targets", {})
-    if not isinstance(records, Mapping):
+    raw_records = layout.get("required_targets", {})
+    if not isinstance(raw_records, Mapping):
         return list(REQUIRED_TARGETS)
+    records = _mapping(raw_records)
     uncalibrated: list[str] = []
     for target in REQUIRED_TARGETS:
-        record = records.get(target)
-        if not isinstance(record, Mapping) or record.get("status") != USER_CALIBRATED or record.get("marked") is not True:
+        record = _mapping(records.get(target))
+        if not record or record.get("status") != USER_CALIBRATED or record.get("marked") is not True:
             uncalibrated.append(target)
     return uncalibrated
 
@@ -396,9 +420,10 @@ def _layout_id_from_payload(payload: Mapping[str, Any]) -> str | None:
         return layout_id.strip()
     window_rect = payload.get("window_rect")
     if isinstance(window_rect, Mapping):
+        rect = _mapping(window_rect)
         try:
-            width = int(window_rect["right"]) - int(window_rect["left"])
-            height = int(window_rect["bottom"]) - int(window_rect["top"])
+            width = int(rect["right"]) - int(rect["left"])
+            height = int(rect["bottom"]) - int(rect["top"])
         except (KeyError, TypeError, ValueError):
             return None
         if width > 0 and height > 0:

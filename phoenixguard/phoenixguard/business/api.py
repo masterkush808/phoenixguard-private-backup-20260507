@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
-from typing import Any, Mapping
+import json
+from typing import Any, Mapping, cast
 
 from fastapi import Body, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,13 +76,6 @@ class HeartbeatInput(BaseModel):
     ea_version: str | None = None
     mt4_terminal_build: str | None = None
     detail: str | None = None
-
-
-def _token_for_customer(store: BusinessStore, customer_id: str) -> str:
-    for token, mapped_customer_id in store.tokens.items():
-        if mapped_customer_id == customer_id:
-            return token
-    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Customer token missing.")
 
 
 def _customer_by_email(store: BusinessStore, email: str) -> Customer | None:
@@ -680,10 +673,11 @@ def register_business_routes(app: FastAPI, store: BusinessStore | None = None) -
         ):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Stripe signature.")
         try:
-            event = json.loads(payload.decode("utf-8") or "{}")
+            event: object = json.loads(payload.decode("utf-8") or "{}")
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid webhook JSON.") from exc
-        return business_store.apply_stripe_event(event if isinstance(event, Mapping) else {})
+        event_payload: Mapping[str, Any] = cast(Mapping[str, Any], event) if isinstance(event, Mapping) else {}
+        return business_store.apply_stripe_event(event_payload)
 
     @app.get("/v1/admin/customers")
     def admin_customers(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -725,3 +719,29 @@ def register_business_routes(app: FastAPI, store: BusinessStore | None = None) -
             metadata={"reason": license_record.revoke_reason},
         )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    app.state.business_route_handler_names = tuple(
+        handler.__name__
+        for handler in (
+            business_health,
+            package_catalog,
+            start_checkout,
+            register,
+            verify_email,
+            resend_email_verification,
+            login,
+            me,
+            onboarding_status,
+            accept_disclosure,
+            create_broker_account,
+            list_licenses,
+            register_device,
+            device_heartbeat,
+            current_entitlement,
+            latest_command,
+            latest_release,
+            stripe_webhook,
+            admin_customers,
+            admin_revoke_license,
+        )
+    )

@@ -1,8 +1,9 @@
 from __future__ import annotations
+import pytest
 
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, Mapping, cast
 
 _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
@@ -11,6 +12,69 @@ if str(_REPO) not in sys.path:
 import torch
 
 from phoenixguard.runtime.local_ensemble_runtime import LocalCVEnsembleRuntime
+
+
+def _normalized_entropy(buy_prob: float, sell_prob: float) -> float:
+    fn = cast(Callable[[float, float], float], getattr(LocalCVEnsembleRuntime, "_normalized_entropy"))
+    return fn(buy_prob, sell_prob)
+
+
+def _apply_adaptation_profile(
+    row: dict[str, Any],
+    name: str,
+    adaptation_profile: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    fn = cast(
+        Callable[[dict[str, Any], str, Mapping[str, Any] | None], dict[str, Any]],
+        getattr(LocalCVEnsembleRuntime, "_apply_adaptation_profile"),
+    )
+    return fn(row, name, adaptation_profile)
+
+
+def _resolve_requested_models(
+    requested_models: list[str] | None,
+    device: torch.device,
+) -> list[str]:
+    fn = cast(
+        Callable[[list[str] | None, torch.device], list[str]],
+        getattr(LocalCVEnsembleRuntime, "_resolve_requested_models"),
+    )
+    return fn(requested_models, device)
+
+
+def _select_prediction_models(
+    runtime: LocalCVEnsembleRuntime,
+    routing_context: Mapping[str, Any] | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    method = cast(
+        Callable[[Mapping[str, Any] | None], tuple[list[str], dict[str, Any]]],
+        getattr(runtime, "_select_prediction_models"),
+    )
+    return method(routing_context)
+
+
+def _aggregate_ensemble_view(
+    model_outputs: Mapping[str, Mapping[str, Any]],
+    *,
+    route_summary: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    fn = cast(
+        Callable[..., dict[str, Any]],
+        getattr(LocalCVEnsembleRuntime, "_aggregate_ensemble_view"),
+    )
+    return fn(model_outputs, route_summary=route_summary)
+
+
+def _build_route_summary(
+    model_outputs: Mapping[str, Mapping[str, Any]],
+    *,
+    routing_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    fn = cast(
+        Callable[..., dict[str, Any]],
+        getattr(LocalCVEnsembleRuntime, "_build_route_summary"),
+    )
+    return fn(model_outputs, routing_context=routing_context)
 
 
 def _row(
@@ -24,7 +88,7 @@ def _row(
     sell_recall: float,
     decision_threshold: float = 0.5,
     runtime_calibration: dict[str, object] | None = None,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return {
         "name": name,
         "role": role,
@@ -34,7 +98,7 @@ def _row(
         "predicted_label": "BUY" if buy_prob >= sell_prob else "SELL",
         "confidence": max(buy_prob, sell_prob),
         "margin": abs(buy_prob - sell_prob),
-        "entropy": LocalCVEnsembleRuntime._normalized_entropy(buy_prob, sell_prob),
+        "entropy": _normalized_entropy(buy_prob, sell_prob),
         "dynamic_weight": weight,
         "shadow_weight": 0.0,
         "decision_threshold": decision_threshold,
@@ -54,7 +118,7 @@ def _runtime() -> LocalCVEnsembleRuntime:
 
 def test_router_promotes_buy_specialists_for_buy_bias() -> None:
     runtime = _runtime()
-    prediction = {
+    prediction: dict[str, Any] = {
         "models": {
             "swav": _row("swav", "generalist", buy_prob=0.57, sell_prob=0.43, weight=1.10, buy_recall=0.70, sell_recall=0.73),
             "clip": _row("clip", "buy_specialist", buy_prob=0.73, sell_prob=0.27, weight=0.95, buy_recall=0.75, sell_recall=0.67),
@@ -98,7 +162,7 @@ def test_router_promotes_buy_specialists_for_buy_bias() -> None:
 
 def test_router_promotes_sell_specialist_for_sell_bias() -> None:
     runtime = _runtime()
-    prediction = {
+    prediction: dict[str, Any] = {
         "models": {
             "swav": _row("swav", "generalist", buy_prob=0.49, sell_prob=0.51, weight=1.06, buy_recall=0.70, sell_recall=0.73),
             "clip": _row("clip", "buy_specialist", buy_prob=0.61, sell_prob=0.39, weight=0.94, buy_recall=0.75, sell_recall=0.67),
@@ -142,7 +206,7 @@ def test_router_promotes_sell_specialist_for_sell_bias() -> None:
 
 def test_router_respects_bearish_council_projection_against_macro_bias() -> None:
     runtime = _runtime()
-    prediction = {
+    prediction: dict[str, Any] = {
         "models": {
             "swav": _row("swav", "generalist", buy_prob=0.54, sell_prob=0.46, weight=1.04, buy_recall=0.70, sell_recall=0.73),
             "clip": _row("clip", "buy_specialist", buy_prob=0.63, sell_prob=0.37, weight=0.96, buy_recall=0.75, sell_recall=0.67),
@@ -197,7 +261,7 @@ def test_adaptation_profile_preserves_thresholded_sell_vote() -> None:
         "dynamic_weight": 1.0,
     }
 
-    adjusted = LocalCVEnsembleRuntime._apply_adaptation_profile(
+    adjusted = _apply_adaptation_profile(
         row,
         "swav",
         {
@@ -211,15 +275,15 @@ def test_adaptation_profile_preserves_thresholded_sell_vote() -> None:
     assert abs(float(adjusted["threshold_gap"]) - 0.02) < 1e-6
 
 
-def test_cpu_runtime_profile_prefers_lightweight_models(monkeypatch) -> None:
+def test_cpu_runtime_profile_prefers_lightweight_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PHOENIXGUARD_LOCAL_ENSEMBLE_MODELS", raising=False)
-    models = LocalCVEnsembleRuntime._resolve_requested_models(None, torch.device("cpu"))
+    models = _resolve_requested_models(None, torch.device("cpu"))
     assert models == list(LocalCVEnsembleRuntime.CPU_DEFAULT_MODELS)
 
 
-def test_runtime_profile_honors_env_override(monkeypatch) -> None:
+def test_runtime_profile_honors_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PHOENIXGUARD_LOCAL_ENSEMBLE_MODELS", "clip, swav, invalid, clip")
-    models = LocalCVEnsembleRuntime._resolve_requested_models(None, torch.device("cpu"))
+    models = _resolve_requested_models(None, torch.device("cpu"))
     assert models == ["clip", "swav"]
 
 
@@ -230,7 +294,8 @@ def test_cpu_selection_prioritizes_sell_specialist_before_always_on_models() -> 
     runtime.loaded_model_names = ["mobilenetv3", "simclr", "swav"]
     runtime.model_info = cast(Any, {name: object() for name in runtime.loaded_model_names})
 
-    selected, summary = runtime._select_prediction_models(
+    selected, summary = _select_prediction_models(
+        runtime,
         {
             "chart_state": {
                 "projection_bias_direction": "SELL",
@@ -270,7 +335,7 @@ def test_cpu_selection_prioritizes_sell_specialist_before_always_on_models() -> 
 
 
 def test_sell_route_runtime_calibration_uses_threshold_centered_support() -> None:
-    prediction = {
+    prediction: dict[str, Any] = {
         "models": {
             "simclr": _row(
                 "simclr",
@@ -304,11 +369,11 @@ def test_sell_route_runtime_calibration_uses_threshold_centered_support() -> Non
         "ensemble": {"failed_models": {}},
     }
 
-    buy_route = LocalCVEnsembleRuntime._aggregate_ensemble_view(
+    buy_route = _aggregate_ensemble_view(
         prediction["models"],
         route_summary={"route_direction": "BUY", "route_strength": 0.74},
     )
-    sell_route = LocalCVEnsembleRuntime._aggregate_ensemble_view(
+    sell_route = _aggregate_ensemble_view(
         prediction["models"],
         route_summary={"route_direction": "SELL", "route_strength": 0.74},
     )
@@ -319,7 +384,7 @@ def test_sell_route_runtime_calibration_uses_threshold_centered_support() -> Non
 
 
 def test_route_summary_promotes_macro_aligned_countertrend_reclaim() -> None:
-    route_summary = LocalCVEnsembleRuntime._build_route_summary(
+    route_summary = _build_route_summary(
         {
             "swav": _row(
                 "swav",
@@ -394,7 +459,7 @@ def test_route_summary_promotes_macro_aligned_countertrend_reclaim() -> None:
 
 
 def test_route_weight_multiplier_reweights_counter_route_models() -> None:
-    base_prediction = {
+    base_prediction: dict[str, Any] = {
         "models": {
             "clip": _row(
                 "clip",
@@ -427,7 +492,7 @@ def test_route_weight_multiplier_reweights_counter_route_models() -> None:
         },
         "ensemble": {"failed_models": {}},
     }
-    calibrated_prediction = {
+    calibrated_prediction: dict[str, Any] = {
         "models": {
             "clip": _row(
                 "clip",
@@ -463,11 +528,11 @@ def test_route_weight_multiplier_reweights_counter_route_models() -> None:
         "ensemble": {"failed_models": {}},
     }
 
-    unweighted = LocalCVEnsembleRuntime._aggregate_ensemble_view(
+    unweighted = _aggregate_ensemble_view(
         base_prediction["models"],
         route_summary={"route_direction": "SELL", "route_strength": 0.74},
     )
-    weighted = LocalCVEnsembleRuntime._aggregate_ensemble_view(
+    weighted = _aggregate_ensemble_view(
         calibrated_prediction["models"],
         route_summary={"route_direction": "SELL", "route_strength": 0.74},
     )

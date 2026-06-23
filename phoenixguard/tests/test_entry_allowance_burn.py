@@ -1,6 +1,6 @@
 from __future__ import annotations
+import pytest
 
-import json
 import time
 from pathlib import Path
 
@@ -47,7 +47,7 @@ def test_entry_state_allows_only_lane_accepted_packet_present() -> None:
     assert entry["execution_authorized"] is True
 
 
-def test_runtime_freshness_prefers_fresh_published_frame_over_old_display_capture(monkeypatch) -> None:
+def test_runtime_freshness_prefers_fresh_published_frame_over_old_display_capture(monkeypatch: pytest.MonkeyPatch) -> None:
     now = time.time()
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "4")
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500")
@@ -80,7 +80,7 @@ def test_runtime_freshness_prefers_fresh_published_frame_over_old_display_captur
     assert freshness["reasons"] == []
 
 
-def test_runtime_freshness_blocks_publish_epoch_lag_by_default(monkeypatch) -> None:
+def test_runtime_freshness_blocks_publish_epoch_lag_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     now = time.time()
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "4")
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500")
@@ -114,7 +114,7 @@ def test_runtime_freshness_blocks_publish_epoch_lag_by_default(monkeypatch) -> N
     assert any(reason.startswith("CAPTURE_AGE_") for reason in freshness["reasons"])
 
 
-def test_runtime_freshness_warning_relaxation_is_explicit(monkeypatch) -> None:
+def test_runtime_freshness_warning_relaxation_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
     now = time.time()
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "4")
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500")
@@ -431,7 +431,7 @@ def test_compact_sample_blocks_entry_when_runtime_is_stale() -> None:
     assert entry["blocked_by"] == "STALE_RUNTIME_GUARD"
 
 
-def test_pixel_freeze_guard_blocks_executable_when_artifact_hash_is_static(tmp_path: Path, monkeypatch) -> None:
+def test_pixel_freeze_guard_blocks_executable_when_artifact_hash_is_static(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_STATIC_PIXEL_SEC", "10")
     monkeypatch.setenv("PHOENIXGUARD_BURN_HARD_STATIC_PIXEL_SEC", "10")
     window = tmp_path / "000001_live_window.jpg"
@@ -471,7 +471,7 @@ def test_pixel_freeze_guard_blocks_executable_when_artifact_hash_is_static(tmp_p
     assert guarded["freshness"]["reasons"][0].startswith("BROKER_PIXELS_FROZEN_")
 
 
-def test_pixel_static_refresh_does_not_block_before_hard_limit(tmp_path: Path, monkeypatch) -> None:
+def test_pixel_static_refresh_does_not_block_before_hard_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_STATIC_PIXEL_SEC", "10")
     monkeypatch.setenv("PHOENIXGUARD_BURN_HARD_STATIC_PIXEL_SEC", "60")
     window = tmp_path / "000001_live_window.jpg"
@@ -617,7 +617,7 @@ def test_blocked_trend_aligned_study_requires_soft_non_stale_blocker() -> None:
     assert location_risk["active"] is False
 
 
-def test_manual_entry_rearm_suppresses_same_candidate_until_rearmed(monkeypatch) -> None:
+def test_manual_entry_rearm_suppresses_same_candidate_until_rearmed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PHOENIXGUARD_MANUAL_ENTRY_REARM_MIN_SEC", "300")
     monkeypatch.setenv("PHOENIXGUARD_MANUAL_ENTRY_REARM_MIN_PRICE_PX", "30")
     monkeypatch.setenv("PHOENIXGUARD_MANUAL_ENTRY_REARM_MIN_FRAME_DELTA", "10")

@@ -49,27 +49,35 @@ def _opposite(side: str) -> str:
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
 
 
 def _rows(value: Sequence[Mapping[str, Any]] | Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(cast(Mapping[str, Any], row)) for row in value if isinstance(row, Mapping)]
+    return [_mapping(row) for row in cast(Sequence[Any], value) if isinstance(row, Mapping)]
 
 
-def _image_height(image_size: tuple[int, int] | Sequence[int]) -> float:
-    if isinstance(image_size, Sequence) and not isinstance(image_size, (str, bytes, bytearray)) and len(image_size) >= 2:
-        return max(1.0, _safe_float(image_size[1], 1.0))
+def _image_height(image_size: Any) -> float:
+    if isinstance(image_size, Sequence) and not isinstance(image_size, (str, bytes, bytearray)):
+        size = cast(Sequence[Any], image_size)
+        if len(size) < 2:
+            return 1.0
+        return max(1.0, _safe_float(size[1], 1.0))
     return 1.0
 
 
 def _normalize_candle(row: Mapping[str, Any], image_height: float) -> dict[str, Any] | None:
     bbox = row.get("bbox", [])
-    if not isinstance(bbox, Sequence) or isinstance(bbox, (str, bytes, bytearray)) or len(bbox) < 4:
+    if not isinstance(bbox, Sequence) or isinstance(bbox, (str, bytes, bytearray)):
         return None
-    top_px = min(_safe_float(bbox[1]), _safe_float(bbox[3]))
-    bottom_px = max(_safe_float(bbox[1]), _safe_float(bbox[3]))
+    bbox_values = cast(Sequence[Any], bbox)
+    if len(bbox_values) < 4:
+        return None
+    top_px = min(_safe_float(bbox_values[1]), _safe_float(bbox_values[3]))
+    bottom_px = max(_safe_float(bbox_values[1]), _safe_float(bbox_values[3]))
     height = max(1.0, float(image_height))
     range_norm = max(0.001, (bottom_px - top_px) / height)
     direction = _side(row.get("direction") or row.get("color"), "HOLD")
@@ -261,7 +269,7 @@ def build_two_candle_study_v3(
 
     if len(features) < 5:
         summary = "Need at least five visible candles before the two-candle study is reliable."
-        payload = {
+        payload: dict[str, Any] = {
             "schema_version": TWO_CANDLE_STUDY_SCHEMA_VERSION,
             "status": "WARMING",
             "horizon_candles": 2,
@@ -420,7 +428,7 @@ def build_two_candle_study_v3(
         reason=second_reason,
     )
     council_side = _side(council.get("side") or council.get("final_side") or kernel.get("dominant_side"), "HOLD")
-    council_agreement = {
+    council_agreement: dict[str, Any] = {
         "side": council_side,
         "agrees": bool(council_side == pressure_side),
         "state": str(council.get("state") or council.get("final_state") or kernel.get("state") or "WATCHING").upper(),
@@ -430,7 +438,7 @@ def build_two_candle_study_v3(
         f"NEXT 2: {second_step['direction_bias']} bias {round(second_confidence * 100):.0f}% | {second_risk}. "
         "Study only; no synthetic candles are rendered."
     )
-    two_candle_study = {
+    two_candle_study: dict[str, Any] = {
         "schema_version": TWO_CANDLE_STUDY_SCHEMA_VERSION,
         "status": "READY",
         "frame_id": frame_id,
@@ -449,7 +457,7 @@ def build_two_candle_study_v3(
         "do_not_render_synthetic_candles": True,
         "summary": summary,
     }
-    signals = [
+    signals: list[dict[str, Any]] = [
         {
             "name": "observed current pressure",
             "side": pressure_side,

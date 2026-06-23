@@ -47,6 +47,17 @@ class HttpPost(Protocol):
         ...
 
 
+def _as_mapping(value: object) -> Mapping[str, Any] | None:
+    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else None
+
+
+def _first_mapping_item(value: object) -> Mapping[str, Any] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    first = cast(list[Any], value)[0]
+    return _as_mapping(first)
+
+
 @dataclass(frozen=True, slots=True)
 class StripeCheckoutSessionConfig:
     secret_key: str
@@ -175,10 +186,11 @@ class StripeCheckoutSessionClient:
         if status_code < 200 or status_code >= 300:
             raise BillingProviderError(f"stripe_checkout_session_failed:{status_code}")
         try:
-            response_payload = json.loads(response_body.decode("utf-8"))
+            decoded_payload: object = json.loads(response_body.decode("utf-8"))
         except json.JSONDecodeError as exc:
             raise BillingProviderError("stripe_checkout_session_invalid_json") from exc
-        if not isinstance(response_payload, Mapping):
+        response_payload = _as_mapping(decoded_payload)
+        if response_payload is None:
             raise BillingProviderError("stripe_checkout_session_invalid_response")
         session_id = str(response_payload.get("id") or "").strip()
         checkout_url = str(response_payload.get("url") or "").strip()
@@ -283,10 +295,11 @@ class BillingService:
     ) -> dict[str, Any]:
         self._stripe_verifier.verify(payload=payload, signature_header=signature_header)
         try:
-            event = json.loads(payload.decode("utf-8"))
+            decoded_event: object = json.loads(payload.decode("utf-8"))
         except json.JSONDecodeError as exc:
             raise BillingPayloadError("stripe_payload_invalid_json") from exc
-        if not isinstance(event, dict):
+        event = _as_mapping(decoded_event)
+        if event is None:
             raise BillingPayloadError("stripe_payload_invalid")
         event_id = str(event.get("id") or "").strip()
         event_type = str(event.get("type") or "").strip()
@@ -317,10 +330,9 @@ class BillingService:
         }
 
     def _apply_stripe_event(self, *, event_type: str, event: Mapping[str, Any]) -> dict[str, Any]:
-        raw_data = event.get("data")
-        data = cast(Mapping[str, Any], raw_data) if isinstance(raw_data, Mapping) else {}
+        data = _as_mapping(event.get("data")) or {}
         raw_object = data.get("object")
-        stripe_object = dict(cast(Mapping[str, Any], raw_object)) if isinstance(raw_object, Mapping) else {}
+        stripe_object = dict(_as_mapping(raw_object) or {})
         if event_type in {
             "customer.subscription.created",
             "customer.subscription.updated",
@@ -529,20 +541,18 @@ def _datetime_from_stripe_epoch(value: object) -> datetime | None:
 
 
 def _subscription_plan_code(subscription: Mapping[str, Any]) -> str:
-    metadata = subscription.get("metadata")
-    if isinstance(metadata, Mapping) and metadata.get("plan_code"):
+    metadata = _as_mapping(subscription.get("metadata"))
+    if metadata is not None and metadata.get("plan_code"):
         return str(metadata["plan_code"])
-    items = subscription.get("items")
-    if isinstance(items, Mapping):
-        data = items.get("data")
-        if isinstance(data, list) and data:
-            first = data[0]
-            if isinstance(first, Mapping):
-                price = first.get("price")
-                if isinstance(price, Mapping):
-                    for key in ("lookup_key", "nickname"):
-                        if price.get(key):
-                            return str(price[key])
+    items = _as_mapping(subscription.get("items"))
+    if items is not None:
+        first = _first_mapping_item(items.get("data"))
+        if first is not None:
+            price = _as_mapping(first.get("price"))
+            if price is not None:
+                for key in ("lookup_key", "nickname"):
+                    if price.get(key):
+                        return str(price[key])
     return "business"
 
 
@@ -550,44 +560,39 @@ def _invoice_subscription_id(invoice: Mapping[str, Any]) -> str:
     direct = str(invoice.get("subscription") or "").strip()
     if direct:
         return direct
-    parent = invoice.get("parent")
-    if isinstance(parent, Mapping):
-        details = parent.get("subscription_details")
-        if isinstance(details, Mapping) and details.get("subscription"):
+    parent = _as_mapping(invoice.get("parent"))
+    if parent is not None:
+        details = _as_mapping(parent.get("subscription_details"))
+        if details is not None and details.get("subscription"):
             return str(details["subscription"]).strip()
     return ""
 
 
 def _invoice_plan_code(invoice: Mapping[str, Any]) -> str:
-    metadata = invoice.get("metadata")
-    if isinstance(metadata, Mapping) and metadata.get("plan_code"):
+    metadata = _as_mapping(invoice.get("metadata"))
+    if metadata is not None and metadata.get("plan_code"):
         return str(metadata["plan_code"])
-    lines = invoice.get("lines")
-    if isinstance(lines, Mapping):
-        data = lines.get("data")
-        if isinstance(data, list) and data:
-            first = data[0]
-            if isinstance(first, Mapping):
-                price = first.get("price")
-                if isinstance(price, Mapping):
-                    for key in ("lookup_key", "nickname"):
-                        if price.get(key):
-                            return str(price[key])
+    lines = _as_mapping(invoice.get("lines"))
+    if lines is not None:
+        first = _first_mapping_item(lines.get("data"))
+        if first is not None:
+            price = _as_mapping(first.get("price"))
+            if price is not None:
+                for key in ("lookup_key", "nickname"):
+                    if price.get(key):
+                        return str(price[key])
     return "business"
 
 
 def _invoice_period_datetime(invoice: Mapping[str, Any], key: str) -> datetime | None:
-    lines = invoice.get("lines")
-    if not isinstance(lines, Mapping):
+    lines = _as_mapping(invoice.get("lines"))
+    if lines is None:
         return None
-    data = lines.get("data")
-    if not isinstance(data, list) or not data:
+    first = _first_mapping_item(lines.get("data"))
+    if first is None:
         return None
-    first = data[0]
-    if not isinstance(first, Mapping):
-        return None
-    period = first.get("period")
-    if not isinstance(period, Mapping):
+    period = _as_mapping(first.get("period"))
+    if period is None:
         return None
     return _datetime_from_stripe_epoch(period.get(key))
 

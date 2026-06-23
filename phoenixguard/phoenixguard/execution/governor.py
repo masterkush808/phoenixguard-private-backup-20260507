@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, cast
 
 
 REASON_APPROVED = "APPROVED"
@@ -21,13 +21,17 @@ _ARMED_STATES = {
 _FALLBACK_EXPIRY_SOURCES = {"fallback", "fallback_derived", "default", "derived_fallback"}
 
 
+def _empty_details() -> dict[str, Any]:
+    return {}
+
+
 @dataclass(frozen=True)
 class ExecutionDecision:
     approved: bool
     reason_codes: tuple[str, ...]
     signal_id: str | None = None
     side: str | None = None
-    details: Mapping[str, Any] = field(default_factory=dict)
+    details: Mapping[str, Any] = field(default_factory=_empty_details)
 
     @property
     def blocked(self) -> bool:
@@ -181,16 +185,17 @@ def _validate_decision_kernel(kernel: Any, side: str | None, reasons: list[str])
     if not isinstance(kernel, Mapping):
         reasons.append("MISSING_DECISION_KERNEL")
         return
+    kernel_payload = dict(cast(Mapping[str, Any], kernel))
 
-    kernel_state = _clean_str(kernel.get("state")).upper()
+    kernel_state = _clean_str(kernel_payload.get("state")).upper()
     if kernel_state and kernel_state not in _ARMED_STATES:
         reasons.append("DECISION_KERNEL_NOT_ARMED")
 
     kernel_side = _normalize_side(
-        kernel.get("side")
-        or kernel.get("dominant_side")
-        or kernel.get("fire_side")
-        or kernel.get("approved_side")
+        kernel_payload.get("side")
+        or kernel_payload.get("dominant_side")
+        or kernel_payload.get("fire_side")
+        or kernel_payload.get("approved_side")
     )
     if kernel_side is None:
         reasons.append("DECISION_KERNEL_MISSING_SIDE")
@@ -202,7 +207,8 @@ def _validate_tracker(tracker: Any, side: str | None, reasons: list[str]) -> Non
     if not isinstance(tracker, Mapping):
         reasons.append("MISSING_TRACKER")
         return
-    tracker_side = _normalize_side(tracker.get("side") or tracker.get("fire_side") or tracker.get("direction"))
+    tracker_payload = dict(cast(Mapping[str, Any], tracker))
+    tracker_side = _normalize_side(tracker_payload.get("side") or tracker_payload.get("fire_side") or tracker_payload.get("direction"))
     if tracker_side is None:
         reasons.append("TRACKER_MISSING_SIDE")
     elif side is not None and tracker_side != side:
@@ -212,8 +218,9 @@ def _validate_tracker(tracker: Any, side: str | None, reasons: list[str]) -> Non
 def _validate_hypotheses(fire_command: Mapping[str, Any], side: str | None, reasons: list[str]) -> None:
     hypotheses = fire_command.get("hypotheses")
     if isinstance(hypotheses, Mapping):
-        resolved = hypotheses.get("resolved") is True
-        selected_side = _normalize_side(hypotheses.get("selected_side") or hypotheses.get("resolved_side"))
+        hypotheses_payload = dict(cast(Mapping[str, Any], hypotheses))
+        resolved = hypotheses_payload.get("resolved") is True
+        selected_side = _normalize_side(hypotheses_payload.get("selected_side") or hypotheses_payload.get("resolved_side"))
     else:
         resolved = fire_command.get("dual_hypothesis_resolved") is True
         selected_side = _normalize_side(fire_command.get("resolved_hypothesis_side"))
@@ -228,11 +235,12 @@ def _validate_timing(timing: Any, reasons: list[str]) -> None:
     if not isinstance(timing, Mapping):
         reasons.append("MISSING_TIMING_FLAGS")
         return
-    if timing.get("late_candle") is True:
+    timing_payload = dict(cast(Mapping[str, Any], timing))
+    if timing_payload.get("late_candle") is True:
         reasons.append("LATE_CANDLE")
-    if timing.get("window_open") is not True:
+    if timing_payload.get("window_open") is not True:
         reasons.append("TIMING_WINDOW_CLOSED")
-    if timing.get("candle_closed") is True:
+    if timing_payload.get("candle_closed") is True:
         reasons.append("CANDLE_ALREADY_CLOSED")
 
 

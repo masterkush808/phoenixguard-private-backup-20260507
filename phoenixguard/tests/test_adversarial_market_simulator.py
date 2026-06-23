@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, Mapping
+
 from phoenixguard.decision.adversarial_market_simulator import (
     ADVERSARIAL_SCENARIOS,
     build_adversarial_snapshot,
@@ -22,8 +24,11 @@ def test_adversarial_steep_impulse_snapshot_sets_late_chase_inputs() -> None:
 
 
 def test_adversarial_market_suite_blocks_dangerous_scenarios() -> None:
+    def _evaluate(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+        return evaluate_model_council_v3(snapshot, now=1000.0)
+
     result = run_adversarial_market_suite(
-        lambda snapshot: evaluate_model_council_v3(snapshot, now=1000.0)
+        _evaluate
     )
 
     assert result["passed"] is True

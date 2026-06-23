@@ -5,7 +5,7 @@ from enum import Enum
 import json
 import time
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 class ShooterMode(str, Enum):
@@ -70,9 +70,15 @@ def _packet_id(packet: Mapping[str, Any]) -> str:
     return str(packet.get("packet_id") or packet.get("decision_id") or "").strip()
 
 
-def _execution(packet: Mapping[str, Any]) -> Mapping[str, Any]:
+def _mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(cast(Mapping[str, Any], value))
+
+
+def _execution(packet: Mapping[str, Any]) -> dict[str, Any]:
     value = packet.get("execution")
-    return value if isinstance(value, Mapping) else {}
+    return _mapping(value)
 
 
 def _base_record(packet: Mapping[str, Any], decision: Mapping[str, Any], mode: ShooterMode, now: float | None) -> dict[str, Any]:
@@ -149,10 +155,11 @@ def build_coordinate_report(
     points: dict[str, dict[str, int]] = {}
     errors: list[str] = []
     for key in candidate_keys:
-        raw_box = boxes.get(key)
-        if not isinstance(raw_box, Mapping):
+        raw_box_value = boxes.get(key)
+        if not isinstance(raw_box_value, Mapping):
             errors.append(f"MISSING_BOX:{key}")
             continue
+        raw_box = _mapping(raw_box_value)
         point = _point_from_box(bounds, raw_box)
         if point is None:
             errors.append(f"INVALID_BOX:{key}")
@@ -231,11 +238,11 @@ def record_live_ready(
     record["clicked"] = bool(clicked)
     record["live_ready_reason"] = str(reason or "")
     if rehearsal is not None:
-        rehearsal_payload = dict(rehearsal)
+        rehearsal_payload = _mapping(rehearsal)
         record["execution_rehearsal"] = rehearsal_payload
-        action_sequence = rehearsal_payload.get("action_sequence")
-        if isinstance(action_sequence, Mapping):
-            record["action_sequence"] = dict(action_sequence)
+        action_sequence = _mapping(rehearsal_payload.get("action_sequence"))
+        if action_sequence:
+            record["action_sequence"] = action_sequence
             record["action_sequence_overall"] = str(action_sequence.get("overall") or "")
             record["action_sequence_reason"] = str(action_sequence.get("reason") or "")
     record_path = append_jsonl(path or LIVE_READY_LOG, record)
@@ -258,6 +265,6 @@ def record_live_behavior_validation(
     record["clicked"] = bool(clicked)
     record["live_behavior_validation_reason"] = str(reason or "")
     if action_report is not None:
-        record["action_sequence"] = dict(action_report)
+        record["action_sequence"] = _mapping(action_report)
     record_path = append_jsonl(path or LIVE_BEHAVIOR_VALIDATION_LOG, record)
     return ShooterModeResult(mode, True, True, str(reason or "LIVE_BEHAVIOR_VALIDATION_RECORDED"), str(record_path))

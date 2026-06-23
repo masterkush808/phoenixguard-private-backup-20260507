@@ -5,7 +5,7 @@ from pathlib import Path
 import json
 import math
 import time
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, cast
+from typing import Any, Callable, Mapping, Optional, Sequence, cast
 
 from phoenixguard.execution.packet_v3 import validate_execution_packet_v3
 
@@ -57,6 +57,12 @@ def _target_candidates(target_name: str) -> tuple[str, ...]:
     return TARGET_ALIASES.get(target, (target,))
 
 
+def _as_mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(cast(Mapping[str, Any], value))
+
+
 def _first_present_target(boxes: Mapping[str, Any], target_name: str) -> str:
     for candidate in _target_candidates(target_name):
         if isinstance(boxes.get(candidate), Mapping):
@@ -70,14 +76,17 @@ def _now() -> float:
 
 def rect_bounds(rect: RectLike) -> tuple[int, int, int, int]:
     if isinstance(rect, Mapping):
+        rect_payload = _as_mapping(rect)
         return (
-            int(rect.get("left", rect.get("x", 0))),
-            int(rect.get("top", rect.get("y", 0))),
-            int(rect.get("right", rect.get("left", 0) + rect.get("width", 0))),
-            int(rect.get("bottom", rect.get("top", 0) + rect.get("height", 0))),
+            int(rect_payload.get("left", rect_payload.get("x", 0))),
+            int(rect_payload.get("top", rect_payload.get("y", 0))),
+            int(rect_payload.get("right", rect_payload.get("left", 0) + rect_payload.get("width", 0))),
+            int(rect_payload.get("bottom", rect_payload.get("top", 0) + rect_payload.get("height", 0))),
         )
-    if isinstance(rect, Sequence) and not isinstance(rect, (str, bytes)) and len(rect) >= 4:
-        return int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])
+    if isinstance(rect, Sequence) and not isinstance(rect, (str, bytes)):
+        rect_sequence = cast(Sequence[Any], rect)
+        if len(rect_sequence) >= 4:
+            return int(rect_sequence[0]), int(rect_sequence[1]), int(rect_sequence[2]), int(rect_sequence[3])
     rect_obj = cast(Any, rect)
     return int(rect_obj.left), int(rect_obj.top), int(rect_obj.right), int(rect_obj.bottom)
 
@@ -103,15 +112,15 @@ def _packet_id(packet: Mapping[str, Any]) -> str:
     return str(packet.get("packet_id") or packet.get("decision_id") or "").strip()
 
 
-def _execution(packet: Mapping[str, Any]) -> Mapping[str, Any]:
+def _execution(packet: Mapping[str, Any]) -> dict[str, Any]:
     value = packet.get("execution")
-    return value if isinstance(value, Mapping) else {}
+    return _as_mapping(value)
 
 
-def _sequence(packet: Mapping[str, Any]) -> Mapping[str, Any]:
+def _sequence(packet: Mapping[str, Any]) -> dict[str, Any]:
     execution = _execution(packet)
     value = execution.get("time_sequence")
-    return value if isinstance(value, Mapping) else {}
+    return _as_mapping(value)
 
 
 def _packet_side(packet: Mapping[str, Any], fallback: str = "") -> str:
@@ -212,12 +221,13 @@ class BrokerTimingProfile:
             candidate = Path(path)
             if candidate.exists():
                 raw = json.loads(candidate.read_text(encoding="utf-8"))
-                if isinstance(raw, Mapping):
-                    profile = raw.get("broker_timing_profile")
-                    arrow = raw.get("arrow_fallback")
-                    if isinstance(profile, Mapping):
-                        payload.update(dict(profile))
-                    if isinstance(arrow, Mapping):
+                raw_payload = _as_mapping(raw)
+                if raw_payload:
+                    profile = _as_mapping(raw_payload.get("broker_timing_profile"))
+                    arrow = _as_mapping(raw_payload.get("arrow_fallback"))
+                    if profile:
+                        payload.update(profile)
+                    if arrow:
                         payload["arrow_fallback_enabled"] = bool(arrow.get("enabled", False))
                         if "max_total_arrow_clicks" in arrow:
                             payload["max_total_arrow_clicks"] = int(arrow["max_total_arrow_clicks"])
@@ -351,6 +361,10 @@ class StepResult:
         }
 
 
+def _empty_step_results() -> list[StepResult]:
+    return []
+
+
 @dataclass
 class ActionSequenceResult:
     overall: str
@@ -361,7 +375,7 @@ class ActionSequenceResult:
     method: str = ""
     expiry_status: str = ""
     state: str = "COMPLETE"
-    steps: list[StepResult] = field(default_factory=list)
+    steps: list[StepResult] = field(default_factory=_empty_step_results)
     evidence_dir: str = ""
     trace_path: str = ""
     report_json_path: str = ""
@@ -450,19 +464,19 @@ class LowLevelActionAdapter:
 
 class CalibratedTargetResolver:
     def __init__(self, boxes: Mapping[str, Any], timing_profile: BrokerTimingProfile) -> None:
-        self.boxes = boxes
+        self.boxes = _as_mapping(boxes)
         self.timing_profile = timing_profile
 
     def resolve(self, rect: RectLike, target_name: str, *, expected_region: str = "") -> TargetEnvelope:
         source_name = target_name
-        raw = None
+        raw: dict[str, Any] | None = None
         for candidate in _target_candidates(target_name):
             candidate_raw = self.boxes.get(candidate)
             if isinstance(candidate_raw, Mapping):
                 source_name = candidate
-                raw = candidate_raw
+                raw = _as_mapping(candidate_raw)
                 break
-        if not isinstance(raw, Mapping):
+        if raw is None:
             return TargetEnvelope(
                 target=target_name,
                 rel=(0.0, 0.0),
@@ -495,8 +509,9 @@ class CalibratedTargetResolver:
             raw = self.boxes.get(candidate)
             if not isinstance(raw, Mapping):
                 continue
-            rel_x = _float_or_none(raw.get("x"))
-            rel_y = _float_or_none(raw.get("y"))
+            raw_payload = _as_mapping(raw)
+            rel_x = _float_or_none(raw_payload.get("x"))
+            rel_y = _float_or_none(raw_payload.get("y"))
             if rel_x is not None and rel_y is not None:
                 return rel_x, rel_y
         return None
@@ -589,8 +604,9 @@ class CalibratedTargetResolver:
                 continue
             if any(target_name in group and other in group for group in alias_groups):
                 continue
-            rel_x = _float_or_none(raw.get("x"))
-            rel_y = _float_or_none(raw.get("y"))
+            raw_payload = _as_mapping(raw)
+            rel_x = _float_or_none(raw_payload.get("x"))
+            rel_y = _float_or_none(raw_payload.get("y"))
             if rel_x is None or rel_y is None:
                 continue
             ox, oy = rel_to_abs(bounds, rel_x, rel_y)
@@ -1014,6 +1030,9 @@ class ShooterActionSequencerV2:
             trace_path=str(self.evidence_recorder.trace_path),
         )
 
+    def publish(self, phase: str, step: str, extra: Mapping[str, Any] | None = None) -> None:
+        self._publish(phase, step, extra)
+
     def _publish(self, phase: str, step: str, extra: Mapping[str, Any] | None = None) -> None:
         payload: dict[str, Any] = {
             "phase": phase,
@@ -1022,7 +1041,7 @@ class ShooterActionSequencerV2:
             "timestamp": _now(),
         }
         if extra:
-            payload.update(dict(extra))
+            payload.update(_as_mapping(extra))
         if self.status_callback is not None:
             try:
                 self.status_callback(payload)
@@ -1043,20 +1062,20 @@ class TimeInputControllerV2:
 
     def set_expiry(self, expiry_seconds: int, packet: Mapping[str, Any]) -> StepResult:
         if self.sequencer.timing_profile.arrow_fallback_enabled:
-            self.sequencer._publish("TIME_ENTRY_METHOD_SELECTED", "calibrated_control_adjustment")
+            self.sequencer.publish("TIME_ENTRY_METHOD_SELECTED", "calibrated_control_adjustment")
             calibrated = self._arrow_fallback(expiry_seconds)
             if calibrated.result in {"PASS", "PASS_UNVERIFIED"}:
                 return calibrated
             calibrated_reason = str(calibrated.reason or "")
             if calibrated_reason.startswith(("CALIBRATED_TARGET_", "CALIBRATION_LAYOUT_", "TARGET_WINDOW_", "WINDOW_", "BROKER_NOT_READY")):
                 return calibrated
-            self.sequencer._publish(
+            self.sequencer.publish(
                 "TIME_ENTRY_METHOD_RETRY",
                 "combined_time_input_after_calibrated_adjustment_unavailable",
                 {"reason": calibrated_reason},
             )
 
-        self.sequencer._publish("TIME_ENTRY_METHOD_SELECTED", "combined_time_input")
+        self.sequencer.publish("TIME_ENTRY_METHOD_SELECTED", "combined_time_input")
         combined = self._combined_time_input(expiry_seconds, packet)
         if combined.result in {"PASS", "PASS_UNVERIFIED"}:
             return combined
@@ -1064,13 +1083,13 @@ class TimeInputControllerV2:
         if combined_reason.startswith(("CALIBRATED_TARGET_", "CALIBRATION_LAYOUT_")):
             return combined
         if combined.verification == "UNVERIFIED_ABORT" and combined_reason.startswith("typed combined expiry "):
-            self.sequencer._publish("TIME_ENTRY_METHOD_RETRY", "exact_preset_after_combined_verification_mismatch", {"reason": combined_reason})
+            self.sequencer.publish("TIME_ENTRY_METHOD_RETRY", "exact_preset_after_combined_verification_mismatch", {"reason": combined_reason})
             preset = self._exact_preset(expiry_seconds)
             if preset.result in {"PASS", "PASS_UNVERIFIED"}:
                 return preset
-            self.sequencer._publish("TIME_ENTRY_METHOD_RETRY", "split_after_combined_verification_mismatch", {"reason": preset.reason or combined_reason})
+            self.sequencer.publish("TIME_ENTRY_METHOD_RETRY", "split_after_combined_verification_mismatch", {"reason": preset.reason or combined_reason})
 
-        self.sequencer._publish("TIME_ENTRY_METHOD_SELECTED", "split_hour_minute_input")
+        self.sequencer.publish("TIME_ENTRY_METHOD_SELECTED", "split_hour_minute_input")
         last_typed = StepResult(step="typed_input", result="FAILED_RETRYABLE", reason="not attempted")
         for attempt in range(1, 3):
             last_typed = self._typed_input(expiry_seconds, attempt=attempt)
@@ -1082,7 +1101,7 @@ class TimeInputControllerV2:
             if last_typed.verification == "UNVERIFIED_ABORT" and str(last_typed.reason or "").startswith("typed expiry "):
                 if not self.sequencer.timing_profile.arrow_fallback_enabled:
                     return last_typed
-                self.sequencer._publish("TIME_ENTRY_METHOD_RETRY", "calibrated_arrow_adjustment_after_typed_mismatch", {"reason": last_typed.reason})
+                self.sequencer.publish("TIME_ENTRY_METHOD_RETRY", "calibrated_arrow_adjustment_after_typed_mismatch", {"reason": last_typed.reason})
                 break
 
         preset = self._exact_preset(expiry_seconds)
@@ -1372,7 +1391,7 @@ def write_live_behavior_validation_report(
     md_target = Path(md_path)
     json_target.parent.mkdir(parents=True, exist_ok=True)
     md_target.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": session_id,
         "mode": mode,
         "packet_id": result.packet_id,

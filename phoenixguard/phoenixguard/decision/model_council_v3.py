@@ -3,12 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 from phoenixguard.decision.reasoning_arbitrator_v3 import analyze_reasoning_arbitration_v3
 from phoenixguard.decision.market_intelligence_v3 import analyze_market_intelligence
 from phoenixguard.execution.packet_v3 import (
-    EXECUTION_PACKET_SCHEMA_VERSION,
     PG_EXECUTION_PACKET_SCHEMA_VERSION,
     build_execution_packet_v3,
     validate_execution_packet_v3,
@@ -119,13 +118,15 @@ WAVE_REASONING_HARD_BAD_CLASSES = {
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(item) for item in value if isinstance(item, Mapping)]
+    return [_mapping(item) for item in cast(Sequence[Any], value) if isinstance(item, Mapping)]
 
 
 def _first_visible_value(*values: Any) -> Any:
@@ -435,7 +436,7 @@ def _scored_candidate_side(
 def _side_sequence(value: Any) -> list[str]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [item for item in (_side(item) for item in value) if item in {"BUY", "SELL"}]
+    return [item for item in (_side(item) for item in cast(Sequence[Any], value)) if item in {"BUY", "SELL"}]
 
 
 def _side_flip_count(sides: Sequence[str]) -> int:
@@ -453,11 +454,12 @@ def _side_flip_count(sides: Sequence[str]) -> int:
 
 def _entry_quality_label(value: Any) -> str:
     if isinstance(value, Mapping):
+        quality = cast(Mapping[str, Any], value)
         return str(
-            value.get("state")
-            or value.get("entry_grade")
-            or value.get("grade")
-            or value.get("quality")
+            quality.get("state")
+            or quality.get("entry_grade")
+            or quality.get("grade")
+            or quality.get("quality")
             or ""
         ).strip().upper()
     return str(value or "").strip().upper()
@@ -469,7 +471,7 @@ def _entry_quality_acceptable(value: Any) -> bool:
         return True
     if label in {"A_PLUS_ENTRY", "GOOD_ENTRY", "ACCEPTABLE_ENTRY"}:
         return True
-    if isinstance(value, Mapping) and value.get("passes_executable_threshold") is True:
+    if isinstance(value, Mapping) and cast(Mapping[str, Any], value).get("passes_executable_threshold") is True:
         return True
     return False
 
@@ -483,7 +485,8 @@ def _candidate_id(
 ) -> str:
     setup = ""
     if isinstance(entry_quality, Mapping):
-        setup = str(entry_quality.get("setup") or entry_quality.get("pattern") or entry_quality.get("entry_model") or "")
+        entry_quality_map = cast(Mapping[str, Any], entry_quality)
+        setup = str(entry_quality_map.get("setup") or entry_quality_map.get("pattern") or entry_quality_map.get("entry_model") or "")
     if not setup:
         setup = str(snapshot.get("setup") or snapshot.get("setup_name") or snapshot.get("strategy") or "")
     zone = str(
@@ -512,14 +515,14 @@ def _diagnostic_skill_gates(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]
     rows: list[dict[str, Any]] = []
     raw = snapshot.get("skill_gates", [])
     if isinstance(raw, Mapping):
-        iterable = raw.values()
+        iterable = list(cast(Mapping[str, Any], raw).values())
     elif isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
-        iterable = raw
+        iterable = list(cast(Sequence[Any], raw))
     else:
         iterable = []
     for item in iterable:
         if isinstance(item, Mapping):
-            row = dict(item)
+            row = dict(cast(Mapping[str, Any], item))
         else:
             row = {"name": str(item)}
         row["role"] = "DIAGNOSTIC_CONTRIBUTOR_ONLY"
@@ -605,7 +608,13 @@ def _build_allowance_package_v1(
         and (entry_now_allowed if package_type == ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW else True)
     )
     blocker = _upper(true_blocker)
-    package = {
+    accepted_lanes_raw = execution_lane.get("accepted_lanes", [])
+    accepted_lanes = (
+        list(cast(Sequence[Any], accepted_lanes_raw))
+        if isinstance(accepted_lanes_raw, Sequence) and not isinstance(accepted_lanes_raw, (str, bytes, bytearray))
+        else []
+    )
+    package: dict[str, Any] = {
         "schema_version": ALLOWANCE_PACKAGE_SCHEMA_VERSION,
         "package_type": package_type,
         "allowance_family": "INTRADAY" if package_type == ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW else "SWING",
@@ -622,10 +631,7 @@ def _build_allowance_package_v1(
         "path_class": _upper(path_class),
         "selected_lane": lane_name,
         "lane_accepted": bool(execution_lane.get("accepted")),
-        "accepted_lanes": list(execution_lane.get("accepted_lanes", []))
-        if isinstance(execution_lane.get("accepted_lanes"), Sequence)
-        and not isinstance(execution_lane.get("accepted_lanes"), (str, bytes, bytearray))
-        else [],
+        "accepted_lanes": accepted_lanes,
         "score": round(float(final_execution_score), 4),
         "threshold": round(float(lane_required_score), 4),
         "score_passed": bool(final_score_passed),
@@ -820,15 +826,6 @@ def _timeframe_seconds(timeframe: Any, default: int = 300) -> int:
         "D1": 86400,
     }
     return int(mapping.get(label, default))
-
-
-def _format_duration_text(seconds: Any) -> str:
-    total_seconds = max(1, _int(seconds, 1))
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, secs = divmod(remainder, 60)
-    if hours:
-        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-    return f"{minutes:02d}:{secs:02d}"
 
 
 def _timing_expiry_band(preferred_seconds: int) -> dict[str, Any]:
@@ -1031,8 +1028,12 @@ def _wave_riding_context(
         smc,
         names=("liquidity_sweep", "stop_hunt", "liquidity_grab", "ssl_sweep", "bsl_sweep"),
     )
-    flow_conflicts_raw = execution_timing.get("current_flow_conflicts") or market_context.get("current_flow_conflicts") or []
-    flow_conflict_count = len(flow_conflicts_raw) if isinstance(flow_conflicts_raw, Sequence) and not isinstance(flow_conflicts_raw, (str, bytes, bytearray)) else 0
+    flow_conflicts_raw: Any = execution_timing.get("current_flow_conflicts") or market_context.get("current_flow_conflicts") or []
+    flow_conflict_count = (
+        len(cast(Sequence[Any], flow_conflicts_raw))
+        if isinstance(flow_conflicts_raw, Sequence) and not isinstance(flow_conflicts_raw, (str, bytes, bytearray))
+        else 0
+    )
     compression_pressure = _clip01(execution_timing.get("compression_pressure"), 0.0)
     history_area_label = _upper(execution_timing.get("history_area_label") or market_context.get("history_area_label"))
     history_area_risk = max(
@@ -1359,7 +1360,7 @@ def _permission_failed_reasons(trade_permission: Mapping[str, Any]) -> set[str]:
     raw = trade_permission.get("failed_reasons")
     reasons: set[str] = set()
     if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
-        reasons.update(_upper(item) for item in raw if str(item or "").strip())
+        reasons.update(_upper(item) for item in cast(Sequence[Any], raw) if str(item or "").strip())
     deny = _upper(trade_permission.get("deny_reason"))
     if deny:
         reasons.add(deny)
@@ -2341,7 +2342,7 @@ def evaluate_model_council_v3(
         or two_candle_study.get("lstm_contribution")
         or _mapping(snapshot.get("decision_kernel")).get("lstm_contribution")
     )
-    skill_contributions = []
+    skill_contributions: list[dict[str, Any]] = []
     if lstm_contribution:
         lstm_strength = ai_contribution_strengths.get("lstm_sequence", 1.0)
         lstm_raw_contribution = _clip01(lstm_contribution.get("contribution"), 0.0)
@@ -2441,10 +2442,6 @@ def evaluate_model_council_v3(
     )
     flip_flop_contained = bool(flip_flop and not flip_flop_release_allowed)
     stable = (not flip_flop_contained) and dominance_margin >= min_dominance_margin
-    context_confirmed = _bool(snapshot.get("context_confirmed")) or (
-        _side(market_context.get("dominant_side")) == candidate_side
-        and _bool(market_context.get("opposing_force_distance_ok"))
-    )
     side_ok = candidate_side in {"BUY", "SELL"}
     base_council_score = max(buy_score, sell_score) if side_ok else 0.0
     raw_council_score = _clip01(base_council_score * ai_strength_multiplier)
@@ -2598,7 +2595,7 @@ def evaluate_model_council_v3(
     )
     expiry_band = _timing_expiry_band(preferred_expiry_seconds)
     drawdown_first_warning_active = bool(not entry_now_allowed or path_class in {"ADVERSE_FIRST_THEN_TARGET", "OPPOSING_FORCE_FIRST", "LATE_CHASE_REVERSAL_RISK"})
-    timing_forecast = {
+    timing_forecast: dict[str, Any] = {
         "side": candidate_side if candidate_side in {"BUY", "SELL"} else None,
         "best_entry_mode": timing_mode,
         "expected_time_to_favourable_move_sec": reward_seconds,
@@ -2609,7 +2606,7 @@ def evaluate_model_council_v3(
         "entry_now_quality": _timing_entry_quality(entry_now_allowed),
         "entry_after_pullback_quality": "GOOD" if path_class in {"PULLBACK_THEN_CONTINUATION", "DIRECT_CONTINUATION"} else "POOR",
     }
-    timing_decision = {
+    timing_decision: dict[str, Any] = {
         "direction_side": candidate_side if candidate_side in {"BUY", "SELL"} else None,
         "direction_confidence": round(float(raw_council_score), 4),
         "entry_now_allowed": entry_now_allowed,
@@ -2832,7 +2829,7 @@ def evaluate_model_council_v3(
     market_blocked_effective = bool(market_blocked and not lane_market_override)
     permission_denied_effective = bool(permission_denied and not lane_permission_override)
     if lane_permission_override:
-        effective_entry_quality = dict(entry_quality_surface) if isinstance(entry_quality_surface, Mapping) else {}
+        effective_entry_quality = _mapping(entry_quality_surface)
         effective_entry_quality.setdefault("raw_state", entry_quality_label)
         effective_entry_quality.update(
             {
@@ -2850,13 +2847,13 @@ def evaluate_model_council_v3(
         )
         entry_quality_surface = effective_entry_quality
         entry_quality_label = _entry_quality_label(entry_quality_surface) or entry_quality_label
-        effective_trade_permission = dict(trade_permission)
+        effective_trade_permission = _mapping(trade_permission)
         failed_reasons: list[str] = []
         raw_failed = trade_permission.get("failed_reasons")
         if isinstance(raw_failed, Sequence) and not isinstance(raw_failed, (str, bytes, bytearray)):
             failed_reasons = [
                 str(reason)
-                for reason in raw_failed
+                for reason in cast(Sequence[Any], raw_failed)
                 if _upper(reason) not in LANE_SOFT_PERMISSION_REASONS
             ]
         effective_trade_permission.update(
@@ -3084,7 +3081,7 @@ def evaluate_model_council_v3(
     trade_candidate_queue_raw = market.get("trade_candidate_queue", _mapping(market_reality.get("trade_candidate_queue")))
     trade_candidate_queue: dict[str, Any]
     if isinstance(trade_candidate_queue_raw, Mapping):
-        trade_candidate_queue = dict(trade_candidate_queue_raw)
+        trade_candidate_queue = _mapping(trade_candidate_queue_raw)
     elif isinstance(trade_candidate_queue_raw, Sequence) and not isinstance(trade_candidate_queue_raw, (str, bytes, bytearray)):
         trade_candidate_queue = {"candidates": _rows(trade_candidate_queue_raw)}
     else:
@@ -3142,7 +3139,7 @@ def evaluate_model_council_v3(
         opposing_force_ok=opposing_force_ok,
         hard_bad_entry_class_active=hard_bad_entry_class_active,
     )
-    promotion_trace = {
+    promotion_trace: dict[str, Any] = {
         "packet_id": base["packet_id"],
         "release_state": release_state,
         "non_executable_state": None if executable else release_state,
@@ -3254,7 +3251,7 @@ def evaluate_model_council_v3(
         "permission": round(float(permission_adjustment), 4),
         "market_reality_adjustment": round(float(market_reality_adjustment), 4),
     }
-    council = {
+    council: dict[str, Any] = {
         "final_state": final_state,
         "final_side": candidate_side if side_ok and final_state != "CONFLICT" else None,
         "decision_id": "mc_" + hashlib.sha1(f"{current_now}|{candidate_side}|{buy_score}|{sell_score}".encode("utf-8")).hexdigest()[:18],
@@ -3346,12 +3343,12 @@ def evaluate_model_council_v3(
         final_state=final_state,
         market=market,
         market_context=market_context,
-        entry_quality=entry_quality_surface,
-        trade_permission=trade_permission,
+        entry_quality=_mapping(entry_quality_surface),
+        trade_permission=_mapping(trade_permission),
         block_reason=block_reason,
     )
     study_side = candidate_side if side_ok and (executable or context_ok or final_state == "PREPARING") else None
-    execution = {
+    execution: dict[str, Any] = {
         "enabled": executable,
         "state": "EXECUTABLE" if executable else final_state,
         "side": study_side,
@@ -3443,7 +3440,7 @@ def evaluate_model_council_v3(
         },
     }
     study_packet_valid_for_seconds = _float(snapshot.get("study_packet_valid_for_seconds"), 20.0)
-    study_packet = {
+    study_packet: dict[str, Any] = {
         "schema_version": MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
         "packet_id": base["packet_id"],
         "packet_type": "STUDY_PACKET",
@@ -3854,7 +3851,7 @@ def publish_model_council_packet_v3(
 ) -> dict[str, Any] | None:
     result = evaluate_model_council_v3(snapshot, previous_state=previous_state, now=now)
     packet = result.get("execution_packet")
-    return dict(packet) if isinstance(packet, Mapping) else None
+    return dict(cast(Mapping[str, Any], packet)) if isinstance(packet, Mapping) else None
 
 
 class ModelCouncilV3:
@@ -3955,5 +3952,5 @@ class ModelCouncilV3:
         self._previous_result = result
         packet = result.get("execution_packet")
         if isinstance(packet, Mapping):
-            return dict(packet)
+            return dict(cast(Mapping[str, Any], packet))
         return result

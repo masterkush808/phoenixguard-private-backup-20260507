@@ -283,6 +283,21 @@ def _active_objects_from_entries(
     return active
 
 
+def active_objects_from_entries(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    min_truth_score: float,
+    stale_seconds: int = DEFAULT_STALE_SECONDS,
+    now_epoch: float | None = None,
+) -> list[Mapping[str, Any]]:
+    return _active_objects_from_entries(
+        entries,
+        min_truth_score=min_truth_score,
+        stale_seconds=stale_seconds,
+        now_epoch=now_epoch,
+    )
+
+
 def _registry_session_candidates(session_id: str) -> list[str]:
     normalized = str(session_id or "").strip()
     if not normalized:

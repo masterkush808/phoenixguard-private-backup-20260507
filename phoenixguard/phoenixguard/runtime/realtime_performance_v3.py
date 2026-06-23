@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import hashlib
 import json
 import math
@@ -79,6 +79,11 @@ def _now_ms() -> int:
     return int(time.time() * 1000.0)
 
 
+def _current_frames_for_diagnostics() -> Mapping[int, Any]:
+    current_frames = cast(Callable[[], Mapping[int, Any]], getattr(sys, "_current_frames"))
+    return current_frames()
+
+
 def _text(value: Any, default: str = "") -> str:
     text = str(value or "").strip()
     return text or default
@@ -99,7 +104,9 @@ def _int(value: Any, default: int = 0) -> int:
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
 
 
 def _surface_signatures_match(session: Mapping[str, Any]) -> bool:
@@ -141,7 +148,7 @@ def _display_only_overlay_authority_locked(session: Mapping[str, Any]) -> bool:
 def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(cast(Mapping[str, Any], item)) for item in value if isinstance(item, Mapping)]
+    return [_mapping(item) for item in cast(Sequence[Any], value) if isinstance(item, Mapping)]
 
 
 def _epoch_to_ms(value: Any) -> int:
@@ -486,7 +493,7 @@ class CaptureWatchdogV3:
         reason: str = "",
     ) -> dict[str, Any]:
         frames: dict[str, list[str]] = {}
-        for thread_id, frame in sys._current_frames().items():
+        for thread_id, frame in _current_frames_for_diagnostics().items():
             frames[str(thread_id)] = traceback.format_stack(frame)[-16:]
         health = CaptureWorkerV3Health.from_session(
             session or {"session_id": session_id},

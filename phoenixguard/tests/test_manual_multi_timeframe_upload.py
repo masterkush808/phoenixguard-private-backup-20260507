@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+import numpy.typing as npt
 from PIL import Image
 import pytest
 
@@ -15,14 +16,20 @@ if str(_REPO) not in sys.path:
 
 import main
 
+Payload = dict[str, Any]
+ImageState = npt.NDArray[np.uint8]
+
 
 class _Upload:
     def __init__(self, path: str) -> None:
         self.name = path
 
 
-def test_run_signal_workstation_requires_exactly_four_uploaded_images(monkeypatch) -> None:
-    monkeypatch.setattr(main, "_build_render_config", lambda **_: {})
+def test_run_signal_workstation_requires_exactly_four_uploaded_images(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _empty_render_config(**_kwargs: object) -> Payload:
+        return {}
+
+    monkeypatch.setattr(main, "_build_render_config", _empty_render_config)
 
     with pytest.raises(Exception, match="Upload exactly four chart images"):
         main.run_signal_workstation(
@@ -40,14 +47,12 @@ def test_run_signal_workstation_requires_exactly_four_uploaded_images(monkeypatc
         )
 
 
-def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch, tmp_path: Path) -> None:
+def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
     monkeypatch.setattr(main.RUNTIME, "data_dir", tmp_path / "data")
 
-    monkeypatch.setattr(
-        main,
-        "_build_render_config",
-        lambda **kwargs: {
+    def _build_render_config(**kwargs: Any) -> Payload:
+        return {
             "overlay_mode": kwargs["overlay_mode"],
             "min_conf_global": kwargs["min_conf_global"],
             "min_conf_latest": kwargs["min_conf_latest"],
@@ -55,7 +60,12 @@ def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch
             "label_density": int(kwargs["label_density"]),
             "projection_focus": kwargs["projection_focus"],
             "debug_depth": int(kwargs["debug_depth"]),
-        },
+        }
+
+    monkeypatch.setattr(
+        main,
+        "_build_render_config",
+        _build_render_config,
     )
 
     def _fake_run_inference(file_path: str, **_: object) -> tuple[dict[str, object], Image.Image, object, object]:
@@ -70,23 +80,28 @@ def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch
         }
         return result, Image.new("RGB", (48, 32), color=(10, 20, 30)), None, None
 
-    monkeypatch.setattr(main.pg_main, "run_inference", _fake_run_inference)
-    monkeypatch.setattr(main, "_source_image_to_state", lambda _: np.zeros((16, 24, 3), dtype=np.uint8))
-    monkeypatch.setattr(
-        main,
-        "_build_timeframe_compare_entry",
-        lambda result, _source_image_state, file_path, label, **_: {
+    def _source_image_to_state(_file_path: object) -> ImageState:
+        return np.zeros((16, 24, 3), dtype=np.uint8)
+
+    def _build_timeframe_compare_entry(
+        result: Payload,
+        _source_image_state: object,
+        file_path: str,
+        label: str,
+        **_kwargs: object,
+    ) -> Payload:
+        projection = cast(Payload, result["projection"])
+        return {
             "label": label,
             "file_path": file_path,
             "action": result["action"],
-            "projection_direction": result["projection"]["direction"],
+            "projection_direction": projection["direction"],
             "confidence": result["confidence"],
-        },
-    )
-    monkeypatch.setattr(
-        main,
-        "_build_multi_timeframe_result",
-        lambda analyzed: {
+        }
+
+    def _build_multi_timeframe_result(analyzed: list[Payload]) -> Payload:
+        entries = [dict(cast(Payload, row["compare_entry"])) for row in analyzed]
+        return {
             "action": "SELL",
             "confidence": 0.73,
             "projection": {"direction": "SELL"},
@@ -95,18 +110,42 @@ def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch
             "multi_timeframe": {
                 "aligned": False,
                 "summary": "Higher TF pair: Higher TF / Zoomed Out BUY / BUY 0.61, Higher TF / Zoomed In BUY / BUY 0.61 | Lower TF pair: Lower TF / Zoomed Out SELL / SELL 0.57, Lower TF / Zoomed In SELL / SELL 0.57",
-                "entries": [dict(row["compare_entry"]) for row in analyzed],
+                "entries": entries,
             },
-        },
+        }
+
+    def _build_session_entry(result: Payload, _image_state: object, file_path: str, source: str) -> Payload:
+        return {"result": result, "file_path": file_path, "source": source}
+
+    def _append_session_entry(entry: Payload) -> object:
+        return captured.setdefault("session_entry", entry)
+
+    def _render_workspace_from_result(
+        _result: Payload,
+        _source_image_state: object,
+        _render_config: Payload,
+        **_kwargs: object,
+    ) -> tuple[str, ...]:
+        return tuple(f"slot-{idx}" for idx in range(21))
+
+    monkeypatch.setattr(main.pg_main, "run_inference", _fake_run_inference)
+    monkeypatch.setattr(main, "_source_image_to_state", _source_image_to_state)
+    monkeypatch.setattr(
+        main,
+        "_build_timeframe_compare_entry",
+        _build_timeframe_compare_entry,
     )
-    monkeypatch.setattr(main, "_build_session_entry", lambda result, _image_state, file_path, source: {"result": result, "file_path": file_path, "source": source})
-    monkeypatch.setattr(main, "_append_session_entry", lambda entry: captured.setdefault("session_entry", entry))
+    monkeypatch.setattr(
+        main,
+        "_build_multi_timeframe_result",
+        _build_multi_timeframe_result,
+    )
+    monkeypatch.setattr(main, "_build_session_entry", _build_session_entry)
+    monkeypatch.setattr(main, "_append_session_entry", _append_session_entry)
     monkeypatch.setattr(
         main,
         "_render_workspace_from_result",
-        lambda result, source_image_state, render_config, **_: tuple(
-            [f"slot-{idx}" for idx in range(21)]
-        ),
+        _render_workspace_from_result,
     )
 
     outputs = main.run_signal_workstation(
@@ -140,7 +179,7 @@ def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch
     }
 
 
-def test_build_session_entry_saves_high_resolution_png_thumbnail(monkeypatch, tmp_path: Path) -> None:
+def test_build_session_entry_saves_high_resolution_png_thumbnail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(main.RUNTIME, "session_thumbnails_dir", tmp_path)
     image_state = np.zeros((720, 1280, 3), dtype=np.uint8)
 
@@ -246,10 +285,19 @@ def test_build_multi_timeframe_overlay_fusion_blends_both_frames(tmp_path: Path)
     assert center_pixel[1] > 40
 
 
-def test_build_timeframe_overlay_gallery_falls_back_to_current_run_snapshot(monkeypatch) -> None:
-    monkeypatch.setattr(main, "_build_overlay_image", lambda *args, **kwargs: Image.new("RGB", (24, 16), color=(12, 18, 24)))
-    monkeypatch.setattr(main, "_write_resized_image_asset", lambda _image, path, **kwargs: str(path))
-    monkeypatch.setattr(main, "_image_uri_from_file", lambda path, **kwargs: f"uri:{Path(path).name}")
+def test_build_timeframe_overlay_gallery_falls_back_to_current_run_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _build_overlay_image(*_args: object, **_kwargs: object) -> Image.Image:
+        return Image.new("RGB", (24, 16), color=(12, 18, 24))
+
+    def _write_resized_image_asset(_image: Image.Image, path: str | Path, **_kwargs: object) -> str:
+        return str(path)
+
+    def _image_uri_from_file(path: str | Path, **_kwargs: object) -> str:
+        return f"uri:{Path(path).name}"
+
+    monkeypatch.setattr(main, "_build_overlay_image", _build_overlay_image)
+    monkeypatch.setattr(main, "_write_resized_image_asset", _write_resized_image_asset)
+    monkeypatch.setattr(main, "_image_uri_from_file", _image_uri_from_file)
 
     html = main._build_timeframe_overlay_gallery_html(
         {

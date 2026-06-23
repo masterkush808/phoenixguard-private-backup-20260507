@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from copy import deepcopy
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, cast
 
 from PIL import Image
+import pytest
 
 from phoenixguard.execution.packet_v3 import build_execution_packet_v3
 from phoenixguard.execution.packet_v3 import validate_execution_packet_v3
@@ -13,6 +14,90 @@ from phoenixguard.execution.sequence_context import resolve_sequence_context
 from phoenixguard.decision.model_council_v3 import ModelCouncilV3
 import phoenixguard.mobile_api.window_tracker as window_tracker_module
 from phoenixguard.mobile_api.window_tracker import ContinuousWindowTrackerService
+
+
+def _publish_model_council_v3_state(
+    service: ContinuousWindowTrackerService,
+    *,
+    payload: Mapping[str, Any],
+    tracking_summary: Mapping[str, Any],
+    latest_signal: Mapping[str, Any],
+    frame_index: int,
+    capture_count: int,
+    input_frame_hash: str,
+    capture_started_epoch: float,
+) -> dict[str, Any]:
+    method = cast(
+        Callable[..., dict[str, Any]],
+        getattr(service, "_publish_model_council_v3_state"),
+    )
+    return method(
+        payload=payload,
+        tracking_summary=tracking_summary,
+        latest_signal=latest_signal,
+        frame_index=frame_index,
+        capture_count=capture_count,
+        input_frame_hash=input_frame_hash,
+        capture_started_epoch=capture_started_epoch,
+    )
+
+
+def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    fn = cast(
+        Callable[[Mapping[str, Any]], dict[str, Any]],
+        getattr(window_tracker_module, "_model_council_study_packet_from_payload"),
+    )
+    return fn(payload)
+
+
+def _evaluate_broker_execution(
+    service: ContinuousWindowTrackerService,
+    *,
+    payload: Mapping[str, Any],
+    descriptor: Mapping[str, Any],
+    window_image: Image.Image,
+    surface_image: Image.Image,
+    tracking_summary: Mapping[str, Any],
+    latest_signal: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    method = cast(
+        Callable[..., tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]],
+        getattr(service, "_evaluate_broker_execution"),
+    )
+    return method(
+        payload=payload,
+        descriptor=descriptor,
+        window_image=window_image,
+        surface_image=surface_image,
+        tracking_summary=tracking_summary,
+        latest_signal=latest_signal,
+    )
+
+
+def _build_model_council_v3_snapshot(
+    service: ContinuousWindowTrackerService,
+    *,
+    payload: Mapping[str, Any],
+    tracking_summary: Mapping[str, Any],
+    latest_signal: Mapping[str, Any],
+    frame_index: int,
+    capture_count: int,
+    input_frame_hash: str,
+    capture_started_epoch: float,
+) -> dict[str, Any]:
+    method = cast(
+        Callable[..., dict[str, Any]],
+        getattr(service, "_build_model_council_v3_snapshot"),
+    )
+    return method(
+        payload=payload,
+        tracking_summary=tracking_summary,
+        latest_signal=latest_signal,
+        frame_index=frame_index,
+        capture_count=capture_count,
+        input_frame_hash=input_frame_hash,
+        capture_started_epoch=capture_started_epoch,
+    )
 
 
 class _FakeCaptureBackend:
@@ -98,7 +183,7 @@ def _complete_sequence_context(*, sequence_id: str = "seq_pocket-live-8788_20") 
 
 def test_signal_thesis_countertrend_block_downgrades_public_council_state(
     tmp_path: Path,
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     execution_backend = _FakeExecutionBackend()
     service = _service(tmp_path, execution_backend)
@@ -172,11 +257,11 @@ def test_signal_thesis_countertrend_block_downgrades_public_council_state(
         def evaluate(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
             return dict(result)
 
-    monkeypatch.setattr(service, "_model_council_for_session", lambda _session_id: _FakeCouncil())
-    monkeypatch.setattr(
-        window_tracker_module,
-        "update_signal_thesis_v3",
-        lambda *_args, **_kwargs: {
+    def _model_council_for_session(_session_id: str) -> _FakeCouncil:
+        return _FakeCouncil()
+
+    def _update_signal_thesis_v3(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return {
             "schema_version": "PG_SIGNAL_THESIS_V3",
             "active": True,
             "countertrend_blocked": True,
@@ -184,10 +269,17 @@ def test_signal_thesis_countertrend_block_downgrades_public_council_state(
             "effective_side": "BUY",
             "raw_read_side": "SELL",
             "thesis_id": "pgthesis-active-buy",
-        },
+        }
+
+    monkeypatch.setattr(service, "_model_council_for_session", _model_council_for_session)
+    monkeypatch.setattr(
+        window_tracker_module,
+        "update_signal_thesis_v3",
+        _update_signal_thesis_v3,
     )
 
-    published = service._publish_model_council_v3_state(
+    published = _publish_model_council_v3_state(
+        service,
         payload={"session_id": "pocket-live-8788"},
         tracking_summary={},
         latest_signal={},
@@ -213,7 +305,7 @@ def test_signal_thesis_countertrend_block_downgrades_public_council_state(
 
 def test_model_council_packet_uses_publication_epoch_not_capture_start(
     tmp_path: Path,
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     execution_backend = _FakeExecutionBackend()
     service = _service(tmp_path, execution_backend)
@@ -265,7 +357,7 @@ def test_model_council_packet_uses_publication_epoch_not_capture_start(
                     "entry_progression": {"steps": [{"type": "TRIGGER", "index": 1}]},
                 },
             )
-            study_packet = {
+            study_packet: dict[str, Any] = {
                 "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
                 "packet_id": packet["packet_id"],
                 "packet_type": "STUDY_PACKET",
@@ -300,15 +392,25 @@ def test_model_council_packet_uses_publication_epoch_not_capture_start(
                 "execution_lane": {"name": "HIGH_FREQUENCY_TWO_CANDLE", "accepted": True},
             }
 
-    monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: publication_epoch)
-    monkeypatch.setattr(service, "_model_council_for_session", lambda _session_id: _FakeCouncil())
+    def _now_epoch() -> float:
+        return publication_epoch
+
+    def _model_council_for_session(_session_id: str) -> _FakeCouncil:
+        return _FakeCouncil()
+
+    def _update_signal_thesis_v3(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return {"schema_version": "PG_SIGNAL_THESIS_V3", "active": False}
+
+    monkeypatch.setattr(window_tracker_module, "_now_epoch", _now_epoch)
+    monkeypatch.setattr(service, "_model_council_for_session", _model_council_for_session)
     monkeypatch.setattr(
         window_tracker_module,
         "update_signal_thesis_v3",
-        lambda *_args, **_kwargs: {"schema_version": "PG_SIGNAL_THESIS_V3", "active": False},
+        _update_signal_thesis_v3,
     )
 
-    published = service._publish_model_council_v3_state(
+    published = _publish_model_council_v3_state(
+        service,
         payload={"session_id": "pocket-live-8788"},
         tracking_summary={"detected_market": "EUR/GBP OTC", "detected_timeframe": "M5"},
         latest_signal={},
@@ -327,7 +429,7 @@ def test_model_council_packet_uses_publication_epoch_not_capture_start(
 
 def test_study_packet_resolver_demotes_executable_claim_without_execution_packet() -> None:
     now = time.time()
-    study = window_tracker_module._model_council_study_packet_from_payload(
+    study = _model_council_study_packet_from_payload(
         {
             "session_id": "pocket-live-8788",
             "model_council_study_packet": {
@@ -362,7 +464,7 @@ def test_study_packet_resolver_demotes_executable_claim_without_execution_packet
 
 def test_tracker_publish_demotes_executable_study_result_without_execution_packet(
     tmp_path: Path,
-    monkeypatch: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     execution_backend = _FakeExecutionBackend()
     service = _service(tmp_path, execution_backend)
@@ -404,14 +506,21 @@ def test_tracker_publish_demotes_executable_study_result_without_execution_packe
         def evaluate(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
             return dict(result)
 
-    monkeypatch.setattr(service, "_model_council_for_session", lambda _session_id: _FakeCouncil())
+    def _model_council_for_session(_session_id: str) -> _FakeCouncil:
+        return _FakeCouncil()
+
+    def _update_signal_thesis_v3(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return {"schema_version": "PG_SIGNAL_THESIS_V3", "active": False}
+
+    monkeypatch.setattr(service, "_model_council_for_session", _model_council_for_session)
     monkeypatch.setattr(
         window_tracker_module,
         "update_signal_thesis_v3",
-        lambda *_args, **_kwargs: {"schema_version": "PG_SIGNAL_THESIS_V3", "active": False},
+        _update_signal_thesis_v3,
     )
 
-    published = service._publish_model_council_v3_state(
+    published = _publish_model_council_v3_state(
+        service,
         payload={"session_id": "pocket-live-8788"},
         tracking_summary={},
         latest_signal={},
@@ -437,7 +546,8 @@ def test_tracker_live_backend_refuses_raw_signal_without_model_council_packet(tm
     execution_backend = _FakeExecutionBackend()
     service = _service(tmp_path, execution_backend)
 
-    _, state, _ = service._evaluate_broker_execution(
+    _, state, _ = _evaluate_broker_execution(
+        service,
         payload={
             "session_id": "pocket-live-8788",
             "execution_controls": {"live_execution_enabled": True, "execution_mode": "live"},
@@ -471,7 +581,8 @@ def test_tracker_live_backend_reads_broker_surface_for_identity_before_v3_packet
 
     service._read_broker_surface = _identity_broker_scan  # type: ignore[method-assign]
 
-    broker_surface, state, _ = service._evaluate_broker_execution(
+    broker_surface, state, _ = _evaluate_broker_execution(
+        service,
         payload={
             "session_id": "pocket-live-8788",
             "execution_controls": {"live_execution_enabled": True, "execution_mode": "live"},
@@ -568,7 +679,8 @@ def test_tracker_live_backend_defers_valid_packet_to_standalone_shooter(tmp_path
     assert packet["frames_used"] == 64
     assert packet["model_council"]["sequence_context"]["box_history"]
 
-    _, state, _ = service._evaluate_broker_execution(
+    _, state, _ = _evaluate_broker_execution(
+        service,
         payload={
             "session_id": "pocket-live-8788",
             "execution_controls": {"live_execution_enabled": True, "execution_mode": "live"},
@@ -589,9 +701,7 @@ def test_tracker_live_backend_defers_valid_packet_to_standalone_shooter(tmp_path
     assert execution_backend.clicks == []
 
 
-def test_tracker_live_backend_rejects_partial_sequence_context_packet(tmp_path: Path) -> None:
-    execution_backend = _FakeExecutionBackend()
-    service = _service(tmp_path, execution_backend)
+def test_tracker_live_backend_rejects_partial_sequence_context_packet() -> None:
     packet = build_execution_packet_v3(
         packet_id="pgpkt-tracker-v3-partial",
         session_id="pocket-live-8788",
@@ -737,7 +847,8 @@ def test_locked_surface_fallback_creates_paper_safe_instrument_context(tmp_path:
     execution_backend = _FakeExecutionBackend()
     service = _service(tmp_path, execution_backend)
 
-    snapshot = service._build_model_council_v3_snapshot(
+    snapshot = _build_model_council_v3_snapshot(
+        service,
         payload={
             "session_id": "pocket-live-8788",
             "execution_controls": {
@@ -780,7 +891,8 @@ def test_locked_surface_fallback_is_broker_click_safe_when_profile_is_proven(tmp
     execution_backend = _FakeExecutionBackend()
     service = _service(tmp_path, execution_backend)
 
-    snapshot = service._build_model_council_v3_snapshot(
+    snapshot = _build_model_council_v3_snapshot(
+        service,
         payload={
             "session_id": "pocket-live-8788",
             "execution_controls": {
@@ -828,7 +940,8 @@ def test_broker_source_lock_profile_is_click_safe_without_identity_fallback(tmp_
     execution_backend = _FakeExecutionBackend()
     service = _service(tmp_path, execution_backend)
 
-    snapshot = service._build_model_council_v3_snapshot(
+    snapshot = _build_model_council_v3_snapshot(
+        service,
         payload={
             "session_id": "pocket-live-8788",
             "execution_controls": {
@@ -915,7 +1028,8 @@ def test_actionable_broker_timing_becomes_model_council_execution_evidence(tmp_p
         },
     }
 
-    snapshot = service._build_model_council_v3_snapshot(
+    snapshot = _build_model_council_v3_snapshot(
+        service,
         payload=payload,
         tracking_summary={
             "detected_market": "",
@@ -1003,7 +1117,8 @@ def test_near_trigger_kernel_candidate_becomes_model_council_execution_evidence(
         },
     }
 
-    snapshot = service._build_model_council_v3_snapshot(
+    snapshot = _build_model_council_v3_snapshot(
+        service,
         payload=payload,
         tracking_summary={
             "detected_market": "",

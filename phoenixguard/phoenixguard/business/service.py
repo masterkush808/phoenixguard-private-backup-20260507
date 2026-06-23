@@ -325,6 +325,38 @@ def create_business_app(
             ip_address=_client_ip(request),
         )
 
+    app.state.business_route_handler_names = tuple(
+        handler.__name__
+        for handler in (
+            _request_id_middleware,
+            _auth_error_handler,
+            _authorization_error_handler,
+            _not_found_error_handler,
+            _conflict_error_handler,
+            _billing_signature_error_handler,
+            _billing_payload_error_handler,
+            _billing_configuration_error_handler,
+            _billing_provider_error_handler,
+            _email_configuration_error_handler,
+            _email_provider_error_handler,
+            _broker_secret_error_handler,
+            _onboarding_email_provider_error_handler,
+            register_customer,
+            verify_email,
+            resend_email_verification,
+            start_checkout,
+            accept_disclosure,
+            create_broker_account,
+            list_licenses,
+            register_device,
+            device_heartbeat,
+            current_entitlement,
+            latest_command,
+            tracker_access,
+            latest_release,
+            stripe_webhook,
+        )
+    )
     return app
 
 
@@ -352,13 +384,6 @@ def _checkout_client(request: Request) -> StripeCheckoutSessionClient:
     if configured is not None:
         return configured
     return StripeCheckoutSessionClient.from_env()
-
-
-def _require_customer_principal(
-    request: Request,
-    authorization: str | None = Header(default=None, alias="Authorization"),
-) -> CustomerPrincipal:
-    return _auth_provider(request).authenticate_customer_header(authorization)
 
 
 def _require_active_customer_principal(

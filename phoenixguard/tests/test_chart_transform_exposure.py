@@ -1,14 +1,14 @@
+from pathlib import Path
 from fastapi.testclient import TestClient
 import os
-import json
 from phoenixguard.mobile_api.app import create_app
-from phoenixguard.vision.market_registry import persist_market_objects, load_market_objects
+from phoenixguard.vision.market_registry import persist_market_objects
 
 
 client = TestClient(create_app())
 
 
-def test_chart_transform_is_exposed(tmp_path):
+def test_chart_transform_is_exposed(tmp_path: Path):
     session = "test-chart-transform-session"
     # sample overlay and transform
     o = {"id": "ct_o1", "bbox": [0.1, 0.1, 0.2, 0.2], "confidence": 0.77}

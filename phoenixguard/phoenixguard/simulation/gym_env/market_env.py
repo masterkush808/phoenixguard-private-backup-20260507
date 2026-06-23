@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import random
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 from phoenixguard.simulation.synthetic_scenarios.generator import generate_synthetic_market_suite
 
@@ -42,12 +42,14 @@ class OfflineDictObservationSpace:
     """Minimal observation-space validator for PhoenixGuardMarketEnv observations."""
 
     def contains(self, value: object) -> bool:
+        if not isinstance(value, Mapping):
+            return False
+        observation = cast(Mapping[Any, Any], value)
         return (
-            isinstance(value, Mapping)
-            and isinstance(value.get("frame"), Mapping)
-            and isinstance(value.get("ohlc"), Mapping)
-            and isinstance(value.get("features"), Mapping)
-            and "frame_index" in value
+            isinstance(observation.get("frame"), Mapping)
+            and isinstance(observation.get("ohlc"), Mapping)
+            and isinstance(observation.get("features"), Mapping)
+            and "frame_index" in observation
         )
 
 
@@ -237,9 +239,9 @@ class PhoenixGuardMarketEnv:
         labels = scenario.get("labels")
         if not isinstance(frames, list) or not frames:
             raise ValueError("offline scenario must contain a non-empty frames list")
-        if not isinstance(labels, list) or len(labels) != len(frames):
+        if not isinstance(labels, list) or len(cast(list[Any], labels)) != len(cast(list[Any], frames)):
             raise ValueError("offline scenario labels must be a list aligned one-to-one with frames")
-        for frame in frames:
+        for frame in cast(list[Any], frames):
             if not isinstance(frame, Mapping) or "ohlc" not in frame or "features" not in frame:
                 raise ValueError("each offline scenario frame must contain ohlc and features dictionaries")
 
@@ -251,7 +253,7 @@ def normalize_action(action: int | str) -> str:
             allowed = ", ".join(ACTION_IDS)
             raise ValueError(f"unknown action {action!r}; expected one of: {allowed}")
         return action_name
-    if isinstance(action, int) and action in ACTION_NAMES:
+    if action in ACTION_NAMES:
         return ACTION_NAMES[action]
     raise ValueError(f"unknown action {action!r}; expected 0/HOLD, 1/BUY, or 2/SELL")
 

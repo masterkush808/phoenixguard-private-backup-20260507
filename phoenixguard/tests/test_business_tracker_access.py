@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import phoenixguard.business.store as business_store_module
 from phoenixguard.business import register_business_routes
-from phoenixguard.business.store import BusinessStore
+from phoenixguard.business.store import BusinessStore, set_business_store_for_test
 from phoenixguard.mobile_api.app import create_app
 
 
@@ -30,7 +29,7 @@ def _mobile_client(
     *,
     tracker: object | None = None,
 ) -> TestClient:
-    business_store_module._BUSINESS_STORE = store or BusinessStore()
+    set_business_store_for_test(store or BusinessStore())
     return TestClient(create_app(window_tracker_service=tracker))  # type: ignore[arg-type]
 
 
@@ -187,4 +186,3 @@ def test_tracker_health_is_explicit_config_required_without_tracker_health_route
     assert payload["components"]["mobile_api"]["status"] == "config-required"
     assert payload["components"]["tracker_session"]["status"] == "config-required"
     assert payload["components"]["tracker_session"]["reason"] == "health route is not registered on this FastAPI app"
-

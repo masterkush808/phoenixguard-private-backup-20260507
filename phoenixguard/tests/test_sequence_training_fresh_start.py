@@ -1,4 +1,7 @@
 from __future__ import annotations
+from pathlib import Path
+from typing import NoReturn
+import pytest
 
 import torch
 from torch import nn
@@ -6,7 +9,7 @@ from torch import nn
 from phoenixguard.training.ensemble_cv_models import EnsembleCVModels
 
 
-def test_prepare_continual_state_skips_existing_bundle_when_disabled(tmp_path, monkeypatch) -> None:
+def test_prepare_continual_state_skips_existing_bundle_when_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle_path = tmp_path / "mobilenetv3_finetuned.pkl"
     bundle_path.write_bytes(b"unused bundle payload")
 
@@ -17,7 +20,7 @@ def test_prepare_continual_state_skips_existing_bundle_when_disabled(tmp_path, m
         enable_continual_learning=False,
     )
 
-    def _unexpected_torch_load(*args, **kwargs):
+    def _unexpected_torch_load(*_args: object, **_kwargs: object) -> NoReturn:
         raise AssertionError("torch.load should not run when continual learning is disabled")
 
     monkeypatch.setattr(torch, "load", _unexpected_torch_load)

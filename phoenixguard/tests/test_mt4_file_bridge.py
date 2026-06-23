@@ -103,6 +103,34 @@ def test_mt4_bridge_compact_command_preserves_ea_contract() -> None:
     assert decoded["live_integrity"]["input_frame_hash"] == "frame_hash_test"
 
 
+def test_mt4_bridge_compact_command_preserves_swing_allowance_package() -> None:
+    bridge = _load_bridge_module()
+    packet = _sample_execution_packet()
+    packet["allowance_package"] = {
+        "schema_version": "PG_ALLOWANCE_PACKAGE_V1",
+        "package_type": "SWING",
+        "allowance_family": "SWING",
+        "execution_authority": "PG_EXECUTION_PACKET_V3",
+        "side": "BUY",
+        "accepted": True,
+        "decision_accepted": True,
+        "execution_ready": True,
+        "entry_now_allowed": False,
+        "timing_mode": "WAIT_FOR_PULLBACK",
+        "selected_lane": "SNIPER_ZONE_ENTRY",
+        "score": 0.79,
+        "threshold": 0.70,
+    }
+
+    command = bridge._compact_command(packet, bridge_sequence=9)
+
+    bridge._validate_command(command)
+    assert command["allowance_package"]["package_type"] == "SWING"
+    assert command["allowance_package"]["allowance_family"] == "SWING"
+    assert command["entry_eligibility"]["allowance_package_type"] == "SWING"
+    assert command["execution"]["allowance_package_type"] == "SWING"
+
+
 def test_mt4_bridge_rejects_compacted_command_that_would_fail_ea_contract() -> None:
     bridge = _load_bridge_module()
     packet = _sample_execution_packet()

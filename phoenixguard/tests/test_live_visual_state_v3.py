@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 
 from pathlib import Path
 from typing import Any, Mapping
@@ -20,7 +21,7 @@ def _png(path: Path, size: tuple[int, int] = (320, 180)) -> Path:
     return path
 
 
-def test_compact_session_payload_preserves_v3_authority_packets_and_sequence(monkeypatch) -> None:
+def test_compact_session_payload_preserves_v3_authority_packets_and_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("phoenixguard.mobile_api.window_tracker.time.time", lambda: 100.0)
     sequence_context = {
         "sequence_id": "seq-100",
@@ -102,7 +103,7 @@ def test_compact_session_payload_preserves_v3_authority_packets_and_sequence(mon
     assert resolved_study["packet_id"] == "study-100"
 
 
-def test_compact_session_payload_drops_expired_execution_authority(monkeypatch) -> None:
+def test_compact_session_payload_drops_expired_execution_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("phoenixguard.mobile_api.live_state_v3.time.time", lambda: 150.0)
     expired_packet = {
         "schema_version": "PG_EXECUTION_PACKET_V3",
@@ -135,7 +136,7 @@ def test_compact_session_payload_drops_expired_execution_authority(monkeypatch) 
     assert compact["broker_execution_state"]["side"] == "HOLD"
 
 
-def test_compact_session_payload_drops_demoted_execution_authority(monkeypatch) -> None:
+def test_compact_session_payload_drops_demoted_execution_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("phoenixguard.mobile_api.live_state_v3.time.time", lambda: 150.0)
     demoted_packet = {
         "schema_version": "PG_EXECUTION_PACKET_V3",
@@ -178,7 +179,7 @@ def test_compact_session_payload_drops_demoted_execution_authority(monkeypatch) 
     assert compact["broker_execution_state"]["side"] == "HOLD"
 
 
-def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, monkeypatch) -> None:
+def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PHOENIXGUARD_ENABLE_PREDICTION_OVERLAY", raising=False)
     window = _png(tmp_path / "window.png", (640, 360))
     chart = _png(tmp_path / "chart.png", (560, 260))

@@ -10,6 +10,7 @@ import tempfile
 from typing import Any, Mapping, Sequence, cast
 
 import numpy as np
+from numpy.typing import NDArray
 from PIL import Image
 
 from phoenixguard.core.config import RUNTIME
@@ -28,6 +29,25 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 def _clip01(value: Any, default: float = 0.0) -> float:
     return float(np.clip(_safe_float(value, default), 0.0, 1.0))
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
+
+
+def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [_mapping(item) for item in cast(Sequence[Any], value) if isinstance(item, Mapping)]
+
+
+def _float_list(value: Any, *, fallback: Sequence[float]) -> list[float]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return [float(item) for item in fallback]
+    parsed = [_safe_float(item, 0.0) for item in cast(Sequence[Any], value)]
+    return parsed if parsed else [float(item) for item in fallback]
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -98,7 +118,7 @@ def build_style_signature(
     sequence_state = sequence_state or {}
     arr = np.asarray(image_rgb.convert("RGB"), dtype=np.float32) / 255.0
     gray = arr.mean(axis=2)
-    saturation = cast(np.ndarray, arr.max(axis=2) - arr.min(axis=2))
+    saturation: NDArray[np.float32] = arr.max(axis=2) - arr.min(axis=2)
     width = max(int(image_rgb.width), 1)
     height = max(int(image_rgb.height), 1)
     return {
@@ -174,15 +194,15 @@ def _build_heuristic_grounded_chart(
     chart_geometry: Mapping[str, Any],
     sequence_state: Mapping[str, Any],
 ) -> dict[str, Any]:
-    visible_candles = cast(list[dict[str, Any]], sequence_state.get("all_visible_candles", []))
-    box_history = cast(list[dict[str, Any]], sequence_state.get("box_history", []))
-    current_box = cast(dict[str, Any], sequence_state.get("current_box", {}))
-    next_boxes = cast(list[dict[str, Any]], sequence_state.get("next_box_hypotheses", []))
-    objects = [
+    visible_candles = _sequence_of_mappings(sequence_state.get("all_visible_candles", []))
+    box_history = _sequence_of_mappings(sequence_state.get("box_history", []))
+    current_box = _mapping(sequence_state.get("current_box", {}))
+    next_boxes = _sequence_of_mappings(sequence_state.get("next_box_hypotheses", []))
+    objects: list[dict[str, Any]] = [
         {
             "id": f"candle_{index}",
             "kind": "candle",
-            "bbox": cast(list[float], candle.get("bbox", [0.0, 0.0, 0.0, 0.0])),
+            "bbox": _float_list(candle.get("bbox", []), fallback=[0.0, 0.0, 0.0, 0.0]),
             "direction": "BUY" if _clip01(candle.get("candle_color_green", 0.0)) >= 0.5 else "SELL",
             "body_pct": _clip01(candle.get("body_height_pct", 0.0)),
             "upper_wick_pct": _clip01(candle.get("upper_wick_pct", 0.0)),
@@ -198,7 +218,7 @@ def _build_heuristic_grounded_chart(
                 {
                     "kind": "pattern_zone",
                     "pattern": pattern,
-                    "bbox": cast(list[float], detection.get("bbox", [0.0, 0.0, 0.0, 0.0])),
+                    "bbox": _float_list(detection.get("bbox", []), fallback=[0.0, 0.0, 0.0, 0.0]),
                     "confidence": _clip01(detection.get("confidence", 0.0)),
                 }
             )
@@ -208,7 +228,7 @@ def _build_heuristic_grounded_chart(
                 "kind": "sequence_box",
                 "box_type": str(box.get("box_type", "balance")),
                 "direction": str(box.get("direction", "HOLD")).upper(),
-                "bbox": cast(list[float], box.get("bbox", [0.0, 0.0, 0.0, 0.0])),
+                "bbox": _float_list(box.get("bbox", []), fallback=[0.0, 0.0, 0.0, 0.0]),
                 "confidence": _clip01(box.get("confidence", 0.0)),
                 "consolidation_score": _clip01(box.get("consolidation_score", 0.0)),
             }
@@ -292,16 +312,16 @@ def build_grounded_chart(
     except Exception:
         return base
 
-    objects = list(cast(list[dict[str, Any]], base.get("objects", [])))
-    zones = list(cast(list[dict[str, Any]], base.get("zones", [])))
-    artifact_summary = dict(cast(dict[str, float], base.get("artifact_summary", {})))
+    objects = _sequence_of_mappings(base.get("objects", []))
+    zones = _sequence_of_mappings(base.get("zones", []))
+    artifact_summary = _mapping(base.get("artifact_summary", {}))
     ui_artifact_score = 0.0
 
-    for index, detection in enumerate(cast(list[dict[str, Any]], getattr(backend, "detections", []))):
+    for index, detection in enumerate(_sequence_of_mappings(getattr(backend, "detections", []))):
         label = str(detection.get("label", "")).strip().lower()
-        bbox = cast(list[float], detection.get("bbox", [0.0, 0.0, 0.0, 0.0]))
+        bbox = _float_list(detection.get("bbox", []), fallback=[0.0, 0.0, 0.0, 0.0])
         score = _clip01(detection.get("score", 0.0))
-        entry = {
+        entry: dict[str, Any] = {
             "id": f"backend_{index}",
             "kind": "grounded_region",
             "label": label,
@@ -951,7 +971,7 @@ class ContinualLearningManager:
             inference_snapshot_path = str(context.get("snapshot_path", ""))
             saved_feedback_image_path = str(feedback_image_path or "").strip()
             learning_snapshot_path = saved_feedback_image_path or inference_snapshot_path
-            replay_item = {
+            replay_item: dict[str, Any] = {
                 "submission_id": submission_key,
                 "image_hash": image_key,
                 "context_id": str(context.get("context_id", pending_key or image_key)),
@@ -966,8 +986,8 @@ class ContinualLearningManager:
                 "confidence": float(np.clip(_safe_float(context.get("confidence", 0.0), 0.0), 0.0, 1.0)),
                 "champion_model": str(context.get("champion_model", "")),
                 "confirmer_model": str(context.get("confirmer_model", "")),
-                "style_signature": dict(context.get("style_signature", {})),
-                "ood_summary": dict(context.get("ood_summary", {})),
+                "style_signature": _mapping(context.get("style_signature", {})),
+                "ood_summary": _mapping(context.get("ood_summary", {})),
                 "source_path": str(context.get("source_path", "")),
                 "selected_view": str(context.get("selected_view", "")),
                 "snapshot_path": learning_snapshot_path,
@@ -987,7 +1007,7 @@ class ContinualLearningManager:
                         line = line.strip()
                         if line:
                             try:
-                                rows.append(cast(dict[str, Any], json.loads(line)))
+                                rows.append(_mapping(json.loads(line)))
                             except Exception:
                                 continue
             rows.append(replay_item)

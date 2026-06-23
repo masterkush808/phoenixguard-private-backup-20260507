@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 
 import json
 import sys
@@ -99,7 +100,7 @@ def _editor_payload(image: Image.Image) -> dict[str, object]:
     }
 
 
-def test_on_feedback_saves_result_image_and_routes_it_into_learning(monkeypatch, tmp_path: Path) -> None:
+def test_on_feedback_saves_result_image_and_routes_it_into_learning(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source_path = tmp_path / "source_chart.png"
     Image.new("RGB", (40, 24), color=(12, 34, 56)).save(source_path)
 
@@ -156,7 +157,7 @@ def test_on_feedback_saves_result_image_and_routes_it_into_learning(monkeypatch,
     assert any(row["event_type"] == "stage_applied" and row["stage"] == "rl" for row in journal_rows)
 
 
-def test_on_feedback_survives_partial_learning_failures(monkeypatch, tmp_path: Path) -> None:
+def test_on_feedback_survives_partial_learning_failures(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source_path = tmp_path / "source_chart.png"
     Image.new("RGB", (40, 24), color=(12, 34, 56)).save(source_path)
 
@@ -187,7 +188,7 @@ def test_on_feedback_survives_partial_learning_failures(monkeypatch, tmp_path: P
     assert feed_rows[-1]["continual_learning_updated"] is True
 
 
-def test_save_feedback_visual_label_persists_editor_payload(monkeypatch, tmp_path: Path) -> None:
+def test_save_feedback_visual_label_persists_editor_payload(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source_path = tmp_path / "source_chart.png"
     Image.new("RGB", (40, 24), color=(12, 34, 56)).save(source_path)
 
@@ -206,7 +207,7 @@ def test_save_feedback_visual_label_persists_editor_payload(monkeypatch, tmp_pat
     assert "Saved visual label ready" in feed_html
 
 
-def test_on_feedback_uses_feed_learning_when_rl_updates_are_paused(monkeypatch, tmp_path: Path) -> None:
+def test_on_feedback_uses_feed_learning_when_rl_updates_are_paused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source_path = tmp_path / "source_chart.png"
     Image.new("RGB", (40, 24), color=(12, 34, 56)).save(source_path)
 
@@ -235,7 +236,7 @@ def test_on_feedback_uses_feed_learning_when_rl_updates_are_paused(monkeypatch, 
     assert fake_rl.calls
 
 
-def test_save_feedback_visual_label_extracts_semantic_regions(monkeypatch, tmp_path: Path) -> None:
+def test_save_feedback_visual_label_extracts_semantic_regions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source_path = tmp_path / "source_chart.png"
     Image.new("RGB", (40, 24), color=(12, 34, 56)).save(source_path)
 
@@ -264,7 +265,7 @@ def test_save_feedback_visual_label_extracts_semantic_regions(monkeypatch, tmp_p
     assert annotation_payload["visual_regions"][0]["semantic_label"] == "entry_zone"
 
 
-def test_on_feedback_structures_loss_as_hold_for_learning(monkeypatch, tmp_path: Path) -> None:
+def test_on_feedback_structures_loss_as_hold_for_learning(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source_path = tmp_path / "source_chart.png"
     Image.new("RGB", (40, 24), color=(12, 34, 56)).save(source_path)
 
@@ -313,7 +314,7 @@ def test_on_feedback_structures_loss_as_hold_for_learning(monkeypatch, tmp_path:
     assert feed_rows[-1]["verdict"] == "HOLD"
 
 
-def test_feedback_resume_replays_pending_submission(monkeypatch, tmp_path: Path) -> None:
+def test_feedback_resume_replays_pending_submission(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source_path = tmp_path / "source_chart.png"
     Image.new("RGB", (40, 24), color=(12, 34, 56)).save(source_path)
 

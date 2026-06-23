@@ -1,10 +1,24 @@
 from __future__ import annotations
 
-from .cases import build_adversarial_case
+from typing import Any
+
+from .cases import DEFAULT_SYMBOL, DEFAULT_TIMEFRAME, build_adversarial_case
 
 
-def build_steep_impulse_trap_case(**kwargs):
-    return build_adversarial_case("steep_impulse_trap", **kwargs)
+def build_steep_impulse_trap_case(
+    *,
+    seed: int = 0,
+    frame_count: int = 48,
+    symbol: str = DEFAULT_SYMBOL,
+    timeframe: str = DEFAULT_TIMEFRAME,
+) -> dict[str, Any]:
+    return build_adversarial_case(
+        "steep_impulse_trap",
+        seed=seed,
+        frame_count=frame_count,
+        symbol=symbol,
+        timeframe=timeframe,
+    )
 
 
 __all__ = ["build_steep_impulse_trap_case"]

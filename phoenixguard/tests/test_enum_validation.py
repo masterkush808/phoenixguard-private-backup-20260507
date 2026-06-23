@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from test_execution_packet_schema_v3 import NOW, _packet
+from tests.test_execution_packet_schema_v3 import NOW, _packet
 
 from phoenixguard.execution.packet_v3 import validate_execution_packet_v3
 

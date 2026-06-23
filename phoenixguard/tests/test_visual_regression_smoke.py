@@ -2,7 +2,7 @@ from pathlib import Path
 from phoenixguard.vision.renderer import render_overlays_on_chart
 
 
-def test_render_overlays_on_chart_smoke(tmp_path):
+def test_render_overlays_on_chart_smoke(tmp_path: Path):
     png = render_overlays_on_chart(None, [])
     assert isinstance(png, (bytes, bytearray)) and len(png) > 100
     out_dir = Path("tests/fixtures/visual_regression")

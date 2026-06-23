@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from pathlib import Path
+from typing import Any, cast
 
 from fastapi.testclient import TestClient
 
@@ -25,9 +25,10 @@ from phoenixguard.mobile_api.app import create_app
 
 NOW = 1_800_000_000.0
 ROOT = Path(__file__).resolve().parents[1]
+Payload = dict[str, Any]
 
 
-def _execution_packet(**overrides):
+def _execution_packet(**overrides: Any) -> Payload:
     packet = build_execution_packet_v3(
         packet_id="pgpkt-language-001",
         session_id="pocket-live-8788",
@@ -55,8 +56,8 @@ def _execution_packet(**overrides):
     return packet
 
 
-def _study_packet(**overrides):
-    packet = {
+def _study_packet(**overrides: Any) -> Payload:
+    packet: Payload = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "study-language-001",
         "packet_type": STUDY_PACKET_TYPE,
@@ -84,10 +85,10 @@ def _study_packet(**overrides):
     return packet
 
 
-def _deep_update(target, updates):
+def _deep_update(target: Payload, updates: Payload) -> None:
     for key, value in updates.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):
-            _deep_update(target[key], value)
+            _deep_update(cast(Payload, target[key]), cast(Payload, value))
         else:
             target[key] = value
 

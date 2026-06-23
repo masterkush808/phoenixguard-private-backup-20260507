@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 
 class ReplayMode(str, Enum):
@@ -41,8 +41,18 @@ class ReplaySpeedController:
     default_frame_interval_seconds: float = 1.0
 
     @classmethod
-    def from_value(cls, mode: ReplayMode | str, **kwargs: Any) -> "ReplaySpeedController":
-        return cls(mode=resolve_replay_mode(mode), **kwargs)
+    def from_value(
+        cls,
+        mode: ReplayMode | str,
+        *,
+        speed_multiplier: float = 1.0,
+        default_frame_interval_seconds: float = 1.0,
+    ) -> "ReplaySpeedController":
+        return cls(
+            mode=resolve_replay_mode(mode),
+            speed_multiplier=speed_multiplier,
+            default_frame_interval_seconds=default_frame_interval_seconds,
+        )
 
     def delay_seconds(
         self,
@@ -70,15 +80,16 @@ class ReplayClock:
     replay_time_seconds: float = 0.0
     previous_timestamp: float | None = None
 
-    def advance(self, frame: Mapping[str, Any] | Any) -> dict[str, Any]:
-        timestamp = _float(
-            frame.get("timestamp", 0.0) if isinstance(frame, Mapping) else getattr(frame, "timestamp", 0.0),
-            0.0,
-        )
-        interval = _float(
-            frame.get("frame_interval_seconds", 0.0) if isinstance(frame, Mapping) else getattr(frame, "frame_interval_seconds", 0.0),
-            0.0,
-        )
+    def advance(self, frame: object) -> dict[str, Any]:
+        if isinstance(frame, Mapping):
+            typed_frame = cast(Mapping[str, Any], frame)
+            timestamp_value = typed_frame.get("timestamp", 0.0)
+            interval_value = typed_frame.get("frame_interval_seconds", 0.0)
+        else:
+            timestamp_value = getattr(frame, "timestamp", 0.0)
+            interval_value = getattr(frame, "frame_interval_seconds", 0.0)
+        timestamp = _float(timestamp_value, 0.0)
+        interval = _float(interval_value, 0.0)
         delay = self.speed.delay_seconds(
             previous_timestamp=self.previous_timestamp,
             current_timestamp=timestamp,

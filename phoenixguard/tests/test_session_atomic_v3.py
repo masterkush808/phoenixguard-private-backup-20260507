@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pathlib import Path
 
 import json
 
@@ -31,7 +32,7 @@ def test_session_touch_without_capture_is_not_fresh() -> None:
     assert result["visual_health"] == "FAIL"
 
 
-def test_atomic_session_write_preserves_frame_fields(tmp_path) -> None:
+def test_atomic_session_write_preserves_frame_fields(tmp_path: Path) -> None:
     target = tmp_path / "session.json"
     payload = {
         "session_id": "s1",

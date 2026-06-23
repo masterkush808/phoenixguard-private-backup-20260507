@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, cast
 
 
 ADVERSARIAL_MARKET_SIMULATOR_VERSION = "ADVERSARIAL_MARKET_SIMULATOR_V1"
@@ -17,6 +17,12 @@ ADVERSARIAL_SCENARIOS: tuple[str, ...] = (
     "overlapping_middle_range",
     "strong_candle_into_opposing_zone",
 )
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
 
 
 def build_adversarial_snapshot(name: str) -> dict[str, Any]:
@@ -100,15 +106,15 @@ def expected_adversarial_outcome(name: str) -> str:
     return "WATCHING_OR_BLOCKED"
 
 
-def run_adversarial_market_suite(evaluator: Any) -> dict[str, Any]:
+def run_adversarial_market_suite(evaluator: Callable[[Mapping[str, Any]], object]) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for name in ADVERSARIAL_SCENARIOS:
         snapshot = build_adversarial_snapshot(name)
         result = evaluator(snapshot)
+        result_map = _mapping(result)
+        council_map = _mapping(result_map.get("model_council"))
         final_state = str(
-            result.get("model_council", {}).get("final_state")
-            if isinstance(result, Mapping)
-            else ""
+            council_map.get("final_state", "")
         ).upper()
         expected = expected_adversarial_outcome(name)
         passed = final_state in {"WATCHING", "BLOCKED_BY_MARKET", "BLOCKED_BY_RUNTIME", "CONFLICT"}

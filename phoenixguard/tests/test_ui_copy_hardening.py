@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 
 import json
 import sys
@@ -59,7 +60,7 @@ def test_cross_checks_panel_stays_operator_safe() -> None:
         assert term not in lowered
 
 
-def test_outcome_review_panel_hides_learning_engine_terms(monkeypatch, tmp_path: Path) -> None:
+def test_outcome_review_panel_hides_learning_engine_terms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(main.RUNTIME, "data_dir", tmp_path / "data")
     monkeypatch.setattr(main.RUNTIME, "models_dir", tmp_path / "models")
     monkeypatch.setattr(main.RUNTIME, "enable_feedback_learning_feed", True)
@@ -313,7 +314,7 @@ def test_compare_desk_images_default_to_uncropped_contained_views() -> None:
     assert "object-fit: contain !important" in main.UI_CSS
 
 
-def test_decision_record_excludes_raw_backend_payload(monkeypatch) -> None:
+def test_decision_record_excludes_raw_backend_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         main,
         "_get_session_snapshot",

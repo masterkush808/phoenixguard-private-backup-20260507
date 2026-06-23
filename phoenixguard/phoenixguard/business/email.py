@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import os
 import re
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping, Protocol, cast
 from urllib import error, request
 
 
@@ -128,11 +128,12 @@ class ResendEmailConfirmationAdapter:
         if status_code < 200 or status_code >= 300:
             raise EmailProviderError(f"resend_email_send_failed:{status_code}")
         try:
-            response_payload = json.loads(response_body.decode("utf-8"))
+            decoded_payload: object = json.loads(response_body.decode("utf-8"))
         except json.JSONDecodeError as exc:
             raise EmailProviderError("resend_email_send_invalid_json") from exc
-        if not isinstance(response_payload, Mapping):
+        if not isinstance(decoded_payload, Mapping):
             raise EmailProviderError("resend_email_send_invalid_response")
+        response_payload = cast(Mapping[str, Any], decoded_payload)
         message_id = str(response_payload.get("id") or "").strip()
         if not message_id:
             raise EmailProviderError("resend_email_send_missing_id")

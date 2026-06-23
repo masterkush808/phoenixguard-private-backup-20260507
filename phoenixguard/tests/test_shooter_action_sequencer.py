@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from phoenixguard.execution.shooter_action_sequencer import (
     ActionEvidenceRecorder,
@@ -10,6 +10,8 @@ from phoenixguard.execution.shooter_action_sequencer import (
     ShooterActionSequencerV2,
 )
 from tools.analyze_shooter_action_trace import analyze_trace
+
+OcrReader = Callable[[int, Mapping[str, Any]], int | None]
 
 
 class FakeAdapter:
@@ -205,6 +207,25 @@ def _packet(side: str = "BUY", expiry: int = 300) -> dict[str, Any]:
     }
 
 
+def _pop_ocr_reading(readings: list[int]) -> OcrReader:
+    def _reader(_hwnd: int, _boxes_arg: Mapping[str, Any]) -> int:
+        return readings.pop(0)
+
+    return _reader
+
+
+def _no_ocr_reading(_hwnd: int, _boxes_arg: Mapping[str, Any]) -> None:
+    return None
+
+
+def _zero_ocr_reading(_hwnd: int, _boxes_arg: Mapping[str, Any]) -> int:
+    return 0
+
+
+def _sixty_ocr_reading(_hwnd: int, _boxes_arg: Mapping[str, Any]) -> int:
+    return 60
+
+
 def _sequencer(
     tmp_path: Path,
     *,
@@ -232,15 +253,27 @@ def _sequencer(
             return bool(foreground_values[-1]) if foreground_values else False
         return bool(foreground_values.pop(0))
 
+    def activate_window(_hwnd: int) -> bool:
+        return True
+
+    def validate_calibration(_boxes_arg: Mapping[str, Any], _rect: tuple[int, int, int, int]) -> bool:
+        return True
+
+    def is_broker_ready(_hwnd: int, _rect: tuple[int, int, int, int]) -> bool:
+        return True
+
+    def ensure_foreground_window(_hwnd: int) -> bool:
+        return bool(ensure_foreground)
+
     sequencer = ShooterActionSequencerV2(
         hwnd=1,
         boxes=boxes or _boxes(),
         get_window_rect=get_rect,
-        activate_window=lambda _hwnd: True,
-        validate_calibration=lambda _boxes_arg, _rect: True,
-        is_broker_ready=lambda _hwnd, _rect: True,
+        activate_window=activate_window,
+        validate_calibration=validate_calibration,
+        is_broker_ready=is_broker_ready,
         adapter=adapter,  # type: ignore[arg-type]
-        ensure_foreground_window=lambda _hwnd: bool(ensure_foreground),
+        ensure_foreground_window=ensure_foreground_window,
         is_foreground_window=is_foreground,
         timing_profile=timing_profile or BrokerTimingProfile(
             window_activate_wait_ms=1,
@@ -421,7 +454,7 @@ def test_combined_mismatch_retries_split_time_fields(tmp_path: Path) -> None:
     )
     sequencer, adapter = _sequencer(tmp_path, boxes=_combined_boxes(), timing_profile=profile)
     readings = [60, 0, 3661]
-    sequencer.ocr_reader = lambda _hwnd, _boxes_arg: readings.pop(0)
+    sequencer.ocr_reader = _pop_ocr_reading(readings)
     packet = _packet("BUY", 3661)
     packet["execution"]["time_sequence"]["target_text"] = "01:01:01"
 
@@ -462,7 +495,7 @@ def test_visible_timer_uses_primary_calibrated_adjustment(tmp_path: Path) -> Non
     )
     sequencer, adapter = _sequencer(tmp_path, boxes=boxes, timing_profile=profile)
     readings = [14400, 600]
-    sequencer.ocr_reader = lambda _hwnd, _boxes_arg: readings.pop(0)
+    sequencer.ocr_reader = _pop_ocr_reading(readings)
     packet = _packet("BUY", 600)
     packet["execution"]["time_sequence"]["target_text"] = "00:10:00"
 
@@ -497,7 +530,7 @@ def test_combined_time_ocr_no_read_uses_completed_calibrated_control_path(tmp_pa
         require_expiry_verification=True,
     )
     sequencer, adapter = _sequencer(tmp_path, boxes=_combined_boxes(), timing_profile=profile)
-    sequencer.ocr_reader = lambda _hwnd, _boxes_arg: None
+    sequencer.ocr_reader = _no_ocr_reading
     packet = _packet("BUY", 600)
     packet["execution"]["time_sequence"]["target_text"] = "00:10:00"
 
@@ -624,7 +657,7 @@ def test_arrow_fallback_bounded_aborts_before_side_click(tmp_path: Path) -> None
             post_side_click_capture_delay_ms=1,
         ),
     )
-    sequencer.ocr_reader = lambda _hwnd, _boxes_arg: 0
+    sequencer.ocr_reader = _zero_ocr_reading
     result = sequencer.execute(_packet("BUY", 900))
 
     assert result.overall == "FAILED"
@@ -783,7 +816,7 @@ def test_arrow_fallback_bounded(tmp_path: Path) -> None:
         ),
     )
 
-    sequencer.ocr_reader = lambda _hwnd, _boxes_arg: 0
+    sequencer.ocr_reader = _zero_ocr_reading
     result = sequencer.execute(_packet("BUY", 900))
 
     assert result.overall == "FAILED"
@@ -837,7 +870,7 @@ def test_required_expiry_verification_blocks_missing_ocr_before_side_click(tmp_p
 
 def test_abort_before_side_click_if_time_unconfirmed(tmp_path: Path) -> None:
     sequencer, adapter = _sequencer(tmp_path)
-    sequencer.ocr_reader = lambda _hwnd, _boxes_arg: 60
+    sequencer.ocr_reader = _sixty_ocr_reading
 
     result = sequencer.execute(_packet("BUY", 300))
 

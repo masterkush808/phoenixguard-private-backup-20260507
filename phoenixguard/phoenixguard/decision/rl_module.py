@@ -73,6 +73,10 @@ def _probs_to_dict(vec: NDArray[np.float32]) -> dict[str, float]:
     }
 
 
+def _empty_probability_map() -> dict[str, float]:
+    return {}
+
+
 def _read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
@@ -166,8 +170,8 @@ class RLResult:
     boosted_action: str = "HOLD"
     boost_applied: bool = False
     blend_weight: float = 1.0
-    prior_probs: dict[str, float] = field(default_factory=dict)
-    policy_probs: dict[str, float] = field(default_factory=dict)
+    prior_probs: dict[str, float] = field(default_factory=_empty_probability_map)
+    policy_probs: dict[str, float] = field(default_factory=_empty_probability_map)
     policy_action: str = "HOLD"
     feedback_count: int = 0
     online_update_count: int = 0
@@ -235,27 +239,28 @@ class RLPolicyEngine:
             return
         try:
             try:
-                payload = torch.load(self.state_path, map_location=self.device, weights_only=False)
+                payload: Any = torch.load(self.state_path, map_location=self.device, weights_only=False)
             except TypeError:
                 payload = torch.load(self.state_path, map_location=self.device)
-            if not isinstance(payload, dict):
+            if not isinstance(payload, Mapping):
                 return
-            model_state = payload.get("model_state_dict")
-            optimizer_state = payload.get("optimizer_state_dict")
-            if isinstance(model_state, dict):
-                self.model.load_state_dict(model_state)
-            if isinstance(optimizer_state, dict):
-                self.optimizer.load_state_dict(optimizer_state)
-            self._recall_counter = int(payload.get("recall_counter", 0) or 0)
-            self._feedback_count = int(payload.get("feedback_count", len(self._feedback_buffer)) or len(self._feedback_buffer))
-            self._online_update_count = int(payload.get("online_update_count", 0) or 0)
-            self._last_loss = float(payload.get("last_loss", 0.0) or 0.0)
+            payload_map = cast(Mapping[str, Any], payload)
+            model_state = payload_map.get("model_state_dict")
+            optimizer_state = payload_map.get("optimizer_state_dict")
+            if isinstance(model_state, Mapping):
+                self.model.load_state_dict(cast(Any, model_state))
+            if isinstance(optimizer_state, Mapping):
+                self.optimizer.load_state_dict(cast(Any, optimizer_state))
+            self._recall_counter = int(payload_map.get("recall_counter", 0) or 0)
+            self._feedback_count = int(payload_map.get("feedback_count", len(self._feedback_buffer)) or len(self._feedback_buffer))
+            self._online_update_count = int(payload_map.get("online_update_count", 0) or 0)
+            self._last_loss = float(payload_map.get("last_loss", 0.0) or 0.0)
         except Exception as exc:
             self.logger.warning("RL policy state load failed: %s", exc)
             self._feedback_count = len(self._feedback_buffer)
 
     def _save_state(self) -> None:
-        payload = {
+        payload: dict[str, Any] = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "recall_counter": int(self._recall_counter),
@@ -424,7 +429,8 @@ class RLPolicyEngine:
         with self._lock:
             x = torch.tensor(fused_vec, dtype=torch.float32, device=self.device).unsqueeze(0)
             logits = self.model(x).squeeze(0)
-            policy_probs = torch.softmax(logits, dim=-1).detach().cpu().to(torch.float32).numpy().astype(np.float32)
+            policy_tensor: Any = torch.softmax(logits, dim=-1).detach().cpu().to(torch.float32)
+            policy_probs = np.asarray(policy_tensor.numpy(), dtype=np.float32)
 
             prior_vec = _safe_probs(prior_probs) if prior_probs is not None else policy_probs.copy()
             contribution_gate = self._contribution_gate_snapshot()
@@ -452,10 +458,11 @@ class RLPolicyEngine:
                 boosted_logits = np.log(np.clip(final_probs.astype(np.float64), 1e-8, 1.0))
                 boost_index = ACTIONS.index(_safe_action(memory_recall_direction))
                 boosted_logits[boost_index] += float(_MEMORY_BOOST_VAL)
-                final_probs = torch.softmax(
+                boosted_tensor: Any = torch.softmax(
                     torch.tensor(boosted_logits, dtype=torch.float32),
                     dim=-1,
-                ).detach().cpu().numpy().astype(np.float32)
+                ).detach().cpu()
+                final_probs = np.asarray(boosted_tensor.numpy(), dtype=np.float32)
                 boost_applied = True
                 boosted_action = _safe_action(memory_recall_direction)
                 self.logger.info(
@@ -614,7 +621,7 @@ class RLPolicyEngine:
             if _safe_action(context.get("predicted_action", "HOLD")) == actual_action:
                 reward += 0.10
 
-            feedback_item = {
+            feedback_item: dict[str, Any] = {
                 "submission_id": str(submission_id or "").strip(),
                 "image_hash": image_key,
                 "context_id": str(context.get("context_id", pending_key or image_key)),
@@ -740,7 +747,7 @@ class RLPolicyEngine:
             self.optimizer.zero_grad(set_to_none=True)
             cast(Any, loss).backward()
             nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            self.optimizer.step()
+            cast(Any, self.optimizer).step()
             return float(loss.item())
 
     def stats_snapshot(self) -> dict[str, Any]:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
-from typing import Any
+from typing import Any, cast
 
 from phoenixguard.business.command_bridge import (
     EXECUTION_COMMAND_TYPE,
@@ -30,7 +30,7 @@ NOW = 1_800_000_000.0
 
 
 def _account(**updates: Any) -> ConnectorAccountState:
-    base = {
+    base: dict[str, Any] = {
         "license_id": "license-a",
         "device_id": "device-a",
         "account_id": "account-a",
@@ -42,7 +42,17 @@ def _account(**updates: Any) -> ConnectorAccountState:
         "service_available": True,
     }
     base.update(updates)
-    return ConnectorAccountState(**base)
+    return ConnectorAccountState(
+        license_id=cast(str, base["license_id"]),
+        device_id=cast(str, base["device_id"]),
+        account_id=cast(str, base["account_id"]),
+        license_valid=cast(bool, base["license_valid"]),
+        license_expires_at_epoch_sec=cast(float | None, base["license_expires_at_epoch_sec"]),
+        device_revoked=cast(bool, base["device_revoked"]),
+        account_bound=cast(bool, base["account_bound"]),
+        update_required=cast(bool, base["update_required"]),
+        service_available=cast(bool, base["service_available"]),
+    )
 
 
 def _packet(**updates: Any) -> dict[str, Any]:
@@ -94,7 +104,7 @@ def _packet(**updates: Any) -> dict[str, Any]:
 def _deep_update(target: dict[str, Any], updates: dict[str, Any]) -> None:
     for key, value in updates.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):
-            _deep_update(target[key], value)
+            _deep_update(cast(dict[str, Any], target[key]), cast(dict[str, Any], value))
         else:
             target[key] = value
 

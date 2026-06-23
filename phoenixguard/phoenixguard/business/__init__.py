@@ -14,7 +14,7 @@ from .license import LicenseService
 from .repository import MockBusinessRepository
 from .service import create_app, create_business_app
 from .api import register_business_routes
-from .store import BusinessStore, get_business_store
+from .store import BusinessStore, get_business_store, reset_business_store_for_test, set_business_store_for_test
 
 
 __all__ = [
@@ -37,5 +37,7 @@ __all__ = [
     "create_app",
     "create_business_app",
     "get_business_store",
+    "reset_business_store_for_test",
     "register_business_routes",
+    "set_business_store_for_test",
 ]

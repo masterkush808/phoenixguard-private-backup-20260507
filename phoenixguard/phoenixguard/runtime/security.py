@@ -4,7 +4,7 @@ import ctypes
 import gc
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
@@ -15,6 +15,9 @@ import sqlite3
 import tempfile
 from contextlib import closing
 from threading import RLock
+
+
+T = TypeVar("T")
 
 
 class SecurityManager:
@@ -130,7 +133,10 @@ class EncryptedPreferenceStore:
 
     def _initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._with_plaintext_conn(write=True, fn=lambda conn, plain_path: None)
+        def _initialize_schema(_conn: sqlite3.Connection, _plain_path: Path) -> None:
+            return None
+
+        self._with_plaintext_conn(write=True, fn=_initialize_schema)
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -186,8 +192,8 @@ class EncryptedPreferenceStore:
         self,
         *,
         write: bool,
-        fn: Any,
-    ) -> Any:
+        fn: Callable[[sqlite3.Connection, Path], T],
+    ) -> T:
         with self._lock:
             with tempfile.TemporaryDirectory(prefix=f"{self.db_path.stem}_prefs_") as tmp_dir_raw:
                 tmp_dir = Path(tmp_dir_raw)

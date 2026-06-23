@@ -1,10 +1,10 @@
 from __future__ import annotations
-# pyright: reportUnusedImport=false, reportUnusedFunction=false, reportUnusedVariable=false, reportPrivateUsage=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportGeneralTypeIssues=false, reportArgumentType=false, reportUnnecessaryIsInstance=false
 
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+from importlib import import_module
 import json
 import logging
 import os
@@ -16,7 +16,8 @@ import threading
 import time
 from functools import cached_property, lru_cache
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence, cast
+from types import TracebackType
+from typing import Any, Callable, Mapping, Protocol, Sequence, TypedDict, Unpack, cast
 from uuid import uuid4
 
 import numpy as np
@@ -81,7 +82,23 @@ LOGGER = logging.getLogger("phoenixguard.mobile_api.window_tracker")
 _ASYNCIO_LOGGER = logging.getLogger("asyncio")
 
 
-def _safe_worker_log(level: int, message: str, *args: object, **kwargs: object) -> None:
+_LogExcInfo = (
+    bool
+    | BaseException
+    | tuple[type[BaseException], BaseException, TracebackType | None]
+    | tuple[None, None, None]
+    | None
+)
+
+
+class _LogKwargs(TypedDict, total=False):
+    exc_info: _LogExcInfo
+    stack_info: bool
+    stacklevel: int
+    extra: Mapping[str, object] | None
+
+
+def _safe_worker_log(level: int, message: str, *args: object, **kwargs: Unpack[_LogKwargs]) -> None:
     stream = getattr(sys, "stderr", None)
     if bool(getattr(stream, "closed", False)):
         return
@@ -321,6 +338,10 @@ def _clip01(value: Any) -> float:
     return float(max(0.0, min(1.0, number)))
 
 
+def _array_mean_float(value: Any) -> float:
+    return float(np.asarray(value, dtype=np.float32).mean())
+
+
 def _timeframe_seconds(timeframe: Any, default: int = 300) -> int:
     label = str(timeframe or "").strip().upper()
     seconds = {
@@ -425,9 +446,8 @@ def _mapping_to_dict(value: Any) -> dict[str, Any]:
 def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    items: list[Any] = list(value)
     result: list[dict[str, Any]] = []
-    for item in items:
+    for item in cast(Sequence[Any], value):
         if isinstance(item, Mapping):
             result.append(_mapping_to_dict(item))
     return result
@@ -1367,7 +1387,6 @@ def _build_execution_timing_profile(
     extreme_risk = _clip01(price_position.get("extreme_score", 0.0))
     global_position = _clip01(price_position.get("global_position", 0.5))
     local_position = _clip01(price_position.get("local_position", 0.5))
-    close_position = _clip01(price_position.get("close_position", local_position))
     favorable_history_reclaim = bool(
         side == "BUY"
         and global_position <= _EXECUTION_BUY_FAVORABLE_GLOBAL_MAX_POSITION
@@ -2114,7 +2133,7 @@ def _json_snapshot_freshness_key(payload: Any, mtime_ns: int) -> tuple[float, in
         return (0.0, 0, int(mtime_ns or 0))
     row = cast(Mapping[str, Any], payload)
     latest_signal = row.get("latest_signal", {})
-    latest_signal_payload = latest_signal if isinstance(latest_signal, Mapping) else {}
+    latest_signal_payload = _mapping_to_dict(latest_signal)
     epoch = max(
         _float_or(row.get("last_capture_epoch") or row.get("last_capture_started_epoch"), 0.0),
         _float_or(latest_signal_payload.get("published_epoch") or latest_signal_payload.get("capture_started_epoch"), 0.0),
@@ -2166,6 +2185,10 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
         if last_error is not None:
             raise last_error
         raise
+
+
+def write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+    _write_json_atomic(path, payload)
 
 
 def _memory_bank_cache_fingerprint(bank_dir: Path) -> tuple[int, ...]:
@@ -3481,6 +3504,10 @@ def _model_council_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, 
     return walk(payload)
 
 
+def model_council_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return _model_council_packet_from_payload(payload)
+
+
 def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Find or synthesize the latest non-executable Model Council visibility packet."""
 
@@ -3929,7 +3956,7 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
         ):
             nested = row.get(key)
             if isinstance(nested, Mapping):
-                normalized = normalize(nested)
+                normalized = normalize(cast(Mapping[str, Any], nested))
                 if normalized.get("packet_id") and packet_is_current(normalized):
                     return normalized
         for key in (
@@ -3997,6 +4024,10 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
             "block_reason": result.get("block_reason") or council.get("arbitration_reason") or "study packet synthesized from council state",
         }
     )
+
+
+def model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return _model_council_study_packet_from_payload(payload)
 
 
 def _model_council_wait_reason_from_payload(payload: Mapping[str, Any], fallback: str = "MISSING_PACKET") -> str:
@@ -4658,6 +4689,10 @@ def _normalize_broker_execution_state(value: Any, *, expire_active: bool = True)
     return state
 
 
+def normalize_broker_execution_state(value: Any, *, expire_active: bool = True) -> dict[str, Any]:
+    return _normalize_broker_execution_state(value, expire_active=expire_active)
+
+
 def _preserve_newer_active_execution_state(
     candidate: Mapping[str, Any],
     persisted: Mapping[str, Any],
@@ -4713,6 +4748,13 @@ def _preserve_newer_active_execution_state(
         merged["status"] = "monitoring"
         merged["message"] = f"Existing {previous_trade.get('side', 'trade')} trade is still being monitored."
     return merged
+
+
+def preserve_newer_active_execution_state(
+    candidate: Mapping[str, Any],
+    persisted: Mapping[str, Any],
+) -> dict[str, Any]:
+    return _preserve_newer_active_execution_state(candidate, persisted)
 
 
 def _same_execution_retry_target(
@@ -5115,6 +5157,24 @@ class WindowCaptureBackend(Protocol):
         ...
 
     def capture_window(self, descriptor: Mapping[str, Any]) -> Image.Image:
+        ...
+
+
+class _MssShot(Protocol):
+    @property
+    def size(self) -> tuple[int, int]:
+        ...
+
+    @property
+    def bgra(self) -> bytes:
+        ...
+
+
+class _MssCapture(Protocol):
+    def grab(self, monitor: Mapping[str, int]) -> _MssShot:
+        ...
+
+    def close(self) -> None:
         ...
 
 
@@ -5742,11 +5802,10 @@ class WindowsWindowCaptureBackend:
         }
         if use_mss:
             try:
-                import mss
-
-                screen_capture = getattr(self, "_mss_screen_capture", None)
+                mss_factory = cast(Callable[[], _MssCapture], getattr(import_module("mss"), "mss"))
+                screen_capture = cast(_MssCapture | None, getattr(self, "_mss_screen_capture", None))
                 if screen_capture is None:
-                    screen_capture = mss.mss()
+                    screen_capture = mss_factory()
                     setattr(self, "_mss_screen_capture", screen_capture)
                 raw = screen_capture.grab(
                     {
@@ -5759,7 +5818,7 @@ class WindowsWindowCaptureBackend:
                 return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX").convert("RGB")
             except Exception:
                 try:
-                    stale_capture = getattr(self, "_mss_screen_capture", None)
+                    stale_capture = cast(_MssCapture | None, getattr(self, "_mss_screen_capture", None))
                     if stale_capture is not None:
                         stale_capture.close()
                 except Exception:
@@ -6107,8 +6166,9 @@ class PocketOptionBrokerExecutionBackend:
                 continue
             if not isinstance(parsed, Mapping):
                 continue
+            parsed_map = cast(Mapping[str, Any], parsed)
             boxes: dict[str, dict[str, float]] = {}
-            for key, value in parsed.items():
+            for key, value in parsed_map.items():
                 row = _mapping_to_dict(value)
                 x = _float_or(row.get("x"), float("nan"))
                 y = _float_or(row.get("y"), float("nan"))
@@ -6395,7 +6455,6 @@ class PocketOptionBrokerExecutionBackend:
         if not self.is_supported():
             return {"status": "blocked", "message": "Live broker clicking is supported only on Windows."}
         surface = _mapping_to_dict(broker_surface)
-        amount_field = _mapping_to_dict(surface.get("amount_field", {}))
         time_field = _mapping_to_dict(surface.get("time_field", {}))
         expiry_lock = _mapping_to_dict(surface.get("expiry_lock", {}))
         execution_boxes = _mapping_to_dict(surface.get("execution_boxes", {}))
@@ -6443,6 +6502,7 @@ class PocketOptionBrokerExecutionBackend:
             button_screen_point = (window_left + button_point[0], window_top + button_point[1])
             time_cursor_point = self._cursor_point_from_physical_screen_point(user32, hwnd, *time_screen_point)
             button_cursor_point = self._cursor_point_from_physical_screen_point(user32, hwnd, *button_screen_point)
+            expiry_result: dict[str, Any]
             if bool(skip_expiry_adjustment):
                 expiry_result = {
                     "status": "skipped",
@@ -6536,7 +6596,6 @@ class PocketOptionBrokerExecutionBackend:
                 LOGGER.debug("Broker surface refresh after expiry adjustment was unavailable.", exc_info=True)
                 refreshed_surface = {}
             if refreshed_surface:
-                refreshed_amount_field = _mapping_to_dict(refreshed_surface.get("amount_field", {}))
                 refreshed_time_field = _mapping_to_dict(refreshed_surface.get("time_field", {}))
                 refreshed_side_button = _mapping_to_dict(
                     refreshed_surface.get("buy_button" if side_action == "BUY" else "sell_button", {})
@@ -6564,7 +6623,6 @@ class PocketOptionBrokerExecutionBackend:
                             int((refreshed_window_image or window_image).height),
                         ],
                     }
-                amount_field = refreshed_amount_field
                 time_field = refreshed_time_field or time_field
                 side_button = refreshed_side_button
                 execution_boxes = _mapping_to_dict(refreshed_surface.get("execution_boxes", execution_boxes))
@@ -6818,6 +6876,10 @@ class PocketOptionBrokerExecutionBackend:
             "popup_controls": {},
         }
 
+    @classmethod
+    def window_descriptor_from_hwnd(cls, user32: Any, hwnd: int) -> dict[str, Any]:
+        return cls._window_descriptor_from_hwnd(user32, hwnd)
+
     @staticmethod
     def _window_descriptor_from_hwnd(user32: Any, hwnd: int) -> dict[str, Any]:
         if int(hwnd or 0) <= 0:
@@ -6863,6 +6925,10 @@ class PocketOptionBrokerExecutionBackend:
             }
         except Exception:
             return {}
+
+    @classmethod
+    def activate_locked_window_for_click(cls, user32: Any, hwnd: int) -> dict[str, Any]:
+        return cls._activate_locked_window_for_click(user32, hwnd)
 
     @classmethod
     def _activate_locked_window_for_click(cls, user32: Any, hwnd: int) -> dict[str, Any]:
@@ -7347,7 +7413,6 @@ class PocketOptionBrokerExecutionBackend:
                 str(row.get("name", "")).startswith(target_shortcut)
                 and bool(_mapping_to_dict(row.get("diagnostic", {})).get("sent_input", False))
                 for row in clicks
-                if isinstance(row, Mapping)
             )
             if shortcut_clicked and shortcut_sent:
                 verification = {
@@ -7393,8 +7458,6 @@ class PocketOptionBrokerExecutionBackend:
     def _expiry_adjustment_clicks_were_sent(clicks: Sequence[Mapping[str, Any]]) -> bool:
         adjustment_clicks: list[Mapping[str, Any]] = []
         for row in clicks:
-            if not isinstance(row, Mapping):
-                continue
             name = str(row.get("name", "") or "")
             if not name or name in {"dismiss_existing_time_popup", "close_time_popup"}:
                 continue
@@ -7452,7 +7515,7 @@ class PocketOptionBrokerExecutionBackend:
             "matches": True,
             "target_seconds": int(target_total),
             "visible_seconds": int(target_total),
-            "visible_text": PocketOptionBrokerExecutionBackend._format_expiry_text(target_total),
+            "visible_text": cls.format_expiry_text(target_total),
             "confidence": _EXPIRY_CLICK_PLAN_ASSUMED_CONFIDENCE,
             "source": "locked_click_plan_low_confidence_ocr",
             "message": (
@@ -7599,7 +7662,7 @@ class PocketOptionBrokerExecutionBackend:
                 [point[1] for point in centers],
                 tolerance=max(9.0, min(18.0, field_h * 0.26)),
             )
-            shortcut_rows = []
+            shortcut_rows: list[float] = []
             grid_right_limit = x0 + max(28.0, field_w * 0.16)
             for row in row_candidates:
                 if row < y1 + max(44.0, field_h * 0.75) or row > y1 + max(220.0, field_h * 4.30):
@@ -7657,7 +7720,7 @@ class PocketOptionBrokerExecutionBackend:
                     min(height, int(round(cy + box_h * 0.5))),
                 ]
 
-            controls = {
+            controls: dict[str, tuple[int, int]] = {
                 "hour_plus": (hour_x, plus_y),
                 "minute_plus": (minute_x, plus_y),
                 "second_plus": (second_x, plus_y),
@@ -7674,7 +7737,7 @@ class PocketOptionBrokerExecutionBackend:
                 "quick_h1": (minute_x, int(round(rows[2]))),
                 "quick_h4": (second_x, int(round(rows[2]))),
             }
-            execution_boxes = {}
+            execution_boxes: dict[str, dict[str, Any]] = {}
             read_at = _now_iso()
             for name, (cx, cy) in controls.items():
                 is_shortcut = name.startswith("quick_")
@@ -8004,6 +8067,10 @@ class PocketOptionBrokerExecutionBackend:
         return max(0, min(24 * 3600, seconds_value))
 
     @classmethod
+    def format_expiry_text(cls, expiry_seconds: object) -> str:
+        return cls._format_expiry_text(expiry_seconds)
+
+    @classmethod
     def _format_expiry_text(cls, expiry_seconds: Any) -> str:
         total_seconds = cls._coerce_expiry_seconds(expiry_seconds)
         hours, remainder = divmod(total_seconds, 3600)
@@ -8016,6 +8083,9 @@ class PocketOptionBrokerExecutionBackend:
         hours, remainder = divmod(total_seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         return int(hours), int(minutes), int(seconds)
+
+    def find_button(self, arr: ArrayND, side: str) -> dict[str, Any]:
+        return self._find_button(arr, side)
 
     def _find_button(self, arr: ArrayND, side: str) -> dict[str, Any]:
         height, width = int(arr.shape[0]), int(arr.shape[1])
@@ -8057,7 +8127,7 @@ class PocketOptionBrokerExecutionBackend:
                 aspect = float(box_w) / float(max(1, box_h))
                 if aspect < 1.45 or aspect > 7.5:
                     continue
-                density = float(np.mean(mask[y: y + box_h, x: x + box_w] > 0))
+                density = _array_mean_float(mask[y: y + box_h, x: x + box_w] > 0)
                 if density < 0.38:
                     continue
                 x_anchor = _clip01((x + box_w * 0.5 - width * 0.42) / max(1.0, width * 0.58))
@@ -8834,7 +8904,7 @@ class PhoenixGuardWindowTrackingAdapter:
             + 0.14 * (1.0 - sideways_probability)
         )
         macro_trend = "BULL" if global_direction == "BUY" else "BEAR" if global_direction == "SELL" else ("BULL" if direction == "BUY" else "BEAR")
-        sequence_state = {
+        sequence_state: dict[str, Any] = {
             "continuation_probability": continuation_probability,
             "pullback_probability": pullback_probability,
             "reversal_probability": reversal_probability,
@@ -9120,13 +9190,14 @@ class PhoenixGuardWindowTrackingAdapter:
                     bbox = source.get(role)
                     if not isinstance(bbox, Sequence) or isinstance(bbox, (str, bytes)):
                         continue
+                    bbox_values = cast(Sequence[Any], bbox)
                     windows.append(
                         {
                             "source": source_name,
                             "source_index": index,
                             "role": role.replace("_window", ""),
                             "direction": _upper_action(source.get("direction", direction), fallback=direction),
-                            "bbox": list(bbox),
+                            "bbox": list(bbox_values),
                             "invalidation_y": source.get("invalidation_y", plan.get("invalidation_y")),
                             "control_hold_candles": source.get("control_hold_candles", plan.get("control_hold_candles")),
                             "label": str(source.get("label", source.get("key", role)) or role),
@@ -9948,7 +10019,7 @@ class PhoenixGuardWindowTrackingAdapter:
         episode_key = episode_id or f"{label}:ungrouped"
         grouped = getattr(bank, "_episode_members", {})
         if isinstance(grouped, Mapping):
-            grouped_dict: dict[str, Any] = dict(grouped)
+            grouped_dict: dict[str, Any] = dict(cast(Mapping[str, Any], grouped))
             members = list(cast(Sequence[Any], grouped_dict.get(episode_key, [])))
             if members:
                 return members
@@ -10561,15 +10632,24 @@ class PhoenixGuardWindowTrackingAdapter:
         if not primary_zone:
             trigger_window = current_box.get("trigger_window")
             target_window = current_box.get("target_window")
-            fallback_bbox = trigger_window if isinstance(trigger_window, Sequence) and not isinstance(trigger_window, (str, bytes, bytearray)) else current_box.get("bbox")
-            if isinstance(fallback_bbox, Sequence) and not isinstance(fallback_bbox, (str, bytes, bytearray)) and len(fallback_bbox) >= 4:
-                primary_zone = {
-                    "kind": "primary",
-                    "direction": dominant_side,
-                    "bbox": list(fallback_bbox),
-                    "target_bbox": list(target_window) if isinstance(target_window, Sequence) and not isinstance(target_window, (str, bytes, bytearray)) and len(target_window) >= 4 else [],
-                    "invalidation_y": current_box.get("invalidation_y", sniper_zone.get("invalidation_y")),
-                }
+            fallback_bbox: object = None
+            if isinstance(trigger_window, Sequence) and not isinstance(trigger_window, (str, bytes, bytearray)):
+                fallback_bbox = cast(object, trigger_window)
+            else:
+                fallback_bbox = cast(object, current_box.get("bbox"))
+            if isinstance(fallback_bbox, Sequence) and not isinstance(fallback_bbox, (str, bytes, bytearray)):
+                fallback_bbox_values = cast(Sequence[Any], fallback_bbox)
+                if len(fallback_bbox_values) >= 4:
+                    target_bbox_values: Sequence[Any] = ()
+                    if isinstance(target_window, Sequence) and not isinstance(target_window, (str, bytes, bytearray)):
+                        target_bbox_values = cast(Sequence[Any], target_window)
+                    primary_zone = {
+                        "kind": "primary",
+                        "direction": dominant_side,
+                        "bbox": list(fallback_bbox_values),
+                        "target_bbox": list(target_bbox_values) if len(target_bbox_values) >= 4 else [],
+                        "invalidation_y": current_box.get("invalidation_y", sniper_zone.get("invalidation_y")),
+                    }
         primary_top = _first_mapping(primary_fit.get("top_matches", []))
         counter_top = _first_mapping(counter_fit.get("top_matches", []))
         primary_matches = _sequence_of_mappings(primary_fit.get("top_matches", []))
@@ -11407,7 +11487,12 @@ class PhoenixGuardWindowTrackingAdapter:
             height = int(clipped[3] - clipped[1])
             if width < 6 or height < 8:
                 return
-            key = tuple(int(round(float(value))) for value in clipped[:4])
+            key = (
+                int(round(float(clipped[0]))),
+                int(round(float(clipped[1]))),
+                int(round(float(clipped[2]))),
+                int(round(float(clipped[3]))),
+            )
             if key in seen:
                 return
             seen.add(key)
@@ -11440,10 +11525,13 @@ class PhoenixGuardWindowTrackingAdapter:
         def add_raw_box(value: Any) -> None:
             row = _mapping_to_dict(value)
             raw = row.get("bbox", [])
-            if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)) or len(raw) < 4:
+            if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+                return
+            raw_values = cast(Sequence[Any], raw)
+            if len(raw_values) < 4:
                 return
             try:
-                x0, y0, x1, y1 = [float(raw[index]) for index in range(4)]
+                x0, y0, x1, y1 = [float(raw_values[index]) for index in range(4)]
             except (TypeError, ValueError):
                 return
             left, right = sorted((x0, x1))
@@ -11495,8 +11583,8 @@ class PhoenixGuardWindowTrackingAdapter:
     def _detect_order_panel_left_boundary(self, arr: ArrayND) -> int | None:
         try:
             detector = PocketOptionBrokerExecutionBackend()
-            buy = _mapping_to_dict(detector._find_button(arr, "BUY"))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-            sell = _mapping_to_dict(detector._find_button(arr, "SELL"))  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            buy = _mapping_to_dict(detector.find_button(arr, "BUY"))
+            sell = _mapping_to_dict(detector.find_button(arr, "SELL"))
         except Exception:
             return None
         if not buy or not sell:
@@ -11970,12 +12058,14 @@ class PhoenixGuardWindowTrackingAdapter:
             or isinstance(first, (str, bytes, bytearray))
             or not isinstance(second, Sequence)
             or isinstance(second, (str, bytes, bytearray))
-            or len(first) < 4
-            or len(second) < 4
         ):
             return 0.0
-        ax0, ay0, ax1, ay1 = [float(value) for value in first[:4]]
-        bx0, by0, bx1, by1 = [float(value) for value in second[:4]]
+        first_values = cast(Sequence[Any], first)
+        second_values = cast(Sequence[Any], second)
+        if len(first_values) < 4 or len(second_values) < 4:
+            return 0.0
+        ax0, ay0, ax1, ay1 = [float(value) for value in first_values[:4]]
+        bx0, by0, bx1, by1 = [float(value) for value in second_values[:4]]
         left = max(min(ax0, ax1), min(bx0, bx1))
         top = max(min(ay0, ay1), min(by0, by1))
         right = min(max(ax0, ax1), max(bx0, bx1))
@@ -13097,7 +13187,7 @@ class PhoenixGuardWindowTrackingAdapter:
         if dynamic_expiry_seconds > 0:
             signal["expiry_seconds"] = dynamic_expiry_seconds
             signal["required_seconds"] = dynamic_expiry_seconds
-            signal["expiry_text"] = PocketOptionBrokerExecutionBackend._format_expiry_text(dynamic_expiry_seconds)  # pyright: ignore[reportPrivateUsage]
+            signal["expiry_text"] = PocketOptionBrokerExecutionBackend.format_expiry_text(dynamic_expiry_seconds)
             signal["expiry_source"] = "opposing_force_timing"
         else:
             signal["expiry_seconds"] = 0
@@ -13224,7 +13314,6 @@ class PhoenixGuardWindowTrackingAdapter:
             if side in side_votes:
                 side_votes[side] += weight
         side = max(side_votes.items(), key=lambda item: item[1])[0] if max(side_votes.values()) > 0.0 else "HOLD"
-        side_vote = side_votes.get(side, 0.0)
         slope_strength = _clip01(abs(field_slope) * 4.8 + abs(float(global_slope)) * 1.8 + abs(float(local_slope)) * 0.9)
         alignment_bonus = 0.0
         if side in {"BUY", "SELL"} and global_side == side:
@@ -15229,10 +15318,13 @@ class PhoenixGuardWindowTrackingAdapter:
                 sniper_zone = zone
 
         def bbox_bounds(raw_bbox: Any) -> tuple[float, float, float, float] | None:
-            if not isinstance(raw_bbox, Sequence) or isinstance(raw_bbox, (str, bytes, bytearray)) or len(raw_bbox) < 4:
+            if not isinstance(raw_bbox, Sequence) or isinstance(raw_bbox, (str, bytes, bytearray)):
+                return None
+            raw_bbox_values = cast(Sequence[Any], raw_bbox)
+            if len(raw_bbox_values) < 4:
                 return None
             try:
-                x0, y0, x1, y1 = [float(value) for value in raw_bbox[:4]]
+                x0, y0, x1, y1 = [float(value) for value in raw_bbox_values[:4]]
             except (TypeError, ValueError):
                 return None
             return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
@@ -15573,7 +15665,6 @@ class PhoenixGuardWindowTrackingAdapter:
         draw = ImageDraw.Draw(canvas, "RGBA")
 
         action = str(latest_signal.get("action", "HOLD") or "HOLD").upper()
-        projection_view = _mapping_to_dict(tracking_summary.get("projection", {}))
         overlay_geometry = _mapping_to_dict(tracking_summary.get("overlay_geometry", {}))
         layer_visibility = _mapping_to_dict(overlay_geometry.get("layer_visibility", {}))
         diagnostics_visible = bool(layer_visibility.get("diagnostics", False)) or bool(overlay_geometry.get("debug_enabled", False))
@@ -16359,7 +16450,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 if aspect < 0.60 or aspect > 3.30:
                     continue
                 sub_mask = blue_mask[y: y + box_h, x: x + box_w]
-                blue_density = float(np.mean(sub_mask > 0))
+                blue_density = _array_mean_float(sub_mask > 0)
                 if blue_density < 0.28:
                     continue
                 pad = max(2, int(round(box_h * 0.22)))
@@ -16662,11 +16753,16 @@ class ContinuousWindowTrackerService:
         )
         kernel_state = str(decision_kernel.get("state") or signal.get("setup_state") or "").strip().upper()
         kernel_decision = str(decision_kernel.get("decision") or signal.get("decision") or "").strip().upper()
-        kernel_firewall_reasons = {
-            str(reason or "").strip().upper()
-            for reason in decision_kernel.get("firewall_reasons", [])
-            if str(reason or "").strip()
-        } if isinstance(decision_kernel.get("firewall_reasons"), Sequence) and not isinstance(decision_kernel.get("firewall_reasons"), (str, bytes, bytearray)) else set()
+        raw_firewall_reasons = decision_kernel.get("firewall_reasons", [])
+        kernel_firewall_reasons: set[str] = (
+            {
+                str(reason or "").strip().upper()
+                for reason in cast(Sequence[Any], raw_firewall_reasons)
+                if str(reason or "").strip()
+            }
+            if isinstance(raw_firewall_reasons, Sequence) and not isinstance(raw_firewall_reasons, (str, bytes, bytearray))
+            else set()
+        )
         kernel_hard_firewall = bool(
             kernel_firewall_reasons
             - {
@@ -17872,16 +17968,17 @@ class ContinuousWindowTrackerService:
                 continue
             if not isinstance(row, Mapping):
                 continue
-            outcome_lane = str(row.get("lane", "") or "").upper()
+            row_map = cast(Mapping[str, Any], row)
+            outcome_lane = str(row_map.get("lane", "") or "").upper()
             if outcome_lane == "DEMO_RANDOM_TEST":
                 continue
-            outcome_side = _upper_action(row.get("side", "HOLD"))
+            outcome_side = _upper_action(row_map.get("side", "HOLD"))
             if outcome_side != side_action:
                 continue
-            resolved_epoch = float(row.get("resolved_epoch", row.get("timestamp_epoch", 0.0)) or 0.0)
+            resolved_epoch = float(row_map.get("resolved_epoch", row_map.get("timestamp_epoch", 0.0)) or 0.0)
             if resolved_epoch > 0.0 and resolved_epoch < cutoff_epoch:
                 break
-            status = str(row.get("status", row.get("outcome", "")) or "").strip().lower()
+            status = str(row_map.get("status", row_map.get("outcome", "")) or "").strip().lower()
             if status not in {"won", "win", "lost", "loss", "flat"}:
                 continue
             inspected += 1
@@ -18072,10 +18169,13 @@ class ContinuousWindowTrackerService:
             return None
 
         def bbox_center(value: Any) -> tuple[float | None, float | None]:
-            if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)) or len(value) < 4:
+            if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+                return None, None
+            values = cast(Sequence[Any], value)
+            if len(values) < 4:
                 return None, None
             try:
-                x0, y0, x1, y1 = [float(item) for item in value[:4]]
+                x0, y0, x1, y1 = [float(item) for item in values[:4]]
             except (TypeError, ValueError):
                 return None, None
             return (x0 + x1) / 2.0, (y0 + y1) / 2.0
@@ -18762,7 +18862,7 @@ class ContinuousWindowTrackerService:
             if title and not str(descriptor.get("title", "") or "").strip():
                 descriptor["title"] = title
             return descriptor, str(descriptor.get("title", "") or title)
-        descriptor = {"hwnd": hwnd}
+        descriptor: dict[str, Any] = {"hwnd": hwnd}
         if title:
             descriptor["title"] = title
         return descriptor, title
@@ -19529,7 +19629,6 @@ class ContinuousWindowTrackerService:
             current_capture = int(current.get("capture_count", current_frame) or 0)
             current_display = int(current.get("display_frame_id", current_frame) or 0)
             display_frame_id = max(current_display, current_capture, current_frame) + 1
-            capture_count = max(current_capture + 1, display_frame_id)
         artifact_dir = self._session_dir(normalized_session_id) / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         window_signature = _surface_signature(window_image)
@@ -19815,7 +19914,7 @@ class ContinuousWindowTrackerService:
         )
         expiry_lock = _mapping_to_dict(broker_surface.get("expiry_lock", {}))
         expiry_lock["configured_seconds"] = selected_expiry
-        expiry_lock["configured_text"] = PocketOptionBrokerExecutionBackend._format_expiry_text(selected_expiry)  # pyright: ignore[reportPrivateUsage]
+        expiry_lock["configured_text"] = PocketOptionBrokerExecutionBackend.format_expiry_text(selected_expiry)
         broker_surface["expiry_lock"] = expiry_lock
 
         state = _normalize_broker_execution_state(payload.get("broker_execution_state", {}))
@@ -20100,13 +20199,14 @@ class ContinuousWindowTrackerService:
                 # Normalize common artifact keys returned by adapters into canonical projection/reference keys
                 try:
                     # helper to resolve a candidate value into a filesystem path under artifact_dir
-                    def _resolve_candidate(val):
+                    def _resolve_candidate(val: object) -> str | None:
                         if not val:
                             return None
                         try:
-                            p = Path(val)
+                            value_text = str(val)
+                            p = Path(value_text)
                             if not p.is_absolute():
-                                p = artifact_dir / val
+                                p = artifact_dir / value_text
                             if p.exists():
                                 return str(p)
                         except Exception:
@@ -21290,7 +21390,7 @@ class ContinuousWindowTrackerService:
             return None
 
         def zone_distance(zone: Mapping[str, Any], *, prefix: str = "") -> float:
-            keys = []
+            keys: list[str] = []
             if prefix:
                 keys.append(f"{prefix}_distance_norm")
             keys.extend(("distance_to_latest_norm", "distance_norm"))
@@ -22221,13 +22321,13 @@ class ContinuousWindowTrackerService:
         if expiry_seconds > 0 and bool(selected.get("actionable", False)) and side in {"BUY", "SELL"} and isinstance(latest_signal, dict):
             latest_signal["expiry_seconds"] = int(expiry_seconds)
             latest_signal["required_seconds"] = int(expiry_seconds)
-            latest_signal["expiry_text"] = PocketOptionBrokerExecutionBackend._format_expiry_text(expiry_seconds)  # pyright: ignore[reportPrivateUsage]
+            latest_signal["expiry_text"] = PocketOptionBrokerExecutionBackend.format_expiry_text(expiry_seconds)
             latest_signal["expiry_source"] = "opposing_force_timing"
             latest_signal["execution_lane"] = lane
         broker_expiry_lock = _mapping_to_dict(broker_surface.get("expiry_lock", {}))
         if expiry_seconds > 0:
             broker_expiry_lock["configured_seconds"] = int(expiry_seconds)
-            broker_expiry_lock["configured_text"] = PocketOptionBrokerExecutionBackend._format_expiry_text(expiry_seconds)  # pyright: ignore[reportPrivateUsage]
+            broker_expiry_lock["configured_text"] = PocketOptionBrokerExecutionBackend.format_expiry_text(expiry_seconds)
         broker_surface["expiry_lock"] = broker_expiry_lock
 
         def block(status: str, message: str, memory_projection: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
@@ -22312,13 +22412,13 @@ class ContinuousWindowTrackerService:
         if lane == "OPPOSING_FORCE_REACTION":
             raw_decisive_votes = timing_profile.get("opposing_force_reaction_decisive_votes", [])
             decisive_votes = (
-                [str(item) for item in raw_decisive_votes]
+                [str(item) for item in cast(Sequence[Any], raw_decisive_votes)]
                 if isinstance(raw_decisive_votes, Sequence) and not isinstance(raw_decisive_votes, (str, bytes, bytearray))
                 else []
             )
             raw_current_votes = timing_profile.get("opposing_force_reaction_current_votes", [])
             current_votes = (
-                [str(item) for item in raw_current_votes]
+                [str(item) for item in cast(Sequence[Any], raw_current_votes)]
                 if isinstance(raw_current_votes, Sequence) and not isinstance(raw_current_votes, (str, bytes, bytearray))
                 else []
             )
@@ -22827,13 +22927,21 @@ class ContinuousWindowTrackerService:
         except Exception:
             LOGGER.debug("Full-window chart-plane derivation failed.", exc_info=True)
             return selected_surface, focus_meta
-        if not isinstance(detector_result, (list, tuple)) or len(detector_result) < 2:
+        if not isinstance(detector_result, Sequence) or isinstance(detector_result, (str, bytes, bytearray)):
             return selected_surface, focus_meta
-        raw_bbox = detector_result[0]
-        confidence = _float_or(detector_result[1], 0.0)
+        detector_values = cast(Sequence[Any], detector_result)
+        if len(detector_values) < 2:
+            return selected_surface, focus_meta
+        raw_bbox = detector_values[0]
+        confidence = _float_or(detector_values[1], 0.0)
+        if not isinstance(raw_bbox, Sequence) or isinstance(raw_bbox, (str, bytes, bytearray)):
+            return selected_surface, focus_meta
+        raw_bbox_values = cast(Sequence[Any], raw_bbox)
+        if len(raw_bbox_values) < 4:
+            return selected_surface, focus_meta
 
         try:
-            bbox = _clip_bbox_to_image(window_image.size, raw_bbox)
+            bbox = _clip_bbox_to_image(window_image.size, raw_bbox_values)
         except Exception:
             return selected_surface, focus_meta
         x0, y0, x1, y1 = [int(value) for value in bbox[:4]]
@@ -23375,9 +23483,9 @@ class ContinuousWindowTrackerService:
             for value in (chart_artifact_frame_id, overlay_artifact_frame_id, full_overlay_artifact_frame_id)
             if value > 0
         ) if any(value > 0 for value in (chart_artifact_frame_id, overlay_artifact_frame_id, full_overlay_artifact_frame_id)) else frame_index
-        tracking_summary.setdefault("artifact_integrity", {})
-        if isinstance(tracking_summary["artifact_integrity"], dict):
-            tracking_summary["artifact_integrity"].update(
+        artifact_integrity = tracking_summary.setdefault("artifact_integrity", {})
+        if isinstance(artifact_integrity, dict):
+            cast(dict[str, Any], artifact_integrity).update(
                 {
                     "hot_artifacts_reused": bool(reuse_previous_chart_overlay or reuse_previous_full_overlay),
                     "hot_artifacts_overwritten": bool(hot_latest_artifacts),
@@ -23646,7 +23754,7 @@ class ContinuousWindowTrackerService:
             if fast_expiry_seconds > 0 and fast_side in {"BUY", "SELL"}:
                 latest_signal["expiry_seconds"] = fast_expiry_seconds
                 latest_signal["required_seconds"] = fast_expiry_seconds
-                latest_signal["expiry_text"] = PocketOptionBrokerExecutionBackend._format_expiry_text(fast_expiry_seconds)  # pyright: ignore[reportPrivateUsage]
+                latest_signal["expiry_text"] = PocketOptionBrokerExecutionBackend.format_expiry_text(fast_expiry_seconds)
                 latest_signal["expiry_source"] = "opposing_force_timing"
                 latest_signal["execution_lane"] = fast_lane
             previous_fast_state = _normalize_broker_execution_state(payload.get("broker_execution_state", {}))
@@ -24242,7 +24350,7 @@ class ContinuousWindowTrackerService:
             except Exception:
                 pass
             time.sleep(0.18)
-            return PocketOptionBrokerExecutionBackend._window_descriptor_from_hwnd(user32, int(hwnd))  # pyright: ignore[reportPrivateUsage]
+            return PocketOptionBrokerExecutionBackend.window_descriptor_from_hwnd(user32, int(hwnd))
         except Exception:
             LOGGER.debug("Locked broker window restore attempt failed.", exc_info=True)
             return {}
@@ -24439,7 +24547,7 @@ class ContinuousWindowTrackerService:
             return dict(descriptor) if descriptor else None
 
         user32 = ctypes.windll.user32
-        activated = PocketOptionBrokerExecutionBackend._activate_locked_window_for_click(user32, hwnd)  # pyright: ignore[reportPrivateUsage]
+        activated = PocketOptionBrokerExecutionBackend.activate_locked_window_for_click(user32, hwnd)
         if not activated:
             return dict(descriptor) if descriptor else None
 

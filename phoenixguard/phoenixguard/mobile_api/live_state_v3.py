@@ -41,6 +41,12 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
+def _sequence(value: object) -> Sequence[Any]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return cast(Sequence[Any], value)
+    return ()
+
+
 def _first_mapping(*values: Any) -> dict[str, Any]:
     for value in values:
         row = _mapping(value)
@@ -50,9 +56,7 @@ def _first_mapping(*values: Any) -> dict[str, Any]:
 
 
 def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        return []
-    return [dict(cast(Mapping[str, Any], item)) for item in value if isinstance(item, Mapping)]
+    return [dict(cast(Mapping[str, Any], item)) for item in _sequence(value) if isinstance(item, Mapping)]
 
 
 def _text(value: Any, default: str = "") -> str:
@@ -87,11 +91,6 @@ def _bool(value: Any, default: bool = False) -> bool:
     if text in {"0", "false", "f", "no", "n", "off", "invalid", "fail", "failed", "missing", "mismatch", "wrong_surface"}:
         return False
     return default
-
-
-def _path_from(value: Any) -> Path | None:
-    text = _text(value)
-    return Path(text) if text else None
 
 
 def _artifact_frame_id_from_path(path: Path | str | None) -> int:
@@ -382,16 +381,16 @@ def _combine_overlays(
 
 def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = False) -> dict[str, Any]:
     row = dict(overlay)
-    bbox = row.get("bbox")
-    if not isinstance(bbox, Sequence) or isinstance(bbox, (str, bytes, bytearray)) or len(bbox) < 4:
+    bbox = _sequence(row.get("bbox"))
+    if len(bbox) < 4:
         bounds_value = row.get("bounds")
-        if isinstance(bounds_value, Sequence) and not isinstance(bounds_value, (str, bytes, bytearray)):
-            bbox = list(bounds_value)[:4]
+        if _sequence(bounds_value):
+            bbox = list(_sequence(bounds_value))[:4]
         elif isinstance(bounds_value, Mapping):
-            maybe_bbox = bounds_value.get("bbox")
-            if isinstance(maybe_bbox, Sequence) and not isinstance(maybe_bbox, (str, bytes, bytearray)):
-                bbox = list(maybe_bbox)[:4]
-    if isinstance(bbox, Sequence) and not isinstance(bbox, (str, bytes, bytearray)) and len(bbox) >= 4:
+            maybe_bbox = _mapping(bounds_value).get("bbox")
+            if _sequence(maybe_bbox):
+                bbox = list(_sequence(maybe_bbox))[:4]
+    if len(bbox) >= 4:
         x0 = _float(bbox[0])
         y0 = _float(bbox[1])
         x1 = _float(bbox[2])
@@ -414,11 +413,12 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
             "bbox": box,
         }
     label_bounds = row.get("label_bounds")
-    if isinstance(label_bounds, Sequence) and not isinstance(label_bounds, (str, bytes, bytearray)) and len(label_bounds) >= 4:
-        lx0 = _float(label_bounds[0])
-        ly0 = _float(label_bounds[1])
-        lx1 = _float(label_bounds[2])
-        ly1 = _float(label_bounds[3])
+    label_bounds_seq = _sequence(label_bounds)
+    if len(label_bounds_seq) >= 4:
+        lx0 = _float(label_bounds_seq[0])
+        ly0 = _float(label_bounds_seq[1])
+        lx1 = _float(label_bounds_seq[2])
+        ly1 = _float(label_bounds_seq[3])
         left, right = sorted((lx0, lx1))
         top, bottom = sorted((ly0, ly1))
         label_box = [left, top, right, bottom]
@@ -550,10 +550,11 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
 def _zone_bbox(zone: Mapping[str, Any]) -> list[float]:
     raw = zone.get("bbox") or zone.get("pixel_bbox") or zone.get("bounds") or zone.get("normalized_bbox")
     if isinstance(raw, Mapping):
-        raw = raw.get("bbox")
-    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)) or len(raw) < 4:
+        raw = _mapping(raw).get("bbox")
+    raw_seq = _sequence(raw)
+    if len(raw_seq) < 4:
         return []
-    x0, y0, x1, y1 = [_float(raw[index]) for index in range(4)]
+    x0, y0, x1, y1 = [_float(raw_seq[index]) for index in range(4)]
     left, right = sorted((x0, x1))
     top, bottom = sorted((y0, y1))
     if right <= left or bottom <= top:
@@ -564,12 +565,14 @@ def _zone_bbox(zone: Mapping[str, Any]) -> list[float]:
 def _bounds_list(value: Any) -> list[float]:
     raw = value
     if isinstance(value, Mapping):
-        raw = value.get("bbox") or value.get("pixel_bbox") or value.get("bounds") or value.get("normalized_bbox")
+        value_map = _mapping(value)
+        raw = value_map.get("bbox") or value_map.get("pixel_bbox") or value_map.get("bounds") or value_map.get("normalized_bbox")
         if isinstance(raw, Mapping):
-            raw = raw.get("bbox")
-    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)) or len(raw) < 4:
+            raw = _mapping(raw).get("bbox")
+    raw_seq = _sequence(raw)
+    if len(raw_seq) < 4:
         return []
-    x0, y0, x1, y1 = [_float(raw[index]) for index in range(4)]
+    x0, y0, x1, y1 = [_float(raw_seq[index]) for index in range(4)]
     left, right = sorted((x0, x1))
     top, bottom = sorted((y0, y1))
     if right <= left or bottom <= top:
@@ -1808,6 +1811,10 @@ def _compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
+    return _compact_session_payload(session)
+
+
 def _compact_live_poll_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
     selected = {
         "session_id",
@@ -1948,14 +1955,14 @@ def build_live_state_v3(
     requested_overlay_mode = _text(overlay_mode, "CLEAN_LIVE")
     active_overlay_mode = normalize_view_mode(requested_overlay_mode)
     visible_layers = _mode_visible_layers(active_overlay_mode)
-    overlay_mode_payload = {
+    overlay_mode_payload: dict[str, Any] = {
         "requested": requested_overlay_mode,
         "active": active_overlay_mode,
         "available_modes": list(VIEW_MODES),
         "visible_layers": visible_layers,
         "reason_if_empty": "",
     }
-    session = dict(cast(Mapping[str, Any], session_payload))
+    session = dict(session_payload)
     session_id = _text(session.get("session_id"), "session")
     model_health_payload = dict(model_health or {})
     broker_source = _broker_source_summary(session)
@@ -2104,7 +2111,7 @@ def build_live_state_v3(
     overlay_mode_payload["overlay_object_frame_id"] = registry.frame_id
     overlay_mode_payload["artifact_frame_aligned"] = overlay_render_alignment_ok
     overlay_mode_payload["artifact_authority_locked"] = overlay_authority_locked
-    overlays_payload = {
+    overlays_payload: dict[str, Any] = {
         "count": renderable_overlay_count,
         "total_count": total_overlay_count,
         "renderable_count": renderable_overlay_count,
@@ -2169,7 +2176,7 @@ def build_live_state_v3(
     overlays_payload["vocabulary"] = overlay_vocabulary
     overlays_payload["ledger"] = overlay_ledger
     prediction_overlay = prediction_overlay_config()
-    live_visual_state = {
+    live_visual_state: dict[str, Any] = {
         "schema_version": LIVE_STATE_SCHEMA_VERSION,
         "session_id": session_id,
         "frame_id": _int(session.get("frame_index")),
@@ -2282,16 +2289,17 @@ def build_live_state_v3(
         "visual_health": {
             **visual_health,
             "full_broker_surface_visible": bool(surface_frame["exists"]),
-            "overlay_contract_ok": bool(visual_health.get("overlay", {}).get("contract_ok", False)) if isinstance(visual_health.get("overlay"), Mapping) else False,
+            "overlay_contract_ok": bool(_mapping(visual_health.get("overlay")).get("contract_ok", False)),
         },
         "provider_status": dict(_mapping(session.get("live_state_provider_status"))),
         "shooter": _shooter_summary(session_id, shooter_state),
-        "shooter_state": dict(shooter_state or {}),
-        "frontend_heartbeat": dict(frontend_heartbeat or {}),
+        "shooter_state": dict(_mapping(shooter_state)),
+        "frontend_heartbeat": dict(_mapping(frontend_heartbeat)),
     }
     live_visual_state["performance_trace_v3"] = build_performance_trace_v3(live_visual_state, now_epoch=now_value)
     live_visual_state["vlm_context_skeleton_v3"] = build_vlm_context_skeleton_v3(live_visual_state)
-    compact_live_visual_state = {
+    market_objects = _mapping(live_visual_state.get("market_objects"))
+    compact_live_visual_state: dict[str, Any] = {
         "schema_version": live_visual_state["schema_version"],
         "session_id": live_visual_state["session_id"],
         "frame_id": live_visual_state["frame_id"],
@@ -2329,9 +2337,9 @@ def build_live_state_v3(
         "vlm_context_skeleton_v3": live_visual_state["vlm_context_skeleton_v3"],
         "overlays": live_visual_state["overlays"],
         "market_objects": {
-            "active_count": live_visual_state["market_objects"]["active_count"],
-            "registry_count": live_visual_state["market_objects"]["registry_count"],
-            "source_status": live_visual_state["market_objects"]["source_status"],
+            "active_count": market_objects.get("active_count"),
+            "registry_count": market_objects.get("registry_count"),
+            "source_status": market_objects.get("source_status"),
         },
         "model_council": live_visual_state["model_council"],
         "signal_thesis_v3": live_visual_state["signal_thesis_v3"],

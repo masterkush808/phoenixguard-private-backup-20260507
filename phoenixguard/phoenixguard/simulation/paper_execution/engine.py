@@ -5,7 +5,7 @@ import hashlib
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence, cast
 
 from phoenixguard.decision.candle_outcome_tracker import track_candle_outcome
 from phoenixguard.execution.execution_rehearsal import rehearse_execution
@@ -52,14 +52,19 @@ class PaperExecutionPaths:
         )
 
 
-def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(item) for item in value if isinstance(item, Mapping)]
+    rows = cast(Sequence[object], value)
+    return [
+        dict(cast(Mapping[str, Any], item))
+        for item in rows
+        if isinstance(item, Mapping)
+    ]
 
 
 def _text(value: Any) -> str:
@@ -388,9 +393,23 @@ def record_executable_paper_packet(
     future_candles: Sequence[Mapping[str, Any]] | None = None,
     *,
     paths: PaperExecutionPaths | None = None,
-    **kwargs: Any,
+    entry_context: Mapping[str, Any] | None = None,
+    decision: Mapping[str, Any] | None = None,
+    now_epoch: float | None = None,
+    expected_session_id: str | None = None,
+    expected_symbol: str | None = None,
+    expected_timeframe: str | None = None,
 ) -> dict[str, Any]:
-    return PaperExecutionEngine(paths).record_executable_packet(packet, future_candles, **kwargs)
+    return PaperExecutionEngine(paths).record_executable_packet(
+        packet,
+        future_candles,
+        entry_context=entry_context,
+        decision=decision,
+        now_epoch=now_epoch,
+        expected_session_id=expected_session_id,
+        expected_symbol=expected_symbol,
+        expected_timeframe=expected_timeframe,
+    )
 
 
 def run_broker_demo_rehearsal(
@@ -400,9 +419,27 @@ def run_broker_demo_rehearsal(
     window_bounds: tuple[int, int, int, int] | list[int],
     *,
     paths: PaperExecutionPaths | None = None,
-    **kwargs: Any,
+    mode: ShooterMode | str = ShooterMode.DRY_RUN_CLICK,
+    latest_packet: Mapping[str, Any] | None = None,
+    now_epoch: float | None = None,
+    estimated_execution_latency_ms: float = 230.0,
+    require_broker_click_safe: bool = True,
+    execute_live_click: bool = False,
+    broker_click_executor: BrokerClickExecutor | None = None,
 ) -> dict[str, Any]:
-    return PaperExecutionEngine(paths).rehearse_broker_demo(packet, decision, boxes, window_bounds, **kwargs)
+    return PaperExecutionEngine(paths).rehearse_broker_demo(
+        packet,
+        decision,
+        boxes,
+        window_bounds,
+        mode=mode,
+        latest_packet=latest_packet,
+        now_epoch=now_epoch,
+        estimated_execution_latency_ms=estimated_execution_latency_ms,
+        require_broker_click_safe=require_broker_click_safe,
+        execute_live_click=execute_live_click,
+        broker_click_executor=broker_click_executor,
+    )
 
 
 __all__ = [

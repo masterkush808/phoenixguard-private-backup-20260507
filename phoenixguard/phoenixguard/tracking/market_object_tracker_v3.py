@@ -56,15 +56,21 @@ except Exception:
         "PREDICTION_PATH": "prediction",
     }
 
+    def _sequence_values(value: Any) -> list[Any]:
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return list(cast(Sequence[Any], value))
+        return []
+
     def normalize_bounds(value: Any) -> list[float] | None:
-        bbox = normalize_bbox(value) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else None
+        values = _sequence_values(value)
+        bbox = normalize_bbox(values) if values else None
         if bbox is not None:
             return [float(item) for item in bbox]
-        points = []
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            for item in value:
-                if isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)) and len(item) >= 2:
-                    points.append((_float(item[0]), _float(item[1])))
+        points: list[tuple[float, float]] = []
+        for item in values:
+            point = _sequence_values(item)
+            if len(point) >= 2:
+                points.append((_float(point[0]), _float(point[1])))
         if not points:
             return None
         xs = [point[0] for point in points]
@@ -165,9 +171,9 @@ except Exception:
         }
 
     def validate_overlay_payload(overlays: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-        rows = list(overlays)
+        rows = [_mapping(row) for row in overlays]
         required = {"overlay_id", "object_id", "track_id", "type", "bounds", "confidence", "truth_score"}
-        errors = [
+        errors: list[dict[str, Any]] = [
             {"object_id": str(row.get("object_id") or ""), "errors": sorted(required - set(row.keys()))}
             for row in rows
             if required - set(row.keys())
@@ -185,18 +191,20 @@ MARKET_OBJECT_REGISTRY_SCHEMA_VERSION = TRACKER_SCHEMA_VERSION
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
 
 
 def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(cast(Mapping[str, Any], item)) for item in value if isinstance(item, Mapping)]
+    return [_mapping(item) for item in cast(Sequence[Any], value) if isinstance(item, Mapping)]
 
 
 def _sequence(value: Any) -> list[Any]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return list(value)
+        return list(cast(Sequence[Any], value))
     return []
 
 
@@ -302,10 +310,11 @@ def _bounds_from_first_key(raw: Mapping[str, Any], keys: Sequence[str]) -> list[
 
 
 def _point_box(point: Any, *, pad: float = 5.0) -> list[float] | None:
-    if not isinstance(point, Sequence) or isinstance(point, (str, bytes, bytearray)) or len(point) < 2:
+    point_values = _sequence(point)
+    if len(point_values) < 2:
         return None
-    x = _float(point[0], float("nan"))
-    y = _float(point[1], float("nan"))
+    x = _float(point_values[0], float("nan"))
+    y = _float(point_values[1], float("nan"))
     if x != x or y != y:
         return None
     return [x - pad, y - pad, x + pad, y + pad]
@@ -514,7 +523,7 @@ def _validated_trendline(
             touches = max(2, len(touch_indices))
             body_cross_fraction = body_cross_count / max(1, evaluated_after_anchor)
             score = (anchor_dx * 0.012) + touches + (0.75 / max(0.35, close_distance_norm + 0.35) if local_only else 0.0)
-            candidate = {
+            candidate: dict[str, Any] = {
                 "role": role,
                 "points": line_points,
                 "line_points": line_points,
@@ -652,6 +661,10 @@ class MarketObjectV3:
         }
 
 
+def _empty_source_status() -> dict[str, str]:
+    return {}
+
+
 @dataclass(frozen=True)
 class SequenceContextV3:
     sequence_id: str
@@ -678,7 +691,7 @@ class SequenceContextV3:
     target_zones: tuple[str, ...] = ()
     invalidation_zones: tuple[str, ...] = ()
     prediction_paths: tuple[str, ...] = ()
-    source_status: Mapping[str, str] = field(default_factory=dict)
+    source_status: dict[str, str] = field(default_factory=_empty_source_status)
     missing_sources: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
@@ -895,7 +908,7 @@ class _RegistryBuilder:
             candle_modes = ["CANDLES", "INSPECTOR"]
             if latest:
                 candle_modes = ["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT", "INSPECTOR"]
-            candle_row = {
+            candle_row: dict[str, Any] = {
                 **candle,
                 "visible_modes": candle_modes,
                 "label": "CURRENT CANDLE" if latest else "CANDLES",
@@ -1208,7 +1221,7 @@ class _RegistryBuilder:
         forward = _mapping(memory.get("forward_projection"))
         projected = _sequence_of_mappings(forward.get("projected_candles"))
         if projected:
-            points = []
+            points: list[list[float]] = []
             for candle in projected:
                 bbox = _raw_bbox(candle)
                 if bbox:

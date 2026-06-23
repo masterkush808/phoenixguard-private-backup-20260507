@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import inspect
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from fastapi import FastAPI, Header, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -198,6 +198,11 @@ def register_business_tracker_access_routes(
         )
         return JSONResponse(status_code=status_code, content=payload)
 
+    app.state.business_tracker_route_handler_names = (
+        tracker_app_access.__name__,
+        business_tracker_health.__name__,
+    )
+
 
 async def aggregate_tracker_health(
     app: FastAPI,
@@ -206,7 +211,7 @@ async def aggregate_tracker_health(
     decision: TrackerAccessDecision,
 ) -> tuple[dict[str, Any], int]:
     components: dict[str, Any] = {}
-    component_specs = (
+    component_specs: tuple[tuple[str, str, dict[str, str]], ...] = (
         (
             "mobile_api",
             "/v1/mobile/health",
@@ -471,9 +476,11 @@ def _find_get_endpoint(app: FastAPI, route_path: str) -> Any | None:
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
+        value_map = cast(Mapping[str, Any], value)
+        return {str(key): _json_safe(item) for key, item in value_map.items()}
     if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
+        items = cast(list[Any] | tuple[Any, ...], value)
+        return [_json_safe(item) for item in items]
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)

@@ -3,11 +3,23 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 
-def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+
+
+def _empty_mapping_list() -> list[dict[str, Any]]:
+    return []
+
+
+def _empty_float_list() -> list[float]:
+    return []
+
+
+def _empty_str_counter() -> Counter[str]:
+    return Counter()
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -26,12 +38,6 @@ def _state(result: Mapping[str, Any]) -> str:
     return str(council.get("final_state") or execution.get("state") or result.get("final_state") or "WATCHING").upper()
 
 
-def _side(result: Mapping[str, Any]) -> str:
-    council = _mapping(result.get("model_council"))
-    execution = _mapping(result.get("execution"))
-    return str(execution.get("side") or council.get("final_side") or result.get("side") or "HOLD").upper()
-
-
 def _expected(expected: Mapping[str, Any], key: str) -> Any:
     nested = _mapping(expected.get("expected"))
     return expected.get(key, nested.get(key))
@@ -43,17 +49,17 @@ class ReplayMetricsRecorder:
     scenario_name: str = ""
     started_epoch: float = field(default_factory=time.time)
     frames_processed: int = 0
-    paper_entries: list[dict[str, Any]] = field(default_factory=list)
+    paper_entries: list[dict[str, Any]] = field(default_factory=_empty_mapping_list)
     blocked_entries: int = 0
     avoided_bad_trades: int = 0
     late_chase_avoidance_count: int = 0
     opposing_force_avoidance_count: int = 0
     false_executable_count: int = 0
     missed_good_entry_count: int = 0
-    entry_quality_distribution: Counter[str] = field(default_factory=Counter)
-    council_disagreement_distribution: Counter[str] = field(default_factory=Counter)
-    overlay_accuracy_metrics: list[dict[str, Any]] = field(default_factory=list)
-    latency_ms: list[float] = field(default_factory=list)
+    entry_quality_distribution: Counter[str] = field(default_factory=_empty_str_counter)
+    council_disagreement_distribution: Counter[str] = field(default_factory=_empty_str_counter)
+    overlay_accuracy_metrics: list[dict[str, Any]] = field(default_factory=_empty_mapping_list)
+    latency_ms: list[float] = field(default_factory=_empty_float_list)
 
     def record_frame(
         self,

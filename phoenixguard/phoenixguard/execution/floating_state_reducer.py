@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, cast
 
 
-def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
+def _mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(cast(Mapping[str, Any], value))
+
+
+def _empty_mapping() -> dict[str, Any]:
+    return {}
 
 
 @dataclass(frozen=True)
@@ -15,14 +21,14 @@ class FloatingStateV2:
     mode: str
     timestamp: float
     state_chip: str
-    packet: dict[str, Any] = field(default_factory=dict)
-    council: dict[str, Any] = field(default_factory=dict)
-    timing: dict[str, Any] = field(default_factory=dict)
-    instrument: dict[str, Any] = field(default_factory=dict)
-    scores: dict[str, Any] = field(default_factory=dict)
-    shooter: dict[str, Any] = field(default_factory=dict)
-    health: dict[str, Any] = field(default_factory=dict)
-    inspector: dict[str, Any] = field(default_factory=dict)
+    packet: dict[str, Any] = field(default_factory=_empty_mapping)
+    council: dict[str, Any] = field(default_factory=_empty_mapping)
+    timing: dict[str, Any] = field(default_factory=_empty_mapping)
+    instrument: dict[str, Any] = field(default_factory=_empty_mapping)
+    scores: dict[str, Any] = field(default_factory=_empty_mapping)
+    shooter: dict[str, Any] = field(default_factory=_empty_mapping)
+    health: dict[str, Any] = field(default_factory=_empty_mapping)
+    inspector: dict[str, Any] = field(default_factory=_empty_mapping)
 
     @classmethod
     def from_dict(cls, state: Mapping[str, Any]) -> "FloatingStateV2":
@@ -60,7 +66,7 @@ class FloatingStateV2:
 
 
 def _sequence(value: Any) -> list[Any]:
-    return list(value) if isinstance(value, list) else []
+    return list(cast(list[Any], value)) if isinstance(value, list) else []
 
 
 def _text(value: Any, fallback: str = "") -> str:
@@ -93,38 +99,6 @@ def _short_id(value: Any) -> str:
     if not text:
         return ""
     return text[-8:] if len(text) > 8 else text
-
-
-def _display_council_state(state: Any) -> str:
-    """Shorten council state names for UI display to prevent overflow."""
-    text = _text(state).upper()
-    
-    # Map long state names to short display names
-    display_map = {
-        "BUY_OBSERVATION": "BUY.OBS",
-        "SELL_OBSERVATION": "SELL.OBS",
-        "BUY_HYPOTHESIS": "BUY.HYP",
-        "SELL_HYPOTHESIS": "SELL.HYP",
-        "BUY_CONTEXT_CONFIRMED": "BUY.CTX",
-        "SELL_CONTEXT_CONFIRMED": "SELL.CTX",
-        "BUY_ZONE_QUALIFIED": "BUY.ZONE",
-        "SELL_ZONE_QUALIFIED": "SELL.ZONE",
-        "BUY_TIMING_READY": "BUY.TIME",
-        "SELL_TIMING_READY": "SELL.TIME",
-        "BUY_PREPARING": "BUY.PREP",
-        "SELL_PREPARING": "SELL.PREP",
-        "BUY_EXECUTABLE": "BUY.EXEC",
-        "SELL_EXECUTABLE": "SELL.EXEC",
-        "CONFLICT": "CONFLICT",
-        "WATCHING": "WATCH",
-        "OBSERVING": "OBS",
-        "COOLDOWN": "COOL",
-        "BLOCKED_BY_MARKET": "BLK.MKT",
-        "BLOCKED_BY_RUNTIME": "BLK.RUN",
-        "NO_SETUP": "NONE",
-    }
-    
-    return display_map.get(text, text[:12])  # Fallback to first 12 chars
 
 
 def _latency(payload: Mapping[str, Any]) -> Optional[float]:
@@ -227,17 +201,17 @@ def _packet_type(payload: Mapping[str, Any]) -> str:
     return "WAITING"
 
 
-def _extract_packet_payload(signal_payload: Optional[Mapping[str, Any]], tracker_payload: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
+def _extract_packet_payload(signal_payload: Optional[Mapping[str, Any]], tracker_payload: Optional[Mapping[str, Any]]) -> dict[str, Any]:
     if isinstance(signal_payload, Mapping) and signal_payload:
-        return signal_payload
+        return _mapping(signal_payload)
     tracker = _mapping(tracker_payload)
     packet = tracker.get("model_council_study_packet")
     if isinstance(packet, Mapping):
-        return packet
+        return _mapping(packet)
     result = _mapping(tracker.get("model_council_result"))
     packet = result.get("study_packet")
     if isinstance(packet, Mapping):
-        return packet
+        return _mapping(packet)
     return {}
 
 
@@ -391,7 +365,7 @@ def build_floating_state(
         entry_now_allowed = timing_entry.get("mode") == "ENTER_NOW"
     timing_summary = ""
     if timing_mode or path_class:
-        timing_bits = []
+        timing_bits: list[str] = []
         if timing_mode:
             timing_bits.append(f"Timing: {_short_reason(timing_mode)}")
         if path_class:
@@ -454,7 +428,8 @@ def build_floating_state(
     elif packet_state in {"PREPARING", "EXECUTABLE_READY"}:
         state_chip = "PREPARING"
 
-    state = {
+    action = _mapping(action_payload)
+    state: dict[str, Any] = {
         "session_id": _text(session_id, "session"),
         "mode": _text(mode, "LIVE").upper(),
         "timestamp": time.time(),
@@ -486,8 +461,8 @@ def build_floating_state(
             "invalidation_eta_sec": invalidation_eta,
             "entry_now_allowed": bool(entry_now_allowed) if entry_now_allowed is not None else None,
             "summary": timing_summary,
-            "current_candle_phase": dict(current_candle_phase) if isinstance(current_candle_phase, Mapping) else {},
-            "drawdown_first_warning": dict(drawdown_warning) if isinstance(drawdown_warning, Mapping) else {},
+            "current_candle_phase": current_candle_phase,
+            "drawdown_first_warning": drawdown_warning,
         },
         "instrument": {
             "state": instrument_state,
@@ -502,8 +477,8 @@ def build_floating_state(
         "shooter": {
             "state": action_state,
             "action": action_text,
-            "calibration": _text(_mapping(action_payload).get("calibration"), "Pending"),
-            "time_sequence": _text(_mapping(action_payload).get("time_sequence"), "Pending" if packet_type == "EXECUTABLE" else "Study only"),
+            "calibration": _text(action.get("calibration"), "Pending"),
+            "time_sequence": _text(action.get("time_sequence"), "Pending" if packet_type == "EXECUTABLE" else "Study only"),
             "cooldown_remaining_sec": max(0, int(cooldown_remaining_seconds)),
         },
         "health": {
@@ -514,9 +489,9 @@ def build_floating_state(
             "latency_sec": latency,
         },
         "inspector": {
-            "packet_raw": dict(payload) if isinstance(payload, Mapping) else {},
-            "tracker_raw": dict(tracker) if isinstance(tracker, Mapping) else {},
-            "action_raw": dict(action_payload) if isinstance(action_payload, Mapping) else {},
+            "packet_raw": payload,
+            "tracker_raw": tracker,
+            "action_raw": action,
         },
     }
     return FloatingStateV2.from_dict(state).as_dict()

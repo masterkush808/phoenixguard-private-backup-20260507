@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence, cast
 
 from phoenixguard.decision.pair_behavior_profile_v3 import update_pair_profile_from_outcome
 from phoenixguard.paths import PROJECT_ROOT
@@ -14,7 +14,7 @@ DEFAULT_OUTCOME_LOG = PROJECT_ROOT / "data" / "outcome_feedback_v3.jsonl"
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -38,11 +38,12 @@ def build_outcome_record(
     result = dict(outcome or {})
     memory = result.get("memory_matches", source.get("memory_matches", source.get("memory_confirmation", [])))
     if isinstance(memory, Mapping):
-        memory_matches = [str(item.get("memory_id") or item.get("entry_id") or item) for item in [memory]]
-    elif isinstance(memory, list):
+        memory_map = cast(Mapping[str, Any], memory)
+        memory_matches = [str(memory_map.get("memory_id") or memory_map.get("entry_id") or memory_map)]
+    elif isinstance(memory, Sequence) and not isinstance(memory, (str, bytes, bytearray)):
         memory_matches = [
             str(_mapping(item).get("memory_id") or _mapping(item).get("entry_id") or item)
-            for item in memory
+            for item in cast(Sequence[Any], memory)
         ]
     else:
         memory_matches = []

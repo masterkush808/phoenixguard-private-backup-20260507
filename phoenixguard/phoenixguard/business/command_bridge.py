@@ -17,17 +17,24 @@ from phoenixguard.execution.packet_v3 import (
     validate_execution_packet_v3,
 )
 
-try:  # pragma: no cover - exercised when cryptography is installed.
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+InvalidSignature: type[Exception]
+serialization: Any | None
+Ed25519PrivateKey: Any | None
 
-    _HAS_ED25519 = True
+try:  # pragma: no cover - exercised when cryptography is installed.
+    from cryptography.exceptions import InvalidSignature as _InvalidSignature
+    from cryptography.hazmat.primitives import serialization as _serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as _Ed25519PrivateKey
+
+    InvalidSignature = _InvalidSignature
+    serialization = _serialization
+    Ed25519PrivateKey = _Ed25519PrivateKey
+    _has_ed25519 = True
 except Exception:  # pragma: no cover - deterministic local fallback.
-    InvalidSignature = Exception  # type: ignore[assignment]
-    Ed25519PrivateKey = None  # type: ignore[assignment]
-    serialization = None  # type: ignore[assignment]
-    _HAS_ED25519 = False
+    InvalidSignature = Exception
+    Ed25519PrivateKey = None
+    serialization = None
+    _has_ed25519 = False
 
 
 MT4_EXECUTION_COMMAND_SCHEMA_VERSION = "PG_MT4_EXECUTION_COMMAND_V2"
@@ -92,7 +99,7 @@ class CommandBuildResult:
     command: dict[str, Any]
     reason_codes: tuple[str, ...] = field(default_factory=tuple)
     status_code: str | None = None
-    packet_validation: Mapping[str, Any] = field(default_factory=dict)
+    packet_validation: Mapping[str, Any] = field(default_factory=lambda: {})
 
     @property
     def executable(self) -> bool:
@@ -146,7 +153,7 @@ class LocalEd25519Signer:
         self.key_id = str(key_id or "pg-local-ed25519-test-v1")
         self._seed = _seed32(seed)
         private_key_cls = Ed25519PrivateKey
-        self._private_key = private_key_cls.from_private_bytes(self._seed) if _HAS_ED25519 and private_key_cls is not None else None
+        self._private_key = private_key_cls.from_private_bytes(self._seed) if _has_ed25519 and private_key_cls is not None else None
 
     @classmethod
     def local_test_key(cls, *, key_id: str = "pg-local-ed25519-test-v1") -> "LocalEd25519Signer":
@@ -672,7 +679,7 @@ def _normalize_status_code(value: str) -> str:
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _clean_str(value: Any) -> str:

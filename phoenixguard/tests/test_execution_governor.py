@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from typing import Any
+
 from phoenixguard.execution import ExecutionGovernor, validate_fire_command
 
 
 NOW = 1_800_000_000.0
+Payload = dict[str, Any]
 
 
-def _context(**overrides):
-    base = {
+def _context(**overrides: Any) -> Payload:
+    base: Payload = {
         "now": NOW,
         "broker_layout_id": "broker-layout-v1",
         "calibration_profile_id": "calibration-v1",
@@ -17,8 +20,8 @@ def _context(**overrides):
     return base
 
 
-def _command(**overrides):
-    base = {
+def _command(**overrides: Any) -> Payload:
+    base: Payload = {
         "signal_id": "sig-001",
         "session_id": "session-a",
         "symbol": "EURUSD_OTC",
@@ -43,7 +46,7 @@ def _command(**overrides):
     return base
 
 
-def _assert_blocked(command, reason_code, context=None):
+def _assert_blocked(command: Payload, reason_code: str, context: Payload | None = None) -> Any:
     decision = validate_fire_command(command, context=context or _context())
     assert decision.blocked
     assert reason_code in decision.reason_codes

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 
 import sys
 from pathlib import Path
@@ -2089,10 +2090,9 @@ def test_transition_alignment_prefers_reversal_release_over_stale_continuation_e
     assert float(result.detail["favorable"]) > float(result.detail["hazard"])
 
 
-def test_zone_memory_preserves_projected_action_without_matching_zone(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "main._match_zone_memory_to_result",
-        lambda _result: {
+def test_zone_memory_preserves_projected_action_without_matching_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _match_zone_memory_to_result(_result: dict[str, Any]) -> dict[str, Any]:
+        return {
             "match_count": 0,
             "preferred_action": "HOLD",
             "probability_bias": 0.0,
@@ -2101,7 +2101,11 @@ def test_zone_memory_preserves_projected_action_without_matching_zone(monkeypatc
             "sell_bias": 0.0,
             "matching_zones": [],
             "visible_zones": [],
-        },
+        }
+
+    monkeypatch.setattr(
+        "main._match_zone_memory_to_result",
+        _match_zone_memory_to_result,
     )
 
     result = _apply_zone_memory_to_result(

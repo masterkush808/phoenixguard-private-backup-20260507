@@ -1,8 +1,9 @@
+from pathlib import Path
 from phoenixguard.vision.market_registry import merge_market_objects, load_market_objects, query_active_objects, promote_lifecycle
 import time
 
 
-def test_merge_and_promotion(tmp_path):
+def test_merge_and_promotion(tmp_path: Path):
     session = "test-session-lifecycle-2"
     # create two overlapping boxes (IoU > 0.5)
     o1 = {"id": "o1", "bbox": [0, 0, 10, 10], "confidence": 0.6}
@@ -27,7 +28,7 @@ def test_merge_and_promotion(tmp_path):
     assert any(e.get("lifecycle_state") == "STALE" for e in entries_after)
 
 
-def test_query_active_objects_filters_entries_past_ttl(tmp_path):
+def test_query_active_objects_filters_entries_past_ttl(tmp_path: Path):
     session = "test-session-lifecycle-ttl"
     merge_market_objects(session, [{"id": "ttl-old", "bbox": [0, 0, 10, 10], "confidence": 0.9}])
     time.sleep(0.01)

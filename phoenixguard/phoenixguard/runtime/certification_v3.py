@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import statistics
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 CERT_SCHEMA_VERSION = "PG_V3_CERTIFICATION"
@@ -26,7 +26,21 @@ def int_or(value: Any, default: int = 0) -> int:
 
 
 def mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
+
+
+def _empty_bool_dict() -> dict[str, bool]:
+    return {}
+
+
+def _empty_any_dict() -> dict[str, Any]:
+    return {}
+
+
+def _empty_string_list() -> list[str]:
+    return []
 
 
 def percentile(values: Sequence[float], pct: float) -> float:
@@ -45,10 +59,10 @@ def average(values: Sequence[float]) -> float:
 class CertificationGateResultV3:
     gate: str
     passed: bool
-    checks: dict[str, bool] = field(default_factory=dict)
-    metrics: dict[str, Any] = field(default_factory=dict)
-    failures: list[str] = field(default_factory=list)
-    evidence: dict[str, Any] = field(default_factory=dict)
+    checks: dict[str, bool] = field(default_factory=_empty_bool_dict)
+    metrics: dict[str, Any] = field(default_factory=_empty_any_dict)
+    failures: list[str] = field(default_factory=_empty_string_list)
+    evidence: dict[str, Any] = field(default_factory=_empty_any_dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {

@@ -128,12 +128,25 @@ def _clip01(value: Any, fallback: float = 0.0) -> float:
     return float(np.clip(number, 0.0, 1.0))
 
 
-def _passes_indicator_filter(text: str) -> bool:
+def _mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
+
+
+def _non_empty_items(value: Any) -> dict[str, Any]:
+    return {key: item for key, item in _mapping(value).items() if item not in ("", None, [], {})}
+
+
+def passes_indicator_filter(text: str) -> bool:
     """
     Backward-compatible predicate for tests and legacy callers.
     Returns True only when the text is free of indicator-overlay terminology.
     """
     return not bool(INDICATOR_RE.search(str(text)))
+
+
+_passes_indicator_filter = passes_indicator_filter
 
 
 def _resolve_memory_image_path(image_path: str | Path) -> Path:
@@ -237,6 +250,18 @@ def _derive_memory_sequence_fields(image_paths: Sequence[str | Path], labels: Se
     return mapping
 
 # ── data classes ──────────────────────────────────────────────────────────────
+def _empty_late_interaction_tokens() -> list[list[float]]:
+    return []
+
+
+def _empty_float_list() -> list[float]:
+    return []
+
+
+def _empty_float_dict() -> dict[str, float]:
+    return {}
+
+
 @dataclass
 class MemoryEntry:
     entry_id: str                       # sha256 of image path
@@ -254,10 +279,10 @@ class MemoryEntry:
     intent_next: str = "continue"
     archetype_id: int = -1
     is_archetype_centroid: bool = False
-    late_interaction_tokens: list[list[float]] = field(default_factory=list)
-    trajectory_signature: list[float] = field(default_factory=list)
-    style_signature: dict[str, float] = field(default_factory=dict)
-    metric_profile: dict[str, float] = field(default_factory=dict)
+    late_interaction_tokens: list[list[float]] = field(default_factory=_empty_late_interaction_tokens)
+    trajectory_signature: list[float] = field(default_factory=_empty_float_list)
+    style_signature: dict[str, float] = field(default_factory=_empty_float_dict)
+    metric_profile: dict[str, float] = field(default_factory=_empty_float_dict)
     ts: str = field(default_factory=utc_now_iso)
 
     def to_dict(self) -> dict[str, Any]:
@@ -268,10 +293,7 @@ class MemoryEntry:
     def from_dict(d: dict[str, Any]) -> "MemoryEntry":
         payload = dict(d)
         # Accept legacy memory-bank exports that stored the same schema as `vlm_json`.
-        chart_state = cast(
-            dict[str, Any],
-            payload.pop("chart_state", payload.pop("vlm_json", {})),
-        )
+        chart_state = _mapping(payload.pop("chart_state", payload.pop("vlm_json", {})))
         label = str(payload.get("label", chart_state.get("direction", "HOLD")) or "HOLD").upper()
         payload["label"] = label
         raw_image_path = str(payload.get("image_path", "") or "").strip()
@@ -282,7 +304,7 @@ class MemoryEntry:
             sequence_index=int(payload.get("sequence_index", 0) or 0),
             image=None,
         )
-        chart_state = cast(dict[str, Any], payload["chart_state"])
+        chart_state = _mapping(payload["chart_state"])
         taxonomy_hints = any(
             key in chart_state
             for key in (
@@ -313,19 +335,14 @@ class MemoryEntry:
         payload.setdefault("local_phase", inferred_local)
         payload.setdefault("phase_risk", inferred_risk)
         payload.setdefault("intent_next", inferred_intent)
-        style_signature_obj = payload.get("style_signature", {})
-        if not isinstance(style_signature_obj, Mapping):
-            style_signature_obj = {}
-        payload["style_signature"] = dict(style_signature_obj) or infer_style_signature_from_chart_state(chart_state)
-        seq_state_obj = chart_state.get("sequence_state", {})
-        if not isinstance(seq_state_obj, Mapping):
-            seq_state_obj = {}
+        payload["style_signature"] = _mapping(payload.get("style_signature", {})) or infer_style_signature_from_chart_state(chart_state)
+        seq_state_obj = _mapping(chart_state.get("sequence_state", {}))
         payload.setdefault(
             "trajectory_signature",
             build_trajectory_signature(
                 chart_state,
                 sequence_index=int(payload.get("sequence_index", 0) or 0),
-                sequence_state=cast(dict[str, Any], seq_state_obj),
+                sequence_state=seq_state_obj,
             ),
         )
         payload.setdefault(
@@ -334,15 +351,15 @@ class MemoryEntry:
                 chart_state,
                 combined_embed=cast(list[float], payload.get("combined_embed", [])),
                 style_signature=cast(dict[str, float], payload["style_signature"]),
-                sequence_state=cast(dict[str, Any], seq_state_obj),
-                metric_profile=cast(dict[str, float], payload.get("metric_profile", {})),
+                sequence_state=seq_state_obj,
+                metric_profile=cast(dict[str, float], _mapping(payload.get("metric_profile", {}))),
             ),
         )
         payload.setdefault(
             "metric_profile",
             build_metric_profile(
                 chart_state,
-                sequence_state=cast(dict[str, Any], seq_state_obj),
+                sequence_state=seq_state_obj,
             ),
         )
         return MemoryEntry(**payload)
@@ -638,7 +655,7 @@ def _entry_progression_from_image(
     pressure_direction = direction if favorable_pressure >= opposing_pressure else ("SELL" if direction == "BUY" else "BUY")
     regression_alignment = 1.0 if regression_direction == direction else (0.55 if regression_direction == "HOLD" else 0.18)
     regression_confidence = _clip01(0.42 * _clip01(abs(slope) * 7.0) + 0.34 * pressure_gap + 0.24 * compression_score)
-    candle_regression = {
+    candle_regression: dict[str, Any] = {
         "slope": round(float(slope), 4),
         "direction": regression_direction,
         "pressure_direction": pressure_direction,
@@ -719,15 +736,12 @@ def _augment_chart_state_with_memory_teaching(
 ) -> dict[str, Any]:
     payload = dict(chart_state)
     teaching = _memory_teaching_from_path(path, label, sequence_index)
-    existing_teaching = payload.get("memory_teaching", {})
-    if isinstance(existing_teaching, Mapping):
-        teaching.update({key: value for key, value in existing_teaching.items() if value not in ("", None, [], {})})
+    teaching.update(_non_empty_items(payload.get("memory_teaching", {})))
 
     if image is not None:
         progression = _entry_progression_from_image(image, label, sequence_index=sequence_index)
     else:
-        existing_progression = payload.get("entry_progression", {})
-        progression = dict(cast(Mapping[str, Any], existing_progression)) if isinstance(existing_progression, Mapping) else {}
+        progression = _mapping(payload.get("entry_progression", {}))
         progression.setdefault("progression_stage", "setup_progression" if int(sequence_index or 0) <= 0 else "progression")
         progression.setdefault("compression_score", 0.42)
         progression.setdefault("pullback_depth", 0.32)
@@ -750,7 +764,7 @@ def _augment_chart_state_with_memory_teaching(
                 "recent_activity_columns": 0,
             },
         )
-        fallback_regression = cast(Mapping[str, Any], progression.get("candle_regression", {}))
+        fallback_regression = _mapping(progression.get("candle_regression", {}))
         progression.setdefault("candle_regression_slope", fallback_regression.get("slope", 0.0))
         progression.setdefault("candle_regression_direction", fallback_regression.get("direction", "HOLD"))
         progression.setdefault("regression_confidence", fallback_regression.get("confidence", 0.35))
@@ -758,20 +772,18 @@ def _augment_chart_state_with_memory_teaching(
     lesson_role = str(teaching.get("lesson_role", "") or "")
     if lesson_role in {"actual_entry", "win_resolution"}:
         progression["progression_stage"] = lesson_role
-    existing_progression = payload.get("entry_progression", {})
-    if isinstance(existing_progression, Mapping):
+    existing_progression = _non_empty_items(payload.get("entry_progression", {}))
+    if existing_progression:
         merged = dict(progression)
-        merged.update({key: value for key, value in existing_progression.items() if value not in ("", None, [], {})})
+        merged.update(existing_progression)
         progression = merged
-    regression = progression.get("candle_regression", {})
-    if not isinstance(regression, Mapping):
-        regression = {}
+    regression = _mapping(progression.get("candle_regression", {}))
     try:
         regression_slope_value = float(regression.get("slope", progression.get("candle_regression_slope", 0.0)) or 0.0)
     except (TypeError, ValueError):
         regression_slope_value = 0.0
     regression_slope_value = float(np.clip(regression_slope_value, -0.5, 0.5))
-    regression_payload = {
+    regression_payload: dict[str, Any] = {
         "slope": round(float(regression_slope_value), 4),
         "direction": str(regression.get("direction", progression.get("candle_regression_direction", "HOLD")) or "HOLD").upper(),
         "pressure_direction": str(regression.get("pressure_direction", teaching.get("label", "HOLD")) or "HOLD").upper(),
@@ -785,9 +797,7 @@ def _augment_chart_state_with_memory_teaching(
     progression["regression_confidence"] = regression_payload["confidence"]
 
     sniper_profile = _sniper_profile_from_progression(progression, teaching)
-    existing_sniper = payload.get("sniper_profile", {})
-    if isinstance(existing_sniper, Mapping):
-        sniper_profile.update({key: value for key, value in existing_sniper.items() if value not in ("", None, [], {})})
+    sniper_profile.update(_non_empty_items(payload.get("sniper_profile", {})))
 
     payload["memory_teaching"] = teaching
     payload["entry_progression"] = progression
@@ -864,7 +874,7 @@ def _heuristic_price_action(
     consol = sum(1 for i in range(1, len(color_seq)) if color_seq[i] != color_seq[i - 1])
 
     direction = label  # use known label folder
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "entry_type": "reversal" if run_len >= 4 else "continuation",
         "direction": direction,
         "candle_count_up": int(green_pct * 10),
@@ -901,12 +911,13 @@ def _heuristic_price_action(
 
 def _chart_state_to_text(chart_state: dict[str, Any]) -> str:
     """Convert structured chart-state data to text for the sentence-transformer."""
-    projected_box = cast(dict[str, Any], chart_state.get("projected_next_box", {}))
-    swing_state = cast(dict[str, Any], chart_state.get("swing_state", {}))
-    teaching = cast(dict[str, Any], chart_state.get("memory_teaching", {}))
-    progression = cast(dict[str, Any], chart_state.get("entry_progression", {}))
-    sniper_profile = cast(dict[str, Any], chart_state.get("sniper_profile", {}))
-    candle_regression = cast(dict[str, Any], chart_state.get("memory_candle_regression", progression.get("candle_regression", {})))
+    projected_box = _mapping(chart_state.get("projected_next_box", {}))
+    swing_state = _mapping(chart_state.get("swing_state", {}))
+    teaching = _mapping(chart_state.get("memory_teaching", {}))
+    progression = _mapping(chart_state.get("entry_progression", {}))
+    sniper_profile = _mapping(chart_state.get("sniper_profile", {}))
+    entry_candle = _mapping(chart_state.get("entry_candle", {}))
+    candle_regression = _mapping(chart_state.get("memory_candle_regression", progression.get("candle_regression", {})))
     parts = [
         f"entry_type={chart_state.get('entry_type', 'unknown')}",
         f"direction={chart_state.get('direction', 'unknown')}",
@@ -919,7 +930,7 @@ def _chart_state_to_text(chart_state: dict[str, Any]) -> str:
         f"continuation_signal={chart_state.get('continuation_signal', 'none')}",
         f"momentum_bias={chart_state.get('momentum_bias', 'neutral')}",
         f"structure_setup={chart_state.get('structure_setup', 'none')}",
-        f"entry_color={chart_state.get('entry_candle', {}).get('color', 'unknown')}",
+        f"entry_color={entry_candle.get('color', 'unknown')}",
         f"direction_probability={chart_state.get('direction_probability', 0.5):.2f}",
         f"projection_direction={projected_box.get('direction', 'unknown')}",
         f"projection_box={projected_box.get('box_type', 'unknown')}",
@@ -1042,12 +1053,15 @@ def _migrate_loaded_metadata(
     *,
     logger: logging.Logger | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
-    rows = [dict(cast(Mapping[str, Any], row)) for row in raw_rows]
+    rows = [_mapping(row) for row in raw_rows]
     if not rows:
         return [], False
 
     image_paths = [str(row.get("image_path", "")) for row in rows]
-    labels = [str(row.get("label", row.get("chart_state", {}).get("direction", "HOLD")) or "HOLD").upper() for row in rows]
+    labels = [
+        str(row.get("label", _mapping(row.get("chart_state", {})).get("direction", "HOLD")) or "HOLD").upper()
+        for row in rows
+    ]
     sequence_fields = _derive_memory_sequence_fields(image_paths, labels)
     migrated = False
 
@@ -1393,8 +1407,7 @@ class MemoryBank:
             entry_ids.append(entry.entry_id)
             entry_vectors.append(np.asarray(entry.combined_embed, dtype=np.float32))
             for key, value in entry.style_signature.items():
-                if isinstance(value, (float, int)):
-                    style_accumulator.setdefault(str(key), []).append(float(value))
+                style_accumulator.setdefault(str(key), []).append(float(value))
         for members in grouped.values():
             members.sort(key=lambda e: int(e.sequence_index))
         for members in archetypes.values():

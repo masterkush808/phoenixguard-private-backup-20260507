@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 import time
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, cast
 
 
 ENTER_NOW_MODE = "ENTER_NOW"
@@ -259,11 +259,11 @@ def _iter_packet_candidates(payload: Mapping[str, Any]) -> Iterable[tuple[str, M
         for key in _PACKET_KEYS:
             value = container.get(key)
             if isinstance(value, Mapping):
-                yield f"{path}.{key}", value
+                yield f"{path}.{key}", _mapping(value)
         for key in _NESTED_PACKET_CONTAINERS:
             value = container.get(key)
             if isinstance(value, Mapping):
-                yield from visit(value, f"{path}.{key}", depth + 1)
+                yield from visit(_mapping(value), f"{path}.{key}", depth + 1)
 
     yield from visit(payload, "session", 0)
 
@@ -346,7 +346,7 @@ def _package_key(
     created_epoch: float | None,
     raw: Mapping[str, Any],
 ) -> str:
-    identity = {
+    identity: dict[str, Any] = {
         "session_id": session_id,
         "packet_id": packet_id,
         "packet_type": packet_type,
@@ -363,7 +363,9 @@ def _package_key(
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(cast(Mapping[str, Any], value))
 
 
 def _first_mapping(*values: Any) -> dict[str, Any]:

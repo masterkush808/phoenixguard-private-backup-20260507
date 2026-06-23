@@ -4,30 +4,12 @@ import html
 import importlib.util
 import re
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parent
 MARKDOWN_PATH = ROOT / "docs" / "architecture" / "PhoenixGuard_System_Blueprint.md"
 PDF_PATH = ROOT / "docs" / "architecture" / "PhoenixGuard_Architecture.pdf"
-
-
-class PageCanvas(Protocol):
-    def saveState(self) -> None: ...
-    def setStrokeColor(self, color: object) -> None: ...
-    def setLineWidth(self, width: float) -> None: ...
-    def line(self, x1: float, y1: float, x2: float, y2: float) -> None: ...
-    def setFont(self, psfontname: str, size: float) -> None: ...
-    def setFillColor(self, color: object) -> None: ...
-    def drawString(self, x: float, y: float, text: str) -> None: ...
-    def drawRightString(self, x: float, y: float, text: str) -> None: ...
-    def restoreState(self) -> None: ...
-
-
-class PageDoc(Protocol):
-    leftMargin: float
-    rightMargin: float
-    page: int
 
 
 def _require_reportlab() -> None:
@@ -111,6 +93,7 @@ def _build_pdf(markdown_text: str) -> None:
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import inch
+    from reportlab.pdfgen.canvas import Canvas
     from reportlab.platypus import (
         Flowable,
         ListFlowable,
@@ -424,7 +407,7 @@ def _build_pdf(markdown_text: str) -> None:
 
     flush_paragraph()
 
-    def draw_page(canvas: PageCanvas, doc_obj: PageDoc) -> None:
+    def draw_page(canvas: Canvas, doc_obj: SimpleDocTemplate) -> None:
         canvas.saveState()
         canvas.setStrokeColor(colors.HexColor("#cbd5e1"))
         canvas.setLineWidth(0.4)

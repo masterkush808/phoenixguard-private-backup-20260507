@@ -62,7 +62,7 @@ def test_dashboard_label_collision_priority():
         page.evaluate('window.resolveLabelCollisions && window.resolveLabelCollisions(document.querySelector(".hotspot-layer"))')
 
         # extract rendered labels, visibility, and rects
-        res = page.evaluate('''() => {
+        page.evaluate('''() => {
           const nodes = Array.from(document.querySelectorAll('.hotspot-layer button.surface-hotspot'));
           return nodes.map(n=>{
             const span = n.querySelector('span');

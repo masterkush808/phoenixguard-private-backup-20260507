@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pathlib import Path
 
 from phoenixguard.decision.high_frequency_candle_predictor import build_high_frequency_candle_forecast
 from phoenixguard.decision.lstm_candle_sequence_contributor_v3 import build_lstm_candle_sequence_contribution
@@ -83,7 +84,7 @@ def test_high_frequency_forecast_reports_warming_without_enough_candles() -> Non
     assert "at least five visible candles" in forecast["summary"]
 
 
-def test_lstm_candle_contributor_is_observed_only_and_non_blocking_without_artifact(tmp_path) -> None:
+def test_lstm_candle_contributor_is_observed_only_and_non_blocking_without_artifact(tmp_path: Path) -> None:
     candles = [
         _candle(1, side="SELL", top=300, bottom=350),
         _candle(2, side="SELL", top=320, bottom=370),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from typing import Any
 
 from phoenixguard.execution.execution_constitution import (
     CONSTITUTION_RULES,
@@ -11,7 +12,7 @@ from phoenixguard.execution.execution_constitution import (
 NOW = 1000.0
 
 
-def _packet() -> dict:
+def _packet() -> dict[str, Any]:
     return {
         "schema_version": "PG_EXECUTION_PACKET_V3",
         "packet_id": "pgpkt_constitution",

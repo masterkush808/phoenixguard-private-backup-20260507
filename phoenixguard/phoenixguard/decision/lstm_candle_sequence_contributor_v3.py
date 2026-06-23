@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping, Sequence, cast
 
 
 LSTM_CANDLE_SEQUENCE_VERSION = "lstm_candle_v3"
@@ -52,7 +52,7 @@ def _side(value: Any, default: str = "HOLD") -> str:
 def _rows(value: Sequence[Mapping[str, Any]] | Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(cast(Mapping[str, Any], row)) for row in value if isinstance(row, Mapping)]
+    return [dict(cast(Mapping[str, Any], row)) for row in cast(Sequence[Any], value) if isinstance(row, Mapping)]
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -83,9 +83,12 @@ def phase_value(value: Any) -> float:
     return 0.50
 
 
-def _image_height(image_size: tuple[int, int] | Sequence[int]) -> float:
-    if isinstance(image_size, Sequence) and not isinstance(image_size, (str, bytes, bytearray)) and len(image_size) >= 2:
-        return max(1.0, _safe_float(image_size[1], 1.0))
+def _image_height(image_size: Any) -> float:
+    if isinstance(image_size, Sequence) and not isinstance(image_size, (str, bytes, bytearray)):
+        size = cast(Sequence[Any], image_size)
+        if len(size) < 2:
+            return 1.0
+        return max(1.0, _safe_float(size[1], 1.0))
     return 1.0
 
 
@@ -106,10 +109,13 @@ def candle_sequence_features(
     features: list[dict[str, Any]] = []
     for index, row in enumerate(rows):
         bbox = row.get("bbox", [])
-        if not isinstance(bbox, Sequence) or isinstance(bbox, (str, bytes, bytearray)) or len(bbox) < 4:
+        if not isinstance(bbox, Sequence) or isinstance(bbox, (str, bytes, bytearray)):
             continue
-        top = min(_safe_float(bbox[1]), _safe_float(bbox[3]))
-        bottom = max(_safe_float(bbox[1]), _safe_float(bbox[3]))
+        bbox_values = cast(Sequence[Any], bbox)
+        if len(bbox_values) < 4:
+            continue
+        top = min(_safe_float(bbox_values[1]), _safe_float(bbox_values[3]))
+        bottom = max(_safe_float(bbox_values[1]), _safe_float(bbox_values[3]))
         candle_range = max(0.001, (bottom - top) / height)
         body_norm = _clip01(row.get("body_height_pct"), candle_range * 0.58)
         direction = _side(row.get("direction") or row.get("color"), "HOLD")
@@ -175,9 +181,12 @@ def create_lstm_candle_sequence_model(
     if torch is None or nn is None:
         raise RuntimeError("PyTorch is required for LSTM candle-sequence model creation.")
 
-    class LSTMCandleSequenceModel(nn.Module):  # type: ignore[misc]
+    module_base: type[Any] = cast(type[Any], nn.Module)
+
+    class LSTMCandleSequenceModel(module_base):
         def __init__(self) -> None:
-            super().__init__()
+            module_init = cast(Callable[[Any], None], module_base.__init__)
+            module_init(self)
             self.lstm = nn.LSTM(
                 input_size=int(input_dim),
                 hidden_size=int(hidden_dim),
@@ -248,9 +257,10 @@ def _load_artifact_bundle(model_path: Path, config_path: Path, metrics_path: Pat
             num_layers=int(config.get("num_layers", 1) or 1),
             dropout=float(config.get("dropout", 0.0) or 0.0),
         )
-        payload = torch.load(model_path, map_location="cpu", weights_only=False)
+        payload: Any = torch.load(model_path, map_location="cpu", weights_only=False)
         if isinstance(payload, Mapping):
-            state_dict = payload.get("state_dict", payload)
+            payload_map = cast(Mapping[str, Any], payload)
+            state_dict: Any = payload_map.get("state_dict", payload_map)
         else:
             state_dict = payload
         model.load_state_dict(state_dict)

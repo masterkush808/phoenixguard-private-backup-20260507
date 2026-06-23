@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 from phoenixguard.execution.v3_language import (
     CalibrationState,
@@ -180,7 +180,9 @@ def is_packet_current(packet: Mapping[str, Any], *, now_epoch: float | None = No
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(cast(Mapping[str, Any], value))
 
 
 def _clean_str(value: Any) -> str:
@@ -207,13 +209,7 @@ def _int(value: Any, default: int = 0) -> int:
 def _sequence(value: Any) -> list[Any]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return list(value)
-
-
-def _truthy(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-    return bool(value)
+    return list(cast(Sequence[Any], value))
 
 
 def _is_fallback_expiry_source(value: Any) -> bool:
@@ -520,7 +516,7 @@ def build_execution_packet_v3(
         _mapping(instrument_context).get("source_lock_id"),
         f"source_lock_{int(frame_id)}",
     )
-    provenance = {
+    provenance: dict[str, Any] = {
         "frame_id": int(frame_id),
         "capture_count": int(capture_count),
         "state_version": int(state_version),
@@ -531,7 +527,7 @@ def build_execution_packet_v3(
         "created_epoch_ms": int(round(created * 1000.0)),
         "valid_until_epoch_ms": int(round(valid_until * 1000.0)),
     }
-    packet = {
+    packet: dict[str, Any] = {
         "schema_version": EXECUTION_PACKET_SCHEMA_VERSION,
         "packet_type": EXECUTION_PACKET_TYPE,
         "packet_id": str(packet_id),

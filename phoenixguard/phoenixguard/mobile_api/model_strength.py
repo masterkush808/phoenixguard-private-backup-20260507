@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Mapping, cast
+from typing import Any, Mapping, cast
 
 from phoenixguard.decision.model_council_v3 import (
     DEFAULT_AI_CONTRIBUTION_STRENGTHS,
@@ -17,6 +17,11 @@ MODEL_STRENGTH_SETTINGS_PATH = (
 DEFAULT_MODEL_CONFIDENCE_FLOOR = 0.44
 DEFAULT_EXECUTION_THRESHOLD = 0.70
 DEFAULT_OVERLAY_CONFIDENCE_FLOOR = 0.0
+
+
+def _as_mapping(value: object) -> Mapping[str, Any]:
+    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
+
 
 MODEL_STRENGTH_NUMBER_GROUPS: dict[str, dict[str, tuple[float, float, float]]] = {
     "timingControls": {
@@ -156,7 +161,7 @@ def _normalize_float_map(
     minimum: float,
     maximum: float,
 ) -> dict[str, float]:
-    source = dict(raw) if isinstance(raw, Mapping) else {}
+    source = _as_mapping(raw)
     normalized: dict[str, float] = {}
     for key, fallback in defaults.items():
         normalized[key] = _bounded_number(source.get(key), float(fallback), minimum, maximum)
@@ -165,7 +170,7 @@ def _normalize_float_map(
 
 def _normalize_control_group(payload: Mapping[str, object], group: str) -> dict[str, object]:
     raw = payload.get(group)
-    source = dict(raw) if isinstance(raw, Mapping) else {}
+    source = _as_mapping(raw)
     normalized: dict[str, object] = {}
     for key, (fallback, minimum, maximum) in MODEL_STRENGTH_NUMBER_GROUPS.get(group, {}).items():
         normalized[key] = _bounded_number(
@@ -185,7 +190,9 @@ def _flatten_control_groups(settings: Mapping[str, object]) -> dict[str, object]
     for group in sorted(set(MODEL_STRENGTH_NUMBER_GROUPS) | set(MODEL_STRENGTH_BOOL_GROUPS)):
         raw = settings.get(group)
         if isinstance(raw, Mapping):
-            flat.update(dict(raw))
+            raw_map = cast(Mapping[str, Any], raw)
+            for key, value in raw_map.items():
+                flat[str(key)] = value
     return flat
 
 
@@ -194,13 +201,23 @@ def sanitize_model_strength_settings(
     *,
     profile_saved: bool = False,
 ) -> dict[str, object]:
-    payload = dict(raw) if isinstance(raw, Mapping) else {}
+    payload: dict[str, object] = dict(raw or {})
     ai_raw = payload.get("aiStrengths")
     if not isinstance(ai_raw, Mapping):
         ai_raw = payload.get("ai_contribution_strengths")
     lane_raw = payload.get("laneThresholds")
     if not isinstance(lane_raw, Mapping):
         lane_raw = payload.get("execution_lane_thresholds") or payload.get("lane_thresholds")
+    ai_source: Mapping[str, object]
+    if isinstance(ai_raw, Mapping):
+        ai_source = cast(Mapping[str, object], ai_raw)
+    else:
+        ai_source = {}
+    lane_source: Mapping[str, object]
+    if isinstance(lane_raw, Mapping):
+        lane_source = cast(Mapping[str, object], lane_raw)
+    else:
+        lane_source = {}
     return {
         "schemaVersion": MODEL_STRENGTH_SCHEMA_VERSION,
         "profileSaved": bool(profile_saved or payload.get("profileSaved") is True),
@@ -225,13 +242,13 @@ def sanitize_model_strength_settings(
             1.0,
         ),
         "aiStrengths": _normalize_float_map(
-            ai_raw,
+            ai_source,
             DEFAULT_AI_CONTRIBUTION_STRENGTHS,
             minimum=0.0,
             maximum=2.0,
         ),
         "laneThresholds": _normalize_float_map(
-            lane_raw,
+            lane_source,
             DEFAULT_EXECUTION_LANE_THRESHOLDS,
             minimum=0.0,
             maximum=1.0,

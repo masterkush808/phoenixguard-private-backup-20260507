@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 LANGUAGE_CONSTITUTION_VERSION = "PG_V3_LANGUAGE_CONSTITUTION_2026_05_25"
@@ -196,13 +196,15 @@ class CalibrationManifestContract:
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(cast(Mapping[str, Any], value))
 
 
 def _sequence(value: Any) -> list[Any]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return list(value)
+    return list(cast(Sequence[Any], value))
 
 
 def _text(value: Any) -> str:

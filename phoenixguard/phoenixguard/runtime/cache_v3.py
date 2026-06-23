@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from phoenixguard.execution.packet_v3 import (
     EXECUTION_PACKET_SCHEMA_VERSION,
@@ -99,7 +99,9 @@ def _integer(value: Any, default: int = 0) -> int:
 
 def _nested_mapping(payload: Mapping[str, Any], key: str) -> dict[str, Any]:
     value = payload.get(key, {})
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(item_key): item_value for item_key, item_value in cast(Mapping[Any, Any], value).items()}
 
 
 def _reason_from_packet_issue_code(code: str) -> str:

@@ -8,16 +8,25 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+InvalidSignature: type[Exception]
+Ed25519PrivateKey: Any | None
+Encoding: Any | None
+PublicFormat: Any | None
+
 try:  # pragma: no cover - fallback exists for lean local Python installs.
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    from cryptography.exceptions import InvalidSignature as _InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as _Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding as _Encoding, PublicFormat as _PublicFormat
+
+    InvalidSignature = _InvalidSignature
+    Ed25519PrivateKey = _Ed25519PrivateKey
+    Encoding = _Encoding
+    PublicFormat = _PublicFormat
 except Exception:  # pragma: no cover
     InvalidSignature = Exception
-    Ed25519PrivateKey = None  # type: ignore[assignment]
-    Ed25519PublicKey = None  # type: ignore[assignment]
-    Encoding = None  # type: ignore[assignment]
-    PublicFormat = None  # type: ignore[assignment]
+    Ed25519PrivateKey = None
+    Encoding = None
+    PublicFormat = None
 
 
 EXECUTION_STATUS = "EXECUTION_PACKET"

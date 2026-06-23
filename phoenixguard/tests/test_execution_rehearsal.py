@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from typing import Any
+
 from phoenixguard.execution.execution_rehearsal import rehearse_execution
 
 
 NOW = 1000.0
 
 
-def _packet(*, broker_click_safe: bool = True) -> dict:
+def _packet(*, broker_click_safe: bool = True) -> dict[str, Any]:
     return {
         "schema_version": "PG_EXECUTION_PACKET_V3",
         "packet_id": "pgpkt_rehearsal",
@@ -37,7 +39,7 @@ def _packet(*, broker_click_safe: bool = True) -> dict:
     }
 
 
-def _boxes() -> dict:
+def _boxes() -> dict[str, dict[str, float]]:
     return {
         "buy_icon": {"x": 0.8, "y": 0.4},
         "sell_icon": {"x": 0.8, "y": 0.5},

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 
 import importlib
 import json
@@ -77,7 +78,7 @@ def test_final_live_profile_declares_single_canonical_launch_path() -> None:
     assert "Startup Test Signal: REMOVED" in engine
 
 
-def test_runtime_config_collapses_to_final_live(monkeypatch) -> None:
+def test_runtime_config_collapses_to_final_live(monkeypatch: pytest.MonkeyPatch) -> None:
     from phoenixguard.core.config import RuntimeConfig
 
     monkeypatch.setenv("PHOENIXGUARD_PROFILE", "legacy-old-profile")

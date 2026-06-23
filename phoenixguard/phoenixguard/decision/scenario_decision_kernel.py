@@ -12,18 +12,47 @@ Adds scenario-aware confidence boosting and multi-path decision logic.
 """
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 from phoenixguard.decision.scenario_integration import (
     predict_scenarios_from_chart_and_forecast,
     rank_scenarios_by_ensemble_agreement,
     scenarios_to_paint_layer,
-    enhanced_forecast_with_scenarios,
 )
-from phoenixguard.decision.scenario_paint import (
-    ScenarioPainter,
-    create_scenario_dashboard_layout,
-)
+from phoenixguard.decision.scenario_paint import create_scenario_dashboard_layout
+
+
+def _float_value(value: object, default: float = 0.0) -> float:
+    if not isinstance(value, (int, float, str)):
+        return float(default)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if parsed != parsed or parsed in {float("inf"), float("-inf")}:
+        return float(default)
+    return float(parsed)
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
+
+
+def _mapping_rows(value: object) -> list[Mapping[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    rows = cast(Sequence[object], value)
+    return [
+        cast(Mapping[str, Any], item)
+        for item in rows
+        if isinstance(item, Mapping)
+    ]
+
+
+def _sequence_items(value: object) -> Sequence[Any]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return cast(Sequence[Any], value)
+    return ()
 
 
 def enhance_forecast_with_scenario_consensus(
@@ -82,13 +111,13 @@ def enhance_forecast_with_scenario_consensus(
 
     # Confidence boosting: if top scenario agrees with ensemble, increase confidence
     if top_dir == ensemble_decision:
-        existing_conf = forecast_output.get("path_confidence", 0.5)
+        existing_conf = _float_value(forecast_output.get("path_confidence"), 0.5)
         boost = 0.1 * top_prob
         enhanced["path_confidence"] = min(1.0, existing_conf + boost)
         enhanced["scenario_confidence_boost"] = boost
     else:
         # Reduce confidence if scenarios suggest alternative
-        existing_conf = forecast_output.get("path_confidence", 0.5)
+        existing_conf = _float_value(forecast_output.get("path_confidence"), 0.5)
         reduction = 0.1 * (1.0 - top_prob)
         enhanced["path_confidence"] = max(0.1, existing_conf - reduction)
         enhanced["scenario_confidence_reduction"] = reduction
@@ -133,7 +162,7 @@ def scenario_dashboard_for_forecast(
     Returns:
         Dict with traces and layout ready for Plotly
     """
-    scenarios_data = forecast_with_scenarios.get("scenarios", {})
+    scenarios_data = _mapping(forecast_with_scenarios.get("scenarios"))
 
     if not scenarios_data:
         return {"traces": [], "layout": {}}
@@ -162,7 +191,7 @@ def scenario_gates_for_execution(
     """
     updated_gates = dict(existing_gates)
 
-    scenarios_raw = forecast_with_scenarios.get("scenarios_raw", [])
+    scenarios_raw = _mapping_rows(forecast_with_scenarios.get("scenarios_raw"))
     if not scenarios_raw:
         updated_gates["scenario_agreement"] = False
         updated_gates["scenario_confidence"] = False
@@ -173,21 +202,20 @@ def scenario_gates_for_execution(
     top_3 = scenarios_raw[:3]
     if top_3:
         directions = [
-            s.get("candles", [])[-1].get("direction", "HOLD")
-            if s.get("candles")
-            else "HOLD"
+            str(candles[-1].get("direction", "HOLD")) if candles else "HOLD"
             for s in top_3
+            for candles in [_mapping_rows(s.get("candles"))]
         ]
         agreement = len([d for d in directions if d == directions[0]]) / len(directions)
         updated_gates["scenario_agreement"] = agreement >= 0.67  # 2 out of 3
 
     # Average confidence
-    avg_conf = sum(s.get("probability", 0.0) for s in scenarios_raw) / max(len(scenarios_raw), 1)
+    avg_conf = sum(_float_value(s.get("probability"), 0.0) for s in scenarios_raw) / max(len(scenarios_raw), 1)
     updated_gates["scenario_confidence"] = avg_conf >= 0.55
 
     # Quality of top scenario
     top_scenario = scenarios_raw[0]
-    top_cost = top_scenario.get("cost", 10.0)
+    top_cost = _float_value(top_scenario.get("cost"), 10.0)
     updated_gates["scenario_quality"] = top_cost <= 3.0
 
     return updated_gates
@@ -237,7 +265,7 @@ def decision_kernel_extension(
 
     # Determine action
     action = ensemble_consensus
-    action_confidence = enhanced.get("path_confidence", ensemble_confidence)
+    action_confidence = _float_value(enhanced.get("path_confidence"), ensemble_confidence)
 
     # Check if scenarios suggest blocking or boosting
     if not updated_gates.get("scenario_agreement"):
@@ -253,12 +281,12 @@ def decision_kernel_extension(
         action_reason = f"Scenarios align with {ensemble_consensus}"
 
     # Scenario summary
-    top_scenario = enhanced.get("top_scenario", {})
-    scenario_summary = {
-        "total_paths_explored": len(enhanced.get("scenarios_raw", [])),
+    top_scenario_map = _mapping(enhanced.get("top_scenario"))
+    scenario_summary: dict[str, Any] = {
+        "total_paths_explored": len(_mapping_rows(enhanced.get("scenarios_raw"))),
         "top_scenario_rank": 1,
-        "top_scenario_probability": top_scenario.get("probability", 0.0),
-        "top_scenario_direction": top_scenario.get("direction", "HOLD"),
+        "top_scenario_probability": top_scenario_map.get("probability", 0.0),
+        "top_scenario_direction": top_scenario_map.get("direction", "HOLD"),
         "consensus_boost": enhanced.get("scenario_confidence_boost", 0.0),
         "gates_passed": sum(1 for v in updated_gates.values() if v),
         "gates_total": len(updated_gates),
@@ -289,15 +317,15 @@ def scenario_overlay_for_live_dashboard(
     Returns:
         Dict with overlay components
     """
-    forecast = decision_output.get("forecast", {})
-    scenarios_paint = forecast.get("scenarios", {})
-    scenario_summary = decision_output.get("scenario_summary", {})
+    forecast = _mapping(decision_output.get("forecast"))
+    scenarios_paint = _mapping(forecast.get("scenarios"))
+    scenario_summary = _mapping(decision_output.get("scenario_summary"))
 
-    top_ranked = scenarios_paint.get("top_ranked", {})
-    confidence_heatmap = scenarios_paint.get("confidence_heatmap", [])
-    tree_structure = scenarios_paint.get("tree_structure", {})
+    top_ranked = _mapping(scenarios_paint.get("top_ranked"))
+    confidence_heatmap = _sequence_items(scenarios_paint.get("confidence_heatmap"))
+    tree_structure = _mapping(scenarios_paint.get("tree_structure"))
 
-    overlay = {
+    overlay: dict[str, Any] = {
         "type": "scenario_forecast",
         "enabled": True,
         "scenarios": {

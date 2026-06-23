@@ -102,6 +102,31 @@ input double                InpTrailingDistancePips                = 8.0;
 input double                InpTrailingStepPips                    = 1.0;
 input int                   InpMaxHoldMinutes                      = 0;
 
+input bool                  InpUsePackageAwareManagement           = true;
+input bool                  InpRequireKnownAllowancePackage        = true;
+input bool                  InpAllowIntradayEnterNowPackages       = true;
+input bool                  InpAllowSwingPackages                  = true;
+input double                InpIntradayRiskPercent                 = 0.35;
+input double                InpSwingRiskPercent                    = 0.50;
+input double                InpIntradayMaxSpreadPips               = 2.0;
+input double                InpSwingMaxSpreadPips                  = 2.8;
+input double                InpIntradayMaxStopLossPips             = 18.0;
+input double                InpSwingMaxStopLossPips                = 35.0;
+input double                InpIntradayRewardRiskRatio             = 1.25;
+input double                InpSwingRewardRiskRatio                = 1.80;
+input int                   InpIntradayMaxHoldMinutes              = 12;
+input int                   InpSwingMaxHoldMinutes                 = 0;
+input double                InpIntradayBreakEvenTriggerPips        = 5.0;
+input double                InpIntradayBreakEvenLockPips           = 0.5;
+input double                InpSwingBreakEvenTriggerPips           = 10.0;
+input double                InpSwingBreakEvenLockPips              = 1.2;
+input double                InpIntradayTrailingStartPips           = 8.0;
+input double                InpIntradayTrailingDistancePips        = 5.0;
+input double                InpIntradayTrailingStepPips            = 0.8;
+input double                InpSwingTrailingStartPips              = 16.0;
+input double                InpSwingTrailingDistancePips           = 10.0;
+input double                InpSwingTrailingStepPips               = 1.5;
+
 input bool                  InpWriteAuditLog                       = true;
 input string                InpAuditFile                           = "PhoenixGuard\\mt4_executioner_audit.csv";
 input string                InpStateFile                           = "PhoenixGuard\\mt4_executioner_state.txt";
@@ -180,7 +205,8 @@ int OnInit()
    Print("PhoenixGuard MT4 Executioner v1.01 FILE-BRIDGE-ONLY armed on ", g_tradeSymbol,
          " source=CommonFileBridge",
          " dry_run=", BoolText(InpDryRun),
-         " live_execution_input=", BoolText(InpAllowLiveExecution));
+         " live_execution_input=", BoolText(InpAllowLiveExecution),
+         " package_management=", BoolText(InpUsePackageAwareManagement));
    Print("PhoenixGuard bridge file: ", InpCommonSignalFile);
    Audit("INIT", "", "", 0.0, "EA initialized");
    return(INIT_SUCCEEDED);
@@ -255,9 +281,9 @@ void PollAndProcess()
       return;
    }
 
-   double sl_pips = ResolveStopLossPips(g_tradeSymbol);
-   double tp_pips = ResolveTakeProfitPips(sl_pips);
-   double lots = CalculateLots(g_tradeSymbol, packet.side, sl_pips, safety_reason);
+   double sl_pips = ResolveStopLossPips(g_tradeSymbol, packet);
+   double tp_pips = ResolveTakeProfitPips(sl_pips, packet);
+   double lots = CalculateLots(g_tradeSymbol, packet.side, sl_pips, packet, safety_reason);
    if(lots <= 0.0)
    {
       SetStatus("lot sizing blocked: " + safety_reason);
@@ -274,7 +300,12 @@ void PollAndProcess()
       g_lastAcceptedState = packet.state_version;
       SetGlobalDouble("last_trade_time", (double)TimeCurrent());
       SavePersistentState();
-      Audit("ACCEPT_TRADE", packet.packet_id, packet.side, lots, "sl_pips=" + DoubleToString(sl_pips, 1) + " tp_pips=" + DoubleToString(tp_pips, 1));
+      Audit("ACCEPT_TRADE", packet.packet_id, packet.side, lots,
+            "package=" + packet.allowance_package_type +
+            " lane=" + packet.allowance_selected_lane +
+            " timing=" + packet.allowance_timing_mode +
+            " sl_pips=" + DoubleToString(sl_pips, 1) +
+            " tp_pips=" + DoubleToString(tp_pips, 1));
    }
 }
 
@@ -520,7 +551,7 @@ bool ValidatePhoenixPacket(const string raw, PgPacket &packet)
       JsonGetBool(allowance, "accepted", packet.allowance_accepted);
       JsonGetBool(allowance, "execution_ready", packet.allowance_execution_ready);
       JsonGetBool(allowance, "entry_now_allowed", packet.allowance_entry_now_allowed);
-      packet.allowance_package_type = Upper(Trim(packet.allowance_package_type));
+      packet.allowance_package_type = NormalizeAllowancePackageType(packet.allowance_package_type);
       packet.allowance_family = Upper(Trim(packet.allowance_family));
       packet.allowance_selected_lane = Upper(Trim(packet.allowance_selected_lane));
       packet.allowance_timing_mode = Upper(Trim(packet.allowance_timing_mode));
@@ -529,6 +560,14 @@ bool ValidatePhoenixPacket(const string raw, PgPacket &packet)
       packet.allowance_package_type = "LEGACY_EXECUTION";
    if(StringLen(packet.allowance_family) <= 0)
       packet.allowance_family = (packet.allowance_package_type == "INTRADAY_ENTER_NOW" ? "INTRADAY" : "SWING");
+   if(InpRequireKnownAllowancePackage && !IsKnownAllowancePackage(packet.allowance_package_type))
+      return Reject(packet, "UNKNOWN_ALLOWANCE_PACKAGE_" + packet.allowance_package_type);
+   if(packet.allowance_package_type == "INTRADAY_ENTER_NOW" && !InpAllowIntradayEnterNowPackages)
+      return Reject(packet, "INTRADAY_ENTER_NOW_PACKAGE_DISABLED");
+   if(packet.allowance_package_type == "SWING" && !InpAllowSwingPackages)
+      return Reject(packet, "SWING_PACKAGE_DISABLED");
+   if(packet.allowance_package_type == "INTRADAY_ENTER_NOW" && !packet.allowance_entry_now_allowed)
+      return Reject(packet, "INTRADAY_PACKAGE_NOT_ENTRY_NOW_ALLOWED");
 
    if(InpRequireCompleteSequence)
    {
@@ -621,7 +660,7 @@ bool OpenPacketTrade(PgPacket &packet, const double lots, const double sl_pips, 
 
    double sl = StopLossPrice(g_tradeSymbol, cmd, price, sl_pips);
    double tp = TakeProfitPrice(g_tradeSymbol, cmd, price, tp_pips);
-   string comment = BuildOrderComment(packet.packet_id);
+   string comment = BuildOrderComment(packet.packet_id, packet.allowance_package_type);
    color arrow = (cmd == OP_BUY ? clrDodgerBlue : clrRed);
 
    int ticket = -1;
@@ -737,69 +776,76 @@ void ManageOpenTrades()
       string symbol = OrderSymbol();
       int type = OrderType();
       double pips = CurrentOrderPips();
+      string package_type = OrderAllowancePackageType();
+      int max_hold_minutes = PackageMaxHoldMinutes(package_type);
+      double break_even_trigger = PackageBreakEvenTriggerPips(package_type);
+      double trailing_start = PackageTrailingStartPips(package_type);
 
-      if(InpMaxHoldMinutes > 0 && (TimeCurrent() - OrderOpenTime()) >= InpMaxHoldMinutes * 60)
+      if(max_hold_minutes > 0 && (TimeCurrent() - OrderOpenTime()) >= max_hold_minutes * 60)
       {
-         CloseTicket(OrderTicket(), "max hold minutes");
+         CloseTicket(OrderTicket(), "max hold minutes package=" + package_type);
          continue;
       }
 
-      if(InpUseBreakEven && pips >= InpBreakEvenTriggerPips)
-         ApplyBreakEven(OrderTicket(), type, symbol);
+      if(InpUseBreakEven && pips >= break_even_trigger)
+         ApplyBreakEven(OrderTicket(), type, symbol, package_type);
 
-      if(InpUseTrailingStop && pips >= InpTrailingStartPips)
-         ApplyTrailingStop(OrderTicket(), type, symbol);
+      if(InpUseTrailingStop && pips >= trailing_start)
+         ApplyTrailingStop(OrderTicket(), type, symbol, package_type);
    }
 }
 
-void ApplyBreakEven(const int ticket, const int type, const string symbol)
+void ApplyBreakEven(const int ticket, const int type, const string symbol, const string package_type)
 {
    if(!OrderSelect(ticket, SELECT_BY_TICKET))
       return;
    double pip = PipSize(symbol);
+   double lock_pips = PackageBreakEvenLockPips(package_type);
    double new_sl = 0.0;
    if(type == OP_BUY)
    {
-      new_sl = OrderOpenPrice() + InpBreakEvenLockPips * pip;
+      new_sl = OrderOpenPrice() + lock_pips * pip;
       if(OrderStopLoss() >= new_sl)
          return;
    }
    else if(type == OP_SELL)
    {
-      new_sl = OrderOpenPrice() - InpBreakEvenLockPips * pip;
+      new_sl = OrderOpenPrice() - lock_pips * pip;
       if(OrderStopLoss() > 0.0 && OrderStopLoss() <= new_sl)
          return;
    }
    else
       return;
 
-   SafeModifyStop(ticket, new_sl, OrderTakeProfit(), "break-even");
+   SafeModifyStop(ticket, new_sl, OrderTakeProfit(), "break-even " + package_type);
 }
 
-void ApplyTrailingStop(const int ticket, const int type, const string symbol)
+void ApplyTrailingStop(const int ticket, const int type, const string symbol, const string package_type)
 {
    if(!OrderSelect(ticket, SELECT_BY_TICKET))
       return;
    double pip = PipSize(symbol);
    double bid = MarketInfo(symbol, MODE_BID);
    double ask = MarketInfo(symbol, MODE_ASK);
+   double trailing_distance = PackageTrailingDistancePips(package_type);
+   double trailing_step = PackageTrailingStepPips(package_type);
    double new_sl = 0.0;
    if(type == OP_BUY)
    {
-      new_sl = bid - InpTrailingDistancePips * pip;
-      if(OrderStopLoss() > 0.0 && new_sl <= OrderStopLoss() + InpTrailingStepPips * pip)
+      new_sl = bid - trailing_distance * pip;
+      if(OrderStopLoss() > 0.0 && new_sl <= OrderStopLoss() + trailing_step * pip)
          return;
    }
    else if(type == OP_SELL)
    {
-      new_sl = ask + InpTrailingDistancePips * pip;
-      if(OrderStopLoss() > 0.0 && new_sl >= OrderStopLoss() - InpTrailingStepPips * pip)
+      new_sl = ask + trailing_distance * pip;
+      if(OrderStopLoss() > 0.0 && new_sl >= OrderStopLoss() - trailing_step * pip)
          return;
    }
    else
       return;
 
-   SafeModifyStop(ticket, new_sl, OrderTakeProfit(), "trailing");
+   SafeModifyStop(ticket, new_sl, OrderTakeProfit(), "trailing " + package_type);
 }
 
 bool SafeModifyStop(const int ticket, const double stop_loss, const double take_profit, const string context)
@@ -895,10 +941,14 @@ bool SafetyAllowsNewTrade(PgPacket &packet, string &reason)
       return(false);
    }
 
+   if(!PackageAllowsNewTrade(packet, reason))
+      return(false);
+
    double spread = SpreadPips(g_tradeSymbol);
-   if(spread > InpMaxSpreadPips)
+   double max_spread = PackageMaxSpreadPips(packet.allowance_package_type);
+   if(spread > max_spread)
    {
-      reason = "spread too high " + DoubleToString(spread, 1) + " pips";
+      reason = "spread too high " + DoubleToString(spread, 1) + " pips for package " + packet.allowance_package_type + " max=" + DoubleToString(max_spread, 1);
       return(false);
    }
 
@@ -969,13 +1019,170 @@ bool IsCooldownActive(string &reason)
    return(false);
 }
 
-double CalculateLots(const string symbol, const string side, const double sl_pips, string &reason)
+bool PackageAllowsNewTrade(PgPacket &packet, string &reason)
+{
+   string package_type = NormalizeAllowancePackageType(packet.allowance_package_type);
+   if(InpRequireKnownAllowancePackage && !IsKnownAllowancePackage(package_type))
+   {
+      reason = "unknown allowance package " + package_type;
+      return(false);
+   }
+   if(package_type == "INTRADAY_ENTER_NOW" && !InpAllowIntradayEnterNowPackages)
+   {
+      reason = "intraday enter-now package disabled";
+      return(false);
+   }
+   if(package_type == "SWING" && !InpAllowSwingPackages)
+   {
+      reason = "swing package disabled";
+      return(false);
+   }
+   if(package_type == "INTRADAY_ENTER_NOW" && !packet.allowance_entry_now_allowed)
+   {
+      reason = "intraday package not marked entry_now_allowed";
+      return(false);
+   }
+   return(true);
+}
+
+double PacketRiskPercent(PgPacket &packet)
+{
+   double base = InpRiskPercent;
+   if(InpUsePackageAwareManagement)
+   {
+      if(packet.allowance_package_type == "INTRADAY_ENTER_NOW" && InpIntradayRiskPercent > 0.0)
+         base = InpIntradayRiskPercent;
+      else if(packet.allowance_package_type == "SWING" && InpSwingRiskPercent > 0.0)
+         base = InpSwingRiskPercent;
+   }
+   return(AdaptiveRiskPercentFromBase(base));
+}
+
+double PackageMaxSpreadPips(const string package_type)
+{
+   string normalized = NormalizeAllowancePackageType(package_type);
+   if(InpUsePackageAwareManagement)
+   {
+      if(normalized == "INTRADAY_ENTER_NOW" && InpIntradayMaxSpreadPips > 0.0)
+         return(InpIntradayMaxSpreadPips);
+      if(normalized == "SWING" && InpSwingMaxSpreadPips > 0.0)
+         return(InpSwingMaxSpreadPips);
+   }
+   return(InpMaxSpreadPips);
+}
+
+double PackageMaxStopLossPips(const string package_type)
+{
+   string normalized = NormalizeAllowancePackageType(package_type);
+   double max_sl = InpMaxStopLossPips;
+   if(InpUsePackageAwareManagement)
+   {
+      if(normalized == "INTRADAY_ENTER_NOW" && InpIntradayMaxStopLossPips > 0.0)
+         max_sl = MathMin(max_sl, InpIntradayMaxStopLossPips);
+      else if(normalized == "SWING" && InpSwingMaxStopLossPips > 0.0)
+         max_sl = MathMin(max_sl, InpSwingMaxStopLossPips);
+   }
+   return(max_sl);
+}
+
+double PackageRewardRiskRatio(const string package_type)
+{
+   string normalized = NormalizeAllowancePackageType(package_type);
+   if(InpUsePackageAwareManagement)
+   {
+      if(normalized == "INTRADAY_ENTER_NOW" && InpIntradayRewardRiskRatio > 0.0)
+         return(InpIntradayRewardRiskRatio);
+      if(normalized == "SWING" && InpSwingRewardRiskRatio > 0.0)
+         return(InpSwingRewardRiskRatio);
+   }
+   return(InpRewardRiskRatio);
+}
+
+int PackageMaxHoldMinutes(const string package_type)
+{
+   string normalized = NormalizeAllowancePackageType(package_type);
+   if(InpUsePackageAwareManagement)
+   {
+      if(normalized == "INTRADAY_ENTER_NOW")
+         return(InpIntradayMaxHoldMinutes);
+      if(normalized == "SWING")
+         return(InpSwingMaxHoldMinutes);
+   }
+   return(InpMaxHoldMinutes);
+}
+
+double PackageBreakEvenTriggerPips(const string package_type)
+{
+   string normalized = NormalizeAllowancePackageType(package_type);
+   if(InpUsePackageAwareManagement)
+   {
+      if(normalized == "INTRADAY_ENTER_NOW" && InpIntradayBreakEvenTriggerPips > 0.0)
+         return(InpIntradayBreakEvenTriggerPips);
+      if(normalized == "SWING" && InpSwingBreakEvenTriggerPips > 0.0)
+         return(InpSwingBreakEvenTriggerPips);
+   }
+   return(InpBreakEvenTriggerPips);
+}
+
+double PackageBreakEvenLockPips(const string package_type)
+{
+   string normalized = NormalizeAllowancePackageType(package_type);
+   if(InpUsePackageAwareManagement)
+   {
+      if(normalized == "INTRADAY_ENTER_NOW" && InpIntradayBreakEvenLockPips >= 0.0)
+         return(InpIntradayBreakEvenLockPips);
+      if(normalized == "SWING" && InpSwingBreakEvenLockPips >= 0.0)
+         return(InpSwingBreakEvenLockPips);
+   }
+   return(InpBreakEvenLockPips);
+}
+
+double PackageTrailingStartPips(const string package_type)
+{
+   string normalized = NormalizeAllowancePackageType(package_type);
+   if(InpUsePackageAwareManagement)
+   {
+      if(normalized == "INTRADAY_ENTER_NOW" && InpIntradayTrailingStartPips > 0.0)
+         return(InpIntradayTrailingStartPips);
+      if(normalized == "SWING" && InpSwingTrailingStartPips > 0.0)
+         return(InpSwingTrailingStartPips);
+   }
+   return(InpTrailingStartPips);
+}
+
+double PackageTrailingDistancePips(const string package_type)
+{
+   string normalized = NormalizeAllowancePackageType(package_type);
+   if(InpUsePackageAwareManagement)
+   {
+      if(normalized == "INTRADAY_ENTER_NOW" && InpIntradayTrailingDistancePips > 0.0)
+         return(InpIntradayTrailingDistancePips);
+      if(normalized == "SWING" && InpSwingTrailingDistancePips > 0.0)
+         return(InpSwingTrailingDistancePips);
+   }
+   return(InpTrailingDistancePips);
+}
+
+double PackageTrailingStepPips(const string package_type)
+{
+   string normalized = NormalizeAllowancePackageType(package_type);
+   if(InpUsePackageAwareManagement)
+   {
+      if(normalized == "INTRADAY_ENTER_NOW" && InpIntradayTrailingStepPips > 0.0)
+         return(InpIntradayTrailingStepPips);
+      if(normalized == "SWING" && InpSwingTrailingStepPips > 0.0)
+         return(InpSwingTrailingStepPips);
+   }
+   return(InpTrailingStepPips);
+}
+
+double CalculateLots(const string symbol, const string side, const double sl_pips, PgPacket &packet, string &reason)
 {
    reason = "";
    double lots = InpFixedLots;
    if(InpRiskMode != PG_RISK_FIXED_LOT)
    {
-      double risk_pct = AdaptiveRiskPercent();
+      double risk_pct = PacketRiskPercent(packet);
       double risk_base = (InpRiskMode == PG_RISK_BALANCE_PERCENT ? AccountBalance() : AccountEquity());
       double risk_money = risk_base * risk_pct / 100.0;
       double pip_value = PipValuePerLot(symbol);
@@ -1018,7 +1225,12 @@ double CalculateLots(const string symbol, const string side, const double sl_pip
 
 double AdaptiveRiskPercent()
 {
-   double risk = InpRiskPercent;
+   return(AdaptiveRiskPercentFromBase(InpRiskPercent));
+}
+
+double AdaptiveRiskPercentFromBase(const double base_risk_percent)
+{
+   double risk = base_risk_percent;
    if(InpRiskMode == PG_RISK_ADAPTIVE_COMPOUND)
    {
       double initial = GetGlobalDouble("initial_equity", AccountEquity());
@@ -1045,7 +1257,7 @@ double AdaptiveRiskPercent()
    return(risk);
 }
 
-double ResolveStopLossPips(const string symbol)
+double ResolveStopLossPips(const string symbol, PgPacket &packet)
 {
    double sl = InpFixedStopLossPips;
    if(InpStopMode == PG_STOP_ATR)
@@ -1058,14 +1270,14 @@ double ResolveStopLossPips(const string symbol)
          sl = (atr / PipSize(symbol)) * InpATRStopMultiplier;
    }
    sl = MathMax(sl, InpMinStopLossPips);
-   sl = MathMin(sl, InpMaxStopLossPips);
+   sl = MathMin(sl, PackageMaxStopLossPips(packet.allowance_package_type));
    sl = MathMax(sl, MinStopDistancePips(symbol));
    return(sl);
 }
 
-double ResolveTakeProfitPips(const double sl_pips)
+double ResolveTakeProfitPips(const double sl_pips, PgPacket &packet)
 {
-   return(MathMax(InpMinTakeProfitPips, sl_pips * InpRewardRiskRatio));
+   return(MathMax(InpMinTakeProfitPips, sl_pips * PackageRewardRiskRatio(packet.allowance_package_type)));
 }
 
 //+------------------------------------------------------------------+
@@ -1700,9 +1912,44 @@ string UrlEncodeLite(const string value)
    return(out);
 }
 
-string BuildOrderComment(const string packet_id)
+string NormalizeAllowancePackageType(const string value)
 {
-   string comment = "PGV3 " + packet_id;
+   string normalized = Upper(Trim(value));
+   if(normalized == "INTRADAY" || normalized == "ENTER_NOW" || normalized == "INTRADAY_ENTER_NOW" || normalized == "PGI")
+      return("INTRADAY_ENTER_NOW");
+   if(normalized == "SWING" || normalized == "SWING_DISCIPLINED" || normalized == "PGS")
+      return("SWING");
+   if(StringFind(normalized, "PGI ", 0) == 0)
+      return("INTRADAY_ENTER_NOW");
+   if(StringFind(normalized, "PGS ", 0) == 0)
+      return("SWING");
+   return(normalized);
+}
+
+bool IsKnownAllowancePackage(const string package_type)
+{
+   string normalized = NormalizeAllowancePackageType(package_type);
+   return(normalized == "INTRADAY_ENTER_NOW" || normalized == "SWING");
+}
+
+string PackageCommentCode(const string package_type)
+{
+   string normalized = NormalizeAllowancePackageType(package_type);
+   if(normalized == "INTRADAY_ENTER_NOW")
+      return("PGI");
+   if(normalized == "SWING")
+      return("PGS");
+   return("PGV3");
+}
+
+string OrderAllowancePackageType()
+{
+   return(NormalizeAllowancePackageType(OrderComment()));
+}
+
+string BuildOrderComment(const string packet_id, const string package_type)
+{
+   string comment = PackageCommentCode(package_type) + " " + packet_id;
    if(StringLen(comment) > 31)
       comment = StringSubstr(comment, 0, 31);
    return(comment);

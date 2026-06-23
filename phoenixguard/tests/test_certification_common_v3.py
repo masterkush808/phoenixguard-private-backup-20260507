@@ -1,8 +1,10 @@
 from __future__ import annotations
+import pytest
 
 from pathlib import Path
 import subprocess
 import sys
+from typing import Any
 
 from tools import certification_common_v3 as cert
 
@@ -14,7 +16,7 @@ from tools import certify_v3_full_system_burn_in as burn
 from tools.capture_dashboard_visual_v3 import prune_capture_evidence
 
 
-def test_wmic_python_process_fallback_preserves_comma_arguments(monkeypatch) -> None:
+def test_wmic_python_process_fallback_preserves_comma_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
     output = """
 CommandLine="C:\\repo\\.venv\\Scripts\\python.exe" start_phoenixguard_24_7_tracker.py --focus-region 0.03,0.13,0.87,0.96 --no-open-dashboard
 ParentProcessId=2596
@@ -25,7 +27,7 @@ ParentProcessId=1
 ProcessId=10380
 """
 
-    def fake_run(*args, **kwargs):
+    def fake_run(*args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout=output, stderr="")
 
     monkeypatch.setattr(cert.subprocess, "run", fake_run)

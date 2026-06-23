@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from phoenixguard.execution.execution_constitution import evaluate_execution_constitution
 from phoenixguard.execution.shooter_modes import build_coordinate_report
@@ -11,7 +11,9 @@ EXECUTION_REHEARSAL_VERSION = "PG_EXECUTION_REHEARSAL_V1"
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return dict(cast(Mapping[str, Any], value))
 
 
 def _text(value: Any) -> str:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 MARKET_MEMORY_CONSTITUTION_VERSION = "MARKET_MEMORY_CONSTITUTION_V1"
@@ -34,13 +34,13 @@ DEFAULT_LEARNED_RULES: tuple[dict[str, Any], ...] = (
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _sequence(value: Any) -> list[Any]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return list(value)
+    return list(cast(Sequence[Any], value))
 
 
 def _upper(value: Any) -> str:
@@ -71,7 +71,7 @@ def applicable_market_memory_rules(context: Mapping[str, Any]) -> dict[str, Any]
     if side == "SELL" and _mapping(row.get("market_context")).get("opposing_force_distance_ok") is False:
         traps.add("SELL_INTO_DEMAND")
 
-    learned = []
+    learned: list[dict[str, Any]] = []
     for rule in DEFAULT_LEARNED_RULES:
         if _upper(rule.get("trap")) in traps:
             learned.append(dict(rule))

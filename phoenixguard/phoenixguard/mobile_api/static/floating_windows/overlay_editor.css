@@ -32,6 +32,7 @@
   border-radius: 8px;
   background: rgba(6, 10, 13, 0.94);
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.56);
+  -webkit-backdrop-filter: blur(16px);
   backdrop-filter: blur(16px);
 }
 
@@ -55,6 +56,7 @@
 
 .overlay-editor-head {
   cursor: move;
+  -webkit-user-select: none;
   user-select: none;
 }
 

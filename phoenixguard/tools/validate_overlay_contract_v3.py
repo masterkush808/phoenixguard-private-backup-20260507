@@ -8,7 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -33,7 +33,7 @@ ALLOWED_COORDINATE_MODES = set(COORDINATE_MODES)
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _sequence(value: Any) -> list[Any]:
@@ -53,7 +53,8 @@ def _http_json(url: str, timeout: float) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - local operator tool
             parsed = json.loads(response.read().decode("utf-8", errors="replace"))
-            return {"ok": 200 <= int(response.status) < 300, "status": int(response.status), "payload": parsed}
+            payload = _mapping(parsed) if isinstance(parsed, Mapping) else {"value": parsed}
+            return {"ok": 200 <= int(response.status) < 300, "status": int(response.status), "payload": payload}
     except urllib.error.HTTPError as exc:
         return {"ok": False, "status": int(exc.code), "error": str(exc), "payload": {}}
     except Exception as exc:
@@ -75,16 +76,16 @@ def _to_overlay_list(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     if direct_overlays:
         rows = _sequence(direct_overlays.get("objects"))
         if rows:
-            return [dict(row) for row in rows if isinstance(row, Mapping)]
+            return [_mapping(row) for row in rows if isinstance(row, Mapping)]
     for key in ("overlay_objects", "overlays"):
         rows = _sequence(payload.get(key))
         if rows:
-            return [dict(row) for row in rows if isinstance(row, Mapping)]
+            return [_mapping(row) for row in rows if isinstance(row, Mapping)]
     visual = _mapping(payload.get("visual"))
     for key in ("overlay_objects", "overlays"):
         rows = _sequence(visual.get(key))
         if rows:
-            return [dict(row) for row in rows if isinstance(row, Mapping)]
+            return [_mapping(row) for row in rows if isinstance(row, Mapping)]
     registry = _mapping(payload.get("market_object_registry"))
     rows = _sequence(registry.get("active_overlays"))
     if rows:
@@ -100,7 +101,7 @@ def _to_overlay_list(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                         merged[field] = row.get(field)
                 out.append(merged)
             else:
-                out.append(dict(row))
+                out.append(_mapping(row))
         return out
     active = _sequence(payload.get("active_overlays"))
     if active:
@@ -108,7 +109,7 @@ def _to_overlay_list(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         for row in active:
             if isinstance(row, Mapping):
                 overlay = _mapping(row.get("overlay"))
-                out.append(overlay or dict(row))
+                out.append(overlay or _mapping(row))
         return out
     return []
 
@@ -116,7 +117,7 @@ def _to_overlay_list(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
 def load_overlays(base_url: str, session_id: str, timeout: float, input_path: str | None = None, mode: str = "DIAGNOSTICS") -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if input_path:
         raw = json.loads(Path(input_path).read_text(encoding="utf-8"))
-        payload = dict(raw) if isinstance(raw, Mapping) else {"overlay_objects": raw}
+        payload = _mapping(raw) if isinstance(raw, Mapping) else {"overlay_objects": raw}
         return _to_overlay_list(payload), {"source": str(input_path), "payload": payload}
 
     base = base_url.rstrip("/")

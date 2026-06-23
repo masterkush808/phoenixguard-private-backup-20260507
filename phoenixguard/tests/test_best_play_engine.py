@@ -1,7 +1,9 @@
 from __future__ import annotations
+import pytest
 
 import sys
 from pathlib import Path
+from typing import Any
 
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -214,10 +216,17 @@ def test_analyze_best_play_prefers_sell_reversal_release() -> None:
     assert float(analysis["likelihoods"]["SELL"]) > float(analysis["likelihoods"]["BUY"])
 
 
-def test_load_best_play_engine_returns_html_and_payload(monkeypatch) -> None:
+def test_load_best_play_engine_returns_html_and_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     snapshot = _buy_snapshot()
-    monkeypatch.setattr(main, "_build_best_play_input_snapshot", lambda result, **kwargs: snapshot)
-    monkeypatch.setattr(main, "_sanitize_result_for_ui", lambda result: result)
+
+    def _build_best_play_input_snapshot(_result: dict[str, Any], **_kwargs: object) -> dict[str, object]:
+        return snapshot
+
+    def _sanitize_result_for_ui(result: dict[str, Any]) -> dict[str, Any]:
+        return result
+
+    monkeypatch.setattr(main, "_build_best_play_input_snapshot", _build_best_play_input_snapshot)
+    monkeypatch.setattr(main, "_sanitize_result_for_ui", _sanitize_result_for_ui)
 
     html, payload = main.load_best_play_engine(
         {

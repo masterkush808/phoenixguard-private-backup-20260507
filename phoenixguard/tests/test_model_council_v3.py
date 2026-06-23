@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 
 from copy import deepcopy
 from typing import Any
@@ -330,7 +331,7 @@ def test_high_frequency_two_candle_requires_local_reclaim_confirmation() -> None
     assert "LOCAL_RECLAIM_NOT_CONFIRMED" in lane["high_frequency_contribution"]["blockers"]
 
 
-def test_reasoning_wait_for_pullback_blocks_high_frequency_execution(monkeypatch) -> None:
+def test_reasoning_wait_for_pullback_blocks_high_frequency_execution(monkeypatch: pytest.MonkeyPatch) -> None:
     def _wait_for_pullback_reasoning(*args: object, **kwargs: object) -> dict[str, object]:
         return {
             "arbitration": {
@@ -369,7 +370,7 @@ def test_reasoning_wait_for_pullback_blocks_high_frequency_execution(monkeypatch
     assert result["promotion_trace"]["reasoning_execution_blocked"] is True
 
 
-def test_intraday_enter_now_package_overrides_soft_pullback_wait(monkeypatch) -> None:
+def test_intraday_enter_now_package_overrides_soft_pullback_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     def _wait_for_pullback_reasoning(*args: object, **kwargs: object) -> dict[str, object]:
         return {
             "arbitration": {
@@ -1401,7 +1402,7 @@ def test_wave_riding_lane_publishes_when_current_flow_has_clear_path() -> None:
     assert wave["phase"] == "CLEAR_PATH_CONTINUATION"
 
 
-def test_clean_wave_riding_overrides_soft_reasoning_pullback_wait(monkeypatch) -> None:
+def test_clean_wave_riding_overrides_soft_reasoning_pullback_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     def _soft_pullback_reasoning(*args: object, **kwargs: object) -> dict[str, object]:
         return {
             "arbitration": {
@@ -1442,7 +1443,7 @@ def test_clean_wave_riding_overrides_soft_reasoning_pullback_wait(monkeypatch) -
     assert packet["promotion_trace"]["reasoning_execution_blocked"] is False
 
 
-def test_wave_riding_does_not_override_hard_buy_high_bad_entry(monkeypatch) -> None:
+def test_wave_riding_does_not_override_hard_buy_high_bad_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     def _buy_high_reasoning(*args: object, **kwargs: object) -> dict[str, object]:
         return {
             "arbitration": {
@@ -1600,7 +1601,7 @@ def test_model_council_blocks_buy_high_resistance_without_role_flip() -> None:
     assert "BUY_HIGH_RESISTANCE_LOCATION_GUARD" in wave["blockers"]
 
 
-def test_model_council_allows_confirmed_role_flip_through_support(monkeypatch) -> None:
+def test_model_council_allows_confirmed_role_flip_through_support(monkeypatch: pytest.MonkeyPatch) -> None:
     def _execute_reasoning(*args: object, **kwargs: object) -> dict[str, object]:
         return {
             "arbitration": {

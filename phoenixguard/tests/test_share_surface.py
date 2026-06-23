@@ -1,7 +1,9 @@
 from __future__ import annotations
+import pytest
 
 from pathlib import Path
 import sys
+from typing import Any, cast
 
 from PIL import Image
 
@@ -9,8 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import share_phoenixguard as share
 
+Payload = dict[str, Any]
 
-def test_share_surface_payload_exposes_alias_and_dialogs(monkeypatch) -> None:
+
+def test_share_surface_payload_exposes_alias_and_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(share, "SHARE_BRAND_ASSET_DIR", Path("missing-share-assets"))
     payload = share._share_surface_payload()
 
@@ -23,7 +27,7 @@ def test_share_surface_payload_exposes_alias_and_dialogs(monkeypatch) -> None:
     assert "share-disclosure" in payload["dialogs_html"]
 
 
-def test_share_hero_html_contains_alias_and_security_copy(monkeypatch) -> None:
+def test_share_hero_html_contains_alias_and_security_copy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(share, "SHARE_BRAND_ASSET_DIR", Path("missing-share-assets"))
     hero_html = share._build_share_hero_html()
 
@@ -67,7 +71,7 @@ def test_submit_share_contact_brief_requires_consent() -> None:
     assert session_id == ""
 
 
-def test_submit_share_contact_brief_logs_to_host(monkeypatch, tmp_path: Path) -> None:
+def test_submit_share_contact_brief_logs_to_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     share._share_sessions.clear()
     share._share_rate_limit_state.clear()
     monkeypatch.setattr(share, "SHARE_CONTACT_LOG_PATH", tmp_path / "contact.log")
@@ -81,7 +85,10 @@ def test_submit_share_contact_brief_logs_to_host(monkeypatch, tmp_path: Path) ->
         def insert_contact_brief(self, row: dict[str, object]) -> None:
             stored_rows.append(dict(row))
 
-    monkeypatch.setattr(share.pg, "_get_pref_store", lambda: _FakeStore())
+    def _get_pref_store() -> _FakeStore:
+        return _FakeStore()
+
+    monkeypatch.setattr(share.pg, "_get_pref_store", _get_pref_store)
 
     status, session_id = share.submit_share_contact_brief(
         "",
@@ -117,7 +124,7 @@ def test_build_share_render_config_pins_multi_timeframe_defaults() -> None:
     assert render_config["lower_timeframe"] == "M5"
 
 
-def test_analyze_share_bundle_applies_timeframe_overrides(monkeypatch) -> None:
+def test_analyze_share_bundle_applies_timeframe_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, object]] = []
 
     def _fake_run_inference(file_path: str, **kwargs: object) -> tuple[dict[str, object], Image.Image, object, object]:
@@ -135,25 +142,41 @@ def test_analyze_share_bundle_applies_timeframe_overrides(monkeypatch) -> None:
             None,
         )
 
-    monkeypatch.setattr(share.pg.pg_main, "run_inference", _fake_run_inference)
-    monkeypatch.setattr(share.pg, "_source_image_to_state", lambda file_path: {"path": file_path})
-    monkeypatch.setattr(
-        share.pg,
-        "_build_timeframe_compare_entry",
-        lambda result, source_image_state, file_path, label, **_: {
+    def _source_image_to_state(file_path: str) -> dict[str, str]:
+        return {"path": file_path}
+
+    def _build_timeframe_compare_entry(
+        result: Payload,
+        _source_image_state: object,
+        file_path: str,
+        label: str,
+        **_kwargs: object,
+    ) -> Payload:
+        return {
             "label": label,
             "file_path": file_path,
             "action": result["action"],
-        },
+        }
+
+    def _build_multi_timeframe_result(analyzed: list[Payload]) -> Payload:
+        entries = [dict(cast(Payload, row["compare_entry"])) for row in analyzed]
+        return {
+            "action": "SELL",
+            "confidence": 0.75,
+            "multi_timeframe": {"entries": entries},
+        }
+
+    monkeypatch.setattr(share.pg.pg_main, "run_inference", _fake_run_inference)
+    monkeypatch.setattr(share.pg, "_source_image_to_state", _source_image_to_state)
+    monkeypatch.setattr(
+        share.pg,
+        "_build_timeframe_compare_entry",
+        _build_timeframe_compare_entry,
     )
     monkeypatch.setattr(
         share.pg,
         "_build_multi_timeframe_result",
-        lambda analyzed: {
-            "action": "SELL",
-            "confidence": 0.75,
-            "multi_timeframe": {"entries": [dict(row["compare_entry"]) for row in analyzed]},
-        },
+        _build_multi_timeframe_result,
     )
 
     result, source_image_state, active_file_path = share._analyze_share_bundle(
@@ -185,12 +208,22 @@ def test_analyze_share_bundle_applies_timeframe_overrides(monkeypatch) -> None:
     assert active_file_path == "lower_tf_2.png"
 
 
-def test_load_share_timeframe_overlays_uses_current_source_image(monkeypatch) -> None:
+def test_load_share_timeframe_overlays_uses_current_source_image(monkeypatch: pytest.MonkeyPatch) -> None:
     share._share_sessions.clear()
     share._share_rate_limit_state.clear()
-    monkeypatch.setattr(share.pg, "_build_overlay_image", lambda *args, **kwargs: Image.new("RGB", (24, 16), color=(12, 18, 24)))
-    monkeypatch.setattr(share.pg, "_write_resized_image_asset", lambda _image, path, **kwargs: str(path))
-    monkeypatch.setattr(share.pg, "_image_uri_from_file", lambda path, **kwargs: f"uri:{Path(path).name}")
+
+    def _build_overlay_image(*_args: object, **_kwargs: object) -> Image.Image:
+        return Image.new("RGB", (24, 16), color=(12, 18, 24))
+
+    def _write_resized_image_asset(_image: Image.Image, path: str | Path, **_kwargs: object) -> str:
+        return str(path)
+
+    def _image_uri_from_file(path: str | Path, **_kwargs: object) -> str:
+        return f"uri:{Path(path).name}"
+
+    monkeypatch.setattr(share.pg, "_build_overlay_image", _build_overlay_image)
+    monkeypatch.setattr(share.pg, "_write_resized_image_asset", _write_resized_image_asset)
+    monkeypatch.setattr(share.pg, "_image_uri_from_file", _image_uri_from_file)
 
     share._update_share_session(
         "snapshot-session",

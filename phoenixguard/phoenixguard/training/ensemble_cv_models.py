@@ -1,4 +1,3 @@
-# pyright: reportMissingTypeStubs=false
 from __future__ import annotations
 
 """
@@ -69,14 +68,16 @@ def _patch_torchvision_register_fake() -> None:
 
 _patch_torchvision_register_fake()
 
+clip: Any | None
 try:
-    import clip  # type: ignore[import-not-found]
+    import clip as _clip
+    clip = _clip
 except Exception:  # pragma: no cover - optional dependency
-    clip = None  # type: ignore[assignment]
+    clip = None
 import timm
 import torchvision.transforms as T
 try:
-    from lightly.models.modules import (  # type: ignore[import-not-found]
+    from lightly.models.modules import (
         BYOLPredictionHead as _LightlyBYOLPredictionHead,
         BYOLProjectionHead as _LightlyBYOLProjectionHead,
         SimCLRProjectionHead as _LightlySimCLRProjectionHead,
@@ -140,7 +141,6 @@ from phoenixguard.core.config import RUNTIME, TRAIN
 from phoenixguard.runtime.continual_adapters import (
     AdapterConfig,
     apply_lora_adapters,
-    available_adapters,
     collect_adaptable_module_paths,
     collect_lora_summary,
     sanitize_adapter_name,
@@ -263,7 +263,9 @@ def _sequence_record_filter_decision(
         return True, "included"
 
     task_labels_obj = record.get("teacher_task_labels", {})
-    task_labels = task_labels_obj if isinstance(task_labels_obj, Mapping) else {}
+    task_labels: Mapping[str, object] = (
+        cast(Mapping[str, object], task_labels_obj) if isinstance(task_labels_obj, Mapping) else {}
+    )
     label_quality = str(task_labels.get("label_quality", "")).strip().lower()
     review_bucket = str(task_labels.get("review_bucket", "")).strip().lower()
     review_required = bool(task_labels.get("review_required", False))
@@ -346,20 +348,32 @@ class ReplaySample:
     adapter_name: str = ""
 
 
+def _replay_sample_list() -> list[ReplaySample]:
+    return []
+
+
+def _string_list() -> list[str]:
+    return []
+
+
+def _tensor_dict() -> dict[str, torch.Tensor]:
+    return {}
+
+
 @dataclass
 class ContinualTrainingState:
     enabled: bool = False
     adapter_name: str = ""
     dominant_context_key: str = ""
     previous_bundle_path: str = ""
-    replay_samples: list[ReplaySample] = field(default_factory=list)
+    replay_samples: list[ReplaySample] = field(default_factory=_replay_sample_list)
     used_lora: bool = False
-    lora_target_paths: list[str] = field(default_factory=list)
+    lora_target_paths: list[str] = field(default_factory=_string_list)
     teacher_model: nn.Module | None = None
     teacher_head: nn.Module | None = None
     teacher_aux_head: nn.Module | None = None
-    reference_params: dict[str, torch.Tensor] = field(default_factory=dict)
-    fisher_diagonal: dict[str, torch.Tensor] = field(default_factory=dict)
+    reference_params: dict[str, torch.Tensor] = field(default_factory=_tensor_dict)
+    fisher_diagonal: dict[str, torch.Tensor] = field(default_factory=_tensor_dict)
 
 
 class FocalCrossEntropyLoss(nn.Module):
@@ -936,7 +950,8 @@ class DinoV2FeatureAdapter(nn.Module):
         self.num_features = base_dim * 2 if use_patch_mean else base_dim
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        output_obj = cast(object, self.backbone.forward_features(x))  # type: ignore[misc]
+        forward_features_fn = cast(Callable[[torch.Tensor], object], getattr(self.backbone, "forward_features"))
+        output_obj = forward_features_fn(x)
         first_tensor = _first_tensor_from_output(output_obj)
         if first_tensor is not None:
             output_obj = cast(object, first_tensor)
@@ -991,14 +1006,16 @@ def get_pooled_features(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
     - For CLIP: use encode_image (already pooled)
     """
     if hasattr(model, "clip_model") and callable(getattr(model, "forward_features", None)):
-        clip_features: object = model.forward_features(x)  # type: ignore[misc]
-        if not isinstance(clip_features, torch.Tensor):  # type: ignore[arg-type]
-            raise RuntimeError(f"CLIP feature output has unexpected type: {type(clip_features)!r}")  # type: ignore[arg-type]
+        clip_forward = cast(Callable[[torch.Tensor], object], getattr(model, "forward_features"))
+        clip_features = clip_forward(x)
+        if not isinstance(clip_features, torch.Tensor):
+            raise RuntimeError(f"CLIP feature output has unexpected type: {type(clip_features)!r}")
         return clip_features
 
     if hasattr(model, "blocks") and callable(getattr(model, "forward_features", None)):
-        vit_output: object = model.forward_features(x)  # type: ignore[misc]
-        first_tensor = _first_tensor_from_output(vit_output)  # type: ignore[arg-type]
+        vit_forward = cast(Callable[[torch.Tensor], object], getattr(model, "forward_features"))
+        vit_output = vit_forward(x)
+        first_tensor = _first_tensor_from_output(vit_output)
         if first_tensor is not None:
             vit_output = first_tensor
 
@@ -1190,8 +1207,8 @@ def safe_pretrained_stats(
 
     cfg_map: dict[str, object] = {}
     if isinstance(cfg_obj, Mapping):
-        raw_items: Sequence[tuple[Any, Any]] = tuple(cfg_obj.items())  # type: ignore
-        cfg_map = {str(key): value for key, value in raw_items}  # type: ignore
+        raw_items = tuple(cast(Mapping[object, object], cfg_obj).items())
+        cfg_map = {str(key): value for key, value in raw_items}
 
     mean_obj: object = cfg_map.get("mean", IMAGENET_MEAN)
     std_obj: object = cfg_map.get("std", IMAGENET_STD)
@@ -1233,7 +1250,8 @@ def _safe_div(numerator: int | float, denominator: int | float) -> float:
 def _set_global_seed(seed: int) -> None:
     normalized_seed = int(seed)
     random.seed(normalized_seed)
-    torch.manual_seed(normalized_seed)
+    manual_seed = cast(Callable[[int], torch.Generator], getattr(torch, "manual_seed"))
+    manual_seed(normalized_seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(normalized_seed)
     if hasattr(torch.backends, "cudnn"):
@@ -1370,8 +1388,8 @@ class EnsembleCVModels:
             return None
         try:
             with metadata_path.open("r", encoding="utf-8") as metadata_file:
-                payload = json.load(metadata_file)
-            return payload if isinstance(payload, dict) else None
+                payload: object = json.load(metadata_file)
+            return dict(cast(Mapping[str, Any], payload)) if isinstance(payload, Mapping) else None
         except Exception:
             return None
 
@@ -1391,20 +1409,29 @@ class EnsembleCVModels:
                     line = line.strip()
                     if not line:
                         continue
-                    payload = json.loads(line)
-                    if isinstance(payload, dict):
-                        records.append(payload)
+                    payload: object = json.loads(line)
+                    if isinstance(payload, Mapping):
+                        records.append(dict(cast(Mapping[str, Any], payload)))
             return records
 
         with manifest_path.open("r", encoding="utf-8") as manifest_file:
-            payload = json.load(manifest_file)
+            payload: object = json.load(manifest_file)
 
         if isinstance(payload, list):
-            return [record for record in payload if isinstance(record, dict)]
-        if isinstance(payload, dict):
-            records_obj = payload.get("records", payload.get("items", []))
+            return [
+                dict(cast(Mapping[str, Any], record))
+                for record in cast(Sequence[object], payload)
+                if isinstance(record, Mapping)
+            ]
+        if isinstance(payload, Mapping):
+            payload_map = cast(Mapping[str, object], payload)
+            records_obj = payload_map.get("records", payload_map.get("items", []))
             if isinstance(records_obj, list):
-                return [record for record in records_obj if isinstance(record, dict)]
+                return [
+                    dict(cast(Mapping[str, Any], record))
+                    for record in cast(Sequence[object], records_obj)
+                    if isinstance(record, Mapping)
+                ]
         raise ValueError(f"Unsupported sequence manifest format: {manifest_path}")
 
     def _load_sequence_manifest(self, manifest_path: str) -> None:
@@ -1448,7 +1475,8 @@ class EnsembleCVModels:
                 continue
 
             normalized_targets: dict[str, str] = {}
-            for task_name_raw, task_value_raw in sequence_targets_obj.items():
+            sequence_targets = cast(Mapping[object, object], sequence_targets_obj)
+            for task_name_raw, task_value_raw in sequence_targets.items():
                 task_name = str(task_name_raw).strip()
                 if not task_name:
                     continue
@@ -1819,13 +1847,18 @@ class EnsembleCVModels:
         aux_head: SequenceAuxiliaryHead | None,
         payload: Mapping[str, Any],
     ) -> dict[str, Any]:
-        lora_payload = cast(dict[str, Any], payload.get("lora", {}))
+        lora_obj = payload.get("lora", {})
+        if isinstance(lora_obj, Mapping):
+            lora_mapping = cast(Mapping[str, Any], lora_obj)
+            lora_payload: dict[str, Any] = dict(lora_mapping)
+        else:
+            lora_payload = {}
         backbone_module = self._resolve_backbone_module(model)
         if bool(lora_payload.get("enabled", False)):
             target_paths = cast(list[str], lora_payload.get("target_paths", []))
             adapter_specs = cast(dict[str, dict[str, Any]], lora_payload.get("adapter_specs", {}))
             fallback_adapter = sanitize_adapter_name(str(lora_payload.get("active_adapter", "continual_default")))
-            spec_info = cast(dict[str, Any], adapter_specs.get(fallback_adapter, {}))
+            spec_info = adapter_specs.get(fallback_adapter, {})
             config = AdapterConfig(
                 rank=int(spec_info.get("rank", TRAIN.lora_rank) or TRAIN.lora_rank),
                 alpha=float(spec_info.get("alpha", TRAIN.lora_alpha) or TRAIN.lora_alpha),
@@ -1936,7 +1969,8 @@ class EnsembleCVModels:
             )
             if aux_count > 0:
                 loss = loss + 0.10 * aux_loss
-            loss.backward()
+            backward = cast(Callable[[], None], loss.backward)
+            backward()
             for param_name, param in named_params:
                 if param.grad is None:
                     continue
@@ -2511,7 +2545,7 @@ class EnsembleCVModels:
             if isinstance(attr_value, (nn.ModuleList, nn.Sequential)) and len(attr_value) > 0:
                 modules = list(cast(Sequence[nn.Module], attr_value))
                 tail = modules[-2:] if len(modules) >= 2 else modules[-1:]
-                return [tail_module for tail_module in tail if isinstance(tail_module, nn.Module)]
+                return tail
 
         layer4_obj = getattr(module, "layer4", None)
         if isinstance(layer4_obj, nn.Module):
@@ -2768,7 +2802,8 @@ class EnsembleCVModels:
         )
 
     def _candidate_thresholds(self, buy_probs: torch.Tensor) -> list[float]:
-        values = sorted({float(x) for x in buy_probs.detach().cpu().tolist() if isinstance(x, (float, int))})  # type: ignore[var-annotated]
+        to_list = cast(Callable[[], list[float]], getattr(buy_probs.detach().cpu(), "tolist"))
+        values = sorted({float(x) for x in to_list()})
         if not values:
             return [0.5]
 
@@ -3041,10 +3076,11 @@ class EnsembleCVModels:
         metadata_path = model_dir / f"{name}_metadata.json"
         if metadata_path.exists():
             try:
-                existing_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                if isinstance(existing_metadata, dict):
+                existing_metadata: object = json.loads(metadata_path.read_text(encoding="utf-8"))
+                if isinstance(existing_metadata, Mapping):
+                    existing_metadata_map = cast(Mapping[str, object], existing_metadata)
                     metadata_payload["runtime_calibration"] = dict(
-                        cast(Mapping[str, Any], existing_metadata.get("runtime_calibration", {}))
+                        cast(Mapping[str, Any], existing_metadata_map.get("runtime_calibration", {}))
                     )
             except Exception:
                 metadata_payload["runtime_calibration"] = {}
@@ -3096,7 +3132,6 @@ class EnsembleCVModels:
             module = self._resolve_backbone_module(model)
 
             if name == "dinov2":
-                block_params: list[nn.Parameter] = []
                 blocks_obj = getattr(module, "blocks", None)
                 if isinstance(blocks_obj, nn.ModuleList) and len(blocks_obj) > 0:
                     second_last_params = (
@@ -3712,10 +3747,11 @@ class EnsembleCVModels:
         existing_metadata_path = model_dir / f"{name}_metadata.json"
         if existing_metadata_path.exists():
             try:
-                existing_metadata = json.loads(existing_metadata_path.read_text(encoding="utf-8"))
-                if isinstance(existing_metadata, dict):
+                existing_metadata: object = json.loads(existing_metadata_path.read_text(encoding="utf-8"))
+                if isinstance(existing_metadata, Mapping):
+                    existing_metadata_map = cast(Mapping[str, object], existing_metadata)
                     existing_runtime_calibration = dict(
-                        cast(Mapping[str, Any], existing_metadata.get("runtime_calibration", {}))
+                        cast(Mapping[str, Any], existing_metadata_map.get("runtime_calibration", {}))
                     )
             except Exception:
                 existing_runtime_calibration = {}
@@ -4217,9 +4253,12 @@ class EnsembleCVModels:
                 logits = head(features)
                 temperature = float(self.temperature_scalers.get(name, 1.0))
                 calibrated_logits = logits / temperature
-                probabilities = torch.softmax(calibrated_logits, dim=-1).detach().cpu().numpy()
-                buy_prob = float(probabilities[0, 0].item()) if probabilities.shape[-1] > 0 else 0.0
-                sell_prob = float(probabilities[0, 1].item()) if probabilities.shape[-1] > 1 else 0.0
+                probability_tensor: torch.Tensor = torch.softmax(calibrated_logits, dim=-1).detach().cpu()
+                tensor_to_list = cast(Callable[[], list[list[float]]], getattr(probability_tensor, "tolist"))
+                probability_rows = tensor_to_list()
+                first_row = probability_rows[0] if probability_rows else []
+                buy_prob = float(first_row[0]) if len(first_row) > 0 else 0.0
+                sell_prob = float(first_row[1]) if len(first_row) > 1 else 0.0
 
             results[name] = {"buy_prob": buy_prob, "sell_prob": sell_prob}
             buy_probs.append(buy_prob)

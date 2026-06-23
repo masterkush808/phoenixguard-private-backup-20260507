@@ -1,64 +1,29 @@
-# Final Language Fluency Hardening Report
+# PhoenixGuard V3 Language Fluency Hardening Report
 
-CLEAR ANSWER
+Generated: 2026-06-23
 
-PhoenixGuard V3 repo source is language-clean under Pyright, compiles, passes the full pytest suite, passes frontend checks, passes V3 integrity, and completes a shadow-mode runtime trace without publishing an execution packet.
+## Clear Answer
 
-CONFIDENCE LEVEL
+PhoenixGuard V3 was hardened repo-wide for the uploaded Pylance/Pyright diagnostics and the configured repo Pyright pass. Python compile, V3 integrity, full pytest, and runtime trace verification were run after the cleanup.
 
-0.96
+## Verification
 
-KEY CAVEATS
+- Uploaded strict diagnostics target: 89 files analyzed, 0 errors, 0 warnings.
+- Repo Pyright config: 367 files analyzed, 0 errors, 0 warnings.
+- Compile: `python -m compileall -q .` passed.
+- V3 integrity: `python tools\verify_v3_integrity.py` passed.
+- Full pytest in clean test environment: 1383 passed, 4 skipped.
+- Runtime trace after stack restart: alignment PASS; study packet published; execution packet not published; broker click safe false with live broker clicks disabled.
 
-No current verification caveats. Runtime trace reported `Alignment: PASS`; the session had incomplete sequence context and no execution packet published, which is expected for the temporary shadow-mode API check.
+## Scope
 
-FILES STUDIED
+- Typed JSON and mapping boundaries across business, decision, execution, runtime, simulation, mobile API, memory, training, scripts, and tests.
+- Added public wrappers for test-needed helpers instead of private imports where practical.
+- Added local stubs for unstable third-party typing surfaces.
+- Fixed frontend CSS prefix compatibility in the overlay editor CSS.
+- Removed explicit `pyright:` suppressions from the checked source/test files.
+- Kept V3 packet authority, calibration files, shooter coordinates, and broker timing doctrine intact.
 
-Core V3 runtime, execution, decision, memory, vision, mobile API, business API, tests, tools, frontend web app, and dashboard static HTML.
+## Remaining Runtime Context
 
-ERRORS FOUND
-
-- Pyright/Pylance unknown/argument/member/optional/private-use diagnostics across runtime, vision, business, scripts, tools, and tests.
-- Test fixture protocol drift and untyped fixture payloads.
-- Market registry active-row tie handling dropped fresh overlays behind stale MERGED rows.
-- Tracker broker-surface fast path skipped read-only visibility checks before blocked execution.
-- Runtime telemetry mixed embedded fixture packet age with wall-clock age.
-- Dashboard/browser compatibility and smoke-test selector drift.
-- Missing runtime dependencies: `mss`, `onnxruntime`, and `pi-heif`.
-
-FIXES APPLIED
-
-- Added targeted typing/narrowing helpers, Protocol-compatible test doubles, explicit fixture types, safer Mapping/object handling, and narrowed third-party dynamic imports.
-- Restored public test-facing shims where tests needed stable non-private access.
-- Fixed market registry latest-row selection so appended rows win timestamp ties.
-- Kept broker visibility read-only scans while still blocking live clicks without a valid V3 packet.
-- Normalized chart/overlay artifact HTTP responses to PNG with no-store headers.
-- Repaired dashboard overlay fallback invariants and refresh cadence.
-- Added `mss`, `onnxruntime`, and `pi-heif` to dependencies and installed them in the venv.
-- Repaired the dormant third-party `.venv\Lib\site-packages\aenum\_py2.py` Python 2 raise syntax so raw compileall over the full workspace passes.
-- Kept calibration, shooter coordinates, V3 packet authority, and live execution doctrine intact.
-
-TESTS RUN
-
-Passed:
-
-- `python -m pyright --outputjson > reports\pyright_latest.json`
-  - 367 files analyzed, 0 errors, 0 warnings.
-- `.venv\Scripts\python.exe -m compileall -q .`
-- `.venv\Scripts\python.exe -m compileall -q -x "(^|[\\/])(?:\.venv|node_modules|\.next|__pycache__|\.git|\.codex_runtime)([\\/]|$)" .`
-- `.venv\Scripts\python.exe -m pytest -q`
-  - 1386 passed in 805.30s.
-- `.venv\Scripts\python.exe tools\verify_v3_integrity.py`
-  - Overall PASS.
-- `.venv\Scripts\python.exe tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20`
-  - Alignment PASS; execution packet not published.
-- `.venv\Scripts\python.exe -m pip check`
-  - No broken requirements found.
-- `npm --prefix web run typecheck`
-- `npm --prefix web run build`
-- `npm --prefix web run test:smoke`
-  - Smoke checks passed for 8 routes.
-
-REMAINING RISKS
-
-No Pyright errors, pytest failures, frontend build failures, dependency breaks, compileall failures, or V3 integrity failures remain in the current working environment.
+The relaunched stack is up on `127.0.0.1:8793` for session `pocket-live-8788`. Runtime trace reports tracker/API alignment, but no executable packet is currently published because the live trace has no complete sequence context/source frames at the time of verification.

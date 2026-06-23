@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 PG_MARKET_REALITY_ENGINE_VERSION = "PG_MARKET_REALITY_ENGINE_V1"
@@ -69,13 +69,13 @@ PERMISSION_DENY_PRIORITY = (
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(item) for item in value if isinstance(item, Mapping)]
+    return [dict(cast(Mapping[str, Any], item)) for item in cast(Sequence[Any], value) if isinstance(item, Mapping)]
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -127,15 +127,6 @@ def _nested(snapshot: Mapping[str, Any], *names: str) -> dict[str, Any]:
     return {}
 
 
-def _market_value(snapshot: Mapping[str, Any], market_inputs: Mapping[str, Any], key: str, default: Any = None) -> Any:
-    if key in snapshot:
-        return snapshot.get(key)
-    market_context = _mapping(market_inputs.get("market_context"))
-    if key in market_context:
-        return market_context.get(key)
-    return default
-
-
 def _extract_side(snapshot: Mapping[str, Any], side: str | None, market_inputs: Mapping[str, Any]) -> str:
     resolved = _side(side)
     if resolved in {"BUY", "SELL"}:
@@ -154,16 +145,17 @@ def _extract_side(snapshot: Mapping[str, Any], side: str | None, market_inputs: 
 
 def _quality_state_from_raw(raw: Any) -> tuple[str | None, float | None, str]:
     if isinstance(raw, Mapping):
+        raw_map = cast(Mapping[str, Any], raw)
         state = _upper(
-            raw.get("state")
-            or raw.get("quality")
-            or raw.get("entry_quality")
-            or raw.get("class")
-            or raw.get("classification")
-            or raw.get("label")
+            raw_map.get("state")
+            or raw_map.get("quality")
+            or raw_map.get("entry_quality")
+            or raw_map.get("class")
+            or raw_map.get("classification")
+            or raw_map.get("label")
         )
-        score = raw.get("score", raw.get("entry_quality_score"))
-        return (state or None, _clip01(score) if score is not None else None, str(raw.get("reason") or ""))
+        score = raw_map.get("score", raw_map.get("entry_quality_score"))
+        return (state or None, _clip01(score) if score is not None else None, str(raw_map.get("reason") or ""))
     if raw is None:
         return None, None, ""
     return _upper(raw) or None, None, ""
@@ -507,7 +499,7 @@ def _market_listening_stream(
         or snapshot.get("listening_events")
         or snapshot.get("events")
     )
-    synthetic = [
+    synthetic: list[dict[str, Any]] = [
         {"event": "ENTRY_QUALITY", "state": entry_quality.get("state"), "score": entry_quality.get("score")},
         {"event": "TRAP_CLASSIFIER", "state": trap.get("trap_type"), "detected": trap.get("detected")},
         {"event": "PATH_RISK", "state": path_risk.get("state"), "score": path_risk.get("score")},
@@ -524,10 +516,12 @@ def _trade_candidate_queue(snapshot: Mapping[str, Any], side: str) -> dict[str, 
     raw = snapshot.get("trade_candidate_queue") or snapshot.get("candidate_queue")
     candidates = _rows(raw)
     if isinstance(raw, Mapping):
-        candidates = _rows(raw.get("candidates")) or candidates
-    recent = []
-    if isinstance(snapshot.get("recent_sides"), Sequence) and not isinstance(snapshot.get("recent_sides"), (str, bytes, bytearray)):
-        recent = [_side(item) for item in snapshot.get("recent_sides", [])]
+        raw_map = cast(Mapping[str, Any], raw)
+        candidates = _rows(raw_map.get("candidates")) or candidates
+    recent: list[str] = []
+    recent_raw = snapshot.get("recent_sides")
+    if isinstance(recent_raw, Sequence) and not isinstance(recent_raw, (str, bytes, bytearray)):
+        recent = [_side(item) for item in cast(Sequence[Any], recent_raw)]
     if not recent and candidates:
         recent = [_side(row.get("side") or row.get("candidate_side")) for row in candidates]
     recent = [item for item in recent if item in {"BUY", "SELL"}]

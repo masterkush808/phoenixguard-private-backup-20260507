@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, Mapping
 
 from phoenixguard.simulation.decision_replay import CouncilReplayEngine, record_agent_votes
 from phoenixguard.simulation.screenshot_replay import (
@@ -85,15 +86,22 @@ def test_replay_session_integrates_record_executable_paper_executor(tmp_path: Pa
         def __init__(self) -> None:
             self.calls = 0
 
-        def record_executable_packet(self, packet: dict) -> dict:
+        def record_executable_packet(self, packet: dict[str, Any]) -> dict[str, Any]:
             self.calls += 1
             return {"recorded": True, "packet_id": packet.get("packet_id"), "outcome_metrics": {"mfe": 1.0, "mae": 0.5}}
+
+    def _council_evaluator(_snapshot: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "packet_id": "pgpkt-test",
+            "execution": {"enabled": True},
+            "model_council": {"final_state": "EXECUTABLE"},
+        }
 
     executor = PaperExecutor()
     session = ReplaySession.from_root(
         root,
         mode=ReplayMode.FAST_REPLAY,
-        council_evaluator=lambda _snapshot: {"packet_id": "pgpkt-test", "execution": {"enabled": True}, "model_council": {"final_state": "EXECUTABLE"}},
+        council_evaluator=_council_evaluator,
         paper_executor=executor,
     )
     result = session.run()

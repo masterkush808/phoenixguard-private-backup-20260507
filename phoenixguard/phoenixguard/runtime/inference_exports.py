@@ -1,20 +1,42 @@
 from __future__ import annotations
 
 import json
+import importlib
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol, Sequence, cast
 
 import torch
 from torch import Tensor
 
-try:
-    from safetensors import safe_open as _safe_open_safetensors
-    from safetensors.torch import load_file as _load_safetensors_file
-    from safetensors.torch import save_file as _save_safetensors_file
-except Exception:  # pragma: no cover - optional dependency guard
-    _safe_open_safetensors = None
-    _load_safetensors_file = None
-    _save_safetensors_file = None
+
+class _SafeTensorReader(Protocol):
+    def __enter__(self) -> "_SafeTensorReader": ...
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None: ...
+    def keys(self) -> Sequence[str]: ...
+    def get_tensor(self, key: str) -> Tensor: ...
+
+
+class _SafeOpenFn(Protocol):
+    def __call__(self, filename: str, *, framework: str, device: str) -> _SafeTensorReader: ...
+
+
+class _SaveFileFn(Protocol):
+    def __call__(self, tensors: Mapping[str, Tensor], filename: str, *, metadata: Mapping[str, str] | None = None) -> None: ...
+
+
+def _load_safetensors_functions() -> tuple[_SafeOpenFn | None, _SaveFileFn | None]:
+    try:
+        safetensors_module = importlib.import_module("safetensors")
+        safetensors_torch_module = importlib.import_module("safetensors.torch")
+    except Exception:  # pragma: no cover - optional dependency guard
+        return None, None
+    return (
+        cast(_SafeOpenFn, getattr(safetensors_module, "safe_open", None)),
+        cast(_SaveFileFn, getattr(safetensors_torch_module, "save_file", None)),
+    )
+
+
+_safe_open_safetensors, _save_safetensors_file = _load_safetensors_functions()
 
 
 INFERENCE_EXPORTS_DIRNAME = "inference_exports"
@@ -27,6 +49,12 @@ ONNX_FILENAME = "model.onnx"
 
 def supports_safetensors() -> bool:
     return _safe_open_safetensors is not None and _save_safetensors_file is not None
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
 
 
 def inference_export_dir(model_dir: str | Path, model_name: str) -> Path:
@@ -69,7 +97,7 @@ def read_export_metadata(model_dir: str | Path, model_name: str) -> dict[str, An
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
-    return dict(raw) if isinstance(raw, dict) else {}
+    return _mapping(raw)
 
 
 def _tensor_state_dict(state_dict: Mapping[str, Any]) -> dict[str, Tensor]:

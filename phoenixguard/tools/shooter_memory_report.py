@@ -11,13 +11,14 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from collections import Counter, defaultdict
-from datetime import datetime
-from statistics import median, mean
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from statistics import mean, median
+from typing import Any
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--session-history", required=True)
     p.add_argument("--out", default="reports/shooter_memory_report.json")
@@ -25,23 +26,25 @@ def parse_args():
     return p.parse_args()
 
 
-def load_session_history(path, max_rows=0):
+def load_session_history(path: str | Path, max_rows: int = 0) -> list[dict[str, Any]]:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
-    rows = []
+    rows: list[dict[str, Any]] = []
     with open(path, "r", encoding="utf-8") as fh:
         for i, line in enumerate(fh):
             if max_rows and i >= max_rows:
                 break
             try:
-                rows.append(json.loads(line))
+                payload = json.loads(line)
             except Exception:
                 continue
+            if isinstance(payload, Mapping):
+                rows.append(dict(payload))
     return rows
 
 
-def percentile(sorted_vals, p):
+def percentile(sorted_vals: Sequence[float], p: float) -> float | None:
     if not sorted_vals:
         return None
     k = (len(sorted_vals) - 1) * (p / 100.0)
@@ -54,12 +57,11 @@ def percentile(sorted_vals, p):
     return d0 + d1
 
 
-def summarize(rows):
-    sims = []
-    zone_match_counts = []
-    preferred_actions = Counter()
-    outcomes = Counter()
-    timestamps = []
+def summarize(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    sims: list[float] = []
+    zone_match_counts: list[int] = []
+    preferred_actions: Counter[str] = Counter()
+    outcomes: Counter[str] = Counter()
 
     for r in rows:
         v = r.get("memory_similarity")
@@ -74,19 +76,16 @@ def summarize(rows):
         out = r.get("outcome")
         if isinstance(out, str):
             outcomes[out] += 1
-        ts = r.get("ts") or r.get("timestamp")
-        if ts:
-            timestamps.append(ts)
 
     sims_sorted = sorted(sims)
     n = len(sims)
 
     thresholds = [0.2, 0.25, 0.3, 0.45, 0.6]
-    thresh_stats = {}
+    thresh_stats: dict[str, float] = {}
     for t in thresholds:
         thresh_stats[str(t)] = sum(1 for x in sims if x >= t) / n if n else 0.0
 
-    report = {
+    report: dict[str, Any] = {
         "rows": len(rows),
         "memory_similarity": {
             "count": n,
@@ -108,7 +107,7 @@ def summarize(rows):
     }
 
     # Recommend thresholds
-    recommended = {}
+    recommended: dict[str, float | None] = {}
     if n:
         # Aim for a threshold that retains ~15-30% of past matches as a starting point
         for target_frac in (0.15, 0.25, 0.35):
@@ -130,8 +129,8 @@ def summarize(rows):
     return report
 
 
-def render_markdown(report):
-    lines = []
+def render_markdown(report: Mapping[str, Any]) -> str:
+    lines: list[str] = []
     ms = report["memory_similarity"]
     lines.append(f"# Shooter Memory Report\n")
     lines.append(f"Rows analyzed: {report['rows']}\n")
