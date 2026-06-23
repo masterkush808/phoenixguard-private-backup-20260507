@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from typing import Any, Mapping, cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -15,6 +16,10 @@ from certification_common_v3 import (
     summarize_numbers,
     write_report,
 )
+
+
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def main() -> int:
@@ -59,14 +64,14 @@ def main() -> int:
             samples.append({"live": live.as_dict(), "heartbeat": heartbeat.as_dict()})
             time.sleep(max(0.1, float(args.interval_sec)))
             continue
-        live_payload = live.payload if isinstance(live.payload, dict) else {}
-        perf_payload = live_payload.get("performance_trace_v3") if isinstance(live_payload.get("performance_trace_v3"), dict) else {}
-        timing = live_payload.get("frame_timing_trace_v3") if isinstance(live_payload.get("frame_timing_trace_v3"), dict) else {}
+        live_payload = _mapping(live.payload)
+        perf_payload = _mapping(live_payload.get("performance_trace_v3"))
+        timing = _mapping(live_payload.get("frame_timing_trace_v3"))
         if not timing:
-            timing = perf_payload.get("timing_trace") if isinstance(perf_payload.get("timing_trace"), dict) else {}
-        model_state = live_payload.get("model_state") if isinstance(live_payload.get("model_state"), dict) else {}
+            timing = _mapping(perf_payload.get("timing_trace"))
+        model_state = _mapping(live_payload.get("model_state"))
         if not model_state:
-            model_state = perf_payload.get("model_state") if isinstance(perf_payload.get("model_state"), dict) else {}
+            model_state = _mapping(perf_payload.get("model_state"))
         frame_age = float(timing.get("frame_age_ms") or live_payload.get("frame_age_ms") or 0.0)
         overlay_age = float(timing.get("overlay_age_ms") or live_payload.get("overlay_age_ms") or 0.0)
         model_age = float(timing.get("model_vote_age_ms") or live_payload.get("model_vote_age_ms") or 0.0)
@@ -79,14 +84,14 @@ def main() -> int:
         queue_depths.append(queue_depth)
         display_frame_id = int(float(timing.get("display_frame_id") or live_payload.get("display_frame_id") or live_payload.get("frame_id") or 0))
         frame_ids.add(display_frame_id)
-        execution_status = live_payload.get("execution_packet_status") if isinstance(live_payload.get("execution_packet_status"), dict) else {}
+        execution_status = _mapping(live_payload.get("execution_packet_status"))
         if execution_status.get("exists") and execution_status.get("fresh") is False:
             stale_execution_packets += 1
-        visual = live_payload.get("visual_health_v3") if isinstance(live_payload.get("visual_health_v3"), dict) else {}
+        visual = _mapping(live_payload.get("visual_health_v3"))
         if not visual:
-            visual = live_payload.get("visual_health") if isinstance(live_payload.get("visual_health"), dict) else {}
+            visual = _mapping(live_payload.get("visual_health"))
         if not visual:
-            visual = perf_payload.get("visual_health") if isinstance(perf_payload.get("visual_health"), dict) else {}
+            visual = _mapping(perf_payload.get("visual_health"))
         if visual and str(visual.get("status") or "").upper() not in {"PASS", "ALIVE", "OK"}:
             stale_overlays_visible += 1
         stale_frame_run = stale_frame_run + 1 if frame_age > 5000.0 else 0

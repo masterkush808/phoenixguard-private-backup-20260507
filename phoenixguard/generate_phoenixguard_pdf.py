@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import html
+import importlib.util
 import re
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Protocol
 
 
 ROOT = Path(__file__).resolve().parent
@@ -11,14 +12,30 @@ MARKDOWN_PATH = ROOT / "docs" / "architecture" / "PhoenixGuard_System_Blueprint.
 PDF_PATH = ROOT / "docs" / "architecture" / "PhoenixGuard_Architecture.pdf"
 
 
+class PageCanvas(Protocol):
+    def saveState(self) -> None: ...
+    def setStrokeColor(self, color: object) -> None: ...
+    def setLineWidth(self, width: float) -> None: ...
+    def line(self, x1: float, y1: float, x2: float, y2: float) -> None: ...
+    def setFont(self, psfontname: str, size: float) -> None: ...
+    def setFillColor(self, color: object) -> None: ...
+    def drawString(self, x: float, y: float, text: str) -> None: ...
+    def drawRightString(self, x: float, y: float, text: str) -> None: ...
+    def restoreState(self) -> None: ...
+
+
+class PageDoc(Protocol):
+    leftMargin: float
+    rightMargin: float
+    page: int
+
+
 def _require_reportlab() -> None:
-    try:
-        import reportlab  # noqa: F401
-    except ImportError as exc:  # pragma: no cover - exercised only on missing env deps
+    if importlib.util.find_spec("reportlab") is None:  # pragma: no cover - missing env deps
         raise SystemExit(
             "Missing dependency: reportlab. Install project dependencies with "
             "`python -m pip install -r requirements.txt`, or install reportlab directly."
-        ) from exc
+        )
 
 
 def _inline_markup(text: str) -> str:
@@ -95,8 +112,8 @@ def _build_pdf(markdown_text: str) -> None:
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import inch
     from reportlab.platypus import (
+        Flowable,
         ListFlowable,
-        ListItem,
         PageBreak,
         Paragraph,
         Preformatted,
@@ -222,7 +239,7 @@ def _build_pdf(markdown_text: str) -> None:
         ),
     }
 
-    story: list[object] = []
+    story: list[Flowable] = []
 
     # Cover
     story.append(Spacer(1, 1.05 * inch))
@@ -379,17 +396,14 @@ def _build_pdf(markdown_text: str) -> None:
         if bullet_match or number_match:
             flush_paragraph()
             ordered = bool(number_match)
-            items: list[ListItem] = []
+            items: list[Flowable] = []
             while index < len(lines):
                 current = lines[index].strip()
                 match = re.match(r"^\d+\.\s+(.+)$", current) if ordered else re.match(r"^[-*]\s+(.+)$", current)
                 if not match:
                     break
                 items.append(
-                    ListItem(
-                        Paragraph(_inline_markup(match.group(1)), styles["bullet"]),
-                        leftIndent=14,
-                    )
+                    Paragraph(_inline_markup(match.group(1)), styles["bullet"])
                 )
                 index += 1
             story.append(
@@ -410,7 +424,7 @@ def _build_pdf(markdown_text: str) -> None:
 
     flush_paragraph()
 
-    def draw_page(canvas, doc_obj) -> None:  # type: ignore[no-untyped-def]
+    def draw_page(canvas: PageCanvas, doc_obj: PageDoc) -> None:
         canvas.saveState()
         canvas.setStrokeColor(colors.HexColor("#cbd5e1"))
         canvas.setLineWidth(0.4)

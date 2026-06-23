@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-from phoenixguard.decision import rl_module as _impl
+from phoenixguard.decision.rl_module import GRPOPolicyHead, RLPolicyEngine, RLResult
 
-globals().update({name: getattr(_impl, name) for name in dir(_impl) if not name.startswith("__")})
+__all__ = ["GRPOPolicyHead", "RLPolicyEngine", "RLResult"]

@@ -2123,7 +2123,7 @@ def build_live_state_v3(
     visual_health = build_visual_health_v3(
         session_id=session_id,
         artifacts=artifact_refs,
-        overlay_objects=overlays,
+        overlay_objects=cast(list[Mapping[str, Any]], overlays),
         sequence_context={"source_status": registry.source_status, **sequence_context},
         model_health=model_health_payload,
         frontend_heartbeat=frontend_heartbeat,
@@ -2378,9 +2378,9 @@ def build_live_state_v3_from_tracker_service(
 
     snapshot_getter = getattr(tracker_service, "get_session_snapshot", None)
     if callable(snapshot_getter):
-        session = snapshot_getter(session_id)
+        session = _mapping(snapshot_getter(session_id))
     else:
-        session = tracker_service.get_session(session_id)
+        session = _mapping(tracker_service.get_session(session_id))
     artifacts: dict[str, Path | str] = {}
     session_artifact_keys = {
         "window": "last_window_path",
@@ -2402,22 +2402,22 @@ def build_live_state_v3_from_tracker_service(
                 mark_degraded(f"artifact:{kind}", exc)
             pass
     try:
-        study_packet = tracker_service.latest_model_council_study_packet(session_id)
+        study_packet = _mapping(tracker_service.latest_model_council_study_packet(session_id))
     except Exception as exc:
         mark_degraded("model_council_study_packet", exc)
         study_packet = _mapping(session.get("model_council_study_packet"))
     try:
-        execution_packet = tracker_service.latest_model_council_packet(session_id)
+        execution_packet = _mapping(tracker_service.latest_model_council_packet(session_id))
     except Exception as exc:
         mark_degraded("model_council_execution_packet", exc)
         fallback_execution_packet = _mapping(session.get("model_council_packet") or session.get("execution_packet"))
-        execution_packet = _current_execution_packet(
+        execution_packet = _mapping(_current_execution_packet(
             fallback_execution_packet,
             now_epoch=float(now_epoch if now_epoch is not None else time.time()),
-        )
-    model_health = dict(model_health_builder(session)) if model_health_builder else {}
+        ))
+    model_health = _mapping(model_health_builder(session)) if model_health_builder else {}
     try:
-        shooter_state = dict(shooter_state_loader(session_id)) if shooter_state_loader else {}
+        shooter_state = _mapping(shooter_state_loader(session_id)) if shooter_state_loader else {}
     except Exception as exc:
         mark_degraded("shooter_state", exc)
         shooter_state = {}
@@ -2432,7 +2432,7 @@ def build_live_state_v3_from_tracker_service(
         mark_degraded("registry_entries", exc)
         registry_entries = []
     try:
-        frontend_heartbeat = dict(frontend_heartbeat_loader(session_id)) if frontend_heartbeat_loader else {}
+        frontend_heartbeat = _mapping(frontend_heartbeat_loader(session_id)) if frontend_heartbeat_loader else {}
     except Exception as exc:
         mark_degraded("frontend_heartbeat", exc)
         frontend_heartbeat = {}

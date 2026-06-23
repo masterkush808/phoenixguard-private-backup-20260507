@@ -1067,5 +1067,17 @@ def main() -> int:
     return 0
 
 
+ensure_session = _ensure_session
+live_fast_display_heartbeat = _live_fast_display_heartbeat
+quarantine_stale_session_on_boot = _quarantine_stale_session_on_boot
+request_json = _request_json
+resolve_python_launcher = _resolve_python_launcher
+restart_tracker_worker = _restart_tracker_worker
+wait_for_fresh_session = _wait_for_fresh_session
+wait_for_fresh_session_or_started = _wait_for_fresh_session_or_started
+wait_for_started_session = _wait_for_started_session
+write_status_file = _write_status_file
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

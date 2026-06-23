@@ -7,7 +7,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -28,8 +28,24 @@ def _normalize_lower(value: Any) -> str | None:
     return text if text else None
 
 
-def _mapping(value: Any) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
+def _mapping(value: object) -> Mapping[str, Any]:
+    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
+
+
+def _dict(value: object) -> dict[str, Any]:
+    return dict(_mapping(value))
+
+
+def _nested_mappings(value: object) -> dict[str, Mapping[str, Any]]:
+    return {
+        str(key): _mapping(item)
+        for key, item in _mapping(value).items()
+        if isinstance(item, Mapping)
+    }
+
+
+def _json_object(value: object) -> dict[str, Any] | None:
+    return cast(dict[str, Any], value) if isinstance(value, dict) else None
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -106,17 +122,9 @@ def _timing_label(
 def build_teacher_task_labels(record: Mapping[str, Any]) -> dict[str, Any]:
     label_direction = _teacher_label_direction(record.get("label"))
     sequence_targets_obj = record.get("sequence_targets", {})
-    sequence_targets = dict(sequence_targets_obj) if isinstance(sequence_targets_obj, Mapping) else {}
+    sequence_targets = _dict(sequence_targets_obj)
     adjustments_obj = record.get("teacher_target_adjustments", {})
-    adjustments = (
-        {
-            str(task_name): dict(task_payload)
-            for task_name, task_payload in adjustments_obj.items()
-            if isinstance(task_payload, Mapping)
-        }
-        if isinstance(adjustments_obj, Mapping)
-        else {}
-    )
+    adjustments = _nested_mappings(adjustments_obj)
     raw_targets = _build_raw_sequence_targets(record, sequence_targets=sequence_targets, adjustments=adjustments)
 
     projection = _mapping(record.get("projection", {}))
@@ -270,18 +278,10 @@ def normalize_teacher_manifest_record(record: Mapping[str, Any]) -> dict[str, An
     if str(normalized.get("error", "")).strip():
         return normalized
     sequence_targets_obj = normalized.get("sequence_targets", {})
-    sequence_targets = dict(sequence_targets_obj) if isinstance(sequence_targets_obj, Mapping) else {}
+    sequence_targets = _dict(sequence_targets_obj)
     label_direction = _teacher_label_direction(normalized.get("label"))
     existing_adjustments_obj = normalized.get("teacher_target_adjustments", {})
-    adjustments = (
-        {
-            str(task_name): dict(task_payload)
-            for task_name, task_payload in existing_adjustments_obj.items()
-            if isinstance(task_payload, Mapping)
-        }
-        if isinstance(existing_adjustments_obj, Mapping)
-        else {}
-    )
+    adjustments = _nested_mappings(existing_adjustments_obj)
     raw_sequence_targets = _build_raw_sequence_targets(
         normalized,
         sequence_targets=sequence_targets,
@@ -330,8 +330,6 @@ def _write_teacher_manifest_records(manifest_path: Path, records: list[dict[str,
             temp_output_path = Path(output_file.name)
             for record in records:
                 output_file.write(json.dumps(record, ensure_ascii=True) + "\n")
-        if temp_output_path is None:
-            raise RuntimeError("Internal error: normalized teacher manifest temp file was not created.")
         os.replace(str(temp_output_path), str(output_path))
     finally:
         if temp_output_path is not None and temp_output_path.exists():
@@ -381,8 +379,6 @@ def normalize_teacher_manifest_file(manifest_path: Path) -> dict[str, int | bool
             ) as metadata_file:
                 temp_metadata_path = Path(metadata_file.name)
                 json.dump(metadata_payload, metadata_file, ensure_ascii=True, indent=2, sort_keys=True)
-            if temp_metadata_path is None:
-                raise RuntimeError("Internal error: normalized teacher metadata temp file was not created.")
             os.replace(str(temp_metadata_path), str(metadata_path))
             metadata_updated = True
         finally:
@@ -417,8 +413,8 @@ def _scan_teacher_manifest(manifest_path: Path) -> dict[str, int]:
             line = raw_line.strip()
             if not line:
                 continue
-            payload = json.loads(line)
-            if not isinstance(payload, dict):
+            payload = _json_object(json.loads(line))
+            if payload is None:
                 continue
             record_count += 1
             if str(payload.get("error", "")).strip():
@@ -441,8 +437,8 @@ def _read_teacher_manifest_records(manifest_path: Path) -> list[dict[str, Any]]:
             line = raw_line.strip()
             if not line:
                 continue
-            payload = json.loads(line)
-            if isinstance(payload, dict):
+            payload = _json_object(json.loads(line))
+            if payload is not None:
                 records.append(payload)
     return records
 
@@ -525,11 +521,7 @@ def summarize_teacher_task_labels(records: list[dict[str, Any]]) -> dict[str, di
         if str(record.get("error", "")).strip():
             continue
         task_labels_obj = record.get("teacher_task_labels", {})
-        task_labels = (
-            dict(task_labels_obj)
-            if isinstance(task_labels_obj, Mapping)
-            else build_teacher_task_labels(record)
-        )
+        task_labels = _dict(task_labels_obj) if isinstance(task_labels_obj, Mapping) else build_teacher_task_labels(record)
         for key in ("label_quality", "review_bucket", "timing_label"):
             value = str(task_labels.get(key, "")).strip().lower()
             if value:
@@ -546,8 +538,8 @@ def load_teacher_manifest_metadata(manifest_path: Path) -> dict[str, Any] | None
     if not metadata_path.exists():
         return None
     with metadata_path.open("r", encoding="utf-8") as metadata_file:
-        payload = json.load(metadata_file)
-    return payload if isinstance(payload, dict) else None
+        payload = _json_object(json.load(metadata_file))
+    return payload
 
 
 def _metadata_int(metadata: Mapping[str, Any], key: str, default: int = -1) -> int:
@@ -661,11 +653,7 @@ def export_teacher_review_queue(
         if str(record.get("error", "")).strip():
             continue
         task_labels_obj = record.get("teacher_task_labels", {})
-        task_labels = (
-            dict(task_labels_obj)
-            if isinstance(task_labels_obj, Mapping)
-            else build_teacher_task_labels(record)
-        )
+        task_labels = _dict(task_labels_obj) if isinstance(task_labels_obj, Mapping) else build_teacher_task_labels(record)
         if not bool(task_labels.get("review_required", False)):
             continue
         priority = _clip01(task_labels.get("review_priority", 0.0))
@@ -748,8 +736,6 @@ def export_teacher_review_queue(
             writer = csv.DictWriter(output_file, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(rows)
-        if temp_output_path is None:
-            raise RuntimeError("Internal error: review queue temp file was not created.")
         os.replace(str(temp_output_path), str(output))
     finally:
         if temp_output_path is not None and temp_output_path.exists():
@@ -823,11 +809,14 @@ def build_teacher_manifest(
                         overlay_mode=overlay_mode,
                         side_effect_free=True,
                     )
-                    projection = _mapping(result.get("projection", {}))
-                    chart_state = _mapping(result.get("chart_state", {}))
+                    if not isinstance(result, Mapping):
+                        raise TypeError(f"run_inference returned {type(result)!r}, expected mapping")
+                    result_map = cast(Mapping[str, Any], result)
+                    projection = _mapping(result_map.get("projection", {}))
+                    chart_state = _mapping(result_map.get("chart_state", {}))
                     next_box = _mapping(projection.get("next_box", chart_state.get("projected_next_box", {})))
                     swing_state = _mapping(projection.get("swing_state", chart_state.get("swing_state", {})))
-                    raw_sequence_targets = extract_sequence_targets(result)
+                    raw_sequence_targets = extract_sequence_targets(result_map)
 
                     record["sequence_targets"] = dict(raw_sequence_targets)
                     record["raw_sequence_targets"] = dict(raw_sequence_targets)
@@ -863,10 +852,10 @@ def build_teacher_manifest(
                         "projected_role": str(swing_state.get("projected_role", "")).lower(),
                         "summary": str(swing_state.get("summary", "")).strip(),
                     }
-                    record["action"] = str(result.get("action", "")).upper()
-                    record["decision_state"] = str(result.get("decision_state", "")).upper()
-                    record["execution_permission"] = str(result.get("execution_permission", "")).upper()
-                    record["confidence"] = float(result.get("confidence", 0.0) or 0.0)
+                    record["action"] = str(result_map.get("action", "")).upper()
+                    record["decision_state"] = str(result_map.get("decision_state", "")).upper()
+                    record["execution_permission"] = str(result_map.get("execution_permission", "")).upper()
+                    record["confidence"] = float(result_map.get("confidence", 0.0) or 0.0)
                     record = normalize_teacher_manifest_record(record)
                     adjustments_obj = record.get("teacher_target_adjustments", {})
                     if isinstance(adjustments_obj, Mapping) and len(adjustments_obj) > 0:
@@ -887,8 +876,6 @@ def build_teacher_manifest(
                 "Re-run after fixing the CV runtime/caches, or pass --allow-errors to keep partial rows."
             )
 
-        if temp_output_path is None:
-            raise RuntimeError("Internal error: teacher manifest temp file was not created.")
         os.replace(str(temp_output_path), str(output_path))
         normalized_records = _read_teacher_manifest_records(output_path)
         review_summary = summarize_teacher_task_labels(normalized_records)

@@ -19,6 +19,10 @@ MOCK_PASSWORD = "mock-password"
 TRACKER_SESSION_ID = "mock-tracker-active"
 
 
+def _new_disclosure_history() -> list[dict[str, Any]]:
+    return []
+
+
 class LoginRequest(BaseModel):
     email: str
     password: str = MOCK_PASSWORD
@@ -57,7 +61,7 @@ class MockPrincipal:
     mt4_account_number_hash: str = ""
     last_heartbeat_epoch: float = 0.0
     connector_version: str = "mock-connector-2026.06"
-    disclosure_history: list[dict[str, Any]] = field(default_factory=list)
+    disclosure_history: list[dict[str, Any]] = field(default_factory=_new_disclosure_history)
 
 
 def _hash_identifier(value: str) -> str:
@@ -115,7 +119,7 @@ def _status_command(status_code: str, reason: str) -> dict[str, Any]:
 
 def _execution_command(principal: MockPrincipal) -> dict[str, Any]:
     now = time.time()
-    unsigned = {
+    unsigned: dict[str, Any] = {
         "schema_version": "PG_MT4_EXECUTION_COMMAND_V2",
         "status": "EXECUTION_PACKET",
         "packet_id": f"mock-exec-{int(now * 1000)}",
@@ -407,6 +411,24 @@ def create_app() -> FastAPI:
 </html>"""
         return HTMLResponse(content=html)
 
+    app.state.mock_business_route_handlers = {
+        "healthz": healthz,
+        "login": login,
+        "me": me,
+        "accept_disclosure": accept_disclosure,
+        "bind_broker_account": bind_broker_account,
+        "licenses": licenses,
+        "register_device": register_device,
+        "heartbeat": heartbeat,
+        "entitlement": entitlement,
+        "latest_command": latest_command,
+        "latest_release": latest_release,
+        "admin_customers": admin_customers,
+        "tracker_status": tracker_status,
+        "tracker_session_health": tracker_session_health,
+        "tracker_session": tracker_session,
+        "tracker_dashboard": tracker_dashboard,
+    }
     return app
 
 

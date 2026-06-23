@@ -85,6 +85,16 @@ def load_manifest(path: str | Path) -> dict[str, Any]:
     return payload
 
 
+def _finite_float(value: object) -> float | None:
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed:
+        return None
+    return parsed
+
+
 def build_manifest(
     boxes_path: str | Path,
     *,
@@ -194,10 +204,9 @@ def validate_profile_layout(
         if not isinstance(point, Mapping):
             invalid_points.append(target)
             continue
-        try:
-            x = float(point.get("x"))
-            y = float(point.get("y"))
-        except (TypeError, ValueError):
+        x = _finite_float(point.get("x"))
+        y = _finite_float(point.get("y"))
+        if x is None or y is None:
             invalid_points.append(target)
             continue
         if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
@@ -275,7 +284,7 @@ def create_deletion_report(
     entries: list[dict[str, Any]] = []
     for artifact in artifacts:
         if isinstance(artifact, Mapping):
-            entry = dict(artifact)
+            entry: dict[str, Any] = dict(artifact)
         else:
             entry = {"artifact_id": str(Path(artifact)), "artifact_type": "path"}
         entry["reason"] = reason
@@ -328,20 +337,27 @@ def _target_record(target: str, source_points: Mapping[str, Any], *, required: b
 
     point = source_points.get(source_key)
     if not _is_marked_point(point):
+        point_mapping = dict(point) if isinstance(point, Mapping) else {}
         return {
             "status": NOT_USER_CALIBRATED,
             "marked": False,
             "required": required,
             "source_key": source_key,
-            "point": point if isinstance(point, Mapping) else None,
+            "point": point_mapping or None,
         }
+    point_mapping = dict(point) if isinstance(point, Mapping) else {}
+    x = _finite_float(point_mapping.get("x"))
+    y = _finite_float(point_mapping.get("y"))
+    if x is None or y is None:
+        x = 0.0
+        y = 0.0
 
     return {
         "status": USER_CALIBRATED,
         "marked": True,
         "required": required,
         "source_key": source_key,
-        "point": {"x": float(point["x"]), "y": float(point["y"])},
+        "point": {"x": x, "y": y},
     }
 
 
@@ -355,10 +371,9 @@ def _find_source_key(target: str, source_points: Mapping[str, Any]) -> str | Non
 def _is_marked_point(value: Any) -> bool:
     if not isinstance(value, Mapping):
         return False
-    try:
-        x = float(value["x"])
-        y = float(value["y"])
-    except (KeyError, TypeError, ValueError):
+    x = _finite_float(value.get("x"))
+    y = _finite_float(value.get("y"))
+    if x is None or y is None:
         return False
     return 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0
 

@@ -1,5 +1,27 @@
 from __future__ import annotations
 
-from phoenixguard.core import utils as _impl
+from phoenixguard.core.utils import (
+    append_hash_chain,
+    can_import_chronos_safely,
+    can_import_module_safely,
+    can_import_sentence_transformers_safely,
+    can_import_torchvision_safely,
+    clamp,
+    safe_json_loads,
+    setup_logger,
+    sha256_text,
+    utc_now_iso,
+)
 
-globals().update({name: getattr(_impl, name) for name in dir(_impl) if not name.startswith("__")})
+__all__ = [
+    "append_hash_chain",
+    "can_import_chronos_safely",
+    "can_import_module_safely",
+    "can_import_sentence_transformers_safely",
+    "can_import_torchvision_safely",
+    "clamp",
+    "safe_json_loads",
+    "setup_logger",
+    "sha256_text",
+    "utc_now_iso",
+]

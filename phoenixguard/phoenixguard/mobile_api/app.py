@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import threading
 import time
+from collections.abc import Iterator
 from typing import Annotated, Any, Mapping, Sequence, cast
 import urllib.error
 import urllib.request
@@ -626,11 +627,7 @@ def _store_direct_performance_trace_cache(session_id: str, trace: Mapping[str, o
 
 
 def _bump_cached_age_ms(container: dict[str, object], key: str, elapsed_ms: int) -> None:
-    value = container.get(key)
-    try:
-        number = float(value) if value is not None else 0.0
-    except (TypeError, ValueError):
-        return
+    number = _epoch_float(container.get(key), 0.0)
     if number <= 0.0:
         return
     container[key] = int(round(number + elapsed_ms))
@@ -1249,9 +1246,8 @@ class VoiceCommandRequest(BaseModel):
 
 
 def _bounded_overlay_editor_number(raw: object, fallback: float, minimum: float, maximum: float) -> float:
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
+    value = _epoch_float(raw, fallback)
+    if value == fallback and raw != fallback:
         return fallback
     if not (minimum <= value <= maximum):
         return max(minimum, min(maximum, value))
@@ -1468,12 +1464,13 @@ def create_app(
             sid = str(resolved.get("session_id") or session_id or "")
             if not sid:
                 sid = resolve_window_tracker_dashboard_session_id(None)
-            frame_id = int(
+            frame_id = int(_epoch_float(
                 resolved.get("display_frame_id")
                 or resolved.get("frame_index")
                 or resolved.get("capture_count")
-                or 0
-            )
+                or 0,
+                0.0,
+            ))
             mtime = 0.0
             # latest artifact path
             try:
@@ -2124,14 +2121,15 @@ def create_app(
         )
         performance_state = {
             "session_id": requested_session_id,
-            "frame_id": int(
+            "frame_id": int(_epoch_float(
                 display_payload.get("display_frame_id")
                 or display_payload.get("frame_index")
                 or display_payload.get("capture_count")
                 or refreshed.get("frame_id")
-                or 0
-            ),
-            "state_version": int(display_payload.get("state_version") or refreshed.get("state_version") or 0),
+                or 0,
+                0.0,
+            )),
+            "state_version": int(_epoch_float(display_payload.get("state_version") or refreshed.get("state_version") or 0, 0.0)),
             "tracking_summary": _mapping_to_plain_dict(
                 refreshed.get("tracking_summary") or display_payload.get("tracking_summary")
             ),
@@ -2402,8 +2400,8 @@ def create_app(
         )
         live_state = {
             "session_id": requested_session_id,
-            "frame_id": int(session.get("display_frame_id") or session.get("frame_index") or session.get("capture_count") or 0),
-            "state_version": int(session.get("state_version") or 0),
+            "frame_id": int(_epoch_float(session.get("display_frame_id") or session.get("frame_index") or session.get("capture_count") or 0, 0.0)),
+            "state_version": int(_epoch_float(session.get("state_version") or 0, 0.0)),
             "tracking_summary": _mapping_to_plain_dict(session.get("tracking_summary")),
             "latest_signal": _mapping_to_plain_dict(session.get("latest_signal")),
             "model_health": model_health,
@@ -2420,7 +2418,7 @@ def create_app(
             "frontend_heartbeat": frontend_heartbeat,
         }
         trace = cast(dict[str, object], build_performance_trace_v3(live_state, now_epoch=now_epoch))
-        trace["frame_id"] = int(frame_timing.get("display_frame_id") or live_state["frame_id"] or 0)
+        trace["frame_id"] = int(_epoch_float(frame_timing.get("display_frame_id") or live_state["frame_id"] or 0, 0.0))
         trace["direct_overlay_source_v3"] = {
             "source": "locked_registry",
             "count": len(overlay_rows),
@@ -2440,16 +2438,18 @@ def create_app(
             except Exception:
                 canonical_trace = None
             if canonical_trace is not None and _performance_trace_overlay_count(canonical_trace) > 0:
-                direct_frame_id = int(
+                direct_frame_id = int(_epoch_float(
                     direct_trace.get("frame_id")
                     or _mapping_to_plain_dict(direct_trace.get("display_frame")).get("frame_id")
-                    or 0
-                )
-                canonical_frame_id = int(
+                    or 0,
+                    0.0,
+                ))
+                canonical_frame_id = int(_epoch_float(
                     canonical_trace.get("frame_id")
                     or _mapping_to_plain_dict(canonical_trace.get("display_frame")).get("frame_id")
-                    or 0
-                )
+                    or 0,
+                    0.0,
+                ))
                 if direct_frame_id > canonical_frame_id:
                     canonical_trace = dict(canonical_trace)
                     canonical_trace["frame_id"] = direct_frame_id
@@ -2815,26 +2815,26 @@ def create_app(
                     registry_rows = []
                 renderable_count = len(registry_rows) or audit_object_count
             if renderable_count <= 0:
-                try:
-                    renderable_count = int(float(overlay_geometry.get("visible_default_count") or 0))
-                except (TypeError, ValueError):
-                    renderable_count = 0
-            try:
-                hidden_count = int(float(clean_live_state.get("hidden_count") or clean_overlays.get("hidden_count") or overlay_geometry.get("hidden_default_count") or 0))
-            except (TypeError, ValueError):
-                hidden_count = 0
-            try:
-                rejected_count = int(
-                    float(
-                        clean_live_state.get("rejected_count")
-                        or clean_overlays.get("rejected_count")
-                        or overlay_truth_audit.get("invalid_object_count")
-                        or overlay_truth_audit.get("decision_invalid_object_count")
-                        or 0
-                    )
+                renderable_count = int(_epoch_float(overlay_geometry.get("visible_default_count") or 0, 0.0))
+            hidden_count = int(
+                _epoch_float(
+                    clean_live_state.get("hidden_count")
+                    or clean_overlays.get("hidden_count")
+                    or overlay_geometry.get("hidden_default_count")
+                    or 0,
+                    0.0,
                 )
-            except (TypeError, ValueError):
-                rejected_count = 0
+            )
+            rejected_count = int(
+                _epoch_float(
+                    clean_live_state.get("rejected_count")
+                    or clean_overlays.get("rejected_count")
+                    or overlay_truth_audit.get("invalid_object_count")
+                    or overlay_truth_audit.get("decision_invalid_object_count")
+                    or 0,
+                    0.0,
+                )
+            )
             frontend_heartbeat = latest_frontend_heartbeat(resolved_session_id)
             frontend_payload = _mapping_to_plain_dict(frontend_heartbeat)
             received_at_epoch = _epoch_float(frontend_payload.get("received_at_ms"), 0.0) / 1000.0
@@ -3113,9 +3113,9 @@ def create_app(
         model_warm_pass = bool(model_health_payload.get("all_required_models_awake") is True)
         overlay_payload = _mapping_to_plain_dict(floating_state.get("payload"))
         overlay_root = _mapping_to_plain_dict(overlay_payload.get("overlays"))
-        overlay_rejected_count = int(overlay_root.get("rejected_count") or overlay_payload.get("overlay_rejected_count") or 0)
-        overlay_backend_count = int(overlay_root.get("renderable_count") or overlay_payload.get("renderable_count") or 0)
-        overlay_frontend_count = int(overlay_payload.get("overlay_count") or overlay_backend_count or 0)
+        overlay_rejected_count = int(_epoch_float(overlay_root.get("rejected_count") or overlay_payload.get("overlay_rejected_count") or 0, 0.0))
+        overlay_backend_count = int(_epoch_float(overlay_root.get("renderable_count") or overlay_payload.get("renderable_count") or 0, 0.0))
+        overlay_frontend_count = int(_epoch_float(overlay_payload.get("overlay_count") or overlay_backend_count or 0, 0.0))
         overlay_truth_pass = overlay_backend_count > 0 and overlay_backend_count == overlay_frontend_count
         promotion_trace = _first_trace_mapping(
             _mapping_to_plain_dict(study_latest.get("payload")).get("promotion_trace"),
@@ -3139,8 +3139,8 @@ def create_app(
         )
         burn_in_payload = _mapping_to_plain_dict(tracker_payload.get("burn_in") or tracker_payload.get("runtime_burn_in"))
         burn_in_pass = bool(
-            float(burn_in_payload.get("hours", 0.0) or 0.0) >= 2.0
-            and int(burn_in_payload.get("crash_count", 0) or 0) == 0
+            _epoch_float(burn_in_payload.get("hours", 0.0) or 0.0, 0.0) >= 2.0
+            and int(_epoch_float(burn_in_payload.get("crash_count", 0) or 0, 0.0)) == 0
         )
 
         def _gate(name: str, passed: bool, *, status_value: str = "", evidence: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -3312,9 +3312,9 @@ def create_app(
         }
         dataflow_contract_trace = {
             "schema_version": "PG_DATAFLOW_CONTRACT_TRACE_V3",
-            "frame_id": int(tracker_payload.get("frame_index") or tracker_payload.get("frame_id") or 0),
-            "capture_count": int(tracker_payload.get("capture_count") or 0),
-            "state_version": int(tracker_payload.get("state_version") or 0),
+            "frame_id": int(_epoch_float(tracker_payload.get("frame_index") or tracker_payload.get("frame_id") or 0, 0.0)),
+            "capture_count": int(_epoch_float(tracker_payload.get("capture_count") or 0, 0.0)),
+            "state_version": int(_epoch_float(tracker_payload.get("state_version") or 0, 0.0)),
             "sequence_id": str(sequence_context_readiness.get("sequence_id") or ""),
             "nodes": dataflow_nodes,
             "reason": reason,
@@ -3588,7 +3588,7 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
 
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-chart")
-    def get_tracker_latest_chart(session_id: str) -> FileResponse:
+    def get_tracker_latest_chart(session_id: str) -> Response:
         try:
             path = get_window_tracker_service().latest_artifact_path(session_id, "chart")
         except KeyError as exc:
@@ -3607,7 +3607,7 @@ def create_app(
         return _safe_file_bytes_response(path, media_type=media_type)
 
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-window")
-    def get_tracker_latest_window(session_id: str) -> FileResponse:
+    def get_tracker_latest_window(session_id: str) -> Response:
         try:
             path = get_window_tracker_service().latest_artifact_path(session_id, "window")
         except KeyError as exc:
@@ -3618,7 +3618,7 @@ def create_app(
         return _safe_file_bytes_response(path, media_type=media_type)
 
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/artifacts/files/{artifact_name}")
-    def get_tracker_artifact_file(session_id: str, artifact_name: str) -> FileResponse:
+    def get_tracker_artifact_file(session_id: str, artifact_name: str) -> Response:
         safe_name = Path(str(artifact_name or "")).name
         if not safe_name or safe_name != str(artifact_name or ""):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid artifact name.")
@@ -3639,7 +3639,7 @@ def create_app(
         return _safe_file_bytes_response(path, media_type=media_type)
 
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-{artifact_kind}")
-    def get_tracker_latest_named_artifact(session_id: str, artifact_kind: str) -> FileResponse:
+    def get_tracker_latest_named_artifact(session_id: str, artifact_kind: str) -> Response:
         try:
             path = get_window_tracker_service().latest_artifact_path(session_id, artifact_kind)
         except KeyError as exc:
@@ -3766,7 +3766,11 @@ def create_app(
                 chart_path = None
             overlays = query_recent_active_objects(session_id, min_truth_score=0.0)
             # convert entries to overlay dicts
-            overlay_dicts = [e.get("overlay") if isinstance(e.get("overlay"), Mapping) else {} for e in overlays]
+            overlay_dicts: list[Mapping[str, Any]] = []
+            for entry in overlays:
+                overlay = entry.get("overlay") if isinstance(entry, Mapping) else None
+                if isinstance(overlay, Mapping):
+                    overlay_dicts.append(cast(Mapping[str, Any], overlay))
             png = render_overlays_on_chart(chart_path if chart_path is not None else None, overlay_dicts)
             # optionally persist snapshot for golden/regression evidence
             save_dir = Path(__file__).resolve().parents[2] / ".codex_runtime" / "visual_evidence"
@@ -3888,7 +3892,7 @@ def create_app(
         applied = False
         if session_id:
             try:
-                get_window_tracker_service().update_session_controls(session_id, **controls)
+                get_window_tracker_service().update_session_controls(session_id, **cast(Any, controls))
                 applied = True
             except KeyError:
                 applied = False
@@ -3961,7 +3965,7 @@ def create_app(
             }
             return json.dumps(parts, sort_keys=True, default=str)
 
-        def _events() -> object:
+        def _events() -> Iterator[str]:
             last_fingerprint = ""
             last_keepalive = 0.0
             while True:

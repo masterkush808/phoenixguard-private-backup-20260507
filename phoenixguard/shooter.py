@@ -113,6 +113,11 @@ def _configure_tesseract_runtime() -> None:
 
 _configure_tesseract_runtime()
 
+
+def _as_mapping_dict(value: Any) -> Dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+
+
 # Disable PyAutoGUI failsafe corner abort for smoother automation.
 pyautogui.FAILSAFE = True
 
@@ -231,8 +236,9 @@ def load_memory_index() -> Optional[Dict[str, Any]]:
         import json
 
         id_map = json.loads(id_map_path.read_text(encoding="utf-8"))
-        vecs = np.load(str(vecs_path), allow_pickle=False)
-        return {"id_map": id_map, "vecs": vecs, "np": np}
+        np_module = cast(Any, np)
+        vecs = np_module.load(str(vecs_path), allow_pickle=False)
+        return {"id_map": id_map, "vecs": vecs, "np": np_module}
     except Exception as exc:
         LOGGER.debug("memory: failed to load index: %s", exc)
         return None
@@ -269,7 +275,7 @@ def _feature_vector_from_payload(payload: Dict[str, Any], np: Optional[object] =
 
         vec = (p1, p3, close_pos, scenario_prob, micro_val)
         if np is not None:
-            return np.asarray(vec, dtype=float)
+            return cast(Any, np).asarray(vec, dtype=float)
         return vec
     except Exception:
         return None
@@ -582,11 +588,8 @@ def _entry_history_position_context(payload: Dict[str, Any], tracking_summary: M
             parsed = _clip_unit_float(price_position.get(key))
             if parsed is not None:
                 result[key] = parsed
-        sample_size_raw = price_position.get("sample_size")
-        try:
-            sample_size = int(sample_size_raw)
-        except (TypeError, ValueError):
-            sample_size = 0
+        sample_size_value = _coerce_finite_float(price_position.get("sample_size"))
+        sample_size = int(sample_size_value) if sample_size_value is not None else 0
         if sample_size > 0:
             result["sample_size"] = sample_size
         if "global_position" in result or "local_position" in result:
@@ -1279,13 +1282,17 @@ class FloatingStatusBox:
         if not resolved_payload:
             return "Signal: waiting for current Phoenix data"
 
-        execution_packet = signal_payload if isinstance(signal_payload, dict) and str(signal_payload.get("schema_version") or "") == PG_EXECUTION_PACKET_SCHEMA_V3 else {}
-        study_packet = resolved_payload.get("model_council_study_packet")
-        if not isinstance(study_packet, dict):
-            study_packet = (resolved_payload.get("model_council_result") or {}).get("study_packet") if isinstance(resolved_payload.get("model_council_result"), dict) else {}
-        if isinstance(execution_packet, dict) and execution_packet:
-            execution = execution_packet.get("execution") if isinstance(execution_packet.get("execution"), dict) else {}
-            promotion = execution_packet.get("promotion_trace") if isinstance(execution_packet.get("promotion_trace"), dict) else {}
+        execution_packet = (
+            dict(signal_payload)
+            if isinstance(signal_payload, dict) and str(signal_payload.get("schema_version") or "") == PG_EXECUTION_PACKET_SCHEMA_V3
+            else {}
+        )
+        study_packet = _as_mapping_dict(resolved_payload.get("model_council_study_packet"))
+        if not study_packet:
+            study_packet = _as_mapping_dict(_as_mapping_dict(resolved_payload.get("model_council_result")).get("study_packet"))
+        if execution_packet:
+            execution = _as_mapping_dict(execution_packet.get("execution"))
+            promotion = _as_mapping_dict(execution_packet.get("promotion_trace"))
             lane_payload = execution_packet.get("execution_lane")
             lane = ""
             if isinstance(lane_payload, dict):
@@ -1296,10 +1303,10 @@ class FloatingStatusBox:
             expiry = execution.get("expiry_seconds", "missing")
             lane_text = f" | lane {_truncate_text(lane, 22)}" if lane else ""
             return f"Packet: EXECUTABLE | {side} | expiry {expiry}s{lane_text} | {packet_id}"
-        if isinstance(study_packet, dict) and study_packet:
-            execution = study_packet.get("execution") if isinstance(study_packet.get("execution"), dict) else {}
-            council = study_packet.get("model_council") if isinstance(study_packet.get("model_council"), dict) else {}
-            promotion = study_packet.get("promotion_trace") if isinstance(study_packet.get("promotion_trace"), dict) else {}
+        if study_packet:
+            execution = _as_mapping_dict(study_packet.get("execution"))
+            council = _as_mapping_dict(study_packet.get("model_council"))
+            promotion = _as_mapping_dict(study_packet.get("promotion_trace"))
             lane_payload = study_packet.get("execution_lane") or council.get("execution_lane") or promotion.get("execution_lane")
             lane = ""
             lane_accepted = promotion.get("lane_accepted")
@@ -1461,7 +1468,7 @@ class FloatingStatusBox:
         return "#2FCE65" if side == "BUY" else "#FF4B42" if side == "SELL" else "#CBD5E1"
 
     def _score_text(self, state: Mapping[str, Any]) -> str:
-        council = state.get("council") if isinstance(state.get("council"), Mapping) else {}
+        council = _as_mapping_dict(state.get("council"))
         score = council.get("final_score")
         threshold = council.get("threshold")
         if isinstance(score, (int, float)) and isinstance(threshold, (int, float)):
@@ -1469,7 +1476,7 @@ class FloatingStatusBox:
         return "Score pending"
 
     def _score_bar(self, state: Mapping[str, Any], cells: int = 12) -> str:
-        council = state.get("council") if isinstance(state.get("council"), Mapping) else {}
+        council = _as_mapping_dict(state.get("council"))
         score = council.get("final_score")
         threshold = council.get("threshold") or 0.70
         if not isinstance(score, (int, float)):
@@ -1479,7 +1486,7 @@ class FloatingStatusBox:
         return "[" + ("█" * filled) + ("░" * (cells - filled)) + "]"
 
     def _gap_text(self, state: Mapping[str, Any]) -> str:
-        council = state.get("council") if isinstance(state.get("council"), Mapping) else {}
+        council = _as_mapping_dict(state.get("council"))
         gap = council.get("score_gap")
         if isinstance(gap, (int, float)):
             if float(gap) <= 0:
@@ -1488,7 +1495,7 @@ class FloatingStatusBox:
         return "Waiting for score"
 
     def _score_grid_text(self, state: Mapping[str, Any]) -> str:
-        scores = state.get("scores") if isinstance(state.get("scores"), Mapping) else {}
+        scores = _as_mapping_dict(state.get("scores"))
 
         def fmt(key: str) -> str:
             value = scores.get(key)
@@ -1497,7 +1504,7 @@ class FloatingStatusBox:
         return f"G {fmt('global')}   L {fmt('local')}   Z {fmt('zone')}\nA {fmt('angle')}   H {fmt('history')}   R {fmt('risk')}"
 
     def _health_text(self, state: Mapping[str, Any]) -> str:
-        health = state.get("health") if isinstance(state.get("health"), Mapping) else {}
+        health = _as_mapping_dict(state.get("health"))
         awake = health.get("models_awake")
         total = health.get("models_total")
         models = f"{awake}/{total}" if isinstance(awake, int) and isinstance(total, int) and total else "models"
@@ -1508,7 +1515,7 @@ class FloatingStatusBox:
         return f"{tracker} | Models {models} | Packet {age_text} | {cache}"
 
     def _cooldown_display(self, state: Mapping[str, Any]) -> str:
-        shooter = state.get("shooter") if isinstance(state.get("shooter"), Mapping) else {}
+        shooter = _as_mapping_dict(state.get("shooter"))
         remaining = shooter.get("cooldown_remaining_sec")
         if not isinstance(remaining, int) or remaining <= 0:
             return "Cooldown ready"
@@ -1575,10 +1582,10 @@ class FloatingStatusBox:
         self._save_floating_settings()
 
     def _render_floating_state(self, state: Mapping[str, Any]) -> None:
-        packet = state.get("packet") if isinstance(state.get("packet"), Mapping) else {}
-        council = state.get("council") if isinstance(state.get("council"), Mapping) else {}
-        timing = state.get("timing") if isinstance(state.get("timing"), Mapping) else {}
-        shooter = state.get("shooter") if isinstance(state.get("shooter"), Mapping) else {}
+        packet = _as_mapping_dict(state.get("packet"))
+        council = _as_mapping_dict(state.get("council"))
+        timing = _as_mapping_dict(state.get("timing"))
+        shooter = _as_mapping_dict(state.get("shooter"))
         chip = str(state.get("state_chip") or packet.get("type") or "WAITING").upper()
         side = str(council.get("side") or packet.get("side") or "")
         lane = str(council.get("lane_short") or council.get("lane") or "LANE PENDING")
@@ -1606,7 +1613,7 @@ class FloatingStatusBox:
         self._set_var("mini_action", action)
 
         packet_id = packet.get("id_short")
-        inspector = state.get("inspector") if isinstance(state.get("inspector"), Mapping) else {}
+        inspector = _as_mapping_dict(state.get("inspector"))
         inspector_text = json.dumps(
             {
                 "packet": packet,
@@ -3496,7 +3503,7 @@ def ocr_read_time_region(hwnd: int, boxes: Dict[str, Dict[str, Any]]) -> Optiona
             width, height = gray.size
             scaled = gray.resize((max(1, width * 4), max(1, height * 4)))
             contrast = ImageEnhance.Contrast(scaled).enhance(2.2)
-            threshold = contrast.point(lambda px: 255 if int(px) > 145 else 0)
+            threshold = contrast.point(lambda px: 255 if int(cast(Any, px)) > 145 else 0)
             if exhaustive_ocr:
                 return [contrast, threshold, scaled, img]
             if fast_ocr:
@@ -6204,12 +6211,18 @@ def execute_v3_packet_trade(
         enabled=evidence_enabled,
         packet_id=packet_id,
     )
+
+    def sequencer_validate_calibration(read_boxes: Mapping[str, Any], rect: Any) -> bool:
+        if rect is None:
+            return False
+        return validate_calibration(cast(Dict[str, Dict[str, Any]], dict(read_boxes)), cast(RECT, rect))
+
     sequencer = ShooterActionSequencerV2(
         hwnd=hwnd,
         boxes=boxes,
         get_window_rect=get_window_rect,
         activate_window=activate_window,
-        validate_calibration=validate_calibration,
+        validate_calibration=sequencer_validate_calibration,
         is_broker_ready=is_broker_ready,
         adapter=LowLevelActionAdapter(pyautogui),
         ensure_foreground_window=ensure_window_foreground,
@@ -8485,6 +8498,22 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                     decision.get("expiry_seconds"),
                     decision.get("packet_id"),
                 )
+                if hwnd is None:
+                    decision["will_click"] = False
+                    decision["reason"] = "WINDOW_HANDLE_MISSING_BEFORE_EXECUTION"
+                    _v3_log_final_decision(decision)
+                    _three_gate_save_state(state)
+                    status_box.update_action(
+                        {
+                            "phase": "BLOCKED",
+                            "step": "window handle missing",
+                            "packet_id": decision.get("packet_id"),
+                            "side": decision.get("side"),
+                            "expiry_seconds": decision.get("expiry_seconds"),
+                        }
+                    )
+                    time.sleep(float(args.poll))
+                    continue
                 status_box.update_action(
                     {
                         "phase": "PACKET_ACCEPTED",

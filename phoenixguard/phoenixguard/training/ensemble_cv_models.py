@@ -77,12 +77,17 @@ import timm
 import torchvision.transforms as T
 try:
     from lightly.models.modules import (  # type: ignore[import-not-found]
-        BYOLPredictionHead,
-        BYOLProjectionHead,
-        SimCLRProjectionHead,
-        SwaVProjectionHead,
-        SwaVPrototypes,
+        BYOLPredictionHead as _LightlyBYOLPredictionHead,
+        BYOLProjectionHead as _LightlyBYOLProjectionHead,
+        SimCLRProjectionHead as _LightlySimCLRProjectionHead,
+        SwaVProjectionHead as _LightlySwaVProjectionHead,
+        SwaVPrototypes as _LightlySwaVPrototypes,
     )
+    BYOLPredictionHead = cast(Any, _LightlyBYOLPredictionHead)
+    BYOLProjectionHead = cast(Any, _LightlyBYOLProjectionHead)
+    SimCLRProjectionHead = cast(Any, _LightlySimCLRProjectionHead)
+    SwaVProjectionHead = cast(Any, _LightlySwaVProjectionHead)
+    SwaVPrototypes = cast(Any, _LightlySwaVPrototypes)
 except Exception:  # pragma: no cover - optional dependency fallback
     class SimCLRProjectionHead(nn.Module):
         def __init__(self, in_features: int, hidden_features: int, out_features: int) -> None:
@@ -768,12 +773,12 @@ class ReplayChartDataset(Dataset[tuple[torch.Tensor, torch.Tensor, dict[str, tor
 
 class MergedChartDataset(Dataset[tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]]):
     def __init__(self, datasets: Sequence[Dataset[tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]]]) -> None:
-        self.datasets = [dataset for dataset in datasets if len(dataset) > 0]
+        self.datasets = [dataset for dataset in datasets if len(cast(Any, dataset)) > 0]
         self._offsets: list[int] = []
         running = 0
         for dataset in self.datasets:
             self._offsets.append(running)
-            running += len(dataset)
+            running += len(cast(Any, dataset))
         self.samples: list[str] = []
         self.labels: list[int] = []
         self.sequence_task_names: list[str] = []
@@ -791,7 +796,7 @@ class MergedChartDataset(Dataset[tuple[torch.Tensor, torch.Tensor, dict[str, tor
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         for dataset, offset in zip(self.datasets, self._offsets):
-            upper = offset + len(dataset)
+            upper = offset + len(cast(Any, dataset))
             if idx < upper:
                 return dataset[idx - offset]
         raise IndexError(idx)
@@ -1460,7 +1465,7 @@ class EnsembleCVModels:
 
         self.sequence_task_values = {}
         self.sequence_task_spaces = {}
-        for task_name in self._ordered_sequence_task_names(task_values.keys()):
+        for task_name in self._ordered_sequence_task_names(list(task_values.keys())):
             values = sorted(task_values[task_name])
             if len(values) < 2:
                 continue
@@ -2207,7 +2212,7 @@ class EnsembleCVModels:
         }
 
         if balanced and is_training:
-            sampler = self._make_sampler(dataset, model_name=model_name)
+            sampler = self._make_sampler(cast(ChartImageDataset, dataset), model_name=model_name)
             return DataLoader(dataset, sampler=sampler, **common_kwargs)
 
         return DataLoader(dataset, shuffle=is_training, **common_kwargs)
@@ -2387,7 +2392,7 @@ class EnsembleCVModels:
             image_dirs=train_dirs,
             is_training=True,
         )
-        train_stats = self._sequence_coverage_stats(train_dataset)
+        train_stats = self._sequence_coverage_stats(cast(ChartImageDataset, train_dataset))
 
         val_stats: dict[str, Any] | None = None
         if val_dirs:
@@ -2396,7 +2401,7 @@ class EnsembleCVModels:
                 image_dirs=val_dirs,
                 is_training=False,
             )
-            val_stats = self._sequence_coverage_stats(val_dataset)
+            val_stats = self._sequence_coverage_stats(cast(ChartImageDataset, val_dataset))
 
         print(
             f"[SEQUENCE COVERAGE] {model_name} train matched "
@@ -2504,7 +2509,8 @@ class EnsembleCVModels:
         for attr_name in ("blocks", "stages", "features"):
             attr_value = getattr(module, attr_name, None)
             if isinstance(attr_value, (nn.ModuleList, nn.Sequential)) and len(attr_value) > 0:
-                tail = list(attr_value[-2:]) if len(attr_value) >= 2 else [attr_value[-1]]
+                modules = list(cast(Sequence[nn.Module], attr_value))
+                tail = modules[-2:] if len(modules) >= 2 else modules[-1:]
                 return [tail_module for tail_module in tail if isinstance(tail_module, nn.Module)]
 
         layer4_obj = getattr(module, "layer4", None)
@@ -3670,7 +3676,16 @@ class EnsembleCVModels:
                     )
                 break
 
-        return best_acc, best_score, history, best_model_state, best_head_state, best_aux_head_state, best_optimizer_state, best_epoch
+        return (
+            best_acc,
+            cast(tuple[float, float, float, float, float, float, float, float, float, float, float, float, float], best_score),
+            history,
+            best_model_state,
+            best_head_state,
+            best_aux_head_state,
+            best_optimizer_state,
+            best_epoch,
+        )
 
     def _save_bundle(
         self,
@@ -3843,7 +3858,7 @@ class EnsembleCVModels:
             if aux_head is not None:
                 print(
                     f"[SEQUENCE TEACHER] {name} auxiliary tasks: "
-                    f"{', '.join(self._ordered_sequence_task_names(self.sequence_task_values.keys()))}"
+                    f"{', '.join(self._ordered_sequence_task_names(list(self.sequence_task_values.keys())))}"
                 )
                 self._validate_sequence_supervision(
                     model_name=name,
@@ -4019,7 +4034,7 @@ class EnsembleCVModels:
                 self.sequence_aux_metrics[name] = {
                     "enabled": True,
                     "loss_weight": float(self.sequence_aux_loss_weight),
-                    "task_names": self._ordered_sequence_task_names(self.sequence_task_values.keys()),
+                    "task_names": self._ordered_sequence_task_names(list(self.sequence_task_values.keys())),
                     "best_train_aux_acc": max((float(epoch_metrics.get("train_aux_acc", 0.0)) for epoch_metrics in history), default=0.0),
                     "best_val_aux_acc": max((float(epoch_metrics.get("val_aux_acc", 0.0)) for epoch_metrics in history), default=0.0),
                     "manifest_path": self.sequence_manifest_path,

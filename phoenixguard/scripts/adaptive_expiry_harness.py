@@ -14,7 +14,7 @@ import sys
 from types import SimpleNamespace
 from pathlib import Path
 from importlib.abc import Loader
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, cast
 
 LOG = logging.getLogger("adaptive_harness")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -38,9 +38,12 @@ assert loader is not None
 cast_loader: Loader = loader
 cast_loader.exec_module(shooter)
 
-_choose = getattr(shooter, "_choose_adaptive_expiry")
+_choose = cast(
+    Callable[[dict[str, Any], int, SimpleNamespace], int],
+    getattr(shooter, "_choose_adaptive_expiry"),
+)
 
-samples: List[Tuple[str, Dict[str, Any]]] = [
+samples: list[tuple[str, dict[str, Any]]] = [
     ("explicit_expiry", {"expiry_seconds": 90, "signal_id": "s-explicit"}),
     ("candle_notation", {"candle_notation": "2c", "focus_timeframe": "M1", "signal_id": "s-candle"}),
     ("countdown", {"countdown_seconds": 12, "signal_id": "s-countdown"}),
@@ -55,7 +58,7 @@ args = SimpleNamespace(adaptive_verbose=True)
 for name, payload in samples:
     try:
         chosen = _choose(payload, 59, args)
-        status = {"status": "ok", "chosen": chosen}
+        status: dict[str, object] = {"status": "ok", "chosen": chosen}
     except ValueError as exc:
         if "strict expiry selection requires explicit PhoenixGuard expiry_seconds" not in str(exc):
             raise

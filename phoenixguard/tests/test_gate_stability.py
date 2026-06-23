@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -73,7 +73,7 @@ class TestGateStability(unittest.TestCase):
             q95 = self._mixed_number()
             module_logits = np.array(
                 [self._mixed_number(allow_none=False) for _ in range(3)],
-                dtype=np.float64,
+                dtype=np.float32,
             )
             chart_state = {
                 "entry_type": self._choice(entry_types),
@@ -94,9 +94,9 @@ class TestGateStability(unittest.TestCase):
             sub_signals = [(self._mixed_number(), self._choice(signal_names)) for _ in range(6)]
 
             core_outputs = self.gates.run_all(
-                probs=probs,
-                q05=q05,
-                q95=q95,
+                probs=cast(dict[str, float], probs),
+                q05=cast(float, q05),
+                q95=cast(float, q95),
                 momentum_bias=self._choice(["bullish", "bearish", "neutral", ""]),
                 explanation=self._choice(
                     [
@@ -106,7 +106,7 @@ class TestGateStability(unittest.TestCase):
                         "",
                     ]
                 ),
-                sub_signals=sub_signals,
+                sub_signals=cast(list[tuple[float, str]], sub_signals),
                 module_logits=module_logits,
                 recent_feedback_count=int(self.rng.integers(-10, 120)),
                 queue_depth=int(self.rng.integers(-2, 12)),
@@ -114,14 +114,14 @@ class TestGateStability(unittest.TestCase):
                 has_dashboard=bool(int(self.rng.integers(0, 2))),
                 risk_ethical_ok=bool(int(self.rng.integers(0, 2))),
                 chart_state=chart_state,
-                prices=prices,
-                direction_prob=self._mixed_number(),
+                prices=cast(list[float], prices),
+                direction_prob=cast(float, self._mixed_number()),
                 mcts={
                     "buy_prob": self._mixed_number(),
                     "sell_prob": self._mixed_number(),
                 },
-                memory_sim=self._mixed_number(),
-                latest_candle_confidence=self._mixed_number(),
+                memory_sim=cast(float, self._mixed_number()),
+                latest_candle_confidence=cast(float, self._mixed_number()),
                 geometry_conflict=bool(int(self.rng.integers(0, 2))),
             )
             self.assertEqual(len(core_outputs), 13)
@@ -135,17 +135,17 @@ class TestGateStability(unittest.TestCase):
                     "control_strength_delta": self._mixed_number(),
                     "phase_risk": self._choice(["breakout_risk", "chop_risk", "exhaustion_risk", "", "continuation"]),
                 },
-                memory_similarity=self._mixed_number(),
+                memory_similarity=cast(float, self._mixed_number()),
                 memory_label=self._choice(["BUY", "SELL", "HOLD", ""]),
-                latest_candle_confidence=self._mixed_number(),
+                latest_candle_confidence=cast(float, self._mixed_number()),
                 geometry_conflict=bool(int(self.rng.integers(0, 2))),
-                reliability=self._mixed_number(),
+                reliability=cast(float, self._mixed_number()),
             )
             self.assertEqual(len(support_outputs), 6)
             self._assert_gate_outputs_are_stable(support_outputs)
 
             decision = self.ensemble.infer(
-                rl_probs=probs,
+                rl_probs=cast(dict[str, float], probs),
                 forecast={
                     "q05": q05,
                     "q50": self._mixed_number(),
@@ -162,14 +162,17 @@ class TestGateStability(unittest.TestCase):
                     "poly_slope": self._mixed_number(),
                 },
                 gate_outputs=core_outputs,
-                memory_bank_similarity=self._mixed_number(),
-                module_reliability={
+                memory_bank_similarity=cast(float, self._mixed_number()),
+                module_reliability=cast(
+                    dict[str, float],
+                    {
                     "cv_quality": self._mixed_number(),
                     "structure_consistency": self._mixed_number(),
                     "sequence_clarity": self._mixed_number(),
                     "consolidation_quality": self._mixed_number(),
                     "memory_novelty": self._mixed_number(),
-                },
+                    },
+                ),
                 memory_summary={
                     "ambiguity": self._mixed_number(),
                     "label_entropy": self._mixed_number(),
@@ -177,13 +180,16 @@ class TestGateStability(unittest.TestCase):
                     "mixed_labels": bool(int(self.rng.integers(0, 2))),
                     "dominant_label": self._choice(["BUY", "SELL", "HOLD", ""]),
                 },
-                latest_candle_confidence=self._mixed_number(),
-                transition_summary={
+                latest_candle_confidence=cast(float, self._mixed_number()),
+                transition_summary=cast(
+                    Any,
+                    {
                     "continue_prob": self._mixed_number(),
                     "pullback_prob": self._mixed_number(),
                     "reversal_attempt_prob": self._mixed_number(),
                     "fakeout_prob": self._mixed_number(),
-                },
+                    },
+                ),
                 support_gate_outputs=support_outputs,
             )
 

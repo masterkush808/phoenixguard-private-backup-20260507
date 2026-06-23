@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional, Protocol, cast
 
 import cv2
 import numpy as np
@@ -27,6 +27,18 @@ from PIL import Image
 
 
 logger = logging.getLogger(__name__)
+
+
+class SamPredictorProtocol(Protocol):
+    def set_image(self, image: NDArray[np.uint8]) -> None: ...
+
+    def predict(
+        self,
+        *,
+        point_coords: NDArray[Any],
+        point_labels: NDArray[Any],
+        multimask_output: bool,
+    ) -> tuple[NDArray[Any], NDArray[Any], NDArray[Any]]: ...
 
 
 @dataclass
@@ -72,7 +84,7 @@ class ChartSegmentationEngine:
 
     def __init__(
         self,
-        sam_predictor: Optional[object] = None,
+        sam_predictor: Optional[SamPredictorProtocol] = None,
         min_chart_ratio: float = 0.2,
         max_chart_ratio: float = 0.95,
         min_confidence: float = 0.5,
@@ -126,9 +138,21 @@ class ChartSegmentationEngine:
     def _segment_with_sam(self, img_array: NDArray[np.uint8]) -> ChartSegmentation:
         """SAM-based segmentation with auto-prompting."""
         h, w = img_array.shape[:2]
+        predictor = self.sam_predictor
+        if predictor is None:
+            return ChartSegmentation(
+                mask=cast(NDArray[np.uint8], np.zeros((h, w), dtype=np.uint8)),
+                confidence=0.0,
+                bbox=(0, 0, w, h),
+                area_pixels=0,
+                area_ratio=0.0,
+                contour=None,
+                is_valid=False,
+                error_message="SAM predictor unavailable",
+            )
         try:
             # Set image in SAM
-            self.sam_predictor.set_image(img_array)
+            predictor.set_image(img_array)
 
             # Auto-prompt strategy: use gradient-based edge detection
             gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY) if img_array.ndim == 3 else img_array
@@ -147,7 +171,7 @@ class ChartSegmentationEngine:
             input_label = np.array([1])  # Positive prompt (chart)
 
             # Run SAM
-            masks, scores, logits = self.sam_predictor.predict(
+            masks, scores, logits = predictor.predict(
                 point_coords=input_point,
                 point_labels=input_label,
                 multimask_output=True,  # Get multiple predictions
@@ -207,18 +231,18 @@ class ChartSegmentationEngine:
             if contours:
                 largest = max(contours, key=cv2.contourArea)
                 mask = np.zeros(binary.shape[:2], dtype=np.uint8)
-                cv2.drawContours(mask, [largest], 0, 255, -1)
+                cv2.drawContours(mask, [largest], 0, (255,), -1)
                 if scale != 1.0:
-                    mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+                    mask = cast(NDArray[np.uint8], cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST))
 
                 return self._validate_segmentation(
-                    mask,
+                    cast(NDArray[np.uint8], mask),
                     confidence=0.6,  # Lower confidence for heuristic
                     img_array=img_array,
                 )
             else:
                 # No contours found, return full image as fallback
-                mask = np.ones((h, w), dtype=np.uint8) * 255
+                mask = cast(NDArray[np.uint8], np.ones((h, w), dtype=np.uint8) * 255)
                 return ChartSegmentation(
                     mask=mask,
                     confidence=0.3,
@@ -233,7 +257,7 @@ class ChartSegmentationEngine:
         except Exception as e:
             logger.error(f"Heuristic segmentation failed: {e}")
             return ChartSegmentation(
-                mask=np.zeros((h, w), dtype=np.uint8),
+                mask=cast(NDArray[np.uint8], np.zeros((h, w), dtype=np.uint8)),
                 confidence=0.0,
                 bbox=(0, 0, w, h),
                 area_pixels=0,
@@ -276,7 +300,7 @@ class ChartSegmentationEngine:
 
         # Extract contour
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contour = contours[0] if contours else None
+        contour = cast(Optional[NDArray[np.int32]], contours[0] if contours else None)
 
         # Validate thresholds
         is_valid = True

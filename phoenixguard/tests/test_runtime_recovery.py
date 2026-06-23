@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
+import pytest
 
 _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
@@ -13,12 +15,12 @@ import main
 
 
 def _restore_capture_state(snapshot: dict[str, object]) -> None:
-    with main._capture_runtime_lock:
-        main._capture_runtime_state.clear()
-        main._capture_runtime_state.update(snapshot)
+    with main.capture_runtime_lock:
+        main.capture_runtime_state.clear()
+        main.capture_runtime_state.update(snapshot)
 
 
-def test_restore_capture_recovery_state_restores_pending_bundle(monkeypatch, tmp_path: Path) -> None:
+def test_restore_capture_recovery_state_restores_pending_bundle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     logs_dir = tmp_path / "logs"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -29,15 +31,15 @@ def test_restore_capture_recovery_state_restores_pending_bundle(monkeypatch, tmp
     monkeypatch.setattr(main.RUNTIME, "data_dir", data_dir)
     monkeypatch.setattr(main.RUNTIME, "logs_dir", logs_dir)
 
-    original_state = dict(main._capture_runtime_state)
+    original_state = dict(main.capture_runtime_state)
     try:
-        with main._capture_runtime_lock:
-            main._capture_runtime_state["pending_bundle"] = []
-            main._capture_runtime_state["inflight_bundle"] = []
-            main._capture_runtime_state["bundle_size"] = 4
-            main._capture_runtime_state["status"] = "Hotkey capture offline."
+        with main.capture_runtime_lock:
+            main.capture_runtime_state["pending_bundle"] = []
+            main.capture_runtime_state["inflight_bundle"] = []
+            main.capture_runtime_state["bundle_size"] = 4
+            main.capture_runtime_state["status"] = "Hotkey capture offline."
 
-        recovery_payload = {
+        recovery_payload: dict[str, Any] = {
             "pending_bundle": [
                 {
                     "file_path": str(capture_file),
@@ -56,8 +58,8 @@ def test_restore_capture_recovery_state_restores_pending_bundle(monkeypatch, tmp
         }
         (data_dir / "capture_recovery_state.json").write_text(json.dumps(recovery_payload), encoding="utf-8")
 
-        restored = main._restore_capture_recovery_state()
-        snapshot = main._get_capture_runtime_snapshot()
+        restored = main.restore_capture_recovery_state()
+        snapshot = main.get_capture_runtime_snapshot()
 
         assert restored["pending_bundle_count"] == 1
         assert snapshot["pending_bundle_count"] == 1
@@ -68,7 +70,7 @@ def test_restore_capture_recovery_state_restores_pending_bundle(monkeypatch, tmp
         _restore_capture_state(original_state)
 
 
-def test_resume_recovered_capture_bundle_submits_background_work(monkeypatch, tmp_path: Path) -> None:
+def test_resume_recovered_capture_bundle_submits_background_work(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     logs_dir = tmp_path / "logs"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -77,24 +79,24 @@ def test_resume_recovered_capture_bundle_submits_background_work(monkeypatch, tm
     monkeypatch.setattr(main.RUNTIME, "data_dir", data_dir)
     monkeypatch.setattr(main.RUNTIME, "logs_dir", logs_dir)
 
-    original_state = dict(main._capture_runtime_state)
+    original_state = dict(main.capture_runtime_state)
     calls: list[tuple[list[dict[str, object]], str]] = []
 
     class _ImmediateExecutor:
-        def submit(self, fn, *args, **kwargs):  # type: ignore[no-untyped-def]
+        def submit(self, fn: Any, *args: Any, **kwargs: Any) -> None:
             fn(*args, **kwargs)
             return None
 
     try:
-        with main._capture_runtime_lock:
-            main._capture_runtime_state["inflight_bundle"] = [
+        with main.capture_runtime_lock:
+            main.capture_runtime_state["inflight_bundle"] = [
                 {
                     "file_path": str(tmp_path / "bundle_a.png"),
                     "captured_at": "2026-03-28T00:00:00+00:00",
                     "slot_index": 1,
                 }
             ]
-            main._capture_runtime_state["inflight_source"] = "recovered"
+            main.capture_runtime_state["inflight_source"] = "recovered"
 
         monkeypatch.setattr(main, "_get_background_executor", lambda: _ImmediateExecutor())
         monkeypatch.setattr(
@@ -103,7 +105,7 @@ def test_resume_recovered_capture_bundle_submits_background_work(monkeypatch, tm
             lambda bundle, source="hotkey": calls.append((bundle, source)) or True,
         )
 
-        main._resume_recovered_capture_bundle_if_needed()
+        main.resume_recovered_capture_bundle_if_needed()
 
         assert calls
         assert calls[0][1] == "recovered"
@@ -111,7 +113,7 @@ def test_resume_recovered_capture_bundle_submits_background_work(monkeypatch, tm
         _restore_capture_state(original_state)
 
 
-def test_record_runtime_crash_writes_journal_entry(monkeypatch, tmp_path: Path) -> None:
+def test_record_runtime_crash_writes_journal_entry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     logs_dir = tmp_path / "logs"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -120,7 +122,7 @@ def test_record_runtime_crash_writes_journal_entry(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(main.RUNTIME, "data_dir", data_dir)
     monkeypatch.setattr(main.RUNTIME, "logs_dir", logs_dir)
 
-    main._record_runtime_crash(scope="unit-test", error="boom", traceback_text="traceback")
+    main.record_runtime_crash(scope="unit-test", error="boom", traceback_text="traceback")
 
     rows = [
         json.loads(line)
@@ -132,22 +134,22 @@ def test_record_runtime_crash_writes_journal_entry(monkeypatch, tmp_path: Path) 
     assert rows[-1]["error"] == "boom"
 
 
-def test_get_local_ensemble_returns_cached_runtime_without_runtime_type_name(monkeypatch) -> None:
-    cache_key = main._local_ensemble_cache_key(target_models=["simclr"], max_loaded_models=1)
+def test_get_local_ensemble_returns_cached_runtime_without_runtime_type_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    cache_key = main.local_ensemble_cache_key(target_models=["simclr"], max_loaded_models=1)
     sentinel = object()
-    original_cache = dict(main._local_ensemble_cache)
-    original_future_cache = dict(main._local_ensemble_future_cache)
-    original_error_cache = dict(main._local_ensemble_error_cache)
+    original_cache = dict(main.local_ensemble_cache)
+    original_future_cache = dict(main.local_ensemble_future_cache)
+    original_error_cache = dict(main.local_ensemble_error_cache)
 
     try:
         monkeypatch.setattr(main.RUNTIME, "enable_local_ensemble", True)
-        with main._local_ensemble_lock:
-            main._local_ensemble_cache.clear()
-            main._local_ensemble_cache[cache_key] = sentinel
-            main._local_ensemble_future_cache.clear()
-            main._local_ensemble_error_cache.clear()
+        with main.local_ensemble_lock:
+            main.local_ensemble_cache.clear()
+            main.local_ensemble_cache[cache_key] = sentinel
+            main.local_ensemble_future_cache.clear()
+            main.local_ensemble_error_cache.clear()
 
-        runtime = main._get_local_ensemble(
+        runtime = main.get_local_ensemble(
             block=True,
             target_models=["simclr"],
             max_loaded_models=1,
@@ -155,43 +157,43 @@ def test_get_local_ensemble_returns_cached_runtime_without_runtime_type_name(mon
 
         assert runtime is sentinel
     finally:
-        with main._local_ensemble_lock:
-            main._local_ensemble_cache.clear()
-            main._local_ensemble_cache.update(original_cache)
-            main._local_ensemble_future_cache.clear()
-            main._local_ensemble_future_cache.update(original_future_cache)
-            main._local_ensemble_error_cache.clear()
-            main._local_ensemble_error_cache.update(original_error_cache)
+        with main.local_ensemble_lock:
+            main.local_ensemble_cache.clear()
+            main.local_ensemble_cache.update(original_cache)
+            main.local_ensemble_future_cache.clear()
+            main.local_ensemble_future_cache.update(original_future_cache)
+            main.local_ensemble_error_cache.clear()
+            main.local_ensemble_error_cache.update(original_error_cache)
 
 
-def test_should_force_side_effect_free_council_when_saved_bundles_exist(monkeypatch) -> None:
+def test_should_force_side_effect_free_council_when_saved_bundles_exist(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main, "_saved_local_ensemble_artifacts_available", lambda target_models=None: True)
 
-    assert main._should_force_side_effect_free_council(
+    assert main.should_force_side_effect_free_council(
         side_effect_free=True,
         use_local_ensemble=None,
         council_scope="auto",
         target_models=None,
     ) is True
-    assert main._should_force_side_effect_free_council(
+    assert main.should_force_side_effect_free_council(
         side_effect_free=True,
         use_local_ensemble=True,
         council_scope="half",
         target_models=["simclr"],
     ) is True
-    assert main._should_force_side_effect_free_council(
+    assert main.should_force_side_effect_free_council(
         side_effect_free=True,
         use_local_ensemble=False,
         council_scope="auto",
         target_models=None,
     ) is False
-    assert main._should_force_side_effect_free_council(
+    assert main.should_force_side_effect_free_council(
         side_effect_free=False,
         use_local_ensemble=None,
         council_scope="auto",
         target_models=None,
     ) is False
-    assert main._should_force_side_effect_free_council(
+    assert main.should_force_side_effect_free_council(
         side_effect_free=True,
         use_local_ensemble=None,
         council_scope="off",
@@ -199,22 +201,22 @@ def test_should_force_side_effect_free_council_when_saved_bundles_exist(monkeypa
     ) is False
 
 
-def test_get_local_ensemble_allow_when_disabled_returns_cached_runtime(monkeypatch) -> None:
-    cache_key = main._local_ensemble_cache_key(target_models=["simclr"], max_loaded_models=1)
+def test_get_local_ensemble_allow_when_disabled_returns_cached_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    cache_key = main.local_ensemble_cache_key(target_models=["simclr"], max_loaded_models=1)
     sentinel = object()
-    original_cache = dict(main._local_ensemble_cache)
-    original_future_cache = dict(main._local_ensemble_future_cache)
-    original_error_cache = dict(main._local_ensemble_error_cache)
+    original_cache = dict(main.local_ensemble_cache)
+    original_future_cache = dict(main.local_ensemble_future_cache)
+    original_error_cache = dict(main.local_ensemble_error_cache)
 
     try:
         monkeypatch.setattr(main.RUNTIME, "enable_local_ensemble", False)
-        with main._local_ensemble_lock:
-            main._local_ensemble_cache.clear()
-            main._local_ensemble_cache[cache_key] = sentinel
-            main._local_ensemble_future_cache.clear()
-            main._local_ensemble_error_cache.clear()
+        with main.local_ensemble_lock:
+            main.local_ensemble_cache.clear()
+            main.local_ensemble_cache[cache_key] = sentinel
+            main.local_ensemble_future_cache.clear()
+            main.local_ensemble_error_cache.clear()
 
-        runtime = main._get_local_ensemble(
+        runtime = main.get_local_ensemble(
             block=True,
             target_models=["simclr"],
             max_loaded_models=1,
@@ -223,7 +225,7 @@ def test_get_local_ensemble_allow_when_disabled_returns_cached_runtime(monkeypat
 
         assert runtime is sentinel
         assert (
-            main._get_local_ensemble(
+            main.get_local_ensemble(
                 block=True,
                 target_models=["simclr"],
                 max_loaded_models=1,
@@ -232,13 +234,13 @@ def test_get_local_ensemble_allow_when_disabled_returns_cached_runtime(monkeypat
             is None
         )
     finally:
-        with main._local_ensemble_lock:
-            main._local_ensemble_cache.clear()
-            main._local_ensemble_cache.update(original_cache)
-            main._local_ensemble_future_cache.clear()
-            main._local_ensemble_future_cache.update(original_future_cache)
-            main._local_ensemble_error_cache.clear()
-            main._local_ensemble_error_cache.update(original_error_cache)
+        with main.local_ensemble_lock:
+            main.local_ensemble_cache.clear()
+            main.local_ensemble_cache.update(original_cache)
+            main.local_ensemble_future_cache.clear()
+            main.local_ensemble_future_cache.update(original_future_cache)
+            main.local_ensemble_error_cache.clear()
+            main.local_ensemble_error_cache.update(original_error_cache)
 
 
 def test_sync_forecast_into_chart_state_promotes_forecast_state_and_projection() -> None:
@@ -271,7 +273,7 @@ def test_sync_forecast_into_chart_state_promotes_forecast_state_and_projection()
         "projected_box_explanation": "counter-macro sell release",
     }
 
-    synced = main._sync_forecast_into_chart_state(chart_state, forecast)
+    synced = main.sync_forecast_into_chart_state(chart_state, forecast)
 
     assert synced["structure_setup"] == "reversal_release"
     assert synced["structure_trade_ready"] is True
@@ -311,7 +313,7 @@ def test_sync_forecast_into_chart_state_preserves_existing_ready_source_when_unc
         "projection_dominance": 0.11,
     }
 
-    synced = main._sync_forecast_into_chart_state(chart_state, forecast)
+    synced = main.sync_forecast_into_chart_state(chart_state, forecast)
 
     assert synced["structure_setup"] == "impulse_chain"
     assert synced["structure_setup_source"] == "council"

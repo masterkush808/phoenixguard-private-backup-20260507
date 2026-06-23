@@ -308,6 +308,9 @@ class MultiModelEnsemble:
         views.extend(candidates[: max(0, view_count - 1)])
         return views[:view_count]
 
+    def build_bagged_views_for_test(self, img_array: NDArray[np.uint8]) -> list[tuple[str, NDArray[np.uint8]]]:
+        return self._build_bagged_views(img_array)
+
     def _run_bagged_yolo(self, img_array: NDArray[np.uint8]) -> Optional[dict[str, Any]]:
         """Run YOLO across deterministic same-coordinate views and pool raw boxes."""
         views = self._build_bagged_views(img_array)
@@ -461,6 +464,13 @@ class MultiModelEnsemble:
         # Filter by confidence
         return [d for d in all_detections if d.confidence >= self.confidence_threshold]
 
+    def fuse_detections_for_test(
+        self,
+        yolo_output: dict[str, Any] | None,
+        vit_output: dict[str, Any] | None,
+    ) -> list[Detection]:
+        return self._fuse_detections(yolo_output, vit_output)
+
     def _weighted_box_fusion(
         self,
         yolo_output: Mapping[str, Any],
@@ -592,6 +602,9 @@ class MultiModelEnsemble:
 
         return keep
 
+    def nms_for_test(self, detections: list[Detection], iou_threshold: float = 0.5) -> list[Detection]:
+        return self._nms(detections, iou_threshold=iou_threshold)
+
     def _compute_iou(self, det1: Detection, det2: Detection) -> float:
         """Compute Intersection over Union between two detections."""
         x1_inter = max(det1.x1, det2.x1)
@@ -608,6 +621,9 @@ class MultiModelEnsemble:
         union_area = det1_area + det2_area - inter_area
 
         return inter_area / union_area if union_area > 0 else 0.0
+
+    def compute_iou_for_test(self, det1: Detection, det2: Detection) -> float:
+        return self._compute_iou(det1, det2)
 
     def _compute_fusion_scores(
         self,

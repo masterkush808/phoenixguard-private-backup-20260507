@@ -32,6 +32,10 @@ try:
 except Exception:  # pragma: no cover - exercised only on systems without tkinter
     tk = None  # type: ignore[assignment]
 
+# `run()` raises a clear runtime error before GUI construction when tkinter is
+# unavailable; this alias keeps the optional module boundary local for Pyright.
+_tk: Any = tk
+
 
 DEFAULT_SESSION_ID = "pocket-live-8788"
 DEFAULT_BASE_URL = "http://127.0.0.1:8793"
@@ -163,7 +167,7 @@ class EnterNowFloatingGui:
         self.root.mainloop()
 
     def _build_window(self) -> None:
-        root = tk.Tk()
+        root = _tk.Tk()
         self.root = root
         root.title("PhoenixGuard Enter Now Sentinel")
         root.geometry(f"{self.size[0]}x{self.size[1]}+{self.position[0]}+{self.position[1]}")
@@ -195,7 +199,7 @@ class EnterNowFloatingGui:
         amber = "#F59E0B"
 
         def var(name: str, value: str = "") -> Any:
-            item = tk.StringVar(value=value)
+            item = _tk.StringVar(value=value)
             self.vars[name] = item
             return item
 
@@ -216,14 +220,14 @@ class EnterNowFloatingGui:
         root.grid_columnconfigure(0, weight=1)
         root.grid_rowconfigure(1, weight=1)
 
-        header = tk.Frame(root, bg=bg, padx=12, pady=10)
+        header = _tk.Frame(root, bg=bg, padx=12, pady=10)
         header.grid(row=0, column=0, sticky="ew")
         header.grid_columnconfigure(1, weight=1)
-        self.status_canvas = tk.Canvas(header, width=22, height=22, bg=bg, highlightthickness=0)
+        self.status_canvas = _tk.Canvas(header, width=22, height=22, bg=bg, highlightthickness=0)
         self.status_canvas.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 9), pady=(2, 0))
         self.status_dot = self.status_canvas.create_oval(4, 4, 18, 18, fill=cyan, outline="#DDFBFF", width=1)
 
-        title = tk.Label(
+        title = _tk.Label(
             header,
             text="ENTER NOW SENTINEL",
             bg=bg,
@@ -232,7 +236,7 @@ class EnterNowFloatingGui:
             font=("Segoe UI", 11, "bold"),
         )
         title.grid(row=0, column=1, sticky="ew")
-        subtitle = tk.Label(
+        subtitle = _tk.Label(
             header,
             textvariable=self.vars["subtitle"],
             bg=bg,
@@ -242,7 +246,7 @@ class EnterNowFloatingGui:
         )
         subtitle.grid(row=1, column=1, sticky="ew", pady=(1, 0))
 
-        close_button = tk.Button(
+        close_button = _tk.Button(
             header,
             text="CLOSE",
             command=self._close,
@@ -257,16 +261,16 @@ class EnterNowFloatingGui:
         )
         close_button.grid(row=0, column=2, rowspan=2, sticky="ne", padx=(10, 0))
 
-        body = tk.Frame(root, bg=panel, highlightbackground=line, highlightthickness=1)
+        body = _tk.Frame(root, bg=panel, highlightbackground=line, highlightthickness=1)
         body.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
         body.grid_columnconfigure(0, weight=1)
         body.grid_rowconfigure(2, weight=0)
         body.grid_rowconfigure(3, weight=1)
 
-        state_row = tk.Frame(body, bg=panel, padx=12, pady=10)
+        state_row = _tk.Frame(body, bg=panel, padx=12, pady=10)
         state_row.grid(row=0, column=0, sticky="ew")
         state_row.grid_columnconfigure(0, weight=1)
-        self.status_label = tk.Label(
+        self.status_label = _tk.Label(
             state_row,
             textvariable=self.vars["state"],
             bg=panel,
@@ -275,7 +279,7 @@ class EnterNowFloatingGui:
             font=("Segoe UI", 10, "bold"),
         )
         self.status_label.grid(row=0, column=0, sticky="ew")
-        clock = tk.Label(
+        clock = _tk.Label(
             state_row,
             textvariable=self.vars["clock"],
             bg=panel,
@@ -285,10 +289,10 @@ class EnterNowFloatingGui:
         )
         clock.grid(row=0, column=1, sticky="e")
 
-        hero = tk.Frame(body, bg="#08111F", padx=12, pady=12, highlightbackground="#1F2F49", highlightthickness=1)
+        hero = _tk.Frame(body, bg="#08111F", padx=12, pady=12, highlightbackground="#1F2F49", highlightthickness=1)
         hero.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
         hero.grid_columnconfigure(0, weight=1)
-        self.side_label = tk.Label(
+        self.side_label = _tk.Label(
             hero,
             textvariable=self.vars["side"],
             bg="#08111F",
@@ -297,7 +301,7 @@ class EnterNowFloatingGui:
             font=("Segoe UI", 26, "bold"),
         )
         self.side_label.grid(row=0, column=0, sticky="ew")
-        lane = tk.Label(
+        lane = _tk.Label(
             hero,
             textvariable=self.vars["lane"],
             bg="#08111F",
@@ -306,7 +310,7 @@ class EnterNowFloatingGui:
             font=("Segoe UI", 10, "bold"),
         )
         lane.grid(row=1, column=0, sticky="ew", pady=(2, 0))
-        score = tk.Label(
+        score = _tk.Label(
             hero,
             textvariable=self.vars["score"],
             bg="#08111F",
@@ -315,7 +319,7 @@ class EnterNowFloatingGui:
             font=("Segoe UI", 9),
         )
         score.grid(row=2, column=0, sticky="ew", pady=(4, 0))
-        packet = tk.Label(
+        packet = _tk.Label(
             hero,
             textvariable=self.vars["packet"],
             bg="#08111F",
@@ -325,7 +329,7 @@ class EnterNowFloatingGui:
         )
         packet.grid(row=3, column=0, sticky="ew", pady=(5, 0))
 
-        reason = tk.Label(
+        reason = _tk.Label(
             body,
             textvariable=self.vars["reason"],
             bg=panel,
@@ -339,11 +343,11 @@ class EnterNowFloatingGui:
         self.reason_label = reason
         reason.grid(row=2, column=0, sticky="new", padx=0, pady=(0, 8))
 
-        feed_frame = tk.Frame(body, bg=rail, padx=8, pady=8)
+        feed_frame = _tk.Frame(body, bg=rail, padx=8, pady=8)
         feed_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 10))
         feed_frame.grid_columnconfigure(0, weight=1)
         feed_frame.grid_rowconfigure(0, weight=1)
-        self.event_text = tk.Text(
+        self.event_text = _tk.Text(
             feed_frame,
             bg=rail,
             fg="#BFD7FF",
@@ -356,10 +360,10 @@ class EnterNowFloatingGui:
         self.event_text.grid(row=0, column=0, sticky="nsew")
         self.event_text.configure(state="disabled")
 
-        footer = tk.Frame(root, bg=bg, padx=12, pady=0)
+        footer = _tk.Frame(root, bg=bg, padx=12, pady=0)
         footer.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         footer.grid_columnconfigure(0, weight=1)
-        source = tk.Label(
+        source = _tk.Label(
             footer,
             textvariable=self.vars["source"],
             bg=bg,
@@ -368,7 +372,7 @@ class EnterNowFloatingGui:
             font=("Segoe UI", 7),
         )
         source.grid(row=0, column=0, sticky="ew")
-        footer_text = tk.Label(
+        footer_text = _tk.Label(
             footer,
             textvariable=self.vars["footer"],
             bg=bg,
@@ -377,7 +381,7 @@ class EnterNowFloatingGui:
             font=("Segoe UI", 7),
         )
         footer_text.grid(row=0, column=1, sticky="e")
-        self.resize_grip = tk.Canvas(footer, width=22, height=18, bg=bg, highlightthickness=0, cursor="sizing")
+        self.resize_grip = _tk.Canvas(footer, width=22, height=18, bg=bg, highlightthickness=0, cursor="sizing")
         self.resize_grip.grid(row=0, column=2, sticky="e", padx=(8, 0))
         for offset in (0, 5, 10):
             self.resize_grip.create_line(
@@ -408,7 +412,7 @@ class EnterNowFloatingGui:
                 pass
 
     def _build_menu(self, root: Any) -> None:
-        menu = tk.Menu(root, tearoff=False, bg="#0B1220", fg="#E8F2FF")
+        menu = _tk.Menu(root, tearoff=False, bg="#0B1220", fg="#E8F2FF")
         menu.add_command(label="Snap Top Right", command=lambda: self._snap("top_right"))
         menu.add_command(label="Snap Bottom Right", command=lambda: self._snap("bottom_right"))
         menu.add_separator()

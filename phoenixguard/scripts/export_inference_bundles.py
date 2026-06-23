@@ -167,7 +167,7 @@ def _save_onnx_export(
     destination.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(
         bundle,
-        example,
+        (example,),
         str(destination),
         input_names=["input"],
         output_names=["logits", "features"],
@@ -237,7 +237,7 @@ def export_model(model_name: str, *, export_onnx: bool = False) -> dict[str, Any
             )
         )
 
-    metadata = {
+    metadata: dict[str, Any] = {
         "format_version": 1,
         "model_name": model_name,
         "source_bundle": str(bundle_path.name),

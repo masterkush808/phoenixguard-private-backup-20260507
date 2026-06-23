@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-from phoenixguard.decision import personalization as _impl
+from phoenixguard.decision.personalization import PersonalizationEngine, PreferenceStore
 
-globals().update({name: getattr(_impl, name) for name in dir(_impl) if not name.startswith("__")})
+__all__ = ["PersonalizationEngine", "PreferenceStore"]

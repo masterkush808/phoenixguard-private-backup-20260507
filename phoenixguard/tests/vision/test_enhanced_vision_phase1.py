@@ -14,6 +14,7 @@ Test Categories:
 """
 import pytest
 import numpy as np
+from numpy.typing import NDArray
 from PIL import Image
 import time
 import logging
@@ -38,16 +39,17 @@ pytest_plugins = ("pytest_asyncio",)
 # ============================================================================
 
 @pytest.fixture
-def sample_chart_image():
+def sample_chart_image() -> Image.Image:
     """Create synthetic chart image (640x480, candlestick pattern)."""
     h, w = 480, 640
-    img = np.ones((h, w, 3), dtype=np.uint8) * 240  # Light gray background
+    rng = np.random.default_rng(808)
+    img: NDArray[np.uint8] = np.full((h, w, 3), 240, dtype=np.uint8)  # Light gray background
 
     # Draw candlesticks
     for x in range(100, 600, 50):
         # High-Low line (wick)
-        y_high = 100 + np.random.randint(0, 50)
-        y_low = y_high + 150 + np.random.randint(0, 50)
+        y_high = 100 + int(rng.integers(0, 50))
+        y_low = y_high + 150 + int(rng.integers(0, 50))
         img[y_high:y_low, x:x+2, :] = [50, 50, 50]  # Black wick
 
         # Open-Close box
@@ -63,10 +65,10 @@ def sample_chart_image():
 
 
 @pytest.fixture
-def sample_video_frames(sample_chart_image):
+def sample_video_frames(sample_chart_image: Image.Image) -> list[Image.Image]:
     """Create sequence of frames (simulating price movement)."""
-    frames = []
-    base_array = np.array(sample_chart_image)
+    frames: list[Image.Image] = []
+    base_array = np.asarray(sample_chart_image, dtype=np.uint8)
 
     for i in range(5):
         # Simulate scrolling candlesticks (left shift)
@@ -77,7 +79,7 @@ def sample_video_frames(sample_chart_image):
 
 
 @pytest.fixture
-def model_registry():
+def model_registry() -> ModelRegistry:
     """Initialize model registry."""
     return ModelRegistry()
 
@@ -95,7 +97,7 @@ class TestModelRegistry:
         assert registry.device in ["cpu", "cuda"]
         logger.info(f"Device detected: {registry.device}")
 
-    def test_yolo_model_loading(self, model_registry):
+    def test_yolo_model_loading(self, model_registry: ModelRegistry) -> None:
         """Test YOLOv8 model registration."""
         # Skip if model not available
         result = model_registry.register_yolo_model("yolov8n.pt")  # nano for speed
@@ -105,7 +107,7 @@ class TestModelRegistry:
         else:
             logger.warning("YOLO model not available (expected in CI environment)")
 
-    def test_vit_model_loading(self, model_registry):
+    def test_vit_model_loading(self, model_registry: ModelRegistry) -> None:
         """Test Vision Transformer registration."""
         result = model_registry.register_vit_model("vit_base_patch16_384")
         if result:
@@ -114,7 +116,7 @@ class TestModelRegistry:
         else:
             logger.warning("ViT model not available (expected in CI environment)")
 
-    def test_model_availability_check(self, model_registry):
+    def test_model_availability_check(self, model_registry: ModelRegistry) -> None:
         """Verify model availability reporting."""
         is_available = model_registry.is_available("yolo")
         # Just check it doesn't crash
@@ -128,7 +130,7 @@ class TestModelRegistry:
 class TestMultiModelEnsemble:
     """Test ensemble inference and fusion."""
 
-    def test_ensemble_initialization(self, model_registry):
+    def test_ensemble_initialization(self, model_registry: ModelRegistry) -> None:
         """Test ensemble creation with valid weights."""
         ensemble = MultiModelEnsemble(
             model_registry,
@@ -141,7 +143,7 @@ class TestMultiModelEnsemble:
         total_weight = sum(ensemble.weights.values())
         assert abs(total_weight - 1.0) < 1e-6
 
-    def test_ensemble_bagging_boosting_strategy(self, model_registry, sample_chart_image):
+    def test_ensemble_bagging_boosting_strategy(self, model_registry: ModelRegistry, sample_chart_image: Image.Image) -> None:
         """Verify deterministic same-coordinate bagging views and strategy metadata."""
         ensemble = MultiModelEnsemble(
             model_registry,
@@ -150,16 +152,17 @@ class TestMultiModelEnsemble:
             bagging_views=3,
             boosting_rounds=2,
         )
-        views = ensemble._build_bagged_views(np.array(sample_chart_image))
+        sample_array = np.asarray(sample_chart_image, dtype=np.uint8)
+        views = ensemble.build_bagged_views_for_test(sample_array)
 
         assert ensemble.ensemble_strategy["bagging_enabled"] is True
         assert ensemble.ensemble_strategy["boosting_enabled"] is True
         assert len(views) == 3
         assert views[0][0] == "original"
-        assert all(view.shape[:2] == np.array(sample_chart_image).shape[:2] for _, view in views)
+        assert all(view.shape[:2] == sample_array.shape[:2] for _, view in views)
         assert ensemble.get_stats()["ensemble_strategy"]["bagging_views"] == 3
 
-    def test_ensemble_weighted_box_fusion_boosts_cross_view_agreement(self, model_registry):
+    def test_ensemble_weighted_box_fusion_boosts_cross_view_agreement(self, model_registry: ModelRegistry) -> None:
         """Bagged YOLO agreement should fuse and boost stable detections."""
         ensemble = MultiModelEnsemble(
             model_registry,
@@ -169,7 +172,7 @@ class TestMultiModelEnsemble:
             bagging_views=3,
             boosting_rounds=2,
         )
-        yolo_output = {
+        yolo_output: dict[str, object] = {
             "status": "success",
             "count": 2,
             "bagging_views": 3,
@@ -179,7 +182,7 @@ class TestMultiModelEnsemble:
             ],
         }
 
-        fused = ensemble._fuse_detections(yolo_output, {"status": "success"})
+        fused = ensemble.fuse_detections_for_test(yolo_output, {"status": "success"})
 
         assert len(fused) == 1
         assert fused[0].model_source == "bagged_boosted_yolo"
@@ -187,7 +190,7 @@ class TestMultiModelEnsemble:
         assert fused[0].metadata["vote_count"] == 2
         assert fused[0].metadata["ensemble_method"] == "bagging+boosting"
 
-    def test_ensemble_weight_normalization(self, model_registry):
+    def test_ensemble_weight_normalization(self, model_registry: ModelRegistry) -> None:
         """Verify weights are properly normalized."""
         ensemble = MultiModelEnsemble(
             model_registry,
@@ -198,7 +201,7 @@ class TestMultiModelEnsemble:
         total = sum(ensemble.weights.values())
         assert abs(total - 1.0) < 1e-6
 
-    def test_detection_nms(self, model_registry):
+    def test_detection_nms(self, model_registry: ModelRegistry) -> None:
         """Test Non-Maximum Suppression deduplication."""
         ensemble = MultiModelEnsemble(model_registry)
 
@@ -206,27 +209,27 @@ class TestMultiModelEnsemble:
         det1 = Detection(x1=0, y1=0, x2=100, y2=100, confidence=0.9, class_id=0, class_name="chart", model_source="yolo", metadata={})
         det2 = Detection(x1=10, y1=10, x2=110, y2=110, confidence=0.8, class_id=0, class_name="chart", model_source="vit", metadata={})
 
-        nms_result = ensemble._nms([det1, det2], iou_threshold=0.5)
+        nms_result = ensemble.nms_for_test([det1, det2], iou_threshold=0.5)
 
         # Should suppress one
         assert len(nms_result) <= 2
 
-    def test_iou_computation(self, model_registry):
+    def test_iou_computation(self, model_registry: ModelRegistry) -> None:
         """Test Intersection-over-Union calculation."""
         ensemble = MultiModelEnsemble(model_registry)
 
         # Perfect overlap
         det1 = Detection(x1=0, y1=0, x2=100, y2=100, confidence=0.9, class_id=0, class_name="chart", model_source="yolo", metadata={})
         det2 = Detection(x1=0, y1=0, x2=100, y2=100, confidence=0.9, class_id=0, class_name="chart", model_source="yolo", metadata={})
-        iou = ensemble._compute_iou(det1, det2)
+        iou = ensemble.compute_iou_for_test(det1, det2)
         assert abs(iou - 1.0) < 1e-6
 
         # No overlap
         det3 = Detection(x1=200, y1=200, x2=300, y2=300, confidence=0.9, class_id=0, class_name="chart", model_source="yolo", metadata={})
-        iou = ensemble._compute_iou(det1, det3)
+        iou = ensemble.compute_iou_for_test(det1, det3)
         assert abs(iou) < 1e-6
 
-    def test_ensemble_inference_empty_models(self, model_registry, sample_chart_image):
+    def test_ensemble_inference_empty_models(self, model_registry: ModelRegistry, sample_chart_image: Image.Image) -> None:
         """Test ensemble with no models loaded (graceful degradation)."""
         ensemble = MultiModelEnsemble(model_registry)
         # Don't load any models
@@ -251,7 +254,7 @@ class TestOpticalFlowTracker:
         assert tracker is not None
         assert tracker.frame_counter == 0
 
-    def test_first_frame_processing(self, sample_chart_image):
+    def test_first_frame_processing(self, sample_chart_image: Image.Image) -> None:
         """Test processing first frame (should return neutral)."""
         tracker = OpticalFlowTracker()
         flow_frame = tracker.process_frame(sample_chart_image, timestamp_ms=0.0)
@@ -261,7 +264,7 @@ class TestOpticalFlowTracker:
         assert flow_frame.consolidation_score == 1.0  # First frame
         assert flow_frame.motion_energy == 0.0
 
-    def test_frame_sequence_processing(self, sample_video_frames):
+    def test_frame_sequence_processing(self, sample_video_frames: list[Image.Image]) -> None:
         """Test processing multiple frames (motion accumulation)."""
         tracker = OpticalFlowTracker(accumulation_window=3)
 
@@ -272,7 +275,7 @@ class TestOpticalFlowTracker:
         # Check history
         assert len(tracker.frame_history) <= 3
 
-    def test_consolidation_scoring(self, sample_chart_image):
+    def test_consolidation_scoring(self, sample_chart_image: Image.Image) -> None:
         """Test consolidation zone detection."""
         tracker = OpticalFlowTracker()
 
@@ -283,7 +286,7 @@ class TestOpticalFlowTracker:
         stats = tracker.get_motion_stats()
         assert stats.consolidation_count >= 0
 
-    def test_motion_stats_aggregation(self, sample_video_frames):
+    def test_motion_stats_aggregation(self, sample_video_frames: list[Image.Image]) -> None:
         """Test statistics aggregation across frame window."""
         tracker = OpticalFlowTracker(accumulation_window=3)
 
@@ -295,7 +298,7 @@ class TestOpticalFlowTracker:
         assert stats.motion_trend in ["increasing", "stable", "decreasing"]
         assert stats.confidence <= 1.0
 
-    def test_flow_visualization(self, sample_chart_image):
+    def test_flow_visualization(self, sample_chart_image: Image.Image) -> None:
         """Test optical flow visualization generation."""
         tracker = OpticalFlowTracker()
         flow_frame = tracker.process_frame(sample_chart_image, 0.0)
@@ -318,7 +321,7 @@ class TestChartSegmentation:
         engine = ChartSegmentationEngine()
         assert engine is not None
 
-    def test_chart_segmentation(self, sample_chart_image):
+    def test_chart_segmentation(self, sample_chart_image: Image.Image) -> None:
         """Test chart boundary detection."""
         engine = ChartSegmentationEngine()
         segmentation = engine.segment_chart(sample_chart_image)
@@ -328,7 +331,7 @@ class TestChartSegmentation:
         assert segmentation.mask is not None
         assert segmentation.bbox is not None
 
-    def test_segmentation_mask_properties(self, sample_chart_image):
+    def test_segmentation_mask_properties(self, sample_chart_image: Image.Image) -> None:
         """Test segmentation mask validity."""
         engine = ChartSegmentationEngine()
         segmentation = engine.segment_chart(sample_chart_image)
@@ -336,7 +339,7 @@ class TestChartSegmentation:
         # Mask should be binary
         assert np.all((segmentation.mask == 0) | (segmentation.mask == 255))
 
-    def test_chart_extraction(self, sample_chart_image):
+    def test_chart_extraction(self, sample_chart_image: Image.Image) -> None:
         """Test cropping and extracting chart region."""
         engine = ChartSegmentationEngine()
         segmentation = engine.segment_chart(sample_chart_image)
@@ -347,7 +350,7 @@ class TestChartSegmentation:
             assert stats.width_px > 0
             assert stats.height_px > 0
 
-    def test_segmentation_visualization(self, sample_chart_image):
+    def test_segmentation_visualization(self, sample_chart_image: Image.Image) -> None:
         """Test segmentation visualization."""
         engine = ChartSegmentationEngine()
         segmentation = engine.segment_chart(sample_chart_image)
@@ -375,7 +378,7 @@ class TestEnhancedVisionEngine:
         assert engine is not None
         assert engine.frame_counter == 0
 
-    def test_end_to_end_frame_processing(self, sample_chart_image):
+    def test_end_to_end_frame_processing(self, sample_chart_image: Image.Image) -> None:
         """Test complete pipeline on single frame."""
         engine = EnhancedVisionEngine(
             enable_vit=False,
@@ -390,7 +393,7 @@ class TestEnhancedVisionEngine:
         assert output.inference_time_ms >= 0.0
         assert 0.0 <= output.quality_score <= 1.0
 
-    def test_multi_frame_sequence(self, sample_video_frames):
+    def test_multi_frame_sequence(self, sample_video_frames: list[Image.Image]) -> None:
         """Test pipeline on frame sequence."""
         engine = EnhancedVisionEngine(
             enable_vit=False,
@@ -407,7 +410,7 @@ class TestEnhancedVisionEngine:
         assert len(outputs) == 3
         assert engine.frame_counter == 3
 
-    def test_output_structure(self, sample_chart_image):
+    def test_output_structure(self, sample_chart_image: Image.Image) -> None:
         """Verify output contains all required fields."""
         engine = EnhancedVisionEngine(
             enable_vit=False,
@@ -428,7 +431,7 @@ class TestEnhancedVisionEngine:
         assert hasattr(output, "attribution_scores")
         assert hasattr(output, "feature_importance")
 
-    def test_engine_reset(self, sample_chart_image):
+    def test_engine_reset(self, sample_chart_image: Image.Image) -> None:
         """Test engine state reset."""
         engine = EnhancedVisionEngine(
             enable_vit=False,
@@ -443,7 +446,7 @@ class TestEnhancedVisionEngine:
         engine.reset()
         assert engine.frame_counter == 0
 
-    def test_diagnostics_interface(self, sample_chart_image):
+    def test_diagnostics_interface(self, sample_chart_image: Image.Image) -> None:
         """Test diagnostic data collection."""
         engine = EnhancedVisionEngine(
             enable_vit=False,
@@ -502,7 +505,7 @@ class TestEdgeCases:
             enable_optical_flow=True,
         )
 
-        img_array = np.ones((480, 640, 3), dtype=np.uint8) * 128
+        img_array: NDArray[np.uint8] = np.full((480, 640, 3), 128, dtype=np.uint8)
         output = engine.process_frame(img_array)
         assert output is not None
 
@@ -515,7 +518,7 @@ class TestEdgeCases:
             enable_optical_flow=True,
         )
 
-        gray_array = np.ones((480, 640), dtype=np.uint8) * 128
+        gray_array: NDArray[np.uint8] = np.full((480, 640), 128, dtype=np.uint8)
         output = engine.process_frame(gray_array)
         assert output is not None
 
@@ -527,7 +530,7 @@ class TestEdgeCases:
 class TestPerformance:
     """Test performance characteristics."""
 
-    def test_optical_flow_latency(self, sample_chart_image):
+    def test_optical_flow_latency(self, sample_chart_image: Image.Image) -> None:
         """Benchmark optical flow inference time."""
         tracker = OpticalFlowTracker()
 
@@ -542,7 +545,7 @@ class TestPerformance:
         logger.info(f"Optical flow latency: {elapsed_ms:.1f}ms")
         assert elapsed_ms < 500  # Should be fast
 
-    def test_segmentation_latency(self, sample_chart_image):
+    def test_segmentation_latency(self, sample_chart_image: Image.Image) -> None:
         """Benchmark chart segmentation time."""
         engine = ChartSegmentationEngine()
 
@@ -553,7 +556,7 @@ class TestPerformance:
         logger.info(f"Segmentation latency: {elapsed_ms:.1f}ms")
         assert elapsed_ms < 1000  # Should complete in reasonable time
 
-    def test_end_to_end_latency(self, sample_chart_image):
+    def test_end_to_end_latency(self, sample_chart_image: Image.Image) -> None:
         """Benchmark complete pipeline."""
         engine = EnhancedVisionEngine(
             enable_vit=False,

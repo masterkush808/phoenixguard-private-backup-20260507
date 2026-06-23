@@ -206,6 +206,11 @@ def _translate(box: Sequence[float], dx: float, dy: float) -> list[float]:
     return [float(box[0]) + dx, float(box[1]) + dy, float(box[2]) + dx, float(box[3]) + dy]
 
 
+def _box_tuple(box: Sequence[Any]) -> tuple[float, float, float, float]:
+    values = _bbox(box) or [0.0, 0.0, 0.0, 0.0]
+    return float(values[0]), float(values[1]), float(values[2]), float(values[3])
+
+
 @dataclass(frozen=True)
 class BrokerSceneGraphV3:
     frame_id: int
@@ -274,16 +279,16 @@ def build_broker_scene_graph_v3(
     valid = bool(surface_width > 1 and surface_height > 1 and plot_full[2] > plot_full[0] and plot_full[3] > plot_full[1])
     return BrokerSceneGraphV3(
         frame_id=frame_id,
-        broker_surface_bounds=tuple(surface),
-        chart_region_bounds=tuple(chart_full),
-        chart_region_chart_bounds=tuple(chart_space),
-        plot_area_bounds=tuple(plot_full),
-        plot_area_chart_bounds=tuple(plot_chart),
-        right_order_panel_bounds=tuple(right_panel),
-        top_asset_tabs_bounds=tuple(top_tabs),
-        left_menu_bounds=tuple(left_menu),
-        price_axis_bounds=tuple(price_axis),
-        time_axis_bounds=tuple(time_axis),
+        broker_surface_bounds=_box_tuple(surface),
+        chart_region_bounds=_box_tuple(chart_full),
+        chart_region_chart_bounds=_box_tuple(chart_space),
+        plot_area_bounds=_box_tuple(plot_full),
+        plot_area_chart_bounds=_box_tuple(plot_chart),
+        right_order_panel_bounds=_box_tuple(right_panel),
+        top_asset_tabs_bounds=_box_tuple(top_tabs),
+        left_menu_bounds=_box_tuple(left_menu),
+        price_axis_bounds=_box_tuple(price_axis),
+        time_axis_bounds=_box_tuple(time_axis),
         valid=valid,
         reason="broker surface and chart plot area locked" if valid else "scene graph could not lock broker surface and chart plot area",
     )

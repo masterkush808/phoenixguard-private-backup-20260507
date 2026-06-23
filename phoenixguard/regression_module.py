@@ -1,5 +1,25 @@
 from __future__ import annotations
 
-from phoenixguard.decision import regression_module as _impl
+from phoenixguard.decision.regression_module import (
+    ChronosRegressor,
+    Forecast3MCore,
+    Forecast3MOutput,
+    ForecastRouter,
+    ImageFusionRegressor,
+    _accumulation_distribution,
+    _conformal_interval,
+    _poly_trend,
+    conformal_interval,
+)
 
-globals().update({name: getattr(_impl, name) for name in dir(_impl) if not name.startswith("__")})
+__all__ = [
+    "ChronosRegressor",
+    "Forecast3MCore",
+    "Forecast3MOutput",
+    "ForecastRouter",
+    "ImageFusionRegressor",
+    "_accumulation_distribution",
+    "_conformal_interval",
+    "_poly_trend",
+    "conformal_interval",
+]

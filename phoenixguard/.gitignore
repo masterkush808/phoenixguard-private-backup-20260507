@@ -21,6 +21,8 @@ node_modules/
 # Runtime/capture/debug output
 .codex_runtime/
 .codex_logs/
+.backups/
+_backups/
 .gradio/
 .tmp_obs/
 .tmp_obs2/

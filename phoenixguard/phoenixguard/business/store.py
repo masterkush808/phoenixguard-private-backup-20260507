@@ -8,7 +8,7 @@ import secrets
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from .packages import (
     DEFAULT_PAID_PLAN_CODE,
@@ -22,6 +22,10 @@ from .packages import (
 
 def _stable_id(prefix: str, value: str) -> str:
     return f"{prefix}_{uuid.uuid5(uuid.NAMESPACE_URL, f'phoenixguard:{value}').hex[:16]}"
+
+
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _hash_secret(value: str) -> str:
@@ -1026,10 +1030,10 @@ class BusinessStore:
                 return {"status": "ignored", "reason": "duplicate_billing_event"}
             self.processed_billing_event_ids.add(event_id)
         event_type = str(event.get("type") or "").strip()
-        data = event.get("data") if isinstance(event.get("data"), Mapping) else {}
-        obj = data.get("object") if isinstance(data.get("object"), Mapping) else {}
+        data = _mapping(event.get("data"))
+        obj = _mapping(data.get("object"))
         provider_subscription_id = str(obj.get("id") or obj.get("subscription") or "")
-        metadata = obj.get("metadata") if isinstance(obj.get("metadata"), Mapping) else {}
+        metadata = _mapping(obj.get("metadata"))
         customer_id = str(obj.get("client_reference_id") or metadata.get("customer_id") or "")
         if event_type == "checkout.session.completed" and customer_id and customer_id in self.customers:
             now = time.time()

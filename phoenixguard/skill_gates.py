@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-from phoenixguard.decision import skill_gates as _impl
+from phoenixguard.decision.skill_gates import CurriculumGates, GateOutput, LinearRouter, SkillGatedMoE
 
-globals().update({name: getattr(_impl, name) for name in dir(_impl) if not name.startswith("__")})
+__all__ = ["CurriculumGates", "GateOutput", "LinearRouter", "SkillGatedMoE"]

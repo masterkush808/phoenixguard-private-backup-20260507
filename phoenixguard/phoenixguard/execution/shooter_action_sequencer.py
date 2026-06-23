@@ -5,7 +5,7 @@ from pathlib import Path
 import json
 import math
 import time
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, cast
 
 from phoenixguard.execution.packet_v3 import validate_execution_packet_v3
 
@@ -78,7 +78,8 @@ def rect_bounds(rect: RectLike) -> tuple[int, int, int, int]:
         )
     if isinstance(rect, Sequence) and not isinstance(rect, (str, bytes)) and len(rect) >= 4:
         return int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])
-    return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
+    rect_obj = cast(Any, rect)
+    return int(rect_obj.left), int(rect_obj.top), int(rect_obj.right), int(rect_obj.bottom)
 
 
 def rel_to_abs(rect: RectLike, rel_x: float, rel_y: float) -> tuple[int, int]:
@@ -131,8 +132,10 @@ def _packet_expiry(packet: Mapping[str, Any], fallback: int = 0) -> int:
         packet.get("expiry_seconds"),
         fallback,
     ):
+        if raw is None:
+            continue
         try:
-            value = int(float(raw))
+            value = int(float(cast(Any, raw)))
         except (TypeError, ValueError):
             continue
         if value > 0:

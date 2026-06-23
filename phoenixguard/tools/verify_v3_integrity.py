@@ -5,6 +5,7 @@ import importlib
 import json
 from pathlib import Path
 import sys
+from typing import Any, Mapping, Sequence, cast
 import urllib.error
 import urllib.request
 
@@ -54,7 +55,18 @@ def status_line(name: str, ok: bool, detail: str = "") -> str:
 
 
 def load_json(path: Path) -> dict[str, object]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return dict(cast(Mapping[str, object], payload)) if isinstance(payload, Mapping) else {}
+
+
+def mapping(value: object) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+
+
+def sequence(value: object) -> list[object]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return list(value)
+    return []
 
 
 def runtime_entry_is_active(path: Path) -> bool:
@@ -100,7 +112,7 @@ def main() -> int:
     manifest = load_json(MANIFEST_PATH)
     print(f"Active Version: {manifest.get('active_version')}")
 
-    for raw in manifest.get("required_files", []):
+    for raw in sequence(manifest.get("required_files", [])):
         path = ROOT / str(raw)
         ok = path.exists()
         print(status_line(f"Required file {raw}", ok))
@@ -121,10 +133,11 @@ def main() -> int:
     if boxes_ok:
         try:
             boxes = load_json(boxes_path)
-            if isinstance(boxes.get("points"), dict):
-                available = set(boxes["points"])
+            points = mapping(boxes.get("points"))
+            if points:
+                available = set(points)
             else:
-                available = set(boxes)
+                available = set(boxes.keys())
             missing_targets = sorted(REQUIRED_BOX_TARGETS - available)
         except Exception as exc:
             missing_targets = sorted(REQUIRED_BOX_TARGETS)
@@ -140,7 +153,7 @@ def main() -> int:
     if not v3_guard_ok:
         failures.append("Legacy Trigger Paths")
 
-    launch_profile = manifest.get("launch_profile") if isinstance(manifest.get("launch_profile"), dict) else {}
+    launch_profile = mapping(manifest.get("launch_profile"))
     canonical_launcher = ROOT / str(launch_profile.get("launcher") or "")
     engine_launcher = ROOT / str(launch_profile.get("engine_launcher") or "")
     launcher_text = canonical_launcher.read_text(encoding="utf-8", errors="ignore") if canonical_launcher.exists() else ""

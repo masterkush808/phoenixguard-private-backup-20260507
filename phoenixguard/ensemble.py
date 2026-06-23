@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-from phoenixguard.decision import ensemble as _impl
+from phoenixguard.decision.ensemble import EnsembleDecisionEngine, GateLike, TransitionSummary
 
-globals().update({name: getattr(_impl, name) for name in dir(_impl) if not name.startswith("__")})
+__all__ = ["EnsembleDecisionEngine", "GateLike", "TransitionSummary"]

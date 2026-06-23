@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -31,8 +32,8 @@ from phoenixguard.vision.v3_overlay_contract import (
 _REPO = Path(__file__).resolve().parents[1]
 
 
-def _base_overlay(**overrides):
-    payload = {
+def _base_overlay(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "overlay_id": "sniper-1",
         "object_id": "obj-1",
         "track_id": "track-1",
@@ -303,7 +304,7 @@ def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
 
 
 def test_contract_reports_missing_required_fields_and_strict_mode_raises() -> None:
-    raw = {"bbox": [1, 2, 3, 4], "confidence": 0.4}
+    raw: dict[str, Any] = {"bbox": [1, 2, 3, 4], "confidence": 0.4}
     result = validate_v3_overlay_object(raw)
 
     assert result.ok is False
@@ -316,7 +317,7 @@ def test_contract_reports_missing_required_fields_and_strict_mode_raises() -> No
 
 
 def test_live_modes_reject_unfiltered_raw_overlays_missing_renderer_contract() -> None:
-    raw = {"type": "SNIPER_ENTRY_BOX", "bbox": [1, 2, 3, 4], "confidence": 0.7}
+    raw: dict[str, Any] = {"type": "SNIPER_ENTRY_BOX", "bbox": [1, 2, 3, 4], "confidence": 0.7}
 
     reasons = overlay_rejection_reasons(raw, "CLEAN_LIVE")
 

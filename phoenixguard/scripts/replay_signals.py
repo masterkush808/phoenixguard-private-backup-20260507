@@ -12,9 +12,11 @@ from pathlib import Path
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterator
+from typing import Any, Iterable, Mapping, cast
 
 import importlib.util
+from importlib.abc import Loader
 
 from phoenixguard.execution.timing import TimingProfile, validate_timing_event
 
@@ -39,26 +41,33 @@ class ReplayEvaluation:
     observed_entry_age_seconds: int
 
 
-def _load_parse_trade_signal():
+def _load_parse_trade_signal() -> Callable[[Mapping[str, Any]], object]:
     shooter_path = Path(__file__).resolve().parents[1] / "shooter.py"
     spec = importlib.util.spec_from_file_location("shooter_module", str(shooter_path))
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot import parse_trade_signal from {shooter_path}")
     shooter = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(shooter)  # type: ignore[union-attr]
-    return getattr(shooter, "parse_trade_signal")
+    loader: Loader = spec.loader
+    loader.exec_module(shooter)
+    return cast(Callable[[Mapping[str, Any]], object], getattr(shooter, "parse_trade_signal"))
 
 
-def read_jsonl(path: Path):
+def _as_mapping(value: object) -> Mapping[str, Any]:
+    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
+
+
+def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
     with path.open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                payload = json.loads(line)
             except Exception:
                 continue
+            if isinstance(payload, dict):
+                yield cast(dict[str, Any], payload)
 
 
 def _normalize_label(value: object, default: str = "") -> str:
@@ -87,12 +96,9 @@ def _is_truthy(value: object) -> bool:
 
 
 def normalize_replay_event(event: Mapping[str, Any]) -> dict[str, Any]:
-    chart_state = event.get("chart_state")
-    chart = chart_state if isinstance(chart_state, Mapping) else {}
-    profile = event.get("profile")
-    profile_map = profile if isinstance(profile, Mapping) else {}
-    timing = event.get("execution_timing")
-    timing_map = timing if isinstance(timing, Mapping) else {}
+    chart = _as_mapping(event.get("chart_state"))
+    profile_map = _as_mapping(event.get("profile"))
+    timing_map = _as_mapping(event.get("execution_timing"))
 
     setup_type = event.get(
         "setup_type",
@@ -182,7 +188,7 @@ def _release_lock(lock_path: Path) -> None:
         pass
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("path", help="path to jsonl file to replay")
     parser.add_argument("--generate-samples", action="store_true", help="Run a few synthetic sample payloads instead of reading a file")
@@ -268,7 +274,8 @@ def main():
         _release_lock(lock_path)
 
     print(f"processed={processed} accepted={accepted} trace=replay_trace.log")
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

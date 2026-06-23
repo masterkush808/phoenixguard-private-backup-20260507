@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 from PIL import Image
@@ -125,12 +126,15 @@ def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch
     assert len(outputs) == 24
     assert outputs[-1] == "lower_tf_2.png"
     assert outputs[-2].shape == (16, 24, 3)
-    assert outputs[-3]["multi_timeframe"]["entries"][0]["label"] == "Higher TF / Zoomed Out"
-    assert outputs[-3]["multi_timeframe"]["entries"][1]["label"] == "Higher TF / Zoomed In"
-    assert outputs[-3]["multi_timeframe"]["entries"][2]["label"] == "Lower TF / Zoomed Out"
-    assert outputs[-3]["multi_timeframe"]["entries"][3]["label"] == "Lower TF / Zoomed In"
+    result_payload = cast(dict[str, Any], outputs[-3])
+    multi_timeframe = cast(dict[str, Any], result_payload["multi_timeframe"])
+    entries = cast(list[dict[str, Any]], multi_timeframe["entries"])
+    assert entries[0]["label"] == "Higher TF / Zoomed Out"
+    assert entries[1]["label"] == "Higher TF / Zoomed In"
+    assert entries[2]["label"] == "Lower TF / Zoomed Out"
+    assert entries[3]["label"] == "Lower TF / Zoomed In"
     assert captured["session_entry"] == {
-        "result": outputs[-3],
+        "result": result_payload,
         "file_path": "lower_tf_2.png",
         "source": "manual-multi-timeframe",
     }
@@ -198,6 +202,8 @@ def test_build_multi_timeframe_overlay_sheet_composes_both_frames(tmp_path: Path
     assert sheet.width > sheet.height
     left_pixel = sheet.getpixel((sheet.width // 4, sheet.height // 2))
     right_pixel = sheet.getpixel(((sheet.width * 3) // 4, sheet.height // 2))
+    assert isinstance(left_pixel, tuple)
+    assert isinstance(right_pixel, tuple)
     assert left_pixel[1] > left_pixel[0]
     assert right_pixel[0] > right_pixel[1]
 
@@ -235,6 +241,7 @@ def test_build_multi_timeframe_overlay_fusion_blends_both_frames(tmp_path: Path)
 
     assert fused is not None
     center_pixel = fused.getpixel((fused.width // 2, fused.height // 2))
+    assert isinstance(center_pixel, tuple)
     assert center_pixel[0] > 40
     assert center_pixel[1] > 40
 

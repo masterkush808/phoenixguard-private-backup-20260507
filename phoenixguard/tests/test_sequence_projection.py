@@ -22,32 +22,32 @@ from phoenixguard.memory.memory_features import (
 )
 from main import (
     MAX_SEQUENCE_HISTORY_DEPTH,
-    _adaptive_overlay_label_controls,
-    _apply_zone_memory_to_result,
-    _apply_parse_quality_cap_to_detections,
-    _build_box_history,
-    _build_chart_state,
-    _build_council_influence_profile,
-    _build_council_sequence_summary,
-    _build_render_config,
-    _build_projection_chain_boxes,
-    _enrich_next_box_hypotheses_with_projected_candles,
-    _build_projected_candle_candidates,
-    _rebuild_projection_synced_state,
-    _build_sequence_model_summary,
-    _build_next_box_hypotheses,
-    _score_projected_box_with_council,
-    _extract_latest_signal_state,
-    _ensemble_base_probs,
-    _choose_overlay_label_rect,
-    _classify_swing_state,
-    _rect_overlap_area,
-    _fuse_transition_probabilities,
-    _sample_overlay_candle_palette,
-    _default_projected_entry_level_norm,
-    _projected_box_path_anchors,
-    _summarize_trend_regime,
-    _should_relax_hold_veto,
+    adaptive_overlay_label_controls as _adaptive_overlay_label_controls,
+    apply_parse_quality_cap_to_detections as _apply_parse_quality_cap_to_detections,
+    apply_zone_memory_to_result as _apply_zone_memory_to_result,
+    build_box_history as _build_box_history,
+    build_chart_state as _build_chart_state,
+    build_council_influence_profile as _build_council_influence_profile,
+    build_council_sequence_summary as _build_council_sequence_summary,
+    build_next_box_hypotheses as _build_next_box_hypotheses,
+    build_projected_candle_candidates as _build_projected_candle_candidates,
+    build_projection_chain_boxes as _build_projection_chain_boxes,
+    build_render_config as _build_render_config,
+    build_sequence_model_summary as _build_sequence_model_summary,
+    choose_overlay_label_rect as _choose_overlay_label_rect,
+    classify_swing_state as _classify_swing_state,
+    default_projected_entry_level_norm as _default_projected_entry_level_norm,
+    ensemble_base_probs as _ensemble_base_probs,
+    enrich_next_box_hypotheses_with_projected_candles as _enrich_next_box_hypotheses_with_projected_candles,
+    extract_latest_signal_state as _extract_latest_signal_state,
+    fuse_transition_probabilities as _fuse_transition_probabilities,
+    projected_box_path_anchors as _projected_box_path_anchors,
+    rebuild_projection_synced_state as _rebuild_projection_synced_state,
+    rect_overlap_area as _rect_overlap_area,
+    sample_overlay_candle_palette as _sample_overlay_candle_palette,
+    score_projected_box_with_council as _score_projected_box_with_council,
+    should_relax_hold_veto as _should_relax_hold_veto,
+    summarize_trend_regime as _summarize_trend_regime,
     build_model_council_html,
     draw_overlay,
 )
@@ -66,6 +66,14 @@ class _NullLogger:
 
     def error(self, *args: object, **kwargs: object) -> None:
         return None
+
+
+def _forecast_3m(regressor: ImageFusionRegressor, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    return cast(dict[str, Any], regressor.forecast_3m(*args, **kwargs))
+
+
+def _infer(engine: EnsembleDecisionEngine, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    return cast(dict[str, Any], engine.infer(*args, **kwargs))
 
 
 def _make_candle(
@@ -1521,7 +1529,7 @@ def test_forecast_requires_consolidation_but_releases_when_present() -> None:
         "projected_next_box": {"box_type": "impulse", "direction": "BUY", "confidence": 0.71},
     }
 
-    without_consol = reg.forecast_3m(
+    without_consol = _forecast_3m(reg, 
         {**base_chart_state, "has_active_consolidation": False, "structure_trade_ready": False},
         detections=[],
         memory_similarity=0.82,
@@ -1529,7 +1537,7 @@ def test_forecast_requires_consolidation_but_releases_when_present() -> None:
         transition_summary={"continue_prob": 0.58, "pullback_prob": 0.16, "reversal_attempt_prob": 0.12, "fakeout_prob": 0.14},
         memory_summary={"top_similarity": 0.82, "dominant_label": "BUY", "mixed_labels": False, "ambiguity": 0.0, "label_entropy": 0.0},
     )
-    with_consol = reg.forecast_3m(
+    with_consol = _forecast_3m(reg, 
         {**base_chart_state, "has_active_consolidation": True, "structure_trade_ready": True, "consolidation_score": 0.71},
         detections=[],
         memory_similarity=0.82,
@@ -1596,7 +1604,7 @@ def test_forecast_releases_for_impulse_chain_without_consolidation() -> None:
         "projected_next_box": {"box_type": "impulse", "direction": "BUY", "confidence": 0.59},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[],
         memory_similarity=0.82,
@@ -1627,7 +1635,7 @@ def test_forecast_accepts_canonical_transition_summary_keys() -> None:
         "projected_next_box": {"box_type": "reversal_base", "direction": "BUY", "confidence": 0.69},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[],
         memory_similarity=0.76,
@@ -1670,7 +1678,7 @@ def test_forecast_releases_counter_macro_reversal_base_against_bearish_ensemble(
         },
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[{"pattern": "bullish_engulfing", "confidence": 0.73}],
         memory_similarity=0.74,
@@ -1710,7 +1718,7 @@ def test_forecast_promotes_macro_pullback_reclaim_to_trade_ready_structure() -> 
         "projected_next_box": {"box_type": "reversal_base", "direction": "BUY", "confidence": 0.72},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[{"pattern": "bullish_engulfing", "confidence": 0.70}],
         memory_similarity=0.74,
@@ -1748,7 +1756,7 @@ def test_forecast_promotes_aligned_reversal_base_to_reversal_release() -> None:
         "projected_next_box": {"box_type": "reversal_base", "direction": "BUY", "confidence": 0.67},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[{"pattern": "bullish_engulfing", "confidence": 0.68}],
         memory_similarity=0.72,
@@ -1785,7 +1793,7 @@ def test_forecast_promotes_with_trend_pullback_resume_to_impulse_chain() -> None
         "projected_next_box": {"box_type": "pullback", "direction": "BUY", "confidence": 0.84},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[{"pattern": "next_candle_buy", "confidence": 0.74}],
         memory_similarity=0.79,
@@ -1822,7 +1830,7 @@ def test_forecast_promotes_high_conviction_sell_pullback_resume_to_impulse_chain
         "projected_next_box": {"box_type": "pullback", "direction": "SELL", "confidence": 0.86},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[{"pattern": "next_candle_sell", "confidence": 0.77}],
         memory_similarity=0.81,
@@ -1861,7 +1869,7 @@ def test_forecast_keeps_weak_sell_pullback_resume_unconfirmed() -> None:
         "projected_next_box": {"box_type": "pullback", "direction": "SELL", "confidence": 0.81},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[{"pattern": "next_candle_sell", "confidence": 0.73}],
         memory_similarity=0.77,
@@ -1898,7 +1906,7 @@ def test_forecast_promotes_counter_macro_sell_breakaway_to_reversal_release() ->
         "projected_next_box": {"box_type": "pullback", "direction": "SELL", "confidence": 0.82},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[{"pattern": "next_candle_sell", "confidence": 0.75}],
         memory_similarity=0.78,
@@ -1937,7 +1945,7 @@ def test_forecast_keeps_weak_counter_macro_sell_breakaway_unconfirmed() -> None:
         "projected_next_box": {"box_type": "pullback", "direction": "SELL", "confidence": 0.80},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[{"pattern": "next_candle_sell", "confidence": 0.73}],
         memory_similarity=0.76,
@@ -1974,7 +1982,7 @@ def test_forecast_promotes_counter_macro_sell_extension_to_reversal_release() ->
         "projected_next_box": {"box_type": "pullback", "direction": "SELL", "confidence": 0.76},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[{"pattern": "next_candle_sell", "confidence": 0.74}],
         memory_similarity=0.77,
@@ -2012,7 +2020,7 @@ def test_forecast_keeps_low_agreement_counter_macro_sell_extension_unconfirmed()
         "projected_next_box": {"box_type": "pullback", "direction": "SELL", "confidence": 0.76},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[{"pattern": "next_candle_sell", "confidence": 0.74}],
         memory_similarity=0.77,
@@ -2049,7 +2057,7 @@ def test_forecast_promotes_counter_macro_impulse_release_to_reversal_release() -
         "projected_next_box": {"box_type": "impulse", "direction": "BUY", "confidence": 0.77},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[{"pattern": "next_candle_buy", "confidence": 0.74}],
         memory_similarity=0.73,
@@ -2233,7 +2241,7 @@ def test_ensemble_supportive_memory_can_execute_below_strict_veto() -> None:
         memory_veto_threshold=0.87,
     )
 
-    result = engine.infer(
+    result = _infer(engine, 
         rl_probs={"BUY": 0.68, "SELL": 0.20, "HOLD": 0.12},
         forecast={
             "q05": 0.05,
@@ -2281,7 +2289,7 @@ def test_ensemble_supports_impulse_chain_without_consolidation() -> None:
         memory_veto_threshold=0.87,
     )
 
-    result = engine.infer(
+    result = _infer(engine, 
         rl_probs={"BUY": 0.66, "SELL": 0.22, "HOLD": 0.12},
         forecast={
             "q05": 0.07,
@@ -2726,7 +2734,7 @@ def test_forecast_releases_for_reversal_release_without_latest_candle_support() 
         "projected_next_box": {"box_type": "impulse", "direction": "BUY", "confidence": 0.69},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[],
         memory_similarity=0.79,
@@ -2753,7 +2761,7 @@ def test_ensemble_projection_bias_survives_zero_latest_candle_confidence() -> No
         memory_veto_threshold=0.87,
     )
 
-    result = engine.infer(
+    result = _infer(engine, 
         rl_probs={"BUY": 0.61, "SELL": 0.27, "HOLD": 0.12},
         forecast={
             "q05": 0.05,
@@ -2811,7 +2819,7 @@ def test_ensemble_reversal_release_projection_flips_bearish_rl_with_weak_memory(
         memory_veto_threshold=0.87,
     )
 
-    result = engine.infer(
+    result = _infer(engine, 
         rl_probs={"BUY": 0.29, "SELL": 0.57, "HOLD": 0.14},
         forecast={
             "q05": 0.06,
@@ -2876,7 +2884,7 @@ def test_ensemble_projection_watch_surfaces_buy_even_when_force_hold_blocks_exec
         memory_veto_threshold=0.87,
     )
 
-    result = engine.infer(
+    result = _infer(engine, 
         rl_probs={"BUY": 0.29, "SELL": 0.57, "HOLD": 0.14},
         forecast={
             "q05": 0.02,
@@ -2941,7 +2949,7 @@ def test_ensemble_skill_gate_failures_are_diagnostic_for_armed_live_setups() -> 
         ("BUY", {"BUY": 0.70, "SELL": 0.18, "HOLD": 0.12}, 0.18),
         ("SELL", {"BUY": 0.18, "SELL": 0.70, "HOLD": 0.12}, -0.18),
     ):
-        result = engine.infer(
+        result = _infer(engine, 
             rl_probs=probs,
             forecast={
                 "q05": min(q50 - 0.05, q50 + 0.05),
@@ -3024,8 +3032,8 @@ def test_ensemble_gate_scores_do_not_inflate_live_confidence() -> None:
         },
     )
 
-    failed = engine.infer(gate_outputs=failed_gates, **kwargs)
-    passing = engine.infer(gate_outputs=passing_gates, **kwargs)
+    failed = _infer(engine, gate_outputs=failed_gates, **kwargs)
+    passing = _infer(engine, gate_outputs=passing_gates, **kwargs)
 
     assert failed["action"] == "BUY"
     assert passing["action"] == "BUY"
@@ -3054,7 +3062,7 @@ def test_forecast_uses_projection_direction_when_projection_overrides_ensemble()
         "projected_next_box": {"box_type": "impulse", "direction": "SELL", "confidence": 0.74},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[],
         memory_similarity=0.81,
@@ -3088,7 +3096,7 @@ def test_forecast_keeps_ensemble_direction_when_opposing_projection_is_weak() ->
         "projected_next_box": {"box_type": "impulse", "direction": "SELL", "confidence": 0.64},
     }
 
-    result = reg.forecast_3m(
+    result = _forecast_3m(reg, 
         chart_state,
         detections=[],
         memory_similarity=0.30,

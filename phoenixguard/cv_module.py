@@ -1,5 +1,31 @@
 from __future__ import annotations
 
-from phoenixguard.vision import cv_module as _impl
+from phoenixguard.vision.cv_module import (
+    CVPatternDetector,
+    HfHubDownloadCallable,
+    KMeansCtor,
+    KMeansLike,
+    LoggerLike,
+    LogisticRegCtor,
+    MakePipelineCallable,
+    PatternDetection,
+    SklearnClassifierLike,
+    StandardScalerCtor,
+    StandardScalerLike,
+    TrainTestSplitCallable,
+)
 
-globals().update({name: getattr(_impl, name) for name in dir(_impl) if not name.startswith("__")})
+__all__ = [
+    "CVPatternDetector",
+    "HfHubDownloadCallable",
+    "KMeansCtor",
+    "KMeansLike",
+    "LoggerLike",
+    "LogisticRegCtor",
+    "MakePipelineCallable",
+    "PatternDetection",
+    "SklearnClassifierLike",
+    "StandardScalerCtor",
+    "StandardScalerLike",
+    "TrainTestSplitCallable",
+]

@@ -6,7 +6,7 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +41,10 @@ def _normalize_action(value: Any) -> str:
     return normalized if normalized in _VALID_ACTIONS else "HOLD"
 
 
+def _as_mapping(value: object) -> Mapping[str, Any]:
+    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
+
+
 def _canonical_label_dir_name(dir_name: str) -> str:
     normalized = str(dir_name).strip().upper()
     if normalized in {"BUY", "BUYS"}:
@@ -56,10 +60,8 @@ def build_runtime_review_row(
     folder_label: str,
     result: Mapping[str, Any],
 ) -> dict[str, str]:
-    chart_state_obj = result.get("chart_state", {})
-    chart_state = chart_state_obj if isinstance(chart_state_obj, Mapping) else {}
-    projection_obj = result.get("projection", {})
-    projection = projection_obj if isinstance(projection_obj, Mapping) else {}
+    chart_state = _as_mapping(result.get("chart_state", {}))
+    projection = _as_mapping(result.get("projection", {}))
 
     action = _normalize_action(result.get("action"))
     decision_state = str(result.get("decision_state", "UNCERTAIN") or "UNCERTAIN").strip().upper()
@@ -223,7 +225,9 @@ def export_runtime_contradiction_queue(
 
         def _default_infer(path: Path) -> Mapping[str, Any]:
             result, *_ = main.run_inference(str(path), side_effect_free=side_effect_free)
-            return result
+            if not isinstance(result, Mapping):
+                raise TypeError(f"run_inference returned {type(result)!r}, expected mapping")
+            return cast(Mapping[str, Any], result)
 
         infer_fn = _default_infer
 

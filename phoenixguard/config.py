@@ -1,5 +1,31 @@
 from __future__ import annotations
 
-from phoenixguard.core import config as _impl
+from phoenixguard.core.config import (
+    MEMORY_BANK,
+    MODELS,
+    RUNTIME,
+    SECURITY,
+    TRAIN,
+    VOICE,
+    MemoryBankConfig,
+    ModelConfig,
+    RuntimeConfig,
+    SecurityConfig,
+    TrainConfig,
+    VoiceConfig,
+)
 
-globals().update({name: getattr(_impl, name) for name in dir(_impl) if not name.startswith("__")})
+__all__ = [
+    "MEMORY_BANK",
+    "MODELS",
+    "RUNTIME",
+    "SECURITY",
+    "TRAIN",
+    "VOICE",
+    "MemoryBankConfig",
+    "ModelConfig",
+    "RuntimeConfig",
+    "SecurityConfig",
+    "TrainConfig",
+    "VoiceConfig",
+]
