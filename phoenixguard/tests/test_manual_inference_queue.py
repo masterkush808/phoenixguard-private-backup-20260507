@@ -51,8 +51,8 @@ def test_restore_manual_inference_jobs_requeues_recoverable_rows(monkeypatch: py
         encoding="utf-8",
     )
 
-    restored = main._restore_manual_inference_jobs()
-    rows = main._read_json_file(queue_path, [])
+    restored = main.restore_manual_inference_jobs()
+    rows = main.read_json_file(queue_path, [])
 
     assert restored == {"restored_jobs": 1}
     assert rows[0]["job_id"] == "recover-me"
@@ -65,7 +65,7 @@ def test_restore_manual_inference_jobs_requeues_recoverable_rows(monkeypatch: py
 
 def test_resume_pending_manual_inference_jobs_submits_background_recovery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_dir, _logs_dir = _configure_runtime_dirs(monkeypatch, tmp_path)
-    original_resume_state = main._manual_inference_resume_started
+    original_resume_state = main.manual_inference_resume_started
     queue_path = data_dir / "manual_inference_jobs.json"
     queue_path.write_text(
         json.dumps(
@@ -89,29 +89,29 @@ def test_resume_pending_manual_inference_jobs_submits_background_recovery(monkey
 
     def _fake_process(job_id: str) -> bool:
         calls.append(job_id)
-        main._update_manual_inference_job(job_id, status="completed", result_path="done.json")
+        main.update_manual_inference_job(job_id, status="completed", result_path="done.json")
         return True
 
     try:
-        main._manual_inference_resume_started = False
+        main.manual_inference_resume_started = False
         monkeypatch.setattr(main, "_get_background_executor", lambda: _ImmediateExecutor())
         monkeypatch.setattr(main, "_process_recovered_manual_inference_job", _fake_process)
 
-        main._resume_pending_manual_inference_jobs()
+        main.resume_pending_manual_inference_jobs()
 
-        rows = main._read_json_file(queue_path, [])
+        rows = main.read_json_file(queue_path, [])
         assert calls == ["queued-job"]
         assert rows[0]["status"] == "completed"
-        assert main._manual_inference_resume_started is False
+        assert main.manual_inference_resume_started is False
     finally:
-        main._manual_inference_resume_started = original_resume_state
+        main.manual_inference_resume_started = original_resume_state
 
 
 def test_complete_manual_inference_job_writes_result_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _configure_runtime_dirs(monkeypatch, tmp_path)
-    job = main._enqueue_manual_inference_job(
+    job = main.enqueue_manual_inference_job(
         [str(tmp_path / "higher.png"), str(tmp_path / "lower.png")],
-        main._build_render_config(
+        main.build_render_config(
             overlay_mode="history-plus-projection",
             min_conf_global=0.42,
             min_conf_latest=0.50,
@@ -126,7 +126,7 @@ def test_complete_manual_inference_job_writes_result_summary(monkeypatch: pytest
         source="manual-sync",
     )
 
-    updated = main._complete_manual_inference_job(
+    updated = main.complete_manual_inference_job(
         str(job["job_id"]),
         {
             "action": "SELL",
@@ -139,7 +139,7 @@ def test_complete_manual_inference_job_writes_result_summary(monkeypatch: pytest
                 "can_publish_execution_packet": False,
                 "can_trigger_shooter": False,
                 "canonical_live_authority": "tracker_model_council_packet_shooter",
-                "required_live_packet": "PG_EXECUTION_PACKET_V3",
+                "required_livepacket": "PG_EXECUTION_PACKET_V3",
             },
             "packet_authority": "OFFLINE_ANALYSIS_ONLY",
             "memory_similarity": 0.44,

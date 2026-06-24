@@ -632,7 +632,7 @@ _compare_frame_cache_lock = threading.Lock()
 _manual_inference_jobs_lock = threading.Lock()
 _processed_capture_files: set[str] = set()
 _hotkey_listener_started = False
-_manual_inference_resume_started = False
+manual_inference_resume_started = False
 _runtime_maintenance_state: dict[str, int] = {"inference_runs": 0}
 _capture_runtime_state: dict[str, Any] = {
     "requested_hotkey": str(RUNTIME.capture_hotkey),
@@ -4046,7 +4046,7 @@ def _record_capture_result(
         )
         _bump_capture_status_token()
         _persist_capture_recovery_state_locked()
-    _append_session_entry(_build_session_entry(result, source_image_state, file_path, source=source))
+    _append_session_entry(build_session_entry(result, source_image_state, file_path, source=source))
 
 
 def _process_multi_timeframe_bundle(bundle: list[dict[str, Any]], source: str = "hotkey") -> bool:
@@ -19964,7 +19964,7 @@ def _analyze_manual_multi_timeframe_once(
     result = _build_multi_timeframe_result(analyzed)
     source_image_state = analyzed[-1]["source_image_state"]
     file_path = str(analyzed[-1]["file_path"])
-    _append_session_entry(_build_session_entry(result, source_image_state, file_path, source="manual-multi-timeframe"))
+    _append_session_entry(build_session_entry(result, source_image_state, file_path, source="manual-multi-timeframe"))
     return result, source_image_state, file_path
 
 
@@ -20009,8 +20009,8 @@ def _process_recovered_manual_inference_job(job_id: str) -> bool:
 
 
 def _resume_pending_manual_inference_jobs() -> None:
-    global _manual_inference_resume_started
-    if _manual_inference_resume_started:
+    global manual_inference_resume_started
+    if manual_inference_resume_started:
         return
     with _manual_inference_jobs_lock:
         jobs = _load_manual_inference_jobs_locked()
@@ -20021,10 +20021,10 @@ def _resume_pending_manual_inference_jobs() -> None:
         ]
     if not pending_ids:
         return
-    _manual_inference_resume_started = True
+    manual_inference_resume_started = True
 
     def _runner() -> None:
-        global _manual_inference_resume_started
+        global manual_inference_resume_started
         try:
             while True:
                 with _manual_inference_jobs_lock:
@@ -20041,12 +20041,12 @@ def _resume_pending_manual_inference_jobs() -> None:
                     break
                 _process_recovered_manual_inference_job(str(next_job.get("job_id", "")))
         finally:
-            _manual_inference_resume_started = False
+            manual_inference_resume_started = False
 
     try:
         _get_background_executor().submit(_runner)
     except Exception:
-        _manual_inference_resume_started = False
+        manual_inference_resume_started = False
         raise
 
 
@@ -20292,7 +20292,7 @@ def _run_signal_workstation_stream(
         result = _build_multi_timeframe_result(analyzed)
         source_image_state = analyzed[-1]["source_image_state"]
         file_path = str(analyzed[-1]["file_path"])
-        _append_session_entry(_build_session_entry(result, source_image_state, file_path, source="manual-multi-timeframe"))
+        _append_session_entry(build_session_entry(result, source_image_state, file_path, source="manual-multi-timeframe"))
         _complete_manual_inference_job(job_id, result, file_path=file_path)
         yield _workspace_run_update(
             control_status_value=_analysis_status_html(
@@ -23015,47 +23015,77 @@ def launch_ui():
 adaptive_overlay_label_controls = _adaptive_overlay_label_controls
 apply_parse_quality_cap_to_detections = _apply_parse_quality_cap_to_detections
 apply_zone_memory_to_result = _apply_zone_memory_to_result
+append_feedback_submission_event = _append_feedback_submission_event
 build_box_history = _build_box_history
 build_chart_state = _build_chart_state
+build_compare_desk_html = _build_compare_desk_html
+build_confidence_heatmap_image = _build_confidence_heatmap_image
+build_confidence_heatmap_payload = _build_confidence_heatmap_payload
 build_council_influence_profile = _build_council_influence_profile
 build_council_sequence_summary = _build_council_sequence_summary
+build_feedback_submission_payload = _build_feedback_submission_payload
+build_heatmap_summary_html = _build_heatmap_summary_html
+build_learning_feed_html = _build_learning_feed_html
+build_multi_timeframe_overlay_fusion = _build_multi_timeframe_overlay_fusion
+build_multi_timeframe_overlay_sheet = _build_multi_timeframe_overlay_sheet
+build_multi_timeframe_result = _build_multi_timeframe_result
 build_next_box_hypotheses = _build_next_box_hypotheses
 build_projected_candle_candidates = _build_projected_candle_candidates
 build_projection_chain_boxes = _build_projection_chain_boxes
 build_render_config = _build_render_config
 build_sequence_model_summary = _build_sequence_model_summary
+build_session_entry = _build_session_entry
+build_setup_guide_dialog_html = _build_setup_guide_dialog_html
+build_timeframe_overlay_gallery_html = _build_timeframe_overlay_gallery_html
 build_transition_summary = _build_transition_summary
+build_workspace_shell_bar_html = _build_workspace_shell_bar_html
+build_zone_editor_value = _build_zone_editor_value
 choose_overlay_label_rect = _choose_overlay_label_rect
 classify_swing_state = _classify_swing_state
+complete_manual_inference_job = _complete_manual_inference_job
+compose_confidence_heatmap_image = _compose_confidence_heatmap_image
 capture_runtime_lock = _capture_runtime_lock
 capture_runtime_state = _capture_runtime_state
 default_projected_entry_level_norm = _default_projected_entry_level_norm
+derive_active_trade_overlay = _derive_active_trade_overlay
 derive_proxy_price_series = _derive_proxy_price_series
 ensemble_base_probs = _ensemble_base_probs
+enqueue_manual_inference_job = _enqueue_manual_inference_job
 enrich_next_box_hypotheses_with_projected_candles = _enrich_next_box_hypotheses_with_projected_candles
 estimate_implied_move_pct = _estimate_implied_move_pct
 extract_chart_structure = _extract_chart_structure
 extract_latest_signal_state = _extract_latest_signal_state
+feedback_submission_states = _feedback_submission_states
 fuse_transition_probabilities = _fuse_transition_probabilities
 get_capture_runtime_snapshot = _get_capture_runtime_snapshot
+get_heatmap_feedback_calibration = _get_heatmap_feedback_calibration
 get_local_ensemble = _get_local_ensemble
+heatmap_feedback_calibration_cache = _heatmap_feedback_calibration_cache
 local_ensemble_cache = _local_ensemble_cache
 local_ensemble_cache_key = _local_ensemble_cache_key
 local_ensemble_error_cache = _local_ensemble_error_cache
 local_ensemble_future_cache = _local_ensemble_future_cache
 local_ensemble_lock = _local_ensemble_lock
 projected_box_path_anchors = _projected_box_path_anchors
+read_json_file = _read_json_file
 record_runtime_crash = _record_runtime_crash
 rebuild_projection_synced_state = _rebuild_projection_synced_state
 rect_overlap_area = _rect_overlap_area
+resolve_ui_launch_auth = _resolve_ui_launch_auth
 restore_capture_recovery_state = _restore_capture_recovery_state
+restore_manual_inference_jobs = _restore_manual_inference_jobs
 resume_recovered_capture_bundle_if_needed = _resume_recovered_capture_bundle_if_needed
+resume_pending_feedback_submissions_if_needed = _resume_pending_feedback_submissions_if_needed
+resume_pending_manual_inference_jobs = _resume_pending_manual_inference_jobs
 sample_overlay_candle_palette = _sample_overlay_candle_palette
+save_feedback_result_image = _save_feedback_result_image
 score_projected_box_with_council = _score_projected_box_with_council
 should_relax_hold_veto = _should_relax_hold_veto
 should_force_side_effect_free_council = _should_force_side_effect_free_council
 sync_forecast_into_chart_state = _sync_forecast_into_chart_state
 summarize_trend_regime = _summarize_trend_regime
+ui_auth_credentials = _ui_auth_credentials
+update_manual_inference_job = _update_manual_inference_job
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ ProcessId=10380
 
     monkeypatch.setattr(cert.subprocess, "run", fake_run)
 
-    rows = cert._python_processes_wmic("primary timeout")
+    rows = cert.python_processes_wmic("primary timeout")
 
     assert rows[0]["ProcessId"] == 26564
     assert rows[0]["ParentProcessId"] == 2596
@@ -62,7 +62,7 @@ def test_dashboard_capture_retention_prunes_old_timestamp_bundles(tmp_path: Path
 
 
 def test_full_activated_without_execution_packet_is_not_certified() -> None:
-    verdict = burn._final_burn_verdict(
+    verdict = burn.final_burn_verdict(
         mode="FULL_ACTIVATED",
         stop_reason="",
         executable_packets=[],
@@ -78,7 +78,7 @@ def test_full_activated_without_execution_packet_is_not_certified() -> None:
 
 
 def test_full_activated_with_promotion_failures_reports_promotion_failure() -> None:
-    verdict = burn._final_burn_verdict(
+    verdict = burn.final_burn_verdict(
         mode="FULL_ACTIVATED",
         stop_reason="",
         executable_packets=[],
@@ -94,7 +94,7 @@ def test_full_activated_with_promotion_failures_reports_promotion_failure() -> N
 
 
 def test_technical_runtime_only_verdict_remains_runtime_only() -> None:
-    verdict = burn._final_burn_verdict(
+    verdict = burn.final_burn_verdict(
         mode="TECHNICAL",
         stop_reason="",
         executable_packets=[],

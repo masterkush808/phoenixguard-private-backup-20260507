@@ -17,7 +17,7 @@ if str(_REPO) not in sys.path:
 from phoenixguard.runtime.adaptive_runtime import (
     ContinualLearningManager,
     OpenSetDetector,
-    _summarize_grounded_structure,
+    summarize_grounded_structure,
     build_artifact_summary,
     build_grounded_chart,
 )
@@ -318,7 +318,7 @@ def test_grounded_chart_structure_summary_tracks_directional_bias() -> None:
 
 
 def test_grounded_structure_respects_bearish_breakout_direction() -> None:
-    structure = _summarize_grounded_structure(
+    structure = summarize_grounded_structure(
         objects=[],
         zones=[
             {

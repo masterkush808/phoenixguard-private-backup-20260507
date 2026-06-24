@@ -431,3 +431,6 @@ def write_final_certification_report(results: Sequence[Mapping[str, Any]], *, ou
             lines.append("")
     target.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     return target
+
+
+python_processes_wmic = _python_processes_wmic

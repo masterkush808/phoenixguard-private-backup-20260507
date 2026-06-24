@@ -1360,6 +1360,9 @@ def build_sequence_context_v3(session_payload: Mapping[str, Any]) -> dict[str, A
     return build_market_object_registry_v3(session_payload).sequence_context.as_dict()
 
 
+derive_trendline_overlays = _derive_trendline_overlays
+
+
 __all__ = [
     "MARKET_OBJECT_REGISTRY_SCHEMA_VERSION",
     "OVERLAY_SCHEMA_VERSION",
@@ -1372,4 +1375,5 @@ __all__ = [
     "build_market_object_registry_v3",
     "build_sequence_context_v3",
     "build_v3_overlays_from_session",
+    "derive_trendline_overlays",
 ]

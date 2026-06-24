@@ -113,6 +113,9 @@ class PersonalizationEngine:
             self.logger.warning('Style embedder unavailable, zero-vector fallback: %s', exc)
         return self.embedder
 
+    def ensure_embedder(self) -> Any | None:
+        return self._ensure_embedder()
+
     def _encode(self, text: str) -> NDArray[np.float32]:
         if not text:
             return np.zeros_like(self.style_vector, dtype=np.float32)

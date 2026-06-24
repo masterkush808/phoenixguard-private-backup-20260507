@@ -4,7 +4,7 @@ from typing import Any
 
 from phoenixguard.mobile_api.window_tracker import (
     PhoenixGuardWindowTrackingAdapter,
-    _normalize_execution_controls,
+    normalize_execution_controls,
 )
 
 
@@ -57,7 +57,7 @@ def test_support_resistance_depth_can_exceed_four_zones() -> None:
     ]
     levels = [float(level) for level in levels]
 
-    zones = adapter._derive_support_resistance_zones(  # noqa: SLF001
+    zones = adapter.derive_support_resistance_zones(  # noqa: SLF001
         _manual_candles(levels),
         (960, 540),
         candidate_action="BUY",
@@ -74,7 +74,7 @@ def test_support_resistance_depth_can_exceed_four_zones() -> None:
 
 
 def test_execution_controls_normalize_knowledge_depth_knobs() -> None:
-    controls = _normalize_execution_controls(
+    controls = normalize_execution_controls(
         {
             "live_max_tracked_candles": 512,
             "support_resistance_max_zones_per_role": 20,

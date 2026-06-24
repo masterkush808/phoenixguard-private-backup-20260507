@@ -550,6 +550,12 @@ def _broker_click_unsafe_result() -> dict[str, Any]:
     return council.evaluate(second, now_epoch=NOW + 0.5)
 
 
+assert_non_executable_release_fields = _assert_non_executable_release_fields
+broker_click_unsafe_result = _broker_click_unsafe_result
+second_packet = _second_packet
+strong_snapshot = _strong_snapshot
+
+
 def test_ready_timing_without_explicit_expiry_does_not_fallback_to_300() -> None:
     council = ModelCouncilV3()
     first = _strong_snapshot("BUY", frame_id=100)

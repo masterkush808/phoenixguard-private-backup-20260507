@@ -74,8 +74,8 @@ def test_reconcile_projection_action_conflict_does_not_override_execute_state() 
 
 
 def test_missing_directional_evidence_stays_neutral_in_chart_helpers() -> None:
-    swing_state = main._classify_swing_state([], {}, market_state=None)
-    trend_regime = main._summarize_trend_regime([], {}, market_state=None)
+    swing_state = main.classify_swing_state([], {}, market_state=None)
+    trend_regime = main.summarize_trend_regime([], {}, market_state=None)
 
     assert swing_state["current_direction"] == "HOLD"
     assert swing_state["macro_direction"] == "HOLD"
@@ -146,7 +146,7 @@ def test_active_trade_overlay_promotes_bearish_hold_to_sell_on_confirmation() ->
         ],
     }
 
-    overlay = main._derive_active_trade_overlay(result)
+    overlay = main.derive_active_trade_overlay(result)
 
     assert overlay["directional_intent"] == "SELL"
     assert overlay["active_trade_state"] == "SELL_ON_CONFIRMATION"

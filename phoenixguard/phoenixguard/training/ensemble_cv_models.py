@@ -28,6 +28,7 @@ Upgrades wired in without changing the outer training flow:
 
 import copy
 import gc
+import importlib
 import json
 import os
 import random
@@ -70,25 +71,23 @@ _patch_torchvision_register_fake()
 
 clip: Any | None
 try:
-    import clip as _clip
-    clip = _clip
+    clip = importlib.import_module("clip")
 except Exception:  # pragma: no cover - optional dependency
     clip = None
 import timm
-import torchvision.transforms as T
+T: Any = importlib.import_module("torchvision.transforms")
 try:
-    from lightly.models.modules import (
-        BYOLPredictionHead as _LightlyBYOLPredictionHead,
-        BYOLProjectionHead as _LightlyBYOLProjectionHead,
-        SimCLRProjectionHead as _LightlySimCLRProjectionHead,
-        SwaVProjectionHead as _LightlySwaVProjectionHead,
-        SwaVPrototypes as _LightlySwaVPrototypes,
-    )
-    BYOLPredictionHead = cast(Any, _LightlyBYOLPredictionHead)
-    BYOLProjectionHead = cast(Any, _LightlyBYOLProjectionHead)
-    SimCLRProjectionHead = cast(Any, _LightlySimCLRProjectionHead)
-    SwaVProjectionHead = cast(Any, _LightlySwaVProjectionHead)
-    SwaVPrototypes = cast(Any, _LightlySwaVPrototypes)
+    _lightly_modules: Any = importlib.import_module("lightly.models.modules")
+    _LightlyBYOLPredictionHead = getattr(_lightly_modules, "BYOLPredictionHead")
+    _LightlyBYOLProjectionHead = getattr(_lightly_modules, "BYOLProjectionHead")
+    _LightlySimCLRProjectionHead = getattr(_lightly_modules, "SimCLRProjectionHead")
+    _LightlySwaVProjectionHead = getattr(_lightly_modules, "SwaVProjectionHead")
+    _LightlySwaVPrototypes = getattr(_lightly_modules, "SwaVPrototypes")
+    BYOLPredictionHead = _LightlyBYOLPredictionHead
+    BYOLProjectionHead = _LightlyBYOLProjectionHead
+    SimCLRProjectionHead = _LightlySimCLRProjectionHead
+    SwaVProjectionHead = _LightlySwaVProjectionHead
+    SwaVPrototypes = _LightlySwaVPrototypes
 except Exception:  # pragma: no cover - optional dependency fallback
     class SimCLRProjectionHead(nn.Module):
         def __init__(self, in_features: int, hidden_features: int, out_features: int) -> None:
@@ -2017,6 +2016,23 @@ class EnsembleCVModels:
         teacher_probs = F.softmax(teacher_logits / temp, dim=-1)
         return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (temp ** 2)
 
+    def prepare_continual_state(
+        self,
+        *,
+        name: str,
+        model: nn.Module,
+        head: nn.Module,
+        aux_head: SequenceAuxiliaryHead | None,
+        model_dir: Path,
+    ) -> ContinualTrainingState:
+        return self._prepare_continual_state(
+            name=name,
+            model=model,
+            head=head,
+            aux_head=aux_head,
+            model_dir=model_dir,
+        )
+
     def _prepare_continual_state(
         self,
         *,
@@ -2186,6 +2202,22 @@ class EnsembleCVModels:
         if len(replay_dataset) == 0:
             return base_dataset
         return MergedChartDataset([base_dataset, replay_dataset])
+
+    def build_dataset(
+        self,
+        model_name: str,
+        image_dirs: Sequence[str] | None = None,
+        is_training: bool = True,
+        include_replay: bool = False,
+        replay_samples: Sequence[ReplaySample] | None = None,
+    ) -> Dataset[tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]]:
+        return self._build_dataset(
+            model_name=model_name,
+            image_dirs=image_dirs,
+            is_training=is_training,
+            include_replay=include_replay,
+            replay_samples=replay_samples,
+        )
 
     def _make_sampler(self, dataset: ChartImageDataset, model_name: str) -> WeightedRandomSampler:
         cfg = TRAIN_CONFIGS.get(model_name, TRAIN_CONFIGS["mobilenetv3"])

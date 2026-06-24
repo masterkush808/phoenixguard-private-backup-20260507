@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import logging
+import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import uvicorn
 
@@ -27,10 +29,11 @@ def _disable_local_tracing_export() -> None:
 def _configure_windows_server_loop() -> None:
     if not sys.platform.startswith("win"):
         return
-    policy_factory = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
-    if policy_factory is None:
+    policy_factory = cast(Callable[[], object] | None, getattr(asyncio, "WindowsSelectorEventLoopPolicy", None))
+    policy_setter = cast(Callable[[object], None] | None, getattr(asyncio, "set_event_loop_policy", None))
+    if policy_factory is None or policy_setter is None:
         return
-    asyncio.set_event_loop_policy(policy_factory())
+    policy_setter(policy_factory())
 
 
 if __name__ == "__main__":

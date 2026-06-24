@@ -554,6 +554,9 @@ class RLPolicyEngine:
             self._feedback_count = len(self._feedback_buffer)
             self._save_feedback_buffer()
 
+    def append_feedback_item(self, item: dict[str, Any]) -> None:
+        self._append_feedback_item(item)
+
     def _recent_feedback_batch(self) -> list[dict[str, Any]]:
         batch_size = int(max(TRAIN.rl_feedback_batch_size, 1))
         if not self._feedback_buffer:

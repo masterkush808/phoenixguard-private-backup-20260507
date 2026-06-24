@@ -62,7 +62,7 @@ def test_v2_adapter_does_not_import_legacy_execution() -> None:
     assert "execution" not in migrate_v2_sniper_overlay.__module__.lower()
 
 
-def test_model_health_not_0_0_when_visual_packet_exists() -> None:
+def test_model_health_not_0_0_when_visualpacket_exists() -> None:
     payload: dict[str, Any] = {
         "session_id": "health-1",
         "model_council_study_packet": {"packet_id": "pkt_1", "schema_version": "PG_MODEL_COUNCIL_STUDY_V3"},
@@ -94,7 +94,7 @@ def test_visual_health_passes_when_chart_overlay_frontend_aligned(tmp_path: Path
         ],
         chart_transform=transform.as_dict(),
     )
-    svc._save_session(
+    svc.save_session(
         {
             "session_id": session_id,
             "manual_focus_region": {"enabled": True, "normalized_bbox": [0, 0, 1, 1]},

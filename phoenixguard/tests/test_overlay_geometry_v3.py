@@ -5,7 +5,7 @@ from typing import Any, cast
 
 from PIL import Image, ImageDraw
 
-from phoenixguard.mobile_api.window_tracker import PhoenixGuardWindowTrackingAdapter, _overlay_font
+from phoenixguard.mobile_api.window_tracker import PhoenixGuardWindowTrackingAdapter, overlay_font
 from phoenixguard.vision.overlay_geometry import (
     DEFAULT_LAYER_VISIBILITY,
     build_overlay_truth_audit,
@@ -233,7 +233,7 @@ def test_overlay_cancel_line_stays_near_trigger_zone_not_full_chart(monkeypatch:
 
     monkeypatch.setattr(adapter, "_draw_dashed_line", capture_line)
 
-    adapter._draw_projection_layer(  # noqa: SLF001
+    adapter.draw_projection_layer(  # noqa: SLF001
         draw,
         {
             "target_first_probability": 0.6,
@@ -254,7 +254,7 @@ def test_overlay_cancel_line_stays_near_trigger_zone_not_full_chart(monkeypatch:
         chart_box=[0, 0, 1000, 500],
         offset=(0, 0),
         colors={"current": (138, 160, 181)},
-        font=_overlay_font(12),
+        font=overlay_font(12),
     )
 
     cancel_lines = [(start, end) for start, end in captured if start[1] == 330 and end[1] == 330]
@@ -272,7 +272,7 @@ def test_live_overlay_does_not_draw_prediction_path(monkeypatch: Any) -> None:
     def fail_projection_draw(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("live overlay must not draw prediction path overlays")
 
-    monkeypatch.setattr(adapter, "_draw_projection_layer", fail_projection_draw)
+    monkeypatch.setattr(adapter, "draw_projection_layer", fail_projection_draw)
     image = Image.new("RGB", (320, 220), (8, 12, 18))
     tracking_summary: dict[str, Any] = {
         "tracked_candles": [
@@ -295,7 +295,7 @@ def test_live_overlay_does_not_draw_prediction_path(monkeypatch: Any) -> None:
         "overlay_geometry": {"layer_visibility": {"trigger_zones": True}},
     }
 
-    adapter._render_overlay(image, [0, 0, 320, 220], tracking_summary, {"action": "SELL"})  # noqa: SLF001
+    adapter.render_overlay(image, [0, 0, 320, 220], tracking_summary, {"action": "SELL"})  # noqa: SLF001
 
 
 def test_live_overlay_renderer_honors_visible_default_for_hidden_layers(monkeypatch: Any) -> None:
@@ -315,12 +315,12 @@ def test_live_overlay_renderer_honors_visible_default_for_hidden_layers(monkeypa
     }
 
     before = canvas.tobytes()
-    adapter._draw_support_resistance_layer(  # noqa: SLF001
+    adapter.draw_support_resistance_layer(  # noqa: SLF001
         draw,
         [hidden_zone],
         chart_box=[0, 0, 320, 220],
         offset=(0, 0),
-        font=_overlay_font(12),
+        font=overlay_font(12),
         require_visible_default=True,
     )
     assert canvas.tobytes() == before
@@ -329,7 +329,7 @@ def test_live_overlay_renderer_honors_visible_default_for_hidden_layers(monkeypa
         raise AssertionError("hidden structure boxes must not be rendered in live mode")
 
     monkeypatch.setattr(adapter, "_draw_structure_box", fail_structure_draw)
-    adapter._render_overlay(  # noqa: SLF001
+    adapter.render_overlay(  # noqa: SLF001
         image,
         [0, 0, 320, 220],
         {
@@ -401,7 +401,7 @@ def test_regression_lines_anchor_to_wick_envelope_not_candle_centers() -> None:
             return None
 
     uptrend_draw = DrawSpy()
-    adapter._draw_regression_line(  # noqa: SLF001
+    adapter.draw_regression_line(  # noqa: SLF001
         cast(ImageDraw.ImageDraw, uptrend_draw),
         [
             {"bbox": [10, 90, 16, 130], "center_x": 13, "center_y": 110, "direction": "BUY"},
@@ -416,7 +416,7 @@ def test_regression_lines_anchor_to_wick_envelope_not_candle_centers() -> None:
     assert abs(y1 - 90.0) <= 0.01
 
     downtrend_draw = DrawSpy()
-    adapter._draw_regression_line(  # noqa: SLF001
+    adapter.draw_regression_line(  # noqa: SLF001
         cast(ImageDraw.ImageDraw, downtrend_draw),
         [
             {"bbox": [10, 50, 16, 90], "center_x": 13, "center_y": 70, "direction": "SELL"},

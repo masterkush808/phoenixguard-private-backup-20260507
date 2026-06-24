@@ -130,7 +130,7 @@ def _activate_window_false(hwnd: int) -> bool:
 def test_tracker_translates_locked_broker_controls_into_chart_exclusions() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     surface = Image.new("RGB", (1000, 600), color=(18, 24, 34))
-    boxes = adapter._chart_space_broker_exclusion_boxes(  # noqa: SLF001
+    boxes = adapter.chart_space_broker_exclusion_boxes(  # noqa: SLF001
         surface,
         [0, 0, 1000, 600],
         session_payload={
@@ -148,9 +148,9 @@ def test_tracker_translates_locked_broker_controls_into_chart_exclusions() -> No
     assert any(box[0] <= 850 <= box[2] and box[1] <= 160 <= box[3] for box in boxes)
 
 
-def test_model_council_study_packet_synthesizes_fresh_when_stored_packet_is_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_model_council_study_packet_synthesizes_fresh_when_storedpacket_is_stale(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(window_tracker_module.time, "time", lambda: 200.0)
-    packet = window_tracker_module._model_council_study_packet_from_payload(
+    packet = window_tracker_module.model_council_study_packet_from_payload(
         {
             "session_id": "pocket-live-8788",
             "state_version": 200123,
@@ -199,7 +199,7 @@ def test_read_json_prefers_newer_last_good_snapshot(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    payload = window_tracker_module._read_json(session_path, {})
+    payload = window_tracker_module.read_json(session_path, {})
 
     assert payload["capture_count"] == 2
     assert payload["last_capture_epoch"] == 200.0
@@ -208,7 +208,7 @@ def test_read_json_prefers_newer_last_good_snapshot(tmp_path: Path) -> None:
 def test_model_council_study_packet_uses_signal_freshness_when_synthesized(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(window_tracker_module.time, "time", lambda: 200.0)
 
-    packet = window_tracker_module._model_council_study_packet_from_payload(
+    packet = window_tracker_module.model_council_study_packet_from_payload(
         {
             "session_id": "pocket-live-8788",
             "state_version": 200123,
@@ -637,7 +637,7 @@ class _StubIdentityAdapter:
             "confidence": self.market_confidence,
             "bbox": [12, 42, 132, 72],
             "source": "stub_market",
-            "raw_text": self.market,
+            "rawtext": self.market,
         }
 
 
@@ -676,9 +676,9 @@ def _test_popup_visual_payload(
     image: Image.Image,
     time_field: Mapping[str, Any],
 ) -> dict[str, Any]:
-    popup_controls = backend._expiry_popup_control_points(time_field)
+    popup_controls = backend.expiry_popup_control_points(time_field)
     popup_locks = {
-        name: backend._control_lock(
+        name: backend.control_lock(
             key=name,
             label=name,
             row={
@@ -1076,7 +1076,7 @@ def test_tracker_capture_surface_unavailable_preserves_overlay_authority(tmp_pat
     payload["last_overlay_path"] = str(existing_overlay)
     write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
 
-    captured = tracker._capture_and_analyze(session_id, force=True)
+    captured = tracker.capture_and_analyze(session_id, force=True)
     refreshed = tracker.get_session(session_id)
 
     assert captured is False
@@ -1090,11 +1090,11 @@ def test_tracker_capture_surface_unavailable_preserves_overlay_authority(tmp_pat
 
 
 def test_tradingview_window_query_matches_compact_visible_tab_title() -> None:
-    assert window_tracker_module._title_matches_window_query(
+    assert window_tracker_module.title_matches_window_query(
         "EURUSD Chart - TradingView - Microsoft Edge",
         "Trading View",
     )
-    assert not window_tracker_module._title_matches_window_query(
+    assert not window_tracker_module.title_matches_window_query(
         "EURUSD Chart - TradingView - Microsoft Edge",
         "Pocket Option",
     )
@@ -1926,7 +1926,7 @@ def test_window_tracker_timing_allows_sell_from_significant_resistance_area() ->
 
 def test_window_tracker_blocks_primary_lane_when_kernel_is_pullback_wait(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "lane")
-    selected = tracker._select_execution_lane(
+    selected = tracker.select_execution_lane(
         {
             "execution_action": "BUY",
             "actionable": True,
@@ -1955,7 +1955,7 @@ def test_window_tracker_blocks_primary_lane_when_kernel_is_pullback_wait(tmp_pat
 def test_window_tracker_accepts_location_sniper_at_significant_resistance(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "location-sniper")
     tracked = [{"close_proxy": value} for value in [0.20, 0.35, 0.48, 0.62, 0.78, 0.92, 0.88, 0.80]]
-    selected = tracker._select_execution_lane(
+    selected = tracker.select_execution_lane(
         {
             "execution_action": "SELL",
             "action": "SELL",
@@ -2023,7 +2023,7 @@ def test_window_tracker_accepts_location_sniper_at_significant_resistance(tmp_pa
 def test_window_tracker_accepts_live_market_flow_from_current_movement(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "live-flow")
     tracked = [{"close_proxy": value} for value in [0.30, 0.42, 0.55, 0.68, 0.82, 0.78, 0.74, 0.70]]
-    selected = tracker._select_execution_lane(
+    selected = tracker.select_execution_lane(
         {
             "execution_action": "HOLD",
             "action": "HOLD",
@@ -2101,7 +2101,7 @@ def test_window_tracker_accepts_live_market_flow_from_current_movement(tmp_path:
 def test_window_tracker_blocks_live_market_flow_into_opposing_support(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "live-flow-opposing")
     tracked = [{"close_proxy": value} for value in [0.30, 0.42, 0.55, 0.68, 0.82, 0.78, 0.74, 0.70]]
-    selected = tracker._select_execution_lane(
+    selected = tracker.select_execution_lane(
         {
             "execution_action": "HOLD",
             "action": "HOLD",
@@ -2190,7 +2190,7 @@ def test_window_tracker_blocks_live_market_flow_into_opposing_support(tmp_path: 
 def test_window_tracker_accepts_opposing_force_reaction_from_active_support(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "opposing-force-reaction")
     tracked = [{"close_proxy": value} for value in [0.88, 0.75, 0.60, 0.47, 0.35, 0.24, 0.27, 0.31]]
-    selected = tracker._select_execution_lane(
+    selected = tracker.select_execution_lane(
         {
             "execution_action": "HOLD",
             "action": "SELL",
@@ -2278,7 +2278,7 @@ def test_window_tracker_accepts_opposing_force_reaction_from_active_support(tmp_
 def test_window_tracker_waits_when_opposing_force_reaction_has_only_impulse_and_kernel(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "opposing-force-impulse-only")
     tracked = [{"close_proxy": value} for value in [0.20, 0.34, 0.48, 0.62, 0.76, 0.88, 0.93, 0.98]]
-    selected = tracker._select_execution_lane(
+    selected = tracker.select_execution_lane(
         {
             "execution_action": "HOLD",
             "action": "BUY",
@@ -2364,7 +2364,7 @@ def test_window_tracker_waits_when_opposing_force_reaction_has_only_impulse_and_
 def test_window_tracker_waits_when_opposing_force_reaction_is_only_latest_candle(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "opposing-force-weak-current")
     tracked = [{"close_proxy": value} for value in [0.88, 0.75, 0.60, 0.47, 0.35, 0.24, 0.25, 0.29]]
-    selected = tracker._select_execution_lane(
+    selected = tracker.select_execution_lane(
         {
             "execution_action": "HOLD",
             "action": "SELL",
@@ -2443,7 +2443,7 @@ def test_window_tracker_waits_when_opposing_force_reaction_is_only_latest_candle
 def test_window_tracker_waits_when_opposing_force_has_no_reaction_confirmation(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "opposing-force-no-confirm")
     tracked = [{"close_proxy": value} for value in [0.88, 0.75, 0.60, 0.47, 0.35, 0.24, 0.27, 0.31]]
-    selected = tracker._select_execution_lane(
+    selected = tracker.select_execution_lane(
         {
             "execution_action": "HOLD",
             "action": "SELL",
@@ -2525,7 +2525,7 @@ def test_window_tracker_waits_when_opposing_force_has_no_reaction_confirmation(t
 
 def test_window_tracker_blocks_primary_lane_when_target_horizon_is_too_short(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "short-target")
-    selected = tracker._select_execution_lane(
+    selected = tracker.select_execution_lane(
         {
             "execution_action": "SELL",
             "actionable": True,
@@ -2553,7 +2553,7 @@ def test_window_tracker_blocks_primary_lane_when_target_horizon_is_too_short(tmp
 
 def test_window_tracker_blocks_primary_lane_when_risk_metrics_are_missing(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "missing-risk")
-    selected = tracker._select_execution_lane(
+    selected = tracker.select_execution_lane(
         {"execution_action": "BUY", "actionable": True},
         {
             "decision_kernel": {
@@ -2572,7 +2572,7 @@ def test_window_tracker_blocks_primary_lane_when_risk_metrics_are_missing(tmp_pa
 
 def test_window_tracker_accepts_primary_lane_only_with_complete_risk_metrics(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "complete-risk")
-    selected = tracker._select_execution_lane(
+    selected = tracker.select_execution_lane(
         {"execution_action": "BUY", "actionable": True},
         {
             "decision_kernel": {
@@ -2601,7 +2601,7 @@ def test_window_tracker_accepts_primary_lane_only_with_complete_risk_metrics(tmp
     assert selected["lane"] == "TREND_FOLLOW"
 
 
-def test_window_tracker_rejects_garbled_broker_market_text() -> None:
+def test_window_tracker_rejects_garbled_broker_markettext() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     normalize = cast(Callable[[str], str], getattr(adapter, "_normalize_market_candidate"))
 
@@ -2768,7 +2768,7 @@ def test_window_tracker_builds_memory_projection_payload(monkeypatch: Any) -> No
         {"confidence": 1.0, "pixel_bbox": [0, 0, chart.width, chart.height], "normalized_bbox": [0.0, 0.0, 1.0, 1.0], "width": chart.width, "height": chart.height},
         candles,
         {"value": "M5", "source": "test", "confidence": 1.0},
-        market_selector={"value": "GBP/JPY OTC", "source": "header_text", "confidence": 0.91},
+        market_selector={"value": "GBP/JPY OTC", "source": "headertext", "confidence": 0.91},
     )
 
     payload = adapter.build_memory_projection(chart, tracking, signal, mode="future")
@@ -2811,7 +2811,7 @@ def test_tracker_memory_projection_actions_persist_and_go_stale(tmp_path: Path, 
     ) -> dict[str, Any]:
         _ = image
         _ = timeframe_selector
-        return {"value": "GBP/JPY OTC", "source": "header_text", "confidence": 0.92}
+        return {"value": "GBP/JPY OTC", "source": "headertext", "confidence": 0.92}
 
     monkeypatch.setattr(
         adapter,
@@ -3057,7 +3057,7 @@ def test_window_tracker_support_resistance_zones_fit_touch_candles() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
 
     def derive_zones(candles: Sequence[Mapping[str, Any]], size: tuple[int, int]) -> list[dict[str, Any]]:
-        return adapter._derive_support_resistance_zones(  # noqa: SLF001
+        return adapter.derive_support_resistance_zones(  # noqa: SLF001
             candles,
             size,
             candidate_action="BUY",
@@ -3147,7 +3147,7 @@ def test_tracker_session_defaults_to_awaiting_focus(tmp_path: Path) -> None:
     assert "Strict execution blocked" not in str(session["latest_signal"]["summary"])
 
 
-def test_start_session_clears_stale_packets_before_first_fresh_capture(
+def test_start_session_clears_stalepackets_before_first_fresh_capture(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -3157,7 +3157,7 @@ def test_start_session_clears_stale_packets_before_first_fresh_capture(
         tracking_adapter=_FakeTrackingAdapter(),
     )
     session = tracker.create_session(session_id="pocket-live")
-    payload = tracker._load_session(str(session["session_id"]))
+    payload = tracker.load_session(str(session["session_id"]))
     assert payload is not None
     payload["manual_focus_region"] = {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]}
     payload["status"] = "ready"
@@ -3166,10 +3166,10 @@ def test_start_session_clears_stale_packets_before_first_fresh_capture(
     payload["last_capture_started_epoch"] = 99.0
     payload["decision_valid_until_epoch"] = 130.0
     payload["model_council_result"] = {"state": "WATCHING"}
-    payload["model_council_study_packet"] = {"packet_id": "stale_packet", "packet_type": "STUDY_PACKET"}
+    payload["model_council_study_packet"] = {"packet_id": "stalepacket", "packet_type": "STUDY_PACKET"}
     payload["model_council_packet"] = {"packet_id": "stale_exec", "packet_type": "PG_EXECUTION_PACKET_V3"}
     payload["execution_packet"] = {"packet_id": "stale_exec", "packet_type": "PG_EXECUTION_PACKET_V3"}
-    tracker._save_session(payload)
+    tracker.save_session(payload)
 
     def ensure_worker_stub(*_args: object, **_kwargs: object) -> None:
         return None
@@ -3182,7 +3182,7 @@ def test_start_session_clears_stale_packets_before_first_fresh_capture(
     assert started["tracking_enabled"] is True
     assert started["last_capture_epoch"] == 0.0
     assert started["latest_signal"]["status"] == "warming"
-    stored = tracker._load_session(str(session["session_id"]))
+    stored = tracker.load_session(str(session["session_id"]))
     assert stored is not None
     assert stored["decision_valid_until_epoch"] == 0.0
     assert stored["model_council_study_packet"] == {}
@@ -3192,7 +3192,7 @@ def test_start_session_clears_stale_packets_before_first_fresh_capture(
 
 def test_model_council_packet_lookup_ignores_expired_execution_packet(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: 150.0)
-    expired_packet: dict[str, Any] = {
+    expiredpacket: dict[str, Any] = {
         "schema_version": "PG_EXECUTION_PACKET_V3",
         "packet_type": "PG_EXECUTION_PACKET_V3",
         "packet_id": "expired-exec",
@@ -3203,8 +3203,8 @@ def test_model_council_packet_lookup_ignores_expired_execution_packet(monkeypatc
 
     assert model_council_packet_from_payload(
         {
-            "model_council_packet": expired_packet,
-            "execution_packet": expired_packet,
+            "model_council_packet": expiredpacket,
+            "execution_packet": expiredpacket,
         }
     ) == {}
 
@@ -3240,7 +3240,7 @@ def test_model_council_packet_lookup_rejects_demoted_execution_root_without_side
     assert model_council_packet_from_payload({"model_council_result": demoted_root}) == {}
 
 
-def test_public_session_payload_does_not_block_non_executable_missing_signal_id(tmp_path: Path) -> None:
+def testpublic_session_payload_does_not_block_non_executable_missing_signal_id(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
 
     payload: dict[str, Any] = {
@@ -3260,7 +3260,7 @@ def test_public_session_payload_does_not_block_non_executable_missing_signal_id(
         "tracking_summary": {"chart_valid": True},
     }
 
-    public = tracker._public_session_payload(payload)
+    public = tracker.public_session_payload(payload)
 
     assert public["latest_signal"]["status"] == "tracking"
     assert public["latest_signal"]["summary"] == "Phoenix forming"
@@ -3268,7 +3268,7 @@ def test_public_session_payload_does_not_block_non_executable_missing_signal_id(
     assert public["latest_signal"]["actionable"] is False
 
 
-def test_public_session_payload_blocks_executable_missing_signal_id(tmp_path: Path) -> None:
+def testpublic_session_payload_blocks_executable_missing_signal_id(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
 
     payload: dict[str, Any] = {
@@ -3287,7 +3287,7 @@ def test_public_session_payload_blocks_executable_missing_signal_id(tmp_path: Pa
         "tracking_summary": {"chart_valid": True},
     }
 
-    public = tracker._public_session_payload(payload)
+    public = tracker.public_session_payload(payload)
 
     assert public["latest_signal"]["status"] == "blocked"
     assert public["latest_signal"]["execution_action"] == "HOLD"
@@ -3295,7 +3295,7 @@ def test_public_session_payload_blocks_executable_missing_signal_id(tmp_path: Pa
     assert public["latest_signal"]["summary"] == "Strict execution blocked this signal because signal_id is missing."
 
 
-def test_public_session_payload_publishes_strict_executable_signal_contract(tmp_path: Path) -> None:
+def testpublic_session_payload_publishes_strict_executable_signal_contract(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
     published_epoch = time.time()
 
@@ -3334,7 +3334,7 @@ def test_public_session_payload_publishes_strict_executable_signal_contract(tmp_
         },
     }
 
-    public = tracker._public_session_payload(payload)
+    public = tracker.public_session_payload(payload)
     signal = public["latest_signal"]
 
     assert signal["signal_id"] == "sig-1"
@@ -3378,7 +3378,7 @@ def test_public_session_payload_publishes_strict_executable_signal_contract(tmp_
         ({"active_hypothesis": {"side": "SELL"}}, "Active hypothesis is SELL"),
     ],
 )
-def test_public_session_payload_blocks_unsafe_published_execution_contract(
+def testpublic_session_payload_blocks_unsafe_published_execution_contract(
     tmp_path: Path,
     signal_overrides: Mapping[str, Any],
     expected_reason: str,
@@ -3397,7 +3397,7 @@ def test_public_session_payload_blocks_unsafe_published_execution_contract(
     }
     latest_signal.update(dict(signal_overrides))
 
-    public = tracker._public_session_payload(
+    public = tracker.public_session_payload(
         {
             "session_id": "pocket-live",
             "status": "running",
@@ -3501,7 +3501,7 @@ def test_tracker_live_mode_writes_fresh_hot_overlays_by_default(tmp_path: Path, 
     write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
-    tracker._capture_and_analyze(str(session["session_id"]))
+    tracker.capture_and_analyze(str(session["session_id"]))
     result = tracker.get_session(str(session["session_id"]))
 
     assert result["last_overlay_path"] != focused["last_overlay_path"]
@@ -3540,7 +3540,7 @@ def test_tracker_forced_minimal_hot_artifacts_overwrites_fresh_overlay(
     write_json_atomic(tracker.session_dir(str(session["session_id"])) / "session.json", payload)
 
     _allow_next_capture(tracker, str(session["session_id"]))
-    tracker._capture_and_analyze(str(session["session_id"]))
+    tracker.capture_and_analyze(str(session["session_id"]))
     result = tracker.get_session(str(session["session_id"]))
 
     assert result["last_overlay_path"] != focused["last_overlay_path"]
@@ -3581,15 +3581,15 @@ def test_tracker_capture_once_live_fast_path_returns_fresh_display_when_worker_b
     adapter_calls = adapter.calls
     before_display = int(payload.get("display_frame_id", 0) or 0)
     before_published = float(payload.get("display_published_epoch", 0.0) or 0.0)
-    with tracker._lock:
-        tracker._active_studies.add(str(session["session_id"]))
-        tracker._active_study_started_epoch[str(session["session_id"])] = time.time()
+    with tracker.lock:
+        tracker.active_studies.add(str(session["session_id"]))
+        tracker.active_study_started_epoch[str(session["session_id"])] = time.time()
     try:
         result = tracker.capture_once(str(session["session_id"]))
     finally:
-        with tracker._lock:
-            tracker._active_studies.discard(str(session["session_id"]))
-            tracker._active_study_started_epoch.pop(str(session["session_id"]), None)
+        with tracker.lock:
+            tracker.active_studies.discard(str(session["session_id"]))
+            tracker.active_study_started_epoch.pop(str(session["session_id"]), None)
 
     capture_result = cast(Mapping[str, Any], result["capture_once_result"])
     assert capture_result["ok"] is True
@@ -3632,8 +3632,8 @@ def test_tracker_capture_once_display_only_does_not_schedule_study_worker(tmp_pa
     assert capture_result["fast_display_path"] is True
     assert capture_result["busy"] is False
     assert adapter.calls == adapter_calls
-    with tracker._lock:
-        assert str(session["session_id"]) not in tracker._active_studies
+    with tracker.lock:
+        assert str(session["session_id"]) not in tracker.active_studies
 
 
 def test_tracker_capture_once_display_only_returns_busy_when_snapshot_in_flight(
@@ -3657,8 +3657,8 @@ def test_tracker_capture_once_display_only_returns_busy_when_snapshot_in_flight(
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0")
     backend.capture_calls = 0
     adapter.calls = 0
-    with tracker._lock:
-        tracker._display_snapshot_started_epoch[str(session["session_id"])] = time.time()
+    with tracker.lock:
+        tracker.display_snapshot_started_epoch[str(session["session_id"])] = time.time()
 
     result = tracker.capture_once(str(session["session_id"]), display_only=True)
 
@@ -3689,8 +3689,8 @@ def test_tracker_display_only_busy_is_single_flight_until_stale_reset(tmp_path: 
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0")
     backend.capture_calls = 0
     adapter.calls = 0
-    with tracker._lock:
-        tracker._display_snapshot_started_epoch[str(session["session_id"])] = time.time() - 5.0
+    with tracker.lock:
+        tracker.display_snapshot_started_epoch[str(session["session_id"])] = time.time() - 5.0
 
     result = tracker.capture_once(str(session["session_id"]), display_only=True)
 
@@ -3725,8 +3725,8 @@ def test_tracker_display_only_stale_inflight_resets_as_emergency_recovery(
     monkeypatch.setenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0")
     backend.capture_calls = 0
     adapter.calls = 0
-    with tracker._lock:
-        tracker._display_snapshot_started_epoch[str(session["session_id"])] = time.time() - 10.0
+    with tracker.lock:
+        tracker.display_snapshot_started_epoch[str(session["session_id"])] = time.time() - 10.0
 
     result = tracker.capture_once(str(session["session_id"]), display_only=True)
 
@@ -3975,8 +3975,8 @@ def test_tracker_display_only_busy_reuses_last_display_heartbeat(
     first_path = str(first["last_display_window_path"])
     first_display = int(first["display_frame_id"])
     backend.capture_calls = 0
-    with tracker._lock:
-        tracker._display_snapshot_started_epoch[str(session["session_id"])] = 1000.0
+    with tracker.lock:
+        tracker.display_snapshot_started_epoch[str(session["session_id"])] = 1000.0
 
     now_values = iter([1002.0, 1009.0])
 
@@ -4010,7 +4010,7 @@ def test_tracker_prunes_stale_artifact_groups(tmp_path: Path, monkeypatch: pytes
         for suffix in ("window.png", "chart.png", "overlay.png", "full_overlay.png", "decision.json"):
             (artifact_dir / f"{stem}_{suffix}").write_text("x", encoding="utf-8")
 
-    tracker._prune_session_artifacts(artifact_dir)
+    tracker.prune_session_artifacts(artifact_dir)
 
     remaining_groups = {
         "_".join(path.name.split("_", 2)[:2])
@@ -4045,7 +4045,7 @@ def test_tracker_prune_preserves_session_referenced_artifact_groups(tmp_path: Pa
         },
     )
 
-    tracker._prune_session_artifacts(artifact_dir)
+    tracker.prune_session_artifacts(artifact_dir)
 
     remaining_groups = {
         "_".join(path.name.split("_", 2)[:2])
@@ -4078,7 +4078,7 @@ def test_tracker_prune_preserves_display_state_referenced_artifact_group(tmp_pat
         },
     )
 
-    tracker._prune_session_artifacts(artifact_dir)
+    tracker.prune_session_artifacts(artifact_dir)
 
     assert protected_display.exists()
 
@@ -4093,7 +4093,7 @@ def test_tracker_event_log_is_bounded(tmp_path: Path, monkeypatch: pytest.Monkey
     )
     session_id = "event-log-prune-test"
     for index in range(20):
-        tracker._write_session_event_log(session_id, "event", index=index, payload="x" * 200)
+        tracker.write_session_event_log(session_id, "event", index=index, payload="x" * 200)
 
     rows = (tracker.session_dir(session_id) / "events.jsonl").read_text(encoding="utf-8").splitlines()
 
@@ -4117,12 +4117,12 @@ def test_tracker_capture_rate_limiter_skips_immediate_duplicate_capture(tmp_path
     monkeypatch.setattr(window_tracker_module.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(window_tracker_module.time, "time", lambda: clock["now"])
 
-    tracker._capture_and_analyze(session_id)
+    tracker.capture_and_analyze(session_id)
     first = tracker.get_session(session_id)
-    tracker._capture_and_analyze(session_id)
+    tracker.capture_and_analyze(session_id)
     duplicate = tracker.get_session(session_id)
     clock["now"] += 0.201
-    tracker._capture_and_analyze(session_id)
+    tracker.capture_and_analyze(session_id)
     after_floor = tracker.get_session(session_id)
 
     assert int(first["capture_count"]) == 1
@@ -4144,7 +4144,7 @@ def test_tracker_capture_preserves_newer_tracking_enabled_state(tmp_path: Path, 
     persisted["status"] = "running"
     write_json_atomic(tracker.session_dir(session_id) / "session.json", persisted)
 
-    original_require = tracker._require_session
+    original_require = tracker.require_session
     returned_stale_once = {"value": False}
 
     def _require_with_stale_local_state(requested_session_id: str) -> dict[str, Any]:
@@ -4157,9 +4157,9 @@ def test_tracker_capture_preserves_newer_tracking_enabled_state(tmp_path: Path, 
             return stale_payload
         return payload
 
-    monkeypatch.setattr(tracker, "_require_session", _require_with_stale_local_state)
+    monkeypatch.setattr(tracker, "require_session", _require_with_stale_local_state)
 
-    tracker._capture_and_analyze(session_id, force=True)
+    tracker.capture_and_analyze(session_id, force=True)
     refreshed = original_require(session_id)
 
     assert refreshed["tracking_enabled"] is True
@@ -4185,7 +4185,7 @@ def test_tracker_capture_does_not_overwrite_newer_published_capture(tmp_path: Pa
 
     monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: 1500.0)
 
-    tracker._capture_and_analyze(session_id, force=True)
+    tracker.capture_and_analyze(session_id, force=True)
     refreshed = tracker.load_session_payload(session_id)
 
     assert refreshed["last_capture_epoch"] == 2000.0
@@ -4216,9 +4216,9 @@ def test_tracker_study_gate_blocks_overlapping_capture(tmp_path: Path) -> None:
 
     setattr(tracker, "tracking_adapter", _BlockingTrackingAdapter("BUY"))
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(tracker._capture_and_analyze, session_id, force=True)
+        future = executor.submit(tracker.capture_and_analyze, session_id, force=True)
         assert started.wait(5.0)
-        tracker._capture_and_analyze(session_id, force=True)
+        tracker.capture_and_analyze(session_id, force=True)
         release.set()
         future.result(timeout=10.0)
 
@@ -4465,19 +4465,19 @@ def test_tracker_worker_loop_uses_adaptive_interval_without_default_floor(tmp_pa
         if next_count >= 2:
             stop_evt.set()
 
-    monkeypatch.setattr(tracker, "_capture_and_analyze", capture_stub)
+    monkeypatch.setattr(tracker, "capture_and_analyze", capture_stub)
     def adaptive_capture_interval_plan(_payload: Mapping[str, Any]) -> dict[str, Any]:
         return {"interval_sec": 0.5, "reason": "entry_ready"}
 
     monkeypatch.setattr(
         tracker,
-        "_adaptive_capture_interval_plan",
+        "adaptive_capture_interval_plan",
         adaptive_capture_interval_plan,
     )
     monkeypatch.setattr(window_tracker_module.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(window_tracker_module.time, "time", lambda: clock["now"])
 
-    tracker._worker_loop(session_id, cast(threading.Event, stop_evt), cast(threading.Event, capture_now_evt))
+    tracker.worker_loop(session_id, cast(threading.Event, stop_evt), cast(threading.Event, capture_now_evt))
     payload = tracker.load_session_payload(session_id)
 
     assert int(payload["capture_count"]) >= 2
@@ -4903,7 +4903,7 @@ def test_memory_precision_allows_aggressive_stacked_primary_when_counter_is_prob
         },
     }
 
-    precision = PhoenixGuardWindowTrackingAdapter._memory_precision_payload(primary_fit, counter_fit)
+    precision = PhoenixGuardWindowTrackingAdapter.memory_precision_payload(primary_fit, counter_fit)
 
     assert precision["accepted"] is True
     assert precision["accepted_by"] == "stacked_favor"
@@ -4948,7 +4948,7 @@ def test_tracker_http_surface_runs_memory_projection_actions(tmp_path: Path, mon
     ) -> dict[str, Any]:
         _ = image
         _ = timeframe_selector
-        return {"value": "GBP/JPY OTC", "source": "header_text", "confidence": 0.90}
+        return {"value": "GBP/JPY OTC", "source": "headertext", "confidence": 0.90}
 
     monkeypatch.setattr(
         adapter,
@@ -5054,7 +5054,7 @@ def test_tracker_accepts_hardened_subsecond_dashboard_timing(tmp_path: Path) -> 
     payload["manual_focus_region"] = {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]}
     payload["latest_signal"] = {"action": "HOLD", "execution_action": "HOLD", "entry_state": "WAIT"}
     payload["tracking_summary"] = {"decision_kernel": {"state": "IDLE"}}
-    base = tracker._adaptive_capture_interval_plan(payload)
+    base = tracker.adaptive_capture_interval_plan(payload)
 
     assert float(base["interval_sec"]) == 0.5
     assert base["reason"] == "base_timer"
@@ -5233,7 +5233,7 @@ def test_pocket_option_execution_backend_anchors_time_field_to_calibrated_box_ma
 
     assert payload["controls_ready"] is True
     assert payload["time_field"]["source"] == "shooter_box_map_time_field"
-    time_center = PocketOptionBrokerExecutionBackend._bbox_center(payload["time_field"]["bbox"])
+    time_center = PocketOptionBrokerExecutionBackend.bbox_center(payload["time_field"]["bbox"])
     assert time_center is not None
     assert abs(time_center[0] - int(round(full_gui.width * 0.91125))) <= 3
     assert abs(time_center[1] - int(round(full_gui.height * 0.26685))) <= 3
@@ -5285,9 +5285,9 @@ def test_pocket_option_execution_backend_sets_expiry_before_live_click(monkeypat
     monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=fake_user32), raising=False)
     window_image = _synthetic_broker_window()
     broker_surface = backend.read_surface(window_image)
-    popup_controls = backend._expiry_popup_control_points(cast(Mapping[str, Any], broker_surface["time_field"]))
+    popup_controls = backend.expiry_popup_control_points(cast(Mapping[str, Any], broker_surface["time_field"]))
     popup_locks = {
-        name: backend._control_lock(
+        name: backend.control_lock(
             key=name,
             label=name,
             row={"bbox": [point[0] - 12, point[1] - 10, point[0] + 12, point[1] + 10], "confidence": 0.9, "source": "test_popup"},
@@ -5312,7 +5312,7 @@ def test_pocket_option_execution_backend_sets_expiry_before_live_click(monkeypat
             "matches": True,
             "target_seconds": target_seconds,
             "visible_seconds": target_seconds,
-            "visible_text": backend._format_expiry_text(target_seconds),
+            "visible_text": backend.format_expiry_text(target_seconds),
             "confidence": 1.0,
             "source": "test_timer",
         }
@@ -5326,7 +5326,7 @@ def test_pocket_option_execution_backend_sets_expiry_before_live_click(monkeypat
             "message": "confirmed by test",
         }
 
-    monkeypatch.setattr(backend, "_expiry_popup_visual_control_points", popup_visual_control_points)
+    monkeypatch.setattr(backend, "expiry_popup_visual_control_points", popup_visual_control_points)
     monkeypatch.setattr(backend, "_verify_expiry_popup_target", verify_expiry_popup_target)
     monkeypatch.setattr(backend, "_verify_trade_click_result", verify_trade_click_result)
 
@@ -5389,7 +5389,7 @@ def test_pocket_option_execution_backend_blocks_without_visual_popup_lock(monkey
     def empty_popup_visual_control_points(**_kwargs: object) -> dict[str, Any]:
         return {}
 
-    monkeypatch.setattr(backend, "_expiry_popup_visual_control_points", empty_popup_visual_control_points)
+    monkeypatch.setattr(backend, "expiry_popup_visual_control_points", empty_popup_visual_control_points)
     window_image = _synthetic_broker_window()
     broker_surface = backend.read_surface(window_image)
 
@@ -5455,7 +5455,7 @@ def test_pocket_option_execution_backend_reports_unverified_click(monkeypatch: A
             "matches": True,
             "target_seconds": target_seconds,
             "visible_seconds": target_seconds,
-            "visible_text": backend._format_expiry_text(target_seconds),
+            "visible_text": backend.format_expiry_text(target_seconds),
             "confidence": 1.0,
             "source": "test_timer",
         }
@@ -5469,7 +5469,7 @@ def test_pocket_option_execution_backend_reports_unverified_click(monkeypatch: A
             "message": "no accepted-trade cue",
         }
 
-    monkeypatch.setattr(backend, "_expiry_popup_visual_control_points", popup_visual_control_points)
+    monkeypatch.setattr(backend, "expiry_popup_visual_control_points", popup_visual_control_points)
     monkeypatch.setattr(backend, "_verify_expiry_popup_target", verify_expiry_popup_target)
     monkeypatch.setattr(backend, "_verify_trade_click_result", verify_trade_click_result)
 
@@ -5511,7 +5511,7 @@ def test_pocket_option_click_refuses_cursor_miss() -> None:
             pass
 
     with pytest.raises(RuntimeError, match="cursor did not land"):
-        PocketOptionBrokerExecutionBackend._click_screen_point(
+        PocketOptionBrokerExecutionBackend.click_screen_point(
             _FakeUser32(),
             100,
             100,
@@ -5524,7 +5524,7 @@ def test_pocket_option_click_refuses_cursor_miss() -> None:
 
 def test_pocket_option_visual_popup_grid_overrides_field_relative_points() -> None:
     backend = PocketOptionBrokerExecutionBackend()
-    fallback = backend._expiry_popup_control_points({"bbox": [1636, 190, 1794, 255]})
+    fallback = backend.expiry_popup_control_points({"bbox": [1636, 190, 1794, 255]})
     image = _surface(width=1938, height=1038)
     draw = ImageDraw.Draw(image)
     cols = [1522, 1582, 1642]
@@ -5544,7 +5544,7 @@ def test_pocket_option_visual_popup_grid_overrides_field_relative_points() -> No
         import phoenixguard.mobile_api.window_tracker as window_tracker_module
 
         window_tracker_module.WindowsWindowCaptureBackend = _CaptureBackend  # type: ignore[assignment]
-        visual = backend._expiry_popup_visual_control_points(
+        visual = backend.expiry_popup_visual_control_points(
             descriptor={"hwnd": 501, "bbox": [0, 0, 1938, 1038]},
             time_field={"bbox": [1636, 190, 1794, 255]},
             fallback=fallback,
@@ -5569,11 +5569,11 @@ def test_pocket_option_visual_popup_grid_overrides_field_relative_points() -> No
 
 
 def test_pocket_option_expiry_plan_uses_m3_shortcut_from_presets() -> None:
-    plan_from_h4 = PocketOptionBrokerExecutionBackend._expiry_popup_click_plan(14400, 120)
-    plan_from_m30 = PocketOptionBrokerExecutionBackend._expiry_popup_click_plan(1800, 120)
-    plan_from_m1 = PocketOptionBrokerExecutionBackend._expiry_popup_click_plan(60, 120)
-    plan_from_h2_to_m3 = PocketOptionBrokerExecutionBackend._expiry_popup_click_plan(7200, 180)
-    plan_from_m3_to_m3 = PocketOptionBrokerExecutionBackend._expiry_popup_click_plan(180, 180)
+    plan_from_h4 = PocketOptionBrokerExecutionBackend.expiry_popup_click_plan(14400, 120)
+    plan_from_m30 = PocketOptionBrokerExecutionBackend.expiry_popup_click_plan(1800, 120)
+    plan_from_m1 = PocketOptionBrokerExecutionBackend.expiry_popup_click_plan(60, 120)
+    plan_from_h2_to_m3 = PocketOptionBrokerExecutionBackend.expiry_popup_click_plan(7200, 180)
+    plan_from_m3_to_m3 = PocketOptionBrokerExecutionBackend.expiry_popup_click_plan(180, 180)
 
     assert plan_from_h4 == ["quick_m1", "minute_plus"]
     assert plan_from_m30 == ["quick_m1", "minute_plus"]
@@ -5583,23 +5583,23 @@ def test_pocket_option_expiry_plan_uses_m3_shortcut_from_presets() -> None:
 
 
 def test_pocket_option_expiry_plan_resets_seconds_state_through_minute_shortcut() -> None:
-    plan = PocketOptionBrokerExecutionBackend._expiry_popup_click_plan(30, 600)
+    plan = PocketOptionBrokerExecutionBackend.expiry_popup_click_plan(30, 600)
 
     assert plan[0] == "quick_m5"
     assert plan.count("minute_plus") == 5
-    assert PocketOptionBrokerExecutionBackend._format_expiry_text("00:03:05") == "00:03:05"
+    assert PocketOptionBrokerExecutionBackend.format_expiry_text("00:03:05") == "00:03:05"
 
 
 def test_pocket_option_expiry_plan_supports_exact_second_controls() -> None:
-    assert PocketOptionBrokerExecutionBackend._expiry_popup_click_plan(15, 3) == ["quick_s3"]
-    assert PocketOptionBrokerExecutionBackend._expiry_popup_click_plan(15, 15) == []
-    plan_to_45 = PocketOptionBrokerExecutionBackend._expiry_popup_click_plan(15, 45)
+    assert PocketOptionBrokerExecutionBackend.expiry_popup_click_plan(15, 3) == ["quick_s3"]
+    assert PocketOptionBrokerExecutionBackend.expiry_popup_click_plan(15, 15) == []
+    plan_to_45 = PocketOptionBrokerExecutionBackend.expiry_popup_click_plan(15, 45)
     assert any(step.startswith("quick_s") or step.startswith("second_") for step in plan_to_45)
-    assert PocketOptionBrokerExecutionBackend._expiry_popup_click_plan(15, 75) == ["minute_plus"]
+    assert PocketOptionBrokerExecutionBackend.expiry_popup_click_plan(15, 75) == ["minute_plus"]
 
 
 def test_pocket_option_expiry_plan_uses_nearest_minute_anchor_for_long_non_preset() -> None:
-    plan = PocketOptionBrokerExecutionBackend._expiry_popup_click_plan(60, 1200)
+    plan = PocketOptionBrokerExecutionBackend.expiry_popup_click_plan(60, 1200)
 
     assert plan[0] == "quick_m30"
     assert plan.count("minute_minus") == 10
@@ -5648,7 +5648,7 @@ def test_tracker_execution_controls_default_to_shadow_fixed_amount(tmp_path: Pat
 
 
 def test_high_frequency_cycle_keeps_active_candidate_side_when_forecasts_disagree() -> None:
-    cycle = window_tracker_module._build_high_frequency_candle_cycle_context(
+    cycle = window_tracker_module.build_high_frequency_candle_cycle_context(
         signal={
             "execution_action": "SELL",
             "two_candle_study": {
@@ -5675,7 +5675,7 @@ def test_high_frequency_cycle_keeps_active_candidate_side_when_forecasts_disagre
 
 
 def test_high_frequency_cycle_does_not_let_hold_mask_candidate_side() -> None:
-    cycle = window_tracker_module._build_high_frequency_candle_cycle_context(
+    cycle = window_tracker_module.build_high_frequency_candle_cycle_context(
         signal={
             "execution_action": "HOLD",
             "candidate_action": "SELL",
@@ -5702,7 +5702,7 @@ def test_high_frequency_cycle_does_not_let_hold_mask_candidate_side() -> None:
 
 
 def test_high_frequency_cycle_forecast_agreement_overrides_candidate_only_when_ready() -> None:
-    cycle = window_tracker_module._build_high_frequency_candle_cycle_context(
+    cycle = window_tracker_module.build_high_frequency_candle_cycle_context(
         signal={
             "execution_action": "SELL",
             "two_candle_study": {
@@ -5802,28 +5802,28 @@ def test_tracker_adaptive_timer_uses_subsecond_entry_sniper_and_default_bounds(t
     }
     payload["tracking_summary"] = {"decision_kernel": {"state": "TRIGGERED", "p_trigger_next_1": 0.70}}
 
-    entry_ready = tracker._adaptive_capture_interval_plan(payload)
+    entry_ready = tracker.adaptive_capture_interval_plan(payload)
     assert float(entry_ready["interval_sec"]) == 0.5
     assert entry_ready["reason"] == "entry_ready"
 
     payload["latest_signal"] = {"action": "BUY", "execution_action": "BUY", "entry_state": "SNIPER_READY"}
     payload["tracking_summary"] = {"decision_kernel": {"state": "ARMED", "p_trigger_next_3": 0.72}}
-    sniper_ready = tracker._adaptive_capture_interval_plan(payload)
+    sniper_ready = tracker.adaptive_capture_interval_plan(payload)
     assert float(sniper_ready["interval_sec"]) == 0.5
 
     payload["latest_signal"] = {"action": "HOLD", "execution_action": "HOLD", "entry_state": "WAIT"}
     payload["tracking_summary"] = {"decision_kernel": {"state": "IDLE"}}
-    base = tracker._adaptive_capture_interval_plan(payload)
+    base = tracker.adaptive_capture_interval_plan(payload)
     assert float(base["interval_sec"]) == 3.0
     assert base["reason"] == "base_timer"
 
     payload["capture_interval_sec"] = 30.0
-    capped = tracker._adaptive_capture_interval_plan(payload)
+    capped = tracker.adaptive_capture_interval_plan(payload)
     assert float(capped["interval_sec"]) == 10.0
     assert capped["reason"] == "base_timer"
 
     payload["execution_controls"] = {"adaptive_timer_enabled": False}
-    fixed = tracker._adaptive_capture_interval_plan(payload)
+    fixed = tracker.adaptive_capture_interval_plan(payload)
     assert float(fixed["interval_sec"]) == 30.0
     assert fixed["reason"] == "fixed_timer"
 
@@ -5839,16 +5839,16 @@ def test_tracker_execution_throttle_blocks_after_five_clicks_per_window(tmp_path
     now = 1000.0
 
     for _index in range(5):
-        allowed, _message = tracker._execution_throttle_allows(state, controls, now_epoch=now)
+        allowed, _message = tracker.execution_throttle_allows(state, controls, now_epoch=now)
         assert allowed is True
-        tracker._record_execution_throttle(state, controls, now_epoch=now)
+        tracker.record_execution_throttle(state, controls, now_epoch=now)
         now += 10.0
 
-    allowed, message = tracker._execution_throttle_allows(state, controls, now_epoch=now)
+    allowed, message = tracker.execution_throttle_allows(state, controls, now_epoch=now)
     assert allowed is False
     assert "5/5" in message
 
-    allowed_after_reset, _message_after_reset = tracker._execution_throttle_allows(state, controls, now_epoch=1301.0)
+    allowed_after_reset, _message_after_reset = tracker.execution_throttle_allows(state, controls, now_epoch=1301.0)
     assert allowed_after_reset is True
 
 
@@ -5952,7 +5952,7 @@ def test_tracker_selects_pullback_reload_lane_when_sniper_ready(tmp_path: Path) 
         "box_context": {"failure_risk": 0.16},
     }
 
-    lane = tracker._select_execution_lane(
+    lane = tracker.select_execution_lane(
         latest_signal,
         tracking_summary,
         {"min_primary_target_candles": 10},
@@ -6020,7 +6020,7 @@ def test_expiry_verification_blocks_locked_click_plan_assumption_by_default() ->
         },
     ]
 
-    verification = PocketOptionBrokerExecutionBackend._assume_expiry_from_locked_click_plan(
+    verification = PocketOptionBrokerExecutionBackend.assume_expiry_from_locked_click_plan(
         target_seconds=900,
         verification={
             "status": "mismatch",
@@ -6062,7 +6062,7 @@ def test_expiry_verification_allows_locked_click_plan_only_when_emergency_enable
         },
     ]
 
-    verification = PocketOptionBrokerExecutionBackend._assume_expiry_from_locked_click_plan(
+    verification = PocketOptionBrokerExecutionBackend.assume_expiry_from_locked_click_plan(
         target_seconds=900,
         verification={
             "status": "mismatch",
@@ -6095,7 +6095,7 @@ def test_expiry_verification_still_blocks_reliable_ocr_mismatch() -> None:
         }
     ]
 
-    verification = PocketOptionBrokerExecutionBackend._assume_expiry_from_locked_click_plan(
+    verification = PocketOptionBrokerExecutionBackend.assume_expiry_from_locked_click_plan(
         target_seconds=900,
         verification={
             "status": "mismatch",
@@ -6364,14 +6364,14 @@ def test_tracker_loss_guard_pauses_same_side_after_recent_live_losses(tmp_path: 
         encoding="utf-8",
     )
 
-    buy_guard = tracker._recent_live_loss_guard(
+    buy_guard = tracker.recent_live_loss_guard(
         str(session["session_id"]),
         side="BUY",
         lane="LIVE_MARKET_FLOW",
         controls={"loss_guard_enabled": True, "loss_guard_max_consecutive_losses": 2, "loss_guard_pause_sec": 600},
         now_epoch=10000.0,
     )
-    sell_guard = tracker._recent_live_loss_guard(
+    sell_guard = tracker.recent_live_loss_guard(
         str(session["session_id"]),
         side="SELL",
         lane="LIVE_MARKET_FLOW",
@@ -6480,7 +6480,7 @@ def test_tracker_fuses_broker_identity_before_live_execution_gate(tmp_path: Path
     assert "Model Council V3 executable packet required" in result["broker_execution_state"]["message"]
 
 
-def test_tracker_reuses_broker_identity_when_live_packet_is_not_executable(tmp_path: Path) -> None:
+def test_tracker_reuses_broker_identity_when_livepacket_is_not_executable(tmp_path: Path) -> None:
     execution_backend = _CountingIdentityExecutionBackend()
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path,

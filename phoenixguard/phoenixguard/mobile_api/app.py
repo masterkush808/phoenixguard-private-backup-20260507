@@ -1104,6 +1104,9 @@ def _window_tracker_service(
     return _default_window_tracker_service
 
 
+window_tracker_service = _window_tracker_service
+
+
 class ObserverSessionCreateRequest(BaseModel):
     session_id: str | None = None
     name: str = ""

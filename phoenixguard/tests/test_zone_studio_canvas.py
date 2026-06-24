@@ -22,7 +22,7 @@ def test_build_zone_editor_value_prefers_processed_overlay_image() -> None:
     source_state = np.zeros((12, 18, 3), dtype=np.uint8)
     overlay = Image.new("RGB", (18, 12), color=(240, 90, 40))
 
-    value = main._build_zone_editor_value(source_state, base_image=overlay)
+    value = main.build_zone_editor_value(source_state, base_image=overlay)
 
     assert isinstance(value, Image.Image)
     assert value.mode == "RGBA"
@@ -39,7 +39,7 @@ def test_refresh_zone_canvas_rebuilds_the_current_processed_chart(monkeypatch: p
     def _image_from_state(_state: object) -> Image.Image:
         return source_image
 
-    def _build_render_config(**kwargs: Any) -> Payload:
+    def build_render_config(**kwargs: Any) -> Payload:
         return {
             "overlay_mode": kwargs["overlay_mode"],
             "min_conf_global": kwargs["min_conf_global"],
@@ -56,8 +56,8 @@ def test_refresh_zone_canvas_rebuilds_the_current_processed_chart(monkeypatch: p
     monkeypatch.setattr(main, "_image_from_state", _image_from_state)
     monkeypatch.setattr(
         main,
-        "_build_render_config",
-        _build_render_config,
+        "build_render_config",
+        build_render_config,
     )
     monkeypatch.setattr(main, "_build_overlay_image", _build_overlay_image)
 

@@ -35,10 +35,10 @@ class FakeAdapter:
         return {"projection": "proj.png", "reference": "ref.png"}
 
 
-def test_public_session_payload_normalizes_chart_overlay_paths(tmp_path: Path) -> None:
+def testpublic_session_payload_normalizes_chart_overlay_paths(tmp_path: Path) -> None:
     svc = ContinuousWindowTrackerService(root_dir=tmp_path / "wt")
     payload: dict[str, Any] = {"session_id": "s1", "last_display_chart_path": "display.png", "last_full_overlay_path": "overlay.png", "last_frame_path": "frame.png", "manual_focus_region": {"enabled": True}}
-    public = svc._public_session_payload(payload)
+    public = svc.public_session_payload(payload)
     assert public.get("last_chart_path") == "display.png"
     assert public.get("last_overlay_path") == "overlay.png"
     assert public.get("last_window_path") == "frame.png"
@@ -52,7 +52,7 @@ def test_run_memory_projection_resolves_adapter_artifacts(tmp_path: Path) -> Non
     img = Image.new("RGB", (10, 10), color=(255, 255, 255))
     img.save(chart_path)
     payload: dict[str, Any] = {"session_id": session_id, "manual_focus_region": {"enabled": True, "normalized_bbox": [0, 0, 1, 1]}, "frame_index": 1, "last_chart_path": str(chart_path)}
-    svc._save_session(payload)
+    svc.save_session(payload)
     result = svc.run_memory_projection(session_id, mode="future")
     mem = result.get("memory_projection_future") or result.get("memory_projection_current")
     assert mem is not None
@@ -70,7 +70,7 @@ def test_api_show_future_and_artifact_endpoint(tmp_path: Path) -> None:
     img = Image.new("RGB", (8, 8), color=(0, 0, 0))
     img.save(chart_path)
     payload: dict[str, Any] = {"session_id": session_id, "manual_focus_region": {"enabled": True, "normalized_bbox": [0, 0, 1, 1]}, "frame_index": 1, "last_chart_path": str(chart_path)}
-    svc._save_session(payload)
+    svc.save_session(payload)
     app = create_app(window_tracker_service=svc)
     client = TestClient(app)
     resp = client.post(f"/v1/mobile/window-tracker/sessions/{session_id}/show-future")

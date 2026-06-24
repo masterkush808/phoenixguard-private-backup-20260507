@@ -8,11 +8,11 @@ from PIL import Image
 
 from phoenixguard.mobile_api.live_state_v3 import (
     LIVE_STATE_SCHEMA_VERSION,
-    _compact_session_payload,
+    compact_session_payload,
     build_live_state_v3,
     build_live_state_v3_from_tracker_service,
 )
-from phoenixguard.mobile_api.window_tracker import _model_council_study_packet_from_payload
+from phoenixguard.mobile_api.window_tracker import model_council_study_packet_from_payload
 
 
 def _png(path: Path, size: tuple[int, int] = (320, 180)) -> Path:
@@ -21,7 +21,7 @@ def _png(path: Path, size: tuple[int, int] = (320, 180)) -> Path:
     return path
 
 
-def test_compact_session_payload_preserves_v3_authority_packets_and_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
+def testcompact_session_payload_preserves_v3_authoritypackets_and_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("phoenixguard.mobile_api.window_tracker.time.time", lambda: 100.0)
     sequence_context: dict[str, Any] = {
         "sequence_id": "seq-100",
@@ -68,7 +68,7 @@ def test_compact_session_payload_preserves_v3_authority_packets_and_sequence(mon
             "final_side": "SELL",
         },
     }
-    compact = _compact_session_payload(
+    compact = compact_session_payload(
         {
             "session_id": "pocket-live-8788",
             "status": "running",
@@ -99,13 +99,13 @@ def test_compact_session_payload_preserves_v3_authority_packets_and_sequence(mon
     compact_council = compact["model_council_result"]["model_council"]
     assert compact_council["sequence_context"]["sequence_id"] == "seq-100"
     assert compact["model_council_result"]["promotion_trace"]["next_required"] == "wait retest"
-    resolved_study = _model_council_study_packet_from_payload(compact)
+    resolved_study = model_council_study_packet_from_payload(compact)
     assert resolved_study["packet_id"] == "study-100"
 
 
-def test_compact_session_payload_drops_expired_execution_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+def testcompact_session_payload_drops_expired_execution_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("phoenixguard.mobile_api.live_state_v3.time.time", lambda: 150.0)
-    expired_packet: dict[str, Any] = {
+    expiredpacket: dict[str, Any] = {
         "schema_version": "PG_EXECUTION_PACKET_V3",
         "packet_type": "PG_EXECUTION_PACKET_V3",
         "packet_id": "exec-expired",
@@ -114,13 +114,13 @@ def test_compact_session_payload_drops_expired_execution_authority(monkeypatch: 
         "valid_until_epoch_sec": 120.0,
     }
 
-    compact = _compact_session_payload(
+    compact = compact_session_payload(
         {
             "session_id": "pocket-live-8788",
             "status": "running",
             "tracking_enabled": True,
-            "model_council_packet": expired_packet,
-            "execution_packet": expired_packet,
+            "model_council_packet": expiredpacket,
+            "execution_packet": expiredpacket,
             "broker_execution_state": {
                 "status": "external_shooter_required",
                 "side": "BUY",
@@ -136,9 +136,9 @@ def test_compact_session_payload_drops_expired_execution_authority(monkeypatch: 
     assert compact["broker_execution_state"]["side"] == "HOLD"
 
 
-def test_compact_session_payload_drops_demoted_execution_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+def testcompact_session_payload_drops_demoted_execution_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("phoenixguard.mobile_api.live_state_v3.time.time", lambda: 150.0)
-    demoted_packet: dict[str, Any] = {
+    demotedpacket: dict[str, Any] = {
         "schema_version": "PG_EXECUTION_PACKET_V3",
         "packet_type": "PG_EXECUTION_PACKET_V3",
         "packet_id": "exec-demoted",
@@ -157,13 +157,13 @@ def test_compact_session_payload_drops_demoted_execution_authority(monkeypatch: 
         },
     }
 
-    compact = _compact_session_payload(
+    compact = compact_session_payload(
         {
             "session_id": "pocket-live-8788",
             "status": "running",
             "tracking_enabled": True,
-            "model_council_packet": demoted_packet,
-            "execution_packet": demoted_packet,
+            "model_council_packet": demotedpacket,
+            "execution_packet": demotedpacket,
             "broker_execution_state": {
                 "status": "external_shooter_required",
                 "side": "SELL",

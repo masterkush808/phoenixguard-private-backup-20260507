@@ -59,7 +59,7 @@ def test_rl_contribution_gate_opens_only_after_verified_accuracy() -> None:
         )
 
         for idx in range(4):
-            engine._append_feedback_item(  # noqa: SLF001
+            engine.append_feedback_item(  # noqa: SLF001
                 {
                     "state": np.full((64,), fill_value=float(idx + 1) / 10.0, dtype=np.float32).tolist(),
                     "target_action": "BUY",
@@ -94,6 +94,7 @@ def test_rl_feedback_creates_verified_update_path() -> None:
             pending_contexts_path=root / "rl_pending.json",
         )
 
+        feedback: dict[str, Any] | None = None
         for idx in range(4):
             state_vec = np.full((64,), fill_value=float(idx + 1) / 10.0, dtype=np.float32)
             rl_out = engine.infer(
@@ -113,6 +114,7 @@ def test_rl_feedback_creates_verified_update_path() -> None:
             )
             feedback = engine.record_feedback(f"img_{idx}", "BUY", "clean continuation")
 
+        assert feedback is not None
         assert cast(bool, feedback["updated"]) is True
         assert cast(int, feedback["feedback_count"]) >= 4
         assert cast(int, feedback["online_update_count"]) >= 1
@@ -225,6 +227,7 @@ def test_rl_feedback_update_retries_transient_policy_replace_contention(monkeypa
 
         monkeypatch.setattr(Path, "replace", _flaky_replace)
 
+        feedback: dict[str, Any] | None = None
         for idx in range(4):
             state_vec = np.full((64,), fill_value=float(idx + 1) / 30.0, dtype=np.float32)
             rl_out = engine.infer(
@@ -244,6 +247,7 @@ def test_rl_feedback_update_retries_transient_policy_replace_contention(monkeypa
             )
             feedback = engine.record_feedback(f"img_retry_{idx}", "BUY", "clean continuation")
 
+        assert feedback is not None
         assert cast(bool, feedback["updated"]) is True
         assert (root / "rl_state.pt").exists()
         assert calls["count"] == 2

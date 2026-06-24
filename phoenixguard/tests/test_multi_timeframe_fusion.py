@@ -160,7 +160,7 @@ def test_multi_timeframe_fusion_confirms_aligned_trigger() -> None:
         position_size_pct=1.7,
     )
 
-    fused = main._build_multi_timeframe_result(_make_bundle(higher, lower))
+    fused = main.build_multi_timeframe_result(_make_bundle(higher, lower))
     mtf = fused["multi_timeframe"]
 
     assert fused["action"] == "BUY"
@@ -268,7 +268,7 @@ def test_multi_timeframe_fusion_combines_four_frame_groups() -> None:
         execution_permission="EXECUTE",
     )
 
-    fused = main._build_multi_timeframe_result(_make_quartet_bundle(higher_out, higher_in, lower_out, lower_in))
+    fused = main.build_multi_timeframe_result(_make_quartet_bundle(higher_out, higher_in, lower_out, lower_in))
     mtf = fused["multi_timeframe"]
 
     assert fused["action"] == "BUY"
@@ -330,7 +330,7 @@ def test_multi_timeframe_fusion_blocks_counter_bias_trigger() -> None:
         position_size_pct=1.8,
     )
 
-    fused = main._build_multi_timeframe_result(_make_bundle(higher, lower))
+    fused = main.build_multi_timeframe_result(_make_bundle(higher, lower))
     mtf = fused["multi_timeframe"]
 
     assert fused["action"] == "HOLD"
@@ -389,7 +389,7 @@ def test_multi_timeframe_fusion_marks_weak_higher_timeframe_as_watch() -> None:
         position_size_pct=1.5,
     )
 
-    fused = main._build_multi_timeframe_result(_make_bundle(higher, lower))
+    fused = main.build_multi_timeframe_result(_make_bundle(higher, lower))
     mtf = fused["multi_timeframe"]
 
     assert fused["action"] == "BUY"
@@ -446,7 +446,7 @@ def test_multi_timeframe_fusion_watch_state_does_not_inherit_buy_bias() -> None:
         position_size_pct=0.9,
     )
 
-    fused = main._build_multi_timeframe_result(_make_bundle(higher, lower))
+    fused = main.build_multi_timeframe_result(_make_bundle(higher, lower))
     mtf = fused["multi_timeframe"]
 
     assert fused["action"] in {"SELL", "HOLD"}
@@ -504,7 +504,7 @@ def test_multi_timeframe_fusion_exposes_headline_vs_execution_actions() -> None:
         execution_permission="WAIT_FOR_CONFIRMATION",
     )
 
-    fused = main._build_multi_timeframe_result(_make_bundle(higher, lower))
+    fused = main.build_multi_timeframe_result(_make_bundle(higher, lower))
 
     assert fused["headline_action"] == "BUY"
     assert fused["action"] == "BUY"

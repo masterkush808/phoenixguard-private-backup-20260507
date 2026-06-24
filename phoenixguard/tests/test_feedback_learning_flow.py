@@ -21,14 +21,14 @@ class _FakePersonal:
         self.feedback_calls: list[dict[str, str]] = []
         self.context_calls: list[dict[str, str]] = []
 
-    def record_feedback(self, image_hash: str, chosen: str, rejected: str, reason: str, annotation_text: str) -> None:
+    def record_feedback(self, image_hash: str, chosen: str, rejected: str, reason: str, annotationtext: str) -> None:
         self.feedback_calls.append(
             {
                 "image_hash": image_hash,
                 "chosen": chosen,
                 "rejected": rejected,
                 "reason": reason,
-                "annotation_text": annotation_text,
+                "annotationtext": annotationtext,
             }
         )
 
@@ -38,7 +38,7 @@ class _FakePersonal:
         context_descriptor: str,
         chosen: str,
         reason: str,
-        annotation_text: str = "",
+        annotationtext: str = "",
     ) -> None:
         self.context_calls.append(
             {
@@ -46,7 +46,7 @@ class _FakePersonal:
                 "context_descriptor": context_descriptor,
                 "chosen": chosen,
                 "reason": reason,
-                "annotation_text": annotation_text,
+                "annotationtext": annotationtext,
             }
         )
 
@@ -89,7 +89,7 @@ class _FakeRL:
 
 
 class _FailingPersonal(_FakePersonal):
-    def record_feedback(self, image_hash: str, chosen: str, rejected: str, reason: str, annotation_text: str) -> None:
+    def record_feedback(self, image_hash: str, chosen: str, rejected: str, reason: str, annotationtext: str) -> None:
         raise RuntimeError("preference store offline")
 
 
@@ -130,7 +130,7 @@ def test_on_feedback_saves_result_image_and_routes_it_into_learning(monkeypatch:
     assert "Outcome review captured and stored successfully." in status
     assert "Result image saved to" in status
     assert fake_personal.feedback_calls
-    assert "feedback_result_image" in fake_personal.feedback_calls[0]["annotation_text"]
+    assert "feedback_result_image" in fake_personal.feedback_calls[0]["annotationtext"]
     assert fake_continual.calls
     assert fake_continual.calls[0]["context_id"] == "inf-1"
     feedback_image_path = str(fake_continual.calls[0]["feedback_image_path"])
@@ -332,12 +332,12 @@ def test_feedback_resume_replays_pending_submission(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(main, "_get_memory_bank", lambda: None)
 
     _img_unused, meta = main.load_any_file_as_image(str(source_path))
-    asset = main._save_feedback_result_image(
+    asset = main.save_feedback_result_image(
         str(meta["sha256"]),
         "BUY",
         _editor_payload(Image.new("RGB", (48, 32), color=(180, 90, 24))),
     )
-    submission = main._build_feedback_submission_payload(
+    submission = main.build_feedback_submission_payload(
         file_path=str(source_path),
         meta=meta,
         result_state={"action": "BUY"},
@@ -351,13 +351,13 @@ def test_feedback_resume_replays_pending_submission(monkeypatch: pytest.MonkeyPa
         notes="resume me",
         feedback_asset=asset,
     )
-    main._append_feedback_submission_event(submission["submission_id"], "submission_created", submission=submission)
+    main.append_feedback_submission_event(submission["submission_id"], "submission_created", submission=submission)
 
-    main._resume_pending_feedback_submissions_if_needed()
+    main.resume_pending_feedback_submissions_if_needed()
 
     assert fake_personal.feedback_calls
     assert fake_continual.calls
     assert fake_rl.calls
 
-    states = main._feedback_submission_states()
+    states = main.feedback_submission_states()
     assert states[-1]["status"] == "completed"

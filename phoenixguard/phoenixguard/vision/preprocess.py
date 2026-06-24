@@ -248,12 +248,12 @@ def auto_crop_price_area_with_meta(img: Image.Image) -> tuple[Image.Image, dict[
         edges = cv2.Canny(gray, threshold1=30, threshold2=80, apertureSize=3)
 
         # Probabilistic Hough transform for horizontal lines
-        raw_lines: object = cv2.HoughLinesP(
+        raw_lines = cast(object | None, cv2.HoughLinesP(
             edges, rho=1, theta=np.pi / 180.0,
             threshold=max(w // 5, 50),
             minLineLength=max(w // 4, 80),
             maxLineGap=20
-        )
+        ))
         if raw_lines is None:
             return img, _full_image_crop_meta(img, reason="no_hough_lines", method="cv2_hough")
         lines = np.asarray(raw_lines)

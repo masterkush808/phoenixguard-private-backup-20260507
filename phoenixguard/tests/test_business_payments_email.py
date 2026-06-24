@@ -257,7 +257,7 @@ def test_license_state_is_not_activated_when_payment_confirmation_send_fails() -
     event = _invoice_paid_event("evt_invoice_paid_email_missing")
 
     with pytest.raises(BillingConfigurationError, match="resend_api_key_required"):
-        service._apply_stripe_event(event_type=event["type"], event=event)
+        service.apply_stripe_event(event_type=event["type"], event=event)
 
     expired_license = repo.get_license("lic_expired")
     assert expired_license.status == "expired"

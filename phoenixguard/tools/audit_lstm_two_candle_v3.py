@@ -7,10 +7,10 @@ from typing import Any
 
 from certification_common_v3 import DEFAULT_BASE_URL, DEFAULT_SESSION, ROOT, http_json, quote_session
 from certify_v3_full_system_burn_in import (
-    _collect_lstm_predictions,
-    _collect_two_candle,
-    _endpoint_payload,
-    _mapping,
+    collect_lstm_predictions,
+    collect_two_candle,
+    endpoint_payload,
+    mapping,
 )
 
 
@@ -79,18 +79,18 @@ def main() -> int:
     failures: list[str] = []
     warnings: list[str] = []
     trace_result = http_json(f"{base}/v1/mobile/runtime/trace/v3?session_id={session_q}", timeout=args.timeout)
-    trace = _mapping(trace_result.payload)
+    trace = mapping(trace_result.payload)
     if not trace_result.ok:
         failures.append(f"runtime trace failed: {trace_result.error or trace_result.status}")
     payloads: list[dict[str, Any]] = [
         trace,
-        _endpoint_payload(trace, "tracker_latest"),
-        _endpoint_payload(trace, "model_council_latest"),
-        _endpoint_payload(trace, "study_latest"),
-        _endpoint_payload(trace, "execution_latest"),
+        endpoint_payload(trace, "tracker_latest"),
+        endpoint_payload(trace, "model_council_latest"),
+        endpoint_payload(trace, "study_latest"),
+        endpoint_payload(trace, "execution_latest"),
     ]
-    lstm_rows = _collect_lstm_predictions(payloads)
-    two_rows = _collect_two_candle(payloads)
+    lstm_rows = collect_lstm_predictions(payloads)
+    two_rows = collect_two_candle(payloads)
     if not lstm_rows:
         warnings.append("no LSTM rows were visible in sampled runtime payloads")
     if not two_rows:

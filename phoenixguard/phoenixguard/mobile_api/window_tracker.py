@@ -6032,6 +6032,88 @@ class PocketOptionBrokerExecutionBackend:
     def __init__(self, *, identity_adapter: Any | None = None) -> None:
         self._identity_adapter = identity_adapter
 
+    @staticmethod
+    def bbox_center(bbox: Any) -> tuple[int, int] | None:
+        return PocketOptionBrokerExecutionBackend._bbox_center(bbox)
+
+    @staticmethod
+    def click_screen_point(
+        user32: Any,
+        x: int,
+        y: int,
+        *,
+        expected_hwnd: int = 0,
+        target_name: str = "",
+        target_bbox: Sequence[int] | None = None,
+        physical_point: tuple[int, int] | None = None,
+    ) -> dict[str, Any]:
+        return PocketOptionBrokerExecutionBackend._click_screen_point(
+            user32,
+            x,
+            y,
+            expected_hwnd=expected_hwnd,
+            target_name=target_name,
+            target_bbox=target_bbox,
+            physical_point=physical_point,
+        )
+
+    def control_lock(
+        self,
+        *,
+        key: str,
+        label: str,
+        row: Mapping[str, Any],
+        read_at: str,
+        image_width: int,
+        image_height: int,
+        role: str = "control",
+    ) -> dict[str, Any]:
+        return self._control_lock(
+            key=key,
+            label=label,
+            row=row,
+            read_at=read_at,
+            image_width=image_width,
+            image_height=image_height,
+            role=role,
+        )
+
+    def expiry_popup_control_points(self, time_field: Mapping[str, Any]) -> dict[str, tuple[int, int]]:
+        return self._expiry_popup_control_points(time_field)
+
+    def expiry_popup_visual_control_points(
+        self,
+        *,
+        descriptor: Mapping[str, Any] | None,
+        time_field: Mapping[str, Any],
+        fallback: Mapping[str, tuple[int, int]],
+    ) -> dict[str, Any]:
+        return self._expiry_popup_visual_control_points(
+            descriptor=descriptor,
+            time_field=time_field,
+            fallback=fallback,
+        )
+
+    @staticmethod
+    def expiry_popup_click_plan(current_seconds: int | None, target_seconds: Any) -> list[str]:
+        return PocketOptionBrokerExecutionBackend._expiry_popup_click_plan(current_seconds, target_seconds)
+
+    @classmethod
+    def assume_expiry_from_locked_click_plan(
+        cls,
+        *,
+        target_seconds: int,
+        verification: Mapping[str, Any],
+        clicks: Sequence[Mapping[str, Any]],
+        geometry: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return cls._assume_expiry_from_locked_click_plan(
+            target_seconds=target_seconds,
+            verification=verification,
+            clicks=clicks,
+            geometry=geometry,
+        )
+
     def is_supported(self) -> bool:
         try:
             import os
@@ -7283,7 +7365,7 @@ class PocketOptionBrokerExecutionBackend:
         # VISUAL LOCK - RETRY UP TO 3 TIMES IF POPUP NOT DETECTED
         visual_controls = None
         for popup_attempt in range(3):
-            visual_controls = self._expiry_popup_visual_control_points(
+            visual_controls = self.expiry_popup_visual_control_points(
                 descriptor=descriptor,
                 time_field=time_field,
                 fallback=controls,
@@ -8214,6 +8296,100 @@ class PocketOptionBrokerExecutionBackend:
 
 
 class PhoenixGuardWindowTrackingAdapter:
+    @staticmethod
+    def memory_precision_payload(
+        primary_fit: Mapping[str, Any],
+        counter_fit: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return PhoenixGuardWindowTrackingAdapter._memory_precision_payload(primary_fit, counter_fit)
+
+    def chart_space_broker_exclusion_boxes(
+        self,
+        surface: Image.Image,
+        chart_bbox: Sequence[Any],
+        *,
+        session_payload: Mapping[str, Any] | None = None,
+    ) -> list[list[float]]:
+        return self._chart_space_broker_exclusion_boxes(
+            surface,
+            chart_bbox,
+            session_payload=session_payload,
+        )
+
+    def derive_support_resistance_zones(
+        self,
+        candle_tracks: Sequence[Mapping[str, Any]],
+        image_size: tuple[int, int],
+        *,
+        candidate_action: str,
+        max_zones_per_role: int = _PHOENIXGUARD_DEFAULT_SR_MAX_ZONES_PER_ROLE,
+        max_total_zones: int = _PHOENIXGUARD_DEFAULT_SR_MAX_TOTAL_ZONES,
+    ) -> list[dict[str, Any]]:
+        return self._derive_support_resistance_zones(
+            candle_tracks,
+            image_size,
+            candidate_action=candidate_action,
+            max_zones_per_role=max_zones_per_role,
+            max_total_zones=max_total_zones,
+        )
+
+    def render_overlay(
+        self,
+        image: Image.Image,
+        chart_bbox: Sequence[Any],
+        tracking_summary: Mapping[str, Any],
+        latest_signal: Mapping[str, Any],
+    ) -> Image.Image:
+        return self._render_overlay(image, chart_bbox, tracking_summary, latest_signal)
+
+    def draw_support_resistance_layer(
+        self,
+        draw: ImageDraw.ImageDraw,
+        zones: Sequence[Any],
+        *,
+        chart_box: Sequence[Any],
+        offset: tuple[float, float],
+        font: OverlayFont,
+        require_visible_default: bool = True,
+    ) -> None:
+        self._draw_support_resistance_layer(
+            draw,
+            zones,
+            chart_box=chart_box,
+            offset=offset,
+            font=font,
+            require_visible_default=require_visible_default,
+        )
+
+    def draw_projection_layer(
+        self,
+        draw: ImageDraw.ImageDraw,
+        projection: Mapping[str, Any],
+        *,
+        chart_box: Sequence[Any],
+        offset: tuple[float, float],
+        colors: Mapping[str, ColorRGB],
+        font: OverlayFont,
+    ) -> None:
+        self._draw_projection_layer(
+            draw,
+            projection,
+            chart_box=chart_box,
+            offset=offset,
+            colors=colors,
+            font=font,
+        )
+
+    def draw_regression_line(
+        self,
+        draw: ImageDraw.ImageDraw,
+        candles: Sequence[Mapping[str, Any]],
+        color: ColorRGBA,
+        *,
+        offset: tuple[float, float] = (0.0, 0.0),
+    ) -> None:
+        self._draw_regression_line(draw, candles, color, offset=offset)
+
     @cached_property
     def _timeframe_template_bank(self) -> dict[str, list[ArrayND]]:
         try:
@@ -16618,6 +16794,95 @@ class ContinuousWindowTrackerService:
         self._last_emergency_hotkey_down = False
         self._start_emergency_hotkey_listener()
 
+    @property
+    def lock(self) -> Any:
+        return self._lock
+
+    @property
+    def active_studies(self) -> set[str]:
+        return self._active_studies
+
+    @property
+    def active_study_started_epoch(self) -> dict[str, float]:
+        return self._active_study_started_epoch
+
+    @property
+    def display_snapshot_started_epoch(self) -> dict[str, float]:
+        return self._display_snapshot_started_epoch
+
+    def write_session_event_log(self, session_id: str, event: str, **fields: Any) -> None:
+        self._write_session_event_log(session_id, event, **fields)
+
+    def model_council_study_packet_from_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return _model_council_study_packet_from_payload(payload)
+
+    def load_session(self, session_id: str) -> dict[str, Any]:
+        return self._load_session(session_id)
+
+    def require_session(self, session_id: str) -> dict[str, Any]:
+        return self._require_session(session_id)
+
+    def save_session(self, payload: Mapping[str, Any]) -> None:
+        self._save_session(payload)
+
+    def public_session_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self._public_session_payload(payload)
+
+    def prune_session_artifacts(self, artifact_dir: Path) -> None:
+        self._prune_session_artifacts(artifact_dir)
+
+    def adaptive_capture_interval_plan(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        return self._adaptive_capture_interval_plan(payload)
+
+    def execution_throttle_allows(
+        self,
+        state: dict[str, Any],
+        controls: Mapping[str, Any],
+        *,
+        now_epoch: float | None = None,
+    ) -> tuple[bool, str]:
+        return self._execution_throttle_allows(state, controls, now_epoch=now_epoch)
+
+    def record_execution_throttle(
+        self,
+        state: dict[str, Any],
+        controls: Mapping[str, Any],
+        *,
+        now_epoch: float | None = None,
+    ) -> None:
+        self._record_execution_throttle(state, controls, now_epoch=now_epoch)
+
+    def select_execution_lane(
+        self,
+        latest_signal: Mapping[str, Any],
+        tracking_summary: Mapping[str, Any],
+        controls: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return self._select_execution_lane(latest_signal, tracking_summary, controls)
+
+    def recent_live_loss_guard(
+        self,
+        session_id: str,
+        *,
+        side: str,
+        lane: str,
+        controls: Mapping[str, Any],
+        now_epoch: float,
+    ) -> dict[str, Any]:
+        return self._recent_live_loss_guard(
+            session_id,
+            side=side,
+            lane=lane,
+            controls=controls,
+            now_epoch=now_epoch,
+        )
+
+    def capture_and_analyze(self, session_id: str, *, force: bool = False) -> bool:
+        return self._capture_and_analyze(session_id, force=force)
+
+    def worker_loop(self, session_id: str, stop_evt: threading.Event, capture_now_evt: threading.Event) -> None:
+        self._worker_loop(session_id, stop_evt, capture_now_evt)
+
     def _artifact_path_if_exists(self, value: Any) -> str:
         raw = str(value or "").strip()
         if not raw:
@@ -20699,7 +20964,7 @@ class ContinuousWindowTrackerService:
                     capture_now_evt.wait(timeout=wait_timeout)
                     continue
                 try:
-                    self._capture_and_analyze(session_id)
+                    self.capture_and_analyze(session_id)
                 except KeyError:
                     LOGGER.warning(
                         "Tracker session %s was temporarily unavailable during capture; worker will retry.",
@@ -20708,7 +20973,7 @@ class ContinuousWindowTrackerService:
                     time.sleep(0.1)
                     continue
                 payload = self._load_session(session_id)
-                plan = self._adaptive_capture_interval_plan(payload or {})
+                plan = self.adaptive_capture_interval_plan(payload or {})
                 interval_sec = float(plan.get("interval_sec", _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC) or _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC)
                 next_run = next_run + interval_sec
                 if next_run < time.monotonic():
@@ -24963,3 +25228,11 @@ class ContinuousWindowTrackerService:
             pass
 
         return public
+
+
+build_high_frequency_candle_cycle_context = _build_high_frequency_candle_cycle_context
+model_council_study_packet_from_payload = _model_council_study_packet_from_payload
+normalize_execution_controls = _normalize_execution_controls
+overlay_font = _overlay_font
+read_json = _read_json
+title_matches_window_query = _title_matches_window_query

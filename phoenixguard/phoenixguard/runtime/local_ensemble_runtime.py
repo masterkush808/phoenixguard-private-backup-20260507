@@ -9,7 +9,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping, Protocol, Sequence, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -35,12 +35,34 @@ from phoenixguard.runtime.inference_exports import (
     read_export_metadata,
 )
 
-try:
-    import onnxruntime as _ort
-except Exception:  # pragma: no cover - optional runtime dependency
-    _ort = None
+class _OrtNodeArgLike(Protocol):
+    name: str
 
-ort: Any | None = _ort
+
+class _OrtSessionLike(Protocol):
+    def get_inputs(self) -> Sequence[_OrtNodeArgLike]:
+        ...
+
+    def get_outputs(self) -> Sequence[_OrtNodeArgLike]:
+        ...
+
+
+class _OrtModuleLike(Protocol):
+    InferenceSession: Callable[..., _OrtSessionLike]
+
+    def get_available_providers(self) -> Sequence[str]:
+        ...
+
+
+def _load_optional_onnxruntime() -> _OrtModuleLike | None:
+    try:
+        module = importlib.import_module("onnxruntime")
+        return cast(_OrtModuleLike, module)
+    except Exception:  # pragma: no cover - optional runtime dependency
+        return None
+
+
+ort: _OrtModuleLike | None = _load_optional_onnxruntime()
 
 _EnsembleCVSymbols = tuple[type[Any], dict[str, Any], Any, Any, type[Any]]
 _ensemble_cv_symbols_cache: _EnsembleCVSymbols | None = None

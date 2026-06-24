@@ -132,7 +132,7 @@ def test_confidence_heatmap_concentrates_on_signal_and_projection_path() -> None
     source = Image.new("RGB", (220, 140), color=(8, 8, 8))
     result = _sample_heatmap_result()
 
-    heatmap = main._build_confidence_heatmap_image(result, source)
+    heatmap = main.build_confidence_heatmap_image(result, source)
 
     assert heatmap is not None
     assert heatmap.size == source.size
@@ -150,7 +150,7 @@ def test_confidence_heatmap_handles_large_source_image() -> None:
     source = Image.new("RGB", (1660, 859), color=(8, 8, 8))
     result = _sample_heatmap_result()
 
-    heatmap = main._build_confidence_heatmap_image(result, source)
+    heatmap = main.build_confidence_heatmap_image(result, source)
 
     assert heatmap is not None
     assert heatmap.size == source.size
@@ -160,8 +160,8 @@ def test_heatmap_summary_exposes_layer_audit_and_ranked_hotspots() -> None:
     source = Image.new("RGB", (220, 140), color=(8, 8, 8))
     result = _sample_heatmap_result()
 
-    payload = main._build_confidence_heatmap_payload(result, source)
-    summary_html = main._build_heatmap_summary_html(result, source, heatmap_payload=payload)
+    payload = main.build_confidence_heatmap_payload(result, source)
+    summary_html = main.build_heatmap_summary_html(result, source, heatmap_payload=payload)
 
     assert payload is not None
     assert len(payload["hotspots"]) >= 1
@@ -195,7 +195,7 @@ def test_heatmap_can_classify_reversal_windows() -> None:
     source = Image.new("RGB", (220, 140), color=(8, 8, 8))
     result = _sample_reversal_heatmap_result()
 
-    payload = main._build_confidence_heatmap_payload(result, source)
+    payload = main.build_confidence_heatmap_payload(result, source)
 
     assert payload is not None
     assert len(payload["hotspots"]) >= 1
@@ -247,10 +247,10 @@ def test_heatmap_feedback_calibration_leans_into_target_path_feedback(monkeypatc
         encoding="utf-8",
     )
     monkeypatch.setattr(main, "_feedback_submission_journal_path", lambda: journal_path)
-    main._heatmap_feedback_calibration_cache["journal_mtime_ns"] = None
-    main._heatmap_feedback_calibration_cache["state"] = None
+    main.heatmap_feedback_calibration_cache["journal_mtime_ns"] = None
+    main.heatmap_feedback_calibration_cache["state"] = None
 
-    calibration = main._get_heatmap_feedback_calibration()
+    calibration = main.get_heatmap_feedback_calibration()
 
     assert int(calibration["sample_count"]) == 1
     assert float(calibration["layer_multipliers"]["corridor"]) > 1.0
@@ -303,8 +303,8 @@ def test_heatmap_mask_shaping_biases_energy_toward_segmented_region() -> None:
         "action": "BUY",
     }
 
-    payload = main._build_confidence_heatmap_payload(result, source)
-    heatmap = main._compose_confidence_heatmap_image(payload, source)
+    payload = main.build_confidence_heatmap_payload(result, source)
+    heatmap = main.compose_confidence_heatmap_image(payload, source)
 
     assert payload is not None
     assert heatmap is not None

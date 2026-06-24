@@ -35,7 +35,7 @@ import time
 from datetime import datetime, timedelta
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence, cast
+from typing import Any, ClassVar, Mapping, Protocol, Sequence, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -479,8 +479,8 @@ def _dual_encode(text_embed: NDArray[np.float32], visual_fp: NDArray[np.float32]
 
 # ── sentence-transformer singleton ──────────────────────────────────────────
 class _EmbedderSingleton:
-    _instance = None
-    _model = None
+    _instance: ClassVar[_EmbedderSingleton | None] = None
+    _model: ClassVar[Any | None] = None
 
     @staticmethod
     def _load_sentence_transformer_class() -> Any | None:
@@ -522,6 +522,11 @@ class _EmbedderSingleton:
                     cls._model = None
         return cls._instance  # type: ignore[return-value]
 
+    @classmethod
+    def reset_for_test(cls) -> None:
+        cls._instance = None
+        cls._model = None
+
     def encode(self, text: str) -> NDArray[np.float32]:
         if self._model is None:
             # Fallback: hash-based pseudo-embedding
@@ -539,6 +544,13 @@ class _EmbedderSingleton:
             return vec
         except Exception:
             return np.zeros(EMBED_DIM, dtype=np.float32)
+
+
+EmbedderSingleton = _EmbedderSingleton
+
+
+def reset_embedder_singleton_for_test() -> None:
+    EmbedderSingleton.reset_for_test()
 
 
 # ── chart-state extraction for ingestion ──────────────────────────────────────

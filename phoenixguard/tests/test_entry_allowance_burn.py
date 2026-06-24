@@ -294,7 +294,7 @@ def test_prune_path_budget_preserves_protected_latest_artifact(tmp_path: Path) -
         max_mb=0.001,
         max_files=1,
         max_age_sec=1,
-        protected_paths={burn._path_key(protected_file)},
+        protected_paths={burn.path_key(protected_file)},
     )
 
     assert result["removed"] == 1

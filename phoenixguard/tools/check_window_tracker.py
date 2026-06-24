@@ -8,7 +8,7 @@ from phoenixguard.mobile_api import app as mobile_app
 from phoenixguard.mobile_api.window_tracker import ContinuousWindowTrackerService
 from phoenixguard.core.config import RUNTIME
 
-service = mobile_app._window_tracker_service()
+service = mobile_app.window_tracker_service()
 print("default service.root_dir:", service.root_dir)
 print("default service.sessions_dir:", service.sessions_dir)
 

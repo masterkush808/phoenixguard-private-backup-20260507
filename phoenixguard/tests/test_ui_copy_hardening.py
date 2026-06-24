@@ -66,7 +66,7 @@ def test_outcome_review_panel_hides_learning_engine_terms(monkeypatch: pytest.Mo
     monkeypatch.setattr(main.RUNTIME, "models_dir", tmp_path / "models")
     monkeypatch.setattr(main.RUNTIME, "enable_feedback_learning_feed", True)
 
-    html = main._build_learning_feed_html()
+    html = main.build_learning_feed_html()
 
     assert "Outcome Review" in html
     lowered = html.lower()
@@ -75,7 +75,7 @@ def test_outcome_review_panel_hides_learning_engine_terms(monkeypatch: pytest.Mo
 
 
 def test_setup_guide_copy_stays_manual_and_non_intrusive() -> None:
-    html = main._build_setup_guide_dialog_html()
+    html = main.build_setup_guide_dialog_html()
 
     assert "Open this any time from the workspace guides" in html
     assert "forced walkthrough" in html
@@ -83,7 +83,7 @@ def test_setup_guide_copy_stays_manual_and_non_intrusive() -> None:
 
 
 def test_ui_head_does_not_auto_open_setup_guide() -> None:
-    shell_html = main._build_workspace_shell_bar_html().lower()
+    shell_html = main.build_workspace_shell_bar_html().lower()
     lowered = main.UI_HEAD.lower()
 
     assert "show overview" in shell_html
@@ -299,7 +299,7 @@ def test_compare_desk_images_default_to_uncropped_contained_views() -> None:
     overlay_image = Image.new("RGB", (96, 54), color=(28, 38, 48))
     heatmap_image = Image.new("RGB", (96, 54), color=(40, 24, 18))
 
-    html = main._build_compare_desk_html(
+    html = main.build_compare_desk_html(
         {"timestamp": "2026-04-03T00:00:00Z", "action": "BUY", "confidence": 0.72},
         source_image,
         overlay_image,

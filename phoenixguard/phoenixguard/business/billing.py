@@ -329,6 +329,9 @@ class BillingService:
             **action_payload,
         }
 
+    def apply_stripe_event(self, *, event_type: str, event: Mapping[str, Any]) -> dict[str, Any]:
+        return self._apply_stripe_event(event_type=event_type, event=event)
+
     def _apply_stripe_event(self, *, event_type: str, event: Mapping[str, Any]) -> dict[str, Any]:
         data = _as_mapping(event.get("data")) or {}
         raw_object = data.get("object")

@@ -1,5 +1,5 @@
 {
-  "typeCheckingMode": "basic",
+  "typeCheckingMode": "strict",
   "include": [
     "main.py",
     "shooter.py",
@@ -40,6 +40,7 @@
   "reportUnknownParameterType": "error",
   "reportMissingParameterType": "error",
   "reportMissingTypeArgument": "error",
+  "reportMissingTypeStubs": "error",
   "reportUnknownLambdaType": "error",
   "reportUnusedVariable": "error",
   "reportUnusedImport": "error",

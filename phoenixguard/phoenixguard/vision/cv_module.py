@@ -131,10 +131,12 @@ except Exception:
 KMeansModel: KMeansCtor | None = None
 _sk_ok = False
 try:
-    import sklearn.cluster as _sk_cluster
+    _sk_cluster_module: Any = importlib.import_module("sklearn.cluster")
+    _kmeans_obj: object = getattr(_sk_cluster_module, "KMeans", None)
 
-    KMeansModel = cast(KMeansCtor, _sk_cluster.KMeans)
-    _sk_ok = True
+    if callable(_kmeans_obj):
+        KMeansModel = cast(KMeansCtor, _kmeans_obj)
+        _sk_ok = True
 except Exception:
     KMeansModel = None
 
@@ -864,7 +866,8 @@ class CVPatternDetector:
         max_iter: int = 1200,
         use_resample: bool = True,
     ) -> tuple[SklearnClassifierLike | None, float]:
-        if int(np.unique(y_train).size) < 2:
+        train_classes = np.asarray(np.unique(y_train), dtype=np.int32)
+        if int(train_classes.size) < 2:
             return None, 1.0
         Xb, yb = (X_train, y_train)
         if use_resample:
@@ -887,7 +890,9 @@ class CVPatternDetector:
         y: NDArray[np.int32],
         random_state: int = 808,
     ) -> tuple[NDArray[np.float32], NDArray[np.int32]]:
-        uniq, counts = np.unique(y, return_counts=True)
+        unique_result = cast(tuple[NDArray[Any], NDArray[Any]], np.unique(y, return_counts=True))
+        uniq = np.asarray(unique_result[0], dtype=np.int32)
+        counts = np.asarray(unique_result[1], dtype=np.int64)
         if int(uniq.size) < 2:
             return X, y
         if int(np.min(counts)) == int(np.max(counts)):
@@ -930,7 +935,9 @@ class CVPatternDetector:
             n = int(X.shape[0])
             cut = max(1, int(n * (1.0 - test_size)))
             return X[:cut], X[cut:], y[:cut], y[cut:]
-        uniq, counts = np.unique(y, return_counts=True)
+        unique_result = cast(tuple[NDArray[Any], NDArray[Any]], np.unique(y, return_counts=True))
+        uniq = np.asarray(unique_result[0], dtype=np.int32)
+        counts = np.asarray(unique_result[1], dtype=np.int64)
         can_stratify = bool(uniq.size >= 2 and counts.size > 0 and int(np.min(counts)) >= 2)
         if can_stratify:
             return train_test_split_fn(X, y, test_size=test_size, random_state=random_state, stratify=y)

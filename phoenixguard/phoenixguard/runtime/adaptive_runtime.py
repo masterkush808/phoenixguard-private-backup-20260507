@@ -1020,3 +1020,6 @@ class ContinualLearningManager:
                     self.pending_contexts.pop(image_key, None)
             _write_json(self.pending_context_path, self.pending_contexts)
             return replay_item
+
+
+summarize_grounded_structure = _summarize_grounded_structure

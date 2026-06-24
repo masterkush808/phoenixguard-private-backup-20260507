@@ -1,18 +1,10 @@
-"""
-PhoenixGuard SIGE-VLA 3.0 — Regression & Probabilistic Forecasting
-===================================================================
-Skills wired:
-  - Regression / Linear & Polynomial Regression (trend line on OHLC)
-  - Advanced Probability & Statistics (Bayesian quantile averaging)
-  - Statistics for Data Science (A/D calculation, body-size volume proxy)
-  - Predictive Analytics (conformal prediction intervals via MAPIE)
-  - Error Estimation (95% prediction set, force HOLD if interval > 0.4%)
-"""
+
 from __future__ import annotations
 
+import importlib
 import os
 import sys
-from typing import Any, Mapping, TypedDict, cast
+from typing import Any, Callable, Mapping, Protocol, TypedDict, cast
 import numpy as np
 from numpy.typing import NDArray
 
@@ -113,6 +105,34 @@ class Forecast3MOutput(Forecast3MCore, total=False):
     projected_box_explanation: str
     projection_bias_confidence: float
     projection_dominance: float
+
+
+class _MapieRegressorLike(Protocol):
+    def fit(
+        self,
+        X: NDArray[np.float64],
+        y: NDArray[np.float64],
+    ) -> "_MapieRegressorLike":
+        ...
+
+    def predict(
+        self,
+        X: NDArray[np.float64],
+        *,
+        alpha: float,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        ...
+
+
+_MapieRegressorFactory = Callable[..., _MapieRegressorLike]
+
+
+def _load_mapie_regressor_factory() -> _MapieRegressorFactory | None:
+    try:
+        module = importlib.import_module("mapie.regression")
+        return cast(_MapieRegressorFactory, getattr(module, "MapieRegressor"))
+    except Exception:  # pragma: no cover - optional forecasting dependency
+        return None
 
 
 def _detection_direction_score(detections: list[dict[str, Any]] | None) -> float:
@@ -658,14 +678,22 @@ def _conformal_interval(returns: NDArray[np.float32], alpha: float = 0.05) -> tu
     if returns.size < 4:
         return float(np.quantile(returns, alpha)), float(np.quantile(returns, 1 - alpha))
     try:
-        from mapie.regression import MapieRegressor
         from sklearn.linear_model import Ridge
-        X = np.arange(len(returns)).reshape(-1, 1).astype(np.float64)
+
+        mapie_factory = _load_mapie_regressor_factory()
+        if mapie_factory is None:
+            raise RuntimeError("MAPIE runtime unavailable.")
+
+        X = np.arange(len(returns), dtype=np.float64).reshape(-1, 1)
         y = returns.astype(np.float64)
-        mapie = cast(Any, MapieRegressor(estimator=Ridge(alpha=1.0), method="plus", cv=min(5, len(returns))))
+        mapie = mapie_factory(
+            estimator=Ridge(alpha=1.0),
+            method="plus",
+            cv=min(5, len(returns)),
+        )
         mapie.fit(X, y)
-        next_x = np.array([[len(returns)]]).astype(np.float64)
-        _, pis = cast(tuple[Any, Any], mapie.predict(next_x, alpha=alpha))
+        next_x = np.array([[len(returns)]], dtype=np.float64)
+        _, pis = mapie.predict(next_x, alpha=alpha)
         lo = float(pis[0, 0, 0])
         hi = float(pis[0, 1, 0])
         return lo, hi

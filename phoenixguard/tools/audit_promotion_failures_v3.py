@@ -9,16 +9,16 @@ from typing import Any
 from certification_common_v3 import DEFAULT_BASE_URL, DEFAULT_SESSION, ROOT, http_json, quote_session
 from certify_v3_full_system_burn_in import (
     BURN_DIR,
-    _append_jsonl,
-    _endpoint_payload,
-    _extract_packet_id,
-    _mapping,
-    _promotion_failure_row,
-    _rank_promotion_blockers,
-    _render_promotion_failure_report,
-    _text,
-    _utc_iso,
-    _write_json,
+    append_jsonl,
+    endpoint_payload,
+    extract_packet_id,
+    mapping,
+    promotion_failure_row,
+    rank_promotion_blockers,
+    render_promotion_failure_report,
+    text,
+    utc_iso,
+    write_json,
 )
 
 
@@ -50,33 +50,33 @@ def main() -> int:
     while time.time() < deadline:
         now = time.time()
         trace_result = http_json(f"{base}/v1/mobile/runtime/trace/v3?session_id={session_q}", timeout=args.timeout)
-        trace = _mapping(trace_result.payload)
+        trace = mapping(trace_result.payload)
         if not trace_result.ok:
             failures.append(f"runtime trace failed: {trace_result.error or trace_result.status}")
             break
-        study = _endpoint_payload(trace, "study_latest")
-        execution = _endpoint_payload(trace, "execution_latest")
-        cert_gates = _mapping(trace.get("certification_gates"))
-        sequence = _mapping(trace.get("sequence_context_readiness"))
+        study = endpoint_payload(trace, "study_latest")
+        execution = endpoint_payload(trace, "execution_latest")
+        cert_gates = mapping(trace.get("certification_gates"))
+        sequence = mapping(trace.get("sequence_context_readiness"))
         sample: dict[str, Any] = {
             "epoch": now,
-            "iso": _utc_iso(now),
-            "source_lock_status": _text(_mapping(cert_gates.get("source_lock")).get("status"), "MISSING"),
-            "packet_contract_status": _text(_mapping(cert_gates.get("packet_contract")).get("status"), "MISSING"),
+            "iso": utc_iso(now),
+            "source_lock_status": text(mapping(cert_gates.get("source_lock")).get("status"), "MISSING"),
+            "packet_contract_status": text(mapping(cert_gates.get("packet_contract")).get("status"), "MISSING"),
             "sequence_ready": bool(sequence.get("ready")),
-            "sequence_status": _text(sequence.get("sequence_status") or sequence.get("status"), "MISSING"),
+            "sequence_status": text(sequence.get("sequence_status") or sequence.get("status"), "MISSING"),
             "sequence_length": sequence.get("sequence_length"),
         }
-        if _extract_packet_id(study) and not _extract_packet_id(execution):
-            row = _promotion_failure_row(now=now, study=study, trace=trace, sample=sample)
+        if extract_packet_id(study) and not extract_packet_id(execution):
+            row = promotion_failure_row(now=now, study=study, trace=trace, sample=sample)
             rows.append(row)
-            _append_jsonl(jsonl_path, row)
+            append_jsonl(jsonl_path, row)
         time.sleep(max(0.1, float(args.interval_sec)))
 
-    ranking = _rank_promotion_blockers(rows)
-    _write_json(BURN_DIR / "promotion_blocker_ranking.json", ranking)
+    ranking = rank_promotion_blockers(rows)
+    write_json(BURN_DIR / "promotion_blocker_ranking.json", ranking)
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(_render_promotion_failure_report(rows, ranking), encoding="utf-8")
+    report_path.write_text(render_promotion_failure_report(rows, ranking), encoding="utf-8")
 
     summary: dict[str, Any] = {
         "schema_version": "PG_PROMOTION_FAILURE_AUDIT_V3",

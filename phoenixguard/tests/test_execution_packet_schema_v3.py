@@ -85,6 +85,9 @@ def _deep_update(target: Payload, updates: Payload) -> None:
             target[key] = value
 
 
+packet = _packet
+
+
 def test_execution_packet_schema_v3_valid() -> None:
     payload = _packet()
     result = validate_execution_packet_v3(

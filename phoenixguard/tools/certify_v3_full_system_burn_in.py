@@ -2072,5 +2072,21 @@ def main() -> int:
     return 0 if verdict in success_verdicts or (args.mode != "FULL_ACTIVATED" and verdict in {"PASS_RUNTIME_ONLY_NO_TRADES", "INSUFFICIENT_SAMPLE"}) else 1
 
 
+append_jsonl = _append_jsonl
+collect_lstm_predictions = _collect_lstm_predictions
+collect_skill_contributions = _collect_skill_contributions
+collect_two_candle = _collect_two_candle
+endpoint_payload = _endpoint_payload
+extract_packet_id = _extract_packet_id
+final_burn_verdict = _final_burn_verdict
+mapping = _mapping
+promotion_failure_row = _promotion_failure_row
+rank_promotion_blockers = _rank_promotion_blockers
+render_promotion_failure_report = _render_promotion_failure_report
+text = _text
+utc_iso = _utc_iso
+write_json = _write_json
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

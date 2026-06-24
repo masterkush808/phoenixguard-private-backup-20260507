@@ -96,7 +96,7 @@ def test_sequence_manifest_quality_filter_skips_contradictory_aux_rows(tmp_path:
     assert ensemble.sequence_manifest_filter_stats["skipped_records"] == 1
     assert ensemble.sequence_manifest_filter_stats["skip_reasons"]["contradictory"] == 1
 
-    dataset = cast(ChartImageDataset, ensemble._build_dataset(
+    dataset = cast(ChartImageDataset, ensemble.build_dataset(
         model_name="mobilenetv3",
         image_dirs=[str(buy_dir), str(sell_dir)],
         is_training=False,

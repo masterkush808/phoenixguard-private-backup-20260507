@@ -7,7 +7,7 @@ from phoenixguard.tracking.market_object_tracker_v3 import (
     OVERLAY_SCHEMA_VERSION,
     TRACKER_SCHEMA_VERSION,
     MarketObjectTrackerV3,
-    _derive_trendline_overlays,
+    derive_trendline_overlays,
     build_market_object_registry_v3,
 )
 
@@ -260,7 +260,7 @@ def test_trendline_derivation_rejects_horizontal_lines() -> None:
         for index in range(8)
     ]
 
-    assert not [row for row in _derive_trendline_overlays(horizontal_lows) if row["type"].endswith("_TRENDLINE")]
+    assert not [row for row in derive_trendline_overlays(horizontal_lows) if row["type"].endswith("_TRENDLINE")]
 
 
 def test_trendline_derivation_emits_valid_downtrend_resistance_only_when_clean() -> None:
@@ -273,7 +273,7 @@ def test_trendline_derivation_emits_valid_downtrend_resistance_only_when_clean()
         for index in range(8)
     ]
 
-    overlays = _derive_trendline_overlays(downtrend)
+    overlays = derive_trendline_overlays(downtrend)
     resistance = [row for row in overlays if row["type"] == "RESISTANCE_TRENDLINE"]
 
     assert resistance
@@ -297,7 +297,7 @@ def test_trendline_derivation_uses_two_wick_anchors_before_extension() -> None:
             }
         )
 
-    overlays = _derive_trendline_overlays(uptrend)
+    overlays = derive_trendline_overlays(uptrend)
     trendline = next(row for row in overlays if row["type"].endswith("_TRENDLINE"))
 
     assert trendline["touch_count"] >= 2

@@ -2469,4 +2469,8 @@ __all__ = [
     "LIVE_STATE_SCHEMA_VERSION",
     "build_live_state_v3",
     "build_live_state_v3_from_tracker_service",
+    "compact_session_payload",
 ]
+
+
+compact_session_payload = _compact_session_payload

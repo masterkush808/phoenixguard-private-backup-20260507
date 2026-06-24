@@ -231,7 +231,8 @@ class ChartSegmentationEngine:
                 mask = np.zeros(binary.shape[:2], dtype=np.uint8)
                 cv2.drawContours(mask, [largest], 0, (255,), -1)
                 if scale != 1.0:
-                    mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+                    resized_mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+                    mask = np.asarray(resized_mask, dtype=np.uint8)
 
                 return self._validate_segmentation(
                     mask,

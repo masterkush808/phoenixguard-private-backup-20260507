@@ -5108,5 +5108,15 @@ def launch_share_ui() -> None:
     )
 
 
+analyze_share_bundle = _analyze_share_bundle
+build_share_hero_html = _build_share_hero_html
+build_share_render_config = _build_share_render_config
+share_rate_limit_state = _share_rate_limit_state
+share_sessions = _share_sessions
+share_status_html = _share_status_html
+share_surface_payload = _share_surface_payload
+update_share_session = _update_share_session
+
+
 if __name__ == "__main__":
     launch_share_ui()

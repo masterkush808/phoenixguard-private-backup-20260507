@@ -9,7 +9,7 @@ from torch import nn
 from phoenixguard.training.ensemble_cv_models import EnsembleCVModels
 
 
-def test_prepare_continual_state_skips_existing_bundle_when_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def testprepare_continual_state_skips_existing_bundle_when_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle_path = tmp_path / "mobilenetv3_finetuned.pkl"
     bundle_path.write_bytes(b"unused bundle payload")
 
@@ -25,7 +25,7 @@ def test_prepare_continual_state_skips_existing_bundle_when_disabled(tmp_path: P
 
     monkeypatch.setattr(torch, "load", _unexpected_torch_load)
 
-    state = ensemble._prepare_continual_state(
+    state = ensemble.prepare_continual_state(
         name="mobilenetv3",
         model=nn.Linear(4, 4),
         head=nn.Linear(4, 2),

@@ -57,7 +57,7 @@ def test_personalization_embedder_defaults_to_cache_only(monkeypatch: pytest.Mon
         _PrefStore(),
         _Logger(),
     )
-    engine._ensure_embedder()
+    engine.ensure_embedder()
 
     assert captured["model_name"] == "sentence-transformers/all-MiniLM-L6-v2"
     assert _captured_kwargs(captured)["local_files_only"] is True
@@ -78,11 +78,9 @@ def test_memory_ingest_embedder_defaults_to_cache_only(monkeypatch: pytest.Monke
     monkeypatch.delenv("PHOENIXGUARD_TEXT_EMBEDDER_FORCE_DOWNLOAD", raising=False)
 
     memory_ingest.SentenceTransformer = None  # type: ignore[assignment]
-    memory_ingest._EmbedderSingleton._instance = None
-    memory_ingest._EmbedderSingleton._model = None
+    memory_ingest.reset_embedder_singleton_for_test()
 
-    memory_ingest._EmbedderSingleton.get()
+    memory_ingest.EmbedderSingleton.get()
 
     assert captured["model_name"] == "sentence-transformers/all-MiniLM-L6-v2"
     assert _captured_kwargs(captured)["local_files_only"] is True
-

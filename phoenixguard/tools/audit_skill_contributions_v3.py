@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from certification_common_v3 import DEFAULT_BASE_URL, DEFAULT_SESSION, ROOT, http_json, quote_session
-from certify_v3_full_system_burn_in import _collect_skill_contributions, _endpoint_payload, _mapping
+from certify_v3_full_system_burn_in import collect_skill_contributions, endpoint_payload, mapping
 
 
 def _report(rows: list[dict[str, Any]], failures: list[str], warnings: list[str]) -> str:
@@ -62,18 +62,18 @@ def main() -> int:
     failures: list[str] = []
     warnings: list[str] = []
     trace_result = http_json(f"{base}/v1/mobile/runtime/trace/v3?session_id={session_q}", timeout=args.timeout)
-    trace = _mapping(trace_result.payload)
+    trace = mapping(trace_result.payload)
     if not trace_result.ok:
         failures.append(f"runtime trace failed: {trace_result.error or trace_result.status}")
     payloads: list[dict[str, Any]] = [
         trace,
-        _endpoint_payload(trace, "tracker_latest"),
-        _endpoint_payload(trace, "model_council_latest"),
-        _endpoint_payload(trace, "study_latest"),
-        _endpoint_payload(trace, "execution_latest"),
-        _mapping(_endpoint_payload(trace, "floating_state")),
+        endpoint_payload(trace, "tracker_latest"),
+        endpoint_payload(trace, "model_council_latest"),
+        endpoint_payload(trace, "study_latest"),
+        endpoint_payload(trace, "execution_latest"),
+        mapping(endpoint_payload(trace, "floating_state")),
     ]
-    rows = _collect_skill_contributions(payloads)
+    rows = collect_skill_contributions(payloads)
     if not rows:
         warnings.append("no skill contribution rows were visible in sampled runtime payloads")
     out_path = Path(args.out)

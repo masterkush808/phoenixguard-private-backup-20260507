@@ -344,8 +344,8 @@ def _display_state_has_locked_window(script_dir: Path, session_id: str) -> bool:
         return False
     if not isinstance(raw, dict):
         return False
+    display_state = cast(JsonDict, raw)
     try:
-        display_state = cast(JsonDict, raw)
         display_frame_id = int(float(display_state.get("display_frame_id") or 0))
     except (TypeError, ValueError):
         display_frame_id = 0

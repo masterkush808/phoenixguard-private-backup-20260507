@@ -29,7 +29,7 @@ def test_run_signal_workstation_requires_exactly_four_uploaded_images(monkeypatc
     def _empty_render_config(**_kwargs: object) -> Payload:
         return {}
 
-    monkeypatch.setattr(main, "_build_render_config", _empty_render_config)
+    monkeypatch.setattr(main, "build_render_config", _empty_render_config)
 
     with pytest.raises(Exception, match="Upload exactly four chart images"):
         main.run_signal_workstation(
@@ -51,7 +51,7 @@ def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch
     captured: dict[str, object] = {}
     monkeypatch.setattr(main.RUNTIME, "data_dir", tmp_path / "data")
 
-    def _build_render_config(**kwargs: Any) -> Payload:
+    def build_render_config(**kwargs: Any) -> Payload:
         return {
             "overlay_mode": kwargs["overlay_mode"],
             "min_conf_global": kwargs["min_conf_global"],
@@ -64,8 +64,8 @@ def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch
 
     monkeypatch.setattr(
         main,
-        "_build_render_config",
-        _build_render_config,
+        "build_render_config",
+        build_render_config,
     )
 
     def _fake_run_inference(file_path: str, **_: object) -> tuple[dict[str, object], Image.Image, object, object]:
@@ -99,7 +99,7 @@ def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch
             "confidence": result["confidence"],
         }
 
-    def _build_multi_timeframe_result(analyzed: list[Payload]) -> Payload:
+    def build_multi_timeframe_result(analyzed: list[Payload]) -> Payload:
         entries = [dict(cast(Payload, row["compare_entry"])) for row in analyzed]
         return {
             "action": "SELL",
@@ -114,7 +114,7 @@ def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch
             },
         }
 
-    def _build_session_entry(result: Payload, _image_state: object, file_path: str, source: str) -> Payload:
+    def build_session_entry(result: Payload, _image_state: object, file_path: str, source: str) -> Payload:
         return {"result": result, "file_path": file_path, "source": source}
 
     def _append_session_entry(entry: Payload) -> object:
@@ -137,10 +137,10 @@ def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch
     )
     monkeypatch.setattr(
         main,
-        "_build_multi_timeframe_result",
-        _build_multi_timeframe_result,
+        "build_multi_timeframe_result",
+        build_multi_timeframe_result,
     )
-    monkeypatch.setattr(main, "_build_session_entry", _build_session_entry)
+    monkeypatch.setattr(main, "build_session_entry", build_session_entry)
     monkeypatch.setattr(main, "_append_session_entry", _append_session_entry)
     monkeypatch.setattr(
         main,
@@ -183,7 +183,7 @@ def test_build_session_entry_saves_high_resolution_png_thumbnail(monkeypatch: py
     monkeypatch.setattr(main.RUNTIME, "session_thumbnails_dir", tmp_path)
     image_state = np.zeros((720, 1280, 3), dtype=np.uint8)
 
-    entry = main._build_session_entry(
+    entry = main.build_session_entry(
         {
             "action": "BUY",
             "confidence": 0.81,
@@ -212,7 +212,7 @@ def test_build_multi_timeframe_overlay_sheet_composes_both_frames(tmp_path: Path
     Image.new("RGB", (280, 160), color=(20, 180, 60)).save(higher_path)
     Image.new("RGB", (280, 160), color=(180, 40, 20)).save(lower_path)
 
-    sheet = main._build_multi_timeframe_overlay_sheet(
+    sheet = main.build_multi_timeframe_overlay_sheet(
         {
             "multi_timeframe": {
                 "gate_state": "confirmed",
@@ -253,7 +253,7 @@ def test_build_multi_timeframe_overlay_fusion_blends_both_frames(tmp_path: Path)
     Image.new("RGB", (280, 160), color=(20, 180, 60)).save(higher_path)
     Image.new("RGB", (280, 160), color=(180, 40, 20)).save(lower_path)
 
-    fused = main._build_multi_timeframe_overlay_fusion(
+    fused = main.build_multi_timeframe_overlay_fusion(
         {
             "multi_timeframe": {
                 "gate_state": "confirmed",
@@ -299,7 +299,7 @@ def test_build_timeframe_overlay_gallery_falls_back_to_current_run_snapshot(monk
     monkeypatch.setattr(main, "_write_resized_image_asset", _write_resized_image_asset)
     monkeypatch.setattr(main, "_image_uri_from_file", _image_uri_from_file)
 
-    html = main._build_timeframe_overlay_gallery_html(
+    html = main.build_timeframe_overlay_gallery_html(
         {
             "action": "BUY",
             "confidence": 0.74,
