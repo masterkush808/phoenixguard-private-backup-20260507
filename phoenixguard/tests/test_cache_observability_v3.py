@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable, Mapping, MutableMapping, cast
 
 from fastapi.testclient import TestClient
+import pytest
 
 import phoenixguard.mobile_api.app as mobile_app
 from phoenixguard.execution.packet_v3 import build_execution_packet_v3
@@ -50,6 +51,7 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
 def _clear_mobile_live_state_caches(*, direct_trace: bool = False) -> None:
     cast(MutableMapping[Any, Any], getattr(mobile_app, "_LIVE_STATE_V3_CACHE")).clear()
     cast(MutableMapping[Any, Any], getattr(mobile_app, "_LIVE_STATE_REGISTRY_CACHE")).clear()
+    cast(MutableMapping[Any, Any], getattr(mobile_app, "_COMPACT_LIVE_STATE_RESPONSE_CACHE")).clear()
     if direct_trace:
         cast(MutableMapping[Any, Any], getattr(mobile_app, "_DIRECT_PERFORMANCE_TRACE_CACHE")).clear()
 
@@ -598,6 +600,129 @@ def test_live_state_v3_direct_read_skips_legacy_registry_when_v3_sources_exist(
     payload = response.json()
     assert payload["provider_status"]["direct_registry_source"] == "skipped_session_v3_overlay_sources"
     assert payload["provider_status"]["direct_registry_entries"] == 0
+
+
+def test_live_state_v3_compact_preserves_overlay_snap_scene_graph(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    _clear_mobile_live_state_caches()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    session_dir.mkdir(parents=True)
+    now_epoch = time.time()
+    chart_region = [72, 84, 1134, 688]
+    broker_surface = {
+        "capture_plane": {"width": 1280, "height": 720},
+        "execution_boxes": {
+            "buy_button": {"bbox": [1168, 392, 1234, 430], "confidence": 0.96},
+            "sell_button": {"bbox": [1168, 438, 1234, 476], "confidence": 0.96},
+        },
+    }
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "status": "running",
+                "tracking_enabled": True,
+                "capture_count": 123,
+                "frame_index": 123,
+                "display_frame_id": 123,
+                "last_capture_epoch": now_epoch,
+                "display_capture_epoch": now_epoch,
+                "display_published_epoch": now_epoch,
+                "last_display_window_path": str(session_dir / "artifacts" / "000123_window.png"),
+                "window_query": "Pocket Option",
+                "locked_title": "The Most Innovative Trading Platform",
+                "broker_surface": broker_surface,
+                "tracking_summary": {
+                    "chart_region": {
+                        "pixel_bbox": chart_region,
+                        "width": chart_region[2] - chart_region[0],
+                        "height": chart_region[3] - chart_region[1],
+                        "confidence": 0.95,
+                        "source": "locked_broker_surface",
+                    },
+                    "detected_market": "CAD/JPY OTC",
+                    "detected_timeframe": "M5",
+                    "local_direction": "BUY",
+                    "tracked_candles": [
+                        {"track_id": "candle-122", "bbox": [880, 340, 895, 456], "direction": "SELL", "confidence": 0.88},
+                        {"track_id": "candle-123", "bbox": [902, 316, 918, 440], "direction": "BUY", "confidence": 0.91},
+                    ],
+                },
+                "latest_signal": {"side": "BUY", "action": "BUY", "timeframe": "M5", "symbol": "CAD/JPY OTC"},
+                "signal_thesis_v3": {
+                    "active": True,
+                    "thesis_id": "snap-test",
+                    "side": "BUY",
+                    "effective_side": "BUY",
+                    "confidence": 0.83,
+                    "entry_zone": {"bbox": [884, 320, 924, 456]},
+                    "target_zone": {"bbox": [938, 248, 1002, 304]},
+                    "invalidation_zone": {"bbox": [846, 468, 928, 506]},
+                    "plain_language": "Regression fixture for candle-plane overlay snapping.",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "display_state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "capture_count": 123,
+                "frame_index": 123,
+                "display_frame_id": 123,
+                "display_capture_epoch": now_epoch,
+                "display_published_epoch": now_epoch,
+                "last_display_window_path": str(session_dir / "artifacts" / "000123_window.png"),
+                "last_display_surface_signature": "snap-surface-123",
+                "status": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
+
+    assert response.status_code == 200
+    raw_payload: object = response.json()
+    assert isinstance(raw_payload, dict)
+    payload = cast(dict[str, object], raw_payload)
+
+    def numeric_bounds(value: object) -> list[float]:
+        assert isinstance(value, list)
+        bounds: list[float] = []
+        for item in cast(list[object], value):
+            assert isinstance(item, (int, float, str))
+            bounds.append(float(item))
+        return bounds
+
+    raw_scene_graph = payload.get("scene_graph")
+    assert isinstance(raw_scene_graph, dict)
+    scene_graph = cast(dict[str, object], raw_scene_graph)
+    chart_region_bounds = numeric_bounds(scene_graph["chart_region_bounds"])
+    plot_area_bounds = numeric_bounds(scene_graph["plot_area_bounds"])
+    assert [round(value, 2) for value in chart_region_bounds] == [72.0, 84.0, 1134.0, 688.0]
+    assert plot_area_bounds[0] > 72.0
+    assert plot_area_bounds[1] > 84.0
+    assert plot_area_bounds[2] < 1134.0
+    assert plot_area_bounds[3] < 688.0
+    raw_chart = payload.get("chart")
+    assert isinstance(raw_chart, dict)
+    chart = cast(dict[str, object], raw_chart)
+    assert chart["scene_graph"] == scene_graph
+    raw_overlays = payload.get("overlays")
+    assert isinstance(raw_overlays, dict)
+    overlays = cast(dict[str, object], raw_overlays)
+    raw_objects = overlays.get("objects")
+    assert isinstance(raw_objects, list)
+    overlay_objects = cast(list[object], raw_objects)
+    assert overlay_objects
 
 
 def test_live_state_v3_direct_read_invalidates_cache_when_display_state_advances(

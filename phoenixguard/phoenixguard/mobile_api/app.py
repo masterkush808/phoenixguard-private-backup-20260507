@@ -1928,6 +1928,81 @@ def create_app(
                 output["objects"] = []
             return output
 
+        def compact_render_geometry_payload(value: object) -> dict[str, object]:
+            row = _mapping_to_plain_dict(value)
+            if not row:
+                return {}
+            return {
+                key: row.get(key)
+                for key in (
+                    "exists",
+                    "x",
+                    "y",
+                    "width",
+                    "height",
+                    "bbox",
+                    "bounds",
+                    "source",
+                    "confidence",
+                    "coordinate_mode",
+                    "coordinate_space",
+                    "manual_focus_region",
+                    "chart_transform_id",
+                    "frame_id",
+                    "plot_area",
+                    "broker_surface_bounds",
+                    "chart_region_bounds",
+                    "chart_region_chart_bounds",
+                    "plot_area_bounds",
+                    "plot_area_chart_bounds",
+                    "right_order_panel_bounds",
+                    "top_asset_tabs_bounds",
+                    "left_menu_bounds",
+                    "price_axis_bounds",
+                    "time_axis_bounds",
+                    "valid",
+                    "reason",
+                    "rules",
+                )
+                if row.get(key) not in (None, "", [], {})
+            }
+
+        def compact_chart_payload(value: object) -> dict[str, object]:
+            row = _mapping_to_plain_dict(value)
+            output = compact_mapping(row, {"frame", "plot_area", "chart_transform", "scene_graph"})
+            plot_area_value = row.get("plot_area")
+            if isinstance(plot_area_value, Mapping):
+                output["plot_area"] = compact_render_geometry_payload(cast(Mapping[str, object], plot_area_value))
+            chart_transform_value = row.get("chart_transform")
+            if isinstance(chart_transform_value, Mapping):
+                output["chart_transform"] = compact_render_geometry_payload(cast(Mapping[str, object], chart_transform_value))
+            scene_graph_value = row.get("scene_graph")
+            if isinstance(scene_graph_value, Mapping):
+                output["scene_graph"] = compact_render_geometry_payload(cast(Mapping[str, object], scene_graph_value))
+            return output
+
+        def preserve_render_geometry(target: dict[str, object], source: Mapping[str, object]) -> None:
+            for geometry_key in ("plot_area", "chart_transform", "scene_graph", "broker_scene_graph_v3"):
+                value = source.get(geometry_key)
+                if isinstance(value, Mapping):
+                    target[geometry_key] = compact_render_geometry_payload(cast(Mapping[str, object], value))
+            chart_payload = source.get("chart")
+            if isinstance(chart_payload, Mapping):
+                target["chart"] = compact_chart_payload(cast(Mapping[str, object], chart_payload))
+            source_scene_graph = source.get("scene_graph")
+            if "broker_scene_graph_v3" not in target and isinstance(source_scene_graph, Mapping):
+                target["broker_scene_graph_v3"] = compact_render_geometry_payload(
+                    cast(Mapping[str, object], source_scene_graph)
+                )
+            if "chart" not in target:
+                chart_output: dict[str, object] = {}
+                for chart_key in ("plot_area", "chart_transform", "scene_graph"):
+                    chart_value = target.get(chart_key)
+                    if isinstance(chart_value, Mapping):
+                        chart_output[chart_key] = _mapping_to_plain_dict(cast(Mapping[str, object], chart_value))
+                if chart_output:
+                    target["chart"] = chart_output
+
         compact: dict[str, object] = dict(compact_session_payload(cast(Mapping[str, Any], live_state)))
         for scalar_key in (
             "schema_version",
@@ -1975,6 +2050,7 @@ def create_app(
                 compact[status_key] = _mapping_to_plain_dict(cast(Mapping[str, object], value))
             elif value not in (None, "", [], {}):
                 compact[status_key] = value
+        preserve_render_geometry(compact, live_state)
         shooter_payload = live_state.get("shooter")
         if isinstance(shooter_payload, Mapping):
             compact["shooter"] = compact_mapping(
@@ -2005,6 +2081,7 @@ def create_app(
                 objects = compact_overlays_value.get("objects")
                 if isinstance(objects, list):
                     compact_visual["overlay_objects"] = objects
+            preserve_render_geometry(compact_visual, live_visual_mapping)
             compact.update(compact_visual)
         overlays = compact.get("overlays")
         if isinstance(overlays, Mapping):
