@@ -79,7 +79,17 @@ SEQUENCE_TYPES = {
     "REPLAY_ENTRY",
     "REPLAY_EXIT",
 }
-CURRENT_CANDLE_LIVE_MODES = {"CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT", "DIAGNOSTICS", "DEBUG", "INSPECTOR"}
+CURRENT_CANDLE_LIVE_MODES = {
+    "CLEAN_LIVE",
+    "CANDLES",
+    "LOCAL",
+    "ACTIVE_CONTEXT",
+    "FULL_HISTORY_READ",
+    "REPLAY",
+    "DIAGNOSTICS",
+    "DEBUG",
+    "INSPECTOR",
+}
 NEST_PARENT_TYPES = {
     "IMPULSE_BOX",
     "PULLBACK_BOX",
@@ -809,6 +819,15 @@ def _only_modes(row: Mapping[str, Any], allowed_modes: set[str], default_modes: 
     return modes or list(default_modes)
 
 
+def _with_modes(modes: Sequence[str], extra_modes: Sequence[str]) -> list[str]:
+    output = [normalize_view_mode(mode) for mode in modes if str(mode or "").strip()]
+    for mode in extra_modes:
+        normalized = normalize_view_mode(mode)
+        if normalized not in output:
+            output.append(normalized)
+    return output
+
+
 def _historical_current_marker(row: Mapping[str, Any]) -> bool:
     haystack = " ".join(
         str(row.get(key) or "")
@@ -855,19 +874,31 @@ def _apply_current_candle_policy(rows: Sequence[Mapping[str, Any]], mode: str = 
         _map_current_marker_to_history(row)
     for index, row in enumerate(live_rows):
         if index == 0:
-            row["visible_modes"] = _only_modes(
-                row,
-                CURRENT_CANDLE_LIVE_MODES,
-                ["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT", "INSPECTOR"],
+            row["visible_modes"] = _with_modes(
+                _only_modes(
+                    row,
+                    CURRENT_CANDLE_LIVE_MODES,
+                    ["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT", "INSPECTOR"],
+                ),
+                ["FULL_HISTORY_READ", "REPLAY"],
             )
             row["display_label"] = "NOW"
             row["short_label"] = "NOW"
             continue
         duplicates_hidden += 1
         row["visible_default"] = False
-        row["visible_modes"] = _only_modes(row, {"CANDLES", "DIAGNOSTICS", "DEBUG", "INSPECTOR"}, ["CANDLES", "INSPECTOR"])
+        row["visible_modes"] = _with_modes(
+            _only_modes(
+                row,
+                {"CANDLES", "FULL_HISTORY_READ", "REPLAY", "DIAGNOSTICS", "DEBUG", "INSPECTOR"},
+                ["CANDLES", "INSPECTOR"],
+            ),
+            ["FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+        )
         row["label_hidden"] = True
         row["label_anchor"] = "hidden"
+        row["label_visible"] = False
+        row["display_state"] = "GHOSTED"
         row.setdefault("precision_flags", []).append("duplicate_now_hidden_from_live")
     return output, duplicates_hidden
 

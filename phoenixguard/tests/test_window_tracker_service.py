@@ -4894,13 +4894,14 @@ def test_tracker_dashboard_replay_overlays_use_professional_label_budget() -> No
     ).read_text(encoding="utf-8")
 
     assert "function frontendOverlayBudget" in dashboard_html
-    assert "REPLAY: {objects: 56, labels: 8}" in dashboard_html
-    assert "FULL_HISTORY_READ: {objects: 56, labels: 8}" in dashboard_html
+    assert "REPLAY: {objects: 64, labels: 20}" in dashboard_html
+    assert "FULL_HISTORY_READ: {objects: 64, labels: 20}" in dashboard_html
     assert "function frontendOverlayPriority" in dashboard_html
+    assert "function frontendOverlayLabelCandidate" in dashboard_html
     assert "function resolveLabelCollisions" in dashboard_html
     assert "window.resolveLabelCollisions = resolveLabelCollisions;" in dashboard_html
     assert "label-collision-hidden" in dashboard_html
-    assert "font-size: calc(8px * var(--overlay-label-scale, 1));" in dashboard_html
+    assert "font-size: calc(7px * var(--overlay-label-scale, 1));" in dashboard_html
     assert "font-size: calc(4.65px * var(--overlay-label-scale, 1));" not in dashboard_html
     assert 'if (mode !== "CLEAN_LIVE")' not in dashboard_html
 

@@ -169,6 +169,16 @@ def _chart_region_bounds(
         chart_raw = [0.0, 0.0, float(max(1, chart_width)), float(max(1, chart_height))]
 
     focus = _focus_bounds(session, surface_size)
+    if focus:
+        focus_width = max(1.0, float(focus[2] - focus[0]))
+        focus_height = max(1.0, float(focus[3] - focus[1]))
+        raw_width = max(0.0, float(chart_raw[2] - chart_raw[0]))
+        raw_height = max(0.0, float(chart_raw[3] - chart_raw[1]))
+        raw_top_ratio = float(chart_raw[1]) / focus_height if focus_height > 0.0 else 0.0
+        if raw_width < focus_width * 0.70 or raw_height < focus_height * 0.42 or raw_top_ratio > 0.30:
+            chart_raw = [0.0, 0.0, focus_width, focus_height]
+            chart_width = int(round(focus_width))
+            chart_height = int(round(focus_height))
     if focus and chart_raw[2] <= (focus[2] - focus[0]) + 4 and chart_raw[3] <= (focus[3] - focus[1]) + 4:
         chart_full = [focus[0] + chart_raw[0], focus[1] + chart_raw[1], focus[0] + chart_raw[2], focus[1] + chart_raw[3]]
     elif max(abs(item) for item in chart_raw) <= 1.0001:

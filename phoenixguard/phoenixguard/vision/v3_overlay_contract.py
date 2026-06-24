@@ -954,6 +954,7 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
     ),
     "FULL_HISTORY_READ": _layer_visibility(
         "chart_bounds",
+        "recent_candles",
         "major_swings",
         "local_swings",
         "supply_demand",
@@ -965,6 +966,7 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
     ),
     "REPLAY": _layer_visibility(
         "chart_bounds",
+        "recent_candles",
         "major_swings",
         "local_swings",
         "supply_demand",

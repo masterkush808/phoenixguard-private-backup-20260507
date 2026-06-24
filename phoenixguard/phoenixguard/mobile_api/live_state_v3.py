@@ -196,6 +196,41 @@ def _bounds_payload(values: Sequence[Any] | None) -> dict[str, Any]:
     }
 
 
+def _focus_chart_space_bounds(
+    session: Mapping[str, Any],
+    artifacts: Mapping[str, Mapping[str, Any]],
+) -> list[float]:
+    tracking = _mapping(session.get("tracking_summary"))
+    focus = _mapping(tracking.get("focus_region")) or _mapping(session.get("manual_focus_region"))
+    focus_box = _bounds_list(focus.get("pixel_bbox"))
+    chart_width = _float(_mapping(artifacts.get("chart")).get("width"), 0.0)
+    chart_height = _float(_mapping(artifacts.get("chart")).get("height"), 0.0)
+    if chart_width <= 0.0 and focus_box:
+        chart_width = max(1.0, focus_box[2] - focus_box[0])
+    if chart_height <= 0.0 and focus_box:
+        chart_height = max(1.0, focus_box[3] - focus_box[1])
+    if chart_width <= 1.0 or chart_height <= 1.0:
+        return []
+    return [0.0, 0.0, float(chart_width), float(chart_height)]
+
+
+def _chart_region_is_too_thin_for_focus(
+    pixel_bbox: object,
+    session: Mapping[str, Any],
+    artifacts: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    bbox = _bounds_list(pixel_bbox)
+    focus_bounds = _focus_chart_space_bounds(session, artifacts)
+    if not bbox or not focus_bounds:
+        return False
+    focus_width = max(1.0, focus_bounds[2] - focus_bounds[0])
+    focus_height = max(1.0, focus_bounds[3] - focus_bounds[1])
+    width = max(0.0, bbox[2] - bbox[0])
+    height = max(0.0, bbox[3] - bbox[1])
+    top_ratio = bbox[1] / focus_height if focus_height > 0.0 else 0.0
+    return bool(width < focus_width * 0.70 or height < focus_height * 0.42 or top_ratio > 0.30)
+
+
 def _plot_area(session: Mapping[str, Any], artifacts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     tracking = _mapping(session.get("tracking_summary"))
     chart_region = _mapping(tracking.get("chart_region") or tracking.get("display_region"))
@@ -204,6 +239,10 @@ def _plot_area(session: Mapping[str, Any], artifacts: Mapping[str, Mapping[str, 
         width = _float(artifacts.get("chart", {}).get("width"), 0.0)
         height = _float(artifacts.get("chart", {}).get("height"), 0.0)
         pixel_bbox = [0.0, 0.0, width, height] if width and height else []
+    elif _chart_region_is_too_thin_for_focus(cast(object, pixel_bbox), session, artifacts):
+        focus_bounds = _focus_chart_space_bounds(session, artifacts)
+        if focus_bounds:
+            pixel_bbox = focus_bounds
     payload = _bounds_payload(cast(Sequence[Any], pixel_bbox) if pixel_bbox else None)
     bounds = dict(payload)
     payload.update(
@@ -324,6 +363,7 @@ def _overlay_from_active_object(
     frame_id: int,
     sequence_id: str,
     chart_transform_id: str,
+    scene_graph: Mapping[str, Any],
     index: int,
 ) -> dict[str, Any] | None:
     overlay = _mapping(row.get("overlay"))
@@ -337,13 +377,17 @@ def _overlay_from_active_object(
     overlay.setdefault("track_id", row.get("track_id") or row.get("object_id") or overlay.get("object_id"))
     overlay.setdefault("truth_score", row.get("truth_score", overlay.get("confidence", 0.0)))
     overlay.setdefault("lifecycle_state", row.get("lifecycle_state", "ACTIVE"))
-    overlay.setdefault("frame_id", frame_id)
-    overlay.setdefault("sequence_id", sequence_id)
-    overlay.setdefault("chart_transform_id", chart_transform_id)
+    overlay["frame_id"] = frame_id
+    overlay["sequence_id"] = sequence_id
+    overlay["chart_transform_id"] = chart_transform_id
     overlay.setdefault("source_agent", row.get("source_agent", "market_registry"))
     overlay.setdefault("reason", row.get("reason", "registry active object"))
     overlay.setdefault("source_rule", row.get("source_rule", "active_object_registry"))
     overlay.setdefault("structural_anchor", row.get("structural_anchor", True))
+    visible_modes = [str(item).upper() for item in _sequence(overlay.get("visible_modes"))]
+    if visible_modes and "REPLAY" in visible_modes and "FULL_HISTORY_READ" not in visible_modes:
+        overlay["visible_modes"] = [*visible_modes, "FULL_HISTORY_READ"]
+    _rescale_registry_overlay_to_current_chart(overlay, row, scene_graph=scene_graph)
     try:
         return normalize_v3_overlay_object(
             overlay,
@@ -357,11 +401,82 @@ def _overlay_from_active_object(
         return None
 
 
+def _scale_number(value: Any, *, source_min: float, source_size: float, target_min: float, target_size: float) -> float:
+    return target_min + ((_float(value, source_min) - source_min) * target_size / max(1.0, source_size))
+
+
+def _scale_bounds_between_chart_spaces(bounds: Sequence[Any], source: Sequence[float], target: Sequence[float]) -> list[float]:
+    source_width = max(1.0, float(source[2] - source[0]))
+    source_height = max(1.0, float(source[3] - source[1]))
+    target_width = max(1.0, float(target[2] - target[0]))
+    target_height = max(1.0, float(target[3] - target[1]))
+    return [
+        _scale_number(bounds[0], source_min=source[0], source_size=source_width, target_min=target[0], target_size=target_width),
+        _scale_number(bounds[1], source_min=source[1], source_size=source_height, target_min=target[1], target_size=target_height),
+        _scale_number(bounds[2], source_min=source[0], source_size=source_width, target_min=target[0], target_size=target_width),
+        _scale_number(bounds[3], source_min=source[1], source_size=source_height, target_min=target[1], target_size=target_height),
+    ]
+
+
+def _scale_point_between_chart_spaces(point: Sequence[Any], source: Sequence[float], target: Sequence[float]) -> list[float]:
+    source_width = max(1.0, float(source[2] - source[0]))
+    source_height = max(1.0, float(source[3] - source[1]))
+    target_width = max(1.0, float(target[2] - target[0]))
+    target_height = max(1.0, float(target[3] - target[1]))
+    return [
+        _scale_number(point[0], source_min=source[0], source_size=source_width, target_min=target[0], target_size=target_width),
+        _scale_number(point[1], source_min=source[1], source_size=source_height, target_min=target[1], target_size=target_height),
+    ]
+
+
+def _scale_points_between_chart_spaces(value: Any, source: Sequence[float], target: Sequence[float]) -> list[list[float]]:
+    points: list[list[float]] = []
+    for item in _sequence(value):
+        point = _sequence(item)
+        if len(point) >= 2:
+            points.append(_scale_point_between_chart_spaces(point, source, target))
+    return points
+
+
+def _rescale_registry_overlay_to_current_chart(
+    overlay: dict[str, Any],
+    row: Mapping[str, Any],
+    *,
+    scene_graph: Mapping[str, Any],
+) -> None:
+    source_transform = _mapping(row.get("chart_transform")) or _mapping(overlay.get("chart_transform"))
+    source_bounds = (
+        _bounds_list(source_transform.get("chart_image_bounds"))
+        or _bounds_list(source_transform.get("window_bounds"))
+        or _bounds_list(source_transform.get("screen_bounds"))
+    )
+    target_bounds = _bounds_list(scene_graph.get("chart_region_chart_bounds"))
+    if not source_bounds or not target_bounds:
+        return
+    source_width = max(1.0, source_bounds[2] - source_bounds[0])
+    source_height = max(1.0, source_bounds[3] - source_bounds[1])
+    target_width = max(1.0, target_bounds[2] - target_bounds[0])
+    target_height = max(1.0, target_bounds[3] - target_bounds[1])
+    if abs(source_width - target_width) < 1.0 and abs(source_height - target_height) < 1.0:
+        return
+    for key in ("bbox", "bounds", "pixel_bbox"):
+        raw_bounds = _sequence(overlay.get(key))
+        if len(raw_bounds) >= 4:
+            overlay[key] = _scale_bounds_between_chart_spaces(raw_bounds[:4], source_bounds, target_bounds)
+    for key in ("points", "line_points", "touch_points", "path"):
+        scaled_points = _scale_points_between_chart_spaces(overlay.get(key), source_bounds, target_bounds)
+        if scaled_points:
+            overlay[key] = scaled_points
+    overlay["coordinate_mode"] = "CHART_IMAGE_SPACE"
+    overlay["registry_chart_space_scaled_v3"] = True
+
+
 def _combine_overlays(
     registry: MarketObjectRegistryV3,
     *,
     active_objects: Sequence[Mapping[str, Any]] | None,
     chart_transform_id: str,
+    scene_graph: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     overlays = [dict(overlay) for overlay in registry.overlays]
     seen = {str(overlay.get("overlay_id")) for overlay in overlays}
@@ -371,6 +486,7 @@ def _combine_overlays(
             frame_id=registry.frame_id,
             sequence_id=registry.sequence_context.sequence_id,
             chart_transform_id=chart_transform_id,
+            scene_graph=scene_graph,
             index=index,
         )
         if overlay is not None and str(overlay.get("overlay_id")) not in seen:
@@ -1996,6 +2112,7 @@ def build_live_state_v3(
         registry,
         active_objects=active_objects,
         chart_transform_id=str(chart_transform["chart_transform_id"]),
+        scene_graph=scene_graph,
     )
     signal_thesis = _first_mapping(
         session.get("signal_thesis_v3"),

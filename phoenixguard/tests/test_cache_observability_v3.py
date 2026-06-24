@@ -575,10 +575,19 @@ def test_live_state_v3_direct_read_skips_legacy_registry_when_v3_sources_exist(
                 "tracking_summary": {
                     "tracked_candles": [
                         {
-                            "track_id": "candle-1",
-                            "bbox": [10, 20, 30, 80],
+                            "track_id": f"candle-{index}",
+                            "bbox": [10 + index * 8, 20, 18 + index * 8, 80],
                             "direction": "up",
                             "confidence": 0.9,
+                        }
+                        for index in range(16)
+                    ],
+                    "structure_boxes": [
+                        {
+                            "key": "global-impulse",
+                            "bbox": [10, 20, 150, 90],
+                            "direction": "BUY",
+                            "confidence": 0.86,
                         }
                     ]
                 },
@@ -600,6 +609,88 @@ def test_live_state_v3_direct_read_skips_legacy_registry_when_v3_sources_exist(
     payload = response.json()
     assert payload["provider_status"]["direct_registry_source"] == "skipped_session_v3_overlay_sources"
     assert payload["provider_status"]["direct_registry_entries"] == 0
+
+
+def test_live_state_v3_thin_direct_sources_load_locked_registry_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    _clear_mobile_live_state_caches()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    session_dir.mkdir(parents=True)
+    now_epoch = time.time()
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "status": "running",
+                "tracking_enabled": True,
+                "capture_count": 9,
+                "frame_index": 9,
+                "last_capture_epoch": now_epoch,
+                "broker_surface": {
+                    "capture_plane": {"width": 400, "height": 240},
+                },
+                "tracking_summary": {
+                    "chart_region": {
+                        "pixel_bbox": [0, 0, 400, 240],
+                        "width": 400,
+                        "height": 240,
+                        "confidence": 0.92,
+                    },
+                    "tracked_candles": [
+                        {
+                            "track_id": "thin-candle",
+                            "bbox": [100, 120, 112, 180],
+                            "direction": "up",
+                            "confidence": 0.9,
+                        }
+                    ]
+                },
+                "latest_signal": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry_entry: dict[str, Any] = {
+        "overlay_id": "support-1",
+        "object_id": "support-1",
+        "track_id": "support-1",
+        "truth_score": 0.91,
+        "lifecycle_state": "CONFIRMED",
+        "chart_transform": {
+            "chart_image_bounds": [0, 0, 400, 240],
+        },
+        "overlay": {
+            "overlay_id": "support-1",
+            "object_id": "support-1",
+            "track_id": "support-1",
+            "type": "SUPPORT",
+            "layer": "supply_demand",
+            "bbox": [40, 160, 220, 190],
+            "truth_score": 0.91,
+            "confidence": 0.91,
+            "visible_modes": ["REPLAY", "ACTIVE_CONTEXT"],
+        },
+    }
+
+    def load_registry_context(*_args: Any, **_kwargs: Any) -> list[Mapping[str, Any]]:
+        return [registry_entry]
+
+    monkeypatch.setattr(mobile_app, "load_recent_market_objects", load_registry_context)
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=FULL_HISTORY_READ&compact=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider_status"]["direct_registry_source"] == "registry_context_for_thin_direct_sources"
+    assert payload["provider_status"]["direct_registry_entries"] == 1
+    overlay_types = {str(row["type"]) for row in payload["overlays"]["objects"]}
+    assert "DEMAND_ZONE" in overlay_types
 
 
 def test_live_state_v3_compact_preserves_overlay_snap_scene_graph(

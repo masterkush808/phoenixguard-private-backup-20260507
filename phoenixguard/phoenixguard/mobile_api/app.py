@@ -256,16 +256,17 @@ def _json_field_cache_signature(path: Path, keys: Sequence[str]) -> str:
 
 
 def _direct_session_has_v3_overlay_sources(payload: Mapping[str, Any]) -> bool:
-    def mapping(value: Any) -> Mapping[str, Any]:
-        return _as_mapping(value)
+    counts = _direct_session_v3_overlay_source_counts(payload)
+    if any(counts.get(key, 0) > 0 for key in counts):
+        return True
+    return False
 
-    def sequence(value: Any) -> Sequence[Any]:
-        return _as_sequence(value)
 
-    tracking = mapping(payload.get("tracking_summary"))
-    signal = mapping(payload.get("latest_signal"))
-    projection = mapping(tracking.get("projection"))
-    thesis = mapping(payload.get("signal_thesis_v3") or signal.get("signal_thesis_v3"))
+def _direct_session_v3_overlay_source_counts(payload: Mapping[str, Any]) -> dict[str, int]:
+    tracking = _as_mapping(payload.get("tracking_summary"))
+    signal = _as_mapping(payload.get("latest_signal"))
+    projection = _as_mapping(tracking.get("projection"))
+    thesis = _as_mapping(payload.get("signal_thesis_v3") or signal.get("signal_thesis_v3"))
     source_keys = (
         "tracked_candles",
         "trendlines_v3",
@@ -274,13 +275,24 @@ def _direct_session_has_v3_overlay_sources(payload: Mapping[str, Any]) -> bool:
         "support_resistance_zones",
         "angle_vectors",
     )
-    if any(len(sequence(tracking.get(key))) > 0 for key in source_keys):
-        return True
-    if len(sequence(projection.get("zones"))) > 0:
-        return True
-    if any(thesis.get(key) not in (None, "", [], {}) for key in ("entry", "target", "invalidation", "support", "resistance")):
-        return True
-    return False
+    counts = {key: len(_as_sequence(tracking.get(key))) for key in source_keys}
+    counts["projection_zones"] = len(_as_sequence(projection.get("zones")))
+    counts["signal_thesis_fields"] = sum(
+        1
+        for key in ("entry", "target", "invalidation", "support", "resistance")
+        if thesis.get(key) not in (None, "", [], {})
+    )
+    return counts
+
+
+def _direct_session_needs_registry_context(payload: Mapping[str, Any], overlay_mode: str) -> bool:
+    normalized_mode = normalize_view_mode(str(overlay_mode or "CLEAN_LIVE"))
+    if normalized_mode not in {"CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY"}:
+        return False
+    counts = _direct_session_v3_overlay_source_counts(payload)
+    tracked_candles = counts.get("tracked_candles", 0)
+    structural_count = sum(value for key, value in counts.items() if key != "tracked_candles")
+    return bool(tracked_candles < 12 or structural_count <= 0)
 
 
 def _direct_session_path_has_v3_overlay_sources(path: Path) -> bool:
@@ -1696,8 +1708,13 @@ def create_app(
         registry_source = "skipped_session_v3_overlay_sources"
         active_objects: list[Mapping[str, Any]] = []
         registry_entries: list[Mapping[str, Any]] = []
+        direct_has_overlay_sources = _direct_session_has_v3_overlay_sources(cast(Mapping[str, Any], session_payload))
+        direct_needs_registry_context = _direct_session_needs_registry_context(
+            cast(Mapping[str, Any], session_payload),
+            overlay_mode,
+        )
         with _LIVE_STATE_V3_CACHE_LOCK:
-            if not _direct_session_has_v3_overlay_sources(cast(Mapping[str, Any], session_payload)):
+            if not direct_has_overlay_sources or direct_needs_registry_context:
                 cached_sources = _LIVE_STATE_REGISTRY_CACHE.get(requested_session_id)
                 if cached_sources and now_epoch - cached_sources[0] <= _LIVE_STATE_REGISTRY_CACHE_TTL_SEC:
                     active_objects = list(cached_sources[1])
@@ -1723,7 +1740,7 @@ def create_app(
                         )
                     ]
                     _LIVE_STATE_REGISTRY_CACHE[requested_session_id] = (now_epoch, active_objects, registry_entries)
-                    registry_source = "legacy_registry"
+                    registry_source = "registry_context_for_thin_direct_sources" if direct_has_overlay_sources else "legacy_registry"
         if compact_public and registry_entries:
             active_objects = _locked_registry_entries_from_entries(registry_entries)
         mark_timing("registry")

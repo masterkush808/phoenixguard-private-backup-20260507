@@ -153,8 +153,9 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "function overlayModeAllows" in dashboard
     assert "function overlayTypeAllowedInMode" in dashboard
     assert "function applyFrontendOverlayModeBudget" in dashboard
-    assert "CLEAN_LIVE: 48" in dashboard
-    assert "visibleLabelCount > 18" in dashboard
+    assert "CLEAN_LIVE: {objects: 56, labels: 18}" in dashboard
+    assert "function frontendOverlayLabelCandidate" in dashboard
+    assert 'clean_live: "FULL_HISTORY_READ"' in dashboard
     assert "function backendObjectOverlayReady" in dashboard
     assert 'SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"])' in dashboard
     assert 'TRENDLINES: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"])' in dashboard
@@ -195,7 +196,7 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "state.layers[layer] === false" in dashboard
     assert "row.visible_default === false" in dashboard
     assert "row.precision_rejected === true" in dashboard
-    assert 'const currentCandleLiveModes = new Set(["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT"]);' in dashboard
+    assert 'const currentCandleLiveModes = new Set(["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY"]);' in dashboard
     assert '!currentCandleLiveModes.has(activeMode)' in dashboard
     assert "rememberOverlayLock(surfaceIdentityKey(session), renderableBoxes, session);" in dashboard
     assert "bridgeSelectedModeWhileHydrating" in dashboard

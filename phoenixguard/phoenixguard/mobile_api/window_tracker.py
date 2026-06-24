@@ -8780,6 +8780,16 @@ class PhoenixGuardWindowTrackingAdapter:
         else:
             chart_bbox, chart_confidence = self._detect_chart_bbox(surface)
             mark_study_stage("detect_chart_bbox")
+        if fast_locked_context:
+            chart_width = int(chart_bbox[2] - chart_bbox[0])
+            chart_height = int(chart_bbox[3] - chart_bbox[1])
+            too_narrow = chart_width < int(round(surface.width * 0.70))
+            too_short = chart_height < int(round(surface.height * 0.42))
+            starts_too_low = int(chart_bbox[1]) > int(round(surface.height * 0.30))
+            if too_narrow or too_short or starts_too_low:
+                chart_bbox = [0, 0, int(surface.width), int(surface.height)]
+                chart_confidence = max(0.72, chart_confidence)
+                mark_study_stage("manual_focus_chart_bbox")
         chart_region = _pixel_bbox_meta(surface.size, chart_bbox)
         chart_region["confidence"] = chart_confidence
         chart_crop_box = (
