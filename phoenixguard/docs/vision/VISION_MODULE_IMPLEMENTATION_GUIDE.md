@@ -1,20 +1,17 @@
 # PhoenixGuard Vision Module Upgrade: Phase 1 Implementation Guide
 
-**Date**: April 21, 2026
-**Phase**: 1 of 3 (Vision Architecture)
-**Status**: Production Ready
+**Date**: April 21, 2026 **Phase**: 1 of 3 (Vision Architecture) **Status**: Production Ready
 **Maintainer**: PhoenixGuard Engineering
 
 ---
 
 ## Overview
 
-This document describes the upgraded PhoenixGuard Computer Vision module
-implemented in Phase 1, transforming it from
-research-grade to **Wall Street tier** performance and reliability.
+This document describes the upgraded PhoenixGuard Computer Vision module implemented in Phase 1,
+transforming it from research-grade to **Wall Street tier** performance and reliability.
 
-**Key Achievement**: Multi-modal vision ensemble with optical flow and chart
-segmentation, providing:
+**Key Achievement**: Multi-modal vision ensemble with optical flow and chart segmentation,
+providing:
 
 - ✅ Semantic + precise + boundary detection (3-model fusion)
 - ✅ Temporal motion analysis (consolidation & breakout signals)
@@ -130,8 +127,7 @@ output = ensemble.infer(image)
 
 ### 2. Optical Flow Motion Detector (`motion_tracker.py`)
 
-**Purpose**: Track pixel motion across frames to detect consolidation and
-breakout zones.
+**Purpose**: Track pixel motion across frames to detect consolidation and breakout zones.
 
 **Key Classes**:
 
@@ -171,13 +167,13 @@ stats = tracker.get_motion_stats()
 
 **Motion Metrics**:
 
-| Metric | Meaning | Usage |
-| ------ | ------- | ----- |
-| **motion_energy** | Total pixel motion (sum of mag²) | Detect activity spike |
+| Metric                  | Meaning                             | Usage                        |
+| ----------------------- | ----------------------------------- | ---------------------------- |
+| **motion_energy**       | Total pixel motion (sum of mag²)    | Detect activity spike        |
 | **consolidation_score** | 1.0 = low motion, 0.0 = high motion | Identify consolidation zones |
-| **breakout_score** | 1.0 = accelerating, 0.0 = no change | Detect breakout start |
-| **dominant_direction** | Primary motion vector (vx, vy) | Confirm trend direction |
-| **consistency** | Frame-to-frame similarity | Detect noise/jitter |
+| **breakout_score**      | 1.0 = accelerating, 0.0 = no change | Detect breakout start        |
+| **dominant_direction**  | Primary motion vector (vx, vy)      | Confirm trend direction      |
+| **consistency**         | Frame-to-frame similarity           | Detect noise/jitter          |
 
 **Algorithm**: DIS (Dense Inverse Search) optical flow
 
@@ -438,34 +434,34 @@ Segmentation: N/A")
 
 ### Latency (Single Frame)
 
-| Component | CPU | GPU |
-| --------- | --- | --- |
-| YOLO detection | 120-150ms | 25-35ms |
-| ViT inference | 80-100ms | 15-25ms |
-| SAM segmentation | 200-300ms | 50-80ms |
-| Optical flow | 40-60ms | 5-10ms |
+| Component            | CPU           | GPU          |
+| -------------------- | ------------- | ------------ |
+| YOLO detection       | 120-150ms     | 25-35ms      |
+| ViT inference        | 80-100ms      | 15-25ms      |
+| SAM segmentation     | 200-300ms     | 50-80ms      |
+| Optical flow         | 40-60ms       | 5-10ms       |
 | **Total (with all)** | **400-500ms** | **80-120ms** |
 
 **Target after Phase 2**: <50ms p99 (GPU with TensorRT quantization)
 
 ### Throughput
 
-| Mode | CPU | GPU |
-| ---- | --- | --- |
+| Mode              | CPU     | GPU      |
+| ----------------- | ------- | -------- |
 | Optical flow only | 20+ fps | 100+ fps |
-| YOLO only | 5-8 fps | 30+ fps |
-| All models | 2-3 fps | 8-12 fps |
+| YOLO only         | 5-8 fps | 30+ fps  |
+| All models        | 2-3 fps | 8-12 fps |
 
 **Target after Phase 2**: 30+ fps streaming
 
 ### Memory Usage
 
-| Model | Size | GPU VRAM |
-| ----- | ---- | -------- |
-| YOLO-medium | 100MB | 2GB |
-| ViT-base-384 | 350MB | 2-3GB |
-| SAM-ViT-B | 375MB | 2-3GB |
-| Total | ~825MB | ~7GB |
+| Model        | Size   | GPU VRAM |
+| ------------ | ------ | -------- |
+| YOLO-medium  | 100MB  | 2GB      |
+| ViT-base-384 | 350MB  | 2-3GB    |
+| SAM-ViT-B    | 375MB  | 2-3GB    |
+| Total        | ~825MB | ~7GB     |
 
 **Target after Phase 2 (with INT8 quantization)**: ~2GB total VRAM
 
@@ -489,7 +485,7 @@ The enhanced vision module integrates with the existing pipeline:
         ↓
 [Feature fusion]
         ↓
-[12-gate curriculum]
+[13-core-gate curriculum]
         ↓
 [Ensemble decision]
         ↓
@@ -643,6 +639,5 @@ engine.motion_tracker = OpticalFlowTracker(
 
 ---
 
-*Document: PhoenixGuard Vision Module v2.0 Implementation Guide*
-*Last Updated: April 21, 2026*
-*Status: Production Ready*
+_Document: PhoenixGuard Vision Module v2.0 Implementation Guide_ _Last Updated: April 21, 2026_
+_Status: Production Ready_

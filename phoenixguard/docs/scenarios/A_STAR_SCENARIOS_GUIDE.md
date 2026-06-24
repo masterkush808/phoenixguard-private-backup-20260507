@@ -1,14 +1,13 @@
-# PhoenixGuard A* Scenario Prediction System
+# PhoenixGuard A\* Scenario Prediction System
 
 ## Overview
 
-The **A* Scenario Prediction Engine** extends PhoenixGuard with
-**multi-step future candle prediction** and **intelligent scenario
-exploration**.
+The **A\* Scenario Prediction Engine** extends PhoenixGuard with **multi-step future candle
+prediction** and **intelligent scenario exploration**.
 
 It leverages:
 
-- **A* Search** for efficient path exploration
+- **A\* Search** for efficient path exploration
 - **Advanced sorting** via heuristic-driven prioritization
 - **Sequence awareness** of market transitions (continue, pullback, reversal,
 
@@ -31,7 +30,7 @@ fakeout)
         ▼                             ▼
 ┌─────────────────┐         ┌──────────────────┐
 │ Regression      │         │ Skill Gates      │
-│ (forecast_3m)   │         │ (12 gates)       │
+│ (forecast_3m)   │         │ (13 core gates)  │
 └────────┬────────┘         └──────┬───────────┘
          │                         │
          │       NEW              │
@@ -203,7 +202,7 @@ dashboard = create_scenario_dashboard_layout(scenarios_paint, title="Forecast Da
 
 ## Configuration
 
-### A* Search Parameters
+### A\* Search Parameters
 
 Edit `A_StarScenarioPredictor.__init__()` in `a_star_scenarios.py`:
 
@@ -282,7 +281,7 @@ forecast_output = {
 **Main Classes:**
 
 - `CandleState`: Single OHLCV + metadata
-- `ScenarioNode`: A* node with path history
+- `ScenarioNode`: A\* node with path history
 - `ScenarioPrediction`: Top-ranked scenario for visualization
 - `A_StarScenarioPredictor`: Main search engine
 
@@ -502,9 +501,9 @@ for chart in batch_charts:
 
 ## References
 
-- **A* Search**: Russell & Norvig, *Artificial Intelligence* (4th Ed.)
-- **Quantile Forecasting**: Hyndman & Athanasopoulos, *Forecasting: Principles &
+- **A\* Search**: Russell & Norvig, _Artificial Intelligence_ (4th Ed.)
+- **Quantile Forecasting**: Hyndman & Athanasopoulos, \*Forecasting: Principles &
 
-Practice*
+Practice\*
 
-- **Memory Augmentation**: Graves et al., *Neural Turing Machines*
+- **Memory Augmentation**: Graves et al., _Neural Turing Machines_

@@ -3,8 +3,9 @@
 ## 1) Input
 
 - User provides image/file (chart screenshot or equivalent).
-- Entry path: `run_inference(...)` in `main.py`.
-Live tracker path: `ContinuousWindowTrackerService` in `phoenixguard/mobile_api/window_tracker.py` keeps the locked broker/chart surface warm on a one-second capture loop.
+- Entry path: `run_inference(...)` in `main.py`. Live tracker path: `ContinuousWindowTrackerService`
+  in `phoenixguard/mobile_api/window_tracker.py` keeps the locked broker/chart surface warm on a
+  one-second capture loop.
 - It collects frames for the dashboard.
 - The service serves the dashboard through the mobile API.
 
@@ -17,14 +18,18 @@ Live tracker path: `ContinuousWindowTrackerService` in `phoenixguard/mobile_api/
 2. **CV model (HF endpoint or YOLO fallback path)**
 
    - `cv_engine.detect(img)` (`cv_module.py`).
-   - `MultiModelEnsemble` (`phoenixguard/vision/multi_model_ensemble.py`) can keep YOLO/ViT/SAM loaded and bag YOLO over same-coordinate contrast/sharpness views.
+   - `MultiModelEnsemble` (`phoenixguard/vision/multi_model_ensemble.py`) can keep YOLO/ViT/SAM
+     loaded and bag YOLO over same-coordinate contrast/sharpness views.
    - Boxes that survive cross-view agreement are then boosted.
 
 3. **Structured chart-state extraction**
 
    - Heuristic/CV-native chart-state payload is built from live chart structure.
-   - Window tracker extracts candle tracks, global/local/impulse boxes, historical structure legs, projected sniper/trigger/target zones, and significant support/resistance zones.
-   - Smart-money context is attached to each box play: order-block retests, fair-value gaps, liquidity sweeps/pools, market-structure shift, S/R entry and target levels, and a per-box SMC score.
+   - Window tracker extracts candle tracks, global/local/impulse boxes, historical structure legs,
+     projected sniper/trigger/target zones, and significant support/resistance zones.
+   - Smart-money context is attached to each box play: order-block retests, fair-value gaps,
+     liquidity sweeps/pools, market-structure shift, S/R entry and target levels, and a per-box SMC
+     score.
 
 4. **Memory retrieval + context injection**
 
@@ -42,7 +47,8 @@ Live tracker path: `ContinuousWindowTrackerService` in `phoenixguard/mobile_api/
 
 7. **RL policy inference**
 
-   - `rl_engine.infer(fused_features, memory_recall_top1_sim, memory_recall_direction)` (`rl_module.py`).
+   - `rl_engine.infer(fused_features, memory_recall_top1_sim, memory_recall_direction)`
+     (`rl_module.py`).
 
 ## 3) Feature Fusion Layer
 
@@ -55,7 +61,7 @@ Live tracker path: `ContinuousWindowTrackerService` in `phoenixguard/mobile_api/
   - personalization style vector.
 - Built by `fused_feature_vector(...)` in `main.py`.
 
-## 4) Diagnostic Gate Layer (12-gate curriculum)
+## 4) Diagnostic Gate Layer (13 core gates + support gates)
 
 - Executed by `gates_engine.run_all(...)` in `skill_gates.py`.
 - Gates include:
@@ -70,12 +76,13 @@ Live tracker path: `ContinuousWindowTrackerService` in `phoenixguard/mobile_api/
   8. Meta constraints
   9. Regression error estimation
   10. Knowledge representation (ontology coherence)
-  11. Formal automata state progression
-  12. Predictive analytics fusion
+  11. Candle group context
+  12. Formal automata state progression
+  13. Predictive analytics fusion
 
-- Gates are diagnostics only in the live path. They can warn, explain, and feed
-  dashboards/logs, but they cannot select side, create HOLD, inflate confidence,
-  choose expiry, veto a tracker-backed setup, or trigger the shooter.
+- Gates are diagnostics only in the live path. They can warn, explain, and feed dashboards/logs, but
+  they cannot select side, create HOLD, inflate confidence, choose expiry, veto a tracker-backed
+  setup, or trigger execution.
 - Supporting diagnostic checks:
   - continuation strength,
   - macro/local alignment,
@@ -87,7 +94,7 @@ Live tracker path: `ContinuousWindowTrackerService` in `phoenixguard/mobile_api/
   - regime stability,
   - transition alignment.
 - Router weighting:
-  - `LinearRouter(12->12)` scales gate scores for explainability/offline review.
+  - `LinearRouter(13->13)` scales gate scores for explainability/offline review.
   - MoE route weights are metadata only for live execution.
 
 ## 5) Ensemble Decision Layer
@@ -101,21 +108,26 @@ Live tracker path: `ContinuousWindowTrackerService` in `phoenixguard/mobile_api/
   - confidence threshold,
   - memory similarity requirement (or no-memory mode),
   - interval safety.
-- Live tracker decisions additionally pass SMC and significant S/R evidence into `phoenixguard/decision/decision_kernel.py`, where those signals join the structure family before the final trade-mode
+- Live tracker decisions additionally pass SMC and significant S/R evidence into
+  `phoenixguard/decision/decision_kernel.py`, where those signals join the structure family before
+  the final trade-mode
 - Live broker timing is map-aware instead of fixed to an M3/M5 shortcut.
 - `window_tracker.py` builds an `opposing_force_timing_v1` profile.
-- The profile keeps the large Global/Local target horizon when the path is clear and scores buy-high/sell-low extreme risk.
+- The profile keeps the large Global/Local target horizon when the path is clear and scores
+  buy-high/sell-low extreme risk.
 - It maps significant opposing S/R forces from history.
-- It only blocks or compresses when price is at a global/local peak/trough or an unbroken opposing level.
-- A lower-history SELL is no longer treated as an automatic wait when the live picture is already firing: `current_flow_continuation_ready` can override the lower-history 
+- It only blocks or compresses when price is at a global/local peak/trough or an unbroken opposing
+  level.
+- A lower-history SELL is no longer treated as an automatic wait when the live picture is already
+  firing: `current_flow_continuation_ready` can override the lower-history
 
 ## 6) Final Action + Outputs
 
-- Final action: `BUY` / `SELL` / `HOLD`, with `HOLD` as the default until the
-  tracker, decision kernel, timing engine, execution governor, calibration
-  manifest, latency budget, cooldown, and broker state agree.
-- Position sizing is outside the live control loop. The broker amount is
-  preserved exactly as visible and PhoenixGuard does not calibrate or edit it.
+- Final action: `BUY` / `SELL` / `HOLD`, with `HOLD` as the default until the tracker, decision
+  kernel, timing engine, execution governor, calibration manifest, latency budget, cooldown, and
+  broker state agree.
+- Position sizing is outside the live control loop. The broker amount is preserved exactly as
+  visible and PhoenixGuard does not calibrate or edit it.
 - Explainability artifacts:
   - gate scores,
   - approximate SHAP contributions,
@@ -124,16 +136,18 @@ Live tracker path: `ContinuousWindowTrackerService` in `phoenixguard/mobile_api/
 - Live execution flow:
   - tracker reasons over the full frame and dual BUY/SELL hypotheses,
   - decision kernel authorizes side, setup, expiry, and invalidation,
-  - execution governor validates freshness, timing, calibration, cooldown,
-    layout, broker state, and tracker agreement,
-  - shooter receives only a calibrated fire command and may operate only
-    expiry/time plus BUY or SELL.
+  - execution governor validates freshness, timing, calibration, cooldown, layout, broker state, and
+    tracker agreement,
+  - shooter receives only a calibrated fire command and may operate only expiry/time plus BUY or
+    SELL.
 - Visualization:
   - chart overlay,
   - always-live tracker dashboard at `/v1/mobile/window-tracker/dashboard/{session_id}`,
   - Study Map cells for Global, Local, Impulse, SMC, Live S/R, and Candles,
-  - inspector rows for every overlay/projection/support/resistance box including SMC score, tags, entry level, target level, and summary,
-  - Timing Lock rows/cards showing recommended expiry, timing class, hold intent, history-area label, entry-area score, opposing-force count/risk, and global-extreme risk,
+  - inspector rows for every overlay/projection/support/resistance box including SMC score, tags,
+    entry level, target level, and summary,
+  - Timing Lock rows/cards showing recommended expiry, timing class, hold intent, history-area
+    label, entry-area score, opposing-force count/risk, and global-extreme risk,
   - confidence gauge,
   - optional skill dashboard.
 
@@ -145,16 +159,26 @@ Live tracker path: `ContinuousWindowTrackerService` in `phoenixguard/mobile_api/
 - Executed/attempted broker trades keep an active trade record containing:
   - entry price proxy
   - decision kernel
-  - STREND FOLLOW, the next event is TRIGGER/TARGET, trigger probability is high, target-before-invalidation wins the race, hazard timing favors trigger, direction alignment is clean, and at least two candles of target runway remain.MC/S/R context
+  - STREND FOLLOW, the next event is TRIGGER/TARGET, trigger probability is high,
+    target-before-invalidation wins the race, hazard timing favors trigger, direction alignment is
+    clean, and at least two candles of target runway remain.MC/S/R context
   - timing profile
   - settlement memory
-- Broker amount is not part of the strategy loop and must remain read-only. PhoenixGuard may adjust expiry/time and click the selected direction only; it must preserve the amount already visible in the broker.
+- Broker amount is not part of the strategy loop and must remain read-only. PhoenixGuard may adjust
+  expiry/time and click the selected direction only; it must preserve the amount already visible in
+  the broker.
 - Live execution location gate is wick-aware and history-aware:
-  - BUY requires a mapped significant support/studied-low context and is blocked in upper historical highs.
-  - SELL requires a mapped significant resistance/studied-high context and is blocked in lower historical lows unless the strict live-flow continuation override proves the current sell is already moving with target runway.
-  - Forward projection reports the current history area, preferred entry area, and nearest opposing force before any live trigger is allowed.
-- Expired trades are classified as won/lost/flat when chart-proxy data is available and appended to `trade_outcomes.jsonl` for future timing review.
+  - BUY requires a mapped significant support/studied-low context and is blocked in upper historical
+    highs.
+  - SELL requires a mapped significant resistance/studied-high context and is blocked in lower
+    historical lows unless the strict live-flow continuation override proves the current sell is
+    already moving with target runway.
+  - Forward projection reports the current history area, preferred entry area, and nearest opposing
+    force before any live trigger is allowed.
+- Expired trades are classified as won/lost/flat when chart-proxy data is available and appended to
+  `trade_outcomes.jsonl` for future timing review.
 - Live tracker deployment uses the Windows VM scripts in `deploy/windows/`:
   - `Start-PhoenixGuardVmMonitor.ps1` supervises API, tracker, and shooter.
   - `phoenixguard.vm-monitor.env.ps1` pins `PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC=1.0`.
-  - `Start-PhoenixGuardQuickTunnel.ps1` can publish the local API through Cloudflare quick tunnel when a public browser URL is needed.
+  - `Start-PhoenixGuardQuickTunnel.ps1` can publish the local API through Cloudflare quick tunnel
+    when a public browser URL is needed.

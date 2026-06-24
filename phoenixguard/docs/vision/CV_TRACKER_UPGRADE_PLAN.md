@@ -1,15 +1,14 @@
 # PhoenixGuard Computer Vision Tracker: Industry High-End Upgrade Plan
 
-**Document Date**: April 21, 2026
-**Status**: Implementation Ready
-**Target Completion**: Phased Rollout (3 sprints)
+**Document Date**: April 21, 2026 **Status**: Implementation Ready **Target Completion**: Phased
+Rollout (3 sprints)
 
 ---
 
 ## Executive Summary
 
-Current system is strong foundationally (YOLO + RL + 12-gate ensemble) but lacks
-industry standards in:
+Current system is strong foundationally (YOLO + RL + 13-core-gate ensemble) but lacks industry
+standards in:
 
 - **Real-time performance** (no GPU pipelining, frame batching)
 - **Vision robustness** (single-model architecture, no optical flow)
@@ -17,9 +16,8 @@ industry standards in:
 - **Model optimization** (no quantization/distillation)
 - **Explainability** (limited attribution analysis)
 
-This plan upgrades PhoenixGuard to **Wall Street tier** computer vision tracker
-with <50ms latency, 99.5% availability,
-and explainable decisions.
+This plan upgrades PhoenixGuard to **Wall Street tier** computer vision tracker with <50ms latency,
+99.5% availability, and explainable decisions.
 
 ---
 
@@ -27,7 +25,7 @@ and explainable decisions.
 
 ### ✅ Strengths
 
-- **Hybrid architecture**: CV + RL + memory + regression + 12-gate ensemble
+- **Hybrid architecture**: CV + RL + memory + regression + 13-core-gate ensemble
 - **Memory augmentation**: Sentence-transformers + FAISS for few-shot context
 - **Multi-output**: Position sizing + confidence + SHAP artifacts
 - **Already instrumented**: OpenTelemetry tracing foundation in place
@@ -35,17 +33,17 @@ and explainable decisions.
 
 ### ⚠️ Gaps (Industry Standards)
 
-| Category | Current State | Industry Expectation | Gap |
-| ---------- | -------------- | ---------------------- | ----- |
-| **Vision Model** | Single YOLO26s | Ensemble ViT + optical flow + SAM | Multi-modal, temporal awareness |
-| **Latency** | ~200-400ms | <50ms (p99) | Need GPU pipelining + batching |
-| **Throughput** | ~3-5 fps | 30+ fps streaming | Requires async frame buffering |
-| **Robustness** | Yaw/pitch sensitivity | Affine invariance + synthetic data | Needs augmentation pipeline |
-| **Explainability** | SHAP only | SHAP + attention maps + grad-CAM | Missing visual attribution |
-| **Model serving** | Direct inference | TensorRT + quantization | ~3-4x speedup possible |
-| **Testing** | Manual validation | Automated edge-case suite | 0 regression tests |
-| **Data monitoring** | None | Distribution + outlier detection | No drift detection |
-| **A/B testing** | Single model | Multi-model router | No experiment framework |
+| Category            | Current State         | Industry Expectation               | Gap                             |
+| ------------------- | --------------------- | ---------------------------------- | ------------------------------- |
+| **Vision Model**    | Single YOLO26s        | Ensemble ViT + optical flow + SAM  | Multi-modal, temporal awareness |
+| **Latency**         | ~200-400ms            | <50ms (p99)                        | Need GPU pipelining + batching  |
+| **Throughput**      | ~3-5 fps              | 30+ fps streaming                  | Requires async frame buffering  |
+| **Robustness**      | Yaw/pitch sensitivity | Affine invariance + synthetic data | Needs augmentation pipeline     |
+| **Explainability**  | SHAP only             | SHAP + attention maps + grad-CAM   | Missing visual attribution      |
+| **Model serving**   | Direct inference      | TensorRT + quantization            | ~3-4x speedup possible          |
+| **Testing**         | Manual validation     | Automated edge-case suite          | 0 regression tests              |
+| **Data monitoring** | None                  | Distribution + outlier detection   | No drift detection              |
+| **A/B testing**     | Single model          | Multi-model router                 | No experiment framework         |
 
 ---
 
@@ -358,7 +356,7 @@ INPUT (Live Chart Frame)
                           ↓
             [Feature Fusion Vector]
                           ↓
-         [12-Gate Curriculum Engine]
+      [13-Core-Gate Curriculum Engine]
                           ↓
             [Ensemble Decision Fusion]
                           ↓
@@ -451,13 +449,13 @@ Input Image
 
 ## Risk Mitigation
 
-| Risk | Mitigation |
-| ------ | ----------- |
-| Increased latency from multi-model fusion | GPU batching + quantization keeps p99 < 50ms |
-| ViT model quality on financial charts | Tested on 10k+ chart images; custom fine-tuning if <95% accuracy |
-| Frame dropping under load | Graceful degradation with metrics; dashboard alerts |
-| Data leakage in A/B test router | Separate train/test data; 100% audit trail |
-| Model complexity (harder to debug) | SHAP + attention maps provide full explainability |
+| Risk                                      | Mitigation                                                       |
+| ----------------------------------------- | ---------------------------------------------------------------- |
+| Increased latency from multi-model fusion | GPU batching + quantization keeps p99 < 50ms                     |
+| ViT model quality on financial charts     | Tested on 10k+ chart images; custom fine-tuning if <95% accuracy |
+| Frame dropping under load                 | Graceful degradation with metrics; dashboard alerts              |
+| Data leakage in A/B test router           | Separate train/test data; 100% audit trail                       |
+| Model complexity (harder to debug)        | SHAP + attention maps provide full explainability                |
 
 ---
 
@@ -555,5 +553,5 @@ Input Image
 
 ---
 
-*Document prepared for implementation. Full code examples and module interfaces
-follow in subsequent sections.*
+_Document prepared for implementation. Full code examples and module interfaces follow in subsequent
+sections._
