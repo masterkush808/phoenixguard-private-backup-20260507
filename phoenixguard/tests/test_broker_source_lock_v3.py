@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from PIL import Image, ImageDraw
 
@@ -110,7 +110,7 @@ def _broker_surface_payload() -> dict[str, Any]:
 
 
 def _edge_broker_payload(**overrides: Any) -> dict[str, Any]:
-    payload = {
+    payload: dict[str, Any] = {
         "browser": "edge",
         "title": "The Most Innovative Trading Platform - Microsoft Edge",
         "url": "https://pocketoption.com/cabinet/",
@@ -123,7 +123,7 @@ def _edge_broker_payload(**overrides: Any) -> dict[str, Any]:
 
 
 def _edge_tradingview_payload(**overrides: Any) -> dict[str, Any]:
-    payload = {
+    payload: dict[str, Any] = {
         "browser": "edge",
         "title": "EURUSD Chart - TradingView - Microsoft Edge",
         "url": "https://www.tradingview.com/chart/abc123/",
@@ -147,7 +147,7 @@ def _tradingview_study_expected() -> dict[str, Any]:
 def test_valid_lock_accepts_edge_broker_with_handle_viewport_and_fingerprints() -> None:
     image = _synthetic_broker_image()
     broker_surface = _broker_surface_payload()
-    expected = {
+    expected: dict[str, Any] = {
         "window_handle": "hwnd-1",
         "viewport": {"width": 1280, "height": 720},
         "broker_pixel_fingerprint": broker_pixel_fingerprint_v3(image),
@@ -312,7 +312,8 @@ def test_desktop_taskbar_dominant_image_classifies_as_wrong_surface() -> None:
 
     assert guard.surface_class == WINDOWS_DESKTOP_TASKBAR
     assert guard.wrong_surface is True
-    assert guard.evidence["desktop"]["taskbar_dominant"] is True
+    desktop_evidence = cast(Mapping[str, Any], guard.evidence["desktop"])
+    assert desktop_evidence["taskbar_dominant"] is True
     assert lock.status == WRONG_SURFACE
     assert lock.surface_guard.surface_class == WINDOWS_DESKTOP_TASKBAR
 

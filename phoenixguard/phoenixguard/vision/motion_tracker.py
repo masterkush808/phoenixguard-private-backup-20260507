@@ -133,7 +133,7 @@ class OpticalFlowTracker:
             gray = cv2.cvtColor(frame_array, cv2.COLOR_RGB2GRAY)
         else:
             gray = frame_array
-        gray = cast(NDArray[np.uint8], np.asarray(gray, dtype=np.uint8))
+        gray = np.asarray(gray, dtype=np.uint8)
 
         # Initialize previous frame
         if self.prev_gray is None:
@@ -161,13 +161,15 @@ class OpticalFlowTracker:
             return flow_frame
 
         # Compute optical flow
-        flow = self.flow_detector.calc(self.prev_gray, gray, None)
+        flow = np.asarray(self.flow_detector.calc(self.prev_gray, gray, None), dtype=np.float32)
 
         # Extract flow components
-        magnitude, angle = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+        magnitude_raw, angle_raw = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+        magnitude = np.asarray(magnitude_raw, dtype=np.float32)
+        angle = np.asarray(angle_raw, dtype=np.float32)
 
         # Create motion mask
-        motion_mask = (magnitude > self.motion_threshold).astype(np.uint8) * 255
+        motion_mask = np.asarray((magnitude > self.motion_threshold).astype(np.uint8) * 255, dtype=np.uint8)
 
         # Compute motion metrics
         motion_energy = float(np.sum(magnitude ** 2))
@@ -180,8 +182,8 @@ class OpticalFlowTracker:
         chart_region_only = False
         if self.chart_region_roi is not None:
             x1, y1, x2, y2 = self.chart_region_roi
-            chart_motion = magnitude[y1:y2, x1:x2].sum()
-            total_motion = magnitude.sum()
+            chart_motion = float(np.sum(magnitude[y1:y2, x1:x2]))
+            total_motion = float(np.sum(magnitude))
             chart_region_only = (chart_motion / (total_motion + 1e-6)) > 0.8
 
         flow_frame = OpticalFlowFrame(
@@ -283,7 +285,8 @@ class OpticalFlowTracker:
         norm_prev = (prev_magnitude - prev_magnitude.mean()) / (prev_magnitude.std() + 1e-6)
         norm_curr = (magnitude - magnitude.mean()) / (magnitude.std() + 1e-6)
 
-        correlation = np.mean(norm_prev * norm_curr)
+        correlation_values: NDArray[np.float32] = np.asarray(norm_prev * norm_curr, dtype=np.float32)
+        correlation = float(correlation_values.mean())
         return float(np.clip(correlation, -1, 1))
 
     def get_motion_stats(self) -> OpticalFlowStats:
@@ -340,7 +343,6 @@ class OpticalFlowTracker:
 
         Returns PIL Image with flow vectors overlaid on input frame.
         """
-        flow = flow_frame.flow
         magnitude = flow_frame.magnitude
 
         # Create output image

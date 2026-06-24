@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, cast
 
 
 VoiceCommandHandler = Callable[[Mapping[str, Any], Mapping[str, Any] | None], Any]
@@ -125,7 +125,11 @@ class VoiceCommandRouter:
             raw_result = spec.handler(_ensure_mapping(args), context)
         except Exception as exc:
             raise VoiceCommandError(f"Voice command '{resolved_name}' failed: {exc}") from exc
-        payload = dict(raw_result) if isinstance(raw_result, Mapping) else {"result": raw_result}
+        payload: dict[str, Any] = (
+            {str(key): value for key, value in cast(Mapping[Any, Any], raw_result).items()}
+            if isinstance(raw_result, Mapping)
+            else {"result": raw_result}
+        )
         payload.setdefault("status", "ok")
         return VoiceCommandResult(
             name=resolved_name,

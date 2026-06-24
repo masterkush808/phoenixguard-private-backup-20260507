@@ -32,16 +32,21 @@ def _mapping(value: object) -> Mapping[str, Any]:
     return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
 
 
+def _mapping_or_none(value: object) -> Mapping[str, Any] | None:
+    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else None
+
+
 def _dict(value: object) -> dict[str, Any]:
     return dict(_mapping(value))
 
 
 def _nested_mappings(value: object) -> dict[str, Mapping[str, Any]]:
-    return {
-        str(key): _mapping(item)
-        for key, item in _mapping(value).items()
-        if isinstance(item, Mapping)
-    }
+    nested: dict[str, Mapping[str, Any]] = {}
+    for key, item in _mapping(value).items():
+        item_map = _mapping_or_none(item)
+        if item_map is not None:
+            nested[str(key)] = item_map
+    return nested
 
 
 def _json_object(value: object) -> dict[str, Any] | None:
@@ -70,10 +75,10 @@ def _build_raw_sequence_targets(
     sequence_targets: Mapping[str, Any],
     adjustments: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
-    existing_raw_targets_obj = record.get("raw_sequence_targets", {})
-    raw_targets = (
-        {str(task_name): task_value for task_name, task_value in existing_raw_targets_obj.items()}
-        if isinstance(existing_raw_targets_obj, Mapping)
+    existing_raw_targets = _mapping_or_none(record.get("raw_sequence_targets", {}))
+    raw_targets: dict[str, Any] = (
+        {str(task_name): task_value for task_name, task_value in existing_raw_targets.items()}
+        if existing_raw_targets is not None
         else {}
     )
 
@@ -81,7 +86,7 @@ def _build_raw_sequence_targets(
         raw_targets.setdefault(str(task_name), task_value)
 
     for task_name, task_payload in adjustments.items():
-        if str(task_name) not in _DIRECTIONAL_LABEL_TASKS or not isinstance(task_payload, Mapping):
+        if str(task_name) not in _DIRECTIONAL_LABEL_TASKS:
             continue
         raw_direction = _normalize_direction(task_payload.get("from"))
         if raw_direction in {"BUY", "SELL"}:
@@ -346,11 +351,11 @@ def normalize_teacher_manifest_file(manifest_path: Path) -> dict[str, int | bool
     adjusted_record_count = 0
     adjusted_target_count = 0
     for record in normalized_records:
-        adjustments_obj = record.get("teacher_target_adjustments", {})
-        if not isinstance(adjustments_obj, Mapping) or len(adjustments_obj) == 0:
+        adjustments = _mapping(record.get("teacher_target_adjustments", {}))
+        if len(adjustments) == 0:
             continue
         adjusted_record_count += 1
-        adjusted_target_count += len(adjustments_obj)
+        adjusted_target_count += len(adjustments)
 
     _write_teacher_manifest_records(manifest, normalized_records)
     review_summary = summarize_teacher_task_labels(normalized_records)
@@ -419,8 +424,8 @@ def _scan_teacher_manifest(manifest_path: Path) -> dict[str, int]:
             record_count += 1
             if str(payload.get("error", "")).strip():
                 error_count += 1
-            sequence_targets = payload.get("sequence_targets", {})
-            if not isinstance(sequence_targets, Mapping) or len(sequence_targets) == 0:
+            sequence_targets = _mapping(payload.get("sequence_targets", {}))
+            if len(sequence_targets) == 0:
                 empty_target_count += 1
 
     return {
@@ -461,8 +466,8 @@ def summarize_directional_teacher_consistency(
         label = str(record.get("label", "")).strip().upper()
         if label not in {"BUY", "SELL"}:
             continue
-        sequence_targets = record.get("sequence_targets", {})
-        if not isinstance(sequence_targets, Mapping):
+        sequence_targets = _mapping(record.get("sequence_targets", {}))
+        if len(sequence_targets) == 0:
             continue
         for task_name in _DIRECTIONAL_LABEL_TASKS:
             task_value = str(sequence_targets.get(task_name, "")).strip().upper()
@@ -521,7 +526,8 @@ def summarize_teacher_task_labels(records: list[dict[str, Any]]) -> dict[str, di
         if str(record.get("error", "")).strip():
             continue
         task_labels_obj = record.get("teacher_task_labels", {})
-        task_labels = _dict(task_labels_obj) if isinstance(task_labels_obj, Mapping) else build_teacher_task_labels(record)
+        task_labels_map = _mapping_or_none(task_labels_obj)
+        task_labels = dict(task_labels_map) if task_labels_map is not None else build_teacher_task_labels(record)
         for key in ("label_quality", "review_bucket", "timing_label"):
             value = str(task_labels.get(key, "")).strip().lower()
             if value:
@@ -653,7 +659,8 @@ def export_teacher_review_queue(
         if str(record.get("error", "")).strip():
             continue
         task_labels_obj = record.get("teacher_task_labels", {})
-        task_labels = _dict(task_labels_obj) if isinstance(task_labels_obj, Mapping) else build_teacher_task_labels(record)
+        task_labels_map = _mapping_or_none(task_labels_obj)
+        task_labels = dict(task_labels_map) if task_labels_map is not None else build_teacher_task_labels(record)
         if not bool(task_labels.get("review_required", False)):
             continue
         priority = _clip01(task_labels.get("review_priority", 0.0))
@@ -809,9 +816,7 @@ def build_teacher_manifest(
                         overlay_mode=overlay_mode,
                         side_effect_free=True,
                     )
-                    if not isinstance(result, Mapping):
-                        raise TypeError(f"run_inference returned {type(result)!r}, expected mapping")
-                    result_map = cast(Mapping[str, Any], result)
+                    result_map: Mapping[str, Any] = result
                     projection = _mapping(result_map.get("projection", {}))
                     chart_state = _mapping(result_map.get("chart_state", {}))
                     next_box = _mapping(projection.get("next_box", chart_state.get("projected_next_box", {})))
@@ -857,10 +862,10 @@ def build_teacher_manifest(
                     record["execution_permission"] = str(result_map.get("execution_permission", "")).upper()
                     record["confidence"] = float(result_map.get("confidence", 0.0) or 0.0)
                     record = normalize_teacher_manifest_record(record)
-                    adjustments_obj = record.get("teacher_target_adjustments", {})
-                    if isinstance(adjustments_obj, Mapping) and len(adjustments_obj) > 0:
+                    adjustments = _mapping(record.get("teacher_target_adjustments", {}))
+                    if len(adjustments) > 0:
                         adjusted_record_count += 1
-                        adjusted_target_count += len(adjustments_obj)
+                        adjusted_target_count += len(adjustments)
                 except Exception as exc:
                     record["error"] = str(exc)
                     error_count += 1
@@ -880,7 +885,7 @@ def build_teacher_manifest(
         normalized_records = _read_teacher_manifest_records(output_path)
         review_summary = summarize_teacher_task_labels(normalized_records)
 
-        metadata = {
+        metadata: dict[str, object] = {
             "schema_version": 3,
             "split_manifest_path": str(split_manifest_path),
             "split_manifest_size": int(split_stat.st_size),

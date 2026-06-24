@@ -6,7 +6,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -23,8 +23,8 @@ if str(ROOT / "tools") not in sys.path:
 from capture_dashboard_visual_v3 import build_capture  # noqa: E402
 
 
-def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
+def _mapping(value: object) -> dict[str, object]:
+    return dict(cast(Mapping[str, object], value)) if isinstance(value, Mapping) else {}
 
 
 def _int_value(value: object, default: int = 0) -> int:
@@ -98,8 +98,9 @@ def main() -> int:
         live_payload = _mapping(live_state.get("payload"))
         overlays = _mapping(live_payload.get("overlays"))
         overlay_objects = live_payload.get("overlay_objects")
-        overlay_count = _int_value(overlays.get("count"), len(overlay_objects) if isinstance(overlay_objects, list) else 0)
-        sample = {
+        overlay_object_count = len(cast(list[object], overlay_objects)) if isinstance(overlay_objects, list) else 0
+        overlay_count = _int_value(overlays.get("count"), overlay_object_count)
+        sample: dict[str, object] = {
             "index": index + 1,
             "verdict": report.get("verdict"),
             "hard_mismatches": report.get("hard_mismatches"),

@@ -9,13 +9,17 @@ import time
 import urllib.parse
 import urllib.request
 from urllib.error import HTTPError, URLError
-from typing import Any
+from typing import Any, Mapping, cast
 
 
 def _json(url: str, timeout: float) -> dict[str, Any]:
     req = urllib.request.Request(url, headers={"User-Agent": "PhoenixGuard-FrameTimingTraceV3/1.0", "Connection": "close"})
     with urllib.request.urlopen(req, timeout=timeout) as response:  # noqa: S310 - local operator endpoint
-        return json.loads(response.read().decode("utf-8", errors="replace"))
+        return _mapping(json.loads(response.read().decode("utf-8", errors="replace")))
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _error(exc: BaseException) -> str:
@@ -45,7 +49,7 @@ def main() -> int:
     try:
         payload = _json(f"{base}/v1/mobile/performance/trace/v3/{session}", args.timeout)
     except Exception as exc:
-        payload = {
+        payload: dict[str, Any] = {
             "schema_version": "PG_PERFORMANCE_TRACE_V3",
             "verdict": "FAIL",
             "session_id": args.session,
@@ -55,7 +59,7 @@ def main() -> int:
         out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         print(json.dumps({"verdict": "FAIL", "error": payload["error"], "out": str(out)}, indent=2))
         return 1
-    timing = payload.get("timing_trace") or {}
+    timing = _mapping(payload.get("timing_trace"))
     out.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     print(json.dumps({
         "schema_version": payload.get("schema_version"),

@@ -254,7 +254,7 @@ def test_get_local_ensemble_allow_when_disabled_returns_cached_runtime(monkeypat
 
 
 def test_sync_forecast_into_chart_state_promotes_forecast_state_and_projection() -> None:
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "entry_type": "continuation",
         "structure_setup": "none",
         "structure_trade_ready": False,
@@ -272,7 +272,7 @@ def test_sync_forecast_into_chart_state_promotes_forecast_state_and_projection()
             "path_clarity": 0.61,
         },
     }
-    forecast = {
+    forecast: dict[str, Any] = {
         "structure_setup": "reversal_release",
         "structure_trade_ready": 1.0,
         "projected_box_type": "reversal_base",
@@ -301,7 +301,7 @@ def test_sync_forecast_into_chart_state_promotes_forecast_state_and_projection()
 
 
 def test_sync_forecast_into_chart_state_preserves_existing_ready_source_when_unchanged() -> None:
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "entry_type": "continuation",
         "structure_setup": "impulse_chain",
         "structure_trade_ready": True,
@@ -313,7 +313,7 @@ def test_sync_forecast_into_chart_state_preserves_existing_ready_source_when_unc
             "dominance_gap": 0.11,
         },
     }
-    forecast = {
+    forecast: dict[str, Any] = {
         "structure_setup": "impulse_chain",
         "structure_trade_ready": 1.0,
         "projected_box_type": "pullback",

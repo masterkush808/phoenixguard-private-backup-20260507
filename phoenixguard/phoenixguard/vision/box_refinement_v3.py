@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, cast
 
 from phoenixguard.runtime.realtime_performance_v3 import OVERLAY_RENDER_BUDGETS
 from phoenixguard.vision.v3_overlay_contract import (
@@ -108,14 +109,18 @@ NEST_CHILD_TYPES = {
 }
 
 
-def _mapping(value: Any) -> dict[str, Any]:
+def _mapping(value: object) -> dict[str, Any]:
     return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
-def _sequence(value: Any) -> list[Any]:
+def _sequence(value: object) -> list[object]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return list(value)
+        return list(cast(Sequence[object], value))
     return []
+
+
+def _string_list(value: object) -> list[str]:
+    return [str(item) for item in _sequence(value) if str(item)]
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -244,19 +249,21 @@ def _clip_or_snap_to_plot(box: Sequence[Any], plot: Sequence[Any], *, thin: bool
     return None
 
 
-def _point_from_value(value: Any) -> list[float] | None:
-    if isinstance(value, Mapping):
+def _point_from_value(value: object) -> list[float] | None:
+    mapping = _mapping(value)
+    point = _sequence(value)
+    if mapping:
         x = _float(
-            value.get("x", value.get("center_x", value.get("left", value.get("x0", value.get("price_x"))))),
+            mapping.get("x", mapping.get("center_x", mapping.get("left", mapping.get("x0", mapping.get("price_x"))))),
             float("nan"),
         )
         y = _float(
-            value.get("y", value.get("center_y", value.get("top", value.get("y0", value.get("price_y"))))),
+            mapping.get("y", mapping.get("center_y", mapping.get("top", mapping.get("y0", mapping.get("price_y"))))),
             float("nan"),
         )
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) and len(value) >= 2:
-        x = _float(value[0], float("nan"))
-        y = _float(value[1], float("nan"))
+    elif len(point) >= 2:
+        x = _float(point[0], float("nan"))
+        y = _float(point[1], float("nan"))
     else:
         return None
     if x != x or y != y:
@@ -793,11 +800,6 @@ def _mark_rejected(row: Mapping[str, Any], reason: str) -> dict[str, Any]:
     return output
 
 
-def _without_modes(row: Mapping[str, Any], blocked_modes: set[str]) -> list[str]:
-    modes = [str(item).upper() for item in _sequence(row.get("visible_modes"))]
-    return [mode for mode in modes if mode not in blocked_modes]
-
-
 def _only_modes(row: Mapping[str, Any], allowed_modes: set[str], default_modes: Sequence[str]) -> list[str]:
     modes: list[str] = []
     for item in _sequence(row.get("visible_modes")):
@@ -1216,7 +1218,9 @@ def resolve_precision_overlays_v3(
         if not row.get("track_id") or not row.get("object_id") or str(row.get("anchor_type") or "").upper() in {"", "NONE", "UNKNOWN"}:
             unanchored += 1
             row["anchor_type"] = "BOX"
-            row.setdefault("precision_flags", []).append("anchor_defaulted")
+            precision_flags = _string_list(row.get("precision_flags"))
+            precision_flags.append("anchor_defaulted")
+            row["precision_flags"] = precision_flags
         if row.get("type") in MARKET_OVERLAY_TYPES:
             raw_bounds, clip_bounds, _space = _bounds_for_overlay(row, scene)
             if raw_bounds is None or clip_bounds is None:
@@ -1224,7 +1228,7 @@ def resolve_precision_overlays_v3(
                 continue
             refined_bounds, flags = _tighten_box(row, raw_bounds, clip_bounds)
             row["raw_bounds"] = [round(float(value), 3) for value in raw_bounds]
-            row["precision_flags"] = list(row.get("precision_flags") or []) + flags
+            row["precision_flags"] = _string_list(row.get("precision_flags")) + flags
             if refined_bounds is None:
                 outside += 1
                 normalized.append(_mark_rejected(row, "outside_plot_area"))
@@ -1234,7 +1238,7 @@ def resolve_precision_overlays_v3(
             snapped_bounds, snap_flags = _snap_box_to_anchor_evidence(row, refined_bounds, clip_bounds)
             if snap_flags:
                 anchor_snap_refined += 1
-                row["precision_flags"] = list(row.get("precision_flags") or []) + snap_flags
+                row["precision_flags"] = _string_list(row.get("precision_flags")) + snap_flags
                 refined_bounds = snapped_bounds
             row["bounds"] = refined_bounds
             row["bbox"] = refined_bounds

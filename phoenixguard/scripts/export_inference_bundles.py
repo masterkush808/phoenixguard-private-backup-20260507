@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Sequence, cast
 
 import torch
@@ -108,7 +109,7 @@ def _apply_lora_from_payload(ensemble: Any, model: nn.Module, payload: dict[str,
     target_paths = cast(list[str], lora_payload.get("target_paths", []))
     adapter_specs = cast(dict[str, dict[str, Any]], lora_payload.get("adapter_specs", {}))
     active_adapter = sanitize_adapter_name(str(lora_payload.get("active_adapter", "continual_default")))
-    primary_spec = cast(dict[str, Any], adapter_specs.get(active_adapter, {}))
+    primary_spec = adapter_specs.get(active_adapter, {})
     apply_lora_adapters(
         backbone_module,
         adapter_name=active_adapter,
@@ -166,7 +167,8 @@ def _save_onnx_export(
     example = torch.randn(1, 3, input_size, input_size, dtype=torch.float32)
     example_args: tuple[torch.Tensor, ...] = (example,)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    torch.onnx.export(
+    onnx_export = cast(Callable[..., object], getattr(torch.onnx, "export"))
+    onnx_export(
         bundle,
         example_args,
         str(destination),

@@ -2337,7 +2337,7 @@ def evaluate_model_council_v3(
         snapshot.get("model_strength_profile")
         or _mapping(snapshot.get("execution_controls")).get("model_strength_profile")
     )
-    lstm_contribution = _mapping(
+    lstm_contribution: dict[str, Any] = _mapping(
         snapshot.get("lstm_contribution")
         or two_candle_study.get("lstm_contribution")
         or _mapping(snapshot.get("decision_kernel")).get("lstm_contribution")
@@ -3086,7 +3086,7 @@ def evaluate_model_council_v3(
         trade_candidate_queue = {"candidates": _rows(trade_candidate_queue_raw)}
     else:
         trade_candidate_queue = {}
-    active_candidate = {
+    active_candidate: dict[str, Any] = {
         "candidate_id": active_candidate_id,
         "side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
         "stage": candidate_stage,

@@ -422,7 +422,7 @@ def test_observer_signal_policy_promotes_directional_watch_without_execute_permi
         timing_state="READY",
         execution_permission="WAIT_FOR_CONFIRMATION",
     )
-    best_play = {
+    best_play: dict[str, Any] = {
         "recommended_direction": "BUY",
         "recommended_confidence": 0.76,
         "recommended_risk": 0.12,
@@ -454,7 +454,7 @@ def test_observer_single_surface_mode_arms_signal_before_execute_permission(tmp_
         root_dir=tmp_path / "observer_arm_state",
         pipeline_adapter=_FakeObserverPipelineAdapter(tmp_path, []),
     )
-    policy = {
+    policy: dict[str, Any] = {
         "single_surface_mode": True,
         "min_actionable_confidence": 0.55,
         "min_directional_confidence": 0.44,
@@ -473,7 +473,7 @@ def test_observer_single_surface_mode_arms_signal_before_execute_permission(tmp_
         timing_state="READY",
         execution_permission="WAIT_FOR_CONFIRMATION",
     )
-    best_play = {
+    best_play: dict[str, Any] = {
         "recommended_direction": "BUY",
         "recommended_confidence": 0.79,
         "recommended_risk": 0.11,
@@ -505,7 +505,7 @@ def test_observer_single_surface_arming_rejects_flip_flop_reversal_noise(tmp_pat
         root_dir=tmp_path / "observer_flip_guard",
         pipeline_adapter=_FakeObserverPipelineAdapter(tmp_path, []),
     )
-    policy = {
+    policy: dict[str, Any] = {
         "single_surface_mode": True,
         "min_actionable_confidence": 0.55,
         "min_directional_confidence": 0.44,
@@ -533,7 +533,7 @@ def test_observer_single_surface_arming_rejects_flip_flop_reversal_noise(tmp_pat
     )
     result["chart_state"] = {"reversal_probability": 0.08}
     result["sequence_state"] = {"reversal_probability": 0.10}
-    best_play = {
+    best_play: dict[str, Any] = {
         "recommended_direction": "SELL",
         "recommended_confidence": 0.54,
         "recommended_risk": 0.20,
@@ -581,7 +581,7 @@ def test_observer_signal_policy_keeps_hold_when_gate_is_blocked(tmp_path: Path) 
         timing_state="READY",
         execution_permission="WAIT_FOR_CONFIRMATION",
     )
-    best_play = {
+    best_play: dict[str, Any] = {
         "recommended_direction": "SELL",
         "recommended_confidence": 0.80,
         "recommended_risk": 0.14,

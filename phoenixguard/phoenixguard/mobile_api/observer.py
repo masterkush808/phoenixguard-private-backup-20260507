@@ -726,7 +726,7 @@ class SignalObserverService:
             bundle_id = uuid4().hex
             bundle_dir = self._bundle_dir(session_id, bundle_id)
             upload_records = self._stage_uploads(bundle_dir / "uploads", uploads)
-            bundle_payload = {
+            bundle_payload: dict[str, Any] = {
                 "session_id": session_id,
                 "bundle_id": bundle_id,
                 "status": "queued",
@@ -1464,7 +1464,7 @@ class SignalObserverService:
             self._render_signal(item, policy)
             for item in _payload_items(payload.get("signal_history", []))
         ]
-        bundle_summaries = [
+        bundle_summaries: list[dict[str, Any]] = [
             {
                 "bundle_id": str(item.get("bundle_id", "")),
                 "status": str(item.get("status", "")),

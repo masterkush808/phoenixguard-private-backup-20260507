@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 from pathlib import Path
 import sys
 
@@ -25,7 +25,7 @@ from phoenixguard.vision.broker_source_lock_v3 import build_broker_source_lock_v
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _synthetic_wrong_surface_session() -> dict[str, Any]:

@@ -331,7 +331,7 @@ def build_status_command(
     resolved_signer = signer or LocalEd25519Signer.local_test_key()
     seed = f"status|{code}|{detail_code or ''}|{current:.6f}|{resolved_signer.key_id}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
-    unsigned = {
+    unsigned: dict[str, Any] = {
         "schema_version": MT4_EXECUTION_COMMAND_SCHEMA_VERSION,
         "command_type": STATUS_COMMAND_TYPE,
         "command_id": f"pgstatus-{digest[:24]}",

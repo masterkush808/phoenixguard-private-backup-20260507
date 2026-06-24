@@ -273,7 +273,7 @@ def test_memory_bank_load_backfills_sequence_metadata(tmp_path: Path) -> None:
     index_dir = bank_dir / "index"
     index_dir.mkdir(parents=True)
 
-    metadata = [
+    metadata: list[dict[str, Any]] = [
         {
             "entry_id": "buy-a",
             "image_path": str(tmp_path / "Screenshot 2026-04-21 120000.png"),
@@ -331,7 +331,7 @@ def test_memory_bank_load_survives_incompatible_hnsw_index(tmp_path: Path) -> No
     bank_dir = tmp_path / "memory_bank"
     index_dir = bank_dir / "index"
     index_dir.mkdir(parents=True)
-    metadata = [
+    metadata: list[dict[str, Any]] = [
         {
             "entry_id": "sell-a",
             "image_path": str(tmp_path / "sell-a.png"),

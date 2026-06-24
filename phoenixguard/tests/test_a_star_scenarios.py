@@ -117,6 +117,7 @@ Integration Checkpoints:
 ✓ Mobile API → live dashboard overlay
 """
 from __future__ import annotations
+from typing import Any
 
 
 def demo_basic_scenario_prediction():
@@ -211,7 +212,7 @@ def demo_integration_with_forecast():
     )
 
     # Synthetic chart state (from CV analysis)
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "direction_probability": 0.72,
         "entry_candle": {
@@ -231,7 +232,7 @@ def demo_integration_with_forecast():
     }
 
     # Synthetic regression forecast
-    forecast_output = {
+    forecast_output: dict[str, Any] = {
         "q05": 1.0480,
         "q50": 1.0535,
         "q95": 1.0585,
@@ -248,7 +249,7 @@ def demo_integration_with_forecast():
     }
 
     # Memory recall
-    memory_recall = {
+    memory_recall: dict[str, Any] = {
         "memory_alignment": 0.70,
         "memory_labels": ["BUY", "BUY", "SELL", "BUY", "BUY"],
         "total_samples": 5,
@@ -290,7 +291,7 @@ def demo_decision_kernel():
 
     from phoenixguard.decision.scenario_decision_kernel import decision_kernel_extension
 
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "direction_probability": 0.72,
         "entry_candle": {
@@ -301,7 +302,7 @@ def demo_decision_kernel():
         },
     }
 
-    forecast_output = {
+    forecast_output: dict[str, Any] = {
         "q05": 1.0480,
         "q50": 1.0535,
         "q95": 1.0585,
@@ -363,7 +364,7 @@ def demo_export_and_sharing():
     )
 
     # Synthetic scenarios
-    scenarios = [
+    scenarios: list[dict[str, Any]] = [
         {
             "rank": 1,
             "probability": 0.45,

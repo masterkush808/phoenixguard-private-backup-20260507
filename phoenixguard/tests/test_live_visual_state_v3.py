@@ -23,7 +23,7 @@ def _png(path: Path, size: tuple[int, int] = (320, 180)) -> Path:
 
 def test_compact_session_payload_preserves_v3_authority_packets_and_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("phoenixguard.mobile_api.window_tracker.time.time", lambda: 100.0)
-    sequence_context = {
+    sequence_context: dict[str, Any] = {
         "sequence_id": "seq-100",
         "status": "COMPLETE",
         "sequence_status": "COMPLETE",
@@ -35,7 +35,7 @@ def test_compact_session_payload_preserves_v3_authority_packets_and_sequence(mon
         "sequence_signature": "sig-100",
         "sequence_confidence": 0.91,
     }
-    study_packet = {
+    study_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_type": "STUDY_PACKET",
         "packet_id": "study-100",
@@ -50,7 +50,7 @@ def test_compact_session_payload_preserves_v3_authority_packets_and_sequence(mon
         },
         "promotion_trace": {"denied_at": "TIMING_WAIT", "next_required": "wait retest"},
     }
-    execution_packet = {
+    execution_packet: dict[str, Any] = {
         "schema_version": "PG_EXECUTION_PACKET_V3",
         "packet_type": "PG_EXECUTION_PACKET_V3",
         "packet_id": "exec-100",
@@ -105,7 +105,7 @@ def test_compact_session_payload_preserves_v3_authority_packets_and_sequence(mon
 
 def test_compact_session_payload_drops_expired_execution_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("phoenixguard.mobile_api.live_state_v3.time.time", lambda: 150.0)
-    expired_packet = {
+    expired_packet: dict[str, Any] = {
         "schema_version": "PG_EXECUTION_PACKET_V3",
         "packet_type": "PG_EXECUTION_PACKET_V3",
         "packet_id": "exec-expired",
@@ -138,7 +138,7 @@ def test_compact_session_payload_drops_expired_execution_authority(monkeypatch: 
 
 def test_compact_session_payload_drops_demoted_execution_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("phoenixguard.mobile_api.live_state_v3.time.time", lambda: 150.0)
-    demoted_packet = {
+    demoted_packet: dict[str, Any] = {
         "schema_version": "PG_EXECUTION_PACKET_V3",
         "packet_type": "PG_EXECUTION_PACKET_V3",
         "packet_id": "exec-demoted",
@@ -184,7 +184,7 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
     window = _png(tmp_path / "window.png", (640, 360))
     chart = _png(tmp_path / "chart.png", (560, 260))
     overlay = _png(tmp_path / "overlay.png", (560, 260))
-    session = {
+    session: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "status": "running",
         "tracking_enabled": True,
@@ -261,7 +261,7 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
             "plain_language": "Tracking the active BUY idea.",
         },
     }
-    study_packet = {
+    study_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_type": "STUDY_PACKET",
         "packet_id": "study-1",
@@ -271,7 +271,7 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
         "model_council": {"final_state": "WATCHING", "final_side": "BUY"},
         "promotion_trace": {"next_required": "full sequence context required"},
     }
-    active_objects = [
+    active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "sniper-1",
             "object_id": "obj-sniper",
@@ -413,7 +413,7 @@ def test_live_state_suppresses_overlay_objects_when_visual_artifact_frame_is_reu
     window = _png(tmp_path / "54_pocket_window.png", (640, 360))
     chart = _png(tmp_path / "54_pocket_chart.png", (560, 260))
     stale_overlay = _png(tmp_path / "53_pocket_overlay.png", (560, 260))
-    session = {
+    session: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "frame_index": 54,
         "capture_count": 54,
@@ -426,7 +426,7 @@ def test_live_state_suppresses_overlay_objects_when_visual_artifact_frame_is_reu
         },
         "latest_signal": {"side": "BUY", "execution_action": "BUY"},
     }
-    active_objects = [
+    active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "sniper-54",
             "object_id": "obj-sniper",
@@ -463,7 +463,7 @@ def test_live_state_keeps_locked_overlay_objects_when_surface_authority_matches(
     window = _png(tmp_path / "54_pocket_window.png", (640, 360))
     chart = _png(tmp_path / "54_pocket_chart.png", (560, 260))
     stale_overlay = _png(tmp_path / "53_pocket_overlay.png", (560, 260))
-    session = {
+    session: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "frame_index": 54,
         "display_frame_id": 120,
@@ -481,7 +481,7 @@ def test_live_state_keeps_locked_overlay_objects_when_surface_authority_matches(
         },
         "latest_signal": {"side": "BUY", "execution_action": "BUY"},
     }
-    active_objects = [
+    active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "sniper-54",
             "object_id": "obj-sniper",
@@ -520,7 +520,7 @@ def test_live_state_keeps_current_frame_objects_when_overlay_artifact_is_stale(t
     window = _png(tmp_path / "182_pocket_window.png", (640, 360))
     chart = _png(tmp_path / "182_pocket_chart.png", (560, 260))
     stale_overlay = _png(tmp_path / "001_pocket_overlay.png", (560, 260))
-    session = {
+    session: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "frame_index": 182,
         "display_frame_id": 182,
@@ -536,7 +536,7 @@ def test_live_state_keeps_current_frame_objects_when_overlay_artifact_is_stale(t
         },
         "latest_signal": {"side": "BUY", "execution_action": "BUY"},
     }
-    active_objects = [
+    active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "support-182",
             "object_id": "obj-support",
@@ -618,13 +618,13 @@ def test_replay_mode_ignores_clean_live_prefilter_env(monkeypatch: Any, tmp_path
     monkeypatch.setenv("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "1")
     window = _png(tmp_path / "window.png", (640, 360))
     chart = _png(tmp_path / "chart.png", (560, 260))
-    session = {
+    session: dict[str, Any] = {
         "session_id": "pocket-live-replay",
         "frame_index": 12,
         "tracking_enabled": True,
         "tracking_summary": {"chart_region": {"pixel_bbox": [0, 0, 560, 260]}},
     }
-    active_objects = [
+    active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "history-locked",
             "truth_score": 0.82,
@@ -664,13 +664,13 @@ def test_replay_mode_ignores_clean_live_prefilter_env(monkeypatch: Any, tmp_path
 def test_unknown_overlay_labels_hidden_from_live_and_collected_for_diagnostics(tmp_path: Path) -> None:
     window = _png(tmp_path / "window.png", (640, 360))
     chart = _png(tmp_path / "chart.png", (560, 260))
-    session = {
+    session: dict[str, Any] = {
         "session_id": "pocket-live-vocab",
         "frame_index": 12,
         "tracking_enabled": True,
         "tracking_summary": {"chart_region": {"pixel_bbox": [0, 0, 560, 260]}},
     }
-    active_objects = [
+    active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "unknown-leftover",
             "truth_score": 0.82,
@@ -716,7 +716,7 @@ def test_unknown_overlay_labels_hidden_from_live_and_collected_for_diagnostics(t
 def test_build_live_state_v3_rejects_market_overlays_for_wrong_broker_source(tmp_path: Path) -> None:
     window = _png(tmp_path / "window.png", (640, 360))
     chart = _png(tmp_path / "chart.png", (560, 260))
-    session = {
+    session: dict[str, Any] = {
         "session_id": "pocket-live-wrong-source",
         "frame_index": 12,
         "locked_window": {"hwnd": 808, "title": "Pocket Option"},
@@ -729,7 +729,7 @@ def test_build_live_state_v3_rejects_market_overlays_for_wrong_broker_source(tmp
             "pixel_fingerprint_valid": True,
         },
     }
-    active_objects = [
+    active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "blocked-sniper",
             "truth_score": 0.92,

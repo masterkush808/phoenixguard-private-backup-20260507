@@ -63,6 +63,16 @@ def _strict_no_fallback_enabled() -> bool:
     return False
 
 
+def _chronos_model_loading_enabled() -> bool:
+    """Avoid native model preload during tests unless explicitly requested."""
+    raw = os.getenv("PHOENIXGUARD_ENABLE_CHRONOS_MODEL_IN_TESTS")
+    if raw is not None and raw.strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        return False
+    return True
+
+
 class Forecast3MCore(TypedDict):
     q05: float
     q50: float
@@ -689,6 +699,8 @@ class ChronosRegressor:
         self.strict_no_fallback = _strict_no_fallback_enabled()
         self.pipeline = None
         try:
+            if not _chronos_model_loading_enabled():
+                raise RuntimeError("Chronos model preload disabled in test runtime")
             if not can_import_chronos_safely():
                 raise RuntimeError("Chronos runtime probe failed")
             import importlib

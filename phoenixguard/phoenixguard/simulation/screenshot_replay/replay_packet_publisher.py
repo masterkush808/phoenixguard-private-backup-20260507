@@ -123,6 +123,7 @@ class ReplayPacketPublisher:
         metadata = _mapping(frame.metadata)
         expected = _mapping(frame.expected)
         explicit = _mapping(metadata.get("snapshot") or metadata.get("council_snapshot") or vision_outputs.get("model_council_seed"))
+        snapshot: dict[str, Any]
         if explicit:
             snapshot = dict(explicit)
         else:

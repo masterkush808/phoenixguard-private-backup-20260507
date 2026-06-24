@@ -88,7 +88,7 @@ class ResendEmailConfirmationAdapter:
         safe_plan_code = _tag_value(plan_code or "business")
         first_license = str(next(iter(license_ids), "") or "").strip()
         license_line = f"License: {first_license}" if first_license else "License provisioning is pending."
-        payload = {
+        payload: dict[str, Any] = {
             "from": self._config.from_email,
             "to": [recipient],
             "subject": "PhoenixGuard payment confirmed",

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
 
 
 def _clip01(value: Any) -> float:
@@ -92,7 +94,7 @@ def build_market_context_from_tracker_session(session: Mapping[str, Any] | None)
         market_summary = "The market is moving, but the setup is not clean enough to execute yet."
     else:
         direction_note = local_direction if local_direction in {"BUY", "SELL"} else global_direction
-        scope_parts = []
+        scope_parts: list[str] = []
         if market:
             scope_parts.append(market)
         if timeframe:

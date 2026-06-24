@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 from phoenixguard.execution.floating_state_reducer import FloatingStateV2, build_floating_state
 
@@ -110,7 +111,7 @@ def test_compact_mode_shows_packet_score_lane_timing() -> None:
 
 
 def test_inspector_mode_shows_raw_packet() -> None:
-    raw_packet = {
+    raw_packet: dict[str, Any] = {
         "packet_id": "exec_raw_packet",
         "packet_type": "PG_EXECUTION_PACKET_V3",
         "execution": {"enabled": True, "state": "EXECUTABLE", "side": "SELL", "expiry_seconds": 300},
@@ -224,7 +225,7 @@ def test_floating_state_shows_broker_click_safe() -> None:
 
 
 def test_floating_state_matches_runtime_trace() -> None:
-    trace_packet = {
+    trace_packet: dict[str, Any] = {
         "packet_id": "pgpkt_trace_truth",
         "packet_type": "STUDY_PACKET",
         "execution": {"enabled": False, "state": "PREPARING", "side": "BUY"},

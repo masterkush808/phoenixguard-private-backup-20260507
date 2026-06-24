@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from certification_common_v3 import DEFAULT_BASE_URL, DEFAULT_SESSION, ROOT, http_json, quote_session
 from certify_v3_full_system_burn_in import _collect_skill_contributions, _endpoint_payload, _mapping
@@ -62,10 +62,10 @@ def main() -> int:
     failures: list[str] = []
     warnings: list[str] = []
     trace_result = http_json(f"{base}/v1/mobile/runtime/trace/v3?session_id={session_q}", timeout=args.timeout)
-    trace = dict(trace_result.payload) if isinstance(trace_result.payload, Mapping) else {}
+    trace = _mapping(trace_result.payload)
     if not trace_result.ok:
         failures.append(f"runtime trace failed: {trace_result.error or trace_result.status}")
-    payloads = [
+    payloads: list[dict[str, Any]] = [
         trace,
         _endpoint_payload(trace, "tracker_latest"),
         _endpoint_payload(trace, "model_council_latest"),

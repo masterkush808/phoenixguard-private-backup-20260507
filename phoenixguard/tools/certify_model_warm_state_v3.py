@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping, Sequence
+from typing import cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -12,6 +14,25 @@ from certification_common_v3 import (
     quote_session,
     write_report,
 )
+
+
+def _mapping(value: object) -> dict[str, object]:
+    return dict(cast(Mapping[str, object], value)) if isinstance(value, Mapping) else {}
+
+
+def _row_list(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [dict(cast(Mapping[str, object], row)) for row in cast(Sequence[object], value) if isinstance(row, Mapping)]
+
+
+def _float(value: object, default: float = 0.0) -> float:
+    if not isinstance(value, (int, float, str)):
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
 
 
 def main() -> int:
@@ -32,24 +53,22 @@ def main() -> int:
         failures.append(f"live state unavailable: {live.error or live.status}")
     if not perf.ok:
         failures.append(f"performance trace unavailable: {perf.error or perf.status}")
-    live_payload = live.payload if isinstance(live.payload, dict) else {}
-    perf_payload = perf.payload if isinstance(perf.payload, dict) else {}
-    states = live_payload.get("model_warm_state_v3") if isinstance(live_payload.get("model_warm_state_v3"), list) else []
-    if not states and isinstance(perf_payload.get("model_warm_state_v3"), list):
-        states = perf_payload.get("model_warm_state_v3")
+    live_payload = _mapping(live.payload)
+    perf_payload = _mapping(perf.payload)
+    states = _row_list(live_payload.get("model_warm_state_v3"))
+    if not states:
+        states = _row_list(perf_payload.get("model_warm_state_v3"))
     awake = 0
     stale_rows: list[dict[str, object]] = []
     queue_rows: list[dict[str, object]] = []
-    for raw in states or []:
-        if not isinstance(raw, dict):
-            continue
+    for raw in states:
         status = str(raw.get("status") or "").upper()
         warm = bool(raw.get("warm")) or status in {"AWAKE", "BUSY", "IDLE_BUT_LOADED", "STAGGERED_FRESH"}
         if warm:
             awake += 1
-        if float(raw.get("last_inference_age_ms") or 0.0) > float(args.max_age_ms) and status != "STAGGERED_FRESH":
+        if _float(raw.get("last_inference_age_ms")) > float(args.max_age_ms) and status != "STAGGERED_FRESH":
             stale_rows.append(raw)
-        if int(float(raw.get("queue_depth") or 0)) > 1:
+        if int(_float(raw.get("queue_depth"))) > 1:
             queue_rows.append(raw)
         for key in ("status", "last_inference_frame_id", "last_inference_age_ms", "p95_inference_ms", "queue_depth", "role_name", "device"):
             if key not in raw:

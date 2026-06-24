@@ -22,11 +22,18 @@ from phoenixguard.runtime.tracker_bootstrap import (
 )
 
 
+JsonDict = dict[str, Any]
+
+
+def _as_json_dict(value: object) -> JsonDict:
+    return cast(JsonDict, value) if isinstance(value, dict) else {}
+
+
 def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def _request_json(base_url: str, path: str, *, method: str = "GET", payload: dict[str, Any] | None = None, timeout: float = 30.0) -> dict[str, Any]:
+def _request_json(base_url: str, path: str, *, method: str = "GET", payload: JsonDict | None = None, timeout: float = 30.0) -> JsonDict:
     effective_timeout = float(timeout)
     if effective_timeout >= 30.0:
         try:
@@ -46,8 +53,8 @@ def _request_json(base_url: str, path: str, *, method: str = "GET", payload: dic
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
     except urllib_error.URLError as exc:
         raise RuntimeError(f"Tracker API unreachable: {exc.reason}") from exc
-    parsed = json.loads(raw)
-    return dict(parsed) if isinstance(parsed, dict) else {"payload": parsed}
+    parsed: Any = json.loads(raw)
+    return cast(JsonDict, parsed) if isinstance(parsed, dict) else {"payload": parsed}
 
 
 def _health(base_url: str) -> bool:
@@ -240,8 +247,8 @@ def _quarantine_stale_session_on_boot(script_dir: Path, session_id: str) -> bool
     if not session_json.exists():
         return False
     try:
-        payload = json.loads(session_json.read_text(encoding="utf-8"))
-        last_capture_epoch = float(dict(payload).get("last_capture_epoch") or 0.0) if isinstance(payload, dict) else 0.0
+        payload: Any = json.loads(session_json.read_text(encoding="utf-8"))
+        last_capture_epoch = float(cast(JsonDict, payload).get("last_capture_epoch") or 0.0) if isinstance(payload, dict) else 0.0
     except Exception:
         last_capture_epoch = 0.0
     if last_capture_epoch <= 0.0 or time.time() - last_capture_epoch <= stale_after_sec:
@@ -276,12 +283,12 @@ def _live_fast_display_file_heartbeat(script_dir: Path, session_id: str, *, now_
         return False
     path = _display_state_path(script_dir, session_id)
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw: Any = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return False
     if not isinstance(raw, dict):
         return False
-    current = dict(raw)
+    current: JsonDict = cast(JsonDict, raw).copy()
     window_path = str(
         current.get("last_display_window_path")
         or current.get("last_window_path")
@@ -332,18 +339,19 @@ def _live_fast_display_file_heartbeat(script_dir: Path, session_id: str, *, now_
 
 def _display_state_has_locked_window(script_dir: Path, session_id: str) -> bool:
     try:
-        raw = json.loads(_display_state_path(script_dir, session_id).read_text(encoding="utf-8"))
+        raw: Any = json.loads(_display_state_path(script_dir, session_id).read_text(encoding="utf-8"))
     except Exception:
         return False
     if not isinstance(raw, dict):
         return False
     try:
-        display_frame_id = int(float(raw.get("display_frame_id") or 0))
+        display_state = cast(JsonDict, raw)
+        display_frame_id = int(float(display_state.get("display_frame_id") or 0))
     except (TypeError, ValueError):
         display_frame_id = 0
     return bool(
         display_frame_id > 0
-        and str(raw.get("last_display_window_path") or raw.get("last_window_path") or raw.get("last_frame_path") or "").strip()
+        and str(display_state.get("last_display_window_path") or display_state.get("last_window_path") or display_state.get("last_frame_path") or "").strip()
     )
 
 
@@ -548,7 +556,7 @@ def _wait_for_fresh_session_or_started(
     started_timeout_sec: float = 20.0,
     fresh_timeout_sec: float = 90.0,
 ) -> dict[str, Any]:
-    session = _wait_for_started_session(
+    _wait_for_started_session(
         base_url,
         session_id,
         capture_interval_sec,
@@ -607,12 +615,12 @@ def _ensure_session(
     try:
         session = _request_json(base_url, f"/v1/mobile/window-tracker/sessions/{session_id}", timeout=30)
     except Exception:
-        create_payload = {
-                "session_id": session_id,
-                "name": session_id,
-                "window_query": window_query or "Pocket Option",
-                "layout_profile": "auto",
-                "capture_interval_sec": float(capture_interval_sec),
+        create_payload: JsonDict = {
+            "session_id": session_id,
+            "name": session_id,
+            "window_query": window_query or "Pocket Option",
+            "layout_profile": "auto",
+            "capture_interval_sec": float(capture_interval_sec),
             "auto_start": False,
             "observer_policy": {
                 "single_surface_mode": True,
@@ -626,9 +634,9 @@ def _ensure_session(
             create_payload["locked_title"] = window_query or "Pocket Option"
         session = _request_json(base_url, "/v1/mobile/window-tracker/sessions", method="POST", payload=create_payload, timeout=30)
     if locked_hwnd > 0:
-        locked = session.get("locked_window", {})
+        locked = _as_json_dict(session.get("locked_window", {}))
         current_hwnd = 0
-        if isinstance(locked, dict):
+        if locked:
             current_hwnd = _parse_positive_int(locked.get("hwnd"))
         if current_hwnd != locked_hwnd:
             session = _request_json(
@@ -663,8 +671,8 @@ def _ensure_session(
 
     if focus_region is not None:
         for _attempt in range(3):
-            manual_focus = session.get("manual_focus_region", {})
-            manual_focus_enabled = isinstance(manual_focus, dict) and bool(manual_focus.get("enabled", False))
+            manual_focus = _as_json_dict(session.get("manual_focus_region", {}))
+            manual_focus_enabled = bool(manual_focus.get("enabled", False))
             if not manual_focus_enabled:
                 session = _request_json(
                     base_url,

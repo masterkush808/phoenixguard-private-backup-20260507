@@ -66,7 +66,8 @@ def _bbox_tuple(value: Sequence[Any]) -> BBox | None:
 
 def _bbox_from_zone(zone: Any) -> Sequence[Any]:
     if isinstance(zone, Mapping):
-        value = zone.get("bbox", ())
+        row = cast(Mapping[str, object], zone)
+        value = row.get("bbox", ())
         return cast(Sequence[Any], value) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else ()
     return cast(Sequence[Any], zone) if isinstance(zone, Sequence) and not isinstance(zone, (str, bytes, bytearray)) else ()
 
@@ -89,8 +90,10 @@ def _point_anchor(value: Any) -> Anchor | None:
             return None
         x_value = row.get("x", row.get("center_x", row.get("anchor_x")))
         return (_safe_float(x_value) if x_value is not None else None, _safe_float(y_value))
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) and len(value) >= 2:
-        return (_safe_float(value[0]), _safe_float(value[1]))
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        point = cast(Sequence[object], value)
+        if len(point) >= 2:
+            return (_safe_float(point[0]), _safe_float(point[1]))
     if isinstance(value, (int, float)):
         return (None, _safe_float(value))
     return None
@@ -113,7 +116,7 @@ def extract_zone_anchors(
         values = zone.get(key)
         if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
             continue
-        for item in values:
+        for item in cast(Sequence[object], values):
             anchor = _point_anchor(item)
             if anchor is not None:
                 anchors.append(anchor)

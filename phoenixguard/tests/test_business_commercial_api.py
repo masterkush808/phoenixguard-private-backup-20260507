@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 import json
 
@@ -361,7 +362,7 @@ def test_customer_cannot_access_admin_surface_but_admin_can() -> None:
 
 def test_mock_stripe_signature_path_rejects_and_accepts_events() -> None:
     client = _client()
-    event = {
+    event: dict[str, Any] = {
         "type": "invoice.payment_failed",
         "data": {"object": {"subscription": "sub_mock_active"}},
     }

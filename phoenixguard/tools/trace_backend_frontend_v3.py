@@ -30,8 +30,8 @@ def _request_json(method: str, url: str, timeout: float, payload: Mapping[str, A
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - local operator tool
             body = response.read().decode("utf-8", errors="replace")
-            parsed = json.loads(body) if body else {}
-            payload_obj = _mapping(parsed) if isinstance(parsed, Mapping) else {"value": parsed}
+            parsed: object = json.loads(body) if body else {}
+            payload_obj = dict(cast(Mapping[str, Any], parsed)) if isinstance(parsed, Mapping) else {"value": parsed}
             return {
                 "ok": 200 <= int(response.status) < 300,
                 "status": int(response.status),
@@ -104,7 +104,8 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         "| endpoint | status | latency_ms | result |",
         "| --- | ---: | ---: | --- |",
     ]
-    for name, row in _mapping(report.get("endpoints")).items():
+    for name, raw_row in _mapping(report.get("endpoints")).items():
+        row = _mapping(raw_row)
         lines.append(f"| {name} | {row.get('status', 0)} | {row.get('latency_ms', 0)} | {_status_word(bool(row.get('ok')))} |")
     lines.extend(["", "## Route Wiring"])
     for item in report.get("route_wiring_needed", []):
@@ -124,7 +125,7 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
 def build_report(base_url: str, session_id: str, timeout: float) -> dict[str, Any]:
     base = base_url.rstrip("/")
     session_q = urllib.parse.quote(session_id, safe="")
-    heartbeat_payload = {
+    heartbeat_payload: dict[str, Any] = {
         "session_id": session_id,
         "surface_id": "trace_backend_frontend_v3",
         "route": f"/v1/mobile/window-tracker/dashboard/{session_id}",

@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import html
 import json
 from pathlib import Path
 from threading import Lock
-import time
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from phoenixguard.core.config import VOICE, VoiceConfig
 from phoenixguard.core.utils import utc_now_iso
 
-from .intents import VoiceIntentMatch, parse_voice_command, public_voice_command_catalog
+from .intents import parse_voice_command, public_voice_command_catalog
 from .remote import VoiceRemoteClientError, WindowTrackerRemoteClient
-from .router import VoiceCommandRouter, build_default_voice_command_router
+from .router import build_default_voice_command_router
 from .time_utils import default_timezone_name, greeting_for_time, local_now
 
 
@@ -60,7 +58,7 @@ def _read_state(path: Path, default: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return dict(default)
     merged = dict(default)
-    merged.update(raw)
+    merged.update(cast(Mapping[str, Any], raw))
     return merged
 
 

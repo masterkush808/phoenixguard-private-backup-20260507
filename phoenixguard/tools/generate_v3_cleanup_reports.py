@@ -7,7 +7,7 @@ import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping, cast
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,7 +114,7 @@ def referenced_files_from_text(path: Path, candidates: set[str]) -> Iterable[Pat
 
 
 def _string_items(value: object) -> list[str]:
-    return [str(item) for item in value] if isinstance(value, list) and all(isinstance(item, str) for item in value) else []
+    return [str(item) for item in cast(list[object], value)] if isinstance(value, list) and all(isinstance(item, str) for item in cast(list[object], value)) else []
 
 
 def build_bfs(manifest: dict[str, object], files: list[Path]) -> set[Path]:
@@ -235,9 +235,13 @@ def main() -> int:
     if quarantine_manifest_path.exists():
         try:
             existing_payload = json.loads(quarantine_manifest_path.read_text(encoding="utf-8"))
-            raw_records = existing_payload.get("records", []) if isinstance(existing_payload, dict) else []
+            existing_map = dict(cast(Mapping[str, object], existing_payload)) if isinstance(existing_payload, Mapping) else {}
+            raw_records = existing_map.get("records", [])
             if isinstance(raw_records, list):
-                existing_records = [item for item in raw_records if isinstance(item, dict) and item.get("new_path")]
+                for item in cast(list[object], raw_records):
+                    item_map = dict(cast(Mapping[str, object], item)) if isinstance(item, Mapping) else {}
+                    if item_map.get("new_path"):
+                        existing_records.append(item_map)
         except (OSError, ValueError):
             existing_records = []
     merged_records = manifest_records + existing_records

@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+from typing import Mapping, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "tools") not in sys.path:
@@ -35,7 +36,9 @@ def main() -> int:
     out = ROOT / "reports" / "certification" / "visual_evidence_v3.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, sort_keys=True, default=str), encoding="utf-8")
-    print(json.dumps({"verdict": report.get("verdict"), "out": str(out), "screenshot": (report.get("capture") or {}).get("path")}, indent=2))
+    capture = report.get("capture")
+    capture_map = dict(cast(Mapping[str, object], capture)) if isinstance(capture, Mapping) else {}
+    print(json.dumps({"verdict": report.get("verdict"), "out": str(out), "screenshot": capture_map.get("path")}, indent=2))
     return 0 if report.get("verdict") == "PASS" else 1
 
 

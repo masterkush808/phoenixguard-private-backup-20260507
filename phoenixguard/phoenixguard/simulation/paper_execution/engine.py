@@ -230,7 +230,7 @@ class PaperExecutionEngine:
             path=self.paths.shooter_paper_log,
             now=now,
         )
-        record = {
+        record: dict[str, Any] = {
             "version": PAPER_EXECUTION_ENGINE_VERSION,
             "event": "paper_execution_packet_recorded",
             "paper_execution_id": _paper_execution_id(packet_payload, entry, future_rows),
@@ -366,7 +366,7 @@ class PaperExecutionEngine:
         else:
             shooter_result = None
 
-        record = {
+        record: dict[str, Any] = {
             "version": PAPER_EXECUTION_ENGINE_VERSION,
             "event": "broker_demo_rehearsal_recorded",
             "timestamp_epoch": now,

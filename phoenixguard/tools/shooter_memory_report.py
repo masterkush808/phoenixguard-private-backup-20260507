@@ -15,7 +15,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from statistics import mean, median
-from typing import Any
+from typing import Any, cast
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,7 +40,7 @@ def load_session_history(path: str | Path, max_rows: int = 0) -> list[dict[str, 
             except Exception:
                 continue
             if isinstance(payload, Mapping):
-                rows.append(dict(payload))
+                rows.append(dict(cast(Mapping[str, Any], payload)))
     return rows
 
 

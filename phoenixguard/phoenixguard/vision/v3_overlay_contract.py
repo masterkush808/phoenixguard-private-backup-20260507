@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import math
 import os
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, cast
 
 from phoenixguard.vision.overlay_geometry import normalize_bbox
 
@@ -148,7 +149,7 @@ VIEW_MODES: tuple[str, ...] = (
 )
 V3_VISIBLE_MODES = VIEW_MODES
 DIAGNOSTIC_VIEW_MODES: frozenset[str] = frozenset({"DIAGNOSTICS", "DEBUG", "INSPECTOR"})
-LIVE_VIEW_MODES: frozenset[str] = frozenset(set(VIEW_MODES) - DIAGNOSTIC_VIEW_MODES)
+LIVE_VIEW_MODES: frozenset[str] = frozenset(set[str](VIEW_MODES) - DIAGNOSTIC_VIEW_MODES)
 
 APPROVED_OVERLAY_DISPLAY_LABELS: tuple[str, ...] = (
     "BROKER SURFACE",
@@ -861,8 +862,8 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
     },
     "TWO_CANDLE_STUDY": {"TWO_CANDLE_STUDY"},
     "LSTM_STUDY": {"LSTM_STUDY"},
-    "ACTIVE_CONTEXT": set(OVERLAY_TYPES) - DIAGNOSTIC_OVERLAY_TYPES - {"BROKER_CONTROL", "PREDICTION_PATH", "INVALIDATION_BOX", "LSTM_STUDY"},
-    "FULL_HISTORY_READ": set(OVERLAY_TYPES) - DIAGNOSTIC_OVERLAY_TYPES - {"BROKER_CONTROL", "PREDICTION_PATH", "INVALIDATION_BOX", "LSTM_STUDY"},
+    "ACTIVE_CONTEXT": set[str](OVERLAY_TYPES) - DIAGNOSTIC_OVERLAY_TYPES - {"BROKER_CONTROL", "PREDICTION_PATH", "INVALIDATION_BOX", "LSTM_STUDY"},
+    "FULL_HISTORY_READ": set[str](OVERLAY_TYPES) - DIAGNOSTIC_OVERLAY_TYPES - {"BROKER_CONTROL", "PREDICTION_PATH", "INVALIDATION_BOX", "LSTM_STUDY"},
     "REPLAY": {
         "CHART_BOUNDS",
         "IMPULSE_BOX",
@@ -1028,9 +1029,15 @@ def _clip01(value: Any) -> float:
     return max(0.0, min(1.0, _float(value, 0.0)))
 
 
-def _sequence(value: Any) -> list[Any]:
+def _object_mapping(value: object) -> Mapping[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    return cast(Mapping[str, object], value)
+
+
+def _sequence(value: object) -> list[object]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return list(value)
+        return list(cast(Sequence[object], value))
     return []
 
 
@@ -1050,11 +1057,12 @@ def _normalize_anchor_type(value: Any, inferred_anchor: str) -> str:
     return normalized if normalized in ANCHOR_TYPES else "BOX"
 
 
-def _anchor_candle_index(value: Any) -> int | None:
-    if isinstance(value, Mapping):
+def _anchor_candle_index(value: object) -> int | None:
+    mapping = _object_mapping(value)
+    if mapping is not None:
         for key in ("candle_index", "index", "idx", "candle", "bar_index", "source_index"):
-            if key in value:
-                return _anchor_candle_index(value.get(key))
+            if key in mapping:
+                return _anchor_candle_index(mapping.get(key))
         return None
     number = _float(value, float("nan"))
     if not math.isfinite(number) or number < 0:
@@ -1062,17 +1070,17 @@ def _anchor_candle_index(value: Any) -> int | None:
     return int(number)
 
 
-def _normalize_anchor_candles(value: Any) -> list[int]:
+def _normalize_anchor_candles(value: object) -> list[int]:
     if isinstance(value, str):
         raw_items: list[Any] = [item for item in value.replace(";", ",").split(",") if item.strip()]
-    elif isinstance(value, Mapping):
+    elif (mapping := _object_mapping(value)) is not None:
         raw_items = []
         for key in ("anchor_candles", "candles", "indices", "source_indices"):
-            if key in value:
-                raw_items = _sequence(value.get(key))
+            if key in mapping:
+                raw_items = _sequence(mapping.get(key))
                 break
         if not raw_items:
-            maybe_index = _anchor_candle_index(value)
+            maybe_index = _anchor_candle_index(mapping)
             raw_items = [maybe_index] if maybe_index is not None else []
     else:
         raw_items = _sequence(value)
@@ -1149,34 +1157,37 @@ def stable_overlay_id(*parts: Any) -> str:
     return f"v3ov_{digest}"
 
 
-def normalize_bounds(value: Any) -> list[float] | None:
-    if isinstance(value, Mapping):
+def normalize_bounds(value: object) -> list[float] | None:
+    mapping = _object_mapping(value)
+    if mapping is not None:
         for key in ("bbox", "pixel_bbox", "normalized_bbox", "xyxy"):
-            if key in value:
-                nested = normalize_bounds(value.get(key))
+            if key in mapping:
+                nested = normalize_bounds(mapping.get(key))
                 if nested is not None:
                     return nested
-        x = _float(value.get("x", value.get("left", float("nan"))), float("nan"))
-        y = _float(value.get("y", value.get("top", float("nan"))), float("nan"))
-        width = _float(value.get("width", value.get("w", float("nan"))), float("nan"))
-        height = _float(value.get("height", value.get("h", float("nan"))), float("nan"))
+        x = _float(mapping.get("x", mapping.get("left", float("nan"))), float("nan"))
+        y = _float(mapping.get("y", mapping.get("top", float("nan"))), float("nan"))
+        width = _float(mapping.get("width", mapping.get("w", float("nan"))), float("nan"))
+        height = _float(mapping.get("height", mapping.get("h", float("nan"))), float("nan"))
         if math.isfinite(x) and math.isfinite(y) and math.isfinite(width) and math.isfinite(height):
             return normalize_bounds([x, y, x + width, y + height])
-        right = _float(value.get("right"), float("nan"))
-        bottom = _float(value.get("bottom"), float("nan"))
+        right = _float(mapping.get("right"), float("nan"))
+        bottom = _float(mapping.get("bottom"), float("nan"))
         if math.isfinite(x) and math.isfinite(y) and math.isfinite(right) and math.isfinite(bottom):
             return normalize_bounds([x, y, right, bottom])
         return None
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+    sequence = _sequence(value)
+    if not sequence:
         return None
-    if len(value) >= 4 and all(not isinstance(item, Sequence) or isinstance(item, (str, bytes, bytearray)) for item in value[:4]):
-        bbox = normalize_bbox(value[:4])
+    if len(sequence) >= 4 and all(not _sequence(item) for item in sequence[:4]):
+        bbox = normalize_bbox(sequence[:4])
         return [float(item) for item in bbox] if bbox is not None else None
     points: list[tuple[float, float]] = []
-    for item in value:
-        if isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)) and len(item) >= 2:
-            x = _float(item[0], float("nan"))
-            y = _float(item[1], float("nan"))
+    for item in sequence:
+        point = _sequence(item)
+        if len(point) >= 2:
+            x = _float(point[0], float("nan"))
+            y = _float(point[1], float("nan"))
             if math.isfinite(x) and math.isfinite(y):
                 points.append((x, y))
     if not points:
@@ -1197,7 +1208,7 @@ def normalize_bounds(value: Any) -> list[float] | None:
     return [float(item) for item in bbox] if bbox is not None else None
 
 
-def _raw_bounds(raw: Mapping[str, Any]) -> tuple[list[float] | None, str]:
+def _raw_bounds(raw: Mapping[str, object]) -> tuple[list[float] | None, str]:
     for key in ("bounds", "bbox", "pixel_bbox", "box", "rect"):
         bounds = normalize_bounds(raw.get(key))
         if bounds is not None:
@@ -1209,15 +1220,17 @@ def _raw_bounds(raw: Mapping[str, Any]) -> tuple[list[float] | None, str]:
     return None, "BOX"
 
 
-def _normalize_overlay_points(value: Any) -> list[list[float]]:
+def _normalize_overlay_points(value: object) -> list[list[float]]:
     points: list[list[float]] = []
     for item in _sequence(value):
-        if isinstance(item, Mapping):
-            x = _float(item.get("x", item.get("left", item.get("center_x", float("nan")))), float("nan"))
-            y = _float(item.get("y", item.get("top", item.get("center_y", float("nan")))), float("nan"))
-        elif isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)) and len(item) >= 2:
-            x = _float(item[0], float("nan"))
-            y = _float(item[1], float("nan"))
+        mapping = _object_mapping(item)
+        point = _sequence(item)
+        if mapping is not None:
+            x = _float(mapping.get("x", mapping.get("left", mapping.get("center_x", float("nan")))), float("nan"))
+            y = _float(mapping.get("y", mapping.get("top", mapping.get("center_y", float("nan")))), float("nan"))
+        elif len(point) >= 2:
+            x = _float(point[0], float("nan"))
+            y = _float(point[1], float("nan"))
         else:
             continue
         if math.isfinite(x) and math.isfinite(y):
@@ -1335,7 +1348,7 @@ def _convert_bounds_for_mode(bounds: list[float], mode: str, image_size: Sequenc
     return bounds
 
 
-def _normalize_visible_modes(raw: Mapping[str, Any], overlay_type: str) -> list[str]:
+def _normalize_visible_modes(raw: Mapping[str, object], overlay_type: str) -> list[str]:
     raw_modes = raw.get("visible_modes") or raw.get("modes") or raw.get("visible_in_modes")
     modes: list[str] = []
     for item in _sequence(raw_modes):
@@ -1366,7 +1379,6 @@ def overlay_type_priority(overlay_type: Any) -> int:
 def short_label_for_overlay(overlay_type: Any, side: Any = "", label: Any = "") -> str:
     overlay_type_value = normalize_overlay_type(overlay_type)
     side_value = _normalize_side(side)
-    raw_label_token = _canonical_token(label)
     if overlay_type_value == "CURRENT_CANDLE":
         return "NOW"
     if overlay_type_value == "CHART_BOUNDS":
@@ -1461,7 +1473,7 @@ def normalize_overlay_display_label(label: Any, overlay_type: Any, side: Any = "
     return canonical_fallback, "remapped", raw_text
 
 
-def _missing_strict_fields(raw: Mapping[str, Any]) -> list[str]:
+def _missing_strict_fields(raw: Mapping[str, object]) -> list[str]:
     missing: list[str] = []
     for field in REQUIRED_FIELDS:
         if field in DEFAULTABLE_REQUIRED_FIELDS:
@@ -1475,16 +1487,16 @@ def _missing_strict_fields(raw: Mapping[str, Any]) -> list[str]:
 
 
 def normalize_v3_overlay_object(
-    raw: Mapping[str, Any],
+    raw: Mapping[str, object],
     *,
     strict: bool = True,
-    image_size: Sequence[Any] | None = None,
+    image_size: Sequence[object] | None = None,
     fallback_index: int = 0,
     frame_id: int | str | None = None,
     sequence_id: str = "",
     chart_transform_id: str = "",
     source_agent: str = "market_object_tracker_v3",
-) -> dict[str, Any]:
+) -> dict[str, object]:
     if strict:
         missing = _missing_strict_fields(raw)
         if missing:
@@ -1553,7 +1565,7 @@ def normalize_v3_overlay_object(
     truth_score = _clip01(raw.get("truth_score", confidence))
     resolved_layer = overlay_layer_name(overlay_type, raw.get("layer") or raw.get("_layer"))
 
-    row = {
+    row: dict[str, object] = {
         "schema_version": V3_OVERLAY_SCHEMA_VERSION,
         "overlay_id": overlay_id,
         "id": overlay_id,
@@ -1665,7 +1677,7 @@ def normalize_v3_overlay_object(
     return row
 
 
-def validate_v3_overlay_object(overlay: Mapping[str, Any]) -> OverlayValidationResult:
+def validate_v3_overlay_object(overlay: Mapping[str, object]) -> OverlayValidationResult:
     issues: list[OverlayContractIssue] = []
     for field in REQUIRED_FIELDS:
         if field == "bounds":
@@ -1880,22 +1892,21 @@ def _label_size(label: str, chart_width: float) -> tuple[float, float]:
 
 
 def layout_overlay_labels(
-    overlays: Sequence[Mapping[str, Any]],
+    overlays: Sequence[Mapping[str, object]],
     *,
-    chart_bounds: Sequence[Any] | None = None,
+    chart_bounds: Sequence[object] | None = None,
     max_attempts_per_label: int = 10,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, object]]:
     chart = normalize_bounds(chart_bounds or [0, 0, 1000, 700]) or [0.0, 0.0, 1000.0, 700.0]
     chart_width = max(1.0, chart[2] - chart[0])
-    chart_height = max(1.0, chart[3] - chart[1])
-    normalized: list[dict[str, Any]] = []
+    normalized: list[dict[str, object]] = []
     for overlay in overlays:
         row = normalize_v3_overlay_object(overlay, strict=False)
         for key, value in dict(overlay).items():
             row.setdefault(str(key), value)
         normalized.append(row)
 
-    def priority(row: Mapping[str, Any]) -> tuple[float, float, float]:
+    def priority(row: Mapping[str, object]) -> tuple[float, float, float]:
         return (
             float(overlay_type_priority(row.get("type"))) / 100.0,
             _float(row.get("truth_score", row.get("confidence", 0.0))),
@@ -1903,7 +1914,7 @@ def layout_overlay_labels(
         )
 
     placed: list[list[float]] = []
-    output: list[dict[str, Any]] = []
+    output: list[dict[str, object]] = []
     for row in sorted(normalized, key=priority, reverse=True):
         bounds = normalize_bounds(row["bounds"]) or [0.0, 0.0, 0.0, 0.0]
         label = _text(row.get("short_label") or row.get("display_label"), abbreviate_label(str(row.get("label") or row.get("type") or "")))

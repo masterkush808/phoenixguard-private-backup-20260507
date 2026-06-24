@@ -3628,7 +3628,7 @@ def _summarize_best_play_ensemble(local_ensemble: Mapping[str, Any]) -> dict[str
         )
     model_votes.sort(key=lambda item: (float(item["confidence"]), float(item["dynamic_weight"])), reverse=True)
     sequence_tasks_raw = cast(dict[str, dict[str, Any]], ensemble_view.get("sequence_task_consensus", {}))
-    sequence_tasks = {
+    sequence_tasks: dict[str, dict[str, Any]] = {
         str(task_name): {
             "value": str(payload.get("value", "") or "").strip(),
             "confidence": float(np.clip(payload.get("confidence", 0.0), 0.0, 1.0)),
@@ -6011,7 +6011,7 @@ def _build_box_history(
             if abs(mean_upper - mean_lower) > 0.04:
                 dominant_wick = "upper" if mean_upper > mean_lower else "lower"
         confidence = float(np.clip(0.45 + 0.25 * np.mean(np.array(parse_vals, dtype=np.float32) if parse_vals else np.array([0.0], dtype=np.float32)) + 0.15 * min(len(chunk), 4) / 4.0, 0.15, 0.98))
-        box_payload = {
+        box_payload: dict[str, Any] = {
             "sequence_index": seq_idx,
             "box_type": box_type,
             "direction": direction,
@@ -6919,7 +6919,7 @@ def _build_next_box_hypotheses(
         )
         if memory_direction in {"BUY", "SELL"}:
             explanation += f" memory={memory_direction}:{memory_support:.2f}"
-        row = {
+        row: dict[str, Any] = {
             "rank": 0,
             "box_type": candidate_type,
             "direction": candidate_dir,
@@ -16249,8 +16249,15 @@ def _build_confidence_heatmap_payload(
 ) -> dict[str, Any] | None:
     if source_image is None:
         return None
-    width = int(source_image.width)
-    height = int(source_image.height)
+    source_width = int(source_image.width)
+    source_height = int(source_image.height)
+    max_analysis_pixels = 320_000
+    source_pixels = max(1, source_width * source_height)
+    analysis_scale = min(1.0, float(np.sqrt(float(max_analysis_pixels) / float(source_pixels))))
+    width = max(1, int(round(float(source_width) * analysis_scale)))
+    height = max(1, int(round(float(source_height) * analysis_scale)))
+    source_to_heat_x = float(width) / float(max(source_width, 1))
+    source_to_heat_y = float(height) / float(max(source_height, 1))
     context_heat = np.zeros((height, width), dtype=np.float32)
     precision_heat = np.zeros((height, width), dtype=np.float32)
     path_heat = np.zeros((height, width), dtype=np.float32)
@@ -16273,6 +16280,33 @@ def _build_confidence_heatmap_payload(
         "continuation": continuation_heat,
         "reversal": reversal_heat,
     }
+
+    def scale_bbox_to_heat_grid(bbox: Sequence[Any]) -> list[float]:
+        if len(bbox) != 4:
+            return []
+        try:
+            x1, y1, x2, y2 = [float(value) for value in bbox]
+        except Exception:
+            return []
+        return [
+            x1 * source_to_heat_x,
+            y1 * source_to_heat_y,
+            x2 * source_to_heat_x,
+            y2 * source_to_heat_y,
+        ]
+
+    def scale_hotspots_to_source_grid(hotspots: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        if width == source_width and height == source_height:
+            return [dict(hotspot) for hotspot in hotspots]
+        scaled: list[dict[str, Any]] = []
+        for hotspot in hotspots:
+            row = dict(hotspot)
+            x_pct = float(row.get("x_pct", 0.0) or 0.0)
+            y_pct = float(row.get("y_pct", 0.0) or 0.0)
+            row["x"] = int(round(np.clip(x_pct, 0.0, 100.0) / 100.0 * float(max(source_width - 1, 0))))
+            row["y"] = int(round(np.clip(y_pct, 0.0, 100.0) / 100.0 * float(max(source_height - 1, 0))))
+            scaled.append(row)
+        return scaled
 
     def add_spot(
         target: NDArray[np.float32],
@@ -16306,7 +16340,7 @@ def _build_confidence_heatmap_payload(
         *,
         focus_scale: float = 1.0,
     ) -> None:
-        clamped = _clamp_bbox(bbox, float(width), float(height))
+        clamped = _clamp_bbox(scale_bbox_to_heat_grid(bbox), float(width), float(height))
         if clamped is None:
             return
         left, top, right, bottom = clamped
@@ -16360,7 +16394,7 @@ def _build_confidence_heatmap_payload(
         audit_scale: float = 0.82,
         audit_radius_scale: float = 1.0,
     ) -> tuple[float, float] | None:
-        clamped = _clamp_bbox(bbox, float(width), float(height))
+        clamped = _clamp_bbox(scale_bbox_to_heat_grid(bbox), float(width), float(height))
         if clamped is None:
             return None
         left, top, right, bottom = clamped
@@ -16408,8 +16442,8 @@ def _build_confidence_heatmap_payload(
         *,
         rank_scale: float = 1.0,
     ) -> None:
-        start = _clamp_bbox(start_bbox, float(width), float(height))
-        end = _clamp_bbox(end_bbox, float(width), float(height))
+        start = _clamp_bbox(scale_bbox_to_heat_grid(start_bbox), float(width), float(height))
+        end = _clamp_bbox(scale_bbox_to_heat_grid(end_bbox), float(width), float(height))
         if start is None or end is None:
             return
         sx = float(start[0] + start[2]) / 2.0
@@ -16453,7 +16487,7 @@ def _build_confidence_heatmap_payload(
         weight: float,
     ) -> bool:
         bbox = cast(list[Any], mask_summary.get("bbox", []))
-        clamped = _clamp_bbox(bbox, float(width), float(height))
+        clamped = _clamp_bbox(scale_bbox_to_heat_grid(bbox), float(width), float(height))
         if clamped is None:
             return False
         left, top, right, bottom = clamped
@@ -16664,6 +16698,8 @@ def _build_confidence_heatmap_payload(
             "core_pct": 0.0,
             "calibration": calibration,
             "segmentation_mask_count": int(segmentation_mask_count),
+            "analysis_size": [width, height],
+            "source_size": [source_width, source_height],
         }
 
     def _layer_scale(name: str) -> float:
@@ -16672,7 +16708,12 @@ def _build_confidence_heatmap_payload(
     def _class_scale(name: str) -> float:
         return float(np.clip(class_multipliers.get(name, 1.0), 0.70, 1.44))
 
-    gray = np.asarray(source_image.convert("L"), dtype=np.float32) / 255.0
+    analysis_source = (
+        source_image
+        if (width, height) == (source_width, source_height)
+        else source_image.resize((width, height), resample=_pillow_bilinear())
+    )
+    gray = np.asarray(analysis_source.convert("L"), dtype=np.float32) / 255.0
     grad_y, grad_x = np.gradient(gray)
     edge_prior = np.hypot(grad_x, grad_y, dtype=np.float32)
     if float(edge_prior.max()) > 1e-6:
@@ -16797,7 +16838,7 @@ def _build_confidence_heatmap_payload(
         ("entry", "continuation", "reversal"),
         key=lambda key: float(class_profile.get(key, 0.0)),
     )
-    hotspots = _extract_heatmap_hotspots(
+    heat_grid_hotspots = _extract_heatmap_hotspots(
         fused_heat,
         {
             "opportunity": opportunity_layer,
@@ -16812,6 +16853,7 @@ def _build_confidence_heatmap_payload(
         signal_action=signal_action,
         preferred_window_class=preferred_window_class,
     )
+    hotspots = scale_hotspots_to_source_grid(heat_grid_hotspots)
     hotspot_groups = _group_heatmap_hotspots(hotspots)
     return {
         "layers": {
@@ -16832,6 +16874,8 @@ def _build_confidence_heatmap_payload(
         "core_pct": float(np.count_nonzero(fused_heat >= 0.72)) / float(max(fused_heat.size, 1)) * 100.0,
         "calibration": calibration,
         "segmentation_mask_count": int(segmentation_mask_count),
+        "analysis_size": [width, height],
+        "source_size": [source_width, source_height],
     }
 
 
@@ -16845,31 +16889,43 @@ def _compose_confidence_heatmap_image(
     fused_heat = layers.get("fused")
     if fused_heat is None or not fused_heat.size or float(fused_heat.max()) <= 1e-6:
         return source_image.copy()
+
+    def resize_overlay_to_source(overlay: Image.Image) -> Image.Image:
+        if overlay.size == source_image.size:
+            return overlay
+        return overlay.resize(source_image.size, resample=_pillow_bilinear())
+
     calibration = cast(dict[str, Any], heatmap_payload.get("calibration", {}))
     render_gammas = cast(dict[str, float], calibration.get("render_gammas", {}))
-    overlay = _render_fused_heat_overlay(fused_heat)
+    overlay = resize_overlay_to_source(_render_fused_heat_overlay(fused_heat))
     blended = Image.alpha_composite(source_image.convert("RGBA"), overlay)
     segmentation_layer = layers.get("segmentation", np.zeros_like(fused_heat))
-    segmentation_overlay = _render_heat_layer_overlay(
-        segmentation_layer,
-        low_color=(34, 70, 118),
-        high_color=(132, 236, 255),
-        gamma=float(render_gammas.get("segmentation", HEATMAP_BASE_RENDER_GAMMAS["segmentation"])),
-        alpha_scale=206.0,
+    segmentation_overlay = resize_overlay_to_source(
+        _render_heat_layer_overlay(
+            segmentation_layer,
+            low_color=(34, 70, 118),
+            high_color=(132, 236, 255),
+            gamma=float(render_gammas.get("segmentation", HEATMAP_BASE_RENDER_GAMMAS["segmentation"])),
+            alpha_scale=206.0,
+        )
     )
     blended = Image.alpha_composite(blended, segmentation_overlay)
     opportunity_layer = layers.get("opportunity", np.zeros_like(fused_heat))
-    opportunity_overlay = _render_heat_layer_overlay(
-        opportunity_layer,
-        low_color=(40, 88, 40),
-        high_color=(255, 224, 118),
-        gamma=float(render_gammas.get("opportunity", HEATMAP_BASE_RENDER_GAMMAS["opportunity"])),
-        alpha_scale=182.0,
+    opportunity_overlay = resize_overlay_to_source(
+        _render_heat_layer_overlay(
+            opportunity_layer,
+            low_color=(40, 88, 40),
+            high_color=(255, 224, 118),
+            gamma=float(render_gammas.get("opportunity", HEATMAP_BASE_RENDER_GAMMAS["opportunity"])),
+            alpha_scale=182.0,
+        )
     )
     blended = Image.alpha_composite(blended, opportunity_overlay)
-    contour_overlay = _build_heat_contour_overlay(
-        fused_heat,
-        cast(list[float], heatmap_payload.get("contour_levels", [0.38, 0.54, 0.70, 0.86])),
+    contour_overlay = resize_overlay_to_source(
+        _build_heat_contour_overlay(
+            fused_heat,
+            cast(list[float], heatmap_payload.get("contour_levels", [0.38, 0.54, 0.70, 0.86])),
+        )
     )
     blended = Image.alpha_composite(blended, contour_overlay)
     hotspots = cast(list[dict[str, Any]], heatmap_payload.get("hotspots", []))
@@ -18759,7 +18815,7 @@ def build_runtime_audit_payload(
 ) -> dict[str, Any]:
     session_snapshot = _get_session_snapshot()
     session_entries = cast(list[dict[str, Any]], session_snapshot.get("entries", []))[-20:]
-    recent_entries = [
+    recent_entries: list[dict[str, Any]] = [
         {
             "timestamp": str(entry.get("timestamp", "")),
             "action": str(entry.get("action", "HOLD")).upper(),

@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Mapping, cast
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,25 +14,25 @@ def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+
+
 def _get_json(url: str, timeout: float) -> tuple[int, dict[str, Any], str, float]:
     started = time.perf_counter()
     req = urllib.request.Request(url=url, method="GET", headers={"Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
-            payload = json.loads(raw) if raw.strip() else {}
-            if not isinstance(payload, dict):
-                payload = {"raw": payload}
-            return int(resp.status), payload, "", (time.perf_counter() - started) * 1000.0
+            payload: object = json.loads(raw) if raw.strip() else {}
+            return int(resp.status), _mapping(payload) if isinstance(payload, Mapping) else {"raw": payload}, "", (time.perf_counter() - started) * 1000.0
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
         try:
-            payload = json.loads(raw) if raw.strip() else {}
+            payload: object = json.loads(raw) if raw.strip() else {}
         except json.JSONDecodeError:
             payload = {"detail": raw}
-        if not isinstance(payload, dict):
-            payload = {"raw": payload}
-        return int(exc.code), payload, "", (time.perf_counter() - started) * 1000.0
+        return int(exc.code), _mapping(payload) if isinstance(payload, Mapping) else {"raw": payload}, "", (time.perf_counter() - started) * 1000.0
     except Exception as exc:
         return 0, {}, str(exc), (time.perf_counter() - started) * 1000.0
 
@@ -45,7 +45,7 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 
 def _nested(payload: dict[str, Any], key: str) -> dict[str, Any]:
     value = payload.get(key)
-    return value if isinstance(value, dict) else {}
+    return _mapping(value)
 
 
 def main() -> int:
@@ -105,7 +105,7 @@ def main() -> int:
         if stale:
             stale_samples += 1
 
-        record = {
+        record: dict[str, Any] = {
             "at_epoch": now,
             "at_utc": _utc_now(),
             "sample": samples,

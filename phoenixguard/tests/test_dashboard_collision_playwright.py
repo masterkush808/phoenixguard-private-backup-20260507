@@ -1,3 +1,4 @@
+from typing import Any
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
@@ -8,7 +9,7 @@ def test_dashboard_label_collision_priority():
     html = html_path.read_text(encoding='utf-8')
 
     # craft a payload with two overlapping boxes where one has higher priority
-    overlays = [
+    overlays: list[dict[str, Any]] = [
         {"id": "low", "bbox": [0.1, 0.1, 0.2, 0.2], "confidence": 0.1, "visible_default": True, "layer": "recent_candles", "label": "LOW"},
         {"id": "high", "bbox": [0.1, 0.1, 0.2, 0.2], "confidence": 0.99, "visible_default": True, "layer": "broker_controls", "label": "HIGH"},
     ]

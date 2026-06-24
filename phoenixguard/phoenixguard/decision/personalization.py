@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import importlib
 import os
+import sys
 from pathlib import Path
 from typing import Any, Mapping, Protocol, cast
 
@@ -15,6 +16,18 @@ import numpy as np
 from numpy.typing import NDArray
 
 from phoenixguard.core.utils import can_import_sentence_transformers_safely, utc_now_iso
+
+
+def _real_text_embedder_loading_enabled() -> bool:
+    raw = os.getenv("PHOENIXGUARD_ENABLE_TEXT_EMBEDDER_IN_TESTS")
+    if raw is not None and raw.strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    if os.getenv("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+        cached_module = sys.modules.get("sentence_transformers")
+        if cached_module is not None and not hasattr(cached_module, "__file__"):
+            return True
+        return False
+    return True
 
 
 class PreferenceStore(Protocol):
@@ -77,6 +90,10 @@ class PersonalizationEngine:
         if not can_import_sentence_transformers_safely():
             self.embedder = None
             self.logger.warning('Style embedder unavailable, zero-vector fallback: runtime probe failed')
+            return self.embedder
+        if not _real_text_embedder_loading_enabled():
+            self.embedder = None
+            self.logger.warning('Style embedder disabled for test runtime, zero-vector fallback enabled')
             return self.embedder
         try:
             from sentence_transformers import SentenceTransformer

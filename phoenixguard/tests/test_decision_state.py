@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 from phoenixguard.core.decision_state import (
     TradeIntent,
@@ -21,7 +22,7 @@ def test_derive_valid_until_epoch_uses_shorter_expiry_window() -> None:
 
 
 def test_build_trade_intent_returns_frozen_actionable_intent() -> None:
-    latest_signal = {
+    latest_signal: dict[str, Any] = {
         "signal_id": "tracker_abc_123",
         "action": "BUY",
         "published_epoch": 100.0,
@@ -31,7 +32,7 @@ def test_build_trade_intent_returns_frozen_actionable_intent() -> None:
         "summary": "BUY setup remains valid near support.",
         "status": "tracking",
     }
-    session_payload = {
+    session_payload: dict[str, Any] = {
         "capture_count": 3,
         "frame_index": 7,
         "capture_interval_sec": 2.0,

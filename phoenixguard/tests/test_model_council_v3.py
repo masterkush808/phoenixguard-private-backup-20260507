@@ -2,7 +2,7 @@ from __future__ import annotations
 import pytest
 
 from copy import deepcopy
-from typing import Any
+from typing import Any, Mapping, cast
 
 from phoenixguard.decision.model_council_v3 import (
     MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
@@ -173,7 +173,7 @@ def _high_frequency_snapshot(side: str = "BUY", *, frame_id: int = 201) -> dict[
         "current_candle_closed": True,
         "close_progress": 1.0,
     }
-    snapshot["current_candle_contract"] = dict(snapshot["current_candle_acceptance"])
+    snapshot["current_candle_contract"] = dict(cast(Mapping[str, Any], snapshot["current_candle_acceptance"]))
     snapshot["high_frequency_candle_cycle"] = {
         "enabled": True,
         "ready": True,
@@ -244,7 +244,7 @@ def _wave_riding_snapshot(
         "current_candle_closed": True,
         "close_progress": 1.0,
     }
-    snapshot["current_candle_contract"] = dict(snapshot["current_candle_acceptance"])
+    snapshot["current_candle_contract"] = dict(cast(Mapping[str, Any], snapshot["current_candle_acceptance"]))
     snapshot["execution_timing"] = {
         "state": "READY",
         "side": side,
@@ -681,7 +681,7 @@ def test_blank_symbol_blocks_broker_click_mode_when_user_locked_only() -> None:
 
 def test_broker_click_mode_executes_when_user_profile_lock_has_v2_evidence() -> None:
     council = ModelCouncilV3()
-    evidence_lock = {
+    evidence_lock: dict[str, Any] = {
         "user_symbol": "EUR/GBP OTC",
         "session_id": "pocket-live-8788",
         "timeframe": "M5",
@@ -1487,9 +1487,9 @@ def test_wave_riding_does_not_override_hard_buy_high_bad_entry(monkeypatch: pyte
 
 
 def _wave_context_from_result(result: dict[str, Any]) -> dict[str, Any]:
-    trace = result.get("promotion_trace") or {}
-    execution_lane = trace.get("execution_lane") or {}
-    return trace.get("wave_context") or execution_lane.get("wave_context") or {}
+    trace = cast(Mapping[str, Any], result.get("promotion_trace") or {})
+    execution_lane = cast(Mapping[str, Any], trace.get("execution_lane") or {})
+    return cast(dict[str, Any], trace.get("wave_context") or execution_lane.get("wave_context") or {})
 
 
 def _apply_sell_low_support_risk(snapshot: dict[str, Any], *, role_flip: bool = False) -> None:

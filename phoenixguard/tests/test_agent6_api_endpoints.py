@@ -1,3 +1,4 @@
+from typing import Any
 from pathlib import Path
 from fastapi.testclient import TestClient
 from phoenixguard.mobile_api.app import create_app
@@ -9,7 +10,7 @@ client = TestClient(create_app())
 
 def test_registry_active_endpoint(tmp_path: Path):
     session = "test-api-session-1"
-    o = {"id": "api_o1", "bbox": [0, 0, 10, 10], "confidence": 0.9}
+    o: dict[str, Any] = {"id": "api_o1", "bbox": [0, 0, 10, 10], "confidence": 0.9}
     merge_market_objects(session, [o])
     resp = client.get(f"/v1/mobile/registry/sessions/{session}/active")
     assert resp.status_code == 200

@@ -214,7 +214,7 @@ def main() -> int:
     parse_trade_signal = _load_parse_trade_signal()
 
     if args.generate_samples:
-        samples = [
+        samples: list[dict[str, Any]] = [
             {"signal_id": "s1", "actionable": True, "execution_action": "BUY", "expiry_seconds": 60},
             {"signal_id": "s2", "actionable": True, "execution_action": "SELL", "expiry_seconds": 30},
             {"signal_id": "s3", "actionable": False, "execution_action": "BUY", "expiry_seconds": 30},

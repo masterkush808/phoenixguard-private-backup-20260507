@@ -61,7 +61,7 @@ def _packet(runtime_model_health: dict[str, Any] | None = None) -> dict[str, Any
 
 
 def test_runtime_telemetry_reports_compute_packet_cache_paper_and_path_quality() -> None:
-    health = {
+    health: dict[str, Any] = {
         "all_required_models_awake": True,
         "council_status": "AWAKE",
         "models": [
@@ -77,7 +77,7 @@ def test_runtime_telemetry_reports_compute_packet_cache_paper_and_path_quality()
         "max_model_latency_ms": 44.0,
         "queue_depth": 3,
     }
-    session = {
+    session: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "capture_count": 21,
         "dropped_frames": 2,
@@ -121,7 +121,7 @@ def test_runtime_telemetry_reports_compute_packet_cache_paper_and_path_quality()
 
 
 def test_health_from_session_returns_all_roles_and_telemetry_aliases() -> None:
-    session = {
+    session: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "cache_metrics": {"rejects": 1},
         "latest_signal": {
@@ -172,7 +172,7 @@ def test_stale_heartbeat_marks_model_stale_and_blocks_health() -> None:
 
 
 def test_stale_model_row_prevents_executable_packet_even_with_compact_awake_flag() -> None:
-    runtime_health = {
+    runtime_health: dict[str, Any] = {
         "all_required_models_awake": True,
         "council_status": "AWAKE",
         "models": [

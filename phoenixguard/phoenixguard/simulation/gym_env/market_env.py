@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 import random
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, ClassVar, Mapping, Sequence, cast
 
 from phoenixguard.simulation.synthetic_scenarios.generator import generate_synthetic_market_suite
 
@@ -61,7 +61,7 @@ class PhoenixGuardMarketEnv:
     Actions are scored only against offline scenario labels.
     """
 
-    metadata = {
+    metadata: ClassVar[dict[str, object]] = {
         "name": "PhoenixGuardMarketEnv",
         "render_modes": ("ansi", "human"),
         "offline_only": True,

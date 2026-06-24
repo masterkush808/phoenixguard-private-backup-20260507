@@ -187,7 +187,7 @@ def snap_candle_collection(
     chart_y_offset: int = 0,
 ) -> list[SnappedCandleGeometry]:
     """Snap a collection of candles to integer pixel grid."""
-    snapped = []
+    snapped: list[SnappedCandleGeometry] = []
     for candle in candles:
         geometry = snap_candle_geometry(
             candle,

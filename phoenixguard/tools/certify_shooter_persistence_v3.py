@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import time
+from collections.abc import Mapping
+from typing import cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -31,8 +32,8 @@ def _load_handshake() -> tuple[dict[str, object], str]:
     for path in HANDSHAKE_PATHS:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                candidates.append((float(path.stat().st_mtime), payload, str(path)))
+            if isinstance(payload, Mapping):
+                candidates.append((float(path.stat().st_mtime), dict(cast(Mapping[str, object], payload)), str(path)))
         except Exception:
             continue
     if not candidates:
@@ -75,7 +76,7 @@ def main() -> int:
         rows = leaf_processes(find_processes(python_processes(), "shooter.py"))
         handshake, handshake_path = _load_handshake()
         alive = bool(initial_pid and any(process_id(row) == initial_pid for row in rows))
-        sample = {
+        sample: dict[str, object] = {
             "epoch": time.time(),
             "alive": alive,
             "pid": initial_pid,
@@ -92,8 +93,8 @@ def main() -> int:
                 failures.append(f"shooter handshake base_url mismatch: {handshake.get('base_url')}")
             if str(handshake.get("session_id") or "") and str(handshake.get("session_id")) != args.session:
                 failures.append(f"shooter handshake session mismatch: {handshake.get('session_id')}")
-            decision = handshake.get("decision") if isinstance(handshake.get("decision"), dict) else {}
-            reason = str(decision.get("reason") or "").upper() if isinstance(decision, dict) else ""
+            decision = dict(cast(Mapping[str, object], handshake.get("decision"))) if isinstance(handshake.get("decision"), Mapping) else {}
+            reason = str(decision.get("reason") or "").upper()
             if "STALE" in reason and "WAIT" not in reason:
                 failures.append(f"shooter consumed or attempted stale packet: {reason}")
         time.sleep(max(0.2, float(args.interval_sec)))

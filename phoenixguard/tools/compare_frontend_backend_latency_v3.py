@@ -9,13 +9,17 @@ import time
 import urllib.parse
 import urllib.request
 from urllib.error import HTTPError, URLError
-from typing import Any
+from typing import Any, Mapping, cast
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _json(url: str, timeout: float) -> dict[str, Any]:
     req = urllib.request.Request(url, headers={"User-Agent": "PhoenixGuard-LatencyCompareV3/1.0", "Connection": "close"})
     with urllib.request.urlopen(req, timeout=timeout) as response:  # noqa: S310 - local operator endpoint
-        return json.loads(response.read().decode("utf-8", errors="replace"))
+        return _mapping(json.loads(response.read().decode("utf-8", errors="replace")))
 
 
 def _error(exc: BaseException) -> str:
@@ -38,10 +42,11 @@ def _int(value: Any) -> int:
 
 
 def _backend_rendered_frame_id(live: dict[str, Any], timing: dict[str, Any]) -> int:
+    broker_surface = _mapping(live.get("broker_surface_frame"))
     for value in (
         live.get("display_frame_id"),
         timing.get("display_frame_id"),
-        (live.get("broker_surface_frame") or {}).get("frame_id") if isinstance(live.get("broker_surface_frame"), dict) else 0,
+        broker_surface.get("frame_id"),
         live.get("frame_id"),
     ):
         parsed = _int(value)
@@ -118,8 +123,9 @@ def _post_heartbeat_payload(base_url: str, payload: dict[str, Any], timeout: flo
         )
         with urllib.request.urlopen(req, timeout=timeout) as response:  # noqa: S310 - local operator endpoint
             body = json.loads(response.read().decode("utf-8", errors="replace"))
-        if isinstance(body, dict) and body.get("status") != "ignored":
-            return "", body
+        body_map = _mapping(body)
+        if body_map and body_map.get("status") != "ignored":
+            return "", body_map
         return f"dashboard_heartbeat_python_post_ignored:{body}", None
     except Exception as exc:
         return f"dashboard_heartbeat_python_post_failed:{_error(exc)}", None
@@ -197,10 +203,13 @@ def _flush_dashboard_heartbeat(client: tuple[Any, Any, Any] | None, *, base_url:
               }
             }"""
         )
-        if isinstance(result, dict) and result.get("ok") and isinstance(result.get("body"), dict):
-            return "", dict(result["body"])
-        if isinstance(result, dict) and isinstance(result.get("payload"), dict):
-            return _post_heartbeat_payload(base_url, dict(result["payload"]), timeout)
+        result_map = _mapping(result)
+        body = _mapping(result_map.get("body"))
+        if result_map.get("ok") and body:
+            return "", body
+        payload = _mapping(result_map.get("payload"))
+        if payload:
+            return _post_heartbeat_payload(base_url, payload, timeout)
         return f"dashboard_heartbeat_flush_unavailable:{result}", None
     except Exception as exc:  # pragma: no cover - environment dependent
         return f"dashboard_heartbeat_flush_failed:{exc}", None
@@ -213,11 +222,9 @@ def _build_report(
     heartbeat: dict[str, Any],
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
-    timing = live.get("frame_timing_trace_v3") or (
-        (live.get("performance_trace_v3") or {}).get("timing_trace")
-        if isinstance(live.get("performance_trace_v3"), dict)
-        else {}
-    ) or {}
+    timing = _mapping(live.get("frame_timing_trace_v3"))
+    if not timing:
+        timing = _mapping(_mapping(live.get("performance_trace_v3")).get("timing_trace"))
     mismatches: list[str] = []
     report_warnings: list[str] = list(warnings or [])
     heartbeat_status = str(heartbeat.get("status") or "").strip().lower()

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import importlib
 import os
 from threading import Lock
-from typing import Any, Sequence, cast
+from typing import Any, cast
 
 import numpy as np
 from PIL import Image
@@ -31,6 +32,13 @@ def _to_device_inputs(payload: dict[str, Any], device: torch.device) -> dict[str
                 pass
         moved[key] = value
     return moved
+
+
+def _first_mask_value(value: object) -> object:
+    if isinstance(value, list) and value:
+        items = cast(list[object], value)
+        return items[0]
+    return cast(object, value)
 
 
 def _pillow_bilinear() -> Any:
@@ -177,8 +185,9 @@ class OptionalGroundedParser:
             post_process = getattr(self._florence_processor, "post_process_generation", None)
             if callable(post_process):
                 parsed = post_process(decoded, task=task, image_size=(image.width, image.height))
-                if isinstance(parsed, dict):
-                    for value in parsed.values():
+                if isinstance(parsed, Mapping):
+                    parsed_mapping = cast(Mapping[object, object], parsed)
+                    for value in parsed_mapping.values():
                         if isinstance(value, str) and value.strip():
                             return value.strip()
                 if isinstance(parsed, str) and parsed.strip():
@@ -268,7 +277,7 @@ class OptionalGroundedParser:
             if not callable(post_process):
                 return []
             masks = cast(
-                Sequence[Any],
+                Sequence[object],
                 post_process(
                     outputs.pred_masks.detach().cpu(),
                     encoded.get("original_sizes"),
@@ -277,10 +286,7 @@ class OptionalGroundedParser:
             )
             summaries: list[dict[str, Any]] = []
             for detection, mask_group in zip(detections, masks):
-                if isinstance(mask_group, list) and mask_group:
-                    first_mask = mask_group[0]
-                else:
-                    first_mask = mask_group
+                first_mask = _first_mask_value(mask_group)
                 mask_array = np.asarray(first_mask, dtype=np.float32)
                 if mask_array.ndim > 2:
                     mask_array = np.squeeze(mask_array)

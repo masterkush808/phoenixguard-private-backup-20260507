@@ -38,7 +38,7 @@ import webbrowser
 from ctypes import Structure, WINFUNCTYPE, byref, c_bool, c_int
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, TypeGuard, cast
 
 import pyautogui
 
@@ -114,8 +114,24 @@ def _configure_tesseract_runtime() -> None:
 _configure_tesseract_runtime()
 
 
+def _is_json_mapping(value: object) -> TypeGuard[Mapping[str, Any]]:
+    return isinstance(value, Mapping)
+
+
+def _is_json_dict(value: object) -> TypeGuard[Dict[str, Any]]:
+    return isinstance(value, dict)
+
+
+def _is_non_string_sequence(value: object) -> TypeGuard[Sequence[Any]]:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+def _is_json_list(value: object) -> TypeGuard[List[Any]]:
+    return isinstance(value, list)
+
+
 def _as_mapping_dict(value: Any) -> Dict[str, Any]:
-    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+    return dict(value) if _is_json_mapping(value) else {}
 
 
 # Disable PyAutoGUI failsafe corner abort for smoother automation.
@@ -250,23 +266,23 @@ def _feature_vector_from_payload(payload: Dict[str, Any], np: Optional[object] =
     Returns numpy array if `np` is provided, else a simple tuple.
     """
     try:
-        kernel = payload.get("decision_kernel") or {}
+        kernel = _as_mapping_dict(payload.get("decision_kernel"))
         p1 = float(_coerce_nonnegative_seconds(kernel.get("p_trigger_next_1")) or 0.0)
         p3 = float(_coerce_nonnegative_seconds(kernel.get("p_trigger_next_3")) or 0.0)
         close_pos = float(_coerce_nonnegative_seconds(payload.get("close_position")) or 0.0)
         scenario_prob = 0.0
-        scenario = payload.get("scenario_analysis") or {}
-        if isinstance(scenario, dict):
-            top = scenario.get("top_scenario")
-            if isinstance(top, dict):
-                try:
-                    scenario_prob = float(top.get("probability") or 0.0)
-                except Exception:
-                    scenario_prob = 0.0
+        scenario = _as_mapping_dict(payload.get("scenario_analysis"))
+        top = _as_mapping_dict(scenario.get("top_scenario"))
+        if top:
+            try:
+                scenario_prob = float(top.get("probability") or 0.0)
+            except Exception:
+                scenario_prob = 0.0
 
+        tracking_summary = _as_mapping_dict(payload.get("tracking_summary"))
         micro = str(
             payload.get("micro_structure_event")
-            or (payload.get("tracking_summary") or {}).get("micro_structure_event")
+            or tracking_summary.get("micro_structure_event")
             or ""
         ).strip().lower()
         # map string micro-event categories to small numeric bucket
@@ -302,7 +318,7 @@ def memory_confidence_for_payload(payload: Dict[str, Any]) -> float:
         # Normalize and compute cosine similarity to all stored vecs
         try:
             # prevent zero vectors
-            def _norm(a):
+            def _norm(a: Any) -> Any:
                 n = np.linalg.norm(a)
                 return a / (n + 1e-9)
 
@@ -325,7 +341,7 @@ def memory_confidence_for_payload(payload: Dict[str, Any]) -> float:
 
 def log_decision(payload: Dict[str, Any], decision: str, reason: str, confidence: float) -> None:
     try:
-        out = {
+        out: Dict[str, Any] = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "signal_id": payload.get("signal_id"),
             "decision": decision,
@@ -499,11 +515,11 @@ def _position_in_price_series(values: Sequence[float], *, window: Optional[int] 
 
 def _extract_price_proxy_series_from_tracking(tracking_summary: Mapping[str, Any]) -> List[float]:
     rows_any = tracking_summary.get("tracked_candles", [])
-    if not isinstance(rows_any, Sequence) or isinstance(rows_any, (str, bytes, bytearray)):
+    if not _is_non_string_sequence(rows_any):
         return []
     values: List[float] = []
     for row in rows_any:
-        if not isinstance(row, Mapping):
+        if not _is_json_mapping(row):
             continue
         for key in ("price_proxy", "close_proxy", "c", "close"):
             if key not in row:
@@ -550,13 +566,13 @@ def _extract_price_proxy_range_values_from_tracking(
     window: Optional[int] = None,
 ) -> List[float]:
     rows_any = tracking_summary.get("tracked_candles", [])
-    if not isinstance(rows_any, Sequence) or isinstance(rows_any, (str, bytes, bytearray)):
+    if not _is_non_string_sequence(rows_any):
         return []
-    rows = [row for row in rows_any if isinstance(row, Mapping)]
+    rows: List[Mapping[str, Any]] = [row for row in rows_any if _is_json_mapping(row)]
     selected = rows[-window:] if window and window > 0 else rows
     values: List[float] = []
     for row in selected:
-        values.extend(_price_proxy_values_from_tracking_row(cast(Mapping[str, Any], row)))
+        values.extend(_price_proxy_values_from_tracking_row(row))
     if not values:
         close_values = _extract_price_proxy_series_from_tracking(tracking_summary)
         values.extend(close_values[-window:] if window and window > 0 else close_values)
@@ -579,10 +595,10 @@ def _entry_history_position_context(payload: Dict[str, Any], tracking_summary: M
     result: Dict[str, Any] = {}
     timing_sources = (payload.get("execution_timing"), tracking_summary.get("execution_timing"))
     for source in timing_sources:
-        if not isinstance(source, dict):
+        if not _is_json_mapping(source):
             continue
         price_position = source.get("price_position")
-        if not isinstance(price_position, dict):
+        if not _is_json_mapping(price_position):
             continue
         for key in ("global_position", "local_position"):
             parsed = _clip_unit_float(price_position.get(key))
@@ -616,7 +632,7 @@ def _entry_history_position_context(payload: Dict[str, Any], tracking_summary: M
     if local_position is not None:
         result["local_position"] = local_position
     rows_any = tracking_summary.get("tracked_candles", [])
-    tracked_count = len(rows_any) if isinstance(rows_any, Sequence) and not isinstance(rows_any, (str, bytes, bytearray)) else 0
+    tracked_count = len(rows_any) if _is_non_string_sequence(rows_any) else 0
     result["sample_size"] = max(len(series), tracked_count)
     if range_values:
         result["range_sample_size"] = len(range_values)
@@ -625,10 +641,10 @@ def _entry_history_position_context(payload: Dict[str, Any], tracking_summary: M
 
 def _execution_timing_block_reason(payload: Dict[str, Any]) -> Optional[str]:
     tracking_summary = payload.get("tracking_summary")
-    tracking_dict = tracking_summary if isinstance(tracking_summary, dict) else {}
-    timing_sources = (payload.get("execution_timing"), tracking_dict.get("execution_timing"))
+    tracking_dict = _as_mapping_dict(tracking_summary)
+    timing_sources: Tuple[Any, Any] = (payload.get("execution_timing"), tracking_dict.get("execution_timing"))
     for source in timing_sources:
-        if not isinstance(source, dict):
+        if not _is_json_mapping(source):
             continue
         entry_allowed = source.get("entry_allowed")
         if entry_allowed is False or (isinstance(entry_allowed, str) and entry_allowed.strip().lower() in {"0", "false", "no", "off"}):
@@ -665,12 +681,12 @@ def _support_resistance_zones_for_entry_gate(payload: Dict[str, Any], tracking_s
     zones: List[Dict[str, Any]] = []
     seen: set[Tuple[str, str, str]] = set()
     for source in raw_sources:
-        if not isinstance(source, Sequence) or isinstance(source, (str, bytes, bytearray)):
+        if not _is_non_string_sequence(source):
             continue
         for row in source:
-            if not isinstance(row, Mapping):
+            if not _is_json_mapping(row):
                 continue
-            zone = dict(cast(Mapping[str, Any], row))
+            zone = dict(row)
             role = str(zone.get("role", "") or "").strip().lower()
             label = str(zone.get("label", zone.get("key", "")) or "").strip()
             line_y = str(zone.get("line_y", "") or "").strip()
@@ -760,8 +776,8 @@ def _payload_from_preferred_source(payload: Dict[str, Any], preferred: str) -> b
     try:
         if not payload or not preferred:
             return False
-        controls = payload.get("execution_controls") or {}
-        if isinstance(controls, dict):
+        controls = _as_mapping_dict(payload.get("execution_controls"))
+        if controls:
             mode = str(controls.get("execution_mode", "") or "").lower()
             if controls.get("live_execution_enabled") is False or mode == "shadow":
                 return False
@@ -839,22 +855,22 @@ def _strict_signal_timeframe_seconds(raw: Any) -> Optional[int]:
 
 def _strict_swing_execution_gate(payload: Dict[str, Any], side: str, expiry_seconds: int) -> Tuple[bool, str]:
     kernel_any = payload.get("decision_kernel")
-    if not isinstance(kernel_any, dict):
+    if not _is_json_dict(kernel_any):
         return False, "missing decision_kernel"
-    kernel = cast(Dict[str, Any], kernel_any)
+    kernel = kernel_any
     trade_mode = str(kernel.get("trade_mode", "") or "").strip().upper()
     tracking_summary_any = payload.get("tracking_summary")
-    tracking_summary = cast(Dict[str, Any], tracking_summary_any) if isinstance(tracking_summary_any, dict) else {}
+    tracking_summary = tracking_summary_any if _is_json_dict(tracking_summary_any) else {}
     if not tracking_summary:
-        execution_payload = payload.get("execution")
-        if isinstance(execution_payload, Mapping):
-            tracking_summary = cast(Dict[str, Any], execution_payload.get("tracking_summary")) if isinstance(execution_payload.get("tracking_summary"), dict) else {}
+        execution_payload = _as_mapping_dict(payload.get("execution"))
+        execution_tracking = execution_payload.get("tracking_summary")
+        tracking_summary = execution_tracking if _is_json_dict(execution_tracking) else {}
     if not tracking_summary:
-        council_payload = payload.get("model_council")
-        if isinstance(council_payload, Mapping):
-            tracking_summary = cast(Dict[str, Any], council_payload.get("tracking_summary")) if isinstance(council_payload.get("tracking_summary"), dict) else {}
+        council_payload = _as_mapping_dict(payload.get("model_council"))
+        council_tracking = council_payload.get("tracking_summary")
+        tracking_summary = council_tracking if _is_json_dict(council_tracking) else {}
     broker_state_any = payload.get("broker_execution_state")
-    broker_state = cast(Dict[str, Any], broker_state_any) if isinstance(broker_state_any, dict) else {}
+    broker_state = broker_state_any if _is_json_dict(broker_state_any) else {}
     execution_lane = str(
         payload.get("execution_lane")
         or payload.get("lane")
@@ -1295,7 +1311,7 @@ class FloatingStatusBox:
             promotion = _as_mapping_dict(execution_packet.get("promotion_trace"))
             lane_payload = execution_packet.get("execution_lane")
             lane = ""
-            if isinstance(lane_payload, dict):
+            if _is_json_mapping(lane_payload):
                 lane = str(lane_payload.get("name") or "")
             lane = lane or str(execution_packet.get("selected_execution_lane") or promotion.get("selected_lane") or "")
             packet_id = _truncate_text(execution_packet.get("packet_id", ""), 18) or "missing"
@@ -1310,7 +1326,7 @@ class FloatingStatusBox:
             lane_payload = study_packet.get("execution_lane") or council.get("execution_lane") or promotion.get("execution_lane")
             lane = ""
             lane_accepted = promotion.get("lane_accepted")
-            if isinstance(lane_payload, dict):
+            if _is_json_mapping(lane_payload):
                 lane = str(lane_payload.get("name") or "")
                 if lane_accepted is None:
                     lane_accepted = lane_payload.get("accepted")
@@ -1403,8 +1419,8 @@ class FloatingStatusBox:
 
     def _load_floating_settings(self) -> None:
         try:
-            parsed = json.loads(self._settings_path.read_text(encoding="utf-8"))
-            if isinstance(parsed, dict):
+            parsed: Any = json.loads(self._settings_path.read_text(encoding="utf-8"))
+            if _is_json_mapping(parsed):
                 mode = str(parsed.get("mode") or self._display_mode).lower()
                 if mode in {"mini", "compact", "expanded", "inspector"}:
                     self._display_mode = mode
@@ -1646,7 +1662,7 @@ class FloatingStatusBox:
             except Exception:
                 pass
         side_labels = self._hud_vars.get("side_labels")
-        if isinstance(side_labels, list):
+        if _is_json_list(side_labels):
             for label in side_labels:
                 try:
                     label.configure(fg=self._side_color(side))
@@ -1848,7 +1864,7 @@ class FloatingStatusBox:
                 except Exception:
                     pass
 
-        widgets = [root, header, title_col, session_row, title_lbl, session_lbl, clock_lbl, chip_lbl, live_lbl, mini, compact, expanded, inspector]
+        widgets: List[Any] = [root, header, title_col, session_row, title_lbl, session_lbl, clock_lbl, chip_lbl, live_lbl, mini, compact, expanded, inspector]
 
         def _append_children(widget: Any) -> None:
             try:
@@ -2487,7 +2503,7 @@ def rect_bounds(rect: RECT) -> Tuple[int, int, int, int]:
 
 
 def _rect_matches_cached_expiry(current: RECT, cached_bounds: Any, *, tolerance_px: int = 40) -> bool:
-    if not isinstance(cached_bounds, (list, tuple)) or len(cached_bounds) != 4:
+    if not _is_non_string_sequence(cached_bounds) or len(cached_bounds) != 4:
         return False
     current_bounds = rect_bounds(current)
     try:
@@ -2612,7 +2628,7 @@ _MANIFEST_SOURCE_TIMING_KEYS: Tuple[str, ...] = (
 
 def _manifest_point(record: Mapping[str, Any]) -> Optional[Dict[str, float]]:
     point = record.get("point")
-    if not isinstance(point, Mapping):
+    if not _is_json_mapping(point):
         return None
     x = _coerce_finite_float(point.get("x"))
     y = _coerce_finite_float(point.get("y"))
@@ -2668,7 +2684,7 @@ def _manifest_source_boxes(manifest_path: Path, layout: Mapping[str, Any]) -> Di
         candidate = Path(source_path)
         candidates.append(candidate if candidate.is_absolute() else manifest_path.parent / candidate)
     runtime_artifacts = layout.get("runtime_artifacts")
-    if isinstance(runtime_artifacts, Sequence) and not isinstance(runtime_artifacts, (str, bytes, bytearray)):
+    if _is_non_string_sequence(runtime_artifacts):
         for artifact in runtime_artifacts:
             text = str(artifact or "").strip()
             if not text:
@@ -2682,27 +2698,27 @@ def _manifest_source_boxes(manifest_path: Path, layout: Mapping[str, Any]) -> Di
             parsed = json.loads(candidate.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if isinstance(parsed, Mapping):
-            return {str(key): cast(Mapping[str, Any], value) for key, value in parsed.items() if isinstance(value, Mapping)}
+        if _is_json_mapping(parsed):
+            return {str(key): value for key, value in parsed.items() if _is_json_mapping(value)}
     return {}
 
 
 def _first_manifest_layout(manifest: Mapping[str, Any]) -> Optional[Tuple[str, str, Mapping[str, Any]]]:
     profiles = manifest.get("profiles")
-    if not isinstance(profiles, Mapping):
+    if not _is_json_mapping(profiles):
         return None
     preferred_profile_ids = ["default", *[str(key) for key in profiles.keys() if str(key) != "default"]]
     for profile_id in preferred_profile_ids:
         profile = profiles.get(profile_id)
-        if not isinstance(profile, Mapping):
+        if not _is_json_mapping(profile):
             continue
         layouts = profile.get("layouts")
-        if not isinstance(layouts, Mapping):
+        if not _is_json_mapping(layouts):
             continue
         preferred_layout_ids = ["default", *[str(key) for key in layouts.keys() if str(key) != "default"]]
         for layout_id in preferred_layout_ids:
             layout = layouts.get(layout_id)
-            if isinstance(layout, Mapping):
+            if _is_json_mapping(layout):
                 return str(profile_id), str(layout_id), layout
     return None
 
@@ -2715,7 +2731,7 @@ def _load_manifest_runtime_boxes(manifest_path: Path) -> Optional[Dict[str, Dict
     except Exception as exc:
         LOGGER.error("Failed to parse authoritative calibration manifest %s: %s", str(manifest_path), exc)
         return {}
-    if not isinstance(manifest_any, Mapping):
+    if not _is_json_mapping(manifest_any):
         LOGGER.error("Authoritative calibration manifest is not a JSON object: %s", str(manifest_path))
         return {}
     if manifest_any.get("authoritative_execution_source") is not True:
@@ -2729,7 +2745,7 @@ def _load_manifest_runtime_boxes(manifest_path: Path) -> Optional[Dict[str, Dict
     records: Dict[str, Any] = {}
     for key in ("required_targets", "optional_targets"):
         value = layout.get(key)
-        if isinstance(value, Mapping):
+        if _is_json_mapping(value):
             records.update(dict(value))
 
     source_boxes = _manifest_source_boxes(manifest_path, layout)
@@ -3038,10 +3054,10 @@ def is_broker_ready(hwnd: int, expected_rect: Optional[RECT] = None, tol_px: int
     return True
 
 
-def validate_calibration(boxes: Dict[str, Dict[str, Any]], rect: RECT) -> bool:
+def validate_calibration(boxes: Mapping[str, Any], rect: RECT) -> bool:
     # Ensure mapped boxes are within rect and not overlapping dangerously
     capabilities = boxes.get("capabilities", {})
-    if isinstance(capabilities, Mapping):
+    if _is_json_mapping(capabilities):
         missing_targets = capabilities.get("missing_runtime_targets")
         if missing_targets:
             LOGGER.error("Calibration invalid: authoritative manifest missing runtime targets: %s", missing_targets)
@@ -3077,7 +3093,7 @@ def validate_calibration(boxes: Dict[str, Dict[str, Any]], rect: RECT) -> bool:
     for name, rel in boxes.items():
         if name == "capabilities":
             continue
-        if not isinstance(rel, Mapping):
+        if not _is_json_mapping(rel):
             LOGGER.error("Calibration point %s is malformed: %s", name, rel)
             return False
         rel_x = _coerce_finite_float(rel.get("x"))
@@ -3793,7 +3809,7 @@ LIVE_BROKER_CLICK_ENV = "PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS"
 def _nested_get(mapping: Mapping[str, Any], path: Sequence[str]) -> Any:
     current: Any = mapping
     for key in path:
-        if not isinstance(current, Mapping):
+        if not _is_json_mapping(current):
             return None
         current = current.get(key)
     return current
@@ -3941,7 +3957,7 @@ def parse_trade_signal(payload: Dict[str, Any]) -> Optional[Tuple[str, int, str,
         side_source = "field(execution_action)"
 
         broker_state = payload.get("broker_execution_state")
-        if isinstance(broker_state, Mapping):
+        if _is_json_mapping(broker_state):
             broker_status = str(broker_state.get("status") or "").strip().lower()
             broker_actionable = broker_state.get("actionable")
             broker_side = _normalize_trade_side(broker_state.get("side"))
@@ -3958,7 +3974,7 @@ def parse_trade_signal(payload: Dict[str, Any]) -> Optional[Tuple[str, int, str,
             return None
 
         kernel = payload.get("decision_kernel")
-        if isinstance(kernel, Mapping):
+        if _is_json_mapping(kernel):
             trade_mode = str(kernel.get("trade_mode") or "").strip().upper()
             target_horizon = _coerce_nonnegative_seconds(kernel.get("target_horizon_candles"))
             if trade_mode in {"COUNTERTREND_SCALP", "SCALP", "MICRO_SCALP"}:
@@ -3994,11 +4010,11 @@ def _three_gate_load_state() -> Dict[str, Any]:
         return {"trade_count": 0, "locked_until": 0.0, "executed_keys": []}
     try:
         parsed = json.loads(THREE_GATE_STATE_FILE.read_text(encoding="utf-8"))
-        if isinstance(parsed, dict):
+        if _is_json_dict(parsed):
             parsed.setdefault("trade_count", 0)
             parsed.setdefault("locked_until", 0.0)
             parsed.setdefault("executed_keys", [])
-            return cast(Dict[str, Any], parsed)
+            return parsed
     except Exception as exc:
         LOGGER.warning("3-gate state load failed: %s", exc)
     return {"trade_count": 0, "locked_until": 0.0, "executed_keys": []}
@@ -4020,7 +4036,7 @@ def _gate1_second_latest_read(
 ) -> Tuple[bool, str]:
     """Gate 1: first read or changed side stores orientation; second read can trade."""
     baseline = state.get("baseline")
-    if not isinstance(baseline, dict):
+    if not _is_json_mapping(baseline):
         state["baseline"] = {
             "side": side,
             "expiry": int(expiry),
@@ -4068,10 +4084,10 @@ def _three_gate_extract_price_rows(payload: Mapping[str, Any]) -> List[Dict[str,
     rows: List[Dict[str, float]] = []
 
     def _consume_row(raw: Any) -> None:
-        if not isinstance(raw, Mapping):
+        if not _is_json_mapping(raw):
             return
         row: Dict[str, float] = {}
-        key_map = {
+        key_map: Dict[str, Tuple[str, ...]] = {
             "open": ("open", "o", "open_proxy"),
             "high": ("high", "h", "high_proxy"),
             "low": ("low", "l", "low_proxy"),
@@ -4097,7 +4113,7 @@ def _three_gate_extract_price_rows(payload: Mapping[str, Any]) -> List[Dict[str,
         _nested_get(payload, ("chart_state", "candles")),
     ]
     for container in containers:
-        if isinstance(container, Sequence) and not isinstance(container, (str, bytes, bytearray)):
+        if _is_non_string_sequence(container):
             for item in container:
                 _consume_row(item)
     return rows
@@ -4150,7 +4166,7 @@ def _zone_price_candidates(zone: Mapping[str, Any]) -> List[float]:
         if parsed is not None:
             values.append(float(parsed))
     bbox = zone.get("bbox")
-    if isinstance(bbox, Sequence) and not isinstance(bbox, (str, bytes, bytearray)) and len(bbox) >= 4:
+    if _is_non_string_sequence(bbox) and len(bbox) >= 4:
         nums = [_coerce_finite_float(v) for v in bbox[:4]]
         nums2 = [float(v) for v in nums if v is not None]
         if len(nums2) == 4:
@@ -4184,14 +4200,15 @@ def _zone_matches_opposing_force(zone: Mapping[str, Any], side: str) -> bool:
 def _three_gate_opposing_zone_prices(payload: Mapping[str, Any], side: str) -> List[float]:
     prices: List[float] = []
     for container in _zone_containers(payload):
-        if isinstance(container, Mapping):
-            iterable = container.values()
-        elif isinstance(container, Sequence) and not isinstance(container, (str, bytes, bytearray)):
+        iterable: Sequence[Any]
+        if _is_json_mapping(container):
+            iterable = list(container.values())
+        elif _is_non_string_sequence(container):
             iterable = container
         else:
             continue
         for item in iterable:
-            if not isinstance(item, Mapping):
+            if not _is_json_mapping(item):
                 continue
             if _zone_matches_opposing_force(item, side):
                 prices.extend(_zone_price_candidates(item))
@@ -4199,14 +4216,15 @@ def _three_gate_opposing_zone_prices(payload: Mapping[str, Any], side: str) -> L
 
 
 def _three_gate_normalized_close_position(payload: Mapping[str, Any], rows: Sequence[Mapping[str, float]], current_price: Optional[float]) -> Optional[float]:
-    for path in [
+    paths: List[Tuple[str, ...]] = [
         ("close_position",),
         ("position_in_range",),
         ("current_position_norm",),
         ("tracking_summary", "close_position"),
         ("tracking_summary", "position_in_range"),
         ("chart_state", "close_position"),
-    ]:
+    ]
+    for path in paths:
         parsed = _clip_unit_float(_nested_get(payload, path))
         if parsed is not None:
             return float(parsed)
@@ -4316,7 +4334,7 @@ def _gate3_opposing_force_distance(
 
 def _three_gate_record_execution(state: Dict[str, Any], signal_key: str, now: float) -> Tuple[int, int]:
     executed_keys = state.get("executed_keys")
-    if not isinstance(executed_keys, list):
+    if not _is_json_list(executed_keys):
         executed_keys = []
     executed_keys.append(signal_key)
     state["executed_keys"] = executed_keys[-200:]
@@ -4335,7 +4353,7 @@ def _three_gate_record_execution(state: Dict[str, Any], signal_key: str, now: fl
 
 def _three_gate_already_executed(state: Mapping[str, Any], signal_key: str) -> bool:
     executed_keys = state.get("executed_keys")
-    if not isinstance(executed_keys, list):
+    if not _is_json_list(executed_keys):
         return False
     return signal_key in {str(k) for k in executed_keys[-200:]}
 
@@ -4375,14 +4393,13 @@ def _v3_execution_lane_context(
         if promotion_payload.get("lane_accepted") is not None
         else lane_payload.get("accepted")
     )
-    accepted_lanes = (
+    accepted_lanes: Any = (
         lane_payload.get("accepted_lanes")
         or promotion_payload.get("accepted_lanes")
         or packet.get("accepted_lanes")
         or []
     )
-    if not isinstance(accepted_lanes, list):
-        accepted_lanes = []
+    accepted_lanes_list: List[Any] = accepted_lanes if _is_json_list(accepted_lanes) else []
     current_candle = _v3_mapping(
         packet.get("current_candle_acceptance")
         or council_payload.get("current_candle_acceptance")
@@ -4393,7 +4410,7 @@ def _v3_execution_lane_context(
         "selected_execution_lane": lane_name,
         "execution_lane": lane_payload,
         "lane_accepted": lane_accepted_raw if isinstance(lane_accepted_raw, bool) else None,
-        "accepted_lanes": [str(lane) for lane in accepted_lanes if str(lane or "").strip()],
+        "accepted_lanes": [str(lane) for lane in accepted_lanes_list if str(lane or "").strip()],
         "current_candle_acceptance": current_candle,
     }
 
@@ -4879,7 +4896,7 @@ def _v3_gate1_second_live_read(
         state["v3_second_live_read_confirmed"] = dict(identity)
         return True, "SECOND_READ_PASS"
     baseline = state.get("v3_second_live_read_baseline")
-    if not isinstance(baseline, Mapping):
+    if not _is_json_mapping(baseline):
         _v3_store_second_read_baseline(state, packet, timestamp, tracker_snapshot)
         return False, "WAITING_SECOND_LIVE_READ"
 
@@ -4928,7 +4945,7 @@ def _v3_packet_has_dual_side_execution(packet: Mapping[str, Any]) -> bool:
     sides: set[str] = set()
     for key in ("sides", "executable_sides", "final_sides"):
         raw_sides = execution.get(key) if key in execution else council.get(key)
-        if isinstance(raw_sides, Sequence) and not isinstance(raw_sides, (str, bytes, bytearray)):
+        if _is_non_string_sequence(raw_sides):
             for raw in raw_sides:
                 parsed = _normalize_trade_side(raw)
                 if parsed in {"BUY", "SELL"}:
@@ -4974,16 +4991,16 @@ def _v3_validate_time_sequence(packet: Mapping[str, Any]) -> Tuple[bool, str]:
         return False, "MODEL_COUNCIL_TIME_SEQUENCE_TARGET_MISMATCH"
 
     steps = time_sequence.get("steps")
-    if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes, bytearray)) or len(steps) == 0:
+    if not _is_non_string_sequence(steps) or len(steps) == 0:
         return False, "MODEL_COUNCIL_TIME_SEQUENCE_STEPS_MISSING"
 
     has_time_focus = False
     has_time_set = False
     has_time_confirm = False
     for raw_step in steps:
-        if not isinstance(raw_step, Mapping):
+        if not _is_json_mapping(raw_step):
             return False, "MODEL_COUNCIL_TIME_SEQUENCE_STEPS_INVALID"
-        step = cast(Mapping[str, Any], raw_step)
+        step = raw_step
         action = _v3_step_text(step.get("action"))
         field_text = _v3_step_text(
             step.get("field")
@@ -5067,7 +5084,7 @@ def _v3_gate3_model_council(packet: Mapping[str, Any]) -> Tuple[bool, str]:
         return False, f"MODEL_COUNCIL_PARTIAL_SEQUENCE_NOT_EXECUTABLE:{sequence_context.sequence_status}"
     if sequence_context.sequence_length < 50:
         return False, "MODEL_COUNCIL_SEQUENCE_LENGTH_BELOW_MINIMUM"
-    entry_allowed, entry_reason = _entry_location_allows_trade(cast(Dict[str, Any], dict(packet)), side)
+    entry_allowed, entry_reason = _entry_location_allows_trade(dict(packet), side)
     if not entry_allowed:
         return False, f"MODEL_COUNCIL_ENTRY_LOCATION_BLOCKED:{entry_reason}"
 
@@ -5081,7 +5098,7 @@ def _v3_gate3_model_council(packet: Mapping[str, Any]) -> Tuple[bool, str]:
 
 def _v3_box_has_point(boxes: Mapping[str, Any], key: str) -> bool:
     value = boxes.get(key)
-    if not isinstance(value, Mapping):
+    if not _is_json_mapping(value):
         return False
     return _coerce_finite_float(value.get("x")) is not None and _coerce_finite_float(value.get("y")) is not None
 
@@ -5093,7 +5110,7 @@ def _v3_box_has_any_point(boxes: Mapping[str, Any], *keys: str) -> bool:
 def _v3_calibration_layout_check(boxes: Mapping[str, Any]) -> Tuple[bool, str]:
     rel_points: Dict[str, Tuple[float, float]] = {}
     for key, value in boxes.items():
-        if key == "capabilities" or not isinstance(value, Mapping):
+        if key == "capabilities" or not _is_json_mapping(value):
             continue
         rel_x = _coerce_finite_float(value.get("x"))
         rel_y = _coerce_finite_float(value.get("y"))
@@ -5141,8 +5158,8 @@ def _v3_calibration_check(boxes: Mapping[str, Any], packet: Mapping[str, Any]) -
     execution = _v3_mapping(packet.get("execution"))
     time_sequence = _v3_mapping(execution.get("time_sequence"))
     steps = time_sequence.get("steps")
-    if isinstance(steps, Sequence) and not isinstance(steps, (str, bytes, bytearray)):
-        actions = {_v3_step_text(cast(Mapping[str, Any], step).get("action")) for step in steps if isinstance(step, Mapping)}
+    if _is_non_string_sequence(steps):
+        actions = {_v3_step_text(step.get("action")) for step in steps if _is_json_mapping(step)}
         if "type_time" in actions and not has_typed_time:
             return False, "CALIBRATION_MISSING_TIME_FIELD_INPUTS"
         if any(action.startswith("verify_time") for action in actions) and not (
@@ -5155,7 +5172,7 @@ def _v3_calibration_check(boxes: Mapping[str, Any], packet: Mapping[str, Any]) -
 def _v3_already_executed(state: Mapping[str, Any], packet: Mapping[str, Any]) -> bool:
     key = _v3_packet_execution_key(packet)
     executed = state.get("v3_executed_packet_keys")
-    if not isinstance(executed, Sequence) or isinstance(executed, (str, bytes, bytearray)):
+    if not _is_non_string_sequence(executed):
         return False
     return key in {str(item) for item in executed[-V3_EXECUTED_PACKET_LIMIT:]}
 
@@ -5163,7 +5180,7 @@ def _v3_already_executed(state: Mapping[str, Any], packet: Mapping[str, Any]) ->
 def _v3_record_execution(state: Dict[str, Any], packet: Mapping[str, Any], now: Optional[float] = None) -> Tuple[int, int]:
     timestamp = float(time.time() if now is None else now)
     executed = state.get("v3_executed_packet_keys")
-    if not isinstance(executed, list):
+    if not _is_json_list(executed):
         executed = []
     key = _v3_packet_execution_key(packet)
     if key not in {str(item) for item in executed[-V3_EXECUTED_PACKET_LIMIT:]}:
@@ -5192,7 +5209,7 @@ def _v3_record_execution(state: Dict[str, Any], packet: Mapping[str, Any], now: 
 
 def _v3_mark_packet_consumed(state: Dict[str, Any], packet: Mapping[str, Any]) -> None:
     executed = state.get("v3_executed_packet_keys")
-    if not isinstance(executed, list):
+    if not _is_json_list(executed):
         executed = []
     key = _v3_packet_execution_key(packet)
     if key not in {str(item) for item in executed[-V3_EXECUTED_PACKET_LIMIT:]}:
@@ -5572,7 +5589,7 @@ def _extract_model_council_packet(payload: Dict[str, Any], *, now: Optional[floa
         packet = dict(candidate)
         packet["_backend_confirmed_execution_packet"] = True
         packet["_backend_execution_packet_source"] = source
-        return cast(Dict[str, Any], packet)
+        return packet
 
     packet = current_execution_packet(payload, "root")
     if packet is not None:
@@ -5586,7 +5603,7 @@ def _extract_model_council_packet(payload: Dict[str, Any], *, now: Optional[floa
         "packet",
     ):
         nested = payload.get(key)
-        if isinstance(nested, dict):
+        if _is_json_mapping(nested):
             packet = current_execution_packet(nested, key)
             if packet is not None:
                 return packet
@@ -5613,7 +5630,7 @@ def _extract_model_council_packet(payload: Dict[str, Any], *, now: Optional[floa
     def scan_nested(value: Any, source: str, depth: int = 0) -> Optional[Dict[str, Any]]:
         if depth > 8:
             return None
-        if isinstance(value, Mapping):
+        if _is_json_mapping(value):
             marker = id(value)
             if marker in seen:
                 return None
@@ -5623,20 +5640,20 @@ def _extract_model_council_packet(payload: Dict[str, Any], *, now: Optional[floa
                 return packet_candidate
             for child_key in priority_keys:
                 child = value.get(child_key)
-                if isinstance(child, (Mapping, list)):
+                if _is_json_mapping(child) or _is_json_list(child):
                     packet_candidate = scan_nested(child, f"{source}.{child_key}", depth + 1)
                     if packet_candidate is not None:
                         return packet_candidate
             for child_key, child in value.items():
                 if child_key in priority_keys:
                     continue
-                if isinstance(child, (Mapping, list)):
+                if _is_json_mapping(child) or _is_json_list(child):
                     packet_candidate = scan_nested(child, f"{source}.{child_key}", depth + 1)
                     if packet_candidate is not None:
                         return packet_candidate
-        elif isinstance(value, list):
+        elif _is_json_list(value):
             for idx, child in enumerate(value[:32]):
-                if isinstance(child, (Mapping, list)):
+                if _is_json_mapping(child) or _is_json_list(child):
                     packet_candidate = scan_nested(child, f"{source}[{idx}]", depth + 1)
                     if packet_candidate is not None:
                         return packet_candidate
@@ -5864,26 +5881,26 @@ def _extract_model_council_study_packet(payload: Dict[str, Any]) -> Optional[Dic
         "latest_study_packet",
     ):
         nested = payload.get(key)
-        if isinstance(nested, dict):
+        if _is_json_dict(nested):
             packet_type = str(nested.get("packet_type") or "").strip().upper()
             schema_version = str(nested.get("schema_version") or "").strip()
             if packet_type == "STUDY_PACKET" or schema_version == PG_MODEL_COUNCIL_STUDY_SCHEMA_V3:
-                return cast(Dict[str, Any], nested)
+                return nested
     result = payload.get("model_council_result")
-    if isinstance(result, dict):
-        packet = _extract_model_council_study_packet(cast(Dict[str, Any], result))
-        if isinstance(packet, dict):
+    if _is_json_dict(result):
+        packet = _extract_model_council_study_packet(result)
+        if _is_json_dict(packet):
             return packet
     synthesized = _synthesize_model_council_study_packet(payload)
     if isinstance(synthesized, dict):
         return synthesized
-    if isinstance(result, dict):
-        synthesized = _synthesize_model_council_study_packet(cast(Dict[str, Any], result))
-        if isinstance(synthesized, dict):
+    if _is_json_dict(result):
+        synthesized = _synthesize_model_council_study_packet(result)
+        if _is_json_dict(synthesized):
             return synthesized
     latest_signal = payload.get("latest_signal")
-    if isinstance(latest_signal, dict):
-        return _extract_model_council_study_packet(cast(Dict[str, Any], latest_signal))
+    if _is_json_dict(latest_signal):
+        return _extract_model_council_study_packet(latest_signal)
     return None
 
 
@@ -6035,7 +6052,7 @@ def _write_shooter_handshake(
             action_packet_id = str(candidate_report.get("packet_id") or "").strip()
             if packet_type == "PG_EXECUTION_PACKET_V3" and action_packet_id and action_packet_id == current_packet_id:
                 action_sequence_report = candidate_report
-        handshake = {
+        handshake: Dict[str, Any] = {
             "session_id": str(session_id or "").strip(),
             "base_url": str(base_url or "").strip(),
             "timestamp_epoch": time.time(),
@@ -6482,18 +6499,18 @@ def _entry_location_current_flow_continuation_ready(
         return False
 
     timing_profile_any = payload.get("execution_timing")
-    if isinstance(timing_profile_any, Mapping) and _timing_profile_current_flow_ready(timing_profile_any, side):
+    if _is_json_mapping(timing_profile_any) and _timing_profile_current_flow_ready(timing_profile_any, side):
         return True
     tracking_timing_any = tracking_summary.get("execution_timing")
-    if isinstance(tracking_timing_any, Mapping) and _timing_profile_current_flow_ready(tracking_timing_any, side):
+    if _is_json_mapping(tracking_timing_any) and _timing_profile_current_flow_ready(tracking_timing_any, side):
         return True
 
     kernel_any = payload.get("decision_kernel")
-    if not isinstance(kernel_any, Mapping):
+    if not _is_json_mapping(kernel_any):
         kernel_any = tracking_summary.get("decision_kernel")
-    if not isinstance(kernel_any, Mapping):
+    if not _is_json_mapping(kernel_any):
         return False
-    kernel = cast(Mapping[str, Any], kernel_any)
+    kernel = kernel_any
 
     if str(kernel.get("trade_mode", "") or "").strip().upper() != "TREND_FOLLOW":
         return False
@@ -6608,26 +6625,26 @@ def _entry_location_allows_trade(payload: Dict[str, Any], side: str) -> Tuple[bo
         return False, "unsupported side"
 
     tracking_summary = payload.get("tracking_summary")
-    if not isinstance(tracking_summary, dict):
+    if not _is_json_dict(tracking_summary):
         execution_payload = payload.get("execution")
-        if isinstance(execution_payload, Mapping):
+        if _is_json_mapping(execution_payload):
             tracking_summary = execution_payload.get("tracking_summary")
-    if not isinstance(tracking_summary, dict):
+    if not _is_json_dict(tracking_summary):
         council_payload = payload.get("model_council")
-        if isinstance(council_payload, Mapping):
+        if _is_json_mapping(council_payload):
             tracking_summary = council_payload.get("tracking_summary")
-    if not isinstance(tracking_summary, dict):
+    if not _is_json_dict(tracking_summary):
         return True, "no tracking summary available"
 
-    tracking_dict = cast(Dict[str, Any], tracking_summary)
+    tracking_dict = tracking_summary
     behavior = tracking_dict.get("behavior")
     latest_token: Dict[str, Any] = {}
-    if isinstance(behavior, dict):
+    if _is_json_mapping(behavior):
         token_rows = behavior.get("candle_tokens")
-        if isinstance(token_rows, list) and token_rows:
+        if _is_json_list(token_rows) and token_rows:
             last_token = token_rows[-1]
-            if isinstance(last_token, dict):
-                latest_token = cast(Dict[str, Any], last_token)
+            if _is_json_dict(last_token):
+                latest_token = last_token
 
     close_position = _coerce_nonnegative_seconds(latest_token.get("close_position"))
     if close_position is None:
@@ -7260,7 +7277,7 @@ def _choose_adaptive_expiry(payload: Dict[str, Any], requested_expiry: int, args
     # Finalize and log diagnostics (sanitized sample)
     chosen = clamp_and_round(int(candidate_seconds or DEFAULT_EXPIRY_FALLBACK_SECONDS))
     try:
-        sample_payload = {
+        sample_payload: Dict[str, Any] = {
             "signal_id": payload.get("signal_id") or payload.get("id") or None,
             "expiry_notation": payload.get("expiry_notation") or payload.get("candle_notation") or payload.get("notation"),
             "focus_timeframe": timeframe,
@@ -7887,18 +7904,14 @@ def _fetch_live_startup_prime_expiry(base_url: str, session_id: str, *, fallback
     def read_json(path: str) -> Optional[Dict[str, Any]]:
         try:
             with urllib.request.urlopen(f"{base}{path}", timeout=1.0) as response:
-                payload = json.loads(response.read().decode("utf-8", errors="replace"))
-            return payload if isinstance(payload, dict) else None
+                payload: Any = json.loads(response.read().decode("utf-8", errors="replace"))
+            return payload if _is_json_dict(payload) else None
         except Exception:
             return None
 
     def candidates(payload: Mapping[str, Any]) -> List[Any]:
-        broker_execution = payload.get("broker_execution_state")
-        execution_controls = payload.get("execution_controls")
-        if not isinstance(broker_execution, Mapping):
-            broker_execution = {}
-        if not isinstance(execution_controls, Mapping):
-            execution_controls = {}
+        broker_execution = _as_mapping_dict(payload.get("broker_execution_state"))
+        execution_controls = _as_mapping_dict(payload.get("execution_controls"))
         return [
             execution_controls.get("high_frequency_expiry_seconds"),
             broker_execution.get("expiry_seconds"),
@@ -8129,6 +8142,11 @@ def run_signal_loop(args: argparse.Namespace) -> int:
     PG_EXECUTION_PACKET_V3 packet while broker clicks remain disabled by default.
     """
     global automatic_trigger_enabled
+    arg_values: Dict[str, Any] = vars(args)
+    base_url = str(arg_values.get("base_url", DEFAULT_BASE_URL) or DEFAULT_BASE_URL)
+    session_id = str(arg_values.get("session_id", "") or "").strip()
+    poll_seconds = float(arg_values.get("poll", DEFAULT_SIGNAL_POLL_SECONDS) or DEFAULT_SIGNAL_POLL_SECONDS)
+    max_signal_age_limit = float(arg_values.get("max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS) or DEFAULT_MAX_SIGNAL_AGE_SECONDS)
     shooter_mode = shooter_modes.resolve_shooter_mode(getattr(args, "shooter_mode", None))
     if shooter_mode.value == "LIVE_DISABLED":
         try:
@@ -8144,13 +8162,14 @@ def run_signal_loop(args: argparse.Namespace) -> int:
             )
         except ValueError:
             disabled_poll_floor = DEFAULT_LIVE_DISABLED_SIGNAL_POLL_SECONDS
-        if float(getattr(args, "poll", DEFAULT_SIGNAL_POLL_SECONDS) or DEFAULT_SIGNAL_POLL_SECONDS) < disabled_poll_floor:
+        if poll_seconds < disabled_poll_floor:
             LOGGER.info(
                 "LIVE_DISABLED poll floor applied: %.3fs -> %.3fs to protect tracker/API display latency.",
-                float(getattr(args, "poll", DEFAULT_SIGNAL_POLL_SECONDS) or DEFAULT_SIGNAL_POLL_SECONDS),
+                poll_seconds,
                 disabled_poll_floor,
             )
             args.poll = disabled_poll_floor
+            poll_seconds = disabled_poll_floor
     preferred_window_hwnd = int(getattr(args, "window_hwnd", 0) or 0) or None
 
     try:
@@ -8169,12 +8188,13 @@ def run_signal_loop(args: argparse.Namespace) -> int:
         broker_url=str(getattr(args, "broker_url", DEFAULT_BROKER_URL)),
         allow_active_fallback=False,
     )
-    resolved_base_url = _resolve_reachable_base_url(args.base_url, args.session_id, timeout=1.0)
-    if resolved_base_url.rstrip("/") != args.base_url.rstrip("/"):
-        LOGGER.warning("Signal API base URL auto-corrected: %s -> %s", args.base_url, resolved_base_url)
+    resolved_base_url = _resolve_reachable_base_url(base_url, session_id, timeout=1.0)
+    if resolved_base_url.rstrip("/") != base_url.rstrip("/"):
+        LOGGER.warning("Signal API base URL auto-corrected: %s -> %s", base_url, resolved_base_url)
         args.base_url = resolved_base_url
+        base_url = resolved_base_url
     else:
-        LOGGER.info("Signal API base URL: %s", args.base_url)
+        LOGGER.info("Signal API base URL: %s", base_url)
 
     boxes = load_boxes()
     preview_shown = False
@@ -8209,7 +8229,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
     execution_endpoint_listener_enabled = _shooter_execution_endpoint_listener_enabled()
     study_endpoint_probes_enabled = _shooter_study_endpoint_probes_enabled()
 
-    status_box = FloatingStatusBox(args.session_id, args.base_url)
+    status_box = FloatingStatusBox(session_id, base_url)
     status_box.start()
 
     LOGGER.info(
@@ -8234,7 +8254,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
         _run_startup_test_entry(
             args,
             hwnd=hwnd,
-            boxes=cast(Dict[str, Dict[str, Any]], dict(boxes)),
+            boxes=boxes,
             shooter_mode=shooter_mode,
             state=state,
         )
@@ -8244,7 +8264,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
         _prime_live_ready_expiry_cache(
             args,
             hwnd=hwnd,
-            boxes=cast(Dict[str, Dict[str, Any]], dict(boxes)),
+            boxes=boxes,
             shooter_mode=shooter_mode,
         )
 
@@ -8255,7 +8275,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                 tracker_fetch_latency = None
                 if last_tracker_snapshot is None or (now - last_tracker_fetch_ts) >= DEFAULT_TRACKER_SESSION_FETCH_INTERVAL_SECONDS:
                     tracker_fetch_started = time.time()
-                    refreshed_tracker_snapshot = fetch_tracker_session_snapshot(args.base_url, args.session_id)
+                    refreshed_tracker_snapshot = fetch_tracker_session_snapshot(base_url, session_id)
                     if refreshed_tracker_snapshot is not None:
                         last_tracker_snapshot = refreshed_tracker_snapshot
                     tracker_fetch_latency = max(0.0, time.time() - tracker_fetch_started)
@@ -8263,11 +8283,11 @@ def run_signal_loop(args: argparse.Namespace) -> int:
 
                 tracker_snapshot = last_tracker_snapshot
                 fetch_started = time.time()
-                max_signal_age_seconds = float(getattr(args, "max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS))
+                max_signal_age_seconds = max_signal_age_limit
                 payload = _extract_model_council_packet(tracker_snapshot, now=now) if isinstance(tracker_snapshot, dict) else None
                 study_payload: Optional[Dict[str, Any]] = None
-                if isinstance(payload, dict) and payload:
-                    leased_execution_packet = dict(payload)
+                if _is_json_dict(payload) and payload:
+                    leased_execution_packet = payload.copy()
                 if not isinstance(payload, dict) or not payload:
                     if isinstance(tracker_snapshot, dict):
                         study_payload = _current_or_synthesized_model_council_study_packet(
@@ -8286,42 +8306,43 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                     ):
                         last_execution_packet_fetch_ts = now
                         endpoint_payload = fetch_latest_model_council_packet(
-                            args.base_url,
-                            args.session_id,
+                            base_url,
+                            session_id,
                             timeout=DEFAULT_ENDPOINT_PACKET_FETCH_TIMEOUT_SECONDS,
                         )
-                        if isinstance(endpoint_payload, dict) and endpoint_payload:
+                        if _is_json_dict(endpoint_payload) and endpoint_payload:
                             endpoint_ok, endpoint_reason = _v3_runtime_integrity_check(
                                 endpoint_payload,
-                                expected_session_id=args.session_id,
+                                expected_session_id=session_id,
                                 now=time.time(),
                                 max_packet_age_seconds=max_signal_age_seconds,
                             )
                             if endpoint_ok:
                                 payload = endpoint_payload
                                 study_payload = None
-                                leased_execution_packet = dict(endpoint_payload)
+                                leased_execution_packet = endpoint_payload.copy()
                             else:
                                 LOGGER.debug(
                                     "Discarding endpoint V3 execution packet: packet_id=%s reason=%s",
                                     _v3_packet_id(endpoint_payload),
                                     endpoint_reason,
                                 )
-                    if not isinstance(payload, dict) and isinstance(leased_execution_packet, dict):
+                    if not _is_json_dict(payload) and leased_execution_packet is not None:
+                        leased_packet = cast(Dict[str, Any], leased_execution_packet)
                         lease_ok, lease_reason = _v3_runtime_integrity_check(
-                            leased_execution_packet,
-                            expected_session_id=args.session_id,
+                            leased_packet,
+                            expected_session_id=session_id,
                             now=time.time(),
                             max_packet_age_seconds=max_signal_age_seconds,
                         )
                         if lease_ok:
-                            payload = dict(leased_execution_packet)
+                            payload = leased_packet.copy()
                             payload["_leased_execution_packet"] = True
                             study_payload = None
                         else:
                             LOGGER.debug(
                                 "Dropping leased V3 execution packet: packet_id=%s reason=%s",
-                                _v3_packet_id(leased_execution_packet),
+                                _v3_packet_id(leased_packet),
                                 lease_reason,
                             )
                             leased_execution_packet = None
@@ -8341,8 +8362,8 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                     ):
                         last_study_packet_fetch_ts = now
                         study_payload = fetch_latest_model_council_study_packet(
-                            args.base_url,
-                            args.session_id,
+                            base_url,
+                            session_id,
                             timeout=DEFAULT_STUDY_ENDPOINT_PACKET_FETCH_TIMEOUT_SECONDS,
                             max_packet_age_seconds=max_signal_age_seconds,
                         )
@@ -8367,8 +8388,8 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                     decision["model_council_wait"] = wait_summary
                     _v3_log_final_decision(decision)
                     _write_shooter_handshake(
-                        session_id=args.session_id,
-                        base_url=args.base_url,
+                        session_id=session_id,
+                        base_url=base_url,
                         decision=decision,
                         packet=study_payload if isinstance(study_payload, dict) else None,
                         tracker_snapshot=tracker_snapshot if isinstance(tracker_snapshot, dict) else None,
@@ -8378,7 +8399,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                     if now - last_waiting_log_ts >= 2.0:
                         LOGGER.info("waiting for PhoenixGuard V3 executable packet: %s", wait_summary)
                         last_waiting_log_ts = now
-                    time.sleep(float(args.poll))
+                    time.sleep(poll_seconds)
                     continue
 
                 decision = _evaluate_v3_shooter_decision(
@@ -8386,9 +8407,9 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                     state,
                     boxes,
                     tracker_snapshot=tracker_snapshot if isinstance(tracker_snapshot, dict) else None,
-                    expected_session_id=args.session_id,
+                    expected_session_id=session_id,
                     now=now,
-                    max_packet_age_seconds=float(getattr(args, "max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS)),
+                    max_packet_age_seconds=max_signal_age_limit,
                 )
                 if bool(decision.get("will_click")):
                     with automatic_trigger_lock:
@@ -8440,16 +8461,16 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                             pre_click_packet = payload
                         if not isinstance(pre_click_packet, dict) and execution_endpoint_listener_enabled:
                             pre_click_packet = fetch_latest_model_council_packet(
-                                args.base_url,
-                                args.session_id,
+                                base_url,
+                                session_id,
                                 timeout=DEFAULT_PRE_CLICK_CONFIRMATION_TIMEOUT_SECONDS,
                             )
                         pre_click_ok, pre_click_reason = _v3_pre_click_confirmation(
                             payload,
                             pre_click_packet,
-                            expected_session_id=args.session_id,
+                            expected_session_id=session_id,
                             now=time.time(),
-                            max_packet_age_seconds=float(getattr(args, "max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS)),
+                            max_packet_age_seconds=max_signal_age_limit,
                         )
                         if not pre_click_ok:
                             decision["will_click"] = False
@@ -8458,8 +8479,8 @@ def run_signal_loop(args: argparse.Namespace) -> int:
 
                 _v3_log_final_decision(decision)
                 _write_shooter_handshake(
-                    session_id=args.session_id,
-                    base_url=args.base_url,
+                    session_id=session_id,
+                    base_url=base_url,
                     decision=decision,
                     packet=payload,
                     tracker_snapshot=tracker_snapshot if isinstance(tracker_snapshot, dict) else None,
@@ -8487,7 +8508,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                             decision.get("calibration"),
                         )
                         last_waiting_log_ts = now
-                    time.sleep(float(args.poll))
+                    time.sleep(poll_seconds)
                     continue
 
                 LOGGER.info("V3 READY: %s", decision.get("reason"))
@@ -8512,7 +8533,7 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                             "expiry_seconds": decision.get("expiry_seconds"),
                         }
                     )
-                    time.sleep(float(args.poll))
+                    time.sleep(poll_seconds)
                     continue
                 status_box.update_action(
                     {
@@ -8536,8 +8557,8 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                         "broker_timing_profile_path": str(getattr(args, "broker_speed_profile", "") or DEFAULT_BROKER_TIMING_PROFILE_FILE),
                         "action_speed": str(getattr(args, "action_speed", "balanced") or "balanced"),
                         "record_action_evidence": bool(getattr(args, "record_action_evidence", False)),
-                        "session_id": str(args.session_id),
-                        "max_packet_age_seconds": float(getattr(args, "max_signal_age", DEFAULT_MAX_SIGNAL_AGE_SECONDS)),
+                        "session_id": session_id,
+                        "max_packet_age_seconds": max_signal_age_limit,
                         "time_button_wait_override_ms": (
                             max(1, int(float(getattr(args, "calibration_test_time_fill_wait", 0) or 0) * 1000))
                             if float(getattr(args, "calibration_test_time_fill_wait", 0) or 0) > 0
@@ -8566,13 +8587,13 @@ def run_signal_loop(args: argparse.Namespace) -> int:
                     log_decision(payload, "reject_validation_mode_failed", mode_result.reason, 0.0)
                     LOGGER.error("%s failed after V3 shooter gates passed: %s", shooter_mode.value, mode_result.reason)
 
-                time.sleep(float(args.poll))
+                time.sleep(poll_seconds)
             except KeyboardInterrupt:
                 LOGGER.info("Signal loop interrupted by user")
                 break
             except Exception as exc:
                 LOGGER.error("Unexpected error in V3 signal loop: %s", exc)
-                time.sleep(float(args.poll))
+                time.sleep(poll_seconds)
     finally:
         status_box.stop()
 

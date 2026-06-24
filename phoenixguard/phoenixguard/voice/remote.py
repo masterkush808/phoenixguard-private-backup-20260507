@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -65,7 +65,9 @@ class WindowTrackerRemoteClient:
             parsed = json.loads(raw)
         except Exception as exc:
             raise VoiceRemoteClientError("Tracker API returned invalid JSON.") from exc
-        return dict(parsed) if isinstance(parsed, dict) else {"payload": parsed}
+        if isinstance(parsed, Mapping):
+            return {str(key): value for key, value in cast(Mapping[Any, Any], parsed).items()}
+        return {"payload": parsed}
 
     def health(self) -> dict[str, Any]:
         return self._request("/v1/mobile/health")

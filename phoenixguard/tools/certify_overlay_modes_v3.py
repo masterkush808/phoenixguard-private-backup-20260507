@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -63,11 +63,11 @@ COUNCIL_MARKER_TYPES: set[str] = {
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _sequence(value: Any) -> list[Any]:
-    return list(value) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else []
+    return list(cast(Sequence[Any], value)) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else []
 
 
 def _bool(value: Any, default: bool = False) -> bool:
@@ -127,10 +127,11 @@ def _validate_payload(requested_mode: str, payload: Mapping[str, Any]) -> list[s
         failures.append(f"{requested_mode}: overlay_count={overlay_count} < renderable_count={renderable_count}")
     if broker_source and not _bool(broker_source.get("valid"), True) and renderable_count > 0:
         failures.append(f"{requested_mode}: invalid broker_source rendered {renderable_count} overlays")
+    typed_overlay_rows = [_mapping(row) for row in overlay_objects if isinstance(row, Mapping)]
     visible_label_rows = [
         row
-        for row in overlay_objects
-        if isinstance(row, Mapping) and row.get("label_hidden") is not True and str(row.get("label_hidden") or "").lower() != "true"
+        for row in typed_overlay_rows
+        if row.get("label_hidden") is not True and str(row.get("label_hidden") or "").lower() != "true"
     ]
     visible_labels = [str(row.get("display_label") or row.get("label") or "").strip() for row in visible_label_rows]
     raw_visible_labels = [str(row.get("label") or "").strip() for row in visible_label_rows]
@@ -143,8 +144,8 @@ def _validate_payload(requested_mode: str, payload: Mapping[str, Any]) -> list[s
     if expected_active not in DIAGNOSTIC_VIEW_MODES:
         leaked_diag = [
             str(row.get("type") or "")
-            for row in overlay_objects
-            if isinstance(row, Mapping) and str(row.get("type") or "") in DIAGNOSTIC_OVERLAY_TYPES
+            for row in typed_overlay_rows
+            if str(row.get("type") or "") in DIAGNOSTIC_OVERLAY_TYPES
         ]
         if leaked_diag:
             failures.append(f"{requested_mode}: diagnostics overlay leaked into live mode={sorted(set(leaked_diag))}")
@@ -158,8 +159,8 @@ def _validate_payload(requested_mode: str, payload: Mapping[str, Any]) -> list[s
     if expected_active == "COUNCIL":
         spam_types = [
             str(row.get("type") or "")
-            for row in overlay_objects
-            if isinstance(row, Mapping) and str(row.get("type") or "") not in COUNCIL_MARKER_TYPES
+            for row in typed_overlay_rows
+            if str(row.get("type") or "") not in COUNCIL_MARKER_TYPES
         ]
         if spam_types:
             failures.append(f"{requested_mode}: council mode rendered box spam={sorted(set(spam_types))}")
@@ -186,7 +187,7 @@ def main() -> int:
     for mode in modes:
         response = http_json(f"{base}/v1/mobile/live/state/v3/{session_q}?mode={quote_session(mode)}&compact=1", timeout=args.timeout)
         payload = _mapping(response.payload)
-        sample = {
+        sample: dict[str, Any] = {
             "mode": mode,
             "ok": response.ok,
             "status": response.status,

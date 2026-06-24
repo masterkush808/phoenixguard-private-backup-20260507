@@ -162,7 +162,7 @@ class SkillGatedMoE(nn.Module):
     def route_weights(self, feat: NDArray[np.float32]) -> NDArray[np.float32]:
         x = _torch_tensor(feat, dtype=torch.float32).unsqueeze(0)
         with torch.inference_mode():
-            routed = cast(Any, _torch_softmax(self.router(x), dim=-1)).squeeze(0)
+            routed = _torch_softmax(self.router(x), dim=-1).squeeze(0)
             to_numpy = cast(Callable[[], Any], getattr(routed, "numpy"))
         return np.asarray(to_numpy(), dtype=np.float32)
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -16,7 +16,7 @@ from certification_common_v3 import (
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _text(value: Any) -> str:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
+from typing import Any, cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -20,6 +22,10 @@ from certification_common_v3 import (
     tcp_listeners,
     write_report,
 )
+
+
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def main() -> int:
@@ -73,9 +79,9 @@ def main() -> int:
     session = http_json(f"{args.base_url.rstrip('/')}/v1/mobile/window-tracker/sessions/{quote_session(args.session)}", timeout=15.0)
     live = http_json(f"{args.base_url.rstrip('/')}/v1/mobile/live/state/v3/{quote_session(args.session)}", timeout=15.0)
     expected_data = normalize_path_text(args.data_dir)
-    artifact_paths = []
-    for payload in (session.payload if isinstance(session.payload, dict) else {}, live.payload if isinstance(live.payload, dict) else {}):
-        for key, value in payload.items():
+    artifact_paths: list[str] = []
+    for payload in (_mapping(session.payload), _mapping(live.payload)):
+        for value in payload.values():
             if isinstance(value, str) and (".codex_runtime" in value or "data_live" in value):
                 artifact_paths.append(value)
     data_dir_ok = any(expected_data in normalize_path_text(path) for path in artifact_paths)

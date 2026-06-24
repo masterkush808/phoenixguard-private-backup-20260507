@@ -1,3 +1,4 @@
+from typing import Any
 from pathlib import Path
 from fastapi.testclient import TestClient
 import os
@@ -11,8 +12,8 @@ client = TestClient(create_app())
 def test_chart_transform_is_exposed(tmp_path: Path):
     session = "test-chart-transform-session"
     # sample overlay and transform
-    o = {"id": "ct_o1", "bbox": [0.1, 0.1, 0.2, 0.2], "confidence": 0.77}
-    chart_transform = {
+    o: dict[str, Any] = {"id": "ct_o1", "bbox": [0.1, 0.1, 0.2, 0.2], "confidence": 0.77}
+    chart_transform: dict[str, Any] = {
         "chart_image_bounds": [0, 0, 800, 600],
         "scale": 1.0,
         "origin": [0, 0]

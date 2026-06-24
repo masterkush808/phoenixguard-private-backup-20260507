@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Mapping, cast
 
 
 def _default_common_files_dir() -> Path:
@@ -28,9 +28,9 @@ def _read_json_file(path: Path) -> tuple[dict[str, Any] | None, str]:
         value = json.loads(raw.strip())
     except json.JSONDecodeError as exc:
         return None, f"json_error:{exc}"
-    if not isinstance(value, dict):
+    if not isinstance(value, Mapping):
         return None, "json_error:not_object"
-    return value, ""
+    return dict(cast(Mapping[str, Any], value)), ""
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
@@ -128,7 +128,7 @@ def main() -> int:
             stale_count += 1
         samples += 1
 
-        record = {
+        record: dict[str, Any] = {
             "at_epoch": now,
             "at_utc": _utc_now(),
             "sample": samples,

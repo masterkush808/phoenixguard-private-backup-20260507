@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import time
+from typing import Mapping, cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -90,7 +91,8 @@ def main() -> int:
                 connection_resets += 1
             if "timeout" in error.lower() or result.latency_ms > args.timeout * 1000.0:
                 timeouts += 1
-            row = {"method": method, "url": url, **result.as_dict()}
+            result_fields = dict(cast(Mapping[str, object], result.as_dict()))
+            row: dict[str, object] = {"method": method, "url": url, **result_fields}
             samples.append(row)
             if not result.ok:
                 failures.append(f"{method} {url} failed: {result.error or result.status}")

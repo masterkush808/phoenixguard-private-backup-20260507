@@ -6,7 +6,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence, cast
 
 
 def _get_json(base_url: str, path: str, timeout: float) -> dict[str, Any]:
@@ -14,16 +14,16 @@ def _get_json(base_url: str, path: str, timeout: float) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - local operator tool
         payload = response.read().decode("utf-8", errors="replace")
-    data = json.loads(payload)
-    return dict(data) if isinstance(data, Mapping) else {"value": data}
+    data: object = json.loads(payload)
+    return dict(cast(Mapping[str, Any], data)) if isinstance(data, Mapping) else {"value": data}
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _sequence(value: Any) -> list[Any]:
-    return list(value) if isinstance(value, list) else []
+    return list(cast(Sequence[Any], value)) if isinstance(value, list) else []
 
 
 def _text(value: Any, fallback: str = "") -> str:

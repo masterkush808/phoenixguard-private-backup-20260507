@@ -88,7 +88,7 @@ class _FakePipelineAdapter:
                     "overlay_asset_path": str(overlay_path),
                 }
             )
-        result = {
+        result: dict[str, Any] = {
             "action": "SELL",
             "headline_action": "SELL",
             "active_trade_state": "SELL_TRUE",

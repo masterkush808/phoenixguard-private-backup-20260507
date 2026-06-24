@@ -325,7 +325,7 @@ def test_old_schema_packet_rejected() -> None:
 
 
 def test_raw_signal_not_executable_packet() -> None:
-    raw_signal = {
+    raw_signal: dict[str, Any] = {
         "signal_id": "legacy-001",
         "actionable": True,
         "execution_action": "BUY",

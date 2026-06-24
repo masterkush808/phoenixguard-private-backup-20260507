@@ -184,7 +184,7 @@ def export_scenarios_json(
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    payload: dict[str, Any] = {
         "version": SYNTHETIC_SCENARIO_VERSION,
         "scenario_count": len(scenario_list),
         "offline_only": True,

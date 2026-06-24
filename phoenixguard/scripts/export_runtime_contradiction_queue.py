@@ -225,9 +225,7 @@ def export_runtime_contradiction_queue(
 
         def _default_infer(path: Path) -> Mapping[str, Any]:
             result, *_ = main.run_inference(str(path), side_effect_free=side_effect_free)
-            if not isinstance(result, Mapping):
-                raise TypeError(f"run_inference returned {type(result)!r}, expected mapping")
-            return cast(Mapping[str, Any], result)
+            return result
 
         infer_fn = _default_infer
 

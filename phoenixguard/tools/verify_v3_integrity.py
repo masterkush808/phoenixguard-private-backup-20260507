@@ -65,7 +65,7 @@ def mapping(value: object) -> dict[str, Any]:
 
 def sequence(value: object) -> list[object]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return list(value)
+        return list(cast(Sequence[object], value))
     return []
 
 

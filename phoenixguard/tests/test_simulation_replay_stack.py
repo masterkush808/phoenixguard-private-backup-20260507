@@ -112,7 +112,7 @@ def test_replay_session_integrates_record_executable_paper_executor(tmp_path: Pa
 
 
 def test_decision_replay_records_votes_and_correctness() -> None:
-    snapshot = {
+    snapshot: dict[str, Any] = {
         "frame_id": 7,
         "expected": {"execution_state": "WATCHING"},
         "market_context": {"dominant_side": "BUY", "global_side": "BUY", "local_side": "BUY", "opposing_force_distance_ok": True},

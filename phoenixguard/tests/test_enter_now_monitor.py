@@ -1,11 +1,12 @@
 from __future__ import annotations
+from typing import Any
 
 from phoenixguard.execution.enter_now_monitor import extract_enter_now_packages, format_enter_now_notification
 
 
 def test_extracts_blocked_enter_now_study_packet() -> None:
     now = 1_800.0
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "broker_execution_state": {
             "status": "blocked_by_runtime",
@@ -42,7 +43,7 @@ def test_extracts_blocked_enter_now_study_packet() -> None:
 
 def test_extracts_runtime_blocked_execution_packet() -> None:
     now = 2_000.0
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "latest_signal": {
             "broker_execution_state": {"status": "blocked_by_runtime", "message": "Shooter mode LIVE_DISABLED."},
@@ -71,7 +72,7 @@ def test_extracts_runtime_blocked_execution_packet() -> None:
 
 def test_ignores_non_enter_now_packet_and_stale_package_when_requested() -> None:
     now = 3_000.0
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "model_council_study_packet": {
             "packet_id": "wait-packet",
@@ -98,7 +99,7 @@ def test_ignores_non_enter_now_packet_and_stale_package_when_requested() -> None
 
 def test_deduplicates_same_packet_published_in_multiple_session_fields() -> None:
     now = 4_000.0
-    packet = {
+    packet: dict[str, Any] = {
         "packet_id": "same-enter-now",
         "packet_type": "PG_EXECUTION_PACKET_V3",
         "created_epoch_sec": now,
@@ -106,7 +107,7 @@ def test_deduplicates_same_packet_published_in_multiple_session_fields() -> None
         "execution": {"enabled": True, "side": "BUY"},
         "timing_decision": {"timing_mode": "ENTER_NOW", "entry_now_allowed": True},
     }
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "model_council_packet": packet,
         "latest_signal": {"execution_packet": dict(packet)},

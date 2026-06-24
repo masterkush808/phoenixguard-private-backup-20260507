@@ -91,7 +91,7 @@ def _combined_boxes(**overrides: Mapping[str, float]) -> dict[str, dict[str, flo
 
 def _packet(side: str = "BUY", expiry: int = 300) -> dict[str, Any]:
     now = time.time()
-    sequence_context = {
+    sequence_context: dict[str, Any] = {
         "sequence_id": "seq-exec-test",
         "session_id": "pocket-live-8788",
         "sequence_index": 1,
@@ -386,7 +386,7 @@ def test_split_time_input_must_live_in_opened_time_panel(tmp_path: Path) -> None
 
 def test_time_input_and_time_button_can_share_middle_box_point(tmp_path: Path) -> None:
     boxes = _combined_boxes(time_button={"x": 0.82, "y": 0.20}, time_input={"x": 0.82, "y": 0.20})
-    sequencer, adapter = _sequencer(tmp_path, boxes=boxes)
+    sequencer, _adapter = _sequencer(tmp_path, boxes=boxes)
     result = sequencer.execute(_packet("BUY", 300))
 
     assert result.overall == "PASS"
@@ -606,7 +606,7 @@ def test_exact_preset_fallback_when_typed_controls_missing(tmp_path: Path) -> No
 
 
 def test_manifest_authoritative_boxes_use_combined_time_without_legacy_split_targets(tmp_path: Path) -> None:
-    boxes = {
+    boxes: dict[str, Any] = {
         "broker_screen": {"x": 0.75, "y": 0.29, "calibration_source": "user_calibration_manifest"},
         "time_button": {"x": 0.89, "y": 0.26, "calibration_source": "user_calibration_manifest"},
         "time_input": {"x": 0.89, "y": 0.26, "calibration_source": "user_calibration_manifest"},

@@ -2187,7 +2187,7 @@ def create_app(
         refreshed["performance_trace_v3"] = performance_trace
         refreshed["visual_health_v3"] = performance_trace.get("visual_health", refreshed.get("visual_health_v3"))
         refreshed["frontend_heartbeat"] = dict(frontend_heartbeat or {})
-        provider = {
+        provider: dict[str, object] = {
             **_mapping_to_plain_dict(refreshed.get("provider_status")),
             "compact_cache_reused_v3": True,
             "compact_cache_refreshed_epoch": now_epoch,
@@ -2337,7 +2337,7 @@ def create_app(
                         cached_age = now_epoch - cached[0]
                         if cached_age <= _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC:
                             compact_cached = dict(cached[1])
-                            provider = {
+                            provider: dict[str, object] = {
                                 **_mapping_to_plain_dict(compact_cached.get("provider_status")),
                                 "compact_cache_hot_reused_v3": True,
                                 "compact_cache_hot_age_ms": round(max(0.0, cached_age) * 1000.0, 3),
@@ -2439,7 +2439,7 @@ def create_app(
             frontend_heartbeat=frontend_heartbeat,
             now_epoch=now_epoch,
         )
-        live_state = {
+        live_state: dict[str, object] = {
             "session_id": requested_session_id,
             "frame_id": int(_epoch_float(session.get("display_frame_id") or session.get("frame_index") or session.get("capture_count") or 0, 0.0)),
             "state_version": int(_epoch_float(session.get("state_version") or 0, 0.0)),
@@ -2934,29 +2934,29 @@ def create_app(
                 "frontend_heartbeat": frontend_payload,
             }
 
-        model_council_latest = collect(
+        model_council_latest: dict[str, object] = collect(
             "model_council_latest",
             _model_council_state_from_trace_tracker,
         )
-        study_latest = collect(
+        study_latest: dict[str, object] = collect(
             "study_latest",
             _study_packet_from_trace_tracker,
         )
-        execution_latest = collect(
+        execution_latest: dict[str, object] = collect(
             "execution_latest",
             _execution_packet_from_trace_tracker,
         )
-        floating_state = collect(
+        floating_state: dict[str, object] = collect(
             "floating_state",
             _runtime_trace_floating_state_summary,
         )
-        shooter_handshake = collect("shooter_handshake", lambda: _latest_shooter_handshake(resolved_session_id))
-        model_health = collect(
+        shooter_handshake: dict[str, object] = collect("shooter_handshake", lambda: _latest_shooter_handshake(resolved_session_id))
+        model_health: dict[str, object] = collect(
             "model_health",
-                lambda: build_model_council_health_from_session(
-                    cast(Mapping[str, Any], tracker_payload),
-                    daemon_status=fetch_model_council_daemon_status(timeout_sec=0.1),
-                ),
+            lambda: build_model_council_health_from_session(
+                cast(Mapping[str, Any], tracker_payload),
+                daemon_status=fetch_model_council_daemon_status(timeout_sec=0.1),
+            ),
         )
 
         def _sequence_context_from_endpoint(endpoint: Mapping[str, object]) -> dict[str, Any]:
@@ -3007,7 +3007,7 @@ def create_app(
             }
 
         project_root = Path(__file__).resolve().parents[2]
-        calibration_status = {
+        calibration_status: dict[str, object] = {
             "status": "PASS"
             if (project_root / "808_shooter_boxes.json").exists()
             and (project_root / "user_calibration_manifest.json").exists()
@@ -3015,11 +3015,11 @@ def create_app(
             "boxes_path": "808_shooter_boxes.json",
             "manifest_path": "user_calibration_manifest.json",
         }
-        cache_status = {
+        cache_status: dict[str, object] = {
             "status": str(tracker_payload.get("cache_status") or tracker_payload.get("cache") or "UNKNOWN").upper(),
             "source": "tracker_latest",
         }
-        endpoints = {
+        endpoints: dict[str, Mapping[str, object]] = {
             "tracker_latest": tracker_latest,
             "model_council_latest": model_council_latest,
             "study_latest": study_latest,
@@ -3173,7 +3173,7 @@ def create_app(
             or promotion_trace.get("release_condition")
             or packet_ids["execution"]
         )
-        packet_contract_pass = (
+        packet_contract_pass: bool = (
             (execution_latest.get("status") in {"PASS", "MISSING"} and not packet_ids["execution"])
             or execution_latest.get("status") == "PASS"
         )
@@ -3355,7 +3355,7 @@ def create_app(
             "Dashboard/FloatingStateV2": _endpoint_status("floating_state"),
             "ShooterActionSequencerV2": "WAITING" if not packet_ids["execution"] else _endpoint_status("shooter_handshake"),
         }
-        dataflow_contract_trace = {
+        dataflow_contract_trace: dict[str, object] = {
             "schema_version": "PG_DATAFLOW_CONTRACT_TRACE_V3",
             "frame_id": int(_epoch_float(tracker_payload.get("frame_index") or tracker_payload.get("frame_id") or 0, 0.0)),
             "capture_count": int(_epoch_float(tracker_payload.get("capture_count") or 0, 0.0)),
@@ -3855,7 +3855,7 @@ def create_app(
                 save_dir.mkdir(parents=True, exist_ok=True)
                 out_path = save_dir / f"{session_id}_render_latest.png"
                 out_path.write_bytes(png)
-                meta = {"session_id": session_id, "saved_at": time.time(), "path": str(out_path)}
+                meta: dict[str, object] = {"session_id": session_id, "saved_at": time.time(), "path": str(out_path)}
                 try:
                     (save_dir / f"{session_id}_render_latest.json").write_text(json.dumps(meta), encoding="utf-8")
                 except Exception:

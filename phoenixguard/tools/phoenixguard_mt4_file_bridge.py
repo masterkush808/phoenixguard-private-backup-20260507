@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import cast
+from typing import Mapping, Sequence, cast
 
 
 def _default_common_files_dir() -> Path:
@@ -25,11 +25,11 @@ SLOT_BYTES = 65536
 
 def _json_safe(value: object) -> object:
     if isinstance(value, dict):
-        return {str(key): _json_safe(child) for key, child in value.items()}
+        return {str(key): _json_safe(child) for key, child in cast(Mapping[object, object], value).items()}
     if isinstance(value, list):
-        return [_json_safe(child) for child in value]
+        return [_json_safe(child) for child in cast(Sequence[object], value)]
     if isinstance(value, tuple):
-        return [_json_safe(child) for child in value]
+        return [_json_safe(child) for child in cast(Sequence[object], value)]
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     return value
@@ -102,12 +102,12 @@ def _get_json(url: str, timeout: float) -> tuple[int, dict[str, object]]:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
-            payload = json.loads(raw) if raw.strip() else {}
+            payload: object = json.loads(raw) if raw.strip() else {}
             return int(resp.status), cast(dict[str, object], payload) if isinstance(payload, dict) else {"raw": payload}
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
         try:
-            payload = json.loads(raw) if raw.strip() else {}
+            payload: object = json.loads(raw) if raw.strip() else {}
         except json.JSONDecodeError:
             payload = {"detail": raw}
         return int(exc.code), cast(dict[str, object], payload) if isinstance(payload, dict) else {"raw": payload}
@@ -141,7 +141,7 @@ def _status(
 
 def _nested(payload: dict[str, object], key: str) -> dict[str, object]:
     value = payload.get(key)
-    return value if isinstance(value, dict) else {}
+    return dict(cast(Mapping[str, object], value)) if isinstance(value, dict) else {}
 
 
 def _collect_reason_codes(*sources: dict[str, object]) -> list[str]:
@@ -150,7 +150,7 @@ def _collect_reason_codes(*sources: dict[str, object]) -> list[str]:
         for key in ("reason_codes", "reasons", "blockers", "deny_reasons"):
             raw = source.get(key)
             if isinstance(raw, list):
-                reasons.extend(str(item) for item in raw if str(item))
+                reasons.extend(str(item) for item in cast(Sequence[object], raw) if str(item))
             elif isinstance(raw, str) and raw:
                 reasons.append(raw)
     return list(dict.fromkeys(reasons))

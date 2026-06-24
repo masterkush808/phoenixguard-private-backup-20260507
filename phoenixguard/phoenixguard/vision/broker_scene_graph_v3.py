@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, cast
 
 from PIL import Image
 
@@ -12,13 +13,13 @@ from phoenixguard.vision.overlay_geometry import normalize_bbox
 BROKER_SCENE_GRAPH_SCHEMA_VERSION = "PG_BROKER_SCENE_GRAPH_V3"
 
 
-def _mapping(value: Any) -> dict[str, Any]:
+def _mapping(value: object) -> dict[str, Any]:
     return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
-def _sequence(value: Any) -> list[Any]:
+def _sequence(value: object) -> list[object]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return list(value)
+        return list(cast(Sequence[object], value))
     return []
 
 
@@ -41,8 +42,9 @@ def _text(value: Any, default: str = "") -> str:
     return text or default
 
 
-def _bbox(value: Any) -> list[float] | None:
-    bbox = normalize_bbox(value) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else None
+def _bbox(value: object) -> list[float] | None:
+    bbox_input = _sequence(value)
+    bbox = normalize_bbox(bbox_input) if bbox_input else None
     return [float(item) for item in bbox] if bbox is not None else None
 
 
@@ -123,7 +125,7 @@ def _focus_bounds(session: Mapping[str, Any], surface_size: tuple[int, int]) -> 
 def _execution_panel_bounds(session: Mapping[str, Any], surface: Sequence[float], chart_full: Sequence[float]) -> list[float]:
     broker_surface = _mapping(session.get("broker_surface"))
     execution_boxes = _mapping(broker_surface.get("execution_boxes"))
-    boxes = []
+    boxes: list[list[float]] = []
     for value in execution_boxes.values():
         box = _bbox(_mapping(value).get("bbox"))
         if box:

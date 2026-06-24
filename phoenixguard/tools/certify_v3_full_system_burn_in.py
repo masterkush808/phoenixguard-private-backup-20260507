@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import Any
+from typing import Any, cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -94,14 +94,14 @@ def _utc_iso(epoch: float | None = None) -> str:
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _sequence(value: Any) -> list[Any]:
     if isinstance(value, list):
-        return value
+        return list(cast(Sequence[Any], value))
     if isinstance(value, tuple):
-        return list(value)
+        return list(cast(Sequence[Any], value))
     return []
 
 
@@ -139,7 +139,7 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return dict(payload) if isinstance(payload, Mapping) else {}
+        return dict(cast(Mapping[str, Any], payload)) if isinstance(payload, Mapping) else {}
     except Exception:
         return {}
 
@@ -161,32 +161,21 @@ def _find_nested(payload: Any, names: set[str], *, contains: tuple[str, ...] = (
         visited += 1
         current = stack.pop()
         if isinstance(current, Mapping):
-            for key, value in current.items():
+            current_map = cast(Mapping[str, Any], current)
+            for key, value in current_map.items():
                 key_text = str(key).strip().lower()
                 if key_text in names or (contains and any(part in key_text for part in contains)):
                     found.append(value)
                 if isinstance(value, (Mapping, list, tuple)):
                     stack.append(value)
         elif isinstance(current, (list, tuple)):
-            stack.extend(current)
+            stack.extend(cast(Sequence[Any], current))
     return found
-
-
-def _compact_http(result: Any) -> dict[str, Any]:
-    if hasattr(result, "as_dict"):
-        row = result.as_dict()
-    else:
-        row = {"ok": False, "status": 0, "latency_ms": 0.0, "error": "invalid_http_result"}
-    payload = row.get("payload")
-    if isinstance(payload, Mapping):
-        row["payload_keys"] = sorted(str(key) for key in payload.keys())[:80]
-        row.pop("payload", None)
-    return row
 
 
 def _extract_payload(endpoint: Any) -> dict[str, Any]:
     payload = getattr(endpoint, "payload", None)
-    return dict(payload) if isinstance(payload, Mapping) else {}
+    return dict(cast(Mapping[str, Any], payload)) if isinstance(payload, Mapping) else {}
 
 
 def _endpoint_payload(trace: Mapping[str, Any], name: str) -> dict[str, Any]:
@@ -247,7 +236,7 @@ def _latest_price_proxy(payloads: Iterable[Mapping[str, Any]]) -> float | None:
 
 def _process_snapshot() -> dict[str, Any]:
     rows = python_processes()
-    process_query_errors = [str(row.get("error")) for row in rows if isinstance(row, Mapping) and row.get("error")]
+    process_query_errors = [str(row.get("error")) for row in rows if row.get("error")]
     api = {process_id(row) for row in find_processes(rows, "start_phoenixguard_mobile_api.py") if process_id(row)}
     tracker = {
         process_id(row)
@@ -266,7 +255,7 @@ def _process_snapshot() -> dict[str, Any]:
         }
     )
     listeners = tcp_listeners([8793, 8787])
-    listener_errors = [str(row.get("error")) for row in listeners if isinstance(row, Mapping) and row.get("error")]
+    listener_errors = [str(row.get("error")) for row in listeners if row.get("error")]
     return {
         "api_pids": sorted(api),
         "tracker_pids": sorted(tracker),
@@ -311,19 +300,22 @@ def _actual_click_observed(shooter: Mapping[str, Any]) -> bool:
         return True
     action_sequence_raw = shooter.get("action_sequence")
     if isinstance(action_sequence_raw, Mapping):
-        if bool(action_sequence_raw.get("clicked")):
+        action_sequence_map = cast(Mapping[str, Any], action_sequence_raw)
+        if bool(action_sequence_map.get("clicked")):
             return True
-        if _text(action_sequence_raw.get("overall")).upper() == "PASS":
+        if _text(action_sequence_map.get("overall")).upper() == "PASS":
             return True
-        if _text(action_sequence_raw.get("reason")).upper() == "ACTION_SEQUENCE_COMPLETE":
+        if _text(action_sequence_map.get("reason")).upper() == "ACTION_SEQUENCE_COMPLETE":
             return True
     rehearsal = shooter.get("execution_rehearsal")
     if isinstance(rehearsal, Mapping):
-        nested_action = rehearsal.get("action_sequence")
+        rehearsal_map = cast(Mapping[str, Any], rehearsal)
+        nested_action = rehearsal_map.get("action_sequence")
         if isinstance(nested_action, Mapping):
-            if bool(nested_action.get("clicked")):
+            nested_action_map = cast(Mapping[str, Any], nested_action)
+            if bool(nested_action_map.get("clicked")):
                 return True
-            if _text(nested_action.get("overall")).upper() == "PASS":
+            if _text(nested_action_map.get("overall")).upper() == "PASS":
                 return True
     action_sequence = _text(action_sequence_raw).upper()
     return action_sequence.startswith("CLICK_SENT") or action_sequence.startswith("LIVE_READY_CLICK_SENT")
@@ -341,7 +333,7 @@ def _read_jsonl_tail(path: Path, *, max_lines: int = 2000) -> list[dict[str, Any
         except Exception:
             continue
         if isinstance(payload, Mapping):
-            rows.append(dict(payload))
+            rows.append(_mapping(payload))
     return rows
 
 
@@ -374,7 +366,7 @@ def _collect_safe_shooter_validation_events() -> list[dict[str, Any]]:
                 continue
             if clicked:
                 continue
-            row = {
+            row: dict[str, Any] = {
                 **raw,
                 "source_log": str(path.relative_to(ROOT)),
                 "mode": mode,
@@ -411,7 +403,7 @@ def _collect_live_ready_click_events(*, since_epoch: float = 0.0) -> list[dict[s
             continue
         if not packet_id or side not in {"BUY", "SELL"} or expiry_seconds <= 0:
             continue
-        row = {
+        row: dict[str, Any] = {
             **raw,
             "source_log": str(path.relative_to(ROOT)),
             "mode": mode,
@@ -531,7 +523,7 @@ def _safe_event_from_shooter_decision(
         for mode in _sequence(_mapping(process_snapshot).get("shooter_modes"))
         if _text(mode)
     ]
-    row = {
+    row: dict[str, Any] = {
         "source_log": "runtime_trace/shooter_handshake",
         "mode": ",".join(modes) or "UNKNOWN",
         "packet_id": packet_id,
@@ -576,7 +568,7 @@ def _settle_safe_paper_monitors(
                 result = "WIN"
             else:
                 result = "LOSS"
-        outcome = {
+        outcome: dict[str, Any] = {
             **monitor,
             "status": "settled_chart_proxy",
             "result": result,
@@ -626,7 +618,7 @@ def _settle_live_trade_monitors(
             else:
                 result = "LOSS"
                 unit_profit = -1.0
-        outcome = {
+        outcome: dict[str, Any] = {
             **monitor,
             "status": "settled_chart_proxy",
             "result": result,
@@ -700,9 +692,9 @@ def _collect_model_votes(payloads: Iterable[Mapping[str, Any]]) -> list[dict[str
     for payload in payloads:
         for found in _find_nested(payload, names, contains=("model_vote", "role_vote")):
             if isinstance(found, Mapping):
-                rows.append(dict(found))
+                rows.append(_mapping(found))
             elif isinstance(found, list):
-                rows.extend(dict(item) for item in found if isinstance(item, Mapping))
+                rows.extend(_mapping(item) for item in cast(Sequence[Any], found) if isinstance(item, Mapping))
     return rows[:100]
 
 
@@ -712,9 +704,9 @@ def _collect_skill_contributions(payloads: Iterable[Mapping[str, Any]]) -> list[
     for payload in payloads:
         for found in _find_nested(payload, names, contains=("skill_",)):
             if isinstance(found, Mapping):
-                rows.append(dict(found))
+                rows.append(_mapping(found))
             elif isinstance(found, list):
-                rows.extend(dict(item) for item in found if isinstance(item, Mapping))
+                rows.extend(_mapping(item) for item in cast(Sequence[Any], found) if isinstance(item, Mapping))
     return rows[:120]
 
 
@@ -724,9 +716,9 @@ def _collect_lstm_predictions(payloads: Iterable[Mapping[str, Any]]) -> list[dic
     for payload in payloads:
         for found in _find_nested(payload, names, contains=("lstm",)):
             if isinstance(found, Mapping):
-                rows.append(dict(found))
+                rows.append(_mapping(found))
             elif isinstance(found, list):
-                rows.extend(dict(item) for item in found if isinstance(item, Mapping))
+                rows.extend(_mapping(item) for item in cast(Sequence[Any], found) if isinstance(item, Mapping))
     return rows[:50]
 
 
@@ -736,9 +728,9 @@ def _collect_two_candle(payloads: Iterable[Mapping[str, Any]]) -> list[dict[str,
     for payload in payloads:
         for found in _find_nested(payload, names, contains=("two_candle", "high_frequency_candle_cycle")):
             if isinstance(found, Mapping):
-                rows.append(dict(found))
+                rows.append(_mapping(found))
             elif isinstance(found, list):
-                rows.extend(dict(item) for item in found if isinstance(item, Mapping))
+                rows.extend(_mapping(item) for item in cast(Sequence[Any], found) if isinstance(item, Mapping))
     return rows[:50]
 
 
@@ -919,19 +911,26 @@ def _promotion_failure_row(
     entry_quality = _mapping(study.get("entry_quality") or council.get("entry_quality") or promotion.get("entry_quality"))
     market_reality = _mapping(study.get("market_reality") or council.get("market_reality") or promotion.get("market_reality"))
     trade_permission = _mapping(study.get("trade_permission") or council.get("trade_permission") or market_reality.get("trade_permission"))
-    skill_summary = (
+    raw_skill_summary: Any = (
         study.get("skill_contributions")
         or council.get("skill_contributions")
         or promotion.get("skill_summary")
         or {}
     )
-    lstm_summary = (
+    skill_summary: dict[str, Any] | list[Any] = (
+        _mapping(raw_skill_summary)
+        if isinstance(raw_skill_summary, Mapping)
+        else _sequence(raw_skill_summary)
+        if isinstance(raw_skill_summary, list)
+        else {}
+    )
+    lstm_summary: dict[str, Any] = _mapping(
         study.get("lstm_contribution")
         or council.get("lstm_contribution")
         or promotion.get("lstm_summary")
         or {}
     )
-    memory_confirmation = (
+    memory_confirmation: dict[str, Any] = _mapping(
         study.get("memory_confirmation")
         or council.get("memory_confirmation")
         or promotion.get("memory_confirmation")
@@ -1025,7 +1024,7 @@ def _promotion_failure_row(
             )
             or "current PG_EXECUTION_PACKET_V3 must exist, or promotion_failure_audit_v3 must name the exact validator rejection"
         )
-    row = {
+    row: dict[str, Any] = {
         "epoch": now,
         "iso": _utc_iso(now),
         "packet_id": _extract_packet_id(study),
@@ -1057,9 +1056,9 @@ def _promotion_failure_row(
         "path_risk": _text(_mapping(study.get("path_quality") or council.get("path_quality")).get("label")),
         "target_before_invalidation": _text(promotion.get("target_before_invalidation")),
         "opposing_force_distance": _text(promotion.get("opposing_force_distance")),
-        "skill_summary": skill_summary if isinstance(skill_summary, (Mapping, list)) else {},
-        "lstm_summary": lstm_summary if isinstance(lstm_summary, Mapping) else {},
-        "memory_confirmation": memory_confirmation if isinstance(memory_confirmation, Mapping) else {},
+        "skill_summary": skill_summary,
+        "lstm_summary": lstm_summary,
+        "memory_confirmation": memory_confirmation,
         "denied_at": denied_at,
         "next_required": next_required,
         "exact_field_preventing_execution_packet": _text(
@@ -1116,12 +1115,12 @@ def _promotion_failure_row(
             audit["exact_field_preventing_execution_packet"] = row["exact_field_preventing_execution_packet"]
             blockers = _sequence(audit.get("blocker_ranking"))
             if blockers and isinstance(blockers[0], Mapping):
-                first = dict(blockers[0])
+                first = _mapping(blockers[0])
                 first["blocker"] = row["denied_at"]
                 first["field"] = row["exact_field_preventing_execution_packet"]
                 first["reason"] = row["next_required"]
                 first["next_required"] = row["next_required"]
-                audit["blocker_ranking"] = [first, *[dict(item) for item in blockers[1:] if isinstance(item, Mapping)]]
+                audit["blocker_ranking"] = [first, *[_mapping(item) for item in blockers[1:] if isinstance(item, Mapping)]]
             row["promotion_failure_audit_v3"] = audit
     return row
 
@@ -1504,8 +1503,7 @@ def main() -> int:
         preflight_nodes = _mapping(_mapping(preflight_trace.get("dataflow_contract_trace")).get("nodes"))
         preflight_source = _mapping(preflight_gates.get("source_lock"))
         preflight_model = _mapping(preflight_gates.get("model_warm_state"))
-        preflight_shooter = _mapping(preflight_gates.get("shooter_persistence"))
-        preflight_failures = []
+        preflight_failures: list[str] = []
         if not preflight_trace_result.ok:
             preflight_failures.append(f"runtime trace unavailable: {preflight_trace_result.error or preflight_trace_result.status}")
         if _text(preflight_source.get("status")).upper() != "PASS":
@@ -1550,7 +1548,7 @@ def main() -> int:
             )
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(report_text, encoding="utf-8")
-            summary = {
+            summary: dict[str, Any] = {
                 "schema_version": "PG_FULL_SYSTEM_ACTIVATED_BURN_IN_V1",
                 "verdict": "FAIL_RUNTIME",
                 "stop_reason": "FULL_ACTIVATED_PREFLIGHT_FAILED",
@@ -1638,7 +1636,7 @@ def main() -> int:
             consecutive_stale_frames = 0
 
         process_query_reliable = not bool(process_snapshot.get("process_query_errors"))
-        api_listener_alive = any(_int(row.get("LocalPort")) == 8793 for row in _sequence(process_snapshot.get("listeners")) if isinstance(row, Mapping))
+        api_listener_alive = any(_int(_mapping(row).get("LocalPort")) == 8793 for row in _sequence(process_snapshot.get("listeners")) if isinstance(row, Mapping))
         if not in_warmup and process_query_reliable:
             consecutive_missing_api_processes = 0 if (process_snapshot["api_pids"] or api_listener_alive) else consecutive_missing_api_processes + 1
             consecutive_missing_tracker_processes = 0 if process_snapshot["tracker_pids"] else consecutive_missing_tracker_processes + 1
@@ -1648,7 +1646,7 @@ def main() -> int:
             consecutive_missing_tracker_processes = 0
             consecutive_missing_shooter_processes = 0
 
-        sample = {
+        sample: dict[str, Any] = {
             "epoch": now,
             "iso": _utc_iso(now),
             "mode": args.mode,
@@ -1734,7 +1732,7 @@ def main() -> int:
             or execution_payload.get("expiry_seconds")
             or execution_time_sequence.get("target_seconds")
         )
-        shooter_signature_payload = {
+        shooter_signature_payload: dict[str, Any] = {
             "packet_id": shooter_packet_id,
             "packet_type": shooter.get("packet_type"),
             "side": shooter.get("side"),
@@ -1748,7 +1746,7 @@ def main() -> int:
         shooter_signature = _stable_hash(shooter_signature_payload)
         if shooter_signature not in seen_shooter_signatures:
             seen_shooter_signatures.add(shooter_signature)
-            action_row = {
+            action_row: dict[str, Any] = {
                 "epoch": now,
                 "iso": _utc_iso(now),
                 **shooter_signature_payload,
@@ -1849,7 +1847,7 @@ def main() -> int:
             packet_id = _text(outcome.get("packet_id"))
             if packet_id and packet_id not in trade_outcome_packet_ids:
                 trade_outcome_packet_ids.add(packet_id)
-                outcome_row = {
+                outcome_row: dict[str, Any] = {
                     "trade_id": f"burn_{len(trade_outcomes) + 1:04d}",
                     "packet_id": packet_id,
                     "side": _text(outcome.get("side")),
@@ -1880,7 +1878,7 @@ def main() -> int:
             and shooter_packet_id not in live_trade_monitors
             and shooter_packet_id not in trade_outcome_packet_ids
         ):
-            monitor_event = {
+            monitor_event: dict[str, Any] = {
                 "packet_id": shooter_packet_id,
                 "side": _text(shooter.get("side")),
                 "timestamp": now,
@@ -2048,7 +2046,7 @@ def main() -> int:
     live_click_arming = _actual_live_click_arming(samples)
     live_click_arming["requested_full_activated_mode"] = args.mode == "FULL_ACTIVATED"
 
-    summary = {
+    summary: dict[str, Any] = {
         "schema_version": "PG_FULL_SYSTEM_ACTIVATED_BURN_IN_V1",
         "verdict": verdict,
         "stop_reason": stop_reason,

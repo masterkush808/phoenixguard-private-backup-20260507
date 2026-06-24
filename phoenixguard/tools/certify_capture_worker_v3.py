@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from typing import Mapping
+from typing import Mapping, cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -24,8 +24,8 @@ def _age_ms(epoch: float, *, now_epoch: float | None = None) -> float:
     return max(0.0, (observed_epoch - float(epoch or 0.0)) * 1000.0) if epoch else 0.0
 
 
-def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
+def _mapping(value: object) -> dict[str, object]:
+    return dict(cast(Mapping[str, object], value)) if isinstance(value, Mapping) else {}
 
 
 def _float_value(value: object, default: float = 0.0) -> float:
@@ -65,7 +65,7 @@ def main() -> int:
 
     for index in range(max(1, int(args.count))):
         before = http_json(live_url, timeout=args.poll_timeout)
-        before_fields = extract_frame_fields(before.payload if isinstance(before.payload, dict) else {})
+        before_fields = extract_frame_fields(_mapping(before.payload))
         response = http_json(
             f"{base}/v1/mobile/window-tracker/sessions/{session_q}/capture-once",
             method="POST",
@@ -78,9 +78,9 @@ def main() -> int:
         after_live = http_json(live_url, timeout=args.poll_timeout)
         after_live_observed_epoch = time.time()
         perf = http_json(f"{base}/v1/mobile/performance/trace/v3/{session_q}", timeout=args.poll_timeout)
-        payload = response.payload if isinstance(response.payload, dict) else {}
+        payload = _mapping(response.payload)
         capture_result = _mapping(payload.get("capture_once_result"))
-        after_fields = extract_frame_fields(after_live.payload if isinstance(after_live.payload, dict) else payload)
+        after_fields = extract_frame_fields(_mapping(after_live.payload) or payload)
         result_after = _mapping(capture_result.get("after"))
         if result_after:
             result_display_frame = _int_value(result_after.get("display_frame_id"))
@@ -107,9 +107,9 @@ def main() -> int:
             float(after_fields.get("display_published_epoch") or 0.0),
         )
         display_age = _age_ms(display_epoch, now_epoch=after_live_observed_epoch)
-        timing = (perf.payload or {}).get("timing_trace", {}) if isinstance(perf.payload, dict) else {}
-        model_age = float(timing.get("model_vote_age_ms") or 0.0) if isinstance(timing, dict) else 0.0
-        sample = {
+        timing = _mapping(_mapping(perf.payload).get("timing_trace"))
+        model_age = _float_value(timing.get("model_vote_age_ms"))
+        sample: dict[str, object] = {
             "index": index + 1,
             "http_ok": response.ok,
             "status": response.status,

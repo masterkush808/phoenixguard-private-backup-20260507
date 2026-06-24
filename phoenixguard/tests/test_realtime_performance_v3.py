@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 from phoenixguard.runtime.realtime_performance_v3 import (
     AsyncArtifactWriterV3,
@@ -25,7 +26,7 @@ def test_latest_frame_buffer_drops_old_frames_and_reads_newest() -> None:
 
 
 def test_frame_timing_trace_reports_required_age_fields() -> None:
-    session = {
+    session: dict[str, Any] = {
         "session_id": "speed",
         "frame_index": 42,
         "state_version": 4200,
@@ -64,7 +65,7 @@ def test_frame_timing_trace_reports_required_age_fields() -> None:
 
 
 def test_display_only_publish_does_not_refresh_stale_overlay_age() -> None:
-    session = {
+    session: dict[str, Any] = {
         "session_id": "speed",
         "frame_index": 42,
         "display_frame_id": 43,
@@ -92,7 +93,7 @@ def test_display_only_publish_does_not_refresh_stale_overlay_age() -> None:
 
 
 def test_display_only_matching_surface_signature_keeps_overlay_aligned() -> None:
-    session = {
+    session: dict[str, Any] = {
         "session_id": "speed",
         "frame_index": 42,
         "display_frame_id": 47,
@@ -124,7 +125,7 @@ def test_display_only_matching_surface_signature_keeps_overlay_aligned() -> None
 
 
 def test_display_only_authority_lock_keeps_overlay_aligned_when_pixels_change() -> None:
-    session = {
+    session: dict[str, Any] = {
         "session_id": "speed",
         "frame_index": 42,
         "chart_frame_id": 42,
@@ -160,7 +161,7 @@ def test_display_only_authority_lock_keeps_overlay_aligned_when_pixels_change() 
 
 
 def test_performance_trace_contains_model_warm_state_and_budgets() -> None:
-    live_state = {
+    live_state: dict[str, Any] = {
         "session_id": "speed",
         "frame_id": 7,
         "state_version": 8,

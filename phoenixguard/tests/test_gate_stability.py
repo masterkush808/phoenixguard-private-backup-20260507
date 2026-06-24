@@ -25,10 +25,13 @@ class TestGateStability(unittest.TestCase):
         ]
         if allow_none:
             variants.append(None)
-        return variants[int(self.rng.integers(0, len(variants)))]
+        return variants[self._integer(0, len(variants))]
 
     def _choice(self, values: list[str]) -> str:
-        return values[int(self.rng.integers(0, len(values)))]
+        return values[self._integer(0, len(values))]
+
+    def _integer(self, low: int, high: int) -> int:
+        return int(cast(Any, self.rng).integers(low, high))
 
     def _assert_gate_outputs_are_stable(self, outputs: list[GateOutput]) -> None:
         self.assertGreater(len(outputs), 0)
@@ -75,7 +78,7 @@ class TestGateStability(unittest.TestCase):
                 [self._mixed_number(allow_none=False) for _ in range(3)],
                 dtype=np.float32,
             )
-            chart_state = {
+            chart_state: dict[str, Any] = {
                 "entry_type": self._choice(entry_types),
                 "reversal_signal": self._choice(reversal_signals),
                 "continuation_signal": self._choice(continuation_signals),
@@ -88,7 +91,7 @@ class TestGateStability(unittest.TestCase):
                 "local_phase": self._choice(local_phases),
                 "phase_risk": self._choice(["breakout_risk", "chop_risk", "exhaustion_risk", "", "continuation"]),
                 "path_clarity": self._mixed_number(),
-                "structure_trade_ready": bool(int(self.rng.integers(0, 2))),
+                "structure_trade_ready": bool(self._integer(0, 2)),
             }
             prices = [self._mixed_number() for _ in range(8)]
             sub_signals = [(self._mixed_number(), self._choice(signal_names)) for _ in range(6)]
@@ -108,11 +111,11 @@ class TestGateStability(unittest.TestCase):
                 ),
                 sub_signals=cast(list[tuple[float, str]], sub_signals),
                 module_logits=module_logits,
-                recent_feedback_count=int(self.rng.integers(-10, 120)),
-                queue_depth=int(self.rng.integers(-2, 12)),
-                gpu_mem_ok=bool(int(self.rng.integers(0, 2))),
-                has_dashboard=bool(int(self.rng.integers(0, 2))),
-                risk_ethical_ok=bool(int(self.rng.integers(0, 2))),
+                recent_feedback_count=self._integer(-10, 120),
+                queue_depth=self._integer(-2, 12),
+                gpu_mem_ok=bool(self._integer(0, 2)),
+                has_dashboard=bool(self._integer(0, 2)),
+                risk_ethical_ok=bool(self._integer(0, 2)),
                 chart_state=chart_state,
                 prices=cast(list[float], prices),
                 direction_prob=cast(float, self._mixed_number()),
@@ -122,7 +125,7 @@ class TestGateStability(unittest.TestCase):
                 },
                 memory_sim=cast(float, self._mixed_number()),
                 latest_candle_confidence=cast(float, self._mixed_number()),
-                geometry_conflict=bool(int(self.rng.integers(0, 2))),
+                geometry_conflict=bool(self._integer(0, 2)),
             )
             self.assertEqual(len(core_outputs), 13)
             self._assert_gate_outputs_are_stable(core_outputs)
@@ -138,7 +141,7 @@ class TestGateStability(unittest.TestCase):
                 memory_similarity=cast(float, self._mixed_number()),
                 memory_label=self._choice(["BUY", "SELL", "HOLD", ""]),
                 latest_candle_confidence=cast(float, self._mixed_number()),
-                geometry_conflict=bool(int(self.rng.integers(0, 2))),
+                geometry_conflict=bool(self._integer(0, 2)),
                 reliability=cast(float, self._mixed_number()),
             )
             self.assertEqual(len(support_outputs), 6)
@@ -177,7 +180,7 @@ class TestGateStability(unittest.TestCase):
                     "ambiguity": self._mixed_number(),
                     "label_entropy": self._mixed_number(),
                     "consensus_ratio": self._mixed_number(),
-                    "mixed_labels": bool(int(self.rng.integers(0, 2))),
+                    "mixed_labels": bool(self._integer(0, 2)),
                     "dominant_label": self._choice(["BUY", "SELL", "HOLD", ""]),
                 },
                 latest_candle_confidence=cast(float, self._mixed_number()),

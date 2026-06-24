@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, asdict
-from typing import Sequence, List
+from typing import Sequence, cast
 import hashlib
 import time
 
@@ -9,12 +9,12 @@ import time
 class V3ChartTransform:
     chart_transform_id: str
     frame_id: int
-    screen_bounds: List[float]
-    window_bounds: List[float]
-    chart_image_bounds: List[float]
-    plot_area_bounds: List[float]
-    price_axis_bounds: List[float]
-    time_axis_bounds: List[float]
+    screen_bounds: list[float]
+    window_bounds: list[float]
+    chart_image_bounds: list[float]
+    plot_area_bounds: list[float]
+    price_axis_bounds: list[float]
+    time_axis_bounds: list[float]
     valid: bool
     reason: str
 
@@ -69,5 +69,5 @@ class V3ChartTransform:
             return [0, 0, 0, 0]
         return [int(round(float(v))) for v in bbox_px]
 
-    def as_dict(self) -> dict:
-        return asdict(self)
+    def as_dict(self) -> dict[str, object]:
+        return cast(dict[str, object], asdict(self))

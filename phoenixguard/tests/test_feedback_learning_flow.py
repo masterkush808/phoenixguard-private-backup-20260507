@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 import pytest
 
 import json
@@ -243,7 +244,7 @@ def test_save_feedback_visual_label_extracts_semantic_regions(monkeypatch: pytes
     layer = Image.new("RGBA", (40, 24), color=(0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
     draw.rectangle((8, 6, 24, 18), fill=(88, 218, 123, 255))
-    payload = {
+    payload: dict[str, Any] = {
         "background": Image.new("RGBA", (40, 24), color=(12, 34, 56, 255)),
         "layers": [layer],
         "composite": Image.alpha_composite(

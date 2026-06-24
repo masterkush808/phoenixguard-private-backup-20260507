@@ -1,12 +1,16 @@
 import ctypes
 import importlib.util
 from pathlib import Path
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, Iterator, NoReturn, cast
 
 import pytest
 
 if not hasattr(ctypes, "windll"):
     pytest.skip("shooter.py runtime is Windows-only", allow_module_level=True)
+
+
+def _approx(expected: float) -> object:
+    return cast(Callable[[float], object], getattr(pytest, "approx"))(expected)
 
 
 def _load_shooter():
@@ -78,7 +82,7 @@ def _packet(
     broker_click_safe: bool = False,
 ) -> dict[str, Any]:
     final = final_side or side
-    sequence_context = {
+    sequence_context: dict[str, Any] = {
         "sequence_id": f"seq_{packet_id}",
         "session_id": session_id,
         "sequence_index": 0,
@@ -228,7 +232,7 @@ def test_fetch_latest_model_council_packet_recovers_from_runtime_trace(
 ) -> None:
     shooter = _load_shooter()
     packet = _packet(packet_id="trace-exec", now=1000.0)
-    trace_payload = {
+    trace_payload: dict[str, Any] = {
         "status": "ok",
         "endpoints": {
             "execution_latest": {
@@ -264,7 +268,7 @@ def test_fetch_latest_model_council_packet_recovers_from_runtime_trace(
         calls.append(url)
         if "runtime/trace/v3" not in url:
             raise TimeoutError("direct execution endpoint timed out")
-        assert timeout == pytest.approx(0.25)
+        assert timeout == _approx(0.25)
         return Response()
 
     monkeypatch.setattr(shooter.urllib.request, "urlopen", fake_urlopen)
@@ -381,16 +385,16 @@ def test_load_boxes_prefers_authoritative_user_calibration_manifest(
     boxes = shooter.load_boxes()
 
     assert boxes["capabilities"]["authoritative_manifest"] is True
-    assert boxes["buy_icon"]["x"] == pytest.approx(0.90)
-    assert boxes["buy_button"]["x"] == pytest.approx(0.90)
-    assert boxes["sell_icon"]["y"] == pytest.approx(0.52)
-    assert boxes["sell_button"]["y"] == pytest.approx(0.52)
-    assert boxes["time_button"]["x"] == pytest.approx(0.91)
-    assert boxes["time_input"]["x"] == pytest.approx(0.91)
-    assert boxes["hourly_input"]["x"] == pytest.approx(0.78)
-    assert boxes["minute_input"]["x"] == pytest.approx(0.82)
-    assert boxes["second_input"]["x"] == pytest.approx(0.85)
-    assert boxes["time_300"]["x"] == pytest.approx(0.15)
+    assert boxes["buy_icon"]["x"] == _approx(0.90)
+    assert boxes["buy_button"]["x"] == _approx(0.90)
+    assert boxes["sell_icon"]["y"] == _approx(0.52)
+    assert boxes["sell_button"]["y"] == _approx(0.52)
+    assert boxes["time_button"]["x"] == _approx(0.91)
+    assert boxes["time_input"]["x"] == _approx(0.91)
+    assert boxes["hourly_input"]["x"] == _approx(0.78)
+    assert boxes["minute_input"]["x"] == _approx(0.82)
+    assert boxes["second_input"]["x"] == _approx(0.85)
+    assert boxes["time_300"]["x"] == _approx(0.15)
     assert boxes["capabilities"]["supplemented_runtime_targets"] == [
         "hourly_input",
         "minute_input",
@@ -401,8 +405,8 @@ def test_load_boxes_prefers_authoritative_user_calibration_manifest(
         "second_plus",
         "time_300",
     ]
-    assert boxes["broker_screen"]["x"] == pytest.approx(0.75)
-    assert boxes["final_screen"]["x"] == pytest.approx(0.50)
+    assert boxes["broker_screen"]["x"] == _approx(0.75)
+    assert boxes["final_screen"]["x"] == _approx(0.50)
     assert shooter.validate_calibration(boxes, _rect(shooter)) is True
 
 
@@ -476,7 +480,7 @@ def test_load_boxes_canonicalizes_plural_seconds_runtime_artifact(
 
     boxes = shooter.load_boxes()
 
-    assert boxes["second_input"]["x"] == pytest.approx(0.85)
+    assert boxes["second_input"]["x"] == _approx(0.85)
     assert boxes["second_input"]["manifest_source_key"] == "seconds_input"
     assert "second_input" not in boxes["capabilities"].get("missing_runtime_targets", [])
     assert shooter.validate_calibration(boxes, _rect(shooter)) is True
@@ -540,7 +544,7 @@ def test_shooter_gates_remain_not_checked_when_packet_missing() -> None:
 
 def test_shooter_displays_study_packet_without_entering_gates() -> None:
     shooter = _load_shooter()
-    study_packet = {
+    study_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "study_1",
         "packet_type": "STUDY_PACKET",
@@ -585,7 +589,7 @@ def test_shooter_displays_study_packet_without_entering_gates() -> None:
 
 def test_shooter_synthesizes_study_packet_from_legacy_council_result() -> None:
     shooter = _load_shooter()
-    tracker_payload = {
+    tracker_payload: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "state_version": 42,
         "decision_version": 42,
@@ -630,7 +634,7 @@ def test_shooter_synthesizes_study_packet_from_legacy_council_result() -> None:
 
 def test_synthesized_study_packet_never_inherits_executable_authority() -> None:
     shooter = _load_shooter()
-    tracker_payload = {
+    tracker_payload: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "state_version": 1002000,
         "last_capture_epoch": 1002.0,
@@ -674,7 +678,7 @@ def test_synthesized_study_packet_never_inherits_executable_authority() -> None:
 
 def test_shooter_rejects_stale_study_packet_for_current_display() -> None:
     shooter = _load_shooter()
-    stale_packet = {
+    stale_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "study_old",
         "packet_type": "STUDY_PACKET",
@@ -684,7 +688,7 @@ def test_shooter_rejects_stale_study_packet_for_current_display() -> None:
         "model_council": {"final_state": "WATCHING", "final_side": "BUY"},
         "promotion_trace": {"denied_at": "TIMING_WAIT", "next_required": "fresh packet"},
     }
-    fresh_packet = dict(stale_packet)
+    fresh_packet: dict[str, Any] = dict(stale_packet)
     fresh_packet["packet_id"] = "study_fresh"
     fresh_packet["created_epoch"] = 1000.0
     fresh_packet["valid_until_epoch"] = 1010.0
@@ -695,7 +699,7 @@ def test_shooter_rejects_stale_study_packet_for_current_display() -> None:
 
 def test_shooter_synthesizes_current_study_when_nested_packet_is_stale() -> None:
     shooter = _load_shooter()
-    tracker_payload = {
+    tracker_payload: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "state_version": 1002000,
         "last_capture_epoch": 1002.0,
@@ -743,7 +747,7 @@ def test_shooter_writes_handshake_for_study_packet(monkeypatch: pytest.MonkeyPat
     handshake_path = tmp_path / "shooter_handshake.json"
     monkeypatch.setattr(shooter, "_SHOOTER_RUNTIME_DIR", tmp_path)
     monkeypatch.setattr(shooter, "_SHOOTER_HANDSHAKE_PATH", handshake_path)
-    study_packet = {
+    study_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "study_handshake",
         "packet_type": "STUDY_PACKET",
@@ -788,7 +792,7 @@ def test_extract_model_council_packet_ignores_expired_snapshot_execution_packet(
     expired_packet["valid_until_epoch"] = 999.0
     expired_packet["valid_until_epoch_sec"] = 999.0
 
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "execution_packet": expired_packet,
         "model_council_packet": expired_packet,
@@ -855,7 +859,7 @@ def test_study_handshake_does_not_carry_previous_action_failure(monkeypatch: pyt
             state="ABORT_BEFORE_SIDE_CLICK",
         ),
     )
-    study_packet = {
+    study_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "study_waiting_packet",
         "packet_type": "STUDY_PACKET",
@@ -1342,25 +1346,24 @@ def test_startup_test_entry_waits_for_fresh_bias_before_calibration_click(monkey
             "CALIBRATION_TEST",
         ]
     )
-    generated = iter(
-        [
-            {
-                "signal_id": "startup-waiting-1",
-                "status": "TEST_WAITING_FOR_PHOENIX_BIAS",
-                "actionable": False,
-                "execution_action": "HOLD",
-                "expiry_seconds": 30,
-            },
-            {
-                "signal_id": "startup-test-2",
-                "actionable": True,
-                "execution_action": "SELL",
-                "expiry_seconds": 60,
-                "focus_timeframe": "M1",
-                "market": "CAD/JPY OTC",
-            },
-        ]
-    )
+    generated_signals: list[dict[str, Any]] = [
+        {
+            "signal_id": "startup-waiting-1",
+            "status": "TEST_WAITING_FOR_PHOENIX_BIAS",
+            "actionable": False,
+            "execution_action": "HOLD",
+            "expiry_seconds": 30,
+        },
+        {
+            "signal_id": "startup-test-2",
+            "actionable": True,
+            "execution_action": "SELL",
+            "expiry_seconds": 60,
+            "focus_timeframe": "M1",
+            "market": "CAD/JPY OTC",
+        },
+    ]
+    generated: Iterator[dict[str, Any]] = iter(generated_signals)
     clicks: list[tuple[str, int]] = []
     sleeps: list[float] = []
     monkeypatch.setenv("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS", "1")
@@ -1628,7 +1631,7 @@ def test_live_ready_clicks_only_when_env_identity_and_rehearsal_pass(tmp_path: P
 def test_live_ready_record_exposes_action_sequence_for_burn_monitor(tmp_path: Path) -> None:
     shooter = _load_shooter()
     record_path = tmp_path / "live_ready.jsonl"
-    action_sequence = {
+    action_sequence: dict[str, Any] = {
         "overall": "PASS",
         "clicked": True,
         "reason": "ACTION_SEQUENCE_COMPLETE",

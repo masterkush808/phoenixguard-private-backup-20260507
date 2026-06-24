@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 import csv
 import json
@@ -61,7 +62,7 @@ def test_validate_teacher_manifest_accepts_matching_metadata(tmp_path: Path) -> 
     )
 
     split_stat = split_manifest.stat()
-    metadata = {
+    metadata: dict[str, Any] = {
         "split_manifest_path": str(split_manifest.resolve()),
         "split_manifest_size": int(split_stat.st_size),
         "split_manifest_mtime_ns": int(split_stat.st_mtime_ns),
@@ -151,7 +152,7 @@ def test_validate_teacher_manifest_rejects_error_rows(tmp_path: Path) -> None:
 
 
 def test_validate_directional_teacher_consistency_rejects_skewed_buy_targets() -> None:
-    records = []
+    records: list[dict[str, Any]] = []
     for _ in range(12):
         records.append(
             {
@@ -178,7 +179,7 @@ def test_validate_directional_teacher_consistency_rejects_skewed_buy_targets() -
 
 
 def test_normalize_teacher_manifest_record_aligns_directional_targets_to_label() -> None:
-    record = {
+    record: dict[str, Any] = {
         "label": "BUY",
         "projection": {"direction": "SELL", "confidence": 0.72, "dominance": 0.14},
         "next_box": {"direction": "SELL", "confidence": 0.77},
@@ -267,7 +268,7 @@ def test_normalize_teacher_manifest_file_rewrites_rows_and_metadata(tmp_path: Pa
         "metadata_updated": True,
     }
 
-    repaired_records = []
+    repaired_records: list[dict[str, Any]] = []
     with teacher_manifest.open("r", encoding="utf-8") as manifest_file:
         for raw_line in manifest_file:
             repaired_records.append(json.loads(raw_line))

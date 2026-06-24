@@ -1,3 +1,4 @@
+from typing import Any
 from pathlib import Path
 from fastapi.testclient import TestClient
 from phoenixguard.mobile_api.app import create_app
@@ -8,7 +9,7 @@ client = TestClient(create_app())
 
 def test_render_endpoint_returns_png(tmp_path: Path):
     session = "test-render-session-1"
-    o = {"id": "r1", "bbox": [10, 10, 60, 60], "confidence": 0.85}
+    o: dict[str, Any] = {"id": "r1", "bbox": [10, 10, 60, 60], "confidence": 0.85}
     merge_market_objects(session, [o])
     resp = client.get(f"/v1/mobile/registry/sessions/{session}/render/latest.png")
     assert resp.status_code == 200

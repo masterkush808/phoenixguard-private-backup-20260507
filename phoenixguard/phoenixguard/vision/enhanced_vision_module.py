@@ -154,12 +154,6 @@ class EnhancedVisionEngine:
         """
         start_time = time.time()
 
-        # Convert input
-        if isinstance(image, Image.Image):
-            img_array = np.array(image)
-        else:
-            img_array = image
-
         # 1. Multi-model ensemble inference
         ensemble_output = self.ensemble.infer(image)
 
@@ -279,11 +273,11 @@ class EnhancedVisionEngine:
         motion_frame: Optional[OpticalFlowFrame],
     ) -> dict[str, float]:
         """Compute importance of top contributing features."""
-        importance = {}
+        importance: dict[str, float] = {}
 
         # YOLO detection confidence
         if ensemble_output.detections:
-            importance["detection_confidence"] = np.mean([d.confidence for d in ensemble_output.detections])
+            importance["detection_confidence"] = float(np.mean([d.confidence for d in ensemble_output.detections]))
         else:
             importance["detection_confidence"] = 0.0
 

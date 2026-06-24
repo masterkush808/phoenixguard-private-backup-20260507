@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 import pytest
 
 import json
@@ -204,7 +205,7 @@ def test_heatmap_can_classify_reversal_windows() -> None:
 
 def test_heatmap_feedback_calibration_leans_into_target_path_feedback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     journal_path = tmp_path / "feedback_submissions.jsonl"
-    submission = {
+    submission: dict[str, Any] = {
         "submission_id": "sub_1",
         "created_at": "2026-03-30T08:00:00+00:00",
         "updated_at": "2026-03-30T08:00:00+00:00",
@@ -267,7 +268,7 @@ def test_heatmap_mask_shaping_biases_energy_toward_segmented_region() -> None:
         [0, 0, 0, 64, 196, 255],
         [0, 0, 0, 48, 176, 236],
     ]
-    result = {
+    result: dict[str, Any] = {
         "detections": [],
         "next_box_hypotheses": [],
         "zone_learning": {"matching_zones": []},

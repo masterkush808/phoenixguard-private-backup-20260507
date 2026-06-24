@@ -10,13 +10,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, cast
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8793"
 DEFAULT_SESSION = "pocket-live-8788"
 DEFAULT_MAX_CAPTURE_SETS = 6
 HEAVY_ARTIFACT_KINDS = {"chart", "overlay", "full-overlay"}
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -177,7 +181,8 @@ def _capture_with_playwright(url: str, output_png: Path, timeout_ms: int, width:
             )
             try:
                 client = page.context.new_cdp_session(page)
-                shot = client.send("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True, "fromSurface": True})
+                send = cast(Callable[[str, Mapping[str, Any]], Any], getattr(client, "send"))
+                shot = _mapping(send("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True, "fromSurface": True}))
                 output_png.write_bytes(base64.b64decode(str(shot.get("data") or "")))
             except Exception:
                 page.screenshot(path=str(output_png), full_page=True, timeout=timeout_ms, animations="disabled")
@@ -218,7 +223,7 @@ def prune_capture_evidence(out_dir: Path, session_id: str, *, max_capture_sets: 
     max_sets = _resolve_max_capture_sets(max_capture_sets)
     groups = _capture_bundle_groups(out_dir, session_id)
     stamps = sorted(groups)
-    retention = {
+    retention: dict[str, Any] = {
         "enabled": max_sets > 0,
         "max_capture_sets": max_sets,
         "existing_capture_sets": len(stamps),
@@ -241,7 +246,7 @@ def prune_capture_evidence(out_dir: Path, session_id: str, *, max_capture_sets: 
                 retention["removed_files"] = int(retention["removed_files"]) + 1
                 retention["removed_bytes"] = int(retention["removed_bytes"]) + size
             except Exception as exc:
-                retention["errors"].append({"path": str(path), "error": str(exc)})
+                cast(list[dict[str, str]], retention["errors"]).append({"path": str(path), "error": str(exc)})
     retention["removed_mb"] = round(float(retention["removed_bytes"]) / (1024.0 * 1024.0), 3)
     return retention
 
@@ -265,7 +270,7 @@ def build_capture(
     screenshot_path = out_dir / f"dashboard_{session_id}_{stamp}.png"
     dashboard_html_path = out_dir / f"dashboard_{session_id}_{stamp}.html"
 
-    capture = {"ok": False, "method": "skipped", "skipped": True, "reason": "playwright disabled"} if skip_playwright else _capture_with_playwright(dashboard_url, screenshot_path, int(timeout * 1000.0), width, height)
+    capture: dict[str, Any] = {"ok": False, "method": "skipped", "skipped": True, "reason": "playwright disabled"} if skip_playwright else _capture_with_playwright(dashboard_url, screenshot_path, int(timeout * 1000.0), width, height)
     dashboard = _http_bytes(dashboard_url, timeout)
     if dashboard.get("body"):
         dashboard_html_path.write_bytes(dashboard["body"])
@@ -286,7 +291,7 @@ def build_capture(
         row = _http_bytes(url, artifact_timeout)
         body = row.pop("body", b"")
         if body:
-            suffix = ".png" if "image" in str(row.get("content_type") or "") or kind != "html" else ".bin"
+            suffix = ".png" if "image" in str(row.get("content_type") or "") else ".bin"
             path = out_dir / f"latest_{kind}_{session_id}_{stamp}{suffix}"
             path.write_bytes(body)
             row["path"] = str(path)
@@ -308,7 +313,7 @@ def build_capture(
         else:
             hard_mismatches.append(f"dashboard screenshot failed or blank: {capture.get('reason') or capture.get('metrics')}")
     elif not capture.get("skipped"):
-        ready = capture.get("ready_state") or {}
+        ready = _mapping(capture.get("ready_state"))
         if not ready.get("live_state"):
             hard_mismatches.append("dashboard screenshot did not hydrate live/state/v3 before capture")
         if ready.get("legacy_state"):
@@ -318,20 +323,20 @@ def build_capture(
         if not ready.get("overlay_rendered"):
             hard_mismatches.append("dashboard screenshot did not render DOM hotspots or the full-overlay artifact")
     for kind in ("window", "chart"):
-        row = artifacts.get(kind, {})
+        row = _mapping(artifacts.get(kind))
         if row.get("skipped"):
             warnings.append(f"latest {kind} artifact download skipped: {row.get('reason')}")
             continue
         if not row.get("ok") or int(row.get("bytes") or 0) <= 0:
             hard_mismatches.append(f"latest {kind} artifact missing")
-        elif row.get("metrics") and row["metrics"].get("nonblank") is False:
+        elif _mapping(row.get("metrics")).get("nonblank") is False:
             hard_mismatches.append(f"latest {kind} artifact is blank")
     if not live.get("ok"):
         warnings.append("live state endpoint unavailable during capture")
     if not visual.get("ok"):
         warnings.append("visual health endpoint unavailable during capture")
 
-    retention = prune_capture_evidence(out_dir, session_id, max_capture_sets=max_capture_sets)
+    retention: dict[str, Any] = prune_capture_evidence(out_dir, session_id, max_capture_sets=max_capture_sets)
     if retention.get("errors"):
         warnings.append(f"evidence retention had {len(retention['errors'])} cleanup error(s)")
 
@@ -371,9 +376,11 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         "| kind | status | bytes | path | nonblank |",
         "| --- | ---: | ---: | --- | --- |",
     ]
-    for kind, row in report.get("artifacts", {}).items():
-        metrics = row.get("metrics") if isinstance(row, Mapping) else {}
-        nonblank = metrics.get("nonblank") if isinstance(metrics, Mapping) else ""
+    artifacts = _mapping(report.get("artifacts"))
+    for kind, raw_row in artifacts.items():
+        row = _mapping(raw_row)
+        metrics = _mapping(row.get("metrics"))
+        nonblank = metrics.get("nonblank", "")
         lines.append(f"| {kind} | {row.get('status', 0)} | {row.get('bytes', 0)} | {row.get('path', '')} | {nonblank} |")
     lines.extend(["", "## Hard Mismatches"])
     if report.get("hard_mismatches"):
@@ -408,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--soft", action="store_true", help="Always exit 0 after writing reports.")
     args = parser.parse_args(argv)
 
-    report = build_capture(
+    report: dict[str, Any] = build_capture(
         args.base_url,
         args.session_id,
         args.timeout,

@@ -92,7 +92,7 @@ class ScenarioPainter:
             # Name
             name = scenario_names[idx] if scenario_names and idx < len(scenario_names) else f"Scenario {rank}"
 
-            trace = {
+            trace: dict[str, Any] = {
                 "x": times,
                 "open": opens,
                 "high": highs,
@@ -167,7 +167,7 @@ class ScenarioPainter:
 
             color = self.branch_colors[idx % len(self.branch_colors)]
 
-            trace = {
+            trace: dict[str, Any] = {
                 "x": times,
                 "y": values,
                 "mode": "lines+markers",

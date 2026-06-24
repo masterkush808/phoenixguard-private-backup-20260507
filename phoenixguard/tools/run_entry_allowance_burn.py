@@ -10,14 +10,13 @@ import re
 import shutil
 import stat as stat_module
 import time
-import urllib.error
 import urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -86,12 +85,12 @@ def append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def sequence(value: Any) -> list[Any]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return list(value)
+        return list(cast(Sequence[Any], value))
     return []
 
 
@@ -209,7 +208,7 @@ def _current_price_point_from_now_object(
     if len(bounds) < 4:
         return _point_from_row(obj, width, height)
     try:
-        x0, y0, x1, y1 = [float(item) for item in bounds[:4]]
+        _x0, y0, x1, y1 = [float(item) for item in bounds[:4]]
     except (TypeError, ValueError):
         return _point_from_row(obj, width, height)
     # The burn evidence must mark the live entry candle, not a historical zone.
@@ -643,7 +642,7 @@ def session_artifact_payloads(session_id: str) -> list[dict[str, Any]]:
     for name in ("session.json", "display_state.json"):
         try:
             raw = json.loads((session_dir / name).read_text(encoding="utf-8"))
-            rows.append(raw if isinstance(raw, dict) else {})
+            rows.append(mapping(raw))
         except Exception:
             rows.append({})
     return rows
@@ -663,7 +662,7 @@ def capture_entry_evidence(
     if entry_side not in {"BUY", "SELL"}:
         return {}
     session_payloads = session_artifact_payloads(session_id)
-    artifact_sources = [live, *session_payloads]
+    artifact_sources: list[Mapping[str, Any]] = [live, *session_payloads]
     overlay_path = newest_local_artifact_path(
         [
             row.get("last_overlay_path") or row.get("last_full_overlay_path") or row.get("last_chart_path")
@@ -707,7 +706,7 @@ def capture_entry_evidence(
             window_image = fetched_window
             window_source_mode = "http_latest_window_after_stale_local"
             window_path = None
-            window_freshness = {
+            window_freshness: dict[str, Any] = {
                 "current_frame": current_artifact_frame(live, sample),
                 "artifact_frame": None,
                 "age_frames": None,
@@ -774,7 +773,7 @@ def capture_entry_evidence(
         broker_warning_point = (max(24, window_image.size[0] - 240), max(24, window_image.size[1] // 2))
         save_jpeg(annotate(overlay_image, entry_side, warning_point, failure_label, status_label=evidence_status_label), failure_overlay)
         save_jpeg(annotate(window_image, entry_side, broker_warning_point, failure_label, status_label=evidence_status_label), failure_broker)
-        meta = {
+        meta: dict[str, Any] = {
             "schema_version": "PG_ENTRY_ALLOWANCE_EVIDENCE_V1",
             "seq": seq,
             "frame": frame,
@@ -813,7 +812,7 @@ def capture_entry_evidence(
     label = f"seq {seq} frame {frame} {chart_point[2]}"
     save_jpeg(annotate(overlay_image, entry_side, (chart_point[0], chart_point[1]), label, status_label=evidence_status_label), overlay_out)
     save_jpeg(annotate(window_image, entry_side, window_point, label, status_label=evidence_status_label), broker_out)
-    meta = {
+    meta: dict[str, Any] = {
         "schema_version": "PG_ENTRY_ALLOWANCE_EVIDENCE_V1",
         "seq": seq,
         "frame": frame,
@@ -848,10 +847,10 @@ def _path_key(path: Path) -> str:
 def protected_session_artifact_paths(session_dir: Path) -> set[str]:
     protected: set[str] = set()
     for name in ("session.json", "display_state.json"):
-        payload = {}
+        payload: dict[str, Any] = {}
         try:
             raw = json.loads((session_dir / name).read_text(encoding="utf-8"))
-            payload = raw if isinstance(raw, dict) else {}
+            payload = mapping(raw)
         except Exception:
             payload = {}
         for key in (
@@ -968,7 +967,7 @@ def storage_guard(out_dir: Path, session_id: str) -> dict[str, Any]:
     protected = protected_session_artifact_paths(session_dir)
     entry_evidence_dir = out_dir / "entry_evidence"
     protected_entry_evidence = protected_allowed_entry_evidence_paths(entry_evidence_dir)
-    results = {
+    results: dict[str, Any] = {
         "at_utc": utc_now(),
         "overlay_geometry_dumps": prune_path_budget(
             repo_runtime / "overlay_geometry_dumps",
@@ -1025,7 +1024,7 @@ def storage_guard(out_dir: Path, session_id: str) -> dict[str, Any]:
 
 def artifact_health(session_id: str) -> dict[str, Any]:
     session_dir = local_root() / "codex_runtime" / "data_live" / "mobile_api" / "window_tracker" / "sessions" / session_id
-    result = {"session_dir": str(session_dir), "artifact_count": 0, "artifact_mb": 0.0, "counts": {}, "scan_errors": 0}
+    result: dict[str, Any] = {"session_dir": str(session_dir), "artifact_count": 0, "artifact_mb": 0.0, "counts": {}, "scan_errors": 0}
     if not session_dir.exists():
         return result
     counts: Counter[str] = Counter()
@@ -1632,7 +1631,7 @@ def score_events(
     horizons = [60, 300, 600, 900]
     scores: dict[str, Any] = {}
     for horizon in horizons:
-        rows = []
+        rows: list[dict[str, Any]] = []
         for event in entries:
             entry_payload = mapping(event.get("entry"))
             included = (
@@ -1689,7 +1688,12 @@ def entry_score_lookup(scores: Mapping[str, Any], seq: int) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for horizon, payload in scores.items():
         rows = sequence(mapping(payload).get("rows"))
-        row = next((mapping(item) for item in rows if int(mapping(item).get("seq", -1) or -1) == seq), {})
+        row: dict[str, Any] = {}
+        for item in rows:
+            candidate = mapping(item)
+            if int(candidate.get("seq", -1) or -1) == seq:
+                row = candidate
+                break
         if row:
             result[str(horizon)] = {
                 "verdict": row.get("verdict"),
@@ -1701,7 +1705,7 @@ def entry_score_lookup(scores: Mapping[str, Any], seq: int) -> dict[str, Any]:
 
 
 def write_entry_gallery(out_dir: Path, entries: list[dict[str, Any]], scores: Mapping[str, Any]) -> Path:
-    manifest = []
+    manifest: list[dict[str, Any]] = []
     for index, event in enumerate(entries, start=1):
         seq = int(event.get("seq", 0) or 0)
         overlay = text(event.get("overlay_evidence_path"))
@@ -1828,7 +1832,7 @@ def write_report(out_dir: Path, samples: list[dict[str, Any]], entries: list[dic
     ]
     market_values = sorted({text(row.get("market") or row.get("symbol") or row.get("name")) for row in identities if text(row.get("market") or row.get("symbol") or row.get("name"))})
     locked_titles = sorted({text(row.get("locked_title")) for row in identities if text(row.get("locked_title"))})
-    summary = {
+    summary: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "sample_count": len(samples),
         "entry_event_count": len(entries),
@@ -1959,7 +1963,7 @@ def main() -> int:
     os.environ.setdefault("PHOENIXGUARD_ENTRY_EVIDENCE_MAX_AGE_SEC", str(retention_age_sec))
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    preflight_cleanup = clear_existing_hardening_studies() if bool(args.clear_existing) and not args.out_dir else {
+    preflight_cleanup: dict[str, Any] = clear_existing_hardening_studies() if bool(args.clear_existing) and not args.out_dir else {
         "path": str(local_root() / "hardening_studies"),
         "status": "kept",
         "removed": 0,
@@ -2078,7 +2082,7 @@ def main() -> int:
             if should_capture_evidence and (first_episode_capture or periodic_episode_capture):
                 seen_entries.add(entry_key)
                 entry_capture_times[entry_key] = loop_started
-                event = capture_entry_evidence(out_dir, sample, live, council, args.session_id, args.base_url, args.timeout_sec)
+                event: dict[str, Any] = capture_entry_evidence(out_dir, sample, live, council, args.session_id, args.base_url, args.timeout_sec)
                 if not event:
                     event = {
                         "seq": seq,

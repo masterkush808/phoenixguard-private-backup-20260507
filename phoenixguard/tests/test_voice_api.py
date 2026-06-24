@@ -33,9 +33,9 @@ class _FakeTrackerService:
         observer_policy: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         resolved_session_id = str(session_id or "pocket-live-8788")
-        payload = self.sessions.get(resolved_session_id)
-        if payload is None:
-            payload = {
+        existing = self.sessions.get(resolved_session_id)
+        if existing is None:
+            payload: dict[str, Any] = {
                 "session_id": resolved_session_id,
                 "name": name or resolved_session_id,
                 "market": market,
@@ -63,6 +63,8 @@ class _FakeTrackerService:
                 },
             }
             self.sessions[resolved_session_id] = payload
+        else:
+            payload = existing
         return dict(payload)
 
     def get_session(self, session_id: str) -> dict[str, Any]:

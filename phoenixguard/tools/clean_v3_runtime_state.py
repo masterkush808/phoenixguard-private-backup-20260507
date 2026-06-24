@@ -144,7 +144,7 @@ def main() -> int:
         else:
             move_path(path, backup_root, moved, reason=reason, apply=args.apply)
 
-    log = {
+    log: dict[str, object] = {
         "applied": bool(args.apply),
         "action": "delete" if args.delete else "archive",
         "backup_root": "" if args.delete else backup_root.relative_to(ROOT).as_posix(),

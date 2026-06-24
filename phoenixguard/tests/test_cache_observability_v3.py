@@ -164,7 +164,7 @@ def test_live_state_compact_cache_signatures_track_display_artifacts(tmp_path: P
         ),
         encoding="utf-8",
     )
-    display_state = {
+    display_state: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "frame_index": 10,
         "display_frame_id": 100,
@@ -195,7 +195,7 @@ def test_live_state_compact_cache_signatures_track_display_artifacts(tmp_path: P
 
 
 def test_study_packet_expires_by_ttl() -> None:
-    study_packet = {
+    study_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_type": "STUDY_PACKET",
         "packet_id": "study-expired",
@@ -312,7 +312,7 @@ def test_all_required_models_awake_permits_packet_publication() -> None:
 
 def test_forensic_log_written_every_cycle(tmp_path: Path) -> None:
     log_path = tmp_path / "forensic" / "decision_cycles.jsonl"
-    decision = {"packet_id": "pgpkt-test", "will_click": False, "reason": "WAITING_SECOND_LIVE_READ"}
+    decision: dict[str, Any] = {"packet_id": "pgpkt-test", "will_click": False, "reason": "WAITING_SECOND_LIVE_READ"}
 
     row = append_forensic_decision_log(log_path, decision, packet=_execution_packet(), now_epoch=1000.0)
 
@@ -323,7 +323,7 @@ def test_forensic_log_written_every_cycle(tmp_path: Path) -> None:
 
 
 def test_bad_entry_replay_blocks_execution() -> None:
-    replay_record = {
+    replay_record: dict[str, Any] = {
         "schema_version": EXECUTION_PACKET_SCHEMA_VERSION,
         "block_reason": BAD_ENTRY_CLASS_001,
         "market_context": {"is_late_chase": True},
@@ -359,7 +359,7 @@ def test_paper_mode_records_without_clicking(tmp_path: Path) -> None:
 def test_model_council_health_endpoint_reads_tracker_session() -> None:
     class _FakeTracker:
         def __init__(self) -> None:
-            self.session = {
+            self.session: dict[str, Any] = {
                 "session_id": "pocket-live-8788",
                 "cache_metrics": {"hits": 2, "misses": 1, "rejects": 1, "entries": 3},
                 "dropped_frames": 1,
@@ -902,7 +902,7 @@ def test_performance_trace_v3_treats_locked_display_overlay_as_authority_locked(
 
 
 def test_model_council_latest_state_endpoint_returns_non_executable_study_packet() -> None:
-    study_packet = {
+    study_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "pgpkt-study",
         "packet_type": "STUDY_PACKET",
@@ -950,7 +950,7 @@ def test_model_council_latest_state_endpoint_returns_non_executable_study_packet
 def test_model_council_latest_study_packet_endpoints_return_visibility_packet(monkeypatch: Any) -> None:
     monkeypatch.setenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "0")
     now = time.time()
-    study_packet = {
+    study_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "pgpkt-study-visible",
         "packet_type": "STUDY_PACKET",
@@ -1051,7 +1051,7 @@ def test_observability_reads_nested_execution_packet_from_model_council_result()
         history_context={"similarity_state": "REPEATING_SUCCESSFUL_PATH"},
         runtime_model_health={"all_required_models_awake": True, "council_status": "AWAKE"},
     )
-    session = {"session_id": "pocket-live-8788", "latest_signal": {"execution_packet": packet}}
+    session: dict[str, Any] = {"session_id": "pocket-live-8788", "latest_signal": {"execution_packet": packet}}
 
     health = build_model_council_health_from_session(session, now_epoch=1000.5)
     intelligence = build_intelligence_health(session)
@@ -1063,7 +1063,7 @@ def test_observability_reads_nested_execution_packet_from_model_council_result()
 
 
 def test_observability_reads_v3_study_result_without_execution_packet() -> None:
-    session = {
+    session: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "latest_signal": {
             "model_council_result": {

@@ -11,7 +11,7 @@ import time
 import urllib.parse
 import urllib.request
 from urllib.error import HTTPError, URLError
-from typing import Any
+from typing import Any, Mapping, cast
 
 from PIL import Image, ImageFilter, ImageStat
 
@@ -35,7 +35,11 @@ def _error(exc: BaseException) -> str:
 
 
 def _json(url: str, timeout: float) -> dict[str, Any]:
-    return json.loads(_bytes(url, timeout).decode("utf-8", errors="replace"))
+    return _mapping(json.loads(_bytes(url, timeout).decode("utf-8", errors="replace")))
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _avg(values: list[float]) -> float:
@@ -89,8 +93,10 @@ def main() -> int:
             })
             time.sleep(max(0.1, float(args.interval_sec)))
             continue
-        artifact = ((live.get("chart_frame") or {}).get("display_artifact") or (live.get("broker_surface") or {}).get("frame") or {})
-        url = str(artifact.get("url") or (live.get("broker_surface") or {}).get("url") or "")
+        chart_frame = _mapping(live.get("chart_frame"))
+        broker_surface = _mapping(live.get("broker_surface"))
+        artifact = _mapping(chart_frame.get("display_artifact") or broker_surface.get("frame"))
+        url = str(artifact.get("url") or broker_surface.get("url") or "")
         if not url:
             endpoint_failures += 1
             samples.append({
@@ -115,23 +121,25 @@ def main() -> int:
             })
             time.sleep(max(0.1, float(args.interval_sec)))
             continue
-        audit = live.get("overlay_precision_audit") or {}
-        report = audit.get("precision_report") or {}
+        audit = _mapping(live.get("overlay_precision_audit"))
+        precision_report = _mapping(audit.get("precision_report"))
         alignment = 1.0
-        if int(report.get("outside_plot_area") or 0) or int(report.get("missing_transform") or 0):
+        if int(precision_report.get("outside_plot_area") or 0) or int(precision_report.get("missing_transform") or 0):
             alignment = 0.0
-        elif int(report.get("label_collisions") or 0):
+        elif int(precision_report.get("label_collisions") or 0):
             alignment = 0.5
+        performance_trace = _mapping(live.get("performance_trace_v3"))
+        adaptive_performance = _mapping(performance_trace.get("adaptive_performance"))
         scores.update({
             "frame_id": live.get("frame_id"),
             "overlay_alignment_score": alignment,
-            "display_profile": ((live.get("performance_trace_v3") or {}).get("adaptive_performance") or {}).get("profile", "BALANCED"),
+            "display_profile": adaptive_performance.get("profile", "BALANCED"),
         })
         samples.append(scores)
         time.sleep(max(0.1, float(args.interval_sec)))
 
     good_samples = [item for item in samples if "width" in item]
-    report = {
+    report: dict[str, Any] = {
         "schema_version": "PG_LIVE_CLARITY_TEST_V3",
         "session_id": args.session,
         "duration_sec": float(args.duration_sec),

@@ -6,6 +6,7 @@ import re
 import shutil
 from functools import cached_property
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Mapping, Protocol, Sequence, cast
 
 import numpy as np
@@ -103,9 +104,14 @@ def _require_mapping_dict(value: object, *, context: str) -> dict[str, Any]:
     raise TypeError(f"{context} must return a mapping, got {type(value).__name__}.")
 
 
+def _string_choices(value: object, fallback: Sequence[object]) -> list[str]:
+    source: Sequence[object] = cast(Sequence[object], value) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else fallback
+    return [str(item) for item in source]
+
+
 class PhoenixGuardPipelineAdapter:
     @cached_property
-    def module(self) -> Any:
+    def module(self) -> ModuleType:
         return importlib.import_module("main")
 
     def describe(self) -> dict[str, Any]:
@@ -117,7 +123,7 @@ class PhoenixGuardPipelineAdapter:
                 context="main._normalize_manual_inference_render_config",
             )
         else:
-            default_settings = {
+            default_settings: dict[str, object] = {
                 "overlay_mode": getattr(module, "DEFAULT_OVERLAY_MODE", DEFAULT_OVERLAY_MODE),
                 "min_conf_global": 0.42,
                 "min_conf_latest": 0.50,
@@ -133,9 +139,9 @@ class PhoenixGuardPipelineAdapter:
         return {
             "required_uploads": len(DEFAULT_UPLOAD_ORDER),
             "upload_order": [dict(slot) for slot in DEFAULT_UPLOAD_ORDER],
-            "timeframe_choices": [str(item) for item in getattr(module, "TIMEFRAME_CHOICES", DEFAULT_TIMEFRAME_CHOICES)],
-            "overlay_choices": [str(item) for item in getattr(module, "VISION_LEVEL_CHOICES", (default_settings["overlay_mode"],))],
-            "council_scope_choices": [str(item) for item in getattr(module, "COUNCIL_SCOPE_CHOICES", (default_settings["council_scope"],))],
+            "timeframe_choices": _string_choices(getattr(module, "TIMEFRAME_CHOICES", DEFAULT_TIMEFRAME_CHOICES), DEFAULT_TIMEFRAME_CHOICES),
+            "overlay_choices": _string_choices(getattr(module, "VISION_LEVEL_CHOICES", (default_settings["overlay_mode"],)), (default_settings["overlay_mode"],)),
+            "council_scope_choices": _string_choices(getattr(module, "COUNCIL_SCOPE_CHOICES", (default_settings["council_scope"],)), (default_settings["council_scope"],)),
             "default_settings": default_settings,
         }
 

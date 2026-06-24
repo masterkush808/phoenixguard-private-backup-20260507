@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import time
-from typing import Any, Mapping
+from typing import Any
 
 from certification_common_v3 import DEFAULT_BASE_URL, DEFAULT_SESSION, ROOT, http_json, quote_session
 from certify_v3_full_system_burn_in import (
@@ -50,7 +50,7 @@ def main() -> int:
     while time.time() < deadline:
         now = time.time()
         trace_result = http_json(f"{base}/v1/mobile/runtime/trace/v3?session_id={session_q}", timeout=args.timeout)
-        trace = dict(trace_result.payload) if isinstance(trace_result.payload, Mapping) else {}
+        trace = _mapping(trace_result.payload)
         if not trace_result.ok:
             failures.append(f"runtime trace failed: {trace_result.error or trace_result.status}")
             break
@@ -58,7 +58,7 @@ def main() -> int:
         execution = _endpoint_payload(trace, "execution_latest")
         cert_gates = _mapping(trace.get("certification_gates"))
         sequence = _mapping(trace.get("sequence_context_readiness"))
-        sample = {
+        sample: dict[str, Any] = {
             "epoch": now,
             "iso": _utc_iso(now),
             "source_lock_status": _text(_mapping(cert_gates.get("source_lock")).get("status"), "MISSING"),
@@ -78,7 +78,7 @@ def main() -> int:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(_render_promotion_failure_report(rows, ranking), encoding="utf-8")
 
-    summary = {
+    summary: dict[str, Any] = {
         "schema_version": "PG_PROMOTION_FAILURE_AUDIT_V3",
         "session_id": args.session,
         "rows": len(rows),

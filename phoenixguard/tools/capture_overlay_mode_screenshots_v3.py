@@ -8,7 +8,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 import sys
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -57,7 +57,7 @@ MODE_TO_SELECT_VALUE: dict[str, str] = {
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _mode_list(raw: str, *, all_modes: bool) -> list[str]:
@@ -74,7 +74,7 @@ def _http_json(url: str, timeout: float) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - local operator tool
             body = response.read()
-            payload = json.loads(body.decode("utf-8", errors="replace")) if body else {}
+            payload = _mapping(json.loads(body.decode("utf-8", errors="replace"))) if body else {}
             return {"ok": 200 <= int(response.status) < 300, "status": int(response.status), "latency_ms": round((time.perf_counter() - started) * 1000.0, 2), "payload": payload}
     except Exception as exc:
         return {"ok": False, "status": 0, "latency_ms": round((time.perf_counter() - started) * 1000.0, 2), "payload": {}, "error": str(exc)}
@@ -257,12 +257,13 @@ def main() -> int:
             screenshot_path = out_dir / f"{mode.lower()}_{args.session}.png"
             try:
                 client = page.context.new_cdp_session(page)
-                shot = client.send("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True, "fromSurface": True})
+                send = cast(Callable[[str, Mapping[str, Any]], Any], getattr(client, "send"))
+                shot = _mapping(send("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True, "fromSurface": True}))
                 screenshot_path.write_bytes(base64.b64decode(str(shot.get("data") or "")))
             except Exception:
                 page.screenshot(path=str(screenshot_path), full_page=True, timeout=int(args.timeout * 1000.0), animations="disabled")
             metrics = _image_metrics(screenshot_path)
-            sample = {
+            sample: dict[str, Any] = {
                 "mode": mode,
                 "select_value": select_value,
                 "backend_ok": backend.get("ok"),

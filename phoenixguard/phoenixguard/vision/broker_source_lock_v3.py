@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import json
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, cast
 
 import numpy as np
 from PIL import Image
@@ -98,6 +99,10 @@ DEFAULT_VIEWPORT_TOLERANCE_PX = 6
 DEFAULT_MAX_CANDIDATES = 16
 
 
+def _empty_evidence() -> dict[str, object]:
+    return {}
+
+
 @dataclass(frozen=True)
 class BrokerSourceTargetV3:
     browser: str = ""
@@ -128,13 +133,13 @@ class DashboardWindowCaptureGuardV3:
     confidence: float
     reason: str
     reason_codes: tuple[str, ...] = field(default_factory=tuple)
-    evidence: dict[str, Any] = field(default_factory=dict)
+    evidence: dict[str, object] = field(default_factory=_empty_evidence)
 
     @property
     def capture_safe(self) -> bool:
         return not self.wrong_surface
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self) -> dict[str, object]:
         return {
             "schema_version": DASHBOARD_WINDOW_CAPTURE_GUARD_V3_SCHEMA_VERSION,
             "surface_class": self.surface_class,
@@ -173,9 +178,9 @@ class BrokerSourceLockV3:
     broker_pixel_fingerprint: str = ""
     broker_control_fingerprint: str = ""
     viewport_fingerprint: str = ""
-    evidence: dict[str, Any] = field(default_factory=dict)
+    evidence: dict[str, object] = field(default_factory=_empty_evidence)
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self) -> dict[str, object]:
         return {
             "schema_version": BROKER_SOURCE_LOCK_V3_SCHEMA_VERSION,
             "status": self.status,
@@ -194,13 +199,16 @@ class BrokerSourceLockV3:
         }
 
 
-def _mapping(value: Any) -> dict[str, Any]:
-    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+def _mapping(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    raw = cast(Mapping[object, object], value)
+    return {str(key): item for key, item in raw.items()}
 
 
-def _sequence(value: Any) -> list[Any]:
+def _sequence(value: object) -> list[object]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return list(value)
+        return list(cast(Sequence[object], value))
     return []
 
 
@@ -230,16 +238,6 @@ def _int(value: Any, default: int = 0) -> int:
     except (TypeError, ValueError):
         return int(default)
     return int(default) if parsed < 0 else parsed
-
-
-def _clip01(value: Any, default: float = 0.0) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return float(default)
-    if parsed != parsed or parsed in {float("inf"), float("-inf")}:
-        return float(default)
-    return max(0.0, min(1.0, float(parsed)))
 
 
 def _bool(value: Any) -> bool:
@@ -394,18 +392,17 @@ def _viewport_from_rect(value: Any) -> tuple[int, int]:
         width = max(0, right - left)
         height = max(0, bottom - top)
         return width, height
-    if isinstance(value, Mapping):
-        row = _mapping(value)
-        if all(key in row for key in ("left", "top", "right", "bottom")):
-            width = max(0, _int(row.get("right")) - _int(row.get("left")))
-            height = max(0, _int(row.get("bottom")) - _int(row.get("top")))
-            return width, height
+    row = _mapping(value)
+    if all(key in row for key in ("left", "top", "right", "bottom")):
+        width = max(0, _int(row.get("right")) - _int(row.get("left")))
+        height = max(0, _int(row.get("bottom")) - _int(row.get("top")))
+        return width, height
     return 0, 0
 
 
 def _viewport_tuple(value: Any) -> tuple[int, int]:
-    if isinstance(value, Mapping):
-        row = _mapping(value)
+    row = _mapping(value)
+    if row:
         nested = _mapping(row.get("viewport")) or _mapping(row.get("capture_plane"))
         if nested:
             width = _int(nested.get("width") or nested.get("viewport_width") or nested.get("innerWidth"))
@@ -506,7 +503,7 @@ def broker_control_fingerprint_v3(value: Mapping[str, Any] | None) -> str:
             for key, item in sorted(execution_boxes.items(), key=lambda pair: str(pair[0]))
             if _control_box(_mapping(item))
         }
-    descriptor = {
+    descriptor: dict[str, object] = {
         "controls_ready": _bool(row.get("controls_ready")),
         "all_required_visible": _bool(visibility.get("all_required_visible")),
         "image_width": _int(visibility.get("image_width") or _mapping(row.get("capture_plane")).get("width")),
@@ -741,7 +738,15 @@ def _desktop_taskbar_image_evidence(image: Image.Image | None) -> dict[str, Any]
     if image is None:
         return {"image_present": False, "taskbar_dominant": False, "taskbar_ratio": 0.0, "desktop_uniformity": 0.0}
     try:
-        arr = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        stats_image = image.convert("RGB")
+        width, height = stats_image.size
+        max_width = 640
+        max_height = 360
+        if width > max_width or height > max_height:
+            scale = min(max_width / max(1, width), max_height / max(1, height))
+            sample_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+            stats_image = stats_image.resize(sample_size)
+        arr = np.asarray(stats_image, dtype=np.uint8)
     except Exception:
         return {"image_present": True, "taskbar_dominant": False, "taskbar_ratio": 0.0, "desktop_uniformity": 0.0}
     if arr.ndim != 3 or arr.shape[0] < 80 or arr.shape[1] < 120:
@@ -770,7 +775,7 @@ def _desktop_taskbar_image_evidence(image: Image.Image | None) -> dict[str, Any]
 def _surface_text(payload: Mapping[str, Any]) -> str:
     locked = _mapping(payload.get("locked_window"))
     descriptor = _mapping(payload.get("window_descriptor"))
-    parts = [
+    parts: list[object] = [
         payload.get("title"),
         payload.get("window_title"),
         payload.get("locked_title"),
@@ -803,7 +808,6 @@ def classify_wrong_surface_v3(
     row = _mapping(payload)
     expected_row = _expected_from(row, expected)
     surface_text = _surface_text(row)
-    lowered = surface_text.lower()
     compacted = _compact(surface_text)
     broker_text = _broker_text_match(row, expected_row)
     pixel_evidence = _broker_button_evidence(image)
@@ -814,7 +818,7 @@ def classify_wrong_surface_v3(
     broker_like_pixels = bool(pixel_evidence.get("broker_like_pixels", False))
     chart_like_pixels = bool(chart_evidence.get("chart_like_pixels", False))
     study_source_expected = _expected_is_study_source(expected_row)
-    evidence = {
+    evidence: dict[str, object] = {
         "title": broker_text["title"],
         "url": broker_text["url"],
         "broker_title_matches": broker_text["title_matches"],
@@ -1012,11 +1016,12 @@ def _has_candidate_shape(row: Mapping[str, Any]) -> bool:
 def _candidate_rows(payload: Mapping[str, Any], candidates: Sequence[Mapping[str, Any]] | None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if candidates is not None:
-        rows.extend(_merge_candidate(payload, cast(Mapping[str, Any], item)) for item in candidates if isinstance(item, Mapping))
+        rows.extend(_merge_candidate(payload, item) for item in candidates)
     for key in ("broker_targets", "candidate_targets", "targets", "windows", "window_candidates", "candidates"):
         for item in _sequence(payload.get(key)):
-            if isinstance(item, Mapping):
-                rows.append(_merge_candidate(payload, cast(Mapping[str, Any], item)))
+            nested_item = _mapping(item)
+            if nested_item:
+                rows.append(_merge_candidate(payload, nested_item))
     for key in ("locked_window", "window_descriptor", "target", "devtools_target"):
         nested = _mapping(payload.get(key))
         if nested:
@@ -1044,7 +1049,7 @@ def _candidate_identity(row: Mapping[str, Any]) -> str:
         return f"hwnd:{handle}"
     if target:
         return f"target:{target}"
-    descriptor = {
+    descriptor: dict[str, object] = {
         "title": _first_text(row.get("title"), row.get("window_title"), row.get("locked_title")),
         "url": _first_text(row.get("url"), row.get("current_url"), row.get("target_url")),
         "viewport": _viewport_tuple(row),
@@ -1106,7 +1111,7 @@ def _lock_result(
     broker_pixel_fingerprint: str = "",
     broker_control_fingerprint: str = "",
     viewport_fingerprint: str = "",
-    evidence: Mapping[str, Any] | None = None,
+    evidence: Mapping[str, object] | None = None,
 ) -> BrokerSourceLockV3:
     return BrokerSourceLockV3(
         status=status,
@@ -1144,12 +1149,12 @@ def evaluate_broker_source_lock_v3(
 
     text_matched_rows: list[dict[str, Any]] = []
     browser_matched_rows: list[dict[str, Any]] = []
-    candidate_evidence: list[dict[str, Any]] = []
+    candidate_evidence: list[dict[str, object]] = []
     for candidate in candidate_rows:
         text_match = _broker_text_match(candidate, expected_row)
         browser = _browser_family(candidate)
         browser_ok = _browser_matches_required(browser, required_browser)
-        evidence_row = {
+        evidence_row: dict[str, object] = {
             "candidate_id": _candidate_identity(candidate),
             "browser": browser,
             "browser_ok": browser_ok,
@@ -1169,7 +1174,7 @@ def evaluate_broker_source_lock_v3(
         if browser_ok:
             browser_matched_rows.append(candidate)
 
-    base_evidence: dict[str, Any] = {
+    base_evidence: dict[str, object] = {
         "required_browser": required_browser,
         "study_source_expected": study_source_expected,
         "chart_source_like": chart_source_like,
@@ -1279,7 +1284,7 @@ def evaluate_broker_source_lock_v3(
     control_source = _control_source(row, selected)
     control_fp = broker_control_fingerprint_v3(control_source)
     viewport_fp = broker_viewport_fingerprint_v3(target.viewport)
-    selected_evidence = {
+    selected_evidence: dict[str, object] = {
         **base_evidence,
         "selected": target.as_dict(),
         "viewport_valid": _viewport_valid(target.viewport, expected_row),

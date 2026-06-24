@@ -10,13 +10,17 @@ import time
 import urllib.parse
 import urllib.request
 from urllib.error import HTTPError, URLError
-from typing import Any
+from typing import Any, Mapping, cast
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _json(url: str, timeout: float) -> dict[str, Any]:
     req = urllib.request.Request(url, headers={"User-Agent": "PhoenixGuard-LiveSpeedTestV3/1.0", "Connection": "close"})
     with urllib.request.urlopen(req, timeout=timeout) as response:  # noqa: S310 - local operator endpoint
-        return json.loads(response.read().decode("utf-8", errors="replace"))
+        return _mapping(json.loads(response.read().decode("utf-8", errors="replace")))
 
 
 def _error(exc: BaseException) -> str:
@@ -86,8 +90,8 @@ def main() -> int:
         except Exception as exc:
             endpoint_failures += 1
             heartbeat = {"error": _error(exc)}
-        timing = perf.get("timing_trace") or {}
-        model_state = perf.get("model_state") or {}
+        timing = _mapping(perf.get("timing_trace"))
+        model_state = _mapping(perf.get("model_state"))
         frame_id = int(float(live.get("frame_id") or 0))
         rendered_frame = int(float(heartbeat.get("rendered_frame_id") or 0))
         frame_ids.append(frame_id)
@@ -99,8 +103,9 @@ def main() -> int:
         frontend_ages.append(float(timing.get("frontend_render_age_ms") or 0))
         end_to_end.append(float(timing.get("frame_age_ms") or 0))
         queue_depths.append(float(model_state.get("queue_depth") or 0))
-        stale_events += 1 if str((perf.get("visual_health") or {}).get("status") or "").upper() not in {"ALIVE", "PASS"} else 0
-        execution_status = live.get("execution_packet_status") or ((live.get("packets") or {}).get("execution") or {})
+        visual_health = _mapping(perf.get("visual_health"))
+        stale_events += 1 if str(visual_health.get("status") or "").upper() not in {"ALIVE", "PASS"} else 0
+        execution_status = _mapping(live.get("execution_packet_status") or _mapping(_mapping(live.get("packets")).get("execution")))
         if execution_status.get("exists") and execution_status.get("fresh") is False:
             stale_execution_packets += 1
         samples.append({
@@ -119,8 +124,8 @@ def main() -> int:
     frames_captured = len(set(frame_ids))
     frames_displayed = len(set(rendered_ids))
     manual_refresh_required = frames_displayed <= 1 and frames_captured > 1
-    model_summary = (samples[-1] if samples else {}).get("visual_health", {})
-    report = {
+    model_summary = _mapping((samples[-1] if samples else {}).get("visual_health"))
+    report: dict[str, Any] = {
         "schema_version": "PG_LIVE_SPEED_TEST_V3",
         "session_id": args.session,
         "duration_sec": float(args.duration_sec),
@@ -154,7 +159,8 @@ def main() -> int:
         "endpoint_failures": endpoint_failures,
         "samples": samples,
     }
-    report["verdict"] = "PASS" if all(report["pass_criteria"].values()) else "FAIL"
+    pass_criteria = _mapping(report.get("pass_criteria"))
+    report["verdict"] = "PASS" if all(bool(value) for value in pass_criteria.values()) else "FAIL"
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_json = out_dir / "live_speed_test_v3.json"

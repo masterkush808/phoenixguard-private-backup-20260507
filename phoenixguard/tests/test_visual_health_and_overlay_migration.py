@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 from pathlib import Path
 
@@ -62,7 +63,7 @@ def test_v2_adapter_does_not_import_legacy_execution() -> None:
 
 
 def test_model_health_not_0_0_when_visual_packet_exists() -> None:
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": "health-1",
         "model_council_study_packet": {"packet_id": "pkt_1", "schema_version": "PG_MODEL_COUNCIL_STUDY_V3"},
     }

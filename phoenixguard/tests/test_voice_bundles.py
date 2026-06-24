@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import importlib
 from pathlib import Path
+from typing import Callable, cast
 
 import pytest
 import torch
@@ -13,10 +15,14 @@ from phoenixguard.voice.bundles import (
     resolve_local_voice_stack,
 )
 
+SaveSafetensorsFile = Callable[[dict[str, torch.Tensor], str], None]
+
 try:
-    from safetensors.torch import save_file as save_safetensors_file
+    _safetensors_torch = importlib.import_module("safetensors.torch")
 except Exception:  # pragma: no cover - optional dependency guard
-    save_safetensors_file = None
+    save_safetensors_file: SaveSafetensorsFile | None = None
+else:
+    save_safetensors_file = cast(SaveSafetensorsFile, getattr(_safetensors_torch, "save_file"))
 
 
 def _write_safetensors(path: Path) -> None:

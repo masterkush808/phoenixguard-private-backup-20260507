@@ -791,7 +791,7 @@ def model_warm_states_from_health(model_health: Mapping[str, Any], *, frame_id: 
         staggered_fresh_ms = max(3000.0, float(os.getenv("PHOENIXGUARD_STAGGERED_MODEL_FRESH_MS", "8000") or "8000"))
     except ValueError:
         staggered_fresh_ms = 8000.0
-    models = _sequence_of_mappings(model_health.get("models"))
+    models: list[dict[str, Any]] = _sequence_of_mappings(model_health.get("models"))
     if not models and model_health.get("all_required_models_awake") is True:
         roles = [str(item) for item in cast(Sequence[Any], model_health.get("required_roles") or [])] or [
             "global_structure",

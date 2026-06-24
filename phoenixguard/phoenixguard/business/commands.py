@@ -154,7 +154,7 @@ def build_status_command(
     if normalized not in STATUS_COMMANDS:
         raise ValueError(f"Unsupported connector status command: {status}")
     created = float(now_epoch if now_epoch is not None else time.time())
-    command = {
+    command: dict[str, Any] = {
         "schema_version": "PG_MT4_EXECUTION_COMMAND_V2",
         "status": normalized,
         "packet_id": packet_id or f"status-{normalized.lower()}-{int(created * 1000)}",
@@ -182,7 +182,7 @@ def build_execution_command(
     if side not in EXECUTION_SIDES:
         raise ValueError("Executable command requires BUY or SELL side.")
     symbol = str(internal_packet.get("symbol") or "EURUSD").strip().upper()
-    command = {
+    command: dict[str, Any] = {
         "schema_version": "PG_MT4_EXECUTION_COMMAND_V2",
         "status": EXECUTION_STATUS,
         "packet_id": str(internal_packet.get("packet_id") or f"mock-{int(now * 1000)}"),

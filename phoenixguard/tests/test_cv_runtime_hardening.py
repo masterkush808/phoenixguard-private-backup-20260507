@@ -109,7 +109,7 @@ def test_detect_returns_heuristic_structure_without_loaded_yolo(monkeypatch: pyt
     )
 
     monkeypatch.setattr(detector, "_raw_detect", _raw_detect)
-    heuristic_rows = [
+    heuristic_rows: list[dict[str, Any]] = [
         {"pattern": "continuation", "confidence": 0.81, "bbox": [10.0, 10.0, 20.0, 40.0], "source": "heuristic"},
         {"pattern": "consolidation", "confidence": 0.62, "bbox": [5.0, 5.0, 25.0, 45.0], "source": "heuristic"},
     ]

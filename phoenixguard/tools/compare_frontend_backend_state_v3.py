@@ -7,7 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8793"
@@ -15,12 +15,12 @@ DEFAULT_SESSION = "pocket-live-8788"
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _sequence(value: Any) -> list[Any]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return list(value)
+        return list(cast(Sequence[Any], value))
     return []
 
 
@@ -35,8 +35,9 @@ def _http_json(method: str, url: str, timeout: float, payload: Mapping[str, Any]
     started = time.perf_counter()
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - local operator tool
-            parsed = json.loads(response.read().decode("utf-8", errors="replace"))
-            return {"ok": 200 <= int(response.status) < 300, "status": int(response.status), "latency_ms": round((time.perf_counter() - started) * 1000.0, 2), "payload": parsed}
+            parsed: object = json.loads(response.read().decode("utf-8", errors="replace"))
+            payload_obj: object = dict(cast(Mapping[str, Any], parsed)) if isinstance(parsed, Mapping) else parsed
+            return {"ok": 200 <= int(response.status) < 300, "status": int(response.status), "latency_ms": round((time.perf_counter() - started) * 1000.0, 2), "payload": payload_obj}
     except urllib.error.HTTPError as exc:
         return {"ok": False, "status": int(exc.code), "latency_ms": round((time.perf_counter() - started) * 1000.0, 2), "error": str(exc), "payload": {}}
     except Exception as exc:
@@ -125,8 +126,8 @@ def build_report(base_url: str, session_id: str, timeout: float, probe_heartbeat
     visual_path = _http_json("GET", f"{base}/v1/mobile/visual/health/v3/{session_q}", timeout)
     visual_query = _http_json("GET", f"{base}/v1/mobile/visual/health/v3?session_id={session_q}", timeout)
     live_payload = _mapping(live.get("payload"))
-    backend = _digest_live_state(live_payload, session_id) if live.get("ok") else {"session_id": session_id}
-    heartbeat = {"ok": False, "status": 0, "payload": {}, "skipped": not probe_heartbeat}
+    backend: dict[str, Any] = _digest_live_state(live_payload, session_id) if live.get("ok") else {"session_id": session_id}
+    heartbeat: dict[str, Any] = {"ok": False, "status": 0, "payload": {}, "skipped": not probe_heartbeat}
     if probe_heartbeat:
         heartbeat = _http_json("POST", f"{base}/v1/mobile/frontend/heartbeat/v3", timeout, _heartbeat_payload(session_id, backend, f"/v1/mobile/window-tracker/dashboard/{session_id}"))
 
@@ -145,7 +146,7 @@ def build_report(base_url: str, session_id: str, timeout: float, probe_heartbeat
     hb_payload = _mapping(heartbeat.get("payload"))
     frontend = _mapping(hb_payload.get("frontend")) or _mapping(hb_payload.get("heartbeat")) or hb_payload
     if live.get("ok") and heartbeat.get("ok"):
-        comparisons = {
+        comparisons: dict[str, tuple[Any, Any]] = {
             "session_id": (frontend.get("session_id"), backend.get("session_id")),
             "frame_id": (frontend.get("frame_id"), backend.get("frame_id")),
             "chart_transform_id": (frontend.get("chart_transform_id"), backend.get("chart_transform_id")),

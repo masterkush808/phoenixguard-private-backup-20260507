@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from typing import Any, Mapping, cast
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -13,10 +14,11 @@ app = create_app()
 client = TestClient(app)
 
 resp = client.get('/v1/mobile/runtime/trace/v3?session_id=debug-tracker')
-trace = resp.json() if resp.status_code == 200 else {'error': resp.text, 'status_code': resp.status_code}
-score = public_language_scorecard()
+raw_trace: object = resp.json() if resp.status_code == 200 else {'error': resp.text, 'status_code': resp.status_code}
+trace: dict[str, Any] = dict(cast(Mapping[str, Any], raw_trace)) if isinstance(raw_trace, Mapping) else {"value": raw_trace}
+score: object = public_language_scorecard()
 
-out = {
+out: dict[str, object] = {
     'runtime_trace_status': resp.status_code,
     'alignment': trace.get('alignment'),
     'language_scorecard': score,

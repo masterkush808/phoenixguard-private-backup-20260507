@@ -1,4 +1,4 @@
-from typing import Mapping, cast
+from typing import Any, Mapping, cast
 
 from phoenixguard.vision.market_registry import persist_market_objects, load_market_objects
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 def test_market_registry_persist_and_load(tmp_path: Path):
     session_id = "test-session-xyz"
     # create demo objects
-    objs = [
+    objs: list[dict[str, Any]] = [
         {"id": "o1", "type": "SNIPER_ENTRY", "bbox": [1,2,3,4], "truth_score": 0.9},
         {"id": "o2", "type": "TARGET_ZONE", "bbox": [5,6,7,8], "truth_score": 0.75},
     ]

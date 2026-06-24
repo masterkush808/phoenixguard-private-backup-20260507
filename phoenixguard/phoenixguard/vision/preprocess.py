@@ -17,6 +17,7 @@ import hashlib
 import importlib
 
 import numpy as np
+from numpy.typing import NDArray
 from PIL import Image, ImageOps, ImageDraw
 
 _torch = None
@@ -247,13 +248,16 @@ def auto_crop_price_area_with_meta(img: Image.Image) -> tuple[Image.Image, dict[
         edges = cv2.Canny(gray, threshold1=30, threshold2=80, apertureSize=3)
 
         # Probabilistic Hough transform for horizontal lines
-        lines = cv2.HoughLinesP(
+        raw_lines: object = cv2.HoughLinesP(
             edges, rho=1, theta=np.pi / 180.0,
             threshold=max(w // 5, 50),
             minLineLength=max(w // 4, 80),
             maxLineGap=20
         )
-        if lines is None or len(lines) == 0:
+        if raw_lines is None:
+            return img, _full_image_crop_meta(img, reason="no_hough_lines", method="cv2_hough")
+        lines = np.asarray(raw_lines)
+        if len(lines) == 0:
             return img, _full_image_crop_meta(img, reason="no_hough_lines", method="cv2_hough")
 
         # Collect Y-coordinates of near-horizontal lines
@@ -305,11 +309,6 @@ def auto_crop_price_area(img: Image.Image) -> Image.Image:
     return cropped
 
 
-def _numpy_crop_price_area(img: Image.Image) -> Image.Image:
-    cropped, _ = _numpy_crop_price_area_with_meta(img)
-    return cropped
-
-
 def _numpy_crop_price_area_with_meta(img: Image.Image) -> tuple[Image.Image, dict[str, Any]]:
     """
     Fallback price-area crop using numpy only.
@@ -318,7 +317,7 @@ def _numpy_crop_price_area_with_meta(img: Image.Image) -> tuple[Image.Image, dic
     arr = np.asarray(img.convert("L"), dtype=np.float32)
     h, _ = arr.shape
     # Row-wise variance (rows with high variance = price action area)
-    row_var = np.var(arr, axis=1)
+    row_var: NDArray[np.float32] = np.asarray(np.var(arr, axis=1), dtype=np.float32)
     # Find rows with above-median variance
     median_var = float(np.median(row_var))
     active_rows = np.where(row_var > median_var * 1.2)[0]

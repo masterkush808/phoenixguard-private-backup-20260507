@@ -120,8 +120,6 @@ class ChartSegmentationEngine:
         else:
             img_array = image
 
-        h, w = img_array.shape[:2]
-
         # Try SAM segmentation
         if self.sam_predictor is not None:
             segmentation = self._segment_with_sam(img_array)
@@ -141,7 +139,7 @@ class ChartSegmentationEngine:
         predictor = self.sam_predictor
         if predictor is None:
             return ChartSegmentation(
-                mask=cast(NDArray[np.uint8], np.zeros((h, w), dtype=np.uint8)),
+                mask=np.zeros((h, w), dtype=np.uint8),
                 confidence=0.0,
                 bbox=(0, 0, w, h),
                 area_pixels=0,
@@ -171,7 +169,7 @@ class ChartSegmentationEngine:
             input_label = np.array([1])  # Positive prompt (chart)
 
             # Run SAM
-            masks, scores, logits = predictor.predict(
+            masks, scores, _logits = predictor.predict(
                 point_coords=input_point,
                 point_labels=input_label,
                 multimask_output=True,  # Get multiple predictions
@@ -233,10 +231,10 @@ class ChartSegmentationEngine:
                 mask = np.zeros(binary.shape[:2], dtype=np.uint8)
                 cv2.drawContours(mask, [largest], 0, (255,), -1)
                 if scale != 1.0:
-                    mask = cast(NDArray[np.uint8], cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST))
+                    mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
 
                 return self._validate_segmentation(
-                    cast(NDArray[np.uint8], mask),
+                    mask,
                     confidence=0.6,  # Lower confidence for heuristic
                     img_array=img_array,
                 )
@@ -257,7 +255,7 @@ class ChartSegmentationEngine:
         except Exception as e:
             logger.error(f"Heuristic segmentation failed: {e}")
             return ChartSegmentation(
-                mask=cast(NDArray[np.uint8], np.zeros((h, w), dtype=np.uint8)),
+                mask=np.zeros((h, w), dtype=np.uint8),
                 confidence=0.0,
                 bbox=(0, 0, w, h),
                 area_pixels=0,
@@ -362,7 +360,7 @@ class ChartSegmentationEngine:
             # Fit ellipse for eccentricity
             if len(contour) >= 5:
                 ellipse = cv2.fitEllipse(contour)
-                (cx, cy), (w, h), angle = ellipse
+                (_center_x, _center_y), (w, h), _angle = ellipse
                 eccentricity = min(w, h) / (max(w, h) + 1e-6)
             else:
                 eccentricity = 1.0

@@ -26,7 +26,8 @@ def _mapping(value: Any) -> dict[str, Any]:
 def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(cast(Mapping[str, Any], item)) for item in value if isinstance(item, Mapping)]
+    items = cast(Sequence[object], value)
+    return [dict(cast(Mapping[str, Any], item)) for item in items if isinstance(item, Mapping)]
 
 
 def _text(value: Any, default: str = "") -> str:
@@ -38,7 +39,7 @@ def _http_json(url: str, timeout: float) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"User-Agent": "PhoenixGuard-V3-OverlayPrecisionAudit/1.0"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         payload = json.loads(response.read().decode("utf-8", errors="replace"))
-    return dict(payload) if isinstance(payload, Mapping) else {}
+    return dict(cast(Mapping[str, Any], payload)) if isinstance(payload, Mapping) else {}
 
 
 def _load_session_file(path: Path) -> dict[str, Any]:

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
 import time
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, cast
 from phoenixguard.core.config import RUNTIME
 from phoenixguard.vision.v3_chart_transform import V3ChartTransform
 
@@ -149,14 +150,18 @@ def _prune_overlay_geometry_dumps(debug_dir: Any) -> None:
         pass
 
 
-def _mapping(value: Any) -> dict[str, Any]:
+def _sequence(value: object) -> list[object]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return list(cast(Sequence[object], value))
+    return []
+
+
+def _mapping(value: object) -> dict[str, Any]:
     return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
-def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        return []
-    return [dict(cast(Mapping[str, Any], item)) for item in value if isinstance(item, Mapping)]
+def _sequence_of_mappings(value: object) -> list[dict[str, Any]]:
+    return [dict(cast(Mapping[str, Any], item)) for item in _sequence(value) if isinstance(item, Mapping)]
 
 
 def normalize_bbox(bbox: Sequence[Any]) -> list[float] | None:
@@ -257,12 +262,12 @@ def _refine_supply_demand_box_to_reaction_cluster(
     bounds = normalize_bbox(chart_bounds)
     if normalized is None or bounds is None:
         return normalized
-    touch_points = []
+    touch_points: list[tuple[float, float]] = []
     raw_points = box.get("touch_points", [])
-    if isinstance(raw_points, Sequence) and not isinstance(raw_points, (str, bytes, bytearray)):
-        for item in raw_points:
-            if isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)) and len(item) >= 2:
-                touch_points.append((_float(item[0]), _float(item[1])))
+    for item in _sequence(raw_points):
+        point = _sequence(item)
+        if len(point) >= 2:
+            touch_points.append((_float(point[0]), _float(point[1])))
     chart_width = max(1.0, bounds[2] - bounds[0])
     chart_height = max(1.0, bounds[3] - bounds[1])
     horizontal_pad = max(20.0, min(52.0, chart_width * 0.045))
@@ -317,7 +322,7 @@ def has_structural_anchor(box: Mapping[str, Any]) -> bool:
         return True
     for key in ("touch_points", "source_indices", "path", "start_point", "end_point"):
         value = box.get(key)
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) and len(value) > 0:
+        if _sequence(value):
             return True
     if _float(box.get("candle_count"), 0.0) > 0.0:
         return True
@@ -366,8 +371,9 @@ def _merge_two_boxes(first: Mapping[str, Any], second: Mapping[str, Any]) -> dic
     merged_keys: list[Any] = []
     for source in (first, second):
         raw_keys = source.get("merged_keys", [])
-        if isinstance(raw_keys, Sequence) and not isinstance(raw_keys, (str, bytes, bytearray)):
-            merged_keys.extend(list(raw_keys))
+        raw_key_items = _sequence(raw_keys)
+        if raw_key_items:
+            merged_keys.extend(raw_key_items)
         else:
             merged_keys.append(source.get("key", source.get("label", "")))
     merged["merged_keys"] = [item for item in merged_keys if str(item or "").strip()]
@@ -380,8 +386,7 @@ def _merge_two_boxes(first: Mapping[str, Any], second: Mapping[str, Any]) -> dic
     for key in ("touch_points", "source_indices"):
         combined: list[Any] = []
         for source in (first.get(key), second.get(key)):
-            if isinstance(source, Sequence) and not isinstance(source, (str, bytes, bytearray)):
-                combined.extend(list(source))
+            combined.extend(_sequence(source))
         if combined:
             merged[key] = combined
     merged["structural_anchor"] = bool(has_structural_anchor(first) or has_structural_anchor(second))
@@ -561,9 +566,10 @@ def _market_exclusion_boxes(
 
 
 def _point_x(value: Any) -> float | None:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)) or len(value) < 2:
+    point = _sequence(value)
+    if len(point) < 2:
         return None
-    return _float(value[0], float("nan"))
+    return _float(point[0], float("nan"))
 
 
 def _tighten_micro_plan_bbox(
@@ -717,7 +723,6 @@ def smooth_overlay_boxes(
     previous_by_key = {
         f"{str(box.get('layer', ''))}:{_box_key(box)}": box
         for box in previous_boxes
-        if isinstance(box, Mapping)
     }
     smoothed: list[dict[str, Any]] = []
     for current in current_boxes:
@@ -737,7 +742,7 @@ def smooth_overlay_boxes(
 
 
 def _static_layer_hash(boxes: Sequence[Mapping[str, Any]]) -> str:
-    static_rows = [
+    static_rows: list[dict[str, object]] = [
         {
             "layer": box.get("layer", ""),
             "key": _box_key(box),
@@ -885,7 +890,7 @@ def build_overlay_truth_audit(
             invalid_count += 1
             if layer in {"supply_demand", "trigger_zones", "active_council_decision"}:
                 decision_invalid_count += 1
-        evidence = []
+        evidence: list[str] = []
         if anchored:
             evidence.append(_anchor_type(box))
         if box.get("merged_count"):
@@ -943,18 +948,12 @@ def prepare_overlay_geometry(
         {"key": "chart_bounds", "label": "CHART BOUNDS", "bbox": chart_bounds, "source": "chart_plane"},
         chart_bounds=chart_bounds,
         layer="chart_bounds",
-        policy=OverlayGeometryPolicy(
-            **{
-                **policy.__dict__,
-                "max_area_ratio": 1.01,
-                "max_structure_area_ratio": 1.01,
-            }
-        ),
+        policy=replace(policy, max_area_ratio=1.01, max_structure_area_ratio=1.01),
     )
     if chart_box is not None:
         boxes.append(chart_box)
 
-    recent_candles = []
+    recent_candles: list[dict[str, Any]] = []
     tracked = _sequence_of_mappings(tracking.get("tracked_candles", []))
     for index, candle in enumerate(tracked[-6:], start=max(1, len(tracked) - 5)):
         row = dict(candle)
@@ -1102,7 +1101,7 @@ def prepare_overlay_geometry(
         if bool(box.get("visible_default", False)):
             visible_default_count += 1
 
-    geometry = {
+    geometry: dict[str, Any] = {
         "version": 3,
         "chart_bounds": chart_bounds,
         "layers": list(OVERLAY_LAYERS),
@@ -1147,9 +1146,10 @@ def prepare_overlay_geometry(
         debug_dir = RUNTIME.project_root / ".codex_runtime" / "overlay_geometry_dumps"
         try:
             debug_dir.mkdir(parents=True, exist_ok=True)
-            frame_id = int(geometry.get("chart_transform", {}).get("frame_id") or tracking.get("frame_id") or 0)
+            chart_transform_payload = _mapping(geometry.get("chart_transform", {}))
+            frame_id = int(chart_transform_payload.get("frame_id") or tracking.get("frame_id") or 0)
             dump_path = debug_dir / f"overlay_geometry_{frame_id}_{int(time.time())}.json"
-            dump = {
+            dump: dict[str, Any] = {
                 "tracking_summary": tracking,
                 "latest_signal": signal,
                 "overlay_geometry": geometry,

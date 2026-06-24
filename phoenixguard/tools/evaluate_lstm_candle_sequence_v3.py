@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, cast
 
 PROJECT_ROOT_BOOTSTRAP = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT_BOOTSTRAP) not in sys.path:
@@ -23,7 +23,8 @@ from phoenixguard.decision.lstm_candle_sequence_contributor_v3 import (
 def _load(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return dict(cast(Mapping[str, Any], payload)) if isinstance(payload, Mapping) else {}
 
 
 def main() -> int:
@@ -47,9 +48,10 @@ def main() -> int:
                 num_layers=int(config.get("num_layers", 1) or 1),
                 dropout=float(config.get("dropout", 0.0) or 0.0),
             )
-            payload = torch.load(args.model_path, map_location="cpu", weights_only=False)
-            state_dict = payload.get("state_dict", payload) if isinstance(payload, dict) else payload
-            model.load_state_dict(state_dict)
+            loaded: object = torch.load(args.model_path, map_location="cpu", weights_only=False)
+            loaded_map = dict(cast(Mapping[str, Any], loaded)) if isinstance(loaded, Mapping) else {}
+            state_dict = loaded_map.get("state_dict", loaded)
+            model.load_state_dict(cast(Mapping[str, Any], state_dict))
             model.eval()
             sequence_length = int(config.get("sequence_length", DEFAULT_SEQUENCE_LENGTH) or DEFAULT_SEQUENCE_LENGTH)
             with torch.inference_mode():
@@ -57,7 +59,7 @@ def main() -> int:
             inference_ok = bool(outputs["next_1_logits"].shape[-1] == 2 and outputs["next_2_logits"].shape[-1] == 2)
         except Exception as exc:
             inference_error = str(exc)
-    checks = {
+    checks: dict[str, bool] = {
         "model_exists": args.model_path.exists(),
         "config_exists": bool(config),
         "metrics_exists": bool(metrics),
@@ -77,7 +79,7 @@ def main() -> int:
         "production_ready": bool(config.get("production_ready") and metrics.get("production_ready")),
     }
     ok = all(value for key, value in checks.items() if key != "production_ready")
-    payload = {
+    payload: dict[str, object] = {
         "ok": ok,
         "production_ready": checks["production_ready"],
         "checks": checks,

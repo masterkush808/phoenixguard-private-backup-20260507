@@ -33,5 +33,19 @@
   "pythonVersion": "3.11",
   "stubPath": "typings",
   "venvPath": ".",
-  "venv": ".venv"
+  "venv": ".venv",
+  "reportUnknownVariableType": "error",
+  "reportUnknownMemberType": "error",
+  "reportUnknownArgumentType": "error",
+  "reportUnknownParameterType": "error",
+  "reportMissingParameterType": "error",
+  "reportMissingTypeArgument": "error",
+  "reportUnknownLambdaType": "error",
+  "reportUnusedVariable": "error",
+  "reportUnusedImport": "error",
+  "reportUnusedFunction": "error",
+  "reportUnnecessaryCast": "error",
+  "reportUnnecessaryComparison": "error",
+  "reportUnnecessaryIsInstance": "error",
+  "reportOperatorIssue": "error"
 }

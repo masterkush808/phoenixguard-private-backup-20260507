@@ -113,7 +113,7 @@ def test_decision_kernel_marks_old_untriggered_setup_stale() -> None:
 
 
 def test_decision_kernel_uses_recent_memory_rows_for_duration_context() -> None:
-    memory_rows = [
+    memory_rows: list[dict[str, Any]] = [
         {"action": "SELL", "setup": "REVERSAL ATTEMPT SELL", "candles_to_trigger": 2, "candles_to_target": 3, "triggered": True},
         {"action": "SELL", "setup": "REVERSAL ATTEMPT SELL", "candles_to_trigger": 3, "candles_to_target": 4, "triggered": True},
         {"action": "SELL", "setup": "REVERSAL ATTEMPT SELL", "candles_to_trigger": 2, "candles_to_target": 5, "triggered": True},
@@ -149,7 +149,7 @@ def test_decision_kernel_uses_recent_memory_rows_for_duration_context() -> None:
 
 
 def test_decision_kernel_separates_countertrend_scalp_from_dominant_trend() -> None:
-    tokens = [
+    tokens: list[dict[str, Any]] = [
         {"direction": "BUY", "micro_structure_event": "bullish_continuation", "distance_to_trigger": 0.22, "distance_to_invalidation": 0.42},
         {"direction": "BUY", "micro_structure_event": "bullish_impulse", "distance_to_trigger": 0.18, "distance_to_invalidation": 0.48},
         {"direction": "SELL", "micro_structure_event": "exhaustion_against_bias", "distance_to_trigger": 0.30, "distance_to_invalidation": 0.16},
@@ -201,7 +201,7 @@ def test_decision_kernel_separates_countertrend_scalp_from_dominant_trend() -> N
 
 
 def test_decision_kernel_only_opens_countertrend_lane_when_explicitly_enabled() -> None:
-    tokens = [
+    tokens: list[dict[str, Any]] = [
         {"direction": "BUY", "micro_structure_event": "bullish_continuation", "distance_to_trigger": 0.22, "distance_to_invalidation": 0.42},
         {"direction": "BUY", "micro_structure_event": "bullish_impulse", "distance_to_trigger": 0.18, "distance_to_invalidation": 0.48},
         {"direction": "SELL", "micro_structure_event": "exhaustion_against_bias", "distance_to_trigger": 0.30, "distance_to_invalidation": 0.16},
@@ -253,7 +253,7 @@ def test_decision_kernel_only_opens_countertrend_lane_when_explicitly_enabled() 
 
 
 def test_decision_kernel_marks_next_candle_trend_follow_when_micro_agrees() -> None:
-    tokens = [
+    tokens: list[dict[str, Any]] = [
         {"direction": "BUY", "micro_structure_event": "bullish_rejection", "distance_to_trigger": 0.10, "distance_to_invalidation": 0.52},
         {"direction": "BUY", "micro_structure_event": "bullish_impulse", "distance_to_trigger": 0.06, "distance_to_invalidation": 0.58},
         {"direction": "BUY", "micro_structure_event": "bullish_continuation", "distance_to_trigger": 0.03, "distance_to_invalidation": 0.62},
@@ -331,7 +331,7 @@ def test_decision_kernel_terminal_states_force_safe_invariants() -> None:
 
 
 def test_decision_kernel_high_sample_memory_has_stronger_shrinkage_weight() -> None:
-    memory_rows = [
+    memory_rows: list[dict[str, Any]] = [
         {
             "action": "BUY",
             "setup": "CONTINUATION BUY",

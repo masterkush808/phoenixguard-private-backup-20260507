@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -18,11 +18,11 @@ def _get_json(base_url: str, path: str, timeout: float) -> dict[str, Any]:
         return {"_error": f"HTTP {exc.code}", "_url": url}
     except Exception as exc:
         return {"_error": str(exc), "_url": url}
-    return payload if isinstance(payload, dict) else {"_error": "non-object response", "_url": url}
+    return dict(cast(Mapping[str, Any], payload)) if isinstance(payload, Mapping) else {"_error": "non-object response", "_url": url}
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _first(*values: Any) -> Any:
@@ -59,12 +59,12 @@ def _study_packet(payload: Mapping[str, Any]) -> dict[str, Any]:
     for key in ("model_council_study_packet", "study_packet", "latest_model_council_study_packet"):
         value = payload.get(key)
         if isinstance(value, Mapping):
-            return dict(value)
+            return _mapping(value)
     result = _mapping(payload.get("model_council_result"))
     for key in ("model_council_study_packet", "study_packet"):
         value = result.get(key)
         if isinstance(value, Mapping):
-            return dict(value)
+            return _mapping(value)
     return {}
 
 

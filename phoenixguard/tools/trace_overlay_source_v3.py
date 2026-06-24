@@ -4,7 +4,7 @@ import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence, cast
 from urllib.request import urlopen, Request
 
 from PIL import Image
@@ -38,12 +38,20 @@ class TraceResult:
     model_health: str
 
 
-def _json_get(url: str) -> tuple[int, Any]:
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+
+
+def _sequence(value: Any) -> list[Any]:
+    return list(cast(Sequence[Any], value)) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else []
+
+
+def _json_get(url: str) -> tuple[int, dict[str, Any]]:
     request = Request(url, headers={"User-Agent": "PhoenixGuard-Overlay-Trace/1.0"})
     try:
         with urlopen(request, timeout=60) as response:
             data = response.read().decode("utf-8", errors="replace")
-            return int(getattr(response, "status", 200)), json.loads(data)
+            return int(getattr(response, "status", 200)), _mapping(json.loads(data))
     except Exception as exc:
         try:
             code = int(getattr(exc, 'code', 500))
@@ -105,7 +113,7 @@ def main() -> int:
     chart_frame_id = int(chart_state.get("frame_id") or session_payload.get("frame_index") or 0)
     # prefer window-tracker artifact endpoint for chart PNG
     chart_url = f"{base_url}/v1/mobile/window-tracker/sessions/{session}/artifacts/latest-chart"
-    chart_status, chart_bytes, chart_content_type = _bytes_get(chart_url)
+    _chart_status, chart_bytes, _chart_content_type = _bytes_get(chart_url)
     chart_path = out_dir / "current_chart.png"
     chart_path.write_bytes(chart_bytes)
 
@@ -116,31 +124,33 @@ def main() -> int:
     except Exception:
         pass
 
-    active_overlays = overlay_payload.get("active_overlays") if isinstance(overlay_payload, Mapping) else []
+    active_overlays = _sequence(overlay_payload.get("active_overlays"))
     overlay_dicts: list[dict[str, Any]] = []
     overlay_source_modules: list[str] = []
     overlay_source_agents: list[str] = []
     overlay_coordinate_modes: list[str] = []
     overlay_ttl_sec: list[float] = []
-    overlay_frame_id = None
-    chart_transform_id = str(overlay_payload.get("chart_transform", {}).get("chart_transform_id") or "") if isinstance(overlay_payload.get("chart_transform"), Mapping) else ""
+    overlay_frame_id: int | None = None
+    chart_transform = _mapping(overlay_payload.get("chart_transform"))
+    chart_transform_id = str(chart_transform.get("chart_transform_id") or "")
     overlays_are_v3 = True
-    for item in active_overlays or []:
+    for item in active_overlays:
         if not isinstance(item, Mapping):
             overlays_are_v3 = False
             continue
-        overlay = dict(item.get("overlay") or {})
+        item_map = cast(Mapping[str, Any], item)
+        overlay = _mapping(item_map.get("overlay"))
         overlay_dicts.append(overlay)
-        overlay_source_modules.append(str(item.get("source_module") or overlay.get("source_module") or ""))
-        overlay_source_agents.append(str(overlay.get("source_agent") or item.get("source_agent") or ""))
+        overlay_source_modules.append(str(item_map.get("source_module") or overlay.get("source_module") or ""))
+        overlay_source_agents.append(str(overlay.get("source_agent") or item_map.get("source_agent") or ""))
         overlay_coordinate_modes.append(str(overlay.get("coordinate_mode") or ""))
         try:
             overlay_ttl_sec.append(float(overlay.get("ttl_sec") or 0.0))
         except Exception:
             overlay_ttl_sec.append(0.0)
-        if overlay_frame_id is None and item.get("frame_id") is not None:
+        if overlay_frame_id is None and item_map.get("frame_id") is not None:
             try:
-                raw_frame_id = item.get("frame_id")
+                raw_frame_id = item_map.get("frame_id")
                 overlay_frame_id = int(raw_frame_id) if isinstance(raw_frame_id, (int, float, str)) else None
             except Exception:
                 overlay_frame_id = None
@@ -160,21 +170,21 @@ def main() -> int:
         chart_artifact_exists=chart_path.exists(),
         overlay_endpoint_url=overlay_url,
         overlay_response_status=overlay_status,
-        overlay_count=len(active_overlays or []),
+        overlay_count=len(active_overlays),
         overlay_frame_id=overlay_frame_id,
         chart_transform_id=chart_transform_id,
         overlay_coordinate_modes=_normalize_list(overlay_coordinate_modes),
         overlay_source_modules=_normalize_list(overlay_source_modules),
         overlay_source_agents=_normalize_list(overlay_source_agents),
-        overlay_ttl_sec=[round(v, 3) for v in overlay_ttl_sec if v is not None],
+        overlay_ttl_sec=[round(v, 3) for v in overlay_ttl_sec],
         visible_mode=str(session_payload.get("visual_mode") or session_payload.get("mode") or session_payload.get("dashboard_mode") or "CLEAN_LIVE"),
         frontend_render_mode="PIL",
         overlay_frame_matches_chart_frame=overlay_frame_id is None or overlay_frame_id == chart_frame_id,
         overlay_transform_matches_chart_transform=bool(chart_transform_id),
         overlays_are_v3_objects=overlays_are_v3,
         study_packet_exists=bool(study_payload),
-        model_council_state_exists=bool(runtime_trace.get("endpoints", {}).get("model_council_latest", {}).get("status") == "PASS"),
-        model_health=str((visual_health.get("model_health") or {}).get("council_status") or "UNKNOWN"),
+        model_council_state_exists=bool(_mapping(_mapping(runtime_trace.get("endpoints")).get("model_council_latest")).get("status") == "PASS"),
+        model_health=str(_mapping(visual_health.get("model_health")).get("council_status") or "UNKNOWN"),
     )
 
     _write_json(out_dir / "overlay_source_trace.json", asdict(result))
@@ -188,7 +198,7 @@ def main() -> int:
         f"- Chart artifact exists: {chart_path.exists()}",
         f"- Overlay endpoint: {overlay_url}",
         f"- Overlay response status: {overlay_status}",
-        f"- Overlay count: {len(active_overlays or [])}",
+        f"- Overlay count: {len(active_overlays)}",
         f"- Overlay frame_id: {overlay_frame_id}",
         f"- Chart transform id: {chart_transform_id}",
         f"- Overlay coordinate modes: {', '.join(_normalize_list(overlay_coordinate_modes)) or 'none'}", 

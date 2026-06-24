@@ -4,7 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -113,9 +113,9 @@ def test_rl_feedback_creates_verified_update_path() -> None:
             )
             feedback = engine.record_feedback(f"img_{idx}", "BUY", "clean continuation")
 
-        assert bool(feedback["updated"]) is True
-        assert int(feedback["feedback_count"]) >= 4
-        assert int(feedback["online_update_count"]) >= 1
+        assert cast(bool, feedback["updated"]) is True
+        assert cast(int, feedback["feedback_count"]) >= 4
+        assert cast(int, feedback["online_update_count"]) >= 1
         assert (root / "rl_state.pt").exists()
         assert (root / "rl_feedback.jsonl").exists()
 
@@ -244,6 +244,6 @@ def test_rl_feedback_update_retries_transient_policy_replace_contention(monkeypa
             )
             feedback = engine.record_feedback(f"img_retry_{idx}", "BUY", "clean continuation")
 
-        assert bool(feedback["updated"]) is True
+        assert cast(bool, feedback["updated"]) is True
         assert (root / "rl_state.pt").exists()
         assert calls["count"] == 2

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any, Callable, cast
 
 import pytest
 
@@ -17,6 +18,10 @@ from phoenixguard.simulation.overlay_eval.zone_snap_metrics import (
     score_zone_anchor,
     zone_anchoring_score,
 )
+
+
+def _approx(expected: float) -> object:
+    return cast(Callable[[float], object], getattr(pytest, "approx"))(expected)
 
 
 def test_box_metrics_matches_boxes_and_counts_false_missed_and_clipping() -> None:
@@ -46,7 +51,7 @@ def test_box_metrics_matches_boxes_and_counts_false_missed_and_clipping() -> Non
     assert match.truth_id == "truth_match"
     assert match.prediction_clipped is True
     assert match.evaluated_prediction_bbox == (0.0, 0.0, 10.0, 10.0)
-    assert match.clipped_area_ratio == pytest.approx(1.0 / 3.0)
+    assert match.clipped_area_ratio == _approx(1.0 / 3.0)
 
 
 def test_box_metric_reports_center_distance_and_temporal_jitter() -> None:
@@ -70,7 +75,7 @@ def test_box_metric_reports_center_distance_and_temporal_jitter() -> None:
 
 
 def test_zone_snap_metrics_score_anchor_quality_and_clipping() -> None:
-    zones = [
+    zones: list[dict[str, Any]] = [
         {"id": "anchored", "bbox": [10, 90, 60, 110], "line_y": 100},
         {"id": "loose", "bbox": [70, 90, 120, 110], "line_y": 125},
         {"id": "clipped", "bbox": [-10, 40, 20, 60], "line_y": 50},
@@ -89,7 +94,7 @@ def test_zone_snap_metrics_score_anchor_quality_and_clipping() -> None:
     assert metrics.clipped_count == 1
     assert metrics.mean_anchoring_score == 0.75
     assert metrics.min_anchoring_score == 0.25
-    assert metrics.metrics[2].clipped_area_ratio == pytest.approx(1.0 / 3.0)
+    assert metrics.metrics[2].clipped_area_ratio == _approx(1.0 / 3.0)
     assert zone_anchoring_score(zones[0], chart_bounds=[0, 0, 160, 120]) == 1.0
 
 
@@ -106,7 +111,7 @@ def test_zone_anchor_can_score_external_touch_points() -> None:
 
 
 def test_label_clutter_counts_overlaps_and_clipped_labels() -> None:
-    labels = [
+    labels: list[dict[str, Any]] = [
         {"id": "a", "bbox": [0, 0, 10, 10]},
         {"id": "b", "bbox": [5, 5, 15, 15]},
         {"id": "c", "bbox": [30, 30, 45, 45]},
@@ -125,6 +130,6 @@ def test_label_clutter_counts_overlaps_and_clipped_labels() -> None:
     assert metrics.overlaps[0].first_id == "a"
     assert metrics.overlaps[0].second_id == "b"
     assert metrics.overlaps[0].overlap_ratio == 0.25
-    assert metrics.mean_clipped_area_ratio == pytest.approx((0.0 + 0.0 + (125.0 / 225.0) + 1.0) / 4.0)
+    assert metrics.mean_clipped_area_ratio == _approx((0.0 + 0.0 + (125.0 / 225.0) + 1.0) / 4.0)
     assert label_overlap_count(labels, chart_bounds=[0, 0, 40, 40]) == 1
     assert clip_label_box(labels[2], [0, 0, 40, 40]) == (30.0, 30.0, 40.0, 40.0)

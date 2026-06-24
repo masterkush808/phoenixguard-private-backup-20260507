@@ -238,7 +238,7 @@ def test_signal_thesis_countertrend_block_downgrades_public_council_state(
             "threshold": 0.5,
         },
     }
-    result = {
+    result: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "pgpkt-countertrend-blocked",
         "packet_type": "STUDY_PACKET",
@@ -491,7 +491,7 @@ def test_tracker_publish_demotes_executable_study_result_without_execution_packe
             "threshold": 0.7,
         },
     }
-    result = {
+    result: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "pgpkt-study-only-exec-claim",
         "packet_type": "STUDY_PACKET",
@@ -606,7 +606,7 @@ def test_tracker_live_backend_reads_broker_surface_for_identity_before_v3_packet
 def test_tracker_live_backend_defers_valid_packet_to_standalone_shooter(tmp_path: Path) -> None:
     execution_backend = _FakeExecutionBackend()
     service = _service(tmp_path, execution_backend)
-    sequence_context = {
+    sequence_context: dict[str, Any] = {
         "sequence_id": "seq_pocket-live-8788_21",
         "session_id": "pocket-live-8788",
         "sequence_index": 3,
@@ -1000,7 +1000,7 @@ def test_broker_source_lock_profile_is_click_safe_without_identity_fallback(tmp_
 def test_actionable_broker_timing_becomes_model_council_execution_evidence(tmp_path: Path) -> None:
     execution_backend = _FakeExecutionBackend()
     service = _service(tmp_path, execution_backend)
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "execution_controls": {
             "live_execution_enabled": True,
@@ -1073,7 +1073,7 @@ def test_actionable_broker_timing_becomes_model_council_execution_evidence(tmp_p
 def test_near_trigger_kernel_candidate_becomes_model_council_execution_evidence(tmp_path: Path) -> None:
     execution_backend = _FakeExecutionBackend()
     service = _service(tmp_path, execution_backend)
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": "pocket-live-8788",
         "execution_controls": {
             "live_execution_enabled": True,
@@ -1091,7 +1091,7 @@ def test_near_trigger_kernel_candidate_becomes_model_council_execution_evidence(
             "actionable": False,
         },
     }
-    latest_signal = {
+    latest_signal: dict[str, Any] = {
         "action": "SELL",
         "candidate_action": "SELL",
         "execution_action": "HOLD",

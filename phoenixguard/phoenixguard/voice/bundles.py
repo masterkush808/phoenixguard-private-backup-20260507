@@ -3,10 +3,25 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, Sequence, cast
+
+
+class _SafeTensorHandle(Protocol):
+    def __enter__(self) -> _SafeTensorHandle: ...
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> object: ...
+
+    def metadata(self) -> Mapping[str, object] | None: ...
+
+    def keys(self) -> Sequence[str]: ...
 
 try:
-    from safetensors import safe_open as _safe_open_safetensors
+    from safetensors import safe_open as _raw_safe_open_safetensors
+
+    _safe_open_safetensors: Callable[..., _SafeTensorHandle] | None = cast(
+        Callable[..., _SafeTensorHandle],
+        _raw_safe_open_safetensors,
+    )
 except Exception:  # pragma: no cover - optional dependency guard
     _safe_open_safetensors = None
 
@@ -87,8 +102,8 @@ class LocalVoiceModelBundle:
     weight_files: tuple[Path, ...] = ()
     config_files: tuple[Path, ...] = ()
     tokenizer_files: tuple[Path, ...] = ()
-    metadata: dict[str, Any] = field(default_factory=dict)
-    safetensors_metadata: dict[str, dict[str, str]] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=lambda: {})
+    safetensors_metadata: dict[str, dict[str, str]] = field(default_factory=lambda: {})
     total_weight_bytes: int = 0
 
     def summary(self) -> dict[str, Any]:
@@ -148,7 +163,9 @@ class LocalVoiceStack:
 
 
 def _safe_json_object(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in cast(Mapping[Any, Any], value).items()}
 
 
 def _safe_string(value: Any, default: str = "") -> str:
@@ -232,7 +249,7 @@ def _resolve_relative_files(bundle_dir: Path, value: Any, *, label: str) -> tupl
             f"Voice bundle field '{label}' must be a JSON array in {bundle_dir / MANIFEST_FILENAME}."
         )
     files: list[Path] = []
-    for item in value:
+    for item in cast(list[Any], value):
         files.append(_ensure_local_relative_path(bundle_dir, _safe_string(item), label=label))
     if not files:
         raise VoiceBundleValidationError(
@@ -246,9 +263,10 @@ def _read_safetensors_metadata(path: Path) -> dict[str, str]:
         return {}
     try:
         with _safe_open_safetensors(str(path), framework="pt", device="cpu") as handle:
-            metadata = {
+            raw_metadata = handle.metadata() or {}
+            metadata: dict[str, str] = {
                 str(key): str(value)
-                for key, value in (handle.metadata() or {}).items()
+                for key, value in raw_metadata.items()
             }
             metadata["_tensor_count"] = str(len(list(handle.keys())))
             return metadata
@@ -303,7 +321,7 @@ def resolve_local_voice_bundle(
             )
         config_files = tuple(
             _ensure_local_relative_path(bundle_dir, _safe_string(item), label="config_files")
-            for item in config_value
+            for item in cast(list[Any], config_value)
         )
     if "tokenizer_files" in manifest:
         tokenizer_value = manifest.get("tokenizer_files")
@@ -313,7 +331,7 @@ def resolve_local_voice_bundle(
             )
         tokenizer_files = tuple(
             _ensure_local_relative_path(bundle_dir, _safe_string(item), label="tokenizer_files")
-            for item in tokenizer_value
+            for item in cast(list[Any], tokenizer_value)
         )
 
     memory_map = _safe_bool(manifest.get("memory_map"), storage_format == "safetensors")

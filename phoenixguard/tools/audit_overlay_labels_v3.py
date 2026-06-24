@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -23,11 +23,11 @@ from phoenixguard.runtime.realtime_performance_v3 import OVERLAY_RENDER_BUDGETS
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, Mapping) else {}
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _sequence(value: Any) -> list[Any]:
-    return list(value) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else []
+    return list(cast(Sequence[Any], value)) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else []
 
 
 def _labels(rows: Sequence[Any]) -> list[str]:

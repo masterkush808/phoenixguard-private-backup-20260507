@@ -131,7 +131,7 @@ class MockEmailProvider:
         self.sent_messages: list[dict[str, Any]] = []
 
     def send(self, *, customer: Customer, template_key: str, metadata: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        message = {
+        message: dict[str, Any] = {
             "provider": "mock-resend",
             "message_id": _stable_id("msg", f"{customer.id}:{template_key}:{time.time()}"),
             "customer_id": customer.id,
@@ -529,7 +529,7 @@ class BusinessStore:
         session_id = str(provider_payload.get("id") or _stable_id("checkout", f"{customer.id}:{time.time()}"))
         plan_code = str(provider_payload.get("plan_code") or DEFAULT_PAID_PLAN_CODE).strip()
         runtime_policy = runtime_policy_for_plan(plan_code)
-        session = {
+        session: dict[str, Any] = {
             "id": session_id,
             "customer_id": customer.id,
             "provider": str(provider_payload.get("provider") or "stripe"),
@@ -836,7 +836,7 @@ class BusinessStore:
 
     def record_heartbeat(self, *, device: Device, payload: Mapping[str, Any] | None = None) -> None:
         device.last_seen_at_epoch = time.time()
-        heartbeat = {
+        heartbeat: dict[str, Any] = {
             "license_id": device.license_id,
             "device_id": device.id,
             "connector_version": device.connector_version,

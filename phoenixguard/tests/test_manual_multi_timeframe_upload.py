@@ -70,7 +70,7 @@ def test_run_signal_workstation_combines_higher_and_lower_timeframes(monkeypatch
 
     def _fake_run_inference(file_path: str, **_: object) -> tuple[dict[str, object], Image.Image, object, object]:
         action = "BUY" if "higher" in file_path else "SELL"
-        result = {
+        result: dict[str, Any] = {
             "action": action,
             "confidence": 0.61 if action == "BUY" else 0.57,
             "projection": {"direction": action},

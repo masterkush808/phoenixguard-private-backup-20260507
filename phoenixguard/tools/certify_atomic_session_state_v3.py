@@ -4,7 +4,9 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -27,6 +29,10 @@ from phoenixguard.runtime.realtime_performance_v3 import (  # noqa: E402
 )
 
 
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Certify PhoenixGuard V3 atomic session state.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
@@ -38,7 +44,7 @@ def main() -> int:
     warnings: list[str] = []
     validator = SessionFreshnessValidatorV3()
 
-    previous = {
+    previous: dict[str, Any] = {
         "session_id": args.session,
         "frame_index": 10,
         "display_frame_id": 10,
@@ -51,12 +57,12 @@ def main() -> int:
         "source_capture_id": "capture:test:10",
         "updated_at": "old",
     }
-    touch_only = dict(previous, updated_at="new", state_version=10011)
-    touch_result = validator.validate(previous, touch_only, now_epoch=101.0)
+    touch_only: dict[str, Any] = dict(previous, updated_at="new", state_version=10011)
+    touch_result = _mapping(validator.validate(previous, touch_only, now_epoch=101.0))
     if touch_result.get("status") != "TOUCH_ONLY_STALE":
         failures.append(f"touch-only stale sample was not rejected: {touch_result}")
 
-    prepared = SessionAtomicWriterV3.prepare_payload(
+    prepared = _mapping(SessionAtomicWriterV3.prepare_payload(
         {
             "session_id": args.session,
             "capture_count": 11,
@@ -66,32 +72,32 @@ def main() -> int:
             "updated_at": "fresh",
         },
         previous=previous,
-    )
+    ))
     raw_prepared_result = prepared.get("session_freshness_v3")
-    prepared_result = raw_prepared_result if isinstance(raw_prepared_result, dict) else {}
+    prepared_result = _mapping(raw_prepared_result)
     if prepared_result.get("missing_fields"):
         failures.append(f"atomic writer left missing frame fields: {prepared_result.get('missing_fields')}")
     if not prepared.get("source_capture_id"):
         failures.append("atomic writer did not create source_capture_id")
 
-    partial = validator.validate({}, {"session_id": args.session, "frame_index": 12, "state_version": 12}, now_epoch=104.0)
+    partial = _mapping(validator.validate({}, {"session_id": args.session, "frame_index": 12, "state_version": 12}, now_epoch=104.0))
     if partial.get("status") != "PARTIAL_SESSION":
         failures.append(f"partial sample was not rejected: {partial}")
 
-    mismatch = validator.validate(
+    mismatch = _mapping(validator.validate(
         previous,
         dict(previous, frame_index=11, display_frame_id=11, chart_frame_id=11, overlay_frame_id=11, model_vote_frame_id=11),
         now_epoch=101.0,
-    )
+    ))
     if mismatch.get("status") != "FRAME_EPOCH_MISMATCH":
         failures.append(f"frame/epoch mismatch sample was not rejected: {mismatch}")
 
     base = args.base_url.rstrip("/")
     live = http_json(f"{base}/v1/mobile/live/state/v3/{quote_session(args.session)}", timeout=args.timeout)
     session = http_json(f"{base}/v1/mobile/window-tracker/sessions/{quote_session(args.session)}", timeout=args.timeout)
-    live_fields = extract_frame_fields(live.payload if isinstance(live.payload, dict) else {})
-    session_payload = session.payload if isinstance(session.payload, dict) else {}
-    session_freshness = session_payload.get("session_freshness_v3") if isinstance(session_payload.get("session_freshness_v3"), dict) else {}
+    live_fields = extract_frame_fields(_mapping(live.payload))
+    session_payload = _mapping(session.payload)
+    session_freshness = _mapping(session_payload.get("session_freshness_v3"))
     required = [
         "frame_id",
         "display_frame_id",

@@ -1,9 +1,11 @@
 from __future__ import annotations
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 import json
 import time
-from datetime import datetime
-from typing import Sequence, Mapping, Any
+from datetime import datetime, timezone
+from numbers import Real
+from typing import Any, cast
 from phoenixguard.core.config import RUNTIME
 from phoenixguard.vision.v2_overlay_migration import migrate_v2_overlay_object
 
@@ -18,7 +20,52 @@ DEFAULT_STALE_SECONDS = 30
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _mapping(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    raw = cast(Mapping[object, object], value)
+    return {str(key): item for key, item in raw.items()}
+
+
+def _sequence(value: object) -> list[object]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        return []
+    return list(cast(Sequence[object], value))
+
+
+def _float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, (str, bytes, bytearray, Real)):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _int(value: object, default: int = 0) -> int:
+    return int(_float(value, float(default)))
+
+
+def _float_list(value: object) -> list[float]:
+    out: list[float] = []
+    for item in _sequence(value):
+        number = _float(item, float("nan"))
+        if number != number:
+            return []
+        out.append(number)
+    return out
+
+
+def _point_pairs(value: object) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    for item in _sequence(value):
+        point = _float_list(item)
+        if len(point) >= 2:
+            points.append((point[0], point[1]))
+    return points
 
 
 def _epoch_from_value(value: Any) -> float:
@@ -38,17 +85,16 @@ def _epoch_from_value(value: Any) -> float:
         return 0.0
 
 
-def _entry_last_seen_epoch(entry: Mapping[str, Any]) -> float:
-    overlay = entry.get("overlay") if isinstance(entry.get("overlay"), Mapping) else {}
+def _entry_last_seen_epoch(entry: Mapping[str, object]) -> float:
+    overlay = _mapping(entry.get("overlay"))
     for key in ("last_seen_at", "updated_at", "timestamp", "created_at"):
         epoch = _epoch_from_value(entry.get(key))
         if epoch > 0.0:
             return epoch
-    if isinstance(overlay, Mapping):
-        for key in ("last_seen_at", "updated_at", "timestamp", "created_at"):
-            epoch = _epoch_from_value(overlay.get(key))
-            if epoch > 0.0:
-                return epoch
+    for key in ("last_seen_at", "updated_at", "timestamp", "created_at"):
+        epoch = _epoch_from_value(overlay.get(key))
+        if epoch > 0.0:
+            return epoch
     return 0.0
 
 
@@ -74,7 +120,7 @@ def _bbox_iou(a: Sequence[float], b: Sequence[float]) -> float:
         return 0.0
 
 
-def persist_market_objects(session_id: str, objects: Sequence[Mapping[str, Any]], chart_transform: Mapping[str, Any] | None = None) -> Path:
+def persist_market_objects(session_id: str, objects: Sequence[Mapping[str, object]], chart_transform: Mapping[str, object] | None = None) -> Path:
     """Persist market overlay objects with enriched metadata to a per-session JSONL file.
 
     Best-effort: does not raise on write errors.
@@ -87,7 +133,7 @@ def persist_market_objects(session_id: str, objects: Sequence[Mapping[str, Any]]
             for obj in objects:
                 overlay = dict(obj)
                 overlay_id = str(overlay.get("id") or overlay.get("key") or overlay.get("label") or f"overlay_{hash(str(overlay))}")
-                entry = {
+                entry: dict[str, object] = {
                     "timestamp": ts,
                     "created_at": ts,
                     "updated_at": ts,
@@ -99,8 +145,8 @@ def persist_market_objects(session_id: str, objects: Sequence[Mapping[str, Any]]
                     "object_id": str(overlay.get("object_id") or overlay.get("id") or ""),
                     "track_id": str(overlay.get("track_id") or ""),
                     "lifecycle_state": str(overlay.get("lifecycle_state") or DEFAULT_LIFECYCLE),
-                    "truth_score": float(overlay.get("truth_score") or overlay.get("confidence") or 0.0),
-                    "merge_count": int(overlay.get("merge_count") or 0),
+                    "truth_score": _float(overlay.get("truth_score") or overlay.get("confidence") or 0.0),
+                    "merge_count": _int(overlay.get("merge_count") or 0),
                     "merged_into": overlay.get("merged_into") or None,
                     "last_seen_at": ts,
                 }
@@ -112,7 +158,7 @@ def persist_market_objects(session_id: str, objects: Sequence[Mapping[str, Any]]
         debug_dir = Path(RUNTIME.project_root) / ".codex_runtime" / "overlay_persist_logs"
         debug_dir.mkdir(parents=True, exist_ok=True)
         dbg_path = debug_dir / f"{session_id}_{int(time.time())}.json"
-        dump = {"session_id": session_id, "objects": [dict(o) for o in objects], "chart_transform": dict(chart_transform) if chart_transform is not None else None}
+        dump: dict[str, object] = {"session_id": session_id, "objects": [dict(o) for o in objects], "chart_transform": dict(chart_transform) if chart_transform is not None else None}
         dbg_path.write_text(json.dumps(dump, default=str), encoding="utf-8")
     except Exception:
         # swallow errors to keep persistence best-effort
@@ -120,11 +166,10 @@ def persist_market_objects(session_id: str, objects: Sequence[Mapping[str, Any]]
     return session_file
 
 
-def _normalize_loaded_market_entry(entry: Mapping[str, Any]) -> Mapping[str, Any]:
-    normalized = dict(entry)
+def _normalize_loaded_market_entry(entry: Mapping[str, object]) -> Mapping[str, object]:
+    normalized: dict[str, object] = dict(entry)
     try:
-        overlay_raw = normalized.get("overlay") or {}
-        overlay = dict(overlay_raw) if isinstance(overlay_raw, Mapping) else {}
+        overlay = _mapping(normalized.get("overlay"))
         # move nested chart_transform into entry if present in overlay
         if not normalized.get("chart_transform") and overlay.get("chart_transform"):
             normalized["chart_transform"] = overlay.get("chart_transform")
@@ -132,37 +177,29 @@ def _normalize_loaded_market_entry(entry: Mapping[str, Any]) -> Mapping[str, Any
         # ensure bbox exists as [x1, y1, x2, y2]
         bbox = overlay.get("bbox") or overlay.get("box") or overlay.get("rect")
         anchors = overlay.get("anchors")
-        if not bbox and anchors and isinstance(anchors, (list, tuple)):
+        if not bbox and anchors:
             # anchors may be a list of point pairs [[x,y],...]
-            try:
-                pts = [
-                    tuple(map(float, p))
-                    for p in anchors
-                    if isinstance(p, (list, tuple)) and len(p) >= 2
-                ]
-                if pts:
-                    xs = [p[0] for p in pts]
-                    ys = [p[1] for p in pts]
-                    bbox = [min(xs), min(ys), max(xs), max(ys)]
-            except Exception:
-                bbox = None
-        if bbox:
-            try:
-                overlay["bbox"] = [float(v) for v in bbox]
-            except Exception:
-                # leave as-is if conversion fails
-                overlay.setdefault("bbox", bbox)
+            pts = _point_pairs(anchors)
+            if pts:
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                bbox = [min(xs), min(ys), max(xs), max(ys)]
+        bbox_values = _float_list(bbox)
+        if bbox_values:
+            overlay["bbox"] = bbox_values
+        elif bbox:
+            overlay.setdefault("bbox", bbox)
         # ensure truth_score present at overlay level
         if "truth_score" not in overlay:
             try:
-                overlay["truth_score"] = float(overlay.get("confidence") or normalized.get("truth_score") or 0.0)
+                overlay["truth_score"] = _float(overlay.get("confidence") or normalized.get("truth_score") or 0.0)
             except Exception:
                 overlay["truth_score"] = 0.0
         # normalize into a V3-shaped object while preserving the legacy payload
-        chart_transform = normalized.get("chart_transform") if isinstance(normalized.get("chart_transform"), Mapping) else None
-        chart_transform_id = str((chart_transform or {}).get("chart_transform_id") or "") if chart_transform else ""
+        chart_transform = _mapping(normalized.get("chart_transform"))
+        chart_transform_id = str(chart_transform.get("chart_transform_id") or "") if chart_transform else ""
         frame_id = None
-        if isinstance(chart_transform, Mapping) and chart_transform.get("frame_id") is not None:
+        if chart_transform.get("frame_id") is not None:
             try:
                 raw_frame_id = chart_transform.get("frame_id")
                 frame_id = int(raw_frame_id) if isinstance(raw_frame_id, (int, float, str)) else None
@@ -184,16 +221,19 @@ def _normalize_loaded_market_entry(entry: Mapping[str, Any]) -> Mapping[str, Any
     return normalized
 
 
-def load_market_objects(session_id: str) -> list[Mapping[str, Any]]:
+def load_market_objects(session_id: str) -> list[Mapping[str, object]]:
     session_file = REGISTRY_DIR / f"{session_id}.jsonl"
-    results: list[Mapping[str, Any]] = []
+    results: list[Mapping[str, object]] = []
     if not session_file.exists():
         return results
     try:
         with session_file.open("r", encoding="utf-8") as fh:
             for line in fh:
                 try:
-                    results.append(json.loads(line))
+                    parsed: object = json.loads(line)
+                    row = _mapping(parsed)
+                    if row:
+                        results.append(row)
                 except Exception:
                     continue
     except Exception:
@@ -225,8 +265,8 @@ def _read_recent_jsonl_lines(path: Path, *, max_lines: int = 2000, chunk_size: i
         return []
 
 
-def load_recent_market_objects(session_id: str, *, max_lines: int = 2000) -> list[Mapping[str, Any]]:
-    entries: list[Mapping[str, Any]] = []
+def load_recent_market_objects(session_id: str, *, max_lines: int = 2000) -> list[Mapping[str, object]]:
+    entries: list[Mapping[str, object]] = []
     candidates = _registry_session_candidates(session_id) or [str(session_id or "").strip()]
     for candidate in candidates:
         session_file = REGISTRY_DIR / f"{candidate}.jsonl"
@@ -234,31 +274,33 @@ def load_recent_market_objects(session_id: str, *, max_lines: int = 2000) -> lis
             continue
         for line in _read_recent_jsonl_lines(session_file, max_lines=max_lines):
             try:
-                parsed = json.loads(line)
+                parsed: object = json.loads(line)
             except Exception:
                 continue
-            if isinstance(parsed, Mapping):
-                entries.append(_normalize_loaded_market_entry(parsed))
+            row = _mapping(parsed)
+            if row:
+                entries.append(_normalize_loaded_market_entry(row))
         if entries:
             break
     return entries
 
 
 def _active_objects_from_entries(
-    entries: Sequence[Mapping[str, Any]],
+    entries: Sequence[Mapping[str, object]],
     *,
     min_truth_score: float,
     stale_seconds: int = DEFAULT_STALE_SECONDS,
     now_epoch: float | None = None,
-) -> list[Mapping[str, Any]]:
-    active: list[Mapping[str, Any]] = []
+) -> list[Mapping[str, object]]:
+    active: list[Mapping[str, object]] = []
     now = time.time() if now_epoch is None else float(now_epoch)
     # Take the latest entry for each overlay_id. JSONL append order is the
     # tie-breaker because merge writes the MERGED marker and replacement row
     # with the same timestamp.
-    latest_by_overlay: dict[str, Mapping[str, Any]] = {}
+    latest_by_overlay: dict[str, Mapping[str, object]] = {}
     for e in entries:
-        oid = str(e.get("overlay_id") or (e.get("overlay") or {}).get("id") or "")
+        overlay = _mapping(e.get("overlay"))
+        oid = str(e.get("overlay_id") or overlay.get("id") or "")
         if not oid:
             continue
         prev = latest_by_overlay.get(oid)
@@ -268,14 +310,15 @@ def _active_objects_from_entries(
             latest_by_overlay[oid] = e
 
     for e in latest_by_overlay.values():
+        overlay = _mapping(e.get("overlay"))
         last_seen_epoch = _entry_last_seen_epoch(e)
         if last_seen_epoch > 0.0 and now - last_seen_epoch > float(stale_seconds):
             continue
         try:
-            truth = float(e.get("truth_score") or (e.get("overlay") or {}).get("truth_score") or (e.get("overlay") or {}).get("confidence") or 0.0)
+            truth = _float(e.get("truth_score") or overlay.get("truth_score") or overlay.get("confidence") or 0.0)
         except Exception:
             truth = 0.0
-        lifecycle = str(e.get("lifecycle_state") or (e.get("overlay") or {}).get("lifecycle_state") or "")
+        lifecycle = str(e.get("lifecycle_state") or overlay.get("lifecycle_state") or "")
         if lifecycle.upper() in {"BROKEN", "STALE", "HIDDEN"}:
             continue
         if truth >= float(min_truth_score) or lifecycle.upper() in {"CONFIRMED", "ACTIVE"}:
@@ -284,12 +327,12 @@ def _active_objects_from_entries(
 
 
 def active_objects_from_entries(
-    entries: Sequence[Mapping[str, Any]],
+    entries: Sequence[Mapping[str, object]],
     *,
     min_truth_score: float,
     stale_seconds: int = DEFAULT_STALE_SECONDS,
     now_epoch: float | None = None,
-) -> list[Mapping[str, Any]]:
+) -> list[Mapping[str, object]]:
     return _active_objects_from_entries(
         entries,
         min_truth_score=min_truth_score,
@@ -322,7 +365,7 @@ def _registry_session_candidates(session_id: str) -> list[str]:
     return candidates
 
 
-def _write_entry(session_id: str, entry: Mapping[str, Any]) -> None:
+def _write_entry(session_id: str, entry: Mapping[str, object]) -> None:
     try:
         session_file = REGISTRY_DIR / f"{session_id}.jsonl"
         with session_file.open("a", encoding="utf-8") as fh:
@@ -331,7 +374,7 @@ def _write_entry(session_id: str, entry: Mapping[str, Any]) -> None:
         pass
 
 
-def merge_market_objects(session_id: str, new_objects: Sequence[Mapping[str, Any]], *, iou_threshold: float = DEFAULT_IOU_THRESHOLD) -> int:
+def merge_market_objects(session_id: str, new_objects: Sequence[Mapping[str, object]], *, iou_threshold: float = DEFAULT_IOU_THRESHOLD) -> int:
     """Merge new overlay objects into the per-session registry.
 
     Returns the number of objects appended (new or merged entries written).
@@ -343,11 +386,11 @@ def merge_market_objects(session_id: str, new_objects: Sequence[Mapping[str, Any
     for obj in new_objects:
         overlay = dict(obj)
         overlay_id = str(overlay.get("id") or overlay.get("key") or overlay.get("overlay_id") or f"overlay_{hash(str(overlay))}")
-        truth = float(overlay.get("truth_score") or overlay.get("confidence") or 0.0)
+        truth = _float(overlay.get("truth_score") or overlay.get("confidence") or 0.0)
 
         matched = None
         for e in reversed(existing):
-            e_overlay = e.get("overlay") or {}
+            e_overlay = _mapping(e.get("overlay"))
             e_overlay_id = str(e.get("overlay_id") or e_overlay.get("id") or "")
             if not e_overlay_id:
                 continue
@@ -356,7 +399,7 @@ def merge_market_objects(session_id: str, new_objects: Sequence[Mapping[str, Any
                 matched = e
                 break
             # try IoU match
-            iou = _bbox_iou(e_overlay.get("bbox") or [0, 0, 0, 0], overlay.get("bbox") or [0, 0, 0, 0])
+            iou = _bbox_iou(_float_list(e_overlay.get("bbox")) or [0.0, 0.0, 0.0, 0.0], _float_list(overlay.get("bbox")) or [0.0, 0.0, 0.0, 0.0])
             if iou >= float(iou_threshold):
                 matched = e
                 break
@@ -369,14 +412,14 @@ def merge_market_objects(session_id: str, new_objects: Sequence[Mapping[str, Any
                 matched_entry["updated_at"] = now_ts
                 matched_entry["lifecycle_state"] = "MERGED"
                 matched_entry.setdefault("merge_count", 0)
-                matched_entry["merge_count"] = int(matched_entry.get("merge_count", 0)) + 1
+                matched_entry["merge_count"] = _int(matched_entry.get("merge_count", 0)) + 1
                 matched_entry["merged_into"] = merged_into
                 _write_entry(session_id, matched_entry)
             except Exception:
                 pass
             # append new as CONFIRMED or ACTIVE depending on truth
             new_state = "CONFIRMED" if truth >= DEFAULT_CONFIRM_TRUTH else "ACTIVE"
-            new_entry = {
+            new_entry: dict[str, object] = {
                 "timestamp": now_ts,
                 "created_at": now_ts,
                 "updated_at": now_ts,
@@ -388,7 +431,7 @@ def merge_market_objects(session_id: str, new_objects: Sequence[Mapping[str, Any
                 "track_id": str(overlay.get("track_id") or ""),
                 "lifecycle_state": new_state,
                 "truth_score": truth,
-                "merge_count": int(overlay.get("merge_count") or 0),
+                "merge_count": _int(overlay.get("merge_count") or 0),
                 "merged_into": None,
                 "last_seen_at": now_ts,
             }
@@ -398,7 +441,7 @@ def merge_market_objects(session_id: str, new_objects: Sequence[Mapping[str, Any
         else:
             # brand new
             new_state = "CONFIRMED" if truth >= DEFAULT_CONFIRM_TRUTH else DEFAULT_LIFECYCLE
-            new_entry = {
+            new_entry: dict[str, object] = {
                 "timestamp": now_ts,
                 "created_at": now_ts,
                 "updated_at": now_ts,
@@ -410,7 +453,7 @@ def merge_market_objects(session_id: str, new_objects: Sequence[Mapping[str, Any
                 "track_id": str(overlay.get("track_id") or ""),
                 "lifecycle_state": new_state,
                 "truth_score": truth,
-                "merge_count": int(overlay.get("merge_count") or 0),
+                "merge_count": _int(overlay.get("merge_count") or 0),
                 "merged_into": None,
                 "last_seen_at": now_ts,
             }
@@ -444,7 +487,7 @@ def promote_lifecycle(session_id: str, *, stale_seconds: int = DEFAULT_STALE_SEC
             continue
 
 
-def query_active_objects(session_id: str, *, min_truth_score: float = 0.55, stale_seconds: int = DEFAULT_STALE_SECONDS) -> list[Mapping[str, Any]]:
+def query_active_objects(session_id: str, *, min_truth_score: float = 0.55, stale_seconds: int = DEFAULT_STALE_SECONDS) -> list[Mapping[str, object]]:
     entries = load_market_objects(session_id)
     if not entries:
         for candidate in _registry_session_candidates(session_id)[1:]:
@@ -460,6 +503,6 @@ def query_recent_active_objects(
     min_truth_score: float = 0.55,
     max_lines: int = 2000,
     stale_seconds: int = DEFAULT_STALE_SECONDS,
-) -> list[Mapping[str, Any]]:
+) -> list[Mapping[str, object]]:
     entries = load_recent_market_objects(session_id, max_lines=max_lines)
     return _active_objects_from_entries(entries, min_truth_score=float(min_truth_score), stale_seconds=int(stale_seconds))

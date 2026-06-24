@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 from pathlib import Path
 
 import json
@@ -10,7 +11,7 @@ from phoenixguard.runtime.realtime_performance_v3 import (
 
 
 def test_session_touch_without_capture_is_not_fresh() -> None:
-    previous = {
+    previous: dict[str, Any] = {
         "session_id": "s1",
         "frame_index": 7,
         "display_frame_id": 7,
@@ -34,7 +35,7 @@ def test_session_touch_without_capture_is_not_fresh() -> None:
 
 def test_atomic_session_write_preserves_frame_fields(tmp_path: Path) -> None:
     target = tmp_path / "session.json"
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": "s1",
         "capture_count": 3,
         "frame_index": 3,
@@ -55,7 +56,7 @@ def test_atomic_session_write_preserves_frame_fields(tmp_path: Path) -> None:
 
 
 def test_display_only_write_does_not_advance_model_epoch() -> None:
-    previous = {
+    previous: dict[str, Any] = {
         "session_id": "s1",
         "capture_count": 7,
         "frame_index": 6,
@@ -91,7 +92,7 @@ def test_display_only_write_does_not_advance_model_epoch() -> None:
 
 
 def test_partial_session_write_rejected() -> None:
-    current = {"session_id": "s1", "frame_index": 4, "state_version": 4}
+    current: dict[str, Any] = {"session_id": "s1", "frame_index": 4, "state_version": 4}
 
     result = SessionFreshnessValidatorV3().validate({}, current, now_epoch=10.0)
 
@@ -101,7 +102,7 @@ def test_partial_session_write_rejected() -> None:
 
 
 def test_capture_epoch_must_advance_with_frame_id() -> None:
-    previous = {
+    previous: dict[str, Any] = {
         "session_id": "s1",
         "frame_index": 4,
         "display_frame_id": 4,

@@ -17,7 +17,7 @@ from phoenixguard.vision.overlay_geometry import (
 
 
 def test_overlay_zone_box_is_clipped_inside_chart_bounds() -> None:
-    zone = {
+    zone: dict[str, Any] = {
         "key": "support_1",
         "role": "support",
         "bbox": [-40, 92, 130, 118],
@@ -43,7 +43,7 @@ def test_overlay_zone_box_is_clipped_inside_chart_bounds() -> None:
 def test_overlay_broker_panel_is_not_accepted_as_chart_zone() -> None:
     chart_bounds = [0, 0, 1000, 500]
     broker_panel = [720, 0, 1000, 500]
-    zone = {
+    zone: dict[str, Any] = {
         "key": "resistance_1",
         "role": "resistance",
         "bbox": [650, 120, 760, 154],
@@ -123,7 +123,7 @@ def test_overlay_geometry_tightens_micro_windows_and_level_lines_against_exclusi
 
 
 def test_overlay_rejects_box_area_above_layer_max() -> None:
-    oversized = {
+    oversized: dict[str, Any] = {
         "key": "support_fullscreen",
         "role": "support",
         "bbox": [0, 0, 1000, 500],
@@ -145,7 +145,7 @@ def test_overlay_rejects_box_area_above_layer_max() -> None:
 
 
 def test_overlay_merges_overlapping_same_type_boxes() -> None:
-    boxes = [
+    boxes: list[dict[str, Any]] = [
         {
             "key": "support_1",
             "role": "support",
@@ -173,7 +173,7 @@ def test_overlay_merges_overlapping_same_type_boxes() -> None:
 
 
 def test_overlay_zone_requires_structural_anchor() -> None:
-    floating_zone = {
+    floating_zone: dict[str, Any] = {
         "key": "floating_zone",
         "role": "support",
         "bbox": [40, 180, 180, 215],
@@ -274,7 +274,7 @@ def test_live_overlay_does_not_draw_prediction_path(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(adapter, "_draw_projection_layer", fail_projection_draw)
     image = Image.new("RGB", (320, 220), (8, 12, 18))
-    tracking_summary = {
+    tracking_summary: dict[str, Any] = {
         "tracked_candles": [
             {"bbox": [40, 110, 48, 160], "center_x": 44, "center_y": 135, "direction": "SELL"},
             {"bbox": [70, 120, 78, 174], "center_x": 74, "center_y": 147, "direction": "SELL"},
@@ -303,7 +303,7 @@ def test_live_overlay_renderer_honors_visible_default_for_hidden_layers(monkeypa
     image = Image.new("RGB", (320, 220), (8, 12, 18))
     canvas = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(canvas, "RGBA")
-    hidden_zone = {
+    hidden_zone: dict[str, Any] = {
         "key": "hidden_support",
         "role": "support",
         "bbox": [40, 140, 220, 168],

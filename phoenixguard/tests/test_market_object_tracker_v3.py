@@ -255,7 +255,7 @@ def test_market_object_registry_v3_ids_are_stable_when_geometry_moves() -> None:
 
 
 def test_trendline_derivation_rejects_horizontal_lines() -> None:
-    horizontal_lows = [
+    horizontal_lows: list[dict[str, Any]] = [
         {"bbox": [10 + index * 20, 100, 20 + index * 20, 140], "center_x": 15 + index * 20, "center_y": 120}
         for index in range(8)
     ]
@@ -264,7 +264,7 @@ def test_trendline_derivation_rejects_horizontal_lines() -> None:
 
 
 def test_trendline_derivation_emits_valid_downtrend_resistance_only_when_clean() -> None:
-    downtrend = [
+    downtrend: list[dict[str, Any]] = [
         {
             "bbox": [10 + index * 42, 80 + index * 9, 24 + index * 42, 126 + index * 7],
             "center_x": 17 + index * 42,
@@ -283,7 +283,7 @@ def test_trendline_derivation_emits_valid_downtrend_resistance_only_when_clean()
 
 
 def test_trendline_derivation_uses_two_wick_anchors_before_extension() -> None:
-    uptrend = []
+    uptrend: list[dict[str, Any]] = []
     for index in range(8):
         left = 10 + index * 36
         wick_bottom = 220 - index * 10

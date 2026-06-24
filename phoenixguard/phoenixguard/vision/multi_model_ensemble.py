@@ -21,8 +21,10 @@ from __future__ import annotations
 import logging
 import time
 import importlib
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Sequence, cast
+from numbers import Real
+from typing import Any, Optional, TypedDict, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -30,6 +32,67 @@ from PIL import Image, ImageEnhance
 
 
 logger = logging.getLogger(__name__)
+
+
+class EnsembleStrategy(TypedDict):
+    bagging_enabled: bool
+    boosting_enabled: bool
+    bagging_views: int
+    boosting_rounds: int
+    fusion_iou_threshold: float
+
+
+class InferenceStats(TypedDict):
+    yolo_calls: int
+    vit_calls: int
+    sam_calls: int
+    bagging_calls: int
+    bagging_views_total: int
+    boosting_rounds_total: int
+    total_time_ms: float
+    avg_inference_ms: float
+
+
+ModelOutput = dict[str, object]
+
+
+def _empty_metadata() -> dict[str, object]:
+    return {}
+
+
+def _mapping(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    raw = cast(Mapping[object, object], value)
+    return {str(key): item for key, item in raw.items()}
+
+
+def _sequence(value: object) -> list[object]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        return []
+    return list(cast(Sequence[object], value))
+
+
+def _mapping_sequence(value: object) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in _sequence(value):
+        row = _mapping(item)
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, (str, bytes, bytearray, Real)):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _int(value: object, default: int = 0) -> int:
+    return int(_float(value, float(default)))
 
 
 @dataclass
@@ -43,7 +106,7 @@ class Detection:
     class_id: int
     class_name: str
     model_source: str  # 'yolo' | 'vit' | 'sam'
-    metadata: dict = field(default_factory=dict)  # Arbitrary model-specific data
+    metadata: dict[str, object] = field(default_factory=_empty_metadata)  # Arbitrary model-specific data
 
 
 @dataclass
@@ -56,7 +119,7 @@ class VisionEnsembleOutput:
     fusion_scores: dict[str, float]  # Per-model contribution scores
     inference_time_ms: float
     model_active_status: dict[str, bool]  # Which models succeeded
-    raw_outputs: dict[str, Any]  # Raw model outputs for debugging
+    raw_outputs: dict[str, object]  # Raw model outputs for debugging
 
 
 class ModelRegistry:
@@ -92,7 +155,6 @@ class ModelRegistry:
         """Load Vision Transformer model for semantic features."""
         try:
             import timm
-            import torch
 
             model = timm.create_model(model_name, pretrained=True)
             model = model.to(self.device)
@@ -117,7 +179,7 @@ class ModelRegistry:
         try:
             segment_anything = importlib.import_module("segment_anything")
             sam_model_registry = cast(Mapping[str, Any], getattr(segment_anything, "sam_model_registry"))
-            sam_predictor_cls = cast(Any, getattr(segment_anything, "SamPredictor"))
+            sam_predictor_cls = getattr(segment_anything, "SamPredictor")
 
             sam = sam_model_registry[model_type](checkpoint=f"sam_{model_type}.pth")
             sam = sam.to(self.device)
@@ -179,14 +241,14 @@ class MultiModelEnsemble:
             self.weights[key] /= total
 
         self.confidence_threshold = confidence_threshold
-        self.ensemble_strategy = {
+        self.ensemble_strategy: EnsembleStrategy = {
             "bagging_enabled": bool(enable_bagging),
             "boosting_enabled": bool(enable_boosting),
             "bagging_views": max(1, min(5, int(bagging_views or 1))),
             "boosting_rounds": max(1, min(4, int(boosting_rounds or 1))),
             "fusion_iou_threshold": 0.55,
         }
-        self.inference_stats = {
+        self.inference_stats: InferenceStats = {
             "yolo_calls": 0,
             "vit_calls": 0,
             "sam_calls": 0,
@@ -225,7 +287,10 @@ class MultiModelEnsemble:
         fusion_scores = self._compute_fusion_scores(yolo_output, vit_output, sam_output)
 
         # Extract attribution
-        attention_map = vit_output.get("attention_map") if vit_output else None
+        attention_map = cast(NDArray[np.float32] | None, vit_output.get("attention_map")) if vit_output else None
+        semantic_features = cast(NDArray[np.float32] | None, vit_output.get("features")) if vit_output else None
+        chart_mask = cast(NDArray[np.uint8] | None, sam_output.get("mask")) if sam_output else None
+        bagging_views = _int(yolo_output.get("bagging_views", 1) or 1, 1) if yolo_output else 1
 
         inference_time_ms = (time.time() - start_time) * 1000
         self.inference_stats["total_time_ms"] += inference_time_ms
@@ -239,8 +304,8 @@ class MultiModelEnsemble:
 
         return VisionEnsembleOutput(
             detections=fused_detections,
-            chart_mask=sam_output.get("mask") if sam_output else None,
-            semantic_features=vit_output.get("features") if vit_output else None,
+            chart_mask=chart_mask,
+            semantic_features=semantic_features,
             attention_map=attention_map,
             fusion_scores=fusion_scores,
             inference_time_ms=inference_time_ms,
@@ -248,7 +313,7 @@ class MultiModelEnsemble:
                 "yolo": yolo_output is not None,
                 "vit": vit_output is not None,
                 "sam": sam_output is not None,
-                "bagging": bool(yolo_output and yolo_output.get("bagging_views", 1) > 1),
+                "bagging": bool(yolo_output and bagging_views > 1),
                 "boosting": bool(self.ensemble_strategy["boosting_enabled"] and yolo_output),
             },
             raw_outputs={
@@ -258,14 +323,14 @@ class MultiModelEnsemble:
             },
         )
 
-    def _run_yolo(self, img_array: NDArray[np.uint8]) -> Optional[dict[str, Any]]:
+    def _run_yolo(self, img_array: NDArray[np.uint8]) -> ModelOutput | None:
         """Run YOLOv8 detection."""
         try:
             self.inference_stats["yolo_calls"] += 1
             yolo_model = self.registry.get_model("yolo")
             results = yolo_model(img_array, conf=self.confidence_threshold, verbose=False)
 
-            detections = []
+            detections: list[dict[str, object]] = []
             for result in results:
                 for box in result.boxes:
                     detections.append({
@@ -315,21 +380,21 @@ class MultiModelEnsemble:
     def build_bagged_views_for_test(self, img_array: NDArray[np.uint8]) -> list[tuple[str, NDArray[np.uint8]]]:
         return self._build_bagged_views(img_array)
 
-    def _run_bagged_yolo(self, img_array: NDArray[np.uint8]) -> Optional[dict[str, Any]]:
+    def _run_bagged_yolo(self, img_array: NDArray[np.uint8]) -> ModelOutput | None:
         """Run YOLO across deterministic same-coordinate views and pool raw boxes."""
         views = self._build_bagged_views(img_array)
         self.inference_stats["bagging_calls"] += 1
         self.inference_stats["bagging_views_total"] += len(views)
 
-        detections: list[dict[str, Any]] = []
-        raw_outputs: list[dict[str, Any]] = []
+        detections: list[dict[str, object]] = []
+        raw_outputs: list[dict[str, object]] = []
         for view_index, (view_name, view_array) in enumerate(views):
             output = self._run_yolo(view_array)
             if not output or output.get("status") != "success":
                 raw_outputs.append({"view": view_name, "status": "failed", "count": 0})
                 continue
             raw_outputs.append({**output, "view": view_name, "view_index": view_index})
-            for item in output.get("detections", []):
+            for item in _mapping_sequence(output.get("detections")):
                 detections.append(
                     {
                         **item,
@@ -348,16 +413,15 @@ class MultiModelEnsemble:
             "raw_view_outputs": raw_outputs,
         }
 
-    def _run_vit(self, img_array: NDArray[np.uint8]) -> Optional[dict[str, Any]]:
+    def _run_vit(self, img_array: NDArray[np.uint8]) -> ModelOutput | None:
         """Run Vision Transformer for semantic features."""
         try:
             import torch
-            import torchvision.transforms as transforms
+            transforms = cast(Any, importlib.import_module("torchvision.transforms"))
 
             self.inference_stats["vit_calls"] += 1
             vit_data = self.registry.get_model("vit")
             vit_model = vit_data["model"]
-            config = vit_data["config"]
 
             # Preprocess image
             img_pil = Image.fromarray(img_array)
@@ -369,7 +433,7 @@ class MultiModelEnsemble:
                     std=[0.229, 0.224, 0.225]
                 ),
             ])
-            img_tensor = cast(Any, transform(img_pil)).unsqueeze(0).to(self.registry.device)
+            img_tensor = transform(img_pil).unsqueeze(0).to(self.registry.device)
 
             with torch.no_grad():
                 features = vit_model.forward_features(img_tensor)
@@ -394,12 +458,9 @@ class MultiModelEnsemble:
     def _extract_vit_attention(self, model: Any, img_tensor: Any) -> NDArray[np.float32]:
         """Extract attention heatmap from ViT's last layer."""
         try:
-            import torch
-
             # Simplified attention extraction
             # In production, hook into model's attention layers
-            attention_weights = torch.ones((24, 24), device=self.registry.device)
-            attention_map = attention_weights.cpu().numpy().astype(np.float32)
+            attention_map = np.ones((24, 24), dtype=np.float32)
 
             # Normalize to [0, 1]
             attention_map = (attention_map - attention_map.min()) / (attention_map.max() - attention_map.min() + 1e-6)
@@ -408,7 +469,7 @@ class MultiModelEnsemble:
             logger.debug(f"Attention extraction failed: {e}")
             return np.zeros((24, 24), dtype=np.float32)
 
-    def _run_sam(self, img_array: NDArray[np.uint8]) -> Optional[dict[str, Any]]:
+    def _run_sam(self, img_array: NDArray[np.uint8]) -> ModelOutput | None:
         """Run Segment Anything Model for chart boundary segmentation."""
         try:
             sam_predictor = self.registry.get_model("sam")
@@ -423,7 +484,7 @@ class MultiModelEnsemble:
             input_point = np.array([[w // 2, h // 2]])
             input_label = np.array([1])
 
-            masks, scores, logits = sam_predictor.predict(
+            masks, scores, _logits = sam_predictor.predict(
                 point_coords=input_point,
                 point_labels=input_label,
                 multimask_output=False,
@@ -440,8 +501,8 @@ class MultiModelEnsemble:
 
     def _fuse_detections(
         self,
-        yolo_output: Optional[dict],
-        vit_output: Optional[dict],
+        yolo_output: ModelOutput | None,
+        vit_output: ModelOutput | None,
     ) -> list[Detection]:
         """
         Fuse detections from multiple models using weighted voting.
@@ -477,25 +538,25 @@ class MultiModelEnsemble:
 
     def _weighted_box_fusion(
         self,
-        yolo_output: Mapping[str, Any],
-        vit_output: Optional[dict],
+        yolo_output: Mapping[str, object],
+        vit_output: ModelOutput | None,
     ) -> list[Detection]:
         """Fuse same-class YOLO boxes from bagged views and boost stable detections."""
-        raw_detections = [dict(item) for item in yolo_output.get("detections", []) if isinstance(item, dict)]
+        raw_detections = _mapping_sequence(yolo_output.get("detections"))
         if not raw_detections:
             return []
 
-        remaining = sorted(raw_detections, key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
-        groups: list[list[dict[str, Any]]] = []
+        remaining = sorted(raw_detections, key=lambda item: _float(item.get("confidence", 0.0)), reverse=True)
+        groups: list[list[dict[str, object]]] = []
         iou_threshold = float(self.ensemble_strategy["fusion_iou_threshold"])
         while remaining:
             seed = remaining.pop(0)
             group = [seed]
-            kept: list[dict[str, Any]] = []
-            seed_det = self._dict_to_detection(seed, confidence=float(seed.get("confidence", 0.0)))
+            kept: list[dict[str, object]] = []
+            seed_det = self._dict_to_detection(seed, confidence=_float(seed.get("confidence", 0.0)))
             for candidate in remaining:
-                candidate_det = self._dict_to_detection(candidate, confidence=float(candidate.get("confidence", 0.0)))
-                same_class = int(candidate.get("class_id", -1)) == int(seed.get("class_id", -2))
+                candidate_det = self._dict_to_detection(candidate, confidence=_float(candidate.get("confidence", 0.0)))
+                same_class = _int(candidate.get("class_id", -1), -1) == _int(seed.get("class_id", -2), -2)
                 if same_class and self._compute_iou(seed_det, candidate_det) >= iou_threshold:
                     group.append(candidate)
                 else:
@@ -504,17 +565,17 @@ class MultiModelEnsemble:
             remaining = kept
 
         fused: list[Detection] = []
-        bagging_views = max(1, int(yolo_output.get("bagging_views", 1) or 1))
+        bagging_views = max(1, _int(yolo_output.get("bagging_views", 1) or 1, 1))
         active_extra_models = int(bool(vit_output and vit_output.get("status") == "success"))
         for group in groups:
-            confidences = np.asarray([max(1e-6, float(item.get("confidence", 0.0))) for item in group], dtype=np.float32)
+            confidences = np.asarray([max(1e-6, _float(item.get("confidence", 0.0))) for item in group], dtype=np.float32)
             coords = np.asarray(
                 [
                     [
-                        float(item.get("x1", 0.0)),
-                        float(item.get("y1", 0.0)),
-                        float(item.get("x2", 0.0)),
-                        float(item.get("y2", 0.0)),
+                        _float(item.get("x1", 0.0)),
+                        _float(item.get("y1", 0.0)),
+                        _float(item.get("x2", 0.0)),
+                        _float(item.get("y2", 0.0)),
                     ]
                     for item in group
                 ],
@@ -539,7 +600,7 @@ class MultiModelEnsemble:
                     x2=float(averaged[2]),
                     y2=float(averaged[3]),
                     confidence=boosted_confidence,
-                    class_id=int(first.get("class_id", 0)),
+                    class_id=_int(first.get("class_id", 0)),
                     class_name=str(first.get("class_name", "unknown")),
                     model_source="bagged_boosted_yolo" if self.ensemble_strategy["boosting_enabled"] else "bagged_yolo",
                     metadata={
@@ -556,14 +617,14 @@ class MultiModelEnsemble:
             )
         return fused
 
-    def _dict_to_detection(self, item: Mapping[str, Any], *, confidence: float) -> Detection:
+    def _dict_to_detection(self, item: Mapping[str, object], *, confidence: float) -> Detection:
         return Detection(
-            x1=float(item.get("x1", 0.0)),
-            y1=float(item.get("y1", 0.0)),
-            x2=float(item.get("x2", 0.0)),
-            y2=float(item.get("y2", 0.0)),
+            x1=_float(item.get("x1", 0.0)),
+            y1=_float(item.get("y1", 0.0)),
+            x2=_float(item.get("x2", 0.0)),
+            y2=_float(item.get("y2", 0.0)),
             confidence=float(confidence),
-            class_id=int(item.get("class_id", 0)),
+            class_id=_int(item.get("class_id", 0)),
             class_name=str(item.get("class_name", "unknown")),
             model_source="raw_yolo",
             metadata={},
@@ -592,9 +653,9 @@ class MultiModelEnsemble:
 
         # Sort by confidence descending
         detections = sorted(detections, key=lambda d: d.confidence, reverse=True)
-        keep = []
+        keep: list[Detection] = []
 
-        for i, det_i in enumerate(detections):
+        for det_i in detections:
             should_keep = True
             for det_j in keep:
                 iou = self._compute_iou(det_i, det_j)
@@ -631,29 +692,29 @@ class MultiModelEnsemble:
 
     def _compute_fusion_scores(
         self,
-        yolo_output: Optional[dict],
-        vit_output: Optional[dict],
-        sam_output: Optional[dict],
+        yolo_output: ModelOutput | None,
+        vit_output: ModelOutput | None,
+        sam_output: ModelOutput | None,
     ) -> dict[str, float]:
         """Compute weighted contribution of each model."""
-        scores = {}
+        scores: dict[str, float] = {}
 
-        if yolo_output and yolo_output["status"] == "success":
-            scores["yolo"] = min(1.0, yolo_output["count"] / 10.0)  # Normalize
-            scores["bagging"] = min(1.0, float(yolo_output.get("bagging_views", 1)) / max(1.0, float(self.ensemble_strategy["bagging_views"])))
+        if yolo_output and yolo_output.get("status") == "success":
+            scores["yolo"] = min(1.0, _float(yolo_output.get("count", 0.0)) / 10.0)  # Normalize
+            scores["bagging"] = min(1.0, _float(yolo_output.get("bagging_views", 1), 1.0) / max(1.0, float(self.ensemble_strategy["bagging_views"])))
             scores["boosting"] = 1.0 if self.ensemble_strategy["boosting_enabled"] else 0.0
         else:
             scores["yolo"] = 0.0
             scores["bagging"] = 0.0
             scores["boosting"] = 0.0
 
-        if vit_output and vit_output["status"] == "success":
+        if vit_output and vit_output.get("status") == "success":
             scores["vit"] = 1.0  # ViT always succeeded if reached here
         else:
             scores["vit"] = 0.0
 
-        if sam_output and sam_output["status"] == "success":
-            scores["sam"] = float(sam_output.get("score", 0.0))
+        if sam_output and sam_output.get("status") == "success":
+            scores["sam"] = _float(sam_output.get("score", 0.0))
         else:
             scores["sam"] = 0.0
 

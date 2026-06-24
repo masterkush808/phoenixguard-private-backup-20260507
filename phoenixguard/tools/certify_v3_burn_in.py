@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from typing import Mapping
+from typing import Mapping, cast
 
 from certification_common_v3 import (
     CERT_DIR,
@@ -29,15 +29,16 @@ def _load_gate_reports() -> list[dict[str, object]]:
     for path in sorted(CERT_DIR.glob("gate*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict) and payload.get("gate"):
-                reports.append(payload)
+            row = _mapping(payload)
+            if row.get("gate"):
+                reports.append(row)
         except Exception:
             pass
     return reports
 
 
-def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
+def _mapping(value: object) -> dict[str, object]:
+    return dict(cast(Mapping[str, object], value)) if isinstance(value, Mapping) else {}
 
 
 def _float_value(value: object, default: float = 0.0) -> float:
@@ -89,7 +90,7 @@ def main() -> int:
         live = http_json(f"{base}/v1/mobile/live/state/v3/{session_q}", timeout=args.timeout)
         perf = http_json(f"{base}/v1/mobile/performance/trace/v3/{session_q}", timeout=args.timeout)
         heartbeat = http_json(f"{base}/v1/mobile/frontend/heartbeat/v3?session_id={session_q}", timeout=min(args.timeout, 3.0))
-        sample = {
+        sample: dict[str, object] = {
             "epoch": time.time(),
             "api_pids": sorted(api),
             "tracker_pids": sorted(tracker),
@@ -103,8 +104,8 @@ def main() -> int:
             endpoint_failures += 1
             sample["error"] = live.error or perf.error
         else:
-            live_payload = live.payload if isinstance(live.payload, dict) else {}
-            perf_payload = perf.payload if isinstance(perf.payload, dict) else {}
+            live_payload = _mapping(live.payload)
+            perf_payload = _mapping(perf.payload)
             timing = _mapping(perf_payload.get("timing_trace"))
             frame_age = _float_value(timing.get("frame_age_ms"), 0.0)
             overlay_age = _float_value(timing.get("overlay_age_ms"), 0.0)

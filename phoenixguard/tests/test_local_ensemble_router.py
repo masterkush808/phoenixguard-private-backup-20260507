@@ -253,7 +253,7 @@ def test_router_respects_bearish_council_projection_against_macro_bias() -> None
 
 
 def test_adaptation_profile_preserves_thresholded_sell_vote() -> None:
-    row = {
+    row: dict[str, Any] = {
         "buy_prob": 0.53,
         "sell_prob": 0.47,
         "predicted_label": "SELL",

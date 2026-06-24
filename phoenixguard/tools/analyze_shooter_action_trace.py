@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence, cast
 
 
 TIME_STEPS = {
@@ -39,8 +39,8 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             rows.append({"_parse_error": line})
             continue
-        if isinstance(value, dict):
-            rows.append(value)
+        if isinstance(value, Mapping):
+            rows.append(dict(cast(Mapping[str, Any], value)))
     return rows
 
 
@@ -108,8 +108,11 @@ def analyze_trace(rows: list[dict[str, Any]], boxes: Mapping[str, Any]) -> list[
         if str(row.get("result") or "").upper().startswith("FAILED"):
             findings.append(f"FAILED_STEP:{row.get('step')}:{row.get('reason')}")
         rect = row.get("window_rect")
-        if isinstance(rect, list) and len(rect) >= 4:
-            rect_tuple = tuple(int(v) for v in rect[:4])
+        if isinstance(rect, list):
+            rect_values = cast(list[Any], rect)
+            if len(rect_values) < 4:
+                continue
+            rect_tuple = tuple(int(v) for v in cast(Sequence[Any], rect_values)[:4])
             if previous_window and rect_tuple != previous_window:
                 old_w = previous_window[2] - previous_window[0]
                 old_h = previous_window[3] - previous_window[1]
@@ -155,7 +158,7 @@ def main() -> int:
     boxes = _load_json(boxes_path)
     if not isinstance(boxes, Mapping):
         raise SystemExit("boxes file must contain a JSON object")
-    findings = analyze_trace(rows, boxes)
+    findings = analyze_trace(rows, dict(cast(Mapping[str, Any], boxes)))
     output = Path(args.output)
     write_report(findings, output)
     for finding in findings:

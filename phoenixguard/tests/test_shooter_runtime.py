@@ -22,7 +22,7 @@ def _load_shooter():
 def test_extract_signal_payload_unwraps_latest_signal() -> None:
     shooter = _load_shooter()
 
-    signal = {"action": "BUY", "actionable": True}
+    signal: dict[str, Any] = {"action": "BUY", "actionable": True}
     assert shooter._extract_signal_payload({"latest_signal": signal}) == signal
 
 
@@ -200,14 +200,14 @@ def test_parse_trade_signal_accepts_opposing_force_reaction_lane() -> None:
 def test_preferred_source_rejects_shadow_controls_even_when_source_matches() -> None:
     shooter = _load_shooter()
 
-    shadow_payload = {
+    shadow_payload: dict[str, Any] = {
         "source": "tracker",
         "execution_controls": {
             "live_execution_enabled": False,
             "execution_mode": "shadow",
         },
     }
-    live_payload = {
+    live_payload: dict[str, Any] = {
         "source": "tracker",
         "execution_controls": {
             "live_execution_enabled": True,
@@ -260,7 +260,7 @@ def test_parse_visible_time_seconds_reads_broker_clock_text() -> None:
 def test_v3_gate3_blocks_bad_entry_location_for_side() -> None:
     shooter = _load_shooter()
 
-    packet = {
+    packet: dict[str, Any] = {
         "execution": {
             "enabled": True,
             "state": "EXECUTABLE",
@@ -335,7 +335,7 @@ def test_v3_gate3_blocks_bad_entry_location_for_side() -> None:
 def test_v3_gate3_rejects_missing_sequence_context() -> None:
     shooter = _load_shooter()
 
-    packet = {
+    packet: dict[str, Any] = {
         "execution": {
             "enabled": True,
             "state": "EXECUTABLE",
@@ -368,7 +368,7 @@ def test_v3_gate3_rejects_missing_sequence_context() -> None:
 def test_v3_gate3_rejects_partial_sequence_context() -> None:
     shooter = _load_shooter()
 
-    packet = {
+    packet: dict[str, Any] = {
         "execution": {
             "enabled": True,
             "state": "EXECUTABLE",
@@ -774,7 +774,7 @@ def test_signal_context_copies_tracker_freshness_fields() -> None:
 def test_fetch_latest_signal_prefers_current_tracker_over_stale_observer(monkeypatch: pytest.MonkeyPatch) -> None:
     shooter = _load_shooter()
 
-    tracker_payload = {
+    tracker_payload: dict[str, Any] = {
         "session_id": "pocket-live",
         "next_capture_in_sec": 8.5,
         "latest_signal": {
@@ -792,7 +792,7 @@ def test_fetch_latest_signal_prefers_current_tracker_over_stale_observer(monkeyp
             },
         },
     }
-    observer_payload = {
+    observer_payload: dict[str, Any] = {
         "signal_id": "observer_stale",
         "status": "stale",
         "action": "HOLD",
@@ -818,7 +818,7 @@ def test_fetch_latest_signal_prefers_current_tracker_over_stale_observer(monkeyp
     def fake_urlopen(req: Any, timeout: float = 1.25) -> _Resp:
         del timeout
         url = str(req.full_url)
-        payload = tracker_payload if "window-tracker" in url else observer_payload
+        payload: dict[str, Any] = tracker_payload if "window-tracker" in url else observer_payload
         raw = __import__("json").dumps(payload).encode("utf-8")
         return _Resp(raw)
 
@@ -835,7 +835,7 @@ def test_fetch_latest_signal_prefers_current_tracker_over_stale_observer(monkeyp
 def test_fetch_phoenix_major_bias_rejects_stale_fallback_bias(monkeypatch: pytest.MonkeyPatch) -> None:
     shooter = _load_shooter()
 
-    stale_observer_payload = {
+    stale_observer_payload: dict[str, Any] = {
         "signal_id": "observer_stale_bias",
         "status": "stale",
         "action": "BUY",
@@ -1370,7 +1370,7 @@ def test_strict_adaptive_expiry_accepts_explicit_expiry_field() -> None:
 def test_floating_status_resolves_raw_side_and_expiry_without_na() -> None:
     shooter = _load_shooter()
     box = shooter.FloatingStatusBox("pocket-live")
-    payload = {
+    payload: dict[str, Any] = {
         "action": "HOLD",
         "execution_action": "HOLD",
         "major_bias": "SELL",

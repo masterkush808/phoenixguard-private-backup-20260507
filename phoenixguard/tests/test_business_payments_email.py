@@ -208,7 +208,7 @@ def test_access_is_not_activated_until_verified_payment_state_is_valid() -> None
     repo = MockBusinessRepository.seeded()
     client = TestClient(create_business_app(repository=repo, stripe_webhook_secret=secret))
 
-    checkout_event = {
+    checkout_event: dict[str, Any] = {
         "id": "evt_checkout_unpaid",
         "type": "checkout.session.completed",
         "data": {

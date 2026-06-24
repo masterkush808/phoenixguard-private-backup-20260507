@@ -4,6 +4,7 @@ import pytest
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from PIL import Image
 
@@ -315,10 +316,8 @@ def test_compare_desk_images_default_to_uncropped_contained_views() -> None:
 
 
 def test_decision_record_excludes_raw_backend_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        main,
-        "_get_session_snapshot",
-        lambda: {
+    def session_snapshot() -> dict[str, Any]:
+        return {
             "session_id": "session-1",
             "entries": [
                 {
@@ -328,7 +327,12 @@ def test_decision_record_excludes_raw_backend_payload(monkeypatch: pytest.Monkey
                     "file_name": "chart.png",
                 }
             ],
-        },
+        }
+
+    monkeypatch.setattr(
+        main,
+        "_get_session_snapshot",
+        session_snapshot,
     )
     monkeypatch.setattr(main, "_feedback_target_entries", lambda limit=240: [{"feedback_status": "pending"}])
     monkeypatch.setattr(main, "_feedback_submission_states", lambda: [{"status": "completed"}])

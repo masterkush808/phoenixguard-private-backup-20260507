@@ -12,6 +12,9 @@ Test Categories:
   6. Edge Cases & Robustness
   7. Performance Benchmarking
 """
+import random
+from typing import Mapping, cast
+
 import pytest
 import numpy as np
 from numpy.typing import NDArray
@@ -27,7 +30,7 @@ from phoenixguard.vision.multi_model_ensemble import (
 )
 from phoenixguard.vision.motion_tracker import OpticalFlowTracker, OpticalFlowFrame
 from phoenixguard.vision.chart_segmentation import ChartSegmentationEngine
-from phoenixguard.vision.enhanced_vision_module import EnhancedVisionEngine
+from phoenixguard.vision.enhanced_vision_module import EnhancedVisionEngine, EnhancedVisionOutput
 
 
 logger = logging.getLogger(__name__)
@@ -42,14 +45,14 @@ pytest_plugins = ("pytest_asyncio",)
 def sample_chart_image() -> Image.Image:
     """Create synthetic chart image (640x480, candlestick pattern)."""
     h, w = 480, 640
-    rng = np.random.default_rng(808)
+    rng = random.Random(808)
     img: NDArray[np.uint8] = np.full((h, w, 3), 240, dtype=np.uint8)  # Light gray background
 
     # Draw candlesticks
     for x in range(100, 600, 50):
         # High-Low line (wick)
-        y_high = 100 + int(rng.integers(0, 50))
-        y_low = y_high + 150 + int(rng.integers(0, 50))
+        y_high = 100 + rng.randrange(0, 50)
+        y_low = y_high + 150 + rng.randrange(0, 50)
         img[y_high:y_low, x:x+2, :] = [50, 50, 50]  # Black wick
 
         # Open-Close box
@@ -187,8 +190,9 @@ class TestMultiModelEnsemble:
         assert len(fused) == 1
         assert fused[0].model_source == "bagged_boosted_yolo"
         assert fused[0].confidence >= 0.5
-        assert fused[0].metadata["vote_count"] == 2
-        assert fused[0].metadata["ensemble_method"] == "bagging+boosting"
+        metadata = cast(Mapping[str, object], getattr(fused[0], "metadata"))
+        assert metadata["vote_count"] == 2
+        assert metadata["ensemble_method"] == "bagging+boosting"
 
     def test_ensemble_weight_normalization(self, model_registry: ModelRegistry) -> None:
         """Verify weights are properly normalized."""
@@ -281,6 +285,7 @@ class TestOpticalFlowTracker:
 
         # Static image (no motion)
         flow_frame = tracker.process_frame(sample_chart_image, 0.0)
+        assert flow_frame.frame_id == 0
         _ = tracker.process_frame(sample_chart_image, 33.0)  # Same image
 
         stats = tracker.get_motion_stats()
@@ -402,7 +407,7 @@ class TestEnhancedVisionEngine:
             enable_optical_flow=True,
         )
 
-        outputs = []
+        outputs: list[EnhancedVisionOutput] = []
         for frame in sample_video_frames[:3]:
             output = engine.process_frame(frame)
             outputs.append(output)

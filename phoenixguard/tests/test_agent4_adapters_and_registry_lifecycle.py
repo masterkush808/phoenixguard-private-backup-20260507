@@ -1,3 +1,4 @@
+from typing import Any
 from pathlib import Path
 from phoenixguard.vision.adapters import (
     memory_episode_match_to_historical_study,
@@ -9,15 +10,15 @@ from phoenixguard.vision.market_registry import merge_market_objects, load_marke
 
 def test_adapters_and_merge_lifecycle(tmp_path: Path):
     # adapters
-    mem = {"episode_id": "e1", "side": "SELL", "would_enter_at": {"frame_id": 10}}
+    mem: dict[str, Any] = {"episode_id": "e1", "side": "SELL", "would_enter_at": {"frame_id": 10}}
     study = memory_episode_match_to_historical_study(mem)
     assert study["study_id"] == "e1"
 
-    ast = {"id": "s1", "side": "BUY", "path": [[0,0],[1,1]], "confidence": 0.42}
+    ast: dict[str, Any] = {"id": "s1", "side": "BUY", "path": [[0,0],[1,1]], "confidence": 0.42}
     pred = a_star_scenario_to_prediction_scenario(ast)
     assert pred["scenario_id"] == "s1"
 
-    paint = {"overlays": [{"key": "oA", "bbox": [1,2,3,4], "confidence": 0.8}, {"key": "oB", "bbox": [5,6,7,8], "confidence": 0.3}]}
+    paint: dict[str, Any] = {"overlays": [{"key": "oA", "bbox": [1,2,3,4], "confidence": 0.8}, {"key": "oB", "bbox": [5,6,7,8], "confidence": 0.3}]}
     objs = scenario_paint_output_to_overlay_objects(paint)
     assert len(objs) == 2
 

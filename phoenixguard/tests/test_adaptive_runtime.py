@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 import tempfile
 from pathlib import Path
@@ -181,7 +182,7 @@ def test_derive_context_key_includes_pair_identity_when_available() -> None:
 def test_grounded_chart_merges_optional_backend_regions() -> None:
     class _BackendResult:
         caption = "candles near support"
-        detections = [
+        detections: list[dict[str, Any]] = [
             {"label": "support zone", "score": 0.82, "bbox": [1.0, 2.0, 20.0, 25.0], "source": "grounding_dino"},
             {"label": "broker ui", "score": 0.91, "bbox": [0.0, 0.0, 10.0, 10.0], "source": "grounding_dino"},
         ]
@@ -275,7 +276,7 @@ def test_metric_profile_context_reranks_memory_hits() -> None:
 def test_grounded_chart_structure_summary_tracks_directional_bias() -> None:
     class _BackendResult:
         caption = "breakout above support"
-        detections = [
+        detections: list[dict[str, Any]] = [
             {"label": "support zone", "score": 0.88, "bbox": [2.0, 6.0, 18.0, 26.0], "source": "grounding_dino"},
             {"label": "breakout box", "score": 0.84, "bbox": [22.0, 6.0, 44.0, 28.0], "source": "grounding_dino"},
         ]

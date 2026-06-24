@@ -81,7 +81,8 @@ def _bbox_tuple(value: Sequence[Any]) -> BBox | None:
 
 def _bbox_from_item(item: Any) -> Sequence[Any]:
     if isinstance(item, Mapping):
-        value = item.get("bbox", ())
+        row = cast(Mapping[str, object], item)
+        value = row.get("bbox", ())
         return cast(Sequence[Any], value) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else ()
     return cast(Sequence[Any], item) if isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)) else ()
 

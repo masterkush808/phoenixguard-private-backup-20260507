@@ -10,8 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Mapping
-import urllib.error
+from typing import Any, Mapping, cast
 import urllib.parse
 import urllib.request
 
@@ -35,6 +34,10 @@ except Exception:  # pragma: no cover - exercised only on systems without tkinte
 # `run()` raises a clear runtime error before GUI construction when tkinter is
 # unavailable; this alias keeps the optional module boundary local for Pyright.
 _tk: Any = tk
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 DEFAULT_SESSION_ID = "pocket-live-8788"
@@ -79,7 +82,7 @@ class TrackerSnapshotClient:
             payload = json.loads(response.read().decode("utf-8"))
         if not isinstance(payload, Mapping):
             raise ValueError("response was not a JSON object")
-        return dict(payload)
+        return _mapping(payload)
 
     def _fetch_direct_session(self) -> dict[str, Any]:
         path = self._direct_session_path()
@@ -88,7 +91,7 @@ class TrackerSnapshotClient:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping):
             raise ValueError(f"{path} did not contain a JSON object")
-        return dict(payload)
+        return _mapping(payload)
 
     def _direct_session_path(self) -> Path:
         data_dir = REPO_ROOT / "data"
@@ -143,8 +146,8 @@ class EnterNowFloatingGui:
         self.resize_y = 0
         self.resize_width = 0
         self.resize_height = 0
-        self.position = (40, 120)
-        self.size = DEFAULT_WINDOW_SIZE
+        self.position: tuple[int, int] = (40, 120)
+        self.size: tuple[int, int] = DEFAULT_WINDOW_SIZE
         self.root: Any = None
         self.vars: dict[str, Any] = {}
         self.event_text: Any = None
@@ -186,8 +189,14 @@ class EnterNowFloatingGui:
             root.attributes("-toolwindow", True)
         except Exception:
             pass
-        root.bind("<Alt-F4>", lambda _event: "break")
-        root.bind("<Unmap>", lambda _event: root.after_idle(root.deiconify))
+        def break_event(_event: Any) -> str:
+            return "break"
+
+        def deiconify_event(_event: Any) -> None:
+            root.after_idle(root.deiconify)
+
+        root.bind("<Alt-F4>", break_event)
+        root.bind("<Unmap>", deiconify_event)
 
         bg = "#060A12"
         panel = "#0B1220"
@@ -574,7 +583,7 @@ class EnterNowFloatingGui:
 
     def _notify(self, package: EnterNowPackage) -> None:
         message = format_enter_now_notification(package)
-        record = {
+        record: dict[str, Any] = {
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "message": message,
             "package": package.as_dict(),
@@ -717,7 +726,7 @@ class EnterNowFloatingGui:
         if self.event_text is None:
             return
         if self.events:
-            lines = []
+            lines: list[str] = []
             for event in self.events[:8]:
                 at = str(event.get("at") or "")[11:19] or time.strftime("%H:%M:%S")
                 lines.append(f"{at}  {event.get('message', '')}")
@@ -760,20 +769,21 @@ class EnterNowFloatingGui:
             data = json.loads(self.settings_path.read_text(encoding="utf-8"))
             if not isinstance(data, Mapping):
                 return
-            x = int(data.get("x", self.position[0]))
-            y = int(data.get("y", self.position[1]))
-            width = int(data.get("width", self.size[0]))
-            height = int(data.get("height", self.size[1]))
+            settings = _mapping(data)
+            x = int(settings.get("x", self.position[0]))
+            y = int(settings.get("y", self.position[1]))
+            width = int(settings.get("width", self.size[0]))
+            height = int(settings.get("height", self.size[1]))
             self.position = (max(0, x), max(0, y))
             self.size = self._clamp_size(width, height)
-            self.opacity = max(0.55, min(1.0, float(data.get("opacity", self.opacity))))
+            self.opacity = max(0.55, min(1.0, float(settings.get("opacity", self.opacity))))
         except Exception:
             pass
 
     def _save_settings(self) -> None:
         try:
             root = self.root
-            payload = {
+            payload: dict[str, Any] = {
                 "height": self.size[1],
                 "opacity": self.opacity,
                 "width": self.size[0],

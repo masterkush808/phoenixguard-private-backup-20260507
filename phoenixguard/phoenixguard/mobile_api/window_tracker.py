@@ -3086,7 +3086,7 @@ def _stable_short_hash(payload: Mapping[str, Any]) -> str:
 def _instrument_viewport_hash(payload: Mapping[str, Any]) -> str:
     focus = _public_manual_focus_region(payload.get("manual_focus_region", {}))
     locked = _mapping_to_dict(payload.get("locked_window", {}))
-    descriptor = {
+    descriptor: dict[str, Any] = {
         "manual_focus_enabled": bool(focus.get("enabled", False)),
         "manual_focus_bbox": list(cast(Sequence[Any], focus.get("normalized_bbox", []))),
         "locked_hwnd": int(locked.get("hwnd", 0) or 0),
@@ -3242,7 +3242,7 @@ def _tracker_signal_state_hash(
         latest_signal.get("lstm_contribution", tracking_summary.get("lstm_contribution", high_frequency.get("lstm_contribution", {})))
     )
     execution_side = _upper_action(latest_signal.get("execution_action", latest_signal.get("action", "HOLD")))
-    payload = {
+    payload: dict[str, Any] = {
         "action": _upper_action(latest_signal.get("action", "HOLD")),
         "candidate_action": _upper_action(latest_signal.get("candidate_action", latest_signal.get("action", "HOLD"))),
         "execution_action": execution_side,
@@ -7246,7 +7246,7 @@ class PocketOptionBrokerExecutionBackend:
                 target_bbox=target_screen_bbox,
                 physical_point=physical,
             )
-            row = {
+            row: dict[str, Any] = {
                 "name": name,
                 "cursor_point": [int(cursor[0]), int(cursor[1])],
                 "physical_point": [int(physical[0]), int(physical[1])],
@@ -7351,7 +7351,7 @@ class PocketOptionBrokerExecutionBackend:
                 time.sleep(0.12)
 
         # VERIFY AND RETRY IF NEEDED
-        verification = self._verify_expiry_popup_target(
+        verification: dict[str, Any] = self._verify_expiry_popup_target(
             descriptor=descriptor,
             time_field=time_field,
             target_seconds=target_total,
@@ -7979,7 +7979,7 @@ class PocketOptionBrokerExecutionBackend:
             if hours > 24 or minutes > 59 or seconds > 59:
                 return template_fallback
             confidence = float(np.mean(np.asarray(confidences, dtype=np.float32))) if confidences else 0.0
-            parsed = {
+            parsed: dict[str, Any] = {
                 "text": f"{hours:02d}:{minutes:02d}:{seconds:02d}",
                 "seconds": int(hours * 3600 + minutes * 60 + seconds),
                 "confidence": _clip01(confidence),
@@ -8550,7 +8550,7 @@ class PhoenixGuardWindowTrackingAdapter:
             cached_market = _normalize_fx_market_candidate(
                 previous_signal.get("market", previous_tracking.get("detected_market", _mapping_to_dict(session_payload).get("market", "")))
             )
-            timeframe_selector = (
+            timeframe_selector: dict[str, Any] = (
                 {
                     "value": cached_timeframe,
                     "source": "live_cached_selector",
@@ -8559,7 +8559,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 if cached_timeframe
                 else {}
             )
-            market_selector = (
+            market_selector: dict[str, Any] = (
                 {
                     "value": cached_market,
                     "source": "live_cached_selector",
@@ -8921,7 +8921,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 "uncertainty": _clip01(sideways_probability + invalidation_first_probability * 0.45),
             },
         }
-        projected_next_box = {
+        projected_next_box: dict[str, Any] = {
             "direction": direction,
             "box_type": box_type,
             "confidence": _clip01(projection.get("confidence", confidence)),
@@ -8965,7 +8965,7 @@ class PhoenixGuardWindowTrackingAdapter:
         recent_buy_count = sum(1 for row in regression_rows if _upper_action(row.get("direction"), fallback="HOLD") == "BUY")
         recent_sell_count = sum(1 for row in regression_rows if _upper_action(row.get("direction"), fallback="HOLD") == "SELL")
         pressure_direction = "BUY" if recent_buy_count >= recent_sell_count else "SELL"
-        candle_regression = {
+        candle_regression: dict[str, Any] = {
             "slope": round(float(regression_slope), 4),
             "direction": regression_direction,
             "pressure_direction": pressure_direction,
@@ -8973,7 +8973,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "alignment_to_label": 1.0 if regression_direction == direction else (0.58 if regression_direction == "HOLD" else 0.18),
             "recent_activity_columns": int(len(regression_rows)),
         }
-        chart_state = {
+        chart_state: dict[str, Any] = {
             "entry_type": entry_type,
             "direction": direction,
             "macro_trend": macro_trend,
@@ -10397,7 +10397,7 @@ class PhoenixGuardWindowTrackingAdapter:
             }
         top_matches = [self._memory_match_payload(bank, row) for row in rows[:3]]
         top_matches = [row for row in top_matches if row]
-        top_predictions = [
+        top_predictions: list[dict[str, Any]] = [
             {
                 "rank": index + 1,
                 "side": _upper_action(match.get("label", desired), fallback=desired),
@@ -11257,7 +11257,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 }
             )
             return rejected
-        memory_match = {
+        memory_match: dict[str, Any] = {
             "dominant_memory_side": direction,
             "top_matches": cast(Sequence[Any], primary_fit.get("top_matches", [])),
             "how_current_differs": str(counter_fit.get("summary", "") or ""),
@@ -11360,7 +11360,7 @@ class PhoenixGuardWindowTrackingAdapter:
             f"{str(counter_top.get('image_name', 'none')) if counter_top else 'none'} "
             f"{float(counter_top.get('similarity', 0.0) or 0.0):.2f}" if counter_top else headline
         )
-        forward_projection = {
+        forward_projection: dict[str, Any] = {
             "headline": headline,
             "path": (
                 f"{str(live_forward.get('likely_path', '') or '').strip()} "
@@ -12327,7 +12327,9 @@ class PhoenixGuardWindowTrackingAdapter:
                     }
                 )
 
-        significant_pools = [
+        significant_pools = cast(
+            list[dict[str, Any]],
+            [
             {
                 "role": str(zone.get("role", "") or ""),
                 "direction": _upper_action(zone.get("direction", "HOLD")),
@@ -12344,9 +12346,10 @@ class PhoenixGuardWindowTrackingAdapter:
             }
             for zone in support_resistance_zones
             if bool(zone.get("still_significant", False)) or _clip01(zone.get("significance_score", zone.get("confidence", 0.0))) >= 0.48
-        ][:max_liquidity_pools]
+            ][:max_liquidity_pools],
+        )
         mss_confidence = _clip01(0.40 * reversal_score + 0.30 * float(global_direction != local_direction and local_direction in {"BUY", "SELL"}) + 0.30 * float(local_direction == impulse_direction and local_direction in {"BUY", "SELL"}))
-        market_structure_shift = {
+        market_structure_shift: dict[str, Any] = {
             "active": bool(mss_confidence >= 0.48),
             "direction": _upper_action(local_direction if local_direction in {"BUY", "SELL"} else impulse_direction),
             "confidence": round(float(mss_confidence), 4),
@@ -12905,7 +12908,7 @@ class PhoenixGuardWindowTrackingAdapter:
         kernel_trade_mode = str(decision_kernel.get("trade_mode", "STAND_ASIDE") or "STAND_ASIDE").upper()
         kernel_candle_side = _upper_action(decision_kernel.get("candle_execution_side", "HOLD"))
         countertrend_allowed = bool(execution_controls.get("allow_countertrend_scalp", False))
-        countertrend_lane = {
+        countertrend_lane: dict[str, Any] = {
             "state": (
                 "SCALP_READY"
                 if countertrend_allowed and kernel_trade_mode == "COUNTERTREND_SCALP" and kernel_candle_side in {"BUY", "SELL"}
@@ -12978,7 +12981,7 @@ class PhoenixGuardWindowTrackingAdapter:
             decision_kernel=decision_kernel,
         )
 
-        tracking_summary = {
+        tracking_summary: dict[str, Any] = {
             "chart_valid": True,
             "surface_kind": "manual_focus_surface",
             "visible_candle_count": int(len(candles)),
@@ -13036,7 +13039,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "major_trend_direction": major_trend_side,
             "major_trend_confidence": major_trend_confidence,
         }
-        signal = {
+        signal: dict[str, Any] = {
             "signal_id": f"tracker_{uuid4().hex}",
             "action": candidate_action,
             "headline_action": candidate_action,
@@ -13223,7 +13226,7 @@ class PhoenixGuardWindowTrackingAdapter:
         signal["phoenixguard_decision_state"] = str(phoenixguard_report.get("decision_state", "forming") or "forming")
         signal["phoenixguard_report_summary"] = str(phoenixguard_report.get("headline", signal.get("summary", "")) or signal.get("summary", ""))
         signal["phoenixguard_report_status"] = str(phoenixguard_report.get("status", "warming") or "warming")
-        previous_geometry = {}
+        previous_geometry: dict[str, Any] = {}
         if session_payload is not None:
             previous_geometry = _mapping_to_dict(
                 _mapping_to_dict(_mapping_to_dict(session_payload).get("tracking_summary", {})).get("overlay_geometry", {})
@@ -13249,7 +13252,8 @@ class PhoenixGuardWindowTrackingAdapter:
             try:
                 from phoenixguard.vision.market_registry import persist_market_objects
 
-                objects = overlay_geometry.get("truth_audit", {}).get("objects", [])
+                truth_audit = _mapping_to_dict(overlay_geometry.get("truth_audit", {}))
+                objects = truth_audit.get("objects", [])
                 chart_transform = overlay_geometry.get("chart_transform")
                 if objects and session_payload is not None:
                     session_id = str(session_payload.get("session_id") or "")
@@ -14078,7 +14082,7 @@ class PhoenixGuardWindowTrackingAdapter:
         dominant_memory_side = _upper_action(
             _mapping_to_dict(session_payload.get("execution_memory_projection", {})).get("dominant_side", "HOLD")
         )
-        memory_recall = {
+        memory_recall: dict[str, Any] = {
             "memory_alignment": _clip01(
                 _mapping_to_dict(session_payload.get("execution_memory_projection", {})).get(
                     "memory_similarity",
@@ -14175,7 +14179,7 @@ class PhoenixGuardWindowTrackingAdapter:
         x1 = max(int(candle["bbox"][2]) for candle in candles)
         y1 = max(int(candle["bbox"][3]) for candle in candles)
         bbox = _expand_bbox(image_size, [x0, y0, x1, y1], pad_x=10, pad_y=10)
-        payload = {
+        payload: dict[str, Any] = {
             "key": key,
             "label": label,
             "bbox": bbox,
@@ -14703,7 +14707,7 @@ class PhoenixGuardWindowTrackingAdapter:
             momentum_exit_score=momentum_exit_score,
             failure_risk=failure_risk,
         )
-        trend_context = {
+        trend_context: dict[str, Any] = {
             "global_bias": str(global_direction or "HOLD").upper(),
             "local_bias": self._contextual_bias_label(global_direction, local_direction),
             "micro_bias": self._contextual_bias_label(local_direction, impulse_direction),
@@ -14825,7 +14829,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 distance_to_invalidation=distance_to_invalidation,
                 volatility_state=volatility_state,
             )
-            token = {
+            token: dict[str, Any] = {
                 "index": int(index),
                 "track_id": int(item.get("track_id", index) or index),
                 "direction": direction,
@@ -16662,7 +16666,7 @@ class ContinuousWindowTrackerService:
         try:
             path = self._event_log_path(session_id)
             path.parent.mkdir(parents=True, exist_ok=True)
-            row = {
+            row: dict[str, Any] = {
                 "timestamp": _now_iso(),
                 "session_id": str(session_id),
                 "event": str(event or "event"),
@@ -16693,17 +16697,17 @@ class ContinuousWindowTrackerService:
         input_frame_hash: str,
         capture_started_epoch: float,
     ) -> dict[str, Any]:
-        tracking = _mapping_to_dict(tracking_summary)
-        signal = _mapping_to_dict(latest_signal)
-        market_context = _mapping_to_dict(
+        tracking: dict[str, Any] = _mapping_to_dict(tracking_summary)
+        signal: dict[str, Any] = _mapping_to_dict(latest_signal)
+        market_context: dict[str, Any] = _mapping_to_dict(
             signal.get("market_context")
             or tracking.get("market_context")
             or signal.get("global_local_control")
             or tracking.get("global_local_control")
         )
-        decision_kernel = _mapping_to_dict(signal.get("decision_kernel") or tracking.get("decision_kernel"))
-        timing_signal = _mapping_to_dict(signal.get("timing_signal") or tracking.get("timing_signal"))
-        execution_timing = _mapping_to_dict(signal.get("execution_timing") or tracking.get("execution_timing"))
+        decision_kernel: dict[str, Any] = _mapping_to_dict(signal.get("decision_kernel") or tracking.get("decision_kernel"))
+        timing_signal: dict[str, Any] = _mapping_to_dict(signal.get("timing_signal") or tracking.get("timing_signal"))
+        execution_timing: dict[str, Any] = _mapping_to_dict(signal.get("execution_timing") or tracking.get("execution_timing"))
         execution_controls = _normalize_execution_controls(payload.get("execution_controls", {}))
         broker_execution_state = _mapping_to_dict(payload.get("broker_execution_state"))
         broker_execution_timing = _mapping_to_dict(broker_execution_state.get("execution_timing"))
@@ -16948,7 +16952,7 @@ class ContinuousWindowTrackerService:
             or payload.get("layout_id")
             or "default"
         ).strip()
-        instrument_identity_lock = _mapping_to_dict(
+        instrument_identity_lock: dict[str, Any] = _mapping_to_dict(
             signal.get("instrument_identity_lock")
             or tracking.get("instrument_identity_lock")
             or payload.get("instrument_identity_lock")
@@ -17097,7 +17101,7 @@ class ContinuousWindowTrackerService:
             hf_expiry = int(high_frequency_cycle.get("expiry_seconds", _HIGH_FREQUENCY_FIXED_EXPIRY_SEC) or _HIGH_FREQUENCY_FIXED_EXPIRY_SEC)
             hf_horizon = int(high_frequency_cycle.get("horizon_candles", _HIGH_FREQUENCY_HORIZON_CANDLES) or _HIGH_FREQUENCY_HORIZON_CANDLES)
             hf_clock = _mapping_to_dict(high_frequency_cycle.get("clock"))
-            hf_current_candle = {
+            hf_current_candle: dict[str, Any] = {
                 "state": "VALID",
                 "phase": "VALID",
                 "candle_phase": "VALID",
@@ -17307,7 +17311,7 @@ class ContinuousWindowTrackerService:
             or _mapping_to_dict(payload.get("live_integrity")).get("input_frame_hash")
             or ""
         )
-        live_integrity = _mapping_to_dict(
+        live_integrity: dict[str, Any] = _mapping_to_dict(
             signal.get("live_integrity")
             or tracking.get("live_integrity")
             or payload.get("live_integrity")
@@ -17647,13 +17651,15 @@ class ContinuousWindowTrackerService:
             or _mapping_to_dict(latest_signal.get("signal_thesis_v3"))
             or _mapping_to_dict(tracking_summary.get("signal_thesis_v3"))
         )
-        signal_thesis = update_signal_thesis_v3(
-            previous_signal_thesis,
-            snapshot=snapshot,
-            model_council_result=result_payload,
-            execution_packet=packet,
-            study_packet=study_packet,
-            now_epoch=publication_epoch,
+        signal_thesis: dict[str, Any] = _mapping_to_dict(
+            update_signal_thesis_v3(
+                previous_signal_thesis,
+                snapshot=snapshot,
+                model_council_result=result_payload,
+                execution_packet=packet,
+                study_packet=study_packet,
+                now_epoch=publication_epoch,
+            )
         )
         replacement_thesis = _mapping_to_dict(signal_thesis.get("replaced_by"))
         if replacement_thesis:
@@ -17890,7 +17896,7 @@ class ContinuousWindowTrackerService:
         return result_payload
 
     def _append_trade_outcome_memory(self, session_id: str, outcome: Mapping[str, Any]) -> None:
-        row = {
+        row: dict[str, Any] = {
             "timestamp": _now_iso(),
             "session_id": str(session_id),
             **dict(outcome),
@@ -18081,7 +18087,7 @@ class ContinuousWindowTrackerService:
         else:
             timing_grade = "unverified"
 
-        outcome = {
+        outcome: dict[str, Any] = {
             "status": status,
             "outcome": outcome_label,
             "message": (
@@ -18380,7 +18386,7 @@ class ContinuousWindowTrackerService:
         timing = _mapping_to_dict(promotion.get("timing_decision"))
         entry_now_raw = timing.get("entry_now_allowed")
         lane_accepted_raw = promotion.get("lane_accepted")
-        evidence = {
+        evidence: dict[str, Any] = {
             "schema_version": "PG_ENTRY_ALLOWANCE_EVIDENCE_V1",
             "session_id": session_id,
             "frame_index": int(frame_index),
@@ -18605,7 +18611,7 @@ class ContinuousWindowTrackerService:
             _slugify(session_id_hint or f"tracker-{uuid4().hex[:10]}", "tracker-session"),
         )
         manual_focus_region = _public_manual_focus_region(raw.get("manual_focus_region", {}))
-        locked_window = _mapping_to_dict(raw.get("locked_window", {}))
+        locked_window: dict[str, Any] = _mapping_to_dict(raw.get("locked_window", {}))
         if not locked_window and int(raw.get("locked_hwnd", 0) or 0) > 0:
             locked_window = {
                 "hwnd": int(raw.get("locked_hwnd", 0) or 0),
@@ -19075,7 +19081,7 @@ class ContinuousWindowTrackerService:
             LOGGER.error("Invalid focus region bbox for session %s: %s", session_id, exc)
             raise
         
-        focus_region = {
+        focus_region: dict[str, Any] = {
             "enabled": True,
             "normalized_bbox": validated_bbox,
             "source": str(source or "dashboard_ctrl_v"),
@@ -19803,7 +19809,7 @@ class ContinuousWindowTrackerService:
             fast_after_payload is not None and fast_after_payload.get("display_snapshot_busy_v3")
         )
         capture_ok = bool(attempted and (advanced or display_snapshot_busy) and not error_message)
-        result = {
+        result: dict[str, Any] = {
             "schema_version": "PG_CAPTURE_ONCE_RESULT_V3",
             "ok": capture_ok,
             "status": (
@@ -22424,7 +22430,7 @@ class ContinuousWindowTrackerService:
             )
             reaction_ready = bool(timing_profile.get("opposing_force_reaction_ready", False))
             if not reaction_ready or len(decisive_votes) < _EXECUTION_OPPOSING_FORCE_REACTION_MIN_DECISIVE_CURRENT:
-                gate = {
+                gate: dict[str, Any] = {
                     "accepted": False,
                     "reason": "Opposing-force reaction blocked before click: local/control/impulse confirmation is not decisive enough.",
                     "current_votes": current_votes,
@@ -22529,7 +22535,7 @@ class ContinuousWindowTrackerService:
                 side=side,
                 session_payload=payload,
             )
-            state["memory_projection"] = {
+            state_memory_projection: dict[str, Any] = {
                 "status": str(memory_projection.get("status", "") or ""),
                 "dominant_side": _upper_action(memory_projection.get("dominant_side", "HOLD")),
                 "memory_similarity": _clip01(memory_projection.get("memory_similarity", 0.0)),
@@ -22537,14 +22543,15 @@ class ContinuousWindowTrackerService:
                 "memory_edge": float(memory_projection.get("memory_edge", 0.0) or 0.0),
                 "summary": str(memory_projection.get("summary", "") or ""),
             }
+            state["memory_projection"] = state_memory_projection
             precision = _mapping_to_dict(memory_projection.get("memory_precision", {}))
             if str(memory_projection.get("status", "") or "").lower() != "ready" or not bool(precision.get("accepted", False)):
                 if lane in {"LIVE_MARKET_FLOW", "OPPOSING_FORCE_REACTION"} and bool(controls.get("live_momentum_memory_advisory", True)):
                     state["memory_gate"] = "advisory_current_market_flow"
-                    state["memory_projection"]["advisory"] = True
-                    state["memory_projection"]["summary"] = (
+                    state_memory_projection["advisory"] = True
+                    state_memory_projection["summary"] = (
                         f"Memory was loose for current-market execution; continuing from current flow evidence. "
-                        f"{state['memory_projection'].get('summary', '')}"
+                        f"{state_memory_projection.get('summary', '')}"
                     ).strip()
                 else:
                     return block(
@@ -22812,7 +22819,7 @@ class ContinuousWindowTrackerService:
         dominant_memory_side = _upper_action(
             _mapping_to_dict(session_payload.get("execution_memory_projection", {})).get("dominant_side", "HOLD")
         )
-        memory_recall = {
+        memory_recall: dict[str, Any] = {
             "memory_alignment": _clip01(
                 _mapping_to_dict(session_payload.get("execution_memory_projection", {})).get(
                     "memory_similarity",
@@ -23244,7 +23251,7 @@ class ContinuousWindowTrackerService:
             study_source_expected=source_lock_study_source_expected,
         )
         broker_source_study_only = _broker_source_lock_is_study_only(broker_source_lock)
-        broker_source_summary = {
+        broker_source_summary: dict[str, Any] = {
             "lock_id": str(broker_source_lock.get("viewport_fingerprint") or broker_source_lock.get("broker_pixel_fingerprint") or ""),
             "valid": bool(broker_source_lock.get("valid", False)),
             "status": str(broker_source_lock.get("status", "")),
@@ -23285,7 +23292,7 @@ class ContinuousWindowTrackerService:
                 message = str(broker_source_lock.get("reason", "") or message)
             published_epoch = _now_epoch()
             published_at = _epoch_to_utc_iso(published_epoch)
-            guard_timing = {
+            guard_timing: dict[str, Any] = {
                 "capture_started_at": capture_started_iso,
                 "capture_started_epoch": capture_started_epoch,
                 "published_at": published_at,
@@ -23296,12 +23303,12 @@ class ContinuousWindowTrackerService:
                 "stages": list(stage_timings),
                 "guard": "pocket_option_surface",
             }
-            tracking_summary = _default_tracking_summary(message=message)
+            tracking_summary: dict[str, Any] = _default_tracking_summary(message=message)
             tracking_summary["pipeline_timing"] = guard_timing
             tracking_summary["broker_source_lock"] = broker_source_lock
             broker_source_summary["reason"] = str(broker_source_lock.get("reason", message) or message)
             tracking_summary["broker_source"] = dict(broker_source_summary)
-            latest_signal = _default_signal(message=message, status="waiting_for_broker_surface")
+            latest_signal: dict[str, Any] = _default_signal(message=message, status="waiting_for_broker_surface")
             latest_signal["timestamp"] = published_at
             latest_signal["published_at"] = published_at
             latest_signal["published_epoch"] = published_epoch
@@ -23412,11 +23419,12 @@ class ContinuousWindowTrackerService:
             full_overlay_image = _compose_full_window_overlay(window_image, study_surface_image, study_focus_meta)
             _encode_full_overlay_artifact(full_overlay_image, full_overlay_path)
             tracking_summary = _default_tracking_summary(message=error_message or "Tracker study failed.")
-            tracking_summary["chart_region"] = {
+            chart_region_payload: dict[str, Any] = {
                 **study_focus_meta,
                 "relative_to": "window_capture",
             }
-            tracking_summary["display_region"] = dict(tracking_summary["chart_region"])
+            tracking_summary["chart_region"] = chart_region_payload
+            tracking_summary["display_region"] = dict(chart_region_payload)
             tracking_summary["focus_region"] = dict(study_focus_meta)
             if list(cast(Sequence[Any], study_focus_meta.get("pixel_bbox", []))) != list(cast(Sequence[Any], focus_meta.get("pixel_bbox", []))):
                 tracking_summary["selected_focus_region"] = dict(focus_meta)
@@ -23533,7 +23541,7 @@ class ContinuousWindowTrackerService:
                 visual_ready_capture_interval * 8.0,
                 float(visual_ready_latency_sec) * 3.0,
             )
-            visual_ready_timing = {
+            visual_ready_timing: dict[str, Any] = {
                 "capture_started_at": capture_started_iso,
                 "capture_started_epoch": capture_started_epoch,
                 "published_at": visual_ready_at,
@@ -23869,7 +23877,7 @@ class ContinuousWindowTrackerService:
             visual_capture_interval * 8.0,
             float(visual_pipeline_latency_sec) * 3.0,
         )
-        visual_pipeline_timing = {
+        visual_pipeline_timing: dict[str, Any] = {
             "capture_started_at": capture_started_iso,
             "capture_started_epoch": capture_started_epoch,
             "published_at": visual_published_at,
@@ -24035,7 +24043,7 @@ class ContinuousWindowTrackerService:
         broker_source_guard = _mapping_to_dict(broker_source_lock.get("surface_guard", {}))
         broker_source_evidence = _mapping_to_dict(broker_source_lock.get("evidence", {}))
         broker_source_study_only = _broker_source_lock_is_study_only(broker_source_lock)
-        broker_source = {
+        broker_source: dict[str, Any] = {
             "lock_id": str(
                 broker_source_lock.get("viewport_fingerprint")
                 or broker_source_lock.get("broker_control_fingerprint")
@@ -24090,7 +24098,7 @@ class ContinuousWindowTrackerService:
             capture_interval_for_freshness * 8.0,
             float(pipeline_latency_sec) * 3.0,
         )
-        pipeline_timing = {
+        pipeline_timing: dict[str, Any] = {
             "capture_started_at": capture_started_iso,
             "capture_started_epoch": capture_started_epoch,
             "published_at": published_at,
@@ -24117,7 +24125,7 @@ class ContinuousWindowTrackerService:
             if compact_decision_artifacts
             else model_council_result
         )
-        decision_payload = {
+        decision_payload: dict[str, Any] = {
             "session_id": str(payload["session_id"]),
             "captured_at": capture_started_iso,
             "published_at": published_at,

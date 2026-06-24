@@ -267,7 +267,7 @@ def model_strength_settings_to_execution_controls(settings: Mapping[str, object]
     )
     ai_strengths = dict(cast(Mapping[str, float], normalized["aiStrengths"]))
     lane_thresholds = dict(cast(Mapping[str, float], normalized["laneThresholds"]))
-    profile = {
+    profile: dict[str, object] = {
         "schema_version": MODEL_STRENGTH_SCHEMA_VERSION,
         "profile_saved": bool(normalized["profileSaved"]),
         "model_confidence_floor": normalized["modelConfidenceFloor"],

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 import pytest
 
 import time
@@ -10,8 +11,8 @@ from tools import run_entry_allowance_burn as burn
 
 
 def test_entry_state_requires_execution_package_authority() -> None:
-    live = {}
-    council = {
+    live: dict[str, Any] = {}
+    council: dict[str, Any] = {
         "promotion_trace": {
             "candidate_side": "BUY",
             "lane_accepted": False,
@@ -29,8 +30,8 @@ def test_entry_state_requires_execution_package_authority() -> None:
 
 
 def test_entry_state_allows_only_lane_accepted_packet_present() -> None:
-    live = {}
-    council = {
+    live: dict[str, Any] = {}
+    council: dict[str, Any] = {
         "execution_packet_present": True,
         "promotion_trace": {
             "candidate_side": "SELL",
@@ -51,12 +52,12 @@ def test_runtime_freshness_prefers_fresh_published_frame_over_old_display_captur
     now = time.time()
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "4")
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500")
-    live = {
+    live: dict[str, Any] = {
         "tracking_enabled": True,
         "status": "running",
         "display_capture_epoch": now - 18.0,
     }
-    perf = {
+    perf: dict[str, Any] = {
         "generated_epoch": now - 0.2,
         "timing_trace": {
             "frame_age_ms": 220,
@@ -84,12 +85,12 @@ def test_runtime_freshness_blocks_publish_epoch_lag_by_default(monkeypatch: pyte
     now = time.time()
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "4")
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500")
-    live = {
+    live: dict[str, Any] = {
         "tracking_enabled": True,
         "status": "running",
         "display_capture_epoch": now - 60.0,
     }
-    perf = {
+    perf: dict[str, Any] = {
         "generated_epoch": now - 12.0,
         "timing_trace": {
             "frame_age_ms": 380,
@@ -120,12 +121,12 @@ def test_runtime_freshness_warning_relaxation_is_explicit(monkeypatch: pytest.Mo
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500")
     monkeypatch.setenv("PHOENIXGUARD_BURN_REJECT_PUBLISHED_AGE_WARNING", "0")
     monkeypatch.setenv("PHOENIXGUARD_BURN_REJECT_CAPTURE_AGE_WARNING", "0")
-    live = {
+    live: dict[str, Any] = {
         "tracking_enabled": True,
         "status": "running",
         "last_capture_epoch": now - 18.0,
     }
-    perf = {
+    perf: dict[str, Any] = {
         "generated_epoch": now - 0.2,
         "timing_trace": {
             "frame_age_ms": 220,
@@ -147,7 +148,7 @@ def test_runtime_freshness_warning_relaxation_is_explicit(monkeypatch: pytest.Mo
 
 
 def test_marker_point_refuses_contextual_fallback() -> None:
-    live = {
+    live: dict[str, Any] = {
         "signal_thesis_v3": {"current_price_proxy": 120},
         "tracking_summary": {
             "entry_zone": {"label": "SUPPORT 6T", "bbox": [10, 20, 30, 40]},
@@ -159,7 +160,7 @@ def test_marker_point_refuses_contextual_fallback() -> None:
 
 
 def test_marker_point_uses_latest_candle_now_right_edge() -> None:
-    live = {
+    live: dict[str, Any] = {
         "overlay_objects": [
             {
                 "type": "CURRENT_CANDLE",
@@ -181,7 +182,7 @@ def test_capture_entry_evidence_renders_current_json_when_overlay_artifact_is_st
     current_window = artifact_dir / "000100_live_window.jpg"
     Image.new("RGB", (200, 140), (25, 25, 28)).save(stale_overlay)
     Image.new("RGB", (200, 140), (12, 16, 24)).save(current_window)
-    sample = {
+    sample: dict[str, Any] = {
         "seq": 7,
         "captured_at_utc": "2026-06-20T00:00:00+00:00",
         "captured_epoch": 1000.0,
@@ -194,7 +195,7 @@ def test_capture_entry_evidence_renders_current_json_when_overlay_artifact_is_st
             "packet_present": True,
         },
     }
-    live = {
+    live: dict[str, Any] = {
         "frame_index": 100,
         "last_overlay_path": str(stale_overlay),
         "last_display_window_path": str(current_window),
@@ -236,7 +237,7 @@ def test_capture_entry_evidence_labels_blocked_enter_now_filename(tmp_path: Path
     window = artifact_dir / "000100_live_window.jpg"
     Image.new("RGB", (200, 140), (25, 25, 28)).save(overlay)
     Image.new("RGB", (200, 140), (12, 16, 24)).save(window)
-    sample = {
+    sample: dict[str, Any] = {
         "seq": 8,
         "captured_at_utc": "2026-06-20T00:00:00+00:00",
         "captured_epoch": 1001.0,
@@ -249,7 +250,7 @@ def test_capture_entry_evidence_labels_blocked_enter_now_filename(tmp_path: Path
             "packet_present": False,
         },
     }
-    live = {
+    live: dict[str, Any] = {
         "frame_index": 100,
         "last_overlay_path": str(overlay),
         "last_display_window_path": str(window),
@@ -334,7 +335,7 @@ def test_prune_path_budget_preserves_allowed_entry_evidence(tmp_path: Path) -> N
 
 
 def test_compact_sample_includes_grade_a_star_audit() -> None:
-    live_resp = {
+    live_resp: dict[str, Any] = {
         "ok": True,
         "latency_ms": 10.0,
         "json": {
@@ -352,7 +353,7 @@ def test_compact_sample_includes_grade_a_star_audit() -> None:
         "top_blocker": "TIMING_MODE_WAIT_FOR_PULLBACK",
         "next_required": "wait for retest",
     }
-    council_resp = {
+    council_resp: dict[str, Any] = {
         "ok": True,
         "latency_ms": 12.0,
         "json": {
@@ -364,7 +365,7 @@ def test_compact_sample_includes_grade_a_star_audit() -> None:
             }
         },
     }
-    perf_resp = {
+    perf_resp: dict[str, Any] = {
         "ok": True,
         "latency_ms": 8.0,
         "json": {"model_health_summary": {"label": "7/7 awake", "queue_depth": 0}},
@@ -380,7 +381,7 @@ def test_compact_sample_includes_grade_a_star_audit() -> None:
 
 
 def test_compact_sample_blocks_entry_when_runtime_is_stale() -> None:
-    live_resp = {
+    live_resp: dict[str, Any] = {
         "ok": True,
         "latency_ms": 10.0,
         "json": {
@@ -394,7 +395,7 @@ def test_compact_sample_blocks_entry_when_runtime_is_stale() -> None:
             "visual_health_v3": {"status": "STALE", "stale_flags": ["frame_age"]},
         },
     }
-    council_resp = {
+    council_resp: dict[str, Any] = {
         "ok": True,
         "latency_ms": 12.0,
         "json": {
@@ -407,7 +408,7 @@ def test_compact_sample_blocks_entry_when_runtime_is_stale() -> None:
             }
         },
     }
-    perf_resp = {
+    perf_resp: dict[str, Any] = {
         "ok": True,
         "latency_ms": 8.0,
         "json": {
@@ -449,7 +450,7 @@ def test_pixel_freeze_guard_blocks_executable_when_artifact_hash_is_static(tmp_p
         1012.0,
     )
 
-    sample = {
+    sample: dict[str, Any] = {
         "freshness": {"fresh": True, "reasons": []},
         "entry": {
             "allowed": True,
@@ -489,7 +490,7 @@ def test_pixel_static_refresh_does_not_block_before_hard_limit(tmp_path: Path, m
         1012.0,
     )
 
-    sample = {
+    sample: dict[str, Any] = {
         "freshness": {"fresh": True, "reasons": []},
         "entry": {
             "allowed": True,
@@ -510,7 +511,7 @@ def test_pixel_static_refresh_does_not_block_before_hard_limit(tmp_path: Path, m
 
 
 def test_score_entries_ignores_blocked_enter_now_evidence() -> None:
-    samples = [
+    samples: list[dict[str, Any]] = [
         {
             "seq": 1,
             "captured_epoch": 1000.0,
@@ -530,7 +531,7 @@ def test_score_entries_ignores_blocked_enter_now_evidence() -> None:
             "entry": {"side": "SELL"},
         },
     ]
-    entries = [
+    entries: list[dict[str, Any]] = [
         {"seq": 1, "entry": {"allowed": False}, "blocked_entry_capture": True},
         {"seq": 2, "entry": {"allowed": True}},
     ]
@@ -543,7 +544,7 @@ def test_score_entries_ignores_blocked_enter_now_evidence() -> None:
 
 
 def test_score_events_tracks_blocked_trend_aligned_study_separately() -> None:
-    samples = [
+    samples: list[dict[str, Any]] = [
         {
             "seq": 1,
             "captured_epoch": 1000.0,
@@ -557,7 +558,7 @@ def test_score_events_tracks_blocked_trend_aligned_study_separately() -> None:
             "entry": {"side": "SELL"},
         },
     ]
-    entries = [
+    entries: list[dict[str, Any]] = [
         {
             "seq": 1,
             "entry": {
@@ -622,7 +623,7 @@ def test_manual_entry_rearm_suppresses_same_candidate_until_rearmed(monkeypatch:
     monkeypatch.setenv("PHOENIXGUARD_MANUAL_ENTRY_REARM_MIN_PRICE_PX", "30")
     monkeypatch.setenv("PHOENIXGUARD_MANUAL_ENTRY_REARM_MIN_FRAME_DELTA", "10")
     state: dict[str, dict[str, object]] = {}
-    entry = {
+    entry: dict[str, Any] = {
         "allowed": True,
         "side": "SELL",
         "lane_name": "SNIPER_ZONE_ENTRY",

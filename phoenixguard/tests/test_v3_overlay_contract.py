@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence, cast
 
 import pytest
 
@@ -683,7 +683,9 @@ def test_label_layout_stacks_crowded_boxes_without_label_overlap() -> None:
     ]
 
     laid_out = layout_overlay_labels(overlays, chart_bounds=[0, 0, 420, 260])
-    visible_labels = [overlay["label_bounds"] for overlay in laid_out if not overlay["label_hidden"]]
+    visible_labels: list[Sequence[Any]] = [
+        cast(Sequence[Any], overlay["label_bounds"]) for overlay in laid_out if not overlay["label_hidden"]
+    ]
 
     assert len(visible_labels) >= 4
     for index, first in enumerate(visible_labels):

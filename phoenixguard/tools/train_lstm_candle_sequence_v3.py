@@ -7,7 +7,7 @@ import random
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from PIL import Image
 import torch
@@ -53,12 +53,18 @@ def _mapping(value: Any) -> dict[str, Any]:
     return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
+def _tensor_list(value: torch.Tensor) -> Any:
+    tolist = cast(Callable[[], Any], getattr(value, "tolist"))
+    return tolist()
+
+
 def _rows(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, Mapping):
-        value = value.get("sequences") or value.get("rows") or []
+        value_map = cast(Mapping[str, Any], value)
+        value = value_map.get("sequences") or value_map.get("rows") or []
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(cast(Mapping[str, Any], item)) for item in value if isinstance(item, Mapping)]
+    return [dict(cast(Mapping[str, Any], item)) for item in cast(Sequence[Any], value) if isinstance(item, Mapping)]
 
 
 def _load_json_dataset(path: Path) -> list[dict[str, Any]]:
@@ -199,26 +205,30 @@ def _dataset_rows_from_json(path: Path, sequence_length: int) -> list[dict[str, 
     clean: list[dict[str, Any]] = []
     for row in _load_json_dataset(path):
         candles = row.get("candles")
-        if not isinstance(candles, Sequence) or isinstance(candles, (str, bytes, bytearray)) or len(candles) < 8:
+        if not isinstance(candles, Sequence) or isinstance(candles, (str, bytes, bytearray)):
+            continue
+        candle_values = cast(Sequence[Any], candles)
+        if len(candle_values) < 8:
             continue
         next_1 = _side(row.get("label_next_1_direction"))
         next_2 = _side(row.get("label_next_2_direction"), next_1)
         if next_1 not in SIDE_TO_INDEX:
             continue
-        matrix = []
-        for candle in candles:
+        matrix: list[list[float]] = []
+        for candle in candle_values:
             if not isinstance(candle, Mapping):
                 continue
-            direction = _side(candle.get("direction"))
+            candle_map = cast(Mapping[str, Any], candle)
+            direction = _side(candle_map.get("direction"))
             matrix.append(
                 [
-                    float(candle.get("body_norm", 0.0) or 0.0),
-                    float(candle.get("upper_wick_norm", 0.0) or 0.0),
-                    float(candle.get("lower_wick_norm", 0.0) or 0.0),
+                    float(candle_map.get("body_norm", 0.0) or 0.0),
+                    float(candle_map.get("upper_wick_norm", 0.0) or 0.0),
+                    float(candle_map.get("lower_wick_norm", 0.0) or 0.0),
                     1.0 if direction == "BUY" else -1.0 if direction == "SELL" else 0.0,
-                    float(candle.get("range_norm", 0.0) or 0.0),
-                    float(candle.get("relative_price_location", 0.0) or 0.0),
-                    phase_value(candle.get("phase", row.get("label_play", ""))),
+                    float(candle_map.get("range_norm", 0.0) or 0.0),
+                    float(candle_map.get("relative_price_location", 0.0) or 0.0),
+                    phase_value(candle_map.get("phase", row.get("label_play", ""))),
                 ]
             )
         matrix = ([[0.0] * len(FEATURE_SCHEMA)] * max(0, sequence_length - len(matrix))) + matrix[-sequence_length:]
@@ -404,23 +414,28 @@ def evaluate(model: Any, rows: Sequence[Mapping[str, Any]], batch_size: int) -> 
     confusion = [[0, 0], [0, 0]]
     model.eval()
     with torch.inference_mode():
-        for sequence, y1, y2, play in loader:
-            outputs = model(sequence)
+        for batch in loader:
+            sequence, y1, y2, play = cast(tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], batch)
+            outputs = cast(Mapping[str, torch.Tensor], model(sequence))
             p1 = torch.softmax(outputs["next_1_logits"], dim=-1)
             p2 = torch.softmax(outputs["next_2_logits"], dim=-1)
             play_probs = torch.softmax(outputs["play_logits"], dim=-1)
             pred1 = torch.argmax(p1, dim=-1)
             pred2 = torch.argmax(p2, dim=-1)
-            for true, pred, probs in zip(y1.tolist(), pred1.tolist(), p1.tolist()):
+            y1_values = cast(list[int], _tensor_list(y1))
+            pred1_values = cast(list[int], _tensor_list(pred1))
+            p1_values = cast(list[list[float]], _tensor_list(p1))
+            for true, pred, probs in zip(y1_values, pred1_values, p1_values):
                 next_1_true.append(int(true))
                 next_1_pred.append(int(pred))
                 confusion[int(true)][int(pred)] += 1
                 confidence_errors.append(abs(float(max(probs)) - float(true == pred)))
-            next_2_true.extend(int(item) for item in y2.tolist())
-            next_2_pred.extend(int(item) for item in pred2.tolist())
-            play_true.extend(int(item) for item in play.tolist())
-            continuation_scores.extend(float(row[0]) for row in play_probs.tolist())
-            reversal_scores.extend(float(row[1]) for row in play_probs.tolist())
+            next_2_true.extend(int(item) for item in cast(list[int], _tensor_list(y2)))
+            next_2_pred.extend(int(item) for item in cast(list[int], _tensor_list(pred2)))
+            play_true.extend(int(item) for item in cast(list[int], _tensor_list(play)))
+            play_prob_rows = cast(list[list[float]], _tensor_list(play_probs))
+            continuation_scores.extend(float(row[0]) for row in play_prob_rows)
+            reversal_scores.extend(float(row[1]) for row in play_prob_rows)
     next_1_acc = sum(int(a == b) for a, b in zip(next_1_true, next_1_pred)) / max(1, len(next_1_true))
     next_2_acc = sum(int(a == b) for a, b in zip(next_2_true, next_2_pred)) / max(1, len(next_2_true))
     continuation_auc = _binary_auc([1 if item == PLAY_TO_INDEX["CONTINUATION"] else 0 for item in play_true], continuation_scores)
@@ -463,7 +478,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     random.seed(int(args.seed))
-    torch.manual_seed(int(args.seed))
+    manual_seed = cast(Callable[[int], Any], getattr(torch, "manual_seed"))
+    manual_seed(int(args.seed))
 
     rows: list[dict[str, Any]] = []
     if args.dataset:
@@ -494,7 +510,7 @@ def main() -> int:
         num_layers=int(args.num_layers),
         dropout=float(args.dropout),
     )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=1e-4)
+    optimizer: torch.optim.Optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=1e-4)
     train_loader = DataLoader(CandleSequenceDataset(train_rows), batch_size=int(args.batch_size), shuffle=True)
     history: list[dict[str, Any]] = []
     best_state: dict[str, Any] | None = None
@@ -503,17 +519,20 @@ def main() -> int:
         model.train()
         total_loss = 0.0
         total_batches = 0
-        for sequence, y1, y2, play in train_loader:
+        for batch in train_loader:
+            sequence, y1, y2, play = cast(tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], batch)
             optimizer.zero_grad(set_to_none=True)
-            outputs = model(sequence)
-            loss = (
+            outputs = cast(Mapping[str, torch.Tensor], model(sequence))
+            loss: torch.Tensor = (
                 F.cross_entropy(outputs["next_1_logits"], y1)
                 + 0.75 * F.cross_entropy(outputs["next_2_logits"], y2)
                 + 0.30 * F.cross_entropy(outputs["play_logits"], play)
             )
-            loss.backward()
+            backward = cast(Callable[[], Any], getattr(loss, "backward"))
+            backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            optimizer_step = cast(Callable[[], Any], getattr(optimizer, "step"))
+            optimizer_step()
             total_loss += float(loss.item())
             total_batches += 1
         metrics = evaluate(model, val_rows or train_rows, int(args.batch_size))
@@ -546,7 +565,7 @@ def main() -> int:
         },
         args.model_path,
     )
-    config = {
+    config: dict[str, Any] = {
         "schema_version": "PG_LSTM_CANDLE_SEQUENCE_CONFIG_V3",
         "model_version": LSTM_CANDLE_SEQUENCE_VERSION,
         "feature_schema": list(FEATURE_SCHEMA),
@@ -565,7 +584,7 @@ def main() -> int:
         "production_ready": production_ready,
         "artifact_path": str(args.model_path),
     }
-    metrics = {
+    metrics: dict[str, Any] = {
         "schema_version": "PG_LSTM_CANDLE_SEQUENCE_METRICS_V3",
         "model_version": LSTM_CANDLE_SEQUENCE_VERSION,
         "training_rows": len(train_rows),

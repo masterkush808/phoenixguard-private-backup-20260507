@@ -5,7 +5,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
@@ -80,7 +80,7 @@ def main() -> int:
         ],
         timeout=args.timeout + 10.0,
     )
-    evidence_args = [
+    evidence_args: list[str] = [
         "tools/capture_v3_visual_evidence.py",
         "--base-url",
         args.base_url,
@@ -98,11 +98,12 @@ def main() -> int:
         failures.append(f"visual evidence capture failed: {evidence.get('stderr') or evidence.get('stdout')}")
     audit_payload: dict[str, object] = {}
     try:
-        audit_payload = json.loads(audit_out.read_text(encoding="utf-8"))
+        raw_audit_payload: object = json.loads(audit_out.read_text(encoding="utf-8"))
+        audit_payload = dict(cast(Mapping[str, object], raw_audit_payload)) if isinstance(raw_audit_payload, Mapping) else {}
     except Exception as exc:
         failures.append(f"unable to read overlay audit output: {exc}")
     raw_precision = audit_payload.get("precision_report")
-    precision: Mapping[str, object] = raw_precision if isinstance(raw_precision, Mapping) else {}
+    precision: dict[str, object] = dict(cast(Mapping[str, object], raw_precision)) if isinstance(raw_precision, Mapping) else {}
     for key in ("outside_plot_area", "missing_transform", "stale_frame_id", "unanchored_boxes", "label_collisions", "nesting_collisions"):
         count = _as_int(precision.get(key), 0)
         if count != 0:

@@ -11,6 +11,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence, cast
 
 from fastapi.testclient import TestClient
 import numpy as np
+from numpy.typing import NDArray
 from PIL import Image, ImageDraw
 import pytest
 
@@ -114,6 +115,16 @@ def _synthetic_full_pocket_option_gui(*, width: int = 1920, height: int = 1017) 
     draw.text((buy_box[0] + 40, buy_box[1] + 14), "BUY", fill=(255, 255, 255))
     draw.text((sell_box[0] + 40, sell_box[1] + 14), "SELL", fill=(255, 255, 255))
     return image
+
+
+def _activate_window_true(hwnd: int) -> bool:
+    _ = hwnd
+    return True
+
+
+def _activate_window_false(hwnd: int) -> bool:
+    _ = hwnd
+    return False
 
 
 def test_tracker_translates_locked_broker_controls_into_chart_exclusions() -> None:
@@ -262,14 +273,14 @@ class _StubPhoenixBank:
     def __init__(self, rows: Sequence[MemoryEntry]) -> None:
         self.entries = list(rows)
 
-    def embed_description(self, chart_state: Mapping[str, Any], image: Image.Image | None = None) -> np.ndarray:
+    def embed_description(self, chart_state: Mapping[str, Any], image: Image.Image | None = None) -> NDArray[np.float32]:
         _ = chart_state
         _ = image
         return np.asarray(_memory_embed(216), dtype=np.float32)
 
     def search(
         self,
-        query_embed: np.ndarray,
+        query_embed: NDArray[np.float32],
         top_k: int = 5,
         macro_trend: str | None = None,
         local_phase: str | None = None,
@@ -573,7 +584,7 @@ class _FakeExecutionBackend:
         skip_expiry_adjustment: bool = False,
     ) -> dict[str, Any]:
         _ = skip_expiry_adjustment
-        payload = {
+        payload: dict[str, Any] = {
             "descriptor": dict(descriptor),
             "side": side,
             "amount": amount,
@@ -754,7 +765,7 @@ class _FakeTrackingAdapter:
         timeframe_source = "synthetic" if self.timeframe else "default_m5_policy"
         p_next_buy = 0.70 if signal_action == "BUY" else 0.12
         p_next_sell = 0.70 if signal_action == "SELL" else 0.12
-        decision_kernel = {
+        decision_kernel: dict[str, Any] = {
             "state": "TRIGGERED",
             "decision": "EXECUTE",
             "trade_mode": "TREND_FOLLOW",
@@ -777,7 +788,7 @@ class _FakeTrackingAdapter:
             "p_next_sell": p_next_sell,
             "expected_value_R": 1.4,
         }
-        tracking_summary = {
+        tracking_summary: dict[str, Any] = {
             "chart_valid": True,
             "surface_kind": "manual_focus_surface",
             "visible_candle_count": 12,
@@ -816,7 +827,7 @@ class _FakeTrackingAdapter:
             "box_context": {"failure_risk": 0.18},
             "decision_kernel": decision_kernel,
         }
-        latest_signal = {
+        latest_signal: dict[str, Any] = {
             "action": signal_action,
             "headline_action": signal_action,
             "candidate_action": signal_action,
@@ -905,7 +916,7 @@ def _focus_session_without_preview(tracker: ContinuousWindowTrackerService, sess
 def _allow_next_capture(tracker: ContinuousWindowTrackerService, session_id: str) -> None:
     last_capture_time = getattr(tracker, "_last_capture_time", None)
     if isinstance(last_capture_time, dict):
-        last_capture_time.pop(session_id, None)
+        cast(dict[str, float], last_capture_time).pop(session_id, None)
 
 
 def _artifact_frame_from_name(path: Any) -> int:
@@ -929,7 +940,7 @@ def test_windows_capture_backend_prefers_printwindow_for_pocket_option_browser_w
     monkeypatch.setattr(backend, "_is_windows", lambda: True)
     monkeypatch.setattr(backend, "_capture_window_imagegrab", capture_with_imagegrab)
     monkeypatch.setattr(backend, "_capture_window_printwindow", capture_with_printwindow)
-    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", lambda hwnd: True)
+    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", _activate_window_true)
 
     captured = backend.capture_window(
         {
@@ -964,7 +975,7 @@ def test_windows_capture_backend_falls_back_when_pocket_option_canvas_is_blank(m
     monkeypatch.setattr(backend, "_is_windows", lambda: True)
     monkeypatch.setattr(backend, "_capture_window_imagegrab", capture_with_imagegrab)
     monkeypatch.setattr(backend, "_capture_window_printwindow", capture_with_printwindow)
-    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", lambda hwnd: True)
+    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", _activate_window_true)
 
     captured = backend.capture_window(
         {
@@ -996,7 +1007,7 @@ def test_windows_capture_backend_accepts_pocket_chart_study_pixels(monkeypatch: 
     monkeypatch.setattr(backend, "_is_windows", lambda: True)
     monkeypatch.setattr(backend, "_capture_window_imagegrab", capture_with_imagegrab)
     monkeypatch.setattr(backend, "_capture_window_printwindow", capture_with_printwindow)
-    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", lambda hwnd: False)
+    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", _activate_window_false)
 
     captured = backend.capture_window(
         {
@@ -1026,7 +1037,7 @@ def test_windows_capture_backend_does_not_grab_wrong_foreground_for_pocket_optio
     monkeypatch.setattr(backend, "_is_windows", lambda: True)
     monkeypatch.setattr(backend, "_capture_window_imagegrab", capture_with_imagegrab)
     monkeypatch.setattr(backend, "_capture_window_printwindow", capture_with_printwindow)
-    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", lambda hwnd: False)
+    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", _activate_window_false)
 
     with pytest.raises(RuntimeError, match="broker/chart surface"):
         backend.capture_window(
@@ -1224,7 +1235,7 @@ def test_window_tracker_blocks_new_trigger_when_target_zone_is_already_reached()
         direction="BUY",
         half_height=18,
     )
-    projection = {
+    projection: dict[str, Any] = {
         "direction": "BUY",
         "zones": [
             {"kind": "sniper", "direction": "BUY", "bbox": [180, 168, 260, 204], "invalidation_y": 260},
@@ -1683,7 +1694,7 @@ def test_window_tracker_timing_allows_buy_reclaim_from_full_history_low() -> Non
         {"close_proxy": value}
         for value in [1.00, 0.42, 0.33, 0.25, 0.18, 0.14, 0.16, 0.18, 0.20, 0.22, 0.25, 0.29, 0.33, 0.37]
     ]
-    signal = {
+    signal: dict[str, Any] = {
         "execution_action": "HOLD",
         "action": "BUY",
         "candidate_action": "BUY",
@@ -1691,7 +1702,7 @@ def test_window_tracker_timing_allows_buy_reclaim_from_full_history_low() -> Non
         "focus_timeframe": "M5",
         "entry_distance": {"trigger": 0.04},
     }
-    tracking = {
+    tracking: dict[str, Any] = {
         "detected_timeframe": "M5",
         "tracked_candles": tracked,
         "latest_price_proxy": 0.37,
@@ -1733,7 +1744,7 @@ def test_window_tracker_trigger_promotion_rejects_upper_history_buy() -> None:
     build_profile = cast(Callable[..., dict[str, Any]], getattr(window_tracker_module, "_build_execution_timing_profile"))
     promote = cast(Callable[..., dict[str, Any]], getattr(window_tracker_module, "_kernel_trigger_promotion_decision"))
     tracked = [{"close_proxy": value} for value in [0.20, 0.32, 0.41, 0.55, 0.64, 0.78, 0.91, 0.98]]
-    signal = {
+    signal: dict[str, Any] = {
         "execution_action": "HOLD",
         "action": "BUY",
         "candidate_action": "BUY",
@@ -1741,7 +1752,7 @@ def test_window_tracker_trigger_promotion_rejects_upper_history_buy() -> None:
         "focus_timeframe": "M5",
         "entry_distance": {"trigger": 0.03},
     }
-    tracking = {
+    tracking: dict[str, Any] = {
         "detected_timeframe": "M5",
         "tracked_candles": tracked,
         "latest_price_proxy": 0.98,
@@ -2706,7 +2717,7 @@ def test_window_tracker_reuses_fresh_phoenixguard_live_report(monkeypatch: Any) 
         image_height=420,
         direction="SELL",
     )
-    previous_report = {
+    previous_report: dict[str, Any] = {
         "status": "ready",
         "headline": "cached precision report",
         "decision_state": "armed",
@@ -2793,10 +2804,19 @@ def test_tracker_memory_projection_actions_persist_and_go_stale(tmp_path: Path, 
     adapter = PhoenixGuardWindowTrackingAdapter()
     entries = _materialize_memory_images(tmp_path / "memory-images", _sample_memory_entries())
     monkeypatch.setattr(adapter, "_get_phoenixguard_memory_bank", lambda: _StubPhoenixBank(entries))
+
+    def detect_market_selector(
+        image: Image.Image,
+        timeframe_selector: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        _ = image
+        _ = timeframe_selector
+        return {"value": "GBP/JPY OTC", "source": "header_text", "confidence": 0.92}
+
     monkeypatch.setattr(
         adapter,
         "_detect_market_selector",
-        lambda image, timeframe_selector=None: {"value": "GBP/JPY OTC", "source": "header_text", "confidence": 0.92},
+        detect_market_selector,
     )
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path,
@@ -2843,7 +2863,7 @@ def test_window_tracker_behavior_detects_box_reaction_context() -> None:
     for index in (4, 5):
         candles[index]["direction"] = "SELL"
         candles[index]["color"] = "magenta"
-    projection = {
+    projection: dict[str, Any] = {
         "direction": "BUY",
         "confidence": 0.78,
         "fit_bounds": [4, 160, 400, 330],
@@ -2886,7 +2906,7 @@ def test_window_tracker_invalidation_cancels_instead_of_entering() -> None:
     latest = candles[-1]
     latest["bbox"] = [190, 132, 202, 248]
     latest["center_y"] = 190.0
-    projection = {
+    projection: dict[str, Any] = {
         "direction": "BUY",
         "zones": [
             {"kind": "sniper", "direction": "BUY", "bbox": [210, 188, 290, 220], "invalidation_y": 240},
@@ -2919,7 +2939,7 @@ def test_window_tracker_sniper_reclaim_can_execute_before_trigger() -> None:
     latest["bbox"] = [190, 190, 202, 236]
     latest["center_y"] = 214.0
     latest["direction"] = "BUY"
-    projection = {
+    projection: dict[str, Any] = {
         "direction": "BUY",
         "zones": [
             {"kind": "sniper", "direction": "BUY", "bbox": [210, 198, 290, 230], "invalidation_y": 252},
@@ -2951,7 +2971,7 @@ def test_window_tracker_filters_top_strip_noise_from_candle_tracks() -> None:
         getattr(adapter, "_filter_main_candle_tracks"),
     )
     real_tracks = _manual_candle_tracks([310, 292, 274, 256, 238, 220, 202, 184], image_width=640, image_height=420)
-    top_noise = [
+    top_noise: list[dict[str, Any]] = [
         {
             "track_id": 900 + index,
             "bbox": [500 + index * 12, 4, 506 + index * 12, 24],
@@ -3035,14 +3055,14 @@ def test_window_tracker_chart_bbox_ignores_broker_top_strip_noise() -> None:
 
 def test_window_tracker_support_resistance_zones_fit_touch_candles() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
-    derive_zones = cast(
-        Callable[[Sequence[Mapping[str, Any]], tuple[int, int]], list[dict[str, Any]]],
-        lambda candles, size: adapter._derive_support_resistance_zones(  # noqa: SLF001
+
+    def derive_zones(candles: Sequence[Mapping[str, Any]], size: tuple[int, int]) -> list[dict[str, Any]]:
+        return adapter._derive_support_resistance_zones(  # noqa: SLF001
             candles,
             size,
             candidate_action="BUY",
-        ),
-    )
+        )
+
     candles = _manual_candle_tracks(
         [230, 224, 232, 226, 231, 225, 233, 227],
         image_width=900,
@@ -3150,7 +3170,11 @@ def test_start_session_clears_stale_packets_before_first_fresh_capture(
     payload["model_council_packet"] = {"packet_id": "stale_exec", "packet_type": "PG_EXECUTION_PACKET_V3"}
     payload["execution_packet"] = {"packet_id": "stale_exec", "packet_type": "PG_EXECUTION_PACKET_V3"}
     tracker._save_session(payload)
-    monkeypatch.setattr(tracker, "_ensure_worker", lambda *args, **kwargs: None)
+
+    def ensure_worker_stub(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(tracker, "_ensure_worker", ensure_worker_stub)
 
     started = tracker.start_session(str(session["session_id"]))
 
@@ -3168,7 +3192,7 @@ def test_start_session_clears_stale_packets_before_first_fresh_capture(
 
 def test_model_council_packet_lookup_ignores_expired_execution_packet(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: 150.0)
-    expired_packet = {
+    expired_packet: dict[str, Any] = {
         "schema_version": "PG_EXECUTION_PACKET_V3",
         "packet_type": "PG_EXECUTION_PACKET_V3",
         "packet_id": "expired-exec",
@@ -3189,7 +3213,7 @@ def test_model_council_packet_lookup_rejects_demoted_execution_root_without_side
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: 150.0)
-    demoted_root = {
+    demoted_root: dict[str, Any] = {
         "schema_version": "PG_EXECUTION_PACKET_V3",
         "packet_type": "PG_EXECUTION_PACKET_V3",
         "packet_id": "pgpkt-demoted-study",
@@ -3219,7 +3243,7 @@ def test_model_council_packet_lookup_rejects_demoted_execution_root_without_side
 def test_public_session_payload_does_not_block_non_executable_missing_signal_id(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
 
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": "pocket-live",
         "status": "running",
         "tracking_enabled": True,
@@ -3247,7 +3271,7 @@ def test_public_session_payload_does_not_block_non_executable_missing_signal_id(
 def test_public_session_payload_blocks_executable_missing_signal_id(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
 
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": "pocket-live",
         "status": "running",
         "tracking_enabled": True,
@@ -3275,7 +3299,7 @@ def test_public_session_payload_publishes_strict_executable_signal_contract(tmp_
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
     published_epoch = time.time()
 
-    payload = {
+    payload: dict[str, Any] = {
         "session_id": "pocket-live",
         "status": "running",
         "tracking_enabled": True,
@@ -4442,10 +4466,13 @@ def test_tracker_worker_loop_uses_adaptive_interval_without_default_floor(tmp_pa
             stop_evt.set()
 
     monkeypatch.setattr(tracker, "_capture_and_analyze", capture_stub)
+    def adaptive_capture_interval_plan(_payload: Mapping[str, Any]) -> dict[str, Any]:
+        return {"interval_sec": 0.5, "reason": "entry_ready"}
+
     monkeypatch.setattr(
         tracker,
         "_adaptive_capture_interval_plan",
-        lambda _payload: {"interval_sec": 0.5, "reason": "entry_ready"},
+        adaptive_capture_interval_plan,
     )
     monkeypatch.setattr(window_tracker_module.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(window_tracker_module.time, "time", lambda: clock["now"])
@@ -4858,7 +4885,7 @@ def test_tracker_dashboard_fits_selected_surface_without_width_only_crop() -> No
 
 
 def test_memory_precision_allows_aggressive_stacked_primary_when_counter_is_probe() -> None:
-    primary_fit = {
+    primary_fit: dict[str, Any] = {
         "top_matches": [
             {"similarity": 0.83, "precision_score": 0.70},
             {"similarity": 0.80, "precision_score": 0.69},
@@ -4866,7 +4893,7 @@ def test_memory_precision_allows_aggressive_stacked_primary_when_counter_is_prob
         ],
         "high_precision_count": 1,
     }
-    counter_fit = {
+    counter_fit: dict[str, Any] = {
         "top_matches": [{"similarity": 0.87, "precision_score": 0.62}],
         "transition_bias": {
             "continue": 0.52,
@@ -4914,10 +4941,19 @@ def test_tracker_http_surface_runs_memory_projection_actions(tmp_path: Path, mon
     adapter = PhoenixGuardWindowTrackingAdapter()
     entries = _materialize_memory_images(tmp_path / "memory-images", _sample_memory_entries())
     monkeypatch.setattr(adapter, "_get_phoenixguard_memory_bank", lambda: _StubPhoenixBank(entries))
+
+    def detect_market_selector(
+        image: Image.Image,
+        timeframe_selector: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        _ = image
+        _ = timeframe_selector
+        return {"value": "GBP/JPY OTC", "source": "header_text", "confidence": 0.90}
+
     monkeypatch.setattr(
         adapter,
         "_detect_market_selector",
-        lambda image, timeframe_selector=None: {"value": "GBP/JPY OTC", "source": "header_text", "confidence": 0.90},
+        detect_market_selector,
     )
     tracker_service = ContinuousWindowTrackerService(
         root_dir=tmp_path,
@@ -5262,39 +5298,37 @@ def test_pocket_option_execution_backend_sets_expiry_before_live_click(monkeypat
         )
         for name, point in popup_controls.items()
     }
-    monkeypatch.setattr(
-        backend,
-        "_expiry_popup_visual_control_points",
-        lambda **_kwargs: {
+    def popup_visual_control_points(**_kwargs: object) -> dict[str, Any]:
+        return {
             "controls": popup_controls,
             "execution_boxes": popup_locks,
             "geometry": {"source": "test_visual_popup_grid"},
-        },
-    )
-    monkeypatch.setattr(
-        backend,
-        "_verify_expiry_popup_target",
-        lambda **kwargs: {
+        }
+
+    def verify_expiry_popup_target(**kwargs: object) -> dict[str, Any]:
+        target_seconds = cast(int, kwargs["target_seconds"])
+        return {
             "status": "verified",
             "matches": True,
-            "target_seconds": kwargs["target_seconds"],
-            "visible_seconds": kwargs["target_seconds"],
-            "visible_text": backend._format_expiry_text(kwargs["target_seconds"]),
+            "target_seconds": target_seconds,
+            "visible_seconds": target_seconds,
+            "visible_text": backend._format_expiry_text(target_seconds),
             "confidence": 1.0,
             "source": "test_timer",
-        },
-    )
-    monkeypatch.setattr(
-        backend,
-        "_verify_trade_click_result",
-        lambda **kwargs: {
+        }
+
+    def verify_trade_click_result(**kwargs: object) -> dict[str, Any]:
+        return {
             "status": "confirmed",
             "confirmed": True,
             "side": kwargs["side"],
             "expiry_seconds": kwargs["expiry_seconds"],
             "message": "confirmed by test",
-        },
-    )
+        }
+
+    monkeypatch.setattr(backend, "_expiry_popup_visual_control_points", popup_visual_control_points)
+    monkeypatch.setattr(backend, "_verify_expiry_popup_target", verify_expiry_popup_target)
+    monkeypatch.setattr(backend, "_verify_trade_click_result", verify_trade_click_result)
 
     result = backend.prepare_and_click(
         descriptor={"hwnd": 501, "bbox": [100, 200, 1060, 740]},
@@ -5352,7 +5386,10 @@ def test_pocket_option_execution_backend_blocks_without_visual_popup_lock(monkey
     backend = PocketOptionBrokerExecutionBackend()
     monkeypatch.setattr(backend, "is_supported", lambda: True)
     monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=_FakeUser32()), raising=False)
-    monkeypatch.setattr(backend, "_expiry_popup_visual_control_points", lambda **_kwargs: {})
+    def empty_popup_visual_control_points(**_kwargs: object) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(backend, "_expiry_popup_visual_control_points", empty_popup_visual_control_points)
     window_image = _synthetic_broker_window()
     broker_surface = backend.read_surface(window_image)
 
@@ -5404,39 +5441,37 @@ def test_pocket_option_execution_backend_reports_unverified_click(monkeypatch: A
     monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=_FakeUser32()), raising=False)
     window_image = _synthetic_broker_window()
     broker_surface = backend.read_surface(window_image)
-    monkeypatch.setattr(
-        backend,
-        "_expiry_popup_visual_control_points",
-        lambda **_kwargs: _test_popup_visual_payload(
+    def popup_visual_control_points(**_kwargs: object) -> dict[str, Any]:
+        return _test_popup_visual_payload(
             backend,
             window_image,
             cast(Mapping[str, Any], broker_surface["time_field"]),
-        ),
-    )
-    monkeypatch.setattr(
-        backend,
-        "_verify_expiry_popup_target",
-        lambda **kwargs: {
+        )
+
+    def verify_expiry_popup_target(**kwargs: object) -> dict[str, Any]:
+        target_seconds = cast(int, kwargs["target_seconds"])
+        return {
             "status": "verified",
             "matches": True,
-            "target_seconds": kwargs["target_seconds"],
-            "visible_seconds": kwargs["target_seconds"],
-            "visible_text": backend._format_expiry_text(kwargs["target_seconds"]),
+            "target_seconds": target_seconds,
+            "visible_seconds": target_seconds,
+            "visible_text": backend._format_expiry_text(target_seconds),
             "confidence": 1.0,
             "source": "test_timer",
-        },
-    )
-    monkeypatch.setattr(
-        backend,
-        "_verify_trade_click_result",
-        lambda **kwargs: {
+        }
+
+    def verify_trade_click_result(**kwargs: object) -> dict[str, Any]:
+        return {
             "status": "unverified",
             "confirmed": False,
             "side": kwargs["side"],
             "expiry_seconds": kwargs["expiry_seconds"],
             "message": "no accepted-trade cue",
-        },
-    )
+        }
+
+    monkeypatch.setattr(backend, "_expiry_popup_visual_control_points", popup_visual_control_points)
+    monkeypatch.setattr(backend, "_verify_expiry_popup_target", verify_expiry_popup_target)
+    monkeypatch.setattr(backend, "_verify_trade_click_result", verify_trade_click_result)
 
     result = backend.prepare_and_click(
         descriptor={"hwnd": 501, "bbox": [100, 200, 1060, 740]},
@@ -5800,7 +5835,7 @@ def test_tracker_execution_throttle_blocks_after_five_clicks_per_window(tmp_path
         tracking_adapter=_FakeTrackingAdapter("BUY"),
     )
     state: dict[str, Any] = {}
-    controls = {"max_executions_per_window": 5, "execution_window_sec": 300.0}
+    controls: dict[str, Any] = {"max_executions_per_window": 5, "execution_window_sec": 300.0}
     now = 1000.0
 
     for _index in range(5):
@@ -5890,13 +5925,13 @@ def test_tracker_selects_pullback_reload_lane_when_sniper_ready(tmp_path: Path) 
         capture_backend=_FakeCaptureBackend([_synthetic_broker_window()]),
         tracking_adapter=_FakeTrackingAdapter("SELL"),
     )
-    latest_signal = {
+    latest_signal: dict[str, Any] = {
         "execution_action": "SELL",
         "actionable": True,
         "entry_state": "SNIPER_READY",
         "summary": "Pullback reload sniper gate is ready.",
     }
-    tracking_summary = {
+    tracking_summary: dict[str, Any] = {
         "decision_kernel": {
             "trade_mode": "PULLBACK_WAIT",
             "dominant_side": "sell",
@@ -5966,7 +6001,7 @@ def test_tracker_live_execution_persists_blocked_click_diagnostics(tmp_path: Pat
 
 
 def test_expiry_verification_blocks_locked_click_plan_assumption_by_default() -> None:
-    clicks = [
+    clicks: list[dict[str, Any]] = [
         {
             "name": "quick_m5",
             "diagnostic": {
@@ -6008,7 +6043,7 @@ def test_expiry_verification_blocks_locked_click_plan_assumption_by_default() ->
 
 def test_expiry_verification_allows_locked_click_plan_only_when_emergency_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PHOENIXGUARD_ALLOW_EMERGENCY_EXPIRY_ASSUMPTION", "1")
-    clicks = [
+    clicks: list[dict[str, Any]] = [
         {
             "name": "quick_m5",
             "diagnostic": {
@@ -6049,7 +6084,7 @@ def test_expiry_verification_allows_locked_click_plan_only_when_emergency_enable
 
 
 def test_expiry_verification_still_blocks_reliable_ocr_mismatch() -> None:
-    clicks = [
+    clicks: list[dict[str, Any]] = [
         {
             "name": "minute_plus",
             "diagnostic": {
@@ -6310,25 +6345,22 @@ def test_tracker_loss_guard_pauses_same_side_after_recent_live_losses(tmp_path: 
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path / "loss-guard")
     session = tracker.create_session(session_id="pocket-live")
     outcomes_path = tracker.session_dir(str(session["session_id"])) / "trade_outcomes.jsonl"
+    loss_rows: list[dict[str, Any]] = [
+        {
+            "status": "lost",
+            "side": "BUY",
+            "lane": "LIVE_MARKET_FLOW",
+            "resolved_epoch": 9900.0,
+        },
+        {
+            "status": "lost",
+            "side": "BUY",
+            "lane": "OPPOSING_FORCE_REACTION",
+            "resolved_epoch": 9950.0,
+        },
+    ]
     outcomes_path.write_text(
-        "\n".join(
-            json.dumps(row)
-            for row in [
-                {
-                    "status": "lost",
-                    "side": "BUY",
-                    "lane": "LIVE_MARKET_FLOW",
-                    "resolved_epoch": 9900.0,
-                },
-                {
-                    "status": "lost",
-                    "side": "BUY",
-                    "lane": "OPPOSING_FORCE_REACTION",
-                    "resolved_epoch": 9950.0,
-                },
-            ]
-        )
-        + "\n",
+        "\n".join(json.dumps(row) for row in loss_rows) + "\n",
         encoding="utf-8",
     )
 
@@ -6354,12 +6386,12 @@ def test_tracker_loss_guard_pauses_same_side_after_recent_live_losses(tmp_path: 
 
 def test_broker_execution_state_preserves_newer_active_trade_from_concurrent_save() -> None:
     now = time.time()
-    candidate = {
+    candidate: dict[str, Any] = {
         "status": "watching",
         "message": "No executable lane is ready.",
         "active_trade": {},
     }
-    persisted = {
+    persisted: dict[str, Any] = {
             "status": "clicked",
             "message": "Clicked BUY while preserving amount.",
         "last_trade_at": "2026-04-29T10:30:23+05:30",

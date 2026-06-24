@@ -38,7 +38,7 @@ def _mapping(value: Any) -> dict[str, Any]:
 
 def _sequence(value: Any) -> list[Any]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return list(value)
+        return list(cast(Sequence[Any], value))
     return []
 
 
@@ -93,23 +93,25 @@ def _to_overlay_list(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         for row in rows:
             if not isinstance(row, Mapping):
                 continue
-            overlay = _mapping(row.get("overlay"))
+            row_map = _mapping(row)
+            overlay = _mapping(row_map.get("overlay"))
             if overlay:
                 merged = dict(overlay)
                 for field in ("overlay_id", "object_id", "track_id", "lifecycle_state", "truth_score", "frame_id", "chart_transform_id"):
-                    if field not in merged and row.get(field) not in (None, ""):
-                        merged[field] = row.get(field)
+                    if field not in merged and row_map.get(field) not in (None, ""):
+                        merged[field] = row_map.get(field)
                 out.append(merged)
             else:
-                out.append(_mapping(row))
+                out.append(row_map)
         return out
     active = _sequence(payload.get("active_overlays"))
     if active:
-        out = []
+        out: list[dict[str, Any]] = []
         for row in active:
             if isinstance(row, Mapping):
-                overlay = _mapping(row.get("overlay"))
-                out.append(overlay or _mapping(row))
+                row_map = _mapping(row)
+                overlay = _mapping(row_map.get("overlay"))
+                out.append(overlay or row_map)
         return out
     return []
 
@@ -141,22 +143,23 @@ def load_overlays(base_url: str, session_id: str, timeout: float, input_path: st
 
 def _valid_bounds(value: Any) -> bool:
     if isinstance(value, Mapping):
+        value_map = _mapping(value)
         for key in ("bbox", "pixel_bbox", "normalized_bbox", "xyxy"):
-            if key in value and _valid_bounds(value.get(key)):
+            if key in value_map and _valid_bounds(value_map.get(key)):
                 return True
         try:
-            x = _float_value(value.get("x", value.get("left")))
-            y = _float_value(value.get("y", value.get("top")))
-            width = _float_value(value.get("width", value.get("w")))
-            height = _float_value(value.get("height", value.get("h")))
+            x = _float_value(value_map.get("x", value_map.get("left")))
+            y = _float_value(value_map.get("y", value_map.get("top")))
+            width = _float_value(value_map.get("width", value_map.get("w")))
+            height = _float_value(value_map.get("height", value_map.get("h")))
             return width > 0 and height > 0 and x == x and y == y
         except Exception:
             pass
         try:
-            left = _float_value(value.get("left", value.get("x")))
-            top = _float_value(value.get("top", value.get("y")))
-            right = _float_value(value.get("right"))
-            bottom = _float_value(value.get("bottom"))
+            left = _float_value(value_map.get("left", value_map.get("x")))
+            top = _float_value(value_map.get("top", value_map.get("y")))
+            right = _float_value(value_map.get("right"))
+            bottom = _float_value(value_map.get("bottom"))
             return right > left and bottom > top
         except Exception:
             return False
@@ -290,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
     overlays, source = load_overlays(args.base_url, args.session_id, args.timeout, args.input, args.mode)
     summary = validate_contract(overlays)
     verdict = "PASS" if summary["ok"] else "FAIL"
-    report = {
+    report: dict[str, Any] = {
         "schema_version": "PG_OVERLAY_CONTRACT_VALIDATION_V3",
         "session_id": args.session_id,
         "base_url": args.base_url.rstrip("/"),

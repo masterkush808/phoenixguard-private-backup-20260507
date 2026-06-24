@@ -199,11 +199,11 @@ def _bounds_payload(values: Sequence[Any] | None) -> dict[str, Any]:
 def _plot_area(session: Mapping[str, Any], artifacts: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     tracking = _mapping(session.get("tracking_summary"))
     chart_region = _mapping(tracking.get("chart_region") or tracking.get("display_region"))
-    pixel_bbox = chart_region.get("pixel_bbox") or chart_region.get("bbox")
+    pixel_bbox: object = chart_region.get("pixel_bbox") or chart_region.get("bbox")
     if not isinstance(pixel_bbox, Sequence) or isinstance(pixel_bbox, (str, bytes, bytearray)):
         width = _float(artifacts.get("chart", {}).get("width"), 0.0)
         height = _float(artifacts.get("chart", {}).get("height"), 0.0)
-        pixel_bbox = [0, 0, width, height] if width and height else []
+        pixel_bbox = [0.0, 0.0, width, height] if width and height else []
     payload = _bounds_payload(cast(Sequence[Any], pixel_bbox) if pixel_bbox else None)
     bounds = dict(payload)
     payload.update(
@@ -684,7 +684,7 @@ def _broker_control_overlay_objects(
         confidence = max(0.01, min(1.0, _float(source_row.get("confidence"), _float(definition.get("confidence"), 0.85))))
         source_key = _text(definition.get("source_key"), f"broker_control_{index}")
         label = _text(definition.get("label"), "BROKER CONTROL")
-        raw = {
+        raw: dict[str, Any] = {
             "overlay_id": f"broker_control_{source_key}_{frame_id}",
             "object_id": f"broker_control_{source_key}",
             "track_id": f"broker_control_{source_key}",
@@ -751,7 +751,7 @@ def _signal_thesis_overlay_objects(
         bbox = _zone_bbox(zone)
         if not bbox:
             return None
-        raw = {
+        raw: dict[str, Any] = {
             "overlay_id": f"thesis_{thesis_id}_{kind}",
             "object_id": f"thesis_{thesis_id}_{kind}",
             "track_id": f"thesis_{thesis_id}",
@@ -907,7 +907,7 @@ def _study_overlay_objects(
         side = _text(payload.get("side") or payload.get("direction") or payload.get("direction_bias") or fallback_side, "HOLD").upper()
         if side not in {"BUY", "SELL", "HOLD"}:
             side = "HOLD"
-        raw = {
+        raw: dict[str, Any] = {
             "overlay_id": f"{overlay_type.lower()}_{frame_id}",
             "object_id": f"{overlay_type.lower()}_{frame_id}",
             "track_id": f"{overlay_type.lower()}_study",
@@ -993,7 +993,7 @@ def _council_overlay_objects(
     if side not in {"BUY", "SELL", "HOLD"}:
         side = "HOLD"
     confidence = max(0.35, min(1.0, _float(council.get("confidence"), _float(_mapping(session.get("latest_signal")).get("effective_confidence"), 0.62))))
-    raw = {
+    raw: dict[str, Any] = {
         "overlay_id": f"model_council_marker_{frame_id}",
         "object_id": f"model_council_marker_{frame_id}",
         "track_id": "model_council_marker",
@@ -1676,7 +1676,7 @@ def _compact_performance_trace_v3(trace: Mapping[str, Any]) -> dict[str, Any]:
         "freshness_score",
         "source",
     }
-    compact = {
+    compact: dict[str, Any] = {
         "schema_version": trace.get("schema_version"),
         "session_id": trace.get("session_id"),
         "generated_epoch": trace.get("generated_epoch"),
@@ -2040,7 +2040,7 @@ def build_live_state_v3(
     precision_input_overlays = raw_overlays + thesis_overlays + study_overlays + council_overlays + broker_control_overlays
     if source_block_reason:
         precision_overlays = []
-        precision_audit = {
+        precision_audit: dict[str, Any] = {
             "schema_version": OVERLAY_PRECISION_AUDIT_SCHEMA_VERSION,
             "frame_id": registry.frame_id,
             "overlay_count": len(precision_input_overlays),

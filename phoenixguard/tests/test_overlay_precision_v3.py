@@ -283,7 +283,7 @@ def test_broker_mode_emits_locked_control_overlays_on_broker_surface(tmp_path: P
 def test_precision_resolver_can_run_directly_on_overlay_contract_objects(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
-    overlays = [
+    overlays: list[dict[str, Any]] = [
         {
             "overlay_id": "target-1",
             "object_id": "target-1",
@@ -319,7 +319,7 @@ def test_precision_resolver_can_run_directly_on_overlay_contract_objects(tmp_pat
 def test_precision_resolver_assigns_display_state_and_visual_weight(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
-    overlays = [
+    overlays: list[dict[str, Any]] = [
         {
             "overlay_id": "sniper-buy-display",
             "object_id": "sniper-buy-display",
@@ -390,7 +390,7 @@ def test_precision_resolver_assigns_display_state_and_visual_weight(tmp_path: Pa
 def test_crowded_valid_overlays_keep_geometry_when_labels_move_to_inspector(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
-    overlays = []
+    overlays: list[dict[str, Any]] = []
     for index in range(24):
         left = 60 + (index % 6) * 92
         top = 95 + (index // 6) * 72
@@ -436,7 +436,7 @@ def test_crowded_valid_overlays_keep_geometry_when_labels_move_to_inspector(tmp_
 def test_precision_resolver_rejects_floating_unanchored_live_zone(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
-    overlays = [
+    overlays: list[dict[str, Any]] = [
         {
             "overlay_id": "floating-zone",
             "object_id": "floating-zone",
@@ -477,7 +477,7 @@ def test_precision_resolver_rejects_floating_unanchored_live_zone(tmp_path: Path
 def test_precision_resolver_snaps_anchored_zone_to_touch_cluster(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
-    overlays = [
+    overlays: list[dict[str, Any]] = [
         {
             "overlay_id": "anchored-demand",
             "object_id": "anchored-demand",
@@ -523,7 +523,7 @@ def test_precision_resolver_snaps_anchored_zone_to_touch_cluster(tmp_path: Path)
 def test_precision_resolver_preserves_source_frame_before_stale_check(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
-    overlays = [
+    overlays: list[dict[str, Any]] = [
         {
             "overlay_id": "old-trigger",
             "object_id": "old-trigger",
@@ -550,7 +550,7 @@ def test_precision_resolver_preserves_source_frame_before_stale_check(tmp_path: 
 def test_precision_resolver_nests_local_and_replay_children_inside_global_parent(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
-    overlays = [
+    overlays: list[dict[str, Any]] = [
         {
             "overlay_id": "global-1",
             "object_id": "global-1",
@@ -629,7 +629,7 @@ def test_precision_resolver_nests_local_and_replay_children_inside_global_parent
 def test_precision_resolver_clean_live_budget_does_not_suppress_active_context_counter_side(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
-    overlays = [
+    overlays: list[dict[str, Any]] = [
         {
             "overlay_id": "buy-sniper-counter-side",
             "object_id": "buy-sniper-counter-side",
@@ -683,7 +683,7 @@ def test_precision_resolver_clean_live_budget_does_not_suppress_active_context_c
 def test_precision_resolver_counts_replay_hidden_defaults_as_rendered(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
-    overlays = [
+    overlays: list[dict[str, Any]] = [
         {
             "overlay_id": "replay-path-hidden-default",
             "object_id": "replay-path-hidden-default",
@@ -726,7 +726,7 @@ def test_precision_resolver_counts_replay_hidden_defaults_as_rendered(tmp_path: 
 def test_no_duplicate_now_labels_in_clean_live_and_history_maps_to_replay(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
-    overlays = [
+    overlays: list[dict[str, Any]] = [
         {
             "overlay_id": "current-live",
             "object_id": "current-live",

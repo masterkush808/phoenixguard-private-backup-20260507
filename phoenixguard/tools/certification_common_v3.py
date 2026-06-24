@@ -12,7 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -150,7 +150,7 @@ def summarize_numbers(values: Sequence[float]) -> dict[str, float]:
     }
 
 
-def run_powershell_json(script: str, *, timeout: float = 20.0) -> Any:
+def run_powershell_json(script: str, *, timeout: float = 20.0) -> list[Any]:
     completed = subprocess.run(
         ["powershell", "-NoProfile", "-Command", script],
         cwd=str(ROOT),
@@ -164,8 +164,8 @@ def run_powershell_json(script: str, *, timeout: float = 20.0) -> Any:
         raise RuntimeError((completed.stderr or completed.stdout or "").strip())
     if not text:
         return []
-    parsed = json.loads(text)
-    return parsed if isinstance(parsed, list) else [parsed]
+    parsed: object = json.loads(text)
+    return list(cast(list[Any], parsed)) if isinstance(parsed, list) else [parsed]
 
 
 def python_processes() -> list[dict[str, Any]]:
@@ -178,7 +178,7 @@ Get-CimInstance Win32_Process -Filter "name = 'python.exe'" |
         rows = run_powershell_json(script)
     except Exception as exc:
         return _python_processes_wmic(str(exc))
-    return [dict(row) for row in rows if isinstance(row, Mapping)]
+    return [dict(cast(Mapping[str, Any], row)) for row in rows if isinstance(row, Mapping)]
 
 
 def _python_processes_wmic(primary_error: str) -> list[dict[str, Any]]:
@@ -251,7 +251,7 @@ Get-NetTCPConnection -State Listen |
         rows = run_powershell_json(script)
     except Exception as exc:
         return _tcp_listeners_netstat(ports, str(exc))
-    return [dict(row) for row in rows if isinstance(row, Mapping)]
+    return [dict(cast(Mapping[str, Any], row)) for row in rows if isinstance(row, Mapping)]
 
 
 def _tcp_listeners_netstat(ports: Sequence[int], primary_error: str) -> list[dict[str, Any]]:
@@ -331,7 +331,7 @@ def write_report(name: str, report: Mapping[str, Any]) -> Path:
 
 
 def print_gate(label: str, report: Mapping[str, Any]) -> None:
-    summary = {
+    summary: dict[str, Any] = {
         "gate": label,
         "verdict": report.get("verdict", "FAIL"),
         "failures": report.get("failures", []),
@@ -361,8 +361,8 @@ def gate_report(
     return report
 
 
-def _mapping(value: object) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
 
 
 def _float_value(value: object, default: float = 0.0) -> float:

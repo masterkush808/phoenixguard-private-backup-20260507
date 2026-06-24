@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
-from typing import Mapping, cast
+from typing import Any, Mapping, cast
 
 
 def _load_bridge_module():
@@ -150,7 +150,7 @@ def test_mt4_bridge_rejects_compacted_command_that_would_fail_ea_contract() -> N
 
 def test_mt4_bridge_json_sanitizes_invalid_numbers() -> None:
     bridge = _load_bridge_module()
-    payload = {"ok": 1.0, "bad": float("nan"), "nested": {"inf": float("inf")}}
+    payload: dict[str, Any] = {"ok": 1.0, "bad": float("nan"), "nested": {"inf": float("inf")}}
 
     decoded = json.loads(bridge._json_dumps(payload))
 

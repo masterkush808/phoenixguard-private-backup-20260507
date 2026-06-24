@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 import sys
 from pathlib import Path
@@ -13,7 +14,7 @@ from phoenixguard.interpreter import interpret
 
 
 def test_interpreter_emits_post_ensemble_machine_and_human_views() -> None:
-    fusion = {
+    fusion: dict[str, Any] = {
         "cv": {
             "setup": "impulse_chain",
             "structure": "current impulse BUY -> projected impulse BUY -> latest=BUY 0.74 -> path=0.81",
@@ -77,7 +78,7 @@ def test_interpreter_emits_post_ensemble_machine_and_human_views() -> None:
 
 
 def test_main_summary_surfaces_interpreter_output() -> None:
-    result = {
+    result: dict[str, Any] = {
         "action": "SELL",
         "trade_bias": "SELL",
         "decision_state": "PROJECTED",
@@ -115,7 +116,7 @@ def test_main_summary_surfaces_interpreter_output() -> None:
 
 
 def test_interpreter_prefers_execution_action_when_action_missing() -> None:
-    fusion = {
+    fusion: dict[str, Any] = {
         "cv": {"setup": "none", "structure": "structure unavailable"},
         "memory": {"match_quality": "low"},
         "forecast": {"direction": "HOLD", "magnitude": 0.0, "q05": 0.0, "q95": 0.0},
@@ -140,7 +141,7 @@ def test_interpreter_prefers_execution_action_when_action_missing() -> None:
 
 
 def test_human_readable_summary_includes_timing_signal() -> None:
-    result = {
+    result: dict[str, Any] = {
         "action": "BUY",
         "trade_bias": "BUY",
         "decision_state": "PROJECTED",

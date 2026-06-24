@@ -74,7 +74,7 @@ def _forecast_3m(regressor: ImageFusionRegressor, *args: Any, **kwargs: Any) -> 
 
 
 def _infer(engine: EnsembleDecisionEngine, *args: Any, **kwargs: Any) -> dict[str, Any]:
-    return cast(dict[str, Any], engine.infer(*args, **kwargs))
+    return engine.infer(*args, **kwargs)
 
 
 def _make_candle(
@@ -118,7 +118,7 @@ def test_box_history_tracks_internal_sequence_and_consolidation() -> None:
 
 
 def test_trend_regime_identifies_pullback_inside_buy_trend() -> None:
-    box_history = [
+    box_history: list[dict[str, Any]] = [
         {
             "sequence_index": 1,
             "box_type": "impulse",
@@ -165,7 +165,7 @@ def test_trend_regime_identifies_pullback_inside_buy_trend() -> None:
 
 
 def test_trend_regime_flags_exhausted_buy_trend_reversal_watch() -> None:
-    box_history = [
+    box_history: list[dict[str, Any]] = [
         {
             "sequence_index": 1,
             "box_type": "impulse",
@@ -217,7 +217,7 @@ def test_trend_regime_flags_exhausted_buy_trend_reversal_watch() -> None:
 
 
 def test_swing_state_respects_market_macro_direction_for_countertrend_sell_push() -> None:
-    box_history = [
+    box_history: list[dict[str, Any]] = [
         {
             "sequence_index": 1,
             "box_type": "impulse",
@@ -363,7 +363,7 @@ def test_projected_pullback_box_shows_internal_counter_move_and_reclaim() -> Non
 
 
 def test_council_influence_profile_dampens_contradictory_sequence_direction() -> None:
-    local_ensemble = {
+    local_ensemble: dict[str, Any] = {
         "ensemble": {
             "predicted_label": "BUY",
             "confidence": 0.56,
@@ -394,7 +394,7 @@ def test_council_influence_profile_dampens_contradictory_sequence_direction() ->
 
 
 def test_council_influence_profile_rejects_weak_opposing_router_sequence_direction() -> None:
-    local_ensemble = {
+    local_ensemble: dict[str, Any] = {
         "ensemble": {
             "predicted_label": "BUY",
             "confidence": 0.54,
@@ -626,7 +626,7 @@ def test_projected_box_council_rerank_does_not_penalize_unaligned_base_case() ->
 
 
 def test_projection_enrichment_keeps_stronger_buy_hypothesis_ahead_of_bearish_fakeout() -> None:
-    current_box = {
+    current_box: dict[str, Any] = {
         "box_type": "impulse",
         "direction": "BUY",
         "confidence": 0.78,
@@ -634,7 +634,7 @@ def test_projection_enrichment_keeps_stronger_buy_hypothesis_ahead_of_bearish_fa
         "consolidation_score": 0.12,
         "bbox": [66.0, 74.0, 92.0, 138.0],
     }
-    sequence_state = {
+    sequence_state: dict[str, Any] = {
         "recent_colors": ["green", "green", "red", "green", "red"],
         "continuation_probability": 0.56,
         "reversal_probability": 0.18,
@@ -660,7 +660,7 @@ def test_projection_enrichment_keeps_stronger_buy_hypothesis_ahead_of_bearish_fa
             _make_candle(92, 98, 96, 152, green=False, body=0.20),
         ],
     }
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "projection_bias_direction": "BUY",
         "projection_bias_confidence": 0.72,
@@ -670,7 +670,7 @@ def test_projection_enrichment_keeps_stronger_buy_hypothesis_ahead_of_bearish_fa
         "fakeout_probability": 0.12,
         "path_clarity": 0.58,
     }
-    local_ensemble = {
+    local_ensemble: dict[str, Any] = {
         "ensemble": {
             "predicted_label": "BUY",
             "confidence": 0.66,
@@ -721,7 +721,7 @@ def test_projection_enrichment_keeps_stronger_buy_hypothesis_ahead_of_bearish_fa
 
 
 def test_projection_hypotheses_reclaim_trend_after_pullback() -> None:
-    box_history = [
+    box_history: list[dict[str, Any]] = [
         {
             "sequence_index": 1,
             "box_type": "impulse",
@@ -743,7 +743,7 @@ def test_projection_hypotheses_reclaim_trend_after_pullback() -> None:
             "consolidation_score": 0.32,
         },
     ]
-    sequence_state = {
+    sequence_state: dict[str, Any] = {
         "continuation_probability": 0.58,
         "pullback_probability": 0.20,
         "reversal_probability": 0.10,
@@ -775,7 +775,7 @@ def test_projection_hypotheses_reclaim_trend_after_pullback() -> None:
 
 
 def test_projection_hypotheses_flip_sell_on_exhausted_buy_trend() -> None:
-    box_history = [
+    box_history: list[dict[str, Any]] = [
         {
             "sequence_index": 1,
             "box_type": "impulse",
@@ -810,7 +810,7 @@ def test_projection_hypotheses_flip_sell_on_exhausted_buy_trend() -> None:
             "dominant_wick": "upper",
         },
     ]
-    sequence_state = {
+    sequence_state: dict[str, Any] = {
         "continuation_probability": 0.52,
         "pullback_probability": 0.18,
         "reversal_probability": 0.20,
@@ -902,7 +902,7 @@ def test_history_plus_projection_overlay_skips_debug_geometry_frames() -> None:
         "plot_inner_bbox": [0.0, 0.0, 63.0, 47.0],
         "latest_sequence_bbox": [20.0, 12.0, 36.0, 32.0],
     }
-    history_box = {
+    history_box: dict[str, Any] = {
         "sequence_index": 3,
         "box_type": "impulse",
         "direction": "BUY",
@@ -941,7 +941,7 @@ def test_history_plus_projection_overlay_skips_debug_geometry_frames() -> None:
 
 def test_history_plus_projection_overlay_keeps_history_boxes_as_outlines() -> None:
     base = Image.new("RGB", (80, 60), color=(0, 0, 0))
-    history_boxes = [
+    history_boxes: list[dict[str, Any]] = [
         {
             "sequence_index": 1,
             "box_type": "impulse",
@@ -991,7 +991,7 @@ def test_history_plus_projection_overlay_keeps_history_boxes_as_outlines() -> No
             "next_box_hypotheses": [],
         },
     )
-    debug = draw_overlay(
+    draw_overlay(
         base,
         [],
         [],
@@ -1010,7 +1010,7 @@ def test_history_plus_projection_overlay_keeps_history_boxes_as_outlines() -> No
 
 def test_history_plus_projection_overlay_suppresses_projected_candles() -> None:
     base = Image.new("RGB", (72, 56), color=(0, 0, 0))
-    projection_box = {
+    projection_box: dict[str, Any] = {
         "rank": 1,
         "box_type": "impulse",
         "direction": "BUY",
@@ -1047,7 +1047,7 @@ def test_history_plus_projection_overlay_suppresses_projected_candles() -> None:
 
 def test_projection_overlay_extra_draws_projected_boxes_and_candles_in_history_view() -> None:
     base = Image.new("RGB", (72, 56), color=(0, 0, 0))
-    projection_box = {
+    projection_box: dict[str, Any] = {
         "rank": 1,
         "box_type": "impulse",
         "direction": "BUY",
@@ -1092,7 +1092,7 @@ def test_projection_chain_builds_four_future_boxes() -> None:
         _make_candle(140, 146, 110, 168, green=True, body=0.26),
         _make_candle(150, 156, 106, 164, green=True, body=0.28),
     ]
-    box_history = [
+    box_history: list[dict[str, Any]] = [
         {
             "sequence_index": 1,
             "box_type": "impulse",
@@ -1121,7 +1121,7 @@ def test_projection_chain_builds_four_future_boxes() -> None:
             "consolidation_score": 0.16,
         },
     ]
-    sequence_state = {
+    sequence_state: dict[str, Any] = {
         "all_visible_candles": visible_candles,
         "body_mean_pct": 0.24,
         "box_history": box_history,
@@ -1138,14 +1138,14 @@ def test_projection_chain_builds_four_future_boxes() -> None:
         "small_body_ratio": 0.12,
         "body_std_pct": 0.05,
     }
-    chart_geometry = {"plot_bbox": [0.0, 0.0, 360.0, 220.0], "body_height_pct": 0.56, "geometry_confidence": 0.84}
+    chart_geometry: dict[str, Any] = {"plot_bbox": [0.0, 0.0, 360.0, 220.0], "body_height_pct": 0.56, "geometry_confidence": 0.84}
     base_hypotheses = _build_next_box_hypotheses(
         box_history,
         sequence_state,
         chart_geometry,
         market_state={"macro_trend": "BULL"},
     )
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "projection_bias_direction": "BUY",
         "projection_bias_confidence": 0.78,
@@ -1182,7 +1182,7 @@ def test_projection_chain_builds_four_future_boxes() -> None:
 
 def test_history_plus_projection_overlay_suppresses_projection_chain_boxes() -> None:
     base = Image.new("RGB", (112, 64), color=(0, 0, 0))
-    projection_chain = [
+    projection_chain: list[dict[str, Any]] = [
         {"rank": 1, "projection_step": 1, "box_type": "impulse", "direction": "BUY", "confidence": 0.84, "bbox": [36.0, 22.0, 46.0, 36.0], "projected_candles": []},
         {"rank": 2, "projection_step": 2, "box_type": "pullback", "direction": "BUY", "confidence": 0.78, "bbox": [50.0, 18.0, 60.0, 32.0], "projected_candles": []},
         {"rank": 3, "projection_step": 3, "box_type": "impulse", "direction": "BUY", "confidence": 0.74, "bbox": [64.0, 14.0, 74.0, 28.0], "projected_candles": []},
@@ -1290,7 +1290,7 @@ def test_hybrid_vision_overlay_draws_yolo_and_structure_together() -> None:
 
 def test_model_council_html_exposes_focus_crops_and_honest_vision_copy() -> None:
     source_image = Image.new("RGB", (128, 80), color=(12, 18, 24))
-    result = {
+    result: dict[str, Any] = {
         "meta": {"sha256": "council-vision-demo"},
         "chart_geometry": {
             "latest_sequence_bbox": [58.0, 14.0, 104.0, 58.0],
@@ -1378,7 +1378,7 @@ def test_model_council_html_exposes_focus_crops_and_honest_vision_copy() -> None
 
 def test_model_council_html_respects_operator_scope_off() -> None:
     source_image = Image.new("RGB", (64, 48), color=(14, 18, 22))
-    result = {
+    result: dict[str, Any] = {
         "local_ensemble": {
             "models": {
                 "swav": {
@@ -1454,7 +1454,7 @@ def test_overlay_extras_draw_grounded_regions_and_tta_tag() -> None:
 
 
 def test_sequence_model_summary_tracks_directional_pressure() -> None:
-    sequence_state = {
+    sequence_state: dict[str, Any] = {
         "recent_colors": ["green", "green", "green", "red", "green"],
         "box_history": [
             {"direction": "BUY", "box_type": "impulse", "confidence": 0.76, "maturity": 0.72},
@@ -1495,7 +1495,7 @@ def test_fused_transitions_use_sequence_state_projection() -> None:
             "fakeout_prob": 0.20,
         }
     }
-    sequence_state = {
+    sequence_state: dict[str, Any] = {
         "continuation_probability": 0.62,
         "pullback_probability": 0.18,
         "reversal_probability": 0.10,
@@ -1518,7 +1518,7 @@ def test_fused_transitions_use_sequence_state_projection() -> None:
 
 def test_forecast_requires_consolidation_but_releases_when_present() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    base_chart_state = {
+    base_chart_state: dict[str, Any] = {
         "direction": "BUY",
         "direction_probability": 0.74,
         "implied_3min_move_pct": 0.08,
@@ -1553,7 +1553,7 @@ def test_forecast_requires_consolidation_but_releases_when_present() -> None:
 
 
 def test_entry_progression_profile_publishes_maturity_and_velocity() -> None:
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "continuation_probability": 0.67,
         "reversal_probability": 0.14,
@@ -1590,7 +1590,7 @@ def test_entry_progression_profile_publishes_maturity_and_velocity() -> None:
 
 def test_forecast_releases_for_impulse_chain_without_consolidation() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "direction_probability": 0.55,
         "implied_3min_move_pct": 0.41,
@@ -1621,7 +1621,7 @@ def test_forecast_releases_for_impulse_chain_without_consolidation() -> None:
 
 def test_forecast_accepts_canonical_transition_summary_keys() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "direction_probability": 0.58,
         "implied_3min_move_pct": 0.18,
@@ -1653,7 +1653,7 @@ def test_forecast_accepts_canonical_transition_summary_keys() -> None:
 
 def test_forecast_releases_counter_macro_reversal_base_against_bearish_ensemble() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "SELL",
         "direction_probability": 0.57,
         "implied_3min_move_pct": 0.22,
@@ -1697,7 +1697,7 @@ def test_forecast_releases_counter_macro_reversal_base_against_bearish_ensemble(
 
 def test_forecast_promotes_macro_pullback_reclaim_to_trade_ready_structure() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "direction_probability": 0.64,
         "implied_3min_move_pct": 0.26,
@@ -1735,7 +1735,7 @@ def test_forecast_promotes_macro_pullback_reclaim_to_trade_ready_structure() -> 
 
 def test_forecast_promotes_aligned_reversal_base_to_reversal_release() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "direction_probability": 0.63,
         "implied_3min_move_pct": 0.24,
@@ -1772,7 +1772,7 @@ def test_forecast_promotes_aligned_reversal_base_to_reversal_release() -> None:
 
 def test_forecast_promotes_with_trend_pullback_resume_to_impulse_chain() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "direction_probability": 0.66,
         "implied_3min_move_pct": 0.27,
@@ -1809,7 +1809,7 @@ def test_forecast_promotes_with_trend_pullback_resume_to_impulse_chain() -> None
 
 def test_forecast_promotes_high_conviction_sell_pullback_resume_to_impulse_chain() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "SELL",
         "direction_probability": 0.64,
         "implied_3min_move_pct": 0.27,
@@ -1848,7 +1848,7 @@ def test_forecast_promotes_high_conviction_sell_pullback_resume_to_impulse_chain
 
 def test_forecast_keeps_weak_sell_pullback_resume_unconfirmed() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "SELL",
         "direction_probability": 0.64,
         "implied_3min_move_pct": 0.25,
@@ -1885,7 +1885,7 @@ def test_forecast_keeps_weak_sell_pullback_resume_unconfirmed() -> None:
 
 def test_forecast_promotes_counter_macro_sell_breakaway_to_reversal_release() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "SELL",
         "direction_probability": 0.63,
         "implied_3min_move_pct": 0.26,
@@ -1924,7 +1924,7 @@ def test_forecast_promotes_counter_macro_sell_breakaway_to_reversal_release() ->
 
 def test_forecast_keeps_weak_counter_macro_sell_breakaway_unconfirmed() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "SELL",
         "direction_probability": 0.63,
         "implied_3min_move_pct": 0.24,
@@ -1961,7 +1961,7 @@ def test_forecast_keeps_weak_counter_macro_sell_breakaway_unconfirmed() -> None:
 
 def test_forecast_promotes_counter_macro_sell_extension_to_reversal_release() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "SELL",
         "direction_probability": 0.62,
         "implied_3min_move_pct": 0.24,
@@ -1999,7 +1999,7 @@ def test_forecast_promotes_counter_macro_sell_extension_to_reversal_release() ->
 
 def test_forecast_keeps_low_agreement_counter_macro_sell_extension_unconfirmed() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "SELL",
         "direction_probability": 0.62,
         "implied_3min_move_pct": 0.24,
@@ -2036,7 +2036,7 @@ def test_forecast_keeps_low_agreement_counter_macro_sell_extension_unconfirmed()
 
 def test_forecast_promotes_counter_macro_impulse_release_to_reversal_release() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "direction_probability": 0.64,
         "implied_3min_move_pct": 0.25,
@@ -2328,7 +2328,7 @@ def test_ensemble_supports_impulse_chain_without_consolidation() -> None:
 
 
 def test_projection_hypotheses_promote_reversal_release_from_sequence_and_memory() -> None:
-    box_history = [
+    box_history: list[dict[str, Any]] = [
         {
             "sequence_index": 1,
             "box_type": "impulse",
@@ -2360,7 +2360,7 @@ def test_projection_hypotheses_promote_reversal_release_from_sequence_and_memory
             "consolidation_score": 0.44,
         },
     ]
-    sequence_state = {
+    sequence_state: dict[str, Any] = {
         "continuation_probability": 0.43,
         "pullback_probability": 0.08,
         "reversal_probability": 0.30,
@@ -2394,7 +2394,7 @@ def test_projection_hypotheses_promote_reversal_release_from_sequence_and_memory
 
 
 def test_projection_hypotheses_reclaim_countertrend_impulse_back_to_trend() -> None:
-    box_history = [
+    box_history: list[dict[str, Any]] = [
         {
             "sequence_index": 1,
             "box_type": "impulse",
@@ -2436,7 +2436,7 @@ def test_projection_hypotheses_reclaim_countertrend_impulse_back_to_trend() -> N
             "consolidation_score": 0.20,
         },
     ]
-    sequence_state = {
+    sequence_state: dict[str, Any] = {
         "continuation_probability": 0.23,
         "pullback_probability": 0.18,
         "reversal_probability": 0.45,
@@ -2479,14 +2479,14 @@ def test_projection_hypotheses_reclaim_countertrend_impulse_back_to_trend() -> N
 
 
 def test_chart_state_classifies_reversal_release_structure() -> None:
-    current_box = {
+    current_box: dict[str, Any] = {
         "box_type": "reversal_base",
         "direction": "BUY",
         "confidence": 0.81,
         "maturity": 0.60,
         "consolidation_score": 0.45,
     }
-    projected_box = {
+    projected_box: dict[str, Any] = {
         "box_type": "impulse",
         "direction": "BUY",
         "confidence": 0.69,
@@ -2543,14 +2543,14 @@ def test_chart_state_classifies_reversal_release_structure() -> None:
 
 
 def test_chart_state_promotes_council_backed_structure_when_core_setup_is_none() -> None:
-    current_box = {
+    current_box: dict[str, Any] = {
         "box_type": "impulse",
         "direction": "BUY",
         "confidence": 0.71,
         "maturity": 0.58,
         "consolidation_score": 0.16,
     }
-    projected_box = {
+    projected_box: dict[str, Any] = {
         "box_type": "impulse",
         "direction": "BUY",
         "confidence": 0.67,
@@ -2612,7 +2612,7 @@ def test_chart_state_promotes_council_backed_structure_when_core_setup_is_none()
 
 
 def test_projection_sync_refreshes_chart_state_after_council_rerank() -> None:
-    current_box = {
+    current_box: dict[str, Any] = {
         "box_type": "impulse",
         "direction": "BUY",
         "confidence": 0.78,
@@ -2620,7 +2620,7 @@ def test_projection_sync_refreshes_chart_state_after_council_rerank() -> None:
         "consolidation_score": 0.12,
         "bbox": [66.0, 74.0, 92.0, 138.0],
     }
-    sequence_state = {
+    sequence_state: dict[str, Any] = {
         "recent_colors": ["green", "green", "red", "green", "red"],
         "continuation_probability": 0.56,
         "reversal_probability": 0.18,
@@ -2668,7 +2668,7 @@ def test_projection_sync_refreshes_chart_state_after_council_rerank() -> None:
             },
         ],
     }
-    local_ensemble = {
+    local_ensemble: dict[str, Any] = {
         "ensemble": {
             "predicted_label": "BUY",
             "confidence": 0.64,
@@ -2721,7 +2721,7 @@ def test_projection_sync_refreshes_chart_state_after_council_rerank() -> None:
 
 def test_forecast_releases_for_reversal_release_without_latest_candle_support() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "direction_probability": 0.64,
         "implied_3min_move_pct": 0.32,
@@ -3049,7 +3049,7 @@ def test_ensemble_gate_scores_do_not_inflate_live_confidence() -> None:
 
 def test_forecast_uses_projection_direction_when_projection_overrides_ensemble() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "direction_probability": 0.61,
         "implied_3min_move_pct": 0.34,
@@ -3083,7 +3083,7 @@ def test_forecast_uses_projection_direction_when_projection_overrides_ensemble()
 
 def test_forecast_keeps_ensemble_direction_when_opposing_projection_is_weak() -> None:
     reg = ImageFusionRegressor(_NullLogger())
-    chart_state = {
+    chart_state: dict[str, Any] = {
         "direction": "BUY",
         "direction_probability": 0.61,
         "implied_3min_move_pct": 0.34,
@@ -3115,7 +3115,7 @@ def test_forecast_keeps_ensemble_direction_when_opposing_projection_is_weak() ->
 
 
 def test_latest_signal_state_reflects_post_cap_parse_quality() -> None:
-    detections = [
+    detections: list[dict[str, Any]] = [
         {"pattern": "latest_parse_quality", "confidence": 0.92, "overlay_confidence": 0.92},
         {"pattern": "latest_candle_sell", "confidence": 0.18, "overlay_confidence": 0.18},
         {"pattern": "latest_candle_buy", "confidence": 0.04, "overlay_confidence": 0.04},

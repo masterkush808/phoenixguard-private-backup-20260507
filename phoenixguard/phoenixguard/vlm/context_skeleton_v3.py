@@ -12,7 +12,7 @@ def _mapping(value: Any) -> dict[str, Any]:
 
 def _sequence(value: Any) -> list[Any]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return list(value)
+        return list(cast(Sequence[Any], value))
     return []
 
 

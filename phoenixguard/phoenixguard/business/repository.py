@@ -558,7 +558,7 @@ class MockBusinessRepository:
                 created_at=utc_datetime(2026, 5, 1),
             ),
         }
-        manifest = {
+        manifest: dict[str, Any] = {
             "release_id": "rel_2026_06_001",
             "channel": "stable",
             "ea_version": "808.2.0",
