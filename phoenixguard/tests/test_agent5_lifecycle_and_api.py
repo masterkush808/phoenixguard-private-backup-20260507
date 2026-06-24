@@ -1,10 +1,16 @@
 from typing import Any
 from pathlib import Path
-from phoenixguard.vision.market_registry import merge_market_objects, load_market_objects, query_active_objects, promote_lifecycle
 import time
 
+import pytest
 
-def test_merge_and_promotion(tmp_path: Path) -> None:
+import phoenixguard.vision.market_registry as market_registry
+from phoenixguard.vision.market_registry import merge_market_objects, load_market_objects, query_active_objects, promote_lifecycle
+
+
+def test_merge_and_promotion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(market_registry, "REGISTRY_DIR", tmp_path / "market_registry")
+    market_registry.REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
     session = f"test-session-lifecycle-2-{tmp_path.name}"
     # create two overlapping boxes (IoU > 0.5)
     o1: dict[str, Any] = {"id": "o1", "bbox": [0, 0, 10, 10], "confidence": 0.6}
@@ -29,7 +35,9 @@ def test_merge_and_promotion(tmp_path: Path) -> None:
     assert any(e.get("lifecycle_state") == "STALE" for e in entries_after)
 
 
-def test_query_active_objects_filters_entries_past_ttl(tmp_path: Path) -> None:
+def test_query_active_objects_filters_entries_past_ttl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(market_registry, "REGISTRY_DIR", tmp_path / "market_registry")
+    market_registry.REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
     session = f"test-session-lifecycle-ttl-{tmp_path.name}"
     merge_market_objects(session, [{"id": "ttl-old", "bbox": [0, 0, 10, 10], "confidence": 0.9}])
     time.sleep(0.01)

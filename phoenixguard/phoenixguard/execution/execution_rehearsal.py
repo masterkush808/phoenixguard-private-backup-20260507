@@ -4,7 +4,6 @@ import time
 from typing import Any, Mapping, cast
 
 from phoenixguard.execution.execution_constitution import evaluate_execution_constitution
-from phoenixguard.execution.shooter_modes import build_coordinate_report
 
 
 EXECUTION_REHEARSAL_VERSION = "PG_EXECUTION_REHEARSAL_V1"
@@ -37,6 +36,15 @@ def _float(value: Any, default: float = 0.0) -> float:
     return float(parsed)
 
 
+def _retired_coordinate_report() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "reason": "BROKER_COORDINATE_EXECUTION_RETIRED",
+        "execution_removed": True,
+        "broker_click_allowed": False,
+    }
+
+
 def rehearse_execution(
     packet: Mapping[str, Any],
     decision: Mapping[str, Any],
@@ -55,7 +63,8 @@ def rehearse_execution(
     time_sequence = _mapping(execution.get("time_sequence"))
     side = _side(execution.get("side"))
     expiry_seconds = int(_float(execution.get("expiry_seconds"), _float(time_sequence.get("target_seconds"), 0.0)))
-    coordinate_report = build_coordinate_report(boxes, window_bounds, side=side, expiry_seconds=expiry_seconds)
+    _ = (boxes, window_bounds, side, expiry_seconds)
+    coordinate_report = _retired_coordinate_report()
     constitution = evaluate_execution_constitution(
         packet,
         decision,
@@ -77,7 +86,7 @@ def rehearse_execution(
     if not time_sequence.get("target_seconds") or not time_sequence.get("target_text"):
         issues.append("TIME_SEQUENCE_TARGET_MISSING")
     if not coordinate_report.get("ok"):
-        issues.append("COORDINATE_REPORT_INVALID")
+        issues.append("BROKER_COORDINATE_EXECUTION_RETIRED")
     if require_broker_click_safe and instrument_context.get("broker_click_safe") is not True:
         issues.append("INSTRUMENT_CONTEXT_NOT_BROKER_CLICK_SAFE")
     if latest_packet is not None and (latest_side != side or latest_council_side != side):
@@ -94,7 +103,7 @@ def rehearse_execution(
         "ready": not unique,
         "reason": unique[0] if unique else "EXECUTION_REHEARSAL_READY",
         "issues": unique,
-        "would_click": side,
+        "would_click": "",
         "would_type_time": _text(time_sequence.get("target_text")),
         "estimated_execution_latency_ms": round(float(estimated_execution_latency_ms), 3),
         "packet_still_valid_after_latency": valid_until > expected_click_epoch,

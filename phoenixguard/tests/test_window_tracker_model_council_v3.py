@@ -16,6 +16,24 @@ import phoenixguard.mobile_api.window_tracker as window_tracker_module
 from phoenixguard.mobile_api.window_tracker import ContinuousWindowTrackerService
 
 
+def _allowance_package(side: str = "BUY") -> dict[str, object]:
+    return {
+        "schema_version": "PG_ALLOWANCE_PACKAGE_V1",
+        "package_type": "INTRADAY_ENTER_NOW",
+        "allowance_family": "INTRADAY",
+        "execution_authority": "PG_EXECUTION_PACKET_V3",
+        "side": side,
+        "accepted": True,
+        "decision_accepted": True,
+        "execution_ready": True,
+        "entry_now_allowed": True,
+        "timing_mode": "ENTER_NOW",
+        "selected_lane": "SNIPER_ZONE_ENTRY",
+        "score": 0.84,
+        "threshold": 0.70,
+    }
+
+
 def _publish_model_council_v3_state(
     service: ContinuousWindowTrackerService,
     *,
@@ -215,6 +233,7 @@ def test_signal_thesis_countertrend_block_downgrades_public_council_state(
         model_council={"final_state": "EXECUTABLE", "final_side": "SELL"},
         runtime_model_health={"all_required_models_awake": True, "council_status": "AWAKE"},
         sequence_context=_complete_sequence_context(sequence_id="seq_countertrend_blocked"),
+        allowance_package=_allowance_package("SELL"),
     )
     study_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
@@ -355,7 +374,8 @@ def test_model_council_packet_uses_publication_epoch_not_capture_start(
                     "box_history": [{"type": "IMPULSE_BOX", "bounds": [0.1, 0.2, 0.3, 0.4]}],
                     "progression": [{"type": "IMPULSE_BOX", "index": 1}],
                     "entry_progression": {"steps": [{"type": "TRIGGER", "index": 1}]},
-                },
+                    },
+                allowance_package=_allowance_package("BUY"),
             )
             study_packet: dict[str, Any] = {
                 "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
@@ -668,6 +688,7 @@ def test_tracker_live_backend_defers_valid_packet_to_standalone_shooter(tmp_path
         model_council={"final_state": "EXECUTABLE", "final_side": "BUY"},
         runtime_model_health={"all_required_models_awake": True, "council_status": "AWAKE"},
         sequence_context=sequence_context,
+        allowance_package=_allowance_package("BUY"),
     )
 
     resolved_sequence_context = resolve_sequence_context(packet)
@@ -694,7 +715,7 @@ def test_tracker_live_backend_defers_valid_packet_to_standalone_shooter(tmp_path
         latest_signal={"model_council_packet": packet},
     )
 
-    assert state["status"] == "external_shooter_required"
+    assert state["status"] == "package_reporter_required"
     assert state["side"] == "BUY"
     assert state["lane"] == "MODEL_COUNCIL_PACKET_V3"
     assert state["expiry_seconds"] == 300
@@ -763,6 +784,7 @@ def test_tracker_live_backend_rejects_partial_sequence_context_packet() -> None:
             "tracking_summary": {"global_direction": "BUY", "local_direction": "BUY"},
             "sequence_history": [],
         },
+        allowance_package=_allowance_package("BUY"),
     )
 
     broken_packet = deepcopy(packet)
@@ -835,6 +857,7 @@ def test_sequence_context_not_read_from_wrong_packet_level(tmp_path: Path) -> No
             "tracking_summary": {"global_direction": "BUY", "local_direction": "BUY"},
             "sequence_history": [{"label": "H1 BUY", "bbox": [10, 10, 20, 20]}],
         },
+        allowance_package=_allowance_package("BUY"),
     )
     packet["sequence_id"] = "wrong-top-level-id"
     resolved = resolve_sequence_context(packet)

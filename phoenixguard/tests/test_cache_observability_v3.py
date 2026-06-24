@@ -541,7 +541,7 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
     payload = response.json()
     assert payload["shooter"]["available"] is False
     assert payload["shooter"]["state"] == "WAITING"
-    assert payload["shooter_state"]["next_required"] == "shooter handshake publish"
+    assert payload["shooter_state"]["next_required"] == "fresh accepted intraday or swing allowance package"
 
     compact_response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?compact=1")
 

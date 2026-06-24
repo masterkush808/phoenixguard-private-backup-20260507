@@ -247,7 +247,7 @@ def test_no_direct_pyautogui_action_outside_low_level_adapter() -> None:
     for path in [ROOT / "shooter.py", *list((ROOT / "phoenixguard").rglob("*.py"))]:
         text = path.read_text(encoding="utf-8", errors="ignore")
         for needle in ("pyautogui.click", "pyautogui.moveTo", "pyautogui.press", "pyautogui.hotkey", "pyautogui.typewrite"):
-            if needle in text and path.name != "shooter_action_sequencer.py":
+            if needle in text:
                 offenders.append(f"{path.relative_to(ROOT)}:{needle}")
     assert offenders == []
 
@@ -255,7 +255,7 @@ def test_no_direct_pyautogui_action_outside_low_level_adapter() -> None:
 def test_public_language_scorecard_names_v3_authorities() -> None:
     scorecard = public_language_scorecard()
     assert scorecard["execution_authority"] == "validated PG_EXECUTION_PACKET_V3 only"
-    assert scorecard["action_authority"] == "ShooterActionSequencerV2 only"
+    assert scorecard["action_authority"] == "MT4 bridge or external executor only; shooter reports allowed packages"
     assert scorecard["operator_truth"] == "FloatingStateV2 reducer only"
 
 
@@ -295,7 +295,7 @@ def test_runtime_trace_v3_contains_all_core_nodes() -> None:
         "floating_state",
         "shooter_handshake",
         "model_health",
-        "calibration_status",
+        "package_reporter_status",
         "cache_status",
         "sequence_context",
     ):

@@ -3,16 +3,17 @@
 Version: `PG_V3_LANGUAGE_CONSTITUTION_2026_05_25`
 
 This file is the canonical vocabulary for PhoenixGuard V3. Runtime code, packets, endpoints,
-tests, dashboards, and the shooter must use these terms with the meanings below.
+tests, dashboards, and the shooter package reporter must use these terms with the meanings below.
 
 ## Core Doctrine
 
 Observation is not execution. Score is not execution. Candidate is not execution. Study
 packet is not execution.
 
-Only a validated `PG_EXECUTION_PACKET_V3` can authorize the shooter. Only
-`ShooterActionSequencerV2` can perform calibrated broker actions. Only `FloatingStateV2`
-reports operator truth.
+Only a validated `PG_EXECUTION_PACKET_V3` can authorize an external execution path.
+The local `shooter.py` process no longer performs calibrated broker actions; it only
+reports accepted `INTRADAY_ENTER_NOW` and `SWING` allowance packages. Only
+`FloatingStateV2` reports operator truth.
 
 ## Canonical Runtime Chain
 
@@ -27,8 +28,8 @@ V3 Launcher
 -> Study Packet Publisher
 -> Execution Packet Publisher
 -> PG_EXECUTION_PACKET_V3 Validator
--> ShooterActionSequencerV2
--> Calibrated Time / Side Action
+-> Shooter Package Reporter
+-> MT4 Bridge / External Execution Path
 -> FloatingStateV2
 -> Observability / Runtime Trace
 ```
@@ -127,24 +128,25 @@ Duration in seconds for the broker time setting. It must match
 
 `time_sequence`
 
-The explicit calibrated time-setting instruction for the shooter. It must include
-`target_seconds`, `target_text`, and ordered steps.
+The explicit time instruction carried by the execution packet. It must include
+`target_seconds`, `target_text`, and ordered steps. The local shooter reports the packet
+but does not set broker controls.
 
-`calibration_valid`
+`allowance_package`
 
-The shooter has loaded the required calibrated targets and verified they are compatible
-with the current broker window before action.
+The Model Council package that classifies executable permission as `INTRADAY_ENTER_NOW`
+or `SWING`. The shooter package reporter publishes a handshake only when this package is
+accepted, execution-ready, authority-bound to `PG_EXECUTION_PACKET_V3`, and not stale.
 
 `runtime_integrity`
 
 Freshness and identity proof: live frame/capture/state advancement, packet TTL, cache
 freshness, model health, instrument identity, and endpoint agreement.
 
-`shooter_action_state`
+`shooter_report_state`
 
-The current action phase of `ShooterActionSequencerV2`, such as `WINDOW_LOCKED`,
-`TIME_PANEL_READY`, `TIME_TYPED_OR_SELECTED`, `FINAL_PRE_CLICK_RECHECK`, or
-`ABORT_BEFORE_SIDE_CLICK`.
+The current reporting phase of the local shooter process, such as `WAITING` or
+`ALLOWED_PACKAGE_REPORTED`. It is not a broker action state.
 
 ## Non-Negotiable Rules
 
@@ -162,5 +164,5 @@ The current action phase of `ShooterActionSequencerV2`, such as `WINDOW_LOCKED`,
     old decision-kernel output cannot authorize action.
 12. Amount controls remain unreachable.
 13. Floating Window compact mode must not display raw `n/a` debug fields.
-14. Runtime trace must show tracker, council, study, execution, shooter, floating state,
-    health, cache, and calibration together.
+14. Runtime trace must show tracker, council, study, execution, shooter package reporter,
+    floating state, health, and cache together.

@@ -30,37 +30,20 @@ def test_import_v3_runtime_components() -> None:
         "phoenixguard.decision.model_council_v3",
         "phoenixguard.decision.market_reality_engine",
         "phoenixguard.execution.packet_v3",
-        "phoenixguard.execution.shooter_action_sequencer",
         "phoenixguard.execution.floating_state_reducer",
-        "phoenixguard.execution.calibration_manifest",
         "phoenixguard.runtime.observability_v3",
     ]
     for module_name in modules:
         assert importlib.import_module(module_name)
 
 
-def test_required_calibration_targets_present() -> None:
-    boxes = json.loads((ROOT / "808_shooter_boxes.json").read_text(encoding="utf-8"))
-    points = boxes.get("points") if isinstance(boxes.get("points"), dict) else boxes
-    for target in (
-        "broker_screen",
-        "time_button",
-        "time_input",
-        "hourly_plus",
-        "hourly_input",
-        "hourly_minus",
-        "minute_plus",
-        "minute_input",
-        "minute_minus",
-        "second_plus",
-        "second_input",
-        "second_minus",
-        "buy_icon",
-        "sell_icon",
-        "final_screen",
-    ):
-        assert target in points
-    assert (ROOT / "user_calibration_manifest.json").exists()
+def test_shooter_calibration_artifacts_retired() -> None:
+    manifest = json.loads((ROOT / "phoenixguard" / "V3_CANONICAL_MANIFEST.json").read_text(encoding="utf-8"))
+    assert manifest["canonical_runtime"]["calibration_manifest"] is False
+    assert manifest["required_calibration_targets"] == []
+    assert not (ROOT / "808_shooter_boxes.json").exists()
+    assert not (ROOT / "user_calibration_manifest.json").exists()
+    assert not (ROOT / "config" / "shooter_broker_timing_profile.json").exists()
 
 
 def test_final_live_profile_declares_single_canonical_launch_path() -> None:
@@ -70,8 +53,8 @@ def test_final_live_profile_declares_single_canonical_launch_path() -> None:
     engine = (ROOT / launch_profile["engine_launcher"]).read_text(encoding="utf-8")
 
     assert launch_profile["production"] == "FINAL_LIVE"
-    assert launch_profile["shooter_mode"] == "LIVE_READY"
-    assert launch_profile["live_click_arm"] == "set_by_canonical_launcher"
+    assert launch_profile["shooter_mode"] == "PACKAGE_REPORTER"
+    assert launch_profile["live_click_arm"] == "retired"
     assert "start_phoenixguard_full_local.ps1" in canonical
     assert "FINAL_LIVE" in engine
     assert "Legacy V1/V2: OFF" in engine

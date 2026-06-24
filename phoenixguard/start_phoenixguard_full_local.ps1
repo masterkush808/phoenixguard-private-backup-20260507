@@ -8,9 +8,9 @@ param(
     [string]$Profile = $(if ($env:PHOENIXGUARD_LOCAL_PROFILE) { $env:PHOENIXGUARD_LOCAL_PROFILE } else { 'FULL' }),
     [double]$ShooterPollSec = 0.05,
     [double]$ShooterMinConfidence = 0.2,
-    [ValidateSet('STUDY_ONLY', 'DRY_RUN_CLICK', 'CALIBRATION_TEST', 'LIVE_DISABLED', 'LIVE_READY', 'LIVE_BEHAVIOR_VALIDATION')]
-    [string]$ShooterMode = $(if ($env:PHOENIXGUARD_SHOOTER_MODE) { $env:PHOENIXGUARD_SHOOTER_MODE } else { 'LIVE_READY' }),
-    [string]$BrokerSpeedProfile = $(if ($env:PHOENIXGUARD_BROKER_SPEED_PROFILE) { $env:PHOENIXGUARD_BROKER_SPEED_PROFILE } else { 'config/shooter_broker_timing_profile.json' }),
+    [ValidateSet('PACKAGE_REPORTER')]
+    [string]$ShooterMode = $(if ($env:PHOENIXGUARD_SHOOTER_MODE) { $env:PHOENIXGUARD_SHOOTER_MODE } else { 'PACKAGE_REPORTER' }),
+    [string]$BrokerSpeedProfile = $(if ($env:PHOENIXGUARD_BROKER_SPEED_PROFILE) { $env:PHOENIXGUARD_BROKER_SPEED_PROFILE } else { '' }),
     [ValidateSet('conservative', 'balanced', 'fast-ui')]
     [string]$ActionSpeed = $(if ($env:PHOENIXGUARD_ACTION_SPEED) { $env:PHOENIXGUARD_ACTION_SPEED } else { 'balanced' }),
     [switch]$RecordActionEvidence,
@@ -85,7 +85,7 @@ if (-not $env:PHOENIXGUARD_TRACKER_STATUS_FILE) {
 
 $launchShooter = @('FULL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED') -contains $Profile
 $startupTestSignal = $false
-$brokerClickPath = if ($ShooterMode -eq 'LIVE_READY') { 'EXPLICIT_LIVE_READY' } elseif ($ShooterMode -eq 'LIVE_BEHAVIOR_VALIDATION') { 'EXPLICIT_LIVE_BEHAVIOR_VALIDATION' } elseif ($ShooterMode -eq 'CALIBRATION_TEST') { 'CALIBRATION_TEST' } else { 'DISABLED' }
+$brokerClickPath = 'RETIRED_PACKAGE_REPORTER_ONLY'
 
 Write-Host "PhoenixGuard launch profile: $finalLaunchProfile"
 Write-Host "  Compatibility profile: $Profile"
@@ -96,9 +96,6 @@ Write-Host "  Legacy V1/V2: OFF"
 Write-Host "  Execution Packet Publisher: ON (STUDY_PACKET every council cycle; PG_EXECUTION_PACKET_V3 only when executable)"
 Write-Host "  Shooter: $(if ($launchShooter) { 'ON' } else { 'OFF' })"
 Write-Host "  Startup Test Signal: REMOVED"
-if ($startupTestSignal) {
-    Write-Host "  Calibration Test Signal: ON (isolated calibration only)"
-}
 Write-Host "  Broker Click Path: $brokerClickPath"
 
 if (-not (Test-Path -LiteralPath $runtimeDir)) {
@@ -255,27 +252,15 @@ try {
         throw "Window tracker session '$SessionId' was not available after startup wait. Last error: $lastSessionError"
     }
     if ($session -and $launchShooter) {
-        Write-Host "Starting shooter against $baseUrl in $ShooterMode mode"
-        $explicitLiveArm = [string]$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS
-        $liveClickArm = if ($ShooterMode -eq 'LIVE_READY' -or $ShooterMode -eq 'LIVE_BEHAVIOR_VALIDATION') { '1' } else { '0' }
-        $disabledShooterPollFloor = if ($env:PHOENIXGUARD_LIVE_DISABLED_SHOOTER_MIN_POLL_SEC) { [double]$env:PHOENIXGUARD_LIVE_DISABLED_SHOOTER_MIN_POLL_SEC } else { 0.50 }
-        $effectiveShooterPollSec = if ($ShooterMode -eq 'LIVE_DISABLED') { [Math]::Max([double]$ShooterPollSec, [double]$disabledShooterPollFloor) } else { [double]$ShooterPollSec }
+        Write-Host "Starting shooter package reporter against $baseUrl"
+        $effectiveShooterPollSec = [double]$ShooterPollSec
         $escapedRoot = $PSScriptRoot.Replace("'", "''")
         $escapedSessionId = $SessionId.Replace("'", "''")
         $escapedBaseUrl = $baseUrl.Replace("'", "''")
-        $escapedBrokerWindowQuery = $BrokerWindowQuery.Replace("'", "''")
-        $escapedBrokerSpeedProfile = $BrokerSpeedProfile.Replace("'", "''")
-        $startupTestArg = if ($startupTestSignal) { ' --test-signal' } else { '' }
-        $calibrationExpiryArg = if ($startupTestSignal -and $CalibrationTestExpirySeconds -gt 0) { " --calibration-test-expiry $CalibrationTestExpirySeconds" } else { '' }
-        $calibrationSideArg = if ($startupTestSignal -and -not [string]::IsNullOrWhiteSpace($CalibrationTestSide)) { " --calibration-test-side $CalibrationTestSide" } else { '' }
-        $calibrationWaitArg = if ($startupTestSignal -and $CalibrationTestTimeFillWaitSeconds -gt 0) { " --calibration-test-time-fill-wait $CalibrationTestTimeFillWaitSeconds" } else { '' }
-        $calibrationTimeOnlyArg = if ($startupTestSignal -and $CalibrationTestTimeOnly) { ' --calibration-test-time-only' } else { '' }
-        $actionEvidenceArg = if ($RecordActionEvidence -or $ShooterMode -eq 'LIVE_BEHAVIOR_VALIDATION') { ' --record-action-evidence' } else { '' }
-        $windowHwndArg = if ($BrokerWindowHwnd -gt 0) { " --window-hwnd $BrokerWindowHwnd" } else { '' }
         $shooterCommand = @(
             "cd '$escapedRoot'",
-            "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='$liveClickArm'",
-            ".\.venv\Scripts\python.exe 'shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll $effectiveShooterPollSec --max-signal-age 30 --preferred-source tracker --require-preferred-source --min-confidence $ShooterMinConfidence --window-query '$escapedBrokerWindowQuery'$windowHwndArg --shooter-mode $ShooterMode --broker-speed-profile '$escapedBrokerSpeedProfile' --action-speed $ActionSpeed --no-auto-open$actionEvidenceArg$startupTestArg$calibrationExpiryArg$calibrationSideArg$calibrationWaitArg$calibrationTimeOnlyArg"
+            "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='0'",
+            ".\.venv\Scripts\python.exe 'shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll $effectiveShooterPollSec"
         ) -join '; '
         Start-Process powershell -ArgumentList @(
             '-NoExit',

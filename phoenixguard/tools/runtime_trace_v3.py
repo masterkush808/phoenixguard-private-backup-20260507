@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             f"council={_text(dataflow_nodes.get('ModelCouncilV3'), 'UNKNOWN')} "
             f"study={_text(dataflow_nodes.get('STUDY_PACKET'), 'UNKNOWN')} "
             f"execution={_text(dataflow_nodes.get('PG_EXECUTION_PACKET_V3'), 'UNKNOWN')} "
-            f"shooter={_text(dataflow_nodes.get('ShooterActionSequencerV2'), 'UNKNOWN')}"
+            f"shooter={_text(dataflow_nodes.get('ShooterPackageReporter'), 'UNKNOWN')}"
         )
         print(f"Dataflow reason: {_text(dataflow.get('reason'), 'none')}")
     print(f"Shooter: {_text(floating_shooter.get('state'), 'UNKNOWN')} | {_text(floating_shooter.get('action'), 'waiting')}")

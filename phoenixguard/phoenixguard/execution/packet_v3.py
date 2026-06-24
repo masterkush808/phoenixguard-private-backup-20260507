@@ -818,6 +818,12 @@ def validate_execution_packet_v3(
         add("MISSING_EXECUTION", "SCHEMA", "execution object is required.")
     if not council:
         add("MISSING_MODEL_COUNCIL", "SCHEMA", "model_council object is required.")
+    if require_executable and not allowance_package:
+        add(
+            "MISSING_ALLOWANCE_PACKAGE",
+            MODEL_COUNCIL,
+            "Executable packets must include a PG_ALLOWANCE_PACKAGE_V1 from Model Council.",
+        )
     if allowance_package:
         allowance_schema = _clean_str(allowance_package.get("schema_version"))
         allowance_type = _enum_text(allowance_package.get("package_type"))
@@ -828,6 +834,12 @@ def validate_execution_packet_v3(
             add("INVALID_ALLOWANCE_PACKAGE_TYPE", MODEL_COUNCIL, "allowance_package.package_type must be SWING or INTRADAY_ENTER_NOW.")
         if allowance_authority and allowance_authority != EXECUTION_PACKET_SCHEMA_VERSION:
             add("INVALID_ALLOWANCE_EXECUTION_AUTHORITY", MODEL_COUNCIL, "allowance_package.execution_authority must be PG_EXECUTION_PACKET_V3.")
+        if require_executable and allowance_authority != EXECUTION_PACKET_SCHEMA_VERSION:
+            add("MISSING_ALLOWANCE_EXECUTION_AUTHORITY", MODEL_COUNCIL, "allowance_package.execution_authority must be PG_EXECUTION_PACKET_V3.")
+        if require_executable and allowance_package.get("accepted") is not True:
+            add("ALLOWANCE_PACKAGE_NOT_ACCEPTED", MODEL_COUNCIL, "allowance_package.accepted must be true for executable packets.")
+        if require_executable and allowance_package.get("execution_ready") is not True:
+            add("ALLOWANCE_PACKAGE_NOT_EXECUTION_READY", MODEL_COUNCIL, "allowance_package.execution_ready must be true for executable packets.")
     if not sequence_context:
         add("MISSING_SEQUENCE_CONTEXT", MODEL_COUNCIL, "model_council.sequence_context is required.")
     else:

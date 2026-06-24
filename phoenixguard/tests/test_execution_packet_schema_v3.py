@@ -25,6 +25,30 @@ NOW = 1_800_000_000.0
 Payload = dict[str, Any]
 
 
+def _allowance_package(
+    *,
+    package_type: str = "INTRADAY_ENTER_NOW",
+    side: str = "BUY",
+    accepted: bool = True,
+    execution_ready: bool = True,
+) -> Payload:
+    return {
+        "schema_version": "PG_ALLOWANCE_PACKAGE_V1",
+        "package_type": package_type,
+        "allowance_family": "INTRADAY" if package_type == "INTRADAY_ENTER_NOW" else "SWING",
+        "execution_authority": "PG_EXECUTION_PACKET_V3",
+        "side": side,
+        "accepted": accepted,
+        "decision_accepted": accepted,
+        "execution_ready": execution_ready,
+        "entry_now_allowed": package_type == "INTRADAY_ENTER_NOW",
+        "timing_mode": "ENTER_NOW" if package_type == "INTRADAY_ENTER_NOW" else "WAIT_FOR_PULLBACK",
+        "selected_lane": "SNIPER_ZONE_ENTRY",
+        "score": 0.83,
+        "threshold": 0.70,
+    }
+
+
 def _packet(**overrides: Any) -> Payload:
     payload = build_execution_packet_v3(
         packet_id="pgpkt-test-001",
@@ -72,6 +96,7 @@ def _packet(**overrides: Any) -> Payload:
             session_id="pocket-live-8788",
             side="BUY",
         ),
+        allowance_package=_allowance_package(),
     )
     _deep_update(payload, overrides)
     return payload
@@ -106,6 +131,29 @@ def test_execution_packet_schema_v3_valid() -> None:
     assert payload["instrument_context"]["identity_state"] == "IDENTITY_CONFIRMED"
     assert payload["instrument_context"]["display_symbol"] == "EUR/GBP OTC"
     assert payload["instrument_context"]["ocr_symbol"] == ""
+
+
+def test_executable_packet_requires_explicit_allowance_package() -> None:
+    payload = _packet()
+    payload.pop("allowance_package")
+    council = cast(Payload, payload["model_council"])
+    council.pop("allowance_package")
+
+    result = validate_execution_packet_v3(payload, now_epoch=NOW)
+
+    assert result.rejected is True
+    assert "MISSING_ALLOWANCE_PACKAGE" in result.reason_codes
+    assert MODEL_COUNCIL in result.categories
+
+
+def test_executable_packet_rejects_non_ready_allowance_package() -> None:
+    payload = _packet(allowance_package=_allowance_package(execution_ready=False))
+
+    result = validate_execution_packet_v3(payload, now_epoch=NOW)
+
+    assert result.rejected is True
+    assert "ALLOWANCE_PACKAGE_NOT_EXECUTION_READY" in result.reason_codes
+    assert MODEL_COUNCIL in result.categories
 
 
 def test_execution_packet_publication_age_overrides_source_frame_age(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,6 +192,7 @@ def test_execution_packet_publication_age_overrides_source_frame_age(monkeypatch
             session_id="pocket-live-8788",
             side="BUY",
         ),
+        allowance_package=_allowance_package(),
     )
 
     assert payload["live_integrity"]["packet_age_ms"] == 200

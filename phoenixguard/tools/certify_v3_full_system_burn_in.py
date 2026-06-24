@@ -82,7 +82,7 @@ REQUIRED_COMPONENTS = [
     "STUDY_PACKET",
     "PG_EXECUTION_PACKET_V3",
     "PacketValidatorV3",
-    "ShooterActionSequencerV2",
+    "ShooterPackageReporter",
     "OutcomeFeedbackV3",
     "Dashboard/FloatingStateV2",
     "RuntimeTraceV3",
@@ -254,6 +254,8 @@ def _process_snapshot() -> dict[str, Any]:
             if match.group(1).strip("\"'")
         }
     )
+    if shooter and not shooter_modes:
+        shooter_modes = ["PACKAGE_REPORTER"]
     listeners = tcp_listeners([8793, 8787])
     listener_errors = [str(row.get("error")) for row in listeners if row.get("error")]
     return {
@@ -276,13 +278,13 @@ def _actual_live_click_arming(samples: Sequence[Mapping[str, Any]]) -> dict[str,
             if text:
                 modes.add(text)
     env_armed = _env_true("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS")
-    live_mode_armed = bool(modes.intersection({"LIVE_READY", "LIVE_ENABLED", "FULL_ACTIVATED", "LIVE_BEHAVIOR_VALIDATION"}))
+    live_mode_armed = False
     return {
         "requested_full_activated_mode": False,
         "env_live_clicks_allowed": env_armed,
         "shooter_modes": sorted(modes),
         "actual_live_clicks_armed": bool(env_armed and live_mode_armed),
-        "reason": "requires PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS=1 and a live-capable shooter mode",
+        "reason": "local shooter click arming is retired; shooter package reporter never clicks",
     }
 
 
@@ -292,7 +294,8 @@ def _live_click_armed_from_snapshot(process_snapshot: Mapping[str, Any]) -> bool
         for mode in _sequence(_mapping(process_snapshot).get("shooter_modes"))
         if _text(mode)
     }
-    return bool(_env_true("PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS") and modes.intersection({"LIVE_READY", "LIVE_ENABLED", "FULL_ACTIVATED", "LIVE_BEHAVIOR_VALIDATION"}))
+    _ = modes
+    return False
 
 
 def _actual_click_observed(shooter: Mapping[str, Any]) -> bool:
@@ -1104,9 +1107,9 @@ def _promotion_failure_row(
             row["next_required"] = "runtime trace must include promotion_trace or execution_lane before packet absence can be certified"
             row["exact_field_preventing_execution_packet"] = "promotion_trace"
         elif same_packet_second_read:
-            row["denied_at"] = "SHOOTER_SECOND_READ_PENDING"
-            row["next_required"] = "ShooterActionSequencerV2 second live read must pass before click"
-            row["exact_field_preventing_execution_packet"] = "ShooterActionSequencerV2.second_read"
+            row["denied_at"] = "SHOOTER_PACKAGE_REPORT_PENDING"
+            row["next_required"] = "ShooterPackageReporter must publish a fresh allowed package report"
+            row["exact_field_preventing_execution_packet"] = "ShooterPackageReporter.allowed_package_report"
         audit = _mapping(row.get("promotion_failure_audit_v3"))
         if audit and row["denied_at"] != "PG_EXECUTION_PACKET_V3_MISSING_AFTER_READY_GATES":
             audit["denied_at"] = row["denied_at"]
@@ -1237,7 +1240,7 @@ def _render_report(
         f"- Mode: `{args.mode}`",
         f"- Full activated certification requested: `{args.mode == 'FULL_ACTIVATED'}`",
         f"- Actual broker clicks armed: `{live_click_arming['actual_live_clicks_armed']}`",
-        f"- Shooter modes observed: `{', '.join(live_click_arming['shooter_modes']) or 'none'}`",
+        f"- Shooter reporter modes observed: `{', '.join(live_click_arming['shooter_modes']) or 'none'}`",
         f"- Live-click env allowed: `{live_click_arming['env_live_clicks_allowed']}`",
         f"- Session: `{args.session}`",
         f"- Base URL: `{args.base_url}`",
@@ -1251,7 +1254,7 @@ def _render_report(
         "",
         "## 3. Live Click Arming",
         "",
-        "- Live clicking was permitted only through fresh validated `PG_EXECUTION_PACKET_V3` and `ShooterActionSequencerV2`.",
+        "- Local shooter live clicking is retired; shooter only reports fresh accepted allowance packages.",
         "- Raw signals, dashboard state, skill gates, memory confidence, and `final_side` alone were not accepted as authority.",
         f"- Actual arming reason: `{live_click_arming['reason']}`",
         "",
@@ -1512,8 +1515,8 @@ def main() -> int:
             preflight_failures.append(f"model health preflight is not PASS: {_text(preflight_model.get('status'), 'MISSING')}")
         if not initial_processes["shooter_pids"] and not args.allow_missing_shooter:
             preflight_failures.append("shooter process is not alive for FULL_ACTIVATED burn-in")
-        if preflight_nodes.get("ShooterActionSequencerV2") in {"MISSING", "FAIL"}:
-            preflight_failures.append(f"ShooterActionSequencerV2 preflight status={preflight_nodes.get('ShooterActionSequencerV2')}")
+        if preflight_nodes.get("ShooterPackageReporter") in {"MISSING", "FAIL"}:
+            preflight_failures.append(f"ShooterPackageReporter preflight status={preflight_nodes.get('ShooterPackageReporter')}")
         if failures or preflight_failures:
             failures.extend(preflight_failures)
             ended = time.time()

@@ -172,27 +172,11 @@ class ExecutionLaneResult:
 
 
 @dataclass(frozen=True)
-class ActionStepResultContract:
-    step: str
-    target: str
-    result: str
-    state: str = ""
-    wait_after_ms: int = 0
-    reason: str = ""
-
-
-@dataclass(frozen=True)
-class CalibrationManifestContract:
-    required_targets: tuple[str, ...] = (
-        "broker_screen",
-        "time_button",
-        "hourly_input",
-        "minute_input",
-        "buy_icon",
-        "sell_icon",
-        "final_screen",
-    )
-    forbidden_targets: tuple[str, ...] = ("amount_input", "amount_box", "amount_plus", "amount_minus")
+class ShooterPackageReportContract:
+    schema_version: str = "PG_SHOOTER_PACKAGE_REPORT_V1"
+    allowed_package_types: tuple[str, ...] = ("INTRADAY_ENTER_NOW", "SWING")
+    execution_removed: bool = True
+    broker_click_allowed: bool = False
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -474,7 +458,7 @@ def public_language_scorecard() -> dict[str, Any]:
         "version": LANGUAGE_CONSTITUTION_VERSION,
         "active_packet_contracts": [STUDY_PACKET_TYPE, EXECUTION_PACKET_TYPE],
         "execution_authority": "validated PG_EXECUTION_PACKET_V3 only",
-        "action_authority": "ShooterActionSequencerV2 only",
+        "action_authority": "MT4 bridge or external executor only; shooter reports allowed packages",
         "operator_truth": "FloatingStateV2 reducer only",
         "side_hierarchy": ["raw_side", "candidate_side", "final_side", "execution.side"],
         "required_runtime_trace_nodes": [
@@ -485,7 +469,7 @@ def public_language_scorecard() -> dict[str, Any]:
             "floating_state",
             "shooter_handshake",
             "model_health",
-            "calibration_status",
+            "package_reporter_status",
             "cache_status",
         ],
     }

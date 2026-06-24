@@ -201,15 +201,10 @@ function Start-LiveReadyShooter {
     $escapedRoot = $PSScriptRoot.Replace("'", "''")
     $escapedSessionId = $SessionId.Replace("'", "''")
     $escapedBaseUrl = $BaseUrl.Replace("'", "''")
-    $escapedBrokerWindowQuery = $BrokerWindowQuery.Replace("'", "''")
-    $windowHwndArg = ""
-    if ($BrokerWindowHwnd -gt 0) {
-        $windowHwndArg = " --window-hwnd $BrokerWindowHwnd"
-    }
     $shooterCommand = @(
         "cd '$escapedRoot'",
-        "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='1'",
-        ".\.venv\Scripts\python.exe 'shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll 0.05 --max-signal-age 30 --preferred-source tracker --require-preferred-source --min-confidence 0.2 --window-query '$escapedBrokerWindowQuery'$windowHwndArg --shooter-mode LIVE_READY --broker-speed-profile 'config/shooter_broker_timing_profile.json' --action-speed balanced --no-auto-open --record-action-evidence"
+        "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='0'",
+        ".\.venv\Scripts\python.exe 'shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll 0.05"
     ) -join '; '
 
     Start-Process powershell -ArgumentList @(
@@ -231,7 +226,7 @@ Write-Host "  Dashboard: $dashboardUrl"
 if ($DisableShooter) {
     Write-Host "  Shooter: DISABLED for this launch"
 } else {
-    Write-Warning "LIVE broker clicks will be armed for this launched shooter process. The shooter still waits for PG_EXECUTION_PACKET_V3."
+    Write-Host "  Shooter: PACKAGE_REPORTER only; broker clicks are retired."
 }
 
 $env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS = '0'
@@ -364,20 +359,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "Preflight: broker window"
-& $pythonPath 'shooter.py' list-windows --contains $BrokerWindowQuery
-if ($LASTEXITCODE -ne 0) {
-    Write-Warning "Broker window preflight found no visible match for '$BrokerWindowQuery'. Continuing so the tracker can warm up and attach when the broker becomes visible."
-}
-
-if (-not $SkipPreview) {
-    Write-Host ""
-    Write-Host "Preflight: calibration preview"
-    & $pythonPath 'shooter.py' preview --window-query $BrokerWindowQuery
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Calibration preview could not run against '$BrokerWindowQuery'. Continuing with a warming launch instead of aborting."
-    }
-}
+Write-Host "Preflight: shooter broker-window and calibration checks retired"
 
 Write-Host ""
 Write-Host "Launching full V3 tracker and Model Council stack; shooter arms only after readiness..."
@@ -386,7 +368,7 @@ $launchArgs = @{
     BrokerWindowQuery = $BrokerWindowQuery
     BrokerWindowHwnd = $BrokerWindowHwnd
     Profile = 'TRACKER_PLUS_COUNCIL'
-    ShooterMode = 'LIVE_DISABLED'
+    ShooterMode = 'PACKAGE_REPORTER'
     RecordActionEvidence = $false
     NoStatusLoop = $true
 }

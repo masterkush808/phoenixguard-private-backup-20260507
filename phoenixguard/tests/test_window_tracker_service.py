@@ -4946,17 +4946,17 @@ def test_full_local_launcher_has_one_final_live_profile_and_keeps_broker_auto_op
 
     assert "FINAL_LIVE" in launcher
     assert "[string]$ShooterMode" in launcher
-    assert "else { 'LIVE_READY' }" in launcher
+    assert "else { 'PACKAGE_REPORTER' }" in launcher
     assert "PAPER_EXECUTION" not in launcher
     legacy_calibration_profile = "CALIBRATION" + "_TEST_ONLY"
     assert legacy_calibration_profile not in launcher
     assert "PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS" in launcher
     assert "BrokerWindowHwnd" in launcher
     assert "PHOENIXGUARD_BROKER_WINDOW_HWND" in launcher
-    assert "--window-hwnd" in launcher
-    assert "$liveClickArm = if ($ShooterMode -eq 'LIVE_READY'" in launcher
-    assert "--shooter-mode" in launcher
-    assert "--no-auto-open" in launcher
+    assert "--window-hwnd" not in launcher
+    assert "$liveClickArm = if ($ShooterMode -eq 'LIVE_READY'" not in launcher
+    assert "--shooter-mode" not in launcher
+    assert "--no-auto-open" not in launcher
 
 
 def test_tracker_http_surface_runs_memory_projection_actions(tmp_path: Path, monkeypatch: Any) -> None:
@@ -5248,17 +5248,17 @@ def test_pocket_option_execution_backend_rejects_blank_calibrated_box_map_fallba
     assert payload["expiry_lock"]["field_ready"] is False
 
 
-def test_pocket_option_execution_backend_anchors_time_field_to_calibrated_box_map_on_real_panel() -> None:
+def test_pocket_option_execution_backend_anchors_time_field_to_surface_fallback_on_real_panel() -> None:
     backend = PocketOptionBrokerExecutionBackend()
     full_gui = _synthetic_full_pocket_option_gui()
     payload = backend.read_surface(full_gui)
 
     assert payload["controls_ready"] is True
-    assert payload["time_field"]["source"] == "shooter_box_map_time_field"
+    assert payload["time_field"]["source"] == "amount_relative"
     time_center = PocketOptionBrokerExecutionBackend.bbox_center(payload["time_field"]["bbox"])
     assert time_center is not None
-    assert abs(time_center[0] - int(round(full_gui.width * 0.91125))) <= 3
-    assert abs(time_center[1] - int(round(full_gui.height * 0.26685))) <= 3
+    assert abs(time_center[0] - int(round(full_gui.width * 0.91125))) <= 20
+    assert abs(time_center[1] - int(round(full_gui.height * 0.26685))) <= 40
 
 
 def test_pocket_option_execution_backend_reads_broker_identity_from_header_adapter() -> None:

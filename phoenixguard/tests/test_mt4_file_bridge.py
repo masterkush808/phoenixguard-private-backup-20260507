@@ -93,6 +93,8 @@ def test_mt4_bridge_compact_command_preserves_ea_contract() -> None:
     assert decoded["entry_eligibility"]["allowance_package_type"] == "INTRADAY_ENTER_NOW"
     assert decoded["allowance_package"]["schema_version"] == "PG_ALLOWANCE_PACKAGE_V1"
     assert decoded["allowance_package"]["package_type"] == "INTRADAY_ENTER_NOW"
+    assert decoded["allowance_package"]["source_present"] is True
+    assert decoded["allowance_package"]["inferred"] is False
     assert decoded["allowance_package"]["selected_lane"] == "SNIPER_ZONE_ENTRY"
     assert decoded["execution"]["allowance_package_type"] == "INTRADAY_ENTER_NOW"
     assert decoded["permission_state"]["entry_eligible"] is True
@@ -129,6 +131,40 @@ def test_mt4_bridge_compact_command_preserves_swing_allowance_package() -> None:
     assert command["allowance_package"]["allowance_family"] == "SWING"
     assert command["entry_eligibility"]["allowance_package_type"] == "SWING"
     assert command["execution"]["allowance_package_type"] == "SWING"
+
+
+def test_mt4_bridge_rejects_inferred_allowance_package() -> None:
+    bridge = _load_bridge_module()
+    packet = _sample_execution_packet()
+    packet.pop("allowance_package")
+
+    command = bridge._compact_command(packet, bridge_sequence=10)
+
+    assert command["allowance_package"]["source_present"] is False
+    assert command["allowance_package"]["inferred"] is True
+    try:
+        bridge._validate_command(command)
+    except ValueError as exc:
+        assert "explicit from Model Council" in str(exc)
+    else:
+        raise AssertionError("bridge accepted an inferred allowance package")
+
+
+def test_mt4_bridge_rejects_non_ready_allowance_package() -> None:
+    bridge = _load_bridge_module()
+    packet = _sample_execution_packet()
+    allowance = dict(cast(Mapping[str, object], packet["allowance_package"]))
+    allowance["execution_ready"] = False
+    packet["allowance_package"] = allowance
+
+    command = bridge._compact_command(packet, bridge_sequence=11)
+
+    try:
+        bridge._validate_command(command)
+    except ValueError as exc:
+        assert "execution_ready" in str(exc)
+    else:
+        raise AssertionError("bridge accepted a non-ready allowance package")
 
 
 def test_mt4_bridge_rejects_compacted_command_that_would_fail_ea_contract() -> None:

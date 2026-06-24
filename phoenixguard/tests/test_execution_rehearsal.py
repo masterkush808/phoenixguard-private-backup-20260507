@@ -50,7 +50,7 @@ def _boxes() -> dict[str, dict[str, float]]:
     }
 
 
-def test_execution_rehearsal_ready_when_packet_coordinate_and_identity_pass() -> None:
+def test_execution_rehearsal_reports_retired_broker_coordinates() -> None:
     result = rehearse_execution(
         _packet(),
         {"gate_1_second_read": "PASS"},
@@ -59,10 +59,12 @@ def test_execution_rehearsal_ready_when_packet_coordinate_and_identity_pass() ->
         now_epoch=NOW,
     )
 
-    assert result["ready"] is True
-    assert result["would_click"] == "BUY"
+    assert result["ready"] is False
+    assert result["would_click"] == ""
     assert result["would_type_time"] == "00:05:00"
     assert result["packet_still_valid_after_latency"] is True
+    assert "BROKER_COORDINATE_EXECUTION_RETIRED" in result["issues"]
+    assert result["coordinate_report"]["execution_removed"] is True
 
 
 def test_execution_rehearsal_blocks_unconfirmed_broker_identity() -> None:
@@ -90,5 +92,5 @@ def test_execution_rehearsal_blocks_bad_coordinates_and_candle_wait() -> None:
     )
 
     assert result["ready"] is False
-    assert "COORDINATE_REPORT_INVALID" in result["issues"]
+    assert "BROKER_COORDINATE_EXECUTION_RETIRED" in result["issues"]
     assert "CURRENT_CANDLE_PHASE_NOT_EXECUTABLE" in result["issues"]

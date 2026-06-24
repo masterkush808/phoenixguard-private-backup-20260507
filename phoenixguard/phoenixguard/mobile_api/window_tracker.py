@@ -3748,8 +3748,8 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
             )
             if prior_blocker.startswith("SHOOTER_SECOND_READ"):
                 return (
-                    "SHOOTER_SECOND_READ_PENDING",
-                    "ShooterActionSequencerV2 second live read must pass before click; expired packets remain rejected.",
+                    "SHOOTER_PACKAGE_REPORT_PENDING",
+                    "Shooter package reporter must publish a fresh allowed package report; expired packets remain rejected.",
                     sequence,
                     lane,
                     final_score,
@@ -6235,29 +6235,6 @@ class PocketOptionBrokerExecutionBackend:
     @staticmethod
     @lru_cache(maxsize=1)
     def _shooter_box_map() -> dict[str, dict[str, float]]:
-        candidates = [
-            Path.cwd() / "808_shooter_boxes.json",
-            Path(__file__).resolve().parents[2] / "808_shooter_boxes.json",
-        ]
-        for path in candidates:
-            if not path.exists():
-                continue
-            try:
-                parsed = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if not isinstance(parsed, Mapping):
-                continue
-            parsed_map = cast(Mapping[str, Any], parsed)
-            boxes: dict[str, dict[str, float]] = {}
-            for key, value in parsed_map.items():
-                row = _mapping_to_dict(value)
-                x = _float_or(row.get("x"), float("nan"))
-                y = _float_or(row.get("y"), float("nan"))
-                if np.isfinite(x) and np.isfinite(y):
-                    boxes[str(key)] = {"x": _clip01(x), "y": _clip01(y)}
-            if boxes:
-                return boxes
         return {}
 
     @staticmethod
@@ -20257,7 +20234,7 @@ class ContinuousWindowTrackerService:
         state["runtime_integrity_category"] = "RUNTIME_INTEGRITY"
         return finish(
             "blocked_by_runtime",
-            "Demo random live execution is disabled under Model Council V3; publish a PG_EXECUTION_PACKET_V3 and let the standalone shooter perform the calibrated click.",
+            "Demo random live execution is disabled under Model Council V3; publish a PG_EXECUTION_PACKET_V3 and let the shooter package reporter publish the allowed package.",
         )
 
         now_epoch = _now_epoch()
@@ -22403,12 +22380,12 @@ class ContinuousWindowTrackerService:
                 packet_side = resolve_v3_packet_side(packet)
                 packet_expiry = resolve_v3_packet_expiry_seconds(packet)
                 broker_surface = dict(previous_surface) if previous_surface else _default_broker_surface_payload(
-                    message="Broker control scan deferred to standalone shooter for executable Model Council packet."
+                    message="Broker control scan deferred because shooter is a package reporter only."
                 )
                 broker_surface["cached"] = bool(previous_surface)
                 broker_surface["cache_age_sec"] = round(float(previous_surface_age), 3) if previous_surface else 0.0
                 broker_surface["scan_skipped"] = True
-                broker_surface["scan_skip_reason"] = "executable_packet_deferred_to_shooter"
+                broker_surface["scan_skip_reason"] = "executable_packet_deferred_to_package_reporter"
                 broker_surface["broker_surface_hash"] = str(
                     broker_surface.get("broker_surface_hash", "") or _surface_signature(window_image)
                 )
@@ -22421,14 +22398,13 @@ class ContinuousWindowTrackerService:
                 state["expiry_seconds"] = int(packet_expiry or 0)
                 state["actionable"] = False
                 state["execution_timing"] = _mapping_to_dict(_mapping_to_dict(packet.get("execution")).get("time_sequence"))
-                state["status"] = "external_shooter_required"
+                state["status"] = "package_reporter_required"
                 state["message"] = (
-                    "Model Council V3 packet is executable; standalone shooter must perform second live read "
-                    "and calibrated click. Tracker will not click."
+                    "Model Council V3 packet is executable; shooter package reporter must publish the allowed package. Tracker will not click."
                 )
                 state["recent_log"] = self._append_execution_log(
                     state,
-                    status="external_shooter_required",
+                    status="package_reporter_required",
                     message=str(state["message"]),
                     side=str(state["side"]),
                     lane=str(state["lane"]),
@@ -22659,8 +22635,8 @@ class ContinuousWindowTrackerService:
             state["actionable"] = False
             state["execution_timing"] = _mapping_to_dict(_mapping_to_dict(packet.get("execution")).get("time_sequence"))
             return block(
-                "external_shooter_required",
-                "Model Council V3 packet is executable; standalone shooter must perform second live read and calibrated click. Tracker will not click.",
+                "package_reporter_required",
+                "Model Council V3 packet is executable; shooter package reporter must publish the allowed package. Tracker will not click.",
             )
         if not bool(broker_surface.get("controls_ready", False)):
             return block("blocked", "Broker BUY/SELL controls were not confidently detected.")

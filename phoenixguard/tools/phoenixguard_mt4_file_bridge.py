@@ -178,6 +178,7 @@ def _compact_allowance_package(
     side: str,
 ) -> dict[str, object]:
     source = _allowance_source(payload, execution, council)
+    source_present = bool(source)
     timing_decision = _nested(payload, "timing_decision") or _nested(council, "timing_decision")
     timing_mode = str(
         source.get("timing_mode")
@@ -200,11 +201,13 @@ def _compact_allowance_package(
         "package_type": package_type,
         "allowance_family": allowance_family,
         "execution_authority": str(source.get("execution_authority") or "PG_EXECUTION_PACKET_V3"),
+        "source_present": source_present,
+        "inferred": not source_present,
         "side": str(source.get("side") or side),
         "accepted": bool(source.get("accepted", eligible)),
         "decision_accepted": bool(source.get("decision_accepted", source.get("accepted", eligible))),
-        "execution_ready": bool(eligible),
-        "executable": bool(eligible),
+        "execution_ready": bool(source.get("execution_ready", eligible)),
+        "executable": bool(source.get("executable", eligible)),
         "tracking_active": bool(source.get("tracking_active", False)) and not eligible,
         "intraday_capture_active": bool(source.get("intraday_capture_active", package_type == "INTRADAY_ENTER_NOW" and eligible)),
         "entry_now_allowed": bool(entry_now_allowed),
@@ -365,10 +368,16 @@ def _validate_command(command: dict[str, object]) -> None:
     allowance = _nested(command, "allowance_package")
     if allowance.get("schema_version") != "PG_ALLOWANCE_PACKAGE_V1":
         raise ValueError("MT4 command allowance_package schema_version mismatch")
+    if allowance.get("source_present") is not True or allowance.get("inferred") is True:
+        raise ValueError("MT4 command allowance_package must be explicit from Model Council")
     if allowance.get("package_type") not in {"SWING", "INTRADAY_ENTER_NOW"}:
         raise ValueError("MT4 command allowance_package.package_type must be SWING or INTRADAY_ENTER_NOW")
     if allowance.get("execution_authority") != "PG_EXECUTION_PACKET_V3":
         raise ValueError("MT4 command allowance_package.execution_authority must be PG_EXECUTION_PACKET_V3")
+    if allowance.get("accepted") is not True:
+        raise ValueError("MT4 command allowance_package.accepted must be true")
+    if allowance.get("execution_ready") is not True:
+        raise ValueError("MT4 command allowance_package.execution_ready must be true")
     live = _nested(command, "live_integrity")
     if live.get("is_live") is not True:
         raise ValueError("MT4 command live_integrity.is_live must be true")

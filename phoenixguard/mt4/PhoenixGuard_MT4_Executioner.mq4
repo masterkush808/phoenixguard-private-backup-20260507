@@ -562,6 +562,10 @@ bool ValidatePhoenixPacket(const string raw, PgPacket &packet)
       packet.allowance_family = (packet.allowance_package_type == "INTRADAY_ENTER_NOW" ? "INTRADAY" : "SWING");
    if(InpRequireKnownAllowancePackage && !IsKnownAllowancePackage(packet.allowance_package_type))
       return Reject(packet, "UNKNOWN_ALLOWANCE_PACKAGE_" + packet.allowance_package_type);
+   if(!packet.allowance_accepted)
+      return Reject(packet, "ALLOWANCE_PACKAGE_NOT_ACCEPTED");
+   if(!packet.allowance_execution_ready)
+      return Reject(packet, "ALLOWANCE_PACKAGE_NOT_EXECUTION_READY");
    if(packet.allowance_package_type == "INTRADAY_ENTER_NOW" && !InpAllowIntradayEnterNowPackages)
       return Reject(packet, "INTRADAY_ENTER_NOW_PACKAGE_DISABLED");
    if(packet.allowance_package_type == "SWING" && !InpAllowSwingPackages)

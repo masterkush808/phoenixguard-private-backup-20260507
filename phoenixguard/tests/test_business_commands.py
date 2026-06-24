@@ -29,6 +29,24 @@ from tests.support.v3_packet_samples import complete_sequence_context_v3
 NOW = 1_800_000_000.0
 
 
+def _allowance_package() -> dict[str, object]:
+    return {
+        "schema_version": "PG_ALLOWANCE_PACKAGE_V1",
+        "package_type": "INTRADAY_ENTER_NOW",
+        "allowance_family": "INTRADAY",
+        "execution_authority": "PG_EXECUTION_PACKET_V3",
+        "side": "BUY",
+        "accepted": True,
+        "decision_accepted": True,
+        "execution_ready": True,
+        "entry_now_allowed": True,
+        "timing_mode": "ENTER_NOW",
+        "selected_lane": "SNIPER_ZONE_ENTRY",
+        "score": 0.84,
+        "threshold": 0.70,
+    }
+
+
 def _account(**updates: Any) -> ConnectorAccountState:
     base: dict[str, Any] = {
         "license_id": "license-a",
@@ -96,6 +114,7 @@ def _packet(**updates: Any) -> dict[str, Any]:
             session_id="pocket-live-8788",
             side="BUY",
         ),
+        allowance_package=_allowance_package(),
     )
     _deep_update(packet, updates)
     return packet

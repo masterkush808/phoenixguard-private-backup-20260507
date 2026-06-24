@@ -21,19 +21,8 @@ REQUIRED_IMPORTS = {
     "Market Reality Engine": "phoenixguard.decision.market_reality_engine",
     "Execution Packet V3": "phoenixguard.execution.packet_v3",
     "V3 Language Contracts": "phoenixguard.execution.v3_language",
-    "Shooter Action Sequencer": "phoenixguard.execution.shooter_action_sequencer",
     "Floating State V2": "phoenixguard.execution.floating_state_reducer",
-    "Calibration Manifest": "phoenixguard.execution.calibration_manifest",
     "Observability V3": "phoenixguard.runtime.observability_v3",
-}
-REQUIRED_BOX_TARGETS = {
-    "broker_screen",
-    "time_button",
-    "hourly_input",
-    "minute_input",
-    "buy_icon",
-    "sell_icon",
-    "final_screen",
 }
 BENIGN_RUNTIME_FILES = {
     "floating_window_v2.json",
@@ -127,31 +116,11 @@ def main() -> int:
             print(status_line(label, False, str(exc)))
             failures.append(label)
 
-    boxes_path = ROOT / "808_shooter_boxes.json"
-    boxes_ok = boxes_path.exists()
-    missing_targets = sorted(REQUIRED_BOX_TARGETS)
-    if boxes_ok:
-        try:
-            boxes = load_json(boxes_path)
-            points = mapping(boxes.get("points"))
-            if points:
-                available = set(points)
-            else:
-                available = set(boxes.keys())
-            missing_targets = sorted(REQUIRED_BOX_TARGETS - available)
-        except Exception as exc:
-            missing_targets = sorted(REQUIRED_BOX_TARGETS)
-            print(status_line("Calibration JSON", False, str(exc)))
-    calibration_ok = boxes_ok and not missing_targets and (ROOT / "user_calibration_manifest.json").exists()
-    print(status_line("Calibration", calibration_ok, "" if calibration_ok else f"missing {missing_targets}"))
-    if not calibration_ok:
-        failures.append("Calibration")
-
     shooter_text = (ROOT / "shooter.py").read_text(encoding="utf-8", errors="ignore")
-    v3_guard_ok = "Live execution authority: PG_EXECUTION_PACKET_V3" in shooter_text and "production V3 modes require PG_EXECUTION_PACKET_V3 only" in shooter_text
-    print(status_line("Legacy Trigger Paths", v3_guard_ok, "DISABLED" if v3_guard_ok else "guard text missing"))
+    v3_guard_ok = "broker execution is retired" in shooter_text and "REPORT_ALLOWED_PACKAGE" in shooter_text
+    print(status_line("Shooter Package Reporter", v3_guard_ok, "execution retired" if v3_guard_ok else "reporter guard text missing"))
     if not v3_guard_ok:
-        failures.append("Legacy Trigger Paths")
+        failures.append("Shooter Package Reporter")
 
     launch_profile = mapping(manifest.get("launch_profile"))
     canonical_launcher = ROOT / str(launch_profile.get("launcher") or "")
@@ -160,16 +129,16 @@ def main() -> int:
     engine_launcher_text = engine_launcher.read_text(encoding="utf-8", errors="ignore") if engine_launcher.exists() else ""
     profile_ok = (
         launch_profile.get("production") == "FINAL_LIVE"
-        and launch_profile.get("shooter_mode") == "LIVE_READY"
-        and launch_profile.get("live_click_arm") == "set_by_canonical_launcher"
+        and launch_profile.get("shooter_mode") == "PACKAGE_REPORTER"
+        and launch_profile.get("live_click_arm") == "retired"
         and "start_phoenixguard_full_local.ps1" in launcher_text
         and "FINAL_LIVE" in engine_launcher_text
         and "Legacy V1/V2: OFF" in engine_launcher_text
         and "Startup Test Signal: REMOVED" in engine_launcher_text
     )
-    print(status_line("FINAL_LIVE canonical launch profile", profile_ok))
+    print(status_line("FINAL_LIVE package reporter launch profile", profile_ok))
     if not profile_ok:
-        failures.append("FINAL_LIVE canonical launch profile")
+        failures.append("FINAL_LIVE package reporter launch profile")
 
     runtime_dir = ROOT / ".codex_runtime"
     runtime_entries = [path for path in runtime_dir.iterdir() if runtime_entry_is_active(path)] if runtime_dir.exists() else []

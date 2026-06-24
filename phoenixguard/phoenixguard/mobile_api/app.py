@@ -954,6 +954,24 @@ def _latest_shooter_handshake(session_id: str | None = None) -> dict[str, object
         raise KeyError("Shooter handshake session mismatch.")
     if requested_session_id and not payload_session_id:
         normalized["session_id"] = requested_session_id
+    if normalized.get("schema_version") == "PG_SHOOTER_PACKAGE_REPORT_V1":
+        updated_epoch = _epoch_float(normalized.get("updated_epoch_sec"), 0.0)
+        fallback_valid_until = updated_epoch + _PUBLISHED_PACKET_FALLBACK_TTL_SEC if updated_epoch > 0.0 else 0.0
+        valid_until = _epoch_float(normalized.get("valid_until_epoch_sec"), fallback_valid_until)
+        if valid_until > 0.0 and time.time() > valid_until:
+            raise KeyError("Shooter package report is stale.")
+        allowance = _as_object_mapping(normalized.get("allowance_package") or normalized.get("allowed_package"))
+        package_type = str(allowance.get("package_type") or "").strip().upper()
+        if allowance.get("schema_version") != "PG_ALLOWANCE_PACKAGE_V1":
+            raise KeyError("Shooter package report allowance schema mismatch.")
+        if package_type not in {"INTRADAY_ENTER_NOW", "SWING"}:
+            raise KeyError("Shooter package report allowance type is not allowed.")
+        if allowance.get("execution_authority") != "PG_EXECUTION_PACKET_V3":
+            raise KeyError("Shooter package report authority mismatch.")
+        if allowance.get("accepted") is not True or allowance.get("execution_ready") is not True:
+            raise KeyError("Shooter package report allowance is not execution-ready.")
+        if package_type == "INTRADAY_ENTER_NOW" and allowance.get("entry_now_allowed") is not True:
+            raise KeyError("Shooter package report intraday package is not entry-now allowed.")
     return normalized
 
 
@@ -965,10 +983,13 @@ def _missing_shooter_handshake_state(
     return {
         "session_id": str(session_id or "").strip(),
         "state": "WAITING",
-        "mode": "LIVE_READY",
+        "mode": "PACKAGE_REPORTER",
         "available": False,
         "reason": detail,
-        "next_required": "shooter handshake publish",
+        "execution_removed": True,
+        "broker_click_allowed": False,
+        "will_click": False,
+        "next_required": "fresh accepted intraday or swing allowance package",
     }
 
 
@@ -3103,14 +3124,16 @@ def create_app(
                 "stale_payload": execution_latest.get("payload"),
             }
 
-        project_root = Path(__file__).resolve().parents[2]
-        calibration_status: dict[str, object] = {
-            "status": "PASS"
-            if (project_root / "808_shooter_boxes.json").exists()
-            and (project_root / "user_calibration_manifest.json").exists()
-            else "MISSING",
-            "boxes_path": "808_shooter_boxes.json",
-            "manifest_path": "user_calibration_manifest.json",
+        package_reporter_status: dict[str, object] = {
+            "status": "PASS" if shooter_handshake.get("status") == "PASS" else "WAITING",
+            "schema_version": "PG_SHOOTER_PACKAGE_REPORT_V1",
+            "mode": "PACKAGE_REPORTER",
+            "execution_removed": True,
+            "broker_click_allowed": False,
+            "reported_package_type": str(shooter_handshake.get("package_type") or ""),
+            "next_required": "fresh accepted intraday or swing allowance package"
+            if shooter_handshake.get("status") != "PASS"
+            else "",
         }
         cache_status: dict[str, object] = {
             "status": str(tracker_payload.get("cache_status") or tracker_payload.get("cache") or "UNKNOWN").upper(),
@@ -3124,7 +3147,7 @@ def create_app(
             "floating_state": floating_state,
             "shooter_handshake": shooter_handshake,
             "model_health": model_health,
-            "calibration_status": calibration_status,
+            "package_reporter_status": package_reporter_status,
             "cache_status": cache_status,
             "sequence_context": {
                 "status": "PASS" if sequence_context_readiness.get("ready") else "INCOMPLETE",
@@ -3450,7 +3473,7 @@ def create_app(
             "OutcomeFeedbackV3": "PASS" if outcome_evidence else "WAITING",
             "RuntimeTraceV3": "PASS",
             "Dashboard/FloatingStateV2": _endpoint_status("floating_state"),
-            "ShooterActionSequencerV2": "WAITING" if not packet_ids["execution"] else _endpoint_status("shooter_handshake"),
+            "ShooterPackageReporter": "WAITING" if not packet_ids["execution"] else _endpoint_status("shooter_handshake"),
         }
         dataflow_contract_trace: dict[str, object] = {
             "schema_version": "PG_DATAFLOW_CONTRACT_TRACE_V3",

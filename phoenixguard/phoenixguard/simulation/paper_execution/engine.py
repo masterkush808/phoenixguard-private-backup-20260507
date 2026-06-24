@@ -10,17 +10,6 @@ from typing import Any, Callable, Mapping, Sequence, cast
 from phoenixguard.decision.candle_outcome_tracker import track_candle_outcome
 from phoenixguard.execution.execution_rehearsal import rehearse_execution
 from phoenixguard.execution.packet_v3 import validate_execution_packet_v3
-from phoenixguard.execution.shooter_modes import (
-    ShooterMode,
-    ShooterModeResult,
-    build_coordinate_report,
-    record_calibration_test,
-    record_dry_run_click,
-    record_live_disabled,
-    record_live_ready,
-    record_paper_execution,
-    resolve_shooter_mode,
-)
 
 
 PAPER_EXECUTION_ENGINE_VERSION = "PG_SIM_PAPER_EXECUTION_ENGINE_V1"
@@ -32,11 +21,7 @@ BrokerClickExecutor = Callable[[Mapping[str, Any], Mapping[str, Any], Mapping[st
 class PaperExecutionPaths:
     packet_log: Path = DEFAULT_PAPER_EXECUTION_ROOT / "executable_packets.jsonl"
     broker_demo_log: Path = DEFAULT_PAPER_EXECUTION_ROOT / "broker_demo_rehearsals.jsonl"
-    shooter_paper_log: Path = DEFAULT_PAPER_EXECUTION_ROOT / "shooter_paper_executions.jsonl"
-    shooter_dry_run_log: Path = DEFAULT_PAPER_EXECUTION_ROOT / "shooter_dry_run_clicks.jsonl"
-    shooter_calibration_log: Path = DEFAULT_PAPER_EXECUTION_ROOT / "shooter_calibration_tests.jsonl"
-    shooter_live_disabled_log: Path = DEFAULT_PAPER_EXECUTION_ROOT / "shooter_live_disabled.jsonl"
-    shooter_live_ready_log: Path = DEFAULT_PAPER_EXECUTION_ROOT / "shooter_live_ready.jsonl"
+    package_report_log: Path = DEFAULT_PAPER_EXECUTION_ROOT / "package_reports.jsonl"
 
     @classmethod
     def in_dir(cls, root: Path | str) -> "PaperExecutionPaths":
@@ -44,11 +29,7 @@ class PaperExecutionPaths:
         return cls(
             packet_log=base / "executable_packets.jsonl",
             broker_demo_log=base / "broker_demo_rehearsals.jsonl",
-            shooter_paper_log=base / "shooter_paper_executions.jsonl",
-            shooter_dry_run_log=base / "shooter_dry_run_clicks.jsonl",
-            shooter_calibration_log=base / "shooter_calibration_tests.jsonl",
-            shooter_live_disabled_log=base / "shooter_live_disabled.jsonl",
-            shooter_live_ready_log=base / "shooter_live_ready.jsonl",
+            package_report_log=base / "package_reports.jsonl",
         )
 
 
@@ -162,21 +143,14 @@ def _paper_execution_id(packet: Mapping[str, Any], entry: Mapping[str, Any], can
     return f"paper-{packet_id}-{stable}" if packet_id else f"paper-{stable}"
 
 
-def _shooter_result_dict(result: ShooterModeResult | None) -> dict[str, Any]:
-    if result is None:
-        return {
-            "mode": "",
-            "recorded": False,
-            "broker_click_allowed": False,
-            "reason": "NO_SHOOTER_MODE_RECORD",
-            "record_path": None,
-        }
+def _package_reporter_result_dict(*, recorded: bool, reason: str, record_path: Path | None = None) -> dict[str, Any]:
     return {
-        "mode": result.mode.value,
-        "recorded": bool(result.recorded),
-        "broker_click_allowed": bool(result.broker_click_allowed),
-        "reason": result.reason,
-        "record_path": result.record_path,
+        "mode": "PACKAGE_REPORTER",
+        "recorded": recorded,
+        "broker_click_allowed": False,
+        "execution_removed": True,
+        "reason": reason,
+        "record_path": str(record_path) if record_path is not None else None,
     }
 
 
@@ -224,11 +198,16 @@ class PaperExecutionEngine:
         entry = _entry_context(packet_payload, entry_context)
         outcome = track_candle_outcome(entry, future_rows)
         decision_payload = _default_decision(packet_payload, decision)
-        shooter_result = record_paper_execution(
-            packet_payload,
-            decision_payload,
-            path=self.paths.shooter_paper_log,
-            now=now,
+        package_record_path = _append_jsonl(
+            self.paths.package_report_log,
+            {
+                "event": "package_report_recorded",
+                "timestamp_epoch": now,
+                "packet_id": _packet_id(packet_payload),
+                "broker_click_allowed": False,
+                "execution_removed": True,
+                "decision": _json_clone(decision_payload),
+            },
         )
         record: dict[str, Any] = {
             "version": PAPER_EXECUTION_ENGINE_VERSION,
@@ -251,7 +230,11 @@ class PaperExecutionEngine:
             "entry_context": _json_clone(entry),
             "future_candle_count": len(future_rows),
             "outcome": _json_clone(outcome),
-            "shooter_mode_result": _shooter_result_dict(shooter_result),
+            "package_reporter_result": _package_reporter_result_dict(
+                recorded=True,
+                reason="PACKAGE_REPORT_RECORDED",
+                record_path=package_record_path,
+            ),
         }
         record_path = _append_jsonl(self.paths.packet_log, record)
         record["record_path"] = str(record_path)
@@ -264,7 +247,7 @@ class PaperExecutionEngine:
         boxes: Mapping[str, Any],
         window_bounds: tuple[int, int, int, int] | list[int],
         *,
-        mode: ShooterMode | str = ShooterMode.DRY_RUN_CLICK,
+        mode: str = "PACKAGE_REPORTER",
         latest_packet: Mapping[str, Any] | None = None,
         now_epoch: float | None = None,
         estimated_execution_latency_ms: float = 230.0,
@@ -275,7 +258,7 @@ class PaperExecutionEngine:
         packet_payload = _mapping(packet)
         now = _resolve_now(packet_payload, now_epoch)
         decision_payload = _default_decision(packet_payload, decision)
-        shooter_mode = resolve_shooter_mode(mode)
+        reporter_mode = _upper(mode) or "PACKAGE_REPORTER"
         rehearsal = rehearse_execution(
             packet_payload,
             decision_payload,
@@ -287,90 +270,21 @@ class PaperExecutionEngine:
             require_broker_click_safe=require_broker_click_safe,
         )
         coordinate_report = _mapping(rehearsal.get("coordinate_report"))
-        if not coordinate_report:
-            coordinate_report = build_coordinate_report(
-                boxes,
-                window_bounds,
-                side=_side(packet_payload),
-                expiry_seconds=_expiry_seconds(packet_payload),
-            )
 
         live_click_report: dict[str, Any] = {
             "requested": bool(execute_live_click),
             "executor_present": broker_click_executor is not None,
             "attempted": False,
             "clicked": False,
-            "reason": "LIVE_CLICK_NOT_REQUESTED",
+            "reason": "SHOOTER_EXECUTION_RETIRED",
         }
-        shooter_result: ShooterModeResult | None
-        if shooter_mode == ShooterMode.PAPER_EXECUTION:
-            shooter_result = record_paper_execution(
-                packet_payload,
-                decision_payload,
-                path=self.paths.shooter_paper_log,
-                now=now,
-            )
-        elif shooter_mode == ShooterMode.DRY_RUN_CLICK:
-            shooter_result = record_dry_run_click(
-                packet_payload,
-                decision_payload,
-                coordinate_report,
-                path=self.paths.shooter_dry_run_log,
-                now=now,
-            )
-        elif shooter_mode == ShooterMode.CALIBRATION_TEST:
-            shooter_result = record_calibration_test(
-                packet_payload,
-                decision_payload,
-                coordinate_report,
-                path=self.paths.shooter_calibration_log,
-                now=now,
-            )
-        elif shooter_mode == ShooterMode.LIVE_DISABLED:
-            shooter_result = record_live_disabled(
-                packet_payload,
-                decision_payload,
-                path=self.paths.shooter_live_disabled_log,
-                now=now,
-            )
-        elif shooter_mode == ShooterMode.LIVE_READY:
-            if execute_live_click and broker_click_executor is not None and rehearsal.get("ready"):
-                live_click_report["attempted"] = True
-                raw_click_result = broker_click_executor(packet_payload, rehearsal, coordinate_report)
-                if isinstance(raw_click_result, Mapping):
-                    live_click_report.update(dict(raw_click_result))
-                    live_click_report["clicked"] = bool(raw_click_result.get("clicked"))
-                else:
-                    live_click_report["clicked"] = bool(raw_click_result)
-                live_click_report["reason"] = str(live_click_report.get("reason") or "LIVE_READY_DEMO_EXECUTOR_RETURNED")
-            elif execute_live_click and broker_click_executor is None:
-                live_click_report["reason"] = "LIVE_CLICK_EXECUTOR_MISSING"
-            elif execute_live_click and not rehearsal.get("ready"):
-                live_click_report["reason"] = f"LIVE_CLICK_REHEARSAL_BLOCKED:{rehearsal.get('reason')}"
-            reason = (
-                "LIVE_READY_DEMO_CLICK_RECORDED"
-                if live_click_report.get("clicked")
-                else "LIVE_READY_REHEARSAL_READY_NO_CLICK"
-                if rehearsal.get("ready")
-                else f"LIVE_READY_REHEARSAL_BLOCKED:{rehearsal.get('reason')}"
-            )
-            shooter_result = record_live_ready(
-                packet_payload,
-                decision_payload,
-                clicked=bool(live_click_report.get("clicked")),
-                reason=reason,
-                rehearsal=rehearsal,
-                path=self.paths.shooter_live_ready_log,
-                now=now,
-            )
-        else:
-            shooter_result = None
+        _ = broker_click_executor
 
         record: dict[str, Any] = {
             "version": PAPER_EXECUTION_ENGINE_VERSION,
             "event": "broker_demo_rehearsal_recorded",
             "timestamp_epoch": now,
-            "mode": shooter_mode.value,
+            "mode": reporter_mode,
             "packet_id": _packet_id(packet_payload),
             "session_id": _text(packet_payload.get("session_id")),
             "side": _side(packet_payload),
@@ -381,7 +295,10 @@ class PaperExecutionEngine:
             "live_click_report": _json_clone(live_click_report),
             "rehearsal": _json_clone(rehearsal),
             "coordinate_report": _json_clone(coordinate_report),
-            "shooter_mode_result": _shooter_result_dict(shooter_result),
+            "package_reporter_result": _package_reporter_result_dict(
+                recorded=True,
+                reason="PACKAGE_REPORTER_REHEARSAL_RECORDED",
+            ),
         }
         record_path = _append_jsonl(self.paths.broker_demo_log, record)
         record["record_path"] = str(record_path)
@@ -419,7 +336,7 @@ def run_broker_demo_rehearsal(
     window_bounds: tuple[int, int, int, int] | list[int],
     *,
     paths: PaperExecutionPaths | None = None,
-    mode: ShooterMode | str = ShooterMode.DRY_RUN_CLICK,
+    mode: str = "PACKAGE_REPORTER",
     latest_packet: Mapping[str, Any] | None = None,
     now_epoch: float | None = None,
     estimated_execution_latency_ms: float = 230.0,
