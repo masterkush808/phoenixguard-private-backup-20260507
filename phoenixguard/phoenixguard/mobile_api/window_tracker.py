@@ -9302,6 +9302,13 @@ class PhoenixGuardWindowTrackingAdapter:
             "touches": int(zone.get("touches", zone.get("touch_count", 0)) or 0),
             "confidence": round(float(_clip01(zone.get("confidence", zone.get("strength", 0.0)))), 4),
             "distance_to_latest_norm": round(float(_clip01(zone.get("distance_to_latest_norm", 1.0))), 4),
+            "supply_demand_origin": str(zone.get("supply_demand_origin", "reaction_cluster") or "reaction_cluster"),
+            "zone_pattern": str(zone.get("zone_pattern", "TOUCH_REACTION_CLUSTER") or "TOUCH_REACTION_CLUSTER"),
+            "freshness_state": str(zone.get("freshness_state", "REFERENCE") or "REFERENCE"),
+            "institutional_zone_score": round(float(_clip01(zone.get("institutional_zone_score", 0.0))), 4),
+            "quality_grade": str(zone.get("quality_grade", "REFERENCE") or "REFERENCE"),
+            "proximal_y": zone.get("proximal_y"),
+            "distal_y": zone.get("distal_y"),
         }
 
     def _phoenixguard_wick_reaction_read(
@@ -12080,6 +12087,218 @@ class PhoenixGuardWindowTrackingAdapter:
                 "still_significant": bool(historical_significance >= 0.43 and not broken_after_touch),
             }
 
+        def candle_center_y(candle: Mapping[str, Any]) -> float | None:
+            bounds = candle_bounds(candle)
+            if bounds is None:
+                return None
+            _x0, top, _x1, bottom = bounds
+            return float(candle.get("center_y", (top + bottom) * 0.5) or (top + bottom) * 0.5)
+
+        def default_supply_demand_origin(
+            *,
+            role: str,
+            zone_top: float,
+            zone_bottom: float,
+        ) -> dict[str, Any]:
+            proximal_y = zone_top if role == "support" else zone_bottom
+            distal_y = zone_bottom if role == "support" else zone_top
+            buffer_px = max(2.0, median_range * 0.32)
+            distal_buffer_y = distal_y + buffer_px if role == "support" else distal_y - buffer_px
+            return {
+                "supply_demand_model_version": "base_departure_v1",
+                "supply_demand_origin": "reaction_cluster",
+                "zone_pattern": "TOUCH_REACTION_CLUSTER",
+                "base_start_index": -1,
+                "base_end_index": -1,
+                "departure_index": -1,
+                "base_duration_candles": 0,
+                "base_height_px": round(float(max(1.0, zone_bottom - zone_top)), 3),
+                "base_compression_score": 0.0,
+                "departure_score": 0.0,
+                "departure_candle_count": 0,
+                "departure_distance_px": 0.0,
+                "freshness_state": "REFERENCE",
+                "freshness_score": 0.24,
+                "return_count_after_departure": 0,
+                "mitigation_count": 0,
+                "proximal_y": round(float(proximal_y), 3),
+                "distal_y": round(float(distal_y), 3),
+                "distal_buffer_y": round(float(distal_buffer_y), 3),
+                "institutional_zone_score": 0.0,
+                "quality_grade": "REFERENCE",
+                "quality_components": {
+                    "departure": 0.0,
+                    "base_duration": 0.0,
+                    "base_compression": 0.0,
+                    "freshness": 0.24,
+                },
+            }
+
+        def supply_demand_origin_metrics(
+            *,
+            role: str,
+            center: float,
+            zone_top: float,
+            zone_bottom: float,
+        ) -> dict[str, Any]:
+            default_metrics = default_supply_demand_origin(
+                role=role,
+                zone_top=zone_top,
+                zone_bottom=zone_bottom,
+            )
+            if len(candles) < 6:
+                return default_metrics
+
+            wanted_direction = "BUY" if role == "support" else "SELL"
+            zone_height = max(1.0, zone_bottom - zone_top)
+            best: dict[str, Any] | None = None
+            max_base_len = min(4, max(1, len(candles) - 3))
+            for base_start in range(1, max(1, len(candles) - 2)):
+                for base_len in range(1, max_base_len + 1):
+                    base_end = base_start + base_len - 1
+                    if base_end + 1 >= len(candles):
+                        continue
+                    base_candles = candles[base_start:base_end + 1]
+                    base_bounds: list[tuple[float, float, float, float]] = []
+                    for item in base_candles:
+                        bounds = candle_bounds(item)
+                        if bounds is not None:
+                            base_bounds.append(bounds)
+                    if len(base_bounds) != base_len:
+                        continue
+                    base_top = min(float(bounds[1]) for bounds in base_bounds)
+                    base_bottom = max(float(bounds[3]) for bounds in base_bounds)
+                    base_center = (base_top + base_bottom) * 0.5
+                    base_height = max(1.0, base_bottom - base_top)
+                    overlap = max(0.0, min(base_bottom, zone_bottom) - max(base_top, zone_top))
+                    center_distance = abs(base_center - center)
+                    if overlap <= 0.0 and center_distance > max(zone_height, median_range * 0.85):
+                        continue
+                    if base_height > max(zone_height * 2.5, median_range * 2.1):
+                        continue
+
+                    departure_end = min(len(candles), base_end + 4)
+                    departure_candles = candles[base_end + 1:departure_end]
+                    departure_centers = [value for item in departure_candles if (value := candle_center_y(item)) is not None]
+                    if not departure_centers:
+                        continue
+                    same_direction_count = sum(
+                        1
+                        for item in departure_candles
+                        if _upper_action(item.get("direction", "HOLD")) == wanted_direction
+                    )
+                    prior_center = candle_center_y(candles[base_start - 1])
+                    approach_delta = base_center - prior_center if prior_center is not None else 0.0
+                    if role == "support":
+                        pattern = "DROP_BASE_RALLY" if approach_delta > median_range * 0.30 else "RALLY_BASE_RALLY"
+                        departure_distance = max(0.0, base_center - min(departure_centers))
+                    else:
+                        pattern = "RALLY_BASE_DROP" if approach_delta < -median_range * 0.30 else "DROP_BASE_DROP"
+                        departure_distance = max(0.0, max(departure_centers) - base_center)
+                    departure_score = _clip01(
+                        (departure_distance / max(1.0, median_range) - 0.45) / 1.85
+                        + 0.08 * same_direction_count
+                    )
+                    if departure_score < 0.26:
+                        continue
+
+                    return_count = 0
+                    broken = False
+                    break_buffer = max(2.0, median_range * 0.34)
+                    for future in candles[base_end + 2:]:
+                        future_bounds = candle_bounds(future)
+                        if future_bounds is None:
+                            continue
+                        _fx0, future_top, _fx1, future_bottom = future_bounds
+                        future_center = float(future.get("center_y", (future_top + future_bottom) * 0.5) or (future_top + future_bottom) * 0.5)
+                        if future_top <= zone_bottom and future_bottom >= zone_top:
+                            return_count += 1
+                        if role == "support" and future_center > zone_bottom + break_buffer:
+                            broken = True
+                        elif role == "resistance" and future_center < zone_top - break_buffer:
+                            broken = True
+
+                    if broken:
+                        freshness_state = "BROKEN"
+                        freshness_score = 0.0
+                    elif return_count == 0:
+                        freshness_state = "FRESH"
+                        freshness_score = 1.0
+                    elif return_count == 1:
+                        freshness_state = "TESTED_ONCE"
+                        freshness_score = 0.74
+                    elif return_count == 2:
+                        freshness_state = "TESTED_TWICE"
+                        freshness_score = 0.48
+                    else:
+                        freshness_state = "CONSUMED"
+                        freshness_score = 0.12
+
+                    base_duration_score = _clip01(1.0 - max(0.0, float(base_len) - 1.0) / 4.0)
+                    base_compression_score = _clip01(1.0 - base_height / max(1.0, median_range * 2.2))
+                    institutional_score = _clip01(
+                        0.42 * departure_score
+                        + 0.22 * base_duration_score
+                        + 0.18 * base_compression_score
+                        + 0.18 * freshness_score
+                    )
+                    if institutional_score >= 0.72 and freshness_state in {"FRESH", "TESTED_ONCE"}:
+                        quality_grade = "A"
+                    elif institutional_score >= 0.52 and freshness_state not in {"BROKEN", "CONSUMED"}:
+                        quality_grade = "B"
+                    elif institutional_score >= 0.36 and freshness_state != "BROKEN":
+                        quality_grade = "C"
+                    else:
+                        quality_grade = "REFERENCE"
+
+                    proximal_y = base_top if role == "support" else base_bottom
+                    distal_y = base_bottom if role == "support" else base_top
+                    distal_buffer_y = distal_y + break_buffer if role == "support" else distal_y - break_buffer
+                    candidate: dict[str, Any] = {
+                        "supply_demand_model_version": "base_departure_v1",
+                        "supply_demand_origin": "base_departure_imbalance",
+                        "zone_pattern": pattern,
+                        "base_start_index": int(base_start),
+                        "base_end_index": int(base_end),
+                        "departure_index": int(base_end + 1),
+                        "base_duration_candles": int(base_len),
+                        "base_height_px": round(float(base_height), 3),
+                        "base_compression_score": round(float(base_compression_score), 4),
+                        "departure_score": round(float(departure_score), 4),
+                        "departure_candle_count": int(len(departure_candles)),
+                        "departure_distance_px": round(float(departure_distance), 3),
+                        "freshness_state": freshness_state,
+                        "freshness_score": round(float(freshness_score), 4),
+                        "return_count_after_departure": int(return_count),
+                        "mitigation_count": int(return_count),
+                        "proximal_y": round(float(proximal_y), 3),
+                        "distal_y": round(float(distal_y), 3),
+                        "distal_buffer_y": round(float(distal_buffer_y), 3),
+                        "institutional_zone_score": round(float(institutional_score), 4),
+                        "quality_grade": quality_grade,
+                        "quality_components": {
+                            "departure": round(float(departure_score), 4),
+                            "base_duration": round(float(base_duration_score), 4),
+                            "base_compression": round(float(base_compression_score), 4),
+                            "freshness": round(float(freshness_score), 4),
+                        },
+                        "_sort_score": round(
+                            float(
+                                institutional_score
+                                + 0.08 * _clip01(overlap / zone_height)
+                                - 0.05 * _clip01(center_distance / max(1.0, zone_height * 2.0))
+                            ),
+                            4,
+                        ),
+                    }
+                    if best is None or float(candidate.get("_sort_score", 0.0)) > float(best.get("_sort_score", 0.0)):
+                        best = candidate
+
+            if best is None:
+                return default_metrics
+            best.pop("_sort_score", None)
+            return best
+
         def clusters(points: Sequence[Mapping[str, float]], role: str) -> list[dict[str, Any]]:
             sorted_points = sorted(points, key=lambda item: float(item.get("y", 0.0)))
             groups: list[list[dict[str, float]]] = []
@@ -12119,11 +12338,29 @@ class PhoenixGuardWindowTrackingAdapter:
                     + 0.16 * (1.0 - abs(center - height * 0.5) / max(1.0, height * 0.5))
                 )
                 historical_significance = _clip01(history_metrics.get("historical_significance", 0.0))
-                strength = _clip01(0.62 * geometric_strength + 0.38 * historical_significance)
-                if strength < 0.30:
-                    continue
                 top = int(round(max(0.0, center - zone_half_height)))
                 bottom = int(round(min(float(height), center + zone_half_height)))
+                origin_metrics = supply_demand_origin_metrics(
+                    role=role,
+                    center=center,
+                    zone_top=float(top),
+                    zone_bottom=float(max(top + 1, bottom)),
+                )
+                institutional_score = _clip01(origin_metrics.get("institutional_zone_score", 0.0))
+                freshness_score = _clip01(origin_metrics.get("freshness_score", 0.0))
+                freshness_state = str(origin_metrics.get("freshness_state", "REFERENCE") or "REFERENCE").upper()
+                strength = _clip01(
+                    0.46 * geometric_strength
+                    + 0.26 * historical_significance
+                    + 0.22 * institutional_score
+                    + 0.06 * freshness_score
+                )
+                if freshness_state == "BROKEN":
+                    strength = _clip01(strength - 0.16)
+                elif freshness_state == "CONSUMED":
+                    strength = _clip01(strength - 0.08)
+                if strength < 0.30 and institutional_score < 0.42:
+                    continue
                 left = max(float(width) * 0.03, span_left - zone_pad_x)
                 right = min(float(width) * 0.97, span_right + zone_pad_x)
                 if (right - left) < min_zone_width:
@@ -12155,23 +12392,36 @@ class PhoenixGuardWindowTrackingAdapter:
                     if role == "resistance" and broken_after_touch
                     else "unbroken_zone"
                 )
+                supply_demand_origin = str(origin_metrics.get("supply_demand_origin", "reaction_cluster") or "reaction_cluster")
+                zone_pattern = str(origin_metrics.get("zone_pattern", "TOUCH_REACTION_CLUSTER") or "TOUCH_REACTION_CLUSTER")
+                knowledge_tags = [
+                    "SUPPLY_DEMAND_ZONE",
+                    "LIQUIDITY_POOL",
+                    "SUPPORT_RESISTANCE_AS_ZONE",
+                ]
+                if supply_demand_origin == "base_departure_imbalance":
+                    knowledge_tags.append("BASE_DEPARTURE_IMBALANCE")
+                if freshness_state in {"FRESH", "TESTED_ONCE", "TESTED_TWICE", "CONSUMED", "BROKEN"}:
+                    knowledge_tags.append(f"{freshness_state}_ZONE")
+                if zone_pattern != "TOUCH_REACTION_CLUSTER":
+                    knowledge_tags.append(zone_pattern)
                 rows.append(
                     {
                         "key": f"{role}_{len(rows) + 1}",
                         "role": role,
-                        "label": f"{role.upper()} {touch_count}T",
+                        "label": f"{role.upper()} {touch_count}T {str(origin_metrics.get('quality_grade', 'REFERENCE') or 'REFERENCE')}",
                         "zone_family": zone_family,
                         "liquidity_pool_type": liquidity_pool_type,
-                        "liquidity_source": "wick_touch_cluster",
+                        "liquidity_source": supply_demand_origin,
                         "role_flip_state": role_flip_state,
                         "zone_stack_id": f"{role}_{int(round(center / max(1.0, merge_band)))}",
                         "source_rule": "zone_not_exact_price",
-                        "validation_reason": "touch_reaction_recency_unbroken_zone",
-                        "knowledge_tags": [
-                            "SUPPLY_DEMAND_ZONE",
-                            "LIQUIDITY_POOL",
-                            "SUPPORT_RESISTANCE_AS_ZONE",
-                        ],
+                        "validation_reason": (
+                            "compact_base_explosive_departure_freshness"
+                            if supply_demand_origin == "base_departure_imbalance"
+                            else "touch_reaction_recency_unbroken_zone"
+                        ),
+                        "knowledge_tags": knowledge_tags,
                         "direction": "BUY" if role == "support" else "SELL",
                         "bbox": [int(round(left)), top, int(round(right)), max(top + 1, bottom)],
                         "line_y": int(round(center)),
@@ -12191,6 +12441,28 @@ class PhoenixGuardWindowTrackingAdapter:
                         "unbroken_score": round(float(_clip01(history_metrics.get("unbroken_score", 0.0))), 4),
                         "historical_significance": round(float(historical_significance), 4),
                         "geometric_strength": round(float(geometric_strength), 4),
+                        "supply_demand_model_version": str(origin_metrics.get("supply_demand_model_version", "base_departure_v1") or "base_departure_v1"),
+                        "supply_demand_origin": supply_demand_origin,
+                        "zone_pattern": zone_pattern,
+                        "base_start_index": int(origin_metrics.get("base_start_index", -1) or -1),
+                        "base_end_index": int(origin_metrics.get("base_end_index", -1) or -1),
+                        "departure_index": int(origin_metrics.get("departure_index", -1) or -1),
+                        "base_duration_candles": int(origin_metrics.get("base_duration_candles", 0) or 0),
+                        "base_height_px": round(float(origin_metrics.get("base_height_px", 0.0) or 0.0), 3),
+                        "base_compression_score": round(float(_clip01(origin_metrics.get("base_compression_score", 0.0))), 4),
+                        "departure_score": round(float(_clip01(origin_metrics.get("departure_score", 0.0))), 4),
+                        "departure_candle_count": int(origin_metrics.get("departure_candle_count", 0) or 0),
+                        "departure_distance_px": round(float(origin_metrics.get("departure_distance_px", 0.0) or 0.0), 3),
+                        "freshness_state": freshness_state,
+                        "freshness_score": round(float(freshness_score), 4),
+                        "return_count_after_departure": int(origin_metrics.get("return_count_after_departure", 0) or 0),
+                        "mitigation_count": int(origin_metrics.get("mitigation_count", 0) or 0),
+                        "proximal_y": round(float(origin_metrics.get("proximal_y", center) or center), 3),
+                        "distal_y": round(float(origin_metrics.get("distal_y", center) or center), 3),
+                        "distal_buffer_y": round(float(origin_metrics.get("distal_buffer_y", center) or center), 3),
+                        "institutional_zone_score": round(float(institutional_score), 4),
+                        "quality_grade": str(origin_metrics.get("quality_grade", "REFERENCE") or "REFERENCE"),
+                        "quality_components": _mapping_to_dict(origin_metrics.get("quality_components", {})),
                         "significance_score": round(float(strength), 4),
                         "distance_to_latest_px": round(float(distance_px), 3),
                         "distance_to_latest_norm": round(float(distance_norm), 4),
@@ -12258,12 +12530,27 @@ class PhoenixGuardWindowTrackingAdapter:
         ]
         if not candidates:
             return {}
-        candidates.sort(
-            key=lambda zone: (
+        freshness_rank = {
+            "FRESH": 0,
+            "TESTED_ONCE": 1,
+            "TESTED_TWICE": 2,
+            "REFERENCE": 3,
+            "CONSUMED": 4,
+            "BROKEN": 5,
+        }
+
+        def rank_zone(zone: Mapping[str, Any]) -> tuple[int, int, float, float, float]:
+            freshness_state = str(zone.get("freshness_state", "REFERENCE") or "REFERENCE").upper()
+            return (
+                freshness_rank.get(freshness_state, 3),
                 0 if bool(zone.get("still_significant", False)) else 1,
-                -float(zone.get("significance_score", zone.get("confidence", 0.0)) or 0.0),
-                float(zone.get("distance_to_latest_norm", 1.0) or 1.0),
+                -_clip01(zone.get("institutional_zone_score", 0.0)),
+                -_clip01(zone.get("significance_score", zone.get("confidence", 0.0))),
+                _clip01(zone.get("distance_to_latest_norm", 1.0)),
             )
+
+        candidates.sort(
+            key=rank_zone
         )
         return candidates[0]
 
@@ -12276,12 +12563,42 @@ class PhoenixGuardWindowTrackingAdapter:
     ) -> dict[str, Any]:
         max_significant_zones = max(1, min(48, int(max_significant_zones)))
         rows = [_mapping_to_dict(zone) for zone in zones]
+        reference_states = {"BROKEN", "CONSUMED"}
         significant = [
             zone
             for zone in rows
-            if bool(zone.get("still_significant", False))
-            or _clip01(zone.get("significance_score", zone.get("confidence", 0.0))) >= 0.48
+            if str(zone.get("freshness_state", "REFERENCE") or "REFERENCE").upper() not in reference_states
+            and (
+                bool(zone.get("still_significant", False))
+                or _clip01(zone.get("significance_score", zone.get("confidence", 0.0))) >= 0.48
+                or _clip01(zone.get("institutional_zone_score", 0.0)) >= 0.52
+            )
         ]
+        reference_zones = [
+            zone
+            for zone in rows
+            if str(zone.get("freshness_state", "REFERENCE") or "REFERENCE").upper() in reference_states
+        ]
+        freshness_rank = {
+            "FRESH": 0,
+            "TESTED_ONCE": 1,
+            "TESTED_TWICE": 2,
+            "REFERENCE": 3,
+            "CONSUMED": 4,
+            "BROKEN": 5,
+        }
+
+        def rank_zone(zone: Mapping[str, Any]) -> tuple[int, float, float, float]:
+            freshness_state = str(zone.get("freshness_state", "REFERENCE") or "REFERENCE").upper()
+            return (
+                freshness_rank.get(freshness_state, 3),
+                -_clip01(zone.get("institutional_zone_score", 0.0)),
+                -_clip01(zone.get("significance_score", zone.get("confidence", 0.0))),
+                _clip01(zone.get("distance_to_latest_norm", 1.0)),
+            )
+
+        significant.sort(key=rank_zone)
+        reference_zones.sort(key=rank_zone)
         nearest_support = self._phoenixguard_nearest_sr_zone(rows, role="support")
         nearest_resistance = self._phoenixguard_nearest_sr_zone(rows, role="resistance")
         buy_structure = 0.0
@@ -12289,9 +12606,11 @@ class PhoenixGuardWindowTrackingAdapter:
         for zone in significant:
             role = str(zone.get("role", "") or "").lower()
             score = _clip01(zone.get("significance_score", zone.get("confidence", 0.0)))
+            institutional_score = _clip01(zone.get("institutional_zone_score", 0.0))
+            freshness_score = _clip01(zone.get("freshness_score", 0.0))
             relevance = str(zone.get("entry_relevance", "") or "")
             proximity = _clip01(1.0 - _clip01(zone.get("distance_to_latest_norm", 1.0)))
-            weighted = _clip01(0.70 * score + 0.30 * proximity)
+            weighted = _clip01(0.52 * score + 0.28 * institutional_score + 0.12 * freshness_score + 0.08 * proximity)
             if role == "support":
                 buy_structure += weighted * (1.12 if relevance == "entry_support" else 0.82)
             elif role == "resistance":
@@ -12308,6 +12627,13 @@ class PhoenixGuardWindowTrackingAdapter:
         return {
             "significant_count": int(len(significant)),
             "total_count": int(len(rows)),
+            "institutional_zone_count": int(
+                sum(1 for zone in rows if _clip01(zone.get("institutional_zone_score", 0.0)) >= 0.52)
+            ),
+            "fresh_zone_count": int(
+                sum(1 for zone in rows if str(zone.get("freshness_state", "") or "").upper() in {"FRESH", "TESTED_ONCE"})
+            ),
+            "reference_zone_count": int(len(reference_zones)),
             "dominant_side": dominant_side,
             "candidate_side": candidate_side,
             "buy_structure_score": round(float(buy_structure), 4),
@@ -12315,7 +12641,8 @@ class PhoenixGuardWindowTrackingAdapter:
             "nearest_support": nearest_support,
             "nearest_resistance": nearest_resistance,
             "significant_zones": significant[:max_significant_zones],
-            "summary": f"{len(significant)} significant S/R zone(s); nearest {nearest_text}.",
+            "reference_zones": reference_zones[:max_significant_zones],
+            "summary": f"{len(significant)} significant S/D-S/R zone(s); nearest {nearest_text}.",
         }
 
     def _derive_smart_money_context(
@@ -12504,11 +12831,23 @@ class PhoenixGuardWindowTrackingAdapter:
                 "role_flip_state": str(zone.get("role_flip_state", "") or ""),
                 "entry_relevance": str(zone.get("entry_relevance", "") or ""),
                 "significance_score": _clip01(zone.get("significance_score", zone.get("confidence", 0.0))),
+                "institutional_zone_score": _clip01(zone.get("institutional_zone_score", 0.0)),
+                "freshness_state": str(zone.get("freshness_state", "REFERENCE") or "REFERENCE"),
+                "freshness_score": _clip01(zone.get("freshness_score", 0.0)),
+                "zone_pattern": str(zone.get("zone_pattern", "") or ""),
+                "quality_grade": str(zone.get("quality_grade", "REFERENCE") or "REFERENCE"),
+                "proximal_y": _float_or(zone.get("proximal_y", zone.get("line_y", 0.0)), 0.0),
+                "distal_y": _float_or(zone.get("distal_y", zone.get("line_y", 0.0)), 0.0),
                 "distance_to_latest_norm": _clip01(zone.get("distance_to_latest_norm", 1.0)),
                 "still_significant": bool(zone.get("still_significant", False)),
             }
             for zone in support_resistance_zones
-            if bool(zone.get("still_significant", False)) or _clip01(zone.get("significance_score", zone.get("confidence", 0.0))) >= 0.48
+            if str(zone.get("freshness_state", "REFERENCE") or "REFERENCE").upper() not in {"BROKEN", "CONSUMED"}
+            and (
+                bool(zone.get("still_significant", False))
+                or _clip01(zone.get("significance_score", zone.get("confidence", 0.0))) >= 0.48
+                or _clip01(zone.get("institutional_zone_score", 0.0)) >= 0.52
+            )
             ][:max_liquidity_pools],
         )
         mss_confidence = _clip01(0.40 * reversal_score + 0.30 * float(global_direction != local_direction and local_direction in {"BUY", "SELL"}) + 0.30 * float(local_direction == impulse_direction and local_direction in {"BUY", "SELL"}))

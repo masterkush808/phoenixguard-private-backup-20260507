@@ -3085,7 +3085,47 @@ def test_window_tracker_support_resistance_zones_fit_touch_candles() -> None:
         assert "historical_significance" in zone
         assert "significance_score" in zone
         assert "still_significant" in zone
+        assert zone["supply_demand_model_version"] == "base_departure_v1"
+        assert zone["supply_demand_origin"] in {"base_departure_imbalance", "reaction_cluster"}
+        assert zone["freshness_state"] in {"FRESH", "TESTED_ONCE", "TESTED_TWICE", "CONSUMED", "BROKEN", "REFERENCE"}
+        assert zone["quality_grade"] in {"A", "B", "C", "REFERENCE"}
+        assert "institutional_zone_score" in zone
+        assert "proximal_y" in zone
+        assert "distal_y" in zone
     assert any(bool(zone.get("nearest")) for zone in zones)
+
+
+def test_window_tracker_supply_demand_origin_prefers_fresh_base_departure() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    candles = _manual_candle_tracks(
+        [300, 332, 354, 352, 351, 315, 286, 260, 235, 220],
+        image_width=900,
+        image_height=520,
+        direction="BUY",
+        half_height=10,
+    )
+
+    zones = adapter.derive_support_resistance_zones(
+        candles,
+        (900, 520),
+        candidate_action="BUY",
+    )
+
+    fresh_demand_zones = [
+        zone
+        for zone in zones
+        if str(zone.get("role", "")) == "support"
+        and str(zone.get("supply_demand_origin", "")) == "base_departure_imbalance"
+    ]
+
+    assert fresh_demand_zones
+    best_demand = max(fresh_demand_zones, key=lambda zone: float(zone.get("institutional_zone_score", 0.0)))
+    assert best_demand["zone_pattern"] in {"DROP_BASE_RALLY", "RALLY_BASE_RALLY"}
+    assert best_demand["freshness_state"] in {"FRESH", "TESTED_ONCE", "TESTED_TWICE"}
+    assert float(best_demand["institutional_zone_score"]) >= 0.52
+    assert best_demand["quality_grade"] in {"A", "B", "C"}
+    assert float(best_demand["proximal_y"]) < float(best_demand["distal_y"])
+    assert float(best_demand["distal_buffer_y"]) > float(best_demand["distal_y"])
 
 
 def test_window_tracker_adds_smart_money_and_significant_sr_context_to_boxes() -> None:
@@ -3123,6 +3163,9 @@ def test_window_tracker_adds_smart_money_and_significant_sr_context_to_boxes() -
     assert smart_money["dominant_side"] in {"BUY", "SELL", "HOLD"}
     assert "summary" in smart_money
     assert "significant_count" in support_resistance
+    assert "institutional_zone_count" in support_resistance
+    assert "fresh_zone_count" in support_resistance
+    assert "reference_zone_count" in support_resistance
     assert signal["smart_money_context"] == smart_money
     assert all("smart_money" in box and "smc_score" in box for box in structure_boxes)
     assert all("smart_money" in zone and "smc_score" in zone for zone in projection_zones)
