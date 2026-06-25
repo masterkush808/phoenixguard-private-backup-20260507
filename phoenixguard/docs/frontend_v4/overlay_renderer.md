@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document defines the frontend V4 renderer contract for chart overlays. It is based on the current dashboard renderer in `phoenixguard/mobile_api/static/window_tracker_dashboard.html` and the backend geometry producer in `phoenixguard/vision/overlay_geometry.py`. The static dashboard is not changed by this document.
+This document defines the frontend V4 renderer contract for chart overlays. It is based on the current dashboard renderer in `Frontend/dashboard/static/window_tracker_dashboard.html` and the backend geometry producer in `Backend/src/phoenixguard/vision/overlay_geometry.py`. The static dashboard is not changed by this document.
 
 The renderer must treat `tracking_summary.overlay_geometry` as the primary overlay source and `latest_signal.overlay_geometry` as the fallback. Legacy structures may still be rendered when `overlay_geometry.boxes` is absent, but V4 should prefer the normalized geometry payload.
 
@@ -42,7 +42,7 @@ Frontend V4 should render these as layered object groups, not as unrelated DOM b
 - `visible_default`
 - `structural_anchor` where available
 
-`phoenixguard/vision/overlay_object_schema.py` provides a small typed helper for this payload shape.
+`Backend/src/phoenixguard/vision/overlay_object_schema.py` provides a small typed helper for this payload shape.
 
 ## Render Modes
 
@@ -132,4 +132,4 @@ Priority order:
 9. `chart_bounds`
 10. `diagnostics`
 
-The simulation helper `phoenixguard/simulation/overlay_eval/label_clutter_metrics.py` should be used to measure label overlap before promoting the new renderer.
+The simulation helper `Backend/src/phoenixguard/simulation/overlay_eval/label_clutter_metrics.py` should be used to measure label overlap before promoting the new renderer.

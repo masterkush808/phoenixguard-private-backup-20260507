@@ -10,6 +10,9 @@ Full wiring of:
 """
 from __future__ import annotations
 
+from _pg_bootstrap import ensure_project_paths
+ensure_project_paths()
+
 import asyncio
 import base64
 from concurrent.futures import Future, ThreadPoolExecutor

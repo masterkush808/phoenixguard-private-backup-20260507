@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from _pg_bootstrap import ensure_project_paths
+ensure_project_paths()
+
 from phoenixguard.decision.regression_module import (
     ChronosRegressor,
     Forecast3MCore,

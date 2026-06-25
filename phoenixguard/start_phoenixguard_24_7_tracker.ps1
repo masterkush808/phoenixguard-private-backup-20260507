@@ -14,6 +14,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
+$backendSrc = Join-Path -Path $PSScriptRoot -ChildPath 'Backend\src'
+$backendRoot = Join-Path -Path $PSScriptRoot -ChildPath 'Backend'
+$env:PYTHONPATH = (@($backendSrc, $backendRoot, $PSScriptRoot, $env:PYTHONPATH) | Where-Object { $_ -and [string]$_ -ne '' }) -join [System.IO.Path]::PathSeparator
+$env:PHOENIXGUARD_PROJECT_ROOT = $PSScriptRoot
 
 if (-not (Test-Path -LiteralPath '.venv')) {
     py -3.11 -m venv .venv

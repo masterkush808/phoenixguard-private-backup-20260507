@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from _pg_bootstrap import ensure_project_paths
+ensure_project_paths()
+
 """
 PhoenixGuard shooter package reporter.
 

@@ -6,7 +6,7 @@ Motion in PhoenixGuard V4 should feel like cockpit instrumentation: fast, precis
 
 ## Motion Tokens
 
-Use the motion tokens from `assets/themes/phoenix_command_tokens.css`:
+Use the motion tokens from `Frontend/assets/themes/phoenix_command_tokens.css`:
 
 | Token | Value | Usage |
 | --- | --- | --- |

@@ -4,9 +4,9 @@
 
 This document describes the current realtime state architecture for the FastAPI plus static HTML window tracker dashboard. It is based on:
 
-- `phoenixguard/mobile_api/app.py`
-- `phoenixguard/mobile_api/window_tracker.py`
-- `phoenixguard/mobile_api/static/window_tracker_dashboard.html`
+- `Backend/src/phoenixguard/mobile_api/app.py`
+- `Backend/src/phoenixguard/mobile_api/window_tracker.py`
+- `Frontend/dashboard/static/window_tracker_dashboard.html`
 
 No SPA framework is present today. The dashboard is a server-rendered static HTML file with a large embedded JavaScript runtime and direct REST calls.
 

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phoenixguard"
+version = "3.0.0"
+description = "PhoenixGuard V3 local chart intelligence runtime"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+package-dir = {"" = "Backend/src"}
+
+[tool.setuptools.packages.find]
+where = ["Backend/src"]
+
+[tool.setuptools.package-data]
+phoenixguard = [
+  "V3_CANONICAL_MANIFEST.json",
+  "V3_LANGUAGE_CONSTITUTION.md"
+]

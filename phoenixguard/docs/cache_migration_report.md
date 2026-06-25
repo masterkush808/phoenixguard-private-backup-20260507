@@ -40,16 +40,16 @@ calibration_profile_id
 Runtime validation is implemented in:
 
 ```text
-phoenixguard/runtime/cache_v3.py
+Backend/src/phoenixguard/runtime/cache_v3.py
 ```
 
 Authoritative execution packet construction and validation lives in:
 
 ```text
-phoenixguard/execution/packet_v3.py
+Backend/src/phoenixguard/execution/packet_v3.py
 ```
 
-`phoenixguard/runtime/cache_v3.py` shares the same schema constants and delegates live execution packet validation to the authoritative packet validator, then exposes Agent 5-friendly freshness reasons for observability/runtime callers.
+`Backend/src/phoenixguard/runtime/cache_v3.py` shares the same schema constants and delegates live execution packet validation to the authoritative packet validator, then exposes Agent 5-friendly freshness reasons for observability/runtime callers.
 
 Old or missing cache schema versions are rejected at validation time. V3 cache records also invalidate on symbol, timeframe, session, input frame hash, viewport hash, model version, preprocess version, calibration profile, packet schema, expiry, and non-advancing frame/capture/state counters.
 
@@ -74,7 +74,7 @@ data/inbox/
 data/manual_inference_results/
 user_calibration_manifest.json
 808_shooter_boxes.json
-phoenixguard/execution/calibration_manifest.py
+Backend/src/phoenixguard/execution/calibration_manifest.py
 data_splits/
 fine_tuning/
 training scripts and manifests
@@ -147,7 +147,7 @@ Reason: some items are generated previews, replay evidence, audit locks, or plat
 
 ```text
 GET /v1/mobile/health
-GET /status on phoenixguard/runtime/model_council_daemon.py
+GET /status on Backend/src/phoenixguard/runtime/model_council_daemon.py
 GET /v1/mobile/observer/sessions/{session_id}/signals/latest
 GET /v1/mobile/window-tracker/sessions/{session_id}
 ```

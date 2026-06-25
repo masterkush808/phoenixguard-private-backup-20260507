@@ -4,7 +4,7 @@
 
 - User provides image/file (chart screenshot or equivalent).
 - Entry path: `run_inference(...)` in `main.py`. Live tracker path: `ContinuousWindowTrackerService`
-  in `phoenixguard/mobile_api/window_tracker.py` keeps the locked broker/chart surface warm on a
+  in `Backend/src/phoenixguard/mobile_api/window_tracker.py` keeps the locked broker/chart surface warm on a
   one-second capture loop.
 - It collects frames for the dashboard.
 - The service serves the dashboard through the mobile API.
@@ -18,7 +18,7 @@
 2. **CV model (HF endpoint or YOLO fallback path)**
 
    - `cv_engine.detect(img)` (`cv_module.py`).
-   - `MultiModelEnsemble` (`phoenixguard/vision/multi_model_ensemble.py`) can keep YOLO/ViT/SAM
+   - `MultiModelEnsemble` (`Backend/src/phoenixguard/vision/multi_model_ensemble.py`) can keep YOLO/ViT/SAM
      loaded and bag YOLO over same-coordinate contrast/sharpness views.
    - Boxes that survive cross-view agreement are then boosted.
 
@@ -109,7 +109,7 @@
   - memory similarity requirement (or no-memory mode),
   - interval safety.
 - Live tracker decisions additionally pass SMC and significant S/R evidence into
-  `phoenixguard/decision/decision_kernel.py`, where those signals join the structure family before
+  `Backend/src/phoenixguard/decision/decision_kernel.py`, where those signals join the structure family before
   the final trade-mode
 - Live broker timing is map-aware instead of fixed to an M3/M5 shortcut.
 - `window_tracker.py` builds an `opposing_force_timing_v1` profile.
@@ -177,7 +177,7 @@
     force before any live trigger is allowed.
 - Expired trades are classified as won/lost/flat when chart-proxy data is available and appended to
   `trade_outcomes.jsonl` for future timing review.
-- Live tracker deployment uses the Windows VM scripts in `deploy/windows/`:
+- Live tracker deployment uses the Windows VM scripts in `Backend/launch/deploy/windows/`:
   - `Start-PhoenixGuardVmMonitor.ps1` supervises API, tracker, and shooter.
   - `phoenixguard.vm-monitor.env.ps1` pins `PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC=1.0`.
   - `Start-PhoenixGuardQuickTunnel.ps1` can publish the local API through Cloudflare quick tunnel

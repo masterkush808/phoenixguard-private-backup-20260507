@@ -13,7 +13,7 @@
 
 ```text
 
-phoenixguard/vision/
+Backend/src/phoenixguard/vision/
 ├── multi_model_ensemble.py           (470 lines) ✅
 │   ├─ ModelRegistry: Model loading & lifecycle
 │   ├─ MultiModelEnsemble: 3-model fusion engine

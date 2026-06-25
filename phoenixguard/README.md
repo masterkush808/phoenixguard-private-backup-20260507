@@ -42,7 +42,7 @@ Start-Sleep -Seconds 3
 
 # Back up and clear stale runtime/cache state. This preserves models, memory,
 # user configuration, reports, and current package-reporter state boundaries.
-python .\tools\clean_v3_runtime_state.py --apply
+python .\Backend\tools\clean_v3_runtime_state.py --apply
 if ($LASTEXITCODE -ne 0) { throw "Runtime cleanup failed. Launch aborted." }
 
 # Canonical final V3 live launch. -NoBrowser prevents popup/editor launch.
@@ -77,9 +77,9 @@ Invoke-RestMethod "$base/v1/mobile/runtime/trace/v3?session_id=$session" |
     ConvertTo-Json -Depth 16
 
 # CLI summaries for quick pass/fail reads.
-python .\tools\runtime_trace_v3.py --base-url $base --session $session --timeout 20
-python .\tools\trace_sequence_context_v3.py --base-url $base --session $session --timeout 20
-python .\tools\verify_v3_integrity.py
+python .\Backend\tools\runtime_trace_v3.py --base-url $base --session $session --timeout 20
+python .\Backend\tools\trace_sequence_context_v3.py --base-url $base --session $session --timeout 20
+python .\Backend\tools\verify_v3_integrity.py
 ```
 
 `verify_v3_integrity.py` should report `Overall: PASS` before you treat the runtime as
@@ -120,7 +120,7 @@ Use this only for debugging the backend API. It does not arm the full production
 shooter process.
 
 ```powershell
-$env:PYTHONPATH = (Get-Location).Path
+$env:PYTHONPATH = "$(Resolve-Path 'Backend/src');$(Resolve-Path 'Backend');$(Resolve-Path '.')"
 python -m uvicorn phoenixguard.mobile_api.app:create_app --factory --host 127.0.0.1 --port 8793 --log-level info
 ```
 
@@ -195,7 +195,7 @@ Start-Sleep -Seconds 3
 .\.venv\Scripts\Activate.ps1
 
 # Clear V3 runtime/cache state before a cold launch.
-python .\tools\clean_v3_runtime_state.py --apply
+python .\Backend\tools\clean_v3_runtime_state.py --apply
 if ($LASTEXITCODE -ne 0) {
     throw "Runtime cleanup failed. Launch aborted."
 }
@@ -248,9 +248,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_r
 After launch, verify runtime trace, sequence context, and canonical integrity:
 
 ```powershell
-python .\tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
-python .\tools\trace_sequence_context_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
-python .\tools\verify_v3_integrity.py
+python .\Backend\tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
+python .\Backend\tools\trace_sequence_context_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
+python .\Backend\tools\verify_v3_integrity.py
 ```
 
 `verify_v3_integrity.py` must report `Overall: PASS` before treating the runtime as
@@ -259,7 +259,7 @@ production-ready.
 Two-hour activated burn-in:
 
 ```powershell
-python .\tools\certify_v3_full_system_burn_in.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --duration-sec 7200 --interval-sec 10 --warmup-sec 60 --status-every-sec 60 --timeout 20 --mode FULL_ACTIVATED --max-frame-age-ms 2500 --max-consecutive-stale-frames 12 --max-consecutive-process-misses 5 --no-stop-on-stale-frame --no-stop-on-stale-execution-packet --out reports\FINAL_FULL_SYSTEM_ACTIVATED_BURN_IN_OVERLAYFIXED_FINAL_REPORT.md
+python .\Backend\tools\certify_v3_full_system_burn_in.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --duration-sec 7200 --interval-sec 10 --warmup-sec 60 --status-every-sec 60 --timeout 20 --mode FULL_ACTIVATED --max-frame-age-ms 2500 --max-consecutive-stale-frames 12 --max-consecutive-process-misses 5 --no-stop-on-stale-frame --no-stop-on-stale-execution-packet --out reports\FINAL_FULL_SYSTEM_ACTIVATED_BURN_IN_OVERLAYFIXED_FINAL_REPORT.md
 ```
 
 For long live observation runs where transient Windows capture latency should be logged but not
@@ -324,11 +324,11 @@ packet contract, shooter persistence, and burn-in evidence.
 Focused Grade A\* hardening checks:
 
 ```powershell
-python -m pytest tests/test_execution_packet_schema_v3.py tests/test_model_council_v3.py tests/test_market_reality_engine.py tests/test_market_intelligence_v3.py tests/test_v3_language_contracts.py tests/test_simulation_paper_execution.py tests/test_mt4_file_bridge.py -q
-python -m pytest tests/test_entry_allowance_burn.py tests/test_business_commands.py -q
-python -m pytest tests/test_cache_observability_v3.py tests/test_runtime_telemetry_v3.py tests/test_manual_inference_queue.py -q
-python -m compileall -q main.py shooter.py phoenixguard\decision phoenixguard\execution phoenixguard\mobile_api phoenixguard\runtime tools\runtime_trace_v3.py tools\certification_common_v3.py
-python tools\verify_v3_integrity.py
+python -m pytest Backend/tests/test_execution_packet_schema_v3.py Backend/tests/test_model_council_v3.py Backend/tests/test_market_reality_engine.py Backend/tests/test_market_intelligence_v3.py Backend/tests/test_v3_language_contracts.py Backend/tests/test_simulation_paper_execution.py Backend/tests/test_mt4_file_bridge.py -q
+python -m pytest Backend/tests/test_entry_allowance_burn.py Backend/tests/test_business_commands.py -q
+python -m pytest Backend/tests/test_cache_observability_v3.py Backend/tests/test_runtime_telemetry_v3.py Backend/tests/test_manual_inference_queue.py -q
+python -m compileall -q main.py shooter.py Backend\src\phoenixguard\decision Backend\src\phoenixguard\execution Backend\src\phoenixguard\mobile_api Backend\src\phoenixguard\runtime Backend\tools\runtime_trace_v3.py Backend\tools\certification_common_v3.py
+python Backend\tools\verify_v3_integrity.py
 ```
 
 ## TradingView Study Source

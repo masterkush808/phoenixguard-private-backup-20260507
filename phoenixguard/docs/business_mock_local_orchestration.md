@@ -4,12 +4,12 @@ This is the local integration lane for the commercial mock portal and business A
 
 ## Boundaries
 
-- Mock API: `scripts/business_mock_api.py`
-- Mock stack launcher: `scripts/start_business_mock_local.ps1`
-- Playwright contract: `web/tests/e2e/business-mock-flow.spec.ts`
-- Business API pytest: `tests/test_business_integration_mock_api.py`
+- Mock API: `Business/api/business_mock_api.py`
+- Mock stack launcher: `Business/api/start_business_mock_local.ps1`
+- Playwright contract: `Business/web/tests/e2e/business-mock-flow.spec.ts`
+- Business API pytest: `Backend/tests/test_business_integration_mock_api.py`
 
-The launcher uses default ports `18180` for FastAPI and `3210` for Next.js. It does not start `shooter.py`, `tools/phoenixguard_mt4_file_bridge.py`, live broker automation, or the mobile API bridge ports.
+The launcher uses default ports `18180` for FastAPI and `3210` for Next.js. It does not start `shooter.py`, `Backend/tools/phoenixguard_mt4_file_bridge.py`, live broker automation, or the mobile API bridge ports.
 
 ## Mock Accounts
 
@@ -24,19 +24,19 @@ Use broker server `PocketOption-Demo` and MT4 account `8082026` for the happy pa
 ## Start And Stop
 
 ```powershell
-.\scripts\start_business_mock_local.ps1 -InstallWebDeps
+.\Business\api\start_business_mock_local.ps1 -InstallWebDeps
 ```
 
 The script writes logs and PIDs under `.codex_runtime/business_mock/`.
 
 ```powershell
-.\scripts\start_business_mock_local.ps1 -Stop
+.\Business\api\start_business_mock_local.ps1 -Stop
 ```
 
 To start only the API:
 
 ```powershell
-.\scripts\start_business_mock_local.ps1 -SkipWeb
+.\Business\api\start_business_mock_local.ps1 -SkipWeb
 ```
 
 ## Test Commands
@@ -44,7 +44,7 @@ To start only the API:
 Business API gates:
 
 ```powershell
-python -m pytest tests/test_business_integration_mock_api.py -v
+python -m pytest Backend/tests/test_business_integration_mock_api.py -v
 ```
 
 Playwright E2E contract, after the mock stack is running:
@@ -53,7 +53,7 @@ Playwright E2E contract, after the mock stack is running:
 $env:BUSINESS_E2E="1"
 $env:BUSINESS_WEB_BASE_URL="http://127.0.0.1:3210"
 $env:BUSINESS_API_BASE_URL="http://127.0.0.1:18180"
-Push-Location web
+Push-Location Business\web
 npx playwright test tests/e2e/business-mock-flow.spec.ts --reporter=line
 Pop-Location
 ```

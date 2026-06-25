@@ -11,7 +11,7 @@ generation
 
 ### 1. Core Implementation (1,800+ LOC)
 
-#### `phoenixguard/decision/a_star_scenarios.py` (~600 LOC)
+#### `Backend/src/phoenixguard/decision/a_star_scenarios.py` (~600 LOC)
 
 **Purpose**: A* search engine + candle generation
 
@@ -34,7 +34,7 @@ generation
 
 ---
 
-#### `phoenixguard/decision/scenario_integration.py` (~400 LOC)
+#### `Backend/src/phoenixguard/decision/scenario_integration.py` (~400 LOC)
 
 **Key Functions**:
 
@@ -53,7 +53,7 @@ generation
 
 ---
 
-#### `phoenixguard/decision/scenario_paint.py` (~450 LOC)
+#### `Backend/src/phoenixguard/decision/scenario_paint.py` (~450 LOC)
 
 **Key Classes**:
 
@@ -77,7 +77,7 @@ generation
 
 ---
 
-#### `phoenixguard/decision/scenario_decision_kernel.py` (~350 LOC)
+#### `Backend/src/phoenixguard/decision/scenario_decision_kernel.py` (~350 LOC)
 
 **Key Functions**:
 
@@ -156,7 +156,7 @@ generation
 
 ### 3. Testing & Demos
 
-#### `tests/test_a_star_scenarios.py` (~300 LOC)
+#### `Backend/tests/test_a_star_scenarios.py` (~300 LOC)
 
 1. **Demo 1**: Basic A* scenario prediction
 
@@ -185,7 +185,7 @@ generation
    - Export scenarios as CSV
    - Show sample exports
 
-**Run**: `python tests/test_a_star_scenarios.py`
+**Run**: `python Backend/tests/test_a_star_scenarios.py`
 
 ---
 
@@ -289,9 +289,9 @@ generation
 
 ### Phase 1: Core Integration (2-3 hours)
 
-- [ ] Copy 4 Python modules to `phoenixguard/decision/`
+- [ ] Copy 4 Python modules to `Backend/src/phoenixguard/decision/`
 - [ ] Update `decision/__init__.py` to export
-- [ ] Run `tests/test_a_star_scenarios.py` (all 4 demos)
+- [ ] Run `Backend/tests/test_a_star_scenarios.py` (all 4 demos)
 - [ ] Verify no import errors
 
 ### Phase 2: Decision Pipeline (1-2 hours)
@@ -383,7 +383,7 @@ A_StarScenarioPredictor(max_depth=8, expand_factor=4, max_scenarios=12)
 
 📦 Project Root
 │
-├─ 📁 phoenixguard/decision/
+├─ 📁 Backend/src/phoenixguard/decision/
 │  ├─ a_star_scenarios.py          ✅ NEW (600 LOC)
 │  ├─ scenario_integration.py       ✅ NEW (400 LOC)
 │  ├─ scenario_paint.py             ✅ NEW (450 LOC)
@@ -458,7 +458,7 @@ dashboard = create_scenario_dashboard_layout(result["forecast"]["scenarios"])
 
 ```bash
 
-python tests/test_a_star_scenarios.py
+python Backend/tests/test_a_star_scenarios.py
 
 ```
 
@@ -500,7 +500,7 @@ python tests/test_a_star_scenarios.py
 | **Integration Examples** | `SCENARIO_INTEGRATION_EXAMPLES.md` |
 | **Quick Reference** | `A_STAR_SCENARIOS_QUICKREF.md` |
 | **Executive Summary** | `A_STAR_SCENARIOS_DELIVERY_SUMMARY.md` |
-| **Demo Code** | `tests/test_a_star_scenarios.py` |
+| **Demo Code** | `Backend/tests/test_a_star_scenarios.py` |
 | **API Docs** | Module docstrings (read with `help()`) |
 
 ---
@@ -510,7 +510,7 @@ python tests/test_a_star_scenarios.py
 For implementation questions or issues:
 
 1. Check `A_STAR_SCENARIOS_GUIDE.md` (troubleshooting section)
-2. Review demo code in `tests/test_a_star_scenarios.py`
+2. Review demo code in `Backend/tests/test_a_star_scenarios.py`
 3. Check docstrings in module files
 4. Refer to `SCENARIO_INTEGRATION_EXAMPLES.md` for patterns
 

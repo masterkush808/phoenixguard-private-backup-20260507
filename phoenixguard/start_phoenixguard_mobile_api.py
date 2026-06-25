@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from _pg_bootstrap import ensure_project_paths
+ensure_project_paths()
+
 import asyncio
 import logging
 import os

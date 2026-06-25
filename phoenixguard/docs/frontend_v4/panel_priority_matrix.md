@@ -1,6 +1,6 @@
 # PhoenixGuard Frontend V4 Panel Priority Matrix
 
-Source dashboard: `phoenixguard/mobile_api/static/window_tracker_dashboard.html`
+Source dashboard: `Frontend/dashboard/static/window_tracker_dashboard.html`
 Protected title text: `808Fx Standard Hybrid System`
 
 ## Priority Definitions

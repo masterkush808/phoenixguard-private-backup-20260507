@@ -1,0 +1,95 @@
+{
+  "active_version": "V3",
+  "canonical_runtime": {
+    "tracker": true,
+    "model_council": true,
+    "market_reality_engine": true,
+    "execution_lane_resolver": true,
+    "study_packet_publisher": true,
+    "execution_packet_v3": true,
+    "shooter_package_reporter": true,
+    "floating_window_v2": true,
+    "calibration_manifest": false,
+    "observability_v3": true
+  },
+  "launch_profile": {
+    "production": "FINAL_LIVE",
+    "launcher": "launch_phoenixguard_live_ready.ps1",
+    "engine_launcher": "start_phoenixguard_full_local.ps1",
+    "shooter_mode": "PACKAGE_REPORTER",
+    "live_click_arm": "retired",
+    "dashboard_route": "live"
+  },
+  "required_files": [
+    "shooter.py",
+    "launch_phoenixguard_live_ready.ps1",
+    "start_phoenixguard_full_local.ps1",
+    "start_phoenixguard_24_7_tracker.py",
+    "start_phoenixguard_mobile_api.py",
+    "Backend/src/phoenixguard/V3_LANGUAGE_CONSTITUTION.md",
+    "Backend/src/phoenixguard/decision/model_council_v3.py",
+    "Backend/src/phoenixguard/decision/market_reality_engine.py",
+    "Backend/src/phoenixguard/decision/market_intelligence_v3.py",
+    "Backend/src/phoenixguard/execution/packet_v3.py",
+    "Backend/src/phoenixguard/execution/v3_language.py",
+    "Backend/src/phoenixguard/execution/floating_state_reducer.py",
+    "Backend/src/phoenixguard/mobile_api/app.py",
+    "Backend/src/phoenixguard/mobile_api/window_tracker.py",
+    "Backend/src/phoenixguard/runtime/instrument_context.py",
+    "Backend/src/phoenixguard/runtime/cache_v3.py",
+    "Backend/src/phoenixguard/runtime/observability_v3.py",
+    "Backend/src/phoenixguard/runtime/tracker_bootstrap.py",
+    "Backend/tools/runtime_trace_v3.py"
+  ],
+  "required_tests": [
+    "Backend/tests/test_model_council_v3.py",
+    "Backend/tests/test_market_reality_engine.py",
+    "Backend/tests/test_execution_packet_schema_v3.py",
+    "Backend/tests/test_shooter_package_reporter.py",
+    "Backend/tests/test_floating_state_reducer.py",
+    "Backend/tests/test_instrument_context_lock.py",
+    "Backend/tests/test_cache_observability_v3.py",
+    "Backend/tests/test_v3_integrity.py",
+    "Backend/tests/test_v3_language_contracts.py",
+    "Backend/tests/test_tracker_bootstrap.py"
+  ],
+  "required_schemas": [
+    "PG_EXECUTION_PACKET_V3",
+    "STUDY_PACKET",
+    "FloatingStateV2",
+    "TimingDecision",
+    "TradeCandidate",
+    "ExecutionLaneResult",
+    "PG_ALLOWANCE_PACKAGE_V1",
+    "PG_SHOOTER_PACKAGE_REPORT_V1",
+    "PG_CACHE_V3_MODEL_COUNCIL_EXECUTION"
+  ],
+  "required_endpoints": [
+    "/v1/mobile/health",
+    "/v1/mobile/model-council/latest",
+    "/v1/mobile/model-council/study/latest",
+    "/v1/mobile/model-council/execution/latest",
+    "/v1/mobile/floating/state",
+    "/v1/mobile/shooter/handshake",
+    "/v1/mobile/runtime/trace/v3"
+  ],
+  "required_calibration_targets": [],
+  "forbidden_active_paths": [
+    "legacy raw trigger execution",
+    "startup test signal execution from the operator launcher",
+    "V1 packet execution",
+    "V2 packet execution",
+    "old decision kernel direct click path",
+    "old skill gate direct blocker path",
+    "raw action as shooter authority",
+    "SNIPER_READY as shooter authority"
+  ],
+  "quarantine_policy": {
+    "delete_directly": false,
+    "quarantine_root": "_archive/legacy_quarantine",
+    "runtime_backup_root": "_archive/runtime_backup",
+    "preserve_model_weights": true,
+    "preserve_training_data": true,
+    "preserve_calibration": false
+  }
+}

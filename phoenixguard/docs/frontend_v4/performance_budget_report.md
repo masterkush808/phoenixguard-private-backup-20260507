@@ -8,7 +8,7 @@ Scope: performance budget recommendations for the local dashboard and safe test 
 
 Static dashboard HTML:
 
-- `phoenixguard/mobile_api/static/window_tracker_dashboard.html` - 187,212 bytes
+- `Frontend/dashboard/static/window_tracker_dashboard.html` - 187,212 bytes
 
 Dashboard scene assets:
 
@@ -44,7 +44,7 @@ Remote/share budget if this dashboard is ever exposed outside localhost:
 Safe regression subset executed in this pass:
 
 ```powershell
-python -m pytest tests/test_mobile_api_service.py tests/test_ui_copy_hardening.py tests/test_window_tracker_service.py::test_tracker_http_surface_serves_session_artifacts_and_dashboard tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop tests/test_window_tracker_service.py::test_live_dashboard_launcher_keeps_voice_bridge_opt_in tests/test_window_tracker_service.py::test_full_local_launcher_arms_live_shooter_without_broker_auto_open tests/test_window_tracker_service.py::test_tracker_http_emergency_stop_disables_live_execution -v --tb=short -ra
+python -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_ui_copy_hardening.py Backend/tests/test_window_tracker_service.py::test_tracker_http_surface_serves_session_artifacts_and_dashboard Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop Backend/tests/test_window_tracker_service.py::test_live_dashboard_launcher_keeps_voice_bridge_opt_in Backend/tests/test_window_tracker_service.py::test_full_local_launcher_arms_live_shooter_without_broker_auto_open Backend/tests/test_window_tracker_service.py::test_tracker_http_emergency_stop_disables_live_execution -v --tb=short -ra
 ```
 
 Result: 15 passed in 35.25s.
@@ -52,13 +52,13 @@ Result: 15 passed in 35.25s.
 Safe broader command:
 
 ```powershell
-python -m pytest tests/test_mobile_api_service.py tests/test_mobile_observer_service.py tests/test_window_tracker_service.py tests/test_ui_copy_hardening.py -v --tb=short -ra
+python -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_mobile_observer_service.py Backend/tests/test_window_tracker_service.py Backend/tests/test_ui_copy_hardening.py -v --tb=short -ra
 ```
 
 Static size check command:
 
 ```powershell
-Get-Item phoenixguard\mobile_api\static\window_tracker_dashboard.html, assets\share\css-control\*.png | ForEach-Object { "{0}`t{1}" -f $_.Name, $_.Length }
+Get-Item Frontend\dashboard\static\window_tracker_dashboard.html, Frontend\assets\share\css-control\*.png | ForEach-Object { "{0}`t{1}" -f $_.Name, $_.Length }
 ```
 
 ## Commands Not Allowed During QA

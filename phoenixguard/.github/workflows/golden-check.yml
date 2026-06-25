@@ -23,4 +23,4 @@ jobs:
         env:
           UPDATE_GOLDEN: ${{ env.UPDATE_GOLDEN }}
         run: |
-          python -m pytest tests/test_visual_golden.py -q
+          python -m pytest Backend/tests/test_visual_golden.py -q

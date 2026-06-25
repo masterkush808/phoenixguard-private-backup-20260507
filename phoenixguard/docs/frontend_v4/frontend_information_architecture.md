@@ -1,7 +1,7 @@
 # PhoenixGuard Frontend V4 Information Architecture
 
-Source surface: `phoenixguard/mobile_api/static/window_tracker_dashboard.html`
-Route source: `phoenixguard/mobile_api/app.py`
+Source surface: `Frontend/dashboard/static/window_tracker_dashboard.html`
+Route source: `Backend/src/phoenixguard/mobile_api/app.py`
 Protected title text: `808Fx Standard Hybrid System`
 
 ## IA Goal

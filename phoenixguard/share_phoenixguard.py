@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+from _pg_bootstrap import ensure_project_paths
+ensure_project_paths()
 # pyright: reportPrivateUsage=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportPossiblyUnboundVariable=false, reportOperatorIssue=false, reportUnnecessaryCast=false, reportArgumentType=false
 
 from dataclasses import dataclass, field

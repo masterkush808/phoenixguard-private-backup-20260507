@@ -54,8 +54,8 @@ Agent 1 did not clear caches. This inventory classifies known paths for the requ
 ## In-Memory Caches Found
 
 - `main.py`: `_local_ensemble_cache`, `_local_ensemble_future_cache`, `_local_ensemble_error_cache`, `_compare_frame_uri_cache`, `_zone_memory_cache`, `_capture_runtime_state`.
-- `phoenixguard/runtime/model_council_daemon.py`: `_runtime_cache`, `_prediction_cache`.
-- `phoenixguard/runtime/local_ensemble_runtime.py`: resident runtime/model cache.
+- `Backend/src/phoenixguard/runtime/model_council_daemon.py`: `_runtime_cache`, `_prediction_cache`.
+- `Backend/src/phoenixguard/runtime/local_ensemble_runtime.py`: resident runtime/model cache.
 
 ## Required V3 Addition
 

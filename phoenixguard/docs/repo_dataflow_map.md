@@ -10,7 +10,7 @@ shooter execution was retired.
      `data/mobile_api/jobs/<job_id>/uploads`.
    - Observer upload: `phoenixguard/mobile_api/observer.py` stages observer bundles under
      `data/mobile_api/observer/sessions/<session_id>/bundles`.
-   - Continuous tracker: `phoenixguard/mobile_api/window_tracker.py` captures the broker window in
+   - Continuous tracker: `Backend/src/phoenixguard/mobile_api/window_tracker.py` captures the broker window in
      `_capture_and_analyze_claimed` and writes session state, artifacts, previews, and event logs.
 
 2. Perception and decision production
@@ -38,13 +38,13 @@ shooter execution was retired.
    - It writes `.codex_runtime/shooter_handshake.json` only when a validated
      `PG_EXECUTION_PACKET_V3` includes an explicit accepted, execution-ready
      `PG_ALLOWANCE_PACKAGE_V1`.
-   - `tools/phoenixguard_mt4_file_bridge.py` compacts the package into an MT4 command and rejects
+   - `Backend/tools/phoenixguard_mt4_file_bridge.py` compacts the package into an MT4 command and rejects
      inferred, missing, non-accepted, or non-ready allowance packages.
    - The API app exposes Model Council health, intelligence, latest execution packet endpoints, and
      package-reporter handshake status.
 
 5. V3 schema support
-   - `phoenixguard/execution/packet_v3.py` now defines `PG_EXECUTION_PACKET_V3` validation and
+   - `Backend/src/phoenixguard/execution/packet_v3.py` now defines `PG_EXECUTION_PACKET_V3` validation and
      publisher helpers.
    - It rejects raw `action` / `execution_action` payloads, `SNIPER_READY`, CALL/PUT aliases, stale
      packets, missing `model_council.final_side`, and side mismatch.
@@ -55,13 +55,13 @@ shooter execution was retired.
 - `main.py::run_inference`: primary analysis producer.
 - `phoenixguard/mobile_api/observer.py::SignalObserverService._build_signal_payload`: observer
   signal payload producer.
-- `phoenixguard/mobile_api/window_tracker.py::ContinuousWindowTrackerService._capture_and_analyze_claimed`:
+- `Backend/src/phoenixguard/mobile_api/window_tracker.py::ContinuousWindowTrackerService._capture_and_analyze_claimed`:
   live tracker session, latest signal, Model Council result, and optional V3 packet producer.
-- `phoenixguard/runtime/model_council_daemon.py`: model ensemble inference daemon, currently
+- `Backend/src/phoenixguard/runtime/model_council_daemon.py`: model ensemble inference daemon, currently
   `/status` and `/predict`, not a V3 execution packet publisher.
-- `phoenixguard/decision/model_council_v3.py`: V3 council evaluator and packet publisher helper now
+- `Backend/src/phoenixguard/decision/model_council_v3.py`: V3 council evaluator and packet publisher helper now
   consuming Agent 1 packet support.
-- `phoenixguard/execution/packet_v3.py::build_execution_packet_v3`: reusable V3 packet publisher
+- `Backend/src/phoenixguard/execution/packet_v3.py::build_execution_packet_v3`: reusable V3 packet publisher
   helper added for later Model Council integration.
 
 ## Key Consumer Functions
@@ -69,13 +69,13 @@ shooter execution was retired.
 - `shooter.py::review_allowed_package`: validates a V3 packet and its allowance package.
 - `shooter.py::publish_allowed_package_report`: writes the package-reporter handshake for accepted
   packages.
-- `tools/phoenixguard_mt4_file_bridge.py::_validate_command`: revalidates allowance package source,
+- `Backend/tools/phoenixguard_mt4_file_bridge.py::_validate_command`: revalidates allowance package source,
   type, authority, accepted state, and execution readiness before MT4 handoff.
-- `phoenixguard/mobile_api/static/window_tracker_dashboard.html`: dashboard consumer of tracker
+- `Frontend/dashboard/static/window_tracker_dashboard.html`: dashboard consumer of tracker
   session `latest_signal` fields.
-- `scripts/replay_signals.py`: dry-run consumer of legacy signal-shaped diagnostics.
-- Tests under `tests/test_execution_packet_schema_v3.py`, `tests/test_mt4_file_bridge.py`, and
-  `tests/test_entry_allowance_burn.py`.
+- `Backend/scripts_runtime/replay_signals.py`: dry-run consumer of legacy signal-shaped diagnostics.
+- Tests under `Backend/tests/test_execution_packet_schema_v3.py`, `Backend/tests/test_mt4_file_bridge.py`, and
+  `Backend/tests/test_entry_allowance_burn.py`.
 
 ## Agent 1 Integration Boundary
 

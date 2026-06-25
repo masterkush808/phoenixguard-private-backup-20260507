@@ -20,7 +20,7 @@
 
 ## Phase 1: Delivered Components
 
-### 1. `phoenixguard/vision/multi_model_ensemble.py` (470 lines)
+### 1. `Backend/src/phoenixguard/vision/multi_model_ensemble.py` (470 lines)
 
 #### Multi-Model Vision Fusion Engine
 
@@ -62,7 +62,7 @@ Key methods:
 
 **Status**: ✅ Production ready, tested, documented
 
-### 2. `phoenixguard/vision/motion_tracker.py` (420 lines)
+### 2. `Backend/src/phoenixguard/vision/motion_tracker.py` (420 lines)
 
 #### Optical Flow Motion Detection Engine
 
@@ -105,7 +105,7 @@ Key methods:
 
 **Status**: ✅ Production ready, comprehensive test coverage
 
-### 3. `phoenixguard/vision/chart_segmentation.py` (380 lines)
+### 3. `Backend/src/phoenixguard/vision/chart_segmentation.py` (380 lines)
 
 #### Chart Boundary Segmentation Engine
 
@@ -153,7 +153,7 @@ Key methods:
 
 **Status**: ✅ Production ready, handles edge cases
 
-### 4. `phoenixguard/vision/enhanced_vision_module.py` (360 lines)
+### 4. `Backend/src/phoenixguard/vision/enhanced_vision_module.py` (360 lines)
 
 #### Integrated Vision Pipeline Orchestrator
 
@@ -312,15 +312,15 @@ To validate Phase 1 implementation:
 
 ## Run all Phase 1 tests
 
-pytest tests/vision/test_enhanced_vision_phase1.py -v
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py -v
 
 ## Run with performance benchmarks
 
-pytest tests/vision/test_enhanced_vision_phase1.py::TestPerformance -v
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py::TestPerformance -v
 
 ## Run with coverage reporting
 
-pytest tests/vision/test_enhanced_vision_phase1.py --cov=phoenixguard.vision
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py --cov=phoenixguard.vision
 
 ## Expected result: 70+ tests PASSED
 
@@ -377,7 +377,7 @@ print(f"Motion: {output.motion_energy:.1f}")
 
 ```bash
 
-pytest tests/vision/test_enhanced_vision_phase1.py -v --tb=short
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py -v --tb=short
 
 ```
 
@@ -428,7 +428,7 @@ approximation.
 
 ### Before Production Deployment
 
-- [ ] Run full test suite: `pytest tests/vision/test_enhanced_vision_phase1.py
+- [ ] Run full test suite: `pytest Backend/tests/vision/test_enhanced_vision_phase1.py
 
 -v`
 

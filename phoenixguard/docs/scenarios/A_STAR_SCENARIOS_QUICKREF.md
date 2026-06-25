@@ -4,7 +4,7 @@
 
 ```text
 
-phoenixguard/decision/
+Backend/src/phoenixguard/decision/
 ├── a_star_scenarios.py              # A* engine + candle generation
 ├── scenario_integration.py           # Regression/ensemble bridge
 ├── scenario_paint.py                 # Visualization/Plotly
@@ -208,7 +208,7 @@ return {"scenarios": overlay, "gates": scenario_gates_as_metrics(final)}
 | Scenarios not generated | Check `forecast_output` has `q05`, `q50`, `q95` |
 | Low confidence scenarios | Increase `path_confidence` in forecast, check memory bias |
 | Slow generation (~500ms+) | Reduce `max_depth` to 3, reduce `expand_factor` to 2 |
-| Import error | Ensure module files are in `phoenixguard/decision/` |
+| Import error | Ensure module files are in `Backend/src/phoenixguard/decision/` |
 | Visualization blank | Check `scenarios_raw` list is not empty |
 
 ## Performance Targets
@@ -310,7 +310,7 @@ csv_str = export_scenarios_as_csv(scenarios_raw)
 
 ```bash
 
-python tests/test_a_star_scenarios.py    # Run all 4 demos
+python Backend/tests/test_a_star_scenarios.py    # Run all 4 demos
 
 ```
 

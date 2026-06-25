@@ -536,19 +536,19 @@ Run the comprehensive test suite:
 
 ## All tests
 
-pytest tests/vision/test_enhanced_vision_phase1.py -v
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py -v
 
 ## Specific test class
 
-pytest tests/vision/test_enhanced_vision_phase1.py::TestOpticalFlowTracker -v
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py::TestOpticalFlowTracker -v
 
 ## With performance benchmarks
 
-pytest tests/vision/test_enhanced_vision_phase1.py::TestPerformance -v
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py::TestPerformance -v
 
 ## With detailed logging
 
-pytest tests/vision/test_enhanced_vision_phase1.py -v --log-cli-level=DEBUG
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py -v --log-cli-level=DEBUG
 
 ```
 

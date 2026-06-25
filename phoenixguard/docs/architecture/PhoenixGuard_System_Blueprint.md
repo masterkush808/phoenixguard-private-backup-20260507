@@ -66,10 +66,10 @@ The final V3 upgrades wired into the repository are:
 - Entry allowance evidence added: every allowed entry package can produce broker and overlay
   screenshots marked on the latest candle now point. Blocked `ENTER_NOW` observations can also be
   captured separately.
-- Entry burn forensic tool added: `tools/run_entry_allowance_burn.py` polls live/council/performance
+- Entry burn forensic tool added: `Backend/tools/run_entry_allowance_burn.py` polls live/council/performance
   endpoints in parallel, captures entry evidence, scores future outcomes, produces manifests,
   galleries, progression sheets, and final reports.
-- Model-strength control layer added: `phoenixguard/mobile_api/model_strength.py`, the dashboard
+- Model-strength control layer added: `Backend/src/phoenixguard/mobile_api/model_strength.py`, the dashboard
   strength control, and `/model-strength` endpoints convert saved settings into execution controls.
 - AI contribution weights made explicit: Model Council now accepts `ai_contribution_strengths`,
   `model_strength_profile`, and execution lane thresholds and records them in council output and
@@ -168,18 +168,18 @@ replay, or deployment assistance.
 | Layer                             | Core Files                                                                                                         | Responsibility                                                                                                                                                                                                                                         |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Launch and profile                | `launch_phoenixguard_live_ready.ps1`, `start_phoenixguard_full_local.ps1`, `start_phoenixguard_24_7_tracker.py`    | Starts the production live stack, pins the FINAL_LIVE profile, prepares runtime state, and launches API/tracker/shooter components.                                                                                                                    |
-| Capture and tracker               | `phoenixguard/mobile_api/window_tracker.py`                                                                        | Locks a window, captures frames, builds live session state, derives chart structure, publishes artifacts, and feeds Model Council.                                                                                                                     |
-| Vision and overlay                | `phoenixguard/vision/*`, `phoenixguard/tracking/market_object_tracker_v3.py`                                       | Performs preprocessing, source-lock checks, chart transforms, object tracking, overlays, layer management, visual health, and registry persistence.                                                                                                    |
+| Capture and tracker               | `Backend/src/phoenixguard/mobile_api/window_tracker.py`                                                                        | Locks a window, captures frames, builds live session state, derives chart structure, publishes artifacts, and feeds Model Council.                                                                                                                     |
+| Vision and overlay                | `Backend/src/phoenixguard/vision/*`, `Backend/src/phoenixguard/tracking/market_object_tracker_v3.py`                                       | Performs preprocessing, source-lock checks, chart transforms, object tracking, overlays, layer management, visual health, and registry persistence.                                                                                                    |
 | Memory                            | `phoenixguard/memory/*`                                                                                            | Embeds and retrieves prior examples, scores visual-play memory confirmation, and produces sequence/style similarity features.                                                                                                                          |
-| Decision                          | `phoenixguard/decision/*`                                                                                          | Performs regime, market reality, price location, scenarios, skill-gate diagnostics, RL/regression, model-council arbitration, and timing readiness scoring.                                                                                            |
-| Execution contract                | `phoenixguard/execution/packet_v3.py`, `phoenixguard/execution/v3_language.py`, `phoenixguard/runtime/cache_v3.py` | Defines canonical schema vocabulary, packet construction, validation, cache integrity, TTL, side agreement, sequence context, and runtime integrity.                                                                                                   |
+| Decision                          | `Backend/src/phoenixguard/decision/*`                                                                                          | Performs regime, market reality, price location, scenarios, skill-gate diagnostics, RL/regression, model-council arbitration, and timing readiness scoring.                                                                                            |
+| Execution contract                | `Backend/src/phoenixguard/execution/packet_v3.py`, `Backend/src/phoenixguard/execution/v3_language.py`, `Backend/src/phoenixguard/runtime/cache_v3.py` | Defines canonical schema vocabulary, packet construction, validation, cache integrity, TTL, side agreement, sequence context, and runtime integrity.                                                                                                   |
 | Shooter package reporter          | `shooter.py`                                                                                                       | Reads only the Model Council execution endpoint, validates the executable packet and allowance package, and writes a package handoff when the package is accepted and execution-ready. It never clicks, calibrates, edits amount, or sets broker time. |
-| MT4/external bridge               | `tools/phoenixguard_mt4_file_bridge.py`, `mt4/PhoenixGuard_MT4_Executioner.mq4`                                    | Consumes only explicit Model Council allowance packages from validated V3 packets and applies its own intraday/swing controls before any external action.                                                                                              |
-| API and dashboard                 | `phoenixguard/mobile_api/app.py`, `phoenixguard/mobile_api/static/window_tracker_dashboard.html`, `assets/js/*`    | Exposes health, live state, packet, tracker, floating-state, artifact, registry, visual, dashboard, stream, and control endpoints.                                                                                                                     |
-| Model-strength controls           | `phoenixguard/mobile_api/model_strength.py`, `phoenixguard/mobile_api/static/floating_windows/model_strength_*`    | Saves developer-tuned model floors, AI contribution weights, lane thresholds, timing controls, risk controls, overlay controls, and study-only execution toggles.                                                                                      |
-| Entry evidence and hardening burn | `tools/run_entry_allowance_burn.py`, tracker entry-evidence capture in `window_tracker.py`                         | Captures broker and overlay screenshots for allowed entry packages, marks the latest candle, scores outcome horizons, and produces forensic galleries/reports.                                                                                         |
-| Runtime and observability         | `phoenixguard/runtime/*`, `phoenixguard/tracing.py`, `tools/*`                                                     | Provides model warm-state, cache validation, telemetry, atomic writes, freshness, certification, traces, and diagnostics.                                                                                                                              |
-| Simulation and training           | `phoenixguard/simulation/*`, `phoenixguard/training/*`, `train_*.py`, `scripts/*`                                  | Creates synthetic and replay scenarios, paper execution, event backtests, LoRA/adapters, clean splits, sequence manifests, and model exports.                                                                                                          |
+| MT4/external bridge               | `Backend/tools/phoenixguard_mt4_file_bridge.py`, `Backend/launch/mt4/PhoenixGuard_MT4_Executioner.mq4`                                    | Consumes only explicit Model Council allowance packages from validated V3 packets and applies its own intraday/swing controls before any external action.                                                                                              |
+| API and dashboard                 | `Backend/src/phoenixguard/mobile_api/app.py`, `Frontend/dashboard/static/window_tracker_dashboard.html`, `Frontend/assets/js/*`    | Exposes health, live state, packet, tracker, floating-state, artifact, registry, visual, dashboard, stream, and control endpoints.                                                                                                                     |
+| Model-strength controls           | `Backend/src/phoenixguard/mobile_api/model_strength.py`, `Frontend/dashboard/static/floating_windows/model_strength_*`    | Saves developer-tuned model floors, AI contribution weights, lane thresholds, timing controls, risk controls, overlay controls, and study-only execution toggles.                                                                                      |
+| Entry evidence and hardening burn | `Backend/tools/run_entry_allowance_burn.py`, tracker entry-evidence capture in `window_tracker.py`                         | Captures broker and overlay screenshots for allowed entry packages, marks the latest candle, scores outcome horizons, and produces forensic galleries/reports.                                                                                         |
+| Runtime and observability         | `Backend/src/phoenixguard/runtime/*`, `phoenixguard/tracing.py`, `Backend/tools/*`                                                     | Provides model warm-state, cache validation, telemetry, atomic writes, freshness, certification, traces, and diagnostics.                                                                                                                              |
+| Simulation and training           | `Backend/src/phoenixguard/simulation/*`, `Developer/model_training/*`, `Developer/model_training/train_*.py`, `Backend/scripts_runtime/*`                                  | Creates synthetic and replay scenarios, paper execution, event backtests, LoRA/adapters, clean splits, sequence manifests, and model exports.                                                                                                          |
 | Mobile and voice                  | `mobile/android/*`, `phoenixguard/voice/*`                                                                         | Provides Android observer UI and voice-command control layers for tracker status, capture, start/stop, interval updates, and command routing.                                                                                                          |
 | Commercial boundary               | `phoenixguard/business/*`                                                                                          | Provides business, license, billing, command, and onboarding API support while remaining outside packet execution authority.                                                                                                                           |
 
@@ -252,7 +252,7 @@ Get-CimInstance Win32_Process |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 Start-Sleep -Seconds 3
-python .\tools\clean_v3_runtime_state.py --apply
+python .\Backend\tools\clean_v3_runtime_state.py --apply
 ```
 
 The final live dashboard stack is launched with:
@@ -283,9 +283,9 @@ Invoke-RestMethod "$base/v1/mobile/live/state/v3/$session?mode=CLEAN_LIVE" | Con
 Invoke-RestMethod "$base/v1/mobile/performance/trace/v3/$session" | ConvertTo-Json -Depth 12
 Invoke-RestMethod "$base/v1/mobile/runtime/trace/v3?session_id=$session" | ConvertTo-Json -Depth 16
 
-python .\tools\runtime_trace_v3.py --base-url $base --session $session --timeout 20
-python .\tools\trace_sequence_context_v3.py --base-url $base --session $session --timeout 20
-python .\tools\verify_v3_integrity.py
+python .\Backend\tools\runtime_trace_v3.py --base-url $base --session $session --timeout 20
+python .\Backend\tools\trace_sequence_context_v3.py --base-url $base --session $session --timeout 20
+python .\Backend\tools\verify_v3_integrity.py
 ```
 
 The API-only fallback for backend debugging is:
@@ -306,7 +306,7 @@ itself.
 | `phoenixguard/vision`                       | Image preprocessing, broker source lock, chart segmentation, overlay schema, V3 overlay contract, transforms, rendering, and object registry support.                              |
 | `phoenixguard/tracking`                     | V3 market object tracker and sequence-context bridge for overlays and registry state.                                                                                              |
 | `phoenixguard/mobile_api`                   | FastAPI app, mobile service, observer service, continuous window tracker, live-state builder, dashboard, and real-time frontend sync.                                              |
-| `phoenixguard/mobile_api/model_strength.py` | Sanitizes and persists model-strength settings, converts them into execution controls, AI contribution strengths, lane thresholds, and profile metadata.                           |
+| `Backend/src/phoenixguard/mobile_api/model_strength.py` | Sanitizes and persists model-strength settings, converts them into execution controls, AI contribution strengths, lane thresholds, and profile metadata.                           |
 | `phoenixguard/business`                     | Business, license, billing, command, and onboarding API support registered into the FastAPI app but isolated from live packet authority.                                           |
 | `phoenixguard/decision`                     | Market reasoning, Model Council, RL, regression, ensemble, skill gates, scenarios, market memory, price location, regime, and outcome feedback.                                    |
 | `phoenixguard/execution`                    | Execution language, packet schema, timing, sequence context, allowance-package validation, MT4/external handoff contracts, and floating-state reducer.                             |
@@ -372,10 +372,10 @@ shorthand only.
 The final V3 architecture includes a developer-controlled model-strength profile. It is stored in:
 
 ```text
-phoenixguard/mobile_api/static/floating_windows/model_strength_settings.json
+Frontend/dashboard/static/floating_windows/model_strength_settings.json
 ```
 
-It is normalized by `phoenixguard/mobile_api/model_strength.py` and applied through tracker
+It is normalized by `Backend/src/phoenixguard/mobile_api/model_strength.py` and applied through tracker
 execution controls. The profile covers:
 
 - Model confidence floor.
@@ -426,7 +426,7 @@ PhoenixGuard considered an entry at the moment the packet allowed it.
 The final V3 architecture treats storage growth as a production risk. The tracker is a live reader
 and predictor, not an unlimited recorder. The hardening adds these guards:
 
-- `tools/clean_v3_runtime_state.py --apply` backs up and clears stale runtime/cache state while
+- `Backend/tools/clean_v3_runtime_state.py --apply` backs up and clears stale runtime/cache state while
   preserving calibration files.
 - Overlay geometry dumps are disabled by default through `PHOENIXGUARD_OVERLAY_GEOMETRY_DUMPS=0`.
 - When overlay geometry dumps are enabled, they are pruned by file count, age, and size.
@@ -438,7 +438,7 @@ and predictor, not an unlimited recorder. The hardening adds these guards:
 
 ## Capture And Window Tracker Design
 
-The continuous tracker is implemented mainly in `phoenixguard/mobile_api/window_tracker.py`. It is
+The continuous tracker is implemented mainly in `Backend/src/phoenixguard/mobile_api/window_tracker.py`. It is
 the largest runtime module because it combines window capture, source control, chart-study
 derivation, overlay rendering, session persistence, Model Council publication, and live dashboard
 payload construction.
@@ -518,16 +518,16 @@ broker surface safety.
 
 | File                                              | Role                                                                                                                                         |
 | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `phoenixguard/vision/preprocess.py`               | Loads arbitrary image/file input, extracts price values, applies CLAHE, crops chart areas, normalizes input, and converts images to tensors. |
-| `phoenixguard/vision/multi_model_ensemble.py`     | Provides model registry and multi-model detection/inference output structures for YOLO, ViT, and SAM-style backends.                         |
-| `phoenixguard/vision/broker_source_lock_v3.py`    | Fingerprints broker viewport, pixels, and controls, classifies wrong surfaces, and builds broker-source lock status.                         |
-| `phoenixguard/vision/v3_chart_transform.py`       | Maps normalized chart coordinates to chart image and screen coordinates.                                                                     |
-| `phoenixguard/vision/v3_overlay_contract.py`      | Defines V3 overlay type, layer, coordinate-mode, and visibility contracts.                                                                   |
-| `phoenixguard/vision/overlay_geometry.py`         | Normalizes and clips boxes, computes IoU/area/aspect, merges boxes, smooths overlays, and applies mode visibility.                           |
-| `phoenixguard/vision/overlay_layer_manager_v3.py` | Resolves overlay layer order and view-mode behavior.                                                                                         |
-| `phoenixguard/vision/candle_snap.py`              | Snaps candle geometry and validates candle overlap and metrics.                                                                              |
-| `phoenixguard/vision/chart_segmentation.py`       | Segments chart regions, extracts chart area, and stores segmentation history.                                                                |
-| `phoenixguard/vision/renderer.py`                 | Renders overlays on chart images.                                                                                                            |
+| `Backend/src/phoenixguard/vision/preprocess.py`               | Loads arbitrary image/file input, extracts price values, applies CLAHE, crops chart areas, normalizes input, and converts images to tensors. |
+| `Backend/src/phoenixguard/vision/multi_model_ensemble.py`     | Provides model registry and multi-model detection/inference output structures for YOLO, ViT, and SAM-style backends.                         |
+| `Backend/src/phoenixguard/vision/broker_source_lock_v3.py`    | Fingerprints broker viewport, pixels, and controls, classifies wrong surfaces, and builds broker-source lock status.                         |
+| `Backend/src/phoenixguard/vision/v3_chart_transform.py`       | Maps normalized chart coordinates to chart image and screen coordinates.                                                                     |
+| `Backend/src/phoenixguard/vision/v3_overlay_contract.py`      | Defines V3 overlay type, layer, coordinate-mode, and visibility contracts.                                                                   |
+| `Backend/src/phoenixguard/vision/overlay_geometry.py`         | Normalizes and clips boxes, computes IoU/area/aspect, merges boxes, smooths overlays, and applies mode visibility.                           |
+| `Backend/src/phoenixguard/vision/overlay_layer_manager_v3.py` | Resolves overlay layer order and view-mode behavior.                                                                                         |
+| `Backend/src/phoenixguard/vision/candle_snap.py`              | Snaps candle geometry and validates candle overlap and metrics.                                                                              |
+| `Backend/src/phoenixguard/vision/chart_segmentation.py`       | Segments chart regions, extracts chart area, and stores segmentation history.                                                                |
+| `Backend/src/phoenixguard/vision/renderer.py`                 | Renders overlays on chart images.                                                                                                            |
 
 ### Vision Techniques Used
 
@@ -542,7 +542,7 @@ broker surface safety.
 
 ## Market Object Registry And Overlay Architecture
 
-`phoenixguard/tracking/market_object_tracker_v3.py` builds V3 market objects from session payloads
+`Backend/src/phoenixguard/tracking/market_object_tracker_v3.py` builds V3 market objects from session payloads
 and overlays. The registry gives the runtime a structured inventory of candles, zones, paths,
 labels, support/resistance, and sequence context.
 
@@ -553,7 +553,7 @@ The overlay system uses these protections:
 - Layer ordering.
 - Visibility by mode.
 - Bounding box normalization.
-- Contract validation through `tools/validate_overlay_contract_v3.py`.
+- Contract validation through `Backend/tools/validate_overlay_contract_v3.py`.
 - Visual regression through dashboard and overlay tests.
 
 This prevents overlay drift from becoming execution truth. Visual overlays explain the decision
@@ -719,7 +719,7 @@ direct live-click authorities.
 
 ## Execution Packet V3 Contract
 
-`phoenixguard/execution/packet_v3.py` defines the canonical execution packet schema and validation
+`Backend/src/phoenixguard/execution/packet_v3.py` defines the canonical execution packet schema and validation
 helpers.
 
 An executable packet must include:
@@ -773,7 +773,7 @@ allowance package is missing, inferred, not accepted, not execution-ready, or no
 
 ## API And Dashboard Layer
 
-`phoenixguard/mobile_api/app.py` creates the FastAPI app. It exposes health, live state, model
+`Backend/src/phoenixguard/mobile_api/app.py` creates the FastAPI app. It exposes health, live state, model
 council, tracker, observer, dashboard, artifact, visual health, registry, performance, voice, and
 streaming endpoints.
 
@@ -871,7 +871,7 @@ and returns explanation; it must not become packet authority.
 PhoenixGuard uses a local model training/runtime stack rather than depending only on external
 inference.
 
-`phoenixguard/training/ensemble_cv_models.py` includes:
+`Developer/model_training/ensemble_cv_models.py` includes:
 
 - Model train configs.
 - Replay samples and continual training state.
@@ -881,7 +881,7 @@ inference.
 - Transform builders for basic, DINOv2, and self-supervised boost views.
 - Triplet loss, probability-gap penalty, feature pooling, and backbone feature forwarding.
 
-`phoenixguard/runtime/local_ensemble_runtime.py` loads saved local CV bundles and routes prediction
+`Backend/src/phoenixguard/runtime/local_ensemble_runtime.py` loads saved local CV bundles and routes prediction
 among model roles:
 
 | Model         | Runtime Role         |
@@ -920,7 +920,7 @@ deeper reasoning fields belong in traces, reports, and developer inspection tool
 
 `phoenixguard/business/*` adds a commercial boundary for customer records, licenses, mock billing,
 connector registration, device heartbeats, entitlements, releases, and command exchange.
-`phoenixguard/mobile_api/app.py` registers those routes into the FastAPI app.
+`Backend/src/phoenixguard/mobile_api/app.py` registers those routes into the FastAPI app.
 
 This is a business/control-plane layer, not a trading authority layer. Its rules are:
 
@@ -943,9 +943,9 @@ context keys, and LoRA-style adapters.
 
 Key files:
 
-- `phoenixguard/runtime/adaptive_runtime.py`
-- `phoenixguard/runtime/continual_adapters.py`
-- `scripts/export_inference_bundles.py`
+- `Backend/src/phoenixguard/runtime/adaptive_runtime.py`
+- `Backend/src/phoenixguard/runtime/continual_adapters.py`
+- `Backend/scripts_runtime/export_inference_bundles.py`
 - `train_finetune.py`
 - `train_finetune_dinov2_only.py`
 - `train_finetune_remaining.py`
@@ -960,11 +960,11 @@ Runtime integrity is enforced by multiple modules:
 
 | Module                                            | Integrity Responsibility                                                                                                                                             |
 | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `phoenixguard/runtime/cache_v3.py`                | Validates cache records, attaches cache metadata, verifies study packet current-state use, validates execution packet cache state, and decides packet executability. |
-| `phoenixguard/runtime/instrument_context.py`      | Builds and validates symbol, timeframe, viewport, broker surface, and instrument identity context.                                                                   |
-| `phoenixguard/runtime/realtime_performance_v3.py` | Atomic session writes, freshness validators, frame timing trace, capture watchdog, latest frame buffer, and performance trace.                                       |
-| `phoenixguard/runtime/observability_v3.py`        | Compute usage, telemetry, Model Council health, intelligence health, forensic decision log, bad-entry replay, and paper-mode records.                                |
-| `phoenixguard/runtime/certification_v3.py`        | Certification gate results, session freshness, capture worker health, and report writing.                                                                            |
+| `Backend/src/phoenixguard/runtime/cache_v3.py`                | Validates cache records, attaches cache metadata, verifies study packet current-state use, validates execution packet cache state, and decides packet executability. |
+| `Backend/src/phoenixguard/runtime/instrument_context.py`      | Builds and validates symbol, timeframe, viewport, broker surface, and instrument identity context.                                                                   |
+| `Backend/src/phoenixguard/runtime/realtime_performance_v3.py` | Atomic session writes, freshness validators, frame timing trace, capture watchdog, latest frame buffer, and performance trace.                                       |
+| `Backend/src/phoenixguard/runtime/observability_v3.py`        | Compute usage, telemetry, Model Council health, intelligence health, forensic decision log, bad-entry replay, and paper-mode records.                                |
+| `Backend/src/phoenixguard/runtime/certification_v3.py`        | Certification gate results, session freshness, capture worker health, and report writing.                                                                            |
 | `phoenixguard/tracing.py`                         | OpenTelemetry setup and FastAPI instrumentation.                                                                                                                     |
 
 The default tracing endpoint is `http://localhost:4318/v1/traces`. Tracing can be disabled with
@@ -997,7 +997,7 @@ The final V3 architecture deliberately avoids unbounded growth during one-second
 
 | Growth Source                   | Control                                                                                                                        |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Runtime cache and old artifacts | `tools/clean_v3_runtime_state.py --apply` moves stale runtime/cache paths into `_archive/runtime_backup`.                      |
+| Runtime cache and old artifacts | `Backend/tools/clean_v3_runtime_state.py --apply` moves stale runtime/cache paths into `_archive/runtime_backup`.                      |
 | Overlay geometry dumps          | Disabled by default; optional pruning by max files, max MB, and max age.                                                       |
 | Event logs                      | Tracker JSONL logs are bounded by MB and tail-line count.                                                                      |
 | Decision payload persistence    | Compact by default through `PHOENIXGUARD_FULL_DECISION_ARTIFACTS=0`.                                                           |
@@ -1008,7 +1008,7 @@ This means PhoenixGuard can poll every second without acting like a permanent re
 
 ## Security And State Protection
 
-`phoenixguard/runtime/security.py` provides:
+`Backend/src/phoenixguard/runtime/security.py` provides:
 
 - Fernet key derivation.
 - File encryption/decryption.
@@ -1026,13 +1026,13 @@ PhoenixGuard includes extensive simulation support:
 
 | Area                | Files                                                            | Purpose                                                                                                                   |
 | ------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Screenshot replay   | `phoenixguard/simulation/screenshot_replay/*`                    | Loads captured frames, controls replay speed, publishes replay packets, records replay metrics, and runs replay sessions. |
-| Paper execution     | `phoenixguard/simulation/paper_execution/*`                      | Records executable packets and rehearses broker-demo behavior without live broker authority.                              |
-| Event backtesting   | `phoenixguard/simulation/event_backtesting/candle_backtester.py` | Runs event candle backtests and parameter sweeps.                                                                         |
-| Adversarial tests   | `phoenixguard/simulation/adversarial_tests/*`                    | Generates fake breakout, range chop, opposing force, and steep impulse cases.                                             |
-| Synthetic scenarios | `phoenixguard/simulation/synthetic_scenarios/*`                  | Generates synthetic market scenario suites and labels expected decisions.                                                 |
-| Overlay eval        | `phoenixguard/simulation/overlay_eval/*`                         | Scores box metrics, temporal jitter, label clutter, and zone anchoring.                                                   |
-| Decision replay     | `phoenixguard/simulation/decision_replay/*`                      | Replays council decisions and records agent votes/maturity stages.                                                        |
+| Screenshot replay   | `Backend/src/phoenixguard/simulation/screenshot_replay/*`                    | Loads captured frames, controls replay speed, publishes replay packets, records replay metrics, and runs replay sessions. |
+| Paper execution     | `Backend/src/phoenixguard/simulation/paper_execution/*`                      | Records executable packets and rehearses broker-demo behavior without live broker authority.                              |
+| Event backtesting   | `Backend/src/phoenixguard/simulation/event_backtesting/candle_backtester.py` | Runs event candle backtests and parameter sweeps.                                                                         |
+| Adversarial tests   | `Backend/src/phoenixguard/simulation/adversarial_tests/*`                    | Generates fake breakout, range chop, opposing force, and steep impulse cases.                                             |
+| Synthetic scenarios | `Backend/src/phoenixguard/simulation/synthetic_scenarios/*`                  | Generates synthetic market scenario suites and labels expected decisions.                                                 |
+| Overlay eval        | `Backend/src/phoenixguard/simulation/overlay_eval/*`                         | Scores box metrics, temporal jitter, label clutter, and zone anchoring.                                                   |
+| Decision replay     | `Backend/src/phoenixguard/simulation/decision_replay/*`                      | Replays council decisions and records agent votes/maturity stages.                                                        |
 
 This lets the system improve logic without relying only on live sessions.
 
@@ -1042,29 +1042,29 @@ The test suite is broad and aligned with the architecture.
 
 | Test Area                             | Representative Tests                                                                                                                                                            |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| V3 schema and language                | `tests/test_execution_packet_schema_v3.py`, `tests/test_v3_language_contracts.py`, `tests/test_v3_integrity.py`                                                                 |
-| Tracker and window state              | `tests/test_window_tracker_service.py`, `tests/test_window_tracker_payload_and_projection.py`, `tests/test_tracker_bootstrap.py`                                                |
-| Model Council and market intelligence | `tests/test_model_council_v3.py`, `tests/test_market_reality_engine.py`, `tests/test_market_intelligence_v3.py`                                                                 |
-| Shooter/package handoff and execution | `tests/test_execution_packet_schema_v3.py`, `tests/test_mt4_file_bridge.py`, `tests/test_entry_allowance_burn.py`, `tests/test_business_commands.py`                            |
-| Visual and overlay                    | `tests/test_visual_health_and_overlay_migration.py`, `tests/test_overlay_precision_v3.py`, `tests/test_v3_overlay_contract.py`, `tests/test_visual_regression.py`               |
-| Runtime performance                   | `tests/test_realtime_performance_v3.py`, `tests/test_cache_observability_v3.py`, `tests/test_runtime_telemetry_v3.py`, `tests/test_session_atomic_v3.py`                        |
-| Memory, RL, and sequence              | `tests/test_memory_sequence_retrieval.py`, `tests/test_rl_runtime_integration.py`, `tests/test_sequence_projection.py`, `tests/test_sequence_teacher_manifest.py`               |
-| Simulation                            | `tests/test_simulation_replay_stack.py`, `tests/test_simulation_paper_execution.py`, `tests/test_simulation_event_backtesting.py`, `tests/test_adversarial_market_simulator.py` |
-| Voice and mobile API                  | `tests/test_voice_api.py`, `tests/test_voice_command_router.py`, `tests/test_mobile_api_service.py`, `tests/test_mobile_observer_service.py`                                    |
-| Final V3 hardening                    | `tests/test_entry_allowance_burn.py`, `tests/test_model_strength_controls.py`, `tests/test_cache_observability_v3.py`, `tests/test_window_tracker_service.py`                   |
-| Business boundary                     | `tests/test_business_api.py`, `tests/test_business_commands.py`, `tests/test_business_commercial_api.py`, `tests/test_business_integration_mock_api.py`                         |
+| V3 schema and language                | `Backend/tests/test_execution_packet_schema_v3.py`, `Backend/tests/test_v3_language_contracts.py`, `Backend/tests/test_v3_integrity.py`                                                                 |
+| Tracker and window state              | `Backend/tests/test_window_tracker_service.py`, `Backend/tests/test_window_tracker_payload_and_projection.py`, `Backend/tests/test_tracker_bootstrap.py`                                                |
+| Model Council and market intelligence | `Backend/tests/test_model_council_v3.py`, `Backend/tests/test_market_reality_engine.py`, `Backend/tests/test_market_intelligence_v3.py`                                                                 |
+| Shooter/package handoff and execution | `Backend/tests/test_execution_packet_schema_v3.py`, `Backend/tests/test_mt4_file_bridge.py`, `Backend/tests/test_entry_allowance_burn.py`, `Backend/tests/test_business_commands.py`                            |
+| Visual and overlay                    | `Backend/tests/test_visual_health_and_overlay_migration.py`, `Backend/tests/test_overlay_precision_v3.py`, `Backend/tests/test_v3_overlay_contract.py`, `Backend/tests/test_visual_regression.py`               |
+| Runtime performance                   | `Backend/tests/test_realtime_performance_v3.py`, `Backend/tests/test_cache_observability_v3.py`, `Backend/tests/test_runtime_telemetry_v3.py`, `Backend/tests/test_session_atomic_v3.py`                        |
+| Memory, RL, and sequence              | `Backend/tests/test_memory_sequence_retrieval.py`, `Backend/tests/test_rl_runtime_integration.py`, `Backend/tests/test_sequence_projection.py`, `Backend/tests/test_sequence_teacher_manifest.py`               |
+| Simulation                            | `Backend/tests/test_simulation_replay_stack.py`, `Backend/tests/test_simulation_paper_execution.py`, `Backend/tests/test_simulation_event_backtesting.py`, `Backend/tests/test_adversarial_market_simulator.py` |
+| Voice and mobile API                  | `Backend/tests/test_voice_api.py`, `Backend/tests/test_voice_command_router.py`, `Backend/tests/test_mobile_api_service.py`, `Backend/tests/test_mobile_observer_service.py`                                    |
+| Final V3 hardening                    | `Backend/tests/test_entry_allowance_burn.py`, `Backend/tests/test_model_strength_controls.py`, `Backend/tests/test_cache_observability_v3.py`, `Backend/tests/test_window_tracker_service.py`                   |
+| Business boundary                     | `Backend/tests/test_business_api.py`, `Backend/tests/test_business_commands.py`, `Backend/tests/test_business_commercial_api.py`, `Backend/tests/test_business_integration_mock_api.py`                         |
 
-Certification tools under `tools/` cover API stability, process topology, dashboard hydration,
+Certification tools under `Backend/tools/` cover API stability, process topology, dashboard hydration,
 capture worker, live speed, model warm state, broker source lock, overlay truth, shooter
 persistence, wrong-surface rejection, and V3 burn-in.
 
 The final hardening validation used:
 
 ```powershell
-python -m py_compile phoenixguard\mobile_api\app.py phoenixguard\mobile_api\window_tracker.py phoenixguard\mobile_api\model_strength.py phoenixguard\decision\model_council_v3.py phoenixguard\vision\overlay_geometry.py tools\run_entry_allowance_burn.py
-python -m pytest -q tests\test_entry_allowance_burn.py tests\test_model_strength_controls.py tests\test_cache_observability_v3.py
-python -m pytest -q tests\test_voice_bundles.py tests\test_voice_command_router.py
-python -m pytest -q tests\test_business_api.py tests\test_business_commands.py tests\test_business_commercial_api.py tests\test_business_integration_mock_api.py
+python -m py_compile Backend\src\Backend\src\phoenixguard\mobile_api\app.py Backend\src\Backend\src\phoenixguard\mobile_api\window_tracker.py Backend\src\Backend\src\phoenixguard\mobile_api\model_strength.py Backend\src\Backend\src\phoenixguard\decision\model_council_v3.py Backend\src\Backend\src\phoenixguard\vision\overlay_geometry.py Backend\tools\run_entry_allowance_burn.py
+python -m pytest -q Backend/tests\test_entry_allowance_burn.py Backend/tests\test_model_strength_controls.py Backend/tests\test_cache_observability_v3.py
+python -m pytest -q Backend/tests\test_voice_bundles.py Backend/tests\test_voice_command_router.py
+python -m pytest -q Backend/tests\test_business_api.py Backend/tests\test_business_commands.py Backend/tests\test_business_commercial_api.py Backend/tests\test_business_integration_mock_api.py
 ```
 
 The corrected four-hour hardening burn retained 108 allowed entry events, 108 broker screenshots,
@@ -1078,7 +1078,7 @@ studied.
 The hardening burn tool is:
 
 ```powershell
-python .\tools\run_entry_allowance_burn.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --duration-sec 14400 --interval-sec 1 --timeout 20
+python .\Backend\tools\run_entry_allowance_burn.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --duration-sec 14400 --interval-sec 1 --timeout 20
 ```
 
 The important output artifacts are:
@@ -1095,7 +1095,7 @@ an old zone or historical candle is considered failed evidence.
 
 ## Deployment And Sharing
 
-Deployment support is concentrated in `deploy/windows` and `deploy/cloudflare`.
+Deployment support is concentrated in `Backend/launch/deploy/windows` and `Backend/launch/deploy/cloudflare`.
 
 Windows VM scripts:
 
@@ -1111,7 +1111,7 @@ Windows VM scripts:
 
 Cloudflare support:
 
-- `deploy/cloudflare/phoenixguard-share.example.yml`
+- `Backend/launch/deploy/cloudflare/phoenixguard-share.example.yml`
 - `docs/share/WORLDWIDE_SHARE.md`
 - `docs/share/FRONTEND_SHARE_UPGRADE_BLUEPRINT.md`
 
@@ -1130,9 +1130,9 @@ does not replace local packet validation or shooter safety.
 | `data/mobile_api/window_tracker/sessions/<session_id>/display_state.json`      | Compact latest display state for fresh dashboard/API reads.                                        |
 | `data/mobile_api/window_tracker/sessions/<session_id>/entry_evidence`          | Runtime entry evidence captures when enabled.                                                      |
 | `%LOCALAPPDATA%\PhoenixGuard\hardening_studies`                                | Burn-in reports, entry screenshots, progression sheets, galleries, and summaries.                  |
-| `phoenixguard/mobile_api/static/floating_windows/model_strength_settings.json` | Saved model-strength profile and execution-control tuning.                                         |
+| `Frontend/dashboard/static/floating_windows/model_strength_settings.json` | Saved model-strength profile and execution-control tuning.                                         |
 | `data/mobile_api/observer/sessions/<session_id>`                               | Observer session bundles and latest signal diagnostics.                                            |
-| `tests/fixtures/visual_regression`                                             | Visual regression baselines.                                                                       |
+| `Backend/tests/fixtures/visual_regression`                                             | Visual regression baselines.                                                                       |
 | `reports`                                                                      | Launch, trace, validation, and certification reports when generated.                               |
 | `memory_bank` and `808 Memory`                                                 | Local memory examples and training context.                                                        |
 | `models`                                                                       | Saved local model bundles and exports.                                                             |
@@ -1170,17 +1170,17 @@ The active execution path document defines key diagnosis cases:
 Primary diagnostic command:
 
 ```powershell
-python tools\diagnose_v3_execution_path.py --session pocket-live-8788 --base-url http://127.0.0.1:8793
+python Backend\tools\diagnose_v3_execution_path.py --session pocket-live-8788 --base-url http://127.0.0.1:8793
 ```
 
 Other useful tools:
 
 ```powershell
-python tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
-python tools\trace_backend_frontend_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
-python tools\trace_overlay_source_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
-python tools\trace_frame_timing_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
-python tools\verify_v3_integrity.py
+python Backend\tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
+python Backend\tools\trace_backend_frontend_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
+python Backend\tools\trace_overlay_source_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
+python Backend\tools\trace_frame_timing_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
+python Backend\tools\verify_v3_integrity.py
 ```
 
 ## Design Principles Used
@@ -1221,7 +1221,7 @@ bound.
 
 The most important safe extension points are:
 
-- Add new visual models through `phoenixguard/runtime/local_ensemble_runtime.py` and training/export
+- Add new visual models through `Backend/src/phoenixguard/runtime/local_ensemble_runtime.py` and training/export
   scripts.
 - Add new overlay types only through `v3_overlay_contract.py` and validation tests.
 - Add new Model Council evidence as diagnostic contributors unless packet schema changes require
@@ -1229,8 +1229,8 @@ The most important safe extension points are:
 - Add new execution lanes by defining threshold, timing behavior, lane release requirements, and
   tests.
 - Add new API views as read-only consumers unless they expose existing validated packet state.
-- Add new simulation cases in `phoenixguard/simulation/adversarial_tests` or `synthetic_scenarios`.
-- Add new certification tools in `tools/` and link them to `verify_v3_integrity.py` where
+- Add new simulation cases in `Backend/src/phoenixguard/simulation/adversarial_tests` or `synthetic_scenarios`.
+- Add new certification tools in `Backend/tools/` and link them to `verify_v3_integrity.py` where
   appropriate.
 
 Unsafe extension points include direct `action` execution, raw observer signal execution,

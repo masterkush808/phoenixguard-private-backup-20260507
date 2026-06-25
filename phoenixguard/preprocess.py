@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from _pg_bootstrap import ensure_project_paths
+ensure_project_paths()
+
 from phoenixguard.vision.preprocess import (
     apply_clahe,
     auto_crop_price_area,

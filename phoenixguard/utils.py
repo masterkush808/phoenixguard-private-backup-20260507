@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from _pg_bootstrap import ensure_project_paths
+ensure_project_paths()
+
 from phoenixguard.core.utils import (
     append_hash_chain,
     can_import_chronos_safely,

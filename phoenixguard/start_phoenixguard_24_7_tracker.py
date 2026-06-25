@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from _pg_bootstrap import ensure_project_paths
+ensure_project_paths()
+
 import argparse
 import json
 import os
@@ -393,6 +396,18 @@ def _launch_mobile_api(
     runtime_lock_token: str = "",
 ) -> subprocess.Popen[str]:
     env = os.environ.copy()
+    backend_src = script_dir / "Backend" / "src"
+    backend_root = script_dir / "Backend"
+    pythonpath_parts = [
+        str(path)
+        for path in (backend_src, backend_root, script_dir)
+        if path.exists()
+    ]
+    existing_pythonpath = str(env.get("PYTHONPATH", "") or "").strip()
+    if existing_pythonpath:
+        pythonpath_parts.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+    env["PHOENIXGUARD_PROJECT_ROOT"] = str(script_dir)
     env["PHOENIXGUARD_MOBILE_API_HOST"] = host
     env["PHOENIXGUARD_MOBILE_API_PORT"] = str(port)
     env.setdefault("PHOENIXGUARD_DATA_DIR", str(_default_live_runtime_dir(script_dir, "data_live")))

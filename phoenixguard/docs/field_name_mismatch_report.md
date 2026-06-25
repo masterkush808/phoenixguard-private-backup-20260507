@@ -23,13 +23,13 @@
 
 - `shooter.py` is now the package reporter and does not parse raw tracker/observer signal fields for
   live authority.
-- `phoenixguard/decision/decision_kernel.py` still treats `SNIPER_READY` and `execution_action` as
+- `Backend/src/phoenixguard/decision/decision_kernel.py` still treats `SNIPER_READY` and `execution_action` as
   state-machine input. Agent 2 must downgrade these to evidence.
-- `phoenixguard/decision/ensemble.py` emits `execution_permission: EXECUTE`. Agent 2 must make this
+- `Backend/src/phoenixguard/decision/ensemble.py` emits `execution_permission: EXECUTE`. Agent 2 must make this
   diagnostic only.
 - `phoenixguard/mobile_api/observer.py` emits `actionable`, `execution_action`, and
   `status=ready/armed/watch`. Agent 2/5 must publish V3 separately.
-- `phoenixguard/mobile_api/window_tracker.py` mutates timing and execution lane fields inside
+- `Backend/src/phoenixguard/mobile_api/window_tracker.py` mutates timing and execution lane fields inside
   `latest_signal` for diagnostics. Final live timing belongs to the Model Council packet and
   accepted allowance package, and tracker live mode refuses internal clicks.
 

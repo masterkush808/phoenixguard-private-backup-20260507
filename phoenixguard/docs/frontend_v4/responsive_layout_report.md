@@ -35,13 +35,13 @@ Responsive behavior:
 Static/source-level responsive checks currently live inside pytest rather than browser viewport automation:
 
 ```powershell
-python -m pytest tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop -v --tb=short -ra
+python -m pytest Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop -v --tb=short -ra
 ```
 
 Broader safe dashboard command:
 
 ```powershell
-python -m pytest tests/test_mobile_api_service.py tests/test_ui_copy_hardening.py tests/test_window_tracker_service.py::test_tracker_http_surface_serves_session_artifacts_and_dashboard tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop -v --tb=short -ra
+python -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_ui_copy_hardening.py Backend/tests/test_window_tracker_service.py::test_tracker_http_surface_serves_session_artifacts_and_dashboard Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop -v --tb=short -ra
 ```
 
 Do not use live launchers for responsive QA. They can start runtime capture and live execution paths depending on saved focus and script parameters.

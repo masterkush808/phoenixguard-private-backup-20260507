@@ -4,10 +4,10 @@
 
 Reviewed files:
 
-- `phoenixguard/mobile_api/static/window_tracker_dashboard.html`
-- `phoenixguard/vision/overlay_geometry.py`
-- `tests/test_overlay_geometry_v3.py`
-- `phoenixguard/simulation/overlay_eval/label_clutter_metrics.py`
+- `Frontend/dashboard/static/window_tracker_dashboard.html`
+- `Backend/src/phoenixguard/vision/overlay_geometry.py`
+- `Backend/tests/test_overlay_geometry_v3.py`
+- `Backend/src/phoenixguard/simulation/overlay_eval/label_clutter_metrics.py`
 
 The backend geometry pipeline is already strong for V4:
 
@@ -42,7 +42,7 @@ The current dashboard renderer is functional but not yet a full V4 layered rende
 
 ## Label Collision Metric
 
-Use `evaluate_label_clutter_metrics` from `phoenixguard/simulation/overlay_eval/label_clutter_metrics.py` on candidate label boxes.
+Use `evaluate_label_clutter_metrics` from `Backend/src/phoenixguard/simulation/overlay_eval/label_clutter_metrics.py` on candidate label boxes.
 
 Recommended promotion thresholds for active-context:
 

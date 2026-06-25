@@ -14,7 +14,7 @@ Do not rewrite it, abbreviate it, change casing, or add extra symbols inside the
 
 ## Foundation Tokens
 
-Use `assets/themes/phoenix_command_tokens.css` as the V4 token source. The file exposes `--pc-*` tokens for new cockpit surfaces and also maps key `--pg-*` variables so older PhoenixGuard components can adopt the same palette when the theme file is loaded.
+Use `Frontend/assets/themes/phoenix_command_tokens.css` as the V4 token source. The file exposes `--pc-*` tokens for new cockpit surfaces and also maps key `--pg-*` variables so older PhoenixGuard components can adopt the same palette when the theme file is loaded.
 
 Core theme roles:
 
@@ -190,7 +190,7 @@ Mobile:
 
 ## Implementation Notes
 
-- New V4 code should import `assets/themes/phoenix_command_tokens.css` before component CSS.
+- New V4 code should import `Frontend/assets/themes/phoenix_command_tokens.css` before component CSS.
 - Prefer token values over one-off colors. If a one-off color is unavoidable, add a token first.
-- Do not alter existing title copy in `phoenixguard/mobile_api/static/window_tracker_dashboard.html`; the current visible title already uses `808Fx Standard Hybrid System`.
+- Do not alter existing title copy in `Frontend/dashboard/static/window_tracker_dashboard.html`; the current visible title already uses `808Fx Standard Hybrid System`.
 - Keep CSS scoped with `.phoenix-command` or token variables when possible so older Gradio/theme assets are not accidentally restyled.

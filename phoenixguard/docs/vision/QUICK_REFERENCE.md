@@ -151,19 +151,19 @@ output = engine.process_frame(image, timestamp_ms=0.0)
 
 ## Run all tests
 
-pytest tests/vision/test_enhanced_vision_phase1.py -v
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py -v
 
 ## Specific test class
 
-pytest tests/vision/test_enhanced_vision_phase1.py::TestOpticalFlowTracker -v
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py::TestOpticalFlowTracker -v
 
 ## Performance benchmarks
 
-pytest tests/vision/test_enhanced_vision_phase1.py::TestPerformance -v
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py::TestPerformance -v
 
 ## Coverage
 
-pytest tests/vision/test_enhanced_vision_phase1.py --cov=phoenixguard.vision
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py --cov=phoenixguard.vision
 
 ```
 

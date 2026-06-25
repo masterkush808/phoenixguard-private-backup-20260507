@@ -5,15 +5,22 @@
     "shooter.py",
     "start_phoenixguard_24_7_tracker.py",
     "start_phoenixguard_mobile_api.py",
-    "hf_model_check.py",
-    "train_finetune.py",
-    "train_finetune_remaining.py",
-    "train_finetune_dinov2_only.py",
-    "train_sequence_aware_all.py",
-    "phoenixguard",
-    "scripts",
-    "tools",
-    "tests"
+    "Backend/src/phoenixguard",
+    "Backend/scripts_runtime",
+    "Backend/scripts_data",
+    "Backend/tools",
+    "Backend/tests",
+    "Business/api",
+    "Developer/datasets",
+    "Developer/developer_tools",
+    "Developer/model_exports",
+    "Developer/model_training",
+    "Developer/sequence_teacher"
+  ],
+  "extraPaths": [
+    "Backend/src",
+    "Backend",
+    "."
   ],
   "exclude": [
     "**/__pycache__",
@@ -28,10 +35,10 @@
     "_backups",
     "DataAnalysisExpert",
     "node_modules",
-    "web"
+    "Business/web"
   ],
   "pythonVersion": "3.11",
-  "stubPath": "typings",
+  "stubPath": "Backend/typings",
   "venvPath": ".",
   "venv": ".venv",
   "reportUnknownVariableType": "error",

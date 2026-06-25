@@ -20,10 +20,10 @@ A **multi-step future candle prediction engine** using **A* Search** that:
 
 | File | Purpose | LOC |
 | --- | --- | --- |
-| `phoenixguard/decision/a_star_scenarios.py` | A* search engine + candle generation | ~600 |
-| `phoenixguard/decision/scenario_integration.py` | Bridge to regression/ensemble/memory | ~400 |
-| `phoenixguard/decision/scenario_paint.py` | Visualization + Plotly rendering | ~450 |
-| `phoenixguard/decision/scenario_decision_kernel.py` | Full orchestration + decision extension | ~350 |
+| `Backend/src/phoenixguard/decision/a_star_scenarios.py` | A* search engine + candle generation | ~600 |
+| `Backend/src/phoenixguard/decision/scenario_integration.py` | Bridge to regression/ensemble/memory | ~400 |
+| `Backend/src/phoenixguard/decision/scenario_paint.py` | Visualization + Plotly rendering | ~450 |
+| `Backend/src/phoenixguard/decision/scenario_decision_kernel.py` | Full orchestration + decision extension | ~350 |
 
 **Total Implementation: ~1,800 lines of production code**
 
@@ -33,7 +33,7 @@ A **multi-step future candle prediction engine** using **A* Search** that:
 | --- | --- |
 | `A_STAR_SCENARIOS_GUIDE.md` | Comprehensive technical guide + API reference |
 | `SCENARIO_INTEGRATION_EXAMPLES.md` | Pseudocode examples for integration |
-| `tests/test_a_star_scenarios.py` | 4 runnable demos + test suite |
+| `Backend/tests/test_a_star_scenarios.py` | 4 runnable demos + test suite |
 
 ---
 
@@ -268,7 +268,7 @@ dashboard = create_scenario_dashboard_layout(
 
 ```python
 
-## tests/test_a_star_scenarios.py
+## Backend/tests/test_a_star_scenarios.py
 
 demo_basic_scenario_prediction()      # A* engine
 demo_integration_with_forecast()      # Integration
@@ -281,7 +281,7 @@ Run with:
 
 ```bash
 
-python tests/test_a_star_scenarios.py
+python Backend/tests/test_a_star_scenarios.py
 
 ```
 
@@ -484,7 +484,7 @@ A_StarScenarioPredictor(
 - **Full Guide**: See `A_STAR_SCENARIOS_GUIDE.md`
 - **Integration Examples**: See `SCENARIO_INTEGRATION_EXAMPLES.md`
 - **API Reference**: Docstrings in each module
-- **Demos**: Run `python tests/test_a_star_scenarios.py`
+- **Demos**: Run `python Backend/tests/test_a_star_scenarios.py`
 
 ---
 

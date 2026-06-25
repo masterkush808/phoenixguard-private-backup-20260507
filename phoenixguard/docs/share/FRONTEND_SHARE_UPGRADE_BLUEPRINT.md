@@ -45,11 +45,11 @@ and run-specific overlay snapshots.
 
 - share feedback gating flags and defaults: share_phoenixguard.py
 - share feedback submit path and mutation guard logic: share_phoenixguard.py
-- full feedback learning flow tests: tests/test_feedback_learning_flow.py
+- full feedback learning flow tests: Backend/tests/test_feedback_learning_flow.py
 
 ### Share surface tests already available
 
-- payload and hero assertions: tests/test_share_surface.py
+- payload and hero assertions: Backend/tests/test_share_surface.py
 
 ## Gap Analysis vs Requested Upgrades
 
@@ -319,13 +319,13 @@ Suggested operator config before launch:
 
 ### Unit and behavior tests
 
-- Extend tests/test_share_surface.py for:
+- Extend Backend/tests/test_share_surface.py for:
   - brand name exact string assertions
   - timing playbook button and panel presence
   - hidden backend wording checks
   - feedback lazy reveal checks
 
-- Extend tests/test_feedback_learning_flow.py for:
+- Extend Backend/tests/test_feedback_learning_flow.py for:
   - feedback tab reveal gating behavior
   - notification payload safety wording
 

@@ -55,7 +55,7 @@ Tunnel in front of it.
 `http://127.0.0.1:7861`.
 2. Add a Cloudflare Access policy so only your brother's email can reach the
 app.
-3. Use the sample config in `deploy/cloudflare/phoenixguard-share.example.yml`.
+3. Use the sample config in `Backend/launch/deploy/cloudflare/phoenixguard-share.example.yml`.
 
 Why this is better:
 

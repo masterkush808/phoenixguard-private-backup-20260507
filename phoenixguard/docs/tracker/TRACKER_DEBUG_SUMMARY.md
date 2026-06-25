@@ -175,7 +175,7 @@ handle errors, could silently fail.
 
 ### Files Modified
 
-- 1 file: `phoenixguard/mobile_api/window_tracker.py`
+- 1 file: `Backend/src/phoenixguard/mobile_api/window_tracker.py`
 
 ---
 

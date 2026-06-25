@@ -65,8 +65,8 @@ Upgrade: cv_module.py → ViT backbone + YOLO26s (dual detection)
 
 **Files to modify/create**:
 
-- `phoenixguard/vision/vision_transformer.py` (new)
-- `phoenixguard/vision/multi_model_ensemble.py` (new)
+- `Backend/src/phoenixguard/vision/vision_transformer.py` (new)
+- `Backend/src/phoenixguard/vision/multi_model_ensemble.py` (new)
 - `cv_module.py` (refactor to orchestrate models)
 
 **Key improvements**:
@@ -86,7 +86,7 @@ Upgrade: cv_module → optical flow (cv2.DISOpticalFlow) → motion features
 
 **Files to create**:
 
-- `phoenixguard/vision/motion_tracker.py` (new)
+- `Backend/src/phoenixguard/vision/motion_tracker.py` (new)
 
 **Key improvements**:
 
@@ -105,7 +105,7 @@ Upgrade: SAM → precise chart boundary segmentation
 
 **Files to create**:
 
-- `phoenixguard/vision/chart_segmentation.py` (new)
+- `Backend/src/phoenixguard/vision/chart_segmentation.py` (new)
 
 **Key improvements**:
 
@@ -130,8 +130,8 @@ Upgrade: CUDA batching + TensorRT compilation + frame queue
 
 **Files to create**:
 
-- `phoenixguard/vision/inference_pipeline.py` (new)
-- `phoenixguard/vision/model_server.py` (new)
+- `Backend/src/phoenixguard/vision/inference_pipeline.py` (new)
+- `Backend/src/phoenixguard/vision/model_server.py` (new)
 
 **Key improvements**:
 
@@ -151,8 +151,8 @@ Upgrade: INT8 quantized models + knowledge distillation
 
 **Files to create**:
 
-- `phoenixguard/training/quantization.py` (new)
-- `phoenixguard/training/distillation.py` (new)
+- `Developer/model_training/quantization.py` (new)
+- `Developer/model_training/distillation.py` (new)
 
 **Key improvements**:
 
@@ -171,7 +171,7 @@ Upgrade: Async frame queue + adaptive frame dropping
 
 **Files to create**:
 
-- `phoenixguard/vision/frame_buffer.py` (new)
+- `Backend/src/phoenixguard/vision/frame_buffer.py` (new)
 
 **Key improvements**:
 
@@ -196,8 +196,8 @@ Upgrade: SHAP + grad-CAM + attention maps + decision tree approximation
 
 **Files to create**:
 
-- `phoenixguard/decision/explainability.py` (new)
-- `phoenixguard/decision/visual_attribution.py` (new)
+- `Backend/src/phoenixguard/decision/explainability.py` (new)
+- `Backend/src/phoenixguard/decision/visual_attribution.py` (new)
 
 **Key improvements**:
 
@@ -216,11 +216,11 @@ Upgrade: Unit + integration + edge-case regression tests
 
 **Files to create**:
 
-- `tests/vision/test_multi_model_ensemble.py` (new)
-- `tests/vision/test_optical_flow.py` (new)
-- `tests/vision/test_inference_pipeline.py` (new)
-- `tests/robustness/test_adversarial.py` (new)
-- `tests/robustness/test_edge_cases.py` (new)
+- `Backend/tests/vision/test_multi_model_ensemble.py` (new)
+- `Backend/tests/vision/test_optical_flow.py` (new)
+- `Backend/tests/vision/test_inference_pipeline.py` (new)
+- `Backend/tests/robustness/test_adversarial.py` (new)
+- `Backend/tests/robustness/test_edge_cases.py` (new)
 
 **Coverage**:
 
@@ -261,8 +261,8 @@ Upgrade: Router-based multi-model serving + metrics collection
 
 **Files to create**:
 
-- `phoenixguard/vision/model_router.py` (new)
-- `phoenixguard/decision/ab_test_router.py` (new)
+- `Backend/src/phoenixguard/vision/model_router.py` (new)
+- `Backend/src/phoenixguard/decision/ab_test_router.py` (new)
 
 **Key improvements**:
 

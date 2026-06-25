@@ -264,7 +264,7 @@ forecast_output = {
 - [ ] Add `scenario_paint.py` to `decision/`
 - [ ] Add `scenario_decision_kernel.py` to `decision/`
 - [ ] Update `decision/__init__.py` to export new modules
-- [ ] Add test file `tests/test_a_star_scenarios.py`
+- [ ] Add test file `Backend/tests/test_a_star_scenarios.py`
 - [ ] Update `ImageFusionRegressor.forecast_3m()` to call
 
 `enhanced_forecast_with_scenarios()`

@@ -63,6 +63,8 @@ data/**
 # Local secrets and profiles
 deploy/windows/phoenixguard.vm-share.env.ps1
 deploy/windows/phoenixguard.vm-monitor.env.ps1
+Backend/launch/deploy/windows/phoenixguard.vm-share.env.ps1
+Backend/launch/deploy/windows/phoenixguard.vm-monitor.env.ps1
 data/preferences.enc.sqlite
 data/kdf_salt.bin
 data/voice_profiles/
@@ -73,3 +75,4 @@ data/voice_runtime_state.json
 book knowledge/
 docs/phoenixguard_v3_operator_view_guide.pdf
 phoenixguard/mobile_api/static/floating_windows/overlay_editor_settings.json
+Frontend/dashboard/static/floating_windows/overlay_editor_settings.json

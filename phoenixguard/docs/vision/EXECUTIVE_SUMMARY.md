@@ -411,7 +411,7 @@ min)
 
 ## Run all tests
 
-pytest tests/vision/test_enhanced_vision_phase1.py -v
+pytest Backend/tests/vision/test_enhanced_vision_phase1.py -v
 
 ## Expected: 70+ tests PASSED ✅
 

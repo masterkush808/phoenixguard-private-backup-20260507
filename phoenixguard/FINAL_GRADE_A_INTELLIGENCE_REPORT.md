@@ -70,7 +70,7 @@ operator launch documentation.
 - Runtime trace now exposes certification gate state for source lock, frame
   freshness, sequence context, model warm state, overlay truth, Model Council
   trace, packet contract, shooter persistence, and burn-in.
-- `tools/runtime_trace_v3.py` prints the new dataflow summary.
+- `Backend/tools/runtime_trace_v3.py` prints the new dataflow summary.
 - Certification reporting now includes Broker Source Lock, Wrong Surface
   Rejection, and Overlay Mode Wiring.
 
@@ -87,50 +87,50 @@ operator launch documentation.
 - `README.md`
 - `main.py`
 - `shooter.py`
-- `phoenixguard/decision/reasoning_arbitrator_v3.py`
-- `phoenixguard/execution/packet_v3.py`
-- `phoenixguard/execution/sequence_context.py`
-- `phoenixguard/execution/shooter_action_sequencer.py`
-- `phoenixguard/mobile_api/app.py`
-- `tools/runtime_trace_v3.py`
-- `tools/certification_common_v3.py`
-- `tests/__init__.py`
-- `tests/support/__init__.py`
-- `tests/support/v3_packet_samples.py`
-- `tests/test_execution_packet_schema_v3.py`
-- `tests/test_market_intelligence_v3.py`
-- `tests/test_market_reality_engine.py`
-- `tests/test_manual_inference_queue.py`
-- `tests/test_runtime_telemetry_v3.py`
-- `tests/test_shooter_action_sequencer.py`
-- `tests/test_shooter_v3_runtime.py`
-- `tests/test_simulation_paper_execution.py`
-- `tests/test_v3_language_contracts.py`
+- `Backend/src/phoenixguard/decision/reasoning_arbitrator_v3.py`
+- `Backend/src/phoenixguard/execution/packet_v3.py`
+- `Backend/src/phoenixguard/execution/sequence_context.py`
+- `Backend/src/phoenixguard/execution/shooter_action_sequencer.py`
+- `Backend/src/phoenixguard/mobile_api/app.py`
+- `Backend/tools/runtime_trace_v3.py`
+- `Backend/tools/certification_common_v3.py`
+- `Backend/tests/__init__.py`
+- `Backend/tests/support/__init__.py`
+- `Backend/tests/support/v3_packet_samples.py`
+- `Backend/tests/test_execution_packet_schema_v3.py`
+- `Backend/tests/test_market_intelligence_v3.py`
+- `Backend/tests/test_market_reality_engine.py`
+- `Backend/tests/test_manual_inference_queue.py`
+- `Backend/tests/test_runtime_telemetry_v3.py`
+- `Backend/tests/test_shooter_action_sequencer.py`
+- `Backend/tests/test_shooter_v3_runtime.py`
+- `Backend/tests/test_simulation_paper_execution.py`
+- `Backend/tests/test_v3_language_contracts.py`
 
 ## Tests Passed
 
 ```text
-python -m pytest tests/test_execution_packet_schema_v3.py tests/test_model_council_v3.py tests/test_market_reality_engine.py tests/test_market_intelligence_v3.py tests/test_v3_language_contracts.py tests/test_simulation_paper_execution.py tests/test_shooter_action_sequencer.py -q
+python -m pytest Backend/tests/test_execution_packet_schema_v3.py Backend/tests/test_model_council_v3.py Backend/tests/test_market_reality_engine.py Backend/tests/test_market_intelligence_v3.py Backend/tests/test_v3_language_contracts.py Backend/tests/test_simulation_paper_execution.py Backend/tests/test_shooter_action_sequencer.py -q
 144 passed in 17.77s
 ```
 
 ```text
-python -m pytest tests/test_shooter_v3_runtime.py -q
+python -m pytest Backend/tests/test_shooter_v3_runtime.py -q
 42 passed in 9.07s
 ```
 
 ```text
-python -m pytest tests/test_cache_observability_v3.py tests/test_runtime_telemetry_v3.py tests/test_manual_inference_queue.py -q
+python -m pytest Backend/tests/test_cache_observability_v3.py Backend/tests/test_runtime_telemetry_v3.py Backend/tests/test_manual_inference_queue.py -q
 33 passed in 54.45s
 ```
 
 ```text
-python -m compileall -q main.py shooter.py phoenixguard\decision phoenixguard\execution phoenixguard\mobile_api phoenixguard\runtime tools\runtime_trace_v3.py tools\certification_common_v3.py
+python -m compileall -q main.py shooter.py Backend\src\phoenixguard\decision Backend\src\phoenixguard\execution Backend\src\phoenixguard\mobile_api Backend\src\phoenixguard\runtime Backend\tools\runtime_trace_v3.py Backend\tools\certification_common_v3.py
 PASS
 ```
 
 ```text
-python tools\verify_v3_integrity.py
+python Backend\tools\verify_v3_integrity.py
 Overall: PASS
 ```
 
@@ -196,7 +196,7 @@ tests/test_window_tracker_service.py::test_tracker_display_only_refresh_does_not
 ```
 
 ```text
-tests/test_runtime_telemetry_v3.py tests/test_realtime_performance_v3.py
+tests/test_runtime_telemetry_v3.py Backend/tests/test_realtime_performance_v3.py
 tests/test_model_council_v3.py::test_high_frequency_two_candle_lane_publishes_fixed_600s_packet
 tests/test_high_frequency_candle_predictor.py
 12 passed
@@ -279,18 +279,18 @@ Additional live blockers fixed:
 
 Files changed in this addendum:
 
-- `phoenixguard/mobile_api/static/window_tracker_dashboard.html`
+- `Frontend/dashboard/static/window_tracker_dashboard.html`
 - `phoenixguard/mobile_api/live_state_v3.py`
-- `phoenixguard/mobile_api/window_tracker.py`
-- `tools/certification_common_v3.py`
-- `tools/certify_v3_full_system_burn_in.py`
-- `tools/capture_dashboard_visual_v3.py`
+- `Backend/src/phoenixguard/mobile_api/window_tracker.py`
+- `Backend/tools/certification_common_v3.py`
+- `Backend/tools/certify_v3_full_system_burn_in.py`
+- `Backend/tools/capture_dashboard_visual_v3.py`
 - `launch_phoenixguard_live_ready.ps1`
 - `shooter.py`
-- `tests/test_shooter_v3_runtime.py`
-- `tests/test_live_visual_state_v3.py`
-- `tests/test_window_tracker_service.py`
-- `tests/test_certification_common_v3.py`
+- `Backend/tests/test_shooter_v3_runtime.py`
+- `Backend/tests/test_live_visual_state_v3.py`
+- `Backend/tests/test_window_tracker_service.py`
+- `Backend/tests/test_certification_common_v3.py`
 - `README.md`
 
 Focused tests passed:
@@ -401,7 +401,7 @@ Live calibration preview on locked HWND `132820`:
 
 Frontend visual verification:
 
-- `tools/capture_dashboard_visual_v3.py`
+- `Backend/tools/capture_dashboard_visual_v3.py`
 - verdict: `PASS`
 - screenshot:
   `reports/dashboard_overlay_verify/dashboard_pocket-live-8788_20260612_032150.png`

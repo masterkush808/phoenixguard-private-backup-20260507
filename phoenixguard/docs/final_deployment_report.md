@@ -57,7 +57,7 @@ consumer, confirm:
 python -m pytest -q
 742 passed, 3 skipped
 
-python -m pytest tests/test_execution_packet_schema_v3.py tests/test_model_council_v3.py tests/test_market_intelligence_v3.py tests/test_cache_observability_v3.py tests/test_shooter_v3_runtime.py tests/test_window_tracker_model_council_v3.py tests/test_shooter_runtime.py tests/test_shooter_parse.py tests/test_window_tracker_service.py -q
+python -m pytest Backend/tests/test_execution_packet_schema_v3.py Backend/tests/test_model_council_v3.py Backend/tests/test_market_intelligence_v3.py Backend/tests/test_cache_observability_v3.py Backend/tests/test_shooter_v3_runtime.py Backend/tests/test_window_tracker_model_council_v3.py Backend/tests/test_shooter_runtime.py Backend/tests/test_shooter_parse.py Backend/tests/test_window_tracker_service.py -q
 231 passed
 
 python -m compileall -q phoenixguard/decision phoenixguard/execution phoenixguard/runtime phoenixguard/mobile_api shooter.py

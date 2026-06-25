@@ -2,7 +2,7 @@
 
 ## Mobile API App
 
-Defined in `phoenixguard/mobile_api/app.py`.
+Defined in `Backend/src/phoenixguard/mobile_api/app.py`.
 
 | Endpoint | Purpose | Current authority |
 | --- | --- | --- |
@@ -38,7 +38,7 @@ Defined in `phoenixguard/mobile_api/app.py`.
 
 ## Model Council Daemon
 
-Defined in `phoenixguard/runtime/model_council_daemon.py`.
+Defined in `Backend/src/phoenixguard/runtime/model_council_daemon.py`.
 
 | Endpoint | Purpose | Current authority |
 | --- | --- | --- |
