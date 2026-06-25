@@ -212,8 +212,47 @@ def _slugify_session_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "")).strip("._").lower() or "session"
 
 
+def _runtime_data_dir_candidates() -> list[Path]:
+    candidates: list[Path] = [Path(RUNTIME.data_dir)]
+    lock_path = Path(__file__).resolve().parents[2] / ".codex_runtime" / "phoenixguard_stack.lock.json"
+    try:
+        lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except Exception:
+        lock_payload = None
+    if isinstance(lock_payload, Mapping):
+        lock_data_dir = str(cast(Mapping[str, object], lock_payload).get("data_dir") or "").strip()
+        if lock_data_dir:
+            candidates.append(Path(lock_data_dir))
+    local_app_data = str(os.getenv("LOCALAPPDATA") or "").strip()
+    if local_app_data:
+        candidates.append(Path(local_app_data) / "PhoenixGuard" / "codex_runtime" / "data_live")
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            key = str(candidate.resolve())
+        except OSError:
+            key = str(candidate)
+        normalized = key.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(candidate)
+    return unique or [Path(RUNTIME.data_dir)]
+
+
+def _direct_session_relative_path(session_id: str) -> Path:
+    return Path("mobile_api") / "window_tracker" / "sessions" / _slugify_session_id(session_id) / "session.json"
+
+
 def _direct_live_state_session_path(session_id: str) -> Path:
-    return Path(RUNTIME.data_dir) / "mobile_api" / "window_tracker" / "sessions" / _slugify_session_id(session_id) / "session.json"
+    relative_path = _direct_session_relative_path(session_id)
+    candidates = _runtime_data_dir_candidates()
+    for data_dir in candidates:
+        path = data_dir / relative_path
+        if path.exists():
+            return path
+    return candidates[0] / relative_path
 
 
 def _direct_window_tracker_display_state_path(session_id: str) -> Path:
@@ -221,7 +260,13 @@ def _direct_window_tracker_display_state_path(session_id: str) -> Path:
 
 
 def _direct_market_registry_path(session_id: str) -> Path:
-    return Path(RUNTIME.data_dir) / "market_registry" / f"{str(session_id or '').strip()}.jsonl"
+    relative_path = Path("market_registry") / f"{str(session_id or '').strip()}.jsonl"
+    candidates = _runtime_data_dir_candidates()
+    for data_dir in candidates:
+        path = data_dir / relative_path
+        if path.exists():
+            return path
+    return candidates[0] / relative_path
 
 
 def _path_cache_signature(path: Path) -> str:
@@ -2277,6 +2322,15 @@ def create_app(
         if display_snapshot is None:
             return refreshed
         display_payload = dict(display_snapshot)
+        surface_mismatch_reason = _display_overlay_authority_mismatch_reason(requested_session_id, display_payload)
+        if surface_mismatch_reason:
+            return _compact_studying_new_pair_live_state(
+                requested_session_id,
+                display_payload,
+                requested_mode=str(refreshed.get("requested_mode") or refreshed.get("active_mode") or "CLEAN_LIVE"),
+                reason=surface_mismatch_reason,
+                now_epoch=now_epoch,
+            )
         overlays_payload = _mapping_to_plain_dict(refreshed.get("overlays"))
         overlay_objects_raw = overlays_payload.get("objects")
         if not isinstance(overlay_objects_raw, list):
@@ -2347,6 +2401,255 @@ def create_app(
             live_visual["provider_status"] = provider
             refreshed["live_visual_state"] = live_visual
         return refreshed
+
+    def _artifact_surface_signature_from_path(value: object) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        name = Path(text).name
+        match = re.match(
+            r"^\d{1,12}_([^\\/]+?)_(?:window|chart|overlay|full_overlay|decision)(?:\.|$)",
+            name,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return str(match.group(1) or "").strip()
+        fallback = re.match(r"^\d{1,12}_([^_\\/]+)", name)
+        return str(fallback.group(1) or "").strip() if fallback else ""
+
+    def _market_selector_rebind_pending(payload: Mapping[str, object]) -> bool:
+        for key in ("tracking_summary", "latest_signal"):
+            row = _mapping_to_plain_dict(payload.get(key))
+            if bool(
+                row.get("market_selector_rebind_required")
+                or row.get("market_selector_studying_new_pair")
+                or row.get("market_selector_visual_changed")
+            ):
+                return True
+        return bool(
+            payload.get("market_selector_rebind_required")
+            or payload.get("market_selector_studying_new_pair")
+            or payload.get("market_selector_visual_changed")
+        )
+
+    def _direct_session_market_selector_rebind_pending(requested_session_id: str) -> bool:
+        try:
+            raw_payload = json.loads(_direct_live_state_session_path(requested_session_id).read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(raw_payload, Mapping):
+            return False
+        return _market_selector_rebind_pending(cast(Mapping[str, object], raw_payload))
+
+    def _display_overlay_authority_mismatch_reason(
+        requested_session_id: str,
+        display_payload: Mapping[str, object],
+    ) -> str:
+        if not (
+            _market_selector_rebind_pending(display_payload)
+            or _direct_session_market_selector_rebind_pending(requested_session_id)
+        ):
+            return ""
+        display_signature = str(
+            display_payload.get("last_display_surface_signature")
+            or display_payload.get("last_window_surface_signature")
+            or _mapping_to_plain_dict(display_payload.get("display_fast_path_v3")).get("surface_signature")
+            or _artifact_surface_signature_from_path(
+                display_payload.get("last_display_window_path")
+                or display_payload.get("last_window_path")
+                or display_payload.get("last_frame_path")
+            )
+            or ""
+        ).strip()
+        overlay_signature = str(
+            display_payload.get("overlay_source_window_signature")
+            or display_payload.get("overlay_source_study_signature")
+            or _artifact_surface_signature_from_path(
+                display_payload.get("last_full_overlay_path") or display_payload.get("last_overlay_path")
+            )
+            or ""
+        ).strip()
+        if display_signature and overlay_signature and display_signature != overlay_signature:
+            return (
+                "Studying new pair: the visible broker surface changed before overlay authority "
+                "rebuilt on the new frame."
+            )
+        return ""
+
+    def _latest_compact_live_state_response_cache(
+        requested_session_id: str,
+        active_mode: str,
+        *,
+        now_epoch: float,
+    ) -> dict[str, object] | None:
+        latest_epoch = 0.0
+        latest_payload: dict[str, object] | None = None
+        for key, cached in _COMPACT_LIVE_STATE_RESPONSE_CACHE.items():
+            cached_session_id, cached_mode, _cached_signature = key
+            if cached_session_id != requested_session_id or cached_mode != active_mode:
+                continue
+            cached_epoch, cached_payload = cached
+            cached_age = now_epoch - cached_epoch
+            if cached_age < 0.0 or cached_age > _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
+                continue
+            if cached_epoch >= latest_epoch:
+                latest_epoch = cached_epoch
+                latest_payload = dict(cached_payload)
+        return latest_payload
+
+    def _display_frame_id(display_payload: Mapping[str, object]) -> int:
+        return int(
+            _epoch_float(
+                display_payload.get("display_frame_id")
+                or display_payload.get("frame_index")
+                or display_payload.get("capture_count")
+                or 0,
+                0.0,
+            )
+        )
+
+    def _compact_studying_new_pair_live_state(
+        requested_session_id: str,
+        display_payload: Mapping[str, object],
+        *,
+        requested_mode: str,
+        reason: str,
+        now_epoch: float,
+    ) -> dict[str, object]:
+        active_mode = normalize_view_mode(requested_mode)
+        frame_id = _display_frame_id(display_payload)
+        window_path = str(
+            display_payload.get("last_display_window_path")
+            or display_payload.get("last_window_path")
+            or display_payload.get("last_frame_path")
+            or ""
+        ).strip()
+        tracking_summary: dict[str, object] = {
+            **_mapping_to_plain_dict(display_payload.get("tracking_summary")),
+            "status": "studying_new_pair",
+            "market_selector_rebind_required": True,
+            "market_selector_studying_new_pair": True,
+        }
+        latest_signal: dict[str, object] = {
+            **_mapping_to_plain_dict(display_payload.get("latest_signal")),
+            "action": "HOLD",
+            "execution_action": "HOLD",
+            "status": "studying_new_pair",
+            "summary": reason,
+            "market_selector_rebind_required": True,
+            "market_selector_studying_new_pair": True,
+        }
+        window_artifact: dict[str, object] = {
+            "kind": "window",
+            "path": window_path,
+            "url": "",
+            "exists": bool(window_path),
+            "frame_id": frame_id,
+        }
+        overlays_payload: dict[str, object] = {
+            "count": 0,
+            "total_count": 0,
+            "renderable_count": 0,
+            "hidden_count": 0,
+            "rejected_count": 0,
+            "artifact_frame_id": int(_epoch_float(display_payload.get("overlay_frame_id"), 0.0)),
+            "overlay_object_frame_id": int(_epoch_float(display_payload.get("overlay_frame_id"), 0.0)),
+            "artifact_frame_aligned": False,
+            "artifact_authority_locked": False,
+            "artifact_mismatch_reason": reason,
+            "objects": [],
+        }
+        provider_status: dict[str, object] = {
+            "live_state_source": "compact_studying_new_pair_fast_path",
+            "compact_studying_new_pair_fast_path_v3": True,
+            "compact_cache_refreshed_epoch": now_epoch,
+            "reason": reason,
+        }
+        base_payload: dict[str, object] = dict(display_payload)
+        base_payload.update(
+            {
+                "schema_version": "PG_LIVE_STATE_V3",
+                "session_id": requested_session_id,
+                "status": "running",
+                "tracking_enabled": True,
+                "frame_id": frame_id,
+                "display_frame_id": frame_id,
+                "state_version": int(_epoch_float(display_payload.get("state_version"), 0.0)),
+                "requested_mode": requested_mode,
+                "active_mode": active_mode,
+                "visible_layers": [],
+                "overlay_count": 0,
+                "renderable_count": 0,
+                "hidden_count": 0,
+                "rejected_count": 0,
+                "reason_if_empty": reason,
+                "overlay_mode": {
+                    "requested": requested_mode,
+                    "active": active_mode,
+                    "reason_if_empty": reason,
+                    "artifact_frame_aligned": False,
+                    "artifact_authority_locked": False,
+                },
+                "tracking_summary": tracking_summary,
+                "latest_signal": latest_signal,
+                "overlays": overlays_payload,
+                "overlay_objects": [],
+                "artifacts": {"window": window_artifact},
+                "surface": {
+                    "selected_plane": "full_broker_surface",
+                    "frame": window_artifact,
+                    "overlay_frame": window_artifact,
+                    "mode": "full_broker_surface",
+                },
+                "chart_frame": {
+                    "artifact": window_artifact,
+                    "url": "",
+                    "image_url": "",
+                    "frame_url": "",
+                    "overlay_url": "",
+                    "display_artifact": window_artifact,
+                },
+                "broker_surface": {
+                    "status": "studying_new_pair",
+                    "frame": window_artifact,
+                    "image_url": "",
+                    "url": "",
+                    "frame_url": "",
+                    "latest_window_url": "",
+                },
+                "provider_status": provider_status,
+            }
+        )
+        base_payload["live_visual_state"] = {
+            key: value
+            for key, value in base_payload.items()
+            if key
+            in {
+                "schema_version",
+                "session_id",
+                "frame_id",
+                "state_version",
+                "requested_mode",
+                "active_mode",
+                "visible_layers",
+                "overlay_count",
+                "renderable_count",
+                "hidden_count",
+                "rejected_count",
+                "reason_if_empty",
+                "overlay_mode",
+                "tracking_summary",
+                "latest_signal",
+                "overlays",
+                "overlay_objects",
+                "artifacts",
+                "surface",
+                "chart_frame",
+                "broker_surface",
+                "provider_status",
+            }
+        }
+        return base_payload
 
     def build_live_state_v3_for_session(
         session_id: str,
@@ -2491,6 +2794,42 @@ def create_app(
                             )
                             _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_refreshed))
                             return compact_refreshed
+                    reusable_cached = _latest_compact_live_state_response_cache(
+                        requested_session_id,
+                        active_mode,
+                        now_epoch=now_epoch,
+                    )
+                    if reusable_cached is not None:
+                        compact_refreshed = _refresh_compact_cached_live_state(
+                            reusable_cached,
+                            requested_session_id,
+                            now_epoch=now_epoch,
+                        )
+                        provider: dict[str, object] = {
+                            **_mapping_to_plain_dict(compact_refreshed.get("provider_status")),
+                            "compact_cache_previous_signature_reused_v3": True,
+                        }
+                        compact_refreshed["provider_status"] = provider
+                        _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_refreshed))
+                        return compact_refreshed
+            display_snapshot = _direct_window_tracker_display_snapshot(
+                requested_session_id,
+                require_overlay_model=False,
+            )
+            if display_snapshot is not None:
+                surface_mismatch_reason = _display_overlay_authority_mismatch_reason(requested_session_id, display_snapshot)
+                if surface_mismatch_reason:
+                    compact_response = _compact_studying_new_pair_live_state(
+                        requested_session_id,
+                        dict(display_snapshot),
+                        requested_mode=mode,
+                        reason=surface_mismatch_reason,
+                        now_epoch=now_epoch,
+                    )
+                    if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
+                        with _LIVE_STATE_V3_CACHE_LOCK:
+                            _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_response))
+                    return compact_response
             live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=True)
             compact_response = compact_live_state_response(live_state)
             if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:

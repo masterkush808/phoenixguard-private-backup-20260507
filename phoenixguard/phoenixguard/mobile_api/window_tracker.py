@@ -8720,11 +8720,16 @@ class PhoenixGuardWindowTrackingAdapter:
             )
         )
         fast_locked_context = bool(fast_selectors and (live_execution_context or locked_study_context))
-        skip_missing_live_market_selector = (
-            live_execution_context
-            and fast_locked_context
-            and str(os.getenv("PHOENIXGUARD_LIVE_SKIP_MISSING_MARKET_SELECTOR", "1") or "").strip().lower() not in {"0", "false", "off", "no"}
+        skip_missing_live_market_selector = fast_locked_context and _env_bool(
+            "PHOENIXGUARD_LIVE_SKIP_MISSING_MARKET_SELECTOR",
+            True,
         )
+        fast_pair_switch_rebind = bool(
+            fast_locked_context
+            and _env_bool("PHOENIXGUARD_LIVE_PAIR_SWITCH_FAST_REBIND", True)
+        )
+        scan_selector_on_pair_switch = _env_bool("PHOENIXGUARD_LIVE_SCAN_SELECTOR_ON_PAIR_SWITCH", False)
+        scan_selector_when_unknown = _env_bool("PHOENIXGUARD_LIVE_SCAN_SELECTOR_WHEN_UNKNOWN", False)
         previous_tracking: dict[str, Any] = {}
         previous_signal: dict[str, Any] = {}
         market_selector_fingerprint = _market_selector_visual_fingerprint(surface)
@@ -8786,20 +8791,46 @@ class PhoenixGuardWindowTrackingAdapter:
             if not timeframe_selector:
                 timeframe_selector = self._detect_timeframe_selector(surface)
             if not market_selector:
-                detected_market_selector = self._detect_market_selector(surface, timeframe_selector=timeframe_selector)
-                if detected_market_selector:
-                    market_selector = dict(detected_market_selector)
-                elif skip_missing_live_market_selector and not market_selector_visual_changed:
-                    market_selector = {}
-                else:
+                if (
+                    fast_pair_switch_rebind
+                    and market_selector_visual_changed
+                    and not scan_selector_on_pair_switch
+                ):
                     market_selector_rebind_required = bool(cached_market or market_selector_visual_changed)
                     market_selector = {
                         "value": "",
-                        "source": "selector_visual_changed_unconfirmed"
-                        if market_selector_visual_changed
-                        else "selector_unconfirmed",
+                        "source": "selector_visual_changed_fast_rebind",
                         "confidence": 0.0,
+                        "studying_new_pair": True,
                     }
+                elif (
+                    skip_missing_live_market_selector
+                    and not cached_market
+                    and not market_selector_visual_changed
+                    and not scan_selector_when_unknown
+                ):
+                    market_selector = {
+                        "value": "",
+                        "source": "selector_skipped_fast_locked_context",
+                        "confidence": 0.0,
+                        "studying_new_pair": False,
+                    }
+                else:
+                    detected_market_selector = self._detect_market_selector(surface, timeframe_selector=timeframe_selector)
+                    if detected_market_selector:
+                        market_selector = dict(detected_market_selector)
+                    elif skip_missing_live_market_selector and not market_selector_visual_changed:
+                        market_selector = {}
+                    else:
+                        market_selector_rebind_required = bool(cached_market or market_selector_visual_changed)
+                        market_selector = {
+                            "value": "",
+                            "source": "selector_visual_changed_unconfirmed"
+                            if market_selector_visual_changed
+                            else "selector_unconfirmed",
+                            "confidence": 0.0,
+                            "studying_new_pair": bool(market_selector_visual_changed),
+                        }
                 market_selector["market_selector_visual_fingerprint"] = market_selector_fingerprint
                 market_selector["previous_market_selector_visual_fingerprint"] = previous_market_selector_fingerprint
                 market_selector["market_selector_visual_changed"] = bool(market_selector_visual_changed)
@@ -13336,6 +13367,7 @@ class PhoenixGuardWindowTrackingAdapter:
         ).strip()
         market_selector_visual_changed = bool(market_row.get("market_selector_visual_changed", False))
         market_selector_rebind_required = bool(market_row.get("market_selector_rebind_required", False))
+        market_selector_studying_new_pair = bool(market_row.get("studying_new_pair", False))
         if len(candles) < 5:
             tracking = _default_tracking_summary(message="Waiting for more visible candle structure.")
             tracking["chart_region"] = dict(chart_region)
@@ -13351,6 +13383,7 @@ class PhoenixGuardWindowTrackingAdapter:
             tracking["previous_market_selector_visual_fingerprint"] = previous_market_selector_fingerprint
             tracking["market_selector_visual_changed"] = market_selector_visual_changed
             tracking["market_selector_rebind_required"] = market_selector_rebind_required
+            tracking["market_selector_studying_new_pair"] = market_selector_studying_new_pair
             signal = _default_signal(
                 message="Waiting for more visible candle structure inside the locked focus region.",
                 status="warming",
@@ -13364,6 +13397,7 @@ class PhoenixGuardWindowTrackingAdapter:
             signal["previous_market_selector_visual_fingerprint"] = previous_market_selector_fingerprint
             signal["market_selector_visual_changed"] = market_selector_visual_changed
             signal["market_selector_rebind_required"] = market_selector_rebind_required
+            signal["market_selector_studying_new_pair"] = market_selector_studying_new_pair
             return tracking, signal
 
         proxies = [float(item.get("price_proxy", 0.0)) for item in candles]
@@ -13742,6 +13776,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "previous_market_selector_visual_fingerprint": previous_market_selector_fingerprint,
             "market_selector_visual_changed": market_selector_visual_changed,
             "market_selector_rebind_required": market_selector_rebind_required,
+            "market_selector_studying_new_pair": market_selector_studying_new_pair,
             "global_direction": global_direction,
             "local_direction": local_direction,
             "impulse_direction": impulse_direction,
@@ -13825,6 +13860,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "previous_market_selector_visual_fingerprint": previous_market_selector_fingerprint,
             "market_selector_visual_changed": market_selector_visual_changed,
             "market_selector_rebind_required": market_selector_rebind_required,
+            "market_selector_studying_new_pair": market_selector_studying_new_pair,
             "execution_permission": execution_permission,
             "entry_state": str(entry_plan.get("entry_state", "WAIT") or "WAIT"),
             "entry_label": str(entry_plan.get("entry_label", "WAIT") or "WAIT"),

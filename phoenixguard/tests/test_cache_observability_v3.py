@@ -884,6 +884,174 @@ def test_live_state_v3_direct_read_invalidates_cache_when_display_state_advances
     assert second_payload["artifacts"]["window"]["path"] == str(second_window)
 
 
+def test_compact_live_state_reuses_cached_response_for_display_heartbeat(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    _clear_mobile_live_state_caches()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    artifact_dir = session_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    window = artifact_dir / "000001_same_window.png"
+    window.write_bytes(b"window")
+    now_epoch = time.time()
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "status": "running",
+                "tracking_enabled": True,
+                "capture_count": 1,
+                "frame_index": 1,
+                "display_frame_id": 1,
+                "overlay_frame_id": 1,
+                "model_vote_frame_id": 1,
+                "display_published_epoch": now_epoch,
+                "last_capture_epoch": now_epoch,
+                "last_window_path": str(window),
+                "last_display_window_path": str(window),
+                "last_display_surface_signature": "same",
+                "overlay_source_window_signature": "same",
+                "tracking_summary": {},
+                "latest_signal": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "display_state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "capture_count": 1,
+                "frame_index": 1,
+                "display_frame_id": 1,
+                "overlay_frame_id": 1,
+                "model_vote_frame_id": 1,
+                "display_published_epoch": now_epoch,
+                "last_display_window_path": str(window),
+                "last_display_surface_signature": "same",
+                "overlay_source_window_signature": "same",
+                "display_snapshot_only_v3": True,
+                "status": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app())
+    first_response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
+    assert first_response.status_code == 200
+
+    def fail_full_build(*_args: Any, **_kwargs: Any) -> dict[str, object]:
+        raise AssertionError("compact display heartbeat should reuse cached live state")
+
+    monkeypatch.setattr(mobile_app, "build_live_state_v3", fail_full_build)
+    (session_dir / "display_state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "capture_count": 2,
+                "frame_index": 1,
+                "display_frame_id": 2,
+                "overlay_frame_id": 1,
+                "model_vote_frame_id": 1,
+                "display_published_epoch": now_epoch + 1.0,
+                "last_display_window_path": str(window),
+                "last_display_surface_signature": "same",
+                "overlay_source_window_signature": "same",
+                "display_snapshot_only_v3": True,
+                "status": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    second_response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
+
+    assert second_response.status_code == 200
+    payload = second_response.json()
+    assert payload["frame_id"] == 2
+    assert payload["provider_status"]["compact_cache_previous_signature_reused_v3"] is True
+
+
+def test_compact_live_state_returns_studying_new_pair_when_surface_outruns_overlay_authority(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    _clear_mobile_live_state_caches()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    artifact_dir = session_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    window = artifact_dir / "000002_new_window.png"
+    window.write_bytes(b"window")
+    now_epoch = time.time()
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "status": "running",
+                "tracking_enabled": True,
+                "capture_count": 1,
+                "frame_index": 1,
+                "display_frame_id": 1,
+                "overlay_frame_id": 1,
+                "model_vote_frame_id": 1,
+                "display_published_epoch": now_epoch,
+                "last_capture_epoch": now_epoch,
+                "last_window_path": str(window),
+                "tracking_summary": {
+                    "market_selector_visual_changed": True,
+                    "market_selector_rebind_required": True,
+                },
+                "latest_signal": {
+                    "market_selector_visual_changed": True,
+                    "market_selector_rebind_required": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "display_state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "capture_count": 2,
+                "frame_index": 1,
+                "display_frame_id": 2,
+                "overlay_frame_id": 1,
+                "model_vote_frame_id": 1,
+                "display_published_epoch": now_epoch + 1.0,
+                "last_display_window_path": str(window),
+                "last_display_surface_signature": "new",
+                "overlay_source_window_signature": "old",
+                "display_snapshot_only_v3": True,
+                "status": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_full_build(*_args: Any, **_kwargs: Any) -> dict[str, object]:
+        raise AssertionError("surface mismatch should return fast studying-new-pair payload")
+
+    monkeypatch.setattr(mobile_app, "build_live_state_v3", fail_full_build)
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["renderable_count"] == 0
+    assert payload["overlays"]["objects"] == []
+    assert payload["provider_status"]["compact_studying_new_pair_fast_path_v3"] is True
+    assert payload["tracking_summary"]["market_selector_studying_new_pair"] is True
+
+
 def test_performance_trace_v3_uses_direct_display_state_fast_path(
     monkeypatch: Any,
     tmp_path: Path,

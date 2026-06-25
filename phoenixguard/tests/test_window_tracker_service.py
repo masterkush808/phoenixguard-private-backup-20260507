@@ -7041,6 +7041,88 @@ def test_real_tracking_adapter_reuses_cached_locked_shadow_selectors(monkeypatch
     assert result.latest_signal["market"] == "EUR/JPY OTC"
 
 
+def test_real_tracking_adapter_pair_switch_fast_rebind_skips_slow_market_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    image = _synthetic_chart_surface("buy")
+    session_payload: dict[str, Any] = {
+        "execution_controls": {"live_execution_enabled": False, "execution_mode": "shadow"},
+        "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
+        "locked_window": {"hwnd": 123, "title": "Pocket Option"},
+        "tracking_summary": {
+            "detected_timeframe": "M5",
+            "timeframe_confidence": 0.93,
+            "detected_market": "EUR/JPY OTC",
+            "market_confidence": 0.91,
+            "market_selector_visual_fingerprint": "previous-pair",
+            "chart_region": {"pixel_bbox": [0, 0, image.width, image.height], "confidence": 0.90},
+        },
+        "latest_signal": {
+            "focus_timeframe": "M5",
+            "focus_timeframe_confidence": 0.93,
+            "market": "EUR/JPY OTC",
+            "market_confidence": 0.91,
+            "market_selector_visual_fingerprint": "previous-pair",
+        },
+    }
+
+    def fail_market_detector(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("pair-switch fast rebind must not block on slow market OCR")
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", fail_market_detector)
+
+    result = adapter.study(image, session_payload=session_payload)
+
+    stages = [str(row.get("stage", "")) for row in result.tracking_summary["study_stage_timings"]]
+    assert "cached_chart_bbox" in stages
+    assert result.tracking_summary["market_selector_visual_changed"] is True
+    assert result.tracking_summary["market_selector_rebind_required"] is True
+    assert result.tracking_summary["market_selector_studying_new_pair"] is True
+    assert result.latest_signal["market_selector_studying_new_pair"] is True
+
+
+def test_real_tracking_adapter_unknown_market_fast_locked_context_skips_slow_market_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    image = _synthetic_chart_surface("buy")
+    selector_fingerprint = str(
+        getattr(window_tracker_module, "_market_selector_visual_fingerprint")(image)
+    )
+    session_payload: dict[str, Any] = {
+        "execution_controls": {"live_execution_enabled": False, "execution_mode": "shadow"},
+        "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
+        "locked_window": {"hwnd": 123, "title": "Pocket Option"},
+        "tracking_summary": {
+            "detected_timeframe": "M5",
+            "timeframe_confidence": 0.93,
+            "detected_market": "",
+            "market_selector_visual_fingerprint": selector_fingerprint,
+            "chart_region": {"pixel_bbox": [0, 0, image.width, image.height], "confidence": 0.90},
+        },
+        "latest_signal": {
+            "focus_timeframe": "M5",
+            "focus_timeframe_confidence": 0.93,
+            "market": "",
+            "market_selector_visual_fingerprint": selector_fingerprint,
+        },
+    }
+
+    def fail_market_detector(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("unknown locked market must not block on slow market OCR")
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", fail_market_detector)
+
+    result = adapter.study(image, session_payload=session_payload)
+
+    stages = [str(row.get("stage", "")) for row in result.tracking_summary["study_stage_timings"]]
+    assert "cached_chart_bbox" in stages
+    assert result.tracking_summary["market_source"] == "selector_skipped_fast_locked_context"
+    assert result.tracking_summary["market_selector_rebind_required"] is False
+    assert result.latest_signal["market"] == ""
+
+
 def test_real_tracking_adapter_excludes_broker_order_panel_from_chart_bbox() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     image = _synthetic_full_pocket_option_gui()
