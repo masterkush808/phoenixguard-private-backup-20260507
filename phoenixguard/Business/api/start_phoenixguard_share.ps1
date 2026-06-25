@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [string]$BindAddress = $(if ($env:PHOENIXGUARD_SHARE_HOST) { $env:PHOENIXGUARD_SHARE_HOST } else { '127.0.0.1' }),
 
@@ -23,13 +23,18 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-Set-Location -LiteralPath $PSScriptRoot
-
-$ProjectRoot = $PSScriptRoot
+$ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location -LiteralPath $ProjectRoot
 $VirtualEnvPath = Join-Path -Path $ProjectRoot -ChildPath '.venv'
 $ActivateScriptPath = Join-Path -Path $VirtualEnvPath -ChildPath 'Scripts\Activate.ps1'
 $RequirementsFilePath = Join-Path -Path $ProjectRoot -ChildPath 'requirements.txt'
-$ShareRunnerPath = Join-Path -Path $ProjectRoot -ChildPath 'share_phoenixguard.py'
+$backendSrc = Join-Path -Path $ProjectRoot -ChildPath 'Backend\src'
+$backendRoot = Join-Path -Path $ProjectRoot -ChildPath 'Backend'
+$backendCompat = Join-Path -Path $ProjectRoot -ChildPath 'Backend\compat'
+$frontendDashboard = Join-Path -Path $ProjectRoot -ChildPath 'Frontend\dashboard'
+$env:PYTHONPATH = (@($backendSrc, $backendRoot, $backendCompat, $frontendDashboard, $ProjectRoot, $env:PYTHONPATH) | Where-Object { $_ -and [string]$_ -ne '' }) -join [System.IO.Path]::PathSeparator
+$env:PHOENIXGUARD_PROJECT_ROOT = $ProjectRoot
+$ShareRunnerPath = Join-Path -Path $ProjectRoot -ChildPath 'Frontend\dashboard\share_phoenixguard.py'
 
 if (-not (Test-Path -LiteralPath $VirtualEnvPath)) {
     py -3.11 -m venv $VirtualEnvPath
@@ -114,7 +119,7 @@ $env:PHOENIXGUARD_UI_OPEN_BROWSER = '0'
 $env:PHOENIXGUARD_UI_SHOW_ERROR = '0'
 
 if (-not (Test-Path -LiteralPath $ShareRunnerPath)) {
-    throw "share_phoenixguard.py was not found at '$ShareRunnerPath'."
+    throw "Frontend\dashboard\share_phoenixguard.py was not found at '$ShareRunnerPath'."
 }
 
 switch ($ResolvedAccessMode) {

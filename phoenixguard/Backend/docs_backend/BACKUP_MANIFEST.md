@@ -29,7 +29,7 @@ Saved on 2026-05-08 after restoring the verified private backup and hardening th
   required live-click gate by default.
 - Live execution gate remains controlled by PhoenixGuard broker/identity/actionability checks.
 - Verification: `.venv\Scripts\python.exe -m pytest` passed with `563 passed`.
-- PowerShell launcher validation: `start_live_dashboard.ps1` parses cleanly and has no PSScriptAnalyzer errors/warnings.
+- PowerShell launcher validation: `Backend/launch/start_live_dashboard.ps1` parses cleanly and has no PSScriptAnalyzer errors/warnings.
 - Dashboard smoke launch: isolated port `8795` returned health `ok` with
   `capture_interval_sec=0.5`, adaptive min `0.5`, adaptive max `2.0`, then the
   smoke listener was stopped.
@@ -38,8 +38,8 @@ Launch:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-.\start_live_dashboard.ps1 -ForceRestart
-python shooter.py signal `
+.\Backend\launch\start_live_dashboard.ps1 -ForceRestart
+python Backend\launch\shooter.py signal `
   --session-id pocket-live-8788 `
   --base-url http://127.0.0.1:8793 `
   --poll 0.05 `

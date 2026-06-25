@@ -20,12 +20,14 @@ LOG = logging.getLogger("adaptive_harness")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-SHOOTER_PATH = ROOT / "shooter.py"
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+PROJECT_ROOT = HERE.parents[1]
+SHOOTER_PATH = PROJECT_ROOT / "Backend" / "launch" / "shooter.py"
+for path in (PROJECT_ROOT / "Backend" / "src", PROJECT_ROOT / "Backend", PROJECT_ROOT / "Backend" / "launch", PROJECT_ROOT):
+    path_text = str(path)
+    if path.exists() and path_text not in sys.path:
+        sys.path.insert(0, path_text)
 if not SHOOTER_PATH.exists():
-    print("Cannot locate 'shooter.py' at expected path:", SHOOTER_PATH)
+    print("Cannot locate 'Backend/launch/shooter.py' at expected path:", SHOOTER_PATH)
     sys.exit(2)
 
 spec = importlib.util.spec_from_file_location("shooter_mod", str(SHOOTER_PATH))

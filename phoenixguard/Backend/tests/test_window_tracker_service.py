@@ -5141,14 +5141,14 @@ def test_memory_precision_allows_aggressive_stacked_primary_when_counter_is_prob
 
 
 def test_live_dashboard_launcher_delegates_to_final_live_profile() -> None:
-    launcher = (Path(__file__).resolve().parents[2] / "start_live_dashboard.ps1").read_text(encoding="utf-8")
+    launcher = (Path(__file__).resolve().parents[2] / "Backend" / "launch" / "start_live_dashboard.ps1").read_text(encoding="utf-8")
 
     assert "launch_phoenixguard_live_ready.ps1" in launcher
     assert "FINAL_LIVE" in launcher
 
 
 def test_full_local_launcher_has_one_final_live_profile_and_keeps_broker_auto_open_off() -> None:
-    launcher = (Path(__file__).resolve().parents[2] / "start_phoenixguard_full_local.ps1").read_text(encoding="utf-8")
+    launcher = (Path(__file__).resolve().parents[2] / "Backend" / "launch" / "start_phoenixguard_full_local.ps1").read_text(encoding="utf-8")
 
     assert "FINAL_LIVE" in launcher
     assert "[string]$ShooterMode" in launcher

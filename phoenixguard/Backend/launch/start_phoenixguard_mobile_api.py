@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from _pg_bootstrap import ensure_project_paths
-ensure_project_paths()
+PROJECT_ROOT = ensure_project_paths()
 
 import asyncio
 import logging
@@ -59,7 +59,7 @@ if __name__ == "__main__":
     port = int(os.getenv("PHOENIXGUARD_MOBILE_API_PORT", "8787") or "8787")
     session_id = str(os.getenv("PHOENIXGUARD_TRACKER_SESSION_ID", "pocket-live-8788") or "pocket-live-8788").strip()
     base_url = f"http://{host}:{port}"
-    guard = guard_from_environment(Path(__file__).resolve().parent)
+    guard = guard_from_environment(PROJECT_ROOT)
     runtime_token = str(os.getenv("PHOENIXGUARD_RUNTIME_LOCK_TOKEN", "") or "").strip()
     acquired_token = ""
     if runtime_token:

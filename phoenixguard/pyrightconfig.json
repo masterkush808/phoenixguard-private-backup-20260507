@@ -1,10 +1,10 @@
 {
   "typeCheckingMode": "strict",
   "include": [
-    "main.py",
-    "shooter.py",
-    "start_phoenixguard_24_7_tracker.py",
-    "start_phoenixguard_mobile_api.py",
+    "Backend/compat",
+    "Backend/launch/shooter.py",
+    "Backend/launch/start_phoenixguard_24_7_tracker.py",
+    "Backend/launch/start_phoenixguard_mobile_api.py",
     "Backend/src/phoenixguard",
     "Backend/scripts_runtime",
     "Backend/scripts_data",
@@ -15,11 +15,15 @@
     "Developer/developer_tools",
     "Developer/model_exports",
     "Developer/model_training",
-    "Developer/sequence_teacher"
+    "Developer/sequence_teacher",
+    "Frontend/dashboard/main.py"
   ],
   "extraPaths": [
     "Backend/src",
     "Backend",
+    "Backend/compat",
+    "Backend/launch",
+    "Frontend/dashboard",
     "."
   ],
   "exclude": [

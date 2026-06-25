@@ -877,13 +877,13 @@ The relevant routes exposed by the FastAPI app are:
 
 ## 16. One-command launcher
 
-`start_live_dashboard.ps1` is the easiest operator path.
+`Backend/launch/start_live_dashboard.ps1` is the easiest operator path.
 
 What it does:
 
 1. Resolves data and log directories.
 2. Checks whether the API is already healthy.
-3. Starts `start_phoenixguard_mobile_api.py` if needed.
+3. Starts `Backend/launch/start_phoenixguard_mobile_api.py` if needed.
 4. Waits for `/v1/mobile/health`.
 5. Warms the tracker runtime by calling the tracker sessions route.
 6. Loads or creates the default tracker session.

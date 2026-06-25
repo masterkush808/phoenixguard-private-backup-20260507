@@ -8,12 +8,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Set-Location $PSScriptRoot
+$ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $ProjectRoot
 
 $finalLaunchProfile = 'FINAL_LIVE'
 Write-Host "PhoenixGuard launch profile: $finalLaunchProfile"
-Write-Warning "launch_full_then_shooter.ps1 is retired. Delegating to the single FINAL_LIVE source of truth."
-& (Join-Path -Path $PSScriptRoot -ChildPath 'launch_phoenixguard_live_ready.ps1') `
+Write-Warning "launch_live_ready.ps1 is retired. Delegating to the single FINAL_LIVE source of truth."
+& (Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\launch_phoenixguard_live_ready.ps1') `
 	-BrokerWindowQuery $BrokerWindowQuery `
 	-SessionId $SessionId `
 	-CaptureIntervalSec $CaptureIntervalSec `

@@ -9,7 +9,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Set-Location $PSScriptRoot
+$ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $ProjectRoot
 
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
     $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -75,11 +76,11 @@ function Initialize-PhoenixGuardApi {
         return
     } catch {
         if (-not $StartMobileApi) {
-            throw "PhoenixGuard Mobile API is not reachable at $script:BaseUrl. Start '.\start_phoenixguard_mobile_api.ps1' or rerun with -StartMobileApi."
+            throw "PhoenixGuard Mobile API is not reachable at $script:BaseUrl. Start '.\Backend\launch\start_phoenixguard_mobile_api.ps1' or rerun with -StartMobileApi."
         }
     }
 
-    $apiScriptPath = Join-Path $PSScriptRoot 'start_phoenixguard_mobile_api.ps1'
+    $apiScriptPath = Join-Path $ProjectRoot 'Backend\launch\start_phoenixguard_mobile_api.ps1'
     if (-not (Test-Path -LiteralPath $apiScriptPath)) {
         throw "Mobile API launcher not found at '$apiScriptPath'."
     }

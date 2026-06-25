@@ -8,10 +8,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Set-Location $PSScriptRoot
+$ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $ProjectRoot
 
 Write-Warning "start_phoenixguard.ps1 no longer supports alternate profiles. Delegating to the single FINAL_LIVE source of truth."
-& (Join-Path -Path $PSScriptRoot -ChildPath 'launch_phoenixguard_live_ready.ps1') `
+& (Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\launch_phoenixguard_live_ready.ps1') `
     -BrokerWindowQuery $BrokerWindowQuery `
     -SessionId $SessionId `
     -CaptureIntervalSec $CaptureIntervalSec `

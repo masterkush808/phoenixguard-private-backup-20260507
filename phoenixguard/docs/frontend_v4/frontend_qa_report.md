@@ -8,9 +8,9 @@ Scope: local dashboard QA for `Frontend/dashboard/static/window_tracker_dashboar
 
 Live broker execution must not be triggered during QA. Treat these as inspect-only unless an operator explicitly chooses a live validation session outside QA:
 
-- `.\start_live_dashboard.ps1`
-- `.\start_phoenixguard_full_local.ps1`
-- `python shooter.py signal ...`
+- `.\Backend\launch\start_live_dashboard.ps1`
+- `.\Backend\launch\start_phoenixguard_full_local.ps1`
+- `python Backend\launch\shooter.py signal ...`
 - any request to `/v1/mobile/window-tracker/sessions/{sessionId}/start`
 - any request to `/v1/mobile/window-tracker/sessions/{sessionId}/capture-once`
 - any request to `/v1/mobile/window-tracker/sessions/{sessionId}/demo-random-trade`
@@ -18,8 +18,8 @@ Live broker execution must not be triggered during QA. Treat these as inspect-on
 
 Observed launcher risk:
 
-- `start_live_dashboard.ps1` can patch controls to live mode and can auto-start tracking when broker focus already exists.
-- `start_phoenixguard_full_local.ps1` starts tracker tooling and then launches `shooter.py` in `LIVE_READY` mode with `PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS` set inside the shooter process.
+- `Backend/launch/start_live_dashboard.ps1` can patch controls to live mode and can auto-start tracking when broker focus already exists.
+- `Backend/launch/start_phoenixguard_full_local.ps1` starts tracker tooling and then launches `Backend/launch/shooter.py` in `LIVE_READY` mode with `PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS` set inside the shooter process.
 
 ## Dashboard Surface Reviewed
 

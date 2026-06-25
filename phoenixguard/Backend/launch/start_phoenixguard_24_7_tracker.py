@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from _pg_bootstrap import ensure_project_paths
-ensure_project_paths()
+PROJECT_ROOT = ensure_project_paths()
 
 import argparse
 import json
@@ -111,7 +111,7 @@ def _live_fast_display_heartbeat(
     now = time.time()
     if now - float(last_heartbeat_epoch or 0.0) < interval_sec:
         return last_heartbeat_epoch
-    resolved_script_dir = script_dir or Path(__file__).resolve().parent
+    resolved_script_dir = script_dir or PROJECT_ROOT
     file_thread_enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "1") or "1").strip().lower() not in {
         "0",
         "false",
@@ -426,7 +426,7 @@ def _launch_mobile_api(
     if runtime_lock_token:
         env["PHOENIXGUARD_RUNTIME_LOCK_TOKEN"] = runtime_lock_token
     return cast(subprocess.Popen[str], subprocess.Popen(
-        [python_exe, str(script_dir / "start_phoenixguard_mobile_api.py")],
+        [python_exe, str(script_dir / "Backend" / "launch" / "start_phoenixguard_mobile_api.py")],
         cwd=str(script_dir),
         env=env,
     ))
@@ -737,7 +737,7 @@ def main() -> int:
         help="Normalized chart focus box as left,top,right,bottom. Use empty string to require manual dashboard lock.",
     )
     parser.add_argument("--health-timeout", type=int, default=int(os.getenv("PHOENIXGUARD_TRACKER_HEALTH_TIMEOUT_SEC", "60")))
-    parser.add_argument("--status-file", default=os.getenv("PHOENIXGUARD_TRACKER_STATUS_FILE", str(Path(__file__).resolve().parent / ".codex_runtime" / "tracker_status.json")))
+    parser.add_argument("--status-file", default=os.getenv("PHOENIXGUARD_TRACKER_STATUS_FILE", str(PROJECT_ROOT / ".codex_runtime" / "tracker_status.json")))
     parser.add_argument("--health-probe-retries", type=int, default=int(os.getenv("PHOENIXGUARD_TRACKER_HEALTH_PROBE_RETRIES", "6")))
     parser.add_argument("--session-read-failures", type=int, default=int(os.getenv("PHOENIXGUARD_TRACKER_SESSION_READ_FAILURES", "3")))
     parser.add_argument("--wait-for-lock", action="store_true", default=True)
@@ -746,7 +746,7 @@ def main() -> int:
     parser.add_argument("--no-open-dashboard", dest="open_dashboard", action="store_false")
     args = parser.parse_args()
 
-    script_dir = Path(__file__).resolve().parent
+    script_dir = PROJECT_ROOT
     os.environ.setdefault("PHOENIXGUARD_DATA_DIR", str(_default_live_runtime_dir(script_dir, "data_live")))
     os.environ.setdefault("PHOENIXGUARD_LOGS_DIR", str(_default_live_runtime_dir(script_dir, "logs_live")))
     os.environ.setdefault("PHOENIXGUARD_LIVE_STATE_CACHE_TTL_SEC", "5.0")

@@ -4,7 +4,7 @@ Generated: 2026-06-21
 
 Runtime profile: PhoenixGuard V3 / FINAL_LIVE
 
-Primary launcher: `launch_phoenixguard_live_ready.ps1`
+Primary launcher: `Backend/launch/launch_phoenixguard_live_ready.ps1`
 
 Primary execution authority: `PG_EXECUTION_PACKET_V3`
 
@@ -25,7 +25,7 @@ an accepted Model Council allowance package.
 The system is built around one strict doctrine: observation is not execution. Raw BUY or SELL
 signals, legacy `action` fields, old skill gate outputs, memory confidence, dashboard displays, and
 study packets are all diagnostic or advisory. The only valid local handoff is a fresh
-`PG_EXECUTION_PACKET_V3` with an explicit `PG_ALLOWANCE_PACKAGE_V1`; `shooter.py` reports that
+`PG_EXECUTION_PACKET_V3` with an explicit `PG_ALLOWANCE_PACKAGE_V1`; `Backend/launch/shooter.py` reports that
 accepted package and does not click, calibrate, or manipulate broker controls.
 
 The architecture is intentionally layered. The live tracker produces state. Vision modules and chart
@@ -54,7 +54,7 @@ The final V3 upgrades wired into the repository are:
 
 - Developer runbook first: `README.md` now starts with the exact safe restart, cleanup, launch,
   dashboard, runtime-read, and tracker start/stop commands.
-- Canonical launcher retained: `launch_phoenixguard_live_ready.ps1` remains the safe live
+- Canonical launcher retained: `Backend/launch/launch_phoenixguard_live_ready.ps1` remains the safe live
   entrypoint; `-DisableShooter` is the read-only developer mode.
 - Freshness bridge added: tracker writes a compact `display_state.json` beside `session.json` so
   dashboard/API reads can advance when the study worker is busy.
@@ -167,13 +167,13 @@ replay, or deployment assistance.
 
 | Layer                             | Core Files                                                                                                         | Responsibility                                                                                                                                                                                                                                         |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Launch and profile                | `launch_phoenixguard_live_ready.ps1`, `start_phoenixguard_full_local.ps1`, `start_phoenixguard_24_7_tracker.py`    | Starts the production live stack, pins the FINAL_LIVE profile, prepares runtime state, and launches API/tracker/shooter components.                                                                                                                    |
+| Launch and profile                | `Backend/launch/launch_phoenixguard_live_ready.ps1`, `Backend/launch/start_phoenixguard_full_local.ps1`, `Backend/launch/start_phoenixguard_24_7_tracker.py`    | Starts the production live stack, pins the FINAL_LIVE profile, prepares runtime state, and launches API/tracker/shooter components.                                                                                                                    |
 | Capture and tracker               | `Backend/src/phoenixguard/mobile_api/window_tracker.py`                                                                        | Locks a window, captures frames, builds live session state, derives chart structure, publishes artifacts, and feeds Model Council.                                                                                                                     |
 | Vision and overlay                | `Backend/src/phoenixguard/vision/*`, `Backend/src/phoenixguard/tracking/market_object_tracker_v3.py`                                       | Performs preprocessing, source-lock checks, chart transforms, object tracking, overlays, layer management, visual health, and registry persistence.                                                                                                    |
 | Memory                            | `phoenixguard/memory/*`                                                                                            | Embeds and retrieves prior examples, scores visual-play memory confirmation, and produces sequence/style similarity features.                                                                                                                          |
 | Decision                          | `Backend/src/phoenixguard/decision/*`                                                                                          | Performs regime, market reality, price location, scenarios, skill-gate diagnostics, RL/regression, model-council arbitration, and timing readiness scoring.                                                                                            |
 | Execution contract                | `Backend/src/phoenixguard/execution/packet_v3.py`, `Backend/src/phoenixguard/execution/v3_language.py`, `Backend/src/phoenixguard/runtime/cache_v3.py` | Defines canonical schema vocabulary, packet construction, validation, cache integrity, TTL, side agreement, sequence context, and runtime integrity.                                                                                                   |
-| Shooter package reporter          | `shooter.py`                                                                                                       | Reads only the Model Council execution endpoint, validates the executable packet and allowance package, and writes a package handoff when the package is accepted and execution-ready. It never clicks, calibrates, edits amount, or sets broker time. |
+| Shooter package reporter          | `Backend/launch/shooter.py`                                                                                                       | Reads only the Model Council execution endpoint, validates the executable packet and allowance package, and writes a package handoff when the package is accepted and execution-ready. It never clicks, calibrates, edits amount, or sets broker time. |
 | MT4/external bridge               | `Backend/tools/phoenixguard_mt4_file_bridge.py`, `Backend/launch/mt4/PhoenixGuard_MT4_Executioner.mq4`                                    | Consumes only explicit Model Council allowance packages from validated V3 packets and applies its own intraday/swing controls before any external action.                                                                                              |
 | API and dashboard                 | `Backend/src/phoenixguard/mobile_api/app.py`, `Frontend/dashboard/static/window_tracker_dashboard.html`, `Frontend/assets/js/*`    | Exposes health, live state, packet, tracker, floating-state, artifact, registry, visual, dashboard, stream, and control endpoints.                                                                                                                     |
 | Model-strength controls           | `Backend/src/phoenixguard/mobile_api/model_strength.py`, `Frontend/dashboard/static/floating_windows/model_strength_*`    | Saves developer-tuned model floors, AI contribution weights, lane thresholds, timing controls, risk controls, overlay controls, and study-only execution toggles.                                                                                      |
@@ -204,9 +204,9 @@ The live system has one preferred dataflow:
 9. The FastAPI app exposes latest study and execution packets.
 10. If an allowed entry package appears, the tracker can capture entry evidence on both the broker
     window and overlay window at the latest candle.
-11. `shooter.py` fetches the execution packet endpoint and rejects absent, stale, malformed,
+11. `Backend/launch/shooter.py` fetches the execution packet endpoint and rejects absent, stale, malformed,
     non-executable, or contradictory packets.
-12. `shooter.py` validates that the packet carries an explicit accepted `PG_ALLOWANCE_PACKAGE_V1` of
+12. `Backend/launch/shooter.py` validates that the packet carries an explicit accepted `PG_ALLOWANCE_PACKAGE_V1` of
     type `INTRADAY_ENTER_NOW` or `SWING`.
 13. The package reporter writes a bounded handshake only for accepted, execution-ready packages.
 14. The MT4 bridge or another explicit external path must revalidate the same allowance package
@@ -216,7 +216,7 @@ The live system has one preferred dataflow:
 
 ## Production Launch Setup
 
-The project treats `launch_phoenixguard_live_ready.ps1` as the production launcher. It is referenced
+The project treats `Backend/launch/launch_phoenixguard_live_ready.ps1` as the production launcher. It is referenced
 by `phoenixguard/V3_CANONICAL_MANIFEST.json` as the FINAL_LIVE entrypoint. The README now begins
 with the developer runbook because safe launch and safe shutdown are part of the architecture.
 
@@ -258,7 +258,7 @@ python .\Backend\tools\clean_v3_runtime_state.py --apply
 The final live dashboard stack is launched with:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser
 ```
 
 The dashboard URL is:
@@ -270,7 +270,7 @@ http://127.0.0.1:8793/dashboard/live/pocket-live-8788
 Read-only developer launch is available with:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser -DisableShooter
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser -DisableShooter
 ```
 
 After launch, the developer read commands are:
@@ -745,7 +745,7 @@ runtime integrity failures, and ambiguous or contradictory timing fields.
 
 ## Shooter Package Reporter And External Handoff
 
-`shooter.py` is the local package reporter. It is deliberately separate from the tracker/API
+`Backend/launch/shooter.py` is the local package reporter. It is deliberately separate from the tracker/API
 process. The tracker can publish state and packets; the reporter only records accepted allowance
 packages for downstream external handling.
 
@@ -1153,7 +1153,7 @@ The live shooter is capable of real broker clicks. Strict operation requires:
 Package reporter mode should follow the README pattern:
 
 ```powershell
-python shooter.py --session-id pocket-live-8788 --base-url http://127.0.0.1:8793 --poll 0.20
+python Backend\launch\shooter.py --session-id pocket-live-8788 --base-url http://127.0.0.1:8793 --poll 0.20
 ```
 
 ## Failure Handling And Diagnostics

@@ -6,7 +6,14 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-for path in (PROJECT_ROOT / "Backend" / "src", PROJECT_ROOT / "Backend", PROJECT_ROOT):
+for path in (
+    PROJECT_ROOT / "Backend" / "src",
+    PROJECT_ROOT / "Backend",
+    PROJECT_ROOT / "Backend" / "compat",
+    PROJECT_ROOT / "Backend" / "launch",
+    PROJECT_ROOT / "Frontend" / "dashboard",
+    PROJECT_ROOT,
+):
     text = str(path)
     if path.exists() and text not in sys.path:
         sys.path.insert(0, text)

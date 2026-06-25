@@ -209,7 +209,7 @@ tests/test_shooter_v3_runtime.py
 
 Live launch evidence:
 
-- `launch_phoenixguard_live_ready.ps1 -NoBrowser -WarmupSeconds 20` completed
+- `Backend/launch/launch_phoenixguard_live_ready.ps1 -NoBrowser -WarmupSeconds 20` completed
   readiness, runtime authority, and freshness gates.
 - Shooter started in `LIVE_READY` mode against
   `http://127.0.0.1:8793`.
@@ -285,8 +285,8 @@ Files changed in this addendum:
 - `Backend/tools/certification_common_v3.py`
 - `Backend/tools/certify_v3_full_system_burn_in.py`
 - `Backend/tools/capture_dashboard_visual_v3.py`
-- `launch_phoenixguard_live_ready.ps1`
-- `shooter.py`
+- `Backend/launch/launch_phoenixguard_live_ready.ps1`
+- `Backend/launch/shooter.py`
 - `Backend/tests/test_shooter_v3_runtime.py`
 - `Backend/tests/test_live_visual_state_v3.py`
 - `Backend/tests/test_window_tracker_service.py`

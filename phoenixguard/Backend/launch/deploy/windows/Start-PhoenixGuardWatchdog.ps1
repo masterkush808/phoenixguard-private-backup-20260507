@@ -22,7 +22,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path (Join-Path -Path $script:ScriptRoot -ChildPath '..\..')).Path
-$LauncherPath = Join-Path -Path $ProjectRoot -ChildPath 'start_phoenixguard.ps1'
+$LauncherPath = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\start_phoenixguard.ps1'
 $PowerShellExe = (Get-Command powershell.exe -ErrorAction Stop).Source
 
 if (-not (Test-Path -LiteralPath $LauncherPath)) {

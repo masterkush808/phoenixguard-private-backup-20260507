@@ -23,7 +23,7 @@ SCAN_SUFFIXES = {".py", ".ps1", ".json", ".md", ".html"}
 PRESERVE_PATTERNS = (
     "808_shooter_boxes.json",
     "user_calibration_manifest.json",
-    "yolov8n.pt",
+    "Backend/config/models/yolov8n.pt",
     "data/",
     "assets/",
 )

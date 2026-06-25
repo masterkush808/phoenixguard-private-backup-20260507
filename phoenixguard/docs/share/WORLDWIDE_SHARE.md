@@ -21,7 +21,7 @@ $env:PHOENIXGUARD_SHARE_CREDENTIALS='you:StrongPass2026!,brother:BrotherPass2026
 
 ```powershell
 
-.\start_phoenixguard_share.ps1 -LaunchMode HEAVY_LAZY -AccessMode TUNNEL
+.\Business\api\start_phoenixguard_share.ps1 -LaunchMode HEAVY_LAZY -AccessMode TUNNEL
 
 ```
 
@@ -47,7 +47,7 @@ Tunnel in front of it.
 
 ```powershell
 
-.\start_phoenixguard_share.ps1 -LaunchMode HEAVY_LAZY -AccessMode LAN
+.\Business\api\start_phoenixguard_share.ps1 -LaunchMode HEAVY_LAZY -AccessMode LAN
 
 ```
 

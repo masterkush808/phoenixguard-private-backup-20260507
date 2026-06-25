@@ -10,7 +10,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 def _candidate_is_project_root(path: Path) -> bool:
     return (
         (path / "requirements.txt").exists()
-        and (path / "launch_phoenixguard_live_ready.ps1").exists()
+        and (path / "Backend" / "launch" / "launch_phoenixguard_live_ready.ps1").exists()
         and (path / "Backend" / "src" / "phoenixguard").exists()
     )
 

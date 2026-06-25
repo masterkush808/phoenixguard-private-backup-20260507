@@ -11,9 +11,9 @@ $ErrorActionPreference = 'Stop'
 
 $script:ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = (Resolve-Path (Join-Path -Path $script:ScriptRoot -ChildPath '..\..')).Path
-$TrackerLauncherPath = Join-Path -Path $ProjectRoot -ChildPath 'start_phoenixguard_24_7_tracker.ps1'
-$TrackerScriptPath = Join-Path -Path $ProjectRoot -ChildPath 'start_phoenixguard_24_7_tracker.py'
-$ShooterPath = Join-Path -Path $ProjectRoot -ChildPath 'shooter.py'
+$TrackerLauncherPath = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\start_phoenixguard_24_7_tracker.ps1'
+$TrackerScriptPath = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\start_phoenixguard_24_7_tracker.py'
+$ShooterPath = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\shooter.py'
 $RequirementsPath = Join-Path -Path $ProjectRoot -ChildPath 'requirements.txt'
 $PowerShellExe = (Get-Command powershell.exe -ErrorAction Stop).Source
 

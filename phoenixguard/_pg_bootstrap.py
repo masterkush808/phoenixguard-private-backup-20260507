@@ -10,6 +10,9 @@ def ensure_project_paths() -> Path:
     for path in (
         project_root / "Backend" / "src",
         project_root / "Backend",
+        project_root / "Backend" / "compat",
+        project_root / "Backend" / "launch",
+        project_root / "Frontend" / "dashboard",
         project_root,
     ):
         text = str(path)

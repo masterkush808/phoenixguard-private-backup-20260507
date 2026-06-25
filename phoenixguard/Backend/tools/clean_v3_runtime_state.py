@@ -17,7 +17,7 @@ PRESERVE_RUNTIME_FILES = {
 PRESERVE_ROOT_FILES = {
     "808_shooter_boxes.json",
     "user_calibration_manifest.json",
-    "shooter_3_gate_state.json",
+    "Backend/config/shooter_3_gate_state.json",
 }
 CACHE_DIR_NAMES = {"__pycache__", ".pytest_cache"}
 SKIP_SCAN_DIR_NAMES = {
@@ -137,7 +137,8 @@ def main() -> int:
     for path, reason in collect_runtime_paths():
         if not path.exists():
             continue
-        if path.is_file() and path.name in PRESERVE_ROOT_FILES:
+        rel_path = path.relative_to(ROOT).as_posix()
+        if path.is_file() and (path.name in PRESERVE_ROOT_FILES or rel_path in PRESERVE_ROOT_FILES):
             continue
         if args.delete:
             delete_path(path, moved, reason=reason, apply=args.apply)

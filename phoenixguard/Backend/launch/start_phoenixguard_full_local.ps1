@@ -28,27 +28,31 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Set-Location $PSScriptRoot
-$backendSrc = Join-Path -Path $PSScriptRoot -ChildPath 'Backend\src'
-$backendRoot = Join-Path -Path $PSScriptRoot -ChildPath 'Backend'
-$env:PYTHONPATH = (@($backendSrc, $backendRoot, $PSScriptRoot, $env:PYTHONPATH) | Where-Object { $_ -and [string]$_ -ne '' }) -join [System.IO.Path]::PathSeparator
-$env:PHOENIXGUARD_PROJECT_ROOT = $PSScriptRoot
+$ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $ProjectRoot
+$backendSrc = Join-Path -Path $ProjectRoot -ChildPath 'Backend\src'
+$backendRoot = Join-Path -Path $ProjectRoot -ChildPath 'Backend'
+$backendCompat = Join-Path -Path $ProjectRoot -ChildPath 'Backend\compat'
+$backendLaunch = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch'
+$frontendDashboard = Join-Path -Path $ProjectRoot -ChildPath 'Frontend\dashboard'
+$env:PYTHONPATH = (@($backendSrc, $backendRoot, $backendCompat, $backendLaunch, $frontendDashboard, $ProjectRoot, $env:PYTHONPATH) | Where-Object { $_ -and [string]$_ -ne '' }) -join [System.IO.Path]::PathSeparator
+$env:PHOENIXGUARD_PROJECT_ROOT = $ProjectRoot
 
 if (-not (Test-Path -LiteralPath '.venv')) {
     py -3.11 -m venv .venv
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to create virtual environment at '$PSScriptRoot\.venv'."
+        throw "Failed to create virtual environment at '$ProjectRoot\.venv'."
     }
 }
 
-$ActivateScriptPath = Join-Path -Path $PSScriptRoot -ChildPath '.venv\Scripts\Activate.ps1'
+$ActivateScriptPath = Join-Path -Path $ProjectRoot -ChildPath '.venv\Scripts\Activate.ps1'
 if (-not (Test-Path -LiteralPath $ActivateScriptPath)) {
     throw "Virtual environment activation script not found at '$ActivateScriptPath'."
 }
 
 . $ActivateScriptPath
 
-$pythonPath = Join-Path -Path $PSScriptRoot -ChildPath '.venv\Scripts\python.exe'
+$pythonPath = Join-Path -Path $ProjectRoot -ChildPath '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $pythonPath)) {
     throw "Python executable not found at '$pythonPath'."
 }
@@ -58,7 +62,7 @@ $defaultRuntimeDir = if ($env:PHOENIXGUARD_RUNTIME_DIR) {
 } elseif ($env:LOCALAPPDATA) {
     Join-Path -Path $env:LOCALAPPDATA -ChildPath 'PhoenixGuard\codex_runtime'
 } else {
-    Join-Path -Path $PSScriptRoot -ChildPath '.codex_runtime'
+    Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
 }
 $runtimeDir = $defaultRuntimeDir
 $statusPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
@@ -107,7 +111,7 @@ if (-not (Test-Path -LiteralPath $runtimeDir)) {
 }
 
 function Start-TrackerChildProcess {
-    $escapedRoot = $PSScriptRoot.Replace("'", "''")
+    $escapedRoot = $ProjectRoot.Replace("'", "''")
     $escapedApiHost = $ApiHost.Replace("'", "''")
     $escapedSessionId = $SessionId.Replace("'", "''")
     $escapedBrokerWindowQuery = $BrokerWindowQuery.Replace("'", "''")
@@ -115,7 +119,7 @@ function Start-TrackerChildProcess {
     $trackerWindowHwndArg = if ($BrokerWindowHwnd -gt 0) { " -BrokerWindowHwnd $BrokerWindowHwnd" } else { "" }
     $trackerCommand = @(
         "cd '$escapedRoot'",
-        ".\start_phoenixguard_24_7_tracker.ps1 -ApiHost '$escapedApiHost' -Port $ApiPort -SessionId '$escapedSessionId' -BrokerWindowQuery '$escapedBrokerWindowQuery'$trackerWindowHwndArg -FocusRegion '$escapedTrackerFocusRegion' -CaptureIntervalSec $CaptureIntervalSec -NoOpenDashboard -InternalTrackerOnly"
+        ".\Backend\launch\start_phoenixguard_24_7_tracker.ps1 -ApiHost '$escapedApiHost' -Port $ApiPort -SessionId '$escapedSessionId' -BrokerWindowQuery '$escapedBrokerWindowQuery'$trackerWindowHwndArg -FocusRegion '$escapedTrackerFocusRegion' -CaptureIntervalSec $CaptureIntervalSec -NoOpenDashboard -InternalTrackerOnly"
     ) -join '; '
 
     Start-Process powershell -ArgumentList @(
@@ -258,13 +262,13 @@ try {
     if ($session -and $launchShooter) {
         Write-Host "Starting shooter package reporter against $baseUrl"
         $effectiveShooterPollSec = [double]$ShooterPollSec
-        $escapedRoot = $PSScriptRoot.Replace("'", "''")
+        $escapedRoot = $ProjectRoot.Replace("'", "''")
         $escapedSessionId = $SessionId.Replace("'", "''")
         $escapedBaseUrl = $baseUrl.Replace("'", "''")
         $shooterCommand = @(
             "cd '$escapedRoot'",
             "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='0'",
-            ".\.venv\Scripts\python.exe 'shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll $effectiveShooterPollSec"
+            ".\.venv\Scripts\python.exe 'Backend\launch\shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll $effectiveShooterPollSec"
         ) -join '; '
         Start-Process powershell -ArgumentList @(
             '-NoExit',

@@ -3,7 +3,7 @@
 Usage: python Backend/scripts_runtime/replay_signals.py <jsonl_path> [--limit N]
 
 This imports parse_trade_signal from `shooter.py` safely (module import doesn't start execution).
-Outputs a replay_trace.log and prints a short summary.
+Outputs Backend/scripts_runtime/replay_trace.log and prints a short summary.
 """
 import argparse
 import json
@@ -23,7 +23,8 @@ from phoenixguard.paths import PROJECT_ROOT
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("replay_harness")
-file_handler = logging.FileHandler("replay_trace.log")
+TRACE_PATH = Path(__file__).resolve().with_name("replay_trace.log")
+file_handler = logging.FileHandler(TRACE_PATH)
 file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
 logger.addHandler(file_handler)
 
@@ -43,7 +44,7 @@ class ReplayEvaluation:
 
 
 def _load_parse_trade_signal() -> Callable[[Mapping[str, Any]], object]:
-    shooter_path = PROJECT_ROOT / "shooter.py"
+    shooter_path = PROJECT_ROOT / "Backend" / "launch" / "shooter.py"
     spec = importlib.util.spec_from_file_location("shooter_module", str(shooter_path))
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot import parse_trade_signal from {shooter_path}")
@@ -274,7 +275,7 @@ def main() -> int:
     if have_lock:
         _release_lock(lock_path)
 
-    print(f"processed={processed} accepted={accepted} trace=replay_trace.log")
+    print(f"processed={processed} accepted={accepted} trace={TRACE_PATH}")
     return 0
 
 

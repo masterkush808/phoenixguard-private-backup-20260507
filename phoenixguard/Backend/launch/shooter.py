@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from _pg_bootstrap import ensure_project_paths
-ensure_project_paths()
+PROJECT_ROOT = ensure_project_paths()
 
 """
 PhoenixGuard shooter package reporter.
@@ -38,7 +38,7 @@ DEFAULT_SESSION_ID = "pocket-live-8788"
 DEFAULT_POLL_SECONDS = 0.20
 DEFAULT_TIMEOUT_SECONDS = 5.0
 REPORT_TTL_SECONDS = 8.0
-_RUNTIME_DIR = Path(__file__).resolve().parent / ".codex_runtime"
+_RUNTIME_DIR = PROJECT_ROOT / ".codex_runtime"
 _SHOOTER_HANDSHAKE_PATH = _RUNTIME_DIR / "shooter_handshake.json"
 
 LOGGER = logging.getLogger("shooter_package_reporter")
@@ -279,7 +279,7 @@ def run_reporter(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python shooter.py",
+        prog="python Backend/launch/shooter.py",
         description="Report allowed PhoenixGuard intraday/swing packages; broker execution is retired.",
     )
     parser.add_argument("command", nargs="?", default="signal")
@@ -303,7 +303,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "manual":
         LOGGER.error("Manual broker execution is retired; shooter only reports allowed packages.")
         return 2
-    guard = guard_from_environment(Path(__file__).resolve().parent)
+    guard = guard_from_environment(PROJECT_ROOT)
     registration = guard.register_component(
         "shooter",
         pid=os.getpid(),

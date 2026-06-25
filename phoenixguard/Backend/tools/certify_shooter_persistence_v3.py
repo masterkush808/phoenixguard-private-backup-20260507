@@ -113,7 +113,7 @@ def main() -> int:
             "sample_count": len(samples),
             "samples": samples[-300:],
             "handshake_paths": [str(path) for path in HANDSHAKE_PATHS],
-            "launch_command": 'python shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20 --max-signal-age 8 --preferred-source tracker --require-preferred-source --window-query "The Most Innovative Trading Platform" --shooter-mode LIVE_READY --no-auto-open --record-action-evidence',
+            "launch_command": "python Backend/launch/shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20",
         },
     )
     out = write_report("gate8_shooter_persistence_v3.json", report)

@@ -10,6 +10,9 @@ def ensure_backend_paths() -> Path:
     for candidate in (
         project_root / "Backend" / "src",
         project_root / "Backend",
+        project_root / "Backend" / "compat",
+        project_root / "Backend" / "launch",
+        project_root / "Frontend" / "dashboard",
         project_root,
     ):
         candidate_text = str(candidate)
@@ -17,4 +20,3 @@ def ensure_backend_paths() -> Path:
             sys.path.insert(0, candidate_text)
     os.environ.setdefault("PHOENIXGUARD_PROJECT_ROOT", str(project_root))
     return project_root
-

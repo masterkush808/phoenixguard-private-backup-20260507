@@ -7,7 +7,7 @@ Agent 1 did not clear caches. This inventory classifies known paths for the requ
 | Path or pattern | Reason |
 | --- | --- |
 | `models/`, `*.pt`, `*.pth`, `*.onnx`, `*.safetensors` | Model weights and exported runtimes |
-| `yolov8n.pt` | Root model asset |
+| `Backend/config/models/yolov8n.pt` | Runtime model asset |
 | `.hf_cache/` | Downloaded model cache; preserve unless explicitly rebuilding model environment |
 | `memory_bank/metadata.json`, `memory_bank/index/id_map.json`, `memory_bank/index/*.npy` | Memory bank source/index data |
 | `memory_bank/BUYS`, `memory_bank/SELLS`, source examples | Labelled training data |
@@ -31,7 +31,7 @@ Agent 1 did not clear caches. This inventory classifies known paths for the requ
 | `data/rl_feedback_buffer.jsonl` | RL feedback buffer, preserve only if training migration consumes it |
 | `data/feedback_feed.jsonl` | Feedback feed, preserve only if training migration consumes it |
 | `.codex_runtime/tracker_status.json` | Launcher status from previous runtime |
-| `shooter_3_gate_state.json` | Shooter gate state, if present |
+| `Backend/config/shooter_3_gate_state.json` | Shooter gate state, if present |
 
 ## Safe To Clear
 
@@ -47,7 +47,7 @@ Agent 1 did not clear caches. This inventory classifies known paths for the requ
 | Path or pattern | Reason |
 | --- | --- |
 | `data/personalization_profiles.json` | May contain user preference/training state |
-| `logs/*.log`, `shooter_debug.log*`, `replay_trace.log` | Forensic value; archive before clearing |
+| `logs/*.log`, `shooter_debug.log*`, `Backend/scripts_runtime/replay_trace.log` | Forensic value; archive before clearing |
 | `memory_bank/decisions.log` | Shooter decision history; archive for bad-entry regression |
 | `memory_bank/audit_hash_chain.log` | Audit trail |
 

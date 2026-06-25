@@ -46,7 +46,7 @@ python .\Backend\tools\clean_v3_runtime_state.py --apply
 if ($LASTEXITCODE -ne 0) { throw "Runtime cleanup failed. Launch aborted." }
 
 # Canonical final V3 live launch. -NoBrowser prevents popup/editor launch.
-powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser
 ```
 
 Open the dashboard after launch:
@@ -129,7 +129,7 @@ python -m uvicorn phoenixguard.mobile_api.app:create_app --factory --host 127.0.
 For normal developer work, use:
 
 ```text
-launch_phoenixguard_live_ready.ps1
+Backend/launch/launch_phoenixguard_live_ready.ps1
 ```
 
 That file is the canonical final V3 live launcher. It starts the mobile API, creates/starts the
@@ -138,7 +138,7 @@ shooter behavior through the packet-gated live stack. Use `-DisableShooter` for 
 development:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser -DisableShooter
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser -DisableShooter
 ```
 
 # PhoenixGuard V3
@@ -161,7 +161,7 @@ BrokerSourceLockV3
 ```
 
 Observation is not execution. Study packets are not execution. Skill gates are diagnostic
-contributors. The local `shooter.py` process no longer clicks or calibrates broker controls; it
+contributors. The local `Backend/launch/shooter.py` process no longer clicks or calibrates broker controls; it
 reports only fresh accepted allowance packages derived from a validated `PG_EXECUTION_PACKET_V3`.
 
 ## Clean Kill, Reset, And Launch
@@ -201,7 +201,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Launch the full live-ready V3 stack.
-powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser
 ```
 
 If more than one matching Edge/Chrome broker window is open, pin the shooter to the broker surface
@@ -210,7 +210,7 @@ locked by the tracker:
 ```powershell
 $state = Invoke-RestMethod "http://127.0.0.1:8793/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE"
 $hwnd = [int]$state.broker_source_lock.selected_target.window_handle
-powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser -BrokerWindowHwnd $hwnd
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser -BrokerWindowHwnd $hwnd
 ```
 
 The launcher also attempts this HWND detection automatically before arming the shooter. Passing
@@ -240,7 +240,7 @@ diagnostic/offline by default in live execution mode so it cannot slow the hot p
 Read-only launch, with tracker/dashboard active and shooter disabled:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_phoenixguard_live_ready.ps1 -NoBrowser -DisableShooter
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser -DisableShooter
 ```
 
 ## Post-Launch Verification
@@ -268,11 +268,11 @@ refuses expired packets through runtime integrity validation.
 
 ## Shooter Package Reporter Safety
 
-The old calibrated broker-click shooter has been retired. `shooter.py` is now a package reporter:
+The old calibrated broker-click shooter has been retired. `Backend/launch/shooter.py` is now a package reporter:
 
 - `main.py::run_inference` is offline/manual analysis only.
 - Observer signals, dashboard state, overlays, and skill gates are diagnostic.
-- `shooter.py` reads the Model Council execution endpoint only.
+- `Backend/launch/shooter.py` reads the Model Council execution endpoint only.
 - It writes `.codex_runtime\shooter_handshake.json` only when the packet carries an accepted,
   execution-ready `PG_ALLOWANCE_PACKAGE_V1`.
 - It never reads calibration files, moves the mouse, sets broker time, edits amount, or clicks
@@ -283,13 +283,13 @@ The old calibrated broker-click shooter has been retired. `shooter.py` is now a 
 To run the reporter once after verification:
 
 ```powershell
-python shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --once
+python Backend\launch\shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --once
 ```
 
 To keep the reporter polling:
 
 ```powershell
-python shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20
+python Backend\launch\shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20
 ```
 
 Package authority:
@@ -327,7 +327,7 @@ Focused Grade A\* hardening checks:
 python -m pytest Backend/tests/test_execution_packet_schema_v3.py Backend/tests/test_model_council_v3.py Backend/tests/test_market_reality_engine.py Backend/tests/test_market_intelligence_v3.py Backend/tests/test_v3_language_contracts.py Backend/tests/test_simulation_paper_execution.py Backend/tests/test_mt4_file_bridge.py -q
 python -m pytest Backend/tests/test_entry_allowance_burn.py Backend/tests/test_business_commands.py -q
 python -m pytest Backend/tests/test_cache_observability_v3.py Backend/tests/test_runtime_telemetry_v3.py Backend/tests/test_manual_inference_queue.py -q
-python -m compileall -q main.py shooter.py Backend\src\phoenixguard\decision Backend\src\phoenixguard\execution Backend\src\phoenixguard\mobile_api Backend\src\phoenixguard\runtime Backend\tools\runtime_trace_v3.py Backend\tools\certification_common_v3.py
+python -m compileall -q Frontend\dashboard\main.py Backend\launch\shooter.py Backend\src\phoenixguard\decision Backend\src\phoenixguard\execution Backend\src\phoenixguard\mobile_api Backend\src\phoenixguard\runtime Backend\tools\runtime_trace_v3.py Backend\tools\certification_common_v3.py
 python Backend\tools\verify_v3_integrity.py
 ```
 
@@ -337,13 +337,13 @@ TradingView may be used as a chart-study source while any real execution path re
 the local package reporter. Keep study sessions separated from broker/external bridge sessions:
 
 ```powershell
-python start_phoenixguard_24_7_tracker.py --session-id tradingview-study --window-query "TradingView" --focus-region ""
+python Backend\launch\start_phoenixguard_24_7_tracker.py --session-id tradingview-study --window-query "TradingView" --focus-region ""
 ```
 
 ## Production Artifacts
 
-- `launch_phoenixguard_live_ready.ps1`: canonical production launcher.
-- `shooter.py`: local package reporter, not a broker-click executor.
+- `Backend/launch/launch_phoenixguard_live_ready.ps1`: canonical production launcher.
+- `Backend/launch/shooter.py`: local package reporter, not a broker-click executor.
 - `.codex_runtime\`: live runtime state, traces, packet cache, handshakes, and evidence.
 - `reports\`: launch, trace, validation, and certification outputs.
 

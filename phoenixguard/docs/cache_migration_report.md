@@ -58,7 +58,7 @@ Old or missing cache schema versions are rejected at validation time. V3 cache r
 These are source, user, calibration, model, or training assets and must not be cleared by cache migration:
 
 ```text
-yolov8n.pt
+Backend/config/models/yolov8n.pt
 models/
 .hf_cache/
 808 Memory/
@@ -105,7 +105,7 @@ logs/phoenixguard.log
 logs/phoenixguard_share.log
 logs/phoenixguard_share_audit_hash_chain.log
 shooter_debug.log*
-replay_trace.log
+Backend/scripts_runtime/replay_trace.log
 ```
 
 Reason: these are session snapshots, latest observer/tracker state, replay buffers, recovery state, runtime logs, and old decision traces. They are useful for audit/replay but must not authorize live V3 execution.

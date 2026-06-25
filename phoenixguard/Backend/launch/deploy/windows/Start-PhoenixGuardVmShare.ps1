@@ -14,7 +14,7 @@ if (-not $ConfigPath) {
 }
 
 $ProjectRoot = (Resolve-Path (Join-Path -Path $script:ScriptRoot -ChildPath '..\..')).Path
-$ShareLauncherPath = Join-Path -Path $ProjectRoot -ChildPath 'start_phoenixguard_share.ps1'
+$ShareLauncherPath = Join-Path -Path $ProjectRoot -ChildPath 'Business\api\start_phoenixguard_share.ps1'
 
 if (-not (Test-Path -LiteralPath $ShareLauncherPath)) {
     throw "PhoenixGuard share launcher not found at '$ShareLauncherPath'."

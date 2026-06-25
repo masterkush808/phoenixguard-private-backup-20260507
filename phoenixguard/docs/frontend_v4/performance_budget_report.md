@@ -66,9 +66,9 @@ Get-Item Frontend\dashboard\static\window_tracker_dashboard.html, Frontend\asset
 Do not run these for performance QA because they can trigger live runtime or broker-facing flows:
 
 ```powershell
-.\start_live_dashboard.ps1
-.\start_phoenixguard_full_local.ps1
-python shooter.py signal --session-id pocket-live-8788 --base-url http://127.0.0.1:8793 --poll 0.05 --max-signal-age 8 --preferred-source tracker --require-preferred-source --shooter-mode LIVE_READY --no-auto-open
+.\Backend\launch\start_live_dashboard.ps1
+.\Backend\launch\start_phoenixguard_full_local.ps1
+python Backend\launch\shooter.py signal --session-id pocket-live-8788 --base-url http://127.0.0.1:8793 --poll 0.05 --max-signal-age 8 --preferred-source tracker --require-preferred-source --shooter-mode LIVE_READY --no-auto-open
 ```
 
 Also do not use performance probes that call:

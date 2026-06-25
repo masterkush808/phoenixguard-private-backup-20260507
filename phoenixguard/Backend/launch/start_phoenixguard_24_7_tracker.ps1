@@ -13,20 +13,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Set-Location $PSScriptRoot
-$backendSrc = Join-Path -Path $PSScriptRoot -ChildPath 'Backend\src'
-$backendRoot = Join-Path -Path $PSScriptRoot -ChildPath 'Backend'
-$env:PYTHONPATH = (@($backendSrc, $backendRoot, $PSScriptRoot, $env:PYTHONPATH) | Where-Object { $_ -and [string]$_ -ne '' }) -join [System.IO.Path]::PathSeparator
-$env:PHOENIXGUARD_PROJECT_ROOT = $PSScriptRoot
+$ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+Set-Location $ProjectRoot
+$backendSrc = Join-Path -Path $ProjectRoot -ChildPath 'Backend\src'
+$backendRoot = Join-Path -Path $ProjectRoot -ChildPath 'Backend'
+$backendCompat = Join-Path -Path $ProjectRoot -ChildPath 'Backend\compat'
+$backendLaunch = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch'
+$frontendDashboard = Join-Path -Path $ProjectRoot -ChildPath 'Frontend\dashboard'
+$env:PYTHONPATH = (@($backendSrc, $backendRoot, $backendCompat, $backendLaunch, $frontendDashboard, $ProjectRoot, $env:PYTHONPATH) | Where-Object { $_ -and [string]$_ -ne '' }) -join [System.IO.Path]::PathSeparator
+$env:PHOENIXGUARD_PROJECT_ROOT = $ProjectRoot
 
 if (-not (Test-Path -LiteralPath '.venv')) {
     py -3.11 -m venv .venv
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to create virtual environment at '$PSScriptRoot\.venv'."
+        throw "Failed to create virtual environment at '$ProjectRoot\.venv'."
     }
 }
 
-$ActivateScriptPath = Join-Path -Path $PSScriptRoot -ChildPath '.venv\Scripts\Activate.ps1'
+$ActivateScriptPath = Join-Path -Path $ProjectRoot -ChildPath '.venv\Scripts\Activate.ps1'
 if (-not (Test-Path -LiteralPath $ActivateScriptPath)) {
     throw "Virtual environment activation script not found at '$ActivateScriptPath'."
 }
@@ -52,12 +56,12 @@ if (-not $InternalTrackerOnly) {
     if ($NoOpenDashboard) {
         $launchArgs['NoBrowser'] = $true
     }
-    & (Join-Path -Path $PSScriptRoot -ChildPath 'launch_phoenixguard_live_ready.ps1') @launchArgs
+    & (Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\launch_phoenixguard_live_ready.ps1') @launchArgs
     exit $LASTEXITCODE
 }
 
 $launcherArgs = @(
-    (Join-Path $PSScriptRoot 'start_phoenixguard_24_7_tracker.py'),
+    (Join-Path $ProjectRoot 'Backend\launch\start_phoenixguard_24_7_tracker.py'),
     '--host', $ApiHost,
     '--port', "$Port",
     '--session-id', $SessionId,

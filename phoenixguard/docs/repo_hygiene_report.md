@@ -4,14 +4,14 @@
 
 | File                                        | Classification | Notes                                                                               |
 | ------------------------------------------- | -------------- | ----------------------------------------------------------------------------------- |
-| `shooter.py`                                | ACTIVE_CORE    | V3 packet reader and accepted allowance-package reporter; no broker-click authority |
+| `Backend/launch/shooter.py`                 | ACTIVE_CORE    | V3 packet reader and accepted allowance-package reporter; no broker-click authority |
 | `Backend/src/phoenixguard/decision/model_council_v3.py` | ACTIVE_CORE    | candidate promotion, study packet, executable packet creation                       |
 | `Backend/src/phoenixguard/mobile_api/window_tracker.py` | ACTIVE_CORE    | tracker session state, council publication, packet lookup                           |
 | `Backend/src/phoenixguard/mobile_api/app.py`            | ACTIVE_CORE    | HTTP endpoint wiring for council/latest, study/latest, execution/latest             |
 | `Backend/src/phoenixguard/execution/packet_v3.py`       | ACTIVE_CORE    | executable packet builder and validator                                             |
 | `Backend/tools/phoenixguard_mt4_file_bridge.py`     | ACTIVE_SUPPORT | package-aware MT4 command bridge and allowance revalidator                          |
 | `Backend/launch/mt4/PhoenixGuard_MT4_Executioner.mq4`      | ACTIVE_SUPPORT | MT4 external execution consumer with intraday/swing package controls                |
-| `start_phoenixguard_full_local.ps1`         | ACTIVE_SUPPORT | local process launcher and profile summary                                          |
+| `Backend/launch/start_phoenixguard_full_local.ps1` | ACTIVE_SUPPORT | local process launcher and profile summary                                          |
 | `Backend/tools/diagnose_v3_execution_path.py`       | ACTIVE_SUPPORT | endpoint comparison tool                                                            |
 
 ## Quarantine Decision
