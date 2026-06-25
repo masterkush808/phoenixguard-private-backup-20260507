@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+
+_PROJECT_ROOT_BOOTSTRAP = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT_BOOTSTRAP) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT_BOOTSTRAP))
+
 from _pg_bootstrap import ensure_project_paths
 PROJECT_ROOT = ensure_project_paths()
 
@@ -17,7 +24,6 @@ import argparse
 import json
 import logging
 import os
-from pathlib import Path
 import time
 from typing import Mapping, Sequence, TypedDict, cast
 import urllib.error
@@ -210,6 +216,57 @@ def _write_shooter_handshake(payload: Mapping[str, object], path: Path = _SHOOTE
     temp_path.replace(path)
 
 
+def build_waiting_report(
+    *,
+    session_id: str,
+    base_url: str,
+    source_url: str,
+    reason: str,
+    now_epoch: float | None = None,
+) -> JsonDict:
+    now_value = float(now_epoch if now_epoch is not None else time.time())
+    return {
+        "schema_version": "PG_SHOOTER_PACKAGE_REPORTER_HEARTBEAT_V1",
+        "status": "WAITING",
+        "state": "WAITING",
+        "mode": "PACKAGE_REPORTER",
+        "available": True,
+        "execution_removed": True,
+        "broker_click_allowed": False,
+        "will_click": False,
+        "action": "WAIT_FOR_ALLOWED_PACKAGE",
+        "reason": reason,
+        "session_id": session_id,
+        "base_url": base_url,
+        "source": "model_council_execution_latest",
+        "source_url": source_url,
+        "updated_epoch_sec": now_value,
+        "next_required": "fresh accepted intraday or swing allowance package",
+        "package_type": "",
+        "packet_id": "",
+    }
+
+
+def publish_waiting_report(
+    *,
+    session_id: str,
+    base_url: str,
+    source_url: str,
+    reason: str,
+    path: Path = _SHOOTER_HANDSHAKE_PATH,
+    now_epoch: float | None = None,
+) -> JsonDict:
+    report = build_waiting_report(
+        session_id=session_id,
+        base_url=base_url,
+        source_url=source_url,
+        reason=reason,
+        now_epoch=now_epoch,
+    )
+    _write_shooter_handshake(report, path)
+    return report
+
+
 def publish_allowed_package_report(
     packet: Mapping[str, object],
     *,
@@ -240,6 +297,24 @@ def run_reporter(
     LOGGER.info("Shooter execution is retired; reporting allowed packages only.")
     LOGGER.info("Polling %s", url)
     last_packet_id = ""
+    last_waiting_write_epoch = 0.0
+
+    def publish_waiting(reason: str, *, force: bool = False) -> None:
+        nonlocal last_waiting_write_epoch
+        now_value = time.time()
+        if not force and now_value - last_waiting_write_epoch < 1.0:
+            return
+        publish_waiting_report(
+            session_id=session_id,
+            base_url=base_url,
+            source_url=url,
+            reason=reason,
+            path=handshake_path,
+            now_epoch=now_value,
+        )
+        last_waiting_write_epoch = now_value
+
+    publish_waiting("WAITING_FOR_EXECUTION_PACKET", force=True)
     while True:
         if runtime_guard is not None and runtime_owner_token:
             runtime_guard.heartbeat(
@@ -260,14 +335,18 @@ def run_reporter(
                         report.get("selected_lane"),
                     )
                     last_packet_id = packet_id
-            elif once:
-                LOGGER.info("No allowed package available; handshake was not updated.")
+            else:
+                publish_waiting("NO_ALLOWED_PACKAGE")
+                if once:
+                    LOGGER.info("No allowed package available; waiting handshake was updated.")
         except urllib.error.HTTPError as exc:
+            publish_waiting(f"HTTP_{exc.code}_NO_EXECUTION_PACKET")
             if once:
                 LOGGER.info("No executable package endpoint available: HTTP %s", exc.code)
             else:
                 LOGGER.debug("Package endpoint unavailable: HTTP %s", exc.code)
         except Exception as exc:
+            publish_waiting(f"WAITING_FOR_EXECUTION_PACKET: {exc}")
             if once:
                 LOGGER.warning("Package reporter failed: %s", exc)
             else:

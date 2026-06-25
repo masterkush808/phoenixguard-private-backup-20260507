@@ -55,6 +55,10 @@ Those files are preserved locally in responsible folders, but they remain ignore
 
 `Backend/launch/launch_phoenixguard_live_ready.ps1` remains the canonical production launcher. After runtime authority, broker source-lock, and frame-freshness gates pass, it opens a visible PowerShell reporter window for `Backend/launch/shooter.py`. The reporter remains package-only and does not click, calibrate, or control the broker.
 
+`Backend/launch/shooter.py` also publishes a `WAITING` heartbeat while no executable package exists, so `/v1/mobile/shooter/handshake`, floating state, and runtime trace can prove the reporter is alive before a valid allowance package arrives.
+
+`Backend/_bootstrap.py` is a compatibility bootstrap for backend tools that are imported through pytest as `tools.*`. Direct CLI execution still uses `Backend/tools/_bootstrap.py`; both bootstraps place `Backend/src`, backend compatibility modules, launch scripts, dashboard helpers, and the project root on `sys.path`.
+
 ## Remaining Root Policy
 
 The files left at project root are not loose application files. They are repository metadata, package/test configuration, and bootstrap files that must stay at root so Python, pytest, Pyright, packaging, and launch scripts can discover the project consistently.

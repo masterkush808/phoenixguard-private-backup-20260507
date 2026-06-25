@@ -40,6 +40,18 @@ ProcessId=10380
     assert rows[1]["ProcessId"] == 10380
 
 
+def test_leaf_processes_returns_deepest_matching_children() -> None:
+    rows: list[dict[str, object]] = [
+        {"ProcessId": 100, "ParentProcessId": 1, "CommandLine": "python start_phoenixguard_24_7_tracker.py"},
+        {"ProcessId": 200, "ParentProcessId": 100, "CommandLine": "python start_phoenixguard_24_7_tracker.py"},
+        {"ProcessId": 300, "ParentProcessId": 200, "CommandLine": "python start_phoenixguard_mobile_api.py"},
+    ]
+
+    leaves = cert.leaf_processes(rows)
+
+    assert [row["ProcessId"] for row in leaves] == [300]
+
+
 def test_dashboard_capture_retention_prunes_old_timestamp_bundles(tmp_path: Path) -> None:
     session = "pocket-live-8788"
     stamps = ["20260616_010000", "20260616_010100", "20260616_010200"]

@@ -316,7 +316,8 @@ def find_processes(rows: Sequence[Mapping[str, Any]], needle: str) -> list[dict[
 
 def leaf_processes(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     process_ids = {process_id(row) for row in rows if process_id(row)}
-    return [dict(row) for row in rows if parent_process_id(row) not in process_ids]
+    parent_ids = {parent_process_id(row) for row in rows if parent_process_id(row) in process_ids}
+    return [dict(row) for row in rows if process_id(row) not in parent_ids]
 
 
 def report_path(name: str) -> Path:

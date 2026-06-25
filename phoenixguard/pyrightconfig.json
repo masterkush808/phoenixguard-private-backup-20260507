@@ -1,6 +1,7 @@
 {
   "typeCheckingMode": "strict",
   "include": [
+    "Backend/_bootstrap.py",
     "Backend/compat",
     "Backend/launch/shooter.py",
     "Backend/launch/start_phoenixguard_24_7_tracker.py",

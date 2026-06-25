@@ -10,6 +10,13 @@ Full wiring of:
 """
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+
+_PROJECT_ROOT_BOOTSTRAP = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT_BOOTSTRAP) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT_BOOTSTRAP))
+
 from _pg_bootstrap import ensure_project_paths
 ensure_project_paths()
 
@@ -26,10 +33,8 @@ import importlib
 import io
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
-import sys
 import threading
 import time
 import traceback

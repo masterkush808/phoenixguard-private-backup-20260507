@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+
+_PROJECT_ROOT_BOOTSTRAP = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT_BOOTSTRAP) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT_BOOTSTRAP))
+
 from _pg_bootstrap import ensure_project_paths
 PROJECT_ROOT = ensure_project_paths()
 
@@ -7,11 +14,9 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 import threading
 import time
 import webbrowser
-from pathlib import Path
 from typing import Any, cast
 from urllib import error as urllib_error
 from urllib import request as urllib_request

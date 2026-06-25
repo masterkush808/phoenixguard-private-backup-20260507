@@ -219,6 +219,9 @@ The launcher also attempts this HWND detection automatically before arming the s
 After runtime authority, source-lock, and frame-freshness gates pass, the launcher opens a visible
 PowerShell window titled `PhoenixGuard Shooter Package Reporter`. That window reports validated
 allowance packages only; it does not click, calibrate, or control the broker.
+While no executable packet is available, `Backend/launch/shooter.py` still publishes a low-rate
+`WAITING` heartbeat so the API, floating state, and runtime trace can distinguish “reporter alive”
+from “reporter missing.”
 
 The production launcher sets the live tracker hot path to low latency:
 
