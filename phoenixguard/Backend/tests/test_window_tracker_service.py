@@ -5075,8 +5075,13 @@ def test_tracker_dashboard_fits_selected_surface_without_width_only_crop() -> No
     assert "function surfaceIdentityKey(session = {})" in dashboard_html
     assert "function overlaySurfaceMatchesDisplay(session = {})" in dashboard_html
     assert "function displayOnlyOverlayAuthorityLocked(session = {})" in dashboard_html
+    assert "function overlayAuthorityFrame(session = {})" in dashboard_html
     assert "const displayArtifact = clean(session.last_display_window_path" in dashboard_html
     assert "overlayFrame > 0 && displayArtifact && overlayArtifact" in dashboard_html
+    assert "explicitArtifactAligned === true" in dashboard_html
+    assert "const overlayFrameId = overlayAuthorityFrame(session);" in dashboard_html
+    assert "display_frame_id: displayFrameId" in dashboard_html
+    assert "overlay_render_frame_id: overlayFrameId" in dashboard_html
     assert "overlay_source_window_signature" in dashboard_html
     assert "overlayLocks: new Map()" in dashboard_html
     assert "const overlayLockUsable = wantsOverlay && hasLockedOverlayForSession(session);" in dashboard_html
@@ -5084,6 +5089,8 @@ def test_tracker_dashboard_fits_selected_surface_without_width_only_crop() -> No
     assert 'useSurfaceImage(els.rawImg, "window", "window-locked-overlay", true);' in dashboard_html
     assert "if (wantsOverlay && hasFullOverlay && !overlayStale)" in dashboard_html
     assert "function backendOverlayFrameAligned(session = {})" in dashboard_html
+    assert 'clean_live: "CLEAN_LIVE"' in dashboard_html
+    assert 'full_history_read: "FULL_HISTORY_READ"' in dashboard_html
     assert "displayOnlyOverlayAuthorityLocked(session)" in dashboard_html
     assert "rawFallbackVisible || state.surface.overlayStale || !overlayFrameReady" in dashboard_html
     assert "else if (hasChart)" in dashboard_html

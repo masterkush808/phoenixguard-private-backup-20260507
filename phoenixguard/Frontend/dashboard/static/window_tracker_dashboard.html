@@ -3752,7 +3752,7 @@
       if (!backendOverlayFrameAligned(session)) {
         return;
       }
-      const overlayFrame = Math.max(overlayObjectFrame(session), overlayArtifactFrame(session), newestDisplayFrame(session));
+      const overlayFrame = overlayAuthorityFrame(session);
       state.surface.overlayLocks.set(identityKey, {
         identityKey,
         pairKey: surfacePairKey(session),
@@ -3785,7 +3785,7 @@
         state.surface.overlayLocks.delete(identityKey);
         return null;
       }
-      const currentFrame = Math.max(overlayObjectFrame(session), overlayArtifactFrame(session));
+      const currentFrame = overlayAuthorityFrame(session);
       if (currentFrame > 0 && lock.frameId > 0 && currentFrame !== lock.frameId) {
         state.surface.overlayLocks.delete(identityKey);
         return null;
@@ -3873,7 +3873,7 @@
       if (!displayOnly) {
         return false;
       }
-      const overlayFrame = Math.max(overlayObjectFrame(session), overlayArtifactFrame(session));
+      const overlayFrame = overlayAuthorityFrame(session);
       const authorityFrame = Math.max(
         frameNumber(session.frame_index),
         frameNumber(session.chart_frame_id),
@@ -3916,6 +3916,10 @@
       );
     }
 
+    function overlayAuthorityFrame(session = {}) {
+      return Math.max(overlayObjectFrame(session), overlayArtifactFrame(session));
+    }
+
     function currentOverlayStateVersion(session = {}) {
       const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
       const timing = objectOrEmpty(session.frame_timing_trace_v3 || liveState.frame_timing_trace_v3);
@@ -3953,14 +3957,14 @@
         overlaysPayload.artifact_authority_locked,
         modePayload.artifact_authority_locked,
       ]);
-      if (explicitAuthorityLocked === true) {
+      if (explicitAuthorityLocked === true || explicitArtifactAligned === true) {
         return true;
       }
       if (explicitArtifactAligned === false) {
         return false;
       }
       const displayFrame = newestDisplayFrame(session);
-      const overlayFrame = Math.max(overlayObjectFrame(session), overlayArtifactFrame(session));
+      const overlayFrame = overlayAuthorityFrame(session);
       if (displayFrame > 0 && overlayFrame > 0 && overlayFrame < displayFrame) {
         return overlaySurfaceMatchesDisplay(session) || displayOnlyOverlayAuthorityLocked(session);
       }
@@ -4352,7 +4356,7 @@
         || 0
       );
       const displayFrame = newestDisplayFrame(session);
-      const overlayFrame = overlayArtifactFrame(session);
+      const overlayFrame = overlayAuthorityFrame(session);
       const modelEpoch = Number(session.model_capture_epoch || 0);
       const displayEpoch = Number(session.display_capture_epoch || session.last_capture_epoch || 0);
       const frameGap = displayFrame > 0 && overlayFrame > 0 ? displayFrame - overlayFrame : 0;
@@ -4396,7 +4400,7 @@
     function backendOverlayMode(mode = state.overlayMode) {
       const normalized = clean(mode, "clean_live").toLowerCase();
       const map = {
-        clean_live: "FULL_HISTORY_READ",
+        clean_live: "CLEAN_LIVE",
         candles: "CANDLES",
         global: "GLOBAL",
         local: "LOCAL",
@@ -7887,12 +7891,17 @@
       const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
       const nowMs = Date.now();
       const visibleOverlayCount = Number(renderMeta.visibleOverlayCount ?? els.hotspotLayer.querySelectorAll(".surface-hotspot").length) || 0;
+      const overlayFrameId = overlayAuthorityFrame(session);
+      const displayFrameId = newestDisplayFrame(session);
+      const chartFrameId = Math.max(
+        frameNumber(liveState.chart_frame_id),
+        frameNumber(session.chart_frame_id),
+        overlayFrameId,
+      );
       const frameId = Math.max(
         frameNumber(liveState.frame_id),
         frameNumber(session.frame_id),
-        frameNumber(session.frame_index),
-        frameNumber(session.chart_frame_id),
-        overlayObjectFrame(session),
+        chartFrameId,
       );
       const size = surfaceImageSize();
       const payload = {
@@ -7902,7 +7911,10 @@
         overlay_mode: backendOverlayMode(state.overlayMode),
         surface_mode: state.mode,
         frame_id: frameId,
-        rendered_frame_id: frameId,
+        rendered_frame_id: displayFrameId || frameId,
+        display_frame_id: displayFrameId,
+        chart_frame_id: chartFrameId,
+        overlay_render_frame_id: overlayFrameId,
         overlay_state_version: currentOverlayStateVersion(session),
         overlay_frame_state_version: currentOverlayFrameStateVersion(session),
         state_version: clean(liveState.state_version || session.state_version || session.decision_version, ""),

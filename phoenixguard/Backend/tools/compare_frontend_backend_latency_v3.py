@@ -148,12 +148,21 @@ def _flush_dashboard_heartbeat(client: tuple[Any, Any, Any] | None, *, base_url:
               const overlayMode = typeof backendOverlayMode === "function"
                 ? backendOverlayMode(state.overlayMode)
                 : String(state.overlayMode || "CLEAN_LIVE").trim().toUpperCase();
+              const overlayFrameId = typeof overlayAuthorityFrame === "function"
+                ? Number(overlayAuthorityFrame(state.session) || 0)
+                : Math.max(Number(state.session.overlay_object_frame_id || 0), Number(state.session.overlay_frame_id || 0));
+              const displayFrameId = typeof newestDisplayFrame === "function"
+                ? Number(newestDisplayFrame(state.session) || 0)
+                : Math.max(Number(state.session.display_frame_id || 0), Number(state.session.frame_index || 0));
+              const chartFrameId = Math.max(
+                Number(liveState.chart_frame_id || 0),
+                Number(state.session.chart_frame_id || 0),
+                overlayFrameId
+              );
               const frameId = Math.max(
                 Number(liveState.frame_id || 0),
                 Number(state.session.frame_id || 0),
-                Number(state.session.display_frame_id || 0),
-                Number(state.session.frame_index || 0),
-                Number(state.session.chart_frame_id || 0)
+                chartFrameId
               );
               const payload = {
                 session_id: state.session.session_id || location.pathname.split("/").pop(),
@@ -162,7 +171,10 @@ def _flush_dashboard_heartbeat(client: tuple[Any, Any, Any] | None, *, base_url:
                 overlay_mode: overlayMode,
                 surface_mode: state.mode,
                 frame_id: frameId,
-                rendered_frame_id: frameId,
+                rendered_frame_id: displayFrameId || frameId,
+                display_frame_id: displayFrameId,
+                chart_frame_id: chartFrameId,
+                overlay_render_frame_id: overlayFrameId,
                 overlay_state_version: state.session.overlay_state_version || liveState.overlay_state_version || timing.overlay_state_version || "",
                 overlay_frame_state_version: state.session.overlay_frame_state_version || liveState.overlay_frame_state_version || timing.overlay_frame_state_version || "",
                 state_version: String(liveState.state_version || state.session.state_version || state.session.decision_version || ""),

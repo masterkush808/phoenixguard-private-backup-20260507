@@ -3038,12 +3038,22 @@ def create_app(
             rendered_frame = int(_epoch_float(payload.get("rendered_frame_id") or payload.get("frame_id"), 0.0))
             heartbeat_overlay_version = str(payload.get("overlay_state_version") or "").strip()
             payload_overlay_count = int(_epoch_float(payload.get("overlay_count"), 0.0))
-            visible_overlay_count = int(_epoch_float(payload.get("visible_overlay_count") or payload.get("overlay_count"), 0.0))
+            payload_visible_count = (
+                payload.get("visible_overlay_count")
+                if payload.get("visible_overlay_count") is not None
+                else payload.get("overlay_count")
+            )
+            visible_overlay_count = int(_epoch_float(payload_visible_count, 0.0))
             latest_heartbeat = latest_frontend_heartbeat(heartbeat_session_id)
+            latest_heartbeat_payload = _mapping_to_plain_dict(latest_heartbeat)
+            latest_visible_source = (
+                latest_heartbeat_payload.get("visible_overlay_count")
+                if latest_heartbeat_payload.get("visible_overlay_count") is not None
+                else latest_heartbeat_payload.get("overlay_count")
+            )
             latest_visible_count = int(
                 _epoch_float(
-                    _mapping_to_plain_dict(latest_heartbeat).get("visible_overlay_count")
-                    or _mapping_to_plain_dict(latest_heartbeat).get("overlay_count"),
+                    latest_visible_source,
                     0.0,
                 )
             )
@@ -3056,15 +3066,13 @@ def create_app(
                     "rendered_frame_id": rendered_frame,
                 }
             if (latest_visible_count > 0 or payload_overlay_count > 0) and visible_overlay_count <= 0:
-                return {
-                    "schema_version": "PG_FRONTEND_HEARTBEAT_V3",
-                    "session_id": heartbeat_session_id,
-                    "status": "ignored",
-                    "reason": "degraded_overlay_heartbeat",
-                    "rendered_frame_id": rendered_frame,
-                    "visible_overlay_count": visible_overlay_count,
-                    "latest_visible_overlay_count": latest_visible_count,
-                }
+                degraded_payload = dict(payload)
+                degraded_payload["status"] = "DEGRADED"
+                degraded_payload["degraded_reason"] = "degraded_overlay_heartbeat"
+                heartbeat = record_frontend_heartbeat(degraded_payload)
+                heartbeat["reason"] = "degraded_overlay_heartbeat"
+                heartbeat["latest_visible_overlay_count"] = latest_visible_count
+                return cast(dict[str, object], heartbeat)
             return cast(dict[str, object], record_frontend_heartbeat(payload))
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
