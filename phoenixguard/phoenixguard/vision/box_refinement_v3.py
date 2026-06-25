@@ -913,9 +913,9 @@ def _suppress_duplicates(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[s
         row_bounds = normalize_bounds(row.get("bounds"))
         duplicate = False
         if row_bounds is not None and row_type in ZONE_TYPES | ACTIONABLE_TYPES:
+            row_family = _duplicate_suppression_family(row)
             for existing in kept:
-                existing_type = str(existing.get("type") or "")
-                if existing_type != row_type and not (row_type in ZONE_TYPES and existing_type in ZONE_TYPES):
+                if _duplicate_suppression_family(existing) != row_family:
                     continue
                 existing_bounds = normalize_bounds(existing.get("bounds"))
                 if existing_bounds is None:
@@ -932,6 +932,14 @@ def _suppress_duplicates(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[s
         else:
             kept.append(row)
     return kept + rejected, duplicate_count
+
+
+def _duplicate_suppression_family(row: Mapping[str, Any]) -> str:
+    overlay_type = str(row.get("type") or "")
+    if overlay_type in ZONE_TYPES:
+        role = _text(row.get("role") or row.get("zone_role") or row.get("zone_family")).lower()
+        return f"{overlay_type}:{role}" if role else overlay_type
+    return overlay_type
 
 
 def _separate_nested_sibling_bounds(loser: Sequence[float], winner: Sequence[float]) -> list[float] | None:
@@ -959,6 +967,10 @@ def _separate_nested_sibling_bounds(loser: Sequence[float], winner: Sequence[flo
         return None
     valid.sort(key=_box_area, reverse=True)
     return [round(float(value), 3) for value in valid[0]]
+
+
+def _both_trendline_siblings(first_row: Mapping[str, Any], second_row: Mapping[str, Any]) -> bool:
+    return str(first_row.get("type") or "") in TRENDLINE_TYPES and str(second_row.get("type") or "") in TRENDLINE_TYPES
 
 
 def _apply_overlay_nesting(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -1041,6 +1053,10 @@ def _apply_overlay_nesting(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict
             for other_index in range(index + 1, len(siblings)):
                 second_row, second_bounds = siblings[other_index]
                 if not (rectangles_overlap(first_bounds, second_bounds, padding=1.0) and _iou(first_bounds, second_bounds) > 0.72):
+                    continue
+                if _both_trendline_siblings(first_row, second_row):
+                    first_row.setdefault("precision_flags", []).append("trendline_sibling_overlap_kept")
+                    second_row.setdefault("precision_flags", []).append("trendline_sibling_overlap_kept")
                     continue
                 if _priority(first_row) >= _priority(second_row):
                     winner_row, winner_bounds = first_row, first_bounds

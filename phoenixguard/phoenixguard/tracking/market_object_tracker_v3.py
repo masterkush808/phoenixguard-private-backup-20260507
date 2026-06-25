@@ -280,7 +280,7 @@ def _raw_bbox(raw: Mapping[str, Any]) -> list[float] | None:
         bbox = normalize_bounds(raw.get(key))
         if bbox is not None:
             return bbox
-    for key in ("points", "anchors", "path"):
+    for key in ("line_points", "points", "anchors", "path"):
         bbox = normalize_bounds(raw.get(key))
         if bbox is not None:
             return bbox
@@ -888,7 +888,7 @@ class _RegistryBuilder:
                     "label": label_value,
                     "layer": layer or TYPE_LAYER_MAP.get(object_type, "diagnostics"),
                     "role": role or TYPE_ROLE_MAP.get(object_type, ""),
-                    "visible_default": object_type not in {"DEBUG_RAW_DETECTION", "PROGRESSION_PATH"},
+                    "visible_default": bool(raw.get("visible_default", object_type not in {"DEBUG_RAW_DETECTION", "PROGRESSION_PATH"})),
                 }
             )
             overlays.append(
@@ -1027,8 +1027,30 @@ class _RegistryBuilder:
             label = _text(box.get("label"), f"history {index + 1}")
             lower = label.lower()
             object_type = "PULLBACK_BOX" if "pullback" in lower else "PROGRESSION_PATH"
+            history_overlay = dict(box)
+            if object_type == "PROGRESSION_PATH":
+                line_points = _sequence(box.get("line_points") or box.get("points") or box.get("path"))
+                if len(line_points) < 2:
+                    start_point = _sequence(box.get("start_point"))
+                    end_point = _sequence(box.get("end_point"))
+                    if len(start_point) >= 2 and len(end_point) >= 2:
+                        line_points = [start_point[:2], end_point[:2]]
+                path_bounds = normalize_bounds(box.get("path_bounds") or line_points)
+                if len(line_points) >= 2 and path_bounds is not None:
+                    history_overlay.update(
+                        {
+                            "bbox": path_bounds,
+                            "bounds": path_bounds,
+                            "line_points": line_points,
+                            "points": line_points,
+                            "path": line_points,
+                            "anchor_type": "POLYGON",
+                            "visible_default": True,
+                            "visible_modes": ["CLEAN_LIVE", "FULL_HISTORY_READ", "REPLAY", "PATH", "ACTIVE_CONTEXT", "INSPECTOR"],
+                        }
+                    )
             add_object(
-                {**box, "visible_modes": ["FULL_HISTORY_READ", "REPLAY", "INSPECTOR"]},
+                {**history_overlay, "visible_modes": history_overlay.get("visible_modes", ["FULL_HISTORY_READ", "REPLAY", "INSPECTOR"])},
                 object_type=object_type,
                 source_path=f"tracking_summary.historical_structure[{index}]",
                 source_key=box.get("key", index),

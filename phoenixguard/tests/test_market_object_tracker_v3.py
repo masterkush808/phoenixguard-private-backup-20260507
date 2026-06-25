@@ -233,6 +233,41 @@ def test_market_object_registry_v3_extracts_tracked_objects_and_overlays() -> No
     assert registry.sequence_context.invalidation_zones
 
 
+def test_market_object_registry_turns_historical_progression_into_path_geometry() -> None:
+    payload = deepcopy(_sample_payload())
+    historical = payload["tracking_summary"]["historical_structure"]
+    historical.append(
+        {
+            "key": "h11",
+            "label": "H11 BUY",
+            "story": "buyers lifted through prior structure",
+            "bbox": [80, 120, 780, 420],
+            "line_points": [[120, 390], [240, 340], [420, 260], [640, 190]],
+            "start_point": [120, 390],
+            "end_point": [640, 190],
+            "direction": "BUY",
+            "confidence": 0.78,
+            "source_indices": [0, 1, 2, 3],
+        }
+    )
+
+    registry = build_market_object_registry_v3(payload)
+    history_rows = [
+        overlay
+        for overlay in registry.as_dict()["overlay_objects"]
+        if overlay.get("type") == "PROGRESSION_PATH"
+        and overlay.get("source_path") == "tracking_summary.historical_structure[1]"
+    ]
+
+    assert len(history_rows) == 1
+    history = history_rows[0]
+    assert history["anchor_type"] == "POLYGON"
+    assert history["line_points"] == [[120.0, 390.0], [240.0, 340.0], [420.0, 260.0], [640.0, 190.0]]
+    assert history["bounds"] == [120.0, 190.0, 640.0, 390.0]
+    assert history["visible_default"] is True
+    assert "CLEAN_LIVE" in history["visible_modes"]
+
+
 def test_market_object_registry_v3_ids_are_stable_when_geometry_moves() -> None:
     first = _sample_payload()
     second = deepcopy(first)

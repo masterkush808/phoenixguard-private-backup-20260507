@@ -1619,9 +1619,13 @@ def normalize_v3_overlay_object(
         "PREDICTION_PATH",
     }
     if geometry_points and overlay_type in line_geometry_types:
+        geometry_bounds = normalize_bounds(geometry_points)
         row["points"] = geometry_points
         row["line_points"] = geometry_points
         row["anchor_type"] = "POLYGON"
+        if geometry_bounds is not None:
+            row["bounds"] = [round(float(value), 6) for value in geometry_bounds]
+            row["bbox"] = list(row["bounds"])
     for key in (
         "trendline_role",
         "trendline_scope",

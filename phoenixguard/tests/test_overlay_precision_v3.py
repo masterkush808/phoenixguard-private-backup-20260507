@@ -139,6 +139,152 @@ def test_precision_resolver_tightens_boxes_suppresses_duplicates_and_shortens_la
             assert rectangles_overlap(first, second, padding=2.0) is False
 
 
+def test_precision_resolver_keeps_overlapping_major_and_inner_trendlines_visible() -> None:
+    scene_graph: dict[str, Any] = {
+        "frame_id": 88,
+        "plot_area_chart_bounds": [0, 0, 800, 500],
+        "chart_region_chart_bounds": [0, 0, 800, 500],
+    }
+    shared_points = [[160, 210], [520, 280]]
+    base_overlay: dict[str, Any] = {
+        "source_agent": "market_object_tracker_v3",
+        "frame_id": 88,
+        "coordinate_mode": "CHART_IMAGE_SPACE",
+        "chart_transform_id": "chart-88",
+        "truth_score": 0.82,
+        "confidence": 0.82,
+        "lifecycle_state": "ACTIVE",
+        "visible_modes": ["CLEAN_LIVE", "TRENDLINES", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+        "visible_default": True,
+    }
+    overlays: list[dict[str, Any]] = [
+        {
+            **base_overlay,
+            "overlay_id": "major-structure-parent",
+            "object_id": "major-structure-parent",
+            "track_id": "major-structure-parent",
+            "type": "IMPULSE_BOX",
+            "label": "IMPULSE",
+            "bounds": [100, 120, 680, 390],
+            "anchor_type": "BOX",
+            "anchor_candles": [1, 5],
+        },
+        {
+            **base_overlay,
+            "overlay_id": "major-resistance-line",
+            "object_id": "major-resistance-line",
+            "track_id": "major-resistance-line",
+            "type": "RESISTANCE_TRENDLINE",
+            "label": "RESISTANCE TRENDLINE",
+            "bounds": [160, 210, 520, 280],
+            "line_points": shared_points,
+            "anchor_type": "LINE",
+            "anchor_candles": [2, 6],
+        },
+        {
+            **base_overlay,
+            "overlay_id": "inner-resistance-line",
+            "object_id": "inner-resistance-line",
+            "track_id": "inner-resistance-line",
+            "type": "INNER_TRENDLINE",
+            "label": "INNER TRENDLINE",
+            "bounds": [160, 210, 520, 280],
+            "line_points": shared_points,
+            "anchor_type": "LINE",
+            "anchor_candles": [2, 6],
+        },
+    ]
+
+    rows, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene_graph,
+        mode="CLEAN_LIVE",
+        current_side="SELL",
+        frame_id=88,
+    )
+
+    trendlines = {row["type"]: row for row in rows if row.get("type") in {"RESISTANCE_TRENDLINE", "INNER_TRENDLINE"}}
+    assert set(trendlines) == {"RESISTANCE_TRENDLINE", "INNER_TRENDLINE"}
+    assert trendlines["INNER_TRENDLINE"]["visible_default"] is True
+    assert "CLEAN_LIVE" in trendlines["INNER_TRENDLINE"]["visible_modes"]
+    assert trendlines["INNER_TRENDLINE"]["display_state"] != "INSPECTOR_ONLY_LABEL"
+    assert "trendline_sibling_overlap_kept" in trendlines["INNER_TRENDLINE"]["precision_flags"]
+    assert trendlines["INNER_TRENDLINE"]["line_points"] == shared_points
+    assert trendlines["RESISTANCE_TRENDLINE"]["line_points"] == shared_points
+    assert audit["rendered_count"] >= 3
+
+
+def test_precision_resolver_keeps_support_resistance_and_opposing_force_families_visible() -> None:
+    scene_graph: dict[str, Any] = {
+        "frame_id": 89,
+        "plot_area_chart_bounds": [0, 0, 900, 540],
+        "chart_region_chart_bounds": [0, 0, 900, 540],
+    }
+    base_overlay: dict[str, Any] = {
+        "source_agent": "market_object_tracker_v3",
+        "frame_id": 89,
+        "coordinate_mode": "CHART_IMAGE_SPACE",
+        "chart_transform_id": "chart-89",
+        "truth_score": 0.78,
+        "confidence": 0.78,
+        "lifecycle_state": "ACTIVE",
+        "visible_modes": ["CLEAN_LIVE", "SUPPLY_DEMAND", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "INSPECTOR"],
+        "visible_default": True,
+        "anchor_type": "BOX",
+        "anchor_candles": [2, 4],
+        "still_significant": True,
+    }
+    shared_bounds = [240, 220, 560, 285]
+    overlays: list[dict[str, Any]] = [
+        {
+            **base_overlay,
+            "overlay_id": "resistance-zone",
+            "object_id": "resistance-zone",
+            "track_id": "resistance-zone",
+            "type": "SUPPLY_ZONE",
+            "role": "resistance",
+            "label": "SUPPLY",
+            "bounds": shared_bounds,
+        },
+        {
+            **base_overlay,
+            "overlay_id": "support-zone",
+            "object_id": "support-zone",
+            "track_id": "support-zone",
+            "type": "DEMAND_ZONE",
+            "role": "support",
+            "label": "DEMAND",
+            "bounds": shared_bounds,
+        },
+        {
+            **base_overlay,
+            "overlay_id": "opposing-force-zone",
+            "object_id": "opposing-force-zone",
+            "track_id": "opposing-force-zone",
+            "type": "OPPOSING_FORCE",
+            "role": "opposing_force_zone",
+            "label": "OPPOSING FORCE",
+            "bounds": shared_bounds,
+        },
+    ]
+
+    rows, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene_graph,
+        mode="CLEAN_LIVE",
+        current_side="SELL",
+        frame_id=89,
+    )
+
+    zones = {row["type"]: row for row in rows if row.get("type") in {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"}}
+    assert set(zones) == {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"}
+    assert zones["SUPPLY_ZONE"]["visible_default"] is True
+    assert zones["DEMAND_ZONE"]["visible_default"] is True
+    assert zones["OPPOSING_FORCE"]["visible_default"] is True
+    assert all(row.get("precision_rejection_reason") != "duplicate_weaker_track" for row in zones.values())
+    assert audit["precision_report"]["duplicate_boxes"] == 0
+
+
 def test_live_state_respects_requested_granular_overlay_mode(tmp_path: Path) -> None:
     session = _session(tmp_path)
     state = build_live_state_v3(session, overlay_mode="TARGET")

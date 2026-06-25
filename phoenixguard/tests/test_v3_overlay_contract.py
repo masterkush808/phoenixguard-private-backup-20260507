@@ -415,6 +415,29 @@ def test_trendline_overlays_preserve_line_geometry_and_layer_modes() -> None:
     assert progression["layer"] == "historical_replay"
 
 
+def test_progression_path_prefers_line_geometry_over_broad_context_bounds() -> None:
+    progression = normalize_v3_overlay_object(
+        _base_overlay(
+            type="PROGRESSION_PATH",
+            layer="historical_replay",
+            label="historical progression",
+            bounds=[20, 40, 760, 420],
+            line_points=[[100, 360], [220, 320], [360, 210], [520, 180]],
+            anchor_type="BOX",
+            visible_modes=["CLEAN_LIVE", "REPLAY", "FULL_HISTORY_READ", "INSPECTOR"],
+            lifecycle_state="HISTORICAL",
+        ),
+        strict=False,
+    )
+
+    assert progression["type"] == "PROGRESSION_PATH"
+    assert progression["layer"] == "historical_replay"
+    assert progression["anchor_type"] == "POLYGON"
+    assert progression["line_points"] == [[100.0, 360.0], [220.0, 320.0], [360.0, 210.0], [520.0, 180.0]]
+    assert progression["bounds"] == [100.0, 180.0, 520.0, 360.0]
+    assert overlay_is_visible(progression, "CLEAN_LIVE") is True
+
+
 def test_coordinate_normalization_converts_between_chart_pixels_and_normalized() -> None:
     normalized = normalize_v3_overlay_object(
         _base_overlay(coordinate_mode="CHART_NORMALIZED", bounds=[80, 60, 400, 300]),

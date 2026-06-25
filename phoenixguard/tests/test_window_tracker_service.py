@@ -6986,6 +6986,8 @@ def test_real_tracking_adapter_reads_buy_pressure_from_uptrend_surface() -> None
     history = cast(Sequence[Mapping[str, Any]], result.tracking_summary["historical_structure"])
     assert len(history) >= 2
     assert all("bbox" in segment for segment in history)
+    assert all(len(cast(Sequence[Any], segment.get("line_points", []))) >= 2 for segment in history)
+    assert all("path_bounds" in segment for segment in history)
     assert min(float(cast(Sequence[Any], segment["bbox"])[0]) for segment in history) < result.chart_image.width * 0.45
     assert max(float(cast(Sequence[Any], segment["bbox"])[2]) for segment in history) > result.chart_image.width * 0.55
     assert result.latest_signal["action"] == "BUY"

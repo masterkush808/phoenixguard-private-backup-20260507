@@ -661,6 +661,77 @@ def test_replay_mode_ignores_clean_live_prefilter_env(monkeypatch: Any, tmp_path
     assert clean_state["overlays"]["objects"][0]["layer"] == "historical_replay"
 
 
+def test_live_state_prefers_v3_historical_path_over_fallback_rectangle(tmp_path: Path) -> None:
+    window = _png(tmp_path / "window.png", (640, 360))
+    chart = _png(tmp_path / "chart.png", (560, 260))
+    session: dict[str, Any] = {
+        "session_id": "pocket-live-history-path",
+        "frame_index": 44,
+        "tracking_enabled": True,
+        "tracking_summary": {
+            "chart_valid": True,
+            "chart_region": {"pixel_bbox": [0, 0, 560, 260], "width": 560, "height": 260},
+            "tracked_candles": [
+                {
+                    "bbox": [50 + index * 48, 190 - index * 24, 60 + index * 48, 228 - index * 24],
+                    "center_x": 55 + index * 48,
+                    "center_y": 209 - index * 24,
+                    "direction": "BUY",
+                    "price_proxy": 0.20 + index * 0.04,
+                    "confidence": 0.90,
+                }
+                for index in range(4)
+            ],
+            "historical_structure": [
+                {
+                    "key": "history_path_1",
+                    "label": "H1 BUY",
+                    "direction": "BUY",
+                    "bbox": [20, 30, 540, 230],
+                    "line_points": [[60, 210], [160, 180], [300, 120], [460, 80]],
+                    "path_bounds": [56, 76, 464, 214],
+                    "start_point": [60, 210],
+                    "end_point": [460, 80],
+                    "confidence": 0.84,
+                    "source_indices": [0, 1, 2, 3],
+                }
+            ],
+        },
+    }
+    active_objects: list[dict[str, Any]] = [
+        {
+            "overlay_id": "legacy-history-rectangle",
+            "truth_score": 0.91,
+            "overlay": {
+                "overlay_id": "legacy-history-rectangle",
+                "type": "HISTORICAL_REPLAY",
+                "layer": "historical_replay",
+                "side": "BUY",
+                "bbox": [20, 30, 540, 230],
+                "confidence": 0.91,
+                "visible_modes": ["CLEAN_LIVE", "REPLAY", "FULL_HISTORY_READ", "INSPECTOR"],
+            },
+        }
+    ]
+
+    state = build_live_state_v3(
+        session,
+        artifacts={"window": window, "chart": chart},
+        active_objects=active_objects,
+        overlay_mode="CLEAN_LIVE",
+        now_epoch=110.0,
+    )
+
+    history_rows = [row for row in state["overlays"]["objects"] if row.get("type") == "PROGRESSION_PATH"]
+    assert len(history_rows) == 1
+    history = history_rows[0]
+    assert history["source_path"] == "tracking_summary.historical_structure[0]"
+    assert history["line_points"] == [[60.0, 210.0], [160.0, 180.0], [300.0, 120.0], [460.0, 80.0]]
+    assert history["bounds"] == [60.0, 80.0, 460.0, 210.0]
+    assert history["visible_default"] is True
+    assert history["anchor_type"] == "POLYGON"
+
+
 def test_unknown_overlay_labels_hidden_from_live_and_collected_for_diagnostics(tmp_path: Path) -> None:
     window = _png(tmp_path / "window.png", (640, 360))
     chart = _png(tmp_path / "chart.png", (560, 260))

@@ -14998,11 +14998,72 @@ class PhoenixGuardWindowTrackingAdapter:
         if len(rows) < 6:
             return []
         rows.sort(key=lambda item: float(item.get("center_x", 0.0) or 0.0))
+        image_w = max(1, int(image_size[0]))
+        image_h = max(1, int(image_size[1]))
         max_segments = 7
         segment_count = min(max_segments, max(2, int(round(len(rows) / 5.0))))
         chunk_size = max(3, int(np.ceil(len(rows) / max(1, segment_count))))
         segments: list[dict[str, Any]] = []
         previous_direction = "HOLD"
+
+        def candle_path_point(candle: Mapping[str, Any], direction_value: str) -> list[int]:
+            bbox = cast(Sequence[Any], candle.get("bbox", []))
+            center_x = float(candle.get("center_x", 0.0) or 0.0)
+            center_y = float(candle.get("center_y", 0.0) or 0.0)
+            if len(bbox) >= 4:
+                try:
+                    x0, y0, x1, y1 = [float(value) for value in bbox[:4]]
+                    center_x = float(candle.get("center_x", (x0 + x1) * 0.5) or (x0 + x1) * 0.5)
+                    if direction_value == "BUY":
+                        center_y = max(y0, y1)
+                    elif direction_value == "SELL":
+                        center_y = min(y0, y1)
+                    else:
+                        center_y = float(candle.get("center_y", (y0 + y1) * 0.5) or (y0 + y1) * 0.5)
+                except (TypeError, ValueError):
+                    pass
+            return [
+                int(round(max(0.0, min(float(image_w - 1), center_x)))),
+                int(round(max(0.0, min(float(image_h - 1), center_y)))),
+            ]
+
+        def dedupe_points(points: Sequence[Sequence[int]]) -> list[list[int]]:
+            output: list[list[int]] = []
+            seen: set[tuple[int, int]] = set()
+            for point in points:
+                if len(point) < 2:
+                    continue
+                rounded = (int(point[0]), int(point[1]))
+                if rounded in seen:
+                    continue
+                seen.add(rounded)
+                output.append([rounded[0], rounded[1]])
+            return output
+
+        def bounds_for_path(points: Sequence[Sequence[int]]) -> list[int]:
+            xs = [int(point[0]) for point in points if len(point) >= 2]
+            ys = [int(point[1]) for point in points if len(point) >= 2]
+            if not xs or not ys:
+                return [0, 0, 1, 1]
+            pad_x = max(4, min(18, int(round(image_w * 0.010))))
+            pad_y = max(4, min(18, int(round(image_h * 0.018))))
+            return [
+                max(0, min(xs) - pad_x),
+                max(0, min(ys) - pad_y),
+                min(image_w - 1, max(xs) + pad_x),
+                min(image_h - 1, max(ys) + pad_y),
+            ]
+
+        def source_indices_for_segment(segment_rows: Sequence[Mapping[str, Any]], start_index: int) -> list[int]:
+            indexes: list[int] = []
+            for offset, candle in enumerate(segment_rows):
+                raw_index = candle.get("index", candle.get("source_index", start_index + offset))
+                try:
+                    indexes.append(int(float(raw_index)))
+                except (TypeError, ValueError):
+                    indexes.append(start_index + offset)
+            return indexes
+
         for segment_index, start in enumerate(range(0, len(rows), chunk_size), start=1):
             segment = rows[start:min(len(rows), start + chunk_size)]
             if len(segment) < 2:
@@ -15015,6 +15076,15 @@ class PhoenixGuardWindowTrackingAdapter:
                 if direction not in {"BUY", "SELL"}:
                     direction = "HOLD"
             previous_direction = direction if direction in {"BUY", "SELL"} else previous_direction
+            path_points = dedupe_points([candle_path_point(candle, direction) for candle in segment])
+            if len(path_points) < 2:
+                path_points = dedupe_points(
+                    [
+                        candle_path_point(segment[0], direction),
+                        candle_path_point(segment[-1], direction),
+                    ]
+                )
+            path_bounds = bounds_for_path(path_points)
             box = self._structure_box(
                 segment,
                 image_size,
@@ -15022,28 +15092,24 @@ class PhoenixGuardWindowTrackingAdapter:
                 f"HISTORY {segment_index}",
                 direction=direction,
             )
-            def wick_point(candle: Mapping[str, Any]) -> list[int]:
-                bbox = cast(Sequence[Any], candle.get("bbox", []))
-                center_x = float(candle.get("center_x", 0.0) or 0.0)
-                center_y = float(candle.get("center_y", 0.0) or 0.0)
-                if len(bbox) >= 4:
-                    try:
-                        x0, y0, x1, y1 = [float(value) for value in bbox[:4]]
-                        center_x = float(candle.get("center_x", (x0 + x1) * 0.5) or (x0 + x1) * 0.5)
-                        if direction == "BUY":
-                            center_y = max(y0, y1)
-                        elif direction == "SELL":
-                            center_y = min(y0, y1)
-                    except (TypeError, ValueError):
-                        pass
-                return [int(round(center_x)), int(round(center_y))]
-
-            start_point = wick_point(segment[0])
-            end_point = wick_point(segment[-1])
+            context_bbox = list(cast(Sequence[Any], box.get("bbox", path_bounds)))[:4]
+            start_point = path_points[0]
+            end_point = path_points[-1]
             net_move = float(proxies[-1] - proxies[0]) if len(proxies) >= 2 else 0.0
             segments.append(
                 {
                     **box,
+                    "bbox": path_bounds,
+                    "path_bounds": path_bounds,
+                    "context_bbox": context_bbox,
+                    "range_bbox": context_bbox,
+                    "line_points": path_points,
+                    "points": path_points,
+                    "path": path_points,
+                    "anchor_type": "POLYGON",
+                    "anchor_candles": source_indices_for_segment(segment, start),
+                    "source_indices": source_indices_for_segment(segment, start),
+                    "progression_shape": "TREND_PATH" if direction in {"BUY", "SELL"} else "CHOP_PATH",
                     "direction": direction,
                     "label": f"H{segment_index} {direction}",
                     "sequence_index": int(segment_index),
@@ -16730,9 +16796,54 @@ class PhoenixGuardWindowTrackingAdapter:
         chart_bounds = [int(round(float(value))) for value in chart_box[:4]]
         offset_x = float(offset[0])
         offset_y = float(offset[1])
+        def raw_sequence(value: Any) -> list[Any]:
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+                return list(cast(Sequence[Any], value))
+            return []
+
+        def segment_path_points(segment: Mapping[str, Any]) -> list[tuple[int, int]]:
+            raw_points = segment.get("line_points") or segment.get("points") or segment.get("path")
+            points: list[tuple[int, int]] = []
+            for item in _sequence_of_mappings(raw_points):
+                x_value = item.get("x", item.get("left", item.get("center_x")))
+                y_value = item.get("y", item.get("top", item.get("center_y")))
+                if x_value is None or y_value is None:
+                    continue
+                point = _clip_point_to_bounds(
+                    chart_bounds,
+                    (float(x_value) + offset_x, float(y_value) + offset_y),
+                    pad=4,
+                )
+                points.append(point)
+            if not points:
+                for item in raw_sequence(raw_points):
+                    point_values = raw_sequence(item)
+                    if len(point_values) < 2:
+                        continue
+                    x_value = _float_or(point_values[0], float("nan"))
+                    y_value = _float_or(point_values[1], float("nan"))
+                    if x_value != x_value or y_value != y_value:
+                        continue
+                    point = _clip_point_to_bounds(
+                        chart_bounds,
+                        (x_value + offset_x, y_value + offset_y),
+                        pad=4,
+                    )
+                    points.append(point)
+            if len(points) >= 2:
+                return points
+            raw_start = cast(Sequence[Any], segment.get("start_point", []))
+            raw_end = cast(Sequence[Any], segment.get("end_point", []))
+            if len(raw_start) >= 2 and len(raw_end) >= 2:
+                return [
+                    _clip_point_to_bounds(chart_bounds, (float(raw_start[0]) + offset_x, float(raw_start[1]) + offset_y), pad=4),
+                    _clip_point_to_bounds(chart_bounds, (float(raw_end[0]) + offset_x, float(raw_end[1]) + offset_y), pad=4),
+                ]
+            return []
+
         for raw_segment in historical_structure:
             segment = _mapping_to_dict(raw_segment)
-            raw_bbox = cast(Sequence[Any], segment.get("bbox", []))
+            raw_bbox = cast(Sequence[Any], segment.get("path_bounds") or segment.get("bbox", []))
             if len(raw_bbox) < 4:
                 continue
             direction = str(segment.get("direction", "HOLD") or "HOLD").upper()
@@ -16747,23 +16858,12 @@ class PhoenixGuardWindowTrackingAdapter:
             width = max(1, int(bbox[2] - bbox[0]))
             height = max(1, int(bbox[3] - bbox[1]))
             radius = max(8, min(14, int(round(min(width, height) * 0.10))))
-            draw.rounded_rectangle(bbox, radius=radius, fill=_rgba(color, 8), outline=_rgba(color, 86), width=1)
-
-            raw_start = cast(Sequence[Any], segment.get("start_point", []))
-            raw_end = cast(Sequence[Any], segment.get("end_point", []))
-            if len(raw_start) >= 2 and len(raw_end) >= 2:
-                start_point = _clip_point_to_bounds(
-                    chart_bounds,
-                    (float(raw_start[0]) + offset_x, float(raw_start[1]) + offset_y),
-                    pad=4,
-                )
-                end_point = _clip_point_to_bounds(
-                    chart_bounds,
-                    (float(raw_end[0]) + offset_x, float(raw_end[1]) + offset_y),
-                    pad=4,
-                )
-                self._draw_dashed_line(draw, start_point, end_point, _rgba(color, 156), width=2, dash=7, gap=5)
+            path_points = segment_path_points(segment)
+            if len(path_points) >= 2:
+                for first, second in zip(path_points, path_points[1:]):
+                    self._draw_dashed_line(draw, first, second, _rgba(color, 168), width=2, dash=7, gap=5)
                 point_radius = 3
+                end_point = path_points[-1]
                 draw.ellipse(
                     (
                         end_point[0] - point_radius,
@@ -16775,6 +16875,8 @@ class PhoenixGuardWindowTrackingAdapter:
                     outline=(7, 16, 22, 210),
                     width=1,
                 )
+            else:
+                draw.rounded_rectangle(bbox, radius=radius, fill=_rgba(color, 8), outline=_rgba(color, 86), width=1)
 
             label = str(segment.get("label", "") or "").upper()
             if label:

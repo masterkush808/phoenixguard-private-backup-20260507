@@ -480,7 +480,14 @@ def _combine_overlays(
 ) -> list[dict[str, Any]]:
     overlays = [dict(overlay) for overlay in registry.overlays]
     seen = {str(overlay.get("overlay_id")) for overlay in overlays}
+    registry_has_historical_progression = any(
+        _text(overlay.get("type")).upper() == "PROGRESSION_PATH"
+        and _text(overlay.get("source_path")).startswith("tracking_summary.historical_structure")
+        for overlay in overlays
+    )
     for index, row in enumerate(active_objects or []):
+        if registry_has_historical_progression and _source_less_progression_rectangle(row):
+            continue
         overlay = _overlay_from_active_object(
             row,
             frame_id=registry.frame_id,
@@ -493,6 +500,21 @@ def _combine_overlays(
             overlays.append(overlay)
             seen.add(str(overlay.get("overlay_id")))
     return overlays
+
+
+def _source_less_progression_rectangle(row: Mapping[str, Any]) -> bool:
+    overlay = _mapping(row.get("overlay")) or dict(row)
+    overlay_type = _text(overlay.get("type") or row.get("type")).upper()
+    layer = _text(overlay.get("layer") or row.get("layer")).lower()
+    source_path = _text(overlay.get("source_path") or row.get("source_path"))
+    has_path_points = bool(
+        _sequence(overlay.get("line_points"))
+        or _sequence(overlay.get("points"))
+        or _sequence(overlay.get("path"))
+        or _sequence(overlay.get("anchors"))
+    )
+    is_progression = overlay_type in {"PROGRESSION_PATH", "HISTORICAL_REPLAY", "HISTORICAL_PROGRESSION", "PROGRESSION"}
+    return bool(is_progression and layer in {"", "historical_replay", "replay"} and not source_path and not has_path_points)
 
 
 def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = False) -> dict[str, Any]:
