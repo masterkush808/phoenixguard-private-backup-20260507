@@ -2447,7 +2447,7 @@ def _broker_source_lock_payload_v3(
         row["expected_broker_source_lock"] = {
             "source_role": "study",
             "source_kind": "pocket_option_chart" if _is_pocket_option_query(query_text) or _is_pocket_option_like_title(title) else "visible_chart",
-            "required_browser": "edge",
+            "required_browser": "chrome",
             "broker_title_tokens": ["pocket option", "pocketoption", "the most innovative trading platform"],
             "broker_url_tokens": ["pocketoption.com", "pocketoption"],
         }

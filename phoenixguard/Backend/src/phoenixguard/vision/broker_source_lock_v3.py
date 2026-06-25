@@ -80,7 +80,7 @@ DEFAULT_BROKER_URL_TOKENS = (
     "pocketoption.com",
     "pocketoption",
 )
-DEFAULT_REQUIRED_BROWSER = "edge"
+DEFAULT_REQUIRED_BROWSER = "chrome"
 STUDY_SOURCE_ROLE_TOKENS = frozenset(
     {
         "study",
@@ -1210,11 +1210,7 @@ def evaluate_broker_source_lock_v3(
 
     if text_matched_rows and not browser_matched_rows:
         browser_label = "the required browser" if required_browser in {"", "any", "*"} else f"the required {required_browser} browser"
-        browser_reason_codes = (
-            ("EDGE_BROWSER_REQUIRED",)
-            if required_browser == DEFAULT_REQUIRED_BROWSER
-            else ("BROWSER_REQUIREMENT_NOT_MET",)
-        )
+        browser_reason_codes = ("CHROME_BROWSER_REQUIRED",) if required_browser == "chrome" else ("BROWSER_REQUIREMENT_NOT_MET",)
         return _lock_result(
             INVALID_BROWSER,
             f"A broker title or URL was found, but it was not in {browser_label} surface.",
@@ -1240,7 +1236,7 @@ def evaluate_broker_source_lock_v3(
             )
         return _lock_result(
             BROKER_NOT_FOUND,
-            "No Edge browser target matched the broker title or URL tokens.",
+            f"No {required_browser or 'required'} browser target matched the broker title or URL tokens.",
             ("BROKER_TARGET_TEXT_NOT_FOUND",),
             candidate_count=len(candidate_rows),
             matching_candidate_count=0,

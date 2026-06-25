@@ -266,14 +266,14 @@ def test_broker_not_found_when_no_candidates_are_available() -> None:
     assert lock.reason_codes == ("NO_CANDIDATES",)
 
 
-def test_invalid_browser_blocks_broker_title_outside_edge() -> None:
+def test_invalid_browser_blocks_broker_title_outside_chrome() -> None:
     image = _synthetic_broker_image()
-    payload = _edge_broker_payload(browser="chrome", title="Pocket Option - Google Chrome")
+    payload = _edge_broker_payload(browser="edge", title="Pocket Option - Microsoft Edge")
 
     lock = build_broker_source_lock_v3(payload, image=image)
 
     assert lock.status == INVALID_BROWSER
-    assert "EDGE_BROWSER_REQUIRED" in lock.reason_codes
+    assert "CHROME_BROWSER_REQUIRED" in lock.reason_codes
 
 
 def test_viewport_mismatch_blocks_lock() -> None:
