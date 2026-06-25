@@ -110,27 +110,27 @@ operator launch documentation.
 ## Tests Passed
 
 ```text
-python -m pytest Backend/tests/test_execution_packet_schema_v3.py Backend/tests/test_model_council_v3.py Backend/tests/test_market_reality_engine.py Backend/tests/test_market_intelligence_v3.py Backend/tests/test_v3_language_contracts.py Backend/tests/test_simulation_paper_execution.py Backend/tests/test_shooter_action_sequencer.py -q
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_execution_packet_schema_v3.py Backend/tests/test_model_council_v3.py Backend/tests/test_market_reality_engine.py Backend/tests/test_market_intelligence_v3.py Backend/tests/test_v3_language_contracts.py Backend/tests/test_simulation_paper_execution.py Backend/tests/test_shooter_action_sequencer.py -q
 144 passed in 17.77s
 ```
 
 ```text
-python -m pytest Backend/tests/test_shooter_v3_runtime.py -q
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_shooter_v3_runtime.py -q
 42 passed in 9.07s
 ```
 
 ```text
-python -m pytest Backend/tests/test_cache_observability_v3.py Backend/tests/test_runtime_telemetry_v3.py Backend/tests/test_manual_inference_queue.py -q
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_cache_observability_v3.py Backend/tests/test_runtime_telemetry_v3.py Backend/tests/test_manual_inference_queue.py -q
 33 passed in 54.45s
 ```
 
 ```text
-python -m compileall -q main.py shooter.py Backend\src\phoenixguard\decision Backend\src\phoenixguard\execution Backend\src\phoenixguard\mobile_api Backend\src\phoenixguard\runtime Backend\tools\runtime_trace_v3.py Backend\tools\certification_common_v3.py
+.\.venv\Scripts\python.exe -m compileall -q main.py shooter.py Backend\src\phoenixguard\decision Backend\src\phoenixguard\execution Backend\src\phoenixguard\mobile_api Backend\src\phoenixguard\runtime Backend\tools\runtime_trace_v3.py Backend\tools\certification_common_v3.py
 PASS
 ```
 
 ```text
-python Backend\tools\verify_v3_integrity.py
+.\.venv\Scripts\python.exe Backend\tools\verify_v3_integrity.py
 Overall: PASS
 ```
 

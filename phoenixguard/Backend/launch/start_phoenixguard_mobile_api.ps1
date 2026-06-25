@@ -26,16 +26,20 @@ $ActivateScriptPath = Join-Path -Path $ProjectRoot -ChildPath '.venv\Scripts\Act
 if (-not (Test-Path -LiteralPath $ActivateScriptPath)) {
     throw "Virtual environment activation script not found at '$ActivateScriptPath'."
 }
+$PythonPath = Join-Path -Path $ProjectRoot -ChildPath '.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $PythonPath)) {
+    throw "Python executable not found at '$PythonPath'."
+}
 
 . $ActivateScriptPath
 
 if ($Bootstrap) {
     Write-Host "Installing Python dependencies for the mobile API..."
-    python -m pip install --upgrade pip
+    & $PythonPath -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to upgrade pip."
     }
-    python -m pip install -r requirements.txt
+    & $PythonPath -m pip install -r requirements.txt
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to install dependencies from 'requirements.txt'."
     }
@@ -45,7 +49,7 @@ $env:PHOENIXGUARD_MOBILE_API_HOST = $Host
 $env:PHOENIXGUARD_MOBILE_API_PORT = "$Port"
 
 Write-Host "Launching PhoenixGuard Mobile API at http://$Host`:$Port"
-python Backend\launch\start_phoenixguard_mobile_api.py
+& $PythonPath Backend\launch\start_phoenixguard_mobile_api.py
 if ($LASTEXITCODE -ne 0) {
     throw "PhoenixGuard Mobile API exited with code $LASTEXITCODE."
 }

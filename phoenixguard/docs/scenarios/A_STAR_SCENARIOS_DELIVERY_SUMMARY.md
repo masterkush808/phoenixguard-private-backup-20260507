@@ -281,7 +281,7 @@ Run with:
 
 ```bash
 
-python Backend/tests/test_a_star_scenarios.py
+.\.venv\Scripts\python.exe Backend/tests/test_a_star_scenarios.py
 
 ```
 

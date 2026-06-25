@@ -39,7 +39,7 @@ Launch:
 ```powershell
 .\.venv\Scripts\Activate.ps1
 .\Backend\launch\start_live_dashboard.ps1 -ForceRestart
-python Backend\launch\shooter.py signal `
+.\.venv\Scripts\python.exe Backend\launch\shooter.py signal `
   --session-id pocket-live-8788 `
   --base-url http://127.0.0.1:8793 `
   --poll 0.05 `

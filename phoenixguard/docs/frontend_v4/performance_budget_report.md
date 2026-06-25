@@ -44,7 +44,7 @@ Remote/share budget if this dashboard is ever exposed outside localhost:
 Safe regression subset executed in this pass:
 
 ```powershell
-python -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_ui_copy_hardening.py Backend/tests/test_window_tracker_service.py::test_tracker_http_surface_serves_session_artifacts_and_dashboard Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop Backend/tests/test_window_tracker_service.py::test_live_dashboard_launcher_keeps_voice_bridge_opt_in Backend/tests/test_window_tracker_service.py::test_full_local_launcher_arms_live_shooter_without_broker_auto_open Backend/tests/test_window_tracker_service.py::test_tracker_http_emergency_stop_disables_live_execution -v --tb=short -ra
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_ui_copy_hardening.py Backend/tests/test_window_tracker_service.py::test_tracker_http_surface_serves_session_artifacts_and_dashboard Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop Backend/tests/test_window_tracker_service.py::test_live_dashboard_launcher_keeps_voice_bridge_opt_in Backend/tests/test_window_tracker_service.py::test_full_local_launcher_arms_live_shooter_without_broker_auto_open Backend/tests/test_window_tracker_service.py::test_tracker_http_emergency_stop_disables_live_execution -v --tb=short -ra
 ```
 
 Result: 15 passed in 35.25s.
@@ -52,7 +52,7 @@ Result: 15 passed in 35.25s.
 Safe broader command:
 
 ```powershell
-python -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_mobile_observer_service.py Backend/tests/test_window_tracker_service.py Backend/tests/test_ui_copy_hardening.py -v --tb=short -ra
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_mobile_observer_service.py Backend/tests/test_window_tracker_service.py Backend/tests/test_ui_copy_hardening.py -v --tb=short -ra
 ```
 
 Static size check command:
@@ -68,7 +68,7 @@ Do not run these for performance QA because they can trigger live runtime or bro
 ```powershell
 .\Backend\launch\start_live_dashboard.ps1
 .\Backend\launch\start_phoenixguard_full_local.ps1
-python Backend\launch\shooter.py signal --session-id pocket-live-8788 --base-url http://127.0.0.1:8793 --poll 0.05 --max-signal-age 8 --preferred-source tracker --require-preferred-source --shooter-mode LIVE_READY --no-auto-open
+.\.venv\Scripts\python.exe Backend\launch\shooter.py signal --session-id pocket-live-8788 --base-url http://127.0.0.1:8793 --poll 0.05 --max-signal-age 8 --preferred-source tracker --require-preferred-source --shooter-mode LIVE_READY --no-auto-open
 ```
 
 Also do not use performance probes that call:

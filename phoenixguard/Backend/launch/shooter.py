@@ -358,7 +358,7 @@ def run_reporter(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python Backend/launch/shooter.py",
+        prog=r".\.venv\Scripts\python.exe Backend\launch\shooter.py",
         description="Report allowed PhoenixGuard intraday/swing packages; broker execution is retired.",
     )
     parser.add_argument("command", nargs="?", default="signal")

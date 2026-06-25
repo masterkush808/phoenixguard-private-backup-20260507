@@ -1,6 +1,6 @@
 """Generate a memory-similarity historical report for the shooter.
 
-Usage: python Backend/tools/shooter_memory_report.py --session-history data/session_history.jsonl \
+Usage: ./.venv/Scripts/python.exe Backend/tools/shooter_memory_report.py --session-history data/session_history.jsonl \
     --out reports/shooter_memory_report.json
 
 The script aggregates `memory_similarity` values, zone match counts, and

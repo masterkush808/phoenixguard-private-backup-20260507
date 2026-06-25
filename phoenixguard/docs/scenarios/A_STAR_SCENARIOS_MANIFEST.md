@@ -458,7 +458,7 @@ dashboard = create_scenario_dashboard_layout(result["forecast"]["scenarios"])
 
 ```bash
 
-python Backend/tests/test_a_star_scenarios.py
+.\.venv\Scripts\python.exe Backend/tests/test_a_star_scenarios.py
 
 ```
 

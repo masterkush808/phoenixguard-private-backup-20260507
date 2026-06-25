@@ -101,7 +101,7 @@ $env:PHOENIXGUARD_MONITOR_BASE_HOST = '127.0.0.1'
 Then from the local shooter machine:
 
 ```powershell
-python Backend\launch\shooter.py signal --session-id pocket-live-8788 --base-url http://VM_PRIVATE_IP:8793 --poll 1.0 --preferred-source tracker --require-preferred-source --min-confidence 0.58 --max-signal-age 8
+.\.venv\Scripts\python.exe Backend\launch\shooter.py signal --session-id pocket-live-8788 --base-url http://VM_PRIVATE_IP:8793 --poll 1.0 --preferred-source tracker --require-preferred-source --min-confidence 0.58 --max-signal-age 8
 ```
 
 Do not expose `8793` unauthenticated to the public internet.

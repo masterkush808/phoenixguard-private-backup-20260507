@@ -15,8 +15,8 @@ other tooling. PhoenixGuard should not depend on that global environment.
 The repo `.venv` currently passes:
 
 ```text
-python -m pip check
-python -m pipdeptree --warn fail
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m pipdeptree --warn fail
 ```
 
 The dependency policy is therefore:

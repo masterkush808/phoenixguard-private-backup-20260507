@@ -18,7 +18,7 @@
 ## Diagnostic Command
 
 ```powershell
-python Backend\tools\diagnose_v3_execution_path.py --session pocket-live-8788 --base-url http://127.0.0.1:8793
+.\.venv\Scripts\python.exe Backend\tools\diagnose_v3_execution_path.py --session pocket-live-8788 --base-url http://127.0.0.1:8793
 ```
 
 Use this while both processes are running. The deciding comparison is:

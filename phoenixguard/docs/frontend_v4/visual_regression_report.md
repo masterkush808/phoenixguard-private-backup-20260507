@@ -30,7 +30,7 @@ The dashboard uses full-screen background scene cycling, a dark glass console, g
 Existing pytest checks assert visual/layout-critical source behavior:
 
 ```powershell
-python -m pytest Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop -v --tb=short -ra
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop -v --tb=short -ra
 ```
 
 Result in this QA pass: passed as part of the 15-test safe subset.
@@ -61,7 +61,7 @@ Use only a non-live test service or fixture-backed API for this checklist. Do no
 No Playwright/Selenium/Lighthouse dependency was found in the repo. When adding a visual harness, keep it isolated from live execution:
 
 ```powershell
-python -m pytest Backend/tests/test_window_tracker_service.py::test_tracker_http_surface_serves_session_artifacts_and_dashboard -v --tb=short -ra
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_window_tracker_service.py::test_tracker_http_surface_serves_session_artifacts_and_dashboard -v --tb=short -ra
 ```
 
 Then add a fixture server that uses fake tracker services only, and capture screenshots at:

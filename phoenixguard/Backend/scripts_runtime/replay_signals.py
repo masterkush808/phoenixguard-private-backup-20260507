@@ -1,6 +1,6 @@
 """Replay script: dry-run evaluation of signal payloads through parse_trade_signal().
 
-Usage: python Backend/scripts_runtime/replay_signals.py <jsonl_path> [--limit N]
+Usage: ./.venv/Scripts/python.exe Backend/scripts_runtime/replay_signals.py <jsonl_path> [--limit N]
 
 This imports parse_trade_signal from `shooter.py` safely (module import doesn't start execution).
 Outputs Backend/scripts_runtime/replay_trace.log and prints a short summary.

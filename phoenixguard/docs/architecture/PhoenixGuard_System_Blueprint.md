@@ -252,7 +252,7 @@ Get-CimInstance Win32_Process |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 Start-Sleep -Seconds 3
-python .\Backend\tools\clean_v3_runtime_state.py --apply
+.\.venv\Scripts\python.exe .\Backend\tools\clean_v3_runtime_state.py --apply
 ```
 
 The final live dashboard stack is launched with:
@@ -283,9 +283,9 @@ Invoke-RestMethod "$base/v1/mobile/live/state/v3/$session?mode=CLEAN_LIVE" | Con
 Invoke-RestMethod "$base/v1/mobile/performance/trace/v3/$session" | ConvertTo-Json -Depth 12
 Invoke-RestMethod "$base/v1/mobile/runtime/trace/v3?session_id=$session" | ConvertTo-Json -Depth 16
 
-python .\Backend\tools\runtime_trace_v3.py --base-url $base --session $session --timeout 20
-python .\Backend\tools\trace_sequence_context_v3.py --base-url $base --session $session --timeout 20
-python .\Backend\tools\verify_v3_integrity.py
+.\.venv\Scripts\python.exe .\Backend\tools\runtime_trace_v3.py --base-url $base --session $session --timeout 20
+.\.venv\Scripts\python.exe .\Backend\tools\trace_sequence_context_v3.py --base-url $base --session $session --timeout 20
+.\.venv\Scripts\python.exe .\Backend\tools\verify_v3_integrity.py
 ```
 
 The API-only fallback for backend debugging is:
@@ -1061,10 +1061,10 @@ persistence, wrong-surface rejection, and V3 burn-in.
 The final hardening validation used:
 
 ```powershell
-python -m py_compile Backend\src\Backend\src\phoenixguard\mobile_api\app.py Backend\src\Backend\src\phoenixguard\mobile_api\window_tracker.py Backend\src\Backend\src\phoenixguard\mobile_api\model_strength.py Backend\src\Backend\src\phoenixguard\decision\model_council_v3.py Backend\src\Backend\src\phoenixguard\vision\overlay_geometry.py Backend\tools\run_entry_allowance_burn.py
-python -m pytest -q Backend/tests\test_entry_allowance_burn.py Backend/tests\test_model_strength_controls.py Backend/tests\test_cache_observability_v3.py
-python -m pytest -q Backend/tests\test_voice_bundles.py Backend/tests\test_voice_command_router.py
-python -m pytest -q Backend/tests\test_business_api.py Backend/tests\test_business_commands.py Backend/tests\test_business_commercial_api.py Backend/tests\test_business_integration_mock_api.py
+.\.venv\Scripts\python.exe -m py_compile Backend\src\Backend\src\phoenixguard\mobile_api\app.py Backend\src\Backend\src\phoenixguard\mobile_api\window_tracker.py Backend\src\Backend\src\phoenixguard\mobile_api\model_strength.py Backend\src\Backend\src\phoenixguard\decision\model_council_v3.py Backend\src\Backend\src\phoenixguard\vision\overlay_geometry.py Backend\tools\run_entry_allowance_burn.py
+.\.venv\Scripts\python.exe -m pytest -q Backend/tests\test_entry_allowance_burn.py Backend/tests\test_model_strength_controls.py Backend/tests\test_cache_observability_v3.py
+.\.venv\Scripts\python.exe -m pytest -q Backend/tests\test_voice_bundles.py Backend/tests\test_voice_command_router.py
+.\.venv\Scripts\python.exe -m pytest -q Backend/tests\test_business_api.py Backend/tests\test_business_commands.py Backend/tests\test_business_commercial_api.py Backend/tests\test_business_integration_mock_api.py
 ```
 
 The corrected four-hour hardening burn retained 108 allowed entry events, 108 broker screenshots,
@@ -1078,7 +1078,7 @@ studied.
 The hardening burn tool is:
 
 ```powershell
-python .\Backend\tools\run_entry_allowance_burn.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --duration-sec 14400 --interval-sec 1 --timeout 20
+.\.venv\Scripts\python.exe .\Backend\tools\run_entry_allowance_burn.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --duration-sec 14400 --interval-sec 1 --timeout 20
 ```
 
 The important output artifacts are:
@@ -1153,7 +1153,7 @@ The live shooter is capable of real broker clicks. Strict operation requires:
 Package reporter mode should follow the README pattern:
 
 ```powershell
-python Backend\launch\shooter.py --session-id pocket-live-8788 --base-url http://127.0.0.1:8793 --poll 0.20
+.\.venv\Scripts\python.exe Backend\launch\shooter.py --session-id pocket-live-8788 --base-url http://127.0.0.1:8793 --poll 0.20
 ```
 
 ## Failure Handling And Diagnostics
@@ -1170,17 +1170,17 @@ The active execution path document defines key diagnosis cases:
 Primary diagnostic command:
 
 ```powershell
-python Backend\tools\diagnose_v3_execution_path.py --session pocket-live-8788 --base-url http://127.0.0.1:8793
+.\.venv\Scripts\python.exe Backend\tools\diagnose_v3_execution_path.py --session pocket-live-8788 --base-url http://127.0.0.1:8793
 ```
 
 Other useful tools:
 
 ```powershell
-python Backend\tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
-python Backend\tools\trace_backend_frontend_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
-python Backend\tools\trace_overlay_source_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
-python Backend\tools\trace_frame_timing_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
-python Backend\tools\verify_v3_integrity.py
+.\.venv\Scripts\python.exe Backend\tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
+.\.venv\Scripts\python.exe Backend\tools\trace_backend_frontend_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
+.\.venv\Scripts\python.exe Backend\tools\trace_overlay_source_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
+.\.venv\Scripts\python.exe Backend\tools\trace_frame_timing_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788
+.\.venv\Scripts\python.exe Backend\tools\verify_v3_integrity.py
 ```
 
 ## Design Principles Used

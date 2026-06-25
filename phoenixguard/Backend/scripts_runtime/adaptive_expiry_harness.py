@@ -1,7 +1,7 @@
 """Simple harness to exercise _choose_adaptive_expiry diagnostics.
 
 Run from repo root:
-    python Backend/scripts_runtime/adaptive_expiry_harness.py
+    ./.venv/Scripts/python.exe Backend/scripts_runtime/adaptive_expiry_harness.py
 
 This will load the `shooter.py` module by path and call the adaptive
 selection helper with several synthetic payloads, printing results.

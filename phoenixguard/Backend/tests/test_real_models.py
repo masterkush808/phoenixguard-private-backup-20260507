@@ -13,7 +13,7 @@ Tests:
 
 Run:
     cd phoenixguard
-    python -m pytest Backend/tests/test_real_models.py -v --tb=short
+    ./.venv/Scripts/python.exe -m pytest Backend/tests/test_real_models.py -v --tb=short
 """
 from __future__ import annotations
 

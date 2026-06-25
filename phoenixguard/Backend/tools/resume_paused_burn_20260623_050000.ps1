@@ -99,7 +99,7 @@ $env:PHOENIXGUARD_BURN_CAPTURE_BLOCKED_ENTER_NOW = "1"
 
 $python = Join-Path $Root ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
-    $python = "python.exe"
+    throw "PhoenixGuard repo Python not found at '$python'. Run Backend\scripts_runtime\env\install_dev.ps1 or create .venv before resuming this burn."
 }
 $powershell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
 

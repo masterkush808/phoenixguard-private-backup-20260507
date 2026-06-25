@@ -310,7 +310,7 @@ csv_str = export_scenarios_as_csv(scenarios_raw)
 
 ```bash
 
-python Backend/tests/test_a_star_scenarios.py    # Run all 4 demos
+.\.venv\Scripts\python.exe Backend/tests/test_a_star_scenarios.py    # Run all 4 demos
 
 ```
 

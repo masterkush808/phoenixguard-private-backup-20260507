@@ -46,9 +46,9 @@ Environment installers live under `Backend/scripts_runtime/env/`:
 Before trusting an environment:
 
 ```powershell
-python -m pip check
-python -m pipdeptree --warn fail
-python .\Backend\tools\verify_dependency_profile.py --profile dev
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m pipdeptree --warn fail
+.\.venv\Scripts\python.exe .\Backend\tools\verify_dependency_profile.py --profile dev
 ```
 
 ## Fast Safe Restart
@@ -84,7 +84,7 @@ Start-Sleep -Seconds 3
 
 # Back up and clear stale runtime/cache state. This preserves models, memory,
 # user configuration, reports, and current package-reporter state boundaries.
-python .\Backend\tools\clean_v3_runtime_state.py --apply
+.\.venv\Scripts\python.exe .\Backend\tools\clean_v3_runtime_state.py --apply
 if ($LASTEXITCODE -ne 0) { throw "Runtime cleanup failed. Launch aborted." }
 
 # Canonical final V3 live launch. -NoBrowser prevents popup/editor launch.
@@ -119,9 +119,9 @@ Invoke-RestMethod "$base/v1/mobile/runtime/trace/v3?session_id=$session" |
     ConvertTo-Json -Depth 16
 
 # CLI summaries for quick pass/fail reads.
-python .\Backend\tools\runtime_trace_v3.py --base-url $base --session $session --timeout 20
-python .\Backend\tools\trace_sequence_context_v3.py --base-url $base --session $session --timeout 20
-python .\Backend\tools\verify_v3_integrity.py
+.\.venv\Scripts\python.exe .\Backend\tools\runtime_trace_v3.py --base-url $base --session $session --timeout 20
+.\.venv\Scripts\python.exe .\Backend\tools\trace_sequence_context_v3.py --base-url $base --session $session --timeout 20
+.\.venv\Scripts\python.exe .\Backend\tools\verify_v3_integrity.py
 ```
 
 `verify_v3_integrity.py` should report `Overall: PASS` before you treat the runtime as
@@ -237,7 +237,7 @@ Start-Sleep -Seconds 3
 .\.venv\Scripts\Activate.ps1
 
 # Clear V3 runtime/cache state before a cold launch.
-python .\Backend\tools\clean_v3_runtime_state.py --apply
+.\.venv\Scripts\python.exe .\Backend\tools\clean_v3_runtime_state.py --apply
 if ($LASTEXITCODE -ne 0) {
     throw "Runtime cleanup failed. Launch aborted."
 }
@@ -297,9 +297,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoe
 After launch, verify runtime trace, sequence context, and canonical integrity:
 
 ```powershell
-python .\Backend\tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
-python .\Backend\tools\trace_sequence_context_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
-python .\Backend\tools\verify_v3_integrity.py
+.\.venv\Scripts\python.exe .\Backend\tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
+.\.venv\Scripts\python.exe .\Backend\tools\trace_sequence_context_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
+.\.venv\Scripts\python.exe .\Backend\tools\verify_v3_integrity.py
 ```
 
 `verify_v3_integrity.py` must report `Overall: PASS` before treating the runtime as
@@ -308,7 +308,7 @@ production-ready.
 Two-hour activated burn-in:
 
 ```powershell
-python .\Backend\tools\certify_v3_full_system_burn_in.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --duration-sec 7200 --interval-sec 10 --warmup-sec 60 --status-every-sec 60 --timeout 20 --mode FULL_ACTIVATED --max-frame-age-ms 2500 --max-consecutive-stale-frames 12 --max-consecutive-process-misses 5 --no-stop-on-stale-frame --no-stop-on-stale-execution-packet --out reports\FINAL_FULL_SYSTEM_ACTIVATED_BURN_IN_OVERLAYFIXED_FINAL_REPORT.md
+.\.venv\Scripts\python.exe .\Backend\tools\certify_v3_full_system_burn_in.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --duration-sec 7200 --interval-sec 10 --warmup-sec 60 --status-every-sec 60 --timeout 20 --mode FULL_ACTIVATED --max-frame-age-ms 2500 --max-consecutive-stale-frames 12 --max-consecutive-process-misses 5 --no-stop-on-stale-frame --no-stop-on-stale-execution-packet --out reports\FINAL_FULL_SYSTEM_ACTIVATED_BURN_IN_OVERLAYFIXED_FINAL_REPORT.md
 ```
 
 For long live observation runs where transient Windows capture latency should be logged but not
@@ -332,13 +332,13 @@ The old calibrated broker-click shooter has been retired. `Backend/launch/shoote
 To run the reporter once after verification:
 
 ```powershell
-python Backend\launch\shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --once
+.\.venv\Scripts\python.exe Backend\launch\shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --once
 ```
 
 To keep the reporter polling:
 
 ```powershell
-python Backend\launch\shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20
+.\.venv\Scripts\python.exe Backend\launch\shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20
 ```
 
 Package authority:
@@ -373,11 +373,11 @@ packet contract, shooter persistence, and burn-in evidence.
 Focused Grade A\* hardening checks:
 
 ```powershell
-python -m pytest Backend/tests/test_execution_packet_schema_v3.py Backend/tests/test_model_council_v3.py Backend/tests/test_market_reality_engine.py Backend/tests/test_market_intelligence_v3.py Backend/tests/test_v3_language_contracts.py Backend/tests/test_simulation_paper_execution.py Backend/tests/test_mt4_file_bridge.py -q
-python -m pytest Backend/tests/test_entry_allowance_burn.py Backend/tests/test_business_commands.py -q
-python -m pytest Backend/tests/test_cache_observability_v3.py Backend/tests/test_runtime_telemetry_v3.py Backend/tests/test_manual_inference_queue.py -q
-python -m compileall -q Frontend\dashboard\main.py Backend\launch\shooter.py Backend\src\phoenixguard\decision Backend\src\phoenixguard\execution Backend\src\phoenixguard\mobile_api Backend\src\phoenixguard\runtime Backend\tools\runtime_trace_v3.py Backend\tools\certification_common_v3.py
-python Backend\tools\verify_v3_integrity.py
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_execution_packet_schema_v3.py Backend/tests/test_model_council_v3.py Backend/tests/test_market_reality_engine.py Backend/tests/test_market_intelligence_v3.py Backend/tests/test_v3_language_contracts.py Backend/tests/test_simulation_paper_execution.py Backend/tests/test_mt4_file_bridge.py -q
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_entry_allowance_burn.py Backend/tests/test_business_commands.py -q
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_cache_observability_v3.py Backend/tests/test_runtime_telemetry_v3.py Backend/tests/test_manual_inference_queue.py -q
+.\.venv\Scripts\python.exe -m compileall -q Frontend\dashboard\main.py Backend\launch\shooter.py Backend\src\phoenixguard\decision Backend\src\phoenixguard\execution Backend\src\phoenixguard\mobile_api Backend\src\phoenixguard\runtime Backend\tools\runtime_trace_v3.py Backend\tools\certification_common_v3.py
+.\.venv\Scripts\python.exe Backend\tools\verify_v3_integrity.py
 ```
 
 ## TradingView Study Source
@@ -386,7 +386,7 @@ TradingView may be used as a chart-study source while any real execution path re
 the local package reporter. Keep study sessions separated from broker/external bridge sessions:
 
 ```powershell
-python Backend\launch\start_phoenixguard_24_7_tracker.py --session-id tradingview-study --window-query "TradingView" --focus-region ""
+.\.venv\Scripts\python.exe Backend\launch\start_phoenixguard_24_7_tracker.py --session-id tradingview-study --window-query "TradingView" --focus-region ""
 ```
 
 ## Production Artifacts

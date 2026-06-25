@@ -27,6 +27,7 @@ $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Pat
 Set-Location -LiteralPath $ProjectRoot
 $VirtualEnvPath = Join-Path -Path $ProjectRoot -ChildPath '.venv'
 $ActivateScriptPath = Join-Path -Path $VirtualEnvPath -ChildPath 'Scripts\Activate.ps1'
+$PythonPath = Join-Path -Path $VirtualEnvPath -ChildPath 'Scripts\python.exe'
 $RequirementsFilePath = Join-Path -Path $ProjectRoot -ChildPath 'requirements.txt'
 $backendSrc = Join-Path -Path $ProjectRoot -ChildPath 'Backend\src'
 $backendRoot = Join-Path -Path $ProjectRoot -ChildPath 'Backend'
@@ -46,6 +47,9 @@ if (-not (Test-Path -LiteralPath $VirtualEnvPath)) {
 if (-not (Test-Path -LiteralPath $ActivateScriptPath)) {
     throw "Virtual environment activation script not found at '$ActivateScriptPath'."
 }
+if (-not (Test-Path -LiteralPath $PythonPath)) {
+    throw "Python executable not found at '$PythonPath'."
+}
 
 . $ActivateScriptPath
 
@@ -55,12 +59,12 @@ if ($Bootstrap) {
     }
 
     Write-Output "Installing Python dependencies..."
-    python -m pip install --upgrade pip
+    & $PythonPath -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to upgrade pip."
     }
 
-    python -m pip install -r $RequirementsFilePath
+    & $PythonPath -m pip install -r $RequirementsFilePath
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to install dependencies from '$RequirementsFilePath'."
     }
@@ -137,7 +141,7 @@ switch ($ResolvedAccessMode) {
 }
 
 Write-Output "Launching 808Fx Standard System premium share surface on $($env:PHOENIXGUARD_UI_HOST):$($env:PHOENIXGUARD_UI_PORT) with access mode $ResolvedAccessMode"
-python $ShareRunnerPath
+& $PythonPath $ShareRunnerPath
 
 if ($LASTEXITCODE -ne 0) {
     throw "808Fx Standard System exited with code $LASTEXITCODE."

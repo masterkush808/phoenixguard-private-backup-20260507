@@ -16,7 +16,7 @@ def _require_reportlab() -> None:
     if importlib.util.find_spec("reportlab") is None:  # pragma: no cover - missing env deps
         raise SystemExit(
             "Missing dependency: reportlab. Install project dependencies with "
-            "`python -m pip install -r requirements.txt`, or install reportlab directly."
+            r"`.\.venv\Scripts\python.exe -m pip install -r requirements.txt`, or install reportlab directly."
         )
 
 

@@ -34,6 +34,10 @@ $ActivateScriptPath = Join-Path -Path $ProjectRoot -ChildPath '.venv\Scripts\Act
 if (-not (Test-Path -LiteralPath $ActivateScriptPath)) {
     throw "Virtual environment activation script not found at '$ActivateScriptPath'."
 }
+$PythonPath = Join-Path -Path $ProjectRoot -ChildPath '.venv\Scripts\python.exe'
+if (-not (Test-Path -LiteralPath $PythonPath)) {
+    throw "Python executable not found at '$PythonPath'."
+}
 
 . $ActivateScriptPath
 
@@ -82,7 +86,7 @@ if ($NoWaitForLock) {
     $launcherArgs += '--no-wait-for-lock'
 }
 
-python @launcherArgs
+& $PythonPath @launcherArgs
 if ($LASTEXITCODE -ne 0) {
     throw "PhoenixGuard 24/7 tracker exited with code $LASTEXITCODE."
 }

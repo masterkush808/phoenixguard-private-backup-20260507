@@ -43,7 +43,7 @@ title. Make sure:
 ```bash
 
 1. Start PhoenixGuard mobile API:
-   python Backend\launch\start_phoenixguard_mobile_api.py
+   .\.venv\Scripts\python.exe Backend\launch\start_phoenixguard_mobile_api.py
 
 2. Open in browser:
    http://localhost:8000/v1/mobile/window-tracker/dashboard

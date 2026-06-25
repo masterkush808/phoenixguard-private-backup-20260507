@@ -16,6 +16,10 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $WebDir = Join-Path $RepoRoot "Business\web"
 $BackendSrc = Join-Path $RepoRoot "Backend\src"
 $BackendRoot = Join-Path $RepoRoot "Backend"
+$PythonPath = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $PythonPath)) {
+    throw "PhoenixGuard repo Python not found at '$PythonPath'. Run Backend\scripts_runtime\env\install_business.ps1 or create .venv before starting the business mock API."
+}
 $env:PYTHONPATH = (@($BackendSrc, $BackendRoot, $RepoRoot, $env:PYTHONPATH) | Where-Object { $_ -and [string]$_ -ne "" }) -join [System.IO.Path]::PathSeparator
 $RuntimeDir = Join-Path $RepoRoot ".codex_runtime\business_mock"
 $PidFile = Join-Path $RuntimeDir "pids.json"
@@ -96,6 +100,11 @@ function Wait-HttpOk {
     throw "Timed out waiting for $Url"
 }
 
+function Quote-PowerShellLiteral {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
 function Start-HiddenPowerShell {
     param(
         [string]$Name,
@@ -135,7 +144,7 @@ $apiProcess = $null
 $webProcess = $null
 
 if (-not $SkipApi) {
-    $apiCommand = "python -m uvicorn Business.api.business_mock_api:app --host $ApiHost --port $ApiPort --log-level info"
+    $apiCommand = "& $(Quote-PowerShellLiteral -Value $PythonPath) -m uvicorn Business.api.business_mock_api:app --host $ApiHost --port $ApiPort --log-level info"
     $apiProcess = Start-HiddenPowerShell -Name "api" -WorkingDirectory $RepoRoot -CommandLine $apiCommand
     Wait-HttpOk -Url "$ApiBaseUrl/healthz" -TimeoutSec 60
     Write-Host "Mock FastAPI ready at $ApiBaseUrl"

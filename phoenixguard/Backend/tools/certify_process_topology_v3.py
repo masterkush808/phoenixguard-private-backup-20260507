@@ -78,17 +78,23 @@ def main() -> int:
         failures.append(f"listener on {args.port} is owned by PID {api_owner_pid}, not a start_phoenixguard_mobile_api.py process")
     if len(api_processes) != 1:
         failures.append(f"expected one API process, found {len(api_processes)}")
-        corrections.append("Stop stale mobile API processes, then relaunch via python Backend/launch/start_phoenixguard_24_7_tracker.py --port 8793.")
+        corrections.append(
+            r"Stop stale mobile API processes, then relaunch via .\.venv\Scripts\python.exe Backend\launch\start_phoenixguard_24_7_tracker.py --port 8793."
+        )
     if fallback_rows:
         failures.append(f"fallback API port {args.fallback_port} is listening: {fallback_rows}")
     if len(tracker_processes) != 1:
         failures.append(f"expected one tracker worker process, found {len(tracker_processes)}")
-        corrections.append("Start tracker with: python Backend/launch/start_phoenixguard_24_7_tracker.py --host 127.0.0.1 --port 8793 --session-id pocket-live-8788 --capture-interval 1 --no-open-dashboard")
+        corrections.append(
+            r"Start tracker with: .\.venv\Scripts\python.exe Backend\launch\start_phoenixguard_24_7_tracker.py --host 127.0.0.1 --port 8793 --session-id pocket-live-8788 --capture-interval 1 --no-open-dashboard"
+        )
     elif args.session not in command_line(tracker_processes[0]):
         failures.append(f"tracker process does not include expected session id {args.session}")
     if not shooter_processes and not args.allow_missing_shooter:
         failures.append("shooter process is not running")
-        corrections.append('Start shooter with: python Backend/launch/shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20')
+        corrections.append(
+            r"Start shooter with: .\.venv\Scripts\python.exe Backend\launch\shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20"
+        )
     if len(shooter_processes) > 1:
         failures.append(f"expected at most one shooter process, found {len(shooter_processes)}")
     if shooter_processes:

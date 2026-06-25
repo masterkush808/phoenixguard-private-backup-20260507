@@ -10,7 +10,7 @@ Live broker execution must not be triggered during QA. Treat these as inspect-on
 
 - `.\Backend\launch\start_live_dashboard.ps1`
 - `.\Backend\launch\start_phoenixguard_full_local.ps1`
-- `python Backend\launch\shooter.py signal ...`
+- `.\.venv\Scripts\python.exe Backend\launch\shooter.py signal ...`
 - any request to `/v1/mobile/window-tracker/sessions/{sessionId}/start`
 - any request to `/v1/mobile/window-tracker/sessions/{sessionId}/capture-once`
 - any request to `/v1/mobile/window-tracker/sessions/{sessionId}/demo-random-trade`
@@ -36,7 +36,7 @@ The dashboard is a single static HTML/CSS/JS surface of 187,212 bytes. It render
 Command:
 
 ```powershell
-python -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_ui_copy_hardening.py Backend/tests/test_window_tracker_service.py::test_tracker_http_surface_serves_session_artifacts_and_dashboard Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop Backend/tests/test_window_tracker_service.py::test_live_dashboard_launcher_keeps_voice_bridge_opt_in Backend/tests/test_window_tracker_service.py::test_full_local_launcher_arms_live_shooter_without_broker_auto_open Backend/tests/test_window_tracker_service.py::test_tracker_http_emergency_stop_disables_live_execution -v --tb=short -ra
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_ui_copy_hardening.py Backend/tests/test_window_tracker_service.py::test_tracker_http_surface_serves_session_artifacts_and_dashboard Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop Backend/tests/test_window_tracker_service.py::test_live_dashboard_launcher_keeps_voice_bridge_opt_in Backend/tests/test_window_tracker_service.py::test_full_local_launcher_arms_live_shooter_without_broker_auto_open Backend/tests/test_window_tracker_service.py::test_tracker_http_emergency_stop_disables_live_execution -v --tb=short -ra
 ```
 
 Result: 15 passed in 35.25s.
@@ -62,19 +62,19 @@ Activate the repo environment first:
 Safe frontend/dashboard regression command:
 
 ```powershell
-python -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_ui_copy_hardening.py Backend/tests/test_window_tracker_service.py::test_tracker_http_surface_serves_session_artifacts_and_dashboard Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop Backend/tests/test_window_tracker_service.py::test_live_dashboard_launcher_keeps_voice_bridge_opt_in Backend/tests/test_window_tracker_service.py::test_full_local_launcher_arms_live_shooter_without_broker_auto_open Backend/tests/test_window_tracker_service.py::test_tracker_http_emergency_stop_disables_live_execution -v --tb=short -ra
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_ui_copy_hardening.py Backend/tests/test_window_tracker_service.py::test_tracker_http_surface_serves_session_artifacts_and_dashboard Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout Backend/tests/test_window_tracker_service.py::test_tracker_dashboard_fits_selected_surface_without_width_only_crop Backend/tests/test_window_tracker_service.py::test_live_dashboard_launcher_keeps_voice_bridge_opt_in Backend/tests/test_window_tracker_service.py::test_full_local_launcher_arms_live_shooter_without_broker_auto_open Backend/tests/test_window_tracker_service.py::test_tracker_http_emergency_stop_disables_live_execution -v --tb=short -ra
 ```
 
 Broader but still unit/integration-oriented dashboard and tracker command:
 
 ```powershell
-python -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_mobile_observer_service.py Backend/tests/test_window_tracker_service.py Backend/tests/test_ui_copy_hardening.py -v --tb=short -ra
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_mobile_api_service.py Backend/tests/test_mobile_observer_service.py Backend/tests/test_window_tracker_service.py Backend/tests/test_ui_copy_hardening.py -v --tb=short -ra
 ```
 
 Do not run live launchers as part of QA. If static validation of launch scripts is needed, use read-only checks:
 
 ```powershell
-python -m pytest Backend/tests/test_window_tracker_service.py::test_live_dashboard_launcher_keeps_voice_bridge_opt_in Backend/tests/test_window_tracker_service.py::test_full_local_launcher_arms_live_shooter_without_broker_auto_open -v --tb=short -ra
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_window_tracker_service.py::test_live_dashboard_launcher_keeps_voice_bridge_opt_in Backend/tests/test_window_tracker_service.py::test_full_local_launcher_arms_live_shooter_without_broker_auto_open -v --tb=short -ra
 ```
 
 ## Product Polish Findings

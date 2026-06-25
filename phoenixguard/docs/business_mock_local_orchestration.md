@@ -44,7 +44,7 @@ To start only the API:
 Business API gates:
 
 ```powershell
-python -m pytest Backend/tests/test_business_integration_mock_api.py -v
+.\.venv\Scripts\python.exe -m pytest Backend/tests/test_business_integration_mock_api.py -v
 ```
 
 Playwright E2E contract, after the mock stack is running:

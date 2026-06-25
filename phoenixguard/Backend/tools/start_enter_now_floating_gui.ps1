@@ -8,10 +8,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $Python)) {
-    $Python = "python"
+    throw "PhoenixGuard repo Python not found at '$Python'. Run Backend\scripts_runtime\env\install_dev.ps1 or create .venv before starting the Enter Now floating GUI."
 }
 
 $ArgsList = @(

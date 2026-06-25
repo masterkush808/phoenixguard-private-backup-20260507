@@ -47,7 +47,7 @@ Those files are preserved locally in responsible folders, but they remain ignore
 
 - `python -m compileall -q .`: PASS
 - `python -m pyright`: PASS, 0 errors, 0 warnings, 0 informations
-- `python Backend\tools\verify_v3_integrity.py`: PASS
+- `.\.venv\Scripts\python.exe Backend\tools\verify_v3_integrity.py`: PASS
 - PowerShell launcher parser check: PASS for all moved launchers
 - Focused migration tests: PASS, 229 passed
 - Full pytest suite: PASS, 1258 passed, 3 skipped

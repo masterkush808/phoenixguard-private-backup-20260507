@@ -8,7 +8,7 @@ Covers every public function / class across all 12 source files:
 
 Run with:
     cd phoenixguard
-    python -m pytest Backend/tests/test_full_suite.py -v
+    ./.venv/Scripts/python.exe -m pytest Backend/tests/test_full_suite.py -v
 """
 from __future__ import annotations
 
