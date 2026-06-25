@@ -40,6 +40,34 @@ def test_overlay_zone_box_is_clipped_inside_chart_bounds() -> None:
     assert 0 <= y0 < y1 <= 120
 
 
+def test_base_departure_zone_keeps_historical_reaction_span() -> None:
+    zone: dict[str, Any] = {
+        "key": "resistance_1",
+        "role": "resistance",
+        "bbox": [700, 340, 1260, 390],
+        "line_y": 366,
+        "line_x0": 700,
+        "line_x1": 1260,
+        "confidence": 0.76,
+        "supply_demand_origin": "base_departure_imbalance",
+        "zone_pattern": "DROP_BASE_DROP",
+        "touch_points": [[51, 372], [580, 367], [931, 366], [1038, 388]],
+    }
+
+    sanitized = sanitize_overlay_box(
+        zone,
+        chart_bounds=[0, 0, 1628, 585],
+        layer="supply_demand",
+        require_anchor=True,
+    )
+
+    assert sanitized is not None
+    x0, _y0, x1, _y1 = sanitized["bbox"]
+    assert x0 < x1
+    assert x1 - x0 >= 1628 * 0.25
+    assert x1 - x0 <= 1628 * 0.31
+
+
 def test_overlay_broker_panel_is_not_accepted_as_chart_zone() -> None:
     chart_bounds = [0, 0, 1000, 500]
     broker_panel = [720, 0, 1000, 500]

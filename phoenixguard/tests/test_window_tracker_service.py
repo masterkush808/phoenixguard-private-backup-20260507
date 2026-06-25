@@ -2610,6 +2610,117 @@ def test_window_tracker_rejects_garbled_broker_markettext() -> None:
     assert normalize("W D0CR01ILJI . /JFW1 P IY W P 1") == ""
 
 
+def test_window_tracker_reuses_cached_market_only_when_selector_fingerprint_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    fingerprint = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_market_selector_visual_fingerprint"),
+    )
+    surface = _synthetic_chart_surface("buy", width=900, height=520)
+    draw = ImageDraw.Draw(surface)
+    draw.rectangle((4, 4, 176, 34), fill=(29, 38, 58))
+    draw.text((12, 12), "AUD/NZD OTC", fill=(235, 240, 248))
+    selector_fingerprint = fingerprint(surface)
+
+    def fail_market_detector(
+        image: Image.Image,
+        timeframe_selector: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        _ = image
+        _ = timeframe_selector
+        raise AssertionError("cached market selector should be reused while the header fingerprint is unchanged")
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", fail_market_detector)
+    study = adapter.study(
+        surface,
+        session_payload={
+            "session_id": "pocket-live",
+            "manual_focus_region": {"enabled": True},
+            "tracking_summary": {
+                "detected_market": "AUD/NZD",
+                "market_confidence": 0.91,
+                "detected_timeframe": "M5",
+                "timeframe_confidence": 1.0,
+                "market_selector_visual_fingerprint": selector_fingerprint,
+            },
+            "latest_signal": {
+                "market": "AUD/NZD",
+                "market_confidence": 0.91,
+                "focus_timeframe": "M5",
+                "focus_timeframe_confidence": 1.0,
+                "market_selector_visual_fingerprint": selector_fingerprint,
+            },
+        },
+    )
+
+    assert study.latest_signal["market"] == "AUD/NZD"
+    assert study.latest_signal["market_source"] == "live_cached_selector"
+    assert study.latest_signal["market_selector_visual_changed"] is False
+
+
+def test_window_tracker_rebinds_market_when_selector_fingerprint_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    fingerprint = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_market_selector_visual_fingerprint"),
+    )
+    old_surface = _synthetic_chart_surface("buy", width=900, height=520)
+    new_surface = _synthetic_chart_surface("sell", width=900, height=520)
+    old_draw = ImageDraw.Draw(old_surface)
+    new_draw = ImageDraw.Draw(new_surface)
+    old_draw.rectangle((4, 4, 176, 34), fill=(29, 38, 58))
+    old_draw.text((12, 12), "AUD/NZD OTC", fill=(235, 240, 248))
+    new_draw.rectangle((4, 4, 176, 34), fill=(29, 38, 58))
+    new_draw.text((12, 12), "EUR/USD OTC", fill=(235, 240, 248))
+    previous_fingerprint = fingerprint(old_surface)
+    assert previous_fingerprint != fingerprint(new_surface)
+
+    detector_calls = 0
+
+    def detect_market_selector(
+        image: Image.Image,
+        timeframe_selector: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        nonlocal detector_calls
+        _ = image
+        _ = timeframe_selector
+        detector_calls += 1
+        return {"value": "EUR/USD OTC", "source": "header_text", "confidence": 0.93}
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", detect_market_selector)
+    study = adapter.study(
+        new_surface,
+        session_payload={
+            "session_id": "pocket-live",
+            "manual_focus_region": {"enabled": True},
+            "tracking_summary": {
+                "detected_market": "AUD/NZD",
+                "market_confidence": 0.91,
+                "detected_timeframe": "M5",
+                "timeframe_confidence": 1.0,
+                "market_selector_visual_fingerprint": previous_fingerprint,
+            },
+            "latest_signal": {
+                "market": "AUD/NZD",
+                "market_confidence": 0.91,
+                "focus_timeframe": "M5",
+                "focus_timeframe_confidence": 1.0,
+                "market_selector_visual_fingerprint": previous_fingerprint,
+            },
+        },
+    )
+
+    assert detector_calls == 1
+    assert study.latest_signal["market"] == "EUR/USD OTC"
+    assert study.latest_signal["market_source"] == "header_text"
+    assert study.latest_signal["market_selector_visual_changed"] is True
+    assert study.tracking_summary["detected_market"] == "EUR/USD OTC"
+
+
 def test_window_tracker_candle_count_increases_probability_sample_weight() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     build_stats = cast(Callable[..., dict[str, Any]], getattr(adapter, "_build_candle_statistics"))
@@ -3089,6 +3200,20 @@ def test_window_tracker_support_resistance_zones_fit_touch_candles() -> None:
         assert zone["supply_demand_origin"] in {"base_departure_imbalance", "reaction_cluster"}
         assert zone["freshness_state"] in {"FRESH", "TESTED_ONCE", "TESTED_TWICE", "CONSUMED", "BROKEN", "REFERENCE"}
         assert zone["quality_grade"] in {"A", "B", "C", "REFERENCE"}
+        assert zone["zone_authority_state"] in {
+            "FRESH_ACTIVE",
+            "MITIGATED_ACTIVE",
+            "HISTORICAL_ACTIVE",
+            "CONTEXT_REFERENCE",
+            "CONSUMED_REFERENCE",
+            "BROKEN_REFERENCE",
+            "ROLE_FLIP_CONFIRMED",
+        }
+        assert isinstance(zone["entry_authority_allowed"], bool)
+        assert "zone_not_exact_price" in zone["book_rule_flags"]
+        assert "body_close_break_checked" in zone["book_rule_flags"]
+        assert "historical_context_preserved" in zone["book_rule_flags"]
+        assert "authority_score" in zone
         assert "institutional_zone_score" in zone
         assert "proximal_y" in zone
         assert "distal_y" in zone
@@ -3126,6 +3251,43 @@ def test_window_tracker_supply_demand_origin_prefers_fresh_base_departure() -> N
     assert best_demand["quality_grade"] in {"A", "B", "C"}
     assert float(best_demand["proximal_y"]) < float(best_demand["distal_y"])
     assert float(best_demand["distal_buffer_y"]) > float(best_demand["distal_y"])
+    assert best_demand["entry_authority_allowed"] is True
+    assert str(best_demand["zone_authority_state"]) in {"FRESH_ACTIVE", "MITIGATED_ACTIVE"}
+    assert "base_departure_imbalance_validated" in best_demand["book_rule_flags"]
+
+
+def test_window_tracker_demotes_body_close_broken_support_to_reference_only() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    candles = _manual_candle_tracks(
+        [220, 222, 221, 223, 222, 260, 232, 300, 314, 330, 326, 318],
+        image_width=900,
+        image_height=520,
+        direction="BUY",
+        half_height=12,
+    )
+
+    zones = adapter.derive_support_resistance_zones(
+        candles,
+        (900, 520),
+        candidate_action="BUY",
+        max_zones_per_role=8,
+        max_total_zones=16,
+    )
+
+    broken_supports = [
+        zone
+        for zone in zones
+        if str(zone.get("role", "")) == "support" and bool(zone.get("broken_after_touch", False))
+    ]
+
+    assert broken_supports
+    for zone in broken_supports:
+        assert zone["entry_authority_allowed"] is False
+        assert zone["zone_authority_state"] == "BROKEN_REFERENCE"
+        assert zone["validation_reason"] == "body_close_broken_reference_only"
+        assert int(zone["body_close_break_count"]) >= 1
+        assert "broken_body_close_demoted" in zone["book_rule_flags"]
+        assert "REFERENCE_ONLY_ZONE" in zone["knowledge_tags"]
 
 
 def test_window_tracker_adds_smart_money_and_significant_sr_context_to_boxes() -> None:
@@ -3166,6 +3328,7 @@ def test_window_tracker_adds_smart_money_and_significant_sr_context_to_boxes() -
     assert "institutional_zone_count" in support_resistance
     assert "fresh_zone_count" in support_resistance
     assert "reference_zone_count" in support_resistance
+    assert "active_authority_count" in support_resistance
     assert signal["smart_money_context"] == smart_money
     assert all("smart_money" in box and "smc_score" in box for box in structure_boxes)
     assert all("smart_money" in zone and "smc_score" in zone for zone in projection_zones)
@@ -6832,6 +6995,31 @@ def test_real_tracking_adapter_reads_buy_pressure_from_uptrend_surface() -> None
 def test_real_tracking_adapter_reuses_cached_locked_shadow_selectors(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     image = _synthetic_chart_surface("buy")
+    session_payload: dict[str, Any] = {
+        "execution_controls": {"live_execution_enabled": False, "execution_mode": "shadow"},
+        "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
+        "locked_window": {"hwnd": 123, "title": "Pocket Option"},
+        "tracking_summary": {
+            "detected_timeframe": "M5",
+            "timeframe_confidence": 0.93,
+            "detected_market": "EUR/JPY OTC",
+            "market_confidence": 0.91,
+            "chart_region": {"pixel_bbox": [0, 0, image.width, image.height], "confidence": 0.90},
+        },
+        "latest_signal": {
+            "focus_timeframe": "M5",
+            "focus_timeframe_confidence": 0.93,
+            "market": "EUR/JPY OTC",
+            "market_confidence": 0.91,
+        },
+    }
+    warmup = adapter.study(image, session_payload=session_payload)
+    selector_fingerprint = str(warmup.tracking_summary.get("market_selector_visual_fingerprint", ""))
+    assert selector_fingerprint
+    tracking_summary = cast(dict[str, Any], session_payload["tracking_summary"])
+    latest_signal = cast(dict[str, Any], session_payload["latest_signal"])
+    tracking_summary["market_selector_visual_fingerprint"] = selector_fingerprint
+    latest_signal["market_selector_visual_fingerprint"] = selector_fingerprint
 
     def fail_detector(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("cached locked shadow study must not rescan selectors")
@@ -6842,24 +7030,7 @@ def test_real_tracking_adapter_reuses_cached_locked_shadow_selectors(monkeypatch
 
     result = adapter.study(
         image,
-        session_payload={
-            "execution_controls": {"live_execution_enabled": False, "execution_mode": "shadow"},
-            "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
-            "locked_window": {"hwnd": 123, "title": "Pocket Option"},
-            "tracking_summary": {
-                "detected_timeframe": "M5",
-                "timeframe_confidence": 0.93,
-                "detected_market": "EUR/JPY OTC",
-                "market_confidence": 0.91,
-                "chart_region": {"pixel_bbox": [0, 0, image.width, image.height], "confidence": 0.90},
-            },
-            "latest_signal": {
-                "focus_timeframe": "M5",
-                "focus_timeframe_confidence": 0.93,
-                "market": "EUR/JPY OTC",
-                "market_confidence": 0.91,
-            },
-        },
+        session_payload=session_payload,
     )
 
     stages = [str(row.get("stage", "")) for row in result.tracking_summary["study_stage_timings"]]

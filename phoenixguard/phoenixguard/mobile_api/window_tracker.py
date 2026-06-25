@@ -1159,6 +1159,25 @@ def _zone_significance(zone: Mapping[str, Any]) -> float:
     return _clip01(max(scores))
 
 
+def _zone_entry_authority_allowed(zone: Mapping[str, Any]) -> bool:
+    explicit = zone.get("entry_authority_allowed")
+    if isinstance(explicit, bool):
+        return explicit
+    if isinstance(explicit, str):
+        normalized = explicit.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    authority_state = str(zone.get("zone_authority_state", "") or "").strip().upper()
+    if authority_state in {"BROKEN_REFERENCE", "CONSUMED_REFERENCE"}:
+        return False
+    freshness_state = str(zone.get("freshness_state", "REFERENCE") or "REFERENCE").strip().upper()
+    if freshness_state in {"BROKEN", "CONSUMED"} and not bool(zone.get("role_flip_confirmed", False)):
+        return False
+    return True
+
+
 def _opposing_force_zones(
     side: str,
     tracking_summary: Mapping[str, Any],
@@ -1172,6 +1191,8 @@ def _opposing_force_zones(
     zones = _support_resistance_zone_candidates(tracking_summary, latest_signal)
     candidates: list[dict[str, Any]] = []
     for zone in zones:
+        if not _zone_entry_authority_allowed(zone):
+            continue
         role = _zone_role(zone)
         if role != wanted_role:
             continue
@@ -1218,6 +1239,8 @@ def _entry_area_zones(
     zones = _support_resistance_zone_candidates(tracking_summary, latest_signal)
     candidates: list[dict[str, Any]] = []
     for zone in zones:
+        if not _zone_entry_authority_allowed(zone):
+            continue
         role = _zone_role(zone)
         if role != wanted_role:
             continue
@@ -3064,6 +3087,17 @@ def _surface_signature(image: Image.Image) -> str:
         sample.thumbnail((96, 96), Image.Resampling.BILINEAR)
     digest = sample.tobytes()
     return uuid4().hex[:6] if not digest else f"{abs(hash(digest)) & 0xFFFFFFFF:08x}"
+
+
+def _market_selector_visual_fingerprint(image: Image.Image) -> str:
+    sample = image.convert("RGB")
+    if sample.width < 64 or sample.height < 48:
+        return ""
+    crop_right = max(120, min(sample.width, int(round(sample.width * 0.34))))
+    crop_bottom = max(42, min(sample.height, int(round(sample.height * 0.18))))
+    crop = sample.crop((0, 0, crop_right, crop_bottom)).convert("L")
+    crop = crop.resize((64, 20), Image.Resampling.BILINEAR)
+    return hashlib.sha256(crop.tobytes()).hexdigest()[:16]
 
 
 def _artifact_frame_id_from_path(path: Path | str | None, default: int = 0) -> int:
@@ -8693,15 +8727,40 @@ class PhoenixGuardWindowTrackingAdapter:
         )
         previous_tracking: dict[str, Any] = {}
         previous_signal: dict[str, Any] = {}
+        market_selector_fingerprint = _market_selector_visual_fingerprint(surface)
+        previous_market_selector_fingerprint = ""
+        market_selector_visual_changed = False
+        market_selector_rebind_required = False
         if fast_selectors:
             previous_tracking = _mapping_to_dict(_mapping_to_dict(session_payload).get("tracking_summary", {}))
             previous_signal = _mapping_to_dict(_mapping_to_dict(session_payload).get("latest_signal", {}))
+            previous_market_selector_fingerprint = str(
+                previous_signal.get(
+                    "market_selector_visual_fingerprint",
+                    previous_tracking.get(
+                        "market_selector_visual_fingerprint",
+                        _mapping_to_dict(session_payload).get("market_selector_visual_fingerprint", ""),
+                    ),
+                )
+                or ""
+            ).strip()
+            market_selector_visual_changed = bool(
+                previous_market_selector_fingerprint
+                and market_selector_fingerprint
+                and previous_market_selector_fingerprint != market_selector_fingerprint
+            )
             cached_timeframe = str(
                 previous_signal.get("focus_timeframe", previous_tracking.get("detected_timeframe", ""))
                 or ""
             ).upper()
             cached_market = _normalize_fx_market_candidate(
                 previous_signal.get("market", previous_tracking.get("detected_market", _mapping_to_dict(session_payload).get("market", "")))
+            )
+            cached_market_reusable = bool(
+                cached_market
+                and previous_market_selector_fingerprint
+                and market_selector_fingerprint
+                and previous_market_selector_fingerprint == market_selector_fingerprint
             )
             timeframe_selector: dict[str, Any] = (
                 {
@@ -8717,17 +8776,42 @@ class PhoenixGuardWindowTrackingAdapter:
                     "value": cached_market,
                     "source": "live_cached_selector",
                     "confidence": _clip01(previous_signal.get("market_confidence", previous_tracking.get("market_confidence", 0.0))),
+                    "market_selector_visual_fingerprint": market_selector_fingerprint,
+                    "previous_market_selector_visual_fingerprint": previous_market_selector_fingerprint,
+                    "market_selector_visual_changed": False,
                 }
-                if cached_market
+                if cached_market_reusable
                 else {}
             )
             if not timeframe_selector:
                 timeframe_selector = self._detect_timeframe_selector(surface)
-            if not market_selector and not skip_missing_live_market_selector:
-                market_selector = self._detect_market_selector(surface, timeframe_selector=timeframe_selector)
+            if not market_selector:
+                detected_market_selector = self._detect_market_selector(surface, timeframe_selector=timeframe_selector)
+                if detected_market_selector:
+                    market_selector = dict(detected_market_selector)
+                elif skip_missing_live_market_selector and not market_selector_visual_changed:
+                    market_selector = {}
+                else:
+                    market_selector_rebind_required = bool(cached_market or market_selector_visual_changed)
+                    market_selector = {
+                        "value": "",
+                        "source": "selector_visual_changed_unconfirmed"
+                        if market_selector_visual_changed
+                        else "selector_unconfirmed",
+                        "confidence": 0.0,
+                    }
+                market_selector["market_selector_visual_fingerprint"] = market_selector_fingerprint
+                market_selector["previous_market_selector_visual_fingerprint"] = previous_market_selector_fingerprint
+                market_selector["market_selector_visual_changed"] = bool(market_selector_visual_changed)
+                market_selector["market_selector_rebind_required"] = bool(market_selector_rebind_required)
         else:
             timeframe_selector = self._detect_timeframe_selector(surface)
             market_selector = self._detect_market_selector(surface, timeframe_selector=timeframe_selector)
+            if market_selector:
+                market_selector["market_selector_visual_fingerprint"] = market_selector_fingerprint
+                market_selector["previous_market_selector_visual_fingerprint"] = previous_market_selector_fingerprint
+                market_selector["market_selector_visual_changed"] = False
+                market_selector["market_selector_rebind_required"] = False
         mark_study_stage("detect_selectors")
         cached_chart_bbox_enabled = (
             fast_selectors
@@ -12019,8 +12103,14 @@ class PhoenixGuardWindowTrackingAdapter:
                     "last_touch_index": 0,
                     "last_touch_age_candles": len(candles),
                     "reaction_count": 0,
+                    "retest_count": 0,
                     "sweep_count": 0,
+                    "body_close_break_count": 0,
+                    "post_break_retest_count": 0,
+                    "post_break_reaction_count": 0,
+                    "original_side_reclaim_count": 0,
                     "broken_after_touch": False,
+                    "role_flip_confirmed": False,
                     "unbroken_score": 0.0,
                     "historical_significance": 0.0,
                     "still_significant": False,
@@ -12031,6 +12121,10 @@ class PhoenixGuardWindowTrackingAdapter:
             reaction_count = 0
             retest_count = 0
             sweep_count = 0
+            body_close_break_count = 0
+            post_break_retest_count = 0
+            post_break_reaction_count = 0
+            original_side_reclaim_count = 0
             broken_after_touch = False
             last_break_index = -1
             tolerance = max(2.0, zone_half_height * 1.35)
@@ -12043,6 +12137,17 @@ class PhoenixGuardWindowTrackingAdapter:
                 center_y = float(candle.get("center_y", (top + bottom) * 0.5) or (top + bottom) * 0.5)
                 direction = _upper_action(candle.get("direction", "HOLD"))
                 touches = bool(top <= center + tolerance and bottom >= center - tolerance)
+                if broken_after_touch and idx > last_break_index:
+                    if touches:
+                        post_break_retest_count += 1
+                        if role == "support" and direction == "SELL":
+                            post_break_reaction_count += 1
+                        elif role == "resistance" and direction == "BUY":
+                            post_break_reaction_count += 1
+                    if role == "support" and center_y < center - tolerance:
+                        original_side_reclaim_count += 1
+                    elif role == "resistance" and center_y > center + tolerance:
+                        original_side_reclaim_count += 1
                 if touches:
                     retest_count += 1
                     if role == "support" and direction == "BUY":
@@ -12053,19 +12158,24 @@ class PhoenixGuardWindowTrackingAdapter:
                     if bottom > center + tolerance and center_y <= center + tolerance:
                         sweep_count += 1
                     if idx > last_touch_index and center_y > center + break_tolerance:
+                        body_close_break_count += 1
                         broken_after_touch = True
-                        last_break_index = idx
+                        if last_break_index < 0:
+                            last_break_index = idx
                 else:
                     if top < center - tolerance and center_y >= center - tolerance:
                         sweep_count += 1
                     if idx > last_touch_index and center_y < center - break_tolerance:
+                        body_close_break_count += 1
                         broken_after_touch = True
-                        last_break_index = idx
+                        if last_break_index < 0:
+                            last_break_index = idx
             recency_from_candles = _clip01(1.0 - (last_touch_age / max(1.0, float(len(candles)))))
             reaction_score = _clip01(reaction_count / max(1.0, retest_count))
             retest_score = _clip01(retest_count / 5.0)
             sweep_score = _clip01(sweep_count / 3.0)
-            unbroken_score = 0.18 if broken_after_touch else 1.0
+            role_flip_confirmed = bool(broken_after_touch and post_break_retest_count > 0 and post_break_reaction_count > 0)
+            unbroken_score = 0.34 if role_flip_confirmed else 0.18 if broken_after_touch else 1.0
             historical_significance = _clip01(
                 0.30 * retest_score
                 + 0.25 * reaction_score
@@ -12080,8 +12190,13 @@ class PhoenixGuardWindowTrackingAdapter:
                 "reaction_count": int(reaction_count),
                 "retest_count": int(retest_count),
                 "sweep_count": int(sweep_count),
+                "body_close_break_count": int(body_close_break_count),
+                "post_break_retest_count": int(post_break_retest_count),
+                "post_break_reaction_count": int(post_break_reaction_count),
+                "original_side_reclaim_count": int(original_side_reclaim_count),
                 "broken_after_touch": bool(broken_after_touch),
                 "last_break_index": int(last_break_index),
+                "role_flip_confirmed": bool(role_flip_confirmed),
                 "unbroken_score": round(float(unbroken_score), 4),
                 "historical_significance": round(float(historical_significance), 4),
                 "still_significant": bool(historical_significance >= 0.43 and not broken_after_touch),
@@ -12299,6 +12414,90 @@ class PhoenixGuardWindowTrackingAdapter:
             best.pop("_sort_score", None)
             return best
 
+        def zone_authority_profile(
+            *,
+            freshness_state: str,
+            broken_after_touch: bool,
+            history_metrics: Mapping[str, Any],
+            institutional_score: float,
+            historical_significance: float,
+            significance_score: float,
+            supply_demand_origin: str,
+        ) -> dict[str, Any]:
+            freshness = str(freshness_state or "REFERENCE").upper()
+            role_flip_confirmed = bool(history_metrics.get("role_flip_confirmed", False))
+            body_close_break_count = int(history_metrics.get("body_close_break_count", 0) or 0)
+            post_break_retest_count = int(history_metrics.get("post_break_retest_count", 0) or 0)
+            post_break_reaction_count = int(history_metrics.get("post_break_reaction_count", 0) or 0)
+            original_side_reclaim_count = int(history_metrics.get("original_side_reclaim_count", 0) or 0)
+            if broken_after_touch or freshness == "BROKEN":
+                if role_flip_confirmed:
+                    state = "ROLE_FLIP_CONFIRMED"
+                    entry_allowed = False
+                    validation_reason = "broken_zone_role_flip_confirmed_reference"
+                else:
+                    state = "BROKEN_REFERENCE"
+                    entry_allowed = False
+                    validation_reason = "body_close_broken_reference_only"
+            elif freshness == "CONSUMED":
+                state = "CONSUMED_REFERENCE"
+                entry_allowed = False
+                validation_reason = "consumed_zone_reference_only"
+            elif freshness == "FRESH":
+                state = "FRESH_ACTIVE"
+                entry_allowed = True
+                validation_reason = "base_departure_imbalance_freshness_validated"
+            elif freshness in {"TESTED_ONCE", "TESTED_TWICE"}:
+                state = "MITIGATED_ACTIVE"
+                entry_allowed = True
+                validation_reason = "mitigated_zone_retest_reaction_validated"
+            elif historical_significance >= 0.43 or institutional_score >= 0.52:
+                state = "HISTORICAL_ACTIVE"
+                entry_allowed = True
+                validation_reason = "historical_reaction_zone_active"
+            else:
+                state = "CONTEXT_REFERENCE"
+                entry_allowed = False
+                validation_reason = "context_zone_reference_only"
+            if supply_demand_origin != "base_departure_imbalance" and validation_reason == "base_departure_imbalance_freshness_validated":
+                validation_reason = "touch_reaction_zone_active"
+            authority_score = _clip01(
+                0.34 * _clip01(significance_score)
+                + 0.24 * _clip01(institutional_score)
+                + 0.18 * _clip01(historical_significance)
+                + 0.14 * _clip01(history_metrics.get("unbroken_score", 0.0))
+                + 0.10 * _clip01(1.0 if entry_allowed else 0.0)
+            )
+            if not entry_allowed:
+                authority_score = min(authority_score, 0.42 if state == "CONTEXT_REFERENCE" else 0.34)
+            book_rule_flags = [
+                "zone_not_exact_price",
+                "touch_reaction_validated",
+                "freshness_respected",
+                "body_close_break_checked",
+                "historical_context_preserved",
+            ]
+            if supply_demand_origin == "base_departure_imbalance":
+                book_rule_flags.append("base_departure_imbalance_validated")
+            if body_close_break_count > 0:
+                book_rule_flags.append("broken_body_close_demoted")
+            if post_break_retest_count > 0:
+                book_rule_flags.append("post_break_retest_tracked")
+            if original_side_reclaim_count > 0:
+                book_rule_flags.append("failed_break_reclaim_tracked")
+            return {
+                "zone_authority_state": state,
+                "entry_authority_allowed": bool(entry_allowed),
+                "authority_score": round(float(authority_score), 4),
+                "validation_reason": validation_reason,
+                "role_flip_confirmed": bool(role_flip_confirmed),
+                "body_close_break_count": int(body_close_break_count),
+                "post_break_retest_count": int(post_break_retest_count),
+                "post_break_reaction_count": int(post_break_reaction_count),
+                "original_side_reclaim_count": int(original_side_reclaim_count),
+                "book_rule_flags": book_rule_flags,
+            }
+
         def clusters(points: Sequence[Mapping[str, float]], role: str) -> list[dict[str, Any]]:
             sorted_points = sorted(points, key=lambda item: float(item.get("y", 0.0)))
             groups: list[list[dict[str, float]]] = []
@@ -12349,18 +12548,32 @@ class PhoenixGuardWindowTrackingAdapter:
                 institutional_score = _clip01(origin_metrics.get("institutional_zone_score", 0.0))
                 freshness_score = _clip01(origin_metrics.get("freshness_score", 0.0))
                 freshness_state = str(origin_metrics.get("freshness_state", "REFERENCE") or "REFERENCE").upper()
+                broken_after_touch = bool(history_metrics.get("broken_after_touch", False))
+                role_flip_confirmed = bool(history_metrics.get("role_flip_confirmed", False))
                 strength = _clip01(
                     0.46 * geometric_strength
                     + 0.26 * historical_significance
                     + 0.22 * institutional_score
                     + 0.06 * freshness_score
                 )
-                if freshness_state == "BROKEN":
-                    strength = _clip01(strength - 0.16)
+                if broken_after_touch and not role_flip_confirmed:
+                    strength = _clip01(strength * 0.55)
+                elif freshness_state == "BROKEN":
+                    strength = _clip01(strength * 0.50)
                 elif freshness_state == "CONSUMED":
-                    strength = _clip01(strength - 0.08)
+                    strength = _clip01(strength * 0.74)
                 if strength < 0.30 and institutional_score < 0.42:
                     continue
+                supply_demand_origin = str(origin_metrics.get("supply_demand_origin", "reaction_cluster") or "reaction_cluster")
+                authority_profile = zone_authority_profile(
+                    freshness_state=freshness_state,
+                    broken_after_touch=broken_after_touch,
+                    history_metrics=history_metrics,
+                    institutional_score=institutional_score,
+                    historical_significance=historical_significance,
+                    significance_score=strength,
+                    supply_demand_origin=supply_demand_origin,
+                )
                 left = max(float(width) * 0.03, span_left - zone_pad_x)
                 right = min(float(width) * 0.97, span_right + zone_pad_x)
                 if (right - left) < min_zone_width:
@@ -12382,17 +12595,19 @@ class PhoenixGuardWindowTrackingAdapter:
                     relevance = "entry_resistance" if role == "resistance" and relation in {"above_price", "at_price"} else "target_support" if role == "support" and relation == "below_price" else "context"
                 else:
                     relevance = "context"
-                broken_after_touch = bool(history_metrics.get("broken_after_touch", False))
                 zone_family = "DEMAND_ZONE" if role == "support" else "SUPPLY_ZONE"
                 liquidity_pool_type = "sell_side_liquidity" if role == "support" else "buy_side_liquidity"
                 role_flip_state = (
-                    "broken_support_watch_resistance_flip"
+                    "broken_support_role_flip_confirmed_resistance"
+                    if role == "support" and role_flip_confirmed
+                    else "broken_resistance_role_flip_confirmed_support"
+                    if role == "resistance" and role_flip_confirmed
+                    else "broken_support_watch_resistance_flip"
                     if role == "support" and broken_after_touch
                     else "broken_resistance_watch_support_flip"
                     if role == "resistance" and broken_after_touch
                     else "unbroken_zone"
                 )
-                supply_demand_origin = str(origin_metrics.get("supply_demand_origin", "reaction_cluster") or "reaction_cluster")
                 zone_pattern = str(origin_metrics.get("zone_pattern", "TOUCH_REACTION_CLUSTER") or "TOUCH_REACTION_CLUSTER")
                 knowledge_tags = [
                     "SUPPLY_DEMAND_ZONE",
@@ -12405,6 +12620,10 @@ class PhoenixGuardWindowTrackingAdapter:
                     knowledge_tags.append(f"{freshness_state}_ZONE")
                 if zone_pattern != "TOUCH_REACTION_CLUSTER":
                     knowledge_tags.append(zone_pattern)
+                if role_flip_confirmed:
+                    knowledge_tags.append("ROLE_FLIP_CONFIRMED")
+                if not bool(authority_profile.get("entry_authority_allowed", False)):
+                    knowledge_tags.append("REFERENCE_ONLY_ZONE")
                 rows.append(
                     {
                         "key": f"{role}_{len(rows) + 1}",
@@ -12416,12 +12635,13 @@ class PhoenixGuardWindowTrackingAdapter:
                         "role_flip_state": role_flip_state,
                         "zone_stack_id": f"{role}_{int(round(center / max(1.0, merge_band)))}",
                         "source_rule": "zone_not_exact_price",
-                        "validation_reason": (
-                            "compact_base_explosive_departure_freshness"
-                            if supply_demand_origin == "base_departure_imbalance"
-                            else "touch_reaction_recency_unbroken_zone"
-                        ),
+                        "validation_reason": str(authority_profile.get("validation_reason", "touch_reaction_recency_unbroken_zone")),
                         "knowledge_tags": knowledge_tags,
+                        "book_rule_flags": list(cast(Sequence[str], authority_profile.get("book_rule_flags", []))),
+                        "zone_authority_state": str(authority_profile.get("zone_authority_state", "CONTEXT_REFERENCE")),
+                        "entry_authority_allowed": bool(authority_profile.get("entry_authority_allowed", False)),
+                        "authority_score": round(float(_clip01(authority_profile.get("authority_score", 0.0))), 4),
+                        "role_flip_confirmed": bool(authority_profile.get("role_flip_confirmed", False)),
                         "direction": "BUY" if role == "support" else "SELL",
                         "bbox": [int(round(left)), top, int(round(right)), max(top + 1, bottom)],
                         "line_y": int(round(center)),
@@ -12436,6 +12656,10 @@ class PhoenixGuardWindowTrackingAdapter:
                         "reaction_count": int(history_metrics.get("reaction_count", 0) or 0),
                         "retest_count": int(history_metrics.get("retest_count", 0) or 0),
                         "sweep_count": int(history_metrics.get("sweep_count", 0) or 0),
+                        "body_close_break_count": int(authority_profile.get("body_close_break_count", 0) or 0),
+                        "post_break_retest_count": int(authority_profile.get("post_break_retest_count", 0) or 0),
+                        "post_break_reaction_count": int(authority_profile.get("post_break_reaction_count", 0) or 0),
+                        "original_side_reclaim_count": int(authority_profile.get("original_side_reclaim_count", 0) or 0),
                         "broken_after_touch": broken_after_touch,
                         "still_significant": bool(history_metrics.get("still_significant", False)),
                         "unbroken_score": round(float(_clip01(history_metrics.get("unbroken_score", 0.0))), 4),
@@ -12539,9 +12763,10 @@ class PhoenixGuardWindowTrackingAdapter:
             "BROKEN": 5,
         }
 
-        def rank_zone(zone: Mapping[str, Any]) -> tuple[int, int, float, float, float]:
+        def rank_zone(zone: Mapping[str, Any]) -> tuple[int, int, int, float, float, float]:
             freshness_state = str(zone.get("freshness_state", "REFERENCE") or "REFERENCE").upper()
             return (
+                0 if _zone_entry_authority_allowed(zone) else 1,
                 freshness_rank.get(freshness_state, 3),
                 0 if bool(zone.get("still_significant", False)) else 1,
                 -_clip01(zone.get("institutional_zone_score", 0.0)),
@@ -12567,7 +12792,8 @@ class PhoenixGuardWindowTrackingAdapter:
         significant = [
             zone
             for zone in rows
-            if str(zone.get("freshness_state", "REFERENCE") or "REFERENCE").upper() not in reference_states
+            if _zone_entry_authority_allowed(zone)
+            and str(zone.get("freshness_state", "REFERENCE") or "REFERENCE").upper() not in reference_states
             and (
                 bool(zone.get("still_significant", False))
                 or _clip01(zone.get("significance_score", zone.get("confidence", 0.0))) >= 0.48
@@ -12577,7 +12803,8 @@ class PhoenixGuardWindowTrackingAdapter:
         reference_zones = [
             zone
             for zone in rows
-            if str(zone.get("freshness_state", "REFERENCE") or "REFERENCE").upper() in reference_states
+            if not _zone_entry_authority_allowed(zone)
+            or str(zone.get("freshness_state", "REFERENCE") or "REFERENCE").upper() in reference_states
         ]
         freshness_rank = {
             "FRESH": 0,
@@ -12634,6 +12861,7 @@ class PhoenixGuardWindowTrackingAdapter:
                 sum(1 for zone in rows if str(zone.get("freshness_state", "") or "").upper() in {"FRESH", "TESTED_ONCE"})
             ),
             "reference_zone_count": int(len(reference_zones)),
+            "active_authority_count": int(sum(1 for zone in rows if _zone_entry_authority_allowed(zone))),
             "dominant_side": dominant_side,
             "candidate_side": candidate_side,
             "buy_structure_score": round(float(buy_structure), 4),
@@ -13102,6 +13330,12 @@ class PhoenixGuardWindowTrackingAdapter:
         market = _normalize_fx_market_candidate(market_row.get("value", ""))
         market_source = str(market_row.get("source", "unconfirmed") or "unconfirmed")
         market_confidence = _clip01(market_row.get("confidence", 0.0)) if market else 0.0
+        market_selector_fingerprint = str(market_row.get("market_selector_visual_fingerprint", "") or "").strip()
+        previous_market_selector_fingerprint = str(
+            market_row.get("previous_market_selector_visual_fingerprint", "") or ""
+        ).strip()
+        market_selector_visual_changed = bool(market_row.get("market_selector_visual_changed", False))
+        market_selector_rebind_required = bool(market_row.get("market_selector_rebind_required", False))
         if len(candles) < 5:
             tracking = _default_tracking_summary(message="Waiting for more visible candle structure.")
             tracking["chart_region"] = dict(chart_region)
@@ -13113,6 +13347,10 @@ class PhoenixGuardWindowTrackingAdapter:
             tracking["detected_market"] = market
             tracking["market_source"] = market_source
             tracking["market_confidence"] = market_confidence
+            tracking["market_selector_visual_fingerprint"] = market_selector_fingerprint
+            tracking["previous_market_selector_visual_fingerprint"] = previous_market_selector_fingerprint
+            tracking["market_selector_visual_changed"] = market_selector_visual_changed
+            tracking["market_selector_rebind_required"] = market_selector_rebind_required
             signal = _default_signal(
                 message="Waiting for more visible candle structure inside the locked focus region.",
                 status="warming",
@@ -13122,6 +13360,10 @@ class PhoenixGuardWindowTrackingAdapter:
             signal["market"] = market
             signal["market_source"] = market_source
             signal["market_confidence"] = market_confidence
+            signal["market_selector_visual_fingerprint"] = market_selector_fingerprint
+            signal["previous_market_selector_visual_fingerprint"] = previous_market_selector_fingerprint
+            signal["market_selector_visual_changed"] = market_selector_visual_changed
+            signal["market_selector_rebind_required"] = market_selector_rebind_required
             return tracking, signal
 
         proxies = [float(item.get("price_proxy", 0.0)) for item in candles]
@@ -13496,6 +13738,10 @@ class PhoenixGuardWindowTrackingAdapter:
             "detected_market": market,
             "market_source": market_source,
             "market_confidence": market_confidence,
+            "market_selector_visual_fingerprint": market_selector_fingerprint,
+            "previous_market_selector_visual_fingerprint": previous_market_selector_fingerprint,
+            "market_selector_visual_changed": market_selector_visual_changed,
+            "market_selector_rebind_required": market_selector_rebind_required,
             "global_direction": global_direction,
             "local_direction": local_direction,
             "impulse_direction": impulse_direction,
@@ -13575,6 +13821,10 @@ class PhoenixGuardWindowTrackingAdapter:
             "market": market,
             "market_source": market_source,
             "market_confidence": market_confidence,
+            "market_selector_visual_fingerprint": market_selector_fingerprint,
+            "previous_market_selector_visual_fingerprint": previous_market_selector_fingerprint,
+            "market_selector_visual_changed": market_selector_visual_changed,
+            "market_selector_rebind_required": market_selector_rebind_required,
             "execution_permission": execution_permission,
             "entry_state": str(entry_plan.get("entry_state", "WAIT") or "WAIT"),
             "entry_label": str(entry_plan.get("entry_label", "WAIT") or "WAIT"),

@@ -111,7 +111,7 @@ function Start-TrackerChildProcess {
     $trackerWindowHwndArg = if ($BrokerWindowHwnd -gt 0) { " -BrokerWindowHwnd $BrokerWindowHwnd" } else { "" }
     $trackerCommand = @(
         "cd '$escapedRoot'",
-        ".\start_phoenixguard_24_7_tracker.ps1 -ApiHost '$escapedApiHost' -Port $ApiPort -SessionId '$escapedSessionId' -BrokerWindowQuery '$escapedBrokerWindowQuery'$trackerWindowHwndArg -FocusRegion '$escapedTrackerFocusRegion' -CaptureIntervalSec $CaptureIntervalSec -NoOpenDashboard"
+        ".\start_phoenixguard_24_7_tracker.ps1 -ApiHost '$escapedApiHost' -Port $ApiPort -SessionId '$escapedSessionId' -BrokerWindowQuery '$escapedBrokerWindowQuery'$trackerWindowHwndArg -FocusRegion '$escapedTrackerFocusRegion' -CaptureIntervalSec $CaptureIntervalSec -NoOpenDashboard -InternalTrackerOnly"
     ) -join '; '
 
     Start-Process powershell -ArgumentList @(

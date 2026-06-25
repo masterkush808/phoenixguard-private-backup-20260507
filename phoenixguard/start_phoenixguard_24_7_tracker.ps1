@@ -8,7 +8,8 @@ param(
     [string]$FocusRegion = $(if ($env:PHOENIXGUARD_TRACKER_FOCUS_REGION) { $env:PHOENIXGUARD_TRACKER_FOCUS_REGION } else { '0.03,0.13,0.87,0.96' }),
     [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 1.0 }),
     [switch]$NoOpenDashboard,
-    [switch]$NoWaitForLock
+    [switch]$NoWaitForLock,
+    [switch]$InternalTrackerOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,6 +36,21 @@ $env:PHOENIXGUARD_BROKER_WINDOW_QUERY = $BrokerWindowQuery
 $env:PHOENIXGUARD_BROKER_WINDOW_HWND = "$BrokerWindowHwnd"
 $env:PHOENIXGUARD_TRACKER_FOCUS_REGION = $FocusRegion
 $env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC = "$CaptureIntervalSec"
+
+if (-not $InternalTrackerOnly) {
+    Write-Warning "start_phoenixguard_24_7_tracker.ps1 is now an internal tracker worker wrapper. Delegating to launch_phoenixguard_live_ready.ps1 so the live dashboard and shooter package reporter start together."
+    $launchArgs = @{
+        BrokerWindowQuery = $BrokerWindowQuery
+        BrokerWindowHwnd = $BrokerWindowHwnd
+        SessionId = $SessionId
+        CaptureIntervalSec = $CaptureIntervalSec
+    }
+    if ($NoOpenDashboard) {
+        $launchArgs['NoBrowser'] = $true
+    }
+    & (Join-Path -Path $PSScriptRoot -ChildPath 'launch_phoenixguard_live_ready.ps1') @launchArgs
+    exit $LASTEXITCODE
+}
 
 $launcherArgs = @(
     (Join-Path $PSScriptRoot 'start_phoenixguard_24_7_tracker.py'),
