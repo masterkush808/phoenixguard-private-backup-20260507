@@ -27,6 +27,28 @@ def _text(value: Any, fallback: str = "") -> str:
     return text if text and text.lower() not in {"none", "null", "n/a"} else fallback
 
 
+def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    items = cast(list[object], value)
+    return [dict(cast(Mapping[str, Any], item)) for item in items if isinstance(item, Mapping)]
+
+
+def _model_health_counts(health: Mapping[str, Any]) -> tuple[int, int]:
+    explicit_awake = health.get("models_awake")
+    explicit_total = health.get("models_total")
+    if isinstance(explicit_awake, int) and isinstance(explicit_total, int) and explicit_total > 0:
+        return explicit_awake, explicit_total
+    models = _sequence_of_mappings(health.get("models"))
+    if models:
+        awake = sum(1 for model in models if _text(model.get("status")).upper() == "AWAKE")
+        return awake, len(models)
+    required_roles = [role for role in health.get("required_roles", []) if isinstance(role, str)]
+    if health.get("all_required_models_awake") is True and required_roles:
+        return len(required_roles), len(required_roles)
+    return 0, 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Fetch and summarize PhoenixGuard V3 runtime trace alignment.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8793")
@@ -63,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     execution = endpoint_payload("execution_latest")
     health = endpoint_payload("model_health")
     floating_health = _mapping(floating.get("health"))
-    if not health or not (health.get("models_awake") or health.get("models_total")):
+    if not health or _model_health_counts(health) == (0, 0):
         health = floating_health
     sequence_readiness = _mapping(trace.get("sequence_context_readiness"))
     if not sequence_readiness:
@@ -107,7 +129,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"Dataflow reason: {_text(dataflow.get('reason'), 'none')}")
     print(f"Shooter: {_text(floating_shooter.get('state'), 'UNKNOWN')} | {_text(floating_shooter.get('action'), 'waiting')}")
-    print(f"Models: {int(health.get('models_awake') or 0)}/{int(health.get('models_total') or 0)}")
+    models_awake, models_total = _model_health_counts(health)
+    print(f"Models: {models_awake}/{models_total}")
     return 0 if alignment.get("status") == "PASS" else 1
 
 
