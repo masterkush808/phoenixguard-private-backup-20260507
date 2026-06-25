@@ -51,6 +51,10 @@ Those files are preserved locally in responsible folders, but they remain ignore
 - Focused migration tests: PASS, 229 passed
 - Full pytest suite: PASS, 1258 passed, 3 skipped
 
+## Launch Behavior
+
+`Backend/launch/launch_phoenixguard_live_ready.ps1` remains the canonical production launcher. After runtime authority, broker source-lock, and frame-freshness gates pass, it opens a visible PowerShell reporter window for `Backend/launch/shooter.py`. The reporter remains package-only and does not click, calibrate, or control the broker.
+
 ## Remaining Root Policy
 
 The files left at project root are not loose application files. They are repository metadata, package/test configuration, and bootstrap files that must stay at root so Python, pytest, Pyright, packaging, and launch scripts can discover the project consistently.

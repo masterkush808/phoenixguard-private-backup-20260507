@@ -216,6 +216,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoe
 The launcher also attempts this HWND detection automatically before arming the shooter. Passing
 `-BrokerWindowHwnd` is the explicit override for a busy desktop.
 
+After runtime authority, source-lock, and frame-freshness gates pass, the launcher opens a visible
+PowerShell window titled `PhoenixGuard Shooter Package Reporter`. That window reports validated
+allowance packages only; it does not click, calibrate, or control the broker.
+
 The production launcher sets the live tracker hot path to low latency:
 
 ```powershell

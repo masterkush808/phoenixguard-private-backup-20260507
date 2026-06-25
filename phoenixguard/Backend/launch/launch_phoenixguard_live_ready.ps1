@@ -210,8 +210,11 @@ function Start-LiveReadyShooter {
     $escapedSessionId = $SessionId.Replace("'", "''")
     $escapedBaseUrl = $BaseUrl.Replace("'", "''")
     $shooterCommand = @(
+        "`$Host.UI.RawUI.WindowTitle = 'PhoenixGuard Shooter Package Reporter - $escapedSessionId'",
         "cd '$escapedRoot'",
         "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='0'",
+        "Write-Host 'PhoenixGuard shooter package reporter is live for session $escapedSessionId'",
+        "Write-Host 'Broker clicks are retired; this window reports validated allowance packages only.'",
         ".\.venv\Scripts\python.exe 'Backend\launch\shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll 0.05"
     ) -join '; '
 
@@ -221,7 +224,7 @@ function Start-LiveReadyShooter {
         'Bypass',
         '-Command',
         $shooterCommand
-    ) -WindowStyle Hidden | Out-Null
+    ) -WindowStyle Normal | Out-Null
 }
 
 Write-Host "PhoenixGuard V3 live-ready launch"
@@ -491,6 +494,6 @@ Write-Host "  Dashboard: $dashboardUrl"
 if ($DisableShooter) {
     Write-Host "  Shooter: disabled; no shooter process was launched."
 } else {
-    Write-Host "  Shooter logs: .codex_runtime\shooter_live_ready_stderr.log"
+    Write-Host "  Shooter reporter: visible PowerShell window"
 }
 Write-Host "  Launch summary: .codex_runtime\live_launch_summary.json"
