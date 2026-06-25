@@ -1238,6 +1238,106 @@
       top: 4px;
     }
 
+    .surface-hotspot {
+      background: rgba(242, 200, 102, var(--overlay-fill-opacity, 0.032));
+    }
+
+    .surface-hotspot.layer-chart-bounds {
+      background: rgba(242, 200, 102, var(--overlay-fill-opacity, 0.018));
+    }
+
+    .surface-hotspot.layer-recent-candles {
+      background: rgba(255, 255, 255, var(--overlay-fill-opacity, 0.028));
+    }
+
+    .surface-hotspot.layer-major-swings,
+    .surface-hotspot.layer-local-swings {
+      background: rgba(107, 200, 255, var(--overlay-fill-opacity, 0.040));
+    }
+
+    .surface-hotspot.layer-supply-demand {
+      background: rgba(242, 200, 102, var(--overlay-fill-opacity, 0.045));
+    }
+
+    .surface-hotspot.layer-supply-demand.buy,
+    .surface-hotspot.layer-supply-demand.semantic-demand,
+    .surface-hotspot.layer-supply-demand[data-semantic-family="buy"],
+    .surface-hotspot.layer-supply-demand[data-semantic-family="demand"] {
+      background: rgba(var(--overlay-demand-rgb), var(--overlay-fill-opacity, 0.050));
+    }
+
+    .surface-hotspot.layer-supply-demand.sell,
+    .surface-hotspot.layer-supply-demand.semantic-supply,
+    .surface-hotspot.layer-supply-demand[data-semantic-family="sell"],
+    .surface-hotspot.layer-supply-demand[data-semantic-family="supply"] {
+      background: rgba(var(--overlay-supply-rgb), var(--overlay-fill-opacity, 0.052));
+    }
+
+    .surface-hotspot.layer-trigger-zones {
+      background: rgba(var(--overlay-trigger-rgb), var(--overlay-fill-opacity, 0.052));
+    }
+
+    .surface-hotspot.layer-target-zones {
+      background: rgba(var(--overlay-target-rgb), var(--overlay-fill-opacity, 0.050));
+    }
+
+    .surface-hotspot.layer-invalidation {
+      background: rgba(var(--overlay-invalid-rgb), var(--overlay-fill-opacity, 0.042));
+    }
+
+    .surface-hotspot.layer-prediction-path {
+      background: rgba(175, 137, 255, var(--overlay-fill-opacity, 0.045));
+    }
+
+    .surface-hotspot.layer-active-council-decision {
+      background: rgba(var(--overlay-council-rgb), var(--overlay-fill-opacity, 0.070));
+    }
+
+    .surface-hotspot.layer-broker-controls {
+      background: rgba(255, 255, 255, var(--overlay-fill-opacity, 0.070));
+    }
+
+    .surface-hotspot.layer-diagnostics {
+      background: rgba(180, 190, 204, var(--overlay-fill-opacity, 0.035));
+    }
+
+    .surface-hotspot[data-label-lane="below"] span,
+    .surface-hotspot.label-lane-below span {
+      top: calc(100% + 2px);
+    }
+
+    .surface-hotspot[data-label-lane="inside"] span,
+    .surface-hotspot[data-label-lane="center"] span,
+    .surface-hotspot.label-lane-inside span,
+    .surface-hotspot.label-lane-center span {
+      left: 3px;
+      top: 3px;
+      max-width: min(calc(var(--overlay-label-max, 118px) * 0.86), 12vw);
+    }
+
+    .surface-hotspot[data-label-lane="right"] span,
+    .surface-hotspot.label-lane-right span {
+      left: calc(100% + 3px);
+      top: 0;
+    }
+
+    .surface-hotspot[data-label-lane="left"] span,
+    .surface-hotspot.label-lane-left span {
+      left: auto;
+      right: calc(100% + 3px);
+      top: 0;
+    }
+
+    .surface-hotspot[data-anchor-evidence-status="STALE"],
+    .surface-hotspot[data-anchor-evidence-status="MISMATCH"],
+    .surface-hotspot[data-anchor-evidence-status="REJECTED"] {
+      border-style: dashed;
+    }
+
+    .surface-hotspot:hover {
+      background: rgba(242, 200, 102, 0.16);
+    }
+
     .inspector-module {
       display: grid;
       grid-template-rows: auto auto minmax(0, 1fr);
@@ -2577,6 +2677,7 @@
               <option value="two_candle_study">Two-Candle Study</option>
               <option value="lstm_study">LSTM Study</option>
               <option value="replay">Replay</option>
+              <option value="deep_debug">Diagnostics</option>
             </select>
           </label>
           <button type="button" id="command-palette-button" class="command-button">Ctrl K</button>
@@ -7452,6 +7553,20 @@
       return raw.replace(/[^a-z0-9_-]/g, "");
     }
 
+    function overlaySafeClassToken(value) {
+      return clean(value, "").toLowerCase().replace(/[^a-z0-9_-]/g, "");
+    }
+
+    function overlayLabelLane(box = {}) {
+      const style = objectOrEmpty(box.style);
+      return overlaySafeClassToken(box.label_lane || box.label_anchor || style.label_lane || style.label_anchor);
+    }
+
+    function overlayAnchorEvidenceStatus(box = {}) {
+      const style = objectOrEmpty(box.style);
+      return clean(box.anchor_evidence_status || style.anchor_evidence_status || "", "").toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+    }
+
     function overlayLabelHiddenByDisplayState(box = {}) {
       const displayState = overlayDisplayState(box);
       return ["GHOSTED", "ICON_ONLY", "INSPECTOR_ONLY_LABEL"].includes(displayState)
@@ -7501,6 +7616,8 @@
     function applyOverlayDisplayStyle(node, box = {}, displayState = overlayDisplayState(box)) {
       const styleVars = overlayStyleVars(box);
       const semanticFamily = overlaySemanticFamily(box);
+      const labelLane = overlayLabelLane(box);
+      const anchorEvidenceStatus = overlayAnchorEvidenceStatus(box);
       node.classList.add(overlayDisplayClassName(displayState));
       if (semanticFamily) {
         node.classList.add(`semantic-${semanticFamily}`);
@@ -7508,9 +7625,19 @@
       } else {
         delete node.dataset.semanticFamily;
       }
+      if (labelLane) {
+        node.classList.add(`label-lane-${labelLane}`);
+        node.dataset.labelLane = labelLane;
+      } else {
+        delete node.dataset.labelLane;
+      }
+      if (anchorEvidenceStatus) {
+        node.dataset.anchorEvidenceStatus = anchorEvidenceStatus;
+      } else {
+        delete node.dataset.anchorEvidenceStatus;
+      }
       node.dataset.displayState = displayState;
       node.dataset.visualWeight = overlayVisualWeight(box).toFixed(2);
-      node.dataset.labelLane = clean(box.label_lane || box.label_anchor, "");
       node.dataset.priority = frontendOverlayPriority(box).toFixed(2);
       node.dataset.labelPriority = Number(box._frontendLabelPriority ?? box._frontendPriority ?? frontendOverlayPriority(box)).toFixed(2);
       node.style.setProperty("--overlay-opacity", String(styleVars.opacity));
@@ -7559,7 +7686,10 @@
       const height = Math.max(0.5, Number(renderedBounds.height || 0.5));
       span.style.left = `${((labelBounds.left - renderedBounds.left) / width) * 100}%`;
       span.style.top = `${((labelBounds.top - renderedBounds.top) / height) * 100}%`;
-      span.dataset.labelLane = clean(box.label_lane || box.label_anchor, "");
+      const labelLane = overlayLabelLane(box);
+      if (labelLane) {
+        span.dataset.labelLane = labelLane;
+      }
     }
 
     function labelRectsOverlap(first, second, padding = 1) {

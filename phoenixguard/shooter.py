@@ -13,6 +13,7 @@ files, move the mouse, click the broker, set time controls, or execute trades.
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 import time
 from typing import Mapping, Sequence, TypedDict, cast
@@ -21,6 +22,7 @@ import urllib.parse
 import urllib.request
 
 from phoenixguard.execution.packet_v3 import validate_execution_packet_v3
+from phoenixguard.runtime.singleton_guard_v3 import PhoenixRuntimeSingletonGuardV3, guard_from_environment
 
 
 JsonDict = dict[str, object]
@@ -228,12 +230,19 @@ def run_reporter(
     timeout_sec: float,
     once: bool,
     handshake_path: Path,
+    runtime_guard: PhoenixRuntimeSingletonGuardV3 | None = None,
+    runtime_owner_token: str = "",
 ) -> int:
     url = _execution_url(base_url, session_id)
     LOGGER.info("Shooter execution is retired; reporting allowed packages only.")
     LOGGER.info("Polling %s", url)
     last_packet_id = ""
     while True:
+        if runtime_guard is not None and runtime_owner_token:
+            runtime_guard.heartbeat(
+                owner_token=runtime_owner_token,
+                updates={"session_id": session_id, "base_url": base_url, "shooter_pid": os.getpid()},
+            )
         try:
             packet = _read_json_url(url, timeout_sec=timeout_sec)
             report = publish_allowed_package_report(packet, source_url=url, path=handshake_path)
@@ -291,14 +300,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command == "manual":
         LOGGER.error("Manual broker execution is retired; shooter only reports allowed packages.")
         return 2
-    return run_reporter(
-        base_url=str(args.base_url),
+    guard = guard_from_environment(Path(__file__).resolve().parent)
+    registration = guard.register_component(
+        "shooter",
+        pid=os.getpid(),
         session_id=str(args.session_id),
-        poll_sec=float(args.poll),
-        timeout_sec=float(args.timeout),
-        once=bool(args.once or command == "once"),
-        handshake_path=Path(str(args.handshake_path)),
+        base_url=str(args.base_url),
+        owner_token=str(os.getenv("PHOENIXGUARD_RUNTIME_LOCK_TOKEN", "") or "").strip() or None,
     )
+    if not registration.ok:
+        LOGGER.error("Shooter reporter singleton registration refused: %s", registration.reason)
+        return 19
+    release_on_exit = registration.reason == "stack_lock_acquired"
+    try:
+        return run_reporter(
+            base_url=str(args.base_url),
+            session_id=str(args.session_id),
+            poll_sec=float(args.poll),
+            timeout_sec=float(args.timeout),
+            once=bool(args.once or command == "once"),
+            handshake_path=Path(str(args.handshake_path)),
+            runtime_guard=guard,
+            runtime_owner_token=registration.owner_token,
+        )
+    finally:
+        if release_on_exit:
+            guard.release(owner_token=registration.owner_token)
 
 
 if __name__ == "__main__":

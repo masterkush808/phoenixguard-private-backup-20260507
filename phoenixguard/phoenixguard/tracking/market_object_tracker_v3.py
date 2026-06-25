@@ -287,6 +287,149 @@ def _raw_bbox(raw: Mapping[str, Any]) -> list[float] | None:
     return None
 
 
+def _anchor_indices_from_raw(raw: Mapping[str, Any]) -> list[int]:
+    output: list[int] = []
+    seen: set[int] = set()
+    for key in ("anchor_candle_indices", "anchor_candles", "source_indices", "candle_indices", "indices"):
+        for item in _sequence(raw.get(key)):
+            index = int(_float(item, -1.0))
+            if index < 0 or index in seen:
+                continue
+            output.append(index)
+            seen.add(index)
+    return output
+
+
+def _box_intersects(first: Sequence[float], second: Sequence[float], *, padding: float = 0.0) -> bool:
+    pad = max(0.0, float(padding))
+    return not (
+        first[2] < second[0] - pad
+        or first[0] > second[2] + pad
+        or first[3] < second[1] - pad
+        or first[1] > second[3] + pad
+    )
+
+
+def _bbox_anchor_candidates(raw: Mapping[str, Any], primary_bbox: Sequence[float]) -> list[list[float]]:
+    candidates: list[list[float]] = []
+    seen: set[tuple[float, float, float, float]] = set()
+    for value in (
+        list(primary_bbox[:4]),
+        raw.get("source_bbox"),
+        raw.get("parent_bbox"),
+        raw.get("anchor_bbox"),
+        raw.get("sequence_bbox"),
+        raw.get("trigger_window"),
+        raw.get("sniper_window"),
+        raw.get("bbox"),
+        raw.get("bounds"),
+    ):
+        bounds = normalize_bounds(value)
+        if bounds is None:
+            continue
+        key: tuple[float, float, float, float] = (
+            round(float(bounds[0]), 3),
+            round(float(bounds[1]), 3),
+            round(float(bounds[2]), 3),
+            round(float(bounds[3]), 3),
+        )
+        if key in seen:
+            continue
+        candidates.append([float(item) for item in bounds[:4]])
+        seen.add(key)
+    return candidates
+
+
+def _candle_anchor_evidence(
+    raw: Mapping[str, Any],
+    primary_bbox: Sequence[float],
+    candles: Sequence[Mapping[str, Any]],
+) -> tuple[list[int], list[list[float]]]:
+    explicit = _anchor_indices_from_raw(raw)
+    candidates = _bbox_anchor_candidates(raw, primary_bbox)
+    points: list[list[float]] = []
+    seen_indexes: set[int] = set(explicit)
+    indexes = list(explicit)
+    for candle_index, candle in enumerate(candles):
+        candle_box = _raw_bbox(candle)
+        if candle_box is None:
+            continue
+        candle_center_x = _float(candle.get("center_x"), (candle_box[0] + candle_box[2]) * 0.5)
+        candle_center_y = _float(candle.get("center_y"), (candle_box[1] + candle_box[3]) * 0.5)
+        touches = any(_box_intersects(candidate, candle_box, padding=8.0) for candidate in candidates)
+        if not touches:
+            continue
+        if candle_index not in seen_indexes:
+            indexes.append(candle_index)
+            seen_indexes.add(candle_index)
+        point = [round(float(candle_center_x), 3), round(float(candle_center_y), 3)]
+        if point not in points:
+            points.append(point)
+    return indexes, points
+
+
+def _bool_false(value: Any) -> bool:
+    if value is False:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"0", "false", "no", "off"}
+    return False
+
+
+def _zone_role(zone: Mapping[str, Any]) -> str:
+    role = str(
+        zone.get("role")
+        or zone.get("zone_role")
+        or zone.get("zone_family")
+        or zone.get("type")
+        or zone.get("kind")
+        or zone.get("label")
+        or ""
+    ).strip().lower()
+    if "support" in role or "demand" in role:
+        return "support"
+    if "resistance" in role or "supply" in role:
+        return "resistance"
+    return ""
+
+
+def _zone_lifecycle_state(zone: Mapping[str, Any]) -> str:
+    explicit = _text(zone.get("lifecycle_state") or zone.get("state")).upper()
+    if explicit:
+        if explicit in {"FRESH", "TESTED", "ACTIVE", "FRESH_ACTIVE"}:
+            return "FRESH_ACTIVE"
+        if explicit in {"MITIGATED", "MITIGATED_ACTIVE"}:
+            return "MITIGATED_ACTIVE"
+        if explicit in {"HISTORICAL", "HISTORICAL_ACTIVE"}:
+            return "HISTORICAL_ACTIVE"
+        if explicit in {"BROKEN", "BROKEN_REFERENCE"}:
+            return "BROKEN_REFERENCE"
+        if explicit in {"CONSUMED", "CONSUMED_REFERENCE", "MITIGATED_REFERENCE"}:
+            return "CONSUMED_REFERENCE"
+        if explicit in {"ROLE_FLIP", "ROLE_FLIP_CONFIRMED"}:
+            return "ROLE_FLIP_CONFIRMED"
+        if explicit in {"CONTEXT", "REFERENCE", "STALE", "CONTEXT_REFERENCE"}:
+            return "CONTEXT_REFERENCE"
+    authority = _text(zone.get("zone_authority_state") or zone.get("freshness_state") or zone.get("authority_state")).upper()
+    if "ROLE_FLIP" in authority:
+        return "ROLE_FLIP_CONFIRMED"
+    if "BROKEN" in authority:
+        return "BROKEN_REFERENCE"
+    if "CONSUMED" in authority:
+        return "CONSUMED_REFERENCE"
+    if "MITIGATED" in authority:
+        return "MITIGATED_ACTIVE" if not _bool_false(zone.get("entry_authority_allowed")) else "CONTEXT_REFERENCE"
+    if _bool_false(zone.get("entry_authority_allowed")):
+        return "CONTEXT_REFERENCE"
+    if "HISTORICAL" in authority:
+        return "HISTORICAL_ACTIVE"
+    return "FRESH_ACTIVE"
+
+
+def _active_zone_lifecycle(lifecycle_state: str) -> bool:
+    return lifecycle_state in {"FRESH_ACTIVE", "MITIGATED_ACTIVE", "HISTORICAL_ACTIVE", "ACTIVE", "FRESH", "TESTED", "MITIGATED"}
+
+
 def _point_pair_bounds(points: Sequence[Any]) -> list[float] | None:
     return normalize_bounds(points)
 
@@ -836,6 +979,7 @@ class _RegistryBuilder:
             bbox = _raw_bbox(raw)
             if bbox is None or normalize_bbox(bbox) is None:
                 return
+            anchor_indices, anchor_touch_points = _candle_anchor_evidence(raw, bbox, candles)
             side_value = _upper_side(side if side is not None else raw.get("side", raw.get("direction", signal.get("action"))))
             object_id = _stable_id(session_id, object_type, source_path, source_key)
             track_id = _text(raw.get("track_id") or raw.get("persistent_id"), object_id)
@@ -860,7 +1004,7 @@ class _RegistryBuilder:
                 reason=reason_value,
                 state=lifecycle_state,
                 anchor_type=_text(raw.get("anchor_type"), "BOX").upper(),
-                anchor_candles=tuple(int(_float(item, 0.0)) for item in _sequence(raw.get("anchor_candles") or raw.get("source_indices"))),
+                anchor_candles=tuple(anchor_indices),
             )
             objects.append(obj)
             overlay_raw = dict(raw)
@@ -880,6 +1024,7 @@ class _RegistryBuilder:
                     "coordinate_mode": overlay_raw.get("coordinate_mode", "CHART_IMAGE_SPACE"),
                     "anchor_type": _text(raw.get("anchor_type"), "BOX").upper(),
                     "anchor_candles": list(obj.anchor_candles),
+                    "anchor_candle_indices": list(obj.anchor_candles),
                     "bounds": bbox,
                     "truth_score": truth,
                     "confidence": confidence,
@@ -891,6 +1036,8 @@ class _RegistryBuilder:
                     "visible_default": bool(raw.get("visible_default", object_type not in {"DEBUG_RAW_DETECTION", "PROGRESSION_PATH"})),
                 }
             )
+            if anchor_touch_points:
+                overlay_raw["touch_points"] = anchor_touch_points
             overlays.append(
                 normalize_v3_overlay_object(
                     overlay_raw,
@@ -988,6 +1135,7 @@ class _RegistryBuilder:
                     {
                         **box,
                         "bbox": box.get(field_name),
+                        "source_bbox": box.get("bbox") or box.get("bounds"),
                         "label": micro_label,
                         "role": micro_role,
                         "visible_modes": ["CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"],
@@ -1009,6 +1157,7 @@ class _RegistryBuilder:
                         {
                             **box,
                             "bbox": [base_bbox[0], invalidation_y - 2.0, base_bbox[2], invalidation_y + 2.0],
+                            "source_bbox": base_bbox,
                             "label": f"{structure_side} INVALIDATION",
                             "role": "invalidation",
                             "visible_modes": ["CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"],
@@ -1085,6 +1234,7 @@ class _RegistryBuilder:
                     {
                         **box,
                         "bbox": replay_bounds,
+                        "source_bbox": box.get("bbox") or box.get("bounds"),
                         "label": replay_label,
                         "display_label": replay_label,
                         "role": replay_role,
@@ -1112,6 +1262,7 @@ class _RegistryBuilder:
                         {
                             **box,
                             "bbox": [base_bbox[0], invalidation_y - 2.0, base_bbox[2], invalidation_y + 2.0],
+                            "source_bbox": base_bbox,
                             "label": "INVALID",
                             "display_label": "INVALID",
                             "role": "replay_invalidation",
@@ -1131,10 +1282,18 @@ class _RegistryBuilder:
                     )
 
         for index, zone in enumerate(_sequence_of_mappings(tracking.get("support_resistance_zones"))):
-            role = str(zone.get("role") or "").lower()
-            object_type = "DEMAND_ZONE" if role == "support" else "SUPPLY_ZONE" if role == "resistance" else normalize_overlay_type(zone.get("type"), layer="supply_demand", role=role, side=zone.get("direction"))
+            role = _zone_role(zone)
+            if role not in {"support", "resistance"}:
+                continue
+            object_type = "DEMAND_ZONE" if role == "support" else "SUPPLY_ZONE"
+            lifecycle_state = _zone_lifecycle_state(zone)
             add_object(
-                zone,
+                {
+                    **zone,
+                    "zone_family": object_type,
+                    "lifecycle_state": lifecycle_state,
+                    "entry_authority_active": _active_zone_lifecycle(lifecycle_state),
+                },
                 object_type=object_type,
                 source_path=f"tracking_summary.support_resistance_zones[{index}]",
                 source_key=zone.get("key", index),
@@ -1142,6 +1301,7 @@ class _RegistryBuilder:
                 role=role or TYPE_ROLE_MAP.get(object_type, ""),
                 layer="supply_demand",
                 side=zone.get("direction"),
+                lifecycle_state=lifecycle_state,
             )
 
         projection = _mapping(tracking.get("projection"))
@@ -1166,7 +1326,12 @@ class _RegistryBuilder:
             )
             if normalize_bounds(zone.get("target_bbox")) is not None:
                 add_object(
-                    {**zone, "bbox": zone.get("target_bbox"), "label": f"{_upper_side(zone.get('direction', projection.get('direction')))} TARGET"},
+                    {
+                        **zone,
+                        "bbox": zone.get("target_bbox"),
+                        "source_bbox": zone.get("bbox") or zone.get("bounds"),
+                        "label": f"{_upper_side(zone.get('direction', projection.get('direction')))} TARGET",
+                    },
                     object_type="TARGET_ZONE_BOX",
                     source_path=f"tracking_summary.projection.zones[{index}].target_bbox",
                     source_key=zone.get("key", kind or index),
@@ -1180,7 +1345,12 @@ class _RegistryBuilder:
                 bbox = _raw_bbox(zone) or [0, 0, 1, 1]
                 y = _float(zone.get("invalidation_y"), bbox[3])
                 add_object(
-                    {**zone, "bbox": [bbox[0], y - 2.0, bbox[2], y + 2.0], "label": f"{_upper_side(zone.get('direction', projection.get('direction')))} INVALIDATION"},
+                    {
+                        **zone,
+                        "bbox": [bbox[0], y - 2.0, bbox[2], y + 2.0],
+                        "source_bbox": bbox,
+                        "label": f"{_upper_side(zone.get('direction', projection.get('direction')))} INVALIDATION",
+                    },
                     object_type="INVALIDATION_BOX",
                     source_path=f"tracking_summary.projection.zones[{index}].invalidation_y",
                     source_key=zone.get("key", kind or index),
@@ -1219,17 +1389,30 @@ class _RegistryBuilder:
         for key, fallback_type in (("entry_area_zone", "DEMAND_ZONE"), ("opposing_force_zone", "OPPOSING_FORCE")):
             zone = _mapping(execution_timing.get(key))
             if zone:
-                role_value = str(zone.get("role") or zone.get("label") or key).lower()
+                role_value = _zone_role(zone)
                 if fallback_type == "OPPOSING_FORCE":
                     object_type = "OPPOSING_FORCE"
-                elif "resistance" in role_value or "supply" in role_value:
+                elif role_value == "resistance":
                     object_type = "SUPPLY_ZONE"
-                elif "support" in role_value or "demand" in role_value:
+                elif role_value == "support":
                     object_type = "DEMAND_ZONE"
                 else:
-                    object_type = normalize_overlay_type(zone.get("type"), layer="supply_demand", role=zone.get("role"), side=zone.get("direction"))
+                    continue
+                lifecycle_state = _zone_lifecycle_state(zone)
+                if object_type == "OPPOSING_FORCE" and not _active_zone_lifecycle(lifecycle_state):
+                    continue
                 add_object(
-                    zone,
+                    {
+                        **zone,
+                        "zone_family": object_type,
+                        "source_zone_id": zone.get("source_zone_id") or zone.get("zone_id") or zone.get("key") or zone.get("label"),
+                        "side_blocked": _upper_side(zone.get("side_blocked") or signal.get("action")),
+                        "force_type": zone.get("force_type") or role_value or "opposing_force",
+                        "force_strength": zone.get("force_strength", zone.get("confidence", 0.0)),
+                        "anchor_level": zone.get("anchor_level", zone.get("line_y")),
+                        "lifecycle_state": lifecycle_state,
+                        "entry_authority_active": _active_zone_lifecycle(lifecycle_state),
+                    },
                     object_type=object_type,
                     source_path=f"tracking_summary.execution_timing.{key}",
                     source_key=zone.get("label", key),
@@ -1237,6 +1420,7 @@ class _RegistryBuilder:
                     role=key,
                     layer="supply_demand",
                     side=zone.get("direction"),
+                    lifecycle_state=lifecycle_state,
                 )
 
         memory = _mapping(payload.get("memory_projection_current")) or _mapping(payload.get("memory_projection_predict")) or _mapping(payload.get("memory_projection_future"))

@@ -321,33 +321,47 @@ def _points_inside_box(points: Sequence[Sequence[Any]], box: Sequence[Any], padd
     return inside
 
 
-def _has_structural_anchor(row: Mapping[str, Any]) -> bool:
-    if bool(row.get("structural_anchor") or row.get("anchored") or row.get("still_significant")):
+def _has_anchor_evidence_mapping(row: Mapping[str, Any]) -> bool:
+    evidence = _mapping(row.get("anchor_evidence"))
+    if not evidence or evidence.get("valid") is not True:
+        return False
+    if _sequence(evidence.get("candle_indices")) or _sequence(evidence.get("anchor_candle_indices")):
         return True
-    if _sequence(row.get("anchor_candles")) or _sequence(row.get("source_indices")):
-        return True
-    if _anchor_points_from_row(row):
-        return True
+    return bool(_anchor_points_from_row({"touch_points": evidence.get("touch_points")}))
+
+
+def _has_positive_anchor_count(row: Mapping[str, Any]) -> bool:
     for key in ("touch_count", "wick_probe_count", "reaction_count", "retest_count", "sweep_count", "candle_count"):
         if _float(row.get(key), 0.0) > 0.0:
             return True
+    return False
+
+
+def _has_hard_anchor_evidence(row: Mapping[str, Any]) -> bool:
+    if _has_anchor_evidence_mapping(row):
+        return True
+    if _sequence(row.get("anchor_candle_indices")) or _sequence(row.get("anchor_candles")) or _sequence(row.get("source_indices")):
+        return True
+    if _anchor_points_from_row(row):
+        return True
+    if _has_positive_anchor_count(row):
+        return True
     if row.get("line_y") is not None and (row.get("line_x0") is not None or row.get("line_x1") is not None):
-        return True
-    source_agent = str(row.get("source_agent") or "").strip().lower()
-    source_path = str(row.get("source_path") or "").strip().lower()
-    if source_agent == "market_object_tracker_v3" and source_path.startswith(
-        (
-            "tracking_summary.support_resistance_zones",
-            "tracking_summary.execution_timing",
-            "tracking_summary.projection.zones",
-            "tracking_summary.structure_boxes",
-            "tracking_summary.historical_structure",
-        )
-    ):
-        return True
+        return _has_positive_anchor_count(row) or bool(_anchor_points_from_row(row))
+    return False
+
+
+def _anchor_rejection_reason(row: Mapping[str, Any]) -> str:
+    for key in ("parent_overlay_id", "parent_label"):
+        if row.get(key) not in (None, "", [], {}):
+            return "parent_only_anchor"
+    if row.get("line_y") is not None and (row.get("line_x0") is not None or row.get("line_x1") is not None):
+        return "line_level_without_touch_evidence"
     for key in (
-        "parent_overlay_id",
-        "parent_label",
+        "source_path",
+        "structural_anchor",
+        "anchored",
+        "still_significant",
         "zone_family",
         "liquidity_pool_type",
         "liquidity_source",
@@ -360,10 +374,13 @@ def _has_structural_anchor(row: Mapping[str, Any]) -> bool:
         "story",
         "knowledge_tags",
     ):
-        value = row.get(key)
-        if value not in (None, "", [], {}):
-            return True
-    return False
+        if row.get(key) not in (None, "", [], {}):
+            return "metadata_only_anchor"
+    return "floating_unanchored_overlay"
+
+
+def _has_structural_anchor(row: Mapping[str, Any]) -> bool:
+    return _has_hard_anchor_evidence(row)
 
 
 def _snap_box_to_anchor_evidence(row: Mapping[str, Any], bounds: Sequence[Any], plot: Sequence[Any]) -> tuple[list[float], list[str]]:
@@ -1106,8 +1123,10 @@ def _reject_unanchored_floating_boxes(rows: Sequence[Mapping[str, Any]]) -> tupl
             output.append(row)
             continue
         rejected += 1
-        rejected_row = _mark_rejected(row, "floating_unanchored_overlay")
-        rejected_row.setdefault("precision_flags", []).append("floating_unanchored_overlay")
+        reason = _anchor_rejection_reason(row)
+        rejected_row = _mark_rejected(row, reason)
+        rejected_row.setdefault("precision_flags", []).append(reason)
+        rejected_row.setdefault("anchor_evidence_status", "MISSING_ANCHOR_EVIDENCE")
         output.append(rejected_row)
     return output, rejected
 
@@ -1303,8 +1322,10 @@ def resolve_precision_overlays_v3(
         )
     current_policy, duplicate_now_hidden = _apply_current_candle_policy(normalized, normalized_mode)
     suppressed, duplicate_count = _suppress_duplicates(current_policy)
-    nested, nesting_report = _apply_overlay_nesting(suppressed)
-    anchored, floating_rejected = _reject_unanchored_floating_boxes(nested)
+    pre_anchored, pre_nesting_floating_rejected = _reject_unanchored_floating_boxes(suppressed)
+    nested, nesting_report = _apply_overlay_nesting(pre_anchored)
+    anchored, post_nesting_floating_rejected = _reject_unanchored_floating_boxes(nested)
+    floating_rejected = pre_nesting_floating_rejected + post_nesting_floating_rejected
     budgeted = (
         _apply_clean_live_budget(anchored, str(current_side or "").upper())
         if normalized_mode == "CLEAN_LIVE"

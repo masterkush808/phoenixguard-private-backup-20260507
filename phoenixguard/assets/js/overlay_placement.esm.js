@@ -16,10 +16,12 @@ export const layerWeights = {
 
 export function computePriority(box){
   try{
-    const conf = Number(box.confidence || box.score || 0) || 0;
+    const style = box && typeof box.style === 'object' ? box.style : {};
+    const conf = Number(box.overlay_confidence || box.confidence || box.score || style.confidence || 0) || 0;
     const visDef = box.visible_default === true ? 1 : 0;
     const lw = Number(layerWeights[box.layer || box.type] || 0);
-    return Math.round((conf * 100 + visDef * 50 + lw * 10) * 100) / 100;
+    const visualWeight = Number(box.visual_weight || style.visual_weight || 0) || 0;
+    return Math.round((conf * 100 + visDef * 50 + lw * 10 + visualWeight * 10) * 100) / 100;
   }catch(e){ return 0; }
 }
 

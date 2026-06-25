@@ -156,144 +156,143 @@ def main() -> int:
     samples: list[dict[str, Any]] = []
 
     with sync_playwright() as playwright:
-        for mode in modes:
-            browser = playwright.chromium.launch(headless=True)
-            page = browser.new_page(viewport={"width": args.width, "height": args.height}, device_scale_factor=1)
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": args.width, "height": args.height}, device_scale_factor=1)
+        try:
             try:
                 page.goto(dashboard_url, wait_until="domcontentloaded", timeout=int(args.timeout * 1000.0))
                 page.wait_for_selector(".console-shell", timeout=int(args.timeout * 1000.0))
                 page.wait_for_timeout(1500)
             except Exception as exc:
-                failures.append(f"{mode}: dashboard initial hydration failed before mode capture: {exc}")
-                page.close()
-                browser.close()
-                continue
-            select_value = MODE_TO_SELECT_VALUE.get(mode)
-            if not select_value:
-                failures.append(f"{mode}: no dashboard select value")
-                page.close()
-                browser.close()
-                continue
-            backend = _http_json_retry(
-                f"{base}/v1/mobile/live/state/v3/{session_q}?mode={urllib.parse.quote(mode, safe='')}&compact=1",
-                timeout=args.timeout,
-            )
-            payload = _mapping(backend.get("payload"))
-            expected_renderable = int(payload.get("renderable_count") or 0)
-            mode_query = f"mode={urllib.parse.quote(mode, safe='')}"
-            try:
-                with page.expect_response(
-                    lambda response, expected=mode_query: "/v1/mobile/live/state/v3/" in response.url
-                    and expected in response.url
-                    and 200 <= response.status < 300,
-                    timeout=int(args.timeout * 1000.0),
-                ):
-                    page.select_option("#overlay-mode-select", select_value, timeout=int(args.timeout * 1000.0))
-            except Exception:
-                page.select_option("#overlay-mode-select", select_value, timeout=int(args.timeout * 1000.0))
-            page.wait_for_timeout(2000)
-            page.evaluate(
-                """async (selectValue) => {
-                  if (typeof refreshSession === "function") await refreshSession();
-                  if (typeof setMode === "function") setMode("overlay");
-                  if (typeof applyOverlayPreset === "function") applyOverlayPreset(selectValue);
-                  if (typeof refreshLiveVisualStateForMode === "function") {
-                    await refreshLiveVisualStateForMode(selectValue);
-                  }
-                  const select = document.querySelector("#overlay-mode-select");
-                  if (select) {
-                    select.value = selectValue;
-                    select.dispatchEvent(new Event("change", {bubbles: true}));
-                  }
-                  if (typeof renderSurface === "function") renderSurface();
-                  await new Promise((resolve) => setTimeout(resolve, 1500));
-                  if (typeof commitSurfaceImage === "function") {
-                    const overlay = document.querySelector("#surface-overlay");
-                    const raw = document.querySelector("#surface-raw");
-                    if (overlay) commitSurfaceImage(overlay);
-                    if (raw) commitSurfaceImage(raw);
-                  }
-                  if (typeof renderHotspots === "function") renderHotspots();
-                }""",
-                select_value,
-            )
-            try:
-                page.wait_for_function(
-                    """({selectValue, expectedRenderable}) => {
-                      const select = document.querySelector("#overlay-mode-select");
-                      const selected = Boolean(select && select.value === selectValue);
-                      const legacy = Boolean(document.body && document.body.innerText.includes("legacy session"));
-                      const updating = Boolean(document.body && (
-                        document.body.innerText.includes("Live surface updating")
-                        || document.body.innerText.includes("Overlay catching up")
-                      ));
-                      const image = document.querySelector("#surface-overlay.visible, #surface-raw.visible");
-                      const hasImage = Boolean(image && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0);
-                      const hotspots = document.querySelectorAll(".surface-hotspot").length;
-                      return selected && !legacy && !updating && hasImage && (expectedRenderable <= 0 || hotspots > 0);
-                    }""",
-                    arg={"selectValue": select_value, "expectedRenderable": expected_renderable},
-                    timeout=int(args.timeout * 1000.0),
+                failures.append(f"dashboard initial hydration failed before mode capture: {exc}")
+                modes = []
+            for mode in modes:
+                page.evaluate("window.scrollTo(0, 0)")
+                select_value = MODE_TO_SELECT_VALUE.get(mode)
+                if not select_value:
+                    failures.append(f"{mode}: no dashboard select value")
+                    continue
+                backend = _http_json_retry(
+                    f"{base}/v1/mobile/live/state/v3/{session_q}?mode={urllib.parse.quote(mode, safe='')}&compact=1",
+                    timeout=args.timeout,
                 )
-            except Exception:
-                pass
-            page.wait_for_timeout(350)
-            ready = page.evaluate(
-                """(expectedMode) => {
-                  const select = document.querySelector("#overlay-mode-select");
-                  const labels = Array.from(document.querySelectorAll(".surface-hotspot span")).map((node) => node.textContent || "");
-                  const image = document.querySelector("#surface-overlay.visible, #surface-raw.visible");
-                  return {
-                    selected_value: select ? select.value : "",
-                    hotspot_count: document.querySelectorAll(".surface-hotspot").length,
-                    labels,
-                    expected_mode: expectedMode,
-                    visible_image: Boolean(image && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0),
-                    body_has_legacy: Boolean(document.body && document.body.innerText.includes("legacy session")),
-                  };
-                }""",
-                mode,
-            )
-            screenshot_path = out_dir / f"{mode.lower()}_{args.session}.png"
-            try:
-                client = page.context.new_cdp_session(page)
-                send = cast(Callable[[str, Mapping[str, Any]], Any], getattr(client, "send"))
-                shot = _mapping(send("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True, "fromSurface": True}))
-                screenshot_path.write_bytes(base64.b64decode(str(shot.get("data") or "")))
-            except Exception:
-                page.screenshot(path=str(screenshot_path), full_page=True, timeout=int(args.timeout * 1000.0), animations="disabled")
-            metrics = _image_metrics(screenshot_path)
-            sample: dict[str, Any] = {
-                "mode": mode,
-                "select_value": select_value,
-                "backend_ok": backend.get("ok"),
-                "backend_status": backend.get("status"),
-                "backend_error": backend.get("error"),
-                "backend_attempt": backend.get("attempt"),
-                "backend_latency_ms": backend.get("latency_ms"),
-                "backend_active_mode": payload.get("active_mode"),
-                "backend_requested_mode": payload.get("requested_mode"),
-                "backend_renderable_count": payload.get("renderable_count"),
-                "backend_unknown_or_unmapped_terms": payload.get("unknown_or_unmapped_terms"),
-                "dashboard_ready": ready,
-                "screenshot": str(screenshot_path),
-                "metrics": metrics,
-            }
-            samples.append(sample)
-            if not backend.get("ok"):
-                failures.append(f"{mode}: backend live-state request failed")
-            if payload.get("active_mode") != mode:
-                failures.append(f"{mode}: backend active_mode={payload.get('active_mode')}")
-            if ready.get("selected_value") != select_value:
-                failures.append(f"{mode}: dashboard select did not stay on {select_value}")
-            if ready.get("body_has_legacy"):
-                failures.append(f"{mode}: dashboard rendered legacy session text")
-            if ready.get("visible_image") is not True:
-                failures.append(f"{mode}: dashboard surface image was not visible")
-            if expected_renderable > 0 and int(ready.get("hotspot_count") or 0) <= 0:
-                failures.append(f"{mode}: dashboard rendered no hotspots for {expected_renderable} backend overlays")
-            if metrics.get("nonblank") is not True:
-                failures.append(f"{mode}: screenshot blank or unreadable")
+                payload = _mapping(backend.get("payload"))
+                expected_renderable = int(payload.get("renderable_count") or 0)
+                mode_query = f"mode={urllib.parse.quote(mode, safe='')}"
+                try:
+                    with page.expect_response(
+                        lambda response, expected=mode_query: "/v1/mobile/live/state/v3/" in response.url
+                        and expected in response.url
+                        and 200 <= response.status < 300,
+                        timeout=int(args.timeout * 1000.0),
+                    ):
+                        page.select_option("#overlay-mode-select", select_value, timeout=int(args.timeout * 1000.0))
+                except Exception:
+                    page.select_option("#overlay-mode-select", select_value, timeout=int(args.timeout * 1000.0))
+                page.wait_for_timeout(2000)
+                page.evaluate(
+                    """async (selectValue) => {
+                      if (typeof refreshSession === "function") await refreshSession();
+                      if (typeof setMode === "function") setMode("overlay");
+                      if (typeof applyOverlayPreset === "function") applyOverlayPreset(selectValue);
+                      if (typeof refreshLiveVisualStateForMode === "function") {
+                        await refreshLiveVisualStateForMode(selectValue);
+                      }
+                      const select = document.querySelector("#overlay-mode-select");
+                      if (select) {
+                        select.value = selectValue;
+                        select.dispatchEvent(new Event("change", {bubbles: true}));
+                      }
+                      if (typeof renderSurface === "function") renderSurface();
+                      await new Promise((resolve) => setTimeout(resolve, 1500));
+                      if (typeof commitSurfaceImage === "function") {
+                        const overlay = document.querySelector("#surface-overlay");
+                        const raw = document.querySelector("#surface-raw");
+                        if (overlay) commitSurfaceImage(overlay);
+                        if (raw) commitSurfaceImage(raw);
+                      }
+                      if (typeof renderHotspots === "function") renderHotspots();
+                    }""",
+                    select_value,
+                )
+                try:
+                    page.wait_for_function(
+                        """({selectValue, expectedRenderable}) => {
+                          const select = document.querySelector("#overlay-mode-select");
+                          const selected = Boolean(select && select.value === selectValue);
+                          const legacy = Boolean(document.body && document.body.innerText.includes("legacy session"));
+                          const updating = Boolean(document.body && (
+                            document.body.innerText.includes("Live surface updating")
+                            || document.body.innerText.includes("Overlay catching up")
+                          ));
+                          const image = document.querySelector("#surface-overlay.visible, #surface-raw.visible");
+                          const hasImage = Boolean(image && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0);
+                          const hotspots = document.querySelectorAll(".surface-hotspot").length;
+                          return selected && !legacy && !updating && hasImage && (expectedRenderable <= 0 || hotspots > 0);
+                        }""",
+                        arg={"selectValue": select_value, "expectedRenderable": expected_renderable},
+                        timeout=int(args.timeout * 1000.0),
+                    )
+                except Exception:
+                    pass
+                page.wait_for_timeout(350)
+                ready = page.evaluate(
+                    """(expectedMode) => {
+                      const select = document.querySelector("#overlay-mode-select");
+                      const labels = Array.from(document.querySelectorAll(".surface-hotspot span")).map((node) => node.textContent || "");
+                      const image = document.querySelector("#surface-overlay.visible, #surface-raw.visible");
+                      return {
+                        selected_value: select ? select.value : "",
+                        hotspot_count: document.querySelectorAll(".surface-hotspot").length,
+                        labels,
+                        expected_mode: expectedMode,
+                        visible_image: Boolean(image && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0),
+                        body_has_legacy: Boolean(document.body && document.body.innerText.includes("legacy session")),
+                      };
+                    }""",
+                    mode,
+                )
+                screenshot_path = out_dir / f"{mode.lower()}_{args.session}.png"
+                try:
+                    client = page.context.new_cdp_session(page)
+                    send = cast(Callable[[str, Mapping[str, Any]], Any], getattr(client, "send"))
+                    shot = _mapping(send("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True, "fromSurface": True}))
+                    screenshot_path.write_bytes(base64.b64decode(str(shot.get("data") or "")))
+                except Exception:
+                    page.screenshot(path=str(screenshot_path), full_page=True, timeout=int(args.timeout * 1000.0), animations="disabled")
+                metrics = _image_metrics(screenshot_path)
+                sample: dict[str, Any] = {
+                    "mode": mode,
+                    "select_value": select_value,
+                    "backend_ok": backend.get("ok"),
+                    "backend_status": backend.get("status"),
+                    "backend_error": backend.get("error"),
+                    "backend_attempt": backend.get("attempt"),
+                    "backend_latency_ms": backend.get("latency_ms"),
+                    "backend_active_mode": payload.get("active_mode"),
+                    "backend_requested_mode": payload.get("requested_mode"),
+                    "backend_renderable_count": payload.get("renderable_count"),
+                    "backend_unknown_or_unmapped_terms": payload.get("unknown_or_unmapped_terms"),
+                    "dashboard_ready": ready,
+                    "screenshot": str(screenshot_path),
+                    "metrics": metrics,
+                }
+                samples.append(sample)
+                if not backend.get("ok"):
+                    failures.append(f"{mode}: backend live-state request failed")
+                if payload.get("active_mode") != mode:
+                    failures.append(f"{mode}: backend active_mode={payload.get('active_mode')}")
+                if ready.get("selected_value") != select_value:
+                    failures.append(f"{mode}: dashboard select did not stay on {select_value}")
+                if ready.get("body_has_legacy"):
+                    failures.append(f"{mode}: dashboard rendered legacy session text")
+                if ready.get("visible_image") is not True:
+                    failures.append(f"{mode}: dashboard surface image was not visible")
+                if expected_renderable > 0 and int(ready.get("hotspot_count") or 0) <= 0:
+                    failures.append(f"{mode}: dashboard rendered no hotspots for {expected_renderable} backend overlays")
+                if metrics.get("nonblank") is not True:
+                    failures.append(f"{mode}: screenshot blank or unreadable")
+        finally:
             page.close()
             browser.close()
 

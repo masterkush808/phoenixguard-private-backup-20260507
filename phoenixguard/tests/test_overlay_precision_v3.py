@@ -620,6 +620,155 @@ def test_precision_resolver_rejects_floating_unanchored_live_zone(tmp_path: Path
     assert "CLEAN_LIVE" not in resolved[0]["visible_modes"]
 
 
+def test_precision_resolver_rejects_metadata_only_live_zone(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
+    overlays: list[dict[str, Any]] = [
+        {
+            "overlay_id": "metadata-zone",
+            "object_id": "metadata-zone",
+            "track_id": "metadata-zone",
+            "type": "DEMAND_ZONE",
+            "side": "BUY",
+            "source_agent": "market_object_tracker_v3",
+            "source_path": "tracking_summary.support_resistance_zones[0]",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [420, 420, 820, 500],
+            "truth_score": 0.88,
+            "confidence": 0.88,
+            "visible_modes": ["CLEAN_LIVE", "SUPPLY_DEMAND", "INSPECTOR"],
+            "ttl_ms": 30000,
+            "reason": "metadata should not promote a naked zone",
+            "label": "DEMAND",
+            "structural_anchor": True,
+            "zone_family": "DEMAND_ZONE",
+            "source_rule": "support_reclaim",
+        }
+    ]
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="CLEAN_LIVE",
+        current_side="BUY",
+        frame_id=14494,
+    )
+
+    assert audit["rendered_count"] == 0
+    assert audit["precision_report"]["floating_unanchored_rejected"] == 1
+    assert resolved[0]["precision_rejection_reason"] == "metadata_only_anchor"
+    assert resolved[0]["precision_rejected"] is True
+
+
+def test_precision_resolver_rejects_parent_only_actionable_child(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
+    overlays: list[dict[str, Any]] = [
+        {
+            "overlay_id": "parent-impulse",
+            "object_id": "parent-impulse",
+            "track_id": "parent-impulse",
+            "type": "IMPULSE_BOX",
+            "side": "SELL",
+            "source_agent": "test",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [280, 220, 760, 520],
+            "truth_score": 0.72,
+            "confidence": 0.72,
+            "visible_modes": ["CLEAN_LIVE", "GLOBAL", "INSPECTOR"],
+            "ttl_ms": 30000,
+            "reason": "parent context",
+            "label": "IMPULSE",
+            "anchor_candles": [8, 12],
+        },
+        {
+            "overlay_id": "child-sniper-parent-only",
+            "object_id": "child-sniper-parent-only",
+            "track_id": "child-sniper-parent-only",
+            "type": "SNIPER_ENTRY_BOX",
+            "side": "SELL",
+            "source_agent": "test",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [500, 340, 590, 382],
+            "truth_score": 0.86,
+            "confidence": 0.86,
+            "visible_modes": ["CLEAN_LIVE", "ACTIVE_CONTEXT", "INSPECTOR"],
+            "ttl_ms": 30000,
+            "reason": "parent-only actionable child must not render",
+            "label": "SNIPER SELL",
+            "parent_label": "parent impulse",
+        },
+    ]
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="CLEAN_LIVE",
+        current_side="SELL",
+        frame_id=14494,
+    )
+    by_id = {row["overlay_id"]: row for row in resolved}
+
+    assert audit["rendered_count"] == 1
+    assert audit["precision_report"]["floating_unanchored_rejected"] == 1
+    assert by_id["child-sniper-parent-only"]["precision_rejection_reason"] == "parent_only_anchor"
+    assert by_id["child-sniper-parent-only"]["precision_rejected"] is True
+
+
+def test_precision_resolver_rejects_line_level_without_touch_evidence(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
+    overlays: list[dict[str, Any]] = [
+        {
+            "overlay_id": "line-only-supply",
+            "object_id": "line-only-supply",
+            "track_id": "line-only-supply",
+            "type": "SUPPLY_ZONE",
+            "side": "SELL",
+            "source_agent": "test",
+            "frame_id": 14494,
+            "sequence_id": "seq",
+            "chart_transform_id": "ct",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "BOX",
+            "bounds": [420, 220, 820, 300],
+            "line_y": 250,
+            "line_x0": 420,
+            "line_x1": 820,
+            "truth_score": 0.88,
+            "confidence": 0.88,
+            "visible_modes": ["CLEAN_LIVE", "SUPPLY_DEMAND", "INSPECTOR"],
+            "ttl_ms": 30000,
+            "reason": "line level needs touch evidence",
+            "label": "SUPPLY",
+        }
+    ]
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="CLEAN_LIVE",
+        current_side="SELL",
+        frame_id=14494,
+    )
+
+    assert audit["rendered_count"] == 0
+    assert resolved[0]["precision_rejection_reason"] == "line_level_without_touch_evidence"
+    assert resolved[0]["precision_rejected"] is True
+
+
 def test_precision_resolver_snaps_anchored_zone_to_touch_cluster(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
@@ -797,6 +946,8 @@ def test_precision_resolver_clean_live_budget_does_not_suppress_active_context_c
             "reason": "counter-side context should remain visible outside clean live",
             "label": "SNIPER BUY",
             "parent_label": "local pullback",
+            "anchor_candles": [10, 11],
+            "touch_points": [[524, 318], [562, 326]],
         }
     ]
 
@@ -890,6 +1041,7 @@ def test_no_duplicate_now_labels_in_clean_live_and_history_maps_to_replay(tmp_pa
             "confidence": 0.96,
             "visible_modes": ["CLEAN_LIVE", "ACTIVE_CONTEXT", "COUNCIL", "INSPECTOR"],
             "label": "NOW",
+            "anchor_candles": [20],
         },
         {
             "overlay_id": "current-duplicate",
@@ -908,6 +1060,7 @@ def test_no_duplicate_now_labels_in_clean_live_and_history_maps_to_replay(tmp_pa
             "confidence": 0.82,
             "visible_modes": ["CLEAN_LIVE", "ACTIVE_CONTEXT", "COUNCIL", "INSPECTOR"],
             "label": "NOW",
+            "anchor_candles": [19],
         },
         {
             "overlay_id": "historical-now",
@@ -927,6 +1080,7 @@ def test_no_duplicate_now_labels_in_clean_live_and_history_maps_to_replay(tmp_pa
             "lifecycle_state": "HISTORICAL",
             "visible_modes": ["CLEAN_LIVE", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
             "label": "NOW",
+            "anchor_candles": [12],
         },
     ]
 

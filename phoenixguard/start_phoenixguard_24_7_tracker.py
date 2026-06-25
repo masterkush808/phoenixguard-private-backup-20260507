@@ -20,6 +20,7 @@ from phoenixguard.runtime.tracker_bootstrap import (
     tracker_session_is_stale,
     tracker_session_runtime_state,
 )
+from phoenixguard.runtime.singleton_guard_v3 import PhoenixRuntimeSingletonGuardV3
 
 
 JsonDict = dict[str, Any]
@@ -383,7 +384,14 @@ def _start_live_fast_display_file_heartbeat_thread(script_dir: Path, session_id:
     return stop_event
 
 
-def _launch_mobile_api(script_dir: Path, host: str, port: int) -> subprocess.Popen[str]:
+def _launch_mobile_api(
+    script_dir: Path,
+    host: str,
+    port: int,
+    *,
+    runtime_lock_path: Path | None = None,
+    runtime_lock_token: str = "",
+) -> subprocess.Popen[str]:
     env = os.environ.copy()
     env["PHOENIXGUARD_MOBILE_API_HOST"] = host
     env["PHOENIXGUARD_MOBILE_API_PORT"] = str(port)
@@ -398,6 +406,10 @@ def _launch_mobile_api(script_dir: Path, host: str, port: int) -> subprocess.Pop
     python_exe, pyvenv_launcher = _resolve_python_launcher(env)
     if pyvenv_launcher and Path(str(python_exe)).resolve() != Path(str(pyvenv_launcher)).resolve():
         env["__PYVENV_LAUNCHER__"] = pyvenv_launcher
+    if runtime_lock_path is not None:
+        env["PHOENIXGUARD_RUNTIME_LOCK_PATH"] = str(runtime_lock_path)
+    if runtime_lock_token:
+        env["PHOENIXGUARD_RUNTIME_LOCK_TOKEN"] = runtime_lock_token
     return cast(subprocess.Popen[str], subprocess.Popen(
         [python_exe, str(script_dir / "start_phoenixguard_mobile_api.py")],
         cwd=str(script_dir),
@@ -747,11 +759,36 @@ def main() -> int:
     dashboard_url = f"{base_url}/v1/mobile/window-tracker/dashboard/{args.session_id}"
     configured_focus_region = _parse_focus_region(args.focus_region)
     status_path = Path(args.status_file)
+    runtime_guard = PhoenixRuntimeSingletonGuardV3.for_repo(script_dir)
+    runtime_lock = runtime_guard.acquire(
+        session_id=args.session_id,
+        base_url=base_url,
+        data_dir=os.environ.get("PHOENIXGUARD_DATA_DIR", str(_default_live_runtime_dir(script_dir, "data_live"))),
+        api_port=args.port,
+        launcher_pid=os.getpid(),
+        tracker_pid=os.getpid(),
+        takeover_stale=True,
+    )
+    if not runtime_lock.ok:
+        print(json.dumps(runtime_lock.as_dict(), indent=2, ensure_ascii=True), flush=True)
+        return 19
+    runtime_owner_token = runtime_lock.owner_token
     consecutive_restart_count = 0
     consecutive_session_read_failures = 0
     session: dict[str, Any] = {}
     api_proc: subprocess.Popen[str] | None = None
     file_heartbeat_stop = _start_live_fast_display_file_heartbeat_thread(script_dir, args.session_id)
+
+    def _runtime_heartbeat() -> None:
+        updates: dict[str, Any] = {
+            "session_id": args.session_id,
+            "base_url": base_url,
+            "api_port": args.port,
+            "tracker_pid": os.getpid(),
+        }
+        if api_proc is not None and api_proc.poll() is None:
+            updates["api_pid"] = api_proc.pid
+        runtime_guard.heartbeat(owner_token=runtime_owner_token, updates=updates)
 
     try:
         if args.open_dashboard:
@@ -762,7 +799,15 @@ def main() -> int:
 
         while True:
             _quarantine_stale_session_on_boot(script_dir, args.session_id)
-            api_proc = _launch_mobile_api(script_dir, args.host, args.port)
+            api_proc = _launch_mobile_api(
+                script_dir,
+                args.host,
+                args.port,
+                runtime_lock_path=runtime_guard.lock_path,
+                runtime_lock_token=runtime_owner_token,
+            )
+            runtime_guard.register_component("api", pid=api_proc.pid, owner_token=runtime_owner_token)
+            _runtime_heartbeat()
             print(f"Launching mobile API on {base_url} (PID {api_proc.pid})")
 
             if not _wait_for_health(base_url, args.health_timeout):
@@ -811,6 +856,7 @@ def main() -> int:
                         "api_pid": api_proc.pid,
                         "timestamp_epoch": time.time(),
                     })
+                    _runtime_heartbeat()
                     time.sleep(2.0)
                     if api_proc.poll() is not None:
                         consecutive_restart_count += 1
@@ -933,6 +979,7 @@ def main() -> int:
                         last_heartbeat_epoch=last_fast_display_heartbeat_epoch,
                         script_dir=script_dir,
                     )
+                    _runtime_heartbeat()
                 if api_proc.poll() is not None:
                     consecutive_restart_count += 1
                     print(f"Mobile API exited with code {api_proc.returncode}; restarting.")
@@ -1052,6 +1099,7 @@ def main() -> int:
                         api_pid=api_proc.pid,
                     ),
                 )
+                _runtime_heartbeat()
     except KeyboardInterrupt:
         pass
     finally:
@@ -1073,6 +1121,7 @@ def main() -> int:
         # The launcher is meant to be long-running; only terminate child API on explicit stop.
         if api_proc is not None and api_proc.poll() is None:
             _stop_process(api_proc)
+        runtime_guard.release(owner_token=runtime_owner_token)
     return 0
 
 

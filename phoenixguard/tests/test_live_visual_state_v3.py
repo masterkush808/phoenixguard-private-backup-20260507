@@ -282,6 +282,8 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
                 "type": "SNIPER_ENTRY_BOX",
                 "side": "BUY",
                 "pixel_bbox": [500, 150, 545, 225],
+                "anchor_candles": [53],
+                "touch_points": [[528, 180]],
                 "confidence": 0.95,
                 "reason": "BUY agg sniper",
             },
@@ -346,7 +348,7 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
     assert state["broker_surface"]["frame_url"] == state["artifacts"]["window"]["url"]
     assert state["broker_surface"]["width"] == 640
     assert state["broker_surface"]["height"] == 360
-    assert state["overlays"]["count"] >= 3
+    assert state["overlays"]["count"] >= 2
     assert state["overlays"]["total_count"] == state["overlay_count"]
     assert state["overlays"]["renderable_count"] == state["renderable_count"] == len(state["overlay_objects"])
     assert state["overlays"]["hidden_count"] >= 0
@@ -437,6 +439,8 @@ def test_live_state_suppresses_overlay_objects_when_visual_artifact_frame_is_reu
                 "type": "SNIPER_ENTRY_BOX",
                 "side": "BUY",
                 "pixel_bbox": [500, 150, 545, 225],
+                "anchor_candles": [0],
+                "touch_points": [[528, 180]],
                 "confidence": 0.95,
                 "reason": "BUY sniper",
             },
@@ -493,6 +497,8 @@ def test_live_state_keeps_locked_overlay_objects_when_surface_authority_matches(
                 "type": "SNIPER_ENTRY_BOX",
                 "side": "BUY",
                 "pixel_bbox": [500, 150, 545, 225],
+                "anchor_candles": [0],
+                "touch_points": [[528, 180]],
                 "confidence": 0.95,
                 "reason": "BUY sniper",
             },
@@ -548,6 +554,8 @@ def test_live_state_keeps_current_frame_objects_when_overlay_artifact_is_stale(t
                 "type": "SNIPER_ENTRY_BOX",
                 "side": "BUY",
                 "pixel_bbox": [500, 150, 545, 225],
+                "anchor_candles": [0],
+                "touch_points": [[528, 180]],
                 "confidence": 0.95,
                 "reason": "current-frame object",
             },
@@ -634,6 +642,8 @@ def test_replay_mode_ignores_clean_live_prefilter_env(monkeypatch: Any, tmp_path
                 "layer": "historical_replay",
                 "side": "SELL",
                 "bbox": [120, 80, 260, 210],
+                "anchor_candles": [0, 1],
+                "line_points": [[120, 210], [180, 150], [260, 80]],
                 "confidence": 0.82,
                 "visible_modes": ["REPLAY", "FULL_HISTORY_READ", "INSPECTOR"],
             },
@@ -885,8 +895,10 @@ def test_build_live_state_v3_from_tracker_service_resolves_common_inputs(tmp_pat
             {
                 "overlay_id": "target-1",
                 "truth_score": 0.9,
-                "overlay": {"type": "TARGET_ZONE_BOX", "pixel_bbox": [100, 40, 170, 80]},
-            }
+            "overlay": {"type": "TARGET_ZONE_BOX", "pixel_bbox": [100, 40, 170, 80]},
+            "anchor_candles": [0],
+            "touch_points": [[135, 60]],
+        }
         ],
         registry_loader=lambda _session_id: [],
         now_epoch=105.0,

@@ -45,7 +45,7 @@ from phoenixguard.vision.market_registry import (
     query_recent_active_objects,
 )
 from phoenixguard.vision.renderer import render_overlays_on_chart
-from phoenixguard.vision.v3_overlay_contract import normalize_view_mode
+from phoenixguard.vision.v3_overlay_contract import REQUIRED_FIELDS, normalize_v3_overlay_object, normalize_view_mode
 
 from .live_state_v3 import (
     build_live_state_v3,
@@ -1842,6 +1842,7 @@ def create_app(
             )
 
         overlay_object_fields = {
+            "schema_version",
             "overlay_id",
             "id",
             "object_id",
@@ -1887,6 +1888,11 @@ def create_app(
             "source_key",
             "broker_source_lock_id",
             "anchor_candles",
+            "anchor_candle_indices",
+            "anchor_price_band",
+            "anchor_time_span",
+            "anchor_evidence",
+            "anchor_evidence_status",
             "parent_overlay_id",
             "parent_type",
             "parent_label",
@@ -1902,7 +1908,7 @@ def create_app(
         }
 
         def compact_overlay_object(value: object) -> dict[str, object]:
-            row = _mapping_to_plain_dict(value)
+            row = normalize_v3_overlay_object(_mapping_to_plain_dict(value), strict=False)
 
             def compact_anchor_candles() -> list[int]:
                 raw_anchors = row.get("anchor_candles")
@@ -1931,10 +1937,11 @@ def create_app(
                     candidates.extend(int(match) for match in re.findall(r"\[(\d+)\]", source_path))
                 return sorted(set(value for value in candidates if value >= 0))
 
+            required_overlay_fields = set(REQUIRED_FIELDS)
             compact_row = {
                 key: row.get(key)
                 for key in overlay_object_fields
-                if row.get(key) not in (None, "", [], {})
+                if key in row and (key in required_overlay_fields or row.get(key) not in (None, "", [], {}))
             }
             compact_row.setdefault("anchor_candles", compact_anchor_candles())
             bounds = row.get("bounds") or row.get("bbox")

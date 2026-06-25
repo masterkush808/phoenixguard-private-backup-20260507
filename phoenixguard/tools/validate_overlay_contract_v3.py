@@ -180,11 +180,14 @@ def validate_overlay(overlay: Mapping[str, Any], index: int) -> dict[str, Any]:
     for issue in contract_result.errors:
         errors.append(f"{issue.field}: {issue.reason}")
     for field in REQUIRED_FIELDS:
-        if field == "anchor_candles" and isinstance(overlay.get(field), Sequence) and not isinstance(overlay.get(field), (str, bytes, bytearray)):
+        value = overlay.get(field)
+        if field in {"anchor_candles", "anchor_candle_indices"} and isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            continue
+        if field in {"anchor_price_band", "anchor_time_span", "anchor_evidence"} and isinstance(value, Mapping):
             continue
         if field in {"source_version", "broker_source_lock_id"} and field in overlay and overlay.get(field) in ("", None):
             continue
-        if overlay.get(field) in (None, "", [], {}):
+        if value in (None, "", [], {}):
             errors.append(f"missing required field: {field}")
     typ = str(overlay.get("type") or "")
     if typ and typ not in ALLOWED_TYPES:

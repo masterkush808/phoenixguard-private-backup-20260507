@@ -664,17 +664,19 @@ def test_live_state_v3_thin_direct_sources_load_locked_registry_context(
         "chart_transform": {
             "chart_image_bounds": [0, 0, 400, 240],
         },
-        "overlay": {
-            "overlay_id": "support-1",
-            "object_id": "support-1",
-            "track_id": "support-1",
-            "type": "SUPPORT",
-            "layer": "supply_demand",
-            "bbox": [40, 160, 220, 190],
-            "truth_score": 0.91,
-            "confidence": 0.91,
-            "visible_modes": ["REPLAY", "ACTIVE_CONTEXT"],
-        },
+            "overlay": {
+                "overlay_id": "support-1",
+                "object_id": "support-1",
+                "track_id": "support-1",
+                "type": "SUPPORT",
+                "layer": "supply_demand",
+                "bbox": [40, 160, 220, 190],
+                "anchor_candles": [0],
+                "touch_points": [[106, 170]],
+                "truth_score": 0.91,
+                "confidence": 0.91,
+                "visible_modes": ["REPLAY", "ACTIVE_CONTEXT"],
+            },
     }
 
     def load_registry_context(*_args: Any, **_kwargs: Any) -> list[Mapping[str, Any]]:

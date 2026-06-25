@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, cast
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
     DEFAULT_DATA_DIR,
     DEFAULT_SESSION,
+    ROOT,
     command_line,
     find_processes,
     gate_report,
@@ -22,10 +29,18 @@ from certification_common_v3 import (
     tcp_listeners,
     write_report,
 )
+from phoenixguard.runtime.singleton_guard_v3 import LOCK_SCHEMA_VERSION, PhoenixRuntimeSingletonGuardV3
 
 
 def _mapping(value: object) -> dict[str, Any]:
     return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+
+
+def _int(value: object, default: int = 0) -> int:
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def main() -> int:
@@ -48,6 +63,9 @@ def main() -> int:
     failures: list[str] = []
     warnings: list[str] = []
     corrections: list[str] = []
+    singleton_guard = PhoenixRuntimeSingletonGuardV3.for_repo(ROOT)
+    singleton_lock = singleton_guard.read_lock()
+    singleton_assessment = singleton_guard.assess(singleton_lock)
 
     if len(listener_rows) != 1:
         failures.append(f"expected exactly one listener on {args.port}, found {len(listener_rows)}")
@@ -75,6 +93,29 @@ def main() -> int:
             failures.append(f"shooter base_url mismatch: expected {args.base_url}, command={shooter_cmd}")
         if args.session not in shooter_cmd:
             failures.append(f"shooter session mismatch: expected {args.session}, command={shooter_cmd}")
+    if not singleton_lock:
+        failures.append(f"runtime singleton lock missing: {singleton_guard.lock_path}")
+        corrections.append("Relaunch through start_phoenixguard_24_7_tracker.py so PhoenixRuntimeSingletonGuardV3 owns the stack.")
+    else:
+        if singleton_lock.get("schema_version") != LOCK_SCHEMA_VERSION:
+            failures.append(f"runtime singleton lock schema mismatch: {singleton_lock.get('schema_version')}")
+        if str(singleton_lock.get("session_id") or "") != str(args.session):
+            failures.append(f"runtime singleton session mismatch: {singleton_lock.get('session_id')} != {args.session}")
+        if str(singleton_lock.get("base_url") or "") != str(args.base_url):
+            failures.append(f"runtime singleton base_url mismatch: {singleton_lock.get('base_url')} != {args.base_url}")
+        if _int(singleton_lock.get("api_port")) != int(args.port):
+            failures.append(f"runtime singleton api_port mismatch: {singleton_lock.get('api_port')} != {args.port}")
+        lock_api_pid = _int(singleton_lock.get("api_pid"))
+        lock_tracker_pid = _int(singleton_lock.get("tracker_pid"))
+        lock_shooter_pid = _int(singleton_lock.get("shooter_pid"))
+        if api_owner_pid and lock_api_pid and lock_api_pid != api_owner_pid:
+            failures.append(f"runtime singleton api_pid mismatch: lock={lock_api_pid} listener={api_owner_pid}")
+        if tracker_processes and lock_tracker_pid and lock_tracker_pid not in {process_id(row) for row in tracker_processes}:
+            failures.append(f"runtime singleton tracker_pid {lock_tracker_pid} is not the tracker process list")
+        if shooter_processes and lock_shooter_pid and lock_shooter_pid not in {process_id(row) for row in shooter_processes}:
+            failures.append(f"runtime singleton shooter_pid {lock_shooter_pid} is not the shooter process list")
+        if singleton_assessment.stale:
+            failures.append(f"runtime singleton lock is stale/unhealthy: {singleton_assessment.reason}")
 
     session = http_json(f"{args.base_url.rstrip('/')}/v1/mobile/window-tracker/sessions/{quote_session(args.session)}", timeout=15.0)
     live = http_json(f"{args.base_url.rstrip('/')}/v1/mobile/live/state/v3/{quote_session(args.session)}", timeout=15.0)
@@ -104,6 +145,9 @@ def main() -> int:
             "api_pid": api_owner_pid,
             "tracker_pid": process_id(tracker_processes[0]) if tracker_processes else 0,
             "shooter_pid": process_id(shooter_processes[0]) if shooter_processes else 0,
+            "singleton_lock_path": str(singleton_guard.lock_path),
+            "singleton_lock": singleton_lock,
+            "singleton_assessment": singleton_assessment.as_dict(),
             "processes": {
                 "api": api_processes,
                 "tracker": tracker_processes,

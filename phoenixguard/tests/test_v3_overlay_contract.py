@@ -46,6 +46,8 @@ def _base_overlay(**overrides: Any) -> dict[str, Any]:
         "chart_transform_id": "ct-42",
         "coordinate_mode": "CHART_IMAGE_SPACE",
         "anchor_type": "BOX",
+        "anchor_candles": [4, 5],
+        "touch_points": [[148, 232], [208, 236]],
         "bounds": [140, 210, 220, 250],
         "truth_score": 0.83,
         "confidence": 0.91,
@@ -73,7 +75,9 @@ def test_contract_normalizes_complete_overlay_and_keeps_renderer_bbox_alias() ->
     assert overlay["confidence"] == 0.91
     assert overlay["source_version"] == "PG_V3_OVERLAY_OBJECT_V1"
     assert overlay["broker_source_lock_id"]
-    assert overlay["anchor_candles"] == []
+    assert overlay["anchor_candles"] == [4, 5]
+    assert overlay["anchor_candle_indices"] == [4, 5]
+    assert overlay["anchor_evidence_status"] == "VALID"
     assert validate_v3_overlay_object(overlay).ok is True
 
 
@@ -529,17 +533,12 @@ def test_view_mode_profile_exposes_layer_policy() -> None:
     assert clean["layer_visibility"]["prediction_path"] is False
     assert council["layer_visibility"]["recent_candles"] is False
     assert council["layer_visibility"]["trigger_zones"] is False
-    assert {
+    assert set(council["allowed_types"]) == {
         "MARKET_PLAY_MARKER",
         "MODEL_COUNCIL_MARKER",
         "PRICE_LOCATION_MARKER",
         "REGIME_MARKER",
-        "SUPPLY_ZONE",
-        "DEMAND_ZONE",
-        "OPPOSING_FORCE",
-        "TWO_CANDLE_STUDY",
-        "LSTM_STUDY",
-    }.issubset(set(council["allowed_types"]))
+    }
     assert supply["mode"] == "SUPPLY_DEMAND"
     assert supply["layer_visibility"]["chart_bounds"] is False
     assert supply["layer_visibility"]["recent_candles"] is False

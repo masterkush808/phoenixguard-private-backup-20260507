@@ -268,6 +268,44 @@ def test_market_object_registry_turns_historical_progression_into_path_geometry(
     assert "CLEAN_LIVE" in history["visible_modes"]
 
 
+def test_market_object_registry_skips_ambiguous_supply_demand_zone() -> None:
+    payload = deepcopy(_sample_payload())
+    payload["tracking_summary"]["support_resistance_zones"].append(
+        {
+            "key": "ambiguous_zone",
+            "role": "",
+            "label": "UNCLASSIFIED LIQUIDITY",
+            "bbox": [280, 180, 520, 220],
+            "confidence": 0.88,
+        }
+    )
+
+    registry = build_market_object_registry_v3(payload)
+    overlays = registry.as_dict()["overlay_objects"]
+
+    assert not any(overlay.get("source_path") == "tracking_summary.support_resistance_zones[2]" for overlay in overlays)
+
+
+def test_market_object_registry_maps_supply_demand_lifecycle_to_reference_state() -> None:
+    payload = deepcopy(_sample_payload())
+    payload["tracking_summary"]["support_resistance_zones"][0]["lifecycle_state"] = "BROKEN"
+    payload["tracking_summary"]["support_resistance_zones"][0]["entry_authority_allowed"] = False
+    payload["tracking_summary"]["execution_timing"]["opposing_force_zone"]["lifecycle_state"] = "BROKEN"
+
+    registry = build_market_object_registry_v3(payload)
+    overlays = registry.as_dict()["overlay_objects"]
+    support = next(
+        overlay
+        for overlay in overlays
+        if overlay.get("source_path") == "tracking_summary.support_resistance_zones[0]"
+    )
+
+    assert support["lifecycle_state"] == "BROKEN_REFERENCE"
+    assert support["display_state"] == "GHOSTED"
+    assert support["entry_authority_active"] is False
+    assert not any(overlay.get("source_path") == "tracking_summary.execution_timing.opposing_force_zone" for overlay in overlays)
+
+
 def test_market_object_registry_v3_ids_are_stable_when_geometry_moves() -> None:
     first = _sample_payload()
     second = deepcopy(first)

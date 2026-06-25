@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import math
 import os
-from typing import Any, cast
+from typing import Any, Literal, TypedDict, cast
 
 from phoenixguard.vision.overlay_geometry import normalize_bbox
 
@@ -26,6 +26,10 @@ REQUIRED_FIELDS: tuple[str, ...] = (
     "coordinate_mode",
     "anchor_type",
     "anchor_candles",
+    "anchor_candle_indices",
+    "anchor_price_band",
+    "anchor_time_span",
+    "anchor_evidence",
     "bounds",
     "truth_score",
     "confidence",
@@ -34,6 +38,8 @@ REQUIRED_FIELDS: tuple[str, ...] = (
     "visible_modes",
     "ttl_ms",
     "reason",
+    "display_state",
+    "style",
 )
 REQUIRED_V3_OVERLAY_FIELDS = REQUIRED_FIELDS
 DEFAULTABLE_REQUIRED_FIELDS: frozenset[str] = frozenset(
@@ -41,7 +47,13 @@ DEFAULTABLE_REQUIRED_FIELDS: frozenset[str] = frozenset(
         "source_version",
         "broker_source_lock_id",
         "anchor_candles",
+        "anchor_candle_indices",
+        "anchor_price_band",
+        "anchor_time_span",
+        "anchor_evidence",
         "layer",
+        "display_state",
+        "style",
     }
 )
 LIVE_RENDER_REQUIRED_FIELDS: tuple[str, ...] = (
@@ -102,6 +114,152 @@ DIAGNOSTIC_OVERLAY_TYPES: frozenset[str] = frozenset(
         "TRANSFORM_DEBUG",
         "SCENE_GRAPH_DEBUG",
         "LABEL_COLLISION_DEBUG",
+    }
+)
+
+AnchorEvidenceType = Literal[
+    "candle_body_cluster",
+    "wick_rejection_cluster",
+    "swing_high_cluster",
+    "swing_low_cluster",
+    "support_reclaim",
+    "resistance_rejection",
+    "break_and_retest",
+    "failed_retest",
+    "impulse_leg",
+    "pullback_leg",
+    "continuation_leg",
+    "trendline_touch_points",
+    "opposing_force_level",
+    "current_candle",
+    "target_band",
+    "invalidation_band",
+    "chart_bounds",
+    "broker_control",
+    "diagnostic",
+]
+
+
+class AnchorPriceBand(TypedDict, total=False):
+    top_y: float
+    bottom_y: float
+    proximal_y: float
+    distal_y: float
+    source: str
+
+
+class AnchorTimeSpan(TypedDict, total=False):
+    left_x: float
+    right_x: float
+    start_candle_index: int
+    end_candle_index: int
+    source: str
+
+
+class AnchorEvidence(TypedDict, total=False):
+    evidence_type: AnchorEvidenceType | str
+    valid: bool
+    reason: str
+    candle_indices: list[int]
+    touch_points: list[list[float]]
+    price_band: AnchorPriceBand
+    time_span: AnchorTimeSpan
+    source_agent: str
+    source_path: str
+
+
+class OverlayStyle(TypedDict, total=False):
+    color_token: str
+    stroke: str
+    fill: str
+    line_style: str
+    stroke_width: float
+    opacity: float
+    fill_opacity: float
+    label_mode: str
+    z_index: int
+
+
+class OverlayHierarchy(TypedDict, total=False):
+    parent_overlay_id: str
+    child_overlay_ids: list[str]
+    nesting_depth: int
+    nesting_role: str
+    group_id: str
+    group_type: str
+
+
+DisplayState = Literal[
+    "FULL",
+    "COMPACT",
+    "GHOSTED",
+    "GROUPED",
+    "NESTED",
+    "ICON_ONLY",
+    "INSPECTOR_LABEL",
+    "FOCUS_EXPANDED",
+]
+
+DISPLAY_STATES: tuple[str, ...] = (
+    "FULL",
+    "COMPACT",
+    "GHOSTED",
+    "GROUPED",
+    "NESTED",
+    "ICON_ONLY",
+    "INSPECTOR_LABEL",
+    "FOCUS_EXPANDED",
+)
+V3_DISPLAY_STATES = DISPLAY_STATES
+
+ANCHOR_EVIDENCE_TYPES: tuple[str, ...] = (
+    "candle_body_cluster",
+    "wick_rejection_cluster",
+    "swing_high_cluster",
+    "swing_low_cluster",
+    "support_reclaim",
+    "resistance_rejection",
+    "break_and_retest",
+    "failed_retest",
+    "impulse_leg",
+    "pullback_leg",
+    "continuation_leg",
+    "trendline_touch_points",
+    "opposing_force_level",
+    "current_candle",
+    "target_band",
+    "invalidation_band",
+    "chart_bounds",
+    "broker_control",
+    "diagnostic",
+)
+
+HARD_ANCHOR_REQUIRED_TYPES: frozenset[str] = frozenset(
+    {
+        "CURRENT_CANDLE",
+        "IMPULSE_BOX",
+        "PULLBACK_BOX",
+        "RETEST_BOX",
+        "CONTINUATION_BOX",
+        "SNIPER_ENTRY_BOX",
+        "TARGET_ZONE_BOX",
+        "INVALIDATION_BOX",
+        "SUPPLY_ZONE",
+        "DEMAND_ZONE",
+        "OPPOSING_FORCE",
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+        "INNER_TRENDLINE",
+        "ANGLE_VECTOR",
+        "PROGRESSION_PATH",
+        "REPLAY_ENTRY",
+        "REPLAY_EXIT",
+        "MODEL_COUNCIL_MARKER",
+        "REGIME_MARKER",
+        "MARKET_PLAY_MARKER",
+        "PRICE_LOCATION_MARKER",
+        "TWO_CANDLE_STUDY",
+        "LSTM_STUDY",
     }
 )
 
@@ -430,6 +588,17 @@ V3_COORDINATE_MODES = COORDINATE_MODES
 LIFECYCLE_STATES: tuple[str, ...] = (
     "ACTIVE",
     "CONFIRMED",
+    "FRESH",
+    "TESTED",
+    "MITIGATED",
+    "BROKEN",
+    "FRESH_ACTIVE",
+    "MITIGATED_ACTIVE",
+    "HISTORICAL_ACTIVE",
+    "CONTEXT_REFERENCE",
+    "CONSUMED_REFERENCE",
+    "BROKEN_REFERENCE",
+    "ROLE_FLIP_CONFIRMED",
     "PREDICTED",
     "HISTORICAL",
     "STALE",
@@ -846,19 +1015,10 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
     "INVALIDATION": {"OPPOSING_FORCE"},
     "PATH": {"ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"},
     "COUNCIL": {
-        "SNIPER_ENTRY_BOX",
-        "RETEST_BOX",
-        "CONTINUATION_BOX",
-        "TARGET_ZONE_BOX",
-        "SUPPLY_ZONE",
-        "DEMAND_ZONE",
-        "OPPOSING_FORCE",
         "MODEL_COUNCIL_MARKER",
         "REGIME_MARKER",
         "MARKET_PLAY_MARKER",
         "PRICE_LOCATION_MARKER",
-        "TWO_CANDLE_STUDY",
-        "LSTM_STUDY",
     },
     "TWO_CANDLE_STUDY": {"TWO_CANDLE_STUDY"},
     "LSTM_STUDY": {"LSTM_STUDY"},
@@ -937,7 +1097,7 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
     "TARGET": _layer_visibility("target_zones", "supply_demand"),
     "INVALIDATION": _layer_visibility("supply_demand"),
     "PATH": _layer_visibility("prediction_path", "historical_replay"),
-    "COUNCIL": _layer_visibility("active_council_decision", "supply_demand"),
+    "COUNCIL": _layer_visibility("active_council_decision"),
     "TWO_CANDLE_STUDY": _layer_visibility("active_council_decision"),
     "LSTM_STUDY": _layer_visibility("active_council_decision"),
     "ACTIVE_CONTEXT": _layer_visibility(
@@ -1096,6 +1256,326 @@ def _normalize_anchor_candles(value: object) -> list[int]:
         indexes.append(index)
         seen.add(index)
     return indexes
+
+
+def _first_present(raw: Mapping[str, object], keys: Sequence[str]) -> object:
+    for key in keys:
+        if key in raw and raw.get(key) not in (None, "", [], {}):
+            return raw.get(key)
+    return None
+
+
+def _normalize_anchor_candle_indices(raw: Mapping[str, object]) -> list[int]:
+    return _normalize_anchor_candles(
+        _first_present(
+            raw,
+            (
+                "anchor_candle_indices",
+                "anchor_candles",
+                "anchor_indices",
+                "source_indices",
+                "candle_indices",
+                "candles",
+                "indices",
+            ),
+        )
+    )
+
+
+def _normalize_float_pair(value: object) -> tuple[float, float] | None:
+    items = _sequence(value)
+    if len(items) < 2:
+        return None
+    first = _float(items[0], float("nan"))
+    second = _float(items[1], float("nan"))
+    if not math.isfinite(first) or not math.isfinite(second):
+        return None
+    return (float(first), float(second))
+
+
+def _normalize_anchor_price_band(raw: Mapping[str, object], bounds: Sequence[float]) -> AnchorPriceBand:
+    band_value = _first_present(raw, ("anchor_price_band", "price_band", "price_range", "y_range", "zone_band"))
+    mapping = _object_mapping(band_value)
+    if mapping is not None:
+        top = _float(mapping.get("top_y", mapping.get("top", mapping.get("upper_y"))), float("nan"))
+        bottom = _float(mapping.get("bottom_y", mapping.get("bottom", mapping.get("lower_y"))), float("nan"))
+        proximal = _float(mapping.get("proximal_y", mapping.get("proximal", top)), top)
+        distal = _float(mapping.get("distal_y", mapping.get("distal", bottom)), bottom)
+        if math.isfinite(top) and math.isfinite(bottom):
+            high = max(top, bottom)
+            low = min(top, bottom)
+            return {
+                "top_y": round(low, 6),
+                "bottom_y": round(high, 6),
+                "proximal_y": round(proximal, 6),
+                "distal_y": round(distal, 6),
+                "source": _text(mapping.get("source"), "provided"),
+            }
+    pair = _normalize_float_pair(band_value)
+    if pair is not None:
+        high = max(pair)
+        low = min(pair)
+        return {"top_y": round(low, 6), "bottom_y": round(high, 6), "proximal_y": round(low, 6), "distal_y": round(high, 6), "source": "provided"}
+    top = min(float(bounds[1]), float(bounds[3]))
+    bottom = max(float(bounds[1]), float(bounds[3]))
+    return {"top_y": round(top, 6), "bottom_y": round(bottom, 6), "proximal_y": round(top, 6), "distal_y": round(bottom, 6), "source": "bounds"}
+
+
+def _normalize_anchor_time_span(raw: Mapping[str, object], bounds: Sequence[float], anchor_indices: Sequence[int]) -> AnchorTimeSpan:
+    span_value = _first_present(raw, ("anchor_time_span", "time_span", "time_range", "x_range", "anchor_times"))
+    mapping = _object_mapping(span_value)
+    if mapping is not None:
+        left = _float(mapping.get("left_x", mapping.get("left", mapping.get("start_x"))), float("nan"))
+        right = _float(mapping.get("right_x", mapping.get("right", mapping.get("end_x"))), float("nan"))
+        if math.isfinite(left) and math.isfinite(right):
+            span: AnchorTimeSpan = {
+                "left_x": round(min(left, right), 6),
+                "right_x": round(max(left, right), 6),
+                "source": _text(mapping.get("source"), "provided"),
+            }
+            start_index = _anchor_candle_index(mapping.get("start_candle_index", mapping.get("start_index")))
+            end_index = _anchor_candle_index(mapping.get("end_candle_index", mapping.get("end_index")))
+            if start_index is not None:
+                span["start_candle_index"] = start_index
+            if end_index is not None:
+                span["end_candle_index"] = end_index
+            return span
+    pair = _normalize_float_pair(span_value)
+    if pair is not None:
+        return {"left_x": round(min(pair), 6), "right_x": round(max(pair), 6), "source": "provided"}
+    span = {"left_x": round(min(float(bounds[0]), float(bounds[2])), 6), "right_x": round(max(float(bounds[0]), float(bounds[2])), 6), "source": "bounds"}
+    if anchor_indices:
+        span["start_candle_index"] = int(min(anchor_indices))
+        span["end_candle_index"] = int(max(anchor_indices))
+    return span
+
+
+def _normalize_point_rows(value: object) -> list[list[float]]:
+    points: list[list[float]] = []
+    for item in _sequence(value):
+        pair = _sequence(item)
+        if len(pair) < 2:
+            continue
+        x_value = _float(pair[0], float("nan"))
+        y_value = _float(pair[1], float("nan"))
+        if math.isfinite(x_value) and math.isfinite(y_value):
+            points.append([round(float(x_value), 6), round(float(y_value), 6)])
+    return points
+
+
+def _anchor_evidence_type_for_overlay(overlay_type: str, role: str) -> str:
+    role_text = role.lower()
+    if overlay_type == "CHART_BOUNDS":
+        return "chart_bounds"
+    if overlay_type == "CURRENT_CANDLE":
+        return "current_candle"
+    if overlay_type == "IMPULSE_BOX":
+        return "impulse_leg"
+    if overlay_type == "PULLBACK_BOX":
+        return "pullback_leg"
+    if overlay_type == "CONTINUATION_BOX":
+        return "continuation_leg"
+    if overlay_type == "RETEST_BOX":
+        return "failed_retest" if "failed" in role_text else "break_and_retest"
+    if overlay_type == "SNIPER_ENTRY_BOX":
+        return "break_and_retest"
+    if overlay_type == "TARGET_ZONE_BOX":
+        return "target_band"
+    if overlay_type == "INVALIDATION_BOX":
+        return "invalidation_band"
+    if overlay_type == "SUPPLY_ZONE":
+        return "resistance_rejection"
+    if overlay_type == "DEMAND_ZONE":
+        return "support_reclaim"
+    if overlay_type == "OPPOSING_FORCE":
+        return "opposing_force_level"
+    if overlay_type in {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"}:
+        return "trendline_touch_points"
+    if overlay_type == "BROKER_CONTROL":
+        return "broker_control"
+    if overlay_type in DIAGNOSTIC_OVERLAY_TYPES:
+        return "diagnostic"
+    return "candle_body_cluster"
+
+
+def _normalize_anchor_evidence(
+    raw: Mapping[str, object],
+    *,
+    overlay_type: str,
+    role: str,
+    anchor_indices: Sequence[int],
+    price_band: AnchorPriceBand,
+    time_span: AnchorTimeSpan,
+    source_agent: str,
+) -> AnchorEvidence:
+    mapping = _object_mapping(raw.get("anchor_evidence"))
+    touch_points = _normalize_point_rows(
+        _first_present(raw, ("touch_points", "anchor_points", "line_points", "points", "anchors", "path"))
+    )
+    line_touch_count = _float(raw.get("touch_count", raw.get("wick_probe_count", raw.get("reaction_count"))), 0.0)
+    line_level = raw.get("line_y") is not None and (raw.get("line_x0") is not None or raw.get("line_x1") is not None)
+    line_level_has_evidence = bool(line_level and line_touch_count > 0.0)
+    hard_anchor_present = bool(anchor_indices or touch_points or line_level_has_evidence)
+    if mapping is not None:
+        evidence_type = _text(mapping.get("evidence_type") or mapping.get("type"), _anchor_evidence_type_for_overlay(overlay_type, role))
+        candle_indices = _normalize_anchor_candles(mapping.get("candle_indices", mapping.get("anchor_candle_indices", anchor_indices)))
+        provided_touch_points = _normalize_point_rows(mapping.get("touch_points"))
+        provided_hard_anchor = bool(candle_indices or provided_touch_points or hard_anchor_present)
+        valid = bool(mapping.get("valid", True)) and provided_hard_anchor
+        reason = _text(
+            mapping.get("reason"),
+            "provided hard anchor evidence" if valid else "MISSING_ANCHOR_EVIDENCE",
+        )
+        return {
+            "evidence_type": evidence_type,
+            "valid": valid,
+            "reason": reason,
+            "candle_indices": candle_indices,
+            "touch_points": provided_touch_points or touch_points,
+            "price_band": price_band,
+            "time_span": time_span,
+            "source_agent": _text(mapping.get("source_agent"), source_agent),
+            "source_path": _text(mapping.get("source_path") or raw.get("source_path")),
+        }
+    has_anchor = hard_anchor_present
+    if overlay_type in {"CHART_BOUNDS", "BROKER_CONTROL"} or overlay_type in DIAGNOSTIC_OVERLAY_TYPES:
+        has_anchor = True
+    return {
+        "evidence_type": _anchor_evidence_type_for_overlay(overlay_type, role),
+        "valid": has_anchor,
+        "reason": "hard anchor evidence inferred from tracked source fields" if has_anchor else "MISSING_ANCHOR_EVIDENCE",
+        "candle_indices": [int(item) for item in anchor_indices],
+        "touch_points": touch_points,
+        "price_band": price_band,
+        "time_span": time_span,
+        "source_agent": source_agent,
+        "source_path": _text(raw.get("source_path")),
+    }
+
+
+def _normalize_display_state(raw: Mapping[str, object], overlay_type: str, lifecycle_state: str) -> str:
+    token = _canonical_token(raw.get("display_state") or raw.get("presentation_state") or raw.get("render_state"))
+    if token == "INSPECTOR_ONLY_LABEL":
+        token = "INSPECTOR_LABEL"
+    if token in DISPLAY_STATES:
+        return token
+    if overlay_type in {"CURRENT_CANDLE", "SNIPER_ENTRY_BOX", "RETEST_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"}:
+        return "FULL"
+    if overlay_type in {"PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"} or lifecycle_state in {"HISTORICAL", "STALE", "BROKEN_REFERENCE", "CONSUMED_REFERENCE"}:
+        return "GHOSTED"
+    if overlay_type in DIAGNOSTIC_OVERLAY_TYPES:
+        return "INSPECTOR_LABEL"
+    if overlay_type in {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX"}:
+        return "COMPACT"
+    return "COMPACT"
+
+
+def _anchor_evidence_valid(value: object) -> bool:
+    mapping = _object_mapping(value)
+    if mapping is None:
+        return False
+    if mapping.get("valid") is not True:
+        return False
+    candle_indices = _normalize_anchor_candles(mapping.get("candle_indices") or mapping.get("anchor_candle_indices"))
+    touch_points = _normalize_point_rows(mapping.get("touch_points"))
+    return bool(candle_indices or touch_points)
+
+
+def _semantic_overlay_style(raw: Mapping[str, object], overlay_type: str, side: str, lifecycle_state: str, display_state: str, z_index: int) -> OverlayStyle:
+    provided = _object_mapping(raw.get("style"))
+    style: OverlayStyle = {}
+    if provided is not None:
+        if "color_token" in provided:
+            style["color_token"] = _text(provided.get("color_token"))
+        if "stroke" in provided:
+            style["stroke"] = _text(provided.get("stroke"))
+        if "fill" in provided:
+            style["fill"] = _text(provided.get("fill"))
+        if "line_style" in provided:
+            style["line_style"] = _text(provided.get("line_style"))
+        if "stroke_width" in provided:
+            style["stroke_width"] = _float(provided.get("stroke_width"), 2.0)
+        if "opacity" in provided:
+            style["opacity"] = _clip01(provided.get("opacity"))
+        if "fill_opacity" in provided:
+            style["fill_opacity"] = _clip01(provided.get("fill_opacity"))
+        if "label_mode" in provided:
+            style["label_mode"] = _text(provided.get("label_mode"))
+        if "z_index" in provided:
+            style["z_index"] = int(_float(provided.get("z_index"), z_index))
+    side_value = _normalize_side(side)
+    if overlay_type in {"DEMAND_ZONE", "SUPPORT_TRENDLINE"} or side_value == "BUY":
+        color_token = "buy-demand-support"
+        stroke = "#20d49b"
+        fill = "rgba(32, 212, 155, 0.16)"
+    elif overlay_type in {"SUPPLY_ZONE", "RESISTANCE_TRENDLINE"} or side_value == "SELL":
+        color_token = "sell-supply-resistance"
+        stroke = "#f58b45"
+        fill = "rgba(245, 139, 69, 0.16)"
+    else:
+        color_token = "neutral-context"
+        stroke = "#d6e2f0"
+        fill = "rgba(214, 226, 240, 0.12)"
+    if overlay_type in {"RETEST_BOX", "SNIPER_ENTRY_BOX"}:
+        color_token = "trigger-confirmation"
+        stroke = "#f4c95d"
+        fill = "rgba(244, 201, 93, 0.14)"
+    elif overlay_type == "TARGET_ZONE_BOX":
+        color_token = "target"
+        stroke = "#35b7ff"
+        fill = "rgba(53, 183, 255, 0.12)"
+    elif overlay_type == "INVALIDATION_BOX":
+        color_token = "invalidation"
+        stroke = "#ff4d5c"
+        fill = "rgba(255, 77, 92, 0.08)"
+    elif overlay_type == "OPPOSING_FORCE":
+        color_token = "opposing-force"
+        stroke = "#b58cff"
+        fill = "rgba(181, 140, 255, 0.12)"
+    elif overlay_type == "INNER_TRENDLINE":
+        color_token = "inner-trendline"
+        stroke = "#9ec7d9"
+        fill = "rgba(158, 199, 217, 0.05)"
+    elif overlay_type in {"PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"}:
+        color_token = "replay-history"
+        stroke = "#8fa7bb"
+        fill = "rgba(143, 167, 187, 0.07)"
+    line_style = "solid"
+    if overlay_type == "INVALIDATION_BOX":
+        line_style = "dashed"
+    if display_state == "GHOSTED" or lifecycle_state in {"HISTORICAL", "STALE", "BROKEN_REFERENCE", "CONSUMED_REFERENCE"}:
+        line_style = "dotted"
+    stroke_width = 2.0
+    if overlay_type in {"SNIPER_ENTRY_BOX", "RETEST_BOX", "TARGET_ZONE_BOX", "CURRENT_CANDLE"}:
+        stroke_width = 2.6
+    elif overlay_type in {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE"}:
+        stroke_width = 2.1
+    elif overlay_type == "INNER_TRENDLINE":
+        stroke_width = 1.4
+    opacity = 0.9
+    if display_state == "GHOSTED":
+        opacity = 0.42
+    elif display_state in {"COMPACT", "NESTED"}:
+        opacity = 0.68
+    if "color_token" not in style:
+        style["color_token"] = color_token
+    if "stroke" not in style:
+        style["stroke"] = stroke
+    if "fill" not in style:
+        style["fill"] = fill
+    if "line_style" not in style:
+        style["line_style"] = line_style
+    if "stroke_width" not in style:
+        style["stroke_width"] = stroke_width
+    if "opacity" not in style:
+        style["opacity"] = opacity
+    if "fill_opacity" not in style:
+        style["fill_opacity"] = 0.16 if display_state == "FULL" else 0.08
+    if "label_mode" not in style:
+        style["label_mode"] = "full" if display_state in {"FULL", "FOCUS_EXPANDED"} else "compact" if display_state in {"COMPACT", "NESTED"} else "inspector"
+    if "z_index" not in style:
+        style["z_index"] = z_index
+    return style
 
 
 def _normalize_frame_id(value: Any) -> int | str:
@@ -1545,11 +2025,9 @@ def normalize_v3_overlay_object(
     if lifecycle not in LIFECYCLE_STATES:
         lifecycle = "PREDICTED" if overlay_type == "PREDICTION_PATH" else "HISTORICAL" if overlay_type in {"PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"} else "ACTIVE"
     anchor_type = _normalize_anchor_type(raw.get("anchor_type"), inferred_anchor)
-    anchor_candles = _normalize_anchor_candles(
-        raw.get("anchor_candles")
-        if "anchor_candles" in raw
-        else raw.get("source_indices") or raw.get("candle_indices") or raw.get("candles")
-    )
+    anchor_candles = _normalize_anchor_candle_indices(raw)
+    anchor_price_band = _normalize_anchor_price_band(raw, bounds)
+    anchor_time_span = _normalize_anchor_time_span(raw, bounds, anchor_candles)
     label = _text(raw.get("label") or raw.get("key") or overlay_type.replace("_", " "))
     raw_display_label = _text(
         raw.get("raw_display_label")
@@ -1566,6 +2044,18 @@ def normalize_v3_overlay_object(
     confidence = _clip01(raw.get("confidence", raw.get("truth_score", 0.0)))
     truth_score = _clip01(raw.get("truth_score", confidence))
     resolved_layer = overlay_layer_name(overlay_type, raw.get("layer") or raw.get("_layer"))
+    display_state = _normalize_display_state(raw, overlay_type, lifecycle)
+    z_index = int(_float(raw.get("z_index"), overlay_type_priority(overlay_type)))
+    anchor_evidence = _normalize_anchor_evidence(
+        raw,
+        overlay_type=overlay_type,
+        role=role,
+        anchor_indices=anchor_candles,
+        price_band=anchor_price_band,
+        time_span=anchor_time_span,
+        source_agent=source_agent_value,
+    )
+    style = _semantic_overlay_style(raw, overlay_type, side, lifecycle, display_state, z_index)
 
     row: dict[str, object] = {
         "schema_version": V3_OVERLAY_SCHEMA_VERSION,
@@ -1584,6 +2074,11 @@ def normalize_v3_overlay_object(
         "coordinate_mode": coordinate_mode,
         "anchor_type": anchor_type,
         "anchor_candles": anchor_candles,
+        "anchor_candle_indices": list(anchor_candles),
+        "anchor_price_band": anchor_price_band,
+        "anchor_time_span": anchor_time_span,
+        "anchor_evidence": anchor_evidence,
+        "anchor_evidence_status": "VALID" if bool(anchor_evidence.get("valid", False)) else "MISSING_ANCHOR_EVIDENCE",
         "bounds": bounds,
         "bbox": list(bounds),
         "truth_score": truth_score,
@@ -1602,7 +2097,17 @@ def normalize_v3_overlay_object(
         "role": _text(raw.get("role") or role, TYPE_ROLE_MAP.get(overlay_type, "")),
         "visible_default": bool(raw.get("visible_default", overlay_type in MODE_ALLOWED_TYPES["CLEAN_LIVE"])),
         "created_at_ms": int(_float(raw.get("created_at_ms"), 0.0)),
-        "z_index": int(_float(raw.get("z_index"), overlay_type_priority(overlay_type))),
+        "z_index": z_index,
+        "display_state": display_state,
+        "style": style,
+        "hierarchy": {
+            "parent_overlay_id": _text(raw.get("parent_overlay_id") or raw.get("parent_id")),
+            "child_overlay_ids": [str(item) for item in _sequence(raw.get("child_overlay_ids") or raw.get("children"))],
+            "nesting_depth": int(_float(raw.get("nesting_depth"), 0.0)),
+            "nesting_role": _text(raw.get("nesting_role")),
+            "group_id": _text(raw.get("group_id")),
+            "group_type": _text(raw.get("group_type")),
+        },
     }
     geometry_points = _normalize_overlay_points(
         raw.get("line_points")
@@ -1627,8 +2132,15 @@ def normalize_v3_overlay_object(
             row["bounds"] = [round(float(value), 6) for value in geometry_bounds]
             row["bbox"] = list(row["bounds"])
     for key in (
+        "anchor_candle_indices",
+        "anchor_price_band",
+        "anchor_time_span",
+        "anchor_evidence",
+        "anchor_evidence_status",
         "trendline_role",
         "trendline_scope",
+        "trendline_validation",
+        "skill_gate",
         "source_path",
         "source_key",
         "structural_anchor",
@@ -1651,10 +2163,18 @@ def normalize_v3_overlay_object(
         "breach_state",
         "validation_reason",
         "zone_family",
+        "entry_authority_active",
         "liquidity_pool_type",
         "liquidity_source",
         "role_flip_state",
         "zone_stack_id",
+        "source_zone_id",
+        "side_blocked",
+        "distance_to_current_price",
+        "distance_to_target",
+        "force_type",
+        "force_strength",
+        "anchor_level",
         "source_rule",
         "knowledge_tags",
         "replay_sequence",
@@ -1664,6 +2184,7 @@ def normalize_v3_overlay_object(
         "display_state",
         "visual_weight",
         "geometry_visible",
+        "label_hidden",
         "label_visible",
         "inspector_visible",
         "label_mode",
@@ -1676,10 +2197,15 @@ def normalize_v3_overlay_object(
         "summary_label",
         "expand_on_hover",
         "expand_on_click",
+        "parent_overlay_id",
+        "child_overlay_ids",
+        "nesting_depth",
+        "nesting_role",
+        "hierarchy",
     ):
         value = raw.get(key)
         if value not in (None, "", [], {}):
-            row[key] = value
+            row.setdefault(key, value)
     return row
 
 
@@ -1708,6 +2234,18 @@ def validate_v3_overlay_object(overlay: Mapping[str, object]) -> OverlayValidati
     if "anchor_candles" in overlay and overlay.get("anchor_candles") not in (None, "", []):
         if not _normalize_anchor_candles(overlay.get("anchor_candles")):
             issues.append(OverlayContractIssue("anchor_candles", "invalid"))
+    if "anchor_candle_indices" in overlay and overlay.get("anchor_candle_indices") not in (None, "", []):
+        if not _normalize_anchor_candle_indices(overlay):
+            issues.append(OverlayContractIssue("anchor_candle_indices", "invalid"))
+    if "anchor_price_band" in overlay and overlay.get("anchor_price_band") not in (None, "", {}):
+        if _object_mapping(overlay.get("anchor_price_band")) is None:
+            issues.append(OverlayContractIssue("anchor_price_band", "invalid"))
+    if "anchor_time_span" in overlay and overlay.get("anchor_time_span") not in (None, "", {}):
+        if _object_mapping(overlay.get("anchor_time_span")) is None:
+            issues.append(OverlayContractIssue("anchor_time_span", "invalid"))
+    if "anchor_evidence" in overlay and overlay.get("anchor_evidence") not in (None, "", {}):
+        if _object_mapping(overlay.get("anchor_evidence")) is None:
+            issues.append(OverlayContractIssue("anchor_evidence", "invalid"))
     if overlay.get("layer") not in (None, "") and not _normalized_layer_value(overlay.get("layer")):
         issues.append(OverlayContractIssue("layer", f"invalid:{overlay.get('layer')}"))
     if overlay.get("ttl_ms") not in (None, ""):
@@ -1717,6 +2255,12 @@ def validate_v3_overlay_object(overlay: Mapping[str, object]) -> OverlayValidati
     lifecycle = str(overlay.get("lifecycle_state") or "").strip().upper()
     if lifecycle and lifecycle not in LIFECYCLE_STATES:
         issues.append(OverlayContractIssue("lifecycle_state", f"invalid:{lifecycle}"))
+    display_state = str(overlay.get("display_state") or "").strip().upper()
+    if display_state and display_state not in DISPLAY_STATES:
+        issues.append(OverlayContractIssue("display_state", f"invalid:{display_state}"))
+    if "style" in overlay and overlay.get("style") not in (None, "", {}):
+        if _object_mapping(overlay.get("style")) is None:
+            issues.append(OverlayContractIssue("style", "invalid"))
     modes = overlay.get("visible_modes")
     if "visible_modes" in overlay and (
         not isinstance(modes, Sequence)
@@ -1798,6 +2342,12 @@ def overlay_rejection_reasons(
         normalized = normalize_v3_overlay_object(overlay, strict=False)
     except V3OverlayContractError as exc:
         return (f"invalid_contract:{str(exc)}",)
+    if (
+        normalized_mode in LIVE_VIEW_MODES
+        and str(normalized.get("type") or "") in HARD_ANCHOR_REQUIRED_TYPES
+        and not _anchor_evidence_valid(normalized.get("anchor_evidence"))
+    ):
+        reasons.append("missing_anchor_evidence")
     label_texts = {
         _canonical_token(normalized.get(key))
         for key in ("label", "role", "reason", "overlay_id", "object_id", "track_id")
@@ -2035,11 +2585,14 @@ def validate_overlay_payload(overlays: Sequence[Mapping[str, Any]]) -> dict[str,
 
 
 __all__ = [
+    "ANCHOR_EVIDENCE_TYPES",
     "ANCHOR_TYPES",
     "APPROVED_OVERLAY_DISPLAY_LABELS",
     "COORDINATE_MODES",
     "DIAGNOSTIC_OVERLAY_TYPES",
     "DIAGNOSTIC_VIEW_MODES",
+    "DISPLAY_STATES",
+    "HARD_ANCHOR_REQUIRED_TYPES",
     "LIVE_VIEW_MODES",
     "LIFECYCLE_STATES",
     "LEGACY_DISPLAY_LABEL_ALIASES",
@@ -2057,6 +2610,7 @@ __all__ = [
     "V3OverlayContractError",
     "V3_ANCHOR_TYPES",
     "V3_COORDINATE_MODES",
+    "V3_DISPLAY_STATES",
     "V3_LIFECYCLE_STATES",
     "V3_OVERLAY_SCHEMA_VERSION",
     "V3_OVERLAY_TYPES",

@@ -10,6 +10,8 @@ from typing import cast
 
 import uvicorn
 
+from phoenixguard.runtime.singleton_guard_v3 import guard_from_environment
+
 
 def _local_tracing_disabled() -> bool:
     enabled = str(os.getenv("PHOENIXGUARD_ENABLE_OTEL", "") or "").strip().lower()
@@ -52,4 +54,28 @@ if __name__ == "__main__":
     )
     host = str(os.getenv("PHOENIXGUARD_MOBILE_API_HOST", "127.0.0.1") or "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.getenv("PHOENIXGUARD_MOBILE_API_PORT", "8787") or "8787")
-    uvicorn.run("phoenixguard.mobile_api.app:create_app", factory=True, host=host, port=port, reload=False)
+    session_id = str(os.getenv("PHOENIXGUARD_TRACKER_SESSION_ID", "pocket-live-8788") or "pocket-live-8788").strip()
+    base_url = f"http://{host}:{port}"
+    guard = guard_from_environment(Path(__file__).resolve().parent)
+    runtime_token = str(os.getenv("PHOENIXGUARD_RUNTIME_LOCK_TOKEN", "") or "").strip()
+    acquired_token = ""
+    if runtime_token:
+        guard.register_component("api", pid=os.getpid(), session_id=session_id, base_url=base_url, owner_token=runtime_token)
+    elif str(os.getenv("PHOENIXGUARD_RUNTIME_SINGLETON_DISABLE", "") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+        result = guard.acquire(
+            session_id=session_id,
+            base_url=base_url,
+            data_dir=os.getenv("PHOENIXGUARD_DATA_DIR", ".codex_runtime/data_live"),
+            api_port=port,
+            launcher_pid=os.getpid(),
+            api_pid=os.getpid(),
+            takeover_stale=True,
+        )
+        if not result.ok:
+            raise SystemExit(f"PhoenixGuard runtime singleton refused API launch: {result.reason} {result.lock_path}")
+        acquired_token = result.owner_token
+    try:
+        uvicorn.run("phoenixguard.mobile_api.app:create_app", factory=True, host=host, port=port, reload=False)
+    finally:
+        if acquired_token:
+            guard.release(owner_token=acquired_token)

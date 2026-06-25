@@ -384,6 +384,19 @@ def _overlay_from_active_object(
     overlay.setdefault("reason", row.get("reason", "registry active object"))
     overlay.setdefault("source_rule", row.get("source_rule", "active_object_registry"))
     overlay.setdefault("structural_anchor", row.get("structural_anchor", True))
+    for key in (
+        "anchor_candles",
+        "anchor_candle_indices",
+        "anchor_price_band",
+        "anchor_time_span",
+        "anchor_evidence",
+        "touch_points",
+        "line_points",
+        "points",
+        "path",
+    ):
+        if key in row and key not in overlay:
+            overlay[key] = row[key]
     visible_modes = [str(item).upper() for item in _sequence(overlay.get("visible_modes"))]
     if visible_modes and "REPLAY" in visible_modes and "FULL_HISTORY_READ" not in visible_modes:
         overlay["visible_modes"] = [*visible_modes, "FULL_HISTORY_READ"]
@@ -579,6 +592,12 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
             row.setdefault("raw_label", original_label)
         row["label"] = canonical_label
         row["short_label"] = canonical_label
+    normalized_row = normalize_v3_overlay_object(row, strict=False)
+    for preserved_key in ("bounds_rect", "label_bounds", "raw_label"):
+        preserved_value = row.get(preserved_key)
+        if preserved_value not in (None, "", [], {}):
+            normalized_row[preserved_key] = preserved_value
+    row = normalized_row
     if not compact:
         return row
     keep_keys = (
@@ -671,6 +690,11 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
         "coordinate_mode",
         "anchor_type",
         "anchor_candles",
+        "anchor_candle_indices",
+        "anchor_price_band",
+        "anchor_time_span",
+        "anchor_evidence",
+        "anchor_evidence_status",
         "lifecycle_state",
         "ttl_ms",
         "reason",

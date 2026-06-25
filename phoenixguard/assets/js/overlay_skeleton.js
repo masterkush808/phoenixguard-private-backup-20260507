@@ -43,7 +43,68 @@
     }catch(e){return null}
     return null;
   }
-  function draw(overlays, canvas, chartTransform, backgroundImage){
+  function firstText(...values){
+    for(const value of values){
+      const text = String(value == null ? '' : value).trim();
+      if(text) return text;
+    }
+    return '';
+  }
+  function normalizedToken(value){
+    return firstText(value).toUpperCase().replace(/\s+/g, '');
+  }
+  function numericFrame(value){
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+  }
+  function payloadSymbol(data){
+    const context = data && typeof data.symbol_context === 'object' ? data.symbol_context : {};
+    return normalizedToken(data && (data.symbol || data.market || data.display_symbol) || context.symbol || context.display_symbol || context.market);
+  }
+  function payloadChartTransformId(data, chartTransform){
+    return firstText(
+      data && (data.chart_transform_id || data.transform_id),
+      chartTransform && (chartTransform.chart_transform_id || chartTransform.transform_id || chartTransform.id)
+    );
+  }
+  function payloadFrameId(data, chartTransform){
+    return Math.max(
+      numericFrame(data && (data.frame_id || data.overlay_object_frame_id || data.overlay_frame_id || data.chart_frame_id)),
+      numericFrame(chartTransform && chartTransform.frame_id)
+    );
+  }
+  function overlayMatchesPayload(obj, data, chartTransform){
+    if(!obj || !data) return true;
+    const expectedFrame = payloadFrameId(data, chartTransform);
+    const objectFrame = numericFrame(obj.frame_id || obj.overlay_frame_id || obj.chart_frame_id || obj.source_frame_id);
+    if(expectedFrame > 0 && objectFrame > 0 && objectFrame !== expectedFrame) return false;
+    const expectedTransform = payloadChartTransformId(data, chartTransform);
+    const objectTransform = firstText(obj.chart_transform_id || obj.transform_id);
+    if(expectedTransform && objectTransform && objectTransform !== expectedTransform) return false;
+    const expectedSymbol = payloadSymbol(data);
+    const objectSymbol = normalizedToken(obj.symbol || obj.market || obj.display_symbol || (obj.symbol_context && (obj.symbol_context.symbol || obj.symbol_context.display_symbol)));
+    if(expectedSymbol && objectSymbol && objectSymbol !== expectedSymbol) return false;
+    return true;
+  }
+  function overlayDisplayState(obj){
+    return normalizedToken(obj && obj.display_state) || 'COMPACT';
+  }
+  function overlayLabelHidden(obj){
+    const state = overlayDisplayState(obj);
+    return obj && (
+      obj.label_visible === false
+      || obj.label_visible === 'false'
+      || obj.label_hidden === true
+      || obj.label_hidden === 'true'
+      || state === 'GHOSTED'
+      || state === 'ICON_ONLY'
+      || state === 'INSPECTOR_ONLY_LABEL'
+    );
+  }
+  function overlayStyle(obj){
+    return obj && typeof obj.style === 'object' ? obj.style : {};
+  }
+  function draw(overlays, canvas, chartTransform, backgroundImage, payload){
     if(!canvas) return;
     const ctx = canvas.getContext('2d');
     const chartBounds = chartTransform && Array.isArray(chartTransform.chart_image_bounds) ? chartTransform.chart_image_bounds : null;
@@ -63,7 +124,9 @@
     }
     const opts = (window.__overlaySkeleton && window.__overlaySkeleton.options) || { tighten: true, labelMode: 'semantic' };
     // Prepare geometries for deterministic label placement using priority and nudging
-    const objs = Array.isArray(overlays) ? overlays.slice(0) : [];
+    const objs = Array.isArray(overlays)
+      ? overlays.filter((obj)=>overlayMatchesPayload(obj, payload, chartTransform)).slice(0)
+      : [];
     const layerWeights = (OverlayPlacementModule && OverlayPlacementModule.layerWeights) || (window && window.OverlayPlacement && window.OverlayPlacement.layerWeights) || {
       broker_controls: 5, active_council_decision: 4, trigger_zones: 3, target_zones: 3, invalidation: 3, prediction_path: 2.5, major_swings: 2.5,
       supply_demand: 2, local_swings: 2, recent_candles: 1.5, historical_replay: 1, diagnostics: 0.5
@@ -190,17 +253,20 @@
           }
           return 'DEBUG RAW DETECTION';
         }
+        let priority = 0;
         try{
           if (OverlayPlacementModule && typeof OverlayPlacementModule.computePriority === 'function'){
             priority = OverlayPlacementModule.computePriority(obj);
           } else if (window && window.OverlayPlacement && typeof window.OverlayPlacement.computePriority === 'function'){
             priority = window.OverlayPlacement.computePriority(obj);
           } else {
-            const conf = Number(obj.confidence || obj.score || 0) || 0;
+            const style = overlayStyle(obj);
+            const conf = Number(obj.overlay_confidence || obj.confidence || obj.score || style.confidence || 0) || 0;
             const visDef = obj.visible_default === true ? 1 : 0;
             const lay = obj.layer || obj.type || 'default';
             const lw = Number(layerWeights[lay] || 0);
-            priority = conf * 100 + visDef * 50 + lw * 10;
+            const visualWeight = Number(obj.visual_weight || style.visual_weight || 0) || 0;
+            priority = conf * 100 + visDef * 50 + lw * 10 + visualWeight * 10;
           }
         }catch(e){ priority = 0; }
         const label = (obj.label && !opts.labelMode) ? String(obj.label) : semanticLabel(obj) || String(obj.id || obj.overlay_id || 'obj');
@@ -218,9 +284,23 @@
         else if(/supply|demand|support|resist/.test(layer)) color = 'rgba(255,165,0,0.95)';
         else if(/broker_controls|chart_bounds/.test(layer)) color = 'rgba(0,150,255,0.95)';
         else if(/major_swings|local_swings/.test(layer)) color = 'rgba(120,255,120,0.95)';
+        const style = overlayStyle(e.obj);
+        const displayState = overlayDisplayState(e.obj);
+        const requestedOpacity = Number(style.opacity);
+        const requestedFillOpacity = Number(style.fill_opacity);
+        const opacityFallback = displayState === 'GHOSTED' ? 0.32 : 0.9;
+        const opacity = Math.max(0.18, Math.min(1, Number.isFinite(requestedOpacity) ? requestedOpacity : opacityFallback));
+        const fillOpacity = Math.max(0, Math.min(0.16, Number.isFinite(requestedFillOpacity) ? requestedFillOpacity : 0.02));
+        ctx.globalAlpha = opacity;
         ctx.strokeStyle = color;
-        ctx.lineWidth = Math.max(2, Math.min(4, Math.floor((e.x2-e.x1 + e.y2-e.y1)/150)));
+        ctx.lineWidth = Math.max(Number(style.border_width || 0) || 0, Math.max(2, Math.min(4, Math.floor((e.x2-e.x1 + e.y2-e.y1)/150))));
+        const evidence = normalizedToken(e.obj.anchor_evidence_status || style.anchor_evidence_status);
+        if(evidence === 'STALE' || evidence === 'MISMATCH' || evidence === 'REJECTED') ctx.setLineDash([6, 4]);
+        ctx.fillStyle = color.replace(/rgba\(([^,]+),([^,]+),([^,]+),[^)]+\)/, `rgba($1,$2,$3,${fillOpacity})`);
+        ctx.fillRect(e.x1,e.y1,Math.max(1,e.x2-e.x1),Math.max(1,e.y2-e.y1));
         ctx.strokeRect(e.x1,e.y1,Math.max(1,e.x2-e.x1),Math.max(1,e.y2-e.y1));
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
       }catch(err){}
     }
 
@@ -233,6 +313,7 @@
     entries.sort((a,b)=>Number(b.priority||0)-Number(a.priority||0));
     for(const e of entries){
       try{
+        if(overlayLabelHidden(e.obj)) continue;
         const text = e.label;
         const metrics = ctx.measureText(text);
         const tw = Math.ceil(metrics.width) + 6; // padding
@@ -243,8 +324,10 @@
           const attempts = (OverlayPlacementModule && Array.isArray(OverlayPlacementModule.attempts)) ? OverlayPlacementModule.attempts : ((window && window.OverlayPlacement && Array.isArray(window.OverlayPlacement.attempts)) ? window.OverlayPlacement.attempts : [ [0,0], [10,0], [-10,0], [0,-(th+2)], [0,th+2], [20,0], [-20,0], [30,0], [-30,0] ]);
         let placed = false;
         for(const off of attempts){
-          const lx = baseX + off[0];
-          const ly = baseY + off[1];
+          const lane = normalizedToken(e.obj.label_lane || e.obj.label_anchor || overlayStyle(e.obj).label_lane || overlayStyle(e.obj).label_anchor);
+          const laneOffset = lane === 'BELOW' ? [0, th + 4] : lane === 'RIGHT' ? [Math.max(10, e.x2 - e.x1), 0] : lane === 'LEFT' ? [-tw - 6, 0] : [0, 0];
+          const lx = baseX + off[0] + laneOffset[0];
+          const ly = baseY + off[1] + laneOffset[1];
           const rect = { left: lx, top: ly-th+2, right: lx+tw, bottom: ly+2 };
           // clamp to canvas
           rect.left = Math.max(0, rect.left);
@@ -291,7 +374,7 @@
           }
           const data = window.__overlaySkeleton && window.__overlaySkeleton._lastData;
           if(data && data.active_overlays){
-            draw(data.active_overlays, canvas, data.chart_transform || null, backgroundImage);
+            draw(data.active_overlays, canvas, data.chart_transform || null, backgroundImage, data);
           }
         };
         backgroundImage.src = bgUrl;
@@ -302,7 +385,7 @@
         const ct = data && data.chart_transform ? data.chart_transform : null;
         if(data && data.active_overlays){
           window.__overlaySkeleton._lastData = data;
-          draw(data.active_overlays, canvas, ct, backgroundImage);
+          draw(data.active_overlays, canvas, ct, backgroundImage, data);
         }
       })();
       setInterval(async ()=>{
@@ -310,7 +393,7 @@
         const ct = data && data.chart_transform ? data.chart_transform : null;
         if(data && data.active_overlays){
           window.__overlaySkeleton._lastData = data;
-          draw(data.active_overlays, canvas, ct, backgroundImage);
+          draw(data.active_overlays, canvas, ct, backgroundImage, data);
         }
       }, 1000);
     }
