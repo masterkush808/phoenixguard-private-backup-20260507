@@ -1,0 +1,22 @@
+-r base.in
+
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+python-multipart>=0.0.9,<1.0
+psutil>=7.0,<8.0
+mss>=9.0,<11.0
+opencv-python-headless>=4.9,<5.0
+torch>=2.5,<2.11
+torchvision>=0.20,<0.26
+scikit-learn>=1.6,<1.9
+scipy>=1.13,<1.18
+cryptography>=44,<47
+pytesseract>=0.3.10,<0.4
+keyboard>=0.13.5,<0.14
+pywin32>=306; platform_system == "Windows"
+opentelemetry-api>=1.33,<2.0
+opentelemetry-sdk>=1.33,<2.0
+opentelemetry-exporter-otlp-proto-http>=1.33,<2.0
+opentelemetry-instrumentation-fastapi>=0.54b0,<1.0
+opentelemetry-instrumentation-requests>=0.54b0,<1.0
+opentelemetry-instrumentation-urllib>=0.54b0,<1.0

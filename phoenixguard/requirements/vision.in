@@ -1,0 +1,9 @@
+-r base.in
+
+opencv-python-headless>=4.9,<5.0
+torch>=2.5,<2.11
+torchvision>=0.20,<0.26
+onnxruntime>=1.18,<2.0
+ultralytics>=8.3,<9.0
+mss>=9.0,<11.0
+pytesseract>=0.3.10,<0.4

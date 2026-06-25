@@ -1,0 +1,14 @@
+-r vision.in
+-r decision.in
+
+accelerate>=1.0,<2.0
+chronos-forecasting>=2.0,<3.0
+faiss-cpu>=1.9,<2.0
+hnswlib>=0.8,<0.9
+matplotlib>=3.8,<4.0
+pandas>=2.2,<4.0
+plotly>=5.24,<7.0
+safetensors>=0.4.5,<1.0
+sentence-transformers>=3.4,<6.0
+transformers>=4.48,<5.0
+tqdm>=4.66,<5.0

@@ -1,0 +1,3 @@
+-r base.in
+
+safetensors>=0.4.5,<1.0

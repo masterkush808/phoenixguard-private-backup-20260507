@@ -13,9 +13,10 @@ pytest.ini
 README.md
 requirements.txt
 sitecustomize.py
+requirements/
 ```
 
-All previously floating launchers, compatibility modules, docs, dashboard entrypoints, business launcher, model asset, and shooter gate state were moved into responsible folders.
+All previously floating launchers, compatibility modules, docs, dashboard entrypoints, business launcher, model asset, and shooter gate state were moved into responsible folders. The root `requirements/` folder is repo-level dependency governance, not runtime code.
 
 ## Files Moved
 
@@ -61,4 +62,4 @@ Those files are preserved locally in responsible folders, but they remain ignore
 
 ## Remaining Root Policy
 
-The files left at project root are not loose application files. They are repository metadata, package/test configuration, and bootstrap files that must stay at root so Python, pytest, Pyright, packaging, and launch scripts can discover the project consistently.
+The files left at project root are not loose application files. They are repository metadata, package/test configuration, dependency-governance files, and bootstrap files that must stay at root so Python, pytest, Pyright, packaging, lock compilation, and launch scripts can discover the project consistently.

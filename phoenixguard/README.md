@@ -9,6 +9,48 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 .\.venv\Scripts\Activate.ps1
 ```
 
+## Dependency Profiles
+
+Do not repair PhoenixGuard by installing random packages into the global Python
+environment. The repo has split dependency profiles:
+
+```text
+requirements/base.in
+requirements/live.in
+requirements/decision.in
+requirements/vision.in
+requirements/training.in
+requirements/simulation.in
+requirements/business.in
+requirements/frontend-dev.in
+requirements/docs-pdf.in
+requirements/voice.in
+requirements/dev.in
+requirements/constraints.in
+requirements/locks/
+```
+
+Use `requirements/locks/live-win-py311.txt` for the lean `FINAL_LIVE` tracker/API/package-reporter runtime.
+Use `requirements/locks/dev-win-py311.txt` for full repo testing and Pyright. Training, business, and
+docs/PDF have separate locks so they do not pollute the live stack.
+
+Environment installers live under `Backend/scripts_runtime/env/`:
+
+```powershell
+.\Backend\scripts_runtime\env\install_live.ps1
+.\Backend\scripts_runtime\env\install_dev.ps1
+.\Backend\scripts_runtime\env\install_training.ps1
+.\Backend\scripts_runtime\env\install_business.ps1
+```
+
+Before trusting an environment:
+
+```powershell
+python -m pip check
+python -m pipdeptree --warn fail
+python .\Backend\tools\verify_dependency_profile.py --profile dev
+```
+
 ## Fast Safe Restart
 
 Use this when you want to stop stale sessions/processes, clear runtime cache, and start the live

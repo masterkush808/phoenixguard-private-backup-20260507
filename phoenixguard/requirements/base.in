@@ -1,0 +1,9 @@
+-c constraints.in
+
+numpy>=1.26.4,<2.0
+pillow>=11.0,<13.0
+requests>=2.32,<3.0
+httpx>=0.28,<0.29
+pydantic>=2.12,<3.0
+python-dotenv>=1.0,<2.0
+typing-extensions>=4.12
