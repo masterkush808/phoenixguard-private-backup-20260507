@@ -621,7 +621,6 @@ def main() -> int:
                 },
             )
         _append_jsonl(out_dir / "source_lock.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), **source_lock})
-        _append_jsonl(out_dir / "model_freshness.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), **model_status, **timing})
         _append_jsonl(out_dir / "sequence_context.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), **sequence_status})
         _append_jsonl(out_dir / "frontend_latency.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), **frontend})
         _append_jsonl(out_dir / "mt4_bridge_acks.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), **mt4})
@@ -717,6 +716,27 @@ def main() -> int:
         if live_state_current_ok and not bool(source_lock.get("valid")):
             stale_reasons.append("source_lock_not_valid")
             source_lock_fail_count += 1
+        monitor_truth_status = "PASS"
+        monitor_truth_reasons: list[str] = []
+        if stale_reasons:
+            monitor_truth_status = "REJECT"
+            monitor_truth_reasons = list(stale_reasons)
+        elif frontend_gap_reasons:
+            monitor_truth_status = "FRONTEND_GAP"
+            monitor_truth_reasons = list(frontend_gap_reasons)
+        elif display_lag_reasons:
+            monitor_truth_status = "DISPLAY_LAG"
+            monitor_truth_reasons = list(display_lag_reasons)
+        elif _text(timing.get("stale_status")).upper() in {"STALE", "REJECT"} and not allowed:
+            monitor_truth_status = "BACKGROUND_CADENCE_WAIT"
+            monitor_truth_reasons = ["raw_backend_stale_flag_without_allowed_execution_packet"]
+        timing = {
+            **timing,
+            "monitor_truth_status": monitor_truth_status,
+            "monitor_truth_reasons": monitor_truth_reasons,
+            "allowed_packet_present": allowed,
+        }
+        _append_jsonl(out_dir / "model_freshness.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), **model_status, **timing})
         if frontend_gap_reasons:
             frontend_gap_count += 1
             _append_jsonl(
@@ -806,6 +826,7 @@ def main() -> int:
             "source_lock_status": source_lock.get("status"),
             "frame_age_ms": timing.get("frame_age_ms"),
             "overlay_age_ms": timing.get("overlay_age_ms"),
+            "monitor_truth_status": timing.get("monitor_truth_status"),
             "frontend_visible_overlay_count": frontend.get("visible_overlay_count"),
             "mt4_bridge_status": mt4.get("bridge_status"),
             "mt4_bridge_fresh": mt4.get("bridge_fresh"),
