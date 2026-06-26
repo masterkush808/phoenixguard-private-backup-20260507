@@ -256,27 +256,54 @@ def _model_status(live: Mapping[str, Any], performance: Mapping[str, Any], runti
 def _frontend_status(heartbeat: Mapping[str, Any]) -> dict[str, object]:
     received_ms = _float(heartbeat.get("received_at_ms"), 0.0)
     age_ms = max(0.0, time.time() * 1000.0 - received_ms) if received_ms > 0 else 0.0
+    render_size = _mapping(heartbeat.get("render_size"))
     return {
         "status": _text(heartbeat.get("status"), "UNKNOWN"),
         "overlay_mode": _text(heartbeat.get("overlay_mode")),
         "age_ms": round(age_ms, 3),
+        "document_hidden": bool(heartbeat.get("document_hidden") is True or _text(heartbeat.get("page_visibility")).lower() == "hidden"),
         "rendered_frame_id": _int(heartbeat.get("rendered_frame_id"), 0),
         "display_frame_id": _int(heartbeat.get("display_frame_id"), 0),
         "overlay_render_frame_id": _int(heartbeat.get("overlay_render_frame_id"), 0),
         "overlay_count": _int(heartbeat.get("overlay_count"), 0),
         "visible_overlay_count": _int(heartbeat.get("visible_overlay_count"), 0),
+        "render_width": _int(render_size.get("width") or render_size.get("canvas_width"), 0),
+        "render_height": _int(render_size.get("height") or render_size.get("canvas_height"), 0),
     }
 
 
-def _mt4_status() -> dict[str, object]:
+def _file_mtime_epoch(path: Path) -> float:
+    try:
+        return float(path.stat().st_mtime)
+    except OSError:
+        return 0.0
+
+
+def _mt4_status(*, stale_sec: float) -> dict[str, object]:
     root = _common_files_dir() / "PhoenixGuard"
+    status_path = root / "mt4_bridge_status.json"
+    command_path = root / "mt4_execution_command.json"
     status = _read_json_file(root / "mt4_bridge_status.json")
     command = _read_json_file(root / "mt4_execution_command.json")
+    status_written = _float(status.get("written_epoch"), 0.0)
+    command_written = _float(command.get("bridge_written_epoch") or command.get("written_epoch"), 0.0)
+    newest_epoch = max(status_written, command_written, _file_mtime_epoch(status_path), _file_mtime_epoch(command_path))
+    age_sec = max(0.0, time.time() - newest_epoch) if newest_epoch > 0.0 else 0.0
+    status_exists = status_path.exists()
+    command_exists = command_path.exists()
+    bridge_status = _text(status.get("bridge_status") or status.get("status"), "MISSING")
+    fresh = bool(status_exists and command_exists and newest_epoch > 0.0 and age_sec <= max(1.0, stale_sec))
     return {
         "common_dir": str(root),
-        "bridge_status": _text(status.get("bridge_status") or status.get("status"), "MISSING"),
+        "bridge_status": bridge_status,
+        "bridge_fresh": fresh,
+        "bridge_age_sec": round(age_sec, 3),
+        "bridge_stale_sec": round(max(1.0, stale_sec), 3),
+        "status_file_exists": status_exists,
+        "command_file_exists": command_exists,
         "bridge_sequence": _int(status.get("bridge_sequence"), 0),
-        "status_written_epoch": _float(status.get("written_epoch"), 0.0),
+        "status_written_epoch": status_written,
+        "command_written_epoch": command_written,
         "packet_id": _text(command.get("packet_id")),
         "command_schema": _text(command.get("schema_version")),
         "entry_eligible": bool(_mapping(command.get("entry_eligibility")).get("eligible") is True),
@@ -390,6 +417,7 @@ def _write_progress_report(
     duration_sec: float,
     sample_count: int,
     stale_count: int,
+    display_lag_count: int,
     frontend_gap_count: int,
     frontend_latency_warning_count: int,
     monitor_endpoint_warning_count: int,
@@ -406,6 +434,7 @@ def _write_progress_report(
         f"- Remaining minutes: {remaining_sec / 60.0:.1f}",
         f"- Samples: {sample_count}",
         f"- Stale market-truth events: {stale_count}",
+        f"- Display lag events: {display_lag_count}",
         f"- Frontend heartbeat gaps: {frontend_gap_count}",
         f"- Frontend latency warnings: {frontend_latency_warning_count}",
         f"- Monitor endpoint warnings: {monitor_endpoint_warning_count}",
@@ -416,6 +445,8 @@ def _write_progress_report(
         f"- Latest overlay age ms: {latest_summary.get('overlay_age_ms', 'UNKNOWN')}",
         f"- Latest frontend visible overlays: {latest_summary.get('frontend_visible_overlay_count', 'UNKNOWN')}",
         f"- Latest MT4 bridge status: {_text(latest_summary.get('mt4_bridge_status'), 'UNKNOWN')}",
+        f"- Latest MT4 bridge fresh: {latest_summary.get('mt4_bridge_fresh', 'UNKNOWN')}",
+        f"- Latest MT4 bridge age sec: {latest_summary.get('mt4_bridge_age_sec', 'UNKNOWN')}",
     ]
     _write_text(path, "\n".join(lines) + "\n")
 
@@ -431,10 +462,13 @@ def _write_final_reports(out_dir: Path, reports_dir: Path, verdict: str, summary
         f"- Completed UTC: {_utc_now()}",
         f"- Samples: {summary.get('sample_count')}",
         f"- Stale market-truth events: {summary.get('stale_event_count')}",
+        f"- Display lag events: {summary.get('display_lag_count')}",
         f"- Frontend heartbeat gaps: {summary.get('frontend_gap_count')}",
         f"- Frontend latency warnings: {summary.get('frontend_latency_warning_count')}",
         f"- Monitor endpoint warnings: {summary.get('monitor_endpoint_warning_count')}",
         f"- Source-lock failures: {summary.get('source_lock_fail_count')}",
+        f"- MT4 bridge stale samples: {summary.get('mt4_bridge_stale_count')}",
+        f"- MT4 bridge missing samples: {summary.get('mt4_bridge_missing_count')}",
         f"- Allowed package events: {summary.get('allowed_package_count')}",
         f"- MT4 bridge status: {summary.get('last_mt4_bridge_status')}",
         f"- Output directory: {out_dir}",
@@ -448,6 +482,7 @@ def _write_final_reports(out_dir: Path, reports_dir: Path, verdict: str, summary
                 "",
                 f"- Stale accepted as live truth: {summary.get('stale_accepted_as_live', 0)}",
                 f"- Stale market-truth events observed: {summary.get('stale_event_count')}",
+                f"- Display lag events observed: {summary.get('display_lag_count')}",
                 f"- Frontend heartbeat gaps observed: {summary.get('frontend_gap_count')}",
                 f"- Frontend latency warnings observed: {summary.get('frontend_latency_warning_count')}",
                 f"- Monitor endpoint warnings observed: {summary.get('monitor_endpoint_warning_count')}",
@@ -463,6 +498,8 @@ def _write_final_reports(out_dir: Path, reports_dir: Path, verdict: str, summary
                 "# Final MT4 Bridge Certification Report",
                 "",
                 f"- Last bridge status: {summary.get('last_mt4_bridge_status')}",
+                f"- Bridge stale samples: {summary.get('mt4_bridge_stale_count')}",
+                f"- Bridge missing samples: {summary.get('mt4_bridge_missing_count')}",
                 f"- Allowed packages observed: {summary.get('allowed_package_count')}",
                 f"- Bridge packet records: {summary.get('mt4_packet_record_count')}",
             ]
@@ -476,12 +513,17 @@ def main() -> int:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--session-id", default=DEFAULT_SESSION_ID)
     parser.add_argument("--duration-sec", type=float, default=36_000.0)
-    parser.add_argument("--sample-sec", type=float, default=5.0)
+    parser.add_argument("--sample-sec", type=float, default=15.0)
     parser.add_argument("--diagnostic-sec", type=float, default=300.0)
     parser.add_argument("--timeout-sec", type=float, default=8.0)
     parser.add_argument("--screenshot-sec", type=float, default=900.0)
     parser.add_argument("--capture-timeout-sec", type=float, default=60.0)
     parser.add_argument("--update-sec", type=float, default=1800.0)
+    parser.add_argument("--frontend-heartbeat-max-age-ms", type=float, default=45_000.0)
+    parser.add_argument("--display-freshness-max-age-ms", type=float, default=15_000.0)
+    parser.add_argument("--authority-frame-max-age-ms", type=float, default=2_500.0)
+    parser.add_argument("--authority-model-max-age-ms", type=float, default=3_000.0)
+    parser.add_argument("--mt4-bridge-stale-sec", type=float, default=45.0)
     parser.add_argument("--out-dir", default=".codex_runtime/10h_cert")
     parser.add_argument("--no-screenshots", action="store_true")
     args = parser.parse_args()
@@ -501,10 +543,13 @@ def main() -> int:
     sample_count = 0
     stale_count = 0
     stale_accepted_as_live = 0
+    display_lag_count = 0
     frontend_gap_count = 0
     frontend_latency_warning_count = 0
     monitor_endpoint_warning_count = 0
     source_lock_fail_count = 0
+    mt4_bridge_stale_count = 0
+    mt4_bridge_missing_count = 0
     allowed_seen: set[str] = set()
     mt4_packet_seen: set[str] = set()
     progression: dict[str, dict[str, Any]] = {}
@@ -554,7 +599,7 @@ def main() -> int:
         sequence_status = _sequence_status(live, runtime_trace)
         model_status = _model_status(live, performance, runtime_trace)
         frontend = _frontend_status(heartbeat)
-        mt4 = _mt4_status()
+        mt4 = _mt4_status(stale_sec=float(args.mt4_bridge_stale_sec))
         allowed, allowed_meta = _execution_allowed(execution)
 
         for endpoint_name, (status, _payload, error, latency_ms) in endpoint_results.items():
@@ -585,18 +630,32 @@ def main() -> int:
             _append_jsonl(out_dir / "mt4_bridge_packets.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), **mt4})
 
         stale_reasons: list[str] = []
+        display_lag_reasons: list[str] = []
         frontend_gap_reasons: list[str] = []
         live_state_current_status = int(endpoint_results.get("live_state", (cached_endpoint_status.get("live_state", 0), {}, "", 0.0))[0])
         live_state_current_ok = live_state_current_status == 200
+        display_max_age_ms = max(1000.0, float(args.display_freshness_max_age_ms))
+        authority_frame_max_age_ms = max(500.0, float(args.authority_frame_max_age_ms))
+        authority_model_max_age_ms = max(500.0, float(args.authority_model_max_age_ms))
         if live_state_current_ok:
-            if _float(timing["frame_age_ms"]) > 2500.0:
-                stale_reasons.append("frame_age_gt_2500ms")
-            if _float(timing["overlay_age_ms"]) > 2500.0:
-                stale_reasons.append("overlay_age_gt_2500ms")
-            if _float(timing["model_vote_age_ms"]) > 3000.0:
-                stale_reasons.append("model_vote_age_gt_3000ms")
+            if _float(timing["frame_age_ms"]) > display_max_age_ms:
+                display_lag_reasons.append(f"frame_age_gt_{display_max_age_ms:.0f}ms")
+            if _float(timing["overlay_age_ms"]) > display_max_age_ms:
+                display_lag_reasons.append(f"overlay_age_gt_{display_max_age_ms:.0f}ms")
+            if _float(timing["model_vote_age_ms"]) > display_max_age_ms:
+                display_lag_reasons.append(f"model_vote_age_gt_{display_max_age_ms:.0f}ms")
+            if allowed:
+                if _float(timing["frame_age_ms"]) > authority_frame_max_age_ms:
+                    stale_reasons.append(f"allowed_packet_frame_age_gt_{authority_frame_max_age_ms:.0f}ms")
+                if _float(timing["overlay_age_ms"]) > authority_frame_max_age_ms:
+                    stale_reasons.append(f"allowed_packet_overlay_age_gt_{authority_frame_max_age_ms:.0f}ms")
+                if _float(timing["model_vote_age_ms"]) > authority_model_max_age_ms:
+                    stale_reasons.append(f"allowed_packet_model_vote_age_gt_{authority_model_max_age_ms:.0f}ms")
             if bool(timing.get("timing_missing")):
-                stale_reasons.append("missing_frame_or_overlay_timing")
+                if allowed:
+                    stale_reasons.append("allowed_packet_missing_frame_or_overlay_timing")
+                else:
+                    display_lag_reasons.append("missing_frame_or_overlay_timing")
         elif live_state_current_status == 0:
             monitor_endpoint_warning_count += 1
             _append_jsonl(
@@ -613,11 +672,13 @@ def main() -> int:
         frontend_alive = _text(frontend.get("status")).upper() == "ALIVE"
         backend_fresh_for_frontend = bool(
             not timing.get("timing_missing")
-            and _float(timing["frame_age_ms"]) <= 2500.0
-            and _float(timing["overlay_age_ms"]) <= 2500.0
-            and _float(timing["model_vote_age_ms"]) <= 3000.0
+            and _float(timing["frame_age_ms"]) <= display_max_age_ms
+            and _float(timing["overlay_age_ms"]) <= display_max_age_ms
+            and _float(timing["model_vote_age_ms"]) <= display_max_age_ms
         )
-        if frontend_heartbeat_age_ms > 3500.0:
+        frontend_max_age_ms = max(1000.0, float(args.frontend_heartbeat_max_age_ms))
+        frontend_hidden = bool(frontend.get("document_hidden") is True)
+        if frontend_heartbeat_age_ms > frontend_max_age_ms:
             if frontend_alive and frontend_visible_count > 0 and backend_fresh_for_frontend:
                 frontend_latency_warning_count += 1
                 _append_jsonl(
@@ -625,7 +686,20 @@ def main() -> int:
                     {
                         "at_epoch": loop_started,
                         "at_utc": _utc_now(),
-                        "reason": "frontend_heartbeat_age_gt_3500ms_but_visible_and_backend_fresh",
+                        "reason": f"frontend_heartbeat_age_gt_{frontend_max_age_ms:.0f}ms_but_visible_and_backend_fresh",
+                        "allowed_packet_present": allowed,
+                        "source_lock": source_lock,
+                        "timing": timing,
+                        "frontend": frontend,
+                    },
+                )
+            elif frontend_hidden and backend_fresh_for_frontend:
+                _append_jsonl(
+                    out_dir / "frontend_hidden_heartbeat.jsonl",
+                    {
+                        "at_epoch": loop_started,
+                        "at_utc": _utc_now(),
+                        "reason": "dashboard_hidden_backend_fresh",
                         "allowed_packet_present": allowed,
                         "source_lock": source_lock,
                         "timing": timing,
@@ -633,7 +707,13 @@ def main() -> int:
                     },
                 )
             else:
-                frontend_gap_reasons.append("frontend_heartbeat_age_gt_3500ms")
+                frontend_gap_reasons.append(f"frontend_heartbeat_age_gt_{frontend_max_age_ms:.0f}ms")
+        if not bool(mt4.get("status_file_exists")) or not bool(mt4.get("command_file_exists")):
+            mt4_bridge_missing_count += 1
+            _append_jsonl(out_dir / "mt4_bridge_stale.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), "reason": "mt4_bridge_file_missing", **mt4})
+        elif not bool(mt4.get("bridge_fresh")):
+            mt4_bridge_stale_count += 1
+            _append_jsonl(out_dir / "mt4_bridge_stale.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), "reason": "mt4_bridge_status_stale", **mt4})
         if live_state_current_ok and not bool(source_lock.get("valid")):
             stale_reasons.append("source_lock_not_valid")
             source_lock_fail_count += 1
@@ -645,6 +725,20 @@ def main() -> int:
                     "at_epoch": loop_started,
                     "at_utc": _utc_now(),
                     "reasons": frontend_gap_reasons,
+                    "allowed_packet_present": allowed,
+                    "source_lock": source_lock,
+                    "timing": timing,
+                    "frontend": frontend,
+                },
+            )
+        if display_lag_reasons:
+            display_lag_count += 1
+            _append_jsonl(
+                out_dir / "display_lag_events.jsonl",
+                {
+                    "at_epoch": loop_started,
+                    "at_utc": _utc_now(),
+                    "reasons": display_lag_reasons,
                     "allowed_packet_present": allowed,
                     "source_lock": source_lock,
                     "timing": timing,
@@ -714,6 +808,8 @@ def main() -> int:
             "overlay_age_ms": timing.get("overlay_age_ms"),
             "frontend_visible_overlay_count": frontend.get("visible_overlay_count"),
             "mt4_bridge_status": mt4.get("bridge_status"),
+            "mt4_bridge_fresh": mt4.get("bridge_fresh"),
+            "mt4_bridge_age_sec": mt4.get("bridge_age_sec"),
         }
         sample_row: dict[str, object] = {
             "at_epoch": loop_started,
@@ -758,6 +854,7 @@ def main() -> int:
                 duration_sec=float(args.duration_sec),
                 sample_count=sample_count,
                 stale_count=stale_count,
+                display_lag_count=display_lag_count,
                 frontend_gap_count=frontend_gap_count,
                 frontend_latency_warning_count=frontend_latency_warning_count,
                 monitor_endpoint_warning_count=monitor_endpoint_warning_count,
@@ -767,7 +864,7 @@ def main() -> int:
             )
             _notify(
                 "PhoenixGuard 10H certification update",
-                f"{elapsed / 60.0:.1f}m elapsed; samples={sample_count}; stale={stale_count}; frontend_gaps={frontend_gap_count}; allowed={len(allowed_seen)}; bridge={mt4.get('bridge_status')}",
+                f"{elapsed / 60.0:.1f}m elapsed; samples={sample_count}; stale={stale_count}; display_lag={display_lag_count}; frontend_gaps={frontend_gap_count}; allowed={len(allowed_seen)}; bridge={mt4.get('bridge_status')}",
                 loud=False,
             )
             next_update = loop_started + max(60.0, float(args.update_sec))
@@ -781,10 +878,13 @@ def main() -> int:
                 "elapsed_sec": round(elapsed, 3),
                 "remaining_sec": round(max(0.0, float(args.duration_sec) - elapsed), 3),
                 "stale_event_count": stale_count,
+                "display_lag_count": display_lag_count,
                 "frontend_gap_count": frontend_gap_count,
                 "frontend_latency_warning_count": frontend_latency_warning_count,
                 "monitor_endpoint_warning_count": monitor_endpoint_warning_count,
                 "source_lock_fail_count": source_lock_fail_count,
+                "mt4_bridge_stale_count": mt4_bridge_stale_count,
+                "mt4_bridge_missing_count": mt4_bridge_missing_count,
                 "allowed_package_count": len(allowed_seen),
                 "latest_summary": latest_summary,
             },
@@ -794,6 +894,8 @@ def main() -> int:
 
     duration = _now_epoch() - start
     verdict = "PASS_PRODUCTION_READY" if stale_accepted_as_live == 0 and source_lock_fail_count == 0 else "FAIL_SOURCE_LOCK"
+    if verdict == "PASS_PRODUCTION_READY" and (mt4_bridge_missing_count > 0 or mt4_bridge_stale_count > 0):
+        verdict = "FAIL_MT4_BRIDGE"
     if not allowed_seen and verdict == "PASS_PRODUCTION_READY":
         verdict = "PASS_RUNTIME_ONLY_NO_ALLOWED_PACKAGES"
     summary = {
@@ -805,10 +907,13 @@ def main() -> int:
         "sample_count": sample_count,
         "stale_event_count": stale_count,
         "stale_accepted_as_live": stale_accepted_as_live,
+        "display_lag_count": display_lag_count,
         "frontend_gap_count": frontend_gap_count,
         "frontend_latency_warning_count": frontend_latency_warning_count,
         "monitor_endpoint_warning_count": monitor_endpoint_warning_count,
         "source_lock_fail_count": source_lock_fail_count,
+        "mt4_bridge_stale_count": mt4_bridge_stale_count,
+        "mt4_bridge_missing_count": mt4_bridge_missing_count,
         "allowed_package_count": len(allowed_seen),
         "mt4_packet_record_count": len(mt4_packet_seen),
         "last_mt4_bridge_status": _text(latest_summary.get("mt4_bridge_status"), "UNKNOWN"),
@@ -818,7 +923,7 @@ def main() -> int:
     _write_final_reports(out_dir, reports_dir, verdict, summary)
     _notify(
         "PhoenixGuard 10H certification finished",
-        f"Verdict {verdict}; allowed={len(allowed_seen)}; stale={stale_count}; frontend_gaps={frontend_gap_count}",
+        f"Verdict {verdict}; allowed={len(allowed_seen)}; stale={stale_count}; display_lag={display_lag_count}; frontend_gaps={frontend_gap_count}",
         loud=True,
     )
     print(json.dumps({"verdict": verdict, "out_dir": str(out_dir), **summary}, indent=2, sort_keys=True))

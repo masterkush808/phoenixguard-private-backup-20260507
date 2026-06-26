@@ -115,7 +115,7 @@ def main() -> int:
     if len(tracker_processes) != 1:
         failures.append(f"expected one tracker worker process, found {len(tracker_processes)}")
         corrections.append(
-            r"Start tracker with: .\.venv\Scripts\python.exe Backend\launch\start_phoenixguard_24_7_tracker.py --host 127.0.0.1 --port 8793 --session-id pocket-live-8788 --capture-interval 1 --no-open-dashboard"
+            r"Start tracker with: .\.venv\Scripts\python.exe Backend\launch\start_phoenixguard_24_7_tracker.py --host 127.0.0.1 --port 8793 --session-id pocket-live-8788 --capture-interval 15 --no-open-dashboard"
         )
     elif args.session not in command_line(tracker_processes[0]):
         failures.append(f"tracker process does not include expected session id {args.session}")

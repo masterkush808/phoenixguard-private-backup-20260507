@@ -29,7 +29,7 @@ MODEL_STRENGTH_NUMBER_GROUPS: dict[str, dict[str, tuple[float, float, float]]] =
         "high_frequency_expiry_seconds": (600.0, 60.0, 3600.0),
         "high_frequency_horizon_candles": (2.0, 1.0, 12.0),
         "min_capture_interval_sec": (0.5, 0.5, 10.0),
-        "max_capture_interval_sec": (10.0, 0.5, 30.0),
+        "max_capture_interval_sec": (30.0, 0.5, 30.0),
         "phoenix_report_interval_sec": (20.0, 0.0, 300.0),
     },
     "memoryIdentityControls": {

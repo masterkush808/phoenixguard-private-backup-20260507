@@ -75,7 +75,7 @@ def main() -> int:
     parser.add_argument("--audit-file", default=r"PhoenixGuard\mt4_executioner_audit.csv")
     parser.add_argument("--state-file", default=r"PhoenixGuard\mt4_executioner_state.txt")
     parser.add_argument("--out-dir", default="")
-    parser.add_argument("--poll-sec", type=float, default=1.0)
+    parser.add_argument("--poll-sec", type=float, default=15.0)
     parser.add_argument("--duration-sec", type=float, default=0.0)
     parser.add_argument("--print-every", type=float, default=30.0)
     args = parser.parse_args()

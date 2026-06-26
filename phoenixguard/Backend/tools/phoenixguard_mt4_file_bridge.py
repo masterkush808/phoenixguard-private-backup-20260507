@@ -407,10 +407,10 @@ def main() -> int:
     parser.add_argument("--signal-file", default=r"PhoenixGuard\mt4_execution_command.json")
     parser.add_argument("--status-file", default=r"PhoenixGuard\mt4_bridge_status.json")
     parser.add_argument("--metrics-file", default=r"PhoenixGuard\mt4_bridge_metrics.jsonl")
-    parser.add_argument("--poll-sec", type=float, default=0.25)
+    parser.add_argument("--poll-sec", type=float, default=15.0)
     parser.add_argument("--timeout-sec", type=float, default=8.0)
-    parser.add_argument("--print-every", type=float, default=5.0)
-    parser.add_argument("--metrics-every", type=float, default=1.0)
+    parser.add_argument("--print-every", type=float, default=30.0)
+    parser.add_argument("--metrics-every", type=float, default=15.0)
     args = parser.parse_args()
 
     common_root = Path(args.common_files_dir) if args.common_files_dir else _default_common_files_dir()

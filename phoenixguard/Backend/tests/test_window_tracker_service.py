@@ -5863,9 +5863,9 @@ def test_tracker_execution_controls_default_to_shadow_fixed_amount(tmp_path: Pat
     assert controls["high_frequency_enabled"] is True
     assert controls["swing_fallback_enabled"] is False
     assert int(controls["high_frequency_expiry_seconds"]) == 600
-    assert float(session["capture_interval_sec"]) == 1.0
+    assert float(session["capture_interval_sec"]) == 15.0
     assert float(controls["min_capture_interval_sec"]) == 0.5
-    assert float(controls["max_capture_interval_sec"]) == 10.0
+    assert float(controls["max_capture_interval_sec"]) == 30.0
     assert float(controls["cooldown_sec"]) == 600.0
 
     updated = tracker.update_session_controls(

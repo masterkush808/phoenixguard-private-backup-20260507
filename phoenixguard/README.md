@@ -164,7 +164,7 @@ $body = @{
     name = "Pocket Option Live"
     window_query = "Pocket Option"
     layout_profile = "auto"
-    capture_interval_sec = 1.0
+    capture_interval_sec = 15.0
     auto_start = $true
 } | ConvertTo-Json
 
