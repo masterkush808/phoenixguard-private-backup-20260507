@@ -192,7 +192,7 @@ def _source_lock_status(live: Mapping[str, Any], runtime_trace: Mapping[str, Any
 
 
 def _timing_status(live: Mapping[str, Any], performance: Mapping[str, Any]) -> dict[str, object]:
-    timing = _mapping(performance.get("timing_trace") or live.get("frame_timing_trace_v3"))
+    timing = _mapping(live.get("frame_timing_trace_v3") or performance.get("timing_trace"))
     visual = _mapping(performance.get("visual_health"))
     return {
         "frame_age_ms": _float(timing.get("frame_age_ms"), _float(live.get("frame_age_ms"), 0.0)),
@@ -222,7 +222,7 @@ def _sequence_status(live: Mapping[str, Any], runtime_trace: Mapping[str, Any]) 
 
 
 def _model_status(live: Mapping[str, Any], performance: Mapping[str, Any], runtime_trace: Mapping[str, Any]) -> dict[str, object]:
-    model_state = _mapping(performance.get("model_state") or live.get("model_state"))
+    model_state = _mapping(live.get("model_state") or performance.get("model_state"))
     gates = _mapping(runtime_trace.get("certification_gates"))
     warm_state = _mapping(gates.get("model_warm_state"))
     return {
