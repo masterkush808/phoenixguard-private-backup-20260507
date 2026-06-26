@@ -391,6 +391,7 @@ def _write_progress_report(
     sample_count: int,
     stale_count: int,
     frontend_gap_count: int,
+    frontend_latency_warning_count: int,
     source_lock_fail_count: int,
     allowed_count: int,
     latest_summary: Mapping[str, object],
@@ -405,6 +406,7 @@ def _write_progress_report(
         f"- Samples: {sample_count}",
         f"- Stale market-truth events: {stale_count}",
         f"- Frontend heartbeat gaps: {frontend_gap_count}",
+        f"- Frontend latency warnings: {frontend_latency_warning_count}",
         f"- Source-lock failures: {source_lock_fail_count}",
         f"- Allowed package events: {allowed_count}",
         f"- Latest source lock: {_text(latest_summary.get('source_lock_status'), 'UNKNOWN')}",
@@ -428,6 +430,7 @@ def _write_final_reports(out_dir: Path, reports_dir: Path, verdict: str, summary
         f"- Samples: {summary.get('sample_count')}",
         f"- Stale market-truth events: {summary.get('stale_event_count')}",
         f"- Frontend heartbeat gaps: {summary.get('frontend_gap_count')}",
+        f"- Frontend latency warnings: {summary.get('frontend_latency_warning_count')}",
         f"- Source-lock failures: {summary.get('source_lock_fail_count')}",
         f"- Allowed package events: {summary.get('allowed_package_count')}",
         f"- MT4 bridge status: {summary.get('last_mt4_bridge_status')}",
@@ -443,6 +446,7 @@ def _write_final_reports(out_dir: Path, reports_dir: Path, verdict: str, summary
                 f"- Stale accepted as live truth: {summary.get('stale_accepted_as_live', 0)}",
                 f"- Stale market-truth events observed: {summary.get('stale_event_count')}",
                 f"- Frontend heartbeat gaps observed: {summary.get('frontend_gap_count')}",
+                f"- Frontend latency warnings observed: {summary.get('frontend_latency_warning_count')}",
                 f"- Source-lock failures: {summary.get('source_lock_fail_count')}",
             ]
         )
@@ -494,6 +498,7 @@ def main() -> int:
     stale_count = 0
     stale_accepted_as_live = 0
     frontend_gap_count = 0
+    frontend_latency_warning_count = 0
     source_lock_fail_count = 0
     allowed_seen: set[str] = set()
     mt4_packet_seen: set[str] = set()
@@ -568,8 +573,32 @@ def main() -> int:
             stale_reasons.append("model_vote_age_gt_3000ms")
         if bool(timing.get("timing_missing")):
             stale_reasons.append("missing_frame_or_overlay_timing")
-        if _float(frontend["age_ms"]) > 3500.0:
-            frontend_gap_reasons.append("frontend_heartbeat_age_gt_3500ms")
+        frontend_heartbeat_age_ms = _float(frontend["age_ms"])
+        frontend_visible_count = _int(frontend.get("visible_overlay_count"), 0)
+        frontend_alive = _text(frontend.get("status")).upper() == "ALIVE"
+        backend_fresh_for_frontend = bool(
+            not timing.get("timing_missing")
+            and _float(timing["frame_age_ms"]) <= 2500.0
+            and _float(timing["overlay_age_ms"]) <= 2500.0
+            and _float(timing["model_vote_age_ms"]) <= 3000.0
+        )
+        if frontend_heartbeat_age_ms > 3500.0:
+            if frontend_alive and frontend_visible_count > 0 and backend_fresh_for_frontend:
+                frontend_latency_warning_count += 1
+                _append_jsonl(
+                    out_dir / "frontend_latency_warnings.jsonl",
+                    {
+                        "at_epoch": loop_started,
+                        "at_utc": _utc_now(),
+                        "reason": "frontend_heartbeat_age_gt_3500ms_but_visible_and_backend_fresh",
+                        "allowed_packet_present": allowed,
+                        "source_lock": source_lock,
+                        "timing": timing,
+                        "frontend": frontend,
+                    },
+                )
+            else:
+                frontend_gap_reasons.append("frontend_heartbeat_age_gt_3500ms")
         if not bool(source_lock.get("valid")):
             stale_reasons.append("source_lock_not_valid")
             source_lock_fail_count += 1
@@ -695,6 +724,7 @@ def main() -> int:
                 sample_count=sample_count,
                 stale_count=stale_count,
                 frontend_gap_count=frontend_gap_count,
+                frontend_latency_warning_count=frontend_latency_warning_count,
                 source_lock_fail_count=source_lock_fail_count,
                 allowed_count=len(allowed_seen),
                 latest_summary=latest_summary,
@@ -716,6 +746,7 @@ def main() -> int:
                 "remaining_sec": round(max(0.0, float(args.duration_sec) - elapsed), 3),
                 "stale_event_count": stale_count,
                 "frontend_gap_count": frontend_gap_count,
+                "frontend_latency_warning_count": frontend_latency_warning_count,
                 "source_lock_fail_count": source_lock_fail_count,
                 "allowed_package_count": len(allowed_seen),
                 "latest_summary": latest_summary,
@@ -738,6 +769,7 @@ def main() -> int:
         "stale_event_count": stale_count,
         "stale_accepted_as_live": stale_accepted_as_live,
         "frontend_gap_count": frontend_gap_count,
+        "frontend_latency_warning_count": frontend_latency_warning_count,
         "source_lock_fail_count": source_lock_fail_count,
         "allowed_package_count": len(allowed_seen),
         "mt4_packet_record_count": len(mt4_packet_seen),
