@@ -7899,6 +7899,21 @@
       return `dashboard_${routeName}_${overlayName}`.replace(/[^a-z0-9_.-]+/g, "_").slice(0, 120);
     }
 
+    function frontendPageInstanceId() {
+      const storageKey = "phoenixguard_frontend_page_instance_id";
+      try {
+        const existing = window.sessionStorage.getItem(storageKey);
+        if (existing) {
+          return existing;
+        }
+        const generated = `pg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+        window.sessionStorage.setItem(storageKey, generated);
+        return generated;
+      } catch (error) {
+        return `pg_${Date.now().toString(36)}`;
+      }
+    }
+
     function publishFrontendHeartbeat(session = {}, renderMeta = {}) {
       const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
       const nowMs = Date.now();
@@ -7934,6 +7949,9 @@
         route: state.route,
         overlay_mode: overlayMode,
         surface_mode: state.mode,
+        page_instance_id: frontendPageInstanceId(),
+        page_visibility: clean(document.visibilityState, "unknown"),
+        document_hidden: Boolean(document.hidden),
         frame_id: frameId,
         rendered_frame_id: displayFrameId || frameId,
         display_frame_id: displayFrameId,

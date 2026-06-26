@@ -98,12 +98,12 @@ def _surface_key(value: str, default: str = "live") -> str:
     return key or default
 
 
-def _dashboard_heartbeat_surface_id(surface_id: str, route: str, overlay_mode: str) -> str:
+def _dashboard_heartbeat_surface_id(surface_id: str, route: str, overlay_mode: str, page_instance_id: str) -> str:
     if surface_id != "dashboard":
         return surface_id
     route_key = _surface_key(route)
     if route_key in {"live", "dashboard"} or "window_tracker_dashboard" in route_key:
-        return "dashboard"
+        return f"dashboard_{page_instance_id}"[:120] if page_instance_id else "dashboard"
     mode_key = _surface_key(overlay_mode, default="clean_live")
     return f"dashboard_{route_key}_{mode_key}"[:120]
 
@@ -113,13 +113,52 @@ def _heartbeat_path(session_id: str, *, surface_id: str = "dashboard", store_dir
     return root / f"{_slug(session_id)}__{_slug(surface_id)}.json"
 
 
+def _is_live_dashboard_heartbeat(heartbeat: Mapping[str, Any]) -> bool:
+    route_key = _surface_key(_text(heartbeat.get("route")))
+    overlay_mode = _text(heartbeat.get("overlay_mode"), "CLEAN_LIVE").upper()
+    route_live = route_key in {"live", "dashboard"} or "window_tracker_dashboard" in route_key
+    return bool(route_live and overlay_mode == "CLEAN_LIVE")
+
+
+def _heartbeat_visible_count(heartbeat: Mapping[str, Any]) -> int:
+    source = heartbeat.get("visible_overlay_count") if heartbeat.get("visible_overlay_count") is not None else heartbeat.get("overlay_count")
+    return _int(source)
+
+
+def _heartbeat_rank(heartbeat: Mapping[str, Any]) -> tuple[int, int, float]:
+    status_rank = 1 if _text(heartbeat.get("status")).upper() == "ALIVE" else 0
+    visible_rank = 1 if _heartbeat_visible_count(heartbeat) > 0 else 0
+    return status_rank, visible_rank, _float(heartbeat.get("received_at_ms"), 0.0)
+
+
+def _load_heartbeat_file(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return _cached_heartbeat(path)
+    try:
+        if path.stat().st_size <= 0:
+            return _cached_heartbeat(path)
+    except OSError:
+        return _cached_heartbeat(path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _cached_heartbeat(path)
+    if not isinstance(payload, Mapping):
+        return _cached_heartbeat(path)
+    heartbeat = dict(cast(Mapping[str, Any], payload))
+    heartbeat["path"] = str(path)
+    _remember_heartbeat(path, heartbeat)
+    return heartbeat
+
+
 def normalize_frontend_heartbeat(payload: Mapping[str, Any], *, now_ms: int | float | None = None) -> dict[str, Any]:
     session_id = _text(payload.get("session_id"))
     if not session_id:
         raise ValueError("frontend heartbeat requires session_id")
     route = _text(payload.get("route"))
     overlay_mode = _text(payload.get("overlay_mode"), _text(payload.get("mode"), "CLEAN_LIVE")).upper()
-    surface_id = _dashboard_heartbeat_surface_id(_text(payload.get("surface_id"), "dashboard"), route, overlay_mode)
+    page_instance_id = _surface_key(_text(payload.get("page_instance_id")), default="")
+    surface_id = _dashboard_heartbeat_surface_id(_text(payload.get("surface_id"), "dashboard"), route, overlay_mode, page_instance_id)
     epoch_ms = int(_float(payload.get("sent_at_ms"), float(now_ms if now_ms is not None else time.time() * 1000.0)))
     viewport = dict(cast(Mapping[str, Any], payload.get("viewport"))) if isinstance(payload.get("viewport"), Mapping) else {}
     render_size = dict(cast(Mapping[str, Any], payload.get("render_size"))) if isinstance(payload.get("render_size"), Mapping) else {}
@@ -133,6 +172,9 @@ def normalize_frontend_heartbeat(payload: Mapping[str, Any], *, now_ms: int | fl
         "route": route,
         "overlay_mode": overlay_mode,
         "surface_mode": _text(payload.get("surface_mode"), "overlay"),
+        "page_instance_id": page_instance_id,
+        "page_visibility": _text(payload.get("page_visibility"), "unknown"),
+        "document_hidden": bool(payload.get("document_hidden", False)),
         "status": _text(payload.get("status"), "ALIVE").upper(),
         "degraded_reason": _text(payload.get("degraded_reason", payload.get("reason"))),
         "frame_id": _int(payload.get("frame_id")),
@@ -205,23 +247,21 @@ def latest_frontend_heartbeat(
     store_dir: Path | str | None = None,
 ) -> dict[str, Any] | None:
     path = _heartbeat_path(session_id, surface_id=surface_id, store_dir=store_dir)
-    if not path.exists():
+    if surface_id != "dashboard":
+        return _load_heartbeat_file(path)
+    root = Path(store_dir or DEFAULT_HEARTBEAT_STORE_DIR)
+    candidates = [path]
+    if root.exists():
+        prefix = f"{_slug(session_id)}__dashboard"
+        candidates.extend(candidate for candidate in root.glob(f"{prefix}*.json") if candidate != path)
+    heartbeats = [
+        heartbeat
+        for heartbeat in (_load_heartbeat_file(candidate) for candidate in candidates)
+        if heartbeat is not None and _is_live_dashboard_heartbeat(heartbeat)
+    ]
+    if not heartbeats:
         return _cached_heartbeat(path)
-    try:
-        if path.stat().st_size <= 0:
-            return _cached_heartbeat(path)
-    except OSError:
-        return _cached_heartbeat(path)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return _cached_heartbeat(path)
-    if not isinstance(payload, Mapping):
-        return _cached_heartbeat(path)
-    heartbeat = dict(cast(Mapping[str, Any], payload))
-    heartbeat["path"] = str(path)
-    _remember_heartbeat(path, heartbeat)
-    return heartbeat
+    return max(heartbeats, key=_heartbeat_rank)
 
 
 def prune_frontend_heartbeats(

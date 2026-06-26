@@ -55,12 +55,39 @@ def _browser_executable_candidates(browser_name: DashboardBrowserName) -> list[P
     return []
 
 
+def _dashboard_chrome_profile_dir() -> Path:
+    configured = str(os.getenv("PHOENIXGUARD_DASHBOARD_CHROME_PROFILE_DIR", "") or "").strip()
+    return Path(configured) if configured else PROJECT_ROOT / ".codex_runtime" / "chrome_dashboard_profile"
+
+
+def _dashboard_browser_args(browser_name: DashboardBrowserName, executable_path: Path, url: str) -> list[str]:
+    args = [str(executable_path)]
+    if browser_name == "chrome":
+        profile_dir = _dashboard_chrome_profile_dir()
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        args.extend(
+            [
+                f"--user-data-dir={profile_dir}",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                "--disable-backgrounding-occluded-windows",
+                "--new-window",
+            ]
+        )
+    args.append(url)
+    return args
+
+
 def _open_dashboard_url(url: str, browser_name: DashboardBrowserName) -> bool:
     if browser_name == "default":
         return bool(webbrowser.open(url))
     for candidate_path in _browser_executable_candidates(browser_name):
         if candidate_path.exists():
-            subprocess.Popen([str(candidate_path), url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(
+                _dashboard_browser_args(browser_name, candidate_path, url),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             return True
     return bool(webbrowser.open(url))
 
@@ -790,7 +817,7 @@ def main() -> int:
     os.environ.setdefault("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_MIN_CAPTURE_INTERVAL_SEC", "0.5")
     base_url = f"http://{args.host}:{args.port}"
-    dashboard_url = f"{base_url}/v1/mobile/window-tracker/dashboard/{args.session_id}"
+    dashboard_url = f"{base_url}/v1/mobile/window-tracker/dashboard/{args.session_id}?launch_epoch_ms={int(time.time() * 1000.0)}"
     configured_focus_region = _parse_focus_region(args.focus_region)
     status_path = Path(args.status_file)
     runtime_guard = PhoenixRuntimeSingletonGuardV3.for_repo(script_dir)

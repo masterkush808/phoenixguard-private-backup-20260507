@@ -89,6 +89,47 @@ def test_replay_dashboard_heartbeat_does_not_overwrite_live_dashboard(tmp_path: 
     assert replay_loaded["frame_id"] == 20
 
 
+def test_latest_dashboard_heartbeat_prefers_fresh_visible_page_instance(tmp_path: Path) -> None:
+    older = record_frontend_heartbeat(
+        {
+            "session_id": "pocket-live-8788",
+            "surface_id": "dashboard",
+            "route": "live",
+            "overlay_mode": "CLEAN_LIVE",
+            "page_instance_id": "old-page",
+            "frame_id": 30,
+            "rendered_frame_id": 30,
+            "overlay_count": 24,
+            "visible_overlay_count": 24,
+        },
+        store_dir=tmp_path,
+        now_ms=1_000_000,
+    )
+    newer = record_frontend_heartbeat(
+        {
+            "session_id": "pocket-live-8788",
+            "surface_id": "dashboard",
+            "route": "live",
+            "overlay_mode": "CLEAN_LIVE",
+            "page_instance_id": "fresh-page",
+            "frame_id": 40,
+            "rendered_frame_id": 40,
+            "overlay_count": 24,
+            "visible_overlay_count": 24,
+        },
+        store_dir=tmp_path,
+        now_ms=1_000_500,
+    )
+
+    loaded = latest_frontend_heartbeat("pocket-live-8788", surface_id="dashboard", store_dir=tmp_path)
+
+    assert older["surface_id"] == "dashboard_old_page"
+    assert newer["surface_id"] == "dashboard_fresh_page"
+    assert loaded is not None
+    assert loaded["page_instance_id"] == "fresh_page"
+    assert loaded["frame_id"] == 40
+
+
 def test_record_frontend_heartbeat_uses_unique_temp_files_under_concurrency(tmp_path: Path) -> None:
     def write_heartbeat(frame_id: int) -> int:
         heartbeat = record_frontend_heartbeat(
