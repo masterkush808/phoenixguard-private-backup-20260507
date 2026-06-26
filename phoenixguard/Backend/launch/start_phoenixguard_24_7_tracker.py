@@ -32,6 +32,7 @@ from phoenixguard.runtime.singleton_guard_v3 import PhoenixRuntimeSingletonGuard
 
 
 JsonDict = dict[str, Any]
+DashboardBrowserName = str
 
 
 def _as_json_dict(value: object) -> JsonDict:
@@ -40,6 +41,28 @@ def _as_json_dict(value: object) -> JsonDict:
 
 def _is_windows() -> bool:
     return os.name == "nt"
+
+
+def _browser_executable_candidates(browser_name: DashboardBrowserName) -> list[Path]:
+    local_app_data = str(os.getenv("LOCALAPPDATA", "") or "").strip()
+    program_files = str(os.getenv("ProgramFiles", "") or "").strip()
+    program_files_x86 = str(os.getenv("ProgramFiles(x86)", "") or "").strip()
+    roots = [Path(root) for root in (program_files, program_files_x86, local_app_data) if root]
+    if browser_name == "chrome":
+        return [root / "Google" / "Chrome" / "Application" / "chrome.exe" for root in roots]
+    if browser_name == "edge":
+        return [root / "Microsoft" / "Edge" / "Application" / "msedge.exe" for root in roots]
+    return []
+
+
+def _open_dashboard_url(url: str, browser_name: DashboardBrowserName) -> bool:
+    if browser_name == "default":
+        return bool(webbrowser.open(url))
+    for candidate_path in _browser_executable_candidates(browser_name):
+        if candidate_path.exists():
+            subprocess.Popen([str(candidate_path), url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+    return bool(webbrowser.open(url))
 
 
 def _request_json(base_url: str, path: str, *, method: str = "GET", payload: JsonDict | None = None, timeout: float = 30.0) -> JsonDict:
@@ -198,23 +221,9 @@ def _stop_process(proc: subprocess.Popen[str], *, timeout_sec: float = 8.0) -> N
 
 
 def _resolve_python_launcher(env: dict[str, str]) -> tuple[str, str]:
-    requested_exe = env.get("PHOENIXGUARD_PYTHON_BASE_EXE") or getattr(sys, "_base_executable", sys.executable)
-    pyvenv_launcher = env.get("PHOENIXGUARD_PYVENV_LAUNCHER") or sys.executable
-    python_exe = requested_exe
-    try:
-        requested_path = Path(requested_exe).resolve()
-        is_windows_venv_redirector = (
-            _is_windows()
-            and requested_path.name.lower() == "python.exe"
-            and requested_path.parent.name.lower() == "scripts"
-        )
-        base_exe = Path(str(getattr(sys, "_base_executable", ""))).resolve()
-        if is_windows_venv_redirector and base_exe.exists() and base_exe != requested_path:
-            python_exe = str(base_exe)
-            pyvenv_launcher = env.get("PHOENIXGUARD_PYVENV_LAUNCHER") or str(requested_path)
-    except Exception:
-        python_exe = requested_exe
-    return python_exe, pyvenv_launcher
+    requested_exe = env.get("PHOENIXGUARD_PYTHON_EXE") or sys.executable
+    pyvenv_launcher = env.get("PHOENIXGUARD_PYVENV_LAUNCHER") or requested_exe
+    return requested_exe, pyvenv_launcher
 
 
 def _default_live_runtime_dir(script_dir: Path, leaf: str) -> Path:
@@ -749,6 +758,11 @@ def main() -> int:
     parser.add_argument("--no-wait-for-lock", dest="wait_for_lock", action="store_false")
     parser.add_argument("--open-dashboard", action="store_true", default=True)
     parser.add_argument("--no-open-dashboard", dest="open_dashboard", action="store_false")
+    parser.add_argument(
+        "--dashboard-browser",
+        choices=("chrome", "default", "edge"),
+        default=os.getenv("PHOENIXGUARD_DASHBOARD_BROWSER", "chrome"),
+    )
     args = parser.parse_args()
 
     script_dir = PROJECT_ROOT
@@ -813,7 +827,7 @@ def main() -> int:
     try:
         if args.open_dashboard:
             try:
-                webbrowser.open(dashboard_url)
+                _open_dashboard_url(dashboard_url, str(args.dashboard_browser))
             except Exception:
                 pass
 

@@ -22,6 +22,8 @@ param(
     [string]$BrokerWindowQuery = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_QUERY) { $env:PHOENIXGUARD_BROKER_WINDOW_QUERY } else { 'Pocket Option' }),
     [int]$BrokerWindowHwnd = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_HWND) { [int]$env:PHOENIXGUARD_BROKER_WINDOW_HWND } else { 0 }),
     [string]$TrackerFocusRegion = $(if ($env:PHOENIXGUARD_TRACKER_FOCUS_REGION) { $env:PHOENIXGUARD_TRACKER_FOCUS_REGION } else { '0.03,0.13,0.87,0.96' }),
+    [ValidateSet('chrome', 'default', 'edge')]
+    [string]$DashboardBrowser = $(if ($env:PHOENIXGUARD_DASHBOARD_BROWSER) { $env:PHOENIXGUARD_DASHBOARD_BROWSER } else { 'chrome' }),
     [switch]$NoBrowser,
     [switch]$NoStatusLoop,
     [switch]$NoKillExisting
@@ -37,6 +39,7 @@ $backendLaunch = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch'
 $frontendDashboard = Join-Path -Path $ProjectRoot -ChildPath 'Frontend\dashboard'
 $env:PYTHONPATH = (@($backendSrc, $backendRoot, $backendCompat, $backendLaunch, $frontendDashboard, $ProjectRoot, $env:PYTHONPATH) | Where-Object { $_ -and [string]$_ -ne '' }) -join [System.IO.Path]::PathSeparator
 $env:PHOENIXGUARD_PROJECT_ROOT = $ProjectRoot
+$env:PHOENIXGUARD_DASHBOARD_BROWSER = $DashboardBrowser
 
 if (-not (Test-Path -LiteralPath '.venv')) {
     py -3.11 -m venv .venv
@@ -94,6 +97,69 @@ if (-not $env:PHOENIXGUARD_TRACKER_STATUS_FILE) {
 $launchShooter = @('FULL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED') -contains $Profile
 $startupTestSignal = $false
 $brokerClickPath = 'RETIRED_PACKAGE_REPORTER_ONLY'
+
+function Get-PhoenixGuardBrowserExecutable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('chrome', 'edge')]
+        [string]$BrowserName
+    )
+
+    $candidatePaths = @()
+    $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+    if ($BrowserName -eq 'chrome') {
+        if ($env:ProgramFiles) {
+            $candidatePaths += Join-Path -Path $env:ProgramFiles -ChildPath 'Google\Chrome\Application\chrome.exe'
+        }
+        if ($programFilesX86) {
+            $candidatePaths += Join-Path -Path $programFilesX86 -ChildPath 'Google\Chrome\Application\chrome.exe'
+        }
+        if ($env:LOCALAPPDATA) {
+            $candidatePaths += Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Google\Chrome\Application\chrome.exe'
+        }
+    } elseif ($BrowserName -eq 'edge') {
+        if ($env:ProgramFiles) {
+            $candidatePaths += Join-Path -Path $env:ProgramFiles -ChildPath 'Microsoft\Edge\Application\msedge.exe'
+        }
+        if ($programFilesX86) {
+            $candidatePaths += Join-Path -Path $programFilesX86 -ChildPath 'Microsoft\Edge\Application\msedge.exe'
+        }
+        if ($env:LOCALAPPDATA) {
+            $candidatePaths += Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Microsoft\Edge\Application\msedge.exe'
+        }
+    }
+
+    foreach ($candidatePath in $candidatePaths) {
+        if ($candidatePath -and (Test-Path -LiteralPath $candidatePath)) {
+            return [string]$candidatePath
+        }
+    }
+    return ''
+}
+
+function Start-PhoenixGuardDashboardBrowser {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Url,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('chrome', 'default', 'edge')]
+        [string]$BrowserName
+    )
+
+    if ($BrowserName -eq 'default') {
+        Start-Process $Url
+        return
+    }
+
+    $browserPath = Get-PhoenixGuardBrowserExecutable -BrowserName $BrowserName
+    if ($browserPath) {
+        Start-Process -FilePath $browserPath -ArgumentList @($Url)
+        return
+    }
+
+    Write-Warning "Configured dashboard browser '$BrowserName' was not found. Falling back to the Windows default browser."
+    Start-Process $Url
+}
 
 Write-Host "PhoenixGuard launch profile: $finalLaunchProfile"
 Write-Host "  Compatibility profile: $Profile"
@@ -285,7 +351,7 @@ try {
 }
 
 if (-not $NoBrowser) {
-    Start-Process $dashboardUrl
+    Start-PhoenixGuardDashboardBrowser -Url $dashboardUrl -BrowserName $DashboardBrowser
 }
 
 if (-not (Test-Path -LiteralPath $statusPath)) {

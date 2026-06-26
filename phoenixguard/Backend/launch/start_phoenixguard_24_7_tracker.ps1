@@ -7,6 +7,8 @@ param(
     [int]$BrokerWindowHwnd = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_HWND) { [int]$env:PHOENIXGUARD_BROKER_WINDOW_HWND } else { 0 }),
     [string]$FocusRegion = $(if ($env:PHOENIXGUARD_TRACKER_FOCUS_REGION) { $env:PHOENIXGUARD_TRACKER_FOCUS_REGION } else { '0.03,0.13,0.87,0.96' }),
     [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 1.0 }),
+    [ValidateSet('chrome', 'default', 'edge')]
+    [string]$DashboardBrowser = $(if ($env:PHOENIXGUARD_DASHBOARD_BROWSER) { $env:PHOENIXGUARD_DASHBOARD_BROWSER } else { 'chrome' }),
     [switch]$NoOpenDashboard,
     [switch]$NoWaitForLock,
     [switch]$InternalTrackerOnly
@@ -48,6 +50,7 @@ $env:PHOENIXGUARD_BROKER_WINDOW_QUERY = $BrokerWindowQuery
 $env:PHOENIXGUARD_BROKER_WINDOW_HWND = "$BrokerWindowHwnd"
 $env:PHOENIXGUARD_TRACKER_FOCUS_REGION = $FocusRegion
 $env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC = "$CaptureIntervalSec"
+$env:PHOENIXGUARD_DASHBOARD_BROWSER = $DashboardBrowser
 
 if (-not $InternalTrackerOnly) {
     Write-Warning "start_phoenixguard_24_7_tracker.ps1 is now an internal tracker worker wrapper. Delegating to launch_phoenixguard_live_ready.ps1 so the live dashboard and shooter package reporter start together."
@@ -56,6 +59,7 @@ if (-not $InternalTrackerOnly) {
         BrokerWindowHwnd = $BrokerWindowHwnd
         SessionId = $SessionId
         CaptureIntervalSec = $CaptureIntervalSec
+        DashboardBrowser = $DashboardBrowser
     }
     if ($NoOpenDashboard) {
         $launchArgs['NoBrowser'] = $true
@@ -71,7 +75,8 @@ $launcherArgs = @(
     '--session-id', $SessionId,
     '--window-query', $BrokerWindowQuery,
     '--focus-region', $FocusRegion,
-    '--capture-interval', "$CaptureIntervalSec"
+    '--capture-interval', "$CaptureIntervalSec",
+    '--dashboard-browser', $DashboardBrowser
 )
 
 if ($BrokerWindowHwnd -gt 0) {

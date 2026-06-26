@@ -80,7 +80,7 @@ DEFAULT_BROKER_URL_TOKENS = (
     "pocketoption.com",
     "pocketoption",
 )
-DEFAULT_REQUIRED_BROWSER = "chrome"
+DEFAULT_REQUIRED_BROWSER = "edge"
 STUDY_SOURCE_ROLE_TOKENS = frozenset(
     {
         "study",

@@ -5,6 +5,8 @@ param(
     [string]$SessionId = $(if ($env:PHOENIXGUARD_TRACKER_SESSION_ID) { $env:PHOENIXGUARD_TRACKER_SESSION_ID } else { 'pocket-live-8788' }),
     [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 1.0 }),
     [int]$WarmupSeconds = 20,
+    [ValidateSet('chrome', 'default', 'edge')]
+    [string]$DashboardBrowser = $(if ($env:PHOENIXGUARD_DASHBOARD_BROWSER) { $env:PHOENIXGUARD_DASHBOARD_BROWSER } else { 'chrome' }),
     [switch]$NoBrowser,
     [switch]$SkipPreview,
     [switch]$DisableShooter
@@ -382,6 +384,7 @@ $launchArgs = @{
     ShooterMode = 'PACKAGE_REPORTER'
     RecordActionEvidence = $false
     NoStatusLoop = $true
+    DashboardBrowser = $DashboardBrowser
 }
 if ($NoBrowser) {
     $launchArgs['NoBrowser'] = $true

@@ -697,6 +697,181 @@ def _compact_session_persisted_payload(payload: Mapping[str, Any]) -> dict[str, 
     return compact
 
 
+_COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
+    {
+        "session_id",
+        "status",
+        "tracking_enabled",
+        "capture_count",
+        "frame_index",
+        "chart_frame_id",
+        "overlay_frame_id",
+        "full_overlay_frame_id",
+        "model_vote_frame_id",
+        "state_version",
+        "display_frame_id",
+        "display_capture_epoch",
+        "display_published_epoch",
+        "last_capture_epoch",
+        "last_display_capture_epoch",
+        "last_display_published_epoch",
+        "last_display_window_path",
+        "last_window_path",
+        "last_frame_path",
+        "last_chart_path",
+        "last_overlay_path",
+        "last_full_overlay_path",
+        "last_projection_path",
+        "last_memory_reference_path",
+        "last_display_surface_signature",
+        "last_window_surface_signature",
+        "last_study_surface_signature",
+        "overlay_source_window_signature",
+        "overlay_source_study_signature",
+        "display_snapshot_only_v3",
+        "display_fast_path_v3",
+        "display_busy_reuse_heartbeat_v3",
+        "display_reuse_only_heartbeat_v3",
+        "manual_focus_region",
+        "tracking_summary",
+        "latest_signal",
+        "signal_thesis_v3",
+        "broker_surface",
+        "broker_source",
+        "broker_source_lock",
+        "broker_source_summary",
+        "source_lock",
+        "source_validation",
+        "locked_window",
+        "descriptor",
+        "model_health",
+        "model_council_result",
+    }
+)
+
+
+_COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
+    {
+        "action",
+        "angle_vectors",
+        "broker_source",
+        "broker_source_lock",
+        "confidence",
+        "detected_market",
+        "detected_timeframe",
+        "effective_confidence",
+        "execution_action",
+        "frame_index",
+        "historical_structure",
+        "latest_price",
+        "market",
+        "market_selector_rebind_required",
+        "market_selector_studying_new_pair",
+        "market_selector_visual_changed",
+        "market_selector_visual_fingerprint",
+        "overlay_source_window_signature",
+        "overlay_truth_audit",
+        "pair",
+        "projection",
+        "signal_thesis_v3",
+        "smart_money_context",
+        "status",
+        "structure_boxes",
+        "summary",
+        "support_resistance_context",
+        "support_resistance_zones",
+        "symbol",
+        "timeframe",
+        "tracked_candles",
+        "trendlines_v3",
+    }
+)
+
+
+_COMPACT_LIVE_STATE_COUNCIL_KEYS: frozenset[str] = frozenset(
+    {
+        "accepted_lanes",
+        "candidate_stage",
+        "confidence",
+        "denied_at",
+        "execution_lane",
+        "final_side",
+        "final_state",
+        "instrument_context_state",
+        "lane_accepted",
+        "next_required",
+        "non_executable_state",
+        "packet_result",
+        "promotion_trace",
+        "score",
+        "selected_execution_lane",
+        "side",
+        "state",
+        "true_blocker",
+    }
+)
+
+
+def _compact_live_state_market_payload(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    mapping = cast(Mapping[str, Any], value)
+    payload: dict[str, Any] = {}
+    for key in _COMPACT_LIVE_STATE_MARKET_KEYS:
+        item = mapping.get(key)
+        if item not in (None, "", [], {}):
+            payload[key] = item
+    return payload
+
+
+def _compact_live_state_council_result(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    mapping = cast(Mapping[str, Any], value)
+    payload: dict[str, Any] = {}
+    for key in _COMPACT_LIVE_STATE_COUNCIL_KEYS:
+        item = mapping.get(key)
+        if item not in (None, "", [], {}):
+            payload[key] = item
+    council = mapping.get("model_council")
+    if isinstance(council, Mapping):
+        council_mapping = cast(Mapping[str, Any], council)
+        compact_council: dict[str, Any] = {}
+        for key in _COMPACT_LIVE_STATE_COUNCIL_KEYS:
+            item = council_mapping.get(key)
+            if item not in (None, "", [], {}):
+                compact_council[key] = item
+        if compact_council:
+            payload["model_council"] = compact_council
+    payload["study_packet_present"] = bool(
+        mapping.get("model_council_study_packet")
+        or mapping.get("study_packet")
+        or mapping.get("latest_model_council_study_packet")
+        or mapping.get("latest_study_packet")
+    )
+    payload["execution_packet_present"] = bool(
+        mapping.get("model_council_packet")
+        or mapping.get("execution_packet")
+        or mapping.get("latest_model_council_packet")
+        or mapping.get("latest_execution_packet")
+    )
+    return payload
+
+
+def _compact_live_state_sidecar_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in _COMPACT_LIVE_STATE_SIDECAR_KEYS:
+        value = payload.get(key)
+        if value not in (None, "", [], {}):
+            compact[key] = value
+    for key in ("tracking_summary", "latest_signal"):
+        if key in compact:
+            compact[key] = _compact_live_state_market_payload(compact[key])
+    if "model_council_result" in compact:
+        compact["model_council_result"] = _compact_live_state_council_result(compact["model_council_result"])
+    return compact
+
+
 def _first_mapping(value: Any) -> dict[str, Any]:
     items = _sequence_of_mappings(value)
     return items[0] if items else {}
@@ -2447,7 +2622,7 @@ def _broker_source_lock_payload_v3(
         row["expected_broker_source_lock"] = {
             "source_role": "study",
             "source_kind": "pocket_option_chart" if _is_pocket_option_query(query_text) or _is_pocket_option_like_title(title) else "visible_chart",
-            "required_browser": "chrome",
+            "required_browser": "edge",
             "broker_title_tokens": ["pocket option", "pocketoption", "the most innovative trading platform"],
             "broker_url_tokens": ["pocketoption.com", "pocketoption"],
         }
@@ -20115,13 +20290,21 @@ class ContinuousWindowTrackerService:
                 not in {"0", "false", "off", "no"}
             )
             if fast_focus_preview:
-                preview_payload = self._publish_display_snapshot_only(
-                    str(payload["session_id"]),
-                    reason="focus_region_fast_display_preview",
-                )
+                try:
+                    preview_payload = self._publish_display_snapshot_only(
+                        str(payload["session_id"]),
+                        reason="focus_region_fast_display_preview",
+                    )
+                except CaptureSurfaceUnavailableError as exc:
+                    LOGGER.info("Focus preview deferred for session %s: %s", session_id, exc)
+                    preview_payload = {}
                 if preview_payload:
                     return self._public_session_payload(preview_payload)
-            self._capture_and_analyze(str(payload["session_id"]), force=True)
+            try:
+                self._capture_and_analyze(str(payload["session_id"]), force=True)
+            except CaptureSurfaceUnavailableError as exc:
+                LOGGER.info("Initial focus capture deferred for session %s: %s", session_id, exc)
+                return self.get_session(str(payload["session_id"]))
         
         return self.get_session(str(payload["session_id"]))
 
@@ -25570,6 +25753,9 @@ class ContinuousWindowTrackerService:
     def _display_state_path(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "display_state.json"
 
+    def _compact_live_state_path(self, session_id: str) -> Path:
+        return self._session_dir(session_id) / "compact_live_state.json"
+
     def _load_display_state(self, session_id: str) -> dict[str, Any]:
         payload = _mapping_to_dict(_read_json(self._display_state_path(session_id), {}))
         if not payload:
@@ -25766,6 +25952,7 @@ class ContinuousWindowTrackerService:
             prepared_payload = dict(payload)
         prepared_payload = _compact_session_persisted_payload(prepared_payload)
         _write_json_atomic(session_path, prepared_payload)
+        _write_json_atomic(self._compact_live_state_path(session_id), _compact_live_state_sidecar_payload(prepared_payload))
         if any(
             str(prepared_payload.get(key, "") or "").strip()
             for key in ("last_display_window_path", "last_window_path", "last_chart_path", "last_overlay_path", "last_full_overlay_path")

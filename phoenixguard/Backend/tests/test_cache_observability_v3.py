@@ -1052,6 +1052,107 @@ def test_compact_live_state_returns_studying_new_pair_when_surface_outruns_overl
     assert payload["tracking_summary"]["market_selector_studying_new_pair"] is True
 
 
+def test_compact_live_state_does_not_reuse_studying_new_pair_cache_after_overlay_recovers(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    _clear_mobile_live_state_caches()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    artifact_dir = session_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    window = artifact_dir / "000002_new_window.png"
+    overlay = artifact_dir / "000001_old_overlay.png"
+    window.write_bytes(b"window")
+    overlay.write_bytes(b"overlay")
+    now_epoch = time.time()
+    base_session: dict[str, object] = {
+        "session_id": "pocket-live-8788",
+        "status": "running",
+        "tracking_enabled": True,
+        "capture_count": 1,
+        "frame_index": 1,
+        "display_frame_id": 1,
+        "overlay_frame_id": 1,
+        "model_vote_frame_id": 1,
+        "display_published_epoch": now_epoch,
+        "last_capture_epoch": now_epoch,
+        "last_window_path": str(window),
+        "last_overlay_path": str(overlay),
+        "tracking_summary": {
+            "market_selector_visual_changed": True,
+            "market_selector_rebind_required": True,
+        },
+        "latest_signal": {
+            "market_selector_visual_changed": True,
+            "market_selector_rebind_required": True,
+        },
+    }
+    (session_dir / "session.json").write_text(json.dumps(base_session), encoding="utf-8")
+    (session_dir / "display_state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "capture_count": 2,
+                "frame_index": 1,
+                "display_frame_id": 2,
+                "overlay_frame_id": 1,
+                "model_vote_frame_id": 1,
+                "display_published_epoch": now_epoch + 1.0,
+                "last_display_window_path": str(window),
+                "last_overlay_path": str(overlay),
+                "last_display_surface_signature": "new",
+                "overlay_source_window_signature": "old",
+                "display_snapshot_only_v3": True,
+                "status": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app())
+    stale_response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
+    assert stale_response.status_code == 200
+    assert stale_response.json()["provider_status"]["compact_studying_new_pair_fast_path_v3"] is True
+
+    recovered_session = {
+        **base_session,
+        "tracking_summary": {"status": "running"},
+        "latest_signal": {"status": "running"},
+        "last_display_surface_signature": "new",
+        "overlay_source_window_signature": "new",
+    }
+    (session_dir / "session.json").write_text(json.dumps(recovered_session), encoding="utf-8")
+    (session_dir / "display_state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "capture_count": 3,
+                "frame_index": 2,
+                "display_frame_id": 3,
+                "overlay_frame_id": 2,
+                "model_vote_frame_id": 2,
+                "display_published_epoch": now_epoch + 2.0,
+                "last_display_window_path": str(window),
+                "last_overlay_path": str(overlay),
+                "last_display_surface_signature": "new",
+                "overlay_source_window_signature": "new",
+                "display_snapshot_only_v3": True,
+                "status": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    recovered_response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
+
+    assert recovered_response.status_code == 200
+    payload = recovered_response.json()
+    assert payload["provider_status"].get("compact_studying_new_pair_fast_path_v3") is not True
+    assert payload["tracking_summary"].get("market_selector_studying_new_pair") is not True
+
+
 def test_performance_trace_v3_uses_direct_display_state_fast_path(
     monkeypatch: Any,
     tmp_path: Path,
@@ -1403,6 +1504,33 @@ def test_shooter_handshake_endpoint_reads_runtime_file(monkeypatch: Any, tmp_pat
     assert direct.json()["packet_id"] == "study_endpoint"
     assert direct.json()["packet_type"] == "STUDY_PACKET"
     assert alias.json()["gate_1_second_read"] == "NOT_CHECKED"
+
+
+def test_stale_shooter_reporter_heartbeat_is_reported_waiting(monkeypatch: Any, tmp_path: Path) -> None:
+    handshake_path = tmp_path / "shooter_handshake.json"
+    handshake_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "PG_SHOOTER_PACKAGE_REPORTER_HEARTBEAT_V1",
+                "session_id": "pocket-live-8788",
+                "state": "WAITING",
+                "mode": "PACKAGE_REPORTER",
+                "updated_epoch_sec": time.time() - 120.0,
+                "will_click": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", handshake_path)
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/shooter/sessions/pocket-live-8788/handshake")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "WAITING"
+    assert payload["available"] is False
+    assert "stale" in str(payload["reason"]).lower()
 
 
 def test_observability_reads_nested_execution_packet_from_model_council_result() -> None:

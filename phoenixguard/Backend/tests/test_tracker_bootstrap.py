@@ -355,7 +355,7 @@ def test_live_fast_display_heartbeat_respects_disable_env(monkeypatch: pytest.Mo
     assert calls == []
 
 
-def test_resolve_python_launcher_unwraps_windows_venv_redirector(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_resolve_python_launcher_keeps_windows_venv_redirector(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
     base_python = tmp_path / "Python311" / "python.exe"
     venv_python.parent.mkdir(parents=True)
@@ -366,10 +366,10 @@ def test_resolve_python_launcher_unwraps_windows_venv_redirector(monkeypatch: py
     monkeypatch.setattr(tracker_launcher.sys, "_base_executable", str(base_python), raising=False)
 
     python_exe, pyvenv_launcher = tracker_launcher.resolve_python_launcher(
-        {"PHOENIXGUARD_PYTHON_BASE_EXE": str(venv_python)}
+        {"PHOENIXGUARD_PYTHON_EXE": str(venv_python)}
     )
 
-    assert Path(python_exe).resolve() == base_python.resolve()
+    assert Path(python_exe).resolve() == venv_python.resolve()
     assert Path(pyvenv_launcher).resolve() == venv_python.resolve()
 
 
@@ -380,7 +380,7 @@ def test_resolve_python_launcher_keeps_requested_exe_on_non_windows(monkeypatch:
     monkeypatch.setattr(tracker_launcher, "_is_windows", lambda: False)
 
     python_exe, _ = tracker_launcher.resolve_python_launcher(
-        {"PHOENIXGUARD_PYTHON_BASE_EXE": str(requested_python)}
+        {"PHOENIXGUARD_PYTHON_EXE": str(requested_python)}
     )
 
     assert Path(python_exe).resolve() == requested_python.resolve()

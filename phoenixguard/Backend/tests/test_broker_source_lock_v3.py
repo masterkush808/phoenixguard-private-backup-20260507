@@ -144,15 +144,21 @@ def _tradingview_study_expected() -> dict[str, Any]:
     }
 
 
+def _edge_broker_expected(**overrides: Any) -> dict[str, Any]:
+    expected: dict[str, Any] = {"required_browser": "edge"}
+    expected.update(overrides)
+    return expected
+
+
 def test_valid_lock_accepts_edge_broker_with_handle_viewport_and_fingerprints() -> None:
     image = _synthetic_broker_image()
     broker_surface = _broker_surface_payload()
-    expected: dict[str, Any] = {
-        "window_handle": "hwnd-1",
-        "viewport": {"width": 1280, "height": 720},
-        "broker_pixel_fingerprint": broker_pixel_fingerprint_v3(image),
-        "broker_control_fingerprint": broker_control_fingerprint_v3(broker_surface),
-    }
+    expected = _edge_broker_expected(
+        window_handle="hwnd-1",
+        viewport={"width": 1280, "height": 720},
+        broker_pixel_fingerprint=broker_pixel_fingerprint_v3(image),
+        broker_control_fingerprint=broker_control_fingerprint_v3(broker_surface),
+    )
 
     lock = build_broker_source_lock_v3(
         _edge_broker_payload(broker_surface=broker_surface),
@@ -177,7 +183,7 @@ def test_devtools_target_id_can_lock_when_window_handle_is_absent() -> None:
     lock = build_broker_source_lock_v3(
         payload,
         image=image,
-        expected={"target_id": "target-abc", "viewport": {"width": 1280, "height": 720}},
+        expected=_edge_broker_expected(target_id="target-abc", viewport={"width": 1280, "height": 720}),
     )
 
     assert lock.status == VALID
@@ -190,11 +196,11 @@ def test_valid_lock_can_be_built_from_control_payload_without_image() -> None:
     broker_surface = _broker_surface_payload()
     lock = build_broker_source_lock_v3(
         _edge_broker_payload(broker_surface=broker_surface),
-        expected={
-            "window_handle": "hwnd-1",
-            "viewport": {"width": 1280, "height": 720},
-            "broker_control_fingerprint": broker_control_fingerprint_v3(broker_surface),
-        },
+        expected=_edge_broker_expected(
+            window_handle="hwnd-1",
+            viewport={"width": 1280, "height": 720},
+            broker_control_fingerprint=broker_control_fingerprint_v3(broker_surface),
+        ),
     )
 
     assert lock.status == VALID
@@ -236,7 +242,11 @@ def test_tradingview_study_source_rejects_matching_title_without_chart_pixels() 
 
 
 def test_title_match_pixel_mismatch_blocks_stale_wrong_tab() -> None:
-    lock = build_broker_source_lock_v3(_edge_broker_payload(), image=_non_broker_image())
+    lock = build_broker_source_lock_v3(
+        _edge_broker_payload(),
+        image=_non_broker_image(),
+        expected=_edge_broker_expected(),
+    )
 
     assert lock.status == TITLE_MATCH_PIXEL_MISMATCH
     assert lock.valid is False
@@ -251,7 +261,7 @@ def test_ambiguous_multiple_edge_broker_targets_without_identity() -> None:
         _edge_broker_payload(window_handle="hwnd-2"),
     ]
 
-    lock = build_broker_source_lock_v3({}, image=image, candidates=candidates)
+    lock = build_broker_source_lock_v3({}, image=image, candidates=candidates, expected=_edge_broker_expected())
 
     assert lock.status == AMBIGUOUS_BROKER_TARGET
     assert lock.matching_candidate_count == 2
@@ -266,14 +276,14 @@ def test_broker_not_found_when_no_candidates_are_available() -> None:
     assert lock.reason_codes == ("NO_CANDIDATES",)
 
 
-def test_invalid_browser_blocks_broker_title_outside_chrome() -> None:
+def test_invalid_browser_blocks_broker_title_outside_edge_capture() -> None:
     image = _synthetic_broker_image()
-    payload = _edge_broker_payload(browser="edge", title="Pocket Option - Microsoft Edge")
+    payload = _edge_broker_payload(browser="chrome", title="Pocket Option - Google Chrome")
 
     lock = build_broker_source_lock_v3(payload, image=image)
 
     assert lock.status == INVALID_BROWSER
-    assert "CHROME_BROWSER_REQUIRED" in lock.reason_codes
+    assert "BROWSER_REQUIREMENT_NOT_MET" in lock.reason_codes
 
 
 def test_viewport_mismatch_blocks_lock() -> None:
@@ -281,7 +291,7 @@ def test_viewport_mismatch_blocks_lock() -> None:
     lock = build_broker_source_lock_v3(
         _edge_broker_payload(),
         image=image,
-        expected={"window_handle": "hwnd-1", "viewport": {"width": 1024, "height": 768}},
+        expected=_edge_broker_expected(window_handle="hwnd-1", viewport={"width": 1024, "height": 768}),
     )
 
     assert lock.status == VIEWPORT_MISMATCH

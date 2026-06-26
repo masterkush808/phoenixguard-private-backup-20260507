@@ -259,6 +259,14 @@ def _direct_live_state_session_path(session_id: str) -> Path:
     return primary_path
 
 
+def _direct_live_state_compact_session_path(session_id: str) -> Path:
+    session_path = _direct_live_state_session_path(session_id)
+    compact_path = session_path.with_name("compact_live_state.json")
+    if compact_path.exists():
+        return compact_path
+    return session_path
+
+
 def _direct_window_tracker_display_state_path(session_id: str) -> Path:
     relative_path = _direct_session_relative_path(session_id).with_name("display_state.json")
     candidates = _runtime_data_dir_candidates()
@@ -386,6 +394,7 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
         ),
     )
     if compact_public:
+        context_path = _direct_live_state_compact_session_path(session_id)
         context_fields = (
             "session_id",
             "window_query",
@@ -410,11 +419,11 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
             "broker_source_lock.status",
         )
         context_signature = _json_field_cache_signature(
-            session_path,
+            context_path,
             context_fields,
         )
         registry_signature = ""
-        if not _direct_session_path_has_v3_overlay_sources(session_path):
+        if not _direct_session_path_has_v3_overlay_sources(context_path):
             registry_signature = f"|registry={_path_cache_signature(_direct_market_registry_path(session_id))}"
         return (
             f"compact=1|context={context_signature}"
@@ -459,7 +468,8 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
 
 def _compact_live_state_response_cache_signature(session_id: str) -> str:
     display_path = _direct_window_tracker_display_state_path(session_id)
-    return _json_field_cache_signature(
+    context_path = _direct_live_state_compact_session_path(session_id)
+    display_signature = _json_field_cache_signature(
         display_path,
         (
             "session_id",
@@ -478,6 +488,12 @@ def _compact_live_state_response_cache_signature(session_id: str) -> str:
             "last_study_surface_signature",
             "overlay_source_window_signature",
             "overlay_source_study_signature",
+        ),
+    )
+    context_signature = _json_field_cache_signature(
+        context_path,
+        (
+            "session_id",
             "window_query",
             "locked_title",
             "locked_window.hwnd",
@@ -494,8 +510,13 @@ def _compact_live_state_response_cache_signature(session_id: str) -> str:
             "latest_signal.market_selector_visual_changed",
             "latest_signal.market_selector_rebind_required",
             "latest_signal.timeframe",
+            "broker_source.lock_id",
+            "broker_source.status",
+            "broker_source_lock.lock_id",
+            "broker_source_lock.status",
         ),
     )
+    return f"display={display_signature}|context={context_signature}"
 
 
 def _mapping_to_plain_dict(value: object) -> dict[str, object]:
@@ -1030,7 +1051,14 @@ def _latest_shooter_handshake(session_id: str | None = None) -> dict[str, object
         raise KeyError("Shooter handshake session mismatch.")
     if requested_session_id and not payload_session_id:
         normalized["session_id"] = requested_session_id
-    if normalized.get("schema_version") == "PG_SHOOTER_PACKAGE_REPORT_V1":
+    schema_version = str(normalized.get("schema_version") or "").strip()
+    if schema_version == "PG_SHOOTER_PACKAGE_REPORTER_HEARTBEAT_V1":
+        updated_epoch = _epoch_float(normalized.get("updated_epoch_sec") or normalized.get("updated_epoch"), 0.0)
+        if updated_epoch <= 0.0:
+            raise KeyError("Shooter package reporter heartbeat has no freshness timestamp.")
+        if time.time() > updated_epoch + _PUBLISHED_PACKET_FALLBACK_TTL_SEC:
+            raise KeyError("Shooter package reporter heartbeat is stale.")
+    if schema_version == "PG_SHOOTER_PACKAGE_REPORT_V1":
         updated_epoch = _epoch_float(normalized.get("updated_epoch_sec"), 0.0)
         fallback_valid_until = updated_epoch + _PUBLISHED_PACKET_FALLBACK_TTL_SEC if updated_epoch > 0.0 else 0.0
         valid_until = _epoch_float(normalized.get("valid_until_epoch_sec"), fallback_valid_until)
@@ -1748,13 +1776,8 @@ def create_app(
         path = _direct_live_state_session_path(requested_session_id)
         raw_session: object
         if compact_public:
+            context_path = _direct_live_state_compact_session_path(requested_session_id)
             raw_context: dict[str, object] = {}
-            try:
-                raw_context_payload = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                raw_context_payload = None
-            if isinstance(raw_context_payload, Mapping):
-                raw_context = cast(dict[str, object], compact_session_payload(cast(Mapping[str, Any], raw_context_payload)))
             try:
                 raw_display = json.loads(_direct_window_tracker_display_state_path(requested_session_id).read_text(encoding="utf-8"))
             except Exception:
@@ -1768,8 +1791,20 @@ def create_app(
                 _epoch_float(raw_display_mapping.get("frame_index"), 0.0) > 0.0
                 and str(raw_display_mapping.get("last_display_window_path") or raw_display_mapping.get("last_window_path") or "").strip()
             ):
+                try:
+                    raw_context_payload = json.loads(context_path.read_text(encoding="utf-8"))
+                except Exception:
+                    raw_context_payload = None
+                if isinstance(raw_context_payload, Mapping):
+                    raw_context = cast(dict[str, object], compact_session_payload(cast(Mapping[str, Any], raw_context_payload)))
                 raw_session = {**raw_context, **dict(raw_display_mapping)}
             else:
+                try:
+                    raw_context_payload = json.loads(context_path.read_text(encoding="utf-8"))
+                except Exception:
+                    raw_context_payload = None
+                if isinstance(raw_context_payload, Mapping):
+                    raw_context = cast(dict[str, object], compact_session_payload(cast(Mapping[str, Any], raw_context_payload)))
                 if raw_context:
                     raw_session = raw_context
                 else:
@@ -2199,21 +2234,21 @@ def create_app(
             visual_overlays = live_visual_mapping.get("overlays")
             if isinstance(visual_overlays, Mapping):
                 compact_visual["overlays"] = compact_overlays_payload(cast(Mapping[str, object], visual_overlays))
-                compact_overlays_value = cast(Mapping[str, object], compact_visual["overlays"])
-                objects = compact_overlays_value.get("objects")
-                if isinstance(objects, list):
-                    compact_visual["overlay_objects"] = objects
             preserve_render_geometry(compact_visual, live_visual_mapping)
             compact.update(compact_visual)
         overlays = compact.get("overlays")
         if isinstance(overlays, Mapping):
             compact_overlays = compact_overlays_payload(cast(Mapping[str, object], overlays))
             compact["overlays"] = compact_overlays
-            objects = compact_overlays.get("objects")
-            if isinstance(objects, list):
-                compact["overlay_objects"] = objects
-        if "overlay_objects" not in compact and isinstance(live_state.get("overlay_objects"), list):
-            compact["overlay_objects"] = compact_overlay_objects(live_state["overlay_objects"])
+        if "overlays" not in compact and isinstance(live_state.get("overlay_objects"), list):
+            fallback_objects = compact_overlay_objects(live_state["overlay_objects"])
+            compact["overlays"] = {
+                "count": len(fallback_objects),
+                "total_count": len(fallback_objects),
+                "renderable_count": len(fallback_objects),
+                "objects": fallback_objects,
+            }
+        compact.pop("overlay_objects", None)
         frame_timing = _mapping_to_plain_dict(compact.get("frame_timing_trace_v3") or compact.get("frame_timing"))
         display_frame_id = int(_epoch_float(frame_timing.get("display_frame_id") or compact.get("display_frame_id"), 0.0))
         overlay_frame_id = int(
@@ -2462,12 +2497,12 @@ def create_app(
     def _display_overlay_authority_mismatch_reason(
         requested_session_id: str,
         display_payload: Mapping[str, object],
+        *,
+        allow_session_probe: bool = False,
     ) -> str:
-        if not (
-            _market_selector_rebind_pending(display_payload)
-            or _direct_session_market_selector_rebind_pending(requested_session_id)
-        ):
-            return ""
+        rebind_pending = _market_selector_rebind_pending(display_payload)
+        if not rebind_pending and allow_session_probe:
+            rebind_pending = _direct_session_market_selector_rebind_pending(requested_session_id)
         display_signature = str(
             display_payload.get("last_display_surface_signature")
             or display_payload.get("last_window_surface_signature")
@@ -2492,6 +2527,8 @@ def create_app(
                 "Studying new pair: the visible broker surface changed before overlay authority "
                 "rebuilt on the new frame."
             )
+        if not rebind_pending:
+            return ""
         return ""
 
     def _latest_compact_live_state_response_cache(
@@ -2509,6 +2546,9 @@ def create_app(
             cached_epoch, cached_payload = cached
             cached_age = now_epoch - cached_epoch
             if cached_age < 0.0 or cached_age > _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
+                continue
+            cached_provider = _mapping_to_plain_dict(cached_payload.get("provider_status"))
+            if bool(cached_provider.get("compact_studying_new_pair_fast_path_v3")):
                 continue
             if cached_epoch >= latest_epoch:
                 latest_epoch = cached_epoch
@@ -2791,6 +2831,8 @@ def create_app(
             cache_key = (requested_session_id, active_mode, cache_signature)
             now_epoch = time.time()
             if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
+                refresh_source: dict[str, object] | None = None
+                refresh_from_previous_signature = False
                 with _LIVE_STATE_V3_CACHE_LOCK:
                     cached = _COMPACT_LIVE_STATE_RESPONSE_CACHE.get(cache_key)
                     if cached:
@@ -2805,31 +2847,31 @@ def create_app(
                             compact_cached["provider_status"] = provider
                             return compact_cached
                         if cached_age <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
-                            compact_refreshed = _refresh_compact_cached_live_state(
-                                dict(cached[1]),
-                                requested_session_id,
-                                now_epoch=now_epoch,
-                            )
-                            _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_refreshed))
-                            return compact_refreshed
-                    reusable_cached = _latest_compact_live_state_response_cache(
-                        requested_session_id,
-                        active_mode,
-                        now_epoch=now_epoch,
-                    )
-                    if reusable_cached is not None:
-                        compact_refreshed = _refresh_compact_cached_live_state(
-                            reusable_cached,
+                            refresh_source = dict(cached[1])
+                    if refresh_source is None:
+                        reusable_cached = _latest_compact_live_state_response_cache(
                             requested_session_id,
+                            active_mode,
                             now_epoch=now_epoch,
                         )
+                        if reusable_cached is not None:
+                            refresh_source = reusable_cached
+                            refresh_from_previous_signature = True
+                if refresh_source is not None:
+                    compact_refreshed = _refresh_compact_cached_live_state(
+                        refresh_source,
+                        requested_session_id,
+                        now_epoch=now_epoch,
+                    )
+                    if refresh_from_previous_signature:
                         provider: dict[str, object] = {
                             **_mapping_to_plain_dict(compact_refreshed.get("provider_status")),
                             "compact_cache_previous_signature_reused_v3": True,
                         }
                         compact_refreshed["provider_status"] = provider
+                    with _LIVE_STATE_V3_CACHE_LOCK:
                         _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_refreshed))
-                        return compact_refreshed
+                    return compact_refreshed
             display_snapshot = _direct_window_tracker_display_snapshot(
                 requested_session_id,
                 require_overlay_model=False,
@@ -3219,18 +3261,12 @@ def create_app(
 
     @app.get("/v1/mobile/shooter/sessions/{session_id}/handshake")
     def latest_shooter_handshake_for_session(session_id: str) -> dict[str, object]:
-        try:
-            return _latest_shooter_handshake(session_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shooter handshake not found.") from exc
+        return _latest_shooter_handshake_or_waiting(session_id)
 
     @app.get("/v1/mobile/shooter/handshake")
     def latest_shooter_handshake(session_id: str | None = None) -> dict[str, object]:
         requested_session_id = str(session_id or "").strip() or None
-        try:
-            return _latest_shooter_handshake(requested_session_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shooter handshake not found.") from exc
+        return _latest_shooter_handshake_or_waiting(requested_session_id)
 
     @app.get("/v1/mobile/model-council/sessions/{session_id}/execution/latest")
     def latest_model_council_execution_packet_for_session(session_id: str) -> dict[str, object]:
