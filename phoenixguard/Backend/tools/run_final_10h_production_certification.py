@@ -465,7 +465,7 @@ def main() -> int:
     parser.add_argument("--session-id", default=DEFAULT_SESSION_ID)
     parser.add_argument("--duration-sec", type=float, default=36_000.0)
     parser.add_argument("--sample-sec", type=float, default=5.0)
-    parser.add_argument("--diagnostic-sec", type=float, default=30.0)
+    parser.add_argument("--diagnostic-sec", type=float, default=300.0)
     parser.add_argument("--timeout-sec", type=float, default=8.0)
     parser.add_argument("--screenshot-sec", type=float, default=900.0)
     parser.add_argument("--capture-timeout-sec", type=float, default=60.0)
