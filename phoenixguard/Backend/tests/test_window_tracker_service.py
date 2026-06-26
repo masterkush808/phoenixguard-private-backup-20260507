@@ -7049,6 +7049,54 @@ def test_real_tracking_adapter_reuses_cached_locked_shadow_selectors(monkeypatch
     assert result.latest_signal["market"] == "EUR/JPY OTC"
 
 
+def test_real_tracking_adapter_falls_back_when_fast_resize_merges_candles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    image = _synthetic_chart_surface("buy", width=1280, height=720)
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH", "480")
+    original_extract = cast(
+        Callable[[Image.Image], list[dict[str, Any]]],
+        getattr(adapter, "_extract_candle_tracks"),
+    )
+
+    def extract_with_resized_merge(image_arg: Image.Image) -> list[dict[str, Any]]:
+        rows = original_extract(image_arg)
+        if image_arg.width < image.width:
+            return rows[:5]
+        return rows
+
+    monkeypatch.setattr(adapter, "_extract_candle_tracks", extract_with_resized_merge)
+
+    result = adapter.study(
+        image,
+        session_payload={
+            "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
+            "locked_window": {"hwnd": 123, "title": "Pocket Option"},
+            "tracking_summary": {
+                "detected_timeframe": "M5",
+                "timeframe_confidence": 0.93,
+                "detected_market": "EUR/JPY OTC",
+                "market_confidence": 0.91,
+                "chart_region": {"pixel_bbox": [0, 0, image.width, image.height], "confidence": 0.90},
+            },
+            "latest_signal": {
+                "focus_timeframe": "M5",
+                "focus_timeframe_confidence": 0.93,
+                "market": "EUR/JPY OTC",
+                "market_confidence": 0.91,
+            },
+        },
+    )
+
+    extraction = cast(Mapping[str, Any], result.tracking_summary["candle_extraction"])
+    assert extraction["mode"] == "full_resolution_fallback"
+    assert extraction["resized_track_count"] == 5
+    assert int(result.tracking_summary["visible_candle_count"]) >= 8
+    assert len(cast(Sequence[Mapping[str, Any]], result.tracking_summary["support_resistance_zones"])) > 0
+    assert len(cast(Sequence[Mapping[str, Any]], result.tracking_summary["historical_structure"])) >= 2
+
+
 def test_real_tracking_adapter_pair_switch_fast_rebind_skips_slow_market_scan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

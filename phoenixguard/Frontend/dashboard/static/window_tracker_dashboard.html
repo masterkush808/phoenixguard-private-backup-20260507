@@ -3297,7 +3297,8 @@
     const DASHBOARD_REFRESH_HIDDEN_INTERVAL_MS = 30000;
     const DASHBOARD_REFRESH_SLOW_RESPONSE_MS = 1200;
     const DASHBOARD_HEARTBEAT_INTERVAL_MS = 15000;
-    const STREAM_LIVE_STATE_HYDRATION_MS = 15000;
+    const DASHBOARD_BASE_REFRESH_INTERVAL_MS = 60000;
+    const STREAM_LIVE_STATE_HYDRATION_MS = 60000;
 
     const $ = (id) => document.getElementById(id);
     const on = (target, eventName, handler, options) => {
@@ -8731,7 +8732,7 @@
             .catch(() => {});
         }
         const nowMs = Date.now();
-        if (state.slowRefreshBusy || (nowMs - Number(state.lastBaseRefreshMs || 0) < 2000)) {
+        if (state.slowRefreshBusy || (nowMs - Number(state.lastBaseRefreshMs || 0) < DASHBOARD_BASE_REFRESH_INTERVAL_MS)) {
           return;
         }
         state.slowRefreshBusy = true;

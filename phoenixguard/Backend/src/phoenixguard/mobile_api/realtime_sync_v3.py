@@ -19,6 +19,64 @@ _HEARTBEAT_WRITE_LOCKS: dict[Path, Lock] = {}
 _HEARTBEAT_WRITE_LOCKS_GUARD = Lock()
 _HEARTBEAT_MEMORY_CACHE: dict[Path, dict[str, Any]] = {}
 _HEARTBEAT_MEMORY_CACHE_GUARD = Lock()
+_HEARTBEAT_SELECTION_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+_HEARTBEAT_SELECTION_CACHE_GUARD = Lock()
+
+
+def _selection_cache_ttl_sec() -> float:
+    try:
+        return max(0.0, float(os.getenv("PHOENIXGUARD_FRONTEND_HEARTBEAT_SELECTION_CACHE_SEC", "5.0") or "5.0"))
+    except ValueError:
+        return 5.0
+
+
+def _selection_cache_key(session_id: str, surface_id: str, store_dir: Path | str | None) -> tuple[str, str, str]:
+    root = str(Path(store_dir or DEFAULT_HEARTBEAT_STORE_DIR))
+    return (_slug(session_id), _slug(surface_id), root)
+
+
+def _remember_selected_heartbeat(
+    session_id: str,
+    surface_id: str,
+    store_dir: Path | str | None,
+    heartbeat: Mapping[str, Any],
+) -> None:
+    key = _selection_cache_key(session_id, surface_id, store_dir)
+    cached = dict(heartbeat)
+    with _HEARTBEAT_SELECTION_CACHE_GUARD:
+        _HEARTBEAT_SELECTION_CACHE[key] = (time.time(), cached)
+        if len(_HEARTBEAT_SELECTION_CACHE) > 128:
+            for stale_key in list(_HEARTBEAT_SELECTION_CACHE)[:32]:
+                _HEARTBEAT_SELECTION_CACHE.pop(stale_key, None)
+
+
+def _cached_selected_heartbeat(
+    session_id: str,
+    surface_id: str,
+    store_dir: Path | str | None,
+) -> dict[str, Any] | None:
+    ttl_sec = _selection_cache_ttl_sec()
+    if ttl_sec <= 0.0:
+        return None
+    key = _selection_cache_key(session_id, surface_id, store_dir)
+    with _HEARTBEAT_SELECTION_CACHE_GUARD:
+        cached = _HEARTBEAT_SELECTION_CACHE.get(key)
+    if cached is None:
+        return None
+    cached_at, heartbeat = cached
+    if time.time() - cached_at > ttl_sec:
+        with _HEARTBEAT_SELECTION_CACHE_GUARD:
+            _HEARTBEAT_SELECTION_CACHE.pop(key, None)
+        return None
+    received_at_ms = _float(heartbeat.get("received_at_ms"), 0.0)
+    if received_at_ms <= 0.0:
+        return None
+    age_sec = max(0.0, (time.time() * 1000.0 - received_at_ms) / 1000.0)
+    if age_sec > 30.0:
+        return None
+    selected = dict(heartbeat)
+    selected.setdefault("selection_cache_reused_v3", True)
+    return selected
 
 
 def _heartbeat_write_lock(path: Path) -> Lock:
@@ -246,9 +304,15 @@ def latest_frontend_heartbeat(
     surface_id: str = "dashboard",
     store_dir: Path | str | None = None,
 ) -> dict[str, Any] | None:
+    cached_selection = _cached_selected_heartbeat(session_id, surface_id, store_dir)
+    if cached_selection is not None:
+        return cached_selection
     path = _heartbeat_path(session_id, surface_id=surface_id, store_dir=store_dir)
     if surface_id != "dashboard":
-        return _load_heartbeat_file(path)
+        heartbeat = _load_heartbeat_file(path)
+        if heartbeat is not None:
+            _remember_selected_heartbeat(session_id, surface_id, store_dir, heartbeat)
+        return heartbeat
     root = Path(store_dir or DEFAULT_HEARTBEAT_STORE_DIR)
     candidates = [path]
     if root.exists():
@@ -260,8 +324,13 @@ def latest_frontend_heartbeat(
         if heartbeat is not None and _is_live_dashboard_heartbeat(heartbeat)
     ]
     if not heartbeats:
-        return _cached_heartbeat(path)
-    return max(heartbeats, key=_heartbeat_rank)
+        fallback = _cached_heartbeat(path)
+        if fallback is not None:
+            _remember_selected_heartbeat(session_id, surface_id, store_dir, fallback)
+        return fallback
+    selected = max(heartbeats, key=_heartbeat_rank)
+    _remember_selected_heartbeat(session_id, surface_id, store_dir, selected)
+    return selected
 
 
 def prune_frontend_heartbeats(

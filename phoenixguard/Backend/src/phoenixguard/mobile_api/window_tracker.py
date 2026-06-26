@@ -298,7 +298,9 @@ _EXECUTION_CURRENT_FLOW_MIN_ALIGNMENT = 4
 _EXECUTION_CURRENT_FLOW_STRETCHED_MIN_CLEAR_PATH = 0.72
 _EXECUTION_CURRENT_FLOW_STRETCHED_MIN_TARGET = 0.78
 _EXECUTION_LIVE_MOMENTUM_MIN_VISIBLE_CANDLES = 8
-_PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES = 64
+_PHOENIXGUARD_DEFAULT_LIVE_MAX_TRACKED_CANDLES = 96
+_PHOENIXGUARD_DEFAULT_LIVE_CANDLE_MAX_WIDTH = 960
+_PHOENIXGUARD_MIN_PRECISION_CANDLE_TRACKS = 8
 _PHOENIXGUARD_DEFAULT_SR_MAX_ZONES_PER_ROLE = 4
 _PHOENIXGUARD_DEFAULT_SR_MAX_TOTAL_ZONES = 8
 _PHOENIXGUARD_DEFAULT_SR_MAX_SIGNIFICANT_ZONES = 8
@@ -753,9 +755,11 @@ _COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
 _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
     {
         "action",
+        "active_track_count",
         "angle_vectors",
         "broker_source",
         "broker_source_lock",
+        "candle_extraction",
         "confidence",
         "detected_market",
         "detected_timeframe",
@@ -784,6 +788,7 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
         "timeframe",
         "tracked_candles",
         "trendlines_v3",
+        "visible_candle_count",
     }
 )
 
@@ -9077,23 +9082,46 @@ class PhoenixGuardWindowTrackingAdapter:
         candle_image = chart_image
         candle_scale_x = 1.0
         candle_scale_y = 1.0
+        candle_image_resized = False
+        candle_extraction_mode = "chart_resolution"
+        resized_candle_track_count = 0
+        full_resolution_fallback_count = 0
         if fast_locked_context:
             try:
-                live_candle_max_width = int(os.getenv("PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH", "320") or "320")
+                live_candle_max_width = int(
+                    os.getenv(
+                        "PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH",
+                        str(_PHOENIXGUARD_DEFAULT_LIVE_CANDLE_MAX_WIDTH),
+                    )
+                    or str(_PHOENIXGUARD_DEFAULT_LIVE_CANDLE_MAX_WIDTH)
+                )
             except ValueError:
-                live_candle_max_width = 320
-            live_candle_max_width = max(180, int(live_candle_max_width))
+                live_candle_max_width = _PHOENIXGUARD_DEFAULT_LIVE_CANDLE_MAX_WIDTH
+            live_candle_max_width = max(480, int(live_candle_max_width))
             if int(chart_image.width) > live_candle_max_width:
                 resized_width = live_candle_max_width
                 resized_height = max(64, int(round(float(chart_image.height) * (float(resized_width) / float(chart_image.width)))))
                 candle_image = chart_image.resize((resized_width, resized_height), Image.Resampling.BILINEAR)
                 candle_scale_x = float(chart_image.width) / float(resized_width)
                 candle_scale_y = float(chart_image.height) / float(resized_height)
+                candle_image_resized = True
+                candle_extraction_mode = "fast_resized"
         tracked_candles = _rescale_candle_tracks(
             self._extract_candle_tracks(candle_image),
             scale_x=candle_scale_x,
             scale_y=candle_scale_y,
         )
+        resized_candle_track_count = len(tracked_candles)
+        if (
+            fast_locked_context
+            and candle_image_resized
+            and len(tracked_candles) < _PHOENIXGUARD_MIN_PRECISION_CANDLE_TRACKS
+        ):
+            full_resolution_tracks = self._extract_candle_tracks(chart_image)
+            full_resolution_fallback_count = len(full_resolution_tracks)
+            if len(full_resolution_tracks) > len(tracked_candles):
+                tracked_candles = full_resolution_tracks
+                candle_extraction_mode = "full_resolution_fallback"
         if fast_locked_context:
             try:
                 live_controls = _normalize_execution_controls(
@@ -9128,6 +9156,20 @@ class PhoenixGuardWindowTrackingAdapter:
             session_payload=session_payload,
             broker_exclusion_boxes=broker_exclusion_boxes,
         )
+        candle_extraction_summary = {
+            "mode": candle_extraction_mode,
+            "fast_locked_context": bool(fast_locked_context),
+            "source_width": int(chart_image.width),
+            "source_height": int(chart_image.height),
+            "analysis_width": int(candle_image.width),
+            "analysis_height": int(candle_image.height),
+            "resized_track_count": int(resized_candle_track_count),
+            "full_resolution_fallback_count": int(full_resolution_fallback_count),
+            "final_track_count": int(len(tracked_candles)),
+            "min_precision_track_count": int(_PHOENIXGUARD_MIN_PRECISION_CANDLE_TRACKS),
+        }
+        tracking_summary["candle_extraction"] = dict(candle_extraction_summary)
+        latest_signal["candle_extraction"] = dict(candle_extraction_summary)
         mark_study_stage("build_signal_payloads")
         overlay_image = self._render_overlay(surface, chart_bbox, tracking_summary, latest_signal)
         mark_study_stage("render_overlay")

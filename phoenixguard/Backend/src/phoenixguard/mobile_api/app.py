@@ -128,13 +128,15 @@ _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC = _env_float_at_least(
 )
 _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC = _env_float_at_least(
     "PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC",
-    0.85,
+    20.0,
     0.0,
 )
 _LIVE_STATE_REGISTRY_MAX_LINES = _env_int_at_least("PHOENIXGUARD_LIVE_STATE_REGISTRY_MAX_LINES", 2000, 50)
 _LIVE_STATE_V3_CACHE_LOCK = threading.Lock()
 _LIVE_STATE_V3_CACHE: dict[tuple[str, str, str, bool], tuple[float, dict[str, object]]] = {}
 _COMPACT_LIVE_STATE_RESPONSE_CACHE: dict[tuple[str, str, str], tuple[float, dict[str, object]]] = {}
+_COMPACT_LIVE_STATE_BUILD_LOCKS_GUARD = threading.Lock()
+_COMPACT_LIVE_STATE_BUILD_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _LIVE_STATE_REGISTRY_CACHE: dict[str, tuple[float, list[Mapping[str, Any]], list[Mapping[str, Any]]]] = {}
 _DIRECT_PERFORMANCE_TRACE_CACHE_LOCK = threading.Lock()
 _DIRECT_PERFORMANCE_TRACE_CACHE: dict[str, tuple[float, dict[str, object]]] = {}
@@ -162,6 +164,43 @@ def _as_sequence(value: object) -> Sequence[Any]:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return cast(Sequence[Any], value)
     return ()
+
+
+def _compact_live_state_build_lock(cache_key: tuple[str, str, str]) -> threading.Lock:
+    with _COMPACT_LIVE_STATE_BUILD_LOCKS_GUARD:
+        lock = _COMPACT_LIVE_STATE_BUILD_LOCKS.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _COMPACT_LIVE_STATE_BUILD_LOCKS[cache_key] = lock
+            if len(_COMPACT_LIVE_STATE_BUILD_LOCKS) > 128:
+                for stale_key in list(_COMPACT_LIVE_STATE_BUILD_LOCKS)[:32]:
+                    _COMPACT_LIVE_STATE_BUILD_LOCKS.pop(stale_key, None)
+        return lock
+
+
+def _compact_live_state_renderable_count(payload: Mapping[str, object]) -> int:
+    overlays = _as_mapping(payload.get("overlays"))
+    objects = overlays.get("objects")
+    if isinstance(objects, Sequence) and not isinstance(objects, (str, bytes, bytearray)):
+        return len(cast(Sequence[object], objects))
+    for key in ("renderable_count", "overlay_count"):
+        value = overlays.get(key, payload.get(key))
+        try:
+            count = int(float(str(value or "0")))
+        except ValueError:
+            count = 0
+        if count > 0:
+            return count
+    live_visual = _as_mapping(payload.get("live_visual_state"))
+    if live_visual:
+        return _compact_live_state_renderable_count(live_visual)
+    return 0
+
+
+def _compact_live_state_cache_can_reuse(payload: Mapping[str, object], cached_age_sec: float) -> bool:
+    if _compact_live_state_renderable_count(payload) > 0:
+        return True
+    return cached_age_sec <= 2.0
 
 
 _DIRECT_DISPLAY_STATE_KEYS = frozenset(
@@ -471,16 +510,6 @@ def _compact_live_state_response_cache_signature(session_id: str) -> str:
         display_path,
         (
             "session_id",
-            "frame_index",
-            "display_frame_id",
-            "chart_frame_id",
-            "overlay_frame_id",
-            "full_overlay_frame_id",
-            "model_vote_frame_id",
-            "last_display_window_path",
-            "last_chart_path",
-            "last_overlay_path",
-            "last_full_overlay_path",
             "last_display_surface_signature",
             "last_window_surface_signature",
             "last_study_surface_signature",
@@ -2529,30 +2558,6 @@ def create_app(
             return ""
         return ""
 
-    def _latest_compact_live_state_response_cache(
-        requested_session_id: str,
-        active_mode: str,
-        *,
-        now_epoch: float,
-    ) -> dict[str, object] | None:
-        latest_epoch = 0.0
-        latest_payload: dict[str, object] | None = None
-        for key, cached in _COMPACT_LIVE_STATE_RESPONSE_CACHE.items():
-            cached_session_id, cached_mode, _cached_signature = key
-            if cached_session_id != requested_session_id or cached_mode != active_mode:
-                continue
-            cached_epoch, cached_payload = cached
-            cached_age = now_epoch - cached_epoch
-            if cached_age < 0.0 or cached_age > _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
-                continue
-            cached_provider = _mapping_to_plain_dict(cached_payload.get("provider_status"))
-            if bool(cached_provider.get("compact_studying_new_pair_fast_path_v3")):
-                continue
-            if cached_epoch >= latest_epoch:
-                latest_epoch = cached_epoch
-                latest_payload = dict(cached_payload)
-        return latest_payload
-
     def _display_frame_id(display_payload: Mapping[str, object]) -> int:
         return int(
             _epoch_float(
@@ -2830,12 +2835,13 @@ def create_app(
             now_epoch = time.time()
             if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
                 refresh_source: dict[str, object] | None = None
-                refresh_from_previous_signature = False
                 with _LIVE_STATE_V3_CACHE_LOCK:
                     cached = _COMPACT_LIVE_STATE_RESPONSE_CACHE.get(cache_key)
                     if cached:
                         cached_age = now_epoch - cached[0]
-                        if cached_age <= _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC:
+                        cached_payload = cached[1]
+                        cache_can_reuse = _compact_live_state_cache_can_reuse(cached_payload, cached_age)
+                        if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC:
                             compact_cached = dict(cached[1])
                             provider: dict[str, object] = {
                                 **_mapping_to_plain_dict(compact_cached.get("provider_status")),
@@ -2844,62 +2850,78 @@ def create_app(
                             }
                             compact_cached["provider_status"] = provider
                             return compact_cached
-                        if cached_age <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
+                        if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
                             refresh_source = dict(cached[1])
-                    if refresh_source is None:
-                        reusable_cached = _latest_compact_live_state_response_cache(
-                            requested_session_id,
-                            active_mode,
-                            now_epoch=now_epoch,
-                        )
-                        if reusable_cached is not None:
-                            refresh_source = reusable_cached
-                            refresh_from_previous_signature = True
                 if refresh_source is not None:
                     compact_refreshed = _refresh_compact_cached_live_state(
                         refresh_source,
                         requested_session_id,
                         now_epoch=now_epoch,
                     )
-                    if refresh_from_previous_signature:
-                        provider: dict[str, object] = {
-                            **_mapping_to_plain_dict(compact_refreshed.get("provider_status")),
-                            "compact_cache_previous_signature_reused_v3": True,
-                        }
-                        compact_refreshed["provider_status"] = provider
                     with _LIVE_STATE_V3_CACHE_LOCK:
                         _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_refreshed))
                     return compact_refreshed
-            display_snapshot = _direct_window_tracker_display_snapshot(
-                requested_session_id,
-                require_overlay_model=False,
-            )
-            if display_snapshot is not None:
-                surface_mismatch_reason = _display_overlay_authority_mismatch_reason(requested_session_id, display_snapshot)
-                if surface_mismatch_reason:
-                    compact_response = _compact_studying_new_pair_live_state(
-                        requested_session_id,
-                        dict(display_snapshot),
-                        requested_mode=mode,
-                        reason=surface_mismatch_reason,
-                        now_epoch=now_epoch,
-                    )
-                    if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
+            with _compact_live_state_build_lock(cache_key):
+                now_epoch = time.time()
+                if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
+                    refresh_source = None
+                    with _LIVE_STATE_V3_CACHE_LOCK:
+                        cached = _COMPACT_LIVE_STATE_RESPONSE_CACHE.get(cache_key)
+                        if cached:
+                            cached_age = now_epoch - cached[0]
+                            cached_payload = cached[1]
+                            cache_can_reuse = _compact_live_state_cache_can_reuse(cached_payload, cached_age)
+                            if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC:
+                                compact_cached = dict(cached[1])
+                                provider = {
+                                    **_mapping_to_plain_dict(compact_cached.get("provider_status")),
+                                    "compact_cache_hot_reused_v3": True,
+                                    "compact_cache_hot_age_ms": round(max(0.0, cached_age) * 1000.0, 3),
+                                    "compact_cache_singleflight_waited_v3": True,
+                                }
+                                compact_cached["provider_status"] = provider
+                                return compact_cached
+                            if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
+                                refresh_source = dict(cached[1])
+                    if refresh_source is not None:
+                        compact_refreshed = _refresh_compact_cached_live_state(
+                            refresh_source,
+                            requested_session_id,
+                            now_epoch=now_epoch,
+                        )
                         with _LIVE_STATE_V3_CACHE_LOCK:
-                            _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_response))
-                    return compact_response
-            live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=True)
-            compact_response = compact_live_state_response(live_state)
-            if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
-                with _LIVE_STATE_V3_CACHE_LOCK:
-                    for stale_key in [
-                        key
-                        for key in _COMPACT_LIVE_STATE_RESPONSE_CACHE
-                        if key[0] == requested_session_id and key[1] == active_mode and key != cache_key
-                    ]:
-                        _COMPACT_LIVE_STATE_RESPONSE_CACHE.pop(stale_key, None)
-                    _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_response))
-            return compact_response
+                            _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_refreshed))
+                        return compact_refreshed
+                display_snapshot = _direct_window_tracker_display_snapshot(
+                    requested_session_id,
+                    require_overlay_model=False,
+                )
+                if display_snapshot is not None:
+                    surface_mismatch_reason = _display_overlay_authority_mismatch_reason(requested_session_id, display_snapshot)
+                    if surface_mismatch_reason:
+                        compact_response = _compact_studying_new_pair_live_state(
+                            requested_session_id,
+                            dict(display_snapshot),
+                            requested_mode=mode,
+                            reason=surface_mismatch_reason,
+                            now_epoch=now_epoch,
+                        )
+                        if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
+                            with _LIVE_STATE_V3_CACHE_LOCK:
+                                _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_response))
+                        return compact_response
+                live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=True)
+                compact_response = compact_live_state_response(live_state)
+                if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
+                    with _LIVE_STATE_V3_CACHE_LOCK:
+                        for stale_key in [
+                            key
+                            for key in _COMPACT_LIVE_STATE_RESPONSE_CACHE
+                            if key[0] == requested_session_id and key[1] == active_mode and key != cache_key
+                        ]:
+                            _COMPACT_LIVE_STATE_RESPONSE_CACHE.pop(stale_key, None)
+                        _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_response))
+                return compact_response
         live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=compact)
         return live_state
 
