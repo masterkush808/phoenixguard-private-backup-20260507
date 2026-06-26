@@ -71,6 +71,7 @@ def _dashboard_browser_args(browser_name: DashboardBrowserName, executable_path:
                 "--disable-background-timer-throttling",
                 "--disable-renderer-backgrounding",
                 "--disable-backgrounding-occluded-windows",
+                "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,BackForwardCache",
                 "--new-window",
             ]
         )
