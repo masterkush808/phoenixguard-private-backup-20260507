@@ -293,24 +293,45 @@ def _execution_allowed(execution_payload: Mapping[str, Any]) -> tuple[bool, dict
     }
 
 
-def _run_capture(command: list[str], out_dir: Path, log_path: Path) -> None:
+def _run_capture(command: list[str], out_dir: Path, log_path: Path, *, timeout_sec: float) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     started = _now_epoch()
-    result = subprocess.run(command, cwd=str(_repo_root()), capture_output=True, text=True, timeout=180.0, check=False)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(_repo_root()),
+            capture_output=True,
+            text=True,
+            timeout=max(5.0, float(timeout_sec)),
+            check=False,
+        )
+        returncode = int(result.returncode)
+        stdout_tail = result.stdout[-2000:]
+        stderr_tail = result.stderr[-2000:]
+        timed_out = False
+    except subprocess.TimeoutExpired as exc:
+        returncode = -1
+        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
+        stdout_tail = stdout[-2000:]
+        stderr_tail = (stderr or f"capture_timeout_after_{timeout_sec:.1f}s")[-2000:]
+        timed_out = True
     _append_jsonl(
         log_path,
         {
             "at_epoch": started,
             "at_utc": _utc_now(),
             "command": command,
-            "returncode": result.returncode,
-            "stdout_tail": result.stdout[-2000:],
-            "stderr_tail": result.stderr[-2000:],
+            "returncode": returncode,
+            "timed_out": timed_out,
+            "timeout_sec": round(float(timeout_sec), 3),
+            "stdout_tail": stdout_tail,
+            "stderr_tail": stderr_tail,
         },
     )
 
 
-def _capture_dashboard(base_url: str, session_id: str, out_dir: Path, log_path: Path) -> None:
+def _capture_dashboard(base_url: str, session_id: str, out_dir: Path, log_path: Path, *, timeout_sec: float) -> None:
     command = [
         _python_executable(),
         "Backend/tools/capture_dashboard_visual_v3.py",
@@ -322,10 +343,10 @@ def _capture_dashboard(base_url: str, session_id: str, out_dir: Path, log_path: 
         str(out_dir),
         "--soft",
     ]
-    _run_capture(command, out_dir, log_path)
+    _run_capture(command, out_dir, log_path, timeout_sec=timeout_sec)
 
 
-def _capture_overlay_modes(base_url: str, session_id: str, out_dir: Path, log_path: Path) -> None:
+def _capture_overlay_modes(base_url: str, session_id: str, out_dir: Path, log_path: Path, *, timeout_sec: float) -> None:
     command = [
         _python_executable(),
         "Backend/tools/capture_overlay_mode_screenshots_v3.py",
@@ -338,7 +359,7 @@ def _capture_overlay_modes(base_url: str, session_id: str, out_dir: Path, log_pa
         "--out",
         str(out_dir),
     ]
-    _run_capture(command, out_dir, log_path)
+    _run_capture(command, out_dir, log_path, timeout_sec=timeout_sec)
 
 
 def _write_progress_report(
@@ -425,6 +446,7 @@ def main() -> int:
     parser.add_argument("--sample-sec", type=float, default=5.0)
     parser.add_argument("--timeout-sec", type=float, default=8.0)
     parser.add_argument("--screenshot-sec", type=float, default=900.0)
+    parser.add_argument("--capture-timeout-sec", type=float, default=60.0)
     parser.add_argument("--update-sec", type=float, default=1800.0)
     parser.add_argument("--out-dir", default=".codex_runtime/10h_cert")
     parser.add_argument("--no-screenshots", action="store_true")
@@ -437,7 +459,7 @@ def main() -> int:
     screenshots_dir.mkdir(parents=True, exist_ok=True)
     urls = _endpoint_urls(args.base_url, args.session_id)
     start = _now_epoch()
-    next_screenshot = start
+    next_screenshot = start + max(60.0, float(args.screenshot_sec))
     next_update = start
     sample_count = 0
     stale_count = 0
@@ -538,7 +560,7 @@ def main() -> int:
                 )
                 package_dir = screenshots_dir / f"package_{packet_id}" / "before"
                 if not args.no_screenshots:
-                    _capture_dashboard(args.base_url, args.session_id, package_dir, capture_log)
+                    _capture_dashboard(args.base_url, args.session_id, package_dir, capture_log, timeout_sec=args.capture_timeout_sec)
                 _append_jsonl(
                     out_dir / "package_progression.jsonl",
                     {"at_epoch": loop_started, "at_utc": _utc_now(), "stage": "before", **allowed_meta, "mt4": mt4, "timing": timing},
@@ -554,7 +576,13 @@ def main() -> int:
                 state["captured_horizons"] = sorted(captured)
                 stage = f"T+{horizon}s"
                 if not args.no_screenshots:
-                    _capture_dashboard(args.base_url, args.session_id, screenshots_dir / f"package_{packet_id}" / stage, capture_log)
+                    _capture_dashboard(
+                        args.base_url,
+                        args.session_id,
+                        screenshots_dir / f"package_{packet_id}" / stage,
+                        capture_log,
+                        timeout_sec=args.capture_timeout_sec,
+                    )
                 _append_jsonl(
                     out_dir / "package_progression.jsonl",
                     {"at_epoch": loop_started, "at_utc": _utc_now(), "packet_id": packet_id, "stage": stage, "mt4": mt4, "timing": timing},
@@ -585,8 +613,20 @@ def main() -> int:
 
         if not args.no_screenshots and loop_started >= next_screenshot:
             stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(loop_started))
-            _capture_dashboard(args.base_url, args.session_id, screenshots_dir / f"periodic_{stamp}" / "dashboard", capture_log)
-            _capture_overlay_modes(args.base_url, args.session_id, screenshots_dir / f"periodic_{stamp}" / "overlay_modes", capture_log)
+            _capture_dashboard(
+                args.base_url,
+                args.session_id,
+                screenshots_dir / f"periodic_{stamp}" / "dashboard",
+                capture_log,
+                timeout_sec=args.capture_timeout_sec,
+            )
+            _capture_overlay_modes(
+                args.base_url,
+                args.session_id,
+                screenshots_dir / f"periodic_{stamp}" / "overlay_modes",
+                capture_log,
+                timeout_sec=args.capture_timeout_sec,
+            )
             next_screenshot = loop_started + max(60.0, float(args.screenshot_sec))
 
         if loop_started >= next_update:
