@@ -47,6 +47,34 @@ def _int(value: object, default: int = 0) -> int:
         return default
 
 
+def _parent_by_pid(processes: list[dict[str, object]]) -> dict[int, int]:
+    parents: dict[int, int] = {}
+    for row in processes:
+        pid = process_id(row)
+        parent = _int(row.get("ParentProcessId"))
+        if pid > 0 and parent > 0:
+            parents[pid] = parent
+    return parents
+
+
+def _same_logical_process(first_pid: int, second_pid: int, processes: list[dict[str, object]]) -> bool:
+    if first_pid <= 0 or second_pid <= 0:
+        return False
+    if first_pid == second_pid:
+        return True
+    parents = _parent_by_pid(processes)
+
+    def ancestors(pid: int) -> set[int]:
+        output: set[int] = set()
+        current = pid
+        while current in parents and parents[current] not in output:
+            current = parents[current]
+            output.add(current)
+        return output
+
+    return first_pid in ancestors(second_pid) or second_pid in ancestors(first_pid)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Certify PhoenixGuard V3 process topology.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
@@ -59,7 +87,8 @@ def main() -> int:
 
     processes = python_processes()
     listeners = tcp_listeners([args.port, args.fallback_port])
-    api_processes = find_processes(processes, "start_phoenixguard_mobile_api.py")
+    raw_api_processes = find_processes(processes, "start_phoenixguard_mobile_api.py")
+    api_processes = leaf_processes(raw_api_processes)
     tracker_processes = leaf_processes(find_processes(processes, "start_phoenixguard_24_7_tracker.py"))
     shooter_processes = leaf_processes(find_processes(processes, "shooter.py"))
     listener_rows = [row for row in listeners if int(row.get("LocalPort") or 0) == int(args.port)]
@@ -74,7 +103,7 @@ def main() -> int:
     if len(listener_rows) != 1:
         failures.append(f"expected exactly one listener on {args.port}, found {len(listener_rows)}")
     api_owner_pid = int(listener_rows[0].get("OwningProcess") or 0) if listener_rows else 0
-    if api_owner_pid and not any(process_id(row) == api_owner_pid for row in api_processes):
+    if api_owner_pid and not any(_same_logical_process(process_id(row), api_owner_pid, processes) for row in api_processes):
         failures.append(f"listener on {args.port} is owned by PID {api_owner_pid}, not a start_phoenixguard_mobile_api.py process")
     if len(api_processes) != 1:
         failures.append(f"expected one API process, found {len(api_processes)}")
@@ -93,7 +122,7 @@ def main() -> int:
     if not shooter_processes and not args.allow_missing_shooter:
         failures.append("shooter process is not running")
         corrections.append(
-            r"Start shooter with: .\.venv\Scripts\python.exe Backend\launch\shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20"
+            r"Start shooter with: .\.venv\Scripts\python.exe Backend\launch\shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 15.0 --heartbeat 4.0"
         )
     if len(shooter_processes) > 1:
         failures.append(f"expected at most one shooter process, found {len(shooter_processes)}")
@@ -118,11 +147,17 @@ def main() -> int:
         lock_api_pid = _int(singleton_lock.get("api_pid"))
         lock_tracker_pid = _int(singleton_lock.get("tracker_pid"))
         lock_shooter_pid = _int(singleton_lock.get("shooter_pid"))
-        if api_owner_pid and lock_api_pid and lock_api_pid != api_owner_pid:
+        if api_owner_pid and lock_api_pid and not _same_logical_process(lock_api_pid, api_owner_pid, processes):
             failures.append(f"runtime singleton api_pid mismatch: lock={lock_api_pid} listener={api_owner_pid}")
-        if tracker_processes and lock_tracker_pid and lock_tracker_pid not in {process_id(row) for row in tracker_processes}:
+        elif api_owner_pid and lock_api_pid and lock_api_pid != api_owner_pid:
+            warnings.append(f"runtime singleton api_pid uses Windows venv redirector chain: lock={lock_api_pid} listener={api_owner_pid}")
+        if tracker_processes and lock_tracker_pid and not any(
+            _same_logical_process(lock_tracker_pid, process_id(row), processes) for row in tracker_processes
+        ):
             failures.append(f"runtime singleton tracker_pid {lock_tracker_pid} is not the tracker process list")
-        if shooter_processes and lock_shooter_pid and lock_shooter_pid not in {process_id(row) for row in shooter_processes}:
+        if shooter_processes and lock_shooter_pid and not any(
+            _same_logical_process(lock_shooter_pid, process_id(row), processes) for row in shooter_processes
+        ):
             failures.append(f"runtime singleton shooter_pid {lock_shooter_pid} is not the shooter process list")
         if singleton_assessment.stale:
             failures.append(f"runtime singleton lock is stale/unhealthy: {singleton_assessment.reason}")
@@ -160,6 +195,7 @@ def main() -> int:
             "singleton_assessment": singleton_assessment.as_dict(),
             "processes": {
                 "api": api_processes,
+                "api_raw": raw_api_processes,
                 "tracker": tracker_processes,
                 "shooter": shooter_processes,
             },

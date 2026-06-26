@@ -161,7 +161,7 @@ def _live_fast_display_heartbeat(
     if enabled in {"0", "false", "off", "no"}:
         return last_heartbeat_epoch
     try:
-        interval_sec = max(0.2, float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC", "0.5") or "0.5"))
+        interval_sec = max(0.2, float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC", "15.0") or "15.0"))
     except ValueError:
         interval_sec = 1.0
     now = time.time()
@@ -179,9 +179,9 @@ def _live_fast_display_heartbeat(
     if _live_fast_display_file_heartbeat(resolved_script_dir, session_id, now_epoch=now):
         return now
     try:
-        timeout_sec = max(0.2, float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC", "0.35") or "0.35"))
+        timeout_sec = max(0.2, float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC", "1.0") or "1.0"))
     except ValueError:
-        timeout_sec = 0.35
+        timeout_sec = 1.0
     try:
         _request_json(
             base_url,
@@ -248,16 +248,35 @@ def _stop_process(proc: subprocess.Popen[str], *, timeout_sec: float = 8.0) -> N
             pass
 
 
-def _resolve_python_launcher(env: dict[str, str]) -> tuple[str, str]:
-    requested_exe = env.get("PHOENIXGUARD_PYTHON_EXE") or sys.executable
+def _repo_venv_python(script_dir: Path) -> Path | None:
+    candidates = (
+        script_dir / ".venv" / "Scripts" / "python.exe",
+        script_dir / ".venv-live" / "Scripts" / "python.exe",
+        script_dir / ".venv" / "bin" / "python",
+        script_dir / ".venv-live" / "bin" / "python",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _python_venv_dir(python_exe: str) -> Path | None:
+    path = Path(str(python_exe))
+    parent = path.parent
+    if parent.name.lower() in {"scripts", "bin"} and parent.parent.exists():
+        return parent.parent
+    return None
+
+
+def _resolve_python_launcher(env: dict[str, str], script_dir: Path | None = None) -> tuple[str, str]:
+    repo_python = _repo_venv_python(script_dir) if script_dir is not None else None
+    requested_exe = env.get("PHOENIXGUARD_PYTHON_EXE") or (str(repo_python) if repo_python is not None else sys.executable)
     pyvenv_launcher = env.get("PHOENIXGUARD_PYVENV_LAUNCHER") or requested_exe
     return requested_exe, pyvenv_launcher
 
 
 def _default_live_runtime_dir(script_dir: Path, leaf: str) -> Path:
-    local_app_data = str(os.getenv("LOCALAPPDATA", "") or "").strip()
-    if local_app_data:
-        return Path(local_app_data) / "PhoenixGuard" / "codex_runtime" / leaf
     return script_dir / ".codex_runtime" / leaf
 
 
@@ -411,9 +430,9 @@ def _start_live_fast_display_file_heartbeat_thread(script_dir: Path, session_id:
         last_epoch = 0.0
         while not stop_event.is_set():
             try:
-                interval_sec = max(0.2, float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC", "0.5") or "0.5"))
+                interval_sec = max(0.2, float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC", "15.0") or "15.0"))
             except ValueError:
-                interval_sec = 0.5
+                interval_sec = 15.0
             now_epoch = time.time()
             if now_epoch - last_epoch >= interval_sec:
                 if _live_fast_display_file_heartbeat(script_dir, session_id, now_epoch=now_epoch):
@@ -460,7 +479,15 @@ def _launch_mobile_api(
         env["OTEL_METRICS_EXPORTER"] = "none"
         env["OTEL_LOGS_EXPORTER"] = "none"
         env["PHOENIXGUARD_TRACING_DISABLED"] = "true"
-    python_exe, pyvenv_launcher = _resolve_python_launcher(env)
+    python_exe, pyvenv_launcher = _resolve_python_launcher(env, script_dir)
+    env["PHOENIXGUARD_PYTHON_EXE"] = str(python_exe)
+    venv_dir = _python_venv_dir(str(python_exe))
+    if venv_dir is not None:
+        env["VIRTUAL_ENV"] = str(venv_dir)
+        scripts_dir = str(Path(str(python_exe)).parent)
+        existing_path = str(env.get("PATH", "") or "")
+        if scripts_dir and not existing_path.lower().startswith(scripts_dir.lower() + os.pathsep):
+            env["PATH"] = scripts_dir + os.pathsep + existing_path
     if pyvenv_launcher and Path(str(python_exe)).resolve() != Path(str(pyvenv_launcher)).resolve():
         env["__PYVENV_LAUNCHER__"] = pyvenv_launcher
     if runtime_lock_path is not None:
@@ -766,6 +793,12 @@ def _ensure_session(
 
 
 def main() -> int:
+    script_dir = PROJECT_ROOT
+    os.environ["PHOENIXGUARD_RUNTIME_DIR"] = str(script_dir / ".codex_runtime")
+    os.environ["PHOENIXGUARD_DATA_DIR"] = str(_default_live_runtime_dir(script_dir, "data_live"))
+    os.environ["PHOENIXGUARD_LOGS_DIR"] = str(_default_live_runtime_dir(script_dir, "logs_live"))
+    os.environ["PHOENIXGUARD_TRACKER_STATUS_FILE"] = str(script_dir / ".codex_runtime" / "tracker_status.json")
+
     parser = argparse.ArgumentParser(description="Start the PhoenixGuard 24/7 locked tracker.")
     parser.add_argument("--host", default=os.getenv("PHOENIXGUARD_MOBILE_API_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("PHOENIXGUARD_MOBILE_API_PORT", "8793")))
@@ -793,19 +826,17 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    script_dir = PROJECT_ROOT
-    os.environ.setdefault("PHOENIXGUARD_DATA_DIR", str(_default_live_runtime_dir(script_dir, "data_live")))
-    os.environ.setdefault("PHOENIXGUARD_LOGS_DIR", str(_default_live_runtime_dir(script_dir, "logs_live")))
     os.environ.setdefault("PHOENIXGUARD_LIVE_STATE_CACHE_TTL_SEC", "5.0")
-    os.environ.setdefault("PHOENIXGUARD_FRONTEND_HEARTBEAT_STALE_SEC", "8.0")
+    os.environ.setdefault("PHOENIXGUARD_FRONTEND_HEARTBEAT_STALE_SEC", "45.0")
     os.environ.setdefault("PHOENIXGUARD_CAPTURE_ONCE_FAST_DISPLAY", "1")
     os.environ.setdefault("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1")
     os.environ.setdefault("PHOENIXGUARD_DISPLAY_REUSE_IDENTICAL_SURFACE", "1")
     os.environ.setdefault("PHOENIXGUARD_DISPLAY_BUSY_REUSE_HEARTBEAT", "1")
     os.environ.setdefault("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "1")
     os.environ.setdefault("PHOENIXGUARD_DISPLAY_SNAPSHOT_STALE_RESET_SEC", "30.0")
-    os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_POLL_SEC", "0.50")
-    os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC", "0.35")
+    os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_POLL_SEC", "15.0")
+    os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC", "1.0")
+    os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC", "15.0")
     os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "1")
     os.environ.setdefault("PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB", "0")
@@ -814,6 +845,7 @@ def main() -> int:
     os.environ.setdefault("PHOENIXGUARD_LIVE_WINDOW_JPEG_QUALITY", "78")
     os.environ.setdefault("PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N", "300")
+    os.environ.setdefault("PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC", "300.0")
     os.environ.setdefault("PHOENIXGUARD_TRUST_LOCKED_WINDOW_DESCRIPTOR", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_MIN_CAPTURE_INTERVAL_SEC", "0.5")
@@ -1026,10 +1058,10 @@ def main() -> int:
                 try:
                     heartbeat_poll_sec = max(
                         0.05,
-                        float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_POLL_SEC", "0.25") or "0.25"),
+                        float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_POLL_SEC", "15.0") or "15.0"),
                     )
                 except ValueError:
-                    heartbeat_poll_sec = 0.25
+                    heartbeat_poll_sec = 15.0
                 for _ in range(max(1, int(round(10.0 / heartbeat_poll_sec)))):
                     time.sleep(heartbeat_poll_sec)
                     if api_proc.poll() is not None:

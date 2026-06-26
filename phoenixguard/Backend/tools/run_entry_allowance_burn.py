@@ -22,6 +22,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 SCHEMA_VERSION = "PG_ENTRY_ALLOWANCE_BURN_V1"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOFT_BLOCKED_STUDY_REASONS = {
     "REASONING_WATCH",
     "REASONING_WAIT_FOR_PULLBACK",
@@ -46,11 +47,19 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def runtime_root() -> Path:
+    configured = os.getenv("PHOENIXGUARD_RUNTIME_DIR")
+    if configured:
+        return Path(configured)
+    return PROJECT_ROOT / ".codex_runtime"
+
+
 def local_root() -> Path:
-    base = os.getenv("LOCALAPPDATA")
-    if base:
-        return Path(base) / "PhoenixGuard"
-    return Path.cwd() / ".codex_runtime"
+    return runtime_root()
+
+
+def session_runtime_dir(session_id: str) -> Path:
+    return runtime_root() / "data_live" / "mobile_api" / "window_tracker" / "sessions" / session_id
 
 
 def write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -637,7 +646,7 @@ def render_live_json_overlay(live: Mapping[str, Any], window_image: Image.Image)
 
 
 def session_artifact_payloads(session_id: str) -> list[dict[str, Any]]:
-    session_dir = local_root() / "codex_runtime" / "data_live" / "mobile_api" / "window_tracker" / "sessions" / session_id
+    session_dir = session_runtime_dir(session_id)
     rows: list[dict[str, Any]] = []
     for name in ("session.json", "display_state.json"):
         try:
@@ -961,9 +970,8 @@ def protected_allowed_entry_evidence_paths(evidence_dir: Path) -> set[str]:
 
 
 def storage_guard(out_dir: Path, session_id: str) -> dict[str, Any]:
-    root = local_root()
-    repo_runtime = Path.cwd() / ".codex_runtime"
-    session_dir = root / "codex_runtime" / "data_live" / "mobile_api" / "window_tracker" / "sessions" / session_id
+    repo_runtime = runtime_root()
+    session_dir = session_runtime_dir(session_id)
     protected = protected_session_artifact_paths(session_dir)
     entry_evidence_dir = out_dir / "entry_evidence"
     protected_entry_evidence = protected_allowed_entry_evidence_paths(entry_evidence_dir)
@@ -1023,7 +1031,7 @@ def storage_guard(out_dir: Path, session_id: str) -> dict[str, Any]:
 
 
 def artifact_health(session_id: str) -> dict[str, Any]:
-    session_dir = local_root() / "codex_runtime" / "data_live" / "mobile_api" / "window_tracker" / "sessions" / session_id
+    session_dir = session_runtime_dir(session_id)
     result: dict[str, Any] = {"session_dir": str(session_dir), "artifact_count": 0, "artifact_mb": 0.0, "counts": {}, "scan_errors": 0}
     if not session_dir.exists():
         return result

@@ -208,6 +208,19 @@ def _sequence(value: Any) -> list[Any]:
     return []
 
 
+def _point_rows(value: Any) -> list[list[float]]:
+    points: list[list[float]] = []
+    for item in _sequence(value):
+        point = _sequence(item)
+        if len(point) < 2:
+            continue
+        x_value = _float(point[0], float("nan"))
+        y_value = _float(point[1], float("nan"))
+        if x_value == x_value and y_value == y_value:
+            points.append([round(float(x_value), 6), round(float(y_value), 6)])
+    return points
+
+
 def _text(value: Any, default: str = "") -> str:
     text = str(value or "").strip()
     return text or default
@@ -980,6 +993,12 @@ class _RegistryBuilder:
             if bbox is None or normalize_bbox(bbox) is None:
                 return
             anchor_indices, anchor_touch_points = _candle_anchor_evidence(raw, bbox, candles)
+            explicit_anchor_indices = _anchor_indices_from_raw(raw)
+            explicit_touch_points = _point_rows(raw.get("touch_points"))
+            if explicit_touch_points:
+                anchor_touch_points = explicit_touch_points
+                if explicit_anchor_indices:
+                    anchor_indices = explicit_anchor_indices
             side_value = _upper_side(side if side is not None else raw.get("side", raw.get("direction", signal.get("action"))))
             object_id = _stable_id(session_id, object_type, source_path, source_key)
             track_id = _text(raw.get("track_id") or raw.get("persistent_id"), object_id)

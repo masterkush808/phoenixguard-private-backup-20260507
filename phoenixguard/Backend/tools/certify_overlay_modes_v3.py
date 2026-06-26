@@ -189,7 +189,7 @@ def main() -> int:
     samples: list[dict[str, Any]] = []
     modes = _mode_list(args.modes, all_modes=args.all_modes)
     for mode in modes:
-        response = http_json(f"{base}/v1/mobile/live/state/v3/{session_q}?mode={quote_session(mode)}&compact=1", timeout=args.timeout)
+        response = http_json(f"{base}/v1/mobile/live/state/v3/{session_q}?mode={quote_session(mode)}", timeout=args.timeout)
         payload = _mapping(response.payload)
         sample: dict[str, Any] = {
             "mode": mode,

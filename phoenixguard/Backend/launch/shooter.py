@@ -41,8 +41,9 @@ PACKAGE_SCHEMA_VERSION = "PG_ALLOWANCE_PACKAGE_V1"
 EXECUTION_AUTHORITY = "PG_EXECUTION_PACKET_V3"
 DEFAULT_BASE_URL = "http://127.0.0.1:8793"
 DEFAULT_SESSION_ID = "pocket-live-8788"
-DEFAULT_POLL_SECONDS = 0.20
+DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 5.0
+DEFAULT_HEARTBEAT_SECONDS = 4.0
 REPORT_TTL_SECONDS = 8.0
 _RUNTIME_DIR = PROJECT_ROOT / ".codex_runtime"
 _SHOOTER_HANDSHAKE_PATH = _RUNTIME_DIR / "shooter_handshake.json"
@@ -288,6 +289,7 @@ def run_reporter(
     session_id: str,
     poll_sec: float,
     timeout_sec: float,
+    heartbeat_sec: float,
     once: bool,
     handshake_path: Path,
     runtime_guard: PhoenixRuntimeSingletonGuardV3 | None = None,
@@ -298,12 +300,15 @@ def run_reporter(
     LOGGER.info("Polling %s", url)
     last_packet_id = ""
     last_waiting_write_epoch = 0.0
+    last_waiting_reason = "WAITING_FOR_EXECUTION_PACKET"
+    last_report_was_waiting = True
 
     def publish_waiting(reason: str, *, force: bool = False) -> None:
-        nonlocal last_waiting_write_epoch
+        nonlocal last_waiting_reason, last_waiting_write_epoch, last_report_was_waiting
         now_value = time.time()
         if not force and now_value - last_waiting_write_epoch < 1.0:
             return
+        last_waiting_reason = reason
         publish_waiting_report(
             session_id=session_id,
             base_url=base_url,
@@ -313,18 +318,22 @@ def run_reporter(
             now_epoch=now_value,
         )
         last_waiting_write_epoch = now_value
+        last_report_was_waiting = True
 
     publish_waiting("WAITING_FOR_EXECUTION_PACKET", force=True)
     while True:
         if runtime_guard is not None and runtime_owner_token:
-            runtime_guard.heartbeat(
+            heartbeat = runtime_guard.heartbeat(
                 owner_token=runtime_owner_token,
                 updates={"session_id": session_id, "base_url": base_url, "shooter_pid": os.getpid()},
             )
+            if not heartbeat.ok:
+                LOGGER.debug("Runtime singleton heartbeat degraded: %s", heartbeat.reason)
         try:
             packet = _read_json_url(url, timeout_sec=timeout_sec)
             report = publish_allowed_package_report(packet, source_url=url, path=handshake_path)
             if report is not None:
+                last_report_was_waiting = False
                 packet_id = _text(report.get("packet_id"))
                 if packet_id != last_packet_id:
                     LOGGER.info(
@@ -353,7 +362,13 @@ def run_reporter(
                 LOGGER.debug("Package reporter waiting: %s", exc)
         if once:
             return 0
-        time.sleep(max(0.05, poll_sec))
+        sleep_deadline = time.time() + max(0.05, poll_sec)
+        heartbeat_interval = max(1.0, min(float(heartbeat_sec), REPORT_TTL_SECONDS / 2.0))
+        while time.time() < sleep_deadline:
+            if last_report_was_waiting:
+                publish_waiting(last_waiting_reason)
+            remaining = max(0.05, sleep_deadline - time.time())
+            time.sleep(min(heartbeat_interval, remaining))
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -367,6 +382,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id", default=DEFAULT_SESSION_ID)
     parser.add_argument("--poll", type=float, default=DEFAULT_POLL_SECONDS)
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--heartbeat", type=float, default=DEFAULT_HEARTBEAT_SECONDS)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--handshake-path", default=str(_SHOOTER_HANDSHAKE_PATH))
     return parser
@@ -400,6 +416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             session_id=str(args.session_id),
             poll_sec=float(args.poll),
             timeout_sec=float(args.timeout),
+            heartbeat_sec=float(args.heartbeat),
             once=bool(args.once or command == "once"),
             handshake_path=Path(str(args.handshake_path)),
             runtime_guard=guard,

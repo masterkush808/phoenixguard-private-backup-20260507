@@ -215,6 +215,7 @@ def _slugify_session_id(value: str) -> str:
 
 def _runtime_data_dir_candidates() -> list[Path]:
     candidates: list[Path] = [Path(RUNTIME.data_dir)]
+    candidates.append(PROJECT_ROOT / ".codex_runtime" / "data_live")
     lock_path = PROJECT_ROOT / ".codex_runtime" / "phoenixguard_stack.lock.json"
     try:
         lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -224,9 +225,6 @@ def _runtime_data_dir_candidates() -> list[Path]:
         lock_data_dir = str(cast(Mapping[str, object], lock_payload).get("data_dir") or "").strip()
         if lock_data_dir:
             candidates.append(Path(lock_data_dir))
-    local_app_data = str(os.getenv("LOCALAPPDATA") or "").strip()
-    if local_app_data:
-        candidates.append(Path(local_app_data) / "PhoenixGuard" / "codex_runtime" / "data_live")
     unique: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:

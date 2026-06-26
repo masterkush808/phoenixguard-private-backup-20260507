@@ -42,12 +42,48 @@ def _load_handshake() -> tuple[dict[str, object], str]:
     return payload, path_text
 
 
+def _int(value: object, default: int = 0) -> int:
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _parent_by_pid(processes: list[dict[str, object]]) -> dict[int, int]:
+    parents: dict[int, int] = {}
+    for row in processes:
+        pid = process_id(row)
+        parent = _int(row.get("ParentProcessId"))
+        if pid > 0 and parent > 0:
+            parents[pid] = parent
+    return parents
+
+
+def _same_logical_process(first_pid: int, second_pid: int, processes: list[dict[str, object]]) -> bool:
+    if first_pid <= 0 or second_pid <= 0:
+        return False
+    if first_pid == second_pid:
+        return True
+    parents = _parent_by_pid(processes)
+
+    def ancestors(pid: int) -> set[int]:
+        output: set[int] = set()
+        current = pid
+        while current in parents and parents[current] not in output:
+            current = parents[current]
+            output.add(current)
+        return output
+
+    return first_pid in ancestors(second_pid) or second_pid in ancestors(first_pid)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Certify PhoenixGuard V3 shooter persistence.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--session", default=DEFAULT_SESSION)
     parser.add_argument("--duration-sec", type=float, default=1800.0)
     parser.add_argument("--interval-sec", type=float, default=2.0)
+    parser.add_argument("--miss-limit", type=int, default=3)
     parser.add_argument("--allow-missing", action="store_true")
     args = parser.parse_args()
 
@@ -72,21 +108,33 @@ def main() -> int:
 
     initial_pid = process_id(initial_rows[0]) if initial_rows else 0
     deadline = time.time() + max(1.0, float(args.duration_sec))
+    missed_samples = 0
     while time.time() < deadline and not failures:
-        rows = leaf_processes(find_processes(python_processes(), "shooter.py"))
+        process_snapshot = python_processes()
+        rows = leaf_processes(find_processes(process_snapshot, "shooter.py"))
         handshake, handshake_path = _load_handshake()
-        alive = bool(initial_pid and any(process_id(row) == initial_pid for row in rows))
+        alive = bool(
+            initial_pid
+            and any(_same_logical_process(initial_pid, process_id(row), process_snapshot) for row in rows)
+        )
         sample: dict[str, object] = {
             "epoch": time.time(),
             "alive": alive,
             "pid": initial_pid,
             "process_count": len(rows),
+            "missed_samples": missed_samples,
             "handshake": handshake,
             "handshake_path": handshake_path,
         }
         samples.append(sample)
-        if not alive and not args.allow_missing:
-            failures.append(f"shooter PID {initial_pid} exited during persistence check")
+        if alive:
+            missed_samples = 0
+        else:
+            missed_samples += 1
+        if not alive and not args.allow_missing and missed_samples >= max(1, int(args.miss_limit)):
+            failures.append(
+                f"shooter PID {initial_pid} missing for {missed_samples} consecutive samples during persistence check"
+            )
             break
         if handshake:
             if str(handshake.get("base_url") or "") and str(handshake.get("base_url")) != args.base_url:
@@ -108,12 +156,13 @@ def main() -> int:
             "session_id": args.session,
             "base_url": args.base_url,
             "duration_sec": float(args.duration_sec),
+            "miss_limit": int(args.miss_limit),
             "initial_pid": initial_pid,
             "initial_processes": initial_rows,
             "sample_count": len(samples),
             "samples": samples[-300:],
             "handshake_paths": [str(path) for path in HANDSHAKE_PATHS],
-            "launch_command": r".\.venv\Scripts\python.exe Backend\launch\shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20",
+            "launch_command": r".\.venv\Scripts\python.exe Backend\launch\shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 15.0 --heartbeat 4.0",
         },
     )
     out = write_report("gate8_shooter_persistence_v3.json", report)

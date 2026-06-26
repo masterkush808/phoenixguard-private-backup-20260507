@@ -1,6 +1,6 @@
 param(
     [string]$Host = $(if ($env:PHOENIXGUARD_MOBILE_API_HOST) { $env:PHOENIXGUARD_MOBILE_API_HOST } else { '127.0.0.1' }),
-    [int]$Port = $(if ($env:PHOENIXGUARD_MOBILE_API_PORT) { [int]$env:PHOENIXGUARD_MOBILE_API_PORT } else { 8787 }),
+    [int]$Port = $(if ($env:PHOENIXGUARD_MOBILE_API_PORT) { [int]$env:PHOENIXGUARD_MOBILE_API_PORT } else { 8793 }),
     [switch]$Bootstrap
 )
 
@@ -32,6 +32,16 @@ if (-not (Test-Path -LiteralPath $PythonPath)) {
 }
 
 . $ActivateScriptPath
+
+$env:PHOENIXGUARD_PYTHON_EXE = $PythonPath
+$env:VIRTUAL_ENV = Join-Path -Path $ProjectRoot -ChildPath '.venv'
+$venvScriptsPath = Join-Path -Path $env:VIRTUAL_ENV -ChildPath 'Scripts'
+$env:PATH = (@($venvScriptsPath) + (($env:PATH -split [System.IO.Path]::PathSeparator) | Where-Object { $_ -and $_ -ne $venvScriptsPath })) -join [System.IO.Path]::PathSeparator
+$runtimeDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
+$env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
+$env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
+$env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
+$env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
 
 if ($Bootstrap) {
     Write-Host "Installing Python dependencies for the mobile API..."

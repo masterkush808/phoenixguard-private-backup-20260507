@@ -153,9 +153,11 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "function overlayModeAllows" in dashboard
     assert "function overlayTypeAllowedInMode" in dashboard
     assert "function applyFrontendOverlayModeBudget" in dashboard
-    assert "CLEAN_LIVE: {objects: 56, labels: 18}" in dashboard
+    assert "CLEAN_LIVE: {objects: 32, labels: 10}" in dashboard
+    assert "DASHBOARD_REFRESH_FAST_INTERVAL_MS = 15000" in dashboard
+    assert "DASHBOARD_HEARTBEAT_INTERVAL_MS = 15000" in dashboard
     assert "function frontendOverlayLabelCandidate" in dashboard
-    assert 'clean_live: "FULL_HISTORY_READ"' in dashboard
+    assert 'clean_live: "CLEAN_LIVE"' in dashboard
     assert "function backendObjectOverlayReady" in dashboard
     assert 'SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"])' in dashboard
     assert 'TRENDLINES: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"])' in dashboard
@@ -175,7 +177,7 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "SUPPORT_TRENDLINE" in dashboard
     assert "RESISTANCE_TRENDLINE" in dashboard
     assert "INNER_TRENDLINE" in dashboard
-    assert 'TRIGGER: new Set(["RETEST_BOX", "SNIPER_ENTRY_BOX"])' in dashboard
+    assert 'TRIGGER: new Set(["TRIGGER_BOX", "TRIGGER_ZONE", "RETEST_BOX", "SNIPER_ENTRY_BOX"])' in dashboard
     assert "function payloadMatchesSelectedOverlayMode" in dashboard
     assert ".surface-hotspot.label-hidden span" in dashboard
     assert "const labelHidden = box.label_hidden === true || box.label_hidden === \"true\";" in dashboard

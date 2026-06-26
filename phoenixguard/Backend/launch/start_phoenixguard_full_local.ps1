@@ -6,7 +6,7 @@ param(
     [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 1.0 }),
     [ValidateSet('FULL', 'TRACKER_ONLY', 'TRACKER_PLUS_COUNCIL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED')]
     [string]$Profile = $(if ($env:PHOENIXGUARD_LOCAL_PROFILE) { $env:PHOENIXGUARD_LOCAL_PROFILE } else { 'FULL' }),
-    [double]$ShooterPollSec = 0.05,
+    [double]$ShooterPollSec = $(if ($env:PHOENIXGUARD_SHOOTER_POLL_SEC) { [double]$env:PHOENIXGUARD_SHOOTER_POLL_SEC } else { 15.0 }),
     [double]$ShooterMinConfidence = 0.2,
     [ValidateSet('PACKAGE_REPORTER')]
     [string]$ShooterMode = $(if ($env:PHOENIXGUARD_SHOOTER_MODE) { $env:PHOENIXGUARD_SHOOTER_MODE } else { 'PACKAGE_REPORTER' }),
@@ -60,13 +60,12 @@ if (-not (Test-Path -LiteralPath $pythonPath)) {
     throw "Python executable not found at '$pythonPath'."
 }
 
-$defaultRuntimeDir = if ($env:PHOENIXGUARD_RUNTIME_DIR) {
-    $env:PHOENIXGUARD_RUNTIME_DIR
-} elseif ($env:LOCALAPPDATA) {
-    Join-Path -Path $env:LOCALAPPDATA -ChildPath 'PhoenixGuard\codex_runtime'
-} else {
-    Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
-}
+$env:PHOENIXGUARD_PYTHON_EXE = $pythonPath
+$env:VIRTUAL_ENV = Join-Path -Path $ProjectRoot -ChildPath '.venv'
+$venvScriptsPath = Join-Path -Path $env:VIRTUAL_ENV -ChildPath 'Scripts'
+$env:PATH = (@($venvScriptsPath) + (($env:PATH -split [System.IO.Path]::PathSeparator) | Where-Object { $_ -and $_ -ne $venvScriptsPath })) -join [System.IO.Path]::PathSeparator
+
+$defaultRuntimeDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
 $runtimeDir = $defaultRuntimeDir
 $statusPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
 $trackerStdoutPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stdout.log'
@@ -82,17 +81,15 @@ $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS = if ($env:PHOENIXGUARD_LIVE_MINIMA
 $env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N = if ($env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N) { $env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N } else { '300' }
 $env:PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH = if ($env:PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH) { $env:PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH } else { '320' }
 $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT = if ($env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT) { $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT } else { '1' }
-$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC = if ($env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC) { $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC } else { '0.5' }
+$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC = if ($env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC) { $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC } else { '15.0' }
+$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_POLL_SEC = if ($env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_POLL_SEC) { $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_POLL_SEC } else { '15.0' }
+$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC = if ($env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC) { $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC } else { '1.0' }
+$env:PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC = if ($env:PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC) { $env:PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC } else { '300.0' }
 $env:PHOENIXGUARD_FAST_FOCUS_PREVIEW = if ($env:PHOENIXGUARD_FAST_FOCUS_PREVIEW) { $env:PHOENIXGUARD_FAST_FOCUS_PREVIEW } else { '1' }
-if (-not $env:PHOENIXGUARD_DATA_DIR) {
-    $env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
-}
-if (-not $env:PHOENIXGUARD_LOGS_DIR) {
-    $env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
-}
-if (-not $env:PHOENIXGUARD_TRACKER_STATUS_FILE) {
-    $env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
-}
+$env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
+$env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
+$env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
+$env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
 
 $launchShooter = @('FULL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED') -contains $Profile
 $startupTestSignal = $false
@@ -328,21 +325,26 @@ try {
     if ($session -and $launchShooter) {
         Write-Host "Starting shooter package reporter against $baseUrl"
         $effectiveShooterPollSec = [double]$ShooterPollSec
-        $escapedRoot = $ProjectRoot.Replace("'", "''")
-        $escapedSessionId = $SessionId.Replace("'", "''")
-        $escapedBaseUrl = $baseUrl.Replace("'", "''")
-        $shooterCommand = @(
-            "cd '$escapedRoot'",
-            "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='0'",
-            ".\.venv\Scripts\python.exe 'Backend\launch\shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll $effectiveShooterPollSec"
-        ) -join '; '
-        Start-Process powershell -ArgumentList @(
-            '-NoExit',
-            '-ExecutionPolicy',
-            'Bypass',
-            '-Command',
-            $shooterCommand
-        ) -WindowStyle Hidden | Out-Null
+        $pollText = ([string]$effectiveShooterPollSec).Replace(',', '.')
+        $logDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime\logs'
+        New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $outPath = Join-Path -Path $logDir -ChildPath "shooter-full-local-$stamp.out.log"
+        $errPath = Join-Path -Path $logDir -ChildPath "shooter-full-local-$stamp.err.log"
+        $shooterArgs = @(
+            'Backend\launch\shooter.py',
+            'signal',
+            '--session-id',
+            $SessionId,
+            '--base-url',
+            $baseUrl,
+            '--poll',
+            $pollText,
+            '--heartbeat',
+            '4.0'
+        )
+        Start-Process -FilePath $pythonPath -ArgumentList $shooterArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $outPath -RedirectStandardError $errPath | Out-Null
+        Write-Host "Shooter package reporter log: $errPath"
     } elseif ($session) {
         Write-Host "Profile $Profile selected; tracker started without shooter."
     }

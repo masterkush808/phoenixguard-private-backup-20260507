@@ -439,7 +439,9 @@ def test_progression_path_prefers_line_geometry_over_broad_context_bounds() -> N
     assert progression["anchor_type"] == "POLYGON"
     assert progression["line_points"] == [[100.0, 360.0], [220.0, 320.0], [360.0, 210.0], [520.0, 180.0]]
     assert progression["bounds"] == [100.0, 180.0, 520.0, 360.0]
-    assert overlay_is_visible(progression, "CLEAN_LIVE") is True
+    assert overlay_is_visible(progression, "CLEAN_LIVE") is False
+    assert overlay_is_visible(progression, "FULL_HISTORY_READ") is True
+    assert overlay_is_visible(progression, "REPLAY") is True
 
 
 def test_coordinate_normalization_converts_between_chart_pixels_and_normalized() -> None:
@@ -482,7 +484,7 @@ def test_semantic_target_invalidation_and_path_layers_override_legacy_layers() -
     assert overlay_is_visible(invalidation, "INSPECTOR") is True
 
 
-def test_mode_resolver_allows_clean_live_replay_but_hides_debug_expired_and_broker_controls() -> None:
+def test_mode_resolver_keeps_clean_live_light_but_allows_history_in_replay() -> None:
     now_ms = 10_000
     overlays = [
         _base_overlay(overlay_id="live-sniper", created_at_ms=9000, ttl_ms=5000),
@@ -513,11 +515,130 @@ def test_mode_resolver_allows_clean_live_replay_but_hides_debug_expired_and_brok
     calibration = resolve_visible_overlays(overlays, "CALIBRATION", now_ms=now_ms)
     inspector = resolve_visible_overlays(overlays, "INSPECTOR", now_ms=now_ms)
 
-    assert {"live-sniper", "replay-1"}.issubset({overlay["overlay_id"] for overlay in live})
+    assert {overlay["overlay_id"] for overlay in live} == {"live-sniper"}
     assert "replay-1" in {overlay["overlay_id"] for overlay in replay}
     assert "broker-1" in {overlay["overlay_id"] for overlay in calibration}
     assert "debug-1" in {overlay["overlay_id"] for overlay in inspector}
     assert all(overlay["overlay_id"] != "expired-1" for overlay in inspector)
+
+
+def test_clean_live_filters_lazy_history_payload_without_mutating_full_context() -> None:
+    overlays = [
+        _base_overlay(
+            overlay_id="chart-bounds",
+            type="CHART_BOUNDS",
+            layer="chart_bounds",
+            label="CHART BOUNDS",
+            visible_modes=["ACTIVE_CONTEXT", "FULL_HISTORY_READ", "INSPECTOR"],
+        ),
+        _base_overlay(
+            overlay_id="current-candle",
+            type="CURRENT_CANDLE",
+            layer="recent_candles",
+            label="NOW",
+            visible_modes=["ACTIVE_CONTEXT", "FULL_HISTORY_READ", "INSPECTOR"],
+        ),
+        _base_overlay(
+            overlay_id="local-pullback",
+            type="PULLBACK_BOX",
+            layer="local_swings",
+            label="LOCAL",
+            visible_modes=["LOCAL", "FULL_HISTORY_READ", "INSPECTOR"],
+        ),
+        _base_overlay(
+            overlay_id="supply-zone",
+            type="SUPPLY_ZONE",
+            layer="supply_demand",
+            label="SUPPLY",
+            visible_modes=["SUPPLY_DEMAND", "FULL_HISTORY_READ", "INSPECTOR"],
+        ),
+        _base_overlay(
+            overlay_id="demand-zone",
+            type="DEMAND_ZONE",
+            layer="supply_demand",
+            side="BUY",
+            label="DEMAND",
+            visible_modes=["SUPPLY_DEMAND", "FULL_HISTORY_READ", "INSPECTOR"],
+        ),
+        _base_overlay(
+            overlay_id="opposing-force",
+            type="OPPOSING_FORCE",
+            layer="supply_demand",
+            label="OPPOSING FORCE",
+            visible_modes=["TARGET", "FULL_HISTORY_READ", "INSPECTOR"],
+        ),
+        _base_overlay(
+            overlay_id="support-trendline",
+            type="SUPPORT_TRENDLINE",
+            layer="trendlines",
+            label="SUPPORT TRENDLINE",
+            visible_modes=["TRENDLINES", "FULL_HISTORY_READ", "INSPECTOR"],
+        ),
+        _base_overlay(
+            overlay_id="sniper-entry",
+            type="SNIPER_ENTRY_BOX",
+            layer="trigger_zones",
+            label="SNIPER SELL",
+            visible_modes=["TRIGGER", "FULL_HISTORY_READ", "INSPECTOR"],
+        ),
+        _base_overlay(
+            overlay_id="target-zone",
+            type="TARGET_ZONE_BOX",
+            layer="target_zones",
+            label="TARGET",
+            visible_modes=["TARGET", "FULL_HISTORY_READ", "INSPECTOR"],
+        ),
+        _base_overlay(
+            overlay_id="council-marker",
+            type="MODEL_COUNCIL_MARKER",
+            layer="active_council_decision",
+            label="MODEL COUNCIL MARKER",
+            visible_modes=["COUNCIL", "FULL_HISTORY_READ", "INSPECTOR"],
+        ),
+        _base_overlay(
+            overlay_id="global-history",
+            type="IMPULSE_BOX",
+            layer="major_swings",
+            label="GLOBAL",
+            visible_modes=["CLEAN_LIVE", "FULL_HISTORY_READ", "INSPECTOR"],
+        ),
+        _base_overlay(
+            overlay_id="progression-history",
+            type="PROGRESSION_PATH",
+            layer="historical_replay",
+            label="HISTORICAL PROGRESSION",
+            visible_modes=["CLEAN_LIVE", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+        ),
+        _base_overlay(
+            overlay_id="replay-entry",
+            type="REPLAY_ENTRY",
+            layer="historical_replay",
+            label="REPLAY ENTRY",
+            visible_modes=["CLEAN_LIVE", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+        ),
+    ]
+
+    clean = resolve_visible_overlays(overlays, "CLEAN_LIVE", apply_label_layout=False)
+    full_history = resolve_visible_overlays(overlays, "FULL_HISTORY_READ", apply_label_layout=False)
+    replay = resolve_visible_overlays(overlays, "REPLAY", apply_label_layout=False)
+
+    assert {overlay["overlay_id"] for overlay in clean} == {
+        "chart-bounds",
+        "current-candle",
+        "local-pullback",
+        "supply-zone",
+        "demand-zone",
+        "opposing-force",
+        "support-trendline",
+        "sniper-entry",
+        "target-zone",
+        "council-marker",
+    }
+    assert {"global-history", "progression-history", "replay-entry"}.issubset(
+        {overlay["overlay_id"] for overlay in full_history}
+    )
+    assert {"progression-history", "replay-entry"}.issubset({overlay["overlay_id"] for overlay in replay})
+    assert overlays[-1]["visible_modes"] == ["CLEAN_LIVE", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"]
 
 
 def test_view_mode_profile_exposes_layer_policy() -> None:
@@ -527,10 +648,13 @@ def test_view_mode_profile_exposes_layer_policy() -> None:
     supply = view_mode_profile("supply-demand")
     trigger = view_mode_profile("trigger")
 
-    assert clean["layer_visibility"]["historical_replay"] is True
+    assert clean["layer_visibility"]["historical_replay"] is False
+    assert clean["layer_visibility"]["major_swings"] is False
     assert clean["layer_visibility"]["trendlines"] is True
     assert clean["layer_visibility"]["diagnostics"] is False
     assert clean["layer_visibility"]["prediction_path"] is False
+    assert "IMPULSE_BOX" not in clean["allowed_types"]
+    assert "PROGRESSION_PATH" not in clean["allowed_types"]
     assert council["layer_visibility"]["recent_candles"] is False
     assert council["layer_visibility"]["trigger_zones"] is False
     assert set(council["allowed_types"]) == {

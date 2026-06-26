@@ -5094,7 +5094,8 @@ def test_tracker_dashboard_fits_selected_surface_without_width_only_crop() -> No
     assert "displayOnlyOverlayAuthorityLocked(session)" in dashboard_html
     assert "rawFallbackVisible || state.surface.overlayStale || !overlayFrameReady" in dashboard_html
     assert "else if (hasChart)" in dashboard_html
-    assert "DASHBOARD_REFRESH_INTERVAL_MS = 250" in dashboard_html
+    assert "DASHBOARD_REFRESH_FAST_INTERVAL_MS = 15000" in dashboard_html
+    assert "DASHBOARD_HEARTBEAT_INTERVAL_MS = 15000" in dashboard_html
 
 
 def test_tracker_dashboard_replay_overlays_use_professional_label_budget() -> None:
@@ -5107,8 +5108,8 @@ def test_tracker_dashboard_replay_overlays_use_professional_label_budget() -> No
     ).read_text(encoding="utf-8")
 
     assert "function frontendOverlayBudget" in dashboard_html
-    assert "REPLAY: {objects: 64, labels: 20}" in dashboard_html
-    assert "FULL_HISTORY_READ: {objects: 64, labels: 20}" in dashboard_html
+    assert "REPLAY: {objects: null, labels: 28}" in dashboard_html
+    assert "FULL_HISTORY_READ: {objects: null, labels: 28}" in dashboard_html
     assert "function frontendOverlayPriority" in dashboard_html
     assert "function frontendOverlayLabelCandidate" in dashboard_html
     assert "function resolveLabelCollisions" in dashboard_html

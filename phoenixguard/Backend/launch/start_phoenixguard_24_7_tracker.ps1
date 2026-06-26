@@ -43,6 +43,16 @@ if (-not (Test-Path -LiteralPath $PythonPath)) {
 
 . $ActivateScriptPath
 
+$env:PHOENIXGUARD_PYTHON_EXE = $PythonPath
+$env:VIRTUAL_ENV = Join-Path -Path $ProjectRoot -ChildPath '.venv'
+$venvScriptsPath = Join-Path -Path $env:VIRTUAL_ENV -ChildPath 'Scripts'
+$env:PATH = (@($venvScriptsPath) + (($env:PATH -split [System.IO.Path]::PathSeparator) | Where-Object { $_ -and $_ -ne $venvScriptsPath })) -join [System.IO.Path]::PathSeparator
+$runtimeDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
+$env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
+$env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
+$env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
+$env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
+
 $env:PHOENIXGUARD_MOBILE_API_HOST = $ApiHost
 $env:PHOENIXGUARD_MOBILE_API_PORT = "$Port"
 $env:PHOENIXGUARD_TRACKER_SESSION_ID = $SessionId

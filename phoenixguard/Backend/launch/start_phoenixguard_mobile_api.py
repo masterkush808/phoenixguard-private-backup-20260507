@@ -49,8 +49,16 @@ def _configure_windows_server_loop() -> None:
 if __name__ == "__main__":
     _disable_local_tracing_export()
     _configure_windows_server_loop()
+    runtime_dir = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or PROJECT_ROOT / ".codex_runtime")
+    data_dir = Path(os.getenv("PHOENIXGUARD_DATA_DIR") or runtime_dir / "data_live")
+    logs_dir_path = Path(os.getenv("PHOENIXGUARD_LOGS_DIR") or runtime_dir / "logs_live")
+    status_file = Path(os.getenv("PHOENIXGUARD_TRACKER_STATUS_FILE") or runtime_dir / "tracker_status.json")
+    os.environ["PHOENIXGUARD_RUNTIME_DIR"] = str(runtime_dir)
+    os.environ["PHOENIXGUARD_DATA_DIR"] = str(data_dir)
+    os.environ["PHOENIXGUARD_LOGS_DIR"] = str(logs_dir_path)
+    os.environ["PHOENIXGUARD_TRACKER_STATUS_FILE"] = str(status_file)
     log_handlers: list[logging.Handler] = [logging.StreamHandler()]
-    logs_dir = str(os.getenv("PHOENIXGUARD_LOGS_DIR", "") or "").strip()
+    logs_dir = str(logs_dir_path).strip()
     if logs_dir:
         Path(logs_dir).mkdir(parents=True, exist_ok=True)
         log_handlers.append(logging.FileHandler(Path(logs_dir) / "mobile_api.log", encoding="utf-8"))
@@ -61,7 +69,7 @@ if __name__ == "__main__":
         force=True,
     )
     host = str(os.getenv("PHOENIXGUARD_MOBILE_API_HOST", "127.0.0.1") or "127.0.0.1").strip() or "127.0.0.1"
-    port = int(os.getenv("PHOENIXGUARD_MOBILE_API_PORT", "8787") or "8787")
+    port = int(os.getenv("PHOENIXGUARD_MOBILE_API_PORT", "8793") or "8793")
     session_id = str(os.getenv("PHOENIXGUARD_TRACKER_SESSION_ID", "pocket-live-8788") or "pocket-live-8788").strip()
     base_url = f"http://{host}:{port}"
     guard = guard_from_environment(PROJECT_ROOT)
@@ -73,7 +81,7 @@ if __name__ == "__main__":
         result = guard.acquire(
             session_id=session_id,
             base_url=base_url,
-            data_dir=os.getenv("PHOENIXGUARD_DATA_DIR", ".codex_runtime/data_live"),
+            data_dir=str(data_dir),
             api_port=port,
             launcher_pid=os.getpid(),
             api_pid=os.getpid(),

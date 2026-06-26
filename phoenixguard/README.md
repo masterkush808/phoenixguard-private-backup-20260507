@@ -51,6 +51,23 @@ Before trusting an environment:
 .\.venv\Scripts\python.exe .\Backend\tools\verify_dependency_profile.py --profile dev
 ```
 
+PhoenixGuard should be launched with the repo virtual environment only:
+
+```text
+.\.venv\Scripts\python.exe
+```
+
+Runtime state is stored under the project runtime root:
+
+```text
+.\.codex_runtime\
+```
+
+Do not run PhoenixGuard with bare `python`, and do not point live runtime state at
+`%LOCALAPPDATA%\PhoenixGuard\codex_runtime`. The launchers set
+`PHOENIXGUARD_RUNTIME_DIR`, `PHOENIXGUARD_DATA_DIR`, `PHOENIXGUARD_LOGS_DIR`, and
+`PHOENIXGUARD_TRACKER_STATUS_FILE` to the repo `.codex_runtime` tree.
+
 ## Fast Safe Restart
 
 Use this when you want to stop stale sessions/processes, clear runtime cache, and start the live
@@ -273,7 +290,7 @@ $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS="1"
 $env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N="300"
 $env:PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH="320"
 $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT="1"
-$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC="0.5"
+$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC="15.0"
 $env:PHOENIXGUARD_FAST_FOCUS_PREVIEW="1"
 $env:PHOENIXGUARD_ENABLE_LIVE_SCENARIO_GENERATION="0"
 ```
@@ -338,7 +355,7 @@ To run the reporter once after verification:
 To keep the reporter polling:
 
 ```powershell
-.\.venv\Scripts\python.exe Backend\launch\shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 0.20
+.\.venv\Scripts\python.exe Backend\launch\shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 15.0 --heartbeat 4.0
 ```
 
 Package authority:
@@ -393,7 +410,7 @@ the local package reporter. Keep study sessions separated from broker/external b
 
 - `Backend/launch/launch_phoenixguard_live_ready.ps1`: canonical production launcher.
 - `Backend/launch/shooter.py`: local package reporter, not a broker-click executor.
-- `.codex_runtime\`: live runtime state, traces, packet cache, handshakes, and evidence.
+- `.codex_runtime\`: the single live runtime root for state, traces, packet cache, handshakes, and evidence.
 - `reports\`: launch, trace, validation, and certification outputs.
 
 ## Tracing

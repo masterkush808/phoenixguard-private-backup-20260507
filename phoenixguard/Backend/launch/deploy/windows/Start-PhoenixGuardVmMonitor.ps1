@@ -10,12 +10,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ProjectRoot = (Resolve-Path (Join-Path -Path $script:ScriptRoot -ChildPath '..\..')).Path
+$ProjectRoot = (Resolve-Path (Join-Path -Path $script:ScriptRoot -ChildPath '..\..\..\..')).Path
 $TrackerLauncherPath = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\start_phoenixguard_24_7_tracker.ps1'
 $TrackerScriptPath = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\start_phoenixguard_24_7_tracker.py'
 $ShooterPath = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\shooter.py'
 $RequirementsPath = Join-Path -Path $ProjectRoot -ChildPath 'requirements.txt'
-$PowerShellExe = (Get-Command powershell.exe -ErrorAction Stop).Source
 
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path -Path $script:ScriptRoot -ChildPath 'phoenixguard.vm-monitor.env.ps1'
@@ -37,6 +36,7 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
 . (Resolve-Path -LiteralPath $ConfigPath).Path
 
 $RuntimeRoot = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
+$env:PHOENIXGUARD_RUNTIME_DIR = $RuntimeRoot
 $LogRoot = Join-Path -Path $RuntimeRoot -ChildPath 'vm_monitor_logs'
 if (-not (Test-Path -LiteralPath $LogRoot)) {
     New-Item -ItemType Directory -Path $LogRoot -Force | Out-Null
@@ -244,7 +244,7 @@ $HealthTimeoutSec = [int](Get-EnvOrDefault -Name 'PHOENIXGUARD_MONITOR_HEALTH_TI
 $HealthIntervalSec = [int](Get-EnvOrDefault -Name 'PHOENIXGUARD_MONITOR_HEALTH_INTERVAL_SEC' -DefaultValue '10')
 $UnhealthyRestartsAfter = [int](Get-EnvOrDefault -Name 'PHOENIXGUARD_MONITOR_UNHEALTHY_RESTARTS_AFTER' -DefaultValue '6')
 $RestartDelaySec = [int](Get-EnvOrDefault -Name 'PHOENIXGUARD_MONITOR_RESTART_DELAY_SEC' -DefaultValue '5')
-$ShooterPollSec = [double](Get-EnvOrDefault -Name 'PHOENIXGUARD_SHOOTER_POLL_SEC' -DefaultValue '1.0')
+$ShooterPollSec = [double](Get-EnvOrDefault -Name 'PHOENIXGUARD_SHOOTER_POLL_SEC' -DefaultValue '15.0')
 $ShooterMinConfidence = [double](Get-EnvOrDefault -Name 'PHOENIXGUARD_SHOOTER_MIN_CONFIDENCE' -DefaultValue '0.2')
 $ShooterMaxSignalAge = [double](Get-EnvOrDefault -Name 'PHOENIXGUARD_SHOOTER_MAX_SIGNAL_AGE_SEC' -DefaultValue '8')
 $ShooterCooldownSec = [double](Get-EnvOrDefault -Name 'PHOENIXGUARD_SHOOTER_COOLDOWN_SEC' -DefaultValue '1200')
@@ -275,8 +275,6 @@ $env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC = [string]$CaptureIntervalSec
 
 $VenvPath = Join-Path -Path $ProjectRoot -ChildPath '.venv'
 $PythonPath = Join-Path -Path $VenvPath -ChildPath 'Scripts\python.exe'
-$BasePythonPath = $PythonPath
-$PyVenvLauncherPath = $PythonPath
 if (-not (Test-Path -LiteralPath $VenvPath)) {
     Write-MonitorLog "Creating virtual environment at '$VenvPath'."
     py -3.11 -m venv $VenvPath
@@ -287,23 +285,7 @@ if (-not (Test-Path -LiteralPath $VenvPath)) {
 if (-not (Test-Path -LiteralPath $PythonPath)) {
     throw "Python executable not found at '$PythonPath'."
 }
-$PyVenvConfigPath = Join-Path -Path $VenvPath -ChildPath 'pyvenv.cfg'
-if (Test-Path -LiteralPath $PyVenvConfigPath) {
-    $pythonHome = (
-        Get-Content -LiteralPath $PyVenvConfigPath |
-        Where-Object { $_ -match '^home\s*=\s*(.+)$' } |
-        ForEach-Object { ($_ -replace '^home\s*=\s*', '').Trim() } |
-        Select-Object -First 1
-    )
-    if ($pythonHome) {
-        $candidateBasePython = Join-Path -Path $pythonHome -ChildPath 'python.exe'
-        if (Test-Path -LiteralPath $candidateBasePython) {
-            $BasePythonPath = $candidateBasePython
-        }
-    }
-}
-$env:PHOENIXGUARD_PYTHON_BASE_EXE = $BasePythonPath
-$env:PHOENIXGUARD_PYVENV_LAUNCHER = $PyVenvLauncherPath
+$env:PHOENIXGUARD_PYTHON_EXE = $PythonPath
 
 if ($Bootstrap) {
     Write-MonitorLog 'Installing Python dependencies for VM monitor.'
@@ -816,13 +798,7 @@ function Start-TrackerProcess {
     $outPath = Join-Path -Path $LogRoot -ChildPath "tracker-$stamp.out.log"
     $errPath = Join-Path -Path $LogRoot -ChildPath "tracker-$stamp.err.log"
     Write-MonitorLog "Starting tracker on $BaseUrl with session '$SessionId'."
-    $previousLauncher = [Environment]::GetEnvironmentVariable('__PYVENV_LAUNCHER__', 'Process')
-    [Environment]::SetEnvironmentVariable('__PYVENV_LAUNCHER__', $PyVenvLauncherPath, 'Process')
-    try {
-        return Start-Process -FilePath $BasePythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $outPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
-    } finally {
-        [Environment]::SetEnvironmentVariable('__PYVENV_LAUNCHER__', $previousLauncher, 'Process')
-    }
+    return Start-Process -FilePath $PythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $outPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
 }
 
 function Start-ShooterProcess {
@@ -843,13 +819,7 @@ function Start-ShooterProcess {
     $outPath = Join-Path -Path $LogRoot -ChildPath "shooter-$stamp.out.log"
     $errPath = Join-Path -Path $LogRoot -ChildPath "shooter-$stamp.err.log"
     Write-MonitorLog "Starting shooter against $BaseUrl with $ShooterPollSec second polling."
-    $previousLauncher = [Environment]::GetEnvironmentVariable('__PYVENV_LAUNCHER__', 'Process')
-    [Environment]::SetEnvironmentVariable('__PYVENV_LAUNCHER__', $PyVenvLauncherPath, 'Process')
-    try {
-        return Start-Process -FilePath $BasePythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $outPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
-    } finally {
-        [Environment]::SetEnvironmentVariable('__PYVENV_LAUNCHER__', $previousLauncher, 'Process')
-    }
+    return Start-Process -FilePath $PythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $outPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
 }
 
 try {

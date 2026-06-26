@@ -373,6 +373,17 @@ def test_resolve_python_launcher_keeps_windows_venv_redirector(monkeypatch: pyte
     assert Path(pyvenv_launcher).resolve() == venv_python.resolve()
 
 
+def test_resolve_python_launcher_prefers_repo_venv_when_env_missing(tmp_path: Path) -> None:
+    venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    python_exe, pyvenv_launcher = tracker_launcher.resolve_python_launcher({}, tmp_path)
+
+    assert Path(python_exe).resolve() == venv_python.resolve()
+    assert Path(pyvenv_launcher).resolve() == venv_python.resolve()
+
+
 def test_resolve_python_launcher_keeps_requested_exe_on_non_windows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     requested_python = tmp_path / ".venv" / "bin" / "python"
     requested_python.parent.mkdir(parents=True)

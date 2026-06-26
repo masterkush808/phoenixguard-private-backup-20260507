@@ -5,6 +5,7 @@ param(
     [string]$SessionId = $(if ($env:PHOENIXGUARD_TRACKER_SESSION_ID) { $env:PHOENIXGUARD_TRACKER_SESSION_ID } else { 'pocket-live-8788' }),
     [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 1.0 }),
     [int]$WarmupSeconds = 20,
+    [double]$ShooterPollSec = $(if ($env:PHOENIXGUARD_SHOOTER_POLL_SEC) { [double]$env:PHOENIXGUARD_SHOOTER_POLL_SEC } else { 15.0 }),
     [ValidateSet('chrome', 'default', 'edge')]
     [string]$DashboardBrowser = $(if ($env:PHOENIXGUARD_DASHBOARD_BROWSER) { $env:PHOENIXGUARD_DASHBOARD_BROWSER } else { 'chrome' }),
     [switch]$NoBrowser,
@@ -34,6 +35,11 @@ $pythonPath = Join-Path -Path $ProjectRoot -ChildPath '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $pythonPath)) {
     throw "Python executable not found at '$pythonPath'."
 }
+
+$env:PHOENIXGUARD_PYTHON_EXE = $pythonPath
+$env:VIRTUAL_ENV = Join-Path -Path $ProjectRoot -ChildPath '.venv'
+$venvScriptsPath = Join-Path -Path $env:VIRTUAL_ENV -ChildPath 'Scripts'
+$env:PATH = (@($venvScriptsPath) + (($env:PATH -split [System.IO.Path]::PathSeparator) | Where-Object { $_ -and $_ -ne $venvScriptsPath })) -join [System.IO.Path]::PathSeparator
 
 $baseUrl = 'http://127.0.0.1:8793'
 $dashboardUrl = "$baseUrl/dashboard/live/$SessionId"
@@ -204,29 +210,32 @@ function Start-LiveReadyShooter {
         [Parameter(Mandatory = $true)]
         [string]$SessionId,
         [Parameter(Mandatory = $true)]
+        [double]$PollSec,
+        [Parameter(Mandatory = $true)]
         [string]$BrokerWindowQuery,
         [int]$BrokerWindowHwnd = 0
     )
 
-    $escapedRoot = $ProjectRoot.Replace("'", "''")
-    $escapedSessionId = $SessionId.Replace("'", "''")
-    $escapedBaseUrl = $BaseUrl.Replace("'", "''")
-    $shooterCommand = @(
-        "`$Host.UI.RawUI.WindowTitle = 'PhoenixGuard Shooter Package Reporter - $escapedSessionId'",
-        "cd '$escapedRoot'",
-        "`$env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS='0'",
-        "Write-Host 'PhoenixGuard shooter package reporter is live for session $escapedSessionId'",
-        "Write-Host 'Broker clicks are retired; this window reports validated allowance packages only.'",
-        ".\.venv\Scripts\python.exe 'Backend\launch\shooter.py' signal --session-id '$escapedSessionId' --base-url '$escapedBaseUrl' --poll 0.05"
-    ) -join '; '
-
-    Start-Process powershell -ArgumentList @(
-        '-NoExit',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        $shooterCommand
-    ) -WindowStyle Normal | Out-Null
+    $pollText = ([string][double]$PollSec).Replace(',', '.')
+    $logDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime\logs'
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $outPath = Join-Path -Path $logDir -ChildPath "shooter-live-ready-$stamp.out.log"
+    $errPath = Join-Path -Path $logDir -ChildPath "shooter-live-ready-$stamp.err.log"
+    $args = @(
+        'Backend\launch\shooter.py',
+        'signal',
+        '--session-id',
+        $SessionId,
+        '--base-url',
+        $BaseUrl,
+        '--poll',
+        $pollText,
+        '--heartbeat',
+        '4.0'
+    )
+    Start-Process -FilePath $pythonPath -ArgumentList $args -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $outPath -RedirectStandardError $errPath | Out-Null
+    Write-Host "Shooter package reporter log: $errPath"
 }
 
 Write-Host "PhoenixGuard V3 live-ready launch"
@@ -254,18 +263,17 @@ $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS = '1'
 $env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N = '300'
 $env:PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH = '320'
 $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT = '1'
-$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC = '0.5'
+$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC = '15.0'
+$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_POLL_SEC = '15.0'
+$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC = '1.0'
+$env:PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC = '300.0'
+$env:PHOENIXGUARD_SHOOTER_POLL_SEC = ([string][double]$ShooterPollSec).Replace(',', '.')
 $env:PHOENIXGUARD_FAST_FOCUS_PREVIEW = '1'
-$runtimeDir = if ($env:PHOENIXGUARD_RUNTIME_DIR) {
-    $env:PHOENIXGUARD_RUNTIME_DIR
-} elseif ($env:LOCALAPPDATA) {
-    Join-Path -Path $env:LOCALAPPDATA -ChildPath 'PhoenixGuard\codex_runtime'
-} else {
-    Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
-}
+$runtimeDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
 if (-not (Test-Path -LiteralPath $runtimeDir)) {
     New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 }
+$env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
 $env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
 $env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
 $env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
@@ -488,8 +496,31 @@ if (-not $DisableShooter) {
         }
     }
     Write-Host "Starting shooter against $baseUrl in LIVE_READY mode"
-    Start-LiveReadyShooter -BaseUrl $baseUrl -SessionId $SessionId -BrokerWindowQuery $BrokerWindowQuery -BrokerWindowHwnd $BrokerWindowHwnd
+    Start-LiveReadyShooter -BaseUrl $baseUrl -SessionId $SessionId -PollSec $ShooterPollSec -BrokerWindowQuery $BrokerWindowQuery -BrokerWindowHwnd $BrokerWindowHwnd
 }
+
+$summaryPath = Join-Path -Path $runtimeDir -ChildPath 'live_launch_summary.json'
+$summaryPayload = [ordered]@{
+    schema_version = 'PG_LIVE_READY_LAUNCH_SUMMARY_V1'
+    created_at = (Get-Date).ToString('o')
+    project_root = $ProjectRoot
+    python_exe = $pythonPath
+    runtime_dir = $runtimeDir
+    data_dir = $env:PHOENIXGUARD_DATA_DIR
+    logs_dir = $env:PHOENIXGUARD_LOGS_DIR
+    tracker_status_file = $env:PHOENIXGUARD_TRACKER_STATUS_FILE
+    base_url = $baseUrl
+    dashboard_url = $dashboardUrl
+    dashboard_browser = $DashboardBrowser
+    broker_window_query = $BrokerWindowQuery
+    broker_window_hwnd = $BrokerWindowHwnd
+    session_id = $SessionId
+    capture_interval_sec = $CaptureIntervalSec
+    shooter_disabled = [bool]$DisableShooter
+    shooter_poll_sec = $ShooterPollSec
+    live_execution_enabled = $env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED
+}
+$summaryPayload | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
 
 Write-Host ""
 Write-Host "Live launch complete."
@@ -497,6 +528,6 @@ Write-Host "  Dashboard: $dashboardUrl"
 if ($DisableShooter) {
     Write-Host "  Shooter: disabled; no shooter process was launched."
 } else {
-    Write-Host "  Shooter reporter: visible PowerShell window"
+    Write-Host "  Shooter reporter: background package reporter with logs in .codex_runtime\logs"
 }
 Write-Host "  Launch summary: .codex_runtime\live_launch_summary.json"

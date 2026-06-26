@@ -6,6 +6,7 @@ from typing import Any
 from PIL import Image
 
 from phoenixguard.mobile_api.live_state_v3 import build_live_state_v3
+from phoenixguard.tracking.market_object_tracker_v3 import build_v3_overlays_from_session
 from phoenixguard.vision.broker_scene_graph_v3 import build_broker_scene_graph_v3
 from phoenixguard.vision.box_refinement_v3 import resolve_precision_overlays_v3
 from phoenixguard.vision.v3_overlay_contract import overlay_is_visible, rectangles_overlap
@@ -93,6 +94,23 @@ def _install_visible_candles(session: dict[str, Any], count: int = 8) -> list[di
     session["tracking_summary"]["tracked_candles"] = candles
     session["tracking_summary"]["visible_candle_count"] = count
     return candles
+
+
+def _trendline_candle(index: int, center_x: float, wick_top: float, wick_bottom: float) -> dict[str, Any]:
+    body_top = wick_top + 18.0
+    body_bottom = wick_bottom - 18.0
+    return {
+        "index": index,
+        "track_id": f"trendline-candle-{index}",
+        "bbox": [center_x - 4.0, body_top, center_x + 4.0, body_bottom],
+        "body_bbox": [center_x - 4.0, body_top, center_x + 4.0, body_bottom],
+        "wick_top": wick_top,
+        "wick_bottom": wick_bottom,
+        "center_x": center_x,
+        "center_y": (wick_top + wick_bottom) / 2.0,
+        "direction": "BUY",
+        "confidence": 0.93,
+    }
 
 
 def test_broker_scene_graph_locks_plot_area_inside_full_window(tmp_path: Path) -> None:
@@ -212,6 +230,38 @@ def test_precision_resolver_keeps_overlapping_major_and_inner_trendlines_visible
     assert trendlines["INNER_TRENDLINE"]["line_points"] == shared_points
     assert trendlines["RESISTANCE_TRENDLINE"]["line_points"] == shared_points
     assert audit["rendered_count"] >= 3
+
+
+def test_market_object_tracker_preserves_trendline_wick_touch_points() -> None:
+    candles = [
+        _trendline_candle(0, 100.0, 210.0, 430.0),
+        _trendline_candle(1, 140.0, 205.0, 390.0),
+        _trendline_candle(2, 180.0, 198.0, 360.0),
+        _trendline_candle(3, 220.0, 212.0, 382.0),
+        _trendline_candle(4, 260.0, 188.0, 340.0),
+        _trendline_candle(5, 300.0, 196.0, 354.0),
+        _trendline_candle(6, 340.0, 178.0, 320.0),
+        _trendline_candle(7, 380.0, 190.0, 338.0),
+        _trendline_candle(8, 420.0, 170.0, 300.0),
+        _trendline_candle(9, 460.0, 182.0, 318.0),
+        _trendline_candle(10, 500.0, 160.0, 280.0),
+        _trendline_candle(11, 540.0, 172.0, 298.0),
+    ]
+    overlays = build_v3_overlays_from_session(
+        {
+            "session_id": "precision-trendline",
+            "frame_index": 10,
+            "tracking_summary": {"tracked_candles": candles},
+            "latest_signal": {"action": "BUY"},
+        }
+    )
+    trendline = next(row for row in overlays if row.get("type") == "INNER_TRENDLINE")
+    expected_anchor_points = [[100.0, 430.0], [460.0, 318.0]]
+
+    assert trendline["line_points"][:2] == expected_anchor_points
+    assert trendline["touch_points"] == expected_anchor_points
+    assert trendline["anchor_evidence"]["touch_points"] == expected_anchor_points
+    assert trendline["anchor_candles"] == [0, 9]
 
 
 def test_precision_resolver_keeps_support_resistance_and_opposing_force_families_visible() -> None:
@@ -683,7 +733,7 @@ def test_precision_resolver_rejects_parent_only_actionable_child(tmp_path: Path)
             "bounds": [280, 220, 760, 520],
             "truth_score": 0.72,
             "confidence": 0.72,
-            "visible_modes": ["CLEAN_LIVE", "GLOBAL", "INSPECTOR"],
+            "visible_modes": ["ACTIVE_CONTEXT", "GLOBAL", "INSPECTOR"],
             "ttl_ms": 30000,
             "reason": "parent context",
             "label": "IMPULSE",
@@ -704,7 +754,7 @@ def test_precision_resolver_rejects_parent_only_actionable_child(tmp_path: Path)
             "bounds": [500, 340, 590, 382],
             "truth_score": 0.86,
             "confidence": 0.86,
-            "visible_modes": ["CLEAN_LIVE", "ACTIVE_CONTEXT", "INSPECTOR"],
+            "visible_modes": ["ACTIVE_CONTEXT", "INSPECTOR"],
             "ttl_ms": 30000,
             "reason": "parent-only actionable child must not render",
             "label": "SNIPER SELL",
@@ -715,7 +765,7 @@ def test_precision_resolver_rejects_parent_only_actionable_child(tmp_path: Path)
     resolved, audit = resolve_precision_overlays_v3(
         overlays,
         scene_graph=scene,
-        mode="CLEAN_LIVE",
+        mode="ACTIVE_CONTEXT",
         current_side="SELL",
         frame_id=14494,
     )

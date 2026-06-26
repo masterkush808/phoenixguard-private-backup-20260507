@@ -667,8 +667,8 @@ def test_replay_mode_ignores_clean_live_prefilter_env(monkeypatch: Any, tmp_path
 
     assert replay_state["renderable_count"] == 1
     assert replay_state["overlays"]["objects"][0]["layer"] == "historical_replay"
-    assert clean_state["renderable_count"] == 1
-    assert clean_state["overlays"]["objects"][0]["layer"] == "historical_replay"
+    assert clean_state["renderable_count"] == 0
+    assert clean_state["overlays"]["objects"] == []
 
 
 def test_live_state_prefers_v3_historical_path_over_fallback_rectangle(tmp_path: Path) -> None:
@@ -728,6 +728,13 @@ def test_live_state_prefers_v3_historical_path_over_fallback_rectangle(tmp_path:
         session,
         artifacts={"window": window, "chart": chart},
         active_objects=active_objects,
+        overlay_mode="FULL_HISTORY_READ",
+        now_epoch=110.0,
+    )
+    clean_state = build_live_state_v3(
+        session,
+        artifacts={"window": window, "chart": chart},
+        active_objects=active_objects,
         overlay_mode="CLEAN_LIVE",
         now_epoch=110.0,
     )
@@ -740,6 +747,7 @@ def test_live_state_prefers_v3_historical_path_over_fallback_rectangle(tmp_path:
     assert history["bounds"] == [60.0, 80.0, 460.0, 210.0]
     assert history["visible_default"] is True
     assert history["anchor_type"] == "POLYGON"
+    assert all(row.get("type") != "PROGRESSION_PATH" for row in clean_state["overlays"]["objects"])
 
 
 def test_unknown_overlay_labels_hidden_from_live_and_collected_for_diagnostics(tmp_path: Path) -> None:

@@ -3292,11 +3292,12 @@
         failedArtifactKeys: new Set(),
       },
     };
-    const DASHBOARD_REFRESH_FAST_INTERVAL_MS = 500;
-    const DASHBOARD_REFRESH_SLOW_INTERVAL_MS = 2000;
-    const DASHBOARD_REFRESH_HIDDEN_INTERVAL_MS = 3000;
+    const DASHBOARD_REFRESH_FAST_INTERVAL_MS = 15000;
+    const DASHBOARD_REFRESH_SLOW_INTERVAL_MS = 15000;
+    const DASHBOARD_REFRESH_HIDDEN_INTERVAL_MS = 30000;
     const DASHBOARD_REFRESH_SLOW_RESPONSE_MS = 1200;
-    const STREAM_LIVE_STATE_HYDRATION_MS = 1000;
+    const DASHBOARD_HEARTBEAT_INTERVAL_MS = 15000;
+    const STREAM_LIVE_STATE_HYDRATION_MS = 15000;
 
     const $ = (id) => document.getElementById(id);
     const on = (target, eventName, handler, options) => {
@@ -5780,14 +5781,14 @@
         return Object.fromEntries(allLayerKeys.map((key) => [key, enabledSet.has(key)]));
       };
       const presets = {
-        clean_live: layerPreset("chart_bounds", "recent_candles", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
+        clean_live: layerPreset("chart_bounds", "recent_candles", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision"),
         candles: layerPreset("chart_bounds", "recent_candles"),
         global: layerPreset("chart_bounds", "major_swings", "historical_replay"),
         local: layerPreset("chart_bounds", "recent_candles", "local_swings", "trigger_zones"),
         supply_demand: layerPreset("supply_demand"),
         trendlines: layerPreset("trendlines"),
         triggers: layerPreset("trigger_zones"),
-        targets: layerPreset("target_zones", "supply_demand"),
+        targets: layerPreset("target_zones", "invalidation", "supply_demand"),
         invalidation: layerPreset("supply_demand"),
         path: layerPreset("prediction_path", "historical_replay"),
         active_context: layerPreset("chart_bounds", "recent_candles", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
@@ -6418,19 +6419,23 @@
 
     function overlayTypeAllowedInMode(row = {}, activeMode = backendOverlayMode(state.overlayMode)) {
       const type = clean(row.type || row.overlay_type || row.kind, "").toUpperCase();
-      if (!type || diagnosticsViewActive()) {
+      const mode = clean(activeMode, "CLEAN_LIVE").toUpperCase();
+      if (diagnosticsViewActive() || mode === "FULL_HISTORY_READ" || mode === "REPLAY") {
+        return true;
+      }
+      if (!type) {
         return true;
       }
       const allowedByMode = {
-        CLEAN_LIVE: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER"]),
+        CLEAN_LIVE: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER"]),
         CHART_BOUNDS: new Set(["CHART_BOUNDS"]),
         CANDLES: new Set(["CHART_BOUNDS", "CURRENT_CANDLE"]),
         GLOBAL: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "PROGRESSION_PATH"]),
         LOCAL: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "PULLBACK_BOX", "RETEST_BOX", "CONTINUATION_BOX", "SNIPER_ENTRY_BOX"]),
         SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"]),
         TRENDLINES: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"]),
-        TRIGGER: new Set(["RETEST_BOX", "SNIPER_ENTRY_BOX"]),
-        TARGET: new Set(["TARGET_ZONE_BOX", "OPPOSING_FORCE"]),
+        TRIGGER: new Set(["TRIGGER_BOX", "TRIGGER_ZONE", "RETEST_BOX", "SNIPER_ENTRY_BOX"]),
+        TARGET: new Set(["TARGET_ZONE_BOX", "INVALIDATION_BOX", "INVALIDATION_ZONE", "OPPOSING_FORCE"]),
         INVALIDATION: new Set(["OPPOSING_FORCE"]),
         PATH: new Set(["ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"]),
         COUNCIL: new Set(["CURRENT_CANDLE", "SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY", "LSTM_STUDY"]),
@@ -6442,7 +6447,7 @@
         BROKER: new Set(["BROKER_CONTROL"]),
         CALIBRATION: new Set(["BROKER_CONTROL", "DEBUG_RAW_DETECTION"]),
       };
-      const allowed = allowedByMode[clean(activeMode, "CLEAN_LIVE").toUpperCase()];
+      const allowed = allowedByMode[mode];
       return !allowed || allowed.has(type);
     }
 
@@ -6454,10 +6459,95 @@
       return clean(box.type || box.overlay_type || box.kind, "").toUpperCase();
     }
 
+    const FRONTEND_OVERLAY_RENDER_MODE_ALIASES = Object.freeze({
+      TRIGGERS: "TRIGGER",
+      TARGETS: "TARGET",
+      FULL_HISTORY: "FULL_HISTORY_READ",
+    });
+
+    const FRONTEND_OVERLAY_RENDER_MODE_PROFILES = Object.freeze({
+      CLEAN_LIVE: {
+        layers: new Set(["chart_bounds", "recent_candles", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision"]),
+        types: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER"]),
+        currentOnly: true,
+      },
+      SUPPLY_DEMAND: {
+        layers: new Set(["supply_demand"]),
+        types: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"]),
+      },
+      TRENDLINES: {
+        layers: new Set(["trendlines"]),
+        types: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"]),
+      },
+      TRIGGER: {
+        layers: new Set(["trigger_zones"]),
+        types: new Set(["TRIGGER_BOX", "TRIGGER_ZONE", "RETEST_BOX", "SNIPER_ENTRY_BOX"]),
+      },
+      TARGET: {
+        layers: new Set(["target_zones", "invalidation", "supply_demand"]),
+        types: new Set(["TARGET_ZONE_BOX", "INVALIDATION_BOX", "INVALIDATION_ZONE", "OPPOSING_FORCE"]),
+      },
+      FULL_HISTORY_READ: {all: true},
+      REPLAY: {all: true},
+    });
+
+    function frontendOverlayRenderModeProfile(activeMode = backendOverlayMode(state.overlayMode)) {
+      const mode = clean(activeMode, "CLEAN_LIVE").toUpperCase();
+      const canonicalMode = FRONTEND_OVERLAY_RENDER_MODE_ALIASES[mode] || mode;
+      return FRONTEND_OVERLAY_RENDER_MODE_PROFILES[canonicalMode] || null;
+    }
+
+    function frontendOverlayCurrentContextAllowed(box = {}) {
+      const layer = frontendOverlayLayerName(box);
+      const type = frontendOverlayTypeName(box);
+      const lifecycle = clean(box.lifecycle_state || box.lifecycle || box.state || box.status, "").toUpperCase();
+      const temporalScope = clean(box.temporal_scope || box.time_scope || box.scope || box.replay_scope, "").toUpperCase();
+      if (box.visible_default === false || box.visible_default === "false") {
+        return false;
+      }
+      if (["major_swings", "historical_replay", "prediction_path", "broker_controls", "diagnostics"].includes(layer)) {
+        return false;
+      }
+      if (["IMPULSE_BOX", "ANGLE_VECTOR", "PROGRESSION_PATH", "PREDICTION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "INVALIDATION_BOX", "INVALIDATION_ZONE"].includes(type)) {
+        return false;
+      }
+      if (["HISTORICAL", "REPLAY", "ARCHIVED", "EXPIRED", "STALE", "INVALIDATED"].includes(lifecycle)) {
+        return false;
+      }
+      if (["HISTORICAL", "REPLAY", "PAST", "PREDICTION", "PROJECTED"].includes(temporalScope)) {
+        return false;
+      }
+      return true;
+    }
+
+    function frontendOverlayModeRenderAllowed(box = {}, activeMode = backendOverlayMode(state.overlayMode)) {
+      if (diagnosticsViewActive()) {
+        return true;
+      }
+      const profile = frontendOverlayRenderModeProfile(activeMode);
+      if (!profile || profile.all) {
+        return true;
+      }
+      const layer = frontendOverlayLayerName(box);
+      const type = frontendOverlayTypeName(box);
+      const typeAllowed = type && profile.types ? profile.types.has(type) : false;
+      const layerAllowed = layer && profile.layers ? profile.layers.has(layer) : false;
+      if (type && !typeAllowed) {
+        return false;
+      }
+      if (!type && !layerAllowed) {
+        return false;
+      }
+      if (profile.currentOnly && !frontendOverlayCurrentContextAllowed(box)) {
+        return false;
+      }
+      return true;
+    }
+
     function frontendOverlayBudget(activeMode = backendOverlayMode(state.overlayMode)) {
       const mode = clean(activeMode, "CLEAN_LIVE").toUpperCase();
       const budgets = {
-        CLEAN_LIVE: {objects: 56, labels: 18},
+        CLEAN_LIVE: {objects: 32, labels: 10},
         CANDLES: {objects: 140, labels: 0},
         SUPPLY_DEMAND: {objects: 22, labels: 8},
         TRENDLINES: {objects: 14, labels: 6},
@@ -6469,8 +6559,8 @@
         TWO_CANDLE_STUDY: {objects: 12, labels: 3},
         LSTM_STUDY: {objects: 12, labels: 3},
         ACTIVE_CONTEXT: {objects: 56, labels: 18},
-        FULL_HISTORY_READ: {objects: 64, labels: 20},
-        REPLAY: {objects: 64, labels: 20},
+        FULL_HISTORY_READ: {objects: null, labels: 28},
+        REPLAY: {objects: null, labels: 28},
       };
       return budgets[mode] || {objects: 48, labels: 8};
     }
@@ -6698,6 +6788,9 @@
       const trustBackendMode = Boolean(options.trustBackendMode);
       const ignoreVisibleModes = Boolean(options.ignoreVisibleModes);
       const rowType = clean(row.type || row.overlay_type || row.kind, "").toUpperCase();
+      if (!frontendOverlayModeRenderAllowed(row, activeMode)) {
+        return false;
+      }
       if (!overlayTypeAllowedInMode(row, activeMode)) {
         return false;
       }
@@ -9136,7 +9229,7 @@
         visibleOverlayCount: els.hotspotLayer.querySelectorAll(".surface-hotspot").length,
         overlayDrawMs: state.surface.lastOverlayRenderMs,
       });
-    }, 1000);
+    }, DASHBOARD_HEARTBEAT_INTERVAL_MS);
   </script>
 </body>
 </html>
