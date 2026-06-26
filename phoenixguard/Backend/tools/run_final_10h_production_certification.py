@@ -18,7 +18,7 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8793"
 DEFAULT_SESSION_ID = "pocket-live-8788"
 ALLOWED_PACKAGE_TYPES = {"SWING", "INTRADAY_ENTER_NOW", "SWING_ENTER_NOW"}
 PROGRESSION_HORIZONS_SEC = (30, 60, 120, 300)
-DIAGNOSTIC_ENDPOINTS = frozenset({"runtime_trace", "session", "performance", "floating_state"})
+DIAGNOSTIC_ENDPOINTS = frozenset({"runtime_trace", "session", "performance", "model_latest", "study_latest", "floating_state"})
 
 
 def _now_epoch() -> float:
@@ -483,7 +483,7 @@ def main() -> int:
     start = _now_epoch()
     next_screenshot = start + max(60.0, float(args.screenshot_sec))
     next_update = start
-    next_diagnostic = start
+    next_diagnostic = start + max(float(args.sample_sec), float(args.diagnostic_sec))
     cached_payloads: dict[str, dict[str, Any]] = {}
     cached_endpoint_status: dict[str, int] = {}
     sample_count = 0
