@@ -390,6 +390,7 @@ def _write_progress_report(
     duration_sec: float,
     sample_count: int,
     stale_count: int,
+    frontend_gap_count: int,
     source_lock_fail_count: int,
     allowed_count: int,
     latest_summary: Mapping[str, object],
@@ -402,7 +403,8 @@ def _write_progress_report(
         f"- Elapsed minutes: {elapsed_sec / 60.0:.1f}",
         f"- Remaining minutes: {remaining_sec / 60.0:.1f}",
         f"- Samples: {sample_count}",
-        f"- Stale events: {stale_count}",
+        f"- Stale market-truth events: {stale_count}",
+        f"- Frontend heartbeat gaps: {frontend_gap_count}",
         f"- Source-lock failures: {source_lock_fail_count}",
         f"- Allowed package events: {allowed_count}",
         f"- Latest source lock: {_text(latest_summary.get('source_lock_status'), 'UNKNOWN')}",
@@ -424,7 +426,8 @@ def _write_final_reports(out_dir: Path, reports_dir: Path, verdict: str, summary
         f"- Verdict: {verdict}",
         f"- Completed UTC: {_utc_now()}",
         f"- Samples: {summary.get('sample_count')}",
-        f"- Stale events: {summary.get('stale_event_count')}",
+        f"- Stale market-truth events: {summary.get('stale_event_count')}",
+        f"- Frontend heartbeat gaps: {summary.get('frontend_gap_count')}",
         f"- Source-lock failures: {summary.get('source_lock_fail_count')}",
         f"- Allowed package events: {summary.get('allowed_package_count')}",
         f"- MT4 bridge status: {summary.get('last_mt4_bridge_status')}",
@@ -438,7 +441,8 @@ def _write_final_reports(out_dir: Path, reports_dir: Path, verdict: str, summary
                 "# Final Stale Data Eradication Report",
                 "",
                 f"- Stale accepted as live truth: {summary.get('stale_accepted_as_live', 0)}",
-                f"- Stale events observed: {summary.get('stale_event_count')}",
+                f"- Stale market-truth events observed: {summary.get('stale_event_count')}",
+                f"- Frontend heartbeat gaps observed: {summary.get('frontend_gap_count')}",
                 f"- Source-lock failures: {summary.get('source_lock_fail_count')}",
             ]
         )
@@ -489,6 +493,7 @@ def main() -> int:
     sample_count = 0
     stale_count = 0
     stale_accepted_as_live = 0
+    frontend_gap_count = 0
     source_lock_fail_count = 0
     allowed_seen: set[str] = set()
     mt4_packet_seen: set[str] = set()
@@ -554,6 +559,7 @@ def main() -> int:
             _append_jsonl(out_dir / "mt4_bridge_packets.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), **mt4})
 
         stale_reasons: list[str] = []
+        frontend_gap_reasons: list[str] = []
         if _float(timing["frame_age_ms"]) > 2500.0:
             stale_reasons.append("frame_age_gt_2500ms")
         if _float(timing["overlay_age_ms"]) > 2500.0:
@@ -563,10 +569,24 @@ def main() -> int:
         if bool(timing.get("timing_missing")):
             stale_reasons.append("missing_frame_or_overlay_timing")
         if _float(frontend["age_ms"]) > 3500.0:
-            stale_reasons.append("frontend_heartbeat_age_gt_3500ms")
+            frontend_gap_reasons.append("frontend_heartbeat_age_gt_3500ms")
         if not bool(source_lock.get("valid")):
             stale_reasons.append("source_lock_not_valid")
             source_lock_fail_count += 1
+        if frontend_gap_reasons:
+            frontend_gap_count += 1
+            _append_jsonl(
+                out_dir / "frontend_gap_events.jsonl",
+                {
+                    "at_epoch": loop_started,
+                    "at_utc": _utc_now(),
+                    "reasons": frontend_gap_reasons,
+                    "allowed_packet_present": allowed,
+                    "source_lock": source_lock,
+                    "timing": timing,
+                    "frontend": frontend,
+                },
+            )
         if stale_reasons:
             stale_count += 1
             if allowed:
@@ -674,13 +694,14 @@ def main() -> int:
                 duration_sec=float(args.duration_sec),
                 sample_count=sample_count,
                 stale_count=stale_count,
+                frontend_gap_count=frontend_gap_count,
                 source_lock_fail_count=source_lock_fail_count,
                 allowed_count=len(allowed_seen),
                 latest_summary=latest_summary,
             )
             _notify(
                 "PhoenixGuard 10H certification update",
-                f"{elapsed / 60.0:.1f}m elapsed; samples={sample_count}; stale={stale_count}; allowed={len(allowed_seen)}; bridge={mt4.get('bridge_status')}",
+                f"{elapsed / 60.0:.1f}m elapsed; samples={sample_count}; stale={stale_count}; frontend_gaps={frontend_gap_count}; allowed={len(allowed_seen)}; bridge={mt4.get('bridge_status')}",
                 loud=False,
             )
             next_update = loop_started + max(60.0, float(args.update_sec))
@@ -694,6 +715,7 @@ def main() -> int:
                 "elapsed_sec": round(elapsed, 3),
                 "remaining_sec": round(max(0.0, float(args.duration_sec) - elapsed), 3),
                 "stale_event_count": stale_count,
+                "frontend_gap_count": frontend_gap_count,
                 "source_lock_fail_count": source_lock_fail_count,
                 "allowed_package_count": len(allowed_seen),
                 "latest_summary": latest_summary,
@@ -715,6 +737,7 @@ def main() -> int:
         "sample_count": sample_count,
         "stale_event_count": stale_count,
         "stale_accepted_as_live": stale_accepted_as_live,
+        "frontend_gap_count": frontend_gap_count,
         "source_lock_fail_count": source_lock_fail_count,
         "allowed_package_count": len(allowed_seen),
         "mt4_packet_record_count": len(mt4_packet_seen),
@@ -723,7 +746,11 @@ def main() -> int:
     }
     _write_json(out_dir / "status.json", {"schema_version": SCHEMA_VERSION, "running": False, "verdict": verdict, **summary})
     _write_final_reports(out_dir, reports_dir, verdict, summary)
-    _notify("PhoenixGuard 10H certification finished", f"Verdict {verdict}; allowed={len(allowed_seen)}; stale={stale_count}", loud=True)
+    _notify(
+        "PhoenixGuard 10H certification finished",
+        f"Verdict {verdict}; allowed={len(allowed_seen)}; stale={stale_count}; frontend_gaps={frontend_gap_count}",
+        loud=True,
+    )
     print(json.dumps({"verdict": verdict, "out_dir": str(out_dir), **summary}, indent=2, sort_keys=True))
     return 0 if verdict.startswith("PASS") else 1
 
