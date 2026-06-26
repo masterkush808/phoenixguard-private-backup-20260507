@@ -3292,7 +3292,10 @@
         failedArtifactKeys: new Set(),
       },
     };
-    const DASHBOARD_REFRESH_INTERVAL_MS = 250;
+    const DASHBOARD_REFRESH_FAST_INTERVAL_MS = 500;
+    const DASHBOARD_REFRESH_SLOW_INTERVAL_MS = 2000;
+    const DASHBOARD_REFRESH_HIDDEN_INTERVAL_MS = 3000;
+    const DASHBOARD_REFRESH_SLOW_RESPONSE_MS = 1200;
     const STREAM_LIVE_STATE_HYDRATION_MS = 1000;
 
     const $ = (id) => document.getElementById(id);
@@ -8637,6 +8640,27 @@
       }
     }
 
+    function dashboardRefreshDelayMs(lastDurationMs = 0) {
+      if (document.hidden) {
+        return DASHBOARD_REFRESH_HIDDEN_INTERVAL_MS;
+      }
+      if (Number(lastDurationMs || 0) >= DASHBOARD_REFRESH_SLOW_RESPONSE_MS) {
+        return DASHBOARD_REFRESH_SLOW_INTERVAL_MS;
+      }
+      return DASHBOARD_REFRESH_FAST_INTERVAL_MS;
+    }
+
+    function scheduleDashboardRefresh(delayMs = DASHBOARD_REFRESH_FAST_INTERVAL_MS) {
+      if (state.refreshTimer) {
+        window.clearTimeout(state.refreshTimer);
+      }
+      state.refreshTimer = window.setTimeout(async () => {
+        const startedAt = performance.now();
+        await refreshSession();
+        scheduleDashboardRefresh(dashboardRefreshDelayMs(performance.now() - startedAt));
+      }, Math.max(250, Number(delayMs || DASHBOARD_REFRESH_FAST_INTERVAL_MS)));
+    }
+
     async function postAction(path, body = null, method = "POST") {
       const memoryMeta = memoryActionMeta(path);
       state.busy = true;
@@ -9047,6 +9071,11 @@
         renderHotspots();
       });
     });
+    on(document, "visibilitychange", () => {
+      if (!document.hidden) {
+        scheduleDashboardRefresh(100);
+      }
+    });
 
     initializeOverlayEditor();
     initializeModelStrengthControls();
@@ -9056,9 +9085,7 @@
     updateLayerControls();
     refreshSession();
     connectSessionStream();
-    state.refreshTimer = window.setInterval(() => {
-      refreshSession();
-    }, DASHBOARD_REFRESH_INTERVAL_MS);
+    scheduleDashboardRefresh(DASHBOARD_REFRESH_FAST_INTERVAL_MS);
     state.heartbeatTimer = window.setInterval(() => {
       if (!state.session) {
         return;
