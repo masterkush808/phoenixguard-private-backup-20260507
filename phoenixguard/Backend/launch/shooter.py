@@ -212,9 +212,22 @@ def build_allowed_package_report(
 def _write_shooter_handshake(payload: Mapping[str, object], path: Path = _SHOOTER_HANDSHAKE_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(_json_ready(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    temp_path = path.with_suffix(path.suffix + ".tmp")
-    temp_path.write_text(encoded, encoding="utf-8")
-    temp_path.replace(path)
+    last_error: OSError | None = None
+    for attempt in range(6):
+        temp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        try:
+            temp_path.write_text(encoded, encoding="utf-8")
+            temp_path.replace(path)
+            return
+        except OSError as exc:
+            last_error = exc
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            time.sleep(min(0.5, 0.05 * (attempt + 1)))
+    if last_error is not None:
+        raise last_error
 
 
 def build_waiting_report(
@@ -309,14 +322,18 @@ def run_reporter(
         if not force and now_value - last_waiting_write_epoch < 1.0:
             return
         last_waiting_reason = reason
-        publish_waiting_report(
-            session_id=session_id,
-            base_url=base_url,
-            source_url=url,
-            reason=reason,
-            path=handshake_path,
-            now_epoch=now_value,
-        )
+        try:
+            publish_waiting_report(
+                session_id=session_id,
+                base_url=base_url,
+                source_url=url,
+                reason=reason,
+                path=handshake_path,
+                now_epoch=now_value,
+            )
+        except OSError as exc:
+            LOGGER.warning("Waiting handshake write failed; reporter remains alive: %s", exc)
+            return
         last_waiting_write_epoch = now_value
         last_report_was_waiting = True
 
