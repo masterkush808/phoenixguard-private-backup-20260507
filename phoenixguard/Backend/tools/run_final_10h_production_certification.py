@@ -56,6 +56,16 @@ def _float(value: object, default: float = 0.0) -> float:
     return number if number == number else default
 
 
+def _age_ms(primary: object, fallback: object, default: float = 0.0) -> float:
+    primary_value = _float(primary, -1.0)
+    if primary_value > 0.0:
+        return primary_value
+    fallback_value = _float(fallback, -1.0)
+    if fallback_value > 0.0:
+        return fallback_value
+    return default
+
+
 def _int(value: object, default: int = 0) -> int:
     return int(_float(value, float(int(default))))
 
@@ -192,16 +202,26 @@ def _source_lock_status(live: Mapping[str, Any], runtime_trace: Mapping[str, Any
 
 
 def _timing_status(live: Mapping[str, Any], performance: Mapping[str, Any]) -> dict[str, object]:
-    timing = _mapping(live.get("frame_timing_trace_v3") or performance.get("timing_trace"))
+    live_timing = _mapping(live.get("frame_timing_trace_v3"))
+    performance_timing = _mapping(performance.get("timing_trace"))
+    frame_age_ms = _age_ms(live_timing.get("frame_age_ms"), performance_timing.get("frame_age_ms") or live.get("frame_age_ms"))
+    overlay_age_ms = _age_ms(
+        live_timing.get("overlay_age_ms"),
+        performance_timing.get("overlay_age_ms") or live.get("overlay_age_ms"),
+    )
+    model_vote_age_ms = _age_ms(live_timing.get("model_vote_age_ms"), performance_timing.get("model_vote_age_ms"))
+    packet_age_ms = _age_ms(live_timing.get("packet_age_ms"), performance_timing.get("packet_age_ms"))
+    frontend_render_age_ms = _age_ms(live_timing.get("frontend_render_age_ms"), performance_timing.get("frontend_render_age_ms"))
     visual = _mapping(performance.get("visual_health"))
     return {
-        "frame_age_ms": _float(timing.get("frame_age_ms"), _float(live.get("frame_age_ms"), 0.0)),
-        "overlay_age_ms": _float(timing.get("overlay_age_ms"), _float(live.get("overlay_age_ms"), 0.0)),
-        "model_vote_age_ms": _float(timing.get("model_vote_age_ms"), 0.0),
-        "packet_age_ms": _float(timing.get("packet_age_ms"), 0.0),
-        "frontend_render_age_ms": _float(timing.get("frontend_render_age_ms"), 0.0),
-        "stale_status": _text(timing.get("stale_status") or visual.get("status"), "UNKNOWN"),
-        "stale_flags": _sequence(timing.get("stale_flags") or visual.get("stale_flags")),
+        "frame_age_ms": frame_age_ms,
+        "overlay_age_ms": overlay_age_ms,
+        "model_vote_age_ms": model_vote_age_ms,
+        "packet_age_ms": packet_age_ms,
+        "frontend_render_age_ms": frontend_render_age_ms,
+        "timing_missing": bool(frame_age_ms <= 0.0 or overlay_age_ms <= 0.0),
+        "stale_status": _text(live_timing.get("stale_status") or performance_timing.get("stale_status") or visual.get("status"), "UNKNOWN"),
+        "stale_flags": _sequence(live_timing.get("stale_flags") or performance_timing.get("stale_flags") or visual.get("stale_flags")),
     }
 
 
@@ -540,6 +560,8 @@ def main() -> int:
             stale_reasons.append("overlay_age_gt_2500ms")
         if _float(timing["model_vote_age_ms"]) > 3000.0:
             stale_reasons.append("model_vote_age_gt_3000ms")
+        if bool(timing.get("timing_missing")):
+            stale_reasons.append("missing_frame_or_overlay_timing")
         if _float(frontend["age_ms"]) > 3500.0:
             stale_reasons.append("frontend_heartbeat_age_gt_3500ms")
         if not bool(source_lock.get("valid")):
