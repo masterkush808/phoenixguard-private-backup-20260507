@@ -103,6 +103,12 @@ def _int(value: Any, default: int = 0) -> int:
     return int(_float(value, float(default)))
 
 
+def _age_since_ms(now_ms: int, timestamp_ms: int) -> int:
+    if int(timestamp_ms) <= 0:
+        return 0
+    return max(1, int(now_ms) - int(timestamp_ms))
+
+
 def _mapping(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
@@ -584,11 +590,11 @@ class FrameTimingTraceV3:
             "state_published_ms": int(self.state_published_ms),
             "frontend_loaded_ms": int(self.frontend_loaded_ms),
             "frontend_overlay_drawn_ms": int(self.frontend_overlay_drawn_ms),
-            "frame_age_ms": max(0, now - int(self.capture_epoch_ms)) if self.capture_epoch_ms else 0,
-            "overlay_age_ms": max(0, now - int(overlay_done)) if overlay_done else 0,
-            "model_vote_age_ms": max(0, now - int(model_done)) if model_done else 0,
-            "frontend_render_age_ms": max(0, now - int(frontend_drawn)) if frontend_drawn else 0,
-            "state_publish_age_ms": max(0, now - int(published)) if published else 0,
+            "frame_age_ms": _age_since_ms(now, int(self.capture_epoch_ms)),
+            "overlay_age_ms": _age_since_ms(now, int(overlay_done)),
+            "model_vote_age_ms": _age_since_ms(now, int(model_done)),
+            "frontend_render_age_ms": _age_since_ms(now, int(frontend_drawn)),
+            "state_publish_age_ms": _age_since_ms(now, int(published)),
             "frames_dropped": int(self.frames_dropped),
             "queue_depth": int(self.queue_depth),
             "freshness_score": round(max(0.0, min(1.0, float(self.freshness_score))), 4),

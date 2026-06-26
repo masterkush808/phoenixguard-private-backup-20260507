@@ -64,6 +64,29 @@ def test_frame_timing_trace_reports_required_age_fields() -> None:
     assert trace["overlay_frame_state_version"].startswith("ov_42_1_")
 
 
+def test_frame_timing_trace_keeps_valid_future_race_timestamps_positive() -> None:
+    session: dict[str, Any] = {
+        "session_id": "speed",
+        "frame_index": 42,
+        "display_capture_epoch": 101.002,
+        "display_published_epoch": 101.003,
+        "last_capture_started_epoch": 101.002,
+        "last_capture_epoch": 101.003,
+        "tracking_summary": {
+            "pipeline_timing": {
+                "capture_started_epoch": 101.002,
+                "published_epoch": 101.003,
+            }
+        },
+    }
+
+    trace = build_frame_timing_trace_v3(session, overlays=[{"overlay_id": "o1"}], now_epoch=101.0)
+
+    assert trace["frame_age_ms"] == 1
+    assert trace["overlay_age_ms"] == 1
+    assert trace["model_vote_age_ms"] == 1
+
+
 def test_display_only_publish_does_not_refresh_stale_overlay_age() -> None:
     session: dict[str, Any] = {
         "session_id": "speed",

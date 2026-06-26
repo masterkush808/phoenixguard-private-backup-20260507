@@ -548,7 +548,8 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
     assert compact_response.status_code == 200
     compact = compact_response.json()
     assert compact["shooter"]["available"] is False
-    assert compact["overlay_objects"] == compact["overlays"]["objects"]
+    assert isinstance(compact["overlays"]["objects"], list)
+    assert "overlay_objects" not in compact
     assert "market_object_registry" not in compact
 
 
