@@ -422,6 +422,7 @@ def _write_progress_report(
     frontend_latency_warning_count: int,
     monitor_endpoint_warning_count: int,
     source_lock_fail_count: int,
+    mt4_bridge_error_count: int,
     allowed_count: int,
     latest_summary: Mapping[str, object],
 ) -> None:
@@ -439,6 +440,7 @@ def _write_progress_report(
         f"- Frontend latency warnings: {frontend_latency_warning_count}",
         f"- Monitor endpoint warnings: {monitor_endpoint_warning_count}",
         f"- Source-lock failures: {source_lock_fail_count}",
+        f"- MT4 bridge error samples: {mt4_bridge_error_count}",
         f"- Allowed package events: {allowed_count}",
         f"- Latest source lock: {_text(latest_summary.get('source_lock_status'), 'UNKNOWN')}",
         f"- Latest frame age ms: {latest_summary.get('frame_age_ms', 'UNKNOWN')}",
@@ -469,6 +471,7 @@ def _write_final_reports(out_dir: Path, reports_dir: Path, verdict: str, summary
         f"- Source-lock failures: {summary.get('source_lock_fail_count')}",
         f"- MT4 bridge stale samples: {summary.get('mt4_bridge_stale_count')}",
         f"- MT4 bridge missing samples: {summary.get('mt4_bridge_missing_count')}",
+        f"- MT4 bridge error samples: {summary.get('mt4_bridge_error_count')}",
         f"- Allowed package events: {summary.get('allowed_package_count')}",
         f"- MT4 bridge status: {summary.get('last_mt4_bridge_status')}",
         f"- Output directory: {out_dir}",
@@ -500,6 +503,7 @@ def _write_final_reports(out_dir: Path, reports_dir: Path, verdict: str, summary
                 f"- Last bridge status: {summary.get('last_mt4_bridge_status')}",
                 f"- Bridge stale samples: {summary.get('mt4_bridge_stale_count')}",
                 f"- Bridge missing samples: {summary.get('mt4_bridge_missing_count')}",
+                f"- Bridge error samples: {summary.get('mt4_bridge_error_count')}",
                 f"- Allowed packages observed: {summary.get('allowed_package_count')}",
                 f"- Bridge packet records: {summary.get('mt4_packet_record_count')}",
             ]
@@ -550,6 +554,7 @@ def main() -> int:
     source_lock_fail_count = 0
     mt4_bridge_stale_count = 0
     mt4_bridge_missing_count = 0
+    mt4_bridge_error_count = 0
     allowed_seen: set[str] = set()
     mt4_packet_seen: set[str] = set()
     progression: dict[str, dict[str, Any]] = {}
@@ -710,6 +715,9 @@ def main() -> int:
         if not bool(mt4.get("status_file_exists")) or not bool(mt4.get("command_file_exists")):
             mt4_bridge_missing_count += 1
             _append_jsonl(out_dir / "mt4_bridge_stale.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), "reason": "mt4_bridge_file_missing", **mt4})
+        elif _upper(mt4.get("bridge_status")) == "BRIDGE_ERROR":
+            mt4_bridge_error_count += 1
+            _append_jsonl(out_dir / "mt4_bridge_errors.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), "reason": "mt4_bridge_error_status", **mt4})
         elif not bool(mt4.get("bridge_fresh")):
             mt4_bridge_stale_count += 1
             _append_jsonl(out_dir / "mt4_bridge_stale.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), "reason": "mt4_bridge_status_stale", **mt4})
@@ -880,6 +888,7 @@ def main() -> int:
                 frontend_latency_warning_count=frontend_latency_warning_count,
                 monitor_endpoint_warning_count=monitor_endpoint_warning_count,
                 source_lock_fail_count=source_lock_fail_count,
+                mt4_bridge_error_count=mt4_bridge_error_count,
                 allowed_count=len(allowed_seen),
                 latest_summary=latest_summary,
             )
@@ -906,6 +915,7 @@ def main() -> int:
                 "source_lock_fail_count": source_lock_fail_count,
                 "mt4_bridge_stale_count": mt4_bridge_stale_count,
                 "mt4_bridge_missing_count": mt4_bridge_missing_count,
+                "mt4_bridge_error_count": mt4_bridge_error_count,
                 "allowed_package_count": len(allowed_seen),
                 "latest_summary": latest_summary,
             },
@@ -915,7 +925,9 @@ def main() -> int:
 
     duration = _now_epoch() - start
     verdict = "PASS_PRODUCTION_READY" if stale_accepted_as_live == 0 and source_lock_fail_count == 0 else "FAIL_SOURCE_LOCK"
-    if verdict == "PASS_PRODUCTION_READY" and (mt4_bridge_missing_count > 0 or mt4_bridge_stale_count > 0):
+    if verdict == "PASS_PRODUCTION_READY" and (
+        mt4_bridge_missing_count > 0 or mt4_bridge_stale_count > 0 or mt4_bridge_error_count > 0
+    ):
         verdict = "FAIL_MT4_BRIDGE"
     if not allowed_seen and verdict == "PASS_PRODUCTION_READY":
         verdict = "PASS_RUNTIME_ONLY_NO_ALLOWED_PACKAGES"
@@ -935,6 +947,7 @@ def main() -> int:
         "source_lock_fail_count": source_lock_fail_count,
         "mt4_bridge_stale_count": mt4_bridge_stale_count,
         "mt4_bridge_missing_count": mt4_bridge_missing_count,
+        "mt4_bridge_error_count": mt4_bridge_error_count,
         "allowed_package_count": len(allowed_seen),
         "mt4_packet_record_count": len(mt4_packet_seen),
         "last_mt4_bridge_status": _text(latest_summary.get("mt4_bridge_status"), "UNKNOWN"),
