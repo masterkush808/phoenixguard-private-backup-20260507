@@ -18,6 +18,7 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8793"
 DEFAULT_SESSION_ID = "pocket-live-8788"
 ALLOWED_PACKAGE_TYPES = {"SWING", "INTRADAY_ENTER_NOW", "SWING_ENTER_NOW"}
 PROGRESSION_HORIZONS_SEC = (30, 60, 120, 300)
+DIAGNOSTIC_ENDPOINTS = frozenset({"runtime_trace", "session", "performance", "floating_state"})
 
 
 def _now_epoch() -> float:
@@ -444,6 +445,7 @@ def main() -> int:
     parser.add_argument("--session-id", default=DEFAULT_SESSION_ID)
     parser.add_argument("--duration-sec", type=float, default=36_000.0)
     parser.add_argument("--sample-sec", type=float, default=5.0)
+    parser.add_argument("--diagnostic-sec", type=float, default=30.0)
     parser.add_argument("--timeout-sec", type=float, default=8.0)
     parser.add_argument("--screenshot-sec", type=float, default=900.0)
     parser.add_argument("--capture-timeout-sec", type=float, default=60.0)
@@ -461,6 +463,9 @@ def main() -> int:
     start = _now_epoch()
     next_screenshot = start + max(60.0, float(args.screenshot_sec))
     next_update = start
+    next_diagnostic = start
+    cached_payloads: dict[str, dict[str, Any]] = {}
+    cached_endpoint_status: dict[str, int] = {}
     sample_count = 0
     stale_count = 0
     stale_accepted_as_live = 0
@@ -491,10 +496,19 @@ def main() -> int:
         if elapsed >= args.duration_sec:
             break
         sample_count += 1
+        diagnostic_due = loop_started >= next_diagnostic
+        requested_endpoints = [
+            name for name in urls if diagnostic_due or name not in DIAGNOSTIC_ENDPOINTS or name not in cached_payloads
+        ]
         endpoint_results: dict[str, tuple[int, dict[str, Any], str, float]] = {
-            name: _get_json(url, float(args.timeout_sec)) for name, url in urls.items()
+            name: _get_json(urls[name], float(args.timeout_sec)) for name in requested_endpoints
         }
-        payloads = {name: result[1] for name, result in endpoint_results.items()}
+        for name, result in endpoint_results.items():
+            cached_endpoint_status[name] = int(result[0])
+            cached_payloads[name] = result[1]
+        if diagnostic_due:
+            next_diagnostic = loop_started + max(float(args.sample_sec), float(args.diagnostic_sec))
+        payloads = {name: cached_payloads.get(name, {}) for name in urls}
         live = payloads["live_state"]
         runtime_trace = payloads["runtime_trace"]
         performance = payloads["performance"]
@@ -607,7 +621,9 @@ def main() -> int:
             "mt4": mt4,
             "allowed": allowed,
             "allowed_meta": allowed_meta,
-            "endpoint_status": {name: result[0] for name, result in endpoint_results.items()},
+            "endpoint_status": dict(cached_endpoint_status),
+            "sampled_endpoints": requested_endpoints,
+            "cached_diagnostic_endpoints": sorted(name for name in DIAGNOSTIC_ENDPOINTS if name not in requested_endpoints),
         }
         _append_jsonl(out_dir / "samples.jsonl", sample_row)
 
