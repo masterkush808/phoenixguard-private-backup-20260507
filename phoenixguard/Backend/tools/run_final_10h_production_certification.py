@@ -392,6 +392,7 @@ def _write_progress_report(
     stale_count: int,
     frontend_gap_count: int,
     frontend_latency_warning_count: int,
+    monitor_endpoint_warning_count: int,
     source_lock_fail_count: int,
     allowed_count: int,
     latest_summary: Mapping[str, object],
@@ -407,6 +408,7 @@ def _write_progress_report(
         f"- Stale market-truth events: {stale_count}",
         f"- Frontend heartbeat gaps: {frontend_gap_count}",
         f"- Frontend latency warnings: {frontend_latency_warning_count}",
+        f"- Monitor endpoint warnings: {monitor_endpoint_warning_count}",
         f"- Source-lock failures: {source_lock_fail_count}",
         f"- Allowed package events: {allowed_count}",
         f"- Latest source lock: {_text(latest_summary.get('source_lock_status'), 'UNKNOWN')}",
@@ -431,6 +433,7 @@ def _write_final_reports(out_dir: Path, reports_dir: Path, verdict: str, summary
         f"- Stale market-truth events: {summary.get('stale_event_count')}",
         f"- Frontend heartbeat gaps: {summary.get('frontend_gap_count')}",
         f"- Frontend latency warnings: {summary.get('frontend_latency_warning_count')}",
+        f"- Monitor endpoint warnings: {summary.get('monitor_endpoint_warning_count')}",
         f"- Source-lock failures: {summary.get('source_lock_fail_count')}",
         f"- Allowed package events: {summary.get('allowed_package_count')}",
         f"- MT4 bridge status: {summary.get('last_mt4_bridge_status')}",
@@ -447,6 +450,7 @@ def _write_final_reports(out_dir: Path, reports_dir: Path, verdict: str, summary
                 f"- Stale market-truth events observed: {summary.get('stale_event_count')}",
                 f"- Frontend heartbeat gaps observed: {summary.get('frontend_gap_count')}",
                 f"- Frontend latency warnings observed: {summary.get('frontend_latency_warning_count')}",
+                f"- Monitor endpoint warnings observed: {summary.get('monitor_endpoint_warning_count')}",
                 f"- Source-lock failures: {summary.get('source_lock_fail_count')}",
             ]
         )
@@ -499,6 +503,7 @@ def main() -> int:
     stale_accepted_as_live = 0
     frontend_gap_count = 0
     frontend_latency_warning_count = 0
+    monitor_endpoint_warning_count = 0
     source_lock_fail_count = 0
     allowed_seen: set[str] = set()
     mt4_packet_seen: set[str] = set()
@@ -554,6 +559,22 @@ def main() -> int:
 
         for endpoint_name, (status, _payload, error, latency_ms) in endpoint_results.items():
             _append_jsonl(out_dir / "api_latency.jsonl", _latency_row(loop_started, endpoint_name, status, latency_ms, error))
+        endpoint_warning_reasons = [
+            f"{endpoint_name}_request_failed"
+            for endpoint_name, (status, _payload, _error, _latency_ms) in endpoint_results.items()
+            if int(status) == 0
+        ]
+        if endpoint_warning_reasons:
+            monitor_endpoint_warning_count += 1
+            _append_jsonl(
+                out_dir / "monitor_endpoint_warnings.jsonl",
+                {
+                    "at_epoch": loop_started,
+                    "at_utc": _utc_now(),
+                    "reasons": endpoint_warning_reasons,
+                    "endpoint_status": {name: int(result[0]) for name, result in endpoint_results.items()},
+                },
+            )
         _append_jsonl(out_dir / "source_lock.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), **source_lock})
         _append_jsonl(out_dir / "model_freshness.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), **model_status, **timing})
         _append_jsonl(out_dir / "sequence_context.jsonl", {"at_epoch": loop_started, "at_utc": _utc_now(), **sequence_status})
@@ -565,14 +586,28 @@ def main() -> int:
 
         stale_reasons: list[str] = []
         frontend_gap_reasons: list[str] = []
-        if _float(timing["frame_age_ms"]) > 2500.0:
-            stale_reasons.append("frame_age_gt_2500ms")
-        if _float(timing["overlay_age_ms"]) > 2500.0:
-            stale_reasons.append("overlay_age_gt_2500ms")
-        if _float(timing["model_vote_age_ms"]) > 3000.0:
-            stale_reasons.append("model_vote_age_gt_3000ms")
-        if bool(timing.get("timing_missing")):
-            stale_reasons.append("missing_frame_or_overlay_timing")
+        live_state_current_status = int(endpoint_results.get("live_state", (cached_endpoint_status.get("live_state", 0), {}, "", 0.0))[0])
+        live_state_current_ok = live_state_current_status == 200
+        if live_state_current_ok:
+            if _float(timing["frame_age_ms"]) > 2500.0:
+                stale_reasons.append("frame_age_gt_2500ms")
+            if _float(timing["overlay_age_ms"]) > 2500.0:
+                stale_reasons.append("overlay_age_gt_2500ms")
+            if _float(timing["model_vote_age_ms"]) > 3000.0:
+                stale_reasons.append("model_vote_age_gt_3000ms")
+            if bool(timing.get("timing_missing")):
+                stale_reasons.append("missing_frame_or_overlay_timing")
+        elif live_state_current_status == 0:
+            monitor_endpoint_warning_count += 1
+            _append_jsonl(
+                out_dir / "monitor_endpoint_warnings.jsonl",
+                {
+                    "at_epoch": loop_started,
+                    "at_utc": _utc_now(),
+                    "reasons": ["live_state_unavailable_skip_truth_stale_eval"],
+                    "endpoint_status": {name: int(result[0]) for name, result in endpoint_results.items()},
+                },
+            )
         frontend_heartbeat_age_ms = _float(frontend["age_ms"])
         frontend_visible_count = _int(frontend.get("visible_overlay_count"), 0)
         frontend_alive = _text(frontend.get("status")).upper() == "ALIVE"
@@ -599,7 +634,7 @@ def main() -> int:
                 )
             else:
                 frontend_gap_reasons.append("frontend_heartbeat_age_gt_3500ms")
-        if not bool(source_lock.get("valid")):
+        if live_state_current_ok and not bool(source_lock.get("valid")):
             stale_reasons.append("source_lock_not_valid")
             source_lock_fail_count += 1
         if frontend_gap_reasons:
@@ -725,6 +760,7 @@ def main() -> int:
                 stale_count=stale_count,
                 frontend_gap_count=frontend_gap_count,
                 frontend_latency_warning_count=frontend_latency_warning_count,
+                monitor_endpoint_warning_count=monitor_endpoint_warning_count,
                 source_lock_fail_count=source_lock_fail_count,
                 allowed_count=len(allowed_seen),
                 latest_summary=latest_summary,
@@ -747,6 +783,7 @@ def main() -> int:
                 "stale_event_count": stale_count,
                 "frontend_gap_count": frontend_gap_count,
                 "frontend_latency_warning_count": frontend_latency_warning_count,
+                "monitor_endpoint_warning_count": monitor_endpoint_warning_count,
                 "source_lock_fail_count": source_lock_fail_count,
                 "allowed_package_count": len(allowed_seen),
                 "latest_summary": latest_summary,
@@ -770,6 +807,7 @@ def main() -> int:
         "stale_accepted_as_live": stale_accepted_as_live,
         "frontend_gap_count": frontend_gap_count,
         "frontend_latency_warning_count": frontend_latency_warning_count,
+        "monitor_endpoint_warning_count": monitor_endpoint_warning_count,
         "source_lock_fail_count": source_lock_fail_count,
         "allowed_package_count": len(allowed_seen),
         "mt4_packet_record_count": len(mt4_packet_seen),
