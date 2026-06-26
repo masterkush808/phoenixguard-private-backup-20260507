@@ -94,6 +94,7 @@ $env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
 $env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
 
 $launchShooter = @('FULL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED') -contains $Profile
+$launchMt4Bridge = -not ($env:PHOENIXGUARD_MT4_BRIDGE_ENABLED -and $env:PHOENIXGUARD_MT4_BRIDGE_ENABLED.Trim().ToLowerInvariant() -in @('0', 'false', 'off', 'no'))
 $startupTestSignal = $false
 $brokerClickPath = 'RETIRED_PACKAGE_REPORTER_ONLY'
 
@@ -349,6 +350,36 @@ try {
         Write-Host "Shooter package reporter log: $errPath"
     } elseif ($session) {
         Write-Host "Profile $Profile selected; tracker started without shooter."
+    }
+    if ($session -and $launchMt4Bridge) {
+        Write-Host "Starting MT4 file bridge against $baseUrl"
+        $bridgePollText = ([string][double]$ShooterPollSec).Replace(',', '.')
+        $bridgeTimeoutSec = if ($env:PHOENIXGUARD_MT4_BRIDGE_TIMEOUT_SEC) { [double]$env:PHOENIXGUARD_MT4_BRIDGE_TIMEOUT_SEC } else { 30.0 }
+        $bridgeTimeoutText = ([string]$bridgeTimeoutSec).Replace(',', '.')
+        $bridgeLogDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime\logs'
+        New-Item -ItemType Directory -Force -Path $bridgeLogDir | Out-Null
+        $bridgeStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $bridgeOutPath = Join-Path -Path $bridgeLogDir -ChildPath "mt4-bridge-full-local-$bridgeStamp.out.log"
+        $bridgeErrPath = Join-Path -Path $bridgeLogDir -ChildPath "mt4-bridge-full-local-$bridgeStamp.err.log"
+        $bridgeArgs = @(
+            'Backend\tools\phoenixguard_mt4_file_bridge.py',
+            '--session-id',
+            $SessionId,
+            '--base-url',
+            $baseUrl,
+            '--poll-sec',
+            $bridgePollText,
+            '--timeout-sec',
+            $bridgeTimeoutText,
+            '--print-every',
+            '30.0',
+            '--metrics-every',
+            '15.0'
+        )
+        Start-Process -FilePath $pythonPath -ArgumentList $bridgeArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $bridgeOutPath -RedirectStandardError $bridgeErrPath | Out-Null
+        Write-Host "MT4 file bridge log: $bridgeOutPath"
+    } elseif ($session) {
+        Write-Host "MT4 file bridge disabled by PHOENIXGUARD_MT4_BRIDGE_ENABLED=$env:PHOENIXGUARD_MT4_BRIDGE_ENABLED"
     }
 } catch {
     throw "Tracker API did not become healthy at $baseUrl. Start output: $($_.Exception.Message)"

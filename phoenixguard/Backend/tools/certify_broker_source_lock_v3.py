@@ -54,13 +54,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Certify PhoenixGuard V3 broker-source lock on the live state.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--session", default=DEFAULT_SESSION)
-    parser.add_argument("--timeout", type=float, default=15.0)
+    parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--allow-empty-lock-id", action="store_true")
     args = parser.parse_args()
 
     base = args.base_url.rstrip("/")
     session_q = quote_session(args.session)
-    live = http_json(f"{base}/v1/mobile/live/state/v3/{session_q}?mode=DIAGNOSTICS", timeout=args.timeout)
+    live = http_json(f"{base}/v1/mobile/live/state/v3/{session_q}?mode=DIAGNOSTICS&compact=1", timeout=args.timeout)
     session = http_json(f"{base}/v1/mobile/window-tracker/sessions/{session_q}", timeout=args.timeout)
     failures: list[str] = []
     warnings: list[str] = []

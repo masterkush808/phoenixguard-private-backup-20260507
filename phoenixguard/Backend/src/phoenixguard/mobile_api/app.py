@@ -314,6 +314,93 @@ def _direct_window_tracker_display_state_path(session_id: str) -> Path:
     return candidates[0] / relative_path
 
 
+def _persisted_compact_overlay_response_path(session_id: str, mode: str) -> Path:
+    safe_mode = re.sub(r"[^A-Za-z0-9_.-]+", "_", normalize_view_mode(mode).lower()).strip("._") or "clean_live"
+    return _direct_live_state_session_path(session_id).with_name(f"compact_overlay_response_{safe_mode}.json")
+
+
+def _surface_signature_from_payload(payload: Mapping[str, object]) -> str:
+    return str(
+        payload.get("last_display_surface_signature")
+        or payload.get("last_window_surface_signature")
+        or _as_mapping(payload.get("display_fast_path_v3")).get("surface_signature")
+        or payload.get("overlay_source_window_signature")
+        or ""
+    ).strip()
+
+
+def _load_persisted_compact_overlay_response(
+    session_id: str,
+    mode: str,
+    display_payload: Mapping[str, object],
+    *,
+    now_epoch: float,
+) -> dict[str, object] | None:
+    path = _persisted_compact_overlay_response_path(session_id, mode)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, Mapping):
+        return None
+    payload = dict(cast(Mapping[str, object], raw))
+    if _compact_live_state_renderable_count(payload) <= 0:
+        return None
+    display_signature = _surface_signature_from_payload(display_payload)
+    cached_signature = str(payload.get("persisted_overlay_surface_signature") or "").strip()
+    if display_signature and cached_signature and display_signature != cached_signature:
+        return None
+    provider = _mapping_to_plain_dict(payload.get("provider_status"))
+    provider.update(
+        {
+            "persisted_compact_overlay_warm_start_v3": True,
+            "persisted_compact_overlay_age_ms": round(max(0.0, now_epoch - _epoch_float(payload.get("persisted_overlay_epoch"), now_epoch)) * 1000.0, 3),
+        }
+    )
+    payload["provider_status"] = provider
+    display_frame = int(
+        _epoch_float(
+            display_payload.get("display_frame_id") or display_payload.get("frame_index") or payload.get("frame_id"),
+            0.0,
+        )
+    )
+    if display_frame > 0:
+        payload["frame_id"] = display_frame
+        payload["display_frame_id"] = display_frame
+    return payload
+
+
+def _persist_compact_overlay_response(session_id: str, mode: str, payload: Mapping[str, object]) -> None:
+    if _compact_live_state_renderable_count(payload) <= 0:
+        return
+    path = _persisted_compact_overlay_response_path(session_id, mode)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = dict(payload)
+        display_signature = str(
+            row.get("last_display_surface_signature")
+            or row.get("last_window_surface_signature")
+            or row.get("overlay_source_window_signature")
+            or ""
+        ).strip()
+        if not display_signature:
+            try:
+                display_raw = json.loads(_direct_window_tracker_display_state_path(session_id).read_text(encoding="utf-8"))
+            except Exception:
+                display_raw = None
+            if isinstance(display_raw, Mapping):
+                display_signature = _surface_signature_from_payload(cast(Mapping[str, object], display_raw))
+        if not display_signature:
+            return
+        row["persisted_overlay_surface_signature"] = display_signature
+        row["persisted_overlay_epoch"] = time.time()
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp_path.write_text(json.dumps(row, separators=(",", ":"), default=str), encoding="utf-8")
+        os.replace(tmp_path, path)
+    except Exception:
+        return
+
+
 def _direct_market_registry_path(session_id: str) -> Path:
     relative_path = Path("market_registry") / f"{str(session_id or '').strip()}.jsonl"
     candidates = _runtime_data_dir_candidates()
@@ -686,6 +773,48 @@ def _direct_window_tracker_session_snapshot(session_id: str) -> dict[str, object
     payload.setdefault("next_capture_in_sec", 0.0)
     payload.setdefault("effective_capture_interval_sec", payload.get("capture_interval_sec", _WINDOW_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC))
     return payload
+
+
+def _direct_model_council_fast_payload(session_id: str) -> dict[str, object] | None:
+    requested_session_id = str(session_id or "").strip()
+    if not requested_session_id:
+        return None
+    compact_path = _direct_live_state_compact_session_path(requested_session_id)
+    session_path = _direct_live_state_session_path(requested_session_id)
+    candidates: list[Path] = []
+    try:
+        compact_mtime = compact_path.stat().st_mtime if compact_path.exists() else 0.0
+    except OSError:
+        compact_mtime = 0.0
+    try:
+        session_mtime = session_path.stat().st_mtime if session_path.exists() else 0.0
+    except OSError:
+        session_mtime = 0.0
+    if session_mtime > compact_mtime + 0.5:
+        candidates.append(session_path)
+    if compact_mtime > 0.0:
+        candidates.append(compact_path)
+    elif session_mtime > 0.0:
+        candidates.append(session_path)
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(raw, Mapping):
+            continue
+        payload = dict(cast(Mapping[str, object], raw))
+        if str(payload.get("session_id", requested_session_id) or requested_session_id) != requested_session_id:
+            continue
+        if payload.get("tracking_enabled") is False:
+            continue
+        return payload
+    return None
 
 
 def _direct_window_tracker_display_snapshot(
@@ -1724,6 +1853,26 @@ def create_app(
         return {"session_id": ""}
 
     def latest_model_council_state_from_live_session(session_id: str) -> dict[str, object]:
+        if not explicit_window_tracker_service:
+            direct_payload = _direct_model_council_fast_payload(session_id)
+            if direct_payload is not None:
+                result = _mapping_to_plain_dict(direct_payload.get("model_council_result"))
+                study_packet = model_council_study_packet_from_payload(cast(Mapping[str, Any], direct_payload))
+                packet = model_council_packet_from_payload(cast(Mapping[str, Any], direct_payload))
+                if result or study_packet or packet:
+                    return {
+                        "session_id": str(direct_payload.get("session_id", session_id) or session_id),
+                        "model_council_result": result,
+                        "model_council_study_packet": study_packet,
+                        "model_council_packet": packet,
+                        "execution_packet_present": bool(packet),
+                        "execution_packet_id": str(packet.get("packet_id", "") or "") if packet else "",
+                        "promotion_trace": _mapping_to_plain_dict(
+                            result.get("promotion_trace")
+                            or study_packet.get("promotion_trace")
+                            or _mapping_to_plain_dict(result.get("model_council")).get("promotion_trace")
+                        ),
+                    }
         payload = resolve_model_council_session_payload(session_id)
         result = _mapping_to_plain_dict(payload.get("model_council_result"))
         study_packet = model_council_study_packet_from_payload(cast(Mapping[str, Any], payload))
@@ -1745,6 +1894,13 @@ def create_app(
         }
 
     def latest_model_council_study_packet_from_live_session(session_id: str) -> dict[str, object]:
+        if not explicit_window_tracker_service:
+            direct_payload = _direct_model_council_fast_payload(session_id)
+            if direct_payload is not None:
+                direct_packet = model_council_study_packet_from_payload(cast(Mapping[str, Any], direct_payload))
+                if direct_packet:
+                    return cast(dict[str, object], direct_packet)
+                raise KeyError(session_id)
         payload = resolve_model_council_session_payload(session_id)
         packet = model_council_study_packet_from_payload(cast(Mapping[str, Any], payload))
         if not packet:
@@ -1752,6 +1908,13 @@ def create_app(
         return cast(dict[str, object], packet)
 
     def latest_model_council_execution_packet_from_live_session(session_id: str) -> dict[str, object]:
+        if not explicit_window_tracker_service:
+            direct_payload = _direct_model_council_fast_payload(session_id)
+            if direct_payload is not None:
+                direct_packet = model_council_packet_from_payload(cast(Mapping[str, Any], direct_payload))
+                if direct_packet:
+                    return cast(dict[str, object], direct_packet)
+                raise KeyError(session_id)
         payload = resolve_model_council_session_payload(session_id)
         packet = model_council_packet_from_payload(cast(Mapping[str, Any], payload))
         if not packet:
@@ -2402,7 +2565,11 @@ def create_app(
         if display_snapshot is None:
             return refreshed
         display_payload = dict(display_snapshot)
-        surface_mismatch_reason = _display_overlay_authority_mismatch_reason(requested_session_id, display_payload)
+        surface_mismatch_reason = _display_overlay_authority_mismatch_reason(
+            requested_session_id,
+            display_payload,
+            allow_session_probe=True,
+        )
         if surface_mismatch_reason:
             return _compact_studying_new_pair_live_state(
                 requested_session_id,
@@ -2550,10 +2717,12 @@ def create_app(
             or ""
         ).strip()
         if display_signature and overlay_signature and display_signature != overlay_signature:
-            return (
-                "Studying new pair: the visible broker surface changed before overlay authority "
-                "rebuilt on the new frame."
-            )
+            if rebind_pending:
+                return (
+                    "Studying new pair: the visible broker surface changed before overlay authority "
+                    "rebuilt on the new frame."
+                )
+            return ""
         if not rebind_pending:
             return ""
         return ""
@@ -2897,7 +3066,11 @@ def create_app(
                     require_overlay_model=False,
                 )
                 if display_snapshot is not None:
-                    surface_mismatch_reason = _display_overlay_authority_mismatch_reason(requested_session_id, display_snapshot)
+                    surface_mismatch_reason = _display_overlay_authority_mismatch_reason(
+                        requested_session_id,
+                        display_snapshot,
+                        allow_session_probe=True,
+                    )
                     if surface_mismatch_reason:
                         compact_response = _compact_studying_new_pair_live_state(
                             requested_session_id,
@@ -2910,6 +3083,16 @@ def create_app(
                             with _LIVE_STATE_V3_CACHE_LOCK:
                                 _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_response))
                         return compact_response
+                    warm_start = _load_persisted_compact_overlay_response(
+                        requested_session_id,
+                        active_mode,
+                        display_snapshot,
+                        now_epoch=now_epoch,
+                    )
+                    if warm_start is not None:
+                        with _LIVE_STATE_V3_CACHE_LOCK:
+                            _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(warm_start))
+                        return warm_start
                 live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=True)
                 compact_response = compact_live_state_response(live_state)
                 if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
@@ -2921,6 +3104,7 @@ def create_app(
                         ]:
                             _COMPACT_LIVE_STATE_RESPONSE_CACHE.pop(stale_key, None)
                         _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_response))
+                _persist_compact_overlay_response(requested_session_id, active_mode, compact_response)
                 return compact_response
         live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=compact)
         return live_state
@@ -3216,10 +3400,14 @@ def create_app(
 
     def build_floating_state_for_session(session_id: str | None = None, *, include_inspector: bool = False) -> dict[str, object]:
         requested_session_id = str(session_id or "").strip()
-        try:
-            tracker_payload = resolve_model_council_session_payload(requested_session_id or None)
-        except KeyError as exc:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
+        tracker_payload: dict[str, object] | None = None
+        if not explicit_window_tracker_service and requested_session_id:
+            tracker_payload = _direct_model_council_fast_payload(requested_session_id)
+        if tracker_payload is None:
+            try:
+                tracker_payload = resolve_model_council_session_payload(requested_session_id or None)
+            except KeyError as exc:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         tracker_payload = dict(tracker_payload)
         resolved_session_id = str(tracker_payload.get("session_id", requested_session_id) or requested_session_id).strip()
         try:
@@ -3284,6 +3472,45 @@ def create_app(
                 cooldown_remaining_seconds=cooldown_remaining,
             ),
         )
+        try:
+            clean_live_state = live_state_v3_for_session(resolved_session_id, mode="CLEAN_LIVE", compact=True)
+        except Exception:
+            clean_live_state = {}
+        clean_overlays = _mapping_to_plain_dict(clean_live_state.get("overlays"))
+        clean_objects = clean_overlays.get("objects")
+        clean_object_count = len(cast(Sequence[object], clean_objects)) if isinstance(clean_objects, list) else 0
+        renderable_count = int(
+            _epoch_float(
+                clean_live_state.get("renderable_count")
+                or clean_overlays.get("renderable_count")
+                or clean_live_state.get("overlay_count")
+                or clean_overlays.get("overlay_count")
+                or clean_object_count,
+                0.0,
+            )
+        )
+        if clean_object_count > 0 and renderable_count <= 0:
+            renderable_count = clean_object_count
+        if clean_overlays or renderable_count > 0:
+            overlay_count = int(
+                _epoch_float(
+                    clean_live_state.get("overlay_count")
+                    or clean_overlays.get("overlay_count")
+                    or renderable_count,
+                    float(renderable_count),
+                )
+            )
+            state_payload["overlay_count"] = overlay_count
+            state_payload["renderable_count"] = renderable_count
+            state_payload["overlay_frame_id"] = clean_live_state.get("overlay_frame_id")
+            state_payload["frame_id"] = clean_live_state.get("frame_id")
+            state_payload["state_version"] = clean_live_state.get("state_version")
+            state_payload["overlays"] = {
+                **clean_overlays,
+                "overlay_count": overlay_count,
+                "renderable_count": renderable_count,
+                "source": "clean_live_compact_state",
+            }
         if not include_inspector:
             state_payload.pop("inspector", None)
         return state_payload

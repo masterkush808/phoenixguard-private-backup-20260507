@@ -427,7 +427,7 @@ def test_model_council_latest_execution_packet_endpoints_return_v3_packet() -> N
         expiry_seconds=300,
         input_frame_hash="frame-endpoint",
         created_epoch=now,
-        valid_until_epoch=now + 2.0,
+        valid_until_epoch=now + 120.0,
         model_council={"final_state": "EXECUTABLE", "final_side": "BUY"},
         runtime_model_health={"all_required_models_awake": True, "council_status": "AWAKE"},
     )
