@@ -49,6 +49,46 @@ def test_record_and_load_frontend_heartbeat(tmp_path: Path) -> None:
     assert loaded["overlay_count"] == 4
 
 
+def test_replay_dashboard_heartbeat_does_not_overwrite_live_dashboard(tmp_path: Path) -> None:
+    live = record_frontend_heartbeat(
+        {
+            "session_id": "pocket-live-8788",
+            "surface_id": "dashboard",
+            "route": "live",
+            "overlay_mode": "CLEAN_LIVE",
+            "frame_id": 10,
+            "rendered_frame_id": 10,
+            "overlay_count": 8,
+        },
+        store_dir=tmp_path,
+        now_ms=1_000_000,
+    )
+    replay = record_frontend_heartbeat(
+        {
+            "session_id": "pocket-live-8788",
+            "surface_id": "dashboard",
+            "route": "replay",
+            "overlay_mode": "REPLAY",
+            "frame_id": 20,
+            "rendered_frame_id": 20,
+            "overlay_count": 3,
+        },
+        store_dir=tmp_path,
+        now_ms=1_000_100,
+    )
+
+    assert live["surface_id"] == "dashboard"
+    assert replay["surface_id"] == "dashboard_replay_replay"
+    live_loaded = latest_frontend_heartbeat("pocket-live-8788", surface_id="dashboard", store_dir=tmp_path)
+    replay_loaded = latest_frontend_heartbeat("pocket-live-8788", surface_id="dashboard_replay_replay", store_dir=tmp_path)
+    assert live_loaded is not None
+    assert replay_loaded is not None
+    assert live_loaded["route"] == "live"
+    assert live_loaded["frame_id"] == 10
+    assert replay_loaded["route"] == "replay"
+    assert replay_loaded["frame_id"] == 20
+
+
 def test_record_frontend_heartbeat_uses_unique_temp_files_under_concurrency(tmp_path: Path) -> None:
     def write_heartbeat(frame_id: int) -> int:
         heartbeat = record_frontend_heartbeat(

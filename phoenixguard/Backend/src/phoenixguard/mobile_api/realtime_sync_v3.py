@@ -93,6 +93,21 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip())[:120] or "default"
 
 
+def _surface_key(value: str, default: str = "live") -> str:
+    key = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    return key or default
+
+
+def _dashboard_heartbeat_surface_id(surface_id: str, route: str, overlay_mode: str) -> str:
+    if surface_id != "dashboard":
+        return surface_id
+    route_key = _surface_key(route)
+    if route_key in {"live", "dashboard"} or "window_tracker_dashboard" in route_key:
+        return "dashboard"
+    mode_key = _surface_key(overlay_mode, default="clean_live")
+    return f"dashboard_{route_key}_{mode_key}"[:120]
+
+
 def _heartbeat_path(session_id: str, *, surface_id: str = "dashboard", store_dir: Path | str | None = None) -> Path:
     root = Path(store_dir or DEFAULT_HEARTBEAT_STORE_DIR)
     return root / f"{_slug(session_id)}__{_slug(surface_id)}.json"
@@ -102,7 +117,9 @@ def normalize_frontend_heartbeat(payload: Mapping[str, Any], *, now_ms: int | fl
     session_id = _text(payload.get("session_id"))
     if not session_id:
         raise ValueError("frontend heartbeat requires session_id")
-    surface_id = _text(payload.get("surface_id"), "dashboard")
+    route = _text(payload.get("route"))
+    overlay_mode = _text(payload.get("overlay_mode"), _text(payload.get("mode"), "CLEAN_LIVE")).upper()
+    surface_id = _dashboard_heartbeat_surface_id(_text(payload.get("surface_id"), "dashboard"), route, overlay_mode)
     epoch_ms = int(_float(payload.get("sent_at_ms"), float(now_ms if now_ms is not None else time.time() * 1000.0)))
     viewport = dict(cast(Mapping[str, Any], payload.get("viewport"))) if isinstance(payload.get("viewport"), Mapping) else {}
     render_size = dict(cast(Mapping[str, Any], payload.get("render_size"))) if isinstance(payload.get("render_size"), Mapping) else {}
@@ -113,8 +130,8 @@ def normalize_frontend_heartbeat(payload: Mapping[str, Any], *, now_ms: int | fl
         "sent_at_ms": epoch_ms,
         "received_at": _now_iso_from_ms(now_ms),
         "received_at_ms": int(now_ms if now_ms is not None else time.time() * 1000.0),
-        "route": _text(payload.get("route")),
-        "overlay_mode": _text(payload.get("overlay_mode"), _text(payload.get("mode"), "CLEAN_LIVE")).upper(),
+        "route": route,
+        "overlay_mode": overlay_mode,
         "surface_mode": _text(payload.get("surface_mode"), "overlay"),
         "status": _text(payload.get("status"), "ALIVE").upper(),
         "degraded_reason": _text(payload.get("degraded_reason", payload.get("reason"))),
@@ -384,7 +401,7 @@ def record_frontend_heartbeat_v3(payload: Mapping[str, Any]) -> dict[str, Any]:
     return record_frontend_heartbeat(payload)
 
 
-def latest_frontend_heartbeat_v3(session_id: str | None = None) -> dict[str, Any]:
+def latest_frontend_heartbeat_v3(session_id: str | None = None, *, surface_id: str = "dashboard") -> dict[str, Any]:
     if not session_id:
         root = DEFAULT_HEARTBEAT_STORE_DIR
         if not root.exists():
@@ -397,7 +414,12 @@ def latest_frontend_heartbeat_v3(session_id: str | None = None) -> dict[str, Any
         except (OSError, ValueError):
             return {"schema_version": FRONTEND_HEARTBEAT_SCHEMA_VERSION, "status": "missing"}
         return dict(cast(Mapping[str, Any], payload)) if isinstance(payload, Mapping) else {"schema_version": FRONTEND_HEARTBEAT_SCHEMA_VERSION, "status": "missing"}
-    return latest_frontend_heartbeat(session_id) or {"schema_version": FRONTEND_HEARTBEAT_SCHEMA_VERSION, "session_id": session_id, "status": "missing"}
+    return latest_frontend_heartbeat(session_id, surface_id=surface_id) or {
+        "schema_version": FRONTEND_HEARTBEAT_SCHEMA_VERSION,
+        "session_id": session_id,
+        "surface_id": surface_id,
+        "status": "missing",
+    }
 
 
 __all__ = [

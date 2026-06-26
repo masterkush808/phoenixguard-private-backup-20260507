@@ -3099,6 +3099,10 @@ def create_app(
                     0.0,
                 )
             )
+            latest_received_ms = _epoch_float(latest_heartbeat_payload.get("received_at_ms"), 0.0)
+            latest_age_ms = max(0.0, time.time() * 1000.0 - latest_received_ms) if latest_received_ms > 0.0 else 999999.0
+            heartbeat_route = str(payload.get("route") or "").strip().lower()
+            heartbeat_mode = str(payload.get("overlay_mode") or payload.get("mode") or "").strip().upper()
             if visible_overlay_count > 0 and not heartbeat_overlay_version:
                 return {
                     "schema_version": "PG_FRONTEND_HEARTBEAT_V3",
@@ -3108,6 +3112,17 @@ def create_app(
                     "rendered_frame_id": rendered_frame,
                 }
             if (latest_visible_count > 0 or payload_overlay_count > 0) and visible_overlay_count <= 0:
+                if heartbeat_route == "live" and heartbeat_mode == "CLEAN_LIVE" and latest_visible_count > 0 and latest_age_ms <= 7000.0:
+                    return {
+                        "schema_version": "PG_FRONTEND_HEARTBEAT_V3",
+                        "session_id": heartbeat_session_id,
+                        "surface_id": str(latest_heartbeat_payload.get("surface_id") or "dashboard"),
+                        "status": "ignored",
+                        "reason": "transient_empty_overlay_heartbeat",
+                        "rendered_frame_id": rendered_frame,
+                        "latest_visible_overlay_count": latest_visible_count,
+                        "latest_heartbeat_age_ms": round(latest_age_ms, 3),
+                    }
                 degraded_payload = dict(payload)
                 degraded_payload["status"] = "DEGRADED"
                 degraded_payload["degraded_reason"] = "degraded_overlay_heartbeat"
@@ -3120,13 +3135,15 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     @app.get("/v1/mobile/frontend/heartbeat/v3")
-    def latest_frontend_heartbeat_v3(session_id: str | None = None) -> dict[str, object]:
+    def latest_frontend_heartbeat_v3(session_id: str | None = None, surface_id: str | None = None) -> dict[str, object]:
         resolved_session_id = str(session_id or "").strip() or resolve_window_tracker_dashboard_session_id(None)
-        heartbeat = latest_frontend_heartbeat(resolved_session_id)
+        resolved_surface_id = str(surface_id or "dashboard").strip() or "dashboard"
+        heartbeat = latest_frontend_heartbeat(resolved_session_id, surface_id=resolved_surface_id)
         if heartbeat is None:
             return {
                 "schema_version": "PG_FRONTEND_HEARTBEAT_V3",
                 "session_id": resolved_session_id,
+                "surface_id": resolved_surface_id,
                 "status": "missing",
             }
         return cast(dict[str, object], heartbeat)

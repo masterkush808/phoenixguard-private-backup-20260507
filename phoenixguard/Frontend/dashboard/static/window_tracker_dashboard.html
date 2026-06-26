@@ -7890,10 +7890,31 @@
       return true;
     }
 
+    function frontendHeartbeatSurfaceId() {
+      const routeName = normalizeRoute(state.route);
+      if (routeName === "live") {
+        return "dashboard";
+      }
+      const overlayName = backendOverlayMode(state.overlayMode).toLowerCase();
+      return `dashboard_${routeName}_${overlayName}`.replace(/[^a-z0-9_.-]+/g, "_").slice(0, 120);
+    }
+
     function publishFrontendHeartbeat(session = {}, renderMeta = {}) {
       const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
       const nowMs = Date.now();
       const visibleOverlayCount = Number(renderMeta.visibleOverlayCount ?? els.hotspotLayer.querySelectorAll(".surface-hotspot").length) || 0;
+      const routeName = normalizeRoute(state.route);
+      const overlayMode = backendOverlayMode(state.overlayMode);
+      const previousVisibleOverlayCount = Number(state.surface.lastHeartbeatVisibleOverlayCount || 0);
+      if (routeName === "live" && overlayMode === "CLEAN_LIVE" && visibleOverlayCount <= 0 && previousVisibleOverlayCount > 0) {
+        const zeroStartedMs = Number(state.surface.zeroOverlayHeartbeatStartedMs || 0) || nowMs;
+        state.surface.zeroOverlayHeartbeatStartedMs = zeroStartedMs;
+        if (nowMs - zeroStartedMs < 5000) {
+          return;
+        }
+      } else if (visibleOverlayCount > 0) {
+        state.surface.zeroOverlayHeartbeatStartedMs = 0;
+      }
       const overlayFrameId = overlayAuthorityFrame(session);
       const displayFrameId = newestDisplayFrame(session);
       const chartFrameId = Math.max(
@@ -7909,9 +7930,9 @@
       const size = surfaceImageSize();
       const payload = {
         session_id: clean(session.session_id || SESSION_ID, SESSION_ID),
-        surface_id: "dashboard",
+        surface_id: frontendHeartbeatSurfaceId(),
         route: state.route,
-        overlay_mode: backendOverlayMode(state.overlayMode),
+        overlay_mode: overlayMode,
         surface_mode: state.mode,
         frame_id: frameId,
         rendered_frame_id: displayFrameId || frameId,
@@ -7959,6 +7980,9 @@
       }
       state.surface.lastHeartbeatSignature = signature;
       state.surface.lastHeartbeatSentMs = nowMs;
+      if (visibleOverlayCount > 0) {
+        state.surface.lastHeartbeatVisibleOverlayCount = visibleOverlayCount;
+      }
       window.fetch("/v1/mobile/frontend/heartbeat/v3", {
         method: "POST",
         cache: "no-store",
