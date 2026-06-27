@@ -205,6 +205,24 @@ def _compact_live_state_renderable_count(payload: Mapping[str, object]) -> int:
     return 0
 
 
+def _compact_live_state_response_cache_candidates(
+    cache_key: tuple[str, str, str],
+) -> list[tuple[tuple[str, str, str], tuple[float, dict[str, object]]]]:
+    exact = _COMPACT_LIVE_STATE_RESPONSE_CACHE.get(cache_key)
+    candidates: list[tuple[tuple[str, str, str], tuple[float, dict[str, object]]]] = []
+    if exact is not None:
+        candidates.append((cache_key, exact))
+    session_id, active_mode, _signature = cache_key
+    previous = [
+        (key, cached)
+        for key, cached in _COMPACT_LIVE_STATE_RESPONSE_CACHE.items()
+        if key != cache_key and key[0] == session_id and key[1] == active_mode
+    ]
+    previous.sort(key=lambda item: item[1][0], reverse=True)
+    candidates.extend(previous[:4])
+    return candidates
+
+
 def _compact_live_state_cache_can_reuse(payload: Mapping[str, object], cached_age_sec: float) -> bool:
     if _compact_live_state_renderable_count(payload) > 0:
         return True
@@ -604,6 +622,13 @@ def _compact_live_state_response_cache_signature(session_id: str) -> str:
         display_path,
         (
             "session_id",
+            "frame_index",
+            "display_frame_id",
+            "chart_frame_id",
+            "overlay_frame_id",
+            "full_overlay_frame_id",
+            "model_vote_frame_id",
+            "last_display_window_path",
             "last_display_surface_signature",
             "last_window_surface_signature",
             "last_study_surface_signature",
@@ -2793,6 +2818,25 @@ def create_app(
             projected["live_visual_state"] = live_visual
         return projected
 
+    def _public_compact_live_state_response(payload: Mapping[str, object]) -> dict[str, object]:
+        public_payload: dict[str, object] = dict(payload)
+        public_payload.pop("live_visual_state", None)
+        omitted_all_objects = 0
+        overlays = _mapping_to_plain_dict(public_payload.get("overlays"))
+        if overlays:
+            all_objects = overlays.get("all_objects")
+            if isinstance(all_objects, list):
+                omitted_all_objects = len(cast(Sequence[object], all_objects))
+            overlays.pop("all_objects", None)
+            public_payload["overlays"] = overlays
+        provider = {
+            **_mapping_to_plain_dict(public_payload.get("provider_status")),
+            "compact_public_payload_v3": True,
+            "compact_public_all_objects_omitted_v3": omitted_all_objects,
+        }
+        public_payload["provider_status"] = provider
+        return public_payload
+
     def _compact_visible_overlay_pool_from_payload(payload: Mapping[str, object]) -> list[Mapping[str, object]]:
         rows: list[Mapping[str, object]] = []
         for container in (
@@ -3318,8 +3362,11 @@ def create_app(
             if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
                 refresh_source: dict[str, object] | None = None
                 with _LIVE_STATE_V3_CACHE_LOCK:
-                    cached = _COMPACT_LIVE_STATE_RESPONSE_CACHE.get(cache_key)
-                    if cached:
+                    for cached_key, cached in _compact_live_state_response_cache_candidates(cache_key):
+                        previous_signature_reused = cached_key != cache_key
+                        cached_provider = _mapping_to_plain_dict(cached[1].get("provider_status"))
+                        if previous_signature_reused and cached_provider.get("compact_studying_new_pair_fast_path_v3") is True:
+                            continue
                         cached_age = now_epoch - cached[0]
                         cached_payload = cached[1]
                         cache_can_reuse = _compact_live_state_cache_can_reuse(cached_payload, cached_age)
@@ -3336,12 +3383,14 @@ def create_app(
                                 **_mapping_to_plain_dict(compact_cached.get("provider_status")),
                                 "compact_cache_hot_reused_v3": True,
                                 "compact_cache_previous_signature_reused_v3": True,
+                                "compact_cache_signature_key_changed_v3": previous_signature_reused,
                                 "compact_cache_hot_age_ms": round(max(0.0, cached_age) * 1000.0, 3),
                             }
                             compact_cached["provider_status"] = provider
-                            return compact_cached
+                            return _public_compact_live_state_response(compact_cached)
                         if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
                             refresh_source = dict(cached[1])
+                            break
                 if refresh_source is not None:
                     display_snapshot = _direct_window_tracker_display_snapshot(
                         requested_session_id,
@@ -3365,14 +3414,17 @@ def create_app(
                         compact_refreshed["live_visual_state"] = live_visual
                     with _LIVE_STATE_V3_CACHE_LOCK:
                         _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_refreshed))
-                    return compact_refreshed
+                    return _public_compact_live_state_response(compact_refreshed)
             with _compact_live_state_build_lock(cache_key):
                 now_epoch = time.time()
                 if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
                     refresh_source = None
                     with _LIVE_STATE_V3_CACHE_LOCK:
-                        cached = _COMPACT_LIVE_STATE_RESPONSE_CACHE.get(cache_key)
-                        if cached:
+                        for cached_key, cached in _compact_live_state_response_cache_candidates(cache_key):
+                            previous_signature_reused = cached_key != cache_key
+                            cached_provider = _mapping_to_plain_dict(cached[1].get("provider_status"))
+                            if previous_signature_reused and cached_provider.get("compact_studying_new_pair_fast_path_v3") is True:
+                                continue
                             cached_age = now_epoch - cached[0]
                             cached_payload = cached[1]
                             cache_can_reuse = _compact_live_state_cache_can_reuse(cached_payload, cached_age)
@@ -3389,13 +3441,15 @@ def create_app(
                                     **_mapping_to_plain_dict(compact_cached.get("provider_status")),
                                     "compact_cache_hot_reused_v3": True,
                                     "compact_cache_previous_signature_reused_v3": True,
+                                    "compact_cache_signature_key_changed_v3": previous_signature_reused,
                                     "compact_cache_hot_age_ms": round(max(0.0, cached_age) * 1000.0, 3),
                                     "compact_cache_singleflight_waited_v3": True,
                                 }
                                 compact_cached["provider_status"] = provider
-                                return compact_cached
+                                return _public_compact_live_state_response(compact_cached)
                             if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
                                 refresh_source = dict(cached[1])
+                                break
                     if refresh_source is not None:
                         display_snapshot = _direct_window_tracker_display_snapshot(
                             requested_session_id,
@@ -3420,7 +3474,7 @@ def create_app(
                             compact_refreshed["live_visual_state"] = live_visual
                         with _LIVE_STATE_V3_CACHE_LOCK:
                             _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_refreshed))
-                        return compact_refreshed
+                        return _public_compact_live_state_response(compact_refreshed)
                 display_snapshot = _direct_window_tracker_display_snapshot(
                     requested_session_id,
                     require_overlay_model=False,
@@ -3444,7 +3498,7 @@ def create_app(
                         if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
                             with _LIVE_STATE_V3_CACHE_LOCK:
                                 _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_response))
-                        return compact_response
+                        return _public_compact_live_state_response(compact_response)
                     warm_start = _load_persisted_compact_overlay_response(
                         requested_session_id,
                         active_mode,
@@ -3455,7 +3509,7 @@ def create_app(
                         warm_start = _apply_display_snapshot_to_projected_payload(warm_start, display_snapshot)
                         with _LIVE_STATE_V3_CACHE_LOCK:
                             _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(warm_start))
-                        return warm_start
+                        return _public_compact_live_state_response(warm_start)
                 projected_warm_start = _projected_compact_warm_start(
                     requested_session_id,
                     active_mode,
@@ -3468,7 +3522,7 @@ def create_app(
                     with _LIVE_STATE_V3_CACHE_LOCK:
                         _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(projected_warm_start))
                     _persist_compact_overlay_response(requested_session_id, active_mode, projected_warm_start)
-                    return projected_warm_start
+                    return _public_compact_live_state_response(projected_warm_start)
                 live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=True)
                 compact_response = _apply_compact_overlay_identity(compact_live_state_response(live_state))
                 if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
@@ -3481,7 +3535,7 @@ def create_app(
                             _COMPACT_LIVE_STATE_RESPONSE_CACHE.pop(stale_key, None)
                         _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_response))
                 _persist_compact_overlay_response(requested_session_id, active_mode, compact_response)
-                return compact_response
+                return _public_compact_live_state_response(compact_response)
         live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=compact)
         return live_state
 

@@ -549,6 +549,8 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
     compact = compact_response.json()
     assert compact["shooter"]["available"] is False
     assert isinstance(compact["overlays"]["objects"], list)
+    assert "all_objects" not in compact["overlays"]
+    assert "live_visual_state" not in compact
     assert "overlay_objects" not in compact
     assert "market_object_registry" not in compact
 
@@ -813,6 +815,12 @@ def test_live_state_v3_compact_preserves_overlay_snap_scene_graph(
     raw_overlays = payload.get("overlays")
     assert isinstance(raw_overlays, dict)
     overlays = cast(dict[str, object], raw_overlays)
+    assert "all_objects" not in overlays
+    assert payload.get("live_visual_state") is None
+    provider = payload.get("provider_status")
+    assert isinstance(provider, dict)
+    assert provider["compact_public_payload_v3"] is True
+    assert isinstance(provider["compact_public_all_objects_omitted_v3"], int)
     raw_objects = overlays.get("objects")
     assert isinstance(raw_objects, list)
     overlay_objects = cast(list[object], raw_objects)
