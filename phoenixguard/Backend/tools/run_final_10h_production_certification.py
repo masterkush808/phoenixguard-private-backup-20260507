@@ -23,6 +23,7 @@ PROGRESSION_HORIZONS_SEC = (30, 60, 120, 300)
 DIAGNOSTIC_ENDPOINTS = frozenset(
     {
         "runtime_trace",
+        "live_state",
         "session",
         "performance",
         "model_latest",
@@ -202,6 +203,47 @@ def _read_json_file(path: Path) -> dict[str, Any]:
     return _mapping(parsed)
 
 
+def _slugify_session_id(value: str) -> str:
+    text = str(value or "").strip()
+    slug = "".join(char if char.isalnum() or char in "._-" else "_" for char in text).strip("._").lower()
+    return slug or "session"
+
+
+def _direct_display_state_path(session_id: str) -> Path:
+    return (
+        _repo_root()
+        / ".codex_runtime"
+        / "data_live"
+        / "mobile_api"
+        / "window_tracker"
+        / "sessions"
+        / _slugify_session_id(session_id)
+        / "display_state.json"
+    )
+
+
+def _direct_display_state(session_id: str) -> dict[str, Any]:
+    return _read_json_file(_direct_display_state_path(session_id))
+
+
+def _direct_display_summary(display_state: Mapping[str, Any]) -> dict[str, object]:
+    published_age_ms = _epoch_age_ms(
+        display_state.get("display_published_epoch")
+        or display_state.get("last_display_published_epoch")
+        or _mapping(display_state.get("display_fast_path_v3")).get("published_epoch")
+    )
+    return {
+        "available": bool(display_state),
+        "frame_index": _int(display_state.get("frame_index"), 0),
+        "display_frame_id": _int(display_state.get("display_frame_id"), 0),
+        "chart_frame_id": _int(display_state.get("chart_frame_id"), 0),
+        "overlay_frame_id": _int(display_state.get("overlay_frame_id"), 0),
+        "model_vote_frame_id": _int(display_state.get("model_vote_frame_id"), 0),
+        "published_age_ms": round(published_age_ms, 3),
+        "display_snapshot_only": bool(display_state.get("display_snapshot_only_v3") is True),
+    }
+
+
 def _notify(title: str, message: str, *, loud: bool = False) -> None:
     try:
         import winsound
@@ -297,23 +339,45 @@ def _source_lock_status(live: Mapping[str, Any], runtime_trace: Mapping[str, Any
     }
 
 
-def _timing_status(live: Mapping[str, Any], performance: Mapping[str, Any]) -> dict[str, object]:
+def _min_positive(left: float, right: float) -> float:
+    if left <= 0.0:
+        return right
+    if right <= 0.0:
+        return left
+    return min(left, right)
+
+
+def _timing_status(
+    live: Mapping[str, Any],
+    performance: Mapping[str, Any],
+    direct_display: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
     live_timing = _mapping(live.get("frame_timing_trace_v3"))
     performance_timing = _mapping(performance.get("timing_trace"))
+    display_state = _mapping(direct_display)
     frame_age_ms = _age_ms(live_timing.get("frame_age_ms"), performance_timing.get("frame_age_ms") or live.get("frame_age_ms"))
     display_age_ms = _epoch_age_ms(
-        live.get("display_published_epoch")
+        display_state.get("display_published_epoch")
+        or display_state.get("last_display_published_epoch")
+        or _mapping(display_state.get("display_fast_path_v3")).get("published_epoch")
+        or live.get("display_published_epoch")
         or live.get("last_display_published_epoch")
         or live_timing.get("display_published_epoch_ms")
         or live_timing.get("display_published_epoch")
     )
     if display_age_ms > 0.0:
-        frame_age_ms = display_age_ms if frame_age_ms <= 0.0 else min(frame_age_ms, display_age_ms)
+        frame_age_ms = _min_positive(frame_age_ms, display_age_ms)
     overlay_age_ms = _age_ms(
         live_timing.get("overlay_age_ms"),
         performance_timing.get("overlay_age_ms") or live.get("overlay_age_ms"),
     )
     model_vote_age_ms = _age_ms(live_timing.get("model_vote_age_ms"), performance_timing.get("model_vote_age_ms"))
+    direct_frame_id = _int(display_state.get("frame_index") or display_state.get("chart_frame_id"), 0)
+    if display_age_ms > 0.0 and direct_frame_id > 0:
+        if _int(display_state.get("overlay_frame_id"), 0) == direct_frame_id:
+            overlay_age_ms = _min_positive(overlay_age_ms, display_age_ms)
+        if _int(display_state.get("model_vote_frame_id"), 0) == direct_frame_id:
+            model_vote_age_ms = _min_positive(model_vote_age_ms, display_age_ms)
     packet_age_ms = _age_ms(live_timing.get("packet_age_ms"), performance_timing.get("packet_age_ms"))
     frontend_render_age_ms = _age_ms(live_timing.get("frontend_render_age_ms"), performance_timing.get("frontend_render_age_ms"))
     visual = _mapping(performance.get("visual_health"))
@@ -324,14 +388,19 @@ def _timing_status(live: Mapping[str, Any], performance: Mapping[str, Any]) -> d
         "model_vote_age_ms": model_vote_age_ms,
         "packet_age_ms": packet_age_ms,
         "frontend_render_age_ms": frontend_render_age_ms,
+        "direct_display_age_ms": display_age_ms,
         "timing_missing": bool(frame_age_ms <= 0.0 or overlay_age_ms <= 0.0),
         "stale_status": _text(live_timing.get("stale_status") or performance_timing.get("stale_status") or visual.get("status"), "UNKNOWN"),
         "stale_flags": _sequence(live_timing.get("stale_flags") or performance_timing.get("stale_flags") or visual.get("stale_flags")),
     }
 
 
-def timing_status_for_certification(live: Mapping[str, Any], performance: Mapping[str, Any]) -> dict[str, object]:
-    return _timing_status(live, performance)
+def timing_status_for_certification(
+    live: Mapping[str, Any],
+    performance: Mapping[str, Any],
+    direct_display: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
+    return _timing_status(live, performance, direct_display)
 
 
 def source_lock_status_for_certification(live: Mapping[str, Any], runtime_trace: Mapping[str, Any]) -> dict[str, object]:
@@ -892,8 +961,10 @@ def main() -> int:
         performance = payloads["performance"]
         heartbeat = payloads["frontend_heartbeat"]
         execution = payloads["execution_latest"]
+        direct_display = _direct_display_state(args.session_id)
+        direct_display_summary = _direct_display_summary(direct_display)
         source_lock = _source_lock_status(live, runtime_trace)
-        timing = _timing_status(live, performance)
+        timing = _timing_status(live, performance, direct_display)
         sequence_status = _sequence_status(live, runtime_trace)
         model_status = _model_status(live, performance, runtime_trace)
         frontend = _frontend_status(heartbeat)
@@ -1145,6 +1216,7 @@ def main() -> int:
             "sequence": sequence_status,
             "model": model_status,
             "frontend": frontend,
+            "direct_display": direct_display_summary,
             "mt4": mt4,
             "allowed": allowed,
             "allowed_meta": allowed_meta,

@@ -17,6 +17,11 @@ from Backend.tools.run_final_10h_production_certification import (
 )
 
 
+def _float_value(value: object) -> float:
+    assert isinstance(value, (int, float))
+    return float(value)
+
+
 def test_timing_status_uses_fresh_display_epoch_for_display_lag() -> None:
     now_epoch = time.time()
     timing = timing_status_for_certification(
@@ -36,6 +41,55 @@ def test_timing_status_uses_fresh_display_epoch_for_display_lag() -> None:
     assert 0.0 < float(frame_age_ms) < 5000.0
     assert timing["display_age_ms"] != 0.0
     assert timing["overlay_age_ms"] == 4846
+
+
+def test_timing_status_uses_direct_display_state_without_live_state_rebuild() -> None:
+    now_epoch = time.time()
+    timing = timing_status_for_certification(
+        {
+            "frame_timing_trace_v3": {
+                "frame_age_ms": 27012,
+                "overlay_age_ms": 27012,
+                "model_vote_age_ms": 27012,
+            },
+        },
+        {},
+        {
+            "display_published_epoch": now_epoch - 1.0,
+            "frame_index": 42,
+            "overlay_frame_id": 42,
+            "model_vote_frame_id": 42,
+        },
+    )
+
+    assert 0.0 < _float_value(timing["frame_age_ms"]) < 5000.0
+    assert 0.0 < _float_value(timing["overlay_age_ms"]) < 5000.0
+    assert 0.0 < _float_value(timing["model_vote_age_ms"]) < 5000.0
+    assert 0.0 < _float_value(timing["direct_display_age_ms"]) < 5000.0
+
+
+def test_timing_status_does_not_refresh_overlay_age_on_frame_mismatch() -> None:
+    now_epoch = time.time()
+    timing = timing_status_for_certification(
+        {
+            "frame_timing_trace_v3": {
+                "frame_age_ms": 27012,
+                "overlay_age_ms": 27012,
+                "model_vote_age_ms": 27012,
+            },
+        },
+        {},
+        {
+            "display_published_epoch": now_epoch - 1.0,
+            "frame_index": 42,
+            "overlay_frame_id": 41,
+            "model_vote_frame_id": 41,
+        },
+    )
+
+    assert 0.0 < _float_value(timing["frame_age_ms"]) < 5000.0
+    assert timing["overlay_age_ms"] == 27012
+    assert timing["model_vote_age_ms"] == 27012
 
 
 def test_capture_job_times_out_and_logs_without_blocking_sampler(tmp_path: Path) -> None:
