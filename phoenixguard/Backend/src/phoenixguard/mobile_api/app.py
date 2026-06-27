@@ -605,12 +605,6 @@ def _compact_live_state_response_cache_signature(session_id: str) -> str:
         display_path,
         (
             "session_id",
-            "last_display_window_path",
-            "last_window_path",
-            "last_frame_path",
-            "last_chart_path",
-            "last_overlay_path",
-            "last_full_overlay_path",
             "last_display_surface_signature",
             "last_window_surface_signature",
             "last_study_surface_signature",

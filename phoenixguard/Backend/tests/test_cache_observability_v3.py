@@ -949,6 +949,8 @@ def test_compact_live_state_reuses_cached_response_for_display_heartbeat(
         raise AssertionError("compact display heartbeat should reuse cached live state")
 
     monkeypatch.setattr(mobile_app, "build_live_state_v3", fail_full_build)
+    next_window = artifact_dir / "000002_window.png"
+    next_window.write_bytes(b"window-2")
     (session_dir / "display_state.json").write_text(
         json.dumps(
             {
@@ -959,7 +961,7 @@ def test_compact_live_state_reuses_cached_response_for_display_heartbeat(
                 "overlay_frame_id": 1,
                 "model_vote_frame_id": 1,
                 "display_published_epoch": now_epoch + 1.0,
-                "last_display_window_path": str(window),
+                "last_display_window_path": str(next_window),
                 "last_display_surface_signature": "same",
                 "overlay_source_window_signature": "same",
                 "display_snapshot_only_v3": True,
@@ -974,6 +976,7 @@ def test_compact_live_state_reuses_cached_response_for_display_heartbeat(
     assert second_response.status_code == 200
     payload = second_response.json()
     assert payload["frame_id"] == 2
+    assert payload["last_display_window_path"] == str(next_window)
     assert payload["provider_status"]["compact_cache_previous_signature_reused_v3"] is True
 
 
