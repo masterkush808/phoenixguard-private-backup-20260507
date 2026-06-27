@@ -622,6 +622,9 @@ def _validated_trendline(
                 continue
             if role == "resistance" and anchor_dy <= min_anchor_dy:
                 continue
+            anchor_dx_signed = float(second_point[0]) - float(first_point[0])
+            slope = 0.0 if abs(anchor_dx_signed) <= 1e-6 else anchor_dy / anchor_dx_signed
+            intercept = float(first_point[1]) - slope * float(first_point[0])
             anchor_start = int(min(first["index"], second["index"]))
             anchor_end = int(max(first["index"], second["index"]))
             if anchor_end <= anchor_start:
@@ -699,8 +702,11 @@ def _validated_trendline(
                 "points": line_points,
                 "line_points": line_points,
                 "touch_points": touch_points,
+                "anchor_wick_points": touch_points,
                 "anchor_candles": anchor_candles,
                 "touch_count": int(touches),
+                "slope": round(float(slope), 6),
+                "intercept": round(float(intercept), 6),
                 "wick_probe_count": int(wick_probe_count),
                 "line_obstruction_count": int(line_obstruction_count),
                 "body_cross_fraction": round(float(body_cross_fraction), 4),
@@ -1072,6 +1078,7 @@ class _RegistryBuilder:
             )
             if anchor_touch_points:
                 overlay_raw["touch_points"] = anchor_touch_points
+                overlay_raw["anchor_wick_points"] = anchor_touch_points
             normalized_overlay = normalize_v3_overlay_object(
                 overlay_raw,
                 strict=False,
@@ -1092,6 +1099,7 @@ class _RegistryBuilder:
                             "path": line_points,
                             "touch_points": touch_points,
                             "trendline_touch_points": touch_points,
+                            "anchor_wick_points": touch_points,
                             "anchor_evidence": {
                                 "valid": True,
                                 "anchor_type": "TRENDLINE_TOUCH_POINTS",

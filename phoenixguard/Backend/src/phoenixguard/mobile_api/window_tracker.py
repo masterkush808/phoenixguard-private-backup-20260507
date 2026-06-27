@@ -12921,6 +12921,7 @@ class PhoenixGuardWindowTrackingAdapter:
                         "wick_touch_band": [round(float(top), 3), round(float(max(top + 1, bottom)), 3)],
                         "touch_count": int(touch_count),
                         "touch_points": [[int(round(item.get("center_x", 0.0))), int(round(item.get("y", 0.0)))] for item in group],
+                        "anchor_wick_points": [[int(round(item.get("center_x", 0.0))), int(round(item.get("y", 0.0)))] for item in group],
                         "source_indices": list(cast(Sequence[int], history_metrics.get("source_indices", []))),
                         "last_touch_index": int(history_metrics.get("last_touch_index", 0) or 0),
                         "last_touch_age_candles": int(history_metrics.get("last_touch_age_candles", 0) or 0),

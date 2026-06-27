@@ -168,6 +168,18 @@ class AnchorEvidence(TypedDict, total=False):
     source_path: str
 
 
+class AnchorQuality(TypedDict, total=False):
+    score: float
+    has_candle_anchor: bool
+    has_wick_anchor: bool
+    has_sequence_anchor: bool
+    inside_plot_area: bool
+    matches_symbol_timeframe: bool
+    chart_transform_valid: bool
+    floating_risk: float
+    reason: str
+
+
 class OverlayStyle(TypedDict, total=False):
     color_token: str
     stroke: str
@@ -1493,6 +1505,129 @@ def _anchor_evidence_valid(value: object) -> bool:
     return bool(candle_indices or touch_points)
 
 
+def _normalize_anchor_wick_points(raw: Mapping[str, object], anchor_evidence: Mapping[str, object]) -> list[list[float]]:
+    direct = _normalize_point_rows(
+        _first_present(
+            raw,
+            (
+                "anchor_wick_points",
+                "wick_points",
+                "wick_touch_points",
+                "trendline_touch_points",
+                "touch_points",
+                "anchor_points",
+                "line_points",
+                "points",
+            ),
+        )
+    )
+    if direct:
+        return direct
+    return _normalize_point_rows(anchor_evidence.get("touch_points"))
+
+
+def _bounds_inside_plot_area(bounds: Sequence[float]) -> bool:
+    if len(bounds) < 4:
+        return False
+    values = [float(value) for value in bounds[:4]]
+    if any(not math.isfinite(value) for value in values):
+        return False
+    width = abs(values[2] - values[0])
+    height = abs(values[3] - values[1])
+    return width >= 1.0 and height >= 1.0
+
+
+def _anchor_quality_reason(score: float, missing: Sequence[str]) -> str:
+    if score >= 0.85:
+        return "anchor_evidence_strong"
+    if score >= 0.65:
+        detail = ",".join(missing) if missing else "lower_confidence_geometry"
+        return f"anchor_evidence_soft:{detail}"
+    detail = ",".join(missing) if missing else "insufficient_anchor_evidence"
+    return f"MISSING_ANCHOR_EVIDENCE:{detail}"
+
+
+def _anchor_quality_for_overlay(
+    raw: Mapping[str, object],
+    *,
+    overlay_type: str,
+    bounds: Sequence[float],
+    anchor_candles: Sequence[int],
+    anchor_wick_points: Sequence[Sequence[float]],
+    anchor_evidence: Mapping[str, object],
+    sequence_id: str,
+    chart_transform_id: str,
+) -> AnchorQuality:
+    has_candle_anchor = bool(anchor_candles)
+    has_wick_anchor = bool(anchor_wick_points)
+    has_sequence_anchor = bool(sequence_id and sequence_id != "sequence_pending")
+    inside_plot_area = _bounds_inside_plot_area(bounds)
+    chart_transform_valid = bool(chart_transform_id and chart_transform_id != "chart_transform_pending")
+    matches_symbol_timeframe = not any(
+        bool(raw.get(key))
+        for key in (
+            "wrong_pair",
+            "wrong_symbol",
+            "wrong_timeframe",
+            "symbol_mismatch",
+            "timeframe_mismatch",
+            "pair_mismatch",
+        )
+    )
+    evidence_valid = bool(anchor_evidence.get("valid") is True)
+    score = 0.0
+    score += 0.26 if evidence_valid else 0.0
+    score += 0.18 if has_candle_anchor else 0.0
+    score += 0.22 if has_wick_anchor else 0.0
+    score += 0.12 if has_sequence_anchor else 0.0
+    score += 0.10 if inside_plot_area else 0.0
+    score += 0.10 if chart_transform_valid else 0.0
+    score += 0.05 if matches_symbol_timeframe else 0.0
+    if overlay_type == "CURRENT_CANDLE" and has_candle_anchor:
+        score += 0.10
+    if overlay_type in {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"} and len(anchor_wick_points) >= 2:
+        score += 0.07
+    if overlay_type in {"CHART_BOUNDS"} or overlay_type in DIAGNOSTIC_OVERLAY_TYPES:
+        score = max(score, 0.95)
+    missing: list[str] = []
+    if not evidence_valid:
+        missing.append("evidence")
+    if overlay_type in HARD_ANCHOR_REQUIRED_TYPES and not has_candle_anchor:
+        missing.append("candle")
+    if overlay_type in {
+        "SUPPLY_ZONE",
+        "DEMAND_ZONE",
+        "OPPOSING_FORCE",
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+        "INNER_TRENDLINE",
+        "SNIPER_ENTRY_BOX",
+        "TARGET_ZONE_BOX",
+        "INVALIDATION_BOX",
+    } and not has_wick_anchor:
+        missing.append("wick")
+    if not has_sequence_anchor:
+        missing.append("sequence")
+    if not inside_plot_area:
+        missing.append("bounds")
+    if not chart_transform_valid:
+        missing.append("chart_transform")
+    if not matches_symbol_timeframe:
+        missing.append("symbol_timeframe")
+    score = _clip01(score)
+    return {
+        "score": round(float(score), 4),
+        "has_candle_anchor": has_candle_anchor,
+        "has_wick_anchor": has_wick_anchor,
+        "has_sequence_anchor": has_sequence_anchor,
+        "inside_plot_area": inside_plot_area,
+        "matches_symbol_timeframe": matches_symbol_timeframe,
+        "chart_transform_valid": chart_transform_valid,
+        "floating_risk": round(float(1.0 - score), 4),
+        "reason": _anchor_quality_reason(score, missing),
+    }
+
+
 def _semantic_overlay_style(raw: Mapping[str, object], overlay_type: str, side: str, lifecycle_state: str, display_state: str, z_index: int) -> OverlayStyle:
     provided = _object_mapping(raw.get("style"))
     style: OverlayStyle = {}
@@ -2067,6 +2202,17 @@ def normalize_v3_overlay_object(
         time_span=anchor_time_span,
         source_agent=source_agent_value,
     )
+    anchor_wick_points = _normalize_anchor_wick_points(raw, anchor_evidence)
+    anchor_quality = _anchor_quality_for_overlay(
+        raw,
+        overlay_type=overlay_type,
+        bounds=bounds,
+        anchor_candles=anchor_candles,
+        anchor_wick_points=anchor_wick_points,
+        anchor_evidence=anchor_evidence,
+        sequence_id=sequence_value,
+        chart_transform_id=chart_transform_value,
+    )
     style = _semantic_overlay_style(raw, overlay_type, side, lifecycle, display_state, z_index)
 
     row: dict[str, object] = {
@@ -2089,6 +2235,10 @@ def normalize_v3_overlay_object(
         "anchor_candle_indices": list(anchor_candles),
         "anchor_price_band": anchor_price_band,
         "anchor_time_span": anchor_time_span,
+        "anchor_wick_points": anchor_wick_points,
+        "anchor_sequence_id": sequence_value,
+        "anchor_confidence": float(anchor_quality.get("score", 0.0)),
+        "anchor_quality": anchor_quality,
         "anchor_evidence": anchor_evidence,
         "anchor_evidence_status": "VALID" if bool(anchor_evidence.get("valid", False)) else "MISSING_ANCHOR_EVIDENCE",
         "bounds": bounds,
@@ -2105,6 +2255,8 @@ def normalize_v3_overlay_object(
         "short_label": display_label,
         "display_label_status": display_label_status,
         "unmapped_display_label": unmapped_display_label,
+        "symbol": _text(raw.get("symbol") or raw.get("asset") or raw.get("pair")),
+        "timeframe": _text(raw.get("timeframe") or raw.get("tf") or raw.get("interval")),
         "layer": resolved_layer,
         "role": _text(raw.get("role") or role, TYPE_ROLE_MAP.get(overlay_type, "")),
         "visible_default": bool(
@@ -2155,6 +2307,10 @@ def normalize_v3_overlay_object(
         "anchor_candle_indices",
         "anchor_price_band",
         "anchor_time_span",
+        "anchor_wick_points",
+        "anchor_sequence_id",
+        "anchor_confidence",
+        "anchor_quality",
         "anchor_evidence",
         "anchor_evidence_status",
         "trendline_role",
@@ -2266,6 +2422,14 @@ def validate_v3_overlay_object(overlay: Mapping[str, object]) -> OverlayValidati
     if "anchor_evidence" in overlay and overlay.get("anchor_evidence") not in (None, "", {}):
         if _object_mapping(overlay.get("anchor_evidence")) is None:
             issues.append(OverlayContractIssue("anchor_evidence", "invalid"))
+    if "anchor_quality" in overlay and overlay.get("anchor_quality") not in (None, "", {}):
+        quality = _object_mapping(overlay.get("anchor_quality"))
+        if quality is None:
+            issues.append(OverlayContractIssue("anchor_quality", "invalid"))
+        else:
+            score = _float(quality.get("score"), float("nan"))
+            if not math.isfinite(score) or score < 0.0 or score > 1.0:
+                issues.append(OverlayContractIssue("anchor_quality", f"invalid_score:{quality.get('score')}"))
     if overlay.get("layer") not in (None, "") and not _normalized_layer_value(overlay.get("layer")):
         issues.append(OverlayContractIssue("layer", f"invalid:{overlay.get('layer')}"))
     if overlay.get("ttl_ms") not in (None, ""):
@@ -2368,6 +2532,11 @@ def overlay_rejection_reasons(
         and not _anchor_evidence_valid(normalized.get("anchor_evidence"))
     ):
         reasons.append("missing_anchor_evidence")
+    if normalized_mode in LIVE_VIEW_MODES and str(normalized.get("type") or "") in HARD_ANCHOR_REQUIRED_TYPES:
+        quality = _object_mapping(normalized.get("anchor_quality"))
+        quality_score = _float(quality.get("score") if quality is not None else None, 0.0)
+        if quality_score < 0.65:
+            reasons.append(f"anchor_quality_below_live_threshold:{quality_score:.2f}")
     if str(normalized.get("type") or "") in OPERATOR_CHART_HIDDEN_TYPES and normalized_mode not in {"DIAGNOSTICS", "DEBUG", "INSPECTOR"}:
         reasons.append(f"operator_chart_hidden:{normalized['type']}")
     label_texts = {

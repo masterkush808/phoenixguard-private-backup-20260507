@@ -128,7 +128,7 @@ def main() -> int:
     parser.add_argument("--modes", default="")
     parser.add_argument("--all-modes", action="store_true")
     parser.add_argument("--out", default=".codex_runtime/visual_evidence/overlay_modes")
-    parser.add_argument("--timeout", type=float, default=25.0)
+    parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--width", type=int, default=1365)
     parser.add_argument("--height", type=int, default=768)
     args = parser.parse_args()

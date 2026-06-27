@@ -190,13 +190,14 @@ def _heartbeat_age_sec(heartbeat: Mapping[str, Any]) -> float:
     return max(0.0, (time.time() * 1000.0 - received_at_ms) / 1000.0)
 
 
-def _heartbeat_rank(heartbeat: Mapping[str, Any]) -> tuple[int, int, int, int, float]:
+def _heartbeat_rank(heartbeat: Mapping[str, Any]) -> tuple[int, float, int, int, int]:
     status_rank = 1 if _text(heartbeat.get("status")).upper() == "ALIVE" else 0
     age_sec = _heartbeat_age_sec(heartbeat)
     freshness_rank = 2 if age_sec <= 45.0 else 1 if age_sec <= 120.0 else 0
     visible_rank = 1 if _heartbeat_visible_count(heartbeat) > 0 else 0
     document_rank = 0 if bool(heartbeat.get("document_hidden") is True) else 1
-    return status_rank, freshness_rank, visible_rank, document_rank, _float(heartbeat.get("received_at_ms"), 0.0)
+    received_at_ms = _float(heartbeat.get("received_at_ms"), 0.0)
+    return freshness_rank, received_at_ms, status_rank, visible_rank, document_rank
 
 
 def _load_heartbeat_file(path: Path) -> dict[str, Any] | None:
@@ -305,6 +306,12 @@ def record_frontend_heartbeat(
                     tmp_path.unlink()
             except OSError:
                 pass
+    session_id = str(heartbeat.get("session_id") or "")
+    surface_id = str(heartbeat.get("surface_id") or "dashboard")
+    if session_id:
+        _remember_selected_heartbeat(session_id, surface_id, store_dir, heartbeat)
+        if surface_id == "dashboard" or (surface_id.startswith("dashboard_") and _is_live_dashboard_heartbeat(heartbeat)):
+            _remember_selected_heartbeat(session_id, "dashboard", store_dir, heartbeat)
     return heartbeat
 
 
