@@ -6,6 +6,8 @@ import sys
 import time
 
 from Backend.tools.run_final_10h_production_certification import (
+    dashboard_capture_command_for_certification,
+    overlay_modes_capture_command_for_certification,
     poll_capture_jobs_for_certification,
     start_capture_job_for_certification,
     timing_status_for_certification,
@@ -80,3 +82,27 @@ def test_capture_job_timeout_records_finished_event(tmp_path: Path) -> None:
     events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
     assert events[-1]["event"] == "capture_finished"
     assert events[-1]["timed_out"] is True
+
+
+def test_dashboard_capture_command_passes_child_timeout(tmp_path: Path) -> None:
+    command = dashboard_capture_command_for_certification(
+        "http://127.0.0.1:8793",
+        "pocket-live-8788",
+        tmp_path / "dashboard",
+        timeout_sec=45.0,
+    )
+
+    timeout_index = command.index("--timeout")
+    assert command[timeout_index + 1] == "45.000"
+
+
+def test_overlay_mode_capture_command_passes_child_timeout(tmp_path: Path) -> None:
+    command = overlay_modes_capture_command_for_certification(
+        "http://127.0.0.1:8793",
+        "pocket-live-8788",
+        tmp_path / "overlay_modes",
+        timeout_sec=30.0,
+    )
+
+    timeout_index = command.index("--timeout")
+    assert command[timeout_index + 1] == "30.000"

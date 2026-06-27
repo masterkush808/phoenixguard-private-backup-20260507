@@ -460,7 +460,7 @@ def _tail_text(path: Path, limit: int = 2000) -> str:
     return data[-max(1, int(limit)) :].decode("utf-8", errors="replace")
 
 
-def _dashboard_capture_command(base_url: str, session_id: str, out_dir: Path) -> list[str]:
+def _dashboard_capture_command(base_url: str, session_id: str, out_dir: Path, *, timeout_sec: float) -> list[str]:
     return [
         _python_executable(),
         "Backend/tools/capture_dashboard_visual_v3.py",
@@ -470,11 +470,13 @@ def _dashboard_capture_command(base_url: str, session_id: str, out_dir: Path) ->
         session_id,
         "--out-dir",
         str(out_dir),
+        "--timeout",
+        f"{max(1.0, float(timeout_sec)):.3f}",
         "--soft",
     ]
 
 
-def _overlay_modes_capture_command(base_url: str, session_id: str, out_dir: Path) -> list[str]:
+def _overlay_modes_capture_command(base_url: str, session_id: str, out_dir: Path, *, timeout_sec: float) -> list[str]:
     return [
         _python_executable(),
         "Backend/tools/capture_overlay_mode_screenshots_v3.py",
@@ -486,6 +488,8 @@ def _overlay_modes_capture_command(base_url: str, session_id: str, out_dir: Path
         "CLEAN_LIVE,SUPPLY_DEMAND,TRENDLINES",
         "--out",
         str(out_dir),
+        "--timeout",
+        f"{max(1.0, float(timeout_sec)):.3f}",
     ]
 
 
@@ -627,8 +631,33 @@ def poll_capture_jobs_for_certification(jobs: Sequence[CaptureJob], log_path: Pa
     return _poll_capture_jobs(jobs, log_path)
 
 
+def dashboard_capture_command_for_certification(
+    base_url: str,
+    session_id: str,
+    out_dir: Path,
+    *,
+    timeout_sec: float,
+) -> list[str]:
+    return _dashboard_capture_command(base_url, session_id, out_dir, timeout_sec=timeout_sec)
+
+
+def overlay_modes_capture_command_for_certification(
+    base_url: str,
+    session_id: str,
+    out_dir: Path,
+    *,
+    timeout_sec: float,
+) -> list[str]:
+    return _overlay_modes_capture_command(base_url, session_id, out_dir, timeout_sec=timeout_sec)
+
+
 def _capture_dashboard(base_url: str, session_id: str, out_dir: Path, log_path: Path, *, timeout_sec: float) -> None:
-    _run_capture(_dashboard_capture_command(base_url, session_id, out_dir), out_dir, log_path, timeout_sec=timeout_sec)
+    _run_capture(
+        _dashboard_capture_command(base_url, session_id, out_dir, timeout_sec=timeout_sec),
+        out_dir,
+        log_path,
+        timeout_sec=timeout_sec,
+    )
 
 
 def _write_progress_report(
@@ -1117,13 +1146,23 @@ def main() -> int:
                     [
                         (
                             "periodic_dashboard",
-                            _dashboard_capture_command(args.base_url, args.session_id, periodic_dir / "dashboard"),
+                            _dashboard_capture_command(
+                                args.base_url,
+                                args.session_id,
+                                periodic_dir / "dashboard",
+                                timeout_sec=periodic_timeout_sec,
+                            ),
                             periodic_dir / "dashboard",
                             periodic_timeout_sec,
                         ),
                         (
                             "periodic_overlay_modes",
-                            _overlay_modes_capture_command(args.base_url, args.session_id, periodic_dir / "overlay_modes"),
+                            _overlay_modes_capture_command(
+                                args.base_url,
+                                args.session_id,
+                                periodic_dir / "overlay_modes",
+                                timeout_sec=periodic_timeout_sec,
+                            ),
                             periodic_dir / "overlay_modes",
                             periodic_timeout_sec,
                         ),
