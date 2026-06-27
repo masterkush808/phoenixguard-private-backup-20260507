@@ -2922,6 +2922,8 @@ def create_app(
     def _apply_display_snapshot_to_projected_payload(
         payload: Mapping[str, object],
         display_snapshot: Mapping[str, object] | None,
+        *,
+        now_epoch: float,
     ) -> dict[str, object]:
         projected = _apply_compact_overlay_identity(dict(payload))
         if display_snapshot is None:
@@ -2988,6 +2990,45 @@ def create_app(
                 tracking_payload["last_capture_epoch"] = display_published
             projected["tracking_summary"] = tracking_payload
         _apply_compact_overlay_identity(projected)
+        timing_source: dict[str, object] = dict(projected)
+        for key, value in display_snapshot.items():
+            timing_source[str(key)] = value
+        overlay_rows = [cast(Mapping[str, Any], row) for row in _compact_visible_overlay_pool_from_payload(projected)]
+        model_health = _live_model_health_summary(timing_source)
+        frontend_heartbeat = latest_frontend_heartbeat(str(projected.get("session_id") or ""))
+        frame_timing = build_frame_timing_trace_v3(
+            cast(Mapping[str, Any], timing_source),
+            overlays=overlay_rows,
+            model_health=cast(Mapping[str, Any], model_health),
+            frontend_heartbeat=frontend_heartbeat,
+            now_epoch=now_epoch,
+        )
+        performance_state: dict[str, object] = {
+            "session_id": str(projected.get("session_id") or ""),
+            "frame_id": int(
+                _epoch_float(
+                    frame_timing.get("display_frame_id")
+                    or projected.get("display_frame_id")
+                    or projected.get("frame_id")
+                    or 0,
+                    0.0,
+                )
+            ),
+            "state_version": int(_epoch_float(projected.get("state_version") or 0, 0.0)),
+            "tracking_summary": _mapping_to_plain_dict(projected.get("tracking_summary")),
+            "latest_signal": _mapping_to_plain_dict(projected.get("latest_signal")),
+            "model_health": model_health,
+            "frame_timing_trace_v3": frame_timing,
+            "frame_timing": frame_timing,
+            "broker_surface": _mapping_to_plain_dict(projected.get("broker_surface")),
+            "frontend_heartbeat": frontend_heartbeat,
+        }
+        performance_trace = build_performance_trace_v3(performance_state, now_epoch=now_epoch)
+        projected["frame_timing_trace_v3"] = frame_timing
+        projected["frame_timing"] = frame_timing
+        projected["performance_trace_v3"] = performance_trace
+        projected["visual_health_v3"] = performance_trace.get("visual_health", projected.get("visual_health_v3"))
+        projected["frontend_heartbeat"] = dict(frontend_heartbeat or {})
         provider = {
             **_mapping_to_plain_dict(projected.get("provider_status")),
             "compact_overlay_projection_light_refresh_v3": True,
@@ -3006,6 +3047,11 @@ def create_app(
                 "state_version",
                 "last_capture_epoch",
                 "last_capture_started_epoch",
+                "frame_timing_trace_v3",
+                "frame_timing",
+                "performance_trace_v3",
+                "visual_health_v3",
+                "frontend_heartbeat",
                 "provider_status",
             ):
                 if key in projected:
@@ -3031,7 +3077,7 @@ def create_app(
         for cached_payload in cached_candidates:
             projected = _project_compact_live_state_response(cached_payload, active_mode, now_epoch=now_epoch)
             if projected is not None:
-                return _apply_display_snapshot_to_projected_payload(projected, display_snapshot)
+                return _apply_display_snapshot_to_projected_payload(projected, display_snapshot, now_epoch=now_epoch)
         if display_snapshot is None:
             return None
         for source_mode in ("CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY"):
@@ -3047,7 +3093,7 @@ def create_app(
                 continue
             projected = _project_compact_live_state_response(persisted, active_mode, now_epoch=now_epoch)
             if projected is not None:
-                return _apply_display_snapshot_to_projected_payload(projected, display_snapshot)
+                return _apply_display_snapshot_to_projected_payload(projected, display_snapshot, now_epoch=now_epoch)
         return None
 
     def _artifact_surface_signature_from_path(value: object) -> str:
@@ -3422,6 +3468,7 @@ def create_app(
                             compact_cached = _apply_display_snapshot_to_projected_payload(
                                 dict(cached[1]),
                                 display_snapshot,
+                                now_epoch=now_epoch,
                             )
                             provider: dict[str, object] = {
                                 **_mapping_to_plain_dict(compact_cached.get("provider_status")),
@@ -3443,6 +3490,7 @@ def create_app(
                     compact_refreshed = _apply_display_snapshot_to_projected_payload(
                         refresh_source,
                         display_snapshot,
+                        now_epoch=now_epoch,
                     )
                     provider = {
                         **_mapping_to_plain_dict(compact_refreshed.get("provider_status")),
@@ -3480,6 +3528,7 @@ def create_app(
                                 compact_cached = _apply_display_snapshot_to_projected_payload(
                                     dict(cached[1]),
                                     display_snapshot,
+                                    now_epoch=now_epoch,
                                 )
                                 provider = {
                                     **_mapping_to_plain_dict(compact_cached.get("provider_status")),
@@ -3502,6 +3551,7 @@ def create_app(
                         compact_refreshed = _apply_display_snapshot_to_projected_payload(
                             refresh_source,
                             display_snapshot,
+                            now_epoch=now_epoch,
                         )
                         provider = {
                             **_mapping_to_plain_dict(compact_refreshed.get("provider_status")),
@@ -3550,7 +3600,11 @@ def create_app(
                         now_epoch=now_epoch,
                     )
                     if warm_start is not None:
-                        warm_start = _apply_display_snapshot_to_projected_payload(warm_start, display_snapshot)
+                        warm_start = _apply_display_snapshot_to_projected_payload(
+                            warm_start,
+                            display_snapshot,
+                            now_epoch=now_epoch,
+                        )
                         with _LIVE_STATE_V3_CACHE_LOCK:
                             _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(warm_start))
                         return _public_compact_live_state_response(warm_start)
