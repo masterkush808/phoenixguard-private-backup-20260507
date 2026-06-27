@@ -6,6 +6,7 @@ ensure_backend_paths()
 
 import argparse
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -37,11 +38,21 @@ def _session_file(mode: str, session_id: str, out_dir: Path) -> Path:
     return out_dir / f"{mode.lower()}_{session_id}.png"
 
 
+def _python_executable() -> str:
+    process_exe = os.getenv("PHOENIXGUARD_PYTHON_PROCESS_EXE", "").strip()
+    if process_exe and Path(process_exe).exists():
+        return process_exe
+    repo_process_exe = Path(__file__).resolve().parents[2] / ".venv" / "Scripts" / "phoenixguard-python.exe"
+    if repo_process_exe.exists():
+        return str(repo_process_exe)
+    return sys.executable
+
+
 def capture_anchor_screenshots(base_url: str, session_id: str, out_dir: Path, *, timeout: float) -> dict[str, Any]:
     out_dir.mkdir(parents=True, exist_ok=True)
     capture_script = Path(__file__).with_name("capture_overlay_mode_screenshots_v3.py")
     command = [
-        sys.executable,
+        _python_executable(),
         str(capture_script),
         "--base-url",
         base_url,

@@ -273,27 +273,18 @@ $env:PHOENIXGUARD_MOBILE_API_PORT = [string]$Port
 $env:PHOENIXGUARD_TRACKER_SESSION_ID = $SessionId
 $env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC = [string]$CaptureIntervalSec
 
-$VenvPath = Join-Path -Path $ProjectRoot -ChildPath '.venv'
-$PythonPath = Join-Path -Path $VenvPath -ChildPath 'Scripts\python.exe'
-if (-not (Test-Path -LiteralPath $VenvPath)) {
-    Write-MonitorLog "Creating virtual environment at '$VenvPath'."
-    py -3.11 -m venv $VenvPath
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to create virtual environment at '$VenvPath'."
-    }
-}
-if (-not (Test-Path -LiteralPath $PythonPath)) {
-    throw "Python executable not found at '$PythonPath'."
-}
-$env:PHOENIXGUARD_PYTHON_EXE = $PythonPath
+. (Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\Resolve-PhoenixGuardPython.ps1')
+$pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
+$PythonPath = [string]$pythonRuntime.VenvPython
+$PythonProcessPath = [string]$pythonRuntime.ProcessPython
 
 if ($Bootstrap) {
     Write-MonitorLog 'Installing Python dependencies for VM monitor.'
-    & $PythonPath -m pip install --upgrade pip
+    & $PythonProcessPath -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) {
         throw 'Failed to upgrade pip.'
     }
-    & $PythonPath -m pip install -r $RequirementsPath
+    & $PythonProcessPath -m pip install -r $RequirementsPath
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to install dependencies from '$RequirementsPath'."
     }
@@ -798,7 +789,7 @@ function Start-TrackerProcess {
     $outPath = Join-Path -Path $LogRoot -ChildPath "tracker-$stamp.out.log"
     $errPath = Join-Path -Path $LogRoot -ChildPath "tracker-$stamp.err.log"
     Write-MonitorLog "Starting tracker on $BaseUrl with session '$SessionId'."
-    return Start-Process -FilePath $PythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $outPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
+    return Start-Process -FilePath $PythonProcessPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $outPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
 }
 
 function Start-ShooterProcess {
@@ -819,7 +810,7 @@ function Start-ShooterProcess {
     $outPath = Join-Path -Path $LogRoot -ChildPath "shooter-$stamp.out.log"
     $errPath = Join-Path -Path $LogRoot -ChildPath "shooter-$stamp.err.log"
     Write-MonitorLog "Starting shooter against $BaseUrl with $ShooterPollSec second polling."
-    return Start-Process -FilePath $PythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $outPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
+    return Start-Process -FilePath $PythonProcessPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $outPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
 }
 
 try {

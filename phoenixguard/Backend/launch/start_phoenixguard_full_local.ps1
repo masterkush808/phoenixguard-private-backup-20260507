@@ -41,20 +41,6 @@ $env:PYTHONPATH = (@($backendSrc, $backendRoot, $backendCompat, $backendLaunch, 
 $env:PHOENIXGUARD_PROJECT_ROOT = $ProjectRoot
 $env:PHOENIXGUARD_DASHBOARD_BROWSER = $DashboardBrowser
 
-if (-not (Test-Path -LiteralPath '.venv')) {
-    py -3.11 -m venv .venv
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to create virtual environment at '$ProjectRoot\.venv'."
-    }
-}
-
-$ActivateScriptPath = Join-Path -Path $ProjectRoot -ChildPath '.venv\Scripts\Activate.ps1'
-if (-not (Test-Path -LiteralPath $ActivateScriptPath)) {
-    throw "Virtual environment activation script not found at '$ActivateScriptPath'."
-}
-
-. $ActivateScriptPath
-
 . (Join-Path -Path $PSScriptRoot -ChildPath 'Resolve-PhoenixGuardPython.ps1')
 $pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
 $pythonPath = [string]$pythonRuntime.VenvPython

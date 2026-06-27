@@ -25,6 +25,8 @@ The dependency policy is therefore:
 Use the repo .venv only.
 Do not run PhoenixGuard from global Python.
 Do not create .venv-live, .venv-dev, .venv-training, or .venv-business.
+Do not auto-create .venv from runtime launchers; if the repo .venv is missing, launch must fail
+with a clear setup error.
 Use logical requirement groups, but keep the interpreter and installed site-packages rooted in .venv.
 Launchers resolve through .\.venv\Scripts\python.exe and use .\.venv\Scripts\phoenixguard-python.exe
 as the long-running process host when present. That host is a copied executable inside the same repo
@@ -75,6 +77,8 @@ The scripts all target:
 
 They install the selected lock into `.venv`, then run `pip check` and
 `Backend/tools/verify_dependency_profile.py`. They do not create secondary virtual environments.
+Runtime launchers do not create `.venv`; the environment must already exist before PhoenixGuard is
+started.
 
 ## Live Runtime Boundary
 

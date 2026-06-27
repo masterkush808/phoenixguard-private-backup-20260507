@@ -25,8 +25,6 @@ $ErrorActionPreference = 'Stop'
 
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location -LiteralPath $ProjectRoot
-$VirtualEnvPath = Join-Path -Path $ProjectRoot -ChildPath '.venv'
-$ActivateScriptPath = Join-Path -Path $VirtualEnvPath -ChildPath 'Scripts\Activate.ps1'
 $RequirementsFilePath = Join-Path -Path $ProjectRoot -ChildPath 'requirements.txt'
 $backendSrc = Join-Path -Path $ProjectRoot -ChildPath 'Backend\src'
 $backendRoot = Join-Path -Path $ProjectRoot -ChildPath 'Backend'
@@ -36,18 +34,6 @@ $env:PYTHONPATH = (@($backendSrc, $backendRoot, $backendCompat, $frontendDashboa
 $env:PHOENIXGUARD_PROJECT_ROOT = $ProjectRoot
 $ShareRunnerPath = Join-Path -Path $ProjectRoot -ChildPath 'Frontend\dashboard\share_phoenixguard.py'
 
-if (-not (Test-Path -LiteralPath $VirtualEnvPath)) {
-    py -3.11 -m venv $VirtualEnvPath
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to create virtual environment at '$VirtualEnvPath'."
-    }
-}
-
-if (-not (Test-Path -LiteralPath $ActivateScriptPath)) {
-    throw "Virtual environment activation script not found at '$ActivateScriptPath'."
-}
-
-. $ActivateScriptPath
 . (Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\Resolve-PhoenixGuardPython.ps1')
 $pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
 $PythonPath = [string]$pythonRuntime.VenvPython

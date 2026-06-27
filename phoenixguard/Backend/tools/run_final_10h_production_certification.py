@@ -124,6 +124,12 @@ def _repo_root() -> Path:
 
 
 def _python_executable() -> str:
+    process_exe = os.getenv("PHOENIXGUARD_PYTHON_PROCESS_EXE", "").strip()
+    if process_exe and Path(process_exe).exists():
+        return process_exe
+    repo_process_exe = _repo_root() / ".venv" / "Scripts" / "phoenixguard-python.exe"
+    if repo_process_exe.exists():
+        return str(repo_process_exe)
     return sys.executable
 
 

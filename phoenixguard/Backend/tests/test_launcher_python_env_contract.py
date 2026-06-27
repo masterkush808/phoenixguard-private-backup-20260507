@@ -12,13 +12,26 @@ def test_launchers_require_repo_venv_python_instead_of_global_python() -> None:
     scripts = {
         "Backend/launch/start_phoenixguard_24_7_tracker.ps1": ("python @launcherArgs",),
         "Backend/launch/start_phoenixguard_mobile_api.ps1": (
+            "py -3.11 -m venv",
+            "Activate.ps1",
             "python -m pip",
             "python Backend\\launch\\start_phoenixguard_mobile_api.py",
         ),
+        "Backend/launch/launch_phoenixguard_live_ready.ps1": ("py -3.11 -m venv",),
+        "Backend/launch/start_phoenixguard_full_local.ps1": (
+            "py -3.11 -m venv",
+            "Activate.ps1",
+        ),
         "Business/api/start_business_mock_local.ps1": ("python -m uvicorn",),
         "Business/api/start_phoenixguard_share.ps1": (
+            "py -3.11 -m venv",
+            "Activate.ps1",
             "python -m pip",
             "python $ShareRunnerPath",
+        ),
+        "Backend/launch/deploy/windows/Start-PhoenixGuardVmMonitor.ps1": (
+            "py -3.11 -m venv",
+            "Start-Process -FilePath $PythonPath",
         ),
         "Backend/tools/resume_paused_burn_20260623_050000.ps1": ('$python = "python.exe"',),
         "Backend/tools/start_enter_now_floating_gui.ps1": ('$Python = "python"',),
@@ -37,3 +50,15 @@ def test_python_resolver_points_process_python_to_repo_venv() -> None:
     assert "$venvPython = Join-Path -Path $venvPath -ChildPath 'Scripts\\python.exe'" in text
     assert "$processPython = Join-Path -Path $scriptsPath -ChildPath 'phoenixguard-python.exe'" in text
     assert "$env:PHOENIXGUARD_PYTHON_PROCESS_EXE = $processPython" in text
+
+
+def test_certification_visual_tools_use_repo_process_host_for_child_python() -> None:
+    for relative_path in (
+        "Backend/tools/run_final_10h_production_certification.py",
+        "Backend/tools/capture_overlay_anchor_screenshots_v3.py",
+        "Backend/tools/certify_overlay_visual_truth_v3.py",
+    ):
+        text = _read(relative_path)
+        assert "PHOENIXGUARD_PYTHON_PROCESS_EXE" in text
+        assert "phoenixguard-python.exe" in text
+        assert "[sys.executable" not in text

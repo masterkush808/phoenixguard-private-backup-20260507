@@ -6,8 +6,11 @@ the repo root:
 ```powershell
 Set-Location "C:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard"
 Set-ExecutionPolicy -Scope Process Bypass -Force
-.\.venv\Scripts\Activate.ps1
 ```
+
+Do not activate nested shells for normal PhoenixGuard work. Invoke the repo interpreter directly
+through `.\.venv\Scripts\python.exe`; long-running launchers resolve to
+`.\.venv\Scripts\phoenixguard-python.exe`, a process host inside the same `.venv`.
 
 ## Dependency Profiles
 
@@ -30,9 +33,11 @@ requirements/constraints.in
 requirements/locks/
 ```
 
-Use `requirements/locks/live-win-py311.txt` for the lean `FINAL_LIVE` tracker/API/package-reporter runtime.
-Use `requirements/locks/dev-win-py311.txt` for full repo testing and Pyright. Training, business, and
-docs/PDF have separate locks so they do not pollute the live stack.
+Use `requirements/locks/live-win-py311.txt` for the `FINAL_LIVE` tracker/API/package-reporter
+runtime package set. Use `requirements/locks/dev-win-py311.txt` for full repo testing and Pyright.
+Training, business, and docs/PDF have separate lock files as install profiles, but they still target
+the same repo `.venv`; PhoenixGuard no longer creates `.venv-live`, `.venv-dev`, or nested runtime
+environments.
 
 Environment installers live under `Backend/scripts_runtime/env/`:
 
@@ -57,11 +62,17 @@ PhoenixGuard should be launched with the repo virtual environment only:
 .\.venv\Scripts\python.exe
 ```
 
+Do not use bare `python`, global Python, Conda, or a second virtual environment for PhoenixGuard
+runtime. If a launcher cannot find the repo `.venv`, it stops instead of creating a new environment.
+
 Runtime state is stored under the project runtime root:
 
 ```text
 .\.codex_runtime\
 ```
+
+`.codex_runtime` is runtime state, locks, logs, screenshots, and certification evidence. It is not a
+Python environment and must not be used as a dependency source.
 
 Do not run PhoenixGuard with bare `python`, and do not point live runtime state at
 `%LOCALAPPDATA%\PhoenixGuard\codex_runtime`. The launchers set
