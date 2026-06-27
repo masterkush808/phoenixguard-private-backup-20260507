@@ -487,6 +487,28 @@ def build_visual_realtime_health(
         dict(cast(Mapping[str, Any], artifacts.get("window", {}))).get("exists")
         or dict(cast(Mapping[str, Any], artifacts.get("chart", {}))).get("exists")
     )
+    if not artifact_ok:
+        frontend = dict(cast(Mapping[str, Any], sync.get("frontend"))) if isinstance(sync.get("frontend"), Mapping) else {}
+        render_size = dict(cast(Mapping[str, Any], frontend.get("render_size"))) if isinstance(frontend.get("render_size"), Mapping) else {}
+        render_width = _int(render_size.get("width"))
+        render_height = _int(render_size.get("height"))
+        live_artifact_path = any(
+            _text(live_state.get(key))
+            for key in (
+                "last_display_window_path",
+                "last_window_path",
+                "last_frame_path",
+                "last_chart_path",
+            )
+        )
+        artifact_ok = bool(
+            live_artifact_path
+            or (
+                frontend.get("full_broker_surface_visible") is True
+                and render_width > 0
+                and render_height > 0
+            )
+        )
     overlay = dict(cast(Mapping[str, Any], visual_health.get("overlay"))) if isinstance(visual_health.get("overlay"), Mapping) else {}
     overlay_ok = bool(overlay.get("frame_matches_chart_frame", True))
     ok = bool(sync.get("ok")) and artifact_ok and overlay_ok

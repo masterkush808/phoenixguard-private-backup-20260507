@@ -328,6 +328,42 @@ def test_visual_realtime_health_passes_when_artifacts_and_sync_match(tmp_path: P
     assert health["ok"] is True
 
 
+def test_visual_realtime_health_uses_compact_surface_fallback_when_artifacts_are_omitted(tmp_path: Path) -> None:
+    heartbeat = record_frontend_heartbeat(
+        {
+            "session_id": "s2",
+            "frame_id": 11,
+            "rendered_frame_id": 11,
+            "chart_transform_id": "ct_11",
+            "overlay_count": 2,
+            "overlay_state_version": "ovlock_2_same",
+            "viewport": {"width": 800, "height": 600},
+            "render_size": {"width": 1200, "height": 720},
+            "full_broker_surface_visible": True,
+        },
+        store_dir=tmp_path,
+        now_ms=20_000,
+    )
+    health = build_visual_realtime_health(
+        "s2",
+        live_state={
+            "session_id": "s2",
+            "frame_id": 11,
+            "chart_transform_id": "ct_11",
+            "overlay_objects": [{}, {}],
+            "overlay_state_version": "ovlock_2_same",
+            "last_display_window_path": "artifacts/000011_window.png",
+        },
+        visual_health={},
+        heartbeat=heartbeat,
+        now_ms=21_000,
+    )
+
+    assert health["status"] == "PASS"
+    assert health["artifact_ok"] is True
+    assert health["frontend_sync"]["ok"] is True
+
+
 def test_prune_frontend_heartbeats(tmp_path: Path) -> None:
     record_frontend_heartbeat(
         {

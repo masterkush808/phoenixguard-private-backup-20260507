@@ -37,12 +37,18 @@ stale heartbeat
 broker surface not visible
 ```
 
+## Compact Artifact Fallback
+
+The compact public live-state response does not always include the full `visual_health.artifacts`
+block. Visual health now derives artifact health from compact live-state artifact paths or from
+the frontend heartbeat proving a visible full broker surface with positive render dimensions.
+
 ## Validation
 
 ```text
 compileall realtime sync files: PASS
 pyright realtime sync files: PASS, 0 errors
-test_realtime_sync_v3.py: PASS, 11 passed
+test_realtime_sync_v3.py: PASS, 12 passed
 ```
 
 ## Runtime Impact
