@@ -1152,6 +1152,8 @@ def test_compact_live_state_promotes_fresh_display_epoch_over_stale_session(
     assert abs(float(payload["last_capture_epoch"]) - now_epoch) < 0.25
     assert payload["last_window_path"] == str(fresh_window)
     assert payload["frame_timing_trace_v3"]["frame_age_ms"] < 5000
+    assert payload["frame_timing_trace_v3"]["backpressure"]["stale_limit_ms"] >= 30_000
+    assert payload["frame_timing_trace_v3"]["backpressure"]["reject_limit_ms"] >= 45_000
 
 
 def test_compact_live_state_returns_studying_new_pair_when_surface_outruns_overlay_authority(

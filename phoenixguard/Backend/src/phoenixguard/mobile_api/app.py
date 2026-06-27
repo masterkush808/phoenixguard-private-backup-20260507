@@ -2048,6 +2048,10 @@ def create_app(
             dict(cast(Mapping[str, object], raw_session)),
             display_path=path.with_name("display_state.json"),
         )
+        session_payload.setdefault(
+            "effective_capture_interval_sec",
+            session_payload.get("capture_interval_sec", _WINDOW_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC),
+        )
         mark_timing("merge_display")
         artifacts: dict[str, str] = {}
         for kind, key in {
