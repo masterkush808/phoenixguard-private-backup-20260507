@@ -84,7 +84,11 @@ def _audit_from_live_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     if audit:
         return audit
     scene = _mapping(payload.get("scene_graph") or payload.get("broker_scene_graph_v3"))
-    overlays = _sequence_of_mappings(payload.get("overlay_objects"))
+    overlays = _sequence_of_mappings(_mapping(payload.get("overlays")).get("objects"))
+    if not overlays:
+        overlays = _sequence_of_mappings(_mapping(_mapping(payload.get("live_visual_state")).get("overlays")).get("objects"))
+    if not overlays:
+        overlays = _sequence_of_mappings(payload.get("overlay_objects"))
     current_side = _text(_mapping(payload.get("model_council")).get("side") or _mapping(payload.get("latest_signal")).get("action"))
     _resolved, audit = resolve_precision_overlays_v3(
         overlays,
