@@ -423,21 +423,32 @@ def build_frontend_sync_status(
     age_sec = max(0.0, (now - _float(heartbeat.get("received_at_ms"), now)) / 1000.0)
     backend_frame = _int(backend_state.get("frame_id"))
     heartbeat_frame = _int(heartbeat.get("frame_id"))
-    if backend_frame and heartbeat_frame and backend_frame != heartbeat_frame:
-        mismatches.append(f"frame_id mismatch backend={backend_frame} frontend={heartbeat_frame}")
     rendered_frame = _int(heartbeat.get("rendered_frame_id"))
-    if backend_frame and rendered_frame and backend_frame != rendered_frame:
-        mismatches.append(f"rendered_frame_id mismatch backend={backend_frame} frontend={rendered_frame}")
     backend_transform = _state_chart_transform_id(backend_state)
     heartbeat_transform = _text(heartbeat.get("chart_transform_id"))
     if backend_transform and heartbeat_transform and backend_transform != heartbeat_transform:
         mismatches.append(f"chart_transform_id mismatch backend={backend_transform} frontend={heartbeat_transform}")
     backend_overlay_count = _state_overlay_count(backend_state)
     heartbeat_overlay_count = _int(heartbeat.get("overlay_count", heartbeat.get("visible_overlay_count", 0)))
-    if backend_overlay_count != heartbeat_overlay_count:
-        mismatches.append(f"overlay_count mismatch backend={backend_overlay_count} frontend={heartbeat_overlay_count}")
     backend_overlay_version = _text(backend_state.get("overlay_state_version"))
     heartbeat_overlay_version = _text(heartbeat.get("overlay_state_version"))
+    overlay_count_matches = backend_overlay_count == heartbeat_overlay_count
+    overlay_version_matches = (
+        not backend_overlay_version
+        or not heartbeat_overlay_version
+        or backend_overlay_version == heartbeat_overlay_version
+    )
+    frame_skew_tolerated = bool(overlay_count_matches and overlay_version_matches)
+    if backend_frame and heartbeat_frame and backend_frame != heartbeat_frame:
+        frame_skew = abs(backend_frame - heartbeat_frame)
+        if not frame_skew_tolerated or frame_skew > 3:
+            mismatches.append(f"frame_id mismatch backend={backend_frame} frontend={heartbeat_frame}")
+    if backend_frame and rendered_frame and backend_frame != rendered_frame:
+        rendered_skew = abs(backend_frame - rendered_frame)
+        if not frame_skew_tolerated or rendered_skew > 3:
+            mismatches.append(f"rendered_frame_id mismatch backend={backend_frame} frontend={rendered_frame}")
+    if not overlay_count_matches:
+        mismatches.append(f"overlay_count mismatch backend={backend_overlay_count} frontend={heartbeat_overlay_count}")
     if backend_overlay_version and heartbeat_overlay_version and backend_overlay_version != heartbeat_overlay_version:
         mismatches.append(f"overlay_state_version mismatch backend={backend_overlay_version} frontend={heartbeat_overlay_version}")
     if age_sec > max_age_sec:
@@ -457,6 +468,7 @@ def build_frontend_sync_status(
             "chart_transform_id": backend_transform,
             "overlay_count": backend_overlay_count,
             "overlay_state_version": backend_overlay_version,
+            "frame_skew_tolerated": frame_skew_tolerated,
         },
     }
 
