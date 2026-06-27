@@ -9,8 +9,9 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 ```
 
 Do not activate nested shells for normal PhoenixGuard work. Invoke the repo interpreter directly
-through `.\.venv\Scripts\python.exe`; long-running launchers resolve to
-`.\.venv\Scripts\phoenixguard-python.exe`, a process host inside the same `.venv`.
+through `.\.venv\Scripts\python.exe`; long-running children use
+`.\.venv\Scripts\phoenixguard-python.exe`, an internal process host inside the same `.venv` that
+avoids the Windows venv redirector child chain.
 
 ## Dependency Profiles
 

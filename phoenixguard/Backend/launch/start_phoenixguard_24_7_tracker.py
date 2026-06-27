@@ -499,12 +499,12 @@ def _launch_mobile_api(
         existing_path = str(env.get("PATH", "") or "")
         if scripts_dir and not existing_path.lower().startswith(scripts_dir.lower() + os.pathsep):
             env["PATH"] = scripts_dir + os.pathsep + existing_path
-    if pyvenv_launcher and Path(str(python_exe)).resolve() != Path(str(pyvenv_launcher)).resolve():
-        env["__PYVENV_LAUNCHER__"] = pyvenv_launcher
     if runtime_lock_path is not None:
         env["PHOENIXGUARD_RUNTIME_LOCK_PATH"] = str(runtime_lock_path)
     if runtime_lock_token:
         env["PHOENIXGUARD_RUNTIME_LOCK_TOKEN"] = runtime_lock_token
+    if pyvenv_launcher and Path(str(python_exe)).resolve() != Path(str(pyvenv_launcher)).resolve():
+        env["__PYVENV_LAUNCHER__"] = pyvenv_launcher
     return cast(subprocess.Popen[str], subprocess.Popen(
         [python_exe, str(script_dir / "Backend" / "launch" / "start_phoenixguard_mobile_api.py")],
         cwd=str(script_dir),

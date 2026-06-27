@@ -90,6 +90,20 @@ def test_certification_visual_tools_use_repo_process_host_for_child_python() -> 
         assert "[sys.executable" not in text
 
 
+def test_profile_installers_never_create_secondary_or_recreated_envs() -> None:
+    for relative_path in (
+        "Backend/scripts_runtime/env/install_live.ps1",
+        "Backend/scripts_runtime/env/install_dev.ps1",
+        "Backend/scripts_runtime/env/install_training.ps1",
+        "Backend/scripts_runtime/env/install_business.ps1",
+    ):
+        text = _read(relative_path)
+        assert "py -3.11 -m venv" not in text
+        assert "Remove-Item -LiteralPath $venvPath -Recurse -Force" not in text
+        assert "Repo .venv Python not found" in text
+        assert "phoenixguard_repo_paths.pth" in text
+
+
 def test_final_certification_periodic_overlay_capture_is_lazy_loaded() -> None:
     text = _read("Backend/tools/run_final_10h_production_certification.py")
     assert '"CLEAN_LIVE,SUPPLY_DEMAND,TRENDLINES"' in text

@@ -44,7 +44,9 @@ function Resolve-PhoenixGuardPythonRuntime {
     $env:PHOENIXGUARD_PYVENV_LAUNCHER = $venvPython
     $env:VIRTUAL_ENV = $venvPath
     $env:PHOENIXGUARD_STRICT_REPO_VENV = if ($env:PHOENIXGUARD_STRICT_REPO_VENV) { $env:PHOENIXGUARD_STRICT_REPO_VENV } else { '1' }
-    $env:__PYVENV_LAUNCHER__ = $venvPython
+    if ($processPython -ne $venvPython) {
+        $env:__PYVENV_LAUNCHER__ = $venvPython
+    }
     $env:PATH = (@($scriptsPath) + (($env:PATH -split [System.IO.Path]::PathSeparator) | Where-Object { $_ -and $_ -ne $scriptsPath })) -join [System.IO.Path]::PathSeparator
 
     [pscustomobject]@{

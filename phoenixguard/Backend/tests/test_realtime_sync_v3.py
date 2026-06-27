@@ -292,6 +292,43 @@ def test_build_frontend_sync_status_allows_small_frame_skew_when_overlay_truth_m
     assert status["status"] == "PASS"
     assert status["mismatches"] == []
     assert status["backend"]["frame_skew_tolerated"] is True
+    assert status["backend"]["frame_skew_tolerance"] == 5
+
+
+def test_build_frontend_sync_status_allows_15_second_cadence_frame_skew_when_overlay_truth_matches(tmp_path: Path) -> None:
+    heartbeat = record_frontend_heartbeat(
+        {
+            "session_id": "s1",
+            "surface_id": "dashboard",
+            "frame_id": 35,
+            "rendered_frame_id": 35,
+            "chart_transform_id": "ct_a",
+            "overlay_count": 11,
+            "overlay_state_version": "ovlock_11_same",
+            "viewport": {"width": 800, "height": 600},
+            "render_size": {"width": 800, "height": 600},
+            "full_broker_surface_visible": True,
+        },
+        store_dir=tmp_path,
+        now_ms=10_000,
+    )
+    status = build_frontend_sync_status(
+        "s1",
+        backend_state={
+            "session_id": "s1",
+            "frame_id": 39,
+            "chart_transform_id": "ct_a",
+            "overlay_objects": [{} for _ in range(11)],
+            "overlay_state_version": "ovlock_11_same",
+            "broker_surface": {"url": "/window.png"},
+        },
+        heartbeat=heartbeat,
+        now_ms=11_000,
+    )
+
+    assert status["status"] == "PASS"
+    assert status["mismatches"] == []
+    assert status["backend"]["frame_skew_tolerated"] is True
 
 
 def test_visual_realtime_health_passes_when_artifacts_and_sync_match(tmp_path: Path) -> None:

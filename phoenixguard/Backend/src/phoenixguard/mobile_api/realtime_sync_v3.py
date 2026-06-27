@@ -30,6 +30,13 @@ def _selection_cache_ttl_sec() -> float:
         return 5.0
 
 
+def _frame_skew_tolerance() -> int:
+    try:
+        return max(0, int(float(os.getenv("PHOENIXGUARD_FRONTEND_FRAME_SKEW_TOLERANCE", "5") or "5")))
+    except ValueError:
+        return 5
+
+
 def _selection_cache_key(session_id: str, surface_id: str, store_dir: Path | str | None) -> tuple[str, str, str]:
     root = str(Path(store_dir or DEFAULT_HEARTBEAT_STORE_DIR))
     return (_slug(session_id), _slug(surface_id), root)
@@ -439,13 +446,14 @@ def build_frontend_sync_status(
         or backend_overlay_version == heartbeat_overlay_version
     )
     frame_skew_tolerated = bool(overlay_count_matches and overlay_version_matches)
+    frame_skew_tolerance = _frame_skew_tolerance()
     if backend_frame and heartbeat_frame and backend_frame != heartbeat_frame:
         frame_skew = abs(backend_frame - heartbeat_frame)
-        if not frame_skew_tolerated or frame_skew > 3:
+        if not frame_skew_tolerated or frame_skew > frame_skew_tolerance:
             mismatches.append(f"frame_id mismatch backend={backend_frame} frontend={heartbeat_frame}")
     if backend_frame and rendered_frame and backend_frame != rendered_frame:
         rendered_skew = abs(backend_frame - rendered_frame)
-        if not frame_skew_tolerated or rendered_skew > 3:
+        if not frame_skew_tolerated or rendered_skew > frame_skew_tolerance:
             mismatches.append(f"rendered_frame_id mismatch backend={backend_frame} frontend={rendered_frame}")
     if not overlay_count_matches:
         mismatches.append(f"overlay_count mismatch backend={backend_overlay_count} frontend={heartbeat_overlay_count}")
@@ -469,6 +477,7 @@ def build_frontend_sync_status(
             "overlay_count": backend_overlay_count,
             "overlay_state_version": backend_overlay_version,
             "frame_skew_tolerated": frame_skew_tolerated,
+            "frame_skew_tolerance": frame_skew_tolerance,
         },
     }
 

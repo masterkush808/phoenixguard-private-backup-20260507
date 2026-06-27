@@ -24,6 +24,7 @@
     "Backend",
     "Backend/compat",
     "Backend/launch",
+    "Backend/tools",
     "Frontend/dashboard",
     "."
   ],

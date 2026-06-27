@@ -28,9 +28,10 @@ Do not create .venv-live, .venv-dev, .venv-training, or .venv-business.
 Do not auto-create .venv from runtime launchers; if the repo .venv is missing, launch must fail
 with a clear setup error.
 Use logical requirement groups, but keep the interpreter and installed site-packages rooted in .venv.
-Launchers resolve through .\.venv\Scripts\python.exe and use .\.venv\Scripts\phoenixguard-python.exe
-as the long-running process host when present. That host is a copied executable inside the same repo
-.venv, so it avoids the Windows venv redirector child chain without creating a second environment.
+Launchers resolve through .\.venv\Scripts\python.exe and use
+.\.venv\Scripts\phoenixguard-python.exe as the long-running process host when present. That host is
+inside the same .venv; it is not a second environment, and it avoids the Windows venv redirector
+child chain.
 ```
 
 ## Profiles
