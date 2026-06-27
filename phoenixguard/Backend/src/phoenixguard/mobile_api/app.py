@@ -3278,11 +3278,26 @@ def create_app(
                         if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
                             refresh_source = dict(cached[1])
                 if refresh_source is not None:
-                    compact_refreshed = _refresh_compact_cached_live_state(
-                        refresh_source,
+                    display_snapshot = _direct_window_tracker_display_snapshot(
                         requested_session_id,
-                        now_epoch=now_epoch,
+                        require_overlay_model=False,
                     )
+                    compact_refreshed = _apply_display_snapshot_to_projected_payload(
+                        refresh_source,
+                        display_snapshot,
+                    )
+                    provider = {
+                        **_mapping_to_plain_dict(compact_refreshed.get("provider_status")),
+                        "compact_cache_light_refreshed_v3": True,
+                        "compact_cache_refreshed_epoch": now_epoch,
+                        "compact_cache_refresh_skipped_observability_rebuild_v3": True,
+                    }
+                    compact_refreshed["provider_status"] = provider
+                    live_visual_state = compact_refreshed.get("live_visual_state")
+                    if isinstance(live_visual_state, Mapping):
+                        live_visual = dict(cast(Mapping[str, object], live_visual_state))
+                        live_visual["provider_status"] = provider
+                        compact_refreshed["live_visual_state"] = live_visual
                     with _LIVE_STATE_V3_CACHE_LOCK:
                         _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_refreshed))
                     return compact_refreshed
@@ -3317,11 +3332,27 @@ def create_app(
                             if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
                                 refresh_source = dict(cached[1])
                     if refresh_source is not None:
-                        compact_refreshed = _refresh_compact_cached_live_state(
-                            refresh_source,
+                        display_snapshot = _direct_window_tracker_display_snapshot(
                             requested_session_id,
-                            now_epoch=now_epoch,
+                            require_overlay_model=False,
                         )
+                        compact_refreshed = _apply_display_snapshot_to_projected_payload(
+                            refresh_source,
+                            display_snapshot,
+                        )
+                        provider = {
+                            **_mapping_to_plain_dict(compact_refreshed.get("provider_status")),
+                            "compact_cache_light_refreshed_v3": True,
+                            "compact_cache_refreshed_epoch": now_epoch,
+                            "compact_cache_refresh_skipped_observability_rebuild_v3": True,
+                            "compact_cache_singleflight_waited_v3": True,
+                        }
+                        compact_refreshed["provider_status"] = provider
+                        live_visual_state = compact_refreshed.get("live_visual_state")
+                        if isinstance(live_visual_state, Mapping):
+                            live_visual = dict(cast(Mapping[str, object], live_visual_state))
+                            live_visual["provider_status"] = provider
+                            compact_refreshed["live_visual_state"] = live_visual
                         with _LIVE_STATE_V3_CACHE_LOCK:
                             _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(compact_refreshed))
                         return compact_refreshed
