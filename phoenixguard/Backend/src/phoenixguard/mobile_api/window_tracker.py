@@ -12792,8 +12792,15 @@ class PhoenixGuardWindowTrackingAdapter:
                     + 0.16 * (1.0 - abs(center - height * 0.5) / max(1.0, height * 0.5))
                 )
                 historical_significance = _clip01(history_metrics.get("historical_significance", 0.0))
-                top = int(round(max(0.0, center - zone_half_height)))
-                bottom = int(round(min(float(height), center + zone_half_height)))
+                touch_ys = [float(item.get("y", center) or center) for item in group]
+                touch_top = min(touch_ys) if touch_ys else center
+                touch_bottom = max(touch_ys) if touch_ys else center
+                wick_band_pad = max(2.0, min(zone_half_height, median_range * 0.18))
+                top = int(round(max(0.0, touch_top - wick_band_pad)))
+                bottom = int(round(min(float(height), touch_bottom + wick_band_pad)))
+                if bottom <= top:
+                    top = int(round(max(0.0, center - 1.5)))
+                    bottom = int(round(min(float(height), center + 1.5)))
                 origin_metrics = supply_demand_origin_metrics(
                     role=role,
                     center=center,
@@ -12891,6 +12898,13 @@ class PhoenixGuardWindowTrackingAdapter:
                         "zone_stack_id": f"{role}_{int(round(center / max(1.0, merge_band)))}",
                         "source_rule": "zone_not_exact_price",
                         "validation_reason": str(authority_profile.get("validation_reason", "touch_reaction_recency_unbroken_zone")),
+                        "anchor_type": "support_reclaim" if role == "support" else "wick_rejection_cluster",
+                        "anchor_price_band": {
+                            "top_y": round(float(top), 3),
+                            "bottom_y": round(float(max(top + 1, bottom)), 3),
+                            "center_y": round(float(center), 3),
+                            "source": "wick_touch_cluster",
+                        },
                         "knowledge_tags": knowledge_tags,
                         "book_rule_flags": list(cast(Sequence[str], authority_profile.get("book_rule_flags", []))),
                         "zone_authority_state": str(authority_profile.get("zone_authority_state", "CONTEXT_REFERENCE")),
@@ -12903,6 +12917,8 @@ class PhoenixGuardWindowTrackingAdapter:
                         "line_x0": int(round(left)),
                         "line_x1": int(round(right)),
                         "zone_height_px": int(max(1, round(bottom - top))),
+                        "wick_anchor_y": round(float(center), 3),
+                        "wick_touch_band": [round(float(top), 3), round(float(max(top + 1, bottom)), 3)],
                         "touch_count": int(touch_count),
                         "touch_points": [[int(round(item.get("center_x", 0.0))), int(round(item.get("y", 0.0)))] for item in group],
                         "source_indices": list(cast(Sequence[int], history_metrics.get("source_indices", []))),
@@ -16985,16 +17001,16 @@ class PhoenixGuardWindowTrackingAdapter:
                 if direction == "SELL"
                 else colors.get("current", (138, 160, 181))
             )
-            alpha_scale = 1.0 if kind == "primary" else (0.84 if kind == "sniper" else 0.62)
             zone_emphasis = kind in {"primary", "sniper"}
             raw_bbox = cast(Sequence[Any], zone.get("bbox", []))
             raw_target = cast(Sequence[Any], zone.get("target_bbox", []))
-            if len(raw_bbox) >= 4:
+            draw_entry_zone = "sniper" in kind
+            if len(raw_bbox) >= 4 and draw_entry_zone:
                 bbox = _clip_bbox_to_bounds(chart_bounds, _translate_bbox(raw_bbox, offset_x=offset_x, offset_y=offset_y))
                 self._draw_projection_zone(
                     draw,
                     bbox,
-                    label=str(zone.get("label", f"{direction} TRIGGER") or f"{direction} TRIGGER"),
+                    label=str(zone.get("label", f"{direction} SNIPER") or f"{direction} SNIPER"),
                     color=color,
                     font=font,
                     confidence=_clip01(zone.get("confidence", 0.0)),
@@ -17013,25 +17029,7 @@ class PhoenixGuardWindowTrackingAdapter:
                     primary=False,
                     bounds=chart_bounds,
                 )
-            raw_path = cast(Sequence[Any], zone.get("path", []))
             path: list[tuple[int, int]] = []
-            for point in raw_path:
-                row = cast(Sequence[Any], point)
-                if len(row) < 2:
-                    continue
-                path.append(_clip_point_to_bounds(chart_bounds, (float(row[0]) + offset_x, float(row[1]) + offset_y), pad=6))
-            if len(path) >= 2:
-                path_color = _rgba(color, int(round(208 * alpha_scale)))
-                for start, end in zip(path, path[1:]):
-                    self._draw_dashed_line(draw, start, end, path_color, width=3 if kind == "primary" else 2, dash=10, gap=7)
-                end_x, end_y = path[-1]
-                point_radius = 5 if kind == "primary" else 4
-                draw.ellipse(
-                    (end_x - point_radius, end_y - point_radius, end_x + point_radius, end_y + point_radius),
-                    fill=path_color,
-                    outline=(7, 16, 22, 230),
-                    width=1,
-                )
             if kind == "primary" and "invalidation_y" in zone:
                 try:
                     invalidation_y = int(round(float(zone.get("invalidation_y", 0.0)) + offset_y))
@@ -17455,7 +17453,6 @@ class PhoenixGuardWindowTrackingAdapter:
         direction = _upper_action(box.get("direction", "HOLD"))
         role_specs: tuple[tuple[str, str, ColorRGB], ...] = (
             ("sniper_window", "SNP", (94, 194, 255)),
-            ("trigger_window", "TRG", (238, 190, 90)),
         )
         for key, label, role_color in role_specs:
             raw_bbox = cast(Sequence[Any], box.get(key, []))

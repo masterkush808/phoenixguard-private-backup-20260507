@@ -44,7 +44,7 @@ MARKET_OVERLAY_TYPES = {
 }
 
 ZONE_TYPES = {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"}
-ACTIONABLE_TYPES = {"SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"}
+ACTIONABLE_TYPES = {"SNIPER_ENTRY_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"}
 FLOATING_REJECT_TYPES = ZONE_TYPES | ACTIONABLE_TYPES
 DISPLAY_STATES = {
     "FULL",
@@ -60,7 +60,7 @@ TRENDLINE_TYPES = {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE
 ALWAYS_LABEL_TYPES = ZONE_TYPES | TRENDLINE_TYPES
 HISTORY_TYPES = {"PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"}
 STRUCTURE_TYPES = {"IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX"}
-EXECUTION_FOCUS_TYPES = {"SNIPER_ENTRY_BOX", "RETEST_BOX", "TARGET_ZONE_BOX"}
+EXECUTION_FOCUS_TYPES = {"SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"}
 DIAGNOSTIC_TYPES = {
     "DEBUG_RAW_DETECTION",
     "REJECTED_OVERLAY",
@@ -494,7 +494,7 @@ def _tighten_box(row: Mapping[str, Any], bounds: Sequence[Any], plot: Sequence[A
     if overlay_type in ZONE_TYPES:
         max_width_ratio = 0.42
         max_height_ratio = 0.135
-    elif overlay_type in {"SNIPER_ENTRY_BOX", "RETEST_BOX", "TARGET_ZONE_BOX"}:
+    elif overlay_type in {"SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"}:
         max_width_ratio = 0.18
         max_height_ratio = 0.115
     elif overlay_type == "INVALIDATION_BOX":
@@ -554,7 +554,7 @@ def _mode_emphasizes_type(mode: str, overlay_type: str, layer: str) -> bool:
     if normalized_mode == "TRENDLINES":
         return overlay_type in TRENDLINE_TYPES
     if normalized_mode == "TRIGGER":
-        return overlay_type in {"SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX"}
+        return overlay_type in {"SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"}
     if normalized_mode == "TARGET":
         return overlay_type in {"TARGET_ZONE_BOX", "OPPOSING_FORCE"}
     if normalized_mode in {"BROKER", "CALIBRATION"}:
@@ -562,7 +562,7 @@ def _mode_emphasizes_type(mode: str, overlay_type: str, layer: str) -> bool:
     if normalized_mode == "GLOBAL":
         return overlay_type in {"IMPULSE_BOX", "PROGRESSION_PATH"} or layer == "major_swings"
     if normalized_mode == "LOCAL":
-        return overlay_type in {"PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "CURRENT_CANDLE"}
+        return overlay_type in {"PULLBACK_BOX", "CONTINUATION_BOX", "SNIPER_ENTRY_BOX", "CURRENT_CANDLE"}
     if normalized_mode == "COUNCIL":
         return overlay_type in {
             "MODEL_COUNCIL_MARKER",
@@ -572,7 +572,6 @@ def _mode_emphasizes_type(mode: str, overlay_type: str, layer: str) -> bool:
             "TWO_CANDLE_STUDY",
             "LSTM_STUDY",
             "SNIPER_ENTRY_BOX",
-            "RETEST_BOX",
             "TARGET_ZONE_BOX",
             "SUPPLY_ZONE",
             "DEMAND_ZONE",
@@ -585,7 +584,7 @@ def _mode_emphasizes_type(mode: str, overlay_type: str, layer: str) -> bool:
     if normalized_mode in {"FULL_HISTORY_READ", "REPLAY"}:
         return overlay_type in HISTORY_TYPES | STRUCTURE_TYPES | EXECUTION_FOCUS_TYPES | ZONE_TYPES | TRENDLINE_TYPES
     if normalized_mode == "PATH":
-        return overlay_type in HISTORY_TYPES | {"ANGLE_VECTOR", "PREDICTION_PATH"}
+        return overlay_type in HISTORY_TYPES
     if normalized_mode == "ACTIVE_CONTEXT":
         return overlay_type in EXECUTION_FOCUS_TYPES | STRUCTURE_TYPES | ZONE_TYPES | TRENDLINE_TYPES
     if normalized_mode in {"DIAGNOSTICS", "DEBUG", "INSPECTOR"}:
@@ -610,7 +609,7 @@ def _semantic_style_family(row: Mapping[str, Any]) -> str:
         return "buy"
     if side == "SELL":
         return "sell"
-    if overlay_type in {"RETEST_BOX", "SNIPER_ENTRY_BOX", "CONTINUATION_BOX"}:
+    if overlay_type in {"SNIPER_ENTRY_BOX", "CONTINUATION_BOX"}:
         return "trigger"
     if overlay_type == "TARGET_ZONE_BOX":
         return "target"

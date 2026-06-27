@@ -130,6 +130,50 @@ def test_latest_dashboard_heartbeat_prefers_fresh_visible_page_instance(tmp_path
     assert loaded["frame_id"] == 40
 
 
+def test_latest_dashboard_heartbeat_prefers_fresh_hidden_page_over_stale_visible_page(tmp_path: Path) -> None:
+    now_ms = time.time() * 1000.0
+    stale_visible = record_frontend_heartbeat(
+        {
+            "session_id": "pocket-live-8788",
+            "surface_id": "dashboard",
+            "route": "live",
+            "overlay_mode": "CLEAN_LIVE",
+            "page_instance_id": "stale-visible",
+            "frame_id": 50,
+            "rendered_frame_id": 50,
+            "overlay_count": 24,
+            "visible_overlay_count": 24,
+            "document_hidden": False,
+        },
+        store_dir=tmp_path,
+        now_ms=now_ms - 10 * 60 * 1000,
+    )
+    fresh_hidden = record_frontend_heartbeat(
+        {
+            "session_id": "pocket-live-8788",
+            "surface_id": "dashboard",
+            "route": "live",
+            "overlay_mode": "CLEAN_LIVE",
+            "page_instance_id": "fresh-hidden",
+            "frame_id": 60,
+            "rendered_frame_id": 60,
+            "overlay_count": 11,
+            "visible_overlay_count": 11,
+            "document_hidden": True,
+        },
+        store_dir=tmp_path,
+        now_ms=now_ms,
+    )
+
+    loaded = latest_frontend_heartbeat("pocket-live-8788", surface_id="dashboard", store_dir=tmp_path)
+
+    assert stale_visible["surface_id"] == "dashboard_stale_visible"
+    assert fresh_hidden["surface_id"] == "dashboard_fresh_hidden"
+    assert loaded is not None
+    assert loaded["page_instance_id"] == "fresh_hidden"
+    assert loaded["frame_id"] == 60
+
+
 def test_record_frontend_heartbeat_uses_unique_temp_files_under_concurrency(tmp_path: Path) -> None:
     def write_heartbeat(frame_id: int) -> int:
         heartbeat = record_frontend_heartbeat(

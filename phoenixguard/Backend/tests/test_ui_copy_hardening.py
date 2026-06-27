@@ -177,7 +177,8 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "SUPPORT_TRENDLINE" in dashboard
     assert "RESISTANCE_TRENDLINE" in dashboard
     assert "INNER_TRENDLINE" in dashboard
-    assert 'TRIGGER: new Set(["TRIGGER_BOX", "TRIGGER_ZONE", "RETEST_BOX", "SNIPER_ENTRY_BOX"])' in dashboard
+    assert 'const operatorHiddenTypes = new Set(["RETEST_BOX", "TRIGGER_BOX", "TRIGGER_ZONE", "PREDICTION_PATH", "ANGLE_VECTOR"])' in dashboard
+    assert 'TRIGGER: new Set(["SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"])' in dashboard
     assert "function payloadMatchesSelectedOverlayMode" in dashboard
     assert ".surface-hotspot.label-hidden span" in dashboard
     assert "const labelHidden = box.label_hidden === true || box.label_hidden === \"true\";" in dashboard

@@ -183,10 +183,20 @@ def _heartbeat_visible_count(heartbeat: Mapping[str, Any]) -> int:
     return _int(source)
 
 
-def _heartbeat_rank(heartbeat: Mapping[str, Any]) -> tuple[int, int, float]:
+def _heartbeat_age_sec(heartbeat: Mapping[str, Any]) -> float:
+    received_at_ms = _float(heartbeat.get("received_at_ms"), 0.0)
+    if received_at_ms <= 0.0:
+        return float("inf")
+    return max(0.0, (time.time() * 1000.0 - received_at_ms) / 1000.0)
+
+
+def _heartbeat_rank(heartbeat: Mapping[str, Any]) -> tuple[int, int, int, int, float]:
     status_rank = 1 if _text(heartbeat.get("status")).upper() == "ALIVE" else 0
+    age_sec = _heartbeat_age_sec(heartbeat)
+    freshness_rank = 2 if age_sec <= 45.0 else 1 if age_sec <= 120.0 else 0
     visible_rank = 1 if _heartbeat_visible_count(heartbeat) > 0 else 0
-    return status_rank, visible_rank, _float(heartbeat.get("received_at_ms"), 0.0)
+    document_rank = 0 if bool(heartbeat.get("document_hidden") is True) else 1
+    return status_rank, freshness_rank, visible_rank, document_rank, _float(heartbeat.get("received_at_ms"), 0.0)
 
 
 def _load_heartbeat_file(path: Path) -> dict[str, Any] | None:

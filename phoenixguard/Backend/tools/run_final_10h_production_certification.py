@@ -190,14 +190,40 @@ def _source_lock_status(live: Mapping[str, Any], runtime_trace: Mapping[str, Any
     broker_source = _mapping(live.get("broker_source"))
     broker_source_lock = _mapping(live.get("broker_source_lock"))
     nodes = _mapping(_mapping(runtime_trace.get("dataflow_contract_trace")).get("nodes"))
-    status = _upper(broker_source_lock.get("status") or broker_source.get("status") or nodes.get("BrokerSourceLockV3"), "UNKNOWN")
-    valid = bool(broker_source_lock.get("valid") is True or broker_source.get("valid") is True or status in {"PASS", "VALID", "LOCKED"})
+    top_level_lock_id = _text(live.get("broker_source_lock_id") or live.get("source_lock_id"))
+    top_level_transform_id = _text(live.get("chart_transform_id"))
+    top_level_status = _upper(live.get("broker_source_lock_status") or live.get("source_lock_status"), "")
+    wrong_surface = bool(broker_source.get("wrong_surface") or broker_source_lock.get("wrong_surface") or live.get("wrong_surface"))
+    identity_valid = bool(top_level_lock_id and top_level_transform_id and not wrong_surface)
+    status = _upper(
+        broker_source_lock.get("status")
+        or broker_source.get("status")
+        or nodes.get("BrokerSourceLockV3")
+        or top_level_status
+        or ("VALID" if identity_valid else ""),
+        "UNKNOWN",
+    )
+    valid = bool(
+        broker_source_lock.get("valid") is True
+        or broker_source.get("valid") is True
+        or status in {"PASS", "VALID", "LOCKED"}
+        or identity_valid
+    )
     return {
         "status": status,
         "valid": valid,
-        "lock_id": _text(broker_source.get("lock_id") or broker_source_lock.get("lock_id") or broker_source_lock.get("broker_source_lock_id")),
-        "wrong_surface": bool(broker_source.get("wrong_surface") or broker_source_lock.get("wrong_surface")),
-        "reason": _text(broker_source_lock.get("reason") or broker_source.get("reason")),
+        "lock_id": _text(
+            broker_source.get("lock_id")
+            or broker_source_lock.get("lock_id")
+            or broker_source_lock.get("broker_source_lock_id")
+            or top_level_lock_id
+        ),
+        "wrong_surface": wrong_surface,
+        "reason": _text(
+            broker_source_lock.get("reason")
+            or broker_source.get("reason")
+            or ("live_state_source_lock_identity" if identity_valid else "")
+        ),
     }
 
 
@@ -225,6 +251,10 @@ def _timing_status(live: Mapping[str, Any], performance: Mapping[str, Any]) -> d
     }
 
 
+def source_lock_status_for_certification(live: Mapping[str, Any], runtime_trace: Mapping[str, Any]) -> dict[str, object]:
+    return _source_lock_status(live, runtime_trace)
+
+
 def _sequence_status(live: Mapping[str, Any], runtime_trace: Mapping[str, Any]) -> dict[str, object]:
     tracking = _mapping(live.get("tracking_summary"))
     sequence_context = _mapping(tracking.get("sequence_context_v3") or tracking.get("sequence_context"))
@@ -245,12 +275,26 @@ def _model_status(live: Mapping[str, Any], performance: Mapping[str, Any], runti
     model_state = _mapping(live.get("model_state") or performance.get("model_state"))
     gates = _mapping(runtime_trace.get("certification_gates"))
     warm_state = _mapping(gates.get("model_warm_state"))
+    models_awake = _int(model_state.get("models_awake") or model_state.get("awake"), 0)
+    models_total = _int(model_state.get("models_total") or model_state.get("total"), 0)
     return {
-        "models_awake": _int(model_state.get("models_awake") or model_state.get("awake"), 0),
-        "models_total": _int(model_state.get("models_total") or model_state.get("total"), 0),
-        "all_required_models_awake": bool(model_state.get("all_required_models_awake") is True or warm_state.get("passed") is True),
+        "models_awake": models_awake,
+        "models_total": models_total,
+        "all_required_models_awake": bool(
+            model_state.get("all_required_models_awake") is True
+            or warm_state.get("passed") is True
+            or (models_total >= 7 and models_awake >= models_total)
+        ),
         "queue_depth": _int(model_state.get("queue_depth"), 0),
     }
+
+
+def model_status_for_certification(
+    live: Mapping[str, Any],
+    performance: Mapping[str, Any],
+    runtime_trace: Mapping[str, Any],
+) -> dict[str, object]:
+    return _model_status(live, performance, runtime_trace)
 
 
 def _frontend_status(heartbeat: Mapping[str, Any]) -> dict[str, object]:

@@ -149,7 +149,7 @@ def test_legacy_registry_overlay_types_stay_renderable_in_active_context() -> No
         )
         assert overlay["type"] == normalized_type
         assert overlay["layer"] == layer
-        assert overlay_is_visible(overlay, "ACTIVE_CONTEXT") is True
+        assert overlay_is_visible(overlay, "ACTIVE_CONTEXT") is (normalized_type != "RETEST_BOX")
 
 
 def test_visible_labels_are_locked_to_approved_dictionary() -> None:
@@ -306,8 +306,12 @@ def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
     assert "SNIPER_ENTRY_BOX" in replay_profile["allowed_types"]
     assert "TARGET_ZONE_BOX" in replay_profile["allowed_types"]
     assert "CURRENT_CANDLE" not in replay_profile["allowed_types"]
+    assert "RETEST_BOX" not in replay_profile["allowed_types"]
+    assert "ANGLE_VECTOR" not in replay_profile["allowed_types"]
     full_history_profile = view_mode_profile("full-history-read")
     assert "CURRENT_CANDLE" not in full_history_profile["allowed_types"]
+    assert "RETEST_BOX" not in full_history_profile["allowed_types"]
+    assert "ANGLE_VECTOR" not in full_history_profile["allowed_types"]
     assert full_history_profile["layer_visibility"]["recent_candles"] is False
     assert replay_profile["layer_visibility"]["trigger_zones"] is True
     assert replay_profile["layer_visibility"]["target_zones"] is True
@@ -684,6 +688,8 @@ def test_view_mode_profile_exposes_layer_policy() -> None:
     assert trigger["layer_visibility"]["trigger_zones"] is True
     assert "CURRENT_CANDLE" not in trigger["allowed_types"]
     assert "CHART_BOUNDS" not in trigger["allowed_types"]
+    assert "RETEST_BOX" not in trigger["allowed_types"]
+    assert set(trigger["allowed_types"]) == {"SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"}
     assert inspector["layer_visibility"]["diagnostics"] is True
     assert inspector["allow_selection"] is True
 
@@ -703,7 +709,9 @@ def test_story_scoped_modes_do_not_render_now_or_chart_bounds_spam() -> None:
         visible_modes=["ACTIVE_CONTEXT", "TRIGGER", "SUPPLY_DEMAND", "INSPECTOR"],
         label="CHART BOUNDS",
     )
-    trigger = _base_overlay(type="RETEST_BOX", layer="trigger_zones", visible_modes=["ACTIVE_CONTEXT"])
+    trigger = _base_overlay(type="RETEST_BOX", layer="trigger_zones", visible_modes=["ACTIVE_CONTEXT", "TRIGGER"])
+    sniper = _base_overlay(type="SNIPER_ENTRY_BOX", layer="trigger_zones", visible_modes=["ACTIVE_CONTEXT", "TRIGGER"])
+    target = _base_overlay(type="TARGET_ZONE_BOX", layer="target_zones", visible_modes=["ACTIVE_CONTEXT", "TRIGGER"])
     supply = _base_overlay(type="SUPPLY_ZONE", layer="supply_demand", visible_modes=["ACTIVE_CONTEXT"])
 
     assert overlay_is_visible(replay_now, "ACTIVE_CONTEXT") is False
@@ -711,7 +719,9 @@ def test_story_scoped_modes_do_not_render_now_or_chart_bounds_spam() -> None:
     assert overlay_is_visible(replay_now, "SUPPLY_DEMAND") is False
     assert overlay_is_visible(chart_bounds, "TRIGGER") is False
     assert overlay_is_visible(chart_bounds, "SUPPLY_DEMAND") is False
-    assert overlay_is_visible(trigger, "TRIGGER") is True
+    assert overlay_is_visible(trigger, "TRIGGER") is False
+    assert overlay_is_visible(sniper, "TRIGGER") is True
+    assert overlay_is_visible(target, "TRIGGER") is True
     assert overlay_is_visible(supply, "SUPPLY_DEMAND") is True
 
 

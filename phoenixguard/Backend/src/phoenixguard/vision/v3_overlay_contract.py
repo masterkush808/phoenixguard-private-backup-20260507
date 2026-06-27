@@ -280,6 +280,14 @@ PREDICTION_OVERLAY_DISABLED_LABEL_TOKENS: frozenset[str] = frozenset(
 )
 PREDICTION_OVERLAY_DISABLED_REASON = "Disabled because current prediction drawings are visually misleading."
 
+OPERATOR_CHART_HIDDEN_TYPES: frozenset[str] = frozenset(
+    {
+        "RETEST_BOX",
+        "PREDICTION_PATH",
+        "ANGLE_VECTOR",
+    }
+)
+
 VIEW_MODES: tuple[str, ...] = (
     "CLEAN_LIVE",
     "CHART_BOUNDS",
@@ -988,7 +996,6 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
         "PULLBACK_BOX",
         "CONTINUATION_BOX",
         "SNIPER_ENTRY_BOX",
-        "RETEST_BOX",
         "TARGET_ZONE_BOX",
         "SUPPLY_ZONE",
         "DEMAND_ZONE",
@@ -1012,16 +1019,15 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
         "CHART_BOUNDS",
         "CURRENT_CANDLE",
         "PULLBACK_BOX",
-        "RETEST_BOX",
         "CONTINUATION_BOX",
         "SNIPER_ENTRY_BOX",
     },
     "SUPPLY_DEMAND": {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"},
     "TRENDLINES": {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"},
-    "TRIGGER": {"RETEST_BOX", "SNIPER_ENTRY_BOX"},
+    "TRIGGER": {"SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"},
     "TARGET": {"TARGET_ZONE_BOX", "OPPOSING_FORCE"},
     "INVALIDATION": {"OPPOSING_FORCE"},
-    "PATH": {"ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"},
+    "PATH": {"PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"},
     "COUNCIL": {
         "MODEL_COUNCIL_MARKER",
         "REGIME_MARKER",
@@ -1030,17 +1036,18 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
     },
     "TWO_CANDLE_STUDY": {"TWO_CANDLE_STUDY"},
     "LSTM_STUDY": {"LSTM_STUDY"},
-    "ACTIVE_CONTEXT": set[str](OVERLAY_TYPES) - DIAGNOSTIC_OVERLAY_TYPES - {"BROKER_CONTROL", "PREDICTION_PATH", "INVALIDATION_BOX", "LSTM_STUDY"},
+    "ACTIVE_CONTEXT": set[str](OVERLAY_TYPES)
+    - DIAGNOSTIC_OVERLAY_TYPES
+    - {"BROKER_CONTROL", "PREDICTION_PATH", "ANGLE_VECTOR", "RETEST_BOX", "INVALIDATION_BOX", "LSTM_STUDY"},
     "FULL_HISTORY_READ": set[str](OVERLAY_TYPES)
     - DIAGNOSTIC_OVERLAY_TYPES
-    - {"BROKER_CONTROL", "PREDICTION_PATH", "INVALIDATION_BOX", "LSTM_STUDY", "CURRENT_CANDLE"},
+    - {"BROKER_CONTROL", "PREDICTION_PATH", "ANGLE_VECTOR", "RETEST_BOX", "INVALIDATION_BOX", "LSTM_STUDY", "CURRENT_CANDLE"},
     "REPLAY": {
         "CHART_BOUNDS",
         "IMPULSE_BOX",
         "PULLBACK_BOX",
         "CONTINUATION_BOX",
         "SNIPER_ENTRY_BOX",
-        "RETEST_BOX",
         "TARGET_ZONE_BOX",
         "PROGRESSION_PATH",
         "REPLAY_ENTRY",
@@ -1048,7 +1055,6 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
         "SUPPORT_TRENDLINE",
         "RESISTANCE_TRENDLINE",
         "INNER_TRENDLINE",
-        "ANGLE_VECTOR",
         "SUPPLY_ZONE",
         "DEMAND_ZONE",
         "OPPOSING_FORCE",
@@ -1101,7 +1107,7 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
     "LOCAL": _layer_visibility("chart_bounds", "recent_candles", "local_swings", "trigger_zones"),
     "SUPPLY_DEMAND": _layer_visibility("supply_demand"),
     "TRENDLINES": _layer_visibility("trendlines"),
-    "TRIGGER": _layer_visibility("trigger_zones"),
+    "TRIGGER": _layer_visibility("trigger_zones", "target_zones"),
     "TARGET": _layer_visibility("target_zones", "supply_demand"),
     "INVALIDATION": _layer_visibility("supply_demand"),
     "PATH": _layer_visibility("prediction_path", "historical_replay"),
@@ -2101,7 +2107,12 @@ def normalize_v3_overlay_object(
         "unmapped_display_label": unmapped_display_label,
         "layer": resolved_layer,
         "role": _text(raw.get("role") or role, TYPE_ROLE_MAP.get(overlay_type, "")),
-        "visible_default": bool(raw.get("visible_default", overlay_type in MODE_ALLOWED_TYPES["CLEAN_LIVE"])),
+        "visible_default": bool(
+            raw.get(
+                "visible_default",
+                overlay_type in MODE_ALLOWED_TYPES["CLEAN_LIVE"] and overlay_type not in OPERATOR_CHART_HIDDEN_TYPES,
+            )
+        ),
         "created_at_ms": int(_float(raw.get("created_at_ms"), 0.0)),
         "z_index": z_index,
         "display_state": display_state,
@@ -2357,6 +2368,8 @@ def overlay_rejection_reasons(
         and not _anchor_evidence_valid(normalized.get("anchor_evidence"))
     ):
         reasons.append("missing_anchor_evidence")
+    if str(normalized.get("type") or "") in OPERATOR_CHART_HIDDEN_TYPES and normalized_mode not in {"DIAGNOSTICS", "DEBUG", "INSPECTOR"}:
+        reasons.append(f"operator_chart_hidden:{normalized['type']}")
     label_texts = {
         _canonical_token(normalized.get(key))
         for key in ("label", "role", "reason", "overlay_id", "object_id", "track_id")
@@ -2609,6 +2622,7 @@ __all__ = [
     "OVERLAY_LAYER_ORDER",
     "OVERLAY_TYPES",
     "OVERLAY_TYPE_PRIORITY",
+    "OPERATOR_CHART_HIDDEN_TYPES",
     "PREDICTION_OVERLAY_DISABLED_LABEL_TOKENS",
     "PREDICTION_OVERLAY_DISABLED_REASON",
     "PREDICTION_OVERLAY_DISABLED_TYPES",
