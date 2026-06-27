@@ -279,6 +279,9 @@ def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
         "invalidation": "INVALIDATION",
         "path": "PATH",
         "council": "COUNCIL",
+        "smc": "COUNCIL",
+        "smc-council": "COUNCIL",
+        "smart-money-council": "COUNCIL",
         "two-candle-study": "TWO_CANDLE_STUDY",
         "next-two-candles": "TWO_CANDLE_STUDY",
         "lstm-study": "LSTM_STUDY",
@@ -302,8 +305,13 @@ def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
     replay_profile = view_mode_profile("replay")
     assert "SNIPER_ENTRY_BOX" in replay_profile["allowed_types"]
     assert "TARGET_ZONE_BOX" in replay_profile["allowed_types"]
+    assert "CURRENT_CANDLE" not in replay_profile["allowed_types"]
+    full_history_profile = view_mode_profile("full-history-read")
+    assert "CURRENT_CANDLE" not in full_history_profile["allowed_types"]
+    assert full_history_profile["layer_visibility"]["recent_candles"] is False
     assert replay_profile["layer_visibility"]["trigger_zones"] is True
     assert replay_profile["layer_visibility"]["target_zones"] is True
+    assert replay_profile["layer_visibility"]["recent_candles"] is False
     assert replay_profile["layer_visibility"]["invalidation"] is False
 
 
@@ -404,7 +412,7 @@ def test_trendline_overlays_preserve_line_geometry_and_layer_modes() -> None:
     assert support["type"] == "SUPPORT_TRENDLINE"
     assert support["display_label"] == "SUPPORT TRENDLINE"
     assert support["layer"] == "trendlines"
-    assert support["anchor_type"] == "POLYGON"
+    assert support["anchor_type"] == "LINE"
     assert support["line_points"] == [[10.0, 100.0], [120.0, 100.0]]
     assert support["bounds"] == [10.0, 97.0, 120.0, 103.0]
     assert overlay_is_visible(support, "SUPPLY_DEMAND") is False

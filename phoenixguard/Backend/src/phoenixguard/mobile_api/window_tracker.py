@@ -15261,10 +15261,11 @@ class PhoenixGuardWindowTrackingAdapter:
         image_w = max(1, int(image_size[0]))
         image_h = max(1, int(image_size[1]))
         max_segments = 7
-        segment_count = min(max_segments, max(2, int(round(len(rows) / 5.0))))
-        chunk_size = max(3, int(np.ceil(len(rows) / max(1, segment_count))))
         segments: list[dict[str, Any]] = []
         previous_direction = "HOLD"
+
+        def row_price_proxy(row: Mapping[str, Any]) -> float:
+            return float(row.get("price_proxy", 0.0) or 0.0)
 
         def candle_path_point(candle: Mapping[str, Any], direction_value: str) -> list[int]:
             bbox = cast(Sequence[Any], candle.get("bbox", []))
@@ -15324,8 +15325,50 @@ class PhoenixGuardWindowTrackingAdapter:
                     indexes.append(start_index + offset)
             return indexes
 
-        for segment_index, start in enumerate(range(0, len(rows), chunk_size), start=1):
-            segment = rows[start:min(len(rows), start + chunk_size)]
+        def segment_rows_by_market_leg() -> list[tuple[int, list[dict[str, Any]]]]:
+            if len(rows) <= 6:
+                return [(0, rows)]
+            min_segment_len = 3
+            epsilon = 0.012
+            output: list[tuple[int, list[dict[str, Any]]]] = []
+            start_index = 0
+            active_direction = "HOLD"
+            for row_index in range(1, len(rows)):
+                delta = row_price_proxy(rows[row_index]) - row_price_proxy(rows[row_index - 1])
+                direction = _trend_direction(delta, epsilon=epsilon)
+                if direction == "HOLD":
+                    continue
+                if active_direction == "HOLD":
+                    active_direction = direction
+                    continue
+                current_len = row_index - start_index
+                remaining_len = len(rows) - row_index
+                if direction != active_direction and current_len >= min_segment_len and remaining_len >= min_segment_len:
+                    output.append((start_index, rows[start_index:row_index]))
+                    start_index = row_index - 1
+                    active_direction = direction
+            output.append((start_index, rows[start_index:]))
+
+            merged: list[tuple[int, list[dict[str, Any]]]] = []
+            for segment_start, segment_rows in output:
+                if len(segment_rows) < min_segment_len and merged:
+                    previous_start, previous_rows = merged[-1]
+                    merged[-1] = (previous_start, previous_rows + segment_rows[1:])
+                else:
+                    merged.append((segment_start, list(segment_rows)))
+            if len(merged) <= max_segments:
+                return merged
+            while len(merged) > max_segments:
+                merge_index = min(
+                    range(len(merged) - 1),
+                    key=lambda index: len(merged[index][1]) + len(merged[index + 1][1]),
+                )
+                left_start, left_rows = merged[merge_index]
+                _right_start, right_rows = merged[merge_index + 1]
+                merged[merge_index:merge_index + 2] = [(left_start, left_rows + right_rows[1:])]
+            return merged
+
+        for segment_index, (start, segment) in enumerate(segment_rows_by_market_leg(), start=1):
             if len(segment) < 2:
                 continue
             proxies = [float(item.get("price_proxy", 0.0) or 0.0) for item in segment]

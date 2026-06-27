@@ -198,7 +198,7 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "state.layers[layer] === false" in dashboard
     assert "row.visible_default === false" in dashboard
     assert "row.precision_rejected === true" in dashboard
-    assert 'const currentCandleLiveModes = new Set(["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY"]);' in dashboard
+    assert 'const currentCandleLiveModes = new Set(["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT"]);' in dashboard
     assert '!currentCandleLiveModes.has(activeMode)' in dashboard
     assert "rememberOverlayLock(surfaceIdentityKey(session), renderableBoxes, session);" in dashboard
     assert "bridgeSelectedModeWhileHydrating" in dashboard
@@ -218,6 +218,7 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "function handleSurfaceImageError" in dashboard
     assert "function pendingSurfaceImage" in dashboard
     assert "pendingSurfaceImageMatches" in dashboard
+    assert "if (state.session && !surfaceHasImage() && pendingSurfaceImage())" in dashboard
     assert "surfaceImageLoading(targetImage)" in dashboard
     assert "liveRefreshBusy" in dashboard
     assert "streamHydrationBusy" in dashboard
@@ -229,6 +230,7 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "const overlayForRender = {...overlay, bbox: overlayBounds, bounds: overlayBounds};" in dashboard
     assert "const boxes = getBoxes(session);" in dashboard
     assert "renderSession(await enrichSessionTelemetry(await mergeSelectedLiveState(payload)));" in dashboard
+    assert "mergeLiveVisualState(state.session || {session_id: SESSION_ID}, livePayload)" in dashboard
     assert '["window", "overlay", "full-overlay", "chart"].includes(normalized)' in dashboard
     assert "imageSourceChanged" in dashboard
     assert "dataset.loadedSrc" in dashboard

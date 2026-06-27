@@ -446,7 +446,16 @@ VIEW_MODE_ALIASES: dict[str, str] = {
     "PATH_LAYER": "PATH",
     "ACTIVE_COUNCIL": "COUNCIL",
     "ACTIVE_COUNCIL_DECISION": "COUNCIL",
+    "COUNCIL_LAYER": "COUNCIL",
     "COUNCIL_LAYERS": "COUNCIL",
+    "SMC": "COUNCIL",
+    "SMC_COUNCIL": "COUNCIL",
+    "SMC_COUNCIL_LAYER": "COUNCIL",
+    "SMC_COUNCIL_LAYERS": "COUNCIL",
+    "SMC_AND_COUNCIL": "COUNCIL",
+    "SMC__COUNCIL": "COUNCIL",
+    "SMART_MONEY": "COUNCIL",
+    "SMART_MONEY_COUNCIL": "COUNCIL",
     "TWO_CANDLE": "TWO_CANDLE_STUDY",
     "TWO_CANDLE_STUDY": "TWO_CANDLE_STUDY",
     "TWO_CANDLE_STUDY_LAYER": "TWO_CANDLE_STUDY",
@@ -550,22 +559,27 @@ MODE_VISIBLE_MODE_COMPATIBILITY: dict[str, set[str]] = {
 
 ANCHOR_TYPES: tuple[str, ...] = (
     "BOX",
+    "LINE",
     "POLYGON",
     "POINTS",
     "CANDLE",
     "CANDLES",
     "BROKER_SURFACE",
+    "TRENDLINE_TOUCH_POINTS",
 )
 V3_ANCHOR_TYPES = ANCHOR_TYPES
 
 ANCHOR_TYPE_ALIASES: dict[str, str] = {
     "ANCHOR": "POINTS",
     "ANCHORS": "POLYGON",
-    "LINE": "POLYGON",
+    "LINE": "LINE",
     "PATH": "POLYGON",
     "POLYLINE": "POLYGON",
     "RECT": "BOX",
     "RECTANGLE": "BOX",
+    "TRENDLINE_TOUCH": "TRENDLINE_TOUCH_POINTS",
+    "TRENDLINE_TOUCH_POINT": "TRENDLINE_TOUCH_POINTS",
+    "TRENDLINE_TOUCH_POINTS": "TRENDLINE_TOUCH_POINTS",
     "CANDLE_RANGE": "CANDLES",
     "CANDLE_INDEX": "CANDLE",
     "CANDLE_INDICES": "CANDLES",
@@ -1017,7 +1031,9 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
     "TWO_CANDLE_STUDY": {"TWO_CANDLE_STUDY"},
     "LSTM_STUDY": {"LSTM_STUDY"},
     "ACTIVE_CONTEXT": set[str](OVERLAY_TYPES) - DIAGNOSTIC_OVERLAY_TYPES - {"BROKER_CONTROL", "PREDICTION_PATH", "INVALIDATION_BOX", "LSTM_STUDY"},
-    "FULL_HISTORY_READ": set[str](OVERLAY_TYPES) - DIAGNOSTIC_OVERLAY_TYPES - {"BROKER_CONTROL", "PREDICTION_PATH", "INVALIDATION_BOX", "LSTM_STUDY"},
+    "FULL_HISTORY_READ": set[str](OVERLAY_TYPES)
+    - DIAGNOSTIC_OVERLAY_TYPES
+    - {"BROKER_CONTROL", "PREDICTION_PATH", "INVALIDATION_BOX", "LSTM_STUDY", "CURRENT_CANDLE"},
     "REPLAY": {
         "CHART_BOUNDS",
         "IMPULSE_BOX",
@@ -1106,7 +1122,6 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
     ),
     "FULL_HISTORY_READ": _layer_visibility(
         "chart_bounds",
-        "recent_candles",
         "major_swings",
         "local_swings",
         "supply_demand",
@@ -1118,7 +1133,6 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
     ),
     "REPLAY": _layer_visibility(
         "chart_bounds",
-        "recent_candles",
         "major_swings",
         "local_swings",
         "supply_demand",
@@ -2119,7 +2133,10 @@ def normalize_v3_overlay_object(
         geometry_bounds = normalize_bounds(geometry_points)
         row["points"] = geometry_points
         row["line_points"] = geometry_points
-        row["anchor_type"] = "POLYGON"
+        if overlay_type in {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"}:
+            row["anchor_type"] = _normalize_anchor_type(raw.get("anchor_type") or row.get("anchor_type") or "LINE", "LINE")
+        else:
+            row["anchor_type"] = "POLYGON"
         if geometry_bounds is not None:
             row["bounds"] = [round(float(value), 6) for value in geometry_bounds]
             row["bbox"] = list(row["bounds"])

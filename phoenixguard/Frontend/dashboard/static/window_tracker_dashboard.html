@@ -4417,6 +4417,12 @@
         path: "PATH",
         active_context: "ACTIVE_CONTEXT",
         council_layers: "COUNCIL",
+        council_layer: "COUNCIL",
+        smc: "COUNCIL",
+        smc_council: "COUNCIL",
+        smc_and_council: "COUNCIL",
+        smart_money: "COUNCIL",
+        smart_money_council: "COUNCIL",
         full_history_read: "FULL_HISTORY_READ",
         broker: "BROKER",
         two_candle_study: "TWO_CANDLE_STUDY",
@@ -4483,16 +4489,13 @@
     }
 
     async function refreshLiveVisualStateForMode(mode = state.overlayMode) {
-      if (!state.session) {
-        return;
-      }
       const requestedBackendMode = backendOverlayMode(mode);
       try {
         const livePayload = await jsonRequest(liveVisualStateUrl(mode));
         if (requestedBackendMode !== backendOverlayMode(state.overlayMode)) {
           return;
         }
-        renderSession(await enrichSessionTelemetry(mergeLiveVisualState(state.session, livePayload)));
+        renderSession(await enrichSessionTelemetry(mergeLiveVisualState(state.session || {session_id: SESSION_ID}, livePayload)));
       } catch (_err) {
       }
     }
@@ -6443,8 +6446,8 @@
         TWO_CANDLE_STUDY: new Set(["TWO_CANDLE_STUDY"]),
         LSTM_STUDY: new Set(["LSTM_STUDY"]),
         ACTIVE_CONTEXT: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY", "LSTM_STUDY"]),
-        FULL_HISTORY_READ: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY"]),
-        REPLAY: new Set(["CHART_BOUNDS", "CURRENT_CANDLE", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"]),
+        FULL_HISTORY_READ: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY"]),
+        REPLAY: new Set(["CHART_BOUNDS", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX", "RETEST_BOX", "SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "ANGLE_VECTOR", "PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"]),
         BROKER: new Set(["BROKER_CONTROL"]),
         CALIBRATION: new Set(["BROKER_CONTROL", "DEBUG_RAW_DETECTION"]),
       };
@@ -6464,6 +6467,11 @@
       TRIGGERS: "TRIGGER",
       TARGETS: "TARGET",
       FULL_HISTORY: "FULL_HISTORY_READ",
+      SMC: "COUNCIL",
+      SMC_COUNCIL: "COUNCIL",
+      SMC_AND_COUNCIL: "COUNCIL",
+      SMART_MONEY: "COUNCIL",
+      SMART_MONEY_COUNCIL: "COUNCIL",
     });
 
     const FRONTEND_OVERLAY_RENDER_MODE_PROFILES = Object.freeze({
@@ -6795,7 +6803,7 @@
       if (!overlayTypeAllowedInMode(row, activeMode)) {
         return false;
       }
-      const currentCandleLiveModes = new Set(["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY"]);
+      const currentCandleLiveModes = new Set(["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT"]);
       if (!diagnosticsViewActive() && rowType === "CURRENT_CANDLE") {
         if (!currentCandleLiveModes.has(activeMode)) {
           return false;
@@ -7614,7 +7622,7 @@
         return true;
       }
       const anchorType = clean(box.anchor_type, "").toUpperCase();
-      return ["LINE", "POLYGON", "POINTS"].includes(anchorType)
+      return ["LINE", "POLYGON", "POINTS", "TRENDLINE_TOUCH_POINTS"].includes(anchorType)
         && (Array.isArray(box.line_points) || Array.isArray(box.points) || Array.isArray(box.path) || Array.isArray(box.anchors));
     }
 
@@ -8707,7 +8715,7 @@
       if (state.busy || state.liveRefreshBusy) {
         return;
       }
-      if (!surfaceHasImage() && pendingSurfaceImage()) {
+      if (state.session && !surfaceHasImage() && pendingSurfaceImage()) {
         return;
       }
       let startedSlowRefresh = false;

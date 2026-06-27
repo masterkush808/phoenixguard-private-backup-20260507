@@ -376,10 +376,40 @@ def test_trendline_derivation_uses_two_wick_anchors_before_extension() -> None:
     assert trendline["touch_count"] >= 2
     assert len(trendline["touch_points"]) >= 2
     assert trendline["line_points"][:2] == trendline["touch_points"][:2]
-    assert trendline["anchor_candles"] == [0, 1]
+    assert trendline["anchor_candles"][:2] == [0, 1]
     assert trendline["line_obstruction_count"] == 0
     assert trendline["significant_close"] is False
     assert trendline["trendline_validation"] == "wick_anchor_no_obstruction_no_significant_close"
+
+
+def test_registry_preserves_trendline_touch_point_anchor_geometry() -> None:
+    registry = build_market_object_registry_v3(_sample_payload())
+    payload = registry.as_dict()
+    trendlines = [
+        overlay
+        for overlay in payload["overlay_objects"]
+        if str(overlay.get("type", "")).endswith("_TRENDLINE")
+    ]
+
+    assert trendlines
+    for trendline in trendlines:
+        assert trendline["anchor_type"] == "TRENDLINE_TOUCH_POINTS"
+        assert len(trendline["line_points"]) >= 2
+        assert len(trendline["trendline_touch_points"]) >= 2
+        assert trendline["anchor_evidence_status"] == "VALID"
+
+
+def test_market_object_tracker_prefers_explicit_source_indices_for_history() -> None:
+    registry = build_market_object_registry_v3(_sample_payload())
+    payload = registry.as_dict()
+    history_rows = [
+        overlay
+        for overlay in payload["overlay_objects"]
+        if str(overlay.get("source_path", "")).startswith("tracking_summary.historical_structure[0]")
+    ]
+
+    assert history_rows
+    assert all(row["anchor_candle_indices"] == [4, 5] for row in history_rows)
 
 
 def test_market_object_tracker_v3_preserves_first_seen_frame() -> None:

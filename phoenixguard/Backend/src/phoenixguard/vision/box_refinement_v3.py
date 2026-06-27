@@ -84,8 +84,6 @@ CURRENT_CANDLE_LIVE_MODES = {
     "CANDLES",
     "LOCAL",
     "ACTIVE_CONTEXT",
-    "FULL_HISTORY_READ",
-    "REPLAY",
     "DIAGNOSTICS",
     "DEBUG",
     "INSPECTOR",
@@ -897,7 +895,7 @@ def _apply_current_candle_policy(rows: Sequence[Mapping[str, Any]], mode: str = 
                     CURRENT_CANDLE_LIVE_MODES,
                     ["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT", "INSPECTOR"],
                 ),
-                ["FULL_HISTORY_READ", "REPLAY"],
+                [],
             )
             row["display_label"] = "NOW"
             row["short_label"] = "NOW"
@@ -907,10 +905,10 @@ def _apply_current_candle_policy(rows: Sequence[Mapping[str, Any]], mode: str = 
         row["visible_modes"] = _with_modes(
             _only_modes(
                 row,
-                {"CANDLES", "FULL_HISTORY_READ", "REPLAY", "DIAGNOSTICS", "DEBUG", "INSPECTOR"},
+                {"CANDLES", "DIAGNOSTICS", "DEBUG", "INSPECTOR"},
                 ["CANDLES", "INSPECTOR"],
             ),
-            ["FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
+            ["INSPECTOR"],
         )
         row["label_hidden"] = True
         row["label_anchor"] = "hidden"

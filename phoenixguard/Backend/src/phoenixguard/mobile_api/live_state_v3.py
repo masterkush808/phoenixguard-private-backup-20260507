@@ -2329,6 +2329,7 @@ def build_live_state_v3(
         or _current_execution_packet(session.get("execution_packet"), now_epoch=now_value)
     )
     visual_plane = _visual_plane_state(frontend_heartbeat)
+    instrument_payload = _instrument(session)
     overlay_layout = _overlay_layout_payload(
         precision_audit,
         rendered_count=renderable_overlay_count,
@@ -2349,12 +2350,47 @@ def build_live_state_v3(
     overlays_payload["vocabulary"] = overlay_vocabulary
     overlays_payload["ledger"] = overlay_ledger
     prediction_overlay = prediction_overlay_config()
+    identity_overlay: Mapping[str, Any] = next(
+        (
+            overlay
+            for overlay in [*overlays, *precision_overlays]
+            if _text(overlay.get("chart_transform_id")) or _text(overlay.get("broker_source_lock_id"))
+        ),
+        cast(Mapping[str, Any], {}),
+    )
+    tracking_summary = _mapping(session.get("tracking_summary"))
+    chart_transform_id = _text(
+        identity_overlay.get("chart_transform_id") or chart_transform.get("chart_transform_id"),
+        f"ct_{session_id}_{registry.frame_id}",
+    )
+    broker_source_lock_id = _text(
+        identity_overlay.get("broker_source_lock_id")
+        or broker_source.get("lock_id")
+        or _mapping(identity_overlay.get("broker_source")).get("lock_id")
+        or f"bsl_{session_id}_{registry.frame_id}"
+    )
+    symbol = _text(
+        instrument_payload.get("market")
+        or session.get("market")
+        or tracking_summary.get("detected_market")
+        or tracking_summary.get("market")
+    )
+    timeframe = _text(
+        instrument_payload.get("timeframe")
+        or session.get("timeframe")
+        or tracking_summary.get("detected_timeframe")
+        or tracking_summary.get("timeframe")
+    )
     live_visual_state: dict[str, Any] = {
         "schema_version": LIVE_STATE_SCHEMA_VERSION,
         "session_id": session_id,
-        "frame_id": _int(session.get("frame_index")),
+        "frame_id": registry.frame_id,
+        "capture_count": _int(session.get("capture_count") or session.get("frame_index")),
         "state_version": _int(session.get("state_version")),
-        "chart_transform_id": chart_transform["chart_transform_id"],
+        "chart_transform_id": chart_transform_id,
+        "broker_source_lock_id": broker_source_lock_id,
+        "symbol": symbol,
+        "timeframe": timeframe,
         "requested_mode": requested_overlay_mode,
         "active_mode": active_overlay_mode,
         "visible_layers": visible_layers,
@@ -2457,8 +2493,8 @@ def build_live_state_v3(
         "execution_packet_status": _study_packet_summary(execution_packet_payload, now_epoch=now_value),
         "model_health": model_health_payload,
         "model_warm_state_v3": model_warm_state,
-        "instrument": _instrument(session),
-        "instrument_context": _instrument(session),
+        "instrument": instrument_payload,
+        "instrument_context": instrument_payload,
         "visual_health": {
             **visual_health,
             "full_broker_surface_visible": bool(surface_frame["exists"]),
@@ -2478,6 +2514,9 @@ def build_live_state_v3(
         "frame_id": live_visual_state["frame_id"],
         "state_version": live_visual_state["state_version"],
         "chart_transform_id": live_visual_state["chart_transform_id"],
+        "broker_source_lock_id": live_visual_state["broker_source_lock_id"],
+        "symbol": live_visual_state["symbol"],
+        "timeframe": live_visual_state["timeframe"],
         "requested_mode": live_visual_state["requested_mode"],
         "active_mode": live_visual_state["active_mode"],
         "visible_layers": live_visual_state["visible_layers"],

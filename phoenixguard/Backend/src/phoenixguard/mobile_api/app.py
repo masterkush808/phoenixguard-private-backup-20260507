@@ -2194,6 +2194,13 @@ def create_app(
             "anchor_time_span",
             "anchor_evidence",
             "anchor_evidence_status",
+            "touch_points",
+            "trendline_touch_points",
+            "touch_count",
+            "wick_probe_count",
+            "line_obstruction_count",
+            "body_cross_fraction",
+            "close_distance_norm",
             "parent_overlay_id",
             "parent_type",
             "parent_label",
@@ -2249,6 +2256,23 @@ def create_app(
             if bounds not in (None, "", [], {}):
                 compact_row.setdefault("bounds", bounds)
                 compact_row.setdefault("bbox", bounds)
+            if str(row.get("type") or "").upper() in {
+                "SUPPORT_TRENDLINE",
+                "RESISTANCE_TRENDLINE",
+                "INNER_TRENDLINE",
+            }:
+                anchor_evidence = _mapping_to_plain_dict(row.get("anchor_evidence"))
+                evidence_touch_points = anchor_evidence.get("touch_points")
+                if (
+                    evidence_touch_points not in (None, "", [], {})
+                    and compact_row.get("touch_points") in (None, "", [], {})
+                ):
+                    compact_row["touch_points"] = evidence_touch_points
+                if (
+                    evidence_touch_points not in (None, "", [], {})
+                    and compact_row.get("trendline_touch_points") in (None, "", [], {})
+                ):
+                    compact_row["trendline_touch_points"] = evidence_touch_points
             return compact_row
 
         def compact_overlay_objects(value: object) -> list[object]:
@@ -2792,11 +2816,73 @@ def create_app(
             projected["live_visual_state"] = live_visual
         return projected
 
+    def _compact_visible_overlay_pool_from_payload(payload: Mapping[str, object]) -> list[Mapping[str, object]]:
+        rows: list[Mapping[str, object]] = []
+        for container in (
+            _mapping_to_plain_dict(payload.get("overlays")),
+            _mapping_to_plain_dict(_mapping_to_plain_dict(payload.get("live_visual_state")).get("overlays")),
+        ):
+            candidates = container.get("objects")
+            if not isinstance(candidates, list):
+                continue
+            for item in cast(Sequence[object], candidates):
+                if isinstance(item, Mapping):
+                    rows.append(cast(Mapping[str, object], item))
+            if rows:
+                return rows
+        return _compact_overlay_pool_from_payload(payload)
+
+    def _compact_overlay_identity_from_payload(payload: Mapping[str, object]) -> dict[str, object]:
+        for overlay in _compact_visible_overlay_pool_from_payload(payload):
+            frame_id = int(_epoch_float(overlay.get("frame_id") or overlay.get("frame_index"), 0.0))
+            chart_transform_id = str(overlay.get("chart_transform_id") or "").strip()
+            broker_source_lock_id = str(overlay.get("broker_source_lock_id") or "").strip()
+            if frame_id <= 0 and not chart_transform_id and not broker_source_lock_id:
+                continue
+            identity: dict[str, object] = {}
+            if frame_id > 0:
+                identity["frame_id"] = frame_id
+                identity["overlay_object_frame_id"] = frame_id
+            if chart_transform_id:
+                identity["chart_transform_id"] = chart_transform_id
+            if broker_source_lock_id:
+                identity["broker_source_lock_id"] = broker_source_lock_id
+            for key in ("symbol", "timeframe", "sequence_id"):
+                value = str(overlay.get(key) or "").strip()
+                if value:
+                    identity[key] = value
+            return identity
+        return {}
+
+    def _apply_compact_overlay_identity(projected: dict[str, object]) -> dict[str, object]:
+        identity = _compact_overlay_identity_from_payload(projected)
+        if not identity:
+            return projected
+        projected.update(identity)
+        overlays = projected.get("overlays")
+        if isinstance(overlays, Mapping):
+            overlay_payload = dict(cast(Mapping[str, object], overlays))
+            for key, value in identity.items():
+                overlay_payload.setdefault(key, value)
+            projected["overlays"] = overlay_payload
+        live_visual_state = projected.get("live_visual_state")
+        if isinstance(live_visual_state, Mapping):
+            live_visual = dict(cast(Mapping[str, object], live_visual_state))
+            live_visual.update(identity)
+            live_visual_overlays = live_visual.get("overlays")
+            if isinstance(live_visual_overlays, Mapping):
+                live_visual_overlay_payload = dict(cast(Mapping[str, object], live_visual_overlays))
+                for key, value in identity.items():
+                    live_visual_overlay_payload.setdefault(key, value)
+                live_visual["overlays"] = live_visual_overlay_payload
+            projected["live_visual_state"] = live_visual
+        return projected
+
     def _apply_display_snapshot_to_projected_payload(
         payload: Mapping[str, object],
         display_snapshot: Mapping[str, object] | None,
     ) -> dict[str, object]:
-        projected = dict(payload)
+        projected = _apply_compact_overlay_identity(dict(payload))
         if display_snapshot is None:
             return projected
         display_frame_id = int(
@@ -2810,7 +2896,6 @@ def create_app(
             )
         )
         if display_frame_id > 0:
-            projected["frame_id"] = display_frame_id
             projected["display_frame_id"] = display_frame_id
         for key in (
             "capture_count",
@@ -2820,6 +2905,7 @@ def create_app(
             "full_overlay_frame_id",
             "model_vote_frame_id",
             "state_version",
+            "display_frame_id",
             "display_capture_epoch",
             "display_published_epoch",
             "last_display_window_path",
@@ -2837,6 +2923,7 @@ def create_app(
             value = display_snapshot.get(key)
             if value not in (None, "", [], {}):
                 projected[key] = value
+        _apply_compact_overlay_identity(projected)
         provider = {
             **_mapping_to_plain_dict(projected.get("provider_status")),
             "compact_overlay_projection_light_refresh_v3": True,
@@ -3387,6 +3474,7 @@ def create_app(
                         now_epoch=now_epoch,
                     )
                     if warm_start is not None:
+                        warm_start = _apply_display_snapshot_to_projected_payload(warm_start, display_snapshot)
                         with _LIVE_STATE_V3_CACHE_LOCK:
                             _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(warm_start))
                         return warm_start
@@ -3398,12 +3486,13 @@ def create_app(
                     now_epoch=now_epoch,
                 )
                 if projected_warm_start is not None:
+                    projected_warm_start = _apply_compact_overlay_identity(projected_warm_start)
                     with _LIVE_STATE_V3_CACHE_LOCK:
                         _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(projected_warm_start))
                     _persist_compact_overlay_response(requested_session_id, active_mode, projected_warm_start)
                     return projected_warm_start
                 live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=True)
-                compact_response = compact_live_state_response(live_state)
+                compact_response = _apply_compact_overlay_identity(compact_live_state_response(live_state))
                 if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
                     with _LIVE_STATE_V3_CACHE_LOCK:
                         for stale_key in [

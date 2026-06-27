@@ -161,6 +161,24 @@ function Start-PhoenixGuardDashboardBrowser {
     Start-Process $Url
 }
 
+function ConvertTo-PhoenixGuardProcessArgumentString {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    return (($Arguments | ForEach-Object {
+        $argument = [string]$_
+        if ($argument.Length -eq 0) {
+            '""'
+        } elseif ($argument -match '[\s"]') {
+            '"' + $argument.Replace('"', '\"') + '"'
+        } else {
+            $argument
+        }
+    }) -join ' ')
+}
+
 Write-Host "PhoenixGuard launch profile: $finalLaunchProfile"
 Write-Host "  Compatibility profile: $Profile"
 Write-Host "  Tracker: ON"
@@ -177,24 +195,29 @@ if (-not (Test-Path -LiteralPath $runtimeDir)) {
 }
 
 function Start-TrackerChildProcess {
-    $escapedRoot = $ProjectRoot.Replace("'", "''")
-    $escapedApiHost = $ApiHost.Replace("'", "''")
-    $escapedSessionId = $SessionId.Replace("'", "''")
-    $escapedBrokerWindowQuery = $BrokerWindowQuery.Replace("'", "''")
-    $escapedTrackerFocusRegion = $TrackerFocusRegion.Replace("'", "''")
-    $trackerWindowHwndArg = if ($BrokerWindowHwnd -gt 0) { " -BrokerWindowHwnd $BrokerWindowHwnd" } else { "" }
-    $trackerCommand = @(
-        "cd '$escapedRoot'",
-        ".\Backend\launch\start_phoenixguard_24_7_tracker.ps1 -ApiHost '$escapedApiHost' -Port $ApiPort -SessionId '$escapedSessionId' -BrokerWindowQuery '$escapedBrokerWindowQuery'$trackerWindowHwndArg -FocusRegion '$escapedTrackerFocusRegion' -CaptureIntervalSec $CaptureIntervalSec -NoOpenDashboard -InternalTrackerOnly"
-    ) -join '; '
+    $trackerArgs = @(
+        'Backend\launch\start_phoenixguard_24_7_tracker.py',
+        '--host',
+        $ApiHost,
+        '--port',
+        "$ApiPort",
+        '--session-id',
+        $SessionId,
+        '--window-query',
+        $BrokerWindowQuery,
+        '--focus-region',
+        $TrackerFocusRegion,
+        '--capture-interval',
+        "$CaptureIntervalSec",
+        '--dashboard-browser',
+        $DashboardBrowser,
+        '--no-open-dashboard'
+    )
+    if ($BrokerWindowHwnd -gt 0) {
+        $trackerArgs += @('--window-hwnd', "$BrokerWindowHwnd")
+    }
 
-    Start-Process powershell -ArgumentList @(
-        '-NoProfile',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        $trackerCommand
-    ) -WindowStyle Hidden -PassThru -RedirectStandardOutput $trackerStdoutPath -RedirectStandardError $trackerStderrPath
+    Start-Process -FilePath $pythonPath -ArgumentList (ConvertTo-PhoenixGuardProcessArgumentString -Arguments $trackerArgs) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $trackerStdoutPath -RedirectStandardError $trackerStderrPath
 }
 
 if (-not $NoKillExisting) {

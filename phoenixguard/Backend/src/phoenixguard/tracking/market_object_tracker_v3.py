@@ -676,15 +676,30 @@ def _validated_trendline(
             line_points = [first_point, second_point]
             if abs(last_x - float(second_point[0])) > 1e-6:
                 line_points.append(end_point)
-            touches = max(2, len(touch_indices))
+            touch_rows = [
+                row
+                for row in scoped
+                if int(row["index"]) in touch_indices
+            ]
+            touch_points = [
+                [
+                    float(row["center_x"]),
+                    float(row["bottom" if role == "support" else "top"]),
+                ]
+                for row in sorted(touch_rows, key=lambda item: float(item["center_x"]))
+            ]
+            if len(touch_points) < 2:
+                touch_points = [first_point, second_point]
+            touches = max(2, len(touch_points))
+            anchor_candles = sorted({int(row["index"]) for row in touch_rows} | {anchor_start, anchor_end})
             body_cross_fraction = body_cross_count / max(1, evaluated_after_anchor)
             score = (anchor_dx * 0.012) + touches + (0.75 / max(0.35, close_distance_norm + 0.35) if local_only else 0.0)
             candidate: dict[str, Any] = {
                 "role": role,
                 "points": line_points,
                 "line_points": line_points,
-                "touch_points": [first_point, second_point],
-                "anchor_candles": [anchor_start, anchor_end],
+                "touch_points": touch_points,
+                "anchor_candles": anchor_candles,
                 "touch_count": int(touches),
                 "wick_probe_count": int(wick_probe_count),
                 "line_obstruction_count": int(line_obstruction_count),
@@ -995,10 +1010,10 @@ class _RegistryBuilder:
             anchor_indices, anchor_touch_points = _candle_anchor_evidence(raw, bbox, candles)
             explicit_anchor_indices = _anchor_indices_from_raw(raw)
             explicit_touch_points = _point_rows(raw.get("touch_points"))
+            if explicit_anchor_indices:
+                anchor_indices = explicit_anchor_indices
             if explicit_touch_points:
                 anchor_touch_points = explicit_touch_points
-                if explicit_anchor_indices:
-                    anchor_indices = explicit_anchor_indices
             side_value = _upper_side(side if side is not None else raw.get("side", raw.get("direction", signal.get("action"))))
             object_id = _stable_id(session_id, object_type, source_path, source_key)
             track_id = _text(raw.get("track_id") or raw.get("persistent_id"), object_id)
@@ -1057,16 +1072,41 @@ class _RegistryBuilder:
             )
             if anchor_touch_points:
                 overlay_raw["touch_points"] = anchor_touch_points
-            overlays.append(
-                normalize_v3_overlay_object(
-                    overlay_raw,
-                    strict=False,
-                    frame_id=frame_id,
-                    sequence_id=sequence_id,
-                    chart_transform_id=chart_transform_id,
-                    source_agent="market_object_tracker_v3",
-                )
+            normalized_overlay = normalize_v3_overlay_object(
+                overlay_raw,
+                strict=False,
+                frame_id=frame_id,
+                sequence_id=sequence_id,
+                chart_transform_id=chart_transform_id,
+                source_agent="market_object_tracker_v3",
             )
+            if object_type in {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"}:
+                line_points = _point_rows(overlay_raw.get("line_points") or overlay_raw.get("points") or overlay_raw.get("path"))
+                touch_points = _point_rows(overlay_raw.get("touch_points")) or line_points[:2]
+                if len(line_points) >= 2 and len(touch_points) >= 2:
+                    normalized_overlay.update(
+                        {
+                            "anchor_type": "TRENDLINE_TOUCH_POINTS",
+                            "line_points": line_points,
+                            "points": line_points,
+                            "path": line_points,
+                            "touch_points": touch_points,
+                            "trendline_touch_points": touch_points,
+                            "anchor_evidence": {
+                                "valid": True,
+                                "anchor_type": "TRENDLINE_TOUCH_POINTS",
+                                "touch_points": touch_points,
+                                "candle_indices": list(obj.anchor_candles),
+                                "touch_count": int(_float(overlay_raw.get("touch_count"), float(len(touch_points)))),
+                                "validation": _text(
+                                    overlay_raw.get("trendline_validation"),
+                                    "wick_anchor_no_obstruction_no_significant_close",
+                                ),
+                            },
+                            "anchor_evidence_status": "VALID",
+                        }
+                    )
+            overlays.append(normalized_overlay)
 
         latest_index = len(candles) - 1
         for candle_index, candle in enumerate(candles):

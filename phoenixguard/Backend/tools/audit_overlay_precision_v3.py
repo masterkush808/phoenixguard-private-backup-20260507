@@ -77,6 +77,12 @@ def _audit_from_live_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     audit = _mapping(payload.get("overlay_precision_audit"))
     if audit:
         return audit
+    audit = _mapping(_mapping(payload.get("overlays")).get("precision_audit"))
+    if audit:
+        return audit
+    audit = _mapping(_mapping(payload.get("live_visual_state")).get("overlay_precision_audit"))
+    if audit:
+        return audit
     scene = _mapping(payload.get("scene_graph") or payload.get("broker_scene_graph_v3"))
     overlays = _sequence_of_mappings(payload.get("overlay_objects"))
     current_side = _text(_mapping(payload.get("model_council")).get("side") or _mapping(payload.get("latest_signal")).get("action"))
@@ -117,7 +123,7 @@ def main() -> int:
         base = args.base_url.rstrip("/")
         session_q = urllib.parse.quote(args.session, safe="")
         mode_q = urllib.parse.quote(args.mode, safe="")
-        payload = _http_json(f"{base}/v1/mobile/live/state/v3/{session_q}?mode={mode_q}", args.timeout)
+        payload = _http_json(f"{base}/v1/mobile/live/state/v3/{session_q}?mode={mode_q}&compact=true", args.timeout)
         audit = _audit_from_live_payload(payload)
     else:
         session_path = Path(args.session_json) if args.session_json else _default_session_path(args.session)
