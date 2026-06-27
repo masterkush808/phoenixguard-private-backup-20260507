@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import json
 import os
@@ -30,6 +31,7 @@ DIAGNOSTIC_ENDPOINTS = frozenset(
         "floating_state",
     }
 )
+EndpointResult = tuple[int, dict[str, Any], str, float]
 
 
 @dataclass(frozen=True)
@@ -123,7 +125,7 @@ def _write_text(path: Path, content: str) -> None:
     tmp_path.replace(path)
 
 
-def _get_json(url: str, timeout_sec: float) -> tuple[int, dict[str, Any], str, float]:
+def _get_json(url: str, timeout_sec: float) -> EndpointResult:
     started = time.perf_counter()
     request = urllib.request.Request(url=url, method="GET", headers={"Accept": "application/json", "Connection": "close"})
     try:
@@ -140,6 +142,35 @@ def _get_json(url: str, timeout_sec: float) -> tuple[int, dict[str, Any], str, f
         return int(exc.code), _mapping(payload), "", (time.perf_counter() - started) * 1000.0
     except Exception as exc:
         return 0, {}, f"{type(exc).__name__}: {exc}", (time.perf_counter() - started) * 1000.0
+
+
+def _fetch_endpoint_results(
+    urls: Mapping[str, str],
+    endpoint_names: Sequence[str],
+    timeout_sec: float,
+) -> dict[str, EndpointResult]:
+    names = [name for name in endpoint_names if name in urls]
+    if not names:
+        return {}
+    max_workers = max(1, min(len(names), 6))
+    results: dict[str, EndpointResult] = {}
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="pg-cert-endpoint") as executor:
+        futures = {executor.submit(_get_json, urls[name], timeout_sec): name for name in names}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                results[name] = future.result()
+            except Exception as exc:
+                results[name] = (0, {}, f"{type(exc).__name__}: {exc}", 0.0)
+    return results
+
+
+def fetch_endpoint_results_for_certification(
+    urls: Mapping[str, str],
+    endpoint_names: Sequence[str],
+    timeout_sec: float,
+) -> dict[str, EndpointResult]:
+    return _fetch_endpoint_results(urls, endpoint_names, timeout_sec)
 
 
 def _repo_root() -> Path:
@@ -849,9 +880,7 @@ def main() -> int:
         requested_endpoints = [
             name for name in urls if diagnostic_due or name not in DIAGNOSTIC_ENDPOINTS or name not in cached_payloads
         ]
-        endpoint_results: dict[str, tuple[int, dict[str, Any], str, float]] = {
-            name: _get_json(urls[name], float(args.timeout_sec)) for name in requested_endpoints
-        }
+        endpoint_results = _fetch_endpoint_results(urls, requested_endpoints, float(args.timeout_sec))
         for name, result in endpoint_results.items():
             cached_endpoint_status[name] = int(result[0])
             cached_payloads[name] = result[1]

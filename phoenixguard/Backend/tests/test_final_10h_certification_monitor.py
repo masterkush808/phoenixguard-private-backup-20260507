@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from Backend.tools.run_final_10h_production_certification import (
     dashboard_capture_command_for_certification,
+    fetch_endpoint_results_for_certification,
     overlay_modes_capture_command_for_certification,
     poll_capture_jobs_for_certification,
     start_capture_job_for_certification,
@@ -106,3 +109,38 @@ def test_overlay_mode_capture_command_passes_child_timeout(tmp_path: Path) -> No
 
     timeout_index = command.index("--timeout")
     assert command[timeout_index + 1] == "30.000"
+
+
+class _SlowJsonHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        time.sleep(0.4)
+        body = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        _ = (format, args)
+        return
+
+
+def test_endpoint_fetch_runs_in_parallel() -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _SlowJsonHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = int(server.server_address[1])
+        urls = {f"endpoint_{index}": f"http://127.0.0.1:{port}/endpoint_{index}" for index in range(4)}
+        started = time.perf_counter()
+        results = fetch_endpoint_results_for_certification(urls, list(urls), timeout_sec=5.0)
+        elapsed = time.perf_counter() - started
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5.0)
+
+    assert set(results) == set(urls)
+    assert all(status == 200 for status, _payload, _error, _latency in results.values())
+    assert elapsed < 1.2
