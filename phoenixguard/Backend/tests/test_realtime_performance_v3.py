@@ -222,6 +222,30 @@ def test_frame_timing_trace_uses_15_second_capture_cadence(monkeypatch: pytest.M
     assert trace["stale_flags"] == []
 
 
+def test_frame_timing_trace_uses_payload_capture_cadence_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC", raising=False)
+    session: dict[str, Any] = {
+        "session_id": "speed",
+        "frame_index": 42,
+        "display_frame_id": 42,
+        "overlay_frame_id": 42,
+        "effective_capture_interval_sec": 15.0,
+        "display_published_epoch": 101.0,
+        "last_capture_started_epoch": 101.0,
+        "last_capture_epoch": 101.0,
+        "tracking_summary": {"pipeline_timing": {"capture_started_epoch": 101.0, "published_epoch": 101.0}},
+    }
+
+    trace = build_frame_timing_trace_v3(session, overlays=[{"overlay_id": "o1"}], now_epoch=123.0)
+    budgets = runtime_speed_budgets_ms(session)
+
+    assert budgets["hard_stale"] >= 15_000
+    assert budgets["hard_reject"] >= 30_000
+    assert trace["frame_age_ms"] == 22_000
+    assert trace["stale_status"] == "PASS"
+    assert trace["stale_flags"] == []
+
+
 def test_performance_trace_contains_model_warm_state_and_budgets() -> None:
     live_state: dict[str, Any] = {
         "session_id": "speed",

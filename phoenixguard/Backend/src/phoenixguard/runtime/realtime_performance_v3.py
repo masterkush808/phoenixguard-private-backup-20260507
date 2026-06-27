@@ -75,14 +75,33 @@ DEFAULT_SPEED_BUDGETS_MS: dict[str, float] = {
 T = TypeVar("T")
 
 
-def runtime_speed_budgets_ms() -> dict[str, float]:
+def _capture_interval_from_payload(payload: Mapping[str, Any] | None) -> float:
+    if payload is None:
+        return 0.0
+    tracking = _mapping(payload.get("tracking_summary"))
+    for value in (
+        payload.get("effective_capture_interval_sec"),
+        payload.get("capture_interval_sec"),
+        tracking.get("effective_capture_interval_sec"),
+        tracking.get("capture_interval_sec"),
+    ):
+        interval = _float(value, 0.0)
+        if interval >= 3.0:
+            return interval
+    return 0.0
+
+
+def runtime_speed_budgets_ms(payload: Mapping[str, Any] | None = None) -> dict[str, float]:
     budgets = dict(DEFAULT_SPEED_BUDGETS_MS)
-    capture_interval_sec = _float(os.getenv("PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC"), 0.0)
+    capture_interval_sec = max(
+        _float(os.getenv("PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC"), 0.0),
+        _capture_interval_from_payload(payload),
+    )
     if capture_interval_sec >= 3.0:
         cadence_ms = capture_interval_sec * 1000.0
         budgets["live_visual_age_target"] = max(budgets["live_visual_age_target"], cadence_ms)
-        budgets["hard_stale"] = max(budgets["hard_stale"], cadence_ms)
-        budgets["hard_reject"] = max(budgets["hard_reject"], cadence_ms * 2.0)
+        budgets["hard_stale"] = max(budgets["hard_stale"], cadence_ms * 2.0)
+        budgets["hard_reject"] = max(budgets["hard_reject"], cadence_ms * 3.0)
     for key, env_name in (
         ("live_visual_age_target", "PHOENIXGUARD_LIVE_VISUAL_AGE_TARGET_MS"),
         ("hard_stale", "PHOENIXGUARD_RUNTIME_HARD_STALE_MS"),
@@ -918,6 +937,7 @@ def build_frame_timing_trace_v3(
             overlay_done_ms = max(overlay_done_ms, display_published_ms)
     raw_overlay_frame_gap = max(0, display_frame_id - overlay_frame_id) if display_frame_id and overlay_frame_id else 0
     overlay_frame_gap = 0 if signatures_aligned or authority_locked else raw_overlay_frame_gap
+    speed_budgets = runtime_speed_budgets_ms(session)
     trace = FrameTimingTraceV3(
         frame_id=display_frame_id,
         capture_epoch_ms=capture_ms or published_ms,
@@ -930,12 +950,11 @@ def build_frame_timing_trace_v3(
         frontend_overlay_drawn_ms=heartbeat_render_ms,
         frames_dropped=_int(_mapping(model_health).get("dropped_frames") or tracking.get("frames_dropped") or signal.get("frames_dropped")),
         queue_depth=_int(_mapping(model_health).get("queue_depth")),
-        freshness_score=max(0.0, min(1.0, 1.0 - max(0.0, (now_ms - (capture_ms or published_ms)) / runtime_speed_budgets_ms()["hard_reject"]))),
+        freshness_score=max(0.0, min(1.0, 1.0 - max(0.0, (now_ms - (capture_ms or published_ms)) / speed_budgets["hard_reject"]))),
     ).as_dict(now_ms=now_ms)
     overlay_rows = list(overlays or [])
     overlay_frame_state_version = _overlay_version(overlay_rows, overlay_frame_id or int(trace["frame_id"]))
     overlay_state_version = _overlay_lock_version(overlay_rows)
-    speed_budgets = runtime_speed_budgets_ms()
     backpressure = RealtimeBackpressureControllerV3(
         stale_limit_ms=float(speed_budgets["hard_stale"]),
         reject_limit_ms=float(speed_budgets["hard_reject"]),
@@ -992,11 +1011,13 @@ def build_performance_trace_v3(
     overlay_age = _float(timing.get("overlay_age_ms"), 0.0)
     model_age = _float(timing.get("model_vote_age_ms"), 0.0)
     frontend_age = _float(timing.get("frontend_render_age_ms"), 0.0)
+    speed_budgets = runtime_speed_budgets_ms(live_state)
+    hard_stale_ms = float(speed_budgets["hard_stale"])
     controller = AdaptivePerformanceControllerV3().choose_profile(
         p95_frame_age_ms=frame_age,
         clarity_score=1.0,
         inference_bottleneck=_float(latency.get("max_model_latency_ms"), 0.0) > DEFAULT_SPEED_BUDGETS_MS["model_inference"],
-        frontend_bottleneck=frontend_age > DEFAULT_SPEED_BUDGETS_MS["frontend_render"] and frontend_age < DEFAULT_SPEED_BUDGETS_MS["hard_stale"],
+        frontend_bottleneck=frontend_age > DEFAULT_SPEED_BUDGETS_MS["frontend_render"] and frontend_age < hard_stale_ms,
     )
     metrics = {
         "capture_ms": _stage_duration_ms(pipeline, ("capture_window",)),
@@ -1031,21 +1052,21 @@ def build_performance_trace_v3(
         "overlay_state": {
             "frame_id": _int(timing.get("overlay_frame_id") or live_state.get("frame_id")),
             "age_ms": overlay_age,
-            "fresh": overlay_age <= DEFAULT_SPEED_BUDGETS_MS["hard_stale"],
+            "fresh": overlay_age <= hard_stale_ms,
             "overlay_state_version": _text(timing.get("overlay_state_version")),
             "overlay_frame_state_version": _text(timing.get("overlay_frame_state_version")),
         },
         "model_state": {
             "frame_id": _int(timing.get("model_vote_frame_id") or live_state.get("frame_id")),
             "age_ms": model_age,
-            "fresh": model_age <= DEFAULT_SPEED_BUDGETS_MS["hard_stale"],
+            "fresh": model_age <= hard_stale_ms,
             "models_awake": awake_count,
             "models_total": len(model_warm_states),
             "queue_depth": _int(model_health.get("queue_depth") or queue.get("depth")),
         },
         "frontend_state": {
             "age_ms": frontend_age,
-            "fresh": frontend_age <= DEFAULT_SPEED_BUDGETS_MS["hard_stale"] if frontend_age > 0.0 else False,
+            "fresh": frontend_age <= hard_stale_ms if frontend_age > 0.0 else False,
             "heartbeat": frontend,
         },
         "metrics": metrics,
@@ -1060,7 +1081,7 @@ def build_performance_trace_v3(
         "adaptive_performance": controller,
         "display_quality_profiles": DISPLAY_QUALITY_PROFILES,
         "overlay_render_budget": OVERLAY_RENDER_BUDGETS,
-        "speed_budgets_ms": runtime_speed_budgets_ms(),
+        "speed_budgets_ms": speed_budgets,
         "visual_health": {
             "status": "ALIVE" if _text(timing.get("stale_status"), "PASS") == "PASS" else _text(timing.get("stale_status")),
             "frame_age_ms": frame_age,
