@@ -36,17 +36,12 @@ $ActivateScriptPath = Join-Path -Path $ProjectRoot -ChildPath '.venv\Scripts\Act
 if (-not (Test-Path -LiteralPath $ActivateScriptPath)) {
     throw "Virtual environment activation script not found at '$ActivateScriptPath'."
 }
-$PythonPath = Join-Path -Path $ProjectRoot -ChildPath '.venv\Scripts\python.exe'
-if (-not (Test-Path -LiteralPath $PythonPath)) {
-    throw "Python executable not found at '$PythonPath'."
-}
-
 . $ActivateScriptPath
 
-$env:PHOENIXGUARD_PYTHON_EXE = $PythonPath
-$env:VIRTUAL_ENV = Join-Path -Path $ProjectRoot -ChildPath '.venv'
-$venvScriptsPath = Join-Path -Path $env:VIRTUAL_ENV -ChildPath 'Scripts'
-$env:PATH = (@($venvScriptsPath) + (($env:PATH -split [System.IO.Path]::PathSeparator) | Where-Object { $_ -and $_ -ne $venvScriptsPath })) -join [System.IO.Path]::PathSeparator
+. (Join-Path -Path $PSScriptRoot -ChildPath 'Resolve-PhoenixGuardPython.ps1')
+$pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
+$PythonPath = [string]$pythonRuntime.VenvPython
+$PythonProcessPath = [string]$pythonRuntime.ProcessPython
 $runtimeDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
 $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
 $env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
@@ -101,7 +96,7 @@ if ($NoWaitForLock) {
     $launcherArgs += '--no-wait-for-lock'
 }
 
-& $PythonPath @launcherArgs
+& $PythonProcessPath @launcherArgs
 if ($LASTEXITCODE -ne 0) {
     throw "PhoenixGuard 24/7 tracker exited with code $LASTEXITCODE."
 }

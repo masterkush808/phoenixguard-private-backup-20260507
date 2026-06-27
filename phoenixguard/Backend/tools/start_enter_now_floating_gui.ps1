@@ -9,10 +9,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
-$Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $Python)) {
-    throw "PhoenixGuard repo Python not found at '$Python'. Run Backend\scripts_runtime\env\install_dev.ps1 or create .venv before starting the Enter Now floating GUI."
-}
+. (Join-Path -Path $RepoRoot -ChildPath "Backend\launch\Resolve-PhoenixGuardPython.ps1")
+$PythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $RepoRoot
+$Python = [string]$PythonRuntime.ProcessPython
 
 $ArgsList = @(
     (Join-Path $RepoRoot "Backend\tools\enter_now_floating_gui.py"),

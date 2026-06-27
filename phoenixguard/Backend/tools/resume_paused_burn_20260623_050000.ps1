@@ -97,10 +97,9 @@ $env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS = "0"
 $env:PHOENIXGUARD_TRACKER_SESSION_ID = $SessionId
 $env:PHOENIXGUARD_BURN_CAPTURE_BLOCKED_ENTER_NOW = "1"
 
-$python = Join-Path $Root ".venv\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $python)) {
-    throw "PhoenixGuard repo Python not found at '$python'. Run Backend\scripts_runtime\env\install_dev.ps1 or create .venv before resuming this burn."
-}
+. (Join-Path -Path $Root -ChildPath "Backend\launch\Resolve-PhoenixGuardPython.ps1")
+$pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $Root
+$python = [string]$pythonRuntime.ProcessPython
 $powershell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
 
 Add-JsonLine -Path $eventLog -Payload ([ordered]@{

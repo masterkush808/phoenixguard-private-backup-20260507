@@ -2,9 +2,9 @@
 
 ## Clear Answer
 
-PhoenixGuard dependencies are now split by responsibility instead of being installed as one overloaded
-environment. The live runtime uses a lean lock, while development, training, business, frontend testing,
-and docs/PDF tooling have their own profiles.
+PhoenixGuard dependencies are grouped by responsibility, but they install into one repo environment:
+`.venv`. Backend, frontend tooling, business tooling, training, docs, and live runtime must not create
+competing Python environments inside the project.
 
 ## Why This Exists
 
@@ -22,9 +22,10 @@ The repo `.venv` currently passes:
 The dependency policy is therefore:
 
 ```text
-Use the repo venv or profile-specific venvs.
+Use the repo .venv only.
 Do not run PhoenixGuard from global Python.
-Do not install training/docs/business/frontend packages into live unless the lock requires them.
+Do not create .venv-live, .venv-dev, .venv-training, or .venv-business.
+Use logical requirement groups, but keep the interpreter and installed site-packages rooted in .venv.
 ```
 
 ## Profiles
@@ -63,20 +64,23 @@ Profile installers live under:
 Backend/scripts_runtime/env/
 ```
 
-The scripts create:
+The scripts all target:
 
 ```text
-.venv-live
-.venv-dev
-.venv-training
-.venv-business
+.venv
 ```
 
-They use `pip-sync`, then run `pip check` and `Backend/tools/verify_dependency_profile.py`.
+They install the selected lock into `.venv`, then run `pip check` and
+`Backend/tools/verify_dependency_profile.py`. They do not create secondary virtual environments.
 
 ## Live Runtime Boundary
 
-The live lock intentionally excludes unrelated heavy or fragile packages such as:
+The single `.venv` may contain training, docs, business, and dev packages. Live runtime safety is
+therefore enforced by launcher paths, lazy imports, optional adapters, and runtime profile checks,
+not by creating a second Python environment.
+
+The following packages must not become required imports for live startup unless the live runtime
+actually needs them:
 
 ```text
 bitsandbytes
@@ -102,7 +106,8 @@ chronos-forecasting
 ultralytics
 ```
 
-Training and dev may include some of those model-development packages, but live must stay lean.
+Training and dev may include some of those model-development packages inside `.venv`, but live startup
+must stay lean by not importing them on the hot path.
 
 ## Optional Adapter Rule
 
@@ -111,7 +116,5 @@ must degrade to the existing fallback path, not break import-time startup.
 
 ## Disk Caveat
 
-At governance time, the C: drive had about 10.47 GB free. Creating `.venv-live`, `.venv-dev`, and
-`.venv-training` simultaneously would duplicate Torch/OpenCV/ML wheels and can consume that space
-quickly. The locks and installers are ready, but profile venv creation should be done intentionally
-when enough disk is available.
+Do not duplicate Torch/OpenCV/ML wheels into multiple project virtual environments. The supported
+PhoenixGuard development layout is one `.venv` plus logical dependency lock files.

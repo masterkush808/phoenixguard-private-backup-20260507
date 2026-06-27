@@ -27,7 +27,6 @@ $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Pat
 Set-Location -LiteralPath $ProjectRoot
 $VirtualEnvPath = Join-Path -Path $ProjectRoot -ChildPath '.venv'
 $ActivateScriptPath = Join-Path -Path $VirtualEnvPath -ChildPath 'Scripts\Activate.ps1'
-$PythonPath = Join-Path -Path $VirtualEnvPath -ChildPath 'Scripts\python.exe'
 $RequirementsFilePath = Join-Path -Path $ProjectRoot -ChildPath 'requirements.txt'
 $backendSrc = Join-Path -Path $ProjectRoot -ChildPath 'Backend\src'
 $backendRoot = Join-Path -Path $ProjectRoot -ChildPath 'Backend'
@@ -47,11 +46,12 @@ if (-not (Test-Path -LiteralPath $VirtualEnvPath)) {
 if (-not (Test-Path -LiteralPath $ActivateScriptPath)) {
     throw "Virtual environment activation script not found at '$ActivateScriptPath'."
 }
-if (-not (Test-Path -LiteralPath $PythonPath)) {
-    throw "Python executable not found at '$PythonPath'."
-}
 
 . $ActivateScriptPath
+. (Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\Resolve-PhoenixGuardPython.ps1')
+$pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
+$PythonPath = [string]$pythonRuntime.VenvPython
+$PythonProcessPath = [string]$pythonRuntime.ProcessPython
 
 if ($Bootstrap) {
     if (-not (Test-Path -LiteralPath $RequirementsFilePath)) {
@@ -59,12 +59,12 @@ if ($Bootstrap) {
     }
 
     Write-Output "Installing Python dependencies..."
-    & $PythonPath -m pip install --upgrade pip
+    & $PythonProcessPath -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to upgrade pip."
     }
 
-    & $PythonPath -m pip install -r $RequirementsFilePath
+    & $PythonProcessPath -m pip install -r $RequirementsFilePath
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to install dependencies from '$RequirementsFilePath'."
     }
@@ -141,7 +141,7 @@ switch ($ResolvedAccessMode) {
 }
 
 Write-Output "Launching 808Fx Standard System premium share surface on $($env:PHOENIXGUARD_UI_HOST):$($env:PHOENIXGUARD_UI_PORT) with access mode $ResolvedAccessMode"
-& $PythonPath $ShareRunnerPath
+& $PythonProcessPath $ShareRunnerPath
 
 if ($LASTEXITCODE -ne 0) {
     throw "808Fx Standard System exited with code $LASTEXITCODE."

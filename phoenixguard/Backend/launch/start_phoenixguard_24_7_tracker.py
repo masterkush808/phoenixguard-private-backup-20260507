@@ -29,6 +29,11 @@ from phoenixguard.runtime.tracker_bootstrap import (
     tracker_session_runtime_state,
 )
 from phoenixguard.runtime.singleton_guard_v3 import PhoenixRuntimeSingletonGuardV3
+from phoenixguard.runtime.python_environment_v3 import (
+    assert_repo_venv_runtime,
+    expected_repo_venv_python,
+    repo_venv_process_executable,
+)
 
 
 JsonDict = dict[str, Any]
@@ -251,9 +256,7 @@ def _stop_process(proc: subprocess.Popen[str], *, timeout_sec: float = 8.0) -> N
 def _repo_venv_python(script_dir: Path) -> Path | None:
     candidates = (
         script_dir / ".venv" / "Scripts" / "python.exe",
-        script_dir / ".venv-live" / "Scripts" / "python.exe",
         script_dir / ".venv" / "bin" / "python",
-        script_dir / ".venv-live" / "bin" / "python",
     )
     for candidate in candidates:
         if candidate.exists():
@@ -272,8 +275,14 @@ def _python_venv_dir(python_exe: str) -> Path | None:
 def _resolve_python_launcher(env: dict[str, str], script_dir: Path | None = None) -> tuple[str, str]:
     repo_python = _repo_venv_python(script_dir) if script_dir is not None else None
     requested_exe = env.get("PHOENIXGUARD_PYTHON_EXE") or (str(repo_python) if repo_python is not None else sys.executable)
-    pyvenv_launcher = env.get("PHOENIXGUARD_PYVENV_LAUNCHER") or requested_exe
-    return requested_exe, pyvenv_launcher
+    pyvenv_launcher = env.get("PHOENIXGUARD_PYVENV_LAUNCHER") or (str(repo_python) if repo_python is not None else requested_exe)
+    process_exe = env.get("PHOENIXGUARD_PYTHON_PROCESS_EXE") or requested_exe
+    if script_dir is not None and repo_python is not None:
+        expected_python = expected_repo_venv_python(script_dir)
+        if Path(str(requested_exe)).resolve() == expected_python.resolve():
+            process_exe = str(repo_venv_process_executable(script_dir))
+            pyvenv_launcher = str(expected_python)
+    return process_exe, pyvenv_launcher
 
 
 def _default_live_runtime_dir(script_dir: Path, leaf: str) -> Path:
@@ -480,11 +489,13 @@ def _launch_mobile_api(
         env["OTEL_LOGS_EXPORTER"] = "none"
         env["PHOENIXGUARD_TRACING_DISABLED"] = "true"
     python_exe, pyvenv_launcher = _resolve_python_launcher(env, script_dir)
-    env["PHOENIXGUARD_PYTHON_EXE"] = str(python_exe)
-    venv_dir = _python_venv_dir(str(python_exe))
+    env["PHOENIXGUARD_PYTHON_EXE"] = str(pyvenv_launcher)
+    env["PHOENIXGUARD_PYTHON_PROCESS_EXE"] = str(python_exe)
+    env["PHOENIXGUARD_PYVENV_LAUNCHER"] = str(pyvenv_launcher)
+    venv_dir = _python_venv_dir(str(pyvenv_launcher)) or _python_venv_dir(str(python_exe))
     if venv_dir is not None:
         env["VIRTUAL_ENV"] = str(venv_dir)
-        scripts_dir = str(Path(str(python_exe)).parent)
+        scripts_dir = str(Path(str(pyvenv_launcher)).parent)
         existing_path = str(env.get("PATH", "") or "")
         if scripts_dir and not existing_path.lower().startswith(scripts_dir.lower() + os.pathsep):
             env["PATH"] = scripts_dir + os.pathsep + existing_path
@@ -794,6 +805,7 @@ def _ensure_session(
 
 def main() -> int:
     script_dir = PROJECT_ROOT
+    assert_repo_venv_runtime("tracker", script_dir)
     os.environ["PHOENIXGUARD_RUNTIME_DIR"] = str(script_dir / ".codex_runtime")
     os.environ["PHOENIXGUARD_DATA_DIR"] = str(_default_live_runtime_dir(script_dir, "data_live"))
     os.environ["PHOENIXGUARD_LOGS_DIR"] = str(_default_live_runtime_dir(script_dir, "logs_live"))

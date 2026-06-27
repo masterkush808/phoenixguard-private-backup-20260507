@@ -5,12 +5,25 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Mapping, Sequence, cast
+
+_PROJECT_ROOT_BOOTSTRAP = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT_BOOTSTRAP) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT_BOOTSTRAP))
+
+from _pg_bootstrap import ensure_project_paths
+
+PROJECT_ROOT = ensure_project_paths()
+
+from phoenixguard.runtime.python_environment_v3 import assert_repo_venv_runtime
+
+_PYTHON_ENVIRONMENT_STATUS = assert_repo_venv_runtime("mt4_bridge", PROJECT_ROOT)
 
 
 def _default_common_files_dir() -> Path:
@@ -52,20 +65,27 @@ def _write_text_atomic(path: Path, text: str) -> float:
         raise ValueError(f"MT4 bridge payload too large: {len(payload)} bytes")
     started = time.perf_counter()
     last_error: Exception | None = None
+    fsync_enabled = str(os.getenv("PHOENIXGUARD_MT4_BRIDGE_FSYNC", "0") or "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     temp_name = ""
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
-            os.fsync(handle.fileno())
-        for _ in range(20):
+            if fsync_enabled:
+                os.fsync(handle.fileno())
+        for attempt in range(40):
             try:
                 os.replace(temp_name, path)
                 return (time.perf_counter() - started) * 1000.0
             except (PermissionError, OSError) as exc:
                 last_error = exc
-                time.sleep(0.025)
+                time.sleep(min(0.12, 0.015 * float(attempt + 1)))
     finally:
         if temp_name:
             try:

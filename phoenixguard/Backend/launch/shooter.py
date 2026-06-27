@@ -31,6 +31,7 @@ import urllib.parse
 import urllib.request
 
 from phoenixguard.execution.packet_v3 import validate_execution_packet_v3
+from phoenixguard.runtime.python_environment_v3 import assert_repo_venv_runtime
 from phoenixguard.runtime.singleton_guard_v3 import PhoenixRuntimeSingletonGuardV3, guard_from_environment
 
 
@@ -47,6 +48,7 @@ DEFAULT_HEARTBEAT_SECONDS = 4.0
 REPORT_TTL_SECONDS = 8.0
 _RUNTIME_DIR = PROJECT_ROOT / ".codex_runtime"
 _SHOOTER_HANDSHAKE_PATH = _RUNTIME_DIR / "shooter_handshake.json"
+_PYTHON_ENVIRONMENT_STATUS = assert_repo_venv_runtime("shooter", PROJECT_ROOT)
 
 LOGGER = logging.getLogger("shooter_package_reporter")
 logging.basicConfig(
@@ -213,11 +215,11 @@ def _write_shooter_handshake(payload: Mapping[str, object], path: Path = _SHOOTE
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(_json_ready(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     last_error: OSError | None = None
-    for attempt in range(6):
+    for attempt in range(24):
         temp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
         try:
             temp_path.write_text(encoded, encoding="utf-8")
-            temp_path.replace(path)
+            os.replace(temp_path, path)
             return
         except OSError as exc:
             last_error = exc
@@ -225,7 +227,7 @@ def _write_shooter_handshake(payload: Mapping[str, object], path: Path = _SHOOTE
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
-            time.sleep(min(0.5, 0.05 * (attempt + 1)))
+            time.sleep(min(0.25, 0.025 * (attempt + 1)))
     if last_error is not None:
         raise last_error
 

@@ -19,6 +19,7 @@ from typing import cast
 import uvicorn
 
 from phoenixguard.runtime.singleton_guard_v3 import guard_from_environment
+from phoenixguard.runtime.python_environment_v3 import assert_repo_venv_runtime
 
 
 def _local_tracing_disabled() -> bool:
@@ -47,6 +48,7 @@ def _configure_windows_server_loop() -> None:
 
 
 if __name__ == "__main__":
+    assert_repo_venv_runtime("mobile_api", PROJECT_ROOT)
     _disable_local_tracing_export()
     _configure_windows_server_loop()
     runtime_dir = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or PROJECT_ROOT / ".codex_runtime")

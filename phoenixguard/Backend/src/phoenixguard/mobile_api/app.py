@@ -26,6 +26,7 @@ from phoenixguard.runtime.observability_v3 import (
     build_model_council_health_from_session,
 )
 from phoenixguard.runtime.realtime_performance_v3 import build_frame_timing_trace_v3, build_performance_trace_v3
+from phoenixguard.runtime.python_environment_v3 import build_python_environment_status
 from phoenixguard.runtime.tracker_bootstrap import tracker_session_runtime_state
 from phoenixguard.tracing import configure_tracing, instrument_fastapi_app
 from phoenixguard.voice.control import (
@@ -1785,6 +1786,15 @@ def create_app(
     @app.get("/v1/mobile/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    def runtime_python_environment_v3() -> dict[str, object]:
+        return dict(build_python_environment_status(PROJECT_ROOT))
+
+    app.add_api_route(
+        "/v1/mobile/runtime/python-environment/v3",
+        runtime_python_environment_v3,
+        methods=["GET"],
+    )
 
     @app.get("/v1/mobile/chart/state/v3")
     def v3_chart_state(session_id: str | None = None) -> dict[str, object]:
@@ -3870,44 +3880,58 @@ def create_app(
                 cooldown_remaining_seconds=cooldown_remaining,
             ),
         )
-        try:
-            clean_live_state = live_state_v3_for_session(resolved_session_id, mode="CLEAN_LIVE", compact=True)
-        except Exception:
-            clean_live_state = {}
-        clean_overlays = _mapping_to_plain_dict(clean_live_state.get("overlays"))
-        clean_objects = clean_overlays.get("objects")
-        clean_object_count = len(cast(Sequence[object], clean_objects)) if isinstance(clean_objects, list) else 0
+        tracking_summary = _mapping_to_plain_dict(tracker_payload.get("tracking_summary"))
+        overlay_geometry = _mapping_to_plain_dict(tracking_summary.get("overlay_geometry"))
+        overlay_geometry_boxes = overlay_geometry.get("boxes")
+        overlay_geometry_count = (
+            len(cast(Sequence[object], overlay_geometry_boxes))
+            if isinstance(overlay_geometry_boxes, list)
+            else 0
+        )
+        session_overlay_objects = tracker_payload.get("overlay_objects")
+        session_overlay_count = (
+            len(cast(Sequence[object], session_overlay_objects))
+            if isinstance(session_overlay_objects, list)
+            else 0
+        )
+        clean_object_count = max(overlay_geometry_count, session_overlay_count)
         renderable_count = int(
             _epoch_float(
-                clean_live_state.get("renderable_count")
-                or clean_overlays.get("renderable_count")
-                or clean_live_state.get("overlay_count")
-                or clean_overlays.get("overlay_count")
+                tracker_payload.get("renderable_count")
+                or overlay_geometry.get("renderable_count")
+                or tracking_summary.get("renderable_count")
+                or tracker_payload.get("overlay_count")
+                or overlay_geometry.get("overlay_count")
+                or tracking_summary.get("overlay_count")
                 or clean_object_count,
                 0.0,
             )
         )
         if clean_object_count > 0 and renderable_count <= 0:
             renderable_count = clean_object_count
-        if clean_overlays or renderable_count > 0:
+        if renderable_count > 0 or clean_object_count > 0:
             overlay_count = int(
                 _epoch_float(
-                    clean_live_state.get("overlay_count")
-                    or clean_overlays.get("overlay_count")
+                    tracker_payload.get("overlay_count")
+                    or overlay_geometry.get("overlay_count")
+                    or tracking_summary.get("overlay_count")
                     or renderable_count,
                     float(renderable_count),
                 )
             )
             state_payload["overlay_count"] = overlay_count
             state_payload["renderable_count"] = renderable_count
-            state_payload["overlay_frame_id"] = clean_live_state.get("overlay_frame_id")
-            state_payload["frame_id"] = clean_live_state.get("frame_id")
-            state_payload["state_version"] = clean_live_state.get("state_version")
+            state_payload["overlay_frame_id"] = tracker_payload.get("overlay_frame_id") or tracker_payload.get("overlay_object_frame_id")
+            state_payload["frame_id"] = tracker_payload.get("frame_id") or tracker_payload.get("frame_index")
+            state_payload["state_version"] = tracker_payload.get("state_version")
             state_payload["overlays"] = {
-                **clean_overlays,
                 "overlay_count": overlay_count,
                 "renderable_count": renderable_count,
-                "source": "clean_live_compact_state",
+                "frame_id": state_payload.get("frame_id"),
+                "overlay_frame_id": state_payload.get("overlay_frame_id"),
+                "chart_transform_id": tracker_payload.get("chart_transform_id")
+                or _mapping_to_plain_dict(overlay_geometry.get("chart_transform")).get("chart_transform_id"),
+                "source": "tracker_payload_overlay_summary",
             }
         if not include_inspector:
             state_payload.pop("inspector", None)

@@ -4,14 +4,13 @@ param(
 )
 
 Set-Location $ProjectRoot
-$venvPath = Join-Path $ProjectRoot '.venv-live'
+$venvPath = Join-Path $ProjectRoot '.venv'
 $lockPath = Join-Path $ProjectRoot 'requirements\locks\live-win-py311.txt'
 if (-not (Test-Path $lockPath)) { throw "Missing lock file: $lockPath" }
 if ($Recreate -and (Test-Path $venvPath)) { Remove-Item -LiteralPath $venvPath -Recurse -Force }
 if (-not (Test-Path $venvPath)) { py -3.11 -m venv $venvPath }
 $python = Join-Path $venvPath 'Scripts\python.exe'
-$sync = Join-Path $venvPath 'Scripts\pip-sync.exe'
 & $python -m pip install -U pip setuptools wheel pip-tools
-& $sync $lockPath
+& $python -m pip install -r $lockPath
 & $python -m pip check
 & $python Backend\tools\verify_dependency_profile.py --profile live

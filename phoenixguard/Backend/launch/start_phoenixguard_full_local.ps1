@@ -55,15 +55,10 @@ if (-not (Test-Path -LiteralPath $ActivateScriptPath)) {
 
 . $ActivateScriptPath
 
-$pythonPath = Join-Path -Path $ProjectRoot -ChildPath '.venv\Scripts\python.exe'
-if (-not (Test-Path -LiteralPath $pythonPath)) {
-    throw "Python executable not found at '$pythonPath'."
-}
-
-$env:PHOENIXGUARD_PYTHON_EXE = $pythonPath
-$env:VIRTUAL_ENV = Join-Path -Path $ProjectRoot -ChildPath '.venv'
-$venvScriptsPath = Join-Path -Path $env:VIRTUAL_ENV -ChildPath 'Scripts'
-$env:PATH = (@($venvScriptsPath) + (($env:PATH -split [System.IO.Path]::PathSeparator) | Where-Object { $_ -and $_ -ne $venvScriptsPath })) -join [System.IO.Path]::PathSeparator
+. (Join-Path -Path $PSScriptRoot -ChildPath 'Resolve-PhoenixGuardPython.ps1')
+$pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
+$pythonPath = [string]$pythonRuntime.VenvPython
+$pythonProcessPath = [string]$pythonRuntime.ProcessPython
 
 $defaultRuntimeDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
 $runtimeDir = $defaultRuntimeDir
@@ -217,7 +212,7 @@ function Start-TrackerChildProcess {
         $trackerArgs += @('--window-hwnd', "$BrokerWindowHwnd")
     }
 
-    Start-Process -FilePath $pythonPath -ArgumentList (ConvertTo-PhoenixGuardProcessArgumentString -Arguments $trackerArgs) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $trackerStdoutPath -RedirectStandardError $trackerStderrPath
+    Start-Process -FilePath $pythonProcessPath -ArgumentList (ConvertTo-PhoenixGuardProcessArgumentString -Arguments $trackerArgs) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $trackerStdoutPath -RedirectStandardError $trackerStderrPath
 }
 
 if (-not $NoKillExisting) {
@@ -369,7 +364,7 @@ try {
             '--heartbeat',
             '4.0'
         )
-        Start-Process -FilePath $pythonPath -ArgumentList $shooterArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $outPath -RedirectStandardError $errPath | Out-Null
+        Start-Process -FilePath $pythonProcessPath -ArgumentList $shooterArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $outPath -RedirectStandardError $errPath | Out-Null
         Write-Host "Shooter package reporter log: $errPath"
     } elseif ($session) {
         Write-Host "Profile $Profile selected; tracker started without shooter."
@@ -399,7 +394,7 @@ try {
             '--metrics-every',
             '15.0'
         )
-        Start-Process -FilePath $pythonPath -ArgumentList $bridgeArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $bridgeOutPath -RedirectStandardError $bridgeErrPath | Out-Null
+        Start-Process -FilePath $pythonProcessPath -ArgumentList $bridgeArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $bridgeOutPath -RedirectStandardError $bridgeErrPath | Out-Null
         Write-Host "MT4 file bridge log: $bridgeOutPath"
     } elseif ($session) {
         Write-Host "MT4 file bridge disabled by PHOENIXGUARD_MT4_BRIDGE_ENABLED=$env:PHOENIXGUARD_MT4_BRIDGE_ENABLED"

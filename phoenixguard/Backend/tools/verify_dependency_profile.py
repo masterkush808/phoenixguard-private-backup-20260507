@@ -8,6 +8,7 @@ import argparse
 from dataclasses import dataclass
 import importlib.metadata as metadata
 import json
+import os
 import platform
 import sys
 from typing import Sequence, cast
@@ -176,10 +177,20 @@ def _status_rows(names: Sequence[str]) -> list[dict[str, object]]:
     ]
 
 
+def _single_repo_venv_policy_enabled() -> bool:
+    return str(os.getenv("PHOENIXGUARD_SINGLE_REPO_VENV", "1") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+
+
 def evaluate_profile(profile_name: str) -> dict[str, object]:
     profile = PROFILES[profile_name]
     missing = [name for name in profile.required if not _installed(name)]
-    forbidden_present = [name for name in profile.forbidden if _installed(name)]
+    single_repo_venv = _single_repo_venv_policy_enabled()
+    forbidden_present = [] if single_repo_venv else [name for name in profile.forbidden if _installed(name)]
     missing_alternatives: list[str] = []
     for alternative in profile.alternatives:
         if not any(_installed(choice) for choice in alternative.choices):
@@ -193,6 +204,7 @@ def evaluate_profile(profile_name: str) -> dict[str, object]:
     return {
         "ok": ok,
         "profile": profile_name,
+        "single_repo_venv": single_repo_venv,
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "missing_required": missing,
