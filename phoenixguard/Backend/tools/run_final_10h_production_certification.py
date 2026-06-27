@@ -479,7 +479,7 @@ def _capture_overlay_modes(base_url: str, session_id: str, out_dir: Path, log_pa
         "--session",
         session_id,
         "--modes",
-        "CLEAN_LIVE,SUPPLY_DEMAND,TRENDLINES,TRIGGER,FULL_HISTORY_READ",
+        "CLEAN_LIVE,SUPPLY_DEMAND,TRENDLINES",
         "--out",
         str(out_dir),
     ]

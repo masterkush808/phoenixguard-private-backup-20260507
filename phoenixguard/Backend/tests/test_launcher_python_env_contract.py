@@ -62,3 +62,9 @@ def test_certification_visual_tools_use_repo_process_host_for_child_python() -> 
         assert "PHOENIXGUARD_PYTHON_PROCESS_EXE" in text
         assert "phoenixguard-python.exe" in text
         assert "[sys.executable" not in text
+
+
+def test_final_certification_periodic_overlay_capture_is_lazy_loaded() -> None:
+    text = _read("Backend/tools/run_final_10h_production_certification.py")
+    assert '"CLEAN_LIVE,SUPPLY_DEMAND,TRENDLINES"' in text
+    assert '"CLEAN_LIVE,SUPPLY_DEMAND,TRENDLINES,TRIGGER,FULL_HISTORY_READ"' not in text
