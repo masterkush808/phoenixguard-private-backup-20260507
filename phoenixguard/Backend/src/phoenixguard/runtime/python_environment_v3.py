@@ -50,45 +50,14 @@ def _same_path(left: Path | str, right: Path | str) -> bool:
         return str(left).lower() == str(right).lower()
 
 
-def _pyvenv_cfg_value(repo_venv: Path, key: str) -> str:
-    cfg_path = repo_venv / "pyvenv.cfg"
-    if not cfg_path.exists():
-        return ""
-    prefix = key.strip().lower() + " ="
-    try:
-        lines = cfg_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return ""
-    for line in lines:
-        stripped = line.strip()
-        if stripped.lower().startswith(prefix):
-            return stripped.split("=", 1)[1].strip()
-    return ""
-
-
 def repo_venv_process_executable(project_root: Path | None = None) -> Path:
-    """Return the process host for the repo venv.
-
-    On Windows, invoking .venv/Scripts/python.exe can leave a redirector parent
-    process. Calling the pyvenv.cfg executable directly with
-    __PYVENV_LAUNCHER__ set to the repo venv python keeps sys.prefix inside the
-    repo .venv while avoiding that extra process layer.
-    """
+    """Return the repo venv executable used by PhoenixGuard launchers."""
     root = project_root or project_root_from_runtime_module()
-    venv_python = expected_repo_venv_python(root)
-    if os.name != "nt":
-        return venv_python
-    cfg_executable = _pyvenv_cfg_value(root / ".venv", "executable")
-    if cfg_executable:
-        executable_path = Path(cfg_executable)
-        if executable_path.exists():
-            return executable_path
-    cfg_home = _pyvenv_cfg_value(root / ".venv", "home")
-    if cfg_home:
-        home_python = Path(cfg_home) / "python.exe"
-        if home_python.exists():
-            return home_python
-    return venv_python
+    if os.name == "nt":
+        process_host = root / ".venv" / "Scripts" / "phoenixguard-python.exe"
+        if process_host.exists():
+            return process_host
+    return expected_repo_venv_python(root)
 
 
 def strict_repo_venv_enabled() -> bool:

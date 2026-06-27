@@ -1784,10 +1784,10 @@ def create_app(
         return tracker_session, market_context
 
     @app.get("/v1/mobile/health")
-    def health() -> dict[str, str]:
+    async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    def runtime_python_environment_v3() -> dict[str, object]:
+    async def runtime_python_environment_v3() -> dict[str, object]:
         return dict(build_python_environment_status(PROJECT_ROOT))
 
     app.add_api_route(
@@ -3686,7 +3686,7 @@ def create_app(
         return await performance_trace_v3_for_session(session_id or resolve_window_tracker_dashboard_session_id(None))
 
     @app.post("/v1/mobile/frontend/heartbeat/v3")
-    def frontend_heartbeat_v3(payload: dict[str, object] = Body(...)) -> dict[str, object]:
+    async def frontend_heartbeat_v3(payload: dict[str, object] = Body(...)) -> dict[str, object]:
         try:
             heartbeat_session_id = str(payload.get("session_id") or "").strip() or resolve_window_tracker_dashboard_session_id(None)
             rendered_frame = int(_epoch_float(payload.get("rendered_frame_id") or payload.get("frame_id"), 0.0))
@@ -3747,7 +3747,7 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     @app.get("/v1/mobile/frontend/heartbeat/v3")
-    def latest_frontend_heartbeat_v3(session_id: str | None = None, surface_id: str | None = None) -> dict[str, object]:
+    async def latest_frontend_heartbeat_v3(session_id: str | None = None, surface_id: str | None = None) -> dict[str, object]:
         resolved_session_id = str(session_id or "").strip() or resolve_window_tracker_dashboard_session_id(None)
         resolved_surface_id = str(surface_id or "dashboard").strip() or "dashboard"
         heartbeat = latest_frontend_heartbeat(resolved_session_id, surface_id=resolved_surface_id)

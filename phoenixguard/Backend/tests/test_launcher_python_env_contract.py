@@ -26,6 +26,14 @@ def test_launchers_require_repo_venv_python_instead_of_global_python() -> None:
 
     for relative_path, forbidden_fragments in scripts.items():
         text = _read(relative_path)
-        assert "Scripts\\python.exe" in text
+        assert "Resolve-PhoenixGuardPythonRuntime" in text
+        assert ".ProcessPython" in text
         for fragment in forbidden_fragments:
             assert fragment not in text
+
+
+def test_python_resolver_points_process_python_to_repo_venv() -> None:
+    text = _read("Backend/launch/Resolve-PhoenixGuardPython.ps1")
+    assert "$venvPython = Join-Path -Path $venvPath -ChildPath 'Scripts\\python.exe'" in text
+    assert "$processPython = Join-Path -Path $scriptsPath -ChildPath 'phoenixguard-python.exe'" in text
+    assert "$env:PHOENIXGUARD_PYTHON_PROCESS_EXE = $processPython" in text

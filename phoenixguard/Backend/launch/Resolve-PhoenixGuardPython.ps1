@@ -10,30 +10,35 @@ function Resolve-PhoenixGuardPythonRuntime {
         throw "PhoenixGuard repo Python not found at '$venvPython'. Create the repo .venv before launching."
     }
 
-    $processPython = $venvPython
+    $scriptsPath = Join-Path -Path $venvPath -ChildPath 'Scripts'
+    $processPython = Join-Path -Path $scriptsPath -ChildPath 'phoenixguard-python.exe'
     $pyvenvCfg = Join-Path -Path $venvPath -ChildPath 'pyvenv.cfg'
-    if (Test-Path -LiteralPath $pyvenvCfg) {
-        $cfgLines = Get-Content -LiteralPath $pyvenvCfg
-        $executableLine = $cfgLines | Where-Object { $_ -match '^\s*executable\s*=' } | Select-Object -First 1
-        if ($executableLine) {
-            $candidate = (($executableLine -split '=', 2)[1]).Trim()
-            if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-                $processPython = $candidate
+    if (-not (Test-Path -LiteralPath $processPython)) {
+        $basePython = $null
+        if (Test-Path -LiteralPath $pyvenvCfg) {
+            $cfgLines = Get-Content -LiteralPath $pyvenvCfg
+            $executableLine = $cfgLines | Where-Object { $_ -match '^\s*executable\s*=' } | Select-Object -First 1
+            if ($executableLine) {
+                $candidate = (($executableLine -split '=', 2)[1]).Trim()
+                if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+                    $basePython = $candidate
+                }
             }
         }
-        if ($processPython -eq $venvPython) {
-            $homeLine = $cfgLines | Where-Object { $_ -match '^\s*home\s*=' } | Select-Object -First 1
-            if ($homeLine) {
-                $home = (($homeLine -split '=', 2)[1]).Trim()
-                $candidate = Join-Path -Path $home -ChildPath 'python.exe'
-                if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-                    $processPython = $candidate
+        if ($basePython) {
+            Copy-Item -LiteralPath $basePython -Destination $processPython -Force
+            $basePythonDir = Split-Path -Parent $basePython
+            foreach ($dllName in @('python311.dll', 'python3.dll')) {
+                $dllSource = Join-Path -Path $basePythonDir -ChildPath $dllName
+                if (Test-Path -LiteralPath $dllSource) {
+                    Copy-Item -LiteralPath $dllSource -Destination (Join-Path -Path $scriptsPath -ChildPath $dllName) -Force
                 }
             }
         }
     }
-
-    $scriptsPath = Join-Path -Path $venvPath -ChildPath 'Scripts'
+    if (-not (Test-Path -LiteralPath $processPython)) {
+        $processPython = $venvPython
+    }
     $env:PHOENIXGUARD_PYTHON_EXE = $venvPython
     $env:PHOENIXGUARD_PYTHON_PROCESS_EXE = $processPython
     $env:PHOENIXGUARD_PYVENV_LAUNCHER = $venvPython

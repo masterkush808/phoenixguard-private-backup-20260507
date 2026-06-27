@@ -132,6 +132,34 @@ function Get-PhoenixGuardBrowserExecutable {
     return ''
 }
 
+function Get-PhoenixGuardDashboardBrowserArguments {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('chrome', 'edge')]
+        [string]$BrowserName,
+        [Parameter(Mandatory = $true)]
+        [string]$Url
+    )
+
+    $arguments = New-Object 'System.Collections.Generic.List[string]'
+    if ($BrowserName -eq 'chrome') {
+        $profileDir = if ($env:PHOENIXGUARD_DASHBOARD_CHROME_PROFILE_DIR) {
+            [string]$env:PHOENIXGUARD_DASHBOARD_CHROME_PROFILE_DIR
+        } else {
+            Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime\chrome_dashboard_profile'
+        }
+        New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+        $arguments.Add("--user-data-dir=$profileDir")
+        $arguments.Add('--disable-background-timer-throttling')
+        $arguments.Add('--disable-renderer-backgrounding')
+        $arguments.Add('--disable-backgrounding-occluded-windows')
+        $arguments.Add('--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,BackForwardCache')
+        $arguments.Add('--new-window')
+    }
+    $arguments.Add($Url)
+    return [string[]]$arguments.ToArray()
+}
+
 function Start-PhoenixGuardDashboardBrowser {
     param(
         [Parameter(Mandatory = $true)]
@@ -148,7 +176,7 @@ function Start-PhoenixGuardDashboardBrowser {
 
     $browserPath = Get-PhoenixGuardBrowserExecutable -BrowserName $BrowserName
     if ($browserPath) {
-        Start-Process -FilePath $browserPath -ArgumentList @($Url)
+        Start-Process -FilePath $browserPath -ArgumentList (Get-PhoenixGuardDashboardBrowserArguments -BrowserName $BrowserName -Url $Url)
         return
     }
 

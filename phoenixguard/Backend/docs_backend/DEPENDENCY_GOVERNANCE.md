@@ -26,6 +26,9 @@ Use the repo .venv only.
 Do not run PhoenixGuard from global Python.
 Do not create .venv-live, .venv-dev, .venv-training, or .venv-business.
 Use logical requirement groups, but keep the interpreter and installed site-packages rooted in .venv.
+Launchers resolve through .\.venv\Scripts\python.exe and use .\.venv\Scripts\phoenixguard-python.exe
+as the long-running process host when present. That host is a copied executable inside the same repo
+.venv, so it avoids the Windows venv redirector child chain without creating a second environment.
 ```
 
 ## Profiles

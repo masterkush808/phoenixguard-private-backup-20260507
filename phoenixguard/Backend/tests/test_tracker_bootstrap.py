@@ -355,7 +355,7 @@ def test_live_fast_display_heartbeat_respects_disable_env(monkeypatch: pytest.Mo
     assert calls == []
 
 
-def test_resolve_python_launcher_uses_repo_venv_context_without_redirector(tmp_path: Path) -> None:
+def test_resolve_python_launcher_uses_repo_venv_executable(tmp_path: Path) -> None:
     venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
     base_python = tmp_path / "Python311" / "python.exe"
     venv_python.parent.mkdir(parents=True)
@@ -372,7 +372,7 @@ def test_resolve_python_launcher_uses_repo_venv_context_without_redirector(tmp_p
         tmp_path,
     )
 
-    assert Path(python_exe).resolve() == base_python.resolve()
+    assert Path(python_exe).resolve() == venv_python.resolve()
     assert Path(pyvenv_launcher).resolve() == venv_python.resolve()
 
 
@@ -384,6 +384,22 @@ def test_resolve_python_launcher_prefers_repo_venv_when_env_missing(tmp_path: Pa
     python_exe, pyvenv_launcher = tracker_launcher.resolve_python_launcher({}, tmp_path)
 
     assert Path(python_exe).resolve() == venv_python.resolve()
+    assert Path(pyvenv_launcher).resolve() == venv_python.resolve()
+
+
+def test_resolve_python_launcher_prefers_repo_venv_process_host(tmp_path: Path) -> None:
+    venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    process_host = tmp_path / ".venv" / "Scripts" / "phoenixguard-python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+    process_host.write_text("", encoding="utf-8")
+
+    python_exe, pyvenv_launcher = tracker_launcher.resolve_python_launcher(
+        {"PHOENIXGUARD_PYTHON_EXE": str(venv_python)},
+        tmp_path,
+    )
+
+    assert Path(python_exe).resolve() == process_host.resolve()
     assert Path(pyvenv_launcher).resolve() == venv_python.resolve()
 
 
