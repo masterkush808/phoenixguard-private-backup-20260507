@@ -600,7 +600,6 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
 
 def _compact_live_state_response_cache_signature(session_id: str) -> str:
     display_path = _direct_window_tracker_display_state_path(session_id)
-    context_path = _direct_live_state_compact_session_path(session_id)
     display_signature = _json_field_cache_signature(
         display_path,
         (
@@ -612,33 +611,7 @@ def _compact_live_state_response_cache_signature(session_id: str) -> str:
             "overlay_source_study_signature",
         ),
     )
-    context_signature = _json_field_cache_signature(
-        context_path,
-        (
-            "session_id",
-            "window_query",
-            "locked_title",
-            "locked_window.hwnd",
-            "manual_focus_region.normalized_bbox",
-            "tracking_summary.detected_market",
-            "tracking_summary.detected_timeframe",
-            "tracking_summary.market_selector_visual_fingerprint",
-            "tracking_summary.market_selector_visual_changed",
-            "tracking_summary.market_selector_rebind_required",
-            "latest_signal.symbol",
-            "latest_signal.pair",
-            "latest_signal.market",
-            "latest_signal.market_selector_visual_fingerprint",
-            "latest_signal.market_selector_visual_changed",
-            "latest_signal.market_selector_rebind_required",
-            "latest_signal.timeframe",
-            "broker_source.lock_id",
-            "broker_source.status",
-            "broker_source_lock.lock_id",
-            "broker_source_lock.status",
-        ),
-    )
-    return f"display={display_signature}|context={context_signature}"
+    return f"display={display_signature}"
 
 
 def _mapping_to_plain_dict(value: object) -> dict[str, object]:
@@ -2900,6 +2873,7 @@ def create_app(
             )
         )
         if display_frame_id > 0:
+            projected["frame_id"] = display_frame_id
             projected["display_frame_id"] = display_frame_id
         for key in (
             "capture_count",
