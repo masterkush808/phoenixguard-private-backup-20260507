@@ -727,7 +727,20 @@ def main() -> int:
         frontend_max_age_ms = max(1000.0, float(args.frontend_heartbeat_max_age_ms))
         frontend_hidden = bool(frontend.get("document_hidden") is True)
         if frontend_heartbeat_age_ms > frontend_max_age_ms:
-            if frontend_alive and frontend_visible_count > 0 and backend_fresh_for_frontend:
+            if frontend_hidden and backend_fresh_for_frontend:
+                _append_jsonl(
+                    out_dir / "frontend_hidden_heartbeat.jsonl",
+                    {
+                        "at_epoch": loop_started,
+                        "at_utc": _utc_now(),
+                        "reason": "dashboard_hidden_backend_fresh",
+                        "allowed_packet_present": allowed,
+                        "source_lock": source_lock,
+                        "timing": timing,
+                        "frontend": frontend,
+                    },
+                )
+            elif frontend_alive and frontend_visible_count > 0 and backend_fresh_for_frontend:
                 frontend_latency_warning_count += 1
                 _append_jsonl(
                     out_dir / "frontend_latency_warnings.jsonl",
@@ -735,19 +748,6 @@ def main() -> int:
                         "at_epoch": loop_started,
                         "at_utc": _utc_now(),
                         "reason": f"frontend_heartbeat_age_gt_{frontend_max_age_ms:.0f}ms_but_visible_and_backend_fresh",
-                        "allowed_packet_present": allowed,
-                        "source_lock": source_lock,
-                        "timing": timing,
-                        "frontend": frontend,
-                    },
-                )
-            elif frontend_hidden and backend_fresh_for_frontend:
-                _append_jsonl(
-                    out_dir / "frontend_hidden_heartbeat.jsonl",
-                    {
-                        "at_epoch": loop_started,
-                        "at_utc": _utc_now(),
-                        "reason": "dashboard_hidden_backend_fresh",
                         "allowed_packet_present": allowed,
                         "source_lock": source_lock,
                         "timing": timing,
