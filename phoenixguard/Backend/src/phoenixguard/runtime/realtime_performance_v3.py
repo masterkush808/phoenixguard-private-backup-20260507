@@ -75,6 +75,27 @@ DEFAULT_SPEED_BUDGETS_MS: dict[str, float] = {
 T = TypeVar("T")
 
 
+def runtime_speed_budgets_ms() -> dict[str, float]:
+    budgets = dict(DEFAULT_SPEED_BUDGETS_MS)
+    capture_interval_sec = _float(os.getenv("PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC"), 0.0)
+    if capture_interval_sec >= 3.0:
+        cadence_ms = capture_interval_sec * 1000.0
+        budgets["live_visual_age_target"] = max(budgets["live_visual_age_target"], cadence_ms)
+        budgets["hard_stale"] = max(budgets["hard_stale"], cadence_ms)
+        budgets["hard_reject"] = max(budgets["hard_reject"], cadence_ms * 2.0)
+    for key, env_name in (
+        ("live_visual_age_target", "PHOENIXGUARD_LIVE_VISUAL_AGE_TARGET_MS"),
+        ("hard_stale", "PHOENIXGUARD_RUNTIME_HARD_STALE_MS"),
+        ("hard_reject", "PHOENIXGUARD_RUNTIME_HARD_REJECT_MS"),
+    ):
+        override = _float(os.getenv(env_name), 0.0)
+        if override > 0.0:
+            budgets[key] = override
+    if budgets["hard_reject"] < budgets["hard_stale"]:
+        budgets["hard_reject"] = budgets["hard_stale"] * 2.0
+    return budgets
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000.0)
 
@@ -909,12 +930,16 @@ def build_frame_timing_trace_v3(
         frontend_overlay_drawn_ms=heartbeat_render_ms,
         frames_dropped=_int(_mapping(model_health).get("dropped_frames") or tracking.get("frames_dropped") or signal.get("frames_dropped")),
         queue_depth=_int(_mapping(model_health).get("queue_depth")),
-        freshness_score=max(0.0, min(1.0, 1.0 - max(0.0, (now_ms - (capture_ms or published_ms)) / DEFAULT_SPEED_BUDGETS_MS["hard_reject"]))),
+        freshness_score=max(0.0, min(1.0, 1.0 - max(0.0, (now_ms - (capture_ms or published_ms)) / runtime_speed_budgets_ms()["hard_reject"]))),
     ).as_dict(now_ms=now_ms)
     overlay_rows = list(overlays or [])
     overlay_frame_state_version = _overlay_version(overlay_rows, overlay_frame_id or int(trace["frame_id"]))
     overlay_state_version = _overlay_lock_version(overlay_rows)
-    backpressure = RealtimeBackpressureControllerV3().evaluate(
+    speed_budgets = runtime_speed_budgets_ms()
+    backpressure = RealtimeBackpressureControllerV3(
+        stale_limit_ms=float(speed_budgets["hard_stale"]),
+        reject_limit_ms=float(speed_budgets["hard_reject"]),
+    ).evaluate(
         frame_age_ms=float(trace["frame_age_ms"]),
         overlay_age_ms=float(trace["overlay_age_ms"]),
         model_vote_age_ms=float(trace["model_vote_age_ms"]),
@@ -1035,7 +1060,7 @@ def build_performance_trace_v3(
         "adaptive_performance": controller,
         "display_quality_profiles": DISPLAY_QUALITY_PROFILES,
         "overlay_render_budget": OVERLAY_RENDER_BUDGETS,
-        "speed_budgets_ms": DEFAULT_SPEED_BUDGETS_MS,
+        "speed_budgets_ms": runtime_speed_budgets_ms(),
         "visual_health": {
             "status": "ALIVE" if _text(timing.get("stale_status"), "PASS") == "PASS" else _text(timing.get("stale_status")),
             "frame_age_ms": frame_age,
@@ -1083,6 +1108,7 @@ __all__ = [
     "build_frame_timing_trace_v3",
     "build_performance_trace_v3",
     "model_warm_states_from_health",
+    "runtime_speed_budgets_ms",
     "summarize_window",
     "write_json_report",
 ]

@@ -1,12 +1,15 @@
 from __future__ import annotations
 from typing import Any
 
+import pytest
+
 from phoenixguard.runtime.realtime_performance_v3 import (
     AsyncArtifactWriterV3,
     LatestFrameBufferV3,
     OVERLAY_RENDER_BUDGETS,
     build_frame_timing_trace_v3,
     build_performance_trace_v3,
+    runtime_speed_budgets_ms,
 )
 
 
@@ -181,6 +184,42 @@ def test_display_only_authority_lock_keeps_overlay_aligned_when_pixels_change() 
     assert trace["surface_signature_aligned"] is False
     assert trace["display_only_authority_locked"] is True
     assert trace["frame_gap_status"] == "AUTHORITY_LOCKED"
+
+
+def test_frame_timing_trace_uses_15_second_capture_cadence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC", "15")
+    session: dict[str, Any] = {
+        "session_id": "speed",
+        "frame_index": 42,
+        "display_frame_id": 42,
+        "overlay_frame_id": 42,
+        "display_published_epoch": 101.0,
+        "last_capture_started_epoch": 101.0,
+        "last_capture_epoch": 101.0,
+        "tracking_summary": {
+            "pipeline_timing": {
+                "capture_started_epoch": 101.0,
+                "published_epoch": 101.0,
+                "stages": [
+                    {"stage": "tracker_study", "elapsed_sec": 0.30, "duration_sec": 0.30},
+                    {"stage": "artifact_write", "elapsed_sec": 0.35, "duration_sec": 0.05},
+                ],
+            }
+        },
+    }
+
+    trace = build_frame_timing_trace_v3(session, overlays=[{"overlay_id": "o1"}], now_epoch=105.2)
+    budgets = runtime_speed_budgets_ms()
+
+    assert budgets["hard_stale"] >= 15_000
+    assert trace["frame_age_ms"] == 4200
+    assert trace["overlay_age_ms"] == 3850
+    assert trace["model_vote_age_ms"] == 3900
+    assert float(trace["frame_age_ms"]) < budgets["hard_stale"]
+    assert float(trace["overlay_age_ms"]) < budgets["hard_stale"]
+    assert float(trace["model_vote_age_ms"]) < budgets["hard_stale"]
+    assert trace["stale_status"] == "PASS"
+    assert trace["stale_flags"] == []
 
 
 def test_performance_trace_contains_model_warm_state_and_budgets() -> None:
