@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,18 @@ DIAGNOSTIC_ENDPOINTS = frozenset(
         "floating_state",
     }
 )
+
+
+@dataclass(frozen=True)
+class CaptureJob:
+    kind: str
+    started_epoch: float
+    command: list[str]
+    out_dir: Path
+    stdout_path: Path
+    stderr_path: Path
+    timeout_sec: float
+    process: subprocess.Popen[bytes]
 
 
 def _now_epoch() -> float:
@@ -440,6 +453,42 @@ def _bridge_execution_allowed(mt4_payload: Mapping[str, object]) -> tuple[bool, 
     }
 
 
+def _tail_text(path: Path, limit: int = 2000) -> str:
+    if not path.exists():
+        return ""
+    data = path.read_bytes()
+    return data[-max(1, int(limit)) :].decode("utf-8", errors="replace")
+
+
+def _dashboard_capture_command(base_url: str, session_id: str, out_dir: Path) -> list[str]:
+    return [
+        _python_executable(),
+        "Backend/tools/capture_dashboard_visual_v3.py",
+        "--base-url",
+        base_url,
+        "--session",
+        session_id,
+        "--out-dir",
+        str(out_dir),
+        "--soft",
+    ]
+
+
+def _overlay_modes_capture_command(base_url: str, session_id: str, out_dir: Path) -> list[str]:
+    return [
+        _python_executable(),
+        "Backend/tools/capture_overlay_mode_screenshots_v3.py",
+        "--base-url",
+        base_url,
+        "--session",
+        session_id,
+        "--modes",
+        "CLEAN_LIVE,SUPPLY_DEMAND,TRENDLINES",
+        "--out",
+        str(out_dir),
+    ]
+
+
 def _run_capture(command: list[str], out_dir: Path, log_path: Path, *, timeout_sec: float) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     started = _now_epoch()
@@ -478,35 +527,108 @@ def _run_capture(command: list[str], out_dir: Path, log_path: Path, *, timeout_s
     )
 
 
+def _start_capture_job(
+    kind: str,
+    command: list[str],
+    out_dir: Path,
+    log_path: Path,
+    *,
+    timeout_sec: float,
+) -> CaptureJob:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = out_dir / "_capture_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    started = _now_epoch()
+    stem = f"{kind}_{int(started * 1000)}"
+    stdout_path = log_dir / f"{stem}.stdout.txt"
+    stderr_path = log_dir / f"{stem}.stderr.txt"
+    with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+        process = subprocess.Popen(
+            command,
+            cwd=str(_repo_root()),
+            stdout=stdout_file,
+            stderr=stderr_file,
+        )
+    job = CaptureJob(
+        kind=kind,
+        started_epoch=started,
+        command=list(command),
+        out_dir=out_dir,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        timeout_sec=max(0.001, float(timeout_sec)),
+        process=process,
+    )
+    _append_jsonl(
+        log_path,
+        {
+            "at_epoch": started,
+            "at_utc": _utc_now(),
+            "event": "capture_started",
+            "kind": kind,
+            "command": command,
+            "pid": process.pid,
+            "timeout_sec": round(job.timeout_sec, 3),
+            "out_dir": str(out_dir),
+        },
+    )
+    return job
+
+
+def _poll_capture_jobs(jobs: Sequence[CaptureJob], log_path: Path) -> list[CaptureJob]:
+    active: list[CaptureJob] = []
+    now_epoch = _now_epoch()
+    for job in jobs:
+        returncode = job.process.poll()
+        timed_out = False
+        if returncode is None and now_epoch - job.started_epoch > job.timeout_sec:
+            timed_out = True
+            job.process.kill()
+            try:
+                returncode = job.process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                returncode = -1
+        if returncode is None:
+            active.append(job)
+            continue
+        _append_jsonl(
+            log_path,
+            {
+                "at_epoch": now_epoch,
+                "at_utc": _utc_now(),
+                "event": "capture_finished",
+                "kind": job.kind,
+                "command": job.command,
+                "pid": job.process.pid,
+                "returncode": int(returncode),
+                "timed_out": timed_out,
+                "timeout_sec": round(job.timeout_sec, 3),
+                "duration_sec": round(now_epoch - job.started_epoch, 3),
+                "stdout_tail": _tail_text(job.stdout_path),
+                "stderr_tail": _tail_text(job.stderr_path),
+                "out_dir": str(job.out_dir),
+            },
+        )
+    return active
+
+
+def start_capture_job_for_certification(
+    kind: str,
+    command: list[str],
+    out_dir: Path,
+    log_path: Path,
+    *,
+    timeout_sec: float,
+) -> CaptureJob:
+    return _start_capture_job(kind, command, out_dir, log_path, timeout_sec=timeout_sec)
+
+
+def poll_capture_jobs_for_certification(jobs: Sequence[CaptureJob], log_path: Path) -> list[CaptureJob]:
+    return _poll_capture_jobs(jobs, log_path)
+
+
 def _capture_dashboard(base_url: str, session_id: str, out_dir: Path, log_path: Path, *, timeout_sec: float) -> None:
-    command = [
-        _python_executable(),
-        "Backend/tools/capture_dashboard_visual_v3.py",
-        "--base-url",
-        base_url,
-        "--session",
-        session_id,
-        "--out-dir",
-        str(out_dir),
-        "--soft",
-    ]
-    _run_capture(command, out_dir, log_path, timeout_sec=timeout_sec)
-
-
-def _capture_overlay_modes(base_url: str, session_id: str, out_dir: Path, log_path: Path, *, timeout_sec: float) -> None:
-    command = [
-        _python_executable(),
-        "Backend/tools/capture_overlay_mode_screenshots_v3.py",
-        "--base-url",
-        base_url,
-        "--session",
-        session_id,
-        "--modes",
-        "CLEAN_LIVE,SUPPLY_DEMAND,TRENDLINES",
-        "--out",
-        str(out_dir),
-    ]
-    _run_capture(command, out_dir, log_path, timeout_sec=timeout_sec)
+    _run_capture(_dashboard_capture_command(base_url, session_id, out_dir), out_dir, log_path, timeout_sec=timeout_sec)
 
 
 def _write_progress_report(
@@ -659,6 +781,8 @@ def main() -> int:
     progression: dict[str, dict[str, Any]] = {}
     latest_summary: dict[str, object] = {}
     capture_log = out_dir / "screenshot_capture_log.jsonl"
+    periodic_capture_jobs: list[CaptureJob] = []
+    periodic_capture_queue: list[tuple[str, list[str], Path, float]] = []
 
     _write_json(
         out_dir / "run_metadata.json",
@@ -676,6 +800,18 @@ def main() -> int:
 
     while True:
         loop_started = _now_epoch()
+        periodic_capture_jobs = _poll_capture_jobs(periodic_capture_jobs, capture_log)
+        if not periodic_capture_jobs and periodic_capture_queue:
+            capture_kind, capture_command, capture_out_dir, capture_timeout_sec = periodic_capture_queue.pop(0)
+            periodic_capture_jobs = [
+                _start_capture_job(
+                    capture_kind,
+                    capture_command,
+                    capture_out_dir,
+                    capture_log,
+                    timeout_sec=capture_timeout_sec,
+                )
+            ]
         elapsed = loop_started - start
         if elapsed >= args.duration_sec:
             break
@@ -962,21 +1098,66 @@ def main() -> int:
 
         if not args.no_screenshots and loop_started >= next_screenshot:
             stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(loop_started))
-            _capture_dashboard(
-                args.base_url,
-                args.session_id,
-                screenshots_dir / f"periodic_{stamp}" / "dashboard",
-                capture_log,
-                timeout_sec=args.capture_timeout_sec,
-            )
-            _capture_overlay_modes(
-                args.base_url,
-                args.session_id,
-                screenshots_dir / f"periodic_{stamp}" / "overlay_modes",
-                capture_log,
-                timeout_sec=args.capture_timeout_sec,
-            )
+            periodic_dir = screenshots_dir / f"periodic_{stamp}"
+            periodic_timeout_sec = min(max(5.0, float(args.sample_sec) * 2.0), max(5.0, float(args.capture_timeout_sec)))
+            if periodic_capture_jobs or periodic_capture_queue:
+                _append_jsonl(
+                    capture_log,
+                    {
+                        "at_epoch": loop_started,
+                        "at_utc": _utc_now(),
+                        "event": "periodic_capture_skipped_active_job",
+                        "active_jobs": len(periodic_capture_jobs),
+                        "queued_jobs": len(periodic_capture_queue),
+                        "next_screenshot_sec": max(60.0, float(args.screenshot_sec)),
+                    },
+                )
+            else:
+                periodic_capture_queue.extend(
+                    [
+                        (
+                            "periodic_dashboard",
+                            _dashboard_capture_command(args.base_url, args.session_id, periodic_dir / "dashboard"),
+                            periodic_dir / "dashboard",
+                            periodic_timeout_sec,
+                        ),
+                        (
+                            "periodic_overlay_modes",
+                            _overlay_modes_capture_command(args.base_url, args.session_id, periodic_dir / "overlay_modes"),
+                            periodic_dir / "overlay_modes",
+                            periodic_timeout_sec,
+                        ),
+                    ]
+                )
+                _append_jsonl(
+                    capture_log,
+                    {
+                        "at_epoch": loop_started,
+                        "at_utc": _utc_now(),
+                        "event": "periodic_capture_queued",
+                        "jobs": [kind for kind, _command, _out_dir, _timeout in periodic_capture_queue],
+                        "timeout_sec": round(periodic_timeout_sec, 3),
+                        "out_dir": str(periodic_dir),
+                    },
+                )
+                capture_kind, capture_command, capture_out_dir, capture_timeout_sec = periodic_capture_queue.pop(0)
+                periodic_capture_jobs = [
+                    _start_capture_job(
+                        capture_kind,
+                        capture_command,
+                        capture_out_dir,
+                        capture_log,
+                        timeout_sec=capture_timeout_sec,
+                    )
+                ]
             next_screenshot = loop_started + max(60.0, float(args.screenshot_sec))
+
+        if periodic_capture_jobs or periodic_capture_queue:
+            latest_summary = {
+                **latest_summary,
+                "periodic_capture_active": len(periodic_capture_jobs),
+                "periodic_capture_queued": len(periodic_capture_queue),
+            }
 
         if loop_started >= next_update:
             _write_progress_report(
@@ -1019,6 +1200,8 @@ def main() -> int:
                 "mt4_bridge_missing_count": mt4_bridge_missing_count,
                 "mt4_bridge_error_count": mt4_bridge_error_count,
                 "allowed_package_count": len(allowed_seen),
+                "periodic_capture_active": len(periodic_capture_jobs),
+                "periodic_capture_queued": len(periodic_capture_queue),
                 "latest_summary": latest_summary,
             },
         )
@@ -1026,6 +1209,7 @@ def main() -> int:
         time.sleep(sleep_for)
 
     duration = _now_epoch() - start
+    periodic_capture_jobs = _poll_capture_jobs(periodic_capture_jobs, capture_log)
     verdict = "PASS_PRODUCTION_READY" if stale_accepted_as_live == 0 and source_lock_fail_count == 0 else "FAIL_SOURCE_LOCK"
     if verdict == "PASS_PRODUCTION_READY" and (
         mt4_bridge_missing_count > 0 or mt4_bridge_stale_count > 0 or mt4_bridge_error_count > 0
