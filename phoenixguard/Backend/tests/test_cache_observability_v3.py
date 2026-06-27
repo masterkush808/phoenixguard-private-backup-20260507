@@ -1022,6 +1022,7 @@ def test_compact_live_state_keeps_display_frame_when_overlay_identity_is_older(
     }
     (session_dir / "session.json").write_text(json.dumps(session_payload), encoding="utf-8")
     (session_dir / "display_state.json").write_text(json.dumps(session_payload), encoding="utf-8")
+    stale_epoch = now_epoch - 60.0
     cache_key = (
         "pocket-live-8788",
         "CLEAN_LIVE",
@@ -1033,6 +1034,9 @@ def test_compact_live_state_keeps_display_frame_when_overlay_identity_is_older(
         "display_frame_id": 1,
         "requested_mode": "CLEAN_LIVE",
         "active_mode": "CLEAN_LIVE",
+        "display_published_epoch": stale_epoch,
+        "last_capture_epoch": stale_epoch,
+        "tracking_summary": {"last_capture_epoch": stale_epoch},
         "overlays": {
             "objects": [
                 {
@@ -1073,7 +1077,81 @@ def test_compact_live_state_keeps_display_frame_when_overlay_identity_is_older(
     assert payload["frame_id"] == 50
     assert payload["display_frame_id"] == 50
     assert payload["frame_id"] != 1
+    assert abs(float(payload["last_capture_epoch"]) - now_epoch) < 0.25
     assert "all_objects" not in payload["overlays"]
+
+
+def test_compact_live_state_promotes_fresh_display_epoch_over_stale_session(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    _clear_mobile_live_state_caches()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    artifact_dir = session_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    stale_window = artifact_dir / "000001_window.png"
+    fresh_window = artifact_dir / "000002_window.png"
+    stale_window.write_bytes(b"window-1")
+    fresh_window.write_bytes(b"window-2")
+    now_epoch = time.time()
+    stale_epoch = now_epoch - 60.0
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "status": "running",
+                "tracking_enabled": True,
+                "capture_count": 1,
+                "frame_index": 1,
+                "display_frame_id": 1,
+                "overlay_frame_id": 1,
+                "model_vote_frame_id": 1,
+                "display_published_epoch": stale_epoch,
+                "last_capture_epoch": stale_epoch,
+                "last_window_path": str(stale_window),
+                "last_display_window_path": str(stale_window),
+                "last_display_surface_signature": "surface-a",
+                "overlay_source_window_signature": "surface-a",
+                "tracking_summary": {},
+                "latest_signal": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "display_state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "capture_count": 2,
+                "frame_index": 1,
+                "display_frame_id": 2,
+                "overlay_frame_id": 1,
+                "model_vote_frame_id": 1,
+                "display_capture_epoch": now_epoch,
+                "display_published_epoch": now_epoch,
+                "last_display_window_path": str(fresh_window),
+                "last_display_surface_signature": "surface-a",
+                "overlay_source_window_signature": "surface-a",
+                "display_snapshot_only_v3": True,
+                "status": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["frame_id"] == 2
+    assert payload["display_frame_id"] == 2
+    assert abs(float(payload["last_capture_epoch"]) - now_epoch) < 0.25
+    assert payload["last_window_path"] == str(fresh_window)
+    assert payload["frame_timing_trace_v3"]["frame_age_ms"] < 5000
 
 
 def test_compact_live_state_returns_studying_new_pair_when_surface_outruns_overlay_authority(

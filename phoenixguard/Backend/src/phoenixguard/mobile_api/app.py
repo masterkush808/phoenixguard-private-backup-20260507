@@ -730,6 +730,27 @@ def _merge_direct_window_tracker_display_state(
                 if key == "overlay_source_study_signature" and study_signature and value_text != study_signature:
                     continue
             payload[str(key)] = value
+    display_published = _epoch_float(
+        display_state.get("display_published_epoch") or display_state.get("last_display_published_epoch"),
+        0.0,
+    )
+    display_captured = _epoch_float(
+        display_state.get("display_capture_epoch") or display_state.get("last_display_capture_epoch"),
+        0.0,
+    )
+    display_window_path = str(
+        display_state.get("last_display_window_path")
+        or display_state.get("last_window_path")
+        or display_state.get("last_frame_path")
+        or ""
+    ).strip()
+    if display_published > 0.0:
+        payload["last_capture_epoch"] = display_published
+    if display_captured > 0.0:
+        payload["last_capture_started_epoch"] = display_captured
+    if display_window_path:
+        payload["last_window_path"] = display_window_path
+        payload["last_frame_path"] = display_window_path
     return payload
 
 
@@ -2944,6 +2965,28 @@ def create_app(
             value = display_snapshot.get(key)
             if value not in (None, "", [], {}):
                 projected[key] = value
+        display_published = _epoch_float(
+            display_snapshot.get("display_published_epoch")
+            or display_snapshot.get("last_display_published_epoch")
+            or display_snapshot.get("last_capture_epoch"),
+            0.0,
+        )
+        display_captured = _epoch_float(
+            display_snapshot.get("display_capture_epoch")
+            or display_snapshot.get("last_display_capture_epoch")
+            or display_snapshot.get("last_capture_started_epoch"),
+            0.0,
+        )
+        if display_published > 0.0:
+            projected["last_capture_epoch"] = display_published
+        if display_captured > 0.0:
+            projected["last_capture_started_epoch"] = display_captured
+        tracking_summary = projected.get("tracking_summary")
+        if isinstance(tracking_summary, Mapping):
+            tracking_payload = dict(cast(Mapping[str, object], tracking_summary))
+            if display_published > 0.0:
+                tracking_payload["last_capture_epoch"] = display_published
+            projected["tracking_summary"] = tracking_payload
         _apply_compact_overlay_identity(projected)
         provider = {
             **_mapping_to_plain_dict(projected.get("provider_status")),
@@ -2961,6 +3004,8 @@ def create_app(
                 "full_overlay_frame_id",
                 "model_vote_frame_id",
                 "state_version",
+                "last_capture_epoch",
+                "last_capture_started_epoch",
                 "provider_status",
             ):
                 if key in projected:
