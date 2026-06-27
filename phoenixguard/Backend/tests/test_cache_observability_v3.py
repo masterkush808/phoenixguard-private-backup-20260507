@@ -988,6 +988,94 @@ def test_compact_live_state_reuses_cached_response_for_display_heartbeat(
     assert payload["provider_status"]["compact_cache_previous_signature_reused_v3"] is True
 
 
+def test_compact_live_state_keeps_display_frame_when_overlay_identity_is_older(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    _clear_mobile_live_state_caches()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    artifact_dir = session_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    window = artifact_dir / "000050_window.png"
+    window.write_bytes(b"window")
+    now_epoch = time.time()
+    session_payload: dict[str, object] = {
+        "session_id": "pocket-live-8788",
+        "status": "running",
+        "tracking_enabled": True,
+        "capture_count": 50,
+        "frame_index": 50,
+        "display_frame_id": 50,
+        "overlay_frame_id": 1,
+        "model_vote_frame_id": 1,
+        "display_published_epoch": now_epoch,
+        "last_capture_epoch": now_epoch,
+        "last_window_path": str(window),
+        "last_display_window_path": str(window),
+        "last_display_surface_signature": "same",
+        "overlay_source_window_signature": "same",
+        "tracking_summary": {},
+        "latest_signal": {},
+    }
+    (session_dir / "session.json").write_text(json.dumps(session_payload), encoding="utf-8")
+    (session_dir / "display_state.json").write_text(json.dumps(session_payload), encoding="utf-8")
+    cache_key = (
+        "pocket-live-8788",
+        "CLEAN_LIVE",
+        _compact_live_state_response_cache_signature("pocket-live-8788"),
+    )
+    cached_payload: dict[str, object] = {
+        "session_id": "pocket-live-8788",
+        "frame_id": 1,
+        "display_frame_id": 1,
+        "requested_mode": "CLEAN_LIVE",
+        "active_mode": "CLEAN_LIVE",
+        "overlays": {
+            "objects": [
+                {
+                    "type": "DEMAND_ZONE",
+                    "label": "DEMAND",
+                    "bounds": [10, 20, 80, 60],
+                    "frame_id": 1,
+                    "chart_transform_id": "ct_pocket-live-8788_1",
+                    "broker_source_lock_id": "vp:fixture",
+                    "sequence_id": "seq_fixture",
+                }
+            ],
+            "all_objects": [
+                {
+                    "type": "DEMAND_ZONE",
+                    "label": "DEMAND",
+                    "bounds": [10, 20, 80, 60],
+                    "frame_id": 1,
+                    "chart_transform_id": "ct_pocket-live-8788_1",
+                    "broker_source_lock_id": "vp:fixture",
+                    "sequence_id": "seq_fixture",
+                }
+            ],
+        },
+        "provider_status": {},
+    }
+    compact_cache = cast(
+        MutableMapping[tuple[str, str, str], tuple[float, dict[str, object]]],
+        getattr(mobile_app, "_COMPACT_LIVE_STATE_RESPONSE_CACHE"),
+    )
+    compact_cache[cache_key] = (time.time(), cached_payload)
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["frame_id"] == 50
+    assert payload["display_frame_id"] == 50
+    assert payload["frame_id"] != 1
+    assert "all_objects" not in payload["overlays"]
+
+
 def test_compact_live_state_returns_studying_new_pair_when_surface_outruns_overlay_authority(
     monkeypatch: Any,
     tmp_path: Path,

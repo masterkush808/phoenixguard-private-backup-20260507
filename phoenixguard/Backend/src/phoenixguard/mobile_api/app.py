@@ -2862,7 +2862,6 @@ def create_app(
                 continue
             identity: dict[str, object] = {}
             if frame_id > 0:
-                identity["frame_id"] = frame_id
                 identity["overlay_object_frame_id"] = frame_id
             if chart_transform_id:
                 identity["chart_transform_id"] = chart_transform_id
