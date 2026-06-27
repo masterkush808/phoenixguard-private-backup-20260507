@@ -37,9 +37,9 @@ Saved on 2026-05-08 after restoring the verified private backup and hardening th
 Launch:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
+$python = ".\.venv\Scripts\python.exe"
 .\Backend\launch\start_live_dashboard.ps1 -ForceRestart
-.\.venv\Scripts\python.exe Backend\launch\shooter.py signal `
+& $python Backend\launch\shooter.py signal `
   --session-id pocket-live-8788 `
   --base-url http://127.0.0.1:8793 `
   --poll 0.05 `

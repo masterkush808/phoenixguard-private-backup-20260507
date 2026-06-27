@@ -1,5 +1,9 @@
 from pathlib import Path
 
+import pytest
+
+from phoenixguard.runtime.python_environment_v3 import build_python_environment_status
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -50,6 +54,28 @@ def test_python_resolver_points_process_python_to_repo_venv() -> None:
     assert "$venvPython = Join-Path -Path $venvPath -ChildPath 'Scripts\\python.exe'" in text
     assert "$processPython = Join-Path -Path $scriptsPath -ChildPath 'phoenixguard-python.exe'" in text
     assert "$env:PHOENIXGUARD_PYTHON_PROCESS_EXE = $processPython" in text
+
+
+def test_bootstrap_process_host_does_not_follow_pyvenv_base_python() -> None:
+    bootstrap_text = _read("_pg_bootstrap.py")
+    sitecustomize_text = _read("sitecustomize.py")
+    assert '"phoenixguard-python.exe"' in bootstrap_text
+    assert '"phoenixguard-python.exe"' in sitecustomize_text
+    assert "pyvenv.cfg" not in bootstrap_text
+    assert "multiprocessing.set_executable(process_text)" in bootstrap_text
+    assert "multiprocessing.set_executable(process_text)" in sitecustomize_text
+
+
+def test_runtime_environment_rejects_wrong_process_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    wrong_process_host = tmp_path / "Python311" / "python.exe"
+    wrong_process_host.parent.mkdir(parents=True)
+    wrong_process_host.write_text("", encoding="utf-8")
+    monkeypatch.setenv("PHOENIXGUARD_PYTHON_PROCESS_EXE", str(wrong_process_host))
+
+    status = build_python_environment_status(ROOT)
+
+    assert status["ok"] is False
+    assert "PHOENIXGUARD_PYTHON_PROCESS_EXE is not repo .venv process host" in status["reason"]
 
 
 def test_certification_visual_tools_use_repo_process_host_for_child_python() -> None:

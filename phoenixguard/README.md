@@ -261,11 +261,11 @@ Get-CimInstance Win32_Process |
 
 Start-Sleep -Seconds 3
 
-# Activate the local environment.
-.\.venv\Scripts\Activate.ps1
+# Use the repo environment directly. Do not activate a nested shell.
+$python = ".\.venv\Scripts\python.exe"
 
 # Clear V3 runtime/cache state before a cold launch.
-.\.venv\Scripts\python.exe .\Backend\tools\clean_v3_runtime_state.py --apply
+& $python .\Backend\tools\clean_v3_runtime_state.py --apply
 if ($LASTEXITCODE -ne 0) {
     throw "Runtime cleanup failed. Launch aborted."
 }

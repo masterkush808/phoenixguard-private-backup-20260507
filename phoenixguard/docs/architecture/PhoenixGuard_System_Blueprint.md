@@ -225,7 +225,7 @@ Safe developer startup begins at the repository root:
 ```powershell
 Set-Location "C:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard"
 Set-ExecutionPolicy -Scope Process Bypass -Force
-.\.venv\Scripts\Activate.ps1
+$python = ".\.venv\Scripts\python.exe"
 ```
 
 The safe restart sequence first requests tracker stop/emergency-stop through the API if it is alive,

@@ -73,21 +73,25 @@ def build_python_environment_status(project_root: Path | None = None) -> PythonE
     root = project_root or project_root_from_runtime_module()
     expected_venv = expected_repo_venv(root)
     expected_python = expected_repo_venv_python(root)
+    expected_process_python = repo_venv_process_executable(root)
     prefix_ok = _same_path(sys.prefix, expected_venv)
     virtual_env = os.getenv("VIRTUAL_ENV", "")
     env_python = os.getenv("PHOENIXGUARD_PYTHON_EXE", "")
     process_python = os.getenv("PHOENIXGUARD_PYTHON_PROCESS_EXE", "")
     virtual_env_ok = not virtual_env or _same_path(virtual_env, expected_venv)
     env_python_ok = not env_python or _same_path(env_python, expected_python)
-    ok = bool(prefix_ok and virtual_env_ok and env_python_ok)
+    process_python_ok = not process_python or _same_path(process_python, expected_process_python)
+    ok = bool(prefix_ok and virtual_env_ok and env_python_ok and process_python_ok)
     if ok:
         reason = "repo .venv runtime active"
     elif not prefix_ok:
         reason = f"sys.prefix is not repo .venv: {sys.prefix}"
     elif not virtual_env_ok:
         reason = f"VIRTUAL_ENV is not repo .venv: {virtual_env}"
-    else:
+    elif not env_python_ok:
         reason = f"PHOENIXGUARD_PYTHON_EXE is not repo .venv python: {env_python}"
+    else:
+        reason = f"PHOENIXGUARD_PYTHON_PROCESS_EXE is not repo .venv process host: {process_python}"
     return {
         "schema_version": "PG_PYTHON_ENVIRONMENT_V3",
         "ok": ok,
@@ -95,7 +99,7 @@ def build_python_environment_status(project_root: Path | None = None) -> PythonE
         "project_root": str(root),
         "expected_venv": str(expected_venv),
         "expected_venv_python": str(expected_python),
-        "process_executable": str(repo_venv_process_executable(root)),
+        "process_executable": str(expected_process_python),
         "sys_executable": sys.executable,
         "sys_prefix": sys.prefix,
         "sys_base_prefix": sys.base_prefix,

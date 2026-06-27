@@ -53,10 +53,10 @@ Coverage from this safe subset:
 
 ## Recommended QA Commands
 
-Activate the repo environment first:
+Use the repo environment directly:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
+$python = ".\.venv\Scripts\python.exe"
 ```
 
 Safe frontend/dashboard regression command:
