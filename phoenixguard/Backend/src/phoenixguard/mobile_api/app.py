@@ -3718,6 +3718,8 @@ def create_app(
             "session_id": requested_session_id,
             "frame_id": int(_epoch_float(session.get("display_frame_id") or session.get("frame_index") or session.get("capture_count") or 0, 0.0)),
             "state_version": int(_epoch_float(session.get("state_version") or 0, 0.0)),
+            "capture_interval_sec": session.get("capture_interval_sec"),
+            "effective_capture_interval_sec": session.get("effective_capture_interval_sec"),
             "tracking_summary": _mapping_to_plain_dict(session.get("tracking_summary")),
             "latest_signal": _mapping_to_plain_dict(session.get("latest_signal")),
             "model_health": model_health,
