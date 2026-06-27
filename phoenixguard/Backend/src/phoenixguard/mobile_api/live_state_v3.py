@@ -2293,6 +2293,11 @@ def build_live_state_v3(
         "unknown_or_unmapped_terms": [],
         "vocabulary": {},
         "objects": overlays,
+        "all_objects": [
+            _dashboard_overlay_object(overlay, compact=True)
+            for overlay in precision_overlays
+            if not bool(overlay.get("precision_rejected", False))
+        ],
     }
     sequence_context = registry.sequence_context.as_dict()
     visual_health = build_visual_health_v3(

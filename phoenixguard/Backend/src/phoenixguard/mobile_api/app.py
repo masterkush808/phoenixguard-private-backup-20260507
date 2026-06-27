@@ -45,8 +45,15 @@ from phoenixguard.vision.market_registry import (
     load_recent_market_objects,
     query_recent_active_objects,
 )
+from phoenixguard.vision.overlay_layer_manager_v3 import OverlayLayerManagerV3
 from phoenixguard.vision.renderer import render_overlays_on_chart
-from phoenixguard.vision.v3_overlay_contract import REQUIRED_FIELDS, normalize_v3_overlay_object, normalize_view_mode
+from phoenixguard.vision.v3_overlay_contract import (
+    REQUIRED_FIELDS,
+    normalize_v3_overlay_object,
+    normalize_view_mode,
+    overlay_is_visible,
+    view_mode_profile,
+)
 
 from .live_state_v3 import (
     build_live_state_v3,
@@ -597,6 +604,12 @@ def _compact_live_state_response_cache_signature(session_id: str) -> str:
         display_path,
         (
             "session_id",
+            "last_display_window_path",
+            "last_window_path",
+            "last_frame_path",
+            "last_chart_path",
+            "last_overlay_path",
+            "last_full_overlay_path",
             "last_display_surface_signature",
             "last_window_surface_signature",
             "last_study_surface_signature",
@@ -2251,6 +2264,7 @@ def create_app(
         def compact_overlays_payload(value: object) -> dict[str, object]:
             overlays = _mapping_to_plain_dict(value)
             objects = compact_overlay_objects(overlays.get("objects"))
+            all_objects = compact_overlay_objects(overlays.get("all_objects"))
             output = compact_mapping(
                 overlays,
                 {
@@ -2273,6 +2287,8 @@ def create_app(
                 output["objects"] = objects
             else:
                 output["objects"] = []
+            if all_objects:
+                output["all_objects"] = all_objects
             return output
 
         def compact_render_geometry_payload(value: object) -> dict[str, object]:
@@ -2649,6 +2665,238 @@ def create_app(
             refreshed["live_visual_state"] = live_visual
         return refreshed
 
+    def _compact_mode_visible_layers(mode: str) -> list[str]:
+        profile = view_mode_profile(mode)
+        layer_visibility = _mapping_to_plain_dict(profile.get("layer_visibility"))
+        ordered_layers = OverlayLayerManagerV3(mode).layer_order()
+        return [layer for layer in ordered_layers if bool(layer_visibility.get(layer, False))]
+
+    def _compact_overlay_pool_from_payload(payload: Mapping[str, object]) -> list[Mapping[str, object]]:
+        overlays = _mapping_to_plain_dict(payload.get("overlays"))
+        candidates = overlays.get("all_objects")
+        if not isinstance(candidates, list):
+            candidates = overlays.get("objects")
+        if not isinstance(candidates, list):
+            live_visual = _mapping_to_plain_dict(payload.get("live_visual_state"))
+            live_overlays = _mapping_to_plain_dict(live_visual.get("overlays"))
+            candidates = live_overlays.get("all_objects")
+            if not isinstance(candidates, list):
+                candidates = live_overlays.get("objects")
+        rows: list[Mapping[str, object]] = []
+        if not isinstance(candidates, list):
+            return rows
+        for item in cast(Sequence[object], candidates):
+            if isinstance(item, Mapping):
+                rows.append(cast(Mapping[str, object], item))
+        return rows
+
+    def _project_compact_live_state_response(
+        payload: Mapping[str, object],
+        requested_mode: str,
+        *,
+        now_epoch: float,
+    ) -> dict[str, object] | None:
+        source_objects = _compact_overlay_pool_from_payload(payload)
+        if not source_objects:
+            return None
+        active_mode = normalize_view_mode(requested_mode)
+        now_ms = int(now_epoch * 1000.0)
+        visible_rows: list[dict[str, object]] = []
+        all_rows: list[dict[str, object]] = []
+        for source_object in source_objects:
+            if bool(source_object.get("precision_rejected", False)):
+                continue
+            try:
+                normalized = normalize_v3_overlay_object(source_object, strict=False)
+            except Exception:
+                continue
+            all_rows.append(normalized)
+            if active_mode == "CLEAN_LIVE" and normalized.get("visible_default") is False:
+                continue
+            created_at_ms = _epoch_float(normalized.get("created_at_ms"), 0.0)
+            effective_now_ms = now_ms if created_at_ms > 0.0 else None
+            try:
+                if not overlay_is_visible(normalized, active_mode, now_ms=effective_now_ms):
+                    continue
+            except Exception:
+                continue
+            visible_rows.append(normalized)
+        if not all_rows:
+            return None
+        layer_manager = OverlayLayerManagerV3(active_mode, now_ms=now_ms)
+        layer_payload = layer_manager.as_dict()
+        active_budget = int(_epoch_float(layer_payload.get("active_budget"), float(len(visible_rows))))
+        if active_budget > 0:
+            selected_rows = sorted(visible_rows, key=layer_manager.overlay_sort_key)[:active_budget]
+        else:
+            selected_rows = sorted(visible_rows, key=layer_manager.overlay_sort_key)
+        renderable_count = len(selected_rows)
+        total_count = len(all_rows)
+        rejected_count = int(_epoch_float(_mapping_to_plain_dict(payload.get("overlays")).get("rejected_count"), 0.0))
+        hidden_count = max(0, total_count - renderable_count - rejected_count)
+        reason_if_empty = "" if renderable_count > 0 else f"no renderable overlays for mode {active_mode}"
+        projected: dict[str, object] = dict(payload)
+        projected["requested_mode"] = requested_mode
+        projected["active_mode"] = active_mode
+        projected["visible_layers"] = _compact_mode_visible_layers(active_mode)
+        projected["overlay_count"] = total_count
+        projected["renderable_count"] = renderable_count
+        projected["hidden_count"] = hidden_count
+        projected["rejected_count"] = rejected_count
+        projected["reason_if_empty"] = reason_if_empty
+        overlay_mode_payload = {
+            **_mapping_to_plain_dict(projected.get("overlay_mode")),
+            "requested": requested_mode,
+            "active": active_mode,
+            "visible_layers": projected["visible_layers"],
+            "reason_if_empty": reason_if_empty,
+        }
+        projected["overlay_mode"] = overlay_mode_payload
+        projected_overlays = {
+            **_mapping_to_plain_dict(projected.get("overlays")),
+            "requested_mode": requested_mode,
+            "active_mode": active_mode,
+            "visible_layers": projected["visible_layers"],
+            "overlay_count": total_count,
+            "total_count": total_count,
+            "renderable_count": renderable_count,
+            "hidden_count": hidden_count,
+            "rejected_count": rejected_count,
+            "reason_if_empty": reason_if_empty,
+            "objects": selected_rows,
+            "all_objects": all_rows,
+            "source": "projected_compact_overlay_pool_v3",
+        }
+        projected["overlays"] = projected_overlays
+        provider = {
+            **_mapping_to_plain_dict(projected.get("provider_status")),
+            "compact_overlay_mode_projection_v3": True,
+            "compact_overlay_projection_epoch": now_epoch,
+            "compact_overlay_projection_source_count": total_count,
+        }
+        projected["provider_status"] = provider
+        live_visual_state = projected.get("live_visual_state")
+        if isinstance(live_visual_state, Mapping):
+            live_visual = dict(cast(Mapping[str, object], live_visual_state))
+            live_visual["requested_mode"] = requested_mode
+            live_visual["active_mode"] = active_mode
+            live_visual["visible_layers"] = projected["visible_layers"]
+            live_visual["overlay_count"] = total_count
+            live_visual["renderable_count"] = renderable_count
+            live_visual["hidden_count"] = hidden_count
+            live_visual["rejected_count"] = rejected_count
+            live_visual["reason_if_empty"] = reason_if_empty
+            live_visual["overlay_mode"] = overlay_mode_payload
+            live_visual["overlays"] = projected_overlays
+            live_visual["provider_status"] = provider
+            projected["live_visual_state"] = live_visual
+        return projected
+
+    def _apply_display_snapshot_to_projected_payload(
+        payload: Mapping[str, object],
+        display_snapshot: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        projected = dict(payload)
+        if display_snapshot is None:
+            return projected
+        display_frame_id = int(
+            _epoch_float(
+                display_snapshot.get("display_frame_id")
+                or display_snapshot.get("frame_index")
+                or display_snapshot.get("capture_count")
+                or projected.get("frame_id")
+                or 0,
+                0.0,
+            )
+        )
+        if display_frame_id > 0:
+            projected["frame_id"] = display_frame_id
+            projected["display_frame_id"] = display_frame_id
+        for key in (
+            "capture_count",
+            "frame_index",
+            "chart_frame_id",
+            "overlay_frame_id",
+            "full_overlay_frame_id",
+            "model_vote_frame_id",
+            "state_version",
+            "display_capture_epoch",
+            "display_published_epoch",
+            "last_display_window_path",
+            "last_window_path",
+            "last_frame_path",
+            "last_chart_path",
+            "last_overlay_path",
+            "last_full_overlay_path",
+            "last_display_surface_signature",
+            "last_window_surface_signature",
+            "last_study_surface_signature",
+            "overlay_source_window_signature",
+            "overlay_source_study_signature",
+        ):
+            value = display_snapshot.get(key)
+            if value not in (None, "", [], {}):
+                projected[key] = value
+        provider = {
+            **_mapping_to_plain_dict(projected.get("provider_status")),
+            "compact_overlay_projection_light_refresh_v3": True,
+        }
+        projected["provider_status"] = provider
+        live_visual_state = projected.get("live_visual_state")
+        if isinstance(live_visual_state, Mapping):
+            live_visual = dict(cast(Mapping[str, object], live_visual_state))
+            for key in (
+                "frame_id",
+                "display_frame_id",
+                "chart_frame_id",
+                "overlay_frame_id",
+                "full_overlay_frame_id",
+                "model_vote_frame_id",
+                "state_version",
+                "provider_status",
+            ):
+                if key in projected:
+                    live_visual[key] = projected[key]
+            projected["live_visual_state"] = live_visual
+        return projected
+
+    def _projected_compact_warm_start(
+        requested_session_id: str,
+        requested_mode: str,
+        cache_signature: str,
+        display_snapshot: Mapping[str, object] | None,
+        *,
+        now_epoch: float,
+    ) -> dict[str, object] | None:
+        active_mode = normalize_view_mode(requested_mode)
+        with _LIVE_STATE_V3_CACHE_LOCK:
+            cached_candidates = [
+                dict(cached_payload)
+                for key, (_cached_epoch, cached_payload) in _COMPACT_LIVE_STATE_RESPONSE_CACHE.items()
+                if key[0] == requested_session_id and key[2] == cache_signature
+            ]
+        for cached_payload in cached_candidates:
+            projected = _project_compact_live_state_response(cached_payload, active_mode, now_epoch=now_epoch)
+            if projected is not None:
+                return _apply_display_snapshot_to_projected_payload(projected, display_snapshot)
+        if display_snapshot is None:
+            return None
+        for source_mode in ("CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY"):
+            if source_mode == active_mode:
+                continue
+            persisted = _load_persisted_compact_overlay_response(
+                requested_session_id,
+                source_mode,
+                display_snapshot,
+                now_epoch=now_epoch,
+            )
+            if persisted is None:
+                continue
+            projected = _project_compact_live_state_response(persisted, active_mode, now_epoch=now_epoch)
+            if projected is not None:
+                return _apply_display_snapshot_to_projected_payload(projected, display_snapshot)
+        return None
+
     def _artifact_surface_signature_from_path(value: object) -> str:
         text = str(value or "").strip()
         if not text:
@@ -3011,10 +3259,18 @@ def create_app(
                         cached_payload = cached[1]
                         cache_can_reuse = _compact_live_state_cache_can_reuse(cached_payload, cached_age)
                         if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC:
-                            compact_cached = dict(cached[1])
+                            display_snapshot = _direct_window_tracker_display_snapshot(
+                                requested_session_id,
+                                require_overlay_model=False,
+                            )
+                            compact_cached = _apply_display_snapshot_to_projected_payload(
+                                dict(cached[1]),
+                                display_snapshot,
+                            )
                             provider: dict[str, object] = {
                                 **_mapping_to_plain_dict(compact_cached.get("provider_status")),
                                 "compact_cache_hot_reused_v3": True,
+                                "compact_cache_previous_signature_reused_v3": True,
                                 "compact_cache_hot_age_ms": round(max(0.0, cached_age) * 1000.0, 3),
                             }
                             compact_cached["provider_status"] = provider
@@ -3041,10 +3297,18 @@ def create_app(
                             cached_payload = cached[1]
                             cache_can_reuse = _compact_live_state_cache_can_reuse(cached_payload, cached_age)
                             if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC:
-                                compact_cached = dict(cached[1])
+                                display_snapshot = _direct_window_tracker_display_snapshot(
+                                    requested_session_id,
+                                    require_overlay_model=False,
+                                )
+                                compact_cached = _apply_display_snapshot_to_projected_payload(
+                                    dict(cached[1]),
+                                    display_snapshot,
+                                )
                                 provider = {
                                     **_mapping_to_plain_dict(compact_cached.get("provider_status")),
                                     "compact_cache_hot_reused_v3": True,
+                                    "compact_cache_previous_signature_reused_v3": True,
                                     "compact_cache_hot_age_ms": round(max(0.0, cached_age) * 1000.0, 3),
                                     "compact_cache_singleflight_waited_v3": True,
                                 }
@@ -3065,7 +3329,9 @@ def create_app(
                     requested_session_id,
                     require_overlay_model=False,
                 )
+                display_snapshot_mapping: Mapping[str, object] | None = None
                 if display_snapshot is not None:
+                    display_snapshot_mapping = display_snapshot
                     surface_mismatch_reason = _display_overlay_authority_mismatch_reason(
                         requested_session_id,
                         display_snapshot,
@@ -3093,6 +3359,18 @@ def create_app(
                         with _LIVE_STATE_V3_CACHE_LOCK:
                             _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(warm_start))
                         return warm_start
+                projected_warm_start = _projected_compact_warm_start(
+                    requested_session_id,
+                    active_mode,
+                    cache_signature,
+                    display_snapshot_mapping,
+                    now_epoch=now_epoch,
+                )
+                if projected_warm_start is not None:
+                    with _LIVE_STATE_V3_CACHE_LOCK:
+                        _COMPACT_LIVE_STATE_RESPONSE_CACHE[cache_key] = (time.time(), dict(projected_warm_start))
+                    _persist_compact_overlay_response(requested_session_id, active_mode, projected_warm_start)
+                    return projected_warm_start
                 live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=True)
                 compact_response = compact_live_state_response(live_state)
                 if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:

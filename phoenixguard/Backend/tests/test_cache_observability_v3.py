@@ -1189,22 +1189,22 @@ def test_performance_trace_v3_uses_direct_display_state_fast_path(
         ),
         encoding="utf-8",
     )
-    (session_dir / "display_state.json").write_text(
-        json.dumps(
-            {
-                "session_id": "pocket-live-8788",
-                "display_frame_id": 2,
-                "display_capture_epoch": now_epoch,
-                "display_published_epoch": now_epoch,
-                "last_display_window_path": str(window),
-                "last_display_surface_signature": "display",
-                "last_window_surface_signature": "display",
-                "overlay_source_window_signature": "old-surface",
-            }
-        ),
-        encoding="utf-8",
-    )
+    display_state: dict[str, object] = {
+        "session_id": "pocket-live-8788",
+        "display_frame_id": 2,
+        "display_capture_epoch": now_epoch,
+        "display_published_epoch": now_epoch,
+        "last_display_window_path": str(window),
+        "last_display_surface_signature": "display",
+        "last_window_surface_signature": "display",
+        "overlay_source_window_signature": "old-surface",
+    }
+    (session_dir / "display_state.json").write_text(json.dumps(display_state), encoding="utf-8")
     client = TestClient(create_app())
+    fresh_display_epoch = time.time()
+    display_state["display_capture_epoch"] = fresh_display_epoch
+    display_state["display_published_epoch"] = fresh_display_epoch
+    (session_dir / "display_state.json").write_text(json.dumps(display_state), encoding="utf-8")
 
     response = client.get("/v1/mobile/performance/trace/v3/pocket-live-8788")
 
