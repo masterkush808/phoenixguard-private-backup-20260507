@@ -99,7 +99,7 @@ $env:PHOENIXGUARD_BURN_CAPTURE_BLOCKED_ENTER_NOW = "1"
 
 . (Join-Path -Path $Root -ChildPath "Backend\launch\Resolve-PhoenixGuardPython.ps1")
 $pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $Root
-$python = [string]$pythonRuntime.ProcessPython
+$python = [string]$pythonRuntime.VenvPython
 $powershell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
 
 Add-JsonLine -Path $eventLog -Payload ([ordered]@{

@@ -331,6 +331,77 @@ def test_build_frontend_sync_status_allows_15_second_cadence_frame_skew_when_ove
     assert status["backend"]["frame_skew_tolerated"] is True
 
 
+def test_latest_frontend_heartbeat_uses_fresh_active_dashboard_when_live_is_stale(tmp_path: Path) -> None:
+    now_ms = int(time.time() * 1000.0)
+    record_frontend_heartbeat(
+        {
+            "session_id": "s1",
+            "surface_id": "dashboard",
+            "route": "live",
+            "overlay_mode": "CLEAN_LIVE",
+            "frame_id": 100,
+            "visible_overlay_count": 11,
+            "full_broker_surface_visible": True,
+        },
+        store_dir=tmp_path,
+        now_ms=now_ms - 60_000,
+    )
+    replay = record_frontend_heartbeat(
+        {
+            "session_id": "s1",
+            "surface_id": "dashboard",
+            "route": "replay",
+            "overlay_mode": "REPLAY",
+            "frame_id": 160,
+            "visible_overlay_count": 38,
+            "full_broker_surface_visible": True,
+        },
+        store_dir=tmp_path,
+        now_ms=now_ms,
+    )
+
+    selected = latest_frontend_heartbeat("s1", store_dir=tmp_path)
+
+    assert selected is not None
+    assert selected["path"] == replay["path"]
+    assert selected["overlay_mode"] == "REPLAY"
+
+
+def test_build_frontend_sync_status_accepts_fresh_non_live_dashboard_surface(tmp_path: Path) -> None:
+    heartbeat = record_frontend_heartbeat(
+        {
+            "session_id": "s1",
+            "surface_id": "dashboard",
+            "route": "replay",
+            "overlay_mode": "REPLAY",
+            "frame_id": 160,
+            "rendered_frame_id": 160,
+            "overlay_count": 38,
+            "visible_overlay_count": 38,
+            "viewport": {"width": 800, "height": 600},
+            "render_size": {"width": 1200, "height": 720},
+            "full_broker_surface_visible": True,
+        },
+        store_dir=tmp_path,
+        now_ms=70_000,
+    )
+    status = build_frontend_sync_status(
+        "s1",
+        backend_state={
+            "session_id": "s1",
+            "frame_id": 220,
+            "overlay_objects": [{} for _ in range(11)],
+            "overlay_state_version": "ovlock_11_live",
+        },
+        heartbeat=heartbeat,
+        now_ms=71_000,
+    )
+
+    assert status["status"] == "PASS"
+    assert status["mismatches"] == []
+    assert status["backend"]["heartbeat_live_dashboard"] is False
+
+
 def test_visual_realtime_health_passes_when_artifacts_and_sync_match(tmp_path: Path) -> None:
     heartbeat = record_frontend_heartbeat(
         {

@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 . (Join-Path -Path $RepoRoot -ChildPath "Backend\launch\Resolve-PhoenixGuardPython.ps1")
 $PythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $RepoRoot
-$Python = [string]$PythonRuntime.ProcessPython
+$Python = [string]$PythonRuntime.VenvPython
 
 $ArgsList = @(
     (Join-Path $RepoRoot "Backend\tools\enter_now_floating_gui.py"),

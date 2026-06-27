@@ -27,7 +27,6 @@ $env:PHOENIXGUARD_PROJECT_ROOT = $ProjectRoot
 . (Join-Path -Path $PSScriptRoot -ChildPath 'Resolve-PhoenixGuardPython.ps1')
 $pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
 $pythonPath = [string]$pythonRuntime.VenvPython
-$pythonProcessPath = [string]$pythonRuntime.ProcessPython
 
 $baseUrl = 'http://127.0.0.1:8793'
 $dashboardUrl = "$baseUrl/dashboard/live/$SessionId"
@@ -222,7 +221,7 @@ function Start-LiveReadyShooter {
         '--heartbeat',
         '4.0'
     )
-    Start-Process -FilePath $pythonProcessPath -ArgumentList $args -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $outPath -RedirectStandardError $errPath | Out-Null
+    Start-Process -FilePath $pythonPath -ArgumentList $args -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $outPath -RedirectStandardError $errPath | Out-Null
     Write-Host "Shooter package reporter log: $errPath"
 }
 
@@ -353,7 +352,7 @@ Write-Host "  stopped_processes=$($targetProcessIds.Count)"
 Write-Host ""
 Write-Host "Preflight: runtime cleanup"
 if (Test-Path ".\Backend\tools\clean_v3_runtime_state.py") {
-    & $pythonProcessPath ".\Backend\tools\clean_v3_runtime_state.py" --apply --delete
+    & $pythonPath ".\Backend\tools\clean_v3_runtime_state.py" --apply --delete
     if ($LASTEXITCODE -ne 0) {
         throw "Runtime cleanup failed. Launch aborted."
     }
@@ -363,7 +362,7 @@ if (Test-Path ".\Backend\tools\clean_v3_runtime_state.py") {
 
 Write-Host ""
 Write-Host "Preflight: V3 integrity"
-& $pythonProcessPath 'Backend\tools\verify_v3_integrity.py'
+& $pythonPath 'Backend\tools\verify_v3_integrity.py'
 if ($LASTEXITCODE -ne 0) {
     throw "V3 integrity preflight failed."
 }
@@ -416,7 +415,7 @@ if ($readySnapshot.ready) {
 
 Write-Host ""
 Write-Host "Runtime trace after warmup"
-& $pythonProcessPath 'Backend\tools\runtime_trace_v3.py' --base-url $baseUrl --session $SessionId --timeout 20
+& $pythonPath 'Backend\tools\runtime_trace_v3.py' --base-url $baseUrl --session $SessionId --timeout 20
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "Runtime trace reported a non-executable live state after launch. The tracker remains running; shooter arming still requires fresh frame readiness."
 }
@@ -443,7 +442,7 @@ if (-not $DisableShooter) {
 
     Write-Host ""
     Write-Host "Shooter arming gate: broker source lock"
-    & $pythonProcessPath 'Backend\tools\certify_broker_source_lock_v3.py' --base-url $baseUrl --session $SessionId
+    & $pythonPath 'Backend\tools\certify_broker_source_lock_v3.py' --base-url $baseUrl --session $SessionId
     if ($LASTEXITCODE -ne 0) {
         throw "Shooter arming refused: broker source lock gate failed. Tracker remains running without shooter."
     }

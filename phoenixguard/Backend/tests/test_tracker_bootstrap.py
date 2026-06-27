@@ -387,7 +387,7 @@ def test_resolve_python_launcher_prefers_repo_venv_when_env_missing(tmp_path: Pa
     assert Path(pyvenv_launcher).resolve() == venv_python.resolve()
 
 
-def test_resolve_python_launcher_prefers_repo_venv_process_host(tmp_path: Path) -> None:
+def test_resolve_python_launcher_ignores_process_host_when_present(tmp_path: Path) -> None:
     venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
     process_host = tmp_path / ".venv" / "Scripts" / "phoenixguard-python.exe"
     venv_python.parent.mkdir(parents=True)
@@ -399,7 +399,7 @@ def test_resolve_python_launcher_prefers_repo_venv_process_host(tmp_path: Path) 
         tmp_path,
     )
 
-    assert Path(python_exe).resolve() == process_host.resolve()
+    assert Path(python_exe).resolve() == venv_python.resolve()
     assert Path(pyvenv_launcher).resolve() == venv_python.resolve()
 
 

@@ -3229,6 +3229,7 @@
       mode: "overlay",
       refreshTimer: null,
       heartbeatTimer: null,
+      heartbeatWorker: null,
       stream: null,
       streamConnected: false,
       telemetryCache: null,
@@ -3297,6 +3298,7 @@
     const DASHBOARD_REFRESH_HIDDEN_INTERVAL_MS = 30000;
     const DASHBOARD_REFRESH_SLOW_RESPONSE_MS = 1200;
     const DASHBOARD_HEARTBEAT_INTERVAL_MS = 15000;
+    const DASHBOARD_BACKGROUND_PULSE_INTERVAL_MS = 15000;
     const DASHBOARD_BASE_REFRESH_INTERVAL_MS = 60000;
     const STREAM_LIVE_STATE_HYDRATION_MS = 60000;
 
@@ -8109,9 +8111,20 @@
       window.fetch("/v1/mobile/frontend/heartbeat/v3", {
         method: "POST",
         cache: "no-store",
+        keepalive: true,
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(payload),
       }).catch(() => {});
+    }
+
+    function pulseFrontendHeartbeat() {
+      if (!state.session) {
+        return;
+      }
+      publishFrontendHeartbeat(state.session, {
+        visibleOverlayCount: els.hotspotLayer.querySelectorAll(".surface-hotspot").length,
+        overlayDrawMs: state.surface.lastOverlayRenderMs,
+      });
     }
 
     function renderHotspots() {
@@ -8808,6 +8821,42 @@
       }, Math.max(250, Number(delayMs || DASHBOARD_REFRESH_FAST_INTERVAL_MS)));
     }
 
+    function startDashboardBackgroundPulse() {
+      if (!window.Worker || state.heartbeatWorker) {
+        return;
+      }
+      const source = `
+        let intervalMs = ${DASHBOARD_BACKGROUND_PULSE_INTERVAL_MS};
+        let timer = null;
+        function tick() { self.postMessage({type: "phoenixguard-background-pulse"}); }
+        function start(ms) {
+          intervalMs = Math.max(1000, Number(ms) || intervalMs);
+          if (timer) { clearInterval(timer); }
+          timer = setInterval(tick, intervalMs);
+          tick();
+        }
+        self.onmessage = (event) => {
+          const data = event.data || {};
+          if (data.type === "start") { start(data.intervalMs); }
+          if (data.type === "stop" && timer) { clearInterval(timer); timer = null; }
+        };
+      `;
+      try {
+        const blob = new Blob([source], {type: "text/javascript"});
+        const worker = new Worker(URL.createObjectURL(blob));
+        worker.onmessage = () => {
+          pulseFrontendHeartbeat();
+          if (document.hidden) {
+            scheduleDashboardRefresh(DASHBOARD_REFRESH_FAST_INTERVAL_MS);
+          }
+        };
+        worker.postMessage({type: "start", intervalMs: DASHBOARD_BACKGROUND_PULSE_INTERVAL_MS});
+        state.heartbeatWorker = worker;
+      } catch (_error) {
+        state.heartbeatWorker = null;
+      }
+    }
+
     async function postAction(path, body = null, method = "POST") {
       const memoryMeta = memoryActionMeta(path);
       state.busy = true;
@@ -9233,14 +9282,9 @@
     refreshSession();
     connectSessionStream();
     scheduleDashboardRefresh(DASHBOARD_REFRESH_FAST_INTERVAL_MS);
+    startDashboardBackgroundPulse();
     state.heartbeatTimer = window.setInterval(() => {
-      if (!state.session) {
-        return;
-      }
-      publishFrontendHeartbeat(state.session, {
-        visibleOverlayCount: els.hotspotLayer.querySelectorAll(".surface-hotspot").length,
-        overlayDrawMs: state.surface.lastOverlayRenderMs,
-      });
+      pulseFrontendHeartbeat();
     }, DASHBOARD_HEARTBEAT_INTERVAL_MS);
   </script>
 </body>

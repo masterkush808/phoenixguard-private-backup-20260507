@@ -18,7 +18,6 @@ $env:PHOENIXGUARD_PROJECT_ROOT = $ProjectRoot
 . (Join-Path -Path $PSScriptRoot -ChildPath 'Resolve-PhoenixGuardPython.ps1')
 $pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
 $PythonPath = [string]$pythonRuntime.VenvPython
-$PythonProcessPath = [string]$pythonRuntime.ProcessPython
 $runtimeDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
 $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
 $env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
@@ -27,11 +26,11 @@ $env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath '
 
 if ($Bootstrap) {
     Write-Host "Installing Python dependencies for the mobile API..."
-    & $PythonProcessPath -m pip install --upgrade pip
+    & $PythonPath -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to upgrade pip."
     }
-    & $PythonProcessPath -m pip install -r requirements.txt
+    & $PythonPath -m pip install -r requirements.txt
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to install dependencies from 'requirements.txt'."
     }
@@ -41,7 +40,7 @@ $env:PHOENIXGUARD_MOBILE_API_HOST = $Host
 $env:PHOENIXGUARD_MOBILE_API_PORT = "$Port"
 
 Write-Host "Launching PhoenixGuard Mobile API at http://$Host`:$Port"
-& $PythonProcessPath Backend\launch\start_phoenixguard_mobile_api.py
+& $PythonPath Backend\launch\start_phoenixguard_mobile_api.py
 if ($LASTEXITCODE -ne 0) {
     throw "PhoenixGuard Mobile API exited with code $LASTEXITCODE."
 }

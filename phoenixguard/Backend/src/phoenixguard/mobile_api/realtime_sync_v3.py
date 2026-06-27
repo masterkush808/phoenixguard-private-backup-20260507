@@ -345,14 +345,20 @@ def latest_frontend_heartbeat(
     heartbeats = [
         heartbeat
         for heartbeat in (_load_heartbeat_file(candidate) for candidate in candidates)
-        if heartbeat is not None and _is_live_dashboard_heartbeat(heartbeat)
+        if heartbeat is not None
     ]
     if not heartbeats:
         fallback = _cached_heartbeat(path)
         if fallback is not None:
             _remember_selected_heartbeat(session_id, surface_id, store_dir, fallback)
         return fallback
-    selected = max(heartbeats, key=_heartbeat_rank)
+    live_heartbeats = [heartbeat for heartbeat in heartbeats if _is_live_dashboard_heartbeat(heartbeat)]
+    fresh_live_heartbeats = [heartbeat for heartbeat in live_heartbeats if _heartbeat_age_sec(heartbeat) <= 45.0]
+    if fresh_live_heartbeats:
+        selected = max(fresh_live_heartbeats, key=_heartbeat_rank)
+    else:
+        fresh_heartbeats = [heartbeat for heartbeat in heartbeats if _heartbeat_age_sec(heartbeat) <= 45.0]
+        selected = max(fresh_heartbeats or live_heartbeats or heartbeats, key=_heartbeat_rank)
     _remember_selected_heartbeat(session_id, surface_id, store_dir, selected)
     return selected
 
@@ -431,9 +437,10 @@ def build_frontend_sync_status(
     backend_frame = _int(backend_state.get("frame_id"))
     heartbeat_frame = _int(heartbeat.get("frame_id"))
     rendered_frame = _int(heartbeat.get("rendered_frame_id"))
+    heartbeat_is_live_dashboard = _is_live_dashboard_heartbeat(heartbeat)
     backend_transform = _state_chart_transform_id(backend_state)
     heartbeat_transform = _text(heartbeat.get("chart_transform_id"))
-    if backend_transform and heartbeat_transform and backend_transform != heartbeat_transform:
+    if heartbeat_is_live_dashboard and backend_transform and heartbeat_transform and backend_transform != heartbeat_transform:
         mismatches.append(f"chart_transform_id mismatch backend={backend_transform} frontend={heartbeat_transform}")
     backend_overlay_count = _state_overlay_count(backend_state)
     heartbeat_overlay_count = _int(heartbeat.get("overlay_count", heartbeat.get("visible_overlay_count", 0)))
@@ -447,17 +454,17 @@ def build_frontend_sync_status(
     )
     frame_skew_tolerated = bool(overlay_count_matches and overlay_version_matches)
     frame_skew_tolerance = _frame_skew_tolerance()
-    if backend_frame and heartbeat_frame and backend_frame != heartbeat_frame:
+    if heartbeat_is_live_dashboard and backend_frame and heartbeat_frame and backend_frame != heartbeat_frame:
         frame_skew = abs(backend_frame - heartbeat_frame)
         if not frame_skew_tolerated or frame_skew > frame_skew_tolerance:
             mismatches.append(f"frame_id mismatch backend={backend_frame} frontend={heartbeat_frame}")
-    if backend_frame and rendered_frame and backend_frame != rendered_frame:
+    if heartbeat_is_live_dashboard and backend_frame and rendered_frame and backend_frame != rendered_frame:
         rendered_skew = abs(backend_frame - rendered_frame)
         if not frame_skew_tolerated or rendered_skew > frame_skew_tolerance:
             mismatches.append(f"rendered_frame_id mismatch backend={backend_frame} frontend={rendered_frame}")
-    if not overlay_count_matches:
+    if heartbeat_is_live_dashboard and not overlay_count_matches:
         mismatches.append(f"overlay_count mismatch backend={backend_overlay_count} frontend={heartbeat_overlay_count}")
-    if backend_overlay_version and heartbeat_overlay_version and backend_overlay_version != heartbeat_overlay_version:
+    if heartbeat_is_live_dashboard and backend_overlay_version and heartbeat_overlay_version and backend_overlay_version != heartbeat_overlay_version:
         mismatches.append(f"overlay_state_version mismatch backend={backend_overlay_version} frontend={heartbeat_overlay_version}")
     if age_sec > max_age_sec:
         mismatches.append(f"frontend heartbeat stale age_sec={age_sec:.1f}")
@@ -478,6 +485,7 @@ def build_frontend_sync_status(
             "overlay_state_version": backend_overlay_version,
             "frame_skew_tolerated": frame_skew_tolerated,
             "frame_skew_tolerance": frame_skew_tolerance,
+            "heartbeat_live_dashboard": heartbeat_is_live_dashboard,
         },
     }
 

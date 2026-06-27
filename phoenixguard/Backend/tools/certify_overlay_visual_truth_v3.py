@@ -21,12 +21,12 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def _python_executable() -> str:
-    process_exe = os.getenv("PHOENIXGUARD_PYTHON_PROCESS_EXE", "").strip()
-    if process_exe and Path(process_exe).exists():
-        return process_exe
-    repo_process_exe = ROOT / ".venv" / "Scripts" / "phoenixguard-python.exe"
-    if repo_process_exe.exists():
-        return str(repo_process_exe)
+    env_exe = os.getenv("PHOENIXGUARD_PYTHON_EXE", "").strip()
+    if env_exe and Path(env_exe).exists():
+        return env_exe
+    repo_python = ROOT / ".venv" / "Scripts" / "python.exe"
+    if repo_python.exists():
+        return str(repo_python)
     return sys.executable
 
 

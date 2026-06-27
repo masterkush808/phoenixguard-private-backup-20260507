@@ -9,9 +9,8 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 ```
 
 Do not activate nested shells for normal PhoenixGuard work. Invoke the repo interpreter directly
-through `.\.venv\Scripts\python.exe`; long-running children use
-`.\.venv\Scripts\phoenixguard-python.exe`, an internal process host inside the same `.venv` that
-avoids the Windows venv redirector child chain.
+through `.\.venv\Scripts\python.exe`; launchers, background workers, certification monitors, and
+tools all resolve to that same executable.
 
 ## Dependency Profiles
 
@@ -73,6 +72,7 @@ Runtime state is stored under the project runtime root:
 ```
 
 `.codex_runtime` is runtime state, locks, logs, screenshots, and certification evidence. It is not a
+Python environment and must not be treated as one.
 Python environment and must not be used as a dependency source.
 
 Do not run PhoenixGuard with bare `python`, and do not point live runtime state at

@@ -32,7 +32,6 @@ from phoenixguard.runtime.singleton_guard_v3 import PhoenixRuntimeSingletonGuard
 from phoenixguard.runtime.python_environment_v3 import (
     assert_repo_venv_runtime,
     expected_repo_venv_python,
-    repo_venv_process_executable,
 )
 
 
@@ -276,11 +275,11 @@ def _resolve_python_launcher(env: dict[str, str], script_dir: Path | None = None
     repo_python = _repo_venv_python(script_dir) if script_dir is not None else None
     requested_exe = env.get("PHOENIXGUARD_PYTHON_EXE") or (str(repo_python) if repo_python is not None else sys.executable)
     pyvenv_launcher = env.get("PHOENIXGUARD_PYVENV_LAUNCHER") or (str(repo_python) if repo_python is not None else requested_exe)
-    process_exe = env.get("PHOENIXGUARD_PYTHON_PROCESS_EXE") or requested_exe
+    process_exe = requested_exe
     if script_dir is not None and repo_python is not None:
         expected_python = expected_repo_venv_python(script_dir)
         if Path(str(requested_exe)).resolve() == expected_python.resolve():
-            process_exe = str(repo_venv_process_executable(script_dir))
+            process_exe = str(expected_python)
             pyvenv_launcher = str(expected_python)
     return process_exe, pyvenv_launcher
 
@@ -490,7 +489,6 @@ def _launch_mobile_api(
         env["PHOENIXGUARD_TRACING_DISABLED"] = "true"
     python_exe, pyvenv_launcher = _resolve_python_launcher(env, script_dir)
     env["PHOENIXGUARD_PYTHON_EXE"] = str(pyvenv_launcher)
-    env["PHOENIXGUARD_PYTHON_PROCESS_EXE"] = str(python_exe)
     env["PHOENIXGUARD_PYVENV_LAUNCHER"] = str(pyvenv_launcher)
     venv_dir = _python_venv_dir(str(pyvenv_launcher)) or _python_venv_dir(str(python_exe))
     if venv_dir is not None:
@@ -503,8 +501,6 @@ def _launch_mobile_api(
         env["PHOENIXGUARD_RUNTIME_LOCK_PATH"] = str(runtime_lock_path)
     if runtime_lock_token:
         env["PHOENIXGUARD_RUNTIME_LOCK_TOKEN"] = runtime_lock_token
-    if pyvenv_launcher and Path(str(python_exe)).resolve() != Path(str(pyvenv_launcher)).resolve():
-        env["__PYVENV_LAUNCHER__"] = pyvenv_launcher
     return cast(subprocess.Popen[str], subprocess.Popen(
         [python_exe, str(script_dir / "Backend" / "launch" / "start_phoenixguard_mobile_api.py")],
         cwd=str(script_dir),

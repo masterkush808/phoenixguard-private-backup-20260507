@@ -276,15 +276,14 @@ $env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC = [string]$CaptureIntervalSec
 . (Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\Resolve-PhoenixGuardPython.ps1')
 $pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
 $PythonPath = [string]$pythonRuntime.VenvPython
-$PythonProcessPath = [string]$pythonRuntime.ProcessPython
 
 if ($Bootstrap) {
     Write-MonitorLog 'Installing Python dependencies for VM monitor.'
-    & $PythonProcessPath -m pip install --upgrade pip
+    & $PythonPath -m pip install --upgrade pip
     if ($LASTEXITCODE -ne 0) {
         throw 'Failed to upgrade pip.'
     }
-    & $PythonProcessPath -m pip install -r $RequirementsPath
+    & $PythonPath -m pip install -r $RequirementsPath
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to install dependencies from '$RequirementsPath'."
     }
@@ -789,7 +788,7 @@ function Start-TrackerProcess {
     $outPath = Join-Path -Path $LogRoot -ChildPath "tracker-$stamp.out.log"
     $errPath = Join-Path -Path $LogRoot -ChildPath "tracker-$stamp.err.log"
     Write-MonitorLog "Starting tracker on $BaseUrl with session '$SessionId'."
-    return Start-Process -FilePath $PythonProcessPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $outPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
+    return Start-Process -FilePath $PythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $outPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
 }
 
 function Start-ShooterProcess {
@@ -810,7 +809,7 @@ function Start-ShooterProcess {
     $outPath = Join-Path -Path $LogRoot -ChildPath "shooter-$stamp.out.log"
     $errPath = Join-Path -Path $LogRoot -ChildPath "shooter-$stamp.err.log"
     Write-MonitorLog "Starting shooter against $BaseUrl with $ShooterPollSec second polling."
-    return Start-Process -FilePath $PythonProcessPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $outPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
+    return Start-Process -FilePath $PythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -RedirectStandardOutput $outPath -RedirectStandardError $errPath -WindowStyle Hidden -PassThru
 }
 
 try {

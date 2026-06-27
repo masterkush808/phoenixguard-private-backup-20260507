@@ -28,7 +28,6 @@ $env:PHOENIXGUARD_PROJECT_ROOT = $ProjectRoot
 . (Join-Path -Path $PSScriptRoot -ChildPath 'Resolve-PhoenixGuardPython.ps1')
 $pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
 $PythonPath = [string]$pythonRuntime.VenvPython
-$PythonProcessPath = [string]$pythonRuntime.ProcessPython
 $runtimeDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
 $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
 $env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
@@ -83,7 +82,7 @@ if ($NoWaitForLock) {
     $launcherArgs += '--no-wait-for-lock'
 }
 
-& $PythonProcessPath @launcherArgs
+& $PythonPath @launcherArgs
 if ($LASTEXITCODE -ne 0) {
     throw "PhoenixGuard 24/7 tracker exited with code $LASTEXITCODE."
 }

@@ -76,6 +76,16 @@ def _age_ms(primary: object, fallback: object, default: float = 0.0) -> float:
     return default
 
 
+def _epoch_age_ms(value: object, *, now_epoch: float | None = None, default: float = 0.0) -> float:
+    epoch = _float(value, 0.0)
+    if epoch <= 0.0:
+        return default
+    now = float(now_epoch if now_epoch is not None else _now_epoch())
+    if epoch > 10_000_000_000.0:
+        epoch = epoch / 1000.0
+    return max(0.0, (now - epoch) * 1000.0)
+
+
 def _int(value: object, default: int = 0) -> int:
     return int(_float(value, float(int(default))))
 
@@ -124,12 +134,12 @@ def _repo_root() -> Path:
 
 
 def _python_executable() -> str:
-    process_exe = os.getenv("PHOENIXGUARD_PYTHON_PROCESS_EXE", "").strip()
-    if process_exe and Path(process_exe).exists():
-        return process_exe
-    repo_process_exe = _repo_root() / ".venv" / "Scripts" / "phoenixguard-python.exe"
-    if repo_process_exe.exists():
-        return str(repo_process_exe)
+    env_exe = os.getenv("PHOENIXGUARD_PYTHON_EXE", "").strip()
+    if env_exe and Path(env_exe).exists():
+        return env_exe
+    repo_python = _repo_root() / ".venv" / "Scripts" / "python.exe"
+    if repo_python.exists():
+        return str(repo_python)
     return sys.executable
 
 
@@ -247,6 +257,14 @@ def _timing_status(live: Mapping[str, Any], performance: Mapping[str, Any]) -> d
     live_timing = _mapping(live.get("frame_timing_trace_v3"))
     performance_timing = _mapping(performance.get("timing_trace"))
     frame_age_ms = _age_ms(live_timing.get("frame_age_ms"), performance_timing.get("frame_age_ms") or live.get("frame_age_ms"))
+    display_age_ms = _epoch_age_ms(
+        live.get("display_published_epoch")
+        or live.get("last_display_published_epoch")
+        or live_timing.get("display_published_epoch_ms")
+        or live_timing.get("display_published_epoch")
+    )
+    if display_age_ms > 0.0:
+        frame_age_ms = display_age_ms if frame_age_ms <= 0.0 else min(frame_age_ms, display_age_ms)
     overlay_age_ms = _age_ms(
         live_timing.get("overlay_age_ms"),
         performance_timing.get("overlay_age_ms") or live.get("overlay_age_ms"),
@@ -257,6 +275,7 @@ def _timing_status(live: Mapping[str, Any], performance: Mapping[str, Any]) -> d
     visual = _mapping(performance.get("visual_health"))
     return {
         "frame_age_ms": frame_age_ms,
+        "display_age_ms": display_age_ms,
         "overlay_age_ms": overlay_age_ms,
         "model_vote_age_ms": model_vote_age_ms,
         "packet_age_ms": packet_age_ms,
@@ -265,6 +284,10 @@ def _timing_status(live: Mapping[str, Any], performance: Mapping[str, Any]) -> d
         "stale_status": _text(live_timing.get("stale_status") or performance_timing.get("stale_status") or visual.get("status"), "UNKNOWN"),
         "stale_flags": _sequence(live_timing.get("stale_flags") or performance_timing.get("stale_flags") or visual.get("stale_flags")),
     }
+
+
+def timing_status_for_certification(live: Mapping[str, Any], performance: Mapping[str, Any]) -> dict[str, object]:
+    return _timing_status(live, performance)
 
 
 def source_lock_status_for_certification(live: Mapping[str, Any], runtime_trace: Mapping[str, Any]) -> dict[str, object]:

@@ -44,7 +44,6 @@ $env:PHOENIXGUARD_DASHBOARD_BROWSER = $DashboardBrowser
 . (Join-Path -Path $PSScriptRoot -ChildPath 'Resolve-PhoenixGuardPython.ps1')
 $pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
 $pythonPath = [string]$pythonRuntime.VenvPython
-$pythonProcessPath = [string]$pythonRuntime.ProcessPython
 
 $defaultRuntimeDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
 $runtimeDir = $defaultRuntimeDir
@@ -226,7 +225,7 @@ function Start-TrackerChildProcess {
         $trackerArgs += @('--window-hwnd', "$BrokerWindowHwnd")
     }
 
-    Start-Process -FilePath $pythonProcessPath -ArgumentList (ConvertTo-PhoenixGuardProcessArgumentString -Arguments $trackerArgs) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $trackerStdoutPath -RedirectStandardError $trackerStderrPath
+    Start-Process -FilePath $pythonPath -ArgumentList (ConvertTo-PhoenixGuardProcessArgumentString -Arguments $trackerArgs) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $trackerStdoutPath -RedirectStandardError $trackerStderrPath
 }
 
 if (-not $NoKillExisting) {
@@ -378,7 +377,7 @@ try {
             '--heartbeat',
             '4.0'
         )
-        Start-Process -FilePath $pythonProcessPath -ArgumentList $shooterArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $outPath -RedirectStandardError $errPath | Out-Null
+        Start-Process -FilePath $pythonPath -ArgumentList $shooterArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $outPath -RedirectStandardError $errPath | Out-Null
         Write-Host "Shooter package reporter log: $errPath"
     } elseif ($session) {
         Write-Host "Profile $Profile selected; tracker started without shooter."
@@ -408,7 +407,7 @@ try {
             '--metrics-every',
             '15.0'
         )
-        Start-Process -FilePath $pythonProcessPath -ArgumentList $bridgeArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $bridgeOutPath -RedirectStandardError $bridgeErrPath | Out-Null
+        Start-Process -FilePath $pythonPath -ArgumentList $bridgeArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $bridgeOutPath -RedirectStandardError $bridgeErrPath | Out-Null
         Write-Host "MT4 file bridge log: $bridgeOutPath"
     } elseif ($session) {
         Write-Host "MT4 file bridge disabled by PHOENIXGUARD_MT4_BRIDGE_ENABLED=$env:PHOENIXGUARD_MT4_BRIDGE_ENABLED"

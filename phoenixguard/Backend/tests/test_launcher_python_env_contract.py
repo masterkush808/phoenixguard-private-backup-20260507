@@ -35,7 +35,6 @@ def test_launchers_require_repo_venv_python_instead_of_global_python() -> None:
         ),
         "Backend/launch/deploy/windows/Start-PhoenixGuardVmMonitor.ps1": (
             "py -3.11 -m venv",
-            "Start-Process -FilePath $PythonPath",
         ),
         "Backend/tools/resume_paused_burn_20260623_050000.ps1": ('$python = "python.exe"',),
         "Backend/tools/start_enter_now_floating_gui.ps1": ('$Python = "python"',),
@@ -44,49 +43,56 @@ def test_launchers_require_repo_venv_python_instead_of_global_python() -> None:
     for relative_path, forbidden_fragments in scripts.items():
         text = _read(relative_path)
         assert "Resolve-PhoenixGuardPythonRuntime" in text
-        assert ".ProcessPython" in text
+        assert ".VenvPython" in text
+        assert ".ProcessPython" not in text
         for fragment in forbidden_fragments:
             assert fragment not in text
 
 
-def test_python_resolver_points_process_python_to_repo_venv() -> None:
+def test_python_resolver_points_every_python_path_to_repo_venv() -> None:
     text = _read("Backend/launch/Resolve-PhoenixGuardPython.ps1")
     assert "$venvPython = Join-Path -Path $venvPath -ChildPath 'Scripts\\python.exe'" in text
-    assert "$processPython = Join-Path -Path $scriptsPath -ChildPath 'phoenixguard-python.exe'" in text
-    assert "$env:PHOENIXGUARD_PYTHON_PROCESS_EXE = $processPython" in text
+    assert "PHOENIXGUARD_PYTHON_PROCESS_EXE" not in text
+    assert "ProcessPython" not in text
+    assert "phoenixguard-python.exe" not in text
+    assert "Copy-Item -LiteralPath $basePython" not in text
 
 
-def test_bootstrap_process_host_does_not_follow_pyvenv_base_python() -> None:
+def test_bootstrap_uses_only_repo_venv_python() -> None:
     bootstrap_text = _read("_pg_bootstrap.py")
     sitecustomize_text = _read("sitecustomize.py")
-    assert '"phoenixguard-python.exe"' in bootstrap_text
-    assert '"phoenixguard-python.exe"' in sitecustomize_text
+    assert '"phoenixguard-python.exe"' not in bootstrap_text
+    assert '"phoenixguard-python.exe"' not in sitecustomize_text
     assert "pyvenv.cfg" not in bootstrap_text
-    assert "multiprocessing.set_executable(process_text)" in bootstrap_text
-    assert "multiprocessing.set_executable(process_text)" in sitecustomize_text
+    assert "multiprocessing.set_executable" not in bootstrap_text
+    assert "multiprocessing.set_executable" not in sitecustomize_text
+    assert "__PYVENV_LAUNCHER__" not in bootstrap_text
+    assert "__PYVENV_LAUNCHER__" not in sitecustomize_text
 
 
-def test_runtime_environment_rejects_wrong_process_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    wrong_process_host = tmp_path / "Python311" / "python.exe"
-    wrong_process_host.parent.mkdir(parents=True)
-    wrong_process_host.write_text("", encoding="utf-8")
-    monkeypatch.setenv("PHOENIXGUARD_PYTHON_PROCESS_EXE", str(wrong_process_host))
+def test_runtime_environment_rejects_wrong_repo_python(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    wrong_python = tmp_path / "Python311" / "python.exe"
+    wrong_python.parent.mkdir(parents=True)
+    wrong_python.write_text("", encoding="utf-8")
+    monkeypatch.setenv("PHOENIXGUARD_PYTHON_EXE", str(wrong_python))
 
     status = build_python_environment_status(ROOT)
 
     assert status["ok"] is False
-    assert "PHOENIXGUARD_PYTHON_PROCESS_EXE is not repo .venv process host" in status["reason"]
+    assert "PHOENIXGUARD_PYTHON_EXE is not repo .venv python" in status["reason"]
 
 
-def test_certification_visual_tools_use_repo_process_host_for_child_python() -> None:
+def test_certification_visual_tools_use_repo_venv_for_child_python() -> None:
     for relative_path in (
         "Backend/tools/run_final_10h_production_certification.py",
         "Backend/tools/capture_overlay_anchor_screenshots_v3.py",
         "Backend/tools/certify_overlay_visual_truth_v3.py",
     ):
         text = _read(relative_path)
-        assert "PHOENIXGUARD_PYTHON_PROCESS_EXE" in text
-        assert "phoenixguard-python.exe" in text
+        assert "PHOENIXGUARD_PYTHON_EXE" in text
+        assert 'Scripts" / "python.exe"' in text
+        assert "PHOENIXGUARD_PYTHON_PROCESS_EXE" not in text
+        assert "phoenixguard-python.exe" not in text
         assert "[sys.executable" not in text
 
 
