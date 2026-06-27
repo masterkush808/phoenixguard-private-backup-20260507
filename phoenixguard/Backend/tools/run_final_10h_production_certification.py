@@ -18,7 +18,17 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8793"
 DEFAULT_SESSION_ID = "pocket-live-8788"
 ALLOWED_PACKAGE_TYPES = {"SWING", "INTRADAY_ENTER_NOW", "SWING_ENTER_NOW"}
 PROGRESSION_HORIZONS_SEC = (30, 60, 120, 300)
-DIAGNOSTIC_ENDPOINTS = frozenset({"runtime_trace", "session", "performance", "model_latest", "study_latest", "floating_state"})
+DIAGNOSTIC_ENDPOINTS = frozenset(
+    {
+        "runtime_trace",
+        "session",
+        "performance",
+        "model_latest",
+        "study_latest",
+        "execution_latest",
+        "floating_state",
+    }
+)
 
 
 def _now_epoch() -> float:
@@ -385,6 +395,22 @@ def _execution_allowed(execution_payload: Mapping[str, Any]) -> tuple[bool, dict
     }
 
 
+def _bridge_execution_allowed(mt4_payload: Mapping[str, object]) -> tuple[bool, dict[str, object]]:
+    package_type = _upper(mt4_payload.get("allowance_package_type"))
+    packet_id = _text(mt4_payload.get("packet_id"))
+    allowed = bool(mt4_payload.get("entry_eligible") is True and package_type in ALLOWED_PACKAGE_TYPES and packet_id)
+    return allowed, {
+        "packet_id": packet_id,
+        "side": "",
+        "state": "BRIDGE_ALLOWED" if allowed else _upper(mt4_payload.get("bridge_status"), "UNKNOWN"),
+        "package_type": package_type,
+        "symbol": "",
+        "timeframe": "",
+        "confidence": 0.0,
+        "reason": "bridge_allowed" if allowed else "bridge_packet_not_allowed",
+    }
+
+
 def _run_capture(command: list[str], out_dir: Path, log_path: Path, *, timeout_sec: float) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     started = _now_epoch()
@@ -649,7 +675,10 @@ def main() -> int:
         model_status = _model_status(live, performance, runtime_trace)
         frontend = _frontend_status(heartbeat)
         mt4 = _mt4_status(stale_sec=float(args.mt4_bridge_stale_sec))
-        allowed, allowed_meta = _execution_allowed(execution)
+        endpoint_allowed, endpoint_allowed_meta = _execution_allowed(execution)
+        bridge_allowed, bridge_allowed_meta = _bridge_execution_allowed(mt4)
+        allowed = endpoint_allowed or bridge_allowed
+        allowed_meta = endpoint_allowed_meta if endpoint_allowed else bridge_allowed_meta
 
         for endpoint_name, (status, _payload, error, latency_ms) in endpoint_results.items():
             _append_jsonl(out_dir / "api_latency.jsonl", _latency_row(loop_started, endpoint_name, status, latency_ms, error))
