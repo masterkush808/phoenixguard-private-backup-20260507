@@ -378,7 +378,7 @@ INPUT (Live Chart Frame)
 
 ```python
 
-## From timm (already in requirements.txt)
+## From timm (already in the dev/training requirement profiles)
 
 model = timm.create_model('vit_base_patch16_384', pretrained=True)
 

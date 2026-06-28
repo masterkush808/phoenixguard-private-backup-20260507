@@ -3,6 +3,7 @@ param(
     [string]$TaskName = 'PhoenixGuard Share',
     [string]$ConfigPath = '',
     [switch]$RunAsCurrentUser,
+    [switch]$RunAtStartupAsSystem,
     [switch]$BootstrapOnFirstRun,
     [switch]$StartNow
 )
@@ -19,9 +20,10 @@ if (-not $ConfigPath) {
 $principalIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($principalIdentity)
 $isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$runAsCurrentUserEffective = $RunAsCurrentUser -or -not $RunAtStartupAsSystem
 
-if (-not $RunAsCurrentUser -and -not $isAdministrator) {
-    throw 'Run this script from an elevated PowerShell session, or pass -RunAsCurrentUser for a per-user task.'
+if (-not $runAsCurrentUserEffective -and -not $isAdministrator) {
+    throw 'Run this script from an elevated PowerShell session for a SYSTEM startup task, or omit -RunAtStartupAsSystem for a per-user task.'
 }
 
 $StartScriptPath = (Resolve-Path -LiteralPath (Join-Path -Path $script:ScriptRoot -ChildPath 'Start-PhoenixGuardVmShare.ps1')).Path
@@ -40,8 +42,8 @@ if ($BootstrapOnFirstRun) {
 }
 
 $taskAction = New-ScheduledTaskAction -Execute $PowerShellExe -Argument ($argumentParts -join ' ')
-$taskTrigger = if ($RunAsCurrentUser) { New-ScheduledTaskTrigger -AtLogOn -User $principalIdentity.Name } else { New-ScheduledTaskTrigger -AtStartup }
-$taskPrincipal = if ($RunAsCurrentUser) {
+$taskTrigger = if ($runAsCurrentUserEffective) { New-ScheduledTaskTrigger -AtLogOn -User $principalIdentity.Name } else { New-ScheduledTaskTrigger -AtStartup }
+$taskPrincipal = if ($runAsCurrentUserEffective) {
     New-ScheduledTaskPrincipal -UserId $principalIdentity.Name -LogonType Interactive -RunLevel Limited
 } else {
     New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
@@ -50,7 +52,7 @@ $taskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeL
 
 Register-ScheduledTask `
     -TaskName $TaskName `
-    -Description $(if ($RunAsCurrentUser) { 'Starts the PhoenixGuard protected share desk for the current user at logon.' } else { 'Starts the PhoenixGuard protected share desk at VM boot.' }) `
+    -Description $(if ($runAsCurrentUserEffective) { 'Starts the PhoenixGuard protected share desk for the current user at logon.' } else { 'Starts the PhoenixGuard protected share desk at VM boot.' }) `
     -Action $taskAction `
     -Trigger $taskTrigger `
     -Principal $taskPrincipal `

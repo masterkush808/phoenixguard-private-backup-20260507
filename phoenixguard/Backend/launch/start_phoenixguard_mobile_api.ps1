@@ -23,6 +23,10 @@ $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
 $env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
 $env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
 $env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
+$RequirementsPath = Join-Path -Path $ProjectRoot -ChildPath 'requirements\locks\live-win-py311.txt'
+if (-not (Test-Path -LiteralPath $RequirementsPath)) {
+    $RequirementsPath = Join-Path -Path $ProjectRoot -ChildPath 'requirements\live.in'
+}
 
 if ($Bootstrap) {
     Write-Host "Installing Python dependencies for the mobile API..."
@@ -30,9 +34,9 @@ if ($Bootstrap) {
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to upgrade pip."
     }
-    & $PythonPath -m pip install -r requirements.txt
+    & $PythonPath -m pip install -r $RequirementsPath
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to install dependencies from 'requirements.txt'."
+        throw "Failed to install dependencies from '$RequirementsPath'."
     }
 }
 

@@ -30,7 +30,7 @@ Agent 1 did not clear caches. This inventory classifies known paths for the requ
 | `data/replay_buffer.jsonl` | Old replay event cache |
 | `data/rl_feedback_buffer.jsonl` | RL feedback buffer, preserve only if training migration consumes it |
 | `data/feedback_feed.jsonl` | Feedback feed, preserve only if training migration consumes it |
-| `.codex_runtime/tracker_status.json` | Launcher status from previous runtime |
+| `runtime/live/tracker_status.json` | Launcher status from previous live runtime |
 | `Backend/config/shooter_3_gate_state.json` | Shooter gate state, if present |
 
 ## Safe To Clear

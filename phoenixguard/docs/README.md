@@ -7,6 +7,7 @@ Operator-facing summaries live here; archived deep dives are in `docs/archive/`.
 Top-level doc groups:
 
 - `architecture/` - system maps and blueprints (summary here, deep content archived)
+- `FORENSIC_REVIEW_2026-06-28.md` - production overlay lock and full-stack mismatch review
 - `scenarios/` - scenario engine guides and quick references
 - `share/` - sharing and Cloudflare tunnel guides
 - `tracker/` - tracker user guide and operator notes (summary)

@@ -9,7 +9,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-RUNTIME_DIR = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or ROOT / "runtime" / "live").resolve()
+EXPECTED_RUNTIME_DIR = (ROOT / "runtime" / "live").resolve()
+RUNTIME_DIR = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or EXPECTED_RUNTIME_DIR).resolve()
 ARCHIVE_ROOT = ROOT / "_archive" / "runtime_backup"
 PRESERVE_RUNTIME_FILES = {
     "floating_window_v2.json",
@@ -36,6 +37,14 @@ SKIP_SCAN_DIR_NAMES = {
     "node_modules",
     "reports",
 }
+
+
+def _assert_expected_runtime_dir() -> None:
+    if RUNTIME_DIR != EXPECTED_RUNTIME_DIR:
+        raise RuntimeError(
+            "Refusing to clean runtime outside the canonical live runtime directory: "
+            f"PHOENIXGUARD_RUNTIME_DIR={RUNTIME_DIR}; expected={EXPECTED_RUNTIME_DIR}"
+        )
 
 
 def _timestamp() -> str:
@@ -100,11 +109,14 @@ def delete_path(path: Path, moved: list[dict[str, str]], *, reason: str, apply: 
 
 
 def collect_runtime_paths() -> list[tuple[Path, str]]:
+    _assert_expected_runtime_dir()
     paths: list[tuple[Path, str]] = []
     if RUNTIME_DIR.exists():
         for child in sorted(RUNTIME_DIR.iterdir()):
             if child.name in PRESERVE_RUNTIME_FILES:
                 continue
+            if child.resolve().parent != RUNTIME_DIR:
+                raise RuntimeError(f"Refusing to collect unexpected runtime child: {child}")
             paths.append((child, "stale active runtime artifact"))
     for dirpath, dirnames, filenames in os.walk(ROOT):
         current = Path(dirpath)

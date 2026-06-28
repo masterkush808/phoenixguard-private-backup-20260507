@@ -685,6 +685,39 @@ def test_blank_symbol_blocks_broker_click_mode_when_user_locked_only() -> None:
     assert "execution_packet" not in result
 
 
+def test_live_packet_publication_mode_is_not_broker_click_identity_mode() -> None:
+    council = ModelCouncilV3()
+    first = _strong_snapshot("BUY", frame_id=100)
+    first.update(
+        {
+            "symbol": "",
+            "market": "",
+            "ocr_symbol": "",
+            "viewport_hash": "chart-viewport-a",
+            "execution_controls": {"execution_mode": "live", "live_execution_enabled": True},
+            "instrument_identity_lock": {"user_symbol": "EUR/GBP OTC"},
+        }
+    )
+    council.evaluate(first, now_epoch=NOW)
+    second = _strong_snapshot("BUY", frame_id=101)
+    second.update(
+        {
+            "symbol": "",
+            "market": "",
+            "ocr_symbol": "",
+            "viewport_hash": "chart-viewport-a",
+            "execution_controls": {"execution_mode": "live", "live_execution_enabled": True},
+            "instrument_identity_lock": {"user_symbol": "EUR/GBP OTC"},
+        }
+    )
+
+    packet = council.evaluate(second, now_epoch=NOW + 0.5)
+
+    assert packet["execution"]["enabled"] is True
+    assert packet["instrument_context"]["paper_safe"] is True
+    assert packet["instrument_context"]["broker_click_safe"] is False
+
+
 def test_broker_click_mode_executes_when_user_profile_lock_has_v2_evidence() -> None:
     council = ModelCouncilV3()
     evidence_lock: dict[str, Any] = {

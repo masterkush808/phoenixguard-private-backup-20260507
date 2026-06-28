@@ -905,6 +905,93 @@ def _compact_live_state_council_result(value: Any) -> Any:
     return payload
 
 
+def _compact_live_state_overlay_object(value: Mapping[str, Any]) -> dict[str, Any]:
+    selected = {
+        "id",
+        "overlay_id",
+        "object_id",
+        "track_id",
+        "type",
+        "role",
+        "layer",
+        "label",
+        "display_label",
+        "short_label",
+        "bounds",
+        "bbox",
+        "points",
+        "line_points",
+        "frame_id",
+        "chart_transform_id",
+        "broker_source_lock_id",
+        "visible_modes",
+        "visible_default",
+        "label_visible",
+        "display_state",
+        "anchor_evidence_status",
+        "truth_score",
+        "confidence",
+        "source_version",
+        "schema_version",
+    }
+    return _compact_selected_mapping(value, selected)
+
+
+def _compact_live_state_overlay_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    overlays = _mapping_to_dict(payload.get("overlays"))
+    objects = _sequence_of_mappings(overlays.get("objects"))
+    if not objects:
+        objects = _sequence_of_mappings(payload.get("overlay_objects"))
+    compact_objects = [
+        compact
+        for compact in (_compact_live_state_overlay_object(row) for row in objects[:64])
+        if compact
+    ]
+    renderable_count = int(
+        _float_or(
+            payload.get("renderable_count")
+            or overlays.get("renderable_count")
+            or len(compact_objects),
+            0.0,
+        )
+    )
+    overlay_count = int(
+        _float_or(
+            payload.get("overlay_count")
+            or overlays.get("overlay_count")
+            or overlays.get("total_count")
+            or len(objects)
+            or renderable_count,
+            float(renderable_count),
+        )
+    )
+    summary: dict[str, Any] = {}
+    for key in (
+        "overlay_object_frame_id",
+        "overlay_frame_id",
+        "chart_transform_id",
+        "overlay_state_version",
+        "overlay_frame_state_version",
+        "broker_source_lock_id",
+        "sequence_id",
+    ):
+        value = payload.get(key) or overlays.get(key)
+        if value not in (None, "", [], {}):
+            summary[key] = value
+    if overlay_count > 0:
+        summary["overlay_count"] = overlay_count
+    if renderable_count > 0:
+        summary["renderable_count"] = renderable_count
+    for key in ("hidden_count", "rejected_count"):
+        value = payload.get(key) or overlays.get(key)
+        if value not in (None, "", [], {}):
+            summary[key] = value
+    if compact_objects:
+        summary["objects"] = compact_objects
+        summary["objects_truncated"] = len(objects) > len(compact_objects)
+    return summary
+
+
 def _compact_live_state_sidecar_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     compact: dict[str, Any] = {}
     for key in _COMPACT_LIVE_STATE_SIDECAR_KEYS:
@@ -916,6 +1003,22 @@ def _compact_live_state_sidecar_payload(payload: Mapping[str, Any]) -> dict[str,
             compact[key] = _compact_live_state_market_payload(compact[key])
     if "model_council_result" in compact:
         compact["model_council_result"] = _compact_live_state_council_result(compact["model_council_result"])
+    overlay_summary = _compact_live_state_overlay_summary(payload)
+    if overlay_summary:
+        compact["overlays"] = overlay_summary
+        for key in (
+            "overlay_count",
+            "renderable_count",
+            "hidden_count",
+            "rejected_count",
+            "overlay_object_frame_id",
+            "chart_transform_id",
+            "overlay_state_version",
+            "overlay_frame_state_version",
+        ):
+            value = overlay_summary.get(key)
+            if value not in (None, "", [], {}):
+                compact[key] = value
     return compact
 
 

@@ -25,7 +25,10 @@ $ErrorActionPreference = 'Stop'
 
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location -LiteralPath $ProjectRoot
-$RequirementsFilePath = Join-Path -Path $ProjectRoot -ChildPath 'requirements.txt'
+$RequirementsFilePath = Join-Path -Path $ProjectRoot -ChildPath 'requirements\locks\business-win-py311.txt'
+if (-not (Test-Path -LiteralPath $RequirementsFilePath)) {
+    $RequirementsFilePath = Join-Path -Path $ProjectRoot -ChildPath 'requirements\business.in'
+}
 $backendSrc = Join-Path -Path $ProjectRoot -ChildPath 'Backend\src'
 $backendRoot = Join-Path -Path $ProjectRoot -ChildPath 'Backend'
 $backendCompat = Join-Path -Path $ProjectRoot -ChildPath 'Backend\compat'
@@ -40,7 +43,7 @@ $PythonPath = [string]$pythonRuntime.VenvPython
 
 if ($Bootstrap) {
     if (-not (Test-Path -LiteralPath $RequirementsFilePath)) {
-        throw "requirements.txt was not found at '$RequirementsFilePath'."
+        throw "Business requirements profile was not found at '$RequirementsFilePath'."
     }
 
     Write-Output "Installing Python dependencies..."

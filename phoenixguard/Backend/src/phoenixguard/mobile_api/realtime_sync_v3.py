@@ -184,7 +184,9 @@ def _is_live_dashboard_heartbeat(heartbeat: Mapping[str, Any]) -> bool:
 
 
 def _heartbeat_visible_count(heartbeat: Mapping[str, Any]) -> int:
-    source = heartbeat.get("visible_overlay_count") if heartbeat.get("visible_overlay_count") is not None else heartbeat.get("overlay_count")
+    source = heartbeat.get("dom_overlay_count")
+    if source is None:
+        source = heartbeat.get("visible_overlay_count")
     return _int(source)
 
 
@@ -260,8 +262,11 @@ def normalize_frontend_heartbeat(payload: Mapping[str, Any], *, now_ms: int | fl
         "overlay_state_version": _text(payload.get("overlay_state_version")),
         "overlay_frame_state_version": _text(payload.get("overlay_frame_state_version")),
         "state_version": _text(payload.get("state_version")),
-        "overlay_count": _int(payload.get("overlay_count", payload.get("visible_overlay_count", 0))),
-        "visible_overlay_count": _int(payload.get("visible_overlay_count", payload.get("overlay_count", 0))),
+        "overlay_count": _int(payload.get("overlay_count", 0)),
+        "visible_overlay_count": _int(payload.get("visible_overlay_count", payload.get("dom_overlay_count", 0))),
+        "dom_overlay_count": _int(payload.get("dom_overlay_count", payload.get("visible_overlay_count", 0))),
+        "server_artifact_loaded": bool(payload.get("server_artifact_loaded", False)),
+        "server_artifact_overlay_count": _int(payload.get("server_artifact_overlay_count", 0)),
         "selected_overlay_id": _text(payload.get("selected_overlay_id")),
         "frontend_loaded_ms": _int(payload.get("frontend_loaded_ms", payload.get("image_loaded_ms", 0))),
         "frontend_overlay_drawn_ms": _int(payload.get("frontend_overlay_drawn_ms", payload.get("overlay_drawn_ms", 0))),
@@ -396,9 +401,21 @@ def _state_overlay_count(backend_state: Mapping[str, Any]) -> int:
     overlays = _mapping(backend_state.get("overlays"))
     if isinstance(overlays.get("objects"), list):
         return len(cast(list[Any], overlays["objects"]))
+    for key in ("renderable_count", "overlay_count", "total_count"):
+        count = _int(overlays.get(key))
+        if count > 0:
+            return count
     live_state = _mapping(backend_state.get("live_visual_state"))
     if isinstance(live_state.get("overlay_objects"), list):
         return len(cast(list[Any], live_state["overlay_objects"]))
+    live_overlays = _mapping(live_state.get("overlays"))
+    if isinstance(live_overlays.get("objects"), list):
+        return len(cast(list[Any], live_overlays["objects"]))
+    for source in (live_overlays, live_state, backend_state):
+        for key in ("renderable_count", "overlay_count", "total_count"):
+            count = _int(source.get(key))
+            if count > 0:
+                return count
     return 0
 
 
@@ -466,7 +483,7 @@ def build_frontend_sync_status(
     if heartbeat_is_live_dashboard and heartbeat_mode_matches_backend and backend_transform and heartbeat_transform and backend_transform != heartbeat_transform:
         mismatches.append(f"chart_transform_id mismatch backend={backend_transform} frontend={heartbeat_transform}")
     backend_overlay_count = _state_overlay_count(backend_state)
-    heartbeat_overlay_count = _int(heartbeat.get("overlay_count", heartbeat.get("visible_overlay_count", 0)))
+    heartbeat_overlay_count = _int(heartbeat.get("overlay_count", 0))
     backend_overlay_version = _text(backend_state.get("overlay_state_version"))
     heartbeat_overlay_version = _text(heartbeat.get("overlay_state_version"))
     overlay_count_matches = backend_overlay_count == heartbeat_overlay_count

@@ -216,9 +216,9 @@ Backend/launch/launch_phoenixguard_live_ready.ps1
 ```
 
 That file is the canonical final V3 live launcher. It starts the mobile API, creates/starts the
-`pocket-live-8788` tracker session, keeps the dashboard on the final V3 path, and only enables
-shooter behavior through the packet-gated live stack. Use `-DisableShooter` for read-only
-development:
+`pocket-live-8788` tracker session, keeps the dashboard on the final V3 path, and starts the local
+package reporter unless `-DisableShooter` is passed. The reporter does not click or manipulate broker
+controls:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser -DisableShooter
@@ -287,8 +287,8 @@ if ($LASTEXITCODE -ne 0) {
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser
 ```
 
-If more than one matching Edge/Chrome broker window is open, pin the shooter to the broker surface
-locked by the tracker:
+If more than one matching Edge/Chrome broker window is open, pin the tracker to the broker surface
+that should be treated as source of truth:
 
 ```powershell
 $state = Invoke-RestMethod "http://127.0.0.1:8793/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE"
@@ -296,7 +296,7 @@ $hwnd = [int]$state.broker_source_lock.selected_target.window_handle
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser -BrokerWindowHwnd $hwnd
 ```
 
-The launcher also attempts this HWND detection automatically before arming the shooter. Passing
+The launcher also attempts this HWND detection automatically before starting the reporter. Passing
 `-BrokerWindowHwnd` is the explicit override for a busy desktop.
 
 After runtime authority, source-lock, and frame-freshness gates pass, the launcher opens a visible
@@ -353,8 +353,8 @@ Two-hour activated burn-in:
 ```
 
 For long live observation runs where transient Windows capture latency should be logged but not
-abort the run, add `--no-stop-on-stale-frame --no-stop-on-stale-execution-packet`. The shooter still
-refuses expired packets through runtime integrity validation.
+abort the run, add `--no-stop-on-stale-frame --no-stop-on-stale-execution-packet`. The package
+reporter still refuses expired packets through runtime integrity validation.
 
 ## Shooter Package Reporter Safety
 

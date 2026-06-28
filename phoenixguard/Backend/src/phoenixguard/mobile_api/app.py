@@ -385,6 +385,11 @@ def _slugify_session_id(value: str) -> str:
 
 def _runtime_data_dir_candidates() -> list[Path]:
     candidates: list[Path] = [Path(RUNTIME.data_dir)]
+    allow_legacy_fallback = str(
+        os.getenv("PHOENIXGUARD_ALLOW_RUNTIME_DATA_DIR_FALLBACK", "0") or "0"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not allow_legacy_fallback:
+        return candidates
     candidates.append(_RUNTIME_ROOT / "data_live")
     lock_path = _RUNTIME_ROOT / "phoenixguard_stack.lock.json"
     try:
@@ -949,6 +954,14 @@ def _direct_model_council_fast_payload(session_id: str) -> dict[str, object] | N
             continue
         if payload.get("tracking_enabled") is False:
             continue
+        if (
+            path == compact_path
+            and compact_path != session_path
+            and session_path.exists()
+            and not _payload_has_overlay_summary_v3(payload)
+            and not _payload_is_intentional_display_snapshot_v3(payload)
+        ):
+            continue
         return payload
     return None
 
@@ -957,6 +970,7 @@ def _direct_window_tracker_display_snapshot(
     session_id: str,
     *,
     require_overlay_model: bool = True,
+    allow_incomplete_display_snapshot: bool = False,
 ) -> dict[str, object] | None:
     if str(os.getenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "1") or "1").strip().lower() in {
         "0",
@@ -981,7 +995,9 @@ def _direct_window_tracker_display_snapshot(
     raw_model_frame = int(_epoch_float(payload.get("model_vote_frame_id"), 0.0))
     if require_overlay_model and (raw_overlay_frame <= 0 or raw_model_frame <= 0):
         return None
-    if not _display_state_frame_bundle_complete_v3(payload):
+    if not _display_state_frame_bundle_complete_v3(payload) and not (
+        allow_incomplete_display_snapshot and _payload_is_intentional_display_snapshot_v3(payload)
+    ):
         return None
     overlay_frame = int(
         _epoch_float(raw_overlay_frame or frame_index, 0.0)
@@ -1023,6 +1039,39 @@ def _direct_complete_session_frame_id_v3(session_id: str) -> int:
     if snapshot is None:
         return 0
     return _atomic_frame_id_v3(snapshot)
+
+
+def _payload_has_overlay_summary_v3(payload: Mapping[str, object]) -> bool:
+    overlays = _mapping_to_plain_dict(payload.get("overlays"))
+    if int(_epoch_float(payload.get("renderable_count") or payload.get("overlay_count") or 0, 0.0)) > 0:
+        return True
+    if int(_epoch_float(overlays.get("renderable_count") or overlays.get("overlay_count") or 0, 0.0)) > 0:
+        return True
+    overlay_objects = payload.get("overlay_objects")
+    if isinstance(overlay_objects, list) and overlay_objects:
+        return True
+    overlay_rows = overlays.get("objects")
+    if isinstance(overlay_rows, list) and overlay_rows:
+        return True
+    tracking_summary = _mapping_to_plain_dict(payload.get("tracking_summary"))
+    overlay_geometry = _mapping_to_plain_dict(tracking_summary.get("overlay_geometry"))
+    boxes = overlay_geometry.get("boxes")
+    if not isinstance(boxes, list):
+        return False
+    return bool(cast(Sequence[object], boxes))
+
+
+def _payload_is_intentional_display_snapshot_v3(payload: Mapping[str, object]) -> bool:
+    if not bool(payload.get("display_snapshot_only_v3")):
+        return False
+    display_frame = int(_epoch_float(payload.get("display_frame_id") or payload.get("capture_count"), 0.0))
+    overlay_frame = int(_epoch_float(payload.get("overlay_frame_id") or payload.get("full_overlay_frame_id"), 0.0))
+    model_frame = int(_epoch_float(payload.get("model_vote_frame_id"), 0.0))
+    window_path = str(
+        payload.get("last_display_window_path") or payload.get("last_window_path") or payload.get("last_frame_path") or ""
+    ).strip()
+    overlay_path = str(payload.get("last_full_overlay_path") or payload.get("last_overlay_path") or "").strip()
+    return bool(display_frame > 0 and window_path and overlay_path and (overlay_frame > 0 or model_frame > 0))
 
 
 def _direct_performance_trace_cache_ttl_sec() -> float:
@@ -2800,6 +2849,7 @@ def create_app(
         display_snapshot = _direct_window_tracker_display_snapshot(
             requested_session_id,
             require_overlay_model=False,
+            allow_incomplete_display_snapshot=True,
         )
         if display_snapshot is None:
             return refreshed
@@ -3656,6 +3706,7 @@ def create_app(
                             display_snapshot = _direct_window_tracker_display_snapshot(
                                 requested_session_id,
                                 require_overlay_model=False,
+                                allow_incomplete_display_snapshot=True,
                             )
                             if _compact_overlay_payload_stale_for_display(cached_payload, display_snapshot):
                                 continue
@@ -3681,6 +3732,7 @@ def create_app(
                     display_snapshot = _direct_window_tracker_display_snapshot(
                         requested_session_id,
                         require_overlay_model=False,
+                        allow_incomplete_display_snapshot=True,
                     )
                     if _compact_overlay_payload_stale_for_display(refresh_source, display_snapshot):
                         refresh_source = None
@@ -3726,6 +3778,7 @@ def create_app(
                                 display_snapshot = _direct_window_tracker_display_snapshot(
                                     requested_session_id,
                                     require_overlay_model=False,
+                                    allow_incomplete_display_snapshot=True,
                                 )
                                 if _compact_overlay_payload_stale_for_display(cached_payload, display_snapshot):
                                     continue
@@ -3752,6 +3805,7 @@ def create_app(
                         display_snapshot = _direct_window_tracker_display_snapshot(
                             requested_session_id,
                             require_overlay_model=False,
+                            allow_incomplete_display_snapshot=True,
                         )
                         if _compact_overlay_payload_stale_for_display(refresh_source, display_snapshot):
                             refresh_source = None
@@ -3780,6 +3834,7 @@ def create_app(
                 display_snapshot = _direct_window_tracker_display_snapshot(
                     requested_session_id,
                     require_overlay_model=False,
+                    allow_incomplete_display_snapshot=True,
                 )
                 display_snapshot_mapping: Mapping[str, object] | None = None
                 if display_snapshot is not None:
@@ -4024,19 +4079,17 @@ def create_app(
             rendered_frame = int(_epoch_float(payload.get("rendered_frame_id") or payload.get("frame_id"), 0.0))
             heartbeat_overlay_version = str(payload.get("overlay_state_version") or "").strip()
             payload_overlay_count = int(_epoch_float(payload.get("overlay_count"), 0.0))
-            payload_visible_count = (
-                payload.get("visible_overlay_count")
-                if payload.get("visible_overlay_count") is not None
-                else payload.get("overlay_count")
-            )
+            payload_visible_count = payload.get("dom_overlay_count")
+            if payload_visible_count is None:
+                payload_visible_count = payload.get("visible_overlay_count")
             visible_overlay_count = int(_epoch_float(payload_visible_count, 0.0))
+            server_artifact_loaded = bool(payload.get("server_artifact_loaded"))
+            server_artifact_overlay_count = int(_epoch_float(payload.get("server_artifact_overlay_count"), 0.0))
             latest_heartbeat = latest_frontend_heartbeat(heartbeat_session_id)
             latest_heartbeat_payload = _mapping_to_plain_dict(latest_heartbeat)
-            latest_visible_source = (
-                latest_heartbeat_payload.get("visible_overlay_count")
-                if latest_heartbeat_payload.get("visible_overlay_count") is not None
-                else latest_heartbeat_payload.get("overlay_count")
-            )
+            latest_visible_source = latest_heartbeat_payload.get("dom_overlay_count")
+            if latest_visible_source is None:
+                latest_visible_source = latest_heartbeat_payload.get("visible_overlay_count")
             latest_visible_count = int(
                 _epoch_float(
                     latest_visible_source,
@@ -4055,7 +4108,12 @@ def create_app(
                     "reason": "missing_overlay_state_version",
                     "rendered_frame_id": rendered_frame,
                 }
-            if (latest_visible_count > 0 or payload_overlay_count > 0) and visible_overlay_count <= 0:
+            artifact_overlay_visible = bool(server_artifact_loaded and server_artifact_overlay_count > 0)
+            if (
+                (latest_visible_count > 0 or payload_overlay_count > 0)
+                and visible_overlay_count <= 0
+                and not artifact_overlay_visible
+            ):
                 if heartbeat_route == "live" and heartbeat_mode == "CLEAN_LIVE" and latest_visible_count > 0 and latest_age_ms <= 7000.0:
                     return {
                         "schema_version": "PG_FRONTEND_HEARTBEAT_V3",
@@ -4214,6 +4272,7 @@ def create_app(
         )
         tracking_summary = _mapping_to_plain_dict(tracker_payload.get("tracking_summary"))
         overlay_geometry = _mapping_to_plain_dict(tracking_summary.get("overlay_geometry"))
+        compact_overlays = _mapping_to_plain_dict(tracker_payload.get("overlays"))
         overlay_geometry_boxes = overlay_geometry.get("boxes")
         overlay_geometry_count = (
             len(cast(Sequence[object], overlay_geometry_boxes))
@@ -4221,18 +4280,24 @@ def create_app(
             else 0
         )
         session_overlay_objects = tracker_payload.get("overlay_objects")
-        session_overlay_count = (
+        compact_overlay_objects = compact_overlays.get("objects")
+        session_overlay_count = max(
             len(cast(Sequence[object], session_overlay_objects))
             if isinstance(session_overlay_objects, list)
-            else 0
+            else 0,
+            len(cast(Sequence[object], compact_overlay_objects))
+            if isinstance(compact_overlay_objects, list)
+            else 0,
         )
         clean_object_count = max(overlay_geometry_count, session_overlay_count)
         renderable_count = int(
             _epoch_float(
                 tracker_payload.get("renderable_count")
+                or compact_overlays.get("renderable_count")
                 or overlay_geometry.get("renderable_count")
                 or tracking_summary.get("renderable_count")
                 or tracker_payload.get("overlay_count")
+                or compact_overlays.get("overlay_count")
                 or overlay_geometry.get("overlay_count")
                 or tracking_summary.get("overlay_count")
                 or clean_object_count,
@@ -4245,6 +4310,7 @@ def create_app(
             overlay_count = int(
                 _epoch_float(
                     tracker_payload.get("overlay_count")
+                    or compact_overlays.get("overlay_count")
                     or overlay_geometry.get("overlay_count")
                     or tracking_summary.get("overlay_count")
                     or renderable_count,
@@ -4262,6 +4328,7 @@ def create_app(
                 "frame_id": state_payload.get("frame_id"),
                 "overlay_frame_id": state_payload.get("overlay_frame_id"),
                 "chart_transform_id": tracker_payload.get("chart_transform_id")
+                or compact_overlays.get("chart_transform_id")
                 or _mapping_to_plain_dict(overlay_geometry.get("chart_transform")).get("chart_transform_id"),
                 "source": "tracker_payload_overlay_summary",
             }
@@ -4449,21 +4516,25 @@ def create_app(
             heartbeat_age_sec = trace_created_epoch_sec - received_at_epoch if received_at_epoch > 0 else 999999.0
             heartbeat_fresh = 0.0 <= heartbeat_age_sec <= 10.0
             frontend_overlay_mode = str(frontend_payload.get("overlay_mode") or "").strip().upper()
-            frontend_count = renderable_count
+            frontend_dom_count = 0
+            frontend_artifact_count = 0
+            frontend_artifact_loaded = False
             frontend_count_source = "backend_clean_live_authority"
             if heartbeat_fresh and frontend_overlay_mode == "CLEAN_LIVE":
-                frontend_count = int(
-                    _epoch_float(
-                        frontend_payload.get("visible_overlay_count")
-                        or frontend_payload.get("overlay_count"),
-                        float(renderable_count),
-                    )
+                frontend_dom_source = frontend_payload.get("dom_overlay_count")
+                if frontend_dom_source is None:
+                    frontend_dom_source = frontend_payload.get("visible_overlay_count")
+                frontend_dom_count = int(_epoch_float(frontend_dom_source, 0.0))
+                frontend_artifact_count = int(
+                    _epoch_float(frontend_payload.get("server_artifact_overlay_count"), 0.0)
                 )
+                frontend_artifact_loaded = bool(frontend_payload.get("server_artifact_loaded"))
                 frontend_count_source = "fresh_frontend_heartbeat"
             elif heartbeat_fresh and frontend_overlay_mode:
                 frontend_count_source = f"ignored_frontend_heartbeat_mode_{frontend_overlay_mode.lower()}"
-            if frontend_count <= 0 and renderable_count > 0:
-                frontend_count = renderable_count
+            displayed_overlay_count = frontend_dom_count
+            if displayed_overlay_count <= 0 and frontend_artifact_loaded:
+                displayed_overlay_count = frontend_artifact_count
             source_packet = _mapping_to_plain_dict(
                 tracker_payload.get("model_council_packet")
                 or tracker_payload.get("execution_packet")
@@ -4478,16 +4549,23 @@ def create_app(
                 "timestamp": trace_created_epoch_sec,
                 "state_chip": "TRACE_SUMMARY",
                 "packet_id": str(source_packet.get("packet_id") or source_packet.get("signal_id") or ""),
-                "overlay_count": frontend_count,
+                "overlay_count": renderable_count,
                 "renderable_count": renderable_count,
+                "frontend_overlay_count": frontend_dom_count,
+                "server_artifact_overlay_count": frontend_artifact_count,
+                "displayed_overlay_count": displayed_overlay_count,
                 "overlay_rejected_count": rejected_count,
                 "overlays": {
                     "renderable_count": renderable_count,
-                    "overlay_count": frontend_count,
+                    "overlay_count": renderable_count,
                     "hidden_count": hidden_count,
                     "rejected_count": rejected_count,
                     "source": "clean_live_compact_state" if clean_live_state else "overlay_truth_audit",
                     "frontend_count_source": frontend_count_source,
+                    "frontend_visible_overlay_count": frontend_dom_count,
+                    "server_artifact_loaded": frontend_artifact_loaded,
+                    "server_artifact_overlay_count": frontend_artifact_count,
+                    "displayed_overlay_count": displayed_overlay_count,
                     "frontend_heartbeat_fresh": heartbeat_fresh,
                     "frontend_heartbeat_overlay_mode": frontend_overlay_mode,
                     "frontend_heartbeat_age_sec": round(max(0.0, heartbeat_age_sec), 3) if received_at_epoch > 0 else None,
@@ -4729,8 +4807,21 @@ def create_app(
         overlay_root = _mapping_to_plain_dict(overlay_payload.get("overlays"))
         overlay_rejected_count = int(_epoch_float(overlay_root.get("rejected_count") or overlay_payload.get("overlay_rejected_count") or 0, 0.0))
         overlay_backend_count = int(_epoch_float(overlay_root.get("renderable_count") or overlay_payload.get("renderable_count") or 0, 0.0))
-        overlay_frontend_count = int(_epoch_float(overlay_payload.get("overlay_count") or overlay_backend_count or 0, 0.0))
-        overlay_truth_pass = overlay_backend_count > 0 and overlay_backend_count == overlay_frontend_count
+        overlay_frontend_count = int(
+            _epoch_float(
+                overlay_payload.get("displayed_overlay_count")
+                or overlay_root.get("displayed_overlay_count")
+                or overlay_payload.get("frontend_overlay_count")
+                or overlay_root.get("frontend_visible_overlay_count")
+                or overlay_payload.get("server_artifact_overlay_count")
+                or overlay_root.get("server_artifact_overlay_count")
+                or overlay_payload.get("overlay_count")
+                or overlay_backend_count
+                or 0,
+                0.0,
+            )
+        )
+        overlay_truth_pass = overlay_backend_count > 0 and overlay_frontend_count > 0
         promotion_trace = _first_trace_mapping(
             _mapping_to_plain_dict(study_latest.get("payload")).get("promotion_trace"),
             _mapping_to_plain_dict(execution_latest.get("payload")).get("promotion_trace"),

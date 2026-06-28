@@ -133,13 +133,11 @@
   - approximate SHAP contributions,
   - memory similarity,
   - forecast stats.
-- Live execution flow:
+- Live authority flow:
   - tracker reasons over the full frame and dual BUY/SELL hypotheses,
-  - decision kernel authorizes side, setup, expiry, and invalidation,
-  - execution governor validates freshness, timing, calibration, cooldown, layout, broker state, and
-    tracker agreement,
-  - shooter receives only a calibrated fire command and may operate only expiry/time plus BUY or
-    SELL.
+  - Model Council authorizes only study or a V3 execution packet,
+  - packet validation checks freshness, timing, source lock, model health, and runtime integrity,
+  - the local shooter process reports accepted allowance packages only and never clicks or edits the broker.
 - Visualization:
   - chart overlay,
   - always-live tracker dashboard at `/v1/mobile/window-tracker/dashboard/{session_id}`,
@@ -156,17 +154,16 @@
 - If memory recall exists, RL receives recall-driven update batches.
 - Router weights update from feedback history.
 - Personalization vector evolves from user feedback + memory-bank DPO pairs.
-- Executed/attempted broker trades keep an active trade record containing:
+- Allowed or externally handled packages may keep a trade record containing:
   - entry price proxy
   - decision kernel
-  - STREND FOLLOW, the next event is TRIGGER/TARGET, trigger probability is high,
-    target-before-invalidation wins the race, hazard timing favors trigger, direction alignment is
-    clean, and at least two candles of target runway remain.MC/S/R context
+  - trend-follow context, trigger/target event context, target-before-invalidation race outcome,
+    hazard timing, direction alignment, target runway, and SMC/S/R context
   - timing profile
   - settlement memory
-- Broker amount is not part of the strategy loop and must remain read-only. PhoenixGuard may adjust
-  expiry/time and click the selected direction only; it must preserve the amount already visible in
-  the broker.
+- Broker amount is not part of the strategy loop and must remain read-only. The local package
+  reporter does not adjust expiry/time, click a direction, or preserve broker controls by touching
+  them; downstream external bridges must revalidate the allowance package before any action.
 - Live execution location gate is wick-aware and history-aware:
   - BUY requires a mapped significant support/studied-low context and is blocked in upper historical
     highs.
@@ -178,7 +175,7 @@
 - Expired trades are classified as won/lost/flat when chart-proxy data is available and appended to
   `trade_outcomes.jsonl` for future timing review.
 - Live tracker deployment uses the Windows VM scripts in `Backend/launch/deploy/windows/`:
-  - `Start-PhoenixGuardVmMonitor.ps1` supervises API, tracker, and shooter.
+  - `Start-PhoenixGuardVmMonitor.ps1` supervises API, tracker, and package reporter.
   - `phoenixguard.vm-monitor.env.ps1` pins `PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC=1.0`.
   - `Start-PhoenixGuardQuickTunnel.ps1` can publish the local API through Cloudflare quick tunnel
     when a public browser URL is needed.

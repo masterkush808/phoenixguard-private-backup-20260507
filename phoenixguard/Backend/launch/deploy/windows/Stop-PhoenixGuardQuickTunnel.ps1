@@ -26,6 +26,11 @@ if (-not $pidValue) {
 
 $process = Get-Process -Id ([int]$pidValue) -ErrorAction SilentlyContinue
 if ($process) {
+    $cimProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$pidValue)" -ErrorAction SilentlyContinue
+    $commandLine = if ($cimProcess) { [string]$cimProcess.CommandLine } else { '' }
+    if ($process.ProcessName -notlike 'cloudflared*' -and $commandLine -notlike '*cloudflared*') {
+        throw "PID $pidValue is not a cloudflared quick tunnel process; refusing to stop it."
+    }
     Stop-Process -Id $process.Id -Force -ErrorAction Stop
     Write-Output "Stopped quick tunnel process $($process.Id)."
 } else {

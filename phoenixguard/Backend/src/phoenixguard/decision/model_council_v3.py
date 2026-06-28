@@ -358,8 +358,15 @@ def _instrument_packet_mode(snapshot: Mapping[str, Any]) -> str:
         or controls.get("execution_mode")
         or ""
     ).strip().lower()
-    live_enabled = _bool(snapshot.get("live_execution_enabled") or controls.get("live_execution_enabled"))
-    if raw_mode in {"broker_click", "broker", "live", "live_click"} or live_enabled:
+    broker_click_enabled = _bool(
+        snapshot.get("allow_live_broker_clicks")
+        or snapshot.get("broker_click_enabled")
+        or controls.get("allow_live_broker_clicks")
+        or controls.get("broker_click_enabled")
+    )
+    if raw_mode in {"broker_click", "broker", "live_click"}:
+        return "broker_click"
+    if raw_mode == "live" and broker_click_enabled:
         return "broker_click"
     return "paper"
 

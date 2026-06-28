@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$TunnelToken,
+    [string]$TunnelToken = $(if ($env:CLOUDFLARED_TUNNEL_TOKEN) { $env:CLOUDFLARED_TUNNEL_TOKEN } else { '' }),
     [switch]$ReinstallService
 )
 
@@ -10,31 +9,11 @@ $ErrorActionPreference = 'Stop'
 
 $principalIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($principalIdentity)
+if ([string]::IsNullOrWhiteSpace($TunnelToken)) {
+    throw 'Provide the tunnel token through -TunnelToken or CLOUDFLARED_TUNNEL_TOKEN.'
+}
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    $scriptPath = $MyInvocation.MyCommand.Path
-    if (-not $scriptPath) {
-        throw 'Run this script from an elevated PowerShell session.'
-    }
-
-    $powerShellExe = (Get-Command powershell.exe -ErrorAction Stop).Source
-    $argumentParts = @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', "`"$scriptPath`"",
-        '-TunnelToken', "`"$TunnelToken`""
-    )
-    if ($ReinstallService) {
-        $argumentParts += '-ReinstallService'
-    }
-
-    $elevated = Start-Process -FilePath $powerShellExe -Verb RunAs -ArgumentList ($argumentParts -join ' ') -Wait -PassThru
-    if ($null -eq $elevated) {
-        throw 'The elevated cloudflared installer did not start.'
-    }
-    if ($elevated.ExitCode -ne 0) {
-        throw "The elevated cloudflared installer exited with code $($elevated.ExitCode)."
-    }
-    return
+    throw 'Run this script from an elevated PowerShell session. The tunnel token is not relayed through a re-launched command line.'
 }
 
 $cloudflaredCommand = Get-Command cloudflared.exe -ErrorAction SilentlyContinue

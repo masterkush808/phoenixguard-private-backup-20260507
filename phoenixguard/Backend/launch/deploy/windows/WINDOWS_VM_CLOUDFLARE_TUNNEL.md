@@ -94,7 +94,8 @@ This will:
 
 - load your VM env script
 - create or reuse `.venv`
-- install `requirements.txt`
+- install the locked business runtime profile from `requirements/locks/business-win-py311.txt`
+  when present, otherwise `requirements/business.in`
 - start the protected share desk locally on `127.0.0.1:7861`
 
 Confirm locally on the VM:

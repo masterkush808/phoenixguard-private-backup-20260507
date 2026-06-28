@@ -446,7 +446,7 @@ payload construction.
 Key design responsibilities:
 
 - Lists candidate windows and locks the selected broker or study surface.
-- Sets DPI awareness early on Windows so click coordinates and captures match the real UI.
+- Sets DPI awareness early on Windows so capture coordinates and chart transforms match the real UI.
 - Captures a full window or focus-region image.
 - Detects wrong-surface conditions and reacquires or blocks when the active surface is not the
   expected broker/chart.
@@ -758,7 +758,7 @@ Key reporter stages:
 - Extracts `PG_ALLOWANCE_PACKAGE_V1` from the packet or Model Council payload.
 - Rejects missing, inferred, stale, non-accepted, non-execution-ready, wrong-authority, or
   side-mismatched packages.
-- Writes `.codex_runtime/shooter_handshake.json` only for accepted `INTRADAY_ENTER_NOW` or `SWING`
+- Writes `runtime/live/shooter_handshake.json` only for accepted `INTRADAY_ENTER_NOW` or `SWING`
   packages.
 - Never reads calibration files, moves the mouse, activates windows, sets broker time, edits amount,
   or clicks BUY/SELL.
@@ -769,7 +769,8 @@ The MT4 bridge and EA are the downstream execution boundary. They must reject an
 allowance package is missing, inferred, not accepted, not execution-ready, or not authority-bound to
 `PG_EXECUTION_PACKET_V3`.
 
-- Explicit environment gating through `PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS`.
+- Local live mode keeps `PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS=0`; external bridge enablement is
+  separate from dashboard/tracker live reporting.
 
 ## API And Dashboard Layer
 
@@ -1122,10 +1123,10 @@ does not replace local packet validation or shooter safety.
 
 | Artifact                                                                       | Purpose                                                                                            |
 | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| `.codex_runtime/shooter_handshake.json`                                        | Latest accepted package-reporter handshake when an allowance package is available.                 |
-| `.codex_runtime/tracker_status.json`                                           | Tracker status.                                                                                    |
-| `.codex_runtime/vm_monitor_status.json`                                        | VM monitor status.                                                                                 |
-| `.codex_runtime/action_evidence`                                               | Historical evidence directory if present; current package reporter does not create click evidence. |
+| `runtime/live/shooter_handshake.json`                                          | Latest accepted package-reporter handshake when an allowance package is available.                 |
+| `runtime/live/tracker_status.json`                                             | Tracker status.                                                                                    |
+| `runtime/live/vm_monitor_status.json`                                          | VM monitor status.                                                                                 |
+| `runtime/live/action_evidence`                                                 | Historical evidence directory if present; current package reporter does not create click evidence. |
 | `data/mobile_api/window_tracker/sessions/<session_id>/session.json`            | Tracker session state.                                                                             |
 | `data/mobile_api/window_tracker/sessions/<session_id>/display_state.json`      | Compact latest display state for fresh dashboard/API reads.                                        |
 | `data/mobile_api/window_tracker/sessions/<session_id>/entry_evidence`          | Runtime entry evidence captures when enabled.                                                      |
@@ -1139,12 +1140,14 @@ does not replace local packet validation or shooter safety.
 
 ## Operator Safety Rules
 
-The live shooter is capable of real broker clicks. Strict operation requires:
+The local shooter has been retired as a broker clicker and is now a package reporter. Strict
+operation requires:
 
 - Run integrity checks before live signal mode.
 - Keep the broker amount manually controlled and unchanged by PhoenixGuard.
-- Use `-DisableShooter` for read-only monitoring.
-- Set `PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS=1` only when deliberately entering live-ready mode.
+- Use `-DisableShooter` when the package reporter should not run.
+- Keep `PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS=0` in local live mode; downstream bridges must be
+  enabled separately and must validate the allowance package.
 - Validate the MT4/external bridge package controls before enabling downstream action.
 - Confirm tracker source lock and wrong-surface rejection.
 - Treat observer signals and dashboard fields as diagnostics only.
@@ -1164,7 +1167,7 @@ The active execution path document defines key diagnosis cases:
 | -------------- | ------------------ | -------------- | ---------------- | ----------------------------------- |
 | current        | WATCHING/PREPARING | present        | missing          | Council has not promoted yet.       |
 | current        | EXECUTABLE         | present        | missing          | Publisher or endpoint wiring fault. |
-| current        | EXECUTABLE         | present        | present          | Shooter should reach V3 gate 1.     |
+| current        | EXECUTABLE         | present        | present          | Package reporter should validate the allowance package. |
 | endpoint error | endpoint error     | endpoint error | endpoint error   | PhoenixGuard API process is down.   |
 
 Primary diagnostic command:
@@ -1243,16 +1246,16 @@ Model Council `final_side` bypass `execution.side`.
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | `FINAL_LIVE`               | Canonical production runtime profile.                                                                                                |
 | `STUDY_PACKET`             | Non-executable packet describing a forming or blocked setup.                                                                         |
-| `PG_EXECUTION_PACKET_V3`   | Only schema allowed to authorize shooter execution.                                                                                  |
+| `PG_EXECUTION_PACKET_V3`   | Only schema allowed to authorize package handoff to the reporter and downstream bridge.                                                |
 | `FloatingStateV2`          | Operator-facing truth state for current runtime and shooter status.                                                                  |
 | `Model Council V3`         | Arbitration layer that promotes candidates and publishes study/execution state.                                                      |
-| `execution.side`           | Only action side that can reach the shooter.                                                                                         |
+| `execution.side`           | Only action side that can reach an accepted allowance package.                                                                        |
 | `final_side`               | Council arbitration result; must match `execution.side` but cannot execute alone.                                                    |
 | `raw_side`                 | Observation-level side from tracker/model/dashboard evidence.                                                                        |
 | `candidate_side`           | Side being evaluated by the council.                                                                                                 |
 | `runtime_integrity`        | Freshness, health, identity, cache, and live-state proof.                                                                            |
 | `instrument_context`       | Symbol, timeframe, viewport, and broker-surface identity lock.                                                                       |
-| `time_sequence`            | Explicit expiry/time-setting sequence for shooter.                                                                                   |
+| `time_sequence`            | Explicit expiry/timing sequence for packet and downstream bridge validation.                                                          |
 | `source lock`              | Proof that the captured surface is the intended broker/chart, not a dashboard or wrong app.                                          |
 | `overlay contract`         | Rules for valid overlay types, coordinates, layers, ids, and modes.                                                                  |
 | `display_state.json`       | Compact latest-display payload used to keep dashboard reads fresh while study work is busy.                                          |

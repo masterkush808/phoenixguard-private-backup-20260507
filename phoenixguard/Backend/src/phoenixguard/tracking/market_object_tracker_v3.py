@@ -18,7 +18,7 @@ try:
         validate_overlay_payload,
     )
 except Exception:
-    _contract_overlay_schema_version = "PG_V3_OVERLAY_OBJECT"
+    _contract_overlay_schema_version = "PG_V3_OVERLAY_OBJECT_V1"
     _contract_type_layer_map = {
         "CURRENT_CANDLE": "recent_candles",
         "IMPULSE_BOX": "major_swings",

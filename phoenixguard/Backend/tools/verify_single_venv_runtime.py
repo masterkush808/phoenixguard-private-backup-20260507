@@ -167,9 +167,19 @@ def _extra_environment_dirs(project_root: Path) -> list[Path]:
     paths: list[Path] = []
     for name in EXTRA_ENVIRONMENT_DIR_NAMES:
         path = project_root / name
-        if path.is_dir():
+        if path.is_dir() and _is_python_environment_dir(path):
             paths.append(path)
     return paths
+
+
+def _is_python_environment_dir(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    if not (path / "pyvenv.cfg").is_file():
+        return False
+    scripts_dir = path / ("Scripts" if os.name == "nt" else "bin")
+    python_name = "python.exe" if os.name == "nt" else "python"
+    return (scripts_dir / python_name).is_file()
 
 
 def _remove_extra_environment_dirs(project_root: Path, paths: Sequence[Path]) -> list[Path]:
@@ -179,6 +189,8 @@ def _remove_extra_environment_dirs(project_root: Path, paths: Sequence[Path]) ->
         resolved = path.resolve()
         if resolved.parent != root_resolved or resolved.name not in EXTRA_ENVIRONMENT_DIR_NAMES:
             raise RuntimeError(f"Refusing to remove unexpected environment path: {resolved}")
+        if not _is_python_environment_dir(resolved):
+            raise RuntimeError(f"Refusing to remove directory without Python environment markers: {resolved}")
         shutil.rmtree(resolved)
         removed.append(resolved)
     return removed

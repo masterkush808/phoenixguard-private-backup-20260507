@@ -27,5 +27,5 @@ Use this while both processes are running. The deciding comparison is:
 | -------------- | ------------------ | -------------- | ---------------- | -------------------------------- |
 | current        | WATCHING/PREPARING | present        | missing          | council has not promoted yet     |
 | current        | EXECUTABLE         | present        | missing          | publisher/endpoint wiring fault  |
-| current        | EXECUTABLE         | present        | present          | shooter should reach gate 1      |
+| current        | EXECUTABLE         | present        | present          | package reporter should validate the allowance package |
 | endpoint error | endpoint error     | endpoint error | endpoint error   | PhoenixGuard API process is down |

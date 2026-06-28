@@ -35,7 +35,7 @@ shooter execution was retired.
 4. Package handoff consumption
    - `shooter.py` is the local package reporter, not a click executor.
    - It probes `/v1/mobile/model-council/sessions/{session_id}/execution/latest`.
-   - It writes `.codex_runtime/shooter_handshake.json` only when a validated
+   - It writes `runtime/live/shooter_handshake.json` only when a validated
      `PG_EXECUTION_PACKET_V3` includes an explicit accepted, execution-ready
      `PG_ALLOWANCE_PACKAGE_V1`.
    - `Backend/tools/phoenixguard_mt4_file_bridge.py` compacts the package into an MT4 command and rejects

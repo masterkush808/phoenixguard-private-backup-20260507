@@ -14,7 +14,10 @@ $ProjectRoot = (Resolve-Path (Join-Path -Path $script:ScriptRoot -ChildPath '..\
 $TrackerLauncherPath = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\start_phoenixguard_24_7_tracker.ps1'
 $TrackerScriptPath = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\start_phoenixguard_24_7_tracker.py'
 $ShooterPath = Join-Path -Path $ProjectRoot -ChildPath 'Backend\launch\shooter.py'
-$RequirementsPath = Join-Path -Path $ProjectRoot -ChildPath 'requirements.txt'
+$RequirementsPath = Join-Path -Path $ProjectRoot -ChildPath 'requirements\locks\live-win-py311.txt'
+if (-not (Test-Path -LiteralPath $RequirementsPath)) {
+    $RequirementsPath = Join-Path -Path $ProjectRoot -ChildPath 'requirements\live.in'
+}
 
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path -Path $script:ScriptRoot -ChildPath 'phoenixguard.vm-monitor.env.ps1'

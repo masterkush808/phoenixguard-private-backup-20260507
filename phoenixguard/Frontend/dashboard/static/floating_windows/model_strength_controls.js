@@ -880,13 +880,13 @@
             notify("model-strength-save", true);
           })
           .catch(() => {
-            settings.profileSaved = true;
+            settings.profileSaved = false;
             writeLocalSavedSettings(settings);
             const controls = settingsToExecutionControls(settings);
             const finishFallback = (patched) => {
               rerender();
-              setSaved(true, patched ? "Saved local; live patched" : "Saved local; route pending");
-              if (statusText) statusText.textContent = patched ? "Local profile active" : "Save route pending";
+              setSaved(false, patched ? "Live patched; backend save failed" : "Local draft; backend save failed");
+              if (statusText) statusText.textContent = patched ? "Live patch active; profile unsaved" : "Profile save failed";
               notify("model-strength-save-fallback", false);
             };
             if (typeof options.patchControls === "function") {
