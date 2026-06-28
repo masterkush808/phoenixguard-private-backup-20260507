@@ -868,6 +868,88 @@ def test_precision_resolver_snaps_anchored_zone_to_touch_cluster(tmp_path: Path)
     assert row["bounds"][1] <= 522 <= row["bounds"][3]
 
 
+def test_tracker_snaps_supply_demand_to_recent_visible_touch_cluster(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    candles = _install_visible_candles(session, count=12)
+    recent_touch_points = [
+        [candles[7]["center_x"], candles[7]["center_y"]],
+        [candles[8]["center_x"], candles[8]["center_y"]],
+        [candles[9]["center_x"], candles[9]["center_y"]],
+        [candles[10]["center_x"], candles[10]["center_y"]],
+        [candles[11]["center_x"], candles[11]["center_y"]],
+    ]
+    session["tracking_summary"]["support_resistance_zones"] = [
+        {
+            "key": "wide_recent_support",
+            "role": "support",
+            "label": "WIDE DEMAND",
+            "direction": "BUY",
+            "bbox": [600, 510, 980, 640],
+            "bounds": [600, 510, 980, 640],
+            "line_y": recent_touch_points[-1][1],
+            "line_x0": 600,
+            "line_x1": 980,
+            "touch_points": [[610, 626], [635, 618], [658, 610], *recent_touch_points],
+            "source_indices": list(range(24)),
+            "confidence": 0.9,
+            "truth_score": 0.9,
+        }
+    ]
+
+    overlays = build_v3_overlays_from_session(session)
+    demand = next(row for row in overlays if row["source_path"] == "tracking_summary.support_resistance_zones[0]")
+    bounds = demand["bounds"]
+
+    assert demand["anchor_evidence_status"] == "VALID"
+    assert demand["anchor_quality"]["local_cluster_snap"] is True
+    assert bounds[0] >= candles[8]["bbox"][0] - 18
+    assert bounds[2] <= candles[-1]["bbox"][2] + 24
+    assert bounds[2] - bounds[0] <= 80
+    assert set(demand["anchor_candles"]).issubset(set(range(6, 12)))
+
+
+def test_tracker_replay_micro_boxes_prefer_child_bbox_over_parent_bounds(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    candles = _install_visible_candles(session, count=12)
+    parent_bounds = [candles[1]["bbox"][0] - 40, 320, candles[-1]["bbox"][2] + 80, 720]
+    sniper_window = [candles[5]["bbox"][0] - 8, 548, candles[8]["bbox"][2] + 8, 570]
+    target_window = [candles[7]["bbox"][0] - 8, 382, candles[10]["bbox"][2] + 8, 404]
+    session["tracking_summary"]["historical_structure"] = [
+        {
+            "key": "history_micro",
+            "label": "H MICRO",
+            "direction": "BUY",
+            "bbox": parent_bounds,
+            "bounds": parent_bounds,
+            "sniper_window": sniper_window,
+            "target_window": target_window,
+            "source_indices": list(range(12)),
+            "start_point": [candles[5]["center_x"], 559],
+            "end_point": [candles[10]["center_x"], 393],
+            "path": [[candle["center_x"], candle["center_y"]] for candle in candles[1:11]],
+            "confidence": 0.88,
+            "truth_score": 0.88,
+        }
+    ]
+
+    overlays = build_v3_overlays_from_session(session)
+    replay_entry = next(row for row in overlays if row["source_path"].endswith("historical_structure[0].sniper_window"))
+    replay_exit = next(row for row in overlays if row["source_path"].endswith("historical_structure[0].target_window"))
+    entry_bounds = replay_entry["bounds"]
+    exit_bounds = replay_exit["bounds"]
+
+    assert replay_entry["type"] == "REPLAY_ENTRY"
+    assert replay_entry["anchor_quality"]["local_cluster_snap"] is True
+    assert entry_bounds[2] - entry_bounds[0] < (parent_bounds[2] - parent_bounds[0]) * 0.35
+    assert entry_bounds[3] - entry_bounds[1] <= 36
+    assert sniper_window[1] - 4 <= entry_bounds[1] <= sniper_window[3] + 4
+    assert replay_exit["type"] == "REPLAY_EXIT"
+    assert replay_exit["anchor_quality"]["local_cluster_snap"] is True
+    assert exit_bounds[2] - exit_bounds[0] < (parent_bounds[2] - parent_bounds[0]) * 0.35
+    assert exit_bounds[3] - exit_bounds[1] <= 36
+    assert target_window[1] - 4 <= exit_bounds[1] <= target_window[3] + 4
+
+
 def test_precision_resolver_preserves_source_frame_before_stale_check(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
@@ -974,7 +1056,7 @@ def test_precision_resolver_nests_local_and_replay_children_inside_global_parent
     assert by_id["local-1"]["nesting_depth"] == 1
 
 
-def test_precision_resolver_clean_live_budget_does_not_suppress_active_context_counter_side(tmp_path: Path) -> None:
+def test_precision_resolver_clean_live_budget_ghosts_counter_side_context(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
     overlays: list[dict[str, Any]] = [
@@ -1024,10 +1106,14 @@ def test_precision_resolver_clean_live_budget_does_not_suppress_active_context_c
     assert "ACTIVE_CONTEXT" in active[0]["visible_modes"]
     assert active[0].get("visible_default") is not False
     assert active[0].get("precision_rejected") is not True
-    assert clean_audit["rendered_count"] == 0
-    assert clean_audit["rejected_count"] == 1
-    assert "CLEAN_LIVE" not in clean[0]["visible_modes"]
-    assert clean[0]["visible_default"] is False
+    assert clean_audit["rendered_count"] == 1
+    assert clean_audit["rejected_count"] == 0
+    assert "CLEAN_LIVE" in clean[0]["visible_modes"]
+    assert clean[0]["visible_default"] is True
+    assert clean[0]["geometry_visible"] is True
+    assert clean[0]["display_state"] == "GHOSTED"
+    assert clean[0]["label_hidden"] is True
+    assert "counter_side_ghosted_not_hidden" in clean[0]["precision_flags"]
 
 
 def test_precision_resolver_counts_replay_hidden_defaults_as_rendered(tmp_path: Path) -> None:

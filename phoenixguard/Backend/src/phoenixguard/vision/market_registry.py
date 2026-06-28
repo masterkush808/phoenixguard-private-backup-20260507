@@ -2,6 +2,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 import json
+import os
 import time
 from datetime import datetime, timezone
 from numbers import Real
@@ -155,7 +156,8 @@ def persist_market_objects(session_id: str, objects: Sequence[Mapping[str, objec
         pass
     # Debug: write a best-effort dump of what was persisted for easier tracing
     try:
-        debug_dir = Path(RUNTIME.project_root) / ".codex_runtime" / "overlay_persist_logs"
+        runtime_root = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or Path(RUNTIME.project_root) / "runtime" / "live")
+        debug_dir = runtime_root / "overlay_persist_logs"
         debug_dir.mkdir(parents=True, exist_ok=True)
         dbg_path = debug_dir / f"{session_id}_{int(time.time())}.json"
         dump: dict[str, object] = {"session_id": session_id, "objects": [dict(o) for o in objects], "chart_transform": dict(chart_transform) if chart_transform is not None else None}

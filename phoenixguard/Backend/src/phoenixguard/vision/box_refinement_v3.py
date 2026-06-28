@@ -44,7 +44,7 @@ MARKET_OVERLAY_TYPES = {
 }
 
 ZONE_TYPES = {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"}
-ACTIONABLE_TYPES = {"SNIPER_ENTRY_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"}
+ACTIONABLE_TYPES = {"SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"}
 FLOATING_REJECT_TYPES = ZONE_TYPES | ACTIONABLE_TYPES
 DISPLAY_STATES = {
     "FULL",
@@ -532,6 +532,30 @@ def _tighten_box(row: Mapping[str, Any], bounds: Sequence[Any], plot: Sequence[A
     box = _clamp_box(box, clip)
     if box is None:
         return None, ["outside_plot_area"]
+    if overlay_type in ACTIONABLE_TYPES and _has_structural_anchor(row):
+        min_size_by_type: dict[str, tuple[float, float]] = {
+            "SNIPER_ENTRY_BOX": (14.0, 10.0),
+            "RETEST_BOX": (14.0, 10.0),
+            "TARGET_ZONE_BOX": (24.0, 8.0),
+            "INVALIDATION_BOX": (24.0, 4.0),
+            "CONTINUATION_BOX": (28.0, 14.0),
+        }
+        min_width, min_height = min_size_by_type.get(overlay_type, (12.0, 8.0))
+        if _box_width(box) < min_width or _box_height(box) < min_height:
+            center_x = (box[0] + box[2]) * 0.5
+            center_y = (box[1] + box[3]) * 0.5
+            expanded = _clamp_box(
+                [
+                    center_x - min_width * 0.5,
+                    center_y - min_height * 0.5,
+                    center_x + min_width * 0.5,
+                    center_y + min_height * 0.5,
+                ],
+                clip,
+            )
+            if expanded is not None:
+                box = expanded
+                flags.append("min_anchor_box_expanded")
     if _box_width(box) < 3.0 or _box_height(box) < 3.0:
         return None, ["too_small_after_refinement"]
     return [round(float(value), 3) for value in box], flags
@@ -685,6 +709,8 @@ def _display_state_for_row(row: Mapping[str, Any], mode: str, current_side: str)
     emphasized = _mode_emphasizes_type(mode, overlay_type, layer)
     if row.get("precision_rejected") or overlay_type in DIAGNOSTIC_TYPES:
         return "INSPECTOR_ONLY_LABEL", 0.15, "removed from live truth; retained for diagnostics inspector"
+    if current_side in {"BUY", "SELL"} and side in {"BUY", "SELL"} and side != current_side and overlay_type in ACTIONABLE_TYPES:
+        return "GHOSTED", max(0.34, min(0.52, truth * 0.30 + 0.22)), "counter-side execution geometry remains visible but subdued"
     if overlay_type in EXECUTION_FOCUS_TYPES:
         weight = 0.90 + (0.07 if active_side else 0.0) + min(0.03, truth * 0.03)
         return "FULL", min(1.0, weight), "execution-relevant overlay remains expanded"
@@ -795,7 +821,9 @@ def _apply_adaptive_label_policy(rows: Sequence[Mapping[str, Any]], mode: str) -
             row["label_hidden"] = True
             row["label_anchor"] = "inspector"
             row["label_visible"] = False
-            if display_state not in {"FULL", "FOCUS_EXPANDED"} or overlay_type not in EXECUTION_FOCUS_TYPES:
+            if display_state in {"GHOSTED", "ICON_ONLY"}:
+                row["label_mode"] = "inspector"
+            elif display_state not in {"FULL", "FOCUS_EXPANDED"} or overlay_type not in EXECUTION_FOCUS_TYPES:
                 row["display_state"] = "INSPECTOR_ONLY_LABEL"
                 row["label_mode"] = "inspector"
                 row["style"] = _style_for_display_state(row, "INSPECTOR_ONLY_LABEL", _float(row.get("visual_weight"), 0.15))
@@ -1143,15 +1171,19 @@ def _apply_clean_live_budget(rows: Sequence[Mapping[str, Any]], current_side: st
             row.update(_mark_rejected(row, "truth_score_below_live_threshold"))
             continue
         if current_side in {"BUY", "SELL"} and side in {"BUY", "SELL"} and side != current_side and overlay_type in ACTIONABLE_TYPES:
-            row["visible_default"] = False
-            row["visible_modes"] = [mode for mode in _sequence(row.get("visible_modes")) if str(mode).upper() not in {"CLEAN_LIVE", "ACTIVE_CONTEXT"}]
-            row.setdefault("precision_flags", []).append("counter_side_hidden_from_live")
+            row["display_state"] = "GHOSTED"
+            row["label_hidden"] = True
+            row["label_visible"] = False
+            row["geometry_visible"] = True
+            row.setdefault("precision_flags", []).append("counter_side_ghosted_not_hidden")
         if overlay_type in ZONE_TYPES:
             supply_demand_visible += 1
             if supply_demand_visible > 6:
-                row["visible_default"] = False
-                row["visible_modes"] = [mode for mode in _sequence(row.get("visible_modes")) if str(mode).upper() != "CLEAN_LIVE"]
-                row.setdefault("precision_flags", []).append("clean_live_zone_budget_hidden")
+                row["display_state"] = "GHOSTED"
+                row["label_hidden"] = True
+                row["label_visible"] = False
+                row["geometry_visible"] = True
+                row.setdefault("precision_flags", []).append("clean_live_zone_budget_ghosted_not_hidden")
         if overlay_type == "CURRENT_CANDLE":
             current_candle_visible += 1
             if current_candle_visible > 1:
@@ -1161,9 +1193,11 @@ def _apply_clean_live_budget(rows: Sequence[Mapping[str, Any]], current_side: st
         if overlay_type in ACTIONABLE_TYPES:
             actionable_visible += 1
             if actionable_visible > 10:
-                row["visible_default"] = False
-                row["visible_modes"] = [mode for mode in _sequence(row.get("visible_modes")) if str(mode).upper() != "CLEAN_LIVE"]
-                row.setdefault("precision_flags", []).append("clean_live_actionable_budget_hidden")
+                row["display_state"] = "GHOSTED"
+                row["label_hidden"] = True
+                row["label_visible"] = False
+                row["geometry_visible"] = True
+                row.setdefault("precision_flags", []).append("clean_live_actionable_budget_ghosted_not_hidden")
     return output
 
 
@@ -1179,11 +1213,11 @@ def _apply_render_budget(rows: Sequence[Mapping[str, Any]], mode: str) -> list[d
         if not row.get("precision_rejected") and normalized_mode in {str(item).upper() for item in _sequence(row.get("visible_modes"))}
     ]
     for row in visible[budget:]:
-        modes = [str(item).upper() for item in _sequence(row.get("visible_modes")) if str(item).upper() != normalized_mode]
-        row["visible_modes"] = modes or ["DEBUG", "INSPECTOR"]
-        if normalized_mode == "CLEAN_LIVE":
-            row["visible_default"] = False
-        row.setdefault("precision_flags", []).append(f"{normalized_mode.lower()}_render_budget_hidden")
+        row["display_state"] = "GHOSTED"
+        row["label_hidden"] = True
+        row["label_visible"] = False
+        row["geometry_visible"] = True
+        row.setdefault("precision_flags", []).append(f"{normalized_mode.lower()}_render_budget_ghosted_not_hidden")
     return output
 
 
@@ -1337,7 +1371,7 @@ def resolve_precision_overlays_v3(
             row["label_anchor"] = "hidden"
             row["label_visible"] = False
     laid_out = _apply_adaptive_label_policy(laid_out, normalized_mode)
-    rendered = [row for row in laid_out if not row.get("precision_rejected") and (row.get("visible_default") is not False or normalized_mode != "CLEAN_LIVE")]
+    rendered = [row for row in laid_out if not row.get("precision_rejected") and row.get("geometry_visible") is not False]
     label_collisions = _label_collision_count(rendered)
     rendered_outside = 0
     for row in rendered:
@@ -1377,7 +1411,7 @@ def resolve_precision_overlays_v3(
             [
                 row
                 for row in laid_out
-                if row.get("precision_rejected") or (normalized_mode == "CLEAN_LIVE" and row.get("visible_default") is False)
+                if row.get("precision_rejected")
             ]
         ),
         precision_report=precision_report,

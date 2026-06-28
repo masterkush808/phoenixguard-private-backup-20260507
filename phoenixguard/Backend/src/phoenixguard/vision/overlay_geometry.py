@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
+from pathlib import Path
 import time
 from typing import Any, cast
 from phoenixguard.core.config import RUNTIME
@@ -364,7 +365,23 @@ def _merge_two_boxes(first: Mapping[str, Any], second: Mapping[str, Any]) -> dic
     if b is None:
         return dict(first)
     confidence = max(_clip01(first.get("confidence", 0.0)), _clip01(second.get("confidence", 0.0)))
-    merged = dict(first if _clip01(first.get("confidence", 0.0)) >= _clip01(second.get("confidence", 0.0)) else second)
+    first_score = _clip01(first.get("anchor_quality", {}).get("score", first.get("truth_score", first.get("confidence", 0.0)))) if isinstance(first.get("anchor_quality"), Mapping) else _clip01(first.get("truth_score", first.get("confidence", 0.0)))
+    second_score = _clip01(second.get("anchor_quality", {}).get("score", second.get("truth_score", second.get("confidence", 0.0)))) if isinstance(second.get("anchor_quality"), Mapping) else _clip01(second.get("truth_score", second.get("confidence", 0.0)))
+    first_layer = str(first.get("layer", "") or "").strip().lower()
+    second_layer = str(second.get("layer", "") or "").strip().lower()
+    first_type = str(first.get("type", first.get("role", "")) or "").strip().upper()
+    second_type = str(second.get("type", second.get("role", "")) or "").strip().upper()
+    tight_layers = {"supply_demand", "trigger_zones", "target_zones", "invalidation"}
+    tight_types = {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SNIPER_ENTRY_BOX", "RETEST_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"}
+    if first_layer in tight_layers or second_layer in tight_layers or first_type in tight_types or second_type in tight_types:
+        winner = dict(first if first_score >= second_score else second)
+        winner["confidence"] = round(confidence, 4)
+        winner["merged_count"] = int(first.get("merged_count", 1) or 1) + int(second.get("merged_count", 1) or 1)
+        winner.setdefault("precision_flags", [])
+        if isinstance(winner.get("precision_flags"), list):
+            winner["precision_flags"].append("duplicate_cluster_kept_tightest_anchor_not_union")
+        return winner
+    merged = dict(first if first_score >= second_score else second)
     merged["bbox"] = [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
     merged["confidence"] = round(confidence, 4)
     merged["merged_count"] = int(first.get("merged_count", 1) or 1) + int(second.get("merged_count", 1) or 1)
@@ -513,6 +530,29 @@ def sanitize_overlay_box(
     row["area_ratio"] = round(float(area_ratio), 6)
     row["aspect_ratio"] = round(float(bbox_aspect_ratio(clipped)), 4)
     row["structural_anchor"] = bool(has_structural_anchor(row))
+    anchor_quality = _mapping(row.get("anchor_quality"))
+    anchor_score = _clip01(anchor_quality.get("score", 0.70 if row["structural_anchor"] else 0.25))
+    row["anchor_quality_score"] = round(float(anchor_score), 4)
+    row["anchor_evidence_status"] = str(anchor_quality.get("status") or ("VALID" if row["structural_anchor"] else "WEAK"))
+    layer_name = str(layer or "").strip().lower()
+    lifecycle = str(row.get("lifecycle_state", row.get("state", "")) or "").upper()
+    if layer_name == "historical_replay" or lifecycle in {"HISTORICAL", "REPLAY", "ARCHIVED"}:
+        row.setdefault("display_state", "GHOSTED")
+        row.setdefault("label_hidden", True)
+        row.setdefault("label_visible", False)
+        row.setdefault("visual_weight", 0.28)
+    elif layer_name in {"trigger_zones", "target_zones", "invalidation", "active_council_decision"}:
+        row.setdefault("display_state", "FULL" if anchor_score >= 0.62 else "COMPACT")
+        row.setdefault("visual_weight", max(0.60, min(1.0, 0.52 + anchor_score * 0.32)))
+    elif layer_name == "supply_demand":
+        row.setdefault("display_state", "COMPACT" if anchor_score >= 0.62 else "GHOSTED")
+        row.setdefault("visual_weight", max(0.38, min(0.76, 0.34 + anchor_score * 0.28)))
+        if anchor_score < 0.72:
+            row.setdefault("label_hidden", True)
+            row.setdefault("label_visible", False)
+    else:
+        row.setdefault("display_state", "NESTED" if anchor_score >= 0.58 else "GHOSTED")
+        row.setdefault("visual_weight", max(0.24, min(0.70, 0.28 + anchor_score * 0.30)))
     return row
 
 
@@ -768,7 +808,7 @@ def _apply_live_default_visibility(boxes: Sequence[Mapping[str, Any]], active_si
         layer = str(row.get("layer", "") or "")
         key = str(row.get("key", "") or "").strip().lower()
         row["visible_default"] = (
-            layer in {"chart_bounds", "recent_candles", "active_council_decision", "historical_replay"}
+            layer in {"chart_bounds", "recent_candles", "active_council_decision"}
             or key == "current"
         )
 
@@ -1138,12 +1178,42 @@ def prepare_overlay_geometry(
                 pass
     except Exception:
         pass
+
+    floating_boxes = 0
+    unanchored_live_overlays = 0
+    loose_zone_count = 0
+    label_collision_risk_count = 0
+    quality_scores: list[float] = []
+    for row in boxes:
+        layer_name = str(row.get("layer", "") or "")
+        anchor_score = _clip01(row.get("anchor_quality_score", _mapping(row.get("anchor_quality", {})).get("score", 0.70 if has_structural_anchor(row) else 0.25)))
+        quality_scores.append(anchor_score)
+        if not has_structural_anchor(row) and layer_name not in {"chart_bounds", "diagnostics", "broker_controls"}:
+            unanchored_live_overlays += 1
+        if anchor_score < 0.45 and layer_name not in {"chart_bounds", "diagnostics", "broker_controls"}:
+            floating_boxes += 1
+        if layer_name == "supply_demand" and _float(row.get("area_ratio"), 0.0) > 0.055:
+            loose_zone_count += 1
+        if row.get("label_hidden") is not True and layer_name in {"historical_replay", "major_swings", "local_swings"}:
+            label_collision_risk_count += 1
+    anchor_quality_avg = sum(quality_scores) / max(1, len(quality_scores))
+    anchor_quality_min = min(quality_scores) if quality_scores else 0.0
+    render_grade = "A" if floating_boxes == 0 and unanchored_live_overlays == 0 and loose_zone_count <= 1 else ("B" if floating_boxes <= 2 and unanchored_live_overlays <= 2 else "FAIL")
+    geometry["overlay_quality"] = {
+        "floating_boxes": int(floating_boxes),
+        "unanchored_live_overlays": int(unanchored_live_overlays),
+        "loose_zone_count": int(loose_zone_count),
+        "label_collision_risk_count": int(label_collision_risk_count),
+        "anchor_quality_avg": round(float(anchor_quality_avg), 4),
+        "anchor_quality_min": round(float(anchor_quality_min), 4),
+        "render_grade": render_grade,
+    }
     geometry["truth_audit"] = build_overlay_truth_audit(boxes)
     tracking["overlay_geometry"] = geometry
     tracking["overlay_truth_audit"] = geometry["truth_audit"]
     signal["overlay_truth_audit"] = geometry["truth_audit"]
     if _env_flag("PHOENIXGUARD_OVERLAY_GEOMETRY_DUMPS", False):
-        debug_dir = RUNTIME.project_root / ".codex_runtime" / "overlay_geometry_dumps"
+        debug_dir = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or RUNTIME.project_root / "runtime" / "live") / "overlay_geometry_dumps"
         try:
             debug_dir.mkdir(parents=True, exist_ok=True)
             chart_transform_payload = _mapping(geometry.get("chart_transform", {}))

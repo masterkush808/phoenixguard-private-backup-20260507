@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import pytest
 
 from pathlib import Path
@@ -13,6 +14,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from tools import certify_v3_full_system_burn_in as burn
+from tools import capture_dashboard_visual_v3 as dashboard_capture
 from tools.capture_dashboard_visual_v3 import prune_capture_evidence
 
 
@@ -71,6 +73,106 @@ def test_dashboard_capture_retention_prunes_old_timestamp_bundles(tmp_path: Path
     assert (tmp_path / f"dashboard_{session}_20260616_010200.png").exists()
     assert (tmp_path / f"latest_full-overlay_{session}_20260616_010200.png").exists()
     assert unrelated.exists()
+
+
+def test_dashboard_capture_probe_does_not_publish_frontend_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        dashboard_capture,
+        "_resolve_capture_context",
+        lambda *_args, **_kwargs: {
+            "route": "live",
+            "backend_mode": "CLEAN_LIVE",
+            "select_value": "clean_live",
+            "expected_renderable_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        dashboard_capture,
+        "_http_bytes",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "status": 200,
+            "bytes": 13,
+            "content_type": "text/html",
+            "body": b"<html></html>",
+        },
+    )
+    monkeypatch.setattr(
+        dashboard_capture,
+        "_http_json",
+        lambda *_args, **_kwargs: {"ok": True, "status": 200, "payload": {"renderable_count": 0}},
+    )
+
+    report = dashboard_capture.build_capture(
+        "http://127.0.0.1:8793",
+        "pocket-live-8788",
+        timeout=1.0,
+        out_dir=tmp_path,
+        width=800,
+        height=600,
+        skip_playwright=True,
+    )
+
+    assert "pg_no_heartbeat=1" in report["dashboard_url"]
+
+
+def test_dashboard_capture_active_heartbeat_prefers_live_truth_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dashboard_capture, "HEARTBEAT_DIR", tmp_path)
+    now_ms = 10_000_000.0
+    monkeypatch.setattr(dashboard_capture.time, "time", lambda: now_ms / 1000.0)
+    session = "pocket-live-8788"
+    live = {
+        "session_id": session,
+        "surface_id": "dashboard_live",
+        "route": "live",
+        "overlay_mode": "CLEAN_LIVE",
+        "visible_artifact_kind": "window-locked-overlay",
+        "visible_overlay_count": 12,
+        "received_at_ms": now_ms - 20_000.0,
+        "chart_transform_id": "ct_live",
+    }
+    replay = {
+        "session_id": session,
+        "surface_id": "dashboard_replay_replay",
+        "route": "replay",
+        "overlay_mode": "REPLAY",
+        "visible_artifact_kind": "window-locked-overlay",
+        "visible_overlay_count": 36,
+        "received_at_ms": now_ms - 1_000.0,
+        "chart_transform_id": "ct_replay",
+    }
+    (tmp_path / f"{session}__dashboard_live.json").write_text(json.dumps(live), encoding="utf-8")
+    (tmp_path / f"{session}__dashboard_replay_replay.json").write_text(json.dumps(replay), encoding="utf-8")
+
+    selected = dashboard_capture._latest_active_dashboard_heartbeat(session)
+
+    assert selected["route"] == "live"
+    assert selected["overlay_mode"] == "CLEAN_LIVE"
+    assert selected["chart_transform_id"] == "ct_live"
+
+
+def test_dashboard_capture_active_heartbeat_does_not_promote_replay_without_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dashboard_capture, "HEARTBEAT_DIR", tmp_path)
+    now_ms = 10_000_000.0
+    monkeypatch.setattr(dashboard_capture.time, "time", lambda: now_ms / 1000.0)
+    session = "pocket-live-8788"
+    replay = {
+        "session_id": session,
+        "surface_id": "dashboard_replay_replay",
+        "route": "replay",
+        "overlay_mode": "REPLAY",
+        "visible_artifact_kind": "window-locked-overlay",
+        "visible_overlay_count": 36,
+        "received_at_ms": now_ms - 1_000.0,
+        "chart_transform_id": "ct_replay",
+    }
+    (tmp_path / f"{session}__dashboard_replay_replay.json").write_text(json.dumps(replay), encoding="utf-8")
+
+    selected = dashboard_capture._latest_active_dashboard_heartbeat(session)
+
+    assert selected == {}
 
 
 def test_full_activated_without_execution_packet_is_not_certified() -> None:

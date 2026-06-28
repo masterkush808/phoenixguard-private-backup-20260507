@@ -51,7 +51,7 @@ if __name__ == "__main__":
     assert_repo_venv_runtime("mobile_api", PROJECT_ROOT)
     _disable_local_tracing_export()
     _configure_windows_server_loop()
-    runtime_dir = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or PROJECT_ROOT / ".codex_runtime")
+    runtime_dir = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or PROJECT_ROOT / "runtime" / "live")
     data_dir = Path(os.getenv("PHOENIXGUARD_DATA_DIR") or runtime_dir / "data_live")
     logs_dir_path = Path(os.getenv("PHOENIXGUARD_LOGS_DIR") or runtime_dir / "logs_live")
     status_file = Path(os.getenv("PHOENIXGUARD_TRACKER_STATUS_FILE") or runtime_dir / "tracker_status.json")

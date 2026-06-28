@@ -97,7 +97,7 @@ def test_app_tracker_allows_customer_or_connector_when_gates_pass() -> None:
         payload = response.json()
         assert payload["allowed"] is True
         assert payload["blocked_gates"] == []
-        assert payload["dashboard_url"] == "/v1/mobile/window-tracker/dashboard"
+        assert payload["dashboard_url"] == "/v3/mobile/window-tracker/dashboard"
         assert all(gate["passed"] for gate in payload["gates"].values())
 
 

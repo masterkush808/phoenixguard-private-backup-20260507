@@ -107,7 +107,8 @@ _WINDOW_TRACKER_BRAND_ASSETS = frozenset(
     }
 )
 _DEFAULT_WINDOW_TRACKER_DASHBOARD_SESSION_ID = "pocket-live-8788"
-_SHOOTER_HANDSHAKE_PATH = PROJECT_ROOT / ".codex_runtime" / "shooter_handshake.json"
+_RUNTIME_ROOT = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or PROJECT_ROOT / "runtime" / "live")
+_SHOOTER_HANDSHAKE_PATH = _RUNTIME_ROOT / "shooter_handshake.json"
 _PUBLISHED_PACKET_FALLBACK_TTL_SEC = 8.0
 
 
@@ -229,6 +230,53 @@ def _compact_live_state_cache_can_reuse(payload: Mapping[str, object], cached_ag
     return cached_age_sec <= 2.0
 
 
+def _compact_overlay_object_frame_id(payload: Mapping[str, object]) -> int:
+    candidates: list[object] = [
+        payload.get("overlay_object_frame_id"),
+        _as_mapping(payload.get("overlays")).get("overlay_object_frame_id"),
+        _as_mapping(payload.get("live_visual_state")).get("overlay_object_frame_id"),
+        _as_mapping(_as_mapping(payload.get("live_visual_state")).get("overlays")).get("overlay_object_frame_id"),
+    ]
+    for container in (
+        _as_mapping(payload.get("overlays")),
+        _as_mapping(_as_mapping(payload.get("live_visual_state")).get("overlays")),
+    ):
+        for key in ("objects", "all_objects"):
+            rows = _as_sequence(container.get(key))
+            if not rows:
+                continue
+            first = _as_mapping(rows[0])
+            candidates.append(first.get("frame_id") or first.get("frame_index"))
+    for candidate in candidates:
+        frame_id = int(_epoch_float(candidate, 0.0))
+        if frame_id > 0:
+            return frame_id
+    return 0
+
+
+def _display_overlay_authority_frame_id(display_payload: Mapping[str, object]) -> int:
+    return max(
+        int(_epoch_float(display_payload.get("overlay_frame_id"), 0.0)),
+        int(_epoch_float(display_payload.get("chart_frame_id"), 0.0)),
+        int(_epoch_float(display_payload.get("full_overlay_frame_id"), 0.0)),
+    )
+
+
+def _compact_overlay_payload_stale_for_display(
+    payload: Mapping[str, object],
+    display_payload: Mapping[str, object] | None,
+) -> bool:
+    if display_payload is None or _compact_live_state_renderable_count(payload) <= 0:
+        return False
+    display_overlay_frame_id = _display_overlay_authority_frame_id(display_payload)
+    if display_overlay_frame_id <= 0:
+        return False
+    payload_overlay_frame_id = _compact_overlay_object_frame_id(payload)
+    if payload_overlay_frame_id <= 0:
+        return True
+    return payload_overlay_frame_id < display_overlay_frame_id
+
+
 _DIRECT_DISPLAY_STATE_KEYS = frozenset(
     {
         "session_id",
@@ -280,8 +328,8 @@ def _slugify_session_id(value: str) -> str:
 
 def _runtime_data_dir_candidates() -> list[Path]:
     candidates: list[Path] = [Path(RUNTIME.data_dir)]
-    candidates.append(PROJECT_ROOT / ".codex_runtime" / "data_live")
-    lock_path = PROJECT_ROOT / ".codex_runtime" / "phoenixguard_stack.lock.json"
+    candidates.append(_RUNTIME_ROOT / "data_live")
+    lock_path = _RUNTIME_ROOT / "phoenixguard_stack.lock.json"
     try:
         lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
     except Exception:
@@ -375,6 +423,8 @@ def _load_persisted_compact_overlay_response(
     display_signature = _surface_signature_from_payload(display_payload)
     cached_signature = str(payload.get("persisted_overlay_surface_signature") or "").strip()
     if display_signature and cached_signature and display_signature != cached_signature:
+        return None
+    if _compact_overlay_payload_stale_for_display(payload, display_payload):
         return None
     provider = _mapping_to_plain_dict(payload.get("provider_status"))
     provider.update(
@@ -1296,6 +1346,66 @@ def _safe_file_bytes_response(path: Path, *, media_type: str | None = None) -> R
     except OSError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact is not readable.") from exc
     return Response(content=content, media_type=media_type, headers=dict(_NO_STORE_ARTIFACT_HEADERS))
+
+
+def _normalize_v3_artifact_mode(value: object) -> str:
+    text = str(value or "").strip().upper().replace("-", "_")
+    if text in {
+        "CLEAN_LIVE",
+        "CANDLES",
+        "GLOBAL",
+        "LOCAL",
+        "SUPPLY_DEMAND",
+        "TRENDLINES",
+        "TRIGGER",
+        "TARGET",
+        "INVALIDATION",
+        "PATH",
+        "ACTIVE_CONTEXT",
+        "COUNCIL",
+        "FULL_HISTORY_READ",
+        "BROKER",
+        "TWO_CANDLE_STUDY",
+        "LSTM_STUDY",
+        "DIAGNOSTICS",
+        "CALIBRATION",
+        "REPLAY",
+    }:
+        return text
+    select_map = {
+        "clean_live": "CLEAN_LIVE",
+        "active_context": "ACTIVE_CONTEXT",
+        "full_history_read": "FULL_HISTORY_READ",
+        "supply_demand": "SUPPLY_DEMAND",
+        "trendlines": "TRENDLINES",
+        "triggers": "TRIGGER",
+        "targets": "TARGET",
+        "invalidation": "INVALIDATION",
+        "replay": "REPLAY",
+        "smc_council": "COUNCIL",
+        "deep_debug": "DIAGNOSTICS",
+    }
+    return select_map.get(str(value or "").strip().lower().replace("-", "_"), "CLEAN_LIVE")
+
+
+def _sequence_mappings(value: object) -> list[Mapping[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    items = cast(Sequence[object], value)
+    return [cast(Mapping[str, Any], item) for item in items if isinstance(item, Mapping)]
+
+
+def _scene_bounds(value: object) -> list[int]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    parts = list(cast(Sequence[object], value))
+    if len(parts) < 4:
+        return []
+    try:
+        x0, y0, x1, y1 = [int(round(float(str(part)))) for part in parts[:4]]
+    except (TypeError, ValueError):
+        return []
+    return [x0, y0, x1, y1] if x1 > x0 and y1 > y0 else []
 
 
 def _compact_capture_once_response(payload: Mapping[str, Any]) -> dict[str, object]:
@@ -2326,6 +2436,11 @@ def create_app(
                     "renderable_count",
                     "hidden_count",
                     "rejected_count",
+                    "artifact_frame_id",
+                    "overlay_object_frame_id",
+                    "artifact_frame_aligned",
+                    "artifact_authority_locked",
+                    "artifact_mismatch_reason",
                     "reason_if_empty",
                     "unknown_or_unmapped_terms",
                     "overlay_state_version",
@@ -2434,6 +2549,10 @@ def create_app(
             "frame_index",
             "state_version",
             "decision_version",
+            "chart_transform_id",
+            "broker_source_lock_id",
+            "sequence_id",
+            "overlay_object_frame_id",
             "overlay_state_version",
             "overlay_frame_state_version",
             "requested_mode",
@@ -3079,6 +3198,8 @@ def create_app(
                 if key[0] == requested_session_id and key[2] == cache_signature
             ]
         for cached_payload in cached_candidates:
+            if _compact_overlay_payload_stale_for_display(cached_payload, display_snapshot):
+                continue
             projected = _project_compact_live_state_response(cached_payload, active_mode, now_epoch=now_epoch)
             if projected is not None:
                 return _apply_display_snapshot_to_projected_payload(projected, display_snapshot, now_epoch=now_epoch)
@@ -3094,6 +3215,8 @@ def create_app(
                 now_epoch=now_epoch,
             )
             if persisted is None:
+                continue
+            if _compact_overlay_payload_stale_for_display(persisted, display_snapshot):
                 continue
             projected = _project_compact_live_state_response(persisted, active_mode, now_epoch=now_epoch)
             if projected is not None:
@@ -3469,6 +3592,8 @@ def create_app(
                                 requested_session_id,
                                 require_overlay_model=False,
                             )
+                            if _compact_overlay_payload_stale_for_display(cached_payload, display_snapshot):
+                                continue
                             compact_cached = _apply_display_snapshot_to_projected_payload(
                                 dict(cached[1]),
                                 display_snapshot,
@@ -3486,11 +3611,15 @@ def create_app(
                         if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
                             refresh_source = dict(cached[1])
                             break
+                display_snapshot: Mapping[str, object] | None = None
                 if refresh_source is not None:
                     display_snapshot = _direct_window_tracker_display_snapshot(
                         requested_session_id,
                         require_overlay_model=False,
                     )
+                    if _compact_overlay_payload_stale_for_display(refresh_source, display_snapshot):
+                        refresh_source = None
+                if refresh_source is not None:
                     compact_refreshed = _apply_display_snapshot_to_projected_payload(
                         refresh_source,
                         display_snapshot,
@@ -3529,6 +3658,8 @@ def create_app(
                                     requested_session_id,
                                     require_overlay_model=False,
                                 )
+                                if _compact_overlay_payload_stale_for_display(cached_payload, display_snapshot):
+                                    continue
                                 compact_cached = _apply_display_snapshot_to_projected_payload(
                                     dict(cached[1]),
                                     display_snapshot,
@@ -3547,11 +3678,15 @@ def create_app(
                             if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC:
                                 refresh_source = dict(cached[1])
                                 break
+                    display_snapshot = None
                     if refresh_source is not None:
                         display_snapshot = _direct_window_tracker_display_snapshot(
                             requested_session_id,
                             require_overlay_model=False,
                         )
+                        if _compact_overlay_payload_stale_for_display(refresh_source, display_snapshot):
+                            refresh_source = None
+                    if refresh_source is not None:
                         compact_refreshed = _apply_display_snapshot_to_projected_payload(
                             refresh_source,
                             display_snapshot,
@@ -3603,6 +3738,8 @@ def create_app(
                         display_snapshot,
                         now_epoch=now_epoch,
                     )
+                    if warm_start is not None and _compact_overlay_payload_stale_for_display(warm_start, display_snapshot):
+                        warm_start = None
                     if warm_start is not None:
                         warm_start = _apply_display_snapshot_to_projected_payload(
                             warm_start,
@@ -4991,6 +5128,86 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
 
+    def _requested_overlay_layers(raw_layers: str | None) -> set[str] | None:
+        if raw_layers is None:
+            return None
+        layers: set[str] = set()
+        for item in re.split(r"[\s,]+", str(raw_layers or "").strip()):
+            layer = item.strip().lower()
+            if layer and re.fullmatch(r"[a-z0-9_:-]+", layer):
+                layers.add(layer)
+        return layers
+
+    def render_v3_overlay_artifact_response(
+        session_id: str,
+        artifact_kind: str,
+        overlay_mode: str | None = None,
+        overlay_layers: str | None = None,
+    ) -> Response | None:
+        kind = str(artifact_kind or "").strip().lower()
+        if kind not in {"overlay", "full-overlay"}:
+            return None
+        mode = _normalize_v3_artifact_mode(overlay_mode or "CLEAN_LIVE")
+        requested_layers = _requested_overlay_layers(overlay_layers)
+        try:
+            tracker = get_window_tracker_service()
+            live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=False)
+            chart_path = tracker.latest_artifact_path(session_id, "chart")
+        except Exception:
+            return None
+        overlays_payload = _mapping_to_plain_dict(live_state.get("overlays"))
+        overlay_dicts = _sequence_mappings(overlays_payload.get("objects"))
+        if requested_layers is not None:
+            overlay_dicts = [
+                overlay
+                for overlay in overlay_dicts
+                if str(overlay.get("layer") or "").strip().lower() in requested_layers
+            ]
+        if not overlay_dicts and requested_layers is None:
+            return None
+        chart_png = render_overlays_on_chart(chart_path, overlay_dicts)
+        headers = {
+            **dict(_NO_STORE_ARTIFACT_HEADERS),
+            "X-PhoenixGuard-Overlay-Source": "live_state_v3",
+            "X-PhoenixGuard-Overlay-Mode": mode,
+        }
+        if requested_layers is not None:
+            headers["X-PhoenixGuard-Overlay-Layers"] = ",".join(sorted(requested_layers))
+        if kind == "overlay":
+            return Response(content=chart_png, media_type="image/png", headers=headers)
+        try:
+            from io import BytesIO
+
+            from PIL import Image
+
+            window_path = tracker.latest_artifact_path(session_id, "window")
+            with Image.open(window_path) as opened_window:
+                window_image = opened_window.convert("RGBA")
+            chart_overlay = Image.open(BytesIO(chart_png)).convert("RGBA")
+            scene_graph = _mapping_to_plain_dict(live_state.get("scene_graph") or live_state.get("broker_scene_graph_v3"))
+            bounds = _scene_bounds(scene_graph.get("chart_region_bounds"))
+            if not bounds:
+                tracking = _mapping_to_plain_dict(live_state.get("tracking_summary"))
+                focus = _mapping_to_plain_dict(tracking.get("focus_region") or live_state.get("manual_focus_region"))
+                bounds = _scene_bounds(focus.get("pixel_bbox"))
+            if not bounds:
+                return None
+            x0, y0, x1, y1 = bounds
+            x0 = max(0, min(window_image.width - 1, x0))
+            y0 = max(0, min(window_image.height - 1, y0))
+            x1 = max(x0 + 1, min(window_image.width, x1))
+            y1 = max(y0 + 1, min(window_image.height, y1))
+            target_size = (max(1, x1 - x0), max(1, y1 - y0))
+            if chart_overlay.size != target_size:
+                chart_overlay = chart_overlay.resize(target_size, Image.Resampling.BILINEAR)
+            canvas = window_image.copy()
+            canvas.alpha_composite(chart_overlay, (x0, y0))
+            output = BytesIO()
+            canvas.convert("RGB").save(output, format="PNG")
+            return Response(content=output.getvalue(), media_type="image/png", headers=headers)
+        except Exception:
+            return None
+
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-chart")
     def get_tracker_latest_chart(session_id: str) -> Response:
         try:
@@ -5059,7 +5276,15 @@ def create_app(
         return _safe_file_bytes_response(path, media_type=media_type)
 
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-{artifact_kind}")
-    def get_tracker_latest_named_artifact(session_id: str, artifact_kind: str) -> Response:
+    def get_tracker_latest_named_artifact(
+        session_id: str,
+        artifact_kind: str,
+        mode: str | None = None,
+        layers: str | None = None,
+    ) -> Response:
+        v3_response = render_v3_overlay_artifact_response(session_id, artifact_kind, mode, layers)
+        if v3_response is not None:
+            return v3_response
         try:
             path = get_window_tracker_service().latest_artifact_path(session_id, artifact_kind)
         except KeyError as exc:
@@ -5209,7 +5434,7 @@ def create_app(
                     overlay_dicts.append(cast(Mapping[str, Any], overlay))
             png = render_overlays_on_chart(chart_path if chart_path is not None else None, overlay_dicts)
             # optionally persist snapshot for golden/regression evidence
-            save_dir = PROJECT_ROOT / ".codex_runtime" / "visual_evidence"
+            save_dir = _RUNTIME_ROOT / "visual_evidence"
             try:
                 save_dir.mkdir(parents=True, exist_ok=True)
                 out_path = save_dir / f"{session_id}_render_latest.png"
@@ -5337,11 +5562,13 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model strength window not found.")
         return HTMLResponse(window_path.read_text(encoding="utf-8"))
 
+    @app.get("/v3/mobile/window-tracker/dashboard", response_class=HTMLResponse)
     @app.get("/v1/mobile/window-tracker/dashboard", response_class=HTMLResponse)
     def window_tracker_dashboard_default() -> HTMLResponse:
         session_id = resolve_window_tracker_dashboard_session_id()
         return HTMLResponse(_render_window_tracker_dashboard(session_id))
 
+    @app.get("/v3/mobile/window-tracker/dashboard/{session_id}", response_class=HTMLResponse)
     @app.get("/v1/mobile/window-tracker/dashboard/{session_id}", response_class=HTMLResponse)
     def window_tracker_dashboard(session_id: str) -> HTMLResponse:
         resolved_session_id = resolve_window_tracker_dashboard_session_id(session_id)

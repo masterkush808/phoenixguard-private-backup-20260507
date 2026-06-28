@@ -29,7 +29,7 @@ $pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
 $pythonPath = [string]$pythonRuntime.VenvPython
 
 $baseUrl = 'http://127.0.0.1:8793'
-$dashboardUrl = "$baseUrl/dashboard/live/$SessionId"
+$dashboardUrl = "$baseUrl/v3/mobile/window-tracker/dashboard/$SessionId"
 
 function Get-LiveReadinessSnapshot {
     param(
@@ -204,7 +204,8 @@ function Start-LiveReadyShooter {
     )
 
     $pollText = ([string][double]$PollSec).Replace(',', '.')
-    $logDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime\logs'
+    $runtimeLogRoot = if ($env:PHOENIXGUARD_RUNTIME_DIR) { $env:PHOENIXGUARD_RUNTIME_DIR } else { Join-Path -Path $ProjectRoot -ChildPath 'runtime\live' }
+    $logDir = Join-Path -Path $runtimeLogRoot -ChildPath 'logs'
     New-Item -ItemType Directory -Force -Path $logDir | Out-Null
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
     $outPath = Join-Path -Path $logDir -ChildPath "shooter-live-ready-$stamp.out.log"
@@ -239,7 +240,7 @@ if ($DisableShooter) {
 }
 
 $env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS = '0'
-$env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED = if ($env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED) { $env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED } else { '0' }
+$env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED = '1'
 $env:PHOENIXGUARD_BROKER_WINDOW_QUERY = $BrokerWindowQuery
 $env:PHOENIXGUARD_TRACKER_SESSION_ID = $SessionId
 $env:PHOENIXGUARD_DASHBOARD_ROUTE = 'live'
@@ -257,7 +258,7 @@ $env:PHOENIXGUARD_COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC = '20.0'
 $env:PHOENIXGUARD_TRACKER_ARTIFACT_PRUNE_INTERVAL_SEC = '300.0'
 $env:PHOENIXGUARD_SHOOTER_POLL_SEC = ([string][double]$ShooterPollSec).Replace(',', '.')
 $env:PHOENIXGUARD_FAST_FOCUS_PREVIEW = '1'
-$runtimeDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
+$runtimeDir = Join-Path -Path $ProjectRoot -ChildPath 'runtime\live'
 if (-not (Test-Path -LiteralPath $runtimeDir)) {
     New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 }
@@ -350,6 +351,13 @@ if ($targetProcessIds.Count -gt 0) {
 Write-Host "  stopped_processes=$($targetProcessIds.Count)"
 
 Write-Host ""
+Write-Host "Preflight: single repo .venv runtime"
+& $pythonPath ".\Backend\tools\verify_single_venv_runtime.py" --cleanup-extra-envs
+if ($LASTEXITCODE -ne 0) {
+    throw "Single repo .venv verification failed. Launch aborted."
+}
+
+Write-Host ""
 Write-Host "Preflight: runtime cleanup"
 if (Test-Path ".\Backend\tools\clean_v3_runtime_state.py") {
     & $pythonPath ".\Backend\tools\clean_v3_runtime_state.py" --apply --delete
@@ -371,12 +379,13 @@ Write-Host ""
 Write-Host "Preflight: shooter broker-window and calibration checks retired"
 
 Write-Host ""
-Write-Host "Launching full V3 tracker and Model Council stack; shooter arms only after readiness..."
+Write-Host "Launching single FINAL_LIVE tracker, Model Council, package reporter, and bridge stack..."
+$childLaunchProfile = if ($DisableShooter) { 'TRACKER_PLUS_COUNCIL' } else { 'FULL' }
 $launchArgs = @{
     CaptureIntervalSec = $CaptureIntervalSec
     BrokerWindowQuery = $BrokerWindowQuery
     BrokerWindowHwnd = $BrokerWindowHwnd
-    Profile = 'TRACKER_PLUS_COUNCIL'
+    Profile = $childLaunchProfile
     ShooterMode = 'PACKAGE_REPORTER'
     RecordActionEvidence = $false
     NoStatusLoop = $true
@@ -422,69 +431,7 @@ if ($LASTEXITCODE -ne 0) {
 
 if (-not $DisableShooter) {
     Write-Host ""
-    Write-Host "Shooter arming gate: runtime authority"
-    $authorityDeadline = (Get-Date).AddSeconds(180)
-    $authoritySnapshot = $null
-    while ((Get-Date) -lt $authorityDeadline) {
-        $authoritySnapshot = Get-LiveRuntimeAuthoritySnapshot -BaseUrl $baseUrl -SessionId $SessionId
-        if ($authoritySnapshot.ready) {
-            break
-        }
-        Start-Sleep -Seconds 2
-    }
-    if ($null -eq $authoritySnapshot) {
-        $authoritySnapshot = Get-LiveRuntimeAuthoritySnapshot -BaseUrl $baseUrl -SessionId $SessionId
-    }
-    if (-not $authoritySnapshot.ready) {
-        throw "Shooter arming refused: runtime authority gate failed ($($authoritySnapshot.reason)). Tracker remains running without shooter."
-    }
-    Write-Host "Runtime authority: PASS sequence=$($authoritySnapshot.sequence_context) study=$($authoritySnapshot.study_packet) execution=$($authoritySnapshot.execution_packet) instrument=$($authoritySnapshot.instrument_state)"
-
-    Write-Host ""
-    Write-Host "Shooter arming gate: broker source lock"
-    & $pythonPath 'Backend\tools\certify_broker_source_lock_v3.py' --base-url $baseUrl --session $SessionId
-    if ($LASTEXITCODE -ne 0) {
-        throw "Shooter arming refused: broker source lock gate failed. Tracker remains running without shooter."
-    }
-
-    Write-Host ""
-    Write-Host "Shooter arming gate: fresh tracker frame"
-    $perfDeadline = (Get-Date).AddSeconds(90)
-    $perfSnapshot = $null
-    while ((Get-Date) -lt $perfDeadline) {
-        $perfSnapshot = Get-LivePerformanceSnapshot -BaseUrl $baseUrl -SessionId $SessionId
-        if ($perfSnapshot.ready) {
-            break
-        }
-        Start-Sleep -Seconds 1
-    }
-    if ($null -eq $perfSnapshot) {
-        $perfSnapshot = Get-LivePerformanceSnapshot -BaseUrl $baseUrl -SessionId $SessionId
-    }
-    if (-not $perfSnapshot.ready) {
-        throw "Shooter arming refused: tracker frame is not fresh ($($perfSnapshot.reason)). Tracker remains running without shooter."
-    }
-    Write-Host "Shooter arming gate: PASS frame_age_ms=$([Math]::Round([double]$perfSnapshot.frame_age_ms, 0)) stale_status=$($perfSnapshot.stale_status)"
-
-    $authoritySnapshot = Get-LiveRuntimeAuthoritySnapshot -BaseUrl $baseUrl -SessionId $SessionId
-    if (-not $authoritySnapshot.ready) {
-        throw "Shooter arming refused: runtime authority changed after freshness gate ($($authoritySnapshot.reason)). Tracker remains running without shooter."
-    }
-    if ($BrokerWindowHwnd -le 0) {
-        try {
-            $liveState = Invoke-RestMethod -Uri "$baseUrl/v1/mobile/live/state/v3/$SessionId`?mode=CLEAN_LIVE" -TimeoutSec 20
-            $lockedHwndText = [string]($liveState.broker_source_lock.selected_target.window_handle)
-            $lockedHwnd = 0
-            if ([int]::TryParse($lockedHwndText, [ref]$lockedHwnd) -and $lockedHwnd -gt 0) {
-                $BrokerWindowHwnd = $lockedHwnd
-                Write-Host "Shooter locked HWND auto-detected from BrokerSourceLockV3: $BrokerWindowHwnd"
-            }
-        } catch {
-            Write-Warning "Could not auto-detect BrokerSourceLockV3 HWND before shooter start: $($_.Exception.Message)"
-        }
-    }
-    Write-Host "Starting shooter against $baseUrl in LIVE_READY mode"
-    Start-LiveReadyShooter -BaseUrl $baseUrl -SessionId $SessionId -PollSec $ShooterPollSec -BrokerWindowQuery $BrokerWindowQuery -BrokerWindowHwnd $BrokerWindowHwnd
+    Write-Host "Shooter reporter: PACKAGE_REPORTER is attached by FINAL_LIVE; separate shooter execution arming is retired."
 }
 
 $summaryPath = Join-Path -Path $runtimeDir -ChildPath 'live_launch_summary.json'
@@ -505,6 +452,8 @@ $summaryPayload = [ordered]@{
     session_id = $SessionId
     capture_interval_sec = $CaptureIntervalSec
     shooter_disabled = [bool]$DisableShooter
+    shooter_mode = if ($DisableShooter) { 'DISABLED' } else { 'PACKAGE_REPORTER' }
+    shooter_execution_path = 'retired_reporter_only'
     shooter_poll_sec = $ShooterPollSec
     live_execution_enabled = $env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED
 }
@@ -516,6 +465,6 @@ Write-Host "  Dashboard: $dashboardUrl"
 if ($DisableShooter) {
     Write-Host "  Shooter: disabled; no shooter process was launched."
 } else {
-    Write-Host "  Shooter reporter: background package reporter with logs in .codex_runtime\logs"
+    Write-Host "  Shooter reporter: background package reporter with logs in runtime\live\logs"
 }
-Write-Host "  Launch summary: .codex_runtime\live_launch_summary.json"
+Write-Host "  Launch summary: runtime\live\live_launch_summary.json"

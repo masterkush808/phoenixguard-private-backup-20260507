@@ -83,7 +83,10 @@ def _default_repo_root() -> Path:
 
 def default_lock_path(repo_root: Path | None = None) -> Path:
     root = repo_root or _default_repo_root()
-    return root / ".codex_runtime" / "phoenixguard_stack.lock.json"
+    runtime_dir = os.getenv("PHOENIXGUARD_RUNTIME_DIR")
+    if runtime_dir:
+        return Path(runtime_dir) / "phoenixguard_stack.lock.json"
+    return root / "runtime" / "live" / "phoenixguard_stack.lock.json"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -242,7 +245,7 @@ class PhoenixRuntimeSingletonGuardV3:
         *,
         session_id: str = DEFAULT_SESSION_ID,
         base_url: str = DEFAULT_BASE_URL,
-        data_dir: str | Path = ".codex_runtime/data_live",
+        data_dir: str | Path = "runtime/live/data_live",
         api_port: int = DEFAULT_API_PORT,
         launcher_pid: int | None = None,
         tracker_pid: int | None = None,

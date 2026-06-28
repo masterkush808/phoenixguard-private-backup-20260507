@@ -171,7 +171,7 @@ def test_tracker_status_file_write_failure_does_not_raise(monkeypatch: pytest.Mo
     assert list(tmp_path.glob("tracker_status.json.*.tmp")) == []
 
 
-def test_launcher_defaults_to_shadow_execution_without_explicit_live_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_launcher_defaults_to_live_execution_without_explicit_live_env(monkeypatch: pytest.MonkeyPatch) -> None:
     control_payloads: list[dict[str, Any]] = []
 
     def _fake_request_json(
@@ -217,8 +217,8 @@ def test_launcher_defaults_to_shadow_execution_without_explicit_live_env(monkeyp
     )
 
     assert control_payloads
-    assert control_payloads[0]["live_execution_enabled"] is False
-    assert control_payloads[0]["execution_mode"] == "shadow"
+    assert control_payloads[0]["live_execution_enabled"] is True
+    assert control_payloads[0]["execution_mode"] == "live"
 
 
 def test_quarantine_stale_session_on_boot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

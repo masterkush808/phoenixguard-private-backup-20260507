@@ -14,6 +14,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from _bootstrap import ensure_backend_paths
+
+ensure_backend_paths()
+
+from phoenixguard.runtime.python_environment_v3 import assert_repo_venv_runtime
+
 
 SCHEMA_VERSION = "PG_FINAL_10H_CERTIFICATION_V1"
 DEFAULT_BASE_URL = "http://127.0.0.1:8793"
@@ -192,7 +198,7 @@ def _common_files_dir() -> Path:
     appdata = os.environ.get("APPDATA", "")
     if appdata:
         return Path(appdata) / "MetaQuotes" / "Terminal" / "Common" / "Files"
-    return _repo_root() / ".codex_runtime" / "mt4_common_files"
+    return _repo_root() / "runtime" / "live" / "mt4_common_files"
 
 
 def _read_json_file(path: Path) -> dict[str, Any]:
@@ -212,7 +218,8 @@ def _slugify_session_id(value: str) -> str:
 def _direct_display_state_path(session_id: str) -> Path:
     return (
         _repo_root()
-        / ".codex_runtime"
+        / "runtime"
+        / "live"
         / "data_live"
         / "mobile_api"
         / "window_tracker"
@@ -863,6 +870,7 @@ def _write_final_reports(out_dir: Path, reports_dir: Path, verdict: str, summary
 
 
 def main() -> int:
+    assert_repo_venv_runtime("final_10h_certification_monitor", _repo_root())
     parser = argparse.ArgumentParser(description="Run PhoenixGuard V3 final 10-hour production certification monitor.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--session-id", default=DEFAULT_SESSION_ID)
@@ -878,7 +886,7 @@ def main() -> int:
     parser.add_argument("--authority-frame-max-age-ms", type=float, default=30_000.0)
     parser.add_argument("--authority-model-max-age-ms", type=float, default=30_000.0)
     parser.add_argument("--mt4-bridge-stale-sec", type=float, default=45.0)
-    parser.add_argument("--out-dir", default=".codex_runtime/10h_cert")
+    parser.add_argument("--out-dir", default="runtime/live/certification/10h_cert")
     parser.add_argument("--no-screenshots", action="store_true")
     args = parser.parse_args()
 

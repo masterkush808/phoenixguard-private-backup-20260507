@@ -213,8 +213,8 @@ def _dashboard_url(snapshot: Mapping[str, Any], config: VoiceConfig) -> str:
     base_url = str(snapshot.get("tracker_api_base_url", config.tracker_api_base_url) or "").rstrip("/")
     session_id = str(snapshot.get("tracker_session_id", config.tracker_session_id) or config.tracker_session_id)
     if not base_url:
-        return f"/v1/mobile/window-tracker/dashboard/{session_id}"
-    return f"{base_url}/v1/mobile/window-tracker/dashboard/{session_id}"
+        return f"/v3/mobile/window-tracker/dashboard/{session_id}"
+    return f"{base_url}/v3/mobile/window-tracker/dashboard/{session_id}"
 
 
 def execute_voice_command(

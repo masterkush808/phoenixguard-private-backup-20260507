@@ -179,4 +179,4 @@ def test_voice_api_returns_market_summary_and_dashboard_action(tmp_path: Path) -
     dashboard_payload = dashboard_response.json()
     assert dashboard_payload["match"]["name"] == "dashboard.open"
     assert dashboard_payload["payload"]["client_action"]["type"] == "open_url"
-    assert "/v1/mobile/window-tracker/dashboard/pocket-live-8788" in dashboard_payload["payload"]["client_action"]["url"]
+    assert "/v3/mobile/window-tracker/dashboard/pocket-live-8788" in dashboard_payload["payload"]["client_action"]["url"]

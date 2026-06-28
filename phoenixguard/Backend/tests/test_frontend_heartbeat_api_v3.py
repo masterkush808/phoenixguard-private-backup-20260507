@@ -65,7 +65,7 @@ def test_frontend_heartbeat_records_current_degraded_overlay_state(
     assert latest_body["overlay_state_version"] == "ov_degraded"
 
 
-def test_frontend_heartbeat_api_keeps_replay_separate_from_live_dashboard(
+def test_frontend_heartbeat_api_records_replay_on_canonical_dashboard_pulse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -86,25 +86,27 @@ def test_frontend_heartbeat_api_keeps_replay_separate_from_live_dashboard(
         "overlay_count": 5,
         "visible_overlay_count": 5,
         "full_broker_surface_visible": True,
+        "visible_artifact_kind": "full-overlay",
+        "visible_image_src": "/v1/mobile/window-tracker/sessions/pocket-live-8788/artifacts/latest-full-overlay?mode=REPLAY",
     }
 
     replay_response = client.post("/v1/mobile/frontend/heartbeat/v3", json=replay_payload)
 
     assert replay_response.status_code == 200
-    assert replay_response.json()["surface_id"] == "dashboard_replay_replay"
+    replay_response_body = replay_response.json()
+    assert replay_response_body["surface_id"] == "dashboard"
+    assert replay_response_body["visible_artifact_kind"] == "full-overlay"
 
     default_response = client.get(f"/v1/mobile/frontend/heartbeat/v3?session_id={session_id}")
-    replay_surface_response = client.get(
-        f"/v1/mobile/frontend/heartbeat/v3?session_id={session_id}&surface_id=dashboard_replay_replay"
-    )
 
     assert default_response.status_code == 200
-    assert default_response.json()["status"] == "missing"
-    assert replay_surface_response.status_code == 200
-    replay_surface_body = replay_surface_response.json()
-    assert replay_surface_body["route"] == "replay"
-    assert replay_surface_body["overlay_mode"] == "REPLAY"
-    assert replay_surface_body["frame_id"] == 210
+    default_body = default_response.json()
+    assert default_body["surface_id"] == "dashboard"
+    assert default_body["route"] == "replay"
+    assert default_body["overlay_mode"] == "REPLAY"
+    assert default_body["frame_id"] == 210
+    assert default_body["visible_artifact_kind"] == "full-overlay"
+    assert "latest-full-overlay" in default_body["visible_image_src"]
 
 
 def test_frontend_heartbeat_api_ignores_transient_empty_live_overlay(

@@ -49,7 +49,7 @@ cd C:\PhoenixGuard\phoenixguard
 Open the dashboard inside the VM:
 
 ```powershell
-Start-Process http://127.0.0.1:8793/v1/mobile/window-tracker/dashboard/pocket-live-8788
+Start-Process http://127.0.0.1:8793/v3/mobile/window-tracker/dashboard/pocket-live-8788
 ```
 
 Lock the Pocket Option chart in the dashboard. The shooter can run while waiting, but it only consumes valid fresh tracker decisions.

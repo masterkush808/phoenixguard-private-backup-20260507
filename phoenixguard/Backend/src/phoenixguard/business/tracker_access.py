@@ -15,7 +15,7 @@ from .store import BusinessStore, Customer, Device, License, Subscription
 
 TRACKER_ACCESS_SCHEMA_VERSION = "PG_BUSINESS_TRACKER_ACCESS_V1"
 TRACKER_HEALTH_SCHEMA_VERSION = "PG_BUSINESS_TRACKER_HEALTH_V1"
-TRACKER_DASHBOARD_ROUTE = "/v1/mobile/window-tracker/dashboard"
+TRACKER_DASHBOARD_ROUTE = "/v3/mobile/window-tracker/dashboard"
 TRACKER_DEFAULT_SESSION_ID = "pocket-live-8788"
 
 GATE_REGISTRATION = "registration"

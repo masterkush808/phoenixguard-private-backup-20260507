@@ -79,7 +79,7 @@ def test_mock_customer_flow_unlocks_active_license_command_and_tracker_gui() -> 
     assert tracker_health.status_code == 200
     assert tracker_health.json()["alive"] is True
 
-    dashboard = client.get(f"/v1/mobile/window-tracker/dashboard/{TRACKER_SESSION_ID}")
+    dashboard = client.get(f"/v3/mobile/window-tracker/dashboard/{TRACKER_SESSION_ID}")
     assert dashboard.status_code == 200
     assert 'data-testid="tracker-gui"' in dashboard.text
     assert "alive: running" in dashboard.text

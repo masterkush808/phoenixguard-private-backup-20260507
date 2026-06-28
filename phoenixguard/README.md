@@ -54,6 +54,7 @@ Before trusting an environment:
 .\.venv\Scripts\python.exe -m pip check
 .\.venv\Scripts\python.exe -m pipdeptree --warn fail
 .\.venv\Scripts\python.exe .\Backend\tools\verify_dependency_profile.py --profile dev
+.\.venv\Scripts\python.exe .\Backend\tools\verify_single_venv_runtime.py
 ```
 
 PhoenixGuard should be launched with the repo virtual environment only:
@@ -72,8 +73,19 @@ Runtime state is stored under the project runtime root:
 ```
 
 `.codex_runtime` is runtime state, locks, logs, screenshots, and certification evidence. It is not a
-Python environment and must not be treated as one.
-Python environment and must not be used as a dependency source.
+Python environment and must not be treated as a dependency source. Deleting it while PhoenixGuard is
+running will remove active tracker state and evidence.
+
+If Windows appears to show a base-Python child under a repo `.venv` parent, verify before changing
+anything:
+
+```powershell
+.\.venv\Scripts\python.exe .\Backend\tools\verify_single_venv_runtime.py --cleanup-extra-envs
+```
+
+The verifier deletes only known extra top-level venv folders such as `.venv-live`, `.venv-dev`,
+`.venv-training`, and `.venv-business` when they exist. It does not delete `.codex_runtime`, because
+that directory is runtime state, not a package environment.
 
 Do not run PhoenixGuard with bare `python`, and do not point live runtime state at
 `%LOCALAPPDATA%\PhoenixGuard\codex_runtime`. The launchers set
@@ -123,7 +135,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoe
 Open the dashboard after launch:
 
 ```text
-http://127.0.0.1:8793/dashboard/live/pocket-live-8788
+http://127.0.0.1:8793/v1/mobile/window-tracker/dashboard/pocket-live-8788
 ```
 
 ## Read The PhoenixGuard State
@@ -192,7 +204,7 @@ shooter process.
 
 ```powershell
 $env:PYTHONPATH = "$(Resolve-Path 'Backend/src');$(Resolve-Path 'Backend');$(Resolve-Path '.')"
-python -m uvicorn phoenixguard.mobile_api.app:create_app --factory --host 127.0.0.1 --port 8793 --log-level info
+.\.venv\Scripts\python.exe -m uvicorn phoenixguard.mobile_api.app:create_app --factory --host 127.0.0.1 --port 8793 --log-level info
 ```
 
 ## File To Launch Safely

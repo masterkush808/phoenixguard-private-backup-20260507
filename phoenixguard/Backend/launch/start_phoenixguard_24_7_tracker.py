@@ -61,7 +61,7 @@ def _browser_executable_candidates(browser_name: DashboardBrowserName) -> list[P
 
 def _dashboard_chrome_profile_dir() -> Path:
     configured = str(os.getenv("PHOENIXGUARD_DASHBOARD_CHROME_PROFILE_DIR", "") or "").strip()
-    return Path(configured) if configured else PROJECT_ROOT / ".codex_runtime" / "chrome_dashboard_profile"
+    return Path(configured) if configured else PROJECT_ROOT / "runtime" / "live" / "chrome_dashboard_profile"
 
 
 def _dashboard_browser_args(browser_name: DashboardBrowserName, executable_path: Path, url: str) -> list[str]:
@@ -285,7 +285,7 @@ def _resolve_python_launcher(env: dict[str, str], script_dir: Path | None = None
 
 
 def _default_live_runtime_dir(script_dir: Path, leaf: str) -> Path:
-    return script_dir / ".codex_runtime" / leaf
+    return script_dir / "runtime" / "live" / leaf
 
 
 def _slugify_session_id(value: str) -> str:
@@ -750,7 +750,7 @@ def _ensure_session(
                 timeout=30,
             )
 
-    live_execution_enabled = str(os.getenv("PHOENIXGUARD_LIVE_EXECUTION_ENABLED", "0") or "0").strip().lower() in {
+    live_execution_enabled = str(os.getenv("PHOENIXGUARD_LIVE_EXECUTION_ENABLED", "1") or "1").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -802,10 +802,10 @@ def _ensure_session(
 def main() -> int:
     script_dir = PROJECT_ROOT
     assert_repo_venv_runtime("tracker", script_dir)
-    os.environ["PHOENIXGUARD_RUNTIME_DIR"] = str(script_dir / ".codex_runtime")
+    os.environ["PHOENIXGUARD_RUNTIME_DIR"] = str(script_dir / "runtime" / "live")
     os.environ["PHOENIXGUARD_DATA_DIR"] = str(_default_live_runtime_dir(script_dir, "data_live"))
     os.environ["PHOENIXGUARD_LOGS_DIR"] = str(_default_live_runtime_dir(script_dir, "logs_live"))
-    os.environ["PHOENIXGUARD_TRACKER_STATUS_FILE"] = str(script_dir / ".codex_runtime" / "tracker_status.json")
+    os.environ["PHOENIXGUARD_TRACKER_STATUS_FILE"] = str(script_dir / "runtime" / "live" / "tracker_status.json")
 
     parser = argparse.ArgumentParser(description="Start the PhoenixGuard 24/7 locked tracker.")
     parser.add_argument("--host", default=os.getenv("PHOENIXGUARD_MOBILE_API_HOST", "127.0.0.1"))
@@ -820,7 +820,7 @@ def main() -> int:
         help="Normalized chart focus box as left,top,right,bottom. Use empty string to require manual dashboard lock.",
     )
     parser.add_argument("--health-timeout", type=int, default=int(os.getenv("PHOENIXGUARD_TRACKER_HEALTH_TIMEOUT_SEC", "60")))
-    parser.add_argument("--status-file", default=os.getenv("PHOENIXGUARD_TRACKER_STATUS_FILE", str(PROJECT_ROOT / ".codex_runtime" / "tracker_status.json")))
+    parser.add_argument("--status-file", default=os.getenv("PHOENIXGUARD_TRACKER_STATUS_FILE", str(PROJECT_ROOT / "runtime" / "live" / "tracker_status.json")))
     parser.add_argument("--health-probe-retries", type=int, default=int(os.getenv("PHOENIXGUARD_TRACKER_HEALTH_PROBE_RETRIES", "6")))
     parser.add_argument("--session-read-failures", type=int, default=int(os.getenv("PHOENIXGUARD_TRACKER_SESSION_READ_FAILURES", "3")))
     parser.add_argument("--wait-for-lock", action="store_true", default=True)
@@ -858,7 +858,7 @@ def main() -> int:
     os.environ.setdefault("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "1")
     os.environ.setdefault("PHOENIXGUARD_LIVE_MIN_CAPTURE_INTERVAL_SEC", "0.5")
     base_url = f"http://{args.host}:{args.port}"
-    dashboard_url = f"{base_url}/v1/mobile/window-tracker/dashboard/{args.session_id}?launch_epoch_ms={int(time.time() * 1000.0)}"
+    dashboard_url = f"{base_url}/v3/mobile/window-tracker/dashboard/{args.session_id}?launch_epoch_ms={int(time.time() * 1000.0)}"
     configured_focus_region = _parse_focus_region(args.focus_region)
     status_path = Path(args.status_file)
     runtime_guard = PhoenixRuntimeSingletonGuardV3.for_repo(script_dir)

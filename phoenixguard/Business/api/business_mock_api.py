@@ -390,6 +390,8 @@ def create_app() -> FastAPI:
             "artifacts": {},
         }
 
+    @app.get("/v3/mobile/window-tracker/dashboard", response_class=HTMLResponse)
+    @app.get("/v3/mobile/window-tracker/dashboard/{session_id}", response_class=HTMLResponse)
     @app.get("/v1/mobile/window-tracker/dashboard", response_class=HTMLResponse)
     @app.get("/v1/mobile/window-tracker/dashboard/{session_id}", response_class=HTMLResponse)
     def tracker_dashboard(session_id: str = TRACKER_SESSION_ID) -> HTMLResponse:

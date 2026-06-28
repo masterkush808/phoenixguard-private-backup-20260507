@@ -153,12 +153,30 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "function overlayModeAllows" in dashboard
     assert "function overlayTypeAllowedInMode" in dashboard
     assert "function applyFrontendOverlayModeBudget" in dashboard
-    assert "CLEAN_LIVE: {objects: 32, labels: 10}" in dashboard
+    assert "CLEAN_LIVE: {objects: null, labels: 9}" in dashboard
     assert "DASHBOARD_REFRESH_FAST_INTERVAL_MS = 15000" in dashboard
     assert "DASHBOARD_HEARTBEAT_INTERVAL_MS = 15000" in dashboard
+    assert "function frontendHeartbeatDisabled" in dashboard
+    assert "pg_no_heartbeat" in dashboard
+    assert "if (frontendHeartbeatDisabled())" in dashboard
     assert "function frontendOverlayLabelCandidate" in dashboard
     assert 'clean_live: "CLEAN_LIVE"' in dashboard
     assert "function backendObjectOverlayReady" in dashboard
+    assert "function currentChartTransformId" in dashboard
+    assert "function transformFrameFromId" in dashboard
+    assert "function chartTransformCandidate" in dashboard
+    assert "const authorityFrame = overlayAuthorityFrame(session);" in dashboard
+    assert "candidate.frame > 0 && candidate.frame === authorityFrame" in dashboard
+    assert "return `ct_${clean(session.session_id || SESSION_ID, SESSION_ID)}_${authorityFrame}`;" in dashboard
+    assert "chartTransformKey || \"CHART_TRANSFORM_PENDING\"" in dashboard
+    assert "chartTransformId: currentChartTransformId(session)" in dashboard
+    assert "const currentChartTransform = currentChartTransformId(session);" in dashboard
+    assert "chart_transform_id: chartTransformId" in dashboard
+    assert "payload.chart_transform_id" in dashboard
+    assert "const dynamicOverlayReady = (normalizedKind === \"overlay\" || normalizedKind === \"full-overlay\")" in dashboard
+    assert "visible_artifact_kind" in dashboard
+    assert "visible_image_src" in dashboard
+    assert "const fullOverlayVisibleCount = Math.max(boxes.length, backendRenderableOverlayCount(session));" in dashboard
     assert 'SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"])' in dashboard
     assert 'TRENDLINES: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"])' in dashboard
     assert "function isLineOverlay" in dashboard
@@ -213,7 +231,14 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "updateLayerControls();\n      renderHotspots();\n      refreshLiveVisualStateForMode(state.overlayMode);" in dashboard
     assert "useLockedWindowOverlayPlane" in dashboard
     assert "window-locked-overlay" in dashboard
+    assert "if (wantsOverlay && hasFullOverlay && !overlayStale)" in dashboard
+    assert "} else if (useLockedWindowOverlayPlane)" in dashboard
     assert "function artifactAvailable" in dashboard
+    assert "if (normalizedKind === \"window\" && fileName)" in dashboard
+    assert "if (normalizedKind === \"full-overlay\" && fullOverlayUsesSavedArtifact())" in dashboard
+    assert "function dynamicOverlayLayerSuffix" in dashboard
+    assert "function applyLayerButtonMode" in dashboard
+    assert "return `${sessionUrl()}/artifacts/files/${encodeURIComponent(fileName)}?v=${version}`;" in dashboard
     assert "artifact.exists === false" in dashboard
     assert "failedArtifactKeys" in dashboard
     assert "function handleSurfaceImageError" in dashboard

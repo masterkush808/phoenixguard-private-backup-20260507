@@ -31,13 +31,15 @@ def test_record_and_load_frontend_heartbeat(tmp_path: Path) -> None:
         {
             "session_id": "pocket-live-8788",
             "surface_id": "dashboard",
-            "route": "/v1/mobile/window-tracker/dashboard/pocket-live-8788",
+            "route": "/v3/mobile/window-tracker/dashboard/pocket-live-8788",
             "frame_id": 12,
             "chart_transform_id": "ct_12",
             "overlay_count": 4,
             "viewport": {"width": 1440, "height": 900},
             "render_size": {"width": 1000, "height": 600},
             "full_broker_surface_visible": True,
+            "visible_artifact_kind": "full-overlay",
+            "visible_image_src": "/v1/mobile/window-tracker/sessions/pocket-live-8788/artifacts/latest-full-overlay?mode=REPLAY",
         },
         store_dir=tmp_path,
         now_ms=1_000_000,
@@ -47,9 +49,11 @@ def test_record_and_load_frontend_heartbeat(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded["frame_id"] == 12
     assert loaded["overlay_count"] == 4
+    assert loaded["visible_artifact_kind"] == "full-overlay"
+    assert "latest-full-overlay" in loaded["visible_image_src"]
 
 
-def test_replay_dashboard_heartbeat_does_not_overwrite_live_dashboard(tmp_path: Path) -> None:
+def test_dashboard_heartbeat_uses_one_canonical_surface_for_all_views(tmp_path: Path) -> None:
     live = record_frontend_heartbeat(
         {
             "session_id": "pocket-live-8788",
@@ -78,15 +82,11 @@ def test_replay_dashboard_heartbeat_does_not_overwrite_live_dashboard(tmp_path: 
     )
 
     assert live["surface_id"] == "dashboard"
-    assert replay["surface_id"] == "dashboard_replay_replay"
+    assert replay["surface_id"] == "dashboard"
     live_loaded = latest_frontend_heartbeat("pocket-live-8788", surface_id="dashboard", store_dir=tmp_path)
-    replay_loaded = latest_frontend_heartbeat("pocket-live-8788", surface_id="dashboard_replay_replay", store_dir=tmp_path)
     assert live_loaded is not None
-    assert replay_loaded is not None
-    assert live_loaded["route"] == "live"
-    assert live_loaded["frame_id"] == 10
-    assert replay_loaded["route"] == "replay"
-    assert replay_loaded["frame_id"] == 20
+    assert live_loaded["route"] == "replay"
+    assert live_loaded["frame_id"] == 20
 
 
 def test_latest_dashboard_heartbeat_prefers_fresh_visible_page_instance(tmp_path: Path) -> None:
@@ -123,8 +123,8 @@ def test_latest_dashboard_heartbeat_prefers_fresh_visible_page_instance(tmp_path
 
     loaded = latest_frontend_heartbeat("pocket-live-8788", surface_id="dashboard", store_dir=tmp_path)
 
-    assert older["surface_id"] == "dashboard_old_page"
-    assert newer["surface_id"] == "dashboard_fresh_page"
+    assert older["surface_id"] == "dashboard"
+    assert newer["surface_id"] == "dashboard"
     assert loaded is not None
     assert loaded["page_instance_id"] == "fresh_page"
     assert loaded["frame_id"] == 40
@@ -167,8 +167,8 @@ def test_latest_dashboard_heartbeat_prefers_fresh_hidden_page_over_stale_visible
 
     loaded = latest_frontend_heartbeat("pocket-live-8788", surface_id="dashboard", store_dir=tmp_path)
 
-    assert stale_visible["surface_id"] == "dashboard_stale_visible"
-    assert fresh_hidden["surface_id"] == "dashboard_fresh_hidden"
+    assert stale_visible["surface_id"] == "dashboard"
+    assert fresh_hidden["surface_id"] == "dashboard"
     assert loaded is not None
     assert loaded["page_instance_id"] == "fresh_hidden"
     assert loaded["frame_id"] == 60

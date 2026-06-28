@@ -172,7 +172,7 @@ def test_overlay_rejects_box_area_above_layer_max() -> None:
     )
 
 
-def test_overlay_merges_overlapping_same_type_boxes() -> None:
+def test_overlay_merges_overlapping_same_type_boxes_by_keeping_best_tight_box() -> None:
     boxes: list[dict[str, Any]] = [
         {
             "key": "support_1",
@@ -196,7 +196,7 @@ def test_overlay_merges_overlapping_same_type_boxes() -> None:
 
     assert len(merged) == 1
     assert merged[0]["merged_count"] == 2
-    assert bbox_iou(merged[0]["bbox"], [40, 180, 190, 216]) > 0.99
+    assert bbox_iou(merged[0]["bbox"], [52, 182, 190, 216]) > 0.99
     assert merged[0]["confidence"] == 0.74
 
 
@@ -219,7 +219,7 @@ def test_overlay_zone_requires_structural_anchor() -> None:
     )
 
 
-def test_overlay_active_live_view_shows_historical_replay_by_default() -> None:
+def test_overlay_active_live_view_ghosts_historical_replay_by_default() -> None:
     prepared = prepare_overlay_geometry(
         {
             "tracked_candles": [
@@ -247,7 +247,10 @@ def test_overlay_active_live_view_shows_historical_replay_by_default() -> None:
     assert DEFAULT_LAYER_VISIBILITY["historical_replay"] is True
     assert geometry["layer_visibility"]["historical_replay"] is True
     assert historical
-    assert all(box["visible_default"] is True for box in historical)
+    assert all(box["visible_default"] is False for box in historical)
+    assert all(box["display_state"] == "GHOSTED" for box in historical)
+    assert all(box["label_hidden"] is True for box in historical)
+    assert all(box["anchor_evidence_status"] == "VALID" for box in historical)
 
 
 def test_overlay_cancel_line_stays_near_trigger_zone_not_full_chart(monkeypatch: Any) -> None:

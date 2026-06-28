@@ -14,7 +14,7 @@ from uuid import uuid4
 FRONTEND_HEARTBEAT_SCHEMA_VERSION = "PG_FRONTEND_HEARTBEAT_V3"
 VISUAL_HEALTH_SCHEMA_VERSION = "PG_VISUAL_HEALTH_V3"
 
-DEFAULT_HEARTBEAT_STORE_DIR = Path(".codex_runtime") / "frontend_heartbeat_v3"
+DEFAULT_HEARTBEAT_STORE_DIR = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or "runtime/live") / "frontend_heartbeat_v3"
 _HEARTBEAT_WRITE_LOCKS: dict[Path, Lock] = {}
 _HEARTBEAT_WRITE_LOCKS_GUARD = Lock()
 _HEARTBEAT_MEMORY_CACHE: dict[Path, dict[str, Any]] = {}
@@ -164,13 +164,12 @@ def _surface_key(value: str, default: str = "live") -> str:
 
 
 def _dashboard_heartbeat_surface_id(surface_id: str, route: str, overlay_mode: str, page_instance_id: str) -> str:
+    surface_key = _surface_key(surface_id, default="dashboard")
+    if surface_id == "dashboard" or surface_key == "dashboard" or surface_key.startswith("dashboard_"):
+        return "dashboard"
     if surface_id != "dashboard":
         return surface_id
-    route_key = _surface_key(route)
-    if route_key in {"live", "dashboard"} or "window_tracker_dashboard" in route_key:
-        return f"dashboard_{page_instance_id}"[:120] if page_instance_id else "dashboard"
-    mode_key = _surface_key(overlay_mode, default="clean_live")
-    return f"dashboard_{route_key}_{mode_key}"[:120]
+    return "dashboard"
 
 
 def _heartbeat_path(session_id: str, *, surface_id: str = "dashboard", store_dir: Path | str | None = None) -> Path:
@@ -272,6 +271,8 @@ def normalize_frontend_heartbeat(payload: Mapping[str, Any], *, now_ms: int | fl
         "viewport": viewport,
         "render_size": render_size,
         "full_broker_surface_visible": bool(payload.get("full_broker_surface_visible", False)),
+        "visible_artifact_kind": _text(payload.get("visible_artifact_kind")),
+        "visible_image_src": _text(payload.get("visible_image_src")),
         "frontend_state_version": _text(payload.get("frontend_state_version")),
     }
 

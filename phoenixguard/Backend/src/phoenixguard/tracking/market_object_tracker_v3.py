@@ -285,7 +285,10 @@ def _chart_transform_id(payload: Mapping[str, Any], tracking: Mapping[str, Any])
 
 
 def _raw_bbox(raw: Mapping[str, Any]) -> list[float] | None:
-    for key in ("bounds", "bbox", "pixel_bbox", "box", "rect"):
+    # Rows derived from a parent structure often carry parent ``bounds`` plus a
+    # specific child ``bbox``. The child crop must win or replay/trigger boxes
+    # expand back into the full parent leg.
+    for key in ("bbox", "bounds", "pixel_bbox", "box", "rect"):
         bbox = normalize_bounds(raw.get(key))
         if bbox is not None:
             return bbox
@@ -379,6 +382,625 @@ def _candle_anchor_evidence(
         if point not in points:
             points.append(point)
     return indexes, points
+
+
+CRITICAL_ANCHORED_OVERLAY_TYPES: frozenset[str] = frozenset(
+    {
+        "SUPPLY_ZONE",
+        "DEMAND_ZONE",
+        "OPPOSING_FORCE",
+        "SNIPER_ENTRY_BOX",
+        "RETEST_BOX",
+        "CONTINUATION_BOX",
+        "TARGET_ZONE_BOX",
+        "INVALIDATION_BOX",
+    }
+)
+ZONE_OVERLAY_TYPES: frozenset[str] = frozenset({"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"})
+ACTIONABLE_OVERLAY_TYPES: frozenset[str] = frozenset(
+    {"SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"}
+)
+HISTORICAL_OVERLAY_TYPES: frozenset[str] = frozenset({"PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"})
+TRENDLINE_OVERLAY_TYPES: frozenset[str] = frozenset({"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"})
+
+
+def _candle_anchor_row(candle: Mapping[str, Any], index: int) -> dict[str, float | int]:
+    box = _raw_bbox(candle) or [0.0, 0.0, 1.0, 1.0]
+    left, top, right, bottom = [float(value) for value in box[:4]]
+    open_y = _float(candle.get("open_y", candle.get("open_px", candle.get("open_price_y"))), float("nan"))
+    close_y = _float(candle.get("close_y", candle.get("close_px", candle.get("close_price_y"))), float("nan"))
+    if open_y == open_y and close_y == close_y:
+        body_top = min(open_y, close_y)
+        body_bottom = max(open_y, close_y)
+    else:
+        body_top = _float(candle.get("body_top", candle.get("body_y0")), top + (bottom - top) * 0.24)
+        body_bottom = _float(candle.get("body_bottom", candle.get("body_y1")), bottom - (bottom - top) * 0.24)
+        if body_bottom < body_top:
+            body_top, body_bottom = body_bottom, body_top
+    wick_high = _float(
+        candle.get("wick_high_y", candle.get("high_y", candle.get("high_px", candle.get("top_y")))),
+        top,
+    )
+    wick_low = _float(
+        candle.get("wick_low_y", candle.get("low_y", candle.get("low_px", candle.get("bottom_y")))),
+        bottom,
+    )
+    center_x = _float(candle.get("center_x", candle.get("x_center")), (left + right) * 0.5)
+    center_y = _float(candle.get("center_y", candle.get("y_center")), (top + bottom) * 0.5)
+    return {
+        "index": int(index),
+        "left": left,
+        "top": top,
+        "right": right,
+        "bottom": bottom,
+        "center_x": center_x,
+        "center_y": center_y,
+        "body_top": float(max(top, min(bottom, body_top))),
+        "body_bottom": float(max(top, min(bottom, body_bottom))),
+        "wick_high": float(max(top, min(bottom, wick_high))),
+        "wick_low": float(max(top, min(bottom, wick_low))),
+        "width": max(1.0, right - left),
+        "height": max(1.0, bottom - top),
+    }
+
+
+def _candle_rows_for_anchor(
+    candles: Sequence[Mapping[str, Any]],
+    anchor_indices: Sequence[int],
+    fallback_bbox: Sequence[float],
+) -> list[dict[str, float | int]]:
+    selected: list[dict[str, float | int]] = []
+    seen: set[int] = set()
+    for raw_index in anchor_indices:
+        index = int(raw_index)
+        if index < 0 or index >= len(candles) or index in seen:
+            continue
+        selected.append(_candle_anchor_row(candles[index], index))
+        seen.add(index)
+    if selected:
+        fallback = normalize_bounds(fallback_bbox)
+        if fallback is None:
+            return selected
+        aligned = [
+            row
+            for row in selected
+            if float(row.get("right", 0.0)) >= fallback[0] - 12.0
+            and float(row.get("left", 0.0)) <= fallback[2] + 12.0
+        ]
+        if aligned:
+            return aligned
+        selected = []
+    fallback = normalize_bounds(fallback_bbox)
+    if fallback is None:
+        return []
+    for index, candle in enumerate(candles):
+        candle_box = _raw_bbox(candle)
+        if candle_box is None:
+            continue
+        if _box_intersects(fallback, candle_box, padding=5.0):
+            selected.append(_candle_anchor_row(candle, index))
+    return selected
+
+
+def _point_from_raw(value: Any) -> list[float] | None:
+    point = _sequence(value)
+    if len(point) < 2:
+        return None
+    x_value = _float(point[0], float("nan"))
+    y_value = _float(point[1], float("nan"))
+    if x_value != x_value or y_value != y_value:
+        return None
+    return [float(x_value), float(y_value)]
+
+
+def _explicit_anchor_points(raw: Mapping[str, Any], *, overlay_type: str) -> list[list[float]]:
+    points: list[list[float]] = []
+    seen: set[tuple[float, float]] = set()
+    for key in ("touch_points", "anchor_wick_points", "line_points", "points", "path"):
+        for point in _point_rows(raw.get(key)):
+            rounded = (round(point[0], 3), round(point[1], 3))
+            if rounded in seen:
+                continue
+            seen.add(rounded)
+            points.append([rounded[0], rounded[1]])
+    type_name = str(overlay_type or "").upper()
+    if type_name in {"REPLAY_ENTRY", "REPLAY_EXIT"}:
+        preferred_keys = ("end_point", "target_point") if type_name == "REPLAY_EXIT" else ("start_point", "entry_point", "sniper_point")
+        for key in preferred_keys:
+            point = _point_from_raw(raw.get(key))
+            if point is None:
+                continue
+            rounded = (round(point[0], 3), round(point[1], 3))
+            if rounded in seen:
+                continue
+            seen.add(rounded)
+            points.insert(0, [rounded[0], rounded[1]])
+            break
+    return points
+
+
+def _nearest_row_for_point(rows: Sequence[Mapping[str, float | int]], point: Sequence[float]) -> dict[str, float | int] | None:
+    if not rows or len(point) < 2:
+        return None
+    px = float(point[0])
+    py = float(point[1])
+
+    def score(row: Mapping[str, float | int]) -> tuple[float, float]:
+        left = float(row.get("left", 0.0))
+        right = float(row.get("right", left))
+        top = float(row.get("top", 0.0))
+        bottom = float(row.get("bottom", top))
+        center_x = float(row.get("center_x", (left + right) * 0.5))
+        center_y = float(row.get("center_y", (top + bottom) * 0.5))
+        x_distance = 0.0 if left - 8.0 <= px <= right + 8.0 else abs(center_x - px)
+        y_distance = 0.0 if top - 10.0 <= py <= bottom + 10.0 else min(abs(top - py), abs(bottom - py), abs(center_y - py))
+        return (x_distance + y_distance * 0.45, x_distance)
+
+    return dict(min(rows, key=score))
+
+
+def _rows_around_indices(
+    all_rows: Sequence[Mapping[str, float | int]],
+    selected_indices: Sequence[int],
+    *,
+    radius: int,
+    max_rows: int,
+) -> list[dict[str, float | int]]:
+    if not all_rows:
+        return []
+    selected: dict[int, dict[str, float | int]] = {}
+    available = {int(row.get("index", index)): dict(row) for index, row in enumerate(all_rows)}
+    for raw_index in selected_indices:
+        for index in range(int(raw_index) - radius, int(raw_index) + radius + 1):
+            row = available.get(index)
+            if row is not None:
+                selected[index] = row
+    rows = [selected[index] for index in sorted(selected)]
+    if len(rows) <= max_rows:
+        return rows
+    center = sum(selected_indices) / max(1, len(selected_indices))
+    return sorted(rows, key=lambda row: abs(float(row.get("index", 0)) - center))[:max_rows]
+
+
+def _rows_from_anchor_points(
+    all_rows: Sequence[Mapping[str, float | int]],
+    points: Sequence[Sequence[float]],
+    source_box: Sequence[float],
+    *,
+    prefer_recent: bool,
+    max_points: int,
+    neighbor_radius: int,
+    max_rows: int,
+) -> list[dict[str, float | int]]:
+    if not all_rows or not points:
+        return []
+    left = min(float(row.get("left", 0.0)) for row in all_rows)
+    right = max(float(row.get("right", 0.0)) for row in all_rows)
+    visible_points = [
+        [float(point[0]), float(point[1])]
+        for point in points
+        if len(point) >= 2 and left - 12.0 <= float(point[0]) <= right + 12.0
+    ]
+    if not visible_points:
+        return []
+    scoped = [
+        point
+        for point in visible_points
+        if float(source_box[0]) - 18.0 <= point[0] <= float(source_box[2]) + 18.0
+    ] or visible_points
+    ordered = sorted(scoped, key=lambda point: point[0], reverse=prefer_recent)
+    selected_points = ordered[: max(1, int(max_points))]
+    selected_indexes: list[int] = []
+    seen_indexes: set[int] = set()
+    for point in selected_points:
+        row = _nearest_row_for_point(all_rows, point)
+        if row is None:
+            continue
+        index = int(row.get("index", -1))
+        if index < 0 or index in seen_indexes:
+            continue
+        selected_indexes.append(index)
+        seen_indexes.add(index)
+    return _rows_around_indices(
+        all_rows,
+        selected_indexes,
+        radius=max(0, int(neighbor_radius)),
+        max_rows=max(1, int(max_rows)),
+    )
+
+
+def _recent_row_cluster(
+    rows: Sequence[Mapping[str, float | int]],
+    source_box: Sequence[float],
+    *,
+    max_rows: int,
+) -> list[dict[str, float | int]]:
+    if len(rows) <= max_rows:
+        return [dict(row) for row in rows]
+    anchor_x = float(source_box[2])
+    ranked = sorted(rows, key=lambda row: abs(float(row.get("center_x", 0.0)) - anchor_x))[:max_rows]
+    return sorted((dict(row) for row in ranked), key=lambda row: float(row.get("center_x", 0.0)))
+
+
+def _select_anchor_rows_for_overlay(
+    *,
+    overlay_type: str,
+    raw: Mapping[str, Any],
+    source_box: Sequence[float],
+    candles: Sequence[Mapping[str, Any]],
+    rows: Sequence[Mapping[str, float | int]],
+) -> list[dict[str, float | int]]:
+    type_name = str(overlay_type or "").upper()
+    all_rows = [_candle_anchor_row(candle, index) for index, candle in enumerate(candles)]
+    if not all_rows:
+        return [dict(row) for row in rows]
+    explicit_points = _explicit_anchor_points(raw, overlay_type=type_name)
+    if type_name in ZONE_OVERLAY_TYPES and explicit_points:
+        point_rows = _rows_from_anchor_points(
+            all_rows,
+            explicit_points,
+            source_box,
+            prefer_recent=True,
+            max_points=5,
+            neighbor_radius=1,
+            max_rows=7,
+        )
+        if point_rows:
+            return point_rows
+    if type_name in {"REPLAY_ENTRY", "REPLAY_EXIT"}:
+        preferred = _explicit_anchor_points(raw, overlay_type=type_name)
+        point_rows = _rows_from_anchor_points(
+            all_rows,
+            preferred,
+            source_box,
+            prefer_recent=type_name == "REPLAY_EXIT",
+            max_points=1,
+            neighbor_radius=1,
+            max_rows=3,
+        )
+        if point_rows:
+            return point_rows
+    if type_name in ACTIONABLE_OVERLAY_TYPES:
+        return _recent_row_cluster(rows, source_box, max_rows=6)
+    if type_name in ZONE_OVERLAY_TYPES:
+        return _recent_row_cluster(rows, source_box, max_rows=7)
+    return [dict(row) for row in rows]
+
+
+def _median(values: Sequence[float], default: float = 0.0) -> float:
+    rows = sorted(float(value) for value in values if value == value)
+    if not rows:
+        return float(default)
+    mid = len(rows) // 2
+    if len(rows) % 2:
+        return rows[mid]
+    return (rows[mid - 1] + rows[mid]) * 0.5
+
+
+def _raw_chart_extent(candles: Sequence[Mapping[str, Any]], fallback_bbox: Sequence[float]) -> tuple[float, float, float, float]:
+    boxes = [_raw_bbox(candle) for candle in candles]
+    valid = [box for box in boxes if box is not None]
+    fallback = normalize_bounds(fallback_bbox) or [0.0, 0.0, 1.0, 1.0]
+    if not valid:
+        return (fallback[0], fallback[1], fallback[2], fallback[3])
+    left = min([fallback[0], *[float(box[0]) for box in valid]])
+    top = min([fallback[1], *[float(box[1]) for box in valid]])
+    right = max([fallback[2], *[float(box[2]) for box in valid]])
+    bottom = max([fallback[3], *[float(box[3]) for box in valid]])
+    return (left, top, right, bottom)
+
+
+def _tighten_bbox_to_anchor_rows(
+    *,
+    object_type: str,
+    raw: Mapping[str, Any],
+    bbox: Sequence[float],
+    candles: Sequence[Mapping[str, Any]],
+    anchor_indices: Sequence[int],
+) -> tuple[list[float], dict[str, Any]]:
+    source_box = normalize_bounds(bbox) or [float(value) for value in bbox[:4]]
+    if len(source_box) < 4:
+        return list(source_box), {"score": 0.0, "status": "INVALID", "reason": "invalid_source_bbox"}
+    rows = _candle_rows_for_anchor(candles, anchor_indices, source_box)
+    chart_left, chart_top, chart_right, chart_bottom = _raw_chart_extent(candles, source_box)
+    chart_width = max(1.0, chart_right - chart_left)
+    chart_height = max(1.0, chart_bottom - chart_top)
+    type_name = str(object_type or "").upper()
+    raw_anchor_count = len(rows)
+    rows = _select_anchor_rows_for_overlay(
+        overlay_type=type_name,
+        raw=raw,
+        source_box=source_box,
+        candles=candles,
+        rows=rows,
+    )
+    anchor_count = len(rows)
+    if not rows:
+        reason = "missing_candle_anchor_rows"
+        score = 0.20 if type_name in CRITICAL_ANCHORED_OVERLAY_TYPES else 0.48
+        return [round(float(value), 3) for value in source_box], {
+            "score": score,
+            "status": "WEAK" if score >= 0.40 else "REJECT",
+            "reason": reason,
+            "anchor_count": 0,
+            "tightened": False,
+        }
+    widths = [float(row["width"]) for row in rows]
+    heights = [float(row["height"]) for row in rows]
+    avg_width = max(3.0, _median(widths, 6.0))
+    avg_height = max(6.0, _median(heights, 18.0))
+    xs_left = [float(row["left"]) for row in rows]
+    xs_right = [float(row["right"]) for row in rows]
+    wick_highs = [float(row["wick_high"]) for row in rows]
+    wick_lows = [float(row["wick_low"]) for row in rows]
+    body_tops = [float(row["body_top"]) for row in rows]
+    body_bottoms = [float(row["body_bottom"]) for row in rows]
+    centers_x = [float(row["center_x"]) for row in rows]
+    centers_y = [float(row["center_y"]) for row in rows]
+    pad_x = max(4.0, min(24.0, avg_width * 0.75))
+    pad_y = max(2.0, min(12.0, avg_height * 0.22))
+    selected_anchor_indices = [int(row["index"]) for row in rows]
+    selected_anchor_points = [[round(float(row["center_x"]), 3), round(float(row["center_y"]), 3)] for row in rows]
+    explicit_point_anchor = bool(_explicit_anchor_points(raw, overlay_type=type_name))
+    snapped_to_local_cluster = anchor_count > 0 and (
+        raw_anchor_count > anchor_count
+        or (type_name in ZONE_OVERLAY_TYPES and explicit_point_anchor)
+        or (type_name in {"REPLAY_ENTRY", "REPLAY_EXIT"} and explicit_point_anchor)
+    )
+    left = min(xs_left) - pad_x
+    right = max(xs_right) + pad_x
+    top = min(wick_highs) - pad_y
+    bottom = max(wick_lows) + pad_y
+    if type_name in {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"}:
+        if type_name == "SUPPLY_ZONE":
+            top = min(wick_highs) - pad_y
+            bottom = max(body_tops) + pad_y
+        elif type_name == "DEMAND_ZONE":
+            top = min(body_bottoms) - pad_y
+            bottom = max(wick_lows) + pad_y
+        else:
+            raw_center_y = (source_box[1] + source_box[3]) * 0.5
+            nearest_center = min(centers_y, key=lambda value: abs(value - raw_center_y))
+            top = nearest_center - max(6.0, avg_height * 0.42)
+            bottom = nearest_center + max(6.0, avg_height * 0.42)
+        raw_left, _raw_top, raw_right, _raw_bottom = source_box
+        if not snapped_to_local_cluster:
+            # Preserve a reasonable validity horizon without turning the zone into a chart-wide slab.
+            left = min(left, max(chart_left, raw_left))
+            right = max(right, min(raw_right, left + max(48.0, avg_width * 8.0)))
+        max_zone_width = max(44.0, chart_width * (0.18 if snapped_to_local_cluster else 0.34))
+        if right - left > max_zone_width:
+            anchor_x = max(centers_x)
+            right = min(chart_right, anchor_x + max_zone_width * 0.40)
+            left = max(chart_left, right - max_zone_width)
+        min_zone_height = max(8.0, avg_height * 0.35)
+        max_zone_height = max(min_zone_height, chart_height * 0.090)
+        center_y = (top + bottom) * 0.5
+        zone_height = min(max(min_zone_height, bottom - top), max_zone_height)
+        top = center_y - zone_height * 0.5
+        bottom = center_y + zone_height * 0.5
+    elif type_name in {"SNIPER_ENTRY_BOX", "RETEST_BOX"}:
+        anchor_x = max(centers_x)
+        anchor_y = _median(centers_y, (source_box[1] + source_box[3]) * 0.5)
+        width = min(max(36.0, avg_width * 6.0), chart_width * 0.22)
+        height = min(max(12.0, avg_height * 1.20), chart_height * 0.075)
+        left = anchor_x - width * 0.45
+        right = anchor_x + width * 0.55
+        top = anchor_y - height * 0.5
+        bottom = anchor_y + height * 0.5
+    elif type_name in {"TARGET_ZONE_BOX", "INVALIDATION_BOX"}:
+        raw_center_y = (source_box[1] + source_box[3]) * 0.5
+        anchor_y = _median(centers_y, raw_center_y)
+        line_y = _float(raw.get("line_y"), raw_center_y)
+        if abs(line_y - raw_center_y) < chart_height * 0.35:
+            anchor_y = line_y
+        width = min(max(44.0, avg_width * 8.0), chart_width * 0.30)
+        height = min(max(7.0, avg_height * 0.58), chart_height * 0.042)
+        anchor_x = max(centers_x)
+        left = max(chart_left, anchor_x - width * 0.72)
+        right = min(chart_right, left + width)
+        top = anchor_y - height * 0.5
+        bottom = anchor_y + height * 0.5
+    elif type_name in {"IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX"}:
+        min_width = max(42.0, avg_width * max(3.0, min(9.0, anchor_count + 1.0)))
+        max_width = max(min_width, chart_width * (0.48 if type_name == "IMPULSE_BOX" else 0.34))
+        min_height = max(18.0, avg_height * 1.6)
+        max_height = max(min_height, chart_height * (0.34 if type_name == "IMPULSE_BOX" else 0.24))
+        if right - left < min_width:
+            center_x = (left + right) * 0.5
+            left = center_x - min_width * 0.5
+            right = center_x + min_width * 0.5
+        if right - left > max_width:
+            anchor_x = max(centers_x)
+            right = min(chart_right, anchor_x + max_width * 0.25)
+            left = right - max_width
+        if bottom - top < min_height:
+            center_y = (top + bottom) * 0.5
+            top = center_y - min_height * 0.5
+            bottom = center_y + min_height * 0.5
+        if bottom - top > max_height:
+            center_y = (top + bottom) * 0.5
+            top = center_y - max_height * 0.5
+            bottom = center_y + max_height * 0.5
+    elif type_name in {"REPLAY_ENTRY", "REPLAY_EXIT"}:
+        source_width = max(1.0, source_box[2] - source_box[0])
+        source_height = max(1.0, source_box[3] - source_box[1])
+        anchor_x = _median(centers_x, (source_box[0] + source_box[2]) * 0.5)
+        source_center_y = (source_box[1] + source_box[3]) * 0.5
+        anchor_y = source_center_y
+        width = min(max(30.0, avg_width * 4.0), max(30.0, source_width), chart_width * 0.14)
+        height = min(max(10.0, min(source_height, avg_height * 0.62)), chart_height * 0.055)
+        left = anchor_x - width * 0.5
+        right = anchor_x + width * 0.5
+        top = anchor_y - height * 0.5
+        bottom = anchor_y + height * 0.5
+    else:
+        # General overlays: tighten only if the source box is much larger than the actual candle cluster.
+        cluster_left = min(xs_left) - pad_x
+        cluster_right = max(xs_right) + pad_x
+        cluster_top = min(wick_highs) - pad_y
+        cluster_bottom = max(wick_lows) + pad_y
+        source_area = max(1.0, (source_box[2] - source_box[0]) * (source_box[3] - source_box[1]))
+        cluster_area = max(1.0, (cluster_right - cluster_left) * (cluster_bottom - cluster_top))
+        if cluster_area < source_area * 0.68:
+            left, top, right, bottom = cluster_left, cluster_top, cluster_right, cluster_bottom
+    left = max(chart_left, min(chart_right, left))
+    right = max(chart_left, min(chart_right, right))
+    top = max(chart_top, min(chart_bottom, top))
+    bottom = max(chart_top, min(chart_bottom, bottom))
+    if right <= left or bottom <= top:
+        return [round(float(value), 3) for value in source_box], {
+            "score": 0.35,
+            "status": "WEAK",
+            "reason": "anchor_refinement_collapsed",
+            "anchor_count": anchor_count,
+            "tightened": False,
+        }
+    refined = [round(float(left), 3), round(float(top), 3), round(float(right), 3), round(float(bottom), 3)]
+    source_area = max(1.0, (source_box[2] - source_box[0]) * (source_box[3] - source_box[1]))
+    refined_area = max(1.0, (refined[2] - refined[0]) * (refined[3] - refined[1]))
+    floating_risk = max(0.0, min(1.0, 1.0 - min(1.0, anchor_count / 3.0)))
+    if refined_area > source_area * 1.40 and type_name in CRITICAL_ANCHORED_OVERLAY_TYPES:
+        floating_risk = min(1.0, floating_risk + 0.20)
+    score = 0.50 + min(0.30, anchor_count * 0.08) + (0.10 if refined_area <= source_area * 1.05 else 0.0) - floating_risk * 0.18
+    score = max(0.0, min(1.0, score))
+    return refined, {
+        "score": round(float(score), 4),
+        "status": "VALID" if score >= 0.65 else "WEAK",
+        "reason": "candle_wick_sequence_anchor",
+        "anchor_count": anchor_count,
+        "tightened": refined != [round(float(value), 3) for value in source_box],
+        "selected_anchor_indices": selected_anchor_indices,
+        "selected_anchor_points": selected_anchor_points,
+        "local_cluster_snap": snapped_to_local_cluster,
+        "source_area": round(float(source_area), 3),
+        "refined_area": round(float(refined_area), 3),
+        "floating_risk": round(float(floating_risk), 4),
+    }
+
+
+
+
+def _short_display_label_for_overlay(object_type: str, side: str, fallback: str) -> str:
+    type_name = str(object_type or "").upper()
+    side_name = str(side or "").upper()
+    if type_name == "SNIPER_ENTRY_BOX":
+        return f"SNIPER {side_name}" if side_name in {"BUY", "SELL"} else "SNIPER"
+    if type_name == "RETEST_BOX":
+        return "TRIGGER"
+    if type_name == "TARGET_ZONE_BOX":
+        return "TARGET"
+    if type_name == "INVALIDATION_BOX":
+        return "INVALID"
+    if type_name == "SUPPLY_ZONE":
+        return "SUPPLY"
+    if type_name == "DEMAND_ZONE":
+        return "DEMAND"
+    if type_name == "OPPOSING_FORCE":
+        return "OPPOSING"
+    if type_name == "SUPPORT_TRENDLINE":
+        return "SUPPORT TREND"
+    if type_name == "RESISTANCE_TRENDLINE":
+        return "RESISTANCE TREND"
+    if type_name == "INNER_TRENDLINE":
+        return "INNER TREND"
+    if type_name == "IMPULSE_BOX":
+        return "IMPULSE"
+    if type_name == "PULLBACK_BOX":
+        return "PULLBACK"
+    if type_name == "CONTINUATION_BOX":
+        return "CONT"
+    if type_name == "CURRENT_CANDLE":
+        return "NOW"
+    if type_name == "REPLAY_ENTRY":
+        return "ENTRY"
+    if type_name == "REPLAY_EXIT":
+        return "EXIT"
+    if type_name == "PROGRESSION_PATH":
+        return "HISTORY"
+    return str(fallback or type_name.replace("_", " ")).strip()
+
+def _display_profile_for_overlay(
+    *,
+    object_type: str,
+    layer: str,
+    lifecycle_state: str,
+    anchor_quality: Mapping[str, Any],
+    confidence: float,
+    truth_score: float,
+) -> dict[str, Any]:
+    type_name = str(object_type or "").upper()
+    layer_name = str(layer or "").lower()
+    lifecycle = str(lifecycle_state or "").upper()
+    score = _clip01(anchor_quality.get("score", 0.0))
+    historical = type_name in HISTORICAL_OVERLAY_TYPES or lifecycle in {"HISTORICAL", "REPLAY", "ARCHIVED"} or layer_name == "historical_replay"
+    rejected = bool(anchor_quality.get("status") == "REJECT")
+    if rejected:
+        display_state = "GHOSTED"
+        label_hidden = True
+        visual_weight = 0.18
+        visible_modes = ["DIAGNOSTICS", "INSPECTOR"]
+    elif historical:
+        display_state = "GHOSTED"
+        label_hidden = True
+        visual_weight = 0.28
+        visible_modes = ["CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"]
+    elif type_name in {"SNIPER_ENTRY_BOX", "RETEST_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX", "CURRENT_CANDLE"}:
+        display_state = "FULL" if score >= 0.62 else "COMPACT"
+        label_hidden = False if type_name in {"SNIPER_ENTRY_BOX", "RETEST_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"} else True
+        visual_weight = max(0.62, min(1.0, 0.58 + score * 0.28 + max(confidence, truth_score) * 0.14))
+        visible_modes = ["CLEAN_LIVE", "ACTIVE_CONTEXT", "LOCAL", "TRIGGERS", "TARGETS", "FULL_HISTORY_READ", "INSPECTOR"]
+    elif type_name in {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"}:
+        display_state = "COMPACT" if score >= 0.62 else "GHOSTED"
+        label_hidden = score < 0.72
+        visual_weight = max(0.42, min(0.76, 0.36 + score * 0.28 + max(confidence, truth_score) * 0.10))
+        visible_modes = ["CLEAN_LIVE", "ACTIVE_CONTEXT", "SUPPLY_DEMAND", "SMC_COUNCIL", "FULL_HISTORY_READ", "INSPECTOR"]
+    elif type_name in TRENDLINE_OVERLAY_TYPES:
+        display_state = "COMPACT"
+        label_hidden = True
+        visual_weight = max(0.34, min(0.72, 0.30 + score * 0.28 + max(confidence, truth_score) * 0.10))
+        visible_modes = ["CLEAN_LIVE", "ACTIVE_CONTEXT", "TRENDLINES", "FULL_HISTORY_READ", "INSPECTOR"]
+    else:
+        display_state = "NESTED" if score >= 0.58 else "GHOSTED"
+        label_hidden = True
+        visual_weight = max(0.30, min(0.68, 0.28 + score * 0.25 + max(confidence, truth_score) * 0.08))
+        visible_modes = ["ACTIVE_CONTEXT", "LOCAL", "MAJOR", "FULL_HISTORY_READ", "INSPECTOR"]
+    semantic_family = "context"
+    if type_name in {"DEMAND_ZONE", "SUPPORT_TRENDLINE"}:
+        semantic_family = "demand"
+    elif type_name in {"SUPPLY_ZONE", "RESISTANCE_TRENDLINE"}:
+        semantic_family = "supply"
+    elif type_name == "SNIPER_ENTRY_BOX":
+        semantic_family = "buy" if truth_score >= 0.0 else "entry"
+    elif type_name == "TARGET_ZONE_BOX":
+        semantic_family = "target"
+    elif type_name == "INVALIDATION_BOX":
+        semantic_family = "invalidation"
+    elif type_name == "OPPOSING_FORCE":
+        semantic_family = "opposing"
+    elif type_name in HISTORICAL_OVERLAY_TYPES:
+        semantic_family = "history"
+    style = {
+        "visual_weight": round(float(visual_weight), 4),
+        "semantic_family": semantic_family,
+        "anchor_evidence_status": str(anchor_quality.get("status", "UNKNOWN")),
+        "opacity": round(float(max(0.14, min(0.96, visual_weight))), 4),
+        "fill_opacity": round(float(max(0.0, min(0.10, visual_weight * 0.045))), 4),
+        "border_width": round(float(max(0.75, min(2.5, 0.75 + visual_weight * 1.1))), 3),
+    }
+    return {
+        "display_state": display_state,
+        "label_hidden": label_hidden,
+        "label_visible": not label_hidden,
+        "label_anchor": "inspector" if label_hidden else "overlay",
+        "geometry_visible": True,
+        "inspector_visible": True,
+        "visual_weight": round(float(visual_weight), 4),
+        "semantic_family": semantic_family,
+        "style": style,
+        "visible_modes": visible_modes,
+        "precision_rejected": rejected,
+    }
 
 
 def _bool_false(value: Any) -> bool:
@@ -1020,6 +1642,27 @@ class _RegistryBuilder:
                 anchor_indices = explicit_anchor_indices
             if explicit_touch_points:
                 anchor_touch_points = explicit_touch_points
+            bbox, anchor_quality = _tighten_bbox_to_anchor_rows(
+                object_type=object_type,
+                raw=raw,
+                bbox=bbox,
+                candles=candles,
+                anchor_indices=anchor_indices,
+            )
+            selected_anchor_indices = [
+                int(_float(item, -1.0))
+                for item in _sequence(anchor_quality.get("selected_anchor_indices"))
+                if int(_float(item, -1.0)) >= 0
+            ]
+            if selected_anchor_indices and object_type not in TRENDLINE_OVERLAY_TYPES:
+                anchor_indices = selected_anchor_indices
+            selected_anchor_points = _point_rows(anchor_quality.get("selected_anchor_points"))
+            if selected_anchor_points and object_type not in TRENDLINE_OVERLAY_TYPES:
+                anchor_touch_points = selected_anchor_points
+            if bool(anchor_quality.get("status") == "REJECT") and object_type in CRITICAL_ANCHORED_OVERLAY_TYPES:
+                # Do not promote forced or floating boxes into the live overlay truth layer.
+                # They remain inspectable as rejected overlays through diagnostics if the caller emits them there.
+                return
             side_value = _upper_side(side if side is not None else raw.get("side", raw.get("direction", signal.get("action"))))
             object_id = _stable_id(session_id, object_type, source_path, source_key)
             track_id = _text(raw.get("track_id") or raw.get("persistent_id"), object_id)
@@ -1065,16 +1708,30 @@ class _RegistryBuilder:
                     "anchor_type": _text(raw.get("anchor_type"), "BOX").upper(),
                     "anchor_candles": list(obj.anchor_candles),
                     "anchor_candle_indices": list(obj.anchor_candles),
+                    "anchor_quality": dict(anchor_quality),
+                    "anchor_evidence_status": _text(anchor_quality.get("status"), "UNKNOWN"),
                     "bounds": bbox,
+                    "bbox": bbox,
                     "truth_score": truth,
                     "confidence": confidence,
                     "lifecycle_state": lifecycle_state,
                     "reason": reason_value,
                     "label": label_value,
+                    "display_label": _short_display_label_for_overlay(object_type, side_value, label_value),
                     "layer": layer or TYPE_LAYER_MAP.get(object_type, "diagnostics"),
                     "role": role or TYPE_ROLE_MAP.get(object_type, ""),
                     "visible_default": bool(raw.get("visible_default", object_type not in {"DEBUG_RAW_DETECTION", "PROGRESSION_PATH"})),
                 }
+            )
+            overlay_raw.update(
+                _display_profile_for_overlay(
+                    object_type=object_type,
+                    layer=str(overlay_raw.get("layer") or layer or TYPE_LAYER_MAP.get(object_type, "diagnostics")),
+                    lifecycle_state=lifecycle_state,
+                    anchor_quality=anchor_quality,
+                    confidence=confidence,
+                    truth_score=truth,
+                )
             )
             if anchor_touch_points:
                 overlay_raw["touch_points"] = anchor_touch_points
@@ -1086,6 +1743,23 @@ class _RegistryBuilder:
                 sequence_id=sequence_id,
                 chart_transform_id=chart_transform_id,
                 source_agent="market_object_tracker_v3",
+            )
+            normalized_overlay.update(
+                {
+                    "anchor_quality": dict(anchor_quality),
+                    "anchor_evidence_status": _text(anchor_quality.get("status"), "UNKNOWN"),
+                    "display_state": overlay_raw.get("display_state", normalized_overlay.get("display_state", "COMPACT")),
+                    "visual_weight": overlay_raw.get("visual_weight", normalized_overlay.get("visual_weight", 0.55)),
+                    "style": overlay_raw.get("style", normalized_overlay.get("style", {})),
+                    "label_hidden": overlay_raw.get("label_hidden", normalized_overlay.get("label_hidden", False)),
+                    "label_visible": overlay_raw.get("label_visible", not bool(overlay_raw.get("label_hidden", False))),
+                    "label_anchor": overlay_raw.get("label_anchor", normalized_overlay.get("label_anchor", "overlay")),
+                    "geometry_visible": True,
+                    "inspector_visible": True,
+                    "visible_modes": overlay_raw.get("visible_modes", normalized_overlay.get("visible_modes", [])),
+                    "bbox": bbox,
+                    "bounds": bbox,
+                }
             )
             if object_type in {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"}:
                 line_points = _point_rows(overlay_raw.get("line_points") or overlay_raw.get("points") or overlay_raw.get("path"))
@@ -1262,7 +1936,7 @@ class _RegistryBuilder:
                             "path": line_points,
                             "anchor_type": "POLYGON",
                             "visible_default": True,
-                            "visible_modes": ["CLEAN_LIVE", "FULL_HISTORY_READ", "REPLAY", "PATH", "ACTIVE_CONTEXT", "INSPECTOR"],
+                            "visible_modes": ["FULL_HISTORY_READ", "REPLAY", "PATH", "ACTIVE_CONTEXT", "INSPECTOR"],
                         }
                     )
             add_object(

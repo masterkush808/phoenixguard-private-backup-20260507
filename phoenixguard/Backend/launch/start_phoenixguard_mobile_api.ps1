@@ -18,7 +18,7 @@ $env:PHOENIXGUARD_PROJECT_ROOT = $ProjectRoot
 . (Join-Path -Path $PSScriptRoot -ChildPath 'Resolve-PhoenixGuardPython.ps1')
 $pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
 $PythonPath = [string]$pythonRuntime.VenvPython
-$runtimeDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
+$runtimeDir = Join-Path -Path $ProjectRoot -ChildPath 'runtime\live'
 $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
 $env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
 $env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'

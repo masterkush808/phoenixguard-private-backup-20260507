@@ -114,3 +114,34 @@ def test_final_certification_periodic_overlay_capture_is_lazy_loaded() -> None:
     text = _read("Backend/tools/run_final_10h_production_certification.py")
     assert '"CLEAN_LIVE,SUPPLY_DEMAND,TRENDLINES"' in text
     assert '"CLEAN_LIVE,SUPPLY_DEMAND,TRENDLINES,TRIGGER,FULL_HISTORY_READ"' not in text
+
+
+def test_single_venv_runtime_verifier_documents_runtime_state_not_environment() -> None:
+    text = _read("Backend/tools/verify_single_venv_runtime.py")
+    assert "EXTRA_ENVIRONMENT_DIR_NAMES" in text
+    assert '".venv-live"' in text
+    assert '".venv-dev"' in text
+    assert '".venv-training"' in text
+    assert '".venv-business"' in text
+    assert "runtime_dir_is_environment=False" in text
+    assert "process_scan_status" in text
+    assert "port_scan_status" in text
+    assert "Refusing to remove unexpected environment path" in text
+
+
+def test_canonical_dashboard_launchers_use_v3_window_tracker_dashboard_route() -> None:
+    for relative_path in (
+        "Backend/launch/launch_phoenixguard_live_ready.ps1",
+        "Backend/launch/start_phoenixguard_full_local.ps1",
+    ):
+        text = _read(relative_path)
+        assert "/v3/mobile/window-tracker/dashboard/$SessionId" in text
+        assert "/v1/mobile/window-tracker/dashboard/$SessionId" not in text
+
+
+def test_dashboard_browser_launcher_quotes_chrome_profile_paths_with_spaces() -> None:
+    text = _read("Backend/launch/start_phoenixguard_full_local.ps1")
+
+    assert "ConvertTo-PhoenixGuardProcessArgumentString -Arguments $browserArguments" in text
+    assert "Start-Process -FilePath $browserPath -ArgumentList $browserArgumentString" in text
+    assert "Start-Process -FilePath $browserPath -ArgumentList (Get-PhoenixGuardDashboardBrowserArguments" not in text

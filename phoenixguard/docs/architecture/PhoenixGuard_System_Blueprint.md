@@ -264,7 +264,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoe
 The dashboard URL is:
 
 ```text
-http://127.0.0.1:8793/dashboard/live/pocket-live-8788
+http://127.0.0.1:8793/v1/mobile/window-tracker/dashboard/pocket-live-8788
 ```
 
 Read-only developer launch is available with:
@@ -292,7 +292,7 @@ The API-only fallback for backend debugging is:
 
 ```powershell
 $env:PYTHONPATH = (Get-Location).Path
-python -m uvicorn phoenixguard.mobile_api.app:create_app --factory --host 127.0.0.1 --port 8793 --log-level info
+.\.venv\Scripts\python.exe -m uvicorn phoenixguard.mobile_api.app:create_app --factory --host 127.0.0.1 --port 8793 --log-level info
 ```
 
 That fallback is not the full production launch path and should not be treated as live-ready by

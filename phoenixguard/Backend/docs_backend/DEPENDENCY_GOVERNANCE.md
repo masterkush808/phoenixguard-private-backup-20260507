@@ -17,6 +17,7 @@ The repo `.venv` currently passes:
 ```text
 .\.venv\Scripts\python.exe -m pip check
 .\.venv\Scripts\python.exe -m pipdeptree --warn fail
+.\.venv\Scripts\python.exe .\Backend\tools\verify_single_venv_runtime.py
 ```
 
 The dependency policy is therefore:
@@ -31,6 +32,8 @@ Use logical requirement groups, but keep the interpreter and installed site-pack
 Launchers, background workers, certification monitors, and tools all resolve through
 .\.venv\Scripts\python.exe. PhoenixGuard must not create or prefer a copied process-host executable
 or any second virtual environment.
+.codex_runtime is runtime state only. It stores locks, logs, tracker state, screenshots, and
+certification evidence; it is not an environment and must not be used as a dependency source.
 ```
 
 ## Profiles
@@ -76,9 +79,10 @@ The scripts all target:
 ```
 
 They install the selected lock into `.venv`, then run `pip check` and
-`Backend/tools/verify_dependency_profile.py`. They do not create secondary virtual environments.
-Runtime launchers do not create `.venv`; the environment must already exist before PhoenixGuard is
-started.
+`Backend/tools/verify_dependency_profile.py`. Run `Backend/tools/verify_single_venv_runtime.py`
+after launch to prove all PhoenixGuard Python processes are using `.venv\Scripts\python.exe`.
+They do not create secondary virtual environments. Runtime launchers do not create `.venv`; the
+environment must already exist before PhoenixGuard is started.
 
 ## Live Runtime Boundary
 

@@ -5,7 +5,7 @@ param(
     [string]$SessionId = $(if ($env:PHOENIXGUARD_TRACKER_SESSION_ID) { $env:PHOENIXGUARD_TRACKER_SESSION_ID } else { 'pocket-live-8788' }),
     [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 15.0 }),
     [ValidateSet('FULL', 'TRACKER_ONLY', 'TRACKER_PLUS_COUNCIL', 'FULL_V3_VALIDATION', 'FULL_V3_SHOOTER_ATTACHED')]
-    [string]$Profile = $(if ($env:PHOENIXGUARD_LOCAL_PROFILE) { $env:PHOENIXGUARD_LOCAL_PROFILE } else { 'FULL' }),
+    [string]$Profile = 'FULL',
     [double]$ShooterPollSec = $(if ($env:PHOENIXGUARD_SHOOTER_POLL_SEC) { [double]$env:PHOENIXGUARD_SHOOTER_POLL_SEC } else { 15.0 }),
     [double]$ShooterMinConfidence = 0.2,
     [ValidateSet('PACKAGE_REPORTER')]
@@ -45,17 +45,17 @@ $env:PHOENIXGUARD_DASHBOARD_BROWSER = $DashboardBrowser
 $pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
 $pythonPath = [string]$pythonRuntime.VenvPython
 
-$defaultRuntimeDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
+$defaultRuntimeDir = Join-Path -Path $ProjectRoot -ChildPath 'runtime\live'
 $runtimeDir = $defaultRuntimeDir
 $statusPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
 $trackerStdoutPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stdout.log'
 $trackerStderrPath = Join-Path -Path $runtimeDir -ChildPath 'tracker_launcher_stderr.log'
 $baseUrl = "http://$ApiHost`:$ApiPort"
-$dashboardUrl = "$baseUrl/dashboard/live/$SessionId"
+$dashboardUrl = "$baseUrl/v3/mobile/window-tracker/dashboard/$SessionId"
 $finalLaunchProfile = 'FINAL_LIVE'
 $env:PHOENIXGUARD_PROFILE = $finalLaunchProfile
 $env:PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS = '0'
-$env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED = if ($env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED) { $env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED } else { '0' }
+$env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED = '1'
 $env:PHOENIXGUARD_BROKER_WINDOW_HWND = "$BrokerWindowHwnd"
 $env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL = if ($env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL) { $env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL } else { '0' }
 $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS = if ($env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS) { $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS } else { '1' }
@@ -131,7 +131,7 @@ function Get-PhoenixGuardDashboardBrowserArguments {
         $profileDir = if ($env:PHOENIXGUARD_DASHBOARD_CHROME_PROFILE_DIR) {
             [string]$env:PHOENIXGUARD_DASHBOARD_CHROME_PROFILE_DIR
         } else {
-            Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime\chrome_dashboard_profile'
+            Join-Path -Path $runtimeDir -ChildPath 'chrome_dashboard_profile'
         }
         New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
         $arguments.Add("--user-data-dir=$profileDir")
@@ -161,7 +161,9 @@ function Start-PhoenixGuardDashboardBrowser {
 
     $browserPath = Get-PhoenixGuardBrowserExecutable -BrowserName $BrowserName
     if ($browserPath) {
-        Start-Process -FilePath $browserPath -ArgumentList (Get-PhoenixGuardDashboardBrowserArguments -BrowserName $BrowserName -Url $Url)
+        $browserArguments = Get-PhoenixGuardDashboardBrowserArguments -BrowserName $BrowserName -Url $Url
+        $browserArgumentString = ConvertTo-PhoenixGuardProcessArgumentString -Arguments $browserArguments
+        Start-Process -FilePath $browserPath -ArgumentList $browserArgumentString
         return
     }
 
@@ -188,13 +190,14 @@ function ConvertTo-PhoenixGuardProcessArgumentString {
 }
 
 Write-Host "PhoenixGuard launch profile: $finalLaunchProfile"
-Write-Host "  Compatibility profile: $Profile"
+Write-Host "  Runtime profile: FINAL_LIVE (package-governed live execution)"
+Write-Host "  Launcher compatibility input: $Profile"
 Write-Host "  Tracker: ON"
 Write-Host "  Model Council V3: ON"
 Write-Host "  Market Reality: ON"
 Write-Host "  Legacy V1/V2: OFF"
 Write-Host "  Execution Packet Publisher: ON (STUDY_PACKET every council cycle; PG_EXECUTION_PACKET_V3 only when executable)"
-Write-Host "  Shooter: $(if ($launchShooter) { 'ON' } else { 'OFF' })"
+Write-Host "  Shooter: $(if ($launchShooter) { 'PACKAGE_REPORTER monitor' } else { 'OFF' })"
 Write-Host "  Startup Test Signal: REMOVED"
 Write-Host "  Broker Click Path: $brokerClickPath"
 
@@ -318,6 +321,13 @@ if (-not $NoKillExisting) {
     }
 }
 
+Write-Host ""
+Write-Host "Preflight: single repo .venv runtime"
+& $pythonPath ".\Backend\tools\verify_single_venv_runtime.py" --cleanup-extra-envs
+if ($LASTEXITCODE -ne 0) {
+    throw "Single repo .venv verification failed. Launch aborted."
+}
+
 Write-Host "Starting PhoenixGuard tracker on $baseUrl"
 $trackerProcess = Start-TrackerChildProcess
 
@@ -360,7 +370,7 @@ try {
         Write-Host "Starting shooter package reporter against $baseUrl"
         $effectiveShooterPollSec = [double]$ShooterPollSec
         $pollText = ([string]$effectiveShooterPollSec).Replace(',', '.')
-        $logDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime\logs'
+        $logDir = Join-Path -Path $runtimeDir -ChildPath 'logs'
         New-Item -ItemType Directory -Force -Path $logDir | Out-Null
         $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
         $outPath = Join-Path -Path $logDir -ChildPath "shooter-full-local-$stamp.out.log"
@@ -387,7 +397,7 @@ try {
         $bridgePollText = ([string][double]$ShooterPollSec).Replace(',', '.')
         $bridgeTimeoutSec = if ($env:PHOENIXGUARD_MT4_BRIDGE_TIMEOUT_SEC) { [double]$env:PHOENIXGUARD_MT4_BRIDGE_TIMEOUT_SEC } else { 30.0 }
         $bridgeTimeoutText = ([string]$bridgeTimeoutSec).Replace(',', '.')
-        $bridgeLogDir = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime\logs'
+        $bridgeLogDir = Join-Path -Path $runtimeDir -ChildPath 'logs'
         New-Item -ItemType Directory -Force -Path $bridgeLogDir | Out-Null
         $bridgeStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
         $bridgeOutPath = Join-Path -Path $bridgeLogDir -ChildPath "mt4-bridge-full-local-$bridgeStamp.out.log"

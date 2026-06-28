@@ -35,7 +35,7 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
 
 . (Resolve-Path -LiteralPath $ConfigPath).Path
 
-$RuntimeRoot = Join-Path -Path $ProjectRoot -ChildPath '.codex_runtime'
+$RuntimeRoot = Join-Path -Path $ProjectRoot -ChildPath 'runtime\live'
 $env:PHOENIXGUARD_RUNTIME_DIR = $RuntimeRoot
 $LogRoot = Join-Path -Path $RuntimeRoot -ChildPath 'vm_monitor_logs'
 if (-not (Test-Path -LiteralPath $LogRoot)) {
@@ -265,7 +265,7 @@ $BrokerUrl = Get-EnvOrDefault -Name 'PHOENIXGUARD_BROKER_URL' -DefaultValue 'htt
 $WaitForLock = ConvertTo-BoolFlag -Value (Get-EnvOrDefault -Name 'PHOENIXGUARD_TRACKER_WAIT_FOR_LOCK' -DefaultValue '1') -DefaultValue $true
 $OpenDashboard = ConvertTo-BoolFlag -Value (Get-EnvOrDefault -Name 'PHOENIXGUARD_TRACKER_OPEN_DASHBOARD' -DefaultValue '0') -DefaultValue $false
 $BaseUrl = "http://$BaseHost`:$Port"
-$DashboardUrl = "$BaseUrl/v1/mobile/window-tracker/dashboard/$SessionId"
+$DashboardUrl = "$BaseUrl/v3/mobile/window-tracker/dashboard/$SessionId"
 $SessionRouteId = [uri]::EscapeDataString($SessionId)
 
 $env:PHOENIXGUARD_MOBILE_API_HOST = $BindHost

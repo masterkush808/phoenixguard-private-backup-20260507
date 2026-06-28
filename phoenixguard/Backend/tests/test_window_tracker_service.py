@@ -5012,7 +5012,15 @@ def test_tracker_http_surface_serves_session_artifacts_and_dashboard(tmp_path: P
     assert full_overlay_response.headers["content-type"].startswith("image/png")
     assert "no-store" in full_overlay_response.headers["cache-control"]
 
-    dashboard_response = client.get(f"/v1/mobile/window-tracker/dashboard/{session_id}")
+    trigger_layer_response = client.get(
+        f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-full-overlay?mode=TRIGGER&layers=trigger_zones"
+    )
+    assert trigger_layer_response.status_code == 200
+    assert trigger_layer_response.headers["content-type"].startswith("image/png")
+    assert trigger_layer_response.headers["x-phoenixguard-overlay-mode"] == "TRIGGER"
+    assert trigger_layer_response.headers["x-phoenixguard-overlay-layers"] == "trigger_zones"
+
+    dashboard_response = client.get(f"/v3/mobile/window-tracker/dashboard/{session_id}")
     assert dashboard_response.status_code == 200
     assert "Locked Broker Surface Tracker" in dashboard_response.text
 
@@ -5081,13 +5089,24 @@ def test_tracker_dashboard_fits_selected_surface_without_width_only_crop() -> No
     assert "explicitArtifactAligned === true" in dashboard_html
     assert "const overlayFrameId = overlayAuthorityFrame(session);" in dashboard_html
     assert "display_frame_id: displayFrameId" in dashboard_html
+    assert "function transformFrameFromId" in dashboard_html
+    assert "function chartTransformCandidate" in dashboard_html
+    assert "candidate.frame > 0 && candidate.frame === authorityFrame" in dashboard_html
+    assert "return `ct_${clean(session.session_id || SESSION_ID, SESSION_ID)}_${authorityFrame}`;" in dashboard_html
+    assert "const chartTransformId = currentChartTransformId(session);" in dashboard_html
+    assert "chart_transform_id: chartTransformId" in dashboard_html
+    assert "chartTransformKey || \"CHART_TRANSFORM_PENDING\"" in dashboard_html
+    assert "chartTransformId: currentChartTransformId(session)" in dashboard_html
     assert "overlay_render_frame_id: overlayFrameId" in dashboard_html
     assert "overlay_source_window_signature" in dashboard_html
     assert "overlayLocks: new Map()" in dashboard_html
     assert "const overlayLockUsable = wantsOverlay && hasLockedOverlayForSession(session);" in dashboard_html
     assert "const useLockedWindowOverlayPlane = wantsOverlay" in dashboard_html
     assert 'useSurfaceImage(els.rawImg, "window", "window-locked-overlay", true);' in dashboard_html
+    assert "if (normalizedKind === \"window\" && fileName)" in dashboard_html
+    assert "if (normalizedKind === \"full-overlay\")" in dashboard_html
     assert "if (wantsOverlay && hasFullOverlay && !overlayStale)" in dashboard_html
+    assert "} else if (useLockedWindowOverlayPlane)" in dashboard_html
     assert "function backendOverlayFrameAligned(session = {})" in dashboard_html
     assert 'clean_live: "CLEAN_LIVE"' in dashboard_html
     assert 'full_history_read: "FULL_HISTORY_READ"' in dashboard_html
@@ -5096,6 +5115,8 @@ def test_tracker_dashboard_fits_selected_surface_without_width_only_crop() -> No
     assert "else if (hasChart)" in dashboard_html
     assert "DASHBOARD_REFRESH_FAST_INTERVAL_MS = 15000" in dashboard_html
     assert "DASHBOARD_HEARTBEAT_INTERVAL_MS = 15000" in dashboard_html
+    assert "function frontendHeartbeatDisabled" in dashboard_html
+    assert "pg_no_heartbeat" in dashboard_html
 
 
 def test_tracker_dashboard_replay_overlays_use_professional_label_budget() -> None:
@@ -5167,7 +5188,8 @@ def test_full_local_launcher_has_one_final_live_profile_and_keeps_broker_auto_op
     assert "PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS" in launcher
     assert "BrokerWindowHwnd" in launcher
     assert "PHOENIXGUARD_BROKER_WINDOW_HWND" in launcher
-    assert "--window-hwnd" not in launcher
+    assert "if ($BrokerWindowHwnd -gt 0)" in launcher
+    assert "--window-hwnd" in launcher
     assert "$liveClickArm = if ($ShooterMode -eq 'LIVE_READY'" not in launcher
     assert "--shooter-mode" not in launcher
     assert "--no-auto-open" not in launcher
@@ -5844,7 +5866,7 @@ def test_pocket_option_expiry_plan_uses_nearest_minute_anchor_for_long_non_prese
     assert all(not step.startswith("second_") for step in plan)
 
 
-def test_tracker_execution_controls_default_to_shadow_fixed_amount(tmp_path: Path) -> None:
+def test_tracker_execution_controls_default_to_live_fixed_amount(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path,
         capture_backend=_FakeCaptureBackend([_synthetic_broker_window()]),
@@ -5854,8 +5876,8 @@ def test_tracker_execution_controls_default_to_shadow_fixed_amount(tmp_path: Pat
     session = tracker.create_session(session_id="pocket-live")
     controls = session["execution_controls"]
 
-    assert controls["live_execution_enabled"] is False
-    assert controls["execution_mode"] == "shadow"
+    assert controls["live_execution_enabled"] is True
+    assert controls["execution_mode"] == "live"
     assert controls["fixed_amount"] == "preserve"
     assert controls["amount_policy"] == "preserve_visible_broker_amount"
     assert controls["allow_countertrend_scalp"] is False

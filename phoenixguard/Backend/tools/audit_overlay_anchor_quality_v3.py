@@ -83,7 +83,14 @@ def _live_anchor_issue(row: Mapping[str, Any]) -> bool:
 
 def build_anchor_quality_audit(payload: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
     rows = _overlay_rows(payload)
-    frame_id = _int(payload.get("frame_id", payload.get("display_frame_id", 0)))
+    display_frame_id = _int(payload.get("frame_id", payload.get("display_frame_id", 0)))
+    overlay_object_frame_id = _int(
+        payload.get(
+            "overlay_object_frame_id",
+            payload.get("overlay_frame_id", payload.get("full_overlay_frame_id", 0)),
+        )
+    )
+    frame_id = overlay_object_frame_id or display_frame_id
     symbol = str(payload.get("symbol") or "").strip()
     timeframe = str(payload.get("timeframe") or "").strip()
     live_rows = [row for row in rows if str(row.get("type") or "") not in DIAGNOSTIC_OVERLAY_TYPES]
@@ -106,6 +113,8 @@ def build_anchor_quality_audit(payload: Mapping[str, Any], *, mode: str) -> dict
     report = {
         "mode": mode,
         "frame_id": frame_id,
+        "display_frame_id": display_frame_id,
+        "overlay_object_frame_id": overlay_object_frame_id,
         "state_version": payload.get("state_version", 0),
         "symbol": symbol,
         "timeframe": timeframe,

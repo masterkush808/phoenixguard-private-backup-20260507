@@ -17,6 +17,36 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8793"
 DEFAULT_SESSION = "pocket-live-8788"
 DEFAULT_MAX_CAPTURE_SETS = 6
 HEAVY_ARTIFACT_KINDS = {"chart", "overlay", "full-overlay"}
+ROOT = Path(__file__).resolve().parents[2]
+HEARTBEAT_DIR = ROOT / "runtime" / "live" / "frontend_heartbeat_v3"
+ROUTE_DEFAULT_MODE = {
+    "live": "CLEAN_LIVE",
+    "chart": "ACTIVE_CONTEXT",
+    "council": "ACTIVE_CONTEXT",
+    "replay": "REPLAY",
+}
+BACKEND_MODE_TO_SELECT = {
+    "CLEAN_LIVE": "clean_live",
+    "CANDLES": "candles",
+    "GLOBAL": "global",
+    "LOCAL": "local",
+    "SUPPLY_DEMAND": "supply_demand",
+    "TRENDLINES": "trendlines",
+    "TRIGGER": "triggers",
+    "TARGET": "targets",
+    "INVALIDATION": "invalidation",
+    "PATH": "path",
+    "ACTIVE_CONTEXT": "active_context",
+    "COUNCIL": "smc_council",
+    "FULL_HISTORY_READ": "full_history_read",
+    "BROKER": "broker",
+    "TWO_CANDLE_STUDY": "two_candle_study",
+    "LSTM_STUDY": "lstm_study",
+    "DIAGNOSTICS": "deep_debug",
+    "CALIBRATION": "calibration",
+    "REPLAY": "replay",
+}
+SELECT_TO_BACKEND_MODE = {value: key for key, value in BACKEND_MODE_TO_SELECT.items()}
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -97,6 +127,134 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _normalize_route(value: str) -> str:
+    route = str(value or "").strip().lower()
+    return route if route in ROUTE_DEFAULT_MODE else "live"
+
+
+def _normalize_backend_mode(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    upper = raw.upper().replace("-", "_")
+    if upper in BACKEND_MODE_TO_SELECT:
+        return upper
+    select = raw.lower().replace("-", "_")
+    return SELECT_TO_BACKEND_MODE.get(select, "")
+
+
+def _dashboard_heartbeat_files(session_id: str, heartbeat_dir: Path | None = None) -> list[Path]:
+    heartbeat_root = heartbeat_dir or HEARTBEAT_DIR
+    if not heartbeat_root.exists():
+        return []
+    safe_session = re.sub(r"[^a-zA-Z0-9_.-]+", "-", session_id.strip())[:120] or "default"
+    return sorted(
+        heartbeat_root.glob(f"{safe_session}__dashboard*.json"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        reverse=True,
+    )
+
+
+def _heartbeat_age_sec(heartbeat: Mapping[str, Any]) -> float:
+    received_at_ms = float(heartbeat.get("received_at_ms") or 0.0)
+    return max(0.0, (time.time() * 1000.0 - received_at_ms) / 1000.0) if received_at_ms > 0.0 else 999999.0
+
+
+def _is_live_dashboard_heartbeat(heartbeat: Mapping[str, Any]) -> bool:
+    route = str(heartbeat.get("route") or "").strip().lower()
+    mode = str(heartbeat.get("overlay_mode") or "").strip().upper().replace("-", "_")
+    return route in {"live", "dashboard", ""} and mode in {"CLEAN_LIVE", ""}
+
+
+def _heartbeat_rank(heartbeat: Mapping[str, Any]) -> tuple[int, int, float]:
+    artifact_kind = str(heartbeat.get("visible_artifact_kind") or "").strip().lower()
+    artifact_rank = {"full-overlay": 3, "overlay": 2, "window-locked-overlay": 1}.get(artifact_kind, 0)
+    return (
+        artifact_rank,
+        int(heartbeat.get("visible_overlay_count") or heartbeat.get("overlay_count") or 0),
+        float(heartbeat.get("received_at_ms") or 0.0),
+    )
+
+
+def _latest_active_dashboard_heartbeat(session_id: str) -> dict[str, Any]:
+    heartbeats: list[dict[str, Any]] = []
+    for path in _dashboard_heartbeat_files(session_id):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        heartbeat = dict(cast(Mapping[str, Any], payload))
+        heartbeat["path"] = str(path)
+        heartbeat["age_sec"] = round(_heartbeat_age_sec(heartbeat), 3)
+        heartbeats.append(heartbeat)
+    if not heartbeats:
+        return {}
+    live_heartbeats = [heartbeat for heartbeat in heartbeats if _is_live_dashboard_heartbeat(heartbeat)]
+    fresh_live = [heartbeat for heartbeat in live_heartbeats if _heartbeat_age_sec(heartbeat) <= 45.0]
+    if fresh_live:
+        return max(fresh_live, key=_heartbeat_rank)
+    if live_heartbeats:
+        return max(live_heartbeats, key=_heartbeat_rank)
+    return {}
+
+
+def _resolve_capture_context(base_url: str, session_id: str, route: str, mode: str, timeout: float) -> dict[str, Any]:
+    heartbeat = _latest_active_dashboard_heartbeat(session_id)
+    route_requested = str(route or "active").strip().lower()
+    mode_requested = str(mode or "").strip()
+    resolved_route = "live" if route_requested in {"", "active"} else _normalize_route(route_requested)
+    heartbeat_backend_mode = _normalize_backend_mode(str(heartbeat.get("overlay_mode") or ""))
+    resolved_backend_mode = _normalize_backend_mode(mode_requested) or (
+        heartbeat_backend_mode if route_requested in {"", "active"} and _is_live_dashboard_heartbeat(heartbeat) else ""
+    ) or ROUTE_DEFAULT_MODE.get(resolved_route, "CLEAN_LIVE")
+    resolved_select_value = BACKEND_MODE_TO_SELECT.get(resolved_backend_mode, "clean_live")
+    base = base_url.rstrip("/")
+    session_q = urllib.parse.quote(session_id, safe="")
+    mode_q = urllib.parse.quote(resolved_backend_mode, safe="")
+    live = _http_json(f"{base}/v1/mobile/live/state/v3/{session_q}?mode={mode_q}&compact=1", timeout)
+    payload = _mapping(live.get("payload"))
+    expected_renderable = int(payload.get("renderable_count") or _mapping(payload.get("overlays")).get("renderable_count") or 0)
+    return {
+        "requested_route": route_requested or "active",
+        "requested_mode": mode_requested,
+        "route": resolved_route,
+        "backend_mode": resolved_backend_mode,
+        "select_value": resolved_select_value,
+        "expected_renderable_count": expected_renderable,
+        "active_heartbeat": {
+            key: heartbeat.get(key)
+            for key in (
+                "path",
+                "route",
+                "overlay_mode",
+                "surface_mode",
+                "visible_overlay_count",
+                "overlay_count",
+                "rendered_frame_id",
+                "chart_frame_id",
+                "overlay_render_frame_id",
+                "chart_transform_id",
+                "document_hidden",
+                "age_sec",
+            )
+            if heartbeat.get(key) is not None
+        },
+        "live_state_probe": {
+            "ok": live.get("ok"),
+            "status": live.get("status"),
+            "error": live.get("error"),
+            "active_mode": payload.get("active_mode"),
+            "requested_mode": payload.get("requested_mode"),
+            "renderable_count": payload.get("renderable_count"),
+            "overlay_count": payload.get("overlay_count"),
+            "overlay_object_frame_id": payload.get("overlay_object_frame_id"),
+            "chart_transform_id": payload.get("chart_transform_id"),
+        },
+    }
+
+
 def _image_metrics(path: Path) -> dict[str, Any]:
     try:
         from PIL import Image, ImageStat
@@ -122,7 +280,17 @@ def _image_metrics(path: Path) -> dict[str, Any]:
         return {"available": False, "reason": str(exc)}
 
 
-def _capture_with_playwright(url: str, output_png: Path, timeout_ms: int, width: int, height: int) -> dict[str, Any]:
+def _capture_with_playwright(
+    url: str,
+    output_png: Path,
+    timeout_ms: int,
+    width: int,
+    height: int,
+    *,
+    select_value: str,
+    expected_backend_mode: str,
+    expected_renderable_count: int,
+) -> dict[str, Any]:
     try:
         from playwright.sync_api import sync_playwright
     except Exception as exc:
@@ -139,45 +307,83 @@ def _capture_with_playwright(url: str, output_png: Path, timeout_ms: int, width:
             page.on("pageerror", lambda exc: page_errors.append(str(exc)[:500]))
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
             page.wait_for_selector(".console-shell", timeout=timeout_ms)
+            if select_value:
+                try:
+                    page.select_option("#overlay-mode-select", select_value, timeout=timeout_ms)
+                except Exception:
+                    pass
+                page.wait_for_timeout(500)
+                page.evaluate(
+                    """async (selectValue) => {
+                      if (typeof applyOverlayPreset === "function") applyOverlayPreset(selectValue);
+                      if (typeof setMode === "function") setMode("overlay");
+                      if (typeof refreshLiveVisualStateForMode === "function") {
+                        await refreshLiveVisualStateForMode(selectValue);
+                      }
+                      if (typeof refreshSession === "function") await refreshSession();
+                      if (typeof renderSurface === "function") renderSurface();
+                      await new Promise((resolve) => setTimeout(resolve, 1200));
+                      if (typeof commitSurfaceImage === "function") {
+                        const overlay = document.querySelector("#surface-overlay");
+                        const raw = document.querySelector("#surface-raw");
+                        if (overlay) commitSurfaceImage(overlay);
+                        if (raw) commitSurfaceImage(raw);
+                      }
+                      if (typeof renderHotspots === "function") renderHotspots();
+                    }""",
+                    select_value,
+                )
             try:
                 page.wait_for_function(
-                    """() => {
+                    """({selectValue, expectedRenderable}) => {
                       const text = document.body ? document.body.innerText : "";
                       const legacySource = text.includes("legacy session");
                       const hotspots = document.querySelectorAll(".surface-hotspot").length;
+                      const select = document.querySelector("#overlay-mode-select");
+                      const selected = !selectValue || Boolean(select && select.value === selectValue);
                       const image = document.querySelector("#surface-overlay.visible, #surface-raw.visible");
                       const hasImage = Boolean(image && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0);
                       const imageSrc = image ? String(image.currentSrc || image.src || "") : "";
-                      const fullOverlayImage = imageSrc.includes("latest-full-overlay") || imageSrc.includes("full-overlay");
+                      const fullOverlayImage = imageSrc.includes("latest-full-overlay") || imageSrc.includes("full-overlay") || imageSrc.includes("full_overlay");
                       const updating = text.includes("Live surface updating") || text.includes("Overlay catching up");
                       const liveSurface = text.includes("BROKER LOCKED") || text.includes("locked to saved broker surface");
-                      return liveSurface && !legacySource && !updating && hasImage && (hotspots > 0 || fullOverlayImage);
+                      const overlayReady = expectedRenderable > 0 ? (fullOverlayImage || hotspots === expectedRenderable) : (fullOverlayImage || hotspots === 0);
+                      return selected && liveSurface && !legacySource && !updating && hasImage && overlayReady;
                     }""",
+                    arg={"selectValue": select_value, "expectedRenderable": int(expected_renderable_count)},
                     timeout=max(15000, int(timeout_ms * 0.85)),
                 )
             except Exception:
                 pass
             page.wait_for_timeout(1000)
             ready_state = page.evaluate(
-                """() => {
+                """({expectedMode, expectedRenderable}) => {
                   const text = document.body ? document.body.innerText : "";
                   const hotspotLabels = Array.from(document.querySelectorAll(".surface-hotspot span")).map((node) => node.textContent || "");
+                  const hotspotCount = document.querySelectorAll(".surface-hotspot").length;
+                  const select = document.querySelector("#overlay-mode-select");
                   const image = document.querySelector("#surface-overlay.visible, #surface-raw.visible");
                   const imageSrc = image ? String(image.currentSrc || image.src || "") : "";
-                  const fullOverlayImage = imageSrc.includes("latest-full-overlay") || imageSrc.includes("full-overlay");
+                  const fullOverlayImage = imageSrc.includes("latest-full-overlay") || imageSrc.includes("full-overlay") || imageSrc.includes("full_overlay");
                   const updating = text.includes("Live surface updating") || text.includes("Overlay catching up");
                   const liveSurface = text.includes("BROKER LOCKED") || text.includes("locked to saved broker surface");
                   return {
+                    expected_backend_mode: expectedMode,
+                    expected_renderable_count: expectedRenderable,
+                    selected_value: select ? String(select.value || "") : "",
                     live_state: liveSurface && !updating,
                     legacy_state: text.includes("legacy session"),
-                    hotspot_count: document.querySelectorAll(".surface-hotspot").length,
+                    hotspot_count: hotspotCount,
+                    hotspot_backend_match: expectedRenderable > 0 ? (fullOverlayImage || hotspotCount === expectedRenderable) : (fullOverlayImage || hotspotCount === 0),
                     visible_image: Boolean(image && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0),
                     full_overlay_image: fullOverlayImage,
                     updating_state_visible: updating,
-                    overlay_rendered: Boolean((hotspotLabels.length > 0) || fullOverlayImage),
+                    live_object_overlay: expectedRenderable > 0 ? (hotspotCount === expectedRenderable && !fullOverlayImage) : !fullOverlayImage,
+                    overlay_rendered: expectedRenderable > 0 ? (fullOverlayImage || hotspotCount === expectedRenderable) : (fullOverlayImage || Boolean(hotspotLabels.length > 0)),
                     label_sample: hotspotLabels.slice(0, 12),
                   };
-                }"""
+                }""",
+                {"expectedMode": expected_backend_mode, "expectedRenderable": int(expected_renderable_count)},
             )
             try:
                 client = page.context.new_cdp_session(page)
@@ -260,17 +466,37 @@ def build_capture(
     height: int,
     skip_playwright: bool,
     *,
+    route: str = "active",
+    mode: str = "",
     max_capture_sets: int | None = None,
 ) -> dict[str, Any]:
     base = base_url.rstrip("/")
     session_q = urllib.parse.quote(session_id, safe="")
     stamp = time.strftime("%Y%m%d_%H%M%S")
-    dashboard_url = f"{base}/v1/mobile/window-tracker/dashboard/{session_q}"
+    capture_context = _resolve_capture_context(base, session_id, route, mode, timeout)
+    route_name = str(capture_context.get("route") or "live")
+    backend_mode = str(capture_context.get("backend_mode") or "CLEAN_LIVE")
+    select_value = str(capture_context.get("select_value") or "clean_live")
+    expected_renderable = int(capture_context.get("expected_renderable_count") or 0)
+    dashboard_url = f"{base}/dashboard/{urllib.parse.quote(route_name, safe='')}/{session_q}?pg_no_heartbeat=1"
     out_dir.mkdir(parents=True, exist_ok=True)
     screenshot_path = out_dir / f"dashboard_{session_id}_{stamp}.png"
     dashboard_html_path = out_dir / f"dashboard_{session_id}_{stamp}.html"
 
-    capture: dict[str, Any] = {"ok": False, "method": "skipped", "skipped": True, "reason": "playwright disabled"} if skip_playwright else _capture_with_playwright(dashboard_url, screenshot_path, int(timeout * 1000.0), width, height)
+    capture: dict[str, Any] = (
+        {"ok": False, "method": "skipped", "skipped": True, "reason": "playwright disabled"}
+        if skip_playwright
+        else _capture_with_playwright(
+            dashboard_url,
+            screenshot_path,
+            int(timeout * 1000.0),
+            width,
+            height,
+            select_value=select_value,
+            expected_backend_mode=backend_mode,
+            expected_renderable_count=expected_renderable,
+        )
+    )
     dashboard = _http_bytes(dashboard_url, timeout)
     if dashboard.get("body"):
         dashboard_html_path.write_bytes(dashboard["body"])
@@ -288,6 +514,8 @@ def build_capture(
             }
             continue
         url = f"{base}/v1/mobile/window-tracker/sessions/{session_q}/artifacts/latest-{kind}"
+        if kind in {"overlay", "full-overlay"}:
+            url = f"{url}?mode={urllib.parse.quote(backend_mode, safe='')}"
         row = _http_bytes(url, artifact_timeout)
         body = row.pop("body", b"")
         if body:
@@ -298,7 +526,10 @@ def build_capture(
             row["metrics"] = _image_metrics(path) if suffix == ".png" else {}
         artifacts[kind] = row
 
-    live = _http_json(f"{base}/v1/mobile/live/state/v3/{session_q}", timeout)
+    live = _http_json(
+        f"{base}/v1/mobile/live/state/v3/{session_q}?mode={urllib.parse.quote(backend_mode, safe='')}&compact=1",
+        timeout,
+    )
     visual = _http_json(f"{base}/v1/mobile/visual/health/v3/{session_q}", timeout)
     if not visual.get("ok"):
         visual = _http_json(f"{base}/v1/mobile/visual/health/v3?session_id={session_q}", timeout)
@@ -321,7 +552,12 @@ def build_capture(
         if ready.get("updating_state_visible"):
             hard_mismatches.append("dashboard screenshot is still showing live surface updating")
         if not ready.get("overlay_rendered"):
-            hard_mismatches.append("dashboard screenshot did not render DOM hotspots or the full-overlay artifact")
+            hard_mismatches.append("dashboard screenshot did not render the canonical backend overlay surface")
+        if int(ready.get("expected_renderable_count") or expected_renderable) > 0 and not ready.get("hotspot_backend_match"):
+            hard_mismatches.append(
+                "dashboard hotspot count does not match backend renderable count: "
+                f"{ready.get('hotspot_count')} != {ready.get('expected_renderable_count') or expected_renderable}"
+            )
     for kind in ("window", "chart"):
         row = _mapping(artifacts.get(kind))
         if row.get("skipped"):
@@ -346,6 +582,7 @@ def build_capture(
         "session_id": session_id,
         "base_url": base,
         "dashboard_url": dashboard_url,
+        "capture_context": capture_context,
         "generated_epoch": time.time(),
         "verdict": verdict,
         "ok": verdict == "PASS",
@@ -366,6 +603,7 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         "",
         f"- Session: {report['session_id']}",
         f"- Dashboard URL: {report['dashboard_url']}",
+        f"- Route/mode: {report.get('capture_context', {}).get('route', 'live')} / {report.get('capture_context', {}).get('backend_mode', 'CLEAN_LIVE')}",
         f"- Verdict: {report['verdict']}",
         f"- Screenshot: {report['capture'].get('path') or 'not captured'}",
         f"- Dashboard HTML: {report['dashboard_html'].get('path') or 'not captured'}",
@@ -406,6 +644,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--width", type=int, default=1440)
     parser.add_argument("--height", type=int, default=900)
     parser.add_argument("--skip-playwright", action="store_true")
+    parser.add_argument("--route", default="active", help="Dashboard route to capture: active, live, chart, council, or replay.")
+    parser.add_argument("--mode", default="", help="Backend overlay mode to capture. Defaults to active heartbeat mode or route default.")
     parser.add_argument(
         "--max-capture-sets",
         type=int,
@@ -423,6 +663,8 @@ def main(argv: list[str] | None = None) -> int:
         args.width,
         args.height,
         args.skip_playwright,
+        route=args.route,
+        mode=args.mode,
         max_capture_sets=args.max_capture_sets,
     )
     _write_json(Path(args.out_json), report)
