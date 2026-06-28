@@ -4178,19 +4178,7 @@
     }
 
     function fullOverlayUsesSavedArtifact(mode = state.overlayMode) {
-      return false;
-    }
-
-    function interactiveDomOverlaySurfaceRequired(session = state.session || {}) {
-      if (state.mode !== "overlay") {
-        return false;
-      }
-      if (!backendObjectOverlayReady(session)) {
-        return false;
-      }
-      const routeName = normalizeRoute(state.route);
-      const mode = backendOverlayMode(state.overlayMode);
-      return routeName === "live" || mode === "CLEAN_LIVE";
+      return backendOverlayMode(mode) === "CLEAN_LIVE" && cleanLiveFullOverlayLayerStateIsDefault();
     }
 
     function dynamicOverlayLayerSuffix(normalizedKind) {
@@ -6843,44 +6831,6 @@
       return layer === "chart_bounds" || type === "CHART_BOUNDS" || type === "CURRENT_CANDLE";
     }
 
-    function frontendOverlayBoundsAllowed(box = {}, bounds = null, activeMode = backendOverlayMode(state.overlayMode)) {
-      if (diagnosticsViewActive()) {
-        return true;
-      }
-      const mode = clean(activeMode, "CLEAN_LIVE").toUpperCase();
-      if (mode === "CLEAN_LIVE") {
-        if (!bounds || typeof bounds !== "object") {
-          return true;
-        }
-      } else {
-        return true;
-      }
-      const layer = frontendOverlayLayerName(box);
-      const type = frontendOverlayTypeName(box);
-      const width = Number(bounds.width || 0);
-      const height = Number(bounds.height || 0);
-      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
-        return false;
-      }
-      if (["historical_replay", "major_swings", "prediction_path", "diagnostics"].includes(layer)) {
-        return false;
-      }
-      if (["PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "IMPULSE_BOX", "RETEST_BOX", "TRIGGER_BOX", "TRIGGER_ZONE"].includes(type)) {
-        return false;
-      }
-      const areaRatio = Math.max(0, Math.min(1, (width * height) / 10000));
-      if (["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"].includes(type)) {
-        return height <= 13.5 && areaRatio <= 0.060;
-      }
-      if (["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"].includes(type)) {
-        return true;
-      }
-      if (["SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX", "CONTINUATION_BOX", "PULLBACK_BOX"].includes(type)) {
-        return areaRatio <= 0.026 && !(width > 28 && height > 8.5);
-      }
-      return areaRatio <= 0.030 && !(width > 34 && height > 8);
-    }
-
     function frontendOverlayLabelCandidate(box = {}, activeMode = backendOverlayMode(state.overlayMode)) {
       if (frontendOverlayDecorativeOnly(box)) {
         return false;
@@ -7496,9 +7446,6 @@
       const overlayStale = wantsOverlay && overlayAvailable && overlayArtifactIsStale(session);
       const overlayLockUsable = wantsOverlay && hasLockedOverlayForSession(session);
       const backendOverlayReady = wantsOverlay && backendObjectOverlayReady(session);
-      const useInteractiveDomOverlaySurface = wantsOverlay
-        && hasWindow
-        && interactiveDomOverlaySurfaceRequired(session);
       const useLockedWindowOverlayPlane = wantsOverlay
         && hasWindow
         && !hasFullOverlay
@@ -7521,9 +7468,7 @@
         imageCommitted = result.committed || imageCommitted;
       }
 
-      if (useInteractiveDomOverlaySurface) {
-        useSurfaceImage(els.rawImg, "window", "window-dom-overlay", true);
-      } else if (wantsOverlay && hasFullOverlay && !overlayStale) {
+      if (wantsOverlay && hasFullOverlay && !overlayStale) {
         const kind = "full-overlay";
         useSurfaceImage(els.overlayImg, kind, kind, true);
       } else if (wantsOverlay && hasOverlay && !overlayStale) {
@@ -8564,9 +8509,6 @@
         }
         const bounds = resolveBoxBounds(box, tracking, visibleImage);
         if (!bounds) {
-          return;
-        }
-        if (!frontendOverlayBoundsAllowed(box, bounds, backendOverlayMode(state.overlayMode))) {
           return;
         }
         if (bounds.width < 4.0 || bounds.height < 2.2 || ["GHOSTED", "ICON_ONLY", "INSPECTOR_LABEL", "INSPECTOR_ONLY_LABEL"].includes(displayState)) {

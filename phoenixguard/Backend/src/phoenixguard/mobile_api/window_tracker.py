@@ -11424,7 +11424,7 @@ class PhoenixGuardWindowTrackingAdapter:
             (header_x, 12),
             header_label,
             font=caption_font,
-            fill=(7, 16, 22, 224),
+            fill=(7, 16, 22, 184),
             outline=(242, 200, 102, 156),
             text_fill=(242, 200, 102, 236),
             padding_x=10,
@@ -16889,7 +16889,7 @@ class PhoenixGuardWindowTrackingAdapter:
             translated = _translate_bbox(bbox, offset_x=chart_offset_x, offset_y=chart_offset_y)
             clipped = _clip_bbox_to_image(surface_image.size, translated)
             label = self._structure_overlay_label(key, tracking_summary, latest_signal)
-            fill_alpha = 18 if key == "current" else 0
+            fill_alpha = 0
             self._draw_structure_box(
                 draw,
                 clipped,
@@ -16940,8 +16940,7 @@ class PhoenixGuardWindowTrackingAdapter:
             clipped = _clip_bbox_to_bounds(chart_bounds, translated)
             line_y = int(round(_float_or(zone.get("line_y", (float(bbox[1]) + float(bbox[3])) * 0.5)) + offset_y))
             line_y = max(chart_bounds[1] + 2, min(chart_bounds[3] - 2, line_y))
-            fill_alpha = 16 if float(zone.get("confidence", 0.0) or 0.0) >= 0.48 else 9
-            draw.rounded_rectangle(clipped, radius=10, fill=_rgba(color, fill_alpha), outline=_rgba(color, 88), width=1)
+            draw.rounded_rectangle(clipped, radius=10, fill=None, outline=_rgba(color, 118), width=1)
             line_x0 = int(round(_float_or(zone.get("line_x0", float(bbox[0])), float(bbox[0])) + offset_x))
             line_x1 = int(round(_float_or(zone.get("line_x1", float(bbox[2])), float(bbox[2])) + offset_x))
             line_left = max(chart_bounds[0] + 8, min(chart_bounds[2] - 8, line_x0))
@@ -17178,7 +17177,7 @@ class PhoenixGuardWindowTrackingAdapter:
                     width=1,
                 )
             else:
-                draw.rounded_rectangle(bbox, radius=radius, fill=_rgba(color, 8), outline=_rgba(color, 86), width=1)
+                draw.rounded_rectangle(bbox, radius=radius, fill=None, outline=_rgba(color, 94), width=1)
 
             label = str(segment.get("label", "") or "").upper()
             if label:
@@ -17211,10 +17210,9 @@ class PhoenixGuardWindowTrackingAdapter:
     ) -> None:
         clipped = [int(round(float(value))) for value in bbox[:4]]
         radius = 14 if primary else 12
-        fill_alpha = 28 if primary else 12
         outline_alpha = 228 if primary else 126
-        glow_alpha = 42 if primary else 20
-        draw.rounded_rectangle(clipped, radius=radius, fill=_rgba(color, fill_alpha), outline=_rgba(color, glow_alpha), width=7)
+        glow_alpha = 28 if primary else 12
+        draw.rounded_rectangle(clipped, radius=radius, fill=None, outline=_rgba(color, glow_alpha), width=3)
         draw.rounded_rectangle(clipped, radius=radius, outline=_rgba(color, outline_alpha), width=2)
         tag = f"{label} {confidence:.2f}" if primary else label
         tag_width, tag_height = self._overlay_tag_size(draw, tag, font=font, padding_x=10, padding_y=4)
@@ -17232,7 +17230,7 @@ class PhoenixGuardWindowTrackingAdapter:
             (tag_x, tag_y),
             tag,
             font=font,
-            fill=(7, 16, 22, 224 if primary else 196),
+            fill=(7, 16, 22, 188 if primary else 156),
             outline=_rgba(color, outline_alpha),
             text_fill=_rgba(color, 255 if primary else 210),
             padding_x=10,
@@ -17465,7 +17463,7 @@ class PhoenixGuardWindowTrackingAdapter:
             draw.rounded_rectangle(
                 bbox,
                 radius=5,
-                fill=_rgba(role_color, 30 if emphasized else 18),
+                fill=None,
                 outline=_rgba(role_color, 174 if emphasized else 116),
                 width=1,
             )

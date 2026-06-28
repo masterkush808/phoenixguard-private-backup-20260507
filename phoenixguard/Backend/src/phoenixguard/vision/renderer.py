@@ -212,8 +212,7 @@ def render_overlays_on_chart(
             x1, y1, x2, y2 = map(lambda value: int(round(float(value))), converted_bbox)
             if x2 <= x1 or y2 <= y1:
                 continue
-            fill = (color[0], color[1], color[2], 8)
-            draw.rectangle([x1, y1, x2, y2], outline=color, fill=fill, width=2)
+            draw.rectangle([x1, y1, x2, y2], outline=color, fill=None, width=2)
             label = str(ov.get("display_label") or ov.get("short_label") or ov.get("label") or ov.get("id") or ov.get("overlay_id") or "OVERLAY")
             text = label
             if label_hidden:

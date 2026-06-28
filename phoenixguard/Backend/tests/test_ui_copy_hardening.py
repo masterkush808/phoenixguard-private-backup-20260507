@@ -177,10 +177,7 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "visible_artifact_kind" in dashboard
     assert "visible_image_src" in dashboard
     assert "const fullOverlayVisibleCount = Math.max(boxes.length, backendRenderableOverlayCount(session));" in dashboard
-    assert "function interactiveDomOverlaySurfaceRequired" in dashboard
-    assert 'useSurfaceImage(els.rawImg, "window", "window-dom-overlay", true);' in dashboard
-    assert "function frontendOverlayBoundsAllowed" in dashboard
-    assert '["PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "IMPULSE_BOX", "RETEST_BOX", "TRIGGER_BOX", "TRIGGER_ZONE"].includes(type)' in dashboard
+    assert 'return backendOverlayMode(mode) === "CLEAN_LIVE" && cleanLiveFullOverlayLayerStateIsDefault();' in dashboard
     assert 'SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"])' in dashboard
     assert 'TRENDLINES: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"])' in dashboard
     assert "function isLineOverlay" in dashboard
@@ -272,6 +269,21 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "frameNumber(session.full_overlay_frame_id)" in dashboard
     assert "frameNumber(overlaysPayload.artifact_frame_id)" in dashboard
     assert "renderSessionImmediate(payload);" in dashboard
+
+
+def test_backend_overlay_renderers_do_not_fill_chart_covering_boxes() -> None:
+    root = Path(__file__).resolve().parents[2]
+    tracker_source = (root / "Backend" / "src" / "phoenixguard" / "mobile_api" / "window_tracker.py").read_text(
+        encoding="utf-8"
+    )
+    renderer_source = (root / "Backend" / "src" / "phoenixguard" / "vision" / "renderer.py").read_text(encoding="utf-8")
+
+    assert "fill_alpha = 0" in tracker_source
+    assert "draw.rounded_rectangle(clipped, radius=10, fill=None" in tracker_source
+    assert "draw.rounded_rectangle(bbox, radius=radius, fill=None" in tracker_source
+    assert "draw.rounded_rectangle(clipped, radius=radius, fill=None" in tracker_source
+    assert "fill=_rgba(role_color, 30 if emphasized else 18)" not in tracker_source
+    assert "draw.rectangle([x1, y1, x2, y2], outline=color, fill=None, width=2)" in renderer_source
 
 
 def test_tracker_dashboard_chart_artifacts_do_not_reuse_candle_green_red_palette() -> None:
