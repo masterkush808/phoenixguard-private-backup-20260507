@@ -168,7 +168,12 @@ def main() -> int:
     artifact_paths: list[str] = []
     for payload in (_mapping(session.payload), _mapping(live.payload)):
         for value in payload.values():
-            if isinstance(value, str) and (".codex_runtime" in value or "data_live" in value):
+            normalized_value = normalize_path_text(value) if isinstance(value, str) else ""
+            if isinstance(value, str) and (
+                "runtime/live" in normalized_value
+                or "runtime\\live" in value.lower()
+                or "data_live" in normalized_value
+            ):
                 artifact_paths.append(value)
     data_dir_ok = any(expected_data in normalize_path_text(path) for path in artifact_paths)
     if not session.ok:

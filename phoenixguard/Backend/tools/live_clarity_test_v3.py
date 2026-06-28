@@ -73,7 +73,7 @@ def main() -> int:
     parser.add_argument("--duration-sec", type=float, default=60.0)
     parser.add_argument("--interval-sec", type=float, default=2.0)
     parser.add_argument("--timeout", type=float, default=30.0)
-    parser.add_argument("--out", default=".codex_runtime/clarity_test")
+    parser.add_argument("--out", default="runtime/live/clarity_test")
     args = parser.parse_args()
 
     base = args.base_url.rstrip("/")

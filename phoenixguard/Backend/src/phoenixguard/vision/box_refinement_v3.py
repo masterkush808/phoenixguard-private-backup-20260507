@@ -53,7 +53,7 @@ DISPLAY_STATES = {
     "ICON_ONLY",
     "GROUPED",
     "NESTED",
-    "INSPECTOR_ONLY_LABEL",
+    "INSPECTOR_LABEL",
     "FOCUS_EXPANDED",
 }
 TRENDLINE_TYPES = {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"}
@@ -452,25 +452,45 @@ def _bounds_for_overlay(row: Mapping[str, Any], scene: Mapping[str, Any]) -> tup
     raw = normalize_bounds(row.get("bounds") or row.get("bbox"))
     if raw is None:
         return None, None, "invalid_bounds"
+    raw_bounds = raw
     coordinate_mode = str(row.get("coordinate_mode") or "").upper()
     chart_bounds = normalize_bounds(scene.get("chart_region_chart_bounds") or [0, 0, 1, 1]) or [0.0, 0.0, 1.0, 1.0]
     plot_chart = normalize_bounds(scene.get("plot_area_chart_bounds") or chart_bounds) or chart_bounds
     plot_full = normalize_bounds(scene.get("plot_area_bounds") or plot_chart) or plot_chart
+    broker_surface = normalize_bounds(scene.get("broker_surface_bounds") or plot_full) or plot_full
     right_panel = normalize_bounds(scene.get("right_order_panel_bounds") or plot_full) or plot_full
-    if max(abs(value) for value in raw) <= 1.0001:
+    raw_is_normalized = max(abs(value) for value in raw_bounds) <= 1.0001
+
+    def scale_to(bounds: Sequence[float]) -> list[float]:
+        bw = max(1.0, float(bounds[2]) - float(bounds[0]))
+        bh = max(1.0, float(bounds[3]) - float(bounds[1]))
+        return [
+            float(bounds[0]) + raw_bounds[0] * bw,
+            float(bounds[1]) + raw_bounds[1] * bh,
+            float(bounds[0]) + raw_bounds[2] * bw,
+            float(bounds[1]) + raw_bounds[3] * bh,
+        ]
+
+    if row.get("type") == "BROKER_CONTROL":
+        if raw_is_normalized:
+            raw_bounds = scale_to(broker_surface)
+        return raw_bounds, right_panel, "broker_controls"
+
+    if coordinate_mode in {"FULL_BROKER_SURFACE", "WINDOW_SPACE"}:
+        if raw_is_normalized:
+            raw_bounds = scale_to(broker_surface)
+        return raw_bounds, plot_full, "full_broker_surface"
+
+    if max(abs(value) for value in raw_bounds) <= 1.0001:
         if coordinate_mode == "PLOT_AREA_NORMALIZED":
             pw = max(1.0, plot_chart[2] - plot_chart[0])
             ph = max(1.0, plot_chart[3] - plot_chart[1])
-            raw = [plot_chart[0] + raw[0] * pw, plot_chart[1] + raw[1] * ph, plot_chart[0] + raw[2] * pw, plot_chart[1] + raw[3] * ph]
+            raw_bounds = [plot_chart[0] + raw_bounds[0] * pw, plot_chart[1] + raw_bounds[1] * ph, plot_chart[0] + raw_bounds[2] * pw, plot_chart[1] + raw_bounds[3] * ph]
         else:
             cw = max(1.0, chart_bounds[2] - chart_bounds[0])
             ch = max(1.0, chart_bounds[3] - chart_bounds[1])
-            raw = [chart_bounds[0] + raw[0] * cw, chart_bounds[1] + raw[1] * ch, chart_bounds[0] + raw[2] * cw, chart_bounds[1] + raw[3] * ch]
-    if row.get("type") == "BROKER_CONTROL":
-        return raw, right_panel, "broker_controls"
-    if coordinate_mode in {"FULL_BROKER_SURFACE", "WINDOW_SPACE"}:
-        return raw, plot_full, "full_broker_surface"
-    return raw, plot_chart, "chart_image_space"
+            raw_bounds = [chart_bounds[0] + raw_bounds[0] * cw, chart_bounds[1] + raw_bounds[1] * ch, chart_bounds[0] + raw_bounds[2] * cw, chart_bounds[1] + raw_bounds[3] * ch]
+    return raw_bounds, plot_chart, "chart_image_space"
 
 
 def _tighten_box(row: Mapping[str, Any], bounds: Sequence[Any], plot: Sequence[Any]) -> tuple[list[float] | None, list[str]]:
@@ -659,17 +679,17 @@ def _style_for_display_state(row: Mapping[str, Any], display_state: str, visual_
         "NESTED": 0.62,
         "GHOSTED": 0.44,
         "ICON_ONLY": 0.38,
-        "INSPECTOR_ONLY_LABEL": 0.42,
+        "INSPECTOR_LABEL": 0.42,
     }
     fill_by_state = {
-        "FULL": 0.075,
-        "FOCUS_EXPANDED": 0.10,
-        "COMPACT": 0.045,
-        "GROUPED": 0.032,
-        "NESTED": 0.030,
-        "GHOSTED": 0.020,
-        "ICON_ONLY": 0.015,
-        "INSPECTOR_ONLY_LABEL": 0.018,
+        "FULL": 0.018,
+        "FOCUS_EXPANDED": 0.022,
+        "COMPACT": 0.012,
+        "GROUPED": 0.008,
+        "NESTED": 0.006,
+        "GHOSTED": 0.0,
+        "ICON_ONLY": 0.0,
+        "INSPECTOR_LABEL": 0.0,
     }
     border_by_state = {
         "FULL": 2.75,
@@ -679,7 +699,7 @@ def _style_for_display_state(row: Mapping[str, Any], display_state: str, visual_
         "NESTED": 1.95,
         "GHOSTED": 1.35,
         "ICON_ONLY": 1.20,
-        "INSPECTOR_ONLY_LABEL": 1.20,
+        "INSPECTOR_LABEL": 1.20,
     }
     label_mode = {
         "FULL": "full",
@@ -689,7 +709,7 @@ def _style_for_display_state(row: Mapping[str, Any], display_state: str, visual_
         "NESTED": "compact",
         "GHOSTED": "inspector",
         "ICON_ONLY": "icon",
-        "INSPECTOR_ONLY_LABEL": "inspector",
+        "INSPECTOR_LABEL": "inspector",
     }[state]
     return {
         "semantic_family": _semantic_style_family(row),
@@ -708,7 +728,7 @@ def _display_state_for_row(row: Mapping[str, Any], mode: str, current_side: str)
     active_side = bool(current_side in {"BUY", "SELL"} and side == current_side)
     emphasized = _mode_emphasizes_type(mode, overlay_type, layer)
     if row.get("precision_rejected") or overlay_type in DIAGNOSTIC_TYPES:
-        return "INSPECTOR_ONLY_LABEL", 0.15, "removed from live truth; retained for diagnostics inspector"
+        return "INSPECTOR_LABEL", 0.15, "removed from live truth; retained for diagnostics inspector"
     if current_side in {"BUY", "SELL"} and side in {"BUY", "SELL"} and side != current_side and overlay_type in ACTIONABLE_TYPES:
         return "GHOSTED", max(0.34, min(0.52, truth * 0.30 + 0.22)), "counter-side execution geometry remains visible but subdued"
     if overlay_type in EXECUTION_FOCUS_TYPES:
@@ -752,7 +772,7 @@ def _apply_display_metadata(rows: Sequence[Mapping[str, Any]], mode: str, curren
         row["label_visible"] = bool(
             row.get("geometry_visible")
             and row.get("label_hidden") is not True
-            and display_state not in {"GHOSTED", "ICON_ONLY", "INSPECTOR_ONLY_LABEL"}
+            and display_state not in {"GHOSTED", "ICON_ONLY", "INSPECTOR_LABEL", "INSPECTOR_ONLY_LABEL"}
         )
         overlay_id = _text(row.get("overlay_id") or row.get("id"))
         parent_id = _text(row.get("parent_overlay_id"))
@@ -792,7 +812,7 @@ def _apply_adaptive_label_policy(rows: Sequence[Mapping[str, Any]], mode: str) -
     for index, row in enumerate(output):
         if row.get("precision_rejected") or row.get("label_hidden") is True:
             continue
-        if str(row.get("display_state") or "") in {"GHOSTED", "ICON_ONLY", "INSPECTOR_ONLY_LABEL"}:
+        if str(row.get("display_state") or "") in {"GHOSTED", "ICON_ONLY", "INSPECTOR_LABEL", "INSPECTOR_ONLY_LABEL"}:
             continue
         candidates.append((_float(row.get("visual_weight"), 0.0), overlay_type_priority(row.get("type")), index))
     candidates.sort(reverse=True)
@@ -801,7 +821,7 @@ def _apply_adaptive_label_policy(rows: Sequence[Mapping[str, Any]], mode: str) -
         display_state = str(row.get("display_state") or "COMPACT")
         overlay_type = str(row.get("type") or "")
         label = _text(row.get("display_label") or row.get("short_label") or row.get("label"))
-        hidden_by_state = display_state in {"GHOSTED", "ICON_ONLY", "INSPECTOR_ONLY_LABEL"}
+        hidden_by_state = display_state in {"GHOSTED", "ICON_ONLY", "INSPECTOR_LABEL", "INSPECTOR_ONLY_LABEL"}
         label_priority_type = overlay_type in ALWAYS_LABEL_TYPES
         hidden_by_budget = (
             not label_priority_type
@@ -824,9 +844,9 @@ def _apply_adaptive_label_policy(rows: Sequence[Mapping[str, Any]], mode: str) -
             if display_state in {"GHOSTED", "ICON_ONLY"}:
                 row["label_mode"] = "inspector"
             elif display_state not in {"FULL", "FOCUS_EXPANDED"} or overlay_type not in EXECUTION_FOCUS_TYPES:
-                row["display_state"] = "INSPECTOR_ONLY_LABEL"
+                row["display_state"] = "INSPECTOR_LABEL"
                 row["label_mode"] = "inspector"
-                row["style"] = _style_for_display_state(row, "INSPECTOR_ONLY_LABEL", _float(row.get("visual_weight"), 0.15))
+                row["style"] = _style_for_display_state(row, "INSPECTOR_LABEL", _float(row.get("visual_weight"), 0.15))
         else:
             row["label_visible"] = row.get("label_hidden") is not True
             row["label_lane"] = _text(row.get("label_anchor"), "inside")
@@ -1121,7 +1141,7 @@ def _apply_overlay_nesting(rows: Sequence[Mapping[str, Any]]) -> tuple[list[dict
                     continue
                 loser_row["visible_default"] = False
                 loser_row["visible_modes"] = ["DIAGNOSTICS", "DEBUG", "INSPECTOR"]
-                loser_row["display_state"] = "INSPECTOR_ONLY_LABEL"
+                loser_row["display_state"] = "INSPECTOR_LABEL"
                 loser_row["label_hidden"] = True
                 loser_row["label_anchor"] = "hidden"
                 loser_row.setdefault("precision_flags", []).append(
@@ -1397,7 +1417,8 @@ def resolve_precision_overlays_v3(
         "floating_unanchored_rejected": floating_rejected,
         "chart_visible_geometry": len([row for row in rendered if row.get("geometry_visible") is not False]),
         "visible_label_count": len([row for row in rendered if row.get("label_hidden") is not True and row.get("label_visible") is not False]),
-        "inspector_only_label_count": display_state_counts.get("INSPECTOR_ONLY_LABEL", 0),
+        "inspector_label_count": display_state_counts.get("INSPECTOR_LABEL", 0),
+        "inspector_only_label_count": display_state_counts.get("INSPECTOR_LABEL", 0) + display_state_counts.get("INSPECTOR_ONLY_LABEL", 0),
         "ghosted_count": display_state_counts.get("GHOSTED", 0),
         "compact_count": display_state_counts.get("COMPACT", 0),
         "full_count": display_state_counts.get("FULL", 0),

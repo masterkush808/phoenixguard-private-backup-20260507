@@ -6,6 +6,7 @@ ensure_backend_paths()
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import urllib.parse
@@ -51,7 +52,9 @@ def _load_session_file(path: Path) -> dict[str, Any]:
 
 
 def _default_session_path(session_id: str) -> Path:
-    return ROOT / ".codex_runtime" / "data_live" / "mobile_api" / "window_tracker" / "sessions" / session_id / "session.json"
+    runtime_dir = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or ROOT / "runtime" / "live")
+    data_dir = Path(os.getenv("PHOENIXGUARD_DATA_DIR") or runtime_dir / "data_live")
+    return data_dir / "mobile_api" / "window_tracker" / "sessions" / session_id / "session.json"
 
 
 def _artifact_refs_from_session(session: Mapping[str, Any]) -> dict[str, dict[str, Any]]:

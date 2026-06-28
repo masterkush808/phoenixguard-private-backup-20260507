@@ -1,4 +1,5 @@
 from typing import Any
+import os
 from pathlib import Path
 from fastapi.testclient import TestClient
 from phoenixguard.mobile_api.app import create_app
@@ -16,5 +17,6 @@ def test_render_endpoint_returns_png(tmp_path: Path):
     assert resp.status_code == 200
     data = resp.content
     assert data[:8] == b"\x89PNG\r\n\x1a\n"
-    candidate = PROJECT_ROOT / ".codex_runtime" / "visual_evidence" / f"{session}_render_latest.png"
+    runtime_root = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or PROJECT_ROOT / "runtime" / "live")
+    candidate = runtime_root / "visual_evidence" / f"{session}_render_latest.png"
     assert candidate.exists()

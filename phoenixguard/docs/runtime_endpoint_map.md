@@ -34,7 +34,7 @@ Defined in `Backend/src/phoenixguard/mobile_api/app.py`.
 | `POST /v1/mobile/window-tracker/sessions/{session_id}/predict` | Tracker prediction action | Diagnostic/analysis |
 | `POST /v1/mobile/window-tracker/sessions/{session_id}/show-future` | Future projection action | Diagnostic |
 | `PATCH /v1/mobile/window-tracker/sessions/{session_id}/controls` | Update tracker controls | Runtime setup |
-| `GET /v1/mobile/window-tracker/dashboard[/<session_id>]` | HTML dashboard | Diagnostic |
+| `GET /v3/mobile/window-tracker/dashboard[/<session_id>]` | Canonical V3 HTML dashboard; `/v1/...` remains a compatibility alias | Diagnostic |
 
 ## Model Council Daemon
 

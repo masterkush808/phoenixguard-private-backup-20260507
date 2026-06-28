@@ -5,6 +5,7 @@ Agent 1 implementation: `Backend/src/phoenixguard/execution/packet_v3.py`.
 | Field | Required | Validator behavior | Legacy mismatch |
 | --- | --- | --- | --- |
 | `schema_version` | Yes | Must equal `PG_EXECUTION_PACKET_V3` | Raw `action` or `execution_action` payloads rejected |
+| `packet_type` | Yes | Must equal `PG_EXECUTION_PACKET_V3` for executable packets | Missing type or `STUDY_PACKET` cannot be treated as executable |
 | `packet_id` | Yes | Non-empty string | Legacy uses `signal_id` |
 | `session_id` | Yes | Non-empty; optional expected-session match | Legacy observer and tracker both use this but not always packet-scoped |
 | `symbol` | Yes | Non-empty; optional expected-symbol match | Legacy often uses `market` or detected market |
@@ -12,8 +13,8 @@ Agent 1 implementation: `Backend/src/phoenixguard/execution/packet_v3.py`.
 | `frame_id` | Yes | Numeric; must advance when previous identity supplied | Legacy tracker uses `frame_index` |
 | `capture_count` | Yes | Numeric; must advance when previous identity supplied | Present in tracker session |
 | `state_version` | Yes | Numeric; must advance when previous identity supplied | Derived in tracker normalization |
-| `created_epoch` | Yes | Positive epoch | Legacy uses `published_epoch`, `completed_epoch`, `timestamp` |
-| `valid_until_epoch` | Yes | Must be in future | Legacy latest signal computes it opportunistically |
+| `created_epoch_sec` | Yes | Positive Unix epoch seconds; alias must match if supplied | Legacy uses `created_epoch`, `published_epoch`, `completed_epoch`, `timestamp` |
+| `valid_until_epoch_sec` | Yes | Must be future Unix epoch seconds; alias must match if supplied | Legacy uses `valid_until_epoch` or computes it opportunistically |
 | `live_integrity.is_live` | Yes | Must be true | Must remain `RUNTIME_INTEGRITY` |
 | `live_integrity.frame_advancing` | Yes | Must be true | Not a market blocker |
 | `live_integrity.capture_advancing` | Yes | Must be true | Not a market blocker |

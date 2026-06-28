@@ -128,7 +128,7 @@ def build_report(base_url: str, session_id: str, timeout: float) -> dict[str, An
     heartbeat_payload: dict[str, Any] = {
         "session_id": session_id,
         "surface_id": "trace_backend_frontend_v3",
-        "route": f"/v1/mobile/window-tracker/dashboard/{session_id}",
+        "route": f"/v3/mobile/window-tracker/dashboard/{session_id}",
         "active_mode": "DIAGNOSTICS",
         "render_mode": "probe",
         "client_timestamp_ms": int(time.time() * 1000.0),
@@ -143,7 +143,7 @@ def build_report(base_url: str, session_id: str, timeout: float) -> dict[str, An
         "visual_health_v3_query": _request_json("GET", f"{base}/v1/mobile/visual/health/v3?session_id={session_q}", timeout),
         "tracker_session": _request_json("GET", f"{base}/v1/mobile/window-tracker/sessions/{session_q}", timeout),
         "registry_active": _request_json("GET", f"{base}/v1/mobile/registry/sessions/{session_q}/active?min_truth_score=0.0", timeout),
-        "dashboard": _request_bytes(f"{base}/v1/mobile/window-tracker/dashboard/{session_q}", timeout),
+        "dashboard": _request_bytes(f"{base}/v3/mobile/window-tracker/dashboard/{session_q}", timeout),
         "latest_window": _request_bytes(f"{base}/v1/mobile/window-tracker/sessions/{session_q}/artifacts/latest-window", timeout),
         "latest_chart": _request_bytes(f"{base}/v1/mobile/window-tracker/sessions/{session_q}/artifacts/latest-chart", timeout),
     }

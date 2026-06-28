@@ -11,9 +11,10 @@ process.env.PW_TEST_SCREENSHOT_NO_FONTS_READY = "1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const webRoot = path.resolve(__dirname, "..");
 const projectRoot = path.resolve(webRoot, "..", "..");
-const screenshotDir = path.join(projectRoot, ".codex_runtime", "web-smoke");
+const runtimeDir = process.env.PHOENIXGUARD_RUNTIME_DIR || path.join(projectRoot, "runtime", "live");
+const screenshotDir = path.join(runtimeDir, "web-smoke");
 const routes = ["/", "/pricing", "/risk-disclosure", "/login", "/app", "/app/downloads", "/app/tracker", "/admin"];
-const trackerPath = process.env.NEXT_PUBLIC_TRACKER_DASHBOARD_URL || "http://127.0.0.1:8793/dashboard/live/pocket-live-8788";
+const trackerPath = process.env.NEXT_PUBLIC_TRACKER_DASHBOARD_URL || "http://127.0.0.1:8793/v3/mobile/window-tracker/dashboard/pocket-live-8788";
 const viewports = [
   { name: "desktop", width: 1440, height: 980 },
   { name: "mobile", width: 390, height: 844 }

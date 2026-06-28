@@ -628,13 +628,19 @@ def validate_execution_packet_v3(
             add("INVALID_SCHEMA_VERSION", "SCHEMA", "Payload is not a PG_EXECUTION_PACKET_V3 packet.")
         return PacketValidationResult(False, False, tuple(issues), packet_id=_clean_str(packet.get("packet_id")) or None)
     packet_type = _clean_str(packet.get("packet_type"))
-    if packet_type and packet_type not in VALID_PACKET_TYPES:
+    if not packet_type:
+        add(
+            "MISSING_PACKET_TYPE",
+            "SCHEMA",
+            "packet_type must be PG_EXECUTION_PACKET_V3 for executable packets.",
+        )
+    elif packet_type not in VALID_PACKET_TYPES:
         add(
             "INVALID_PACKET_TYPE_ENUM",
             "SCHEMA",
             "packet_type must be STUDY_PACKET or PG_EXECUTION_PACKET_V3.",
         )
-    elif packet_type and packet_type != EXECUTION_PACKET_TYPE:
+    elif packet_type != EXECUTION_PACKET_TYPE:
         add(
             "PACKET_TYPE_NOT_EXECUTION_PACKET",
             "SCHEMA",

@@ -19,9 +19,13 @@ ROOT = Path(__file__).resolve().parents[2]
 CERT_DIR = ROOT / "reports" / "certification"
 DEFAULT_BASE_URL = "http://127.0.0.1:8793"
 DEFAULT_SESSION = "pocket-live-8788"
+DEFAULT_RUNTIME_DIR = Path(
+    os.getenv("PHOENIXGUARD_RUNTIME_DIR")
+    or ROOT / "runtime" / "live"
+)
 DEFAULT_DATA_DIR = Path(
     os.getenv("PHOENIXGUARD_DATA_DIR")
-    or ROOT / ".codex_runtime" / "data_live"
+    or DEFAULT_RUNTIME_DIR / "data_live"
 )
 
 

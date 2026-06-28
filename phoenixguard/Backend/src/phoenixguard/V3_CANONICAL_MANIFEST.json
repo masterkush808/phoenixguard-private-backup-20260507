@@ -18,7 +18,7 @@
     "engine_launcher": "Backend/launch/start_phoenixguard_full_local.ps1",
     "shooter_mode": "PACKAGE_REPORTER",
     "live_click_arm": "retired",
-    "dashboard_route": "live"
+    "dashboard_route": "/v3/mobile/window-tracker/dashboard"
   },
   "required_files": [
     "Backend/launch/shooter.py",
@@ -70,6 +70,9 @@
     "/v1/mobile/model-council/study/latest",
     "/v1/mobile/model-council/execution/latest",
     "/v1/mobile/floating/state",
+    "/v1/mobile/floating/sessions/{session_id}/state",
+    "/v1/mobile/live/state/v3/{session_id}",
+    "/v3/mobile/window-tracker/dashboard/{session_id}",
     "/v1/mobile/shooter/handshake",
     "/v1/mobile/runtime/trace/v3"
   ],

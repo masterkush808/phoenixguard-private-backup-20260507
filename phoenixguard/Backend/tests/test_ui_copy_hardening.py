@@ -185,6 +185,10 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "surface-line-hotspot" in dashboard
     assert "function overlayDisplayState" in dashboard
     assert "function overlayVisualWeight" in dashboard
+    assert "function overlayFillCeiling" in dashboard
+    assert "function overlayRenderedAreaRatio" in dashboard
+    assert "Number.isFinite(requestedFill)" in dashboard
+    assert "fillScale: boundedSetting(saved.fillScale, OVERLAY_EDITOR_DEFAULTS.fillScale, 0, 1.00)" in dashboard
     assert "function applyOverlayDisplayStyle" in dashboard
     assert "function applyOverlayLabelPosition" in dashboard
     assert "display-ghosted" in dashboard

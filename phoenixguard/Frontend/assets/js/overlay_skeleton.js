@@ -290,14 +290,28 @@
         const requestedFillOpacity = Number(style.fill_opacity);
         const opacityFallback = displayState === 'GHOSTED' ? 0.32 : 0.9;
         const opacity = Math.max(0.18, Math.min(1, Number.isFinite(requestedOpacity) ? requestedOpacity : opacityFallback));
-        const fillOpacity = Math.max(0, Math.min(0.16, Number.isFinite(requestedFillOpacity) ? requestedFillOpacity : 0.02));
+        const areaRatio = Math.max(
+          0,
+          Math.min(
+            1,
+            ((Math.max(0, e.x2 - e.x1) * Math.max(0, e.y2 - e.y1)) / Math.max(1, canvas.width * canvas.height)),
+          ),
+        );
+        let fillCeiling = displayState === 'GHOSTED' || displayState === 'ICON_ONLY' || displayState === 'INSPECTOR_LABEL' || displayState === 'INSPECTOR_ONLY_LABEL'
+          ? 0
+          : 0.018;
+        if(areaRatio >= 0.18) fillCeiling = 0;
+        else if(areaRatio >= 0.10) fillCeiling = Math.min(fillCeiling, 0.003);
+        else if(areaRatio >= 0.06) fillCeiling = Math.min(fillCeiling, 0.006);
+        else if(areaRatio >= 0.035) fillCeiling = Math.min(fillCeiling, 0.009);
+        const fillOpacity = Math.max(0, Math.min(fillCeiling, Number.isFinite(requestedFillOpacity) ? requestedFillOpacity : 0.006));
         ctx.globalAlpha = opacity;
         ctx.strokeStyle = color;
         ctx.lineWidth = Math.max(Number(style.border_width || 0) || 0, Math.max(2, Math.min(4, Math.floor((e.x2-e.x1 + e.y2-e.y1)/150))));
         const evidence = normalizedToken(e.obj.anchor_evidence_status || style.anchor_evidence_status);
         if(evidence === 'STALE' || evidence === 'MISMATCH' || evidence === 'REJECTED') ctx.setLineDash([6, 4]);
         ctx.fillStyle = color.replace(/rgba\(([^,]+),([^,]+),([^,]+),[^)]+\)/, `rgba($1,$2,$3,${fillOpacity})`);
-        ctx.fillRect(e.x1,e.y1,Math.max(1,e.x2-e.x1),Math.max(1,e.y2-e.y1));
+        if(fillOpacity > 0) ctx.fillRect(e.x1,e.y1,Math.max(1,e.x2-e.x1),Math.max(1,e.y2-e.y1));
         ctx.strokeRect(e.x1,e.y1,Math.max(1,e.x2-e.x1),Math.max(1,e.y2-e.y1));
         ctx.setLineDash([]);
         ctx.globalAlpha = 1;

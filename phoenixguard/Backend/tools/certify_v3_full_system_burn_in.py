@@ -14,6 +14,7 @@ from typing import Any, cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
+    DEFAULT_RUNTIME_DIR,
     DEFAULT_SESSION,
     ROOT,
     command_line,
@@ -29,10 +30,10 @@ from certification_common_v3 import (
 )
 
 
-BURN_DIR = ROOT / ".codex_runtime" / "burn_in"
+BURN_DIR = DEFAULT_RUNTIME_DIR / "burn_in"
 DEFAULT_OUT = ROOT / "reports" / "FINAL_FULL_SYSTEM_ACTIVATED_BURN_IN_REPORT.md"
-SHOOTER_HANDSHAKE_PATH = ROOT / ".codex_runtime" / "shooter_handshake.json"
-ACTION_EVIDENCE_DIR = ROOT / ".codex_runtime" / "action_evidence"
+SHOOTER_HANDSHAKE_PATH = DEFAULT_RUNTIME_DIR / "shooter_handshake.json"
+ACTION_EVIDENCE_DIR = DEFAULT_RUNTIME_DIR / "action_evidence"
 SHOOTER_VALIDATION_DIR = ROOT / "data" / "shooter_validation"
 SAFE_SHOOTER_VALIDATION_LOGS = (
     "live_disabled.jsonl",

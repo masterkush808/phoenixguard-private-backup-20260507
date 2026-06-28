@@ -71,7 +71,7 @@ def _start_dashboard_client(
         playwright = sync_playwright().start()
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": int(width), "height": int(height)})
-        url = f"{base_url.rstrip('/')}/v1/mobile/window-tracker/dashboard/{urllib.parse.quote(session, safe='')}"
+        url = f"{base_url.rstrip('/')}/v3/mobile/window-tracker/dashboard/{urllib.parse.quote(session, safe='')}"
         page.goto(url, wait_until="domcontentloaded", timeout=int(max(1.0, timeout) * 1000.0))
         page.wait_for_selector(".console-shell", timeout=int(max(1.0, timeout) * 1000.0))
         page.wait_for_function(

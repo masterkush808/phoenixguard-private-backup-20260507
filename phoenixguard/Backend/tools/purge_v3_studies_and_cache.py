@@ -5,6 +5,7 @@ from _bootstrap import ensure_backend_paths
 ensure_backend_paths()
 
 import argparse
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,10 @@ from typing import Iterable, Sequence
 from phoenixguard.paths import PROJECT_ROOT
 
 ROOT = PROJECT_ROOT
+
+
+def runtime_root(root: Path) -> Path:
+    return Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or root / "runtime" / "live").resolve()
 
 DIRECT_RUNTIME_DIRS = {
     "studies": "generated V3 runtime study records",
@@ -200,7 +205,7 @@ def _dedupe_targets(targets: Iterable[tuple[Path, str]]) -> list[tuple[Path, str
 
 def iter_purge_records(root: Path) -> tuple[PurgeRecord, ...]:
     root = root.resolve()
-    runtime = root / ".codex_runtime"
+    runtime = runtime_root(root)
     if not runtime.exists() or runtime.is_symlink():
         return ()
 
@@ -226,7 +231,7 @@ def iter_purge_records(root: Path) -> tuple[PurgeRecord, ...]:
 
 def _delete_record(record: PurgeRecord, root: Path, runtime: Path) -> None:
     if not _is_under_runtime(record.path, runtime):
-        raise RuntimeError(f"Refusing to purge outside .codex_runtime: {record.path}")
+        raise RuntimeError(f"Refusing to purge outside active runtime root: {record.path}")
     if is_protected_path(record.path, root):
         return
 
@@ -245,7 +250,7 @@ def _delete_record(record: PurgeRecord, root: Path, runtime: Path) -> None:
         if is_protected_path(file_path, root):
             continue
         if not _is_under_runtime(file_path, runtime):
-            raise RuntimeError(f"Refusing to purge outside .codex_runtime: {file_path}")
+            raise RuntimeError(f"Refusing to purge outside active runtime root: {file_path}")
         file_path.unlink()
 
     if record.path.is_dir():
@@ -326,7 +331,7 @@ def write_report(result: PurgeResult) -> None:
 
 def run_purge(root: Path, *, confirm_delete: bool = False, report_path: Path | None = None) -> PurgeResult:
     root = root.resolve()
-    runtime = root / ".codex_runtime"
+    runtime = runtime_root(root)
     report_path = (
         report_path or root / "reports" / "FINAL_PURGED_STUDIES_AND_CACHE_REPORT.md"
     ).resolve()

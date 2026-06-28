@@ -14,7 +14,7 @@ Set `NEXT_PUBLIC_API_BASE_URL` for auth/onboarding API calls and `NEXT_PUBLIC_TR
 
 ```powershell
 $env:NEXT_PUBLIC_API_BASE_URL="http://127.0.0.1:18181"
-$env:NEXT_PUBLIC_TRACKER_DASHBOARD_URL="http://127.0.0.1:8793/dashboard/live/pocket-live-8788"
+$env:NEXT_PUBLIC_TRACKER_DASHBOARD_URL="http://127.0.0.1:8793/v3/mobile/window-tracker/dashboard/pocket-live-8788"
 npm run dev
 ```
 

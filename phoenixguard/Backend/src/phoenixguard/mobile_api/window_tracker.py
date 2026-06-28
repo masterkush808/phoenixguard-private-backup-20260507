@@ -8912,7 +8912,7 @@ class PhoenixGuardWindowTrackingAdapter:
             fast_market_selector_skip_context
             and _env_bool("PHOENIXGUARD_LIVE_PAIR_SWITCH_FAST_REBIND", True)
         )
-        scan_selector_on_pair_switch = _env_bool("PHOENIXGUARD_LIVE_SCAN_SELECTOR_ON_PAIR_SWITCH", False)
+        scan_selector_on_pair_switch = _env_bool("PHOENIXGUARD_LIVE_SCAN_SELECTOR_ON_PAIR_SWITCH", True)
         scan_selector_when_unknown = _env_bool("PHOENIXGUARD_LIVE_SCAN_SELECTOR_WHEN_UNKNOWN", False)
         previous_tracking: dict[str, Any] = {}
         previous_signal: dict[str, Any] = {}

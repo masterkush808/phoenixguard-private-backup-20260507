@@ -402,6 +402,7 @@ ACTIONABLE_OVERLAY_TYPES: frozenset[str] = frozenset(
 )
 HISTORICAL_OVERLAY_TYPES: frozenset[str] = frozenset({"PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"})
 TRENDLINE_OVERLAY_TYPES: frozenset[str] = frozenset({"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"})
+EXPLICIT_PATH_OVERLAY_TYPES: frozenset[str] = frozenset({"PROGRESSION_PATH", "PREDICTION_PATH", "ANGLE_VECTOR"})
 
 
 def _candle_anchor_row(candle: Mapping[str, Any], index: int) -> dict[str, float | int]:
@@ -899,11 +900,11 @@ def _short_display_label_for_overlay(object_type: str, side: str, fallback: str)
     if type_name == "OPPOSING_FORCE":
         return "OPPOSING"
     if type_name == "SUPPORT_TRENDLINE":
-        return "SUPPORT TREND"
+        return "SUPPORT TRENDLINE"
     if type_name == "RESISTANCE_TRENDLINE":
-        return "RESISTANCE TREND"
+        return "RESISTANCE TRENDLINE"
     if type_name == "INNER_TRENDLINE":
-        return "INNER TREND"
+        return "INNER TRENDLINE"
     if type_name == "IMPULSE_BOX":
         return "IMPULSE"
     if type_name == "PULLBACK_BOX":
@@ -980,12 +981,16 @@ def _display_profile_for_overlay(
         semantic_family = "opposing"
     elif type_name in HISTORICAL_OVERLAY_TYPES:
         semantic_family = "history"
+    if display_state in {"GHOSTED", "ICON_ONLY", "INSPECTOR_LABEL", "INSPECTOR_ONLY_LABEL"}:
+        fill_opacity = 0.0
+    else:
+        fill_opacity = max(0.0, min(0.018, visual_weight * 0.018))
     style = {
         "visual_weight": round(float(visual_weight), 4),
         "semantic_family": semantic_family,
         "anchor_evidence_status": str(anchor_quality.get("status", "UNKNOWN")),
         "opacity": round(float(max(0.14, min(0.96, visual_weight))), 4),
-        "fill_opacity": round(float(max(0.0, min(0.10, visual_weight * 0.045))), 4),
+        "fill_opacity": round(float(fill_opacity), 4),
         "border_width": round(float(max(0.75, min(2.5, 0.75 + visual_weight * 1.1))), 3),
     }
     return {
@@ -1633,6 +1638,9 @@ class _RegistryBuilder:
             lifecycle_state: str = "ACTIVE",
         ) -> None:
             bbox = _raw_bbox(raw)
+            path_bounds = normalize_bounds(raw.get("line_points") or raw.get("points") or raw.get("path"))
+            if object_type in EXPLICIT_PATH_OVERLAY_TYPES and path_bounds is not None:
+                bbox = path_bounds
             if bbox is None or normalize_bbox(bbox) is None:
                 return
             anchor_indices, anchor_touch_points = _candle_anchor_evidence(raw, bbox, candles)
@@ -1642,13 +1650,25 @@ class _RegistryBuilder:
                 anchor_indices = explicit_anchor_indices
             if explicit_touch_points:
                 anchor_touch_points = explicit_touch_points
-            bbox, anchor_quality = _tighten_bbox_to_anchor_rows(
-                object_type=object_type,
-                raw=raw,
-                bbox=bbox,
-                candles=candles,
-                anchor_indices=anchor_indices,
-            )
+            if object_type in EXPLICIT_PATH_OVERLAY_TYPES and path_bounds is not None:
+                bbox = [round(float(value), 3) for value in path_bounds]
+                anchor_quality = {
+                    "score": max(0.68, _clip01(raw.get("confidence", raw.get("truth_score", 0.68)))),
+                    "status": "VALID",
+                    "reason": "explicit_path_geometry",
+                    "anchor_count": len(_point_rows(raw.get("line_points") or raw.get("points") or raw.get("path"))),
+                    "tightened": False,
+                    "selected_anchor_indices": list(anchor_indices),
+                    "selected_anchor_points": _point_rows(raw.get("line_points") or raw.get("points") or raw.get("path")),
+                }
+            else:
+                bbox, anchor_quality = _tighten_bbox_to_anchor_rows(
+                    object_type=object_type,
+                    raw=raw,
+                    bbox=bbox,
+                    candles=candles,
+                    anchor_indices=anchor_indices,
+                )
             selected_anchor_indices = [
                 int(_float(item, -1.0))
                 for item in _sequence(anchor_quality.get("selected_anchor_indices"))
@@ -1659,10 +1679,6 @@ class _RegistryBuilder:
             selected_anchor_points = _point_rows(anchor_quality.get("selected_anchor_points"))
             if selected_anchor_points and object_type not in TRENDLINE_OVERLAY_TYPES:
                 anchor_touch_points = selected_anchor_points
-            if bool(anchor_quality.get("status") == "REJECT") and object_type in CRITICAL_ANCHORED_OVERLAY_TYPES:
-                # Do not promote forced or floating boxes into the live overlay truth layer.
-                # They remain inspectable as rejected overlays through diagnostics if the caller emits them there.
-                return
             side_value = _upper_side(side if side is not None else raw.get("side", raw.get("direction", signal.get("action"))))
             object_id = _stable_id(session_id, object_type, source_path, source_key)
             track_id = _text(raw.get("track_id") or raw.get("persistent_id"), object_id)
@@ -1717,7 +1733,10 @@ class _RegistryBuilder:
                     "lifecycle_state": lifecycle_state,
                     "reason": reason_value,
                     "label": label_value,
-                    "display_label": _short_display_label_for_overlay(object_type, side_value, label_value),
+                    "display_label": _text(
+                        raw.get("display_label") or raw.get("short_label"),
+                        _short_display_label_for_overlay(object_type, side_value, label_value),
+                    ),
                     "layer": layer or TYPE_LAYER_MAP.get(object_type, "diagnostics"),
                     "role": role or TYPE_ROLE_MAP.get(object_type, ""),
                     "visible_default": bool(raw.get("visible_default", object_type not in {"DEBUG_RAW_DETECTION", "PROGRESSION_PATH"})),
@@ -1754,6 +1773,8 @@ class _RegistryBuilder:
                     "label_hidden": overlay_raw.get("label_hidden", normalized_overlay.get("label_hidden", False)),
                     "label_visible": overlay_raw.get("label_visible", not bool(overlay_raw.get("label_hidden", False))),
                     "label_anchor": overlay_raw.get("label_anchor", normalized_overlay.get("label_anchor", "overlay")),
+                    "display_label": overlay_raw.get("display_label", normalized_overlay.get("display_label", label_value)),
+                    "short_label": overlay_raw.get("short_label", normalized_overlay.get("short_label", label_value)),
                     "geometry_visible": True,
                     "inspector_visible": True,
                     "visible_modes": overlay_raw.get("visible_modes", normalized_overlay.get("visible_modes", [])),

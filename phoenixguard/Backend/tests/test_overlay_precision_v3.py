@@ -623,12 +623,13 @@ def test_crowded_valid_overlays_keep_geometry_when_labels_move_to_inspector(tmp_
         current_side="BUY",
         frame_id=14494,
     )
-    inspector_only = [row for row in resolved if row.get("display_state") == "INSPECTOR_ONLY_LABEL"]
+    inspector_only = [row for row in resolved if row.get("display_state") == "INSPECTOR_LABEL"]
 
     assert audit["rendered_count"] == 24
     assert inspector_only
     assert all(row["geometry_visible"] is True for row in inspector_only)
     assert all(row["label_visible"] is False for row in inspector_only)
+    assert all(row["style"]["fill_opacity"] == 0.0 for row in inspector_only)
     assert audit["precision_report"]["inspector_only_label_count"] >= 1
 
 

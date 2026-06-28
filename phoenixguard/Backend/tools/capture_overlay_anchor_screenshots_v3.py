@@ -130,7 +130,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Capture PhoenixGuard V3 overlay anchor correction evidence screenshots.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--session", default=DEFAULT_SESSION)
-    parser.add_argument("--out", default=".codex_runtime/visual_evidence/anchor_fix")
+    parser.add_argument("--out", default="runtime/live/visual_evidence/anchor_fix")
     parser.add_argument("--timeout", type=float, default=60.0)
     args = parser.parse_args()
 

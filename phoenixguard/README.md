@@ -69,10 +69,10 @@ runtime. If a launcher cannot find the repo `.venv`, it stops instead of creatin
 Runtime state is stored under the project runtime root:
 
 ```text
-.\.codex_runtime\
+.\runtime\live\
 ```
 
-`.codex_runtime` is runtime state, locks, logs, screenshots, and certification evidence. It is not a
+`runtime\live` is runtime state, locks, logs, screenshots, and certification evidence. It is not a
 Python environment and must not be treated as a dependency source. Deleting it while PhoenixGuard is
 running will remove active tracker state and evidence.
 
@@ -84,13 +84,13 @@ anything:
 ```
 
 The verifier deletes only known extra top-level venv folders such as `.venv-live`, `.venv-dev`,
-`.venv-training`, and `.venv-business` when they exist. It does not delete `.codex_runtime`, because
+`.venv-training`, and `.venv-business` when they exist. It does not delete `runtime\live`, because
 that directory is runtime state, not a package environment.
 
 Do not run PhoenixGuard with bare `python`, and do not point live runtime state at
 `%LOCALAPPDATA%\PhoenixGuard\codex_runtime`. The launchers set
 `PHOENIXGUARD_RUNTIME_DIR`, `PHOENIXGUARD_DATA_DIR`, `PHOENIXGUARD_LOGS_DIR`, and
-`PHOENIXGUARD_TRACKER_STATUS_FILE` to the repo `.codex_runtime` tree.
+`PHOENIXGUARD_TRACKER_STATUS_FILE` to the repo `runtime\live` tree.
 
 ## Fast Safe Restart
 
@@ -135,7 +135,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoe
 Open the dashboard after launch:
 
 ```text
-http://127.0.0.1:8793/v1/mobile/window-tracker/dashboard/pocket-live-8788
+http://127.0.0.1:8793/v3/mobile/window-tracker/dashboard/pocket-live-8788
 ```
 
 ## Read The PhoenixGuard State
@@ -363,7 +363,7 @@ The old calibrated broker-click shooter has been retired. `Backend/launch/shoote
 - `main.py::run_inference` is offline/manual analysis only.
 - Observer signals, dashboard state, overlays, and skill gates are diagnostic.
 - `Backend/launch/shooter.py` reads the Model Council execution endpoint only.
-- It writes `.codex_runtime\shooter_handshake.json` only when the packet carries an accepted,
+- It writes `runtime\live\shooter_handshake.json` only when the packet carries an accepted,
   execution-ready `PG_ALLOWANCE_PACKAGE_V1`.
 - It never reads calibration files, moves the mouse, sets broker time, edits amount, or clicks
   BUY/SELL.
@@ -402,7 +402,7 @@ Every execution packet must carry provenance:
 
 ```text
 frame_id, capture_count, state_version, sequence_id, source_lock_id,
-model_health_id, chart_transform_id, created_epoch_ms, valid_until_epoch_ms
+model_health_id, chart_transform_id, created_epoch_sec, valid_until_epoch_sec
 ```
 
 Every live state must be explainable through RuntimeTraceV3 dataflow and certification gates: source
@@ -434,7 +434,7 @@ the local package reporter. Keep study sessions separated from broker/external b
 
 - `Backend/launch/launch_phoenixguard_live_ready.ps1`: canonical production launcher.
 - `Backend/launch/shooter.py`: local package reporter, not a broker-click executor.
-- `.codex_runtime\`: the single live runtime root for state, traces, packet cache, handshakes, and evidence.
+- `runtime\live\`: the single live runtime root for state, traces, packet cache, handshakes, and evidence.
 - `reports\`: launch, trace, validation, and certification outputs.
 
 ## Tracing

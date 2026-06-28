@@ -26,14 +26,21 @@ from phoenixguard.vision.v3_overlay_contract import VIEW_MODES, normalize_view_m
 REQUIRED_OPERATOR_MODES: tuple[str, ...] = (
     "CLEAN_LIVE",
     "ACTIVE_CONTEXT",
+    "CANDLES",
+    "CHART_BOUNDS",
     "GLOBAL",
     "LOCAL",
     "SUPPLY_DEMAND",
     "TRENDLINES",
     "TRIGGER",
     "TARGET",
+    "INVALIDATION",
+    "PREDICTION",
     "PATH",
     "COUNCIL",
+    "CALIBRATION",
+    "DEBUG",
+    "INSPECTOR",
     "FULL_HISTORY_READ",
     "REPLAY",
     "BROKER",
@@ -44,14 +51,21 @@ REQUIRED_OPERATOR_MODES: tuple[str, ...] = (
 MODE_TO_SELECT_VALUE: dict[str, str] = {
     "CLEAN_LIVE": "clean_live",
     "ACTIVE_CONTEXT": "active_context",
+    "CANDLES": "candles",
+    "CHART_BOUNDS": "chart_bounds",
     "GLOBAL": "global",
     "LOCAL": "local",
     "SUPPLY_DEMAND": "supply_demand",
     "TRENDLINES": "trendlines",
     "TRIGGER": "triggers",
     "TARGET": "targets",
+    "INVALIDATION": "invalidation",
+    "PREDICTION": "prediction",
     "PATH": "path",
     "COUNCIL": "council_layers",
+    "CALIBRATION": "calibration",
+    "DEBUG": "debug",
+    "INSPECTOR": "inspector",
     "FULL_HISTORY_READ": "full_history_read",
     "REPLAY": "replay",
     "BROKER": "broker",
@@ -127,7 +141,7 @@ def main() -> int:
     parser.add_argument("--session", default=DEFAULT_SESSION)
     parser.add_argument("--modes", default="")
     parser.add_argument("--all-modes", action="store_true")
-    parser.add_argument("--out", default=".codex_runtime/visual_evidence/overlay_modes")
+    parser.add_argument("--out", default="runtime/live/visual_evidence/overlay_modes")
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--width", type=int, default=1365)
     parser.add_argument("--height", type=int, default=768)
@@ -151,7 +165,7 @@ def main() -> int:
 
     base = args.base_url.rstrip("/")
     session_q = quote_session(args.session)
-    dashboard_url = f"{base}/v1/mobile/window-tracker/dashboard/{session_q}"
+    dashboard_url = f"{base}/v3/mobile/window-tracker/dashboard/{session_q}"
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     modes = _mode_list(args.modes, all_modes=args.all_modes)

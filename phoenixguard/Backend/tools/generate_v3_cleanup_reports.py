@@ -52,7 +52,7 @@ def load_manifest() -> dict[str, object]:
 
 
 def iter_files() -> list[Path]:
-    ignored_parts = {".git", ".venv", "__pycache__", ".pytest_cache", "_archive"}
+    ignored_parts = {".git", ".venv", "__pycache__", ".pytest_cache", "_archive", "runtime"}
     files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(ROOT):
         dirnames[:] = [
@@ -161,7 +161,7 @@ def classify(path: Path, active: set[Path]) -> FileRecord:
         return FileRecord(path, "ACTIVE_V3_SUPPORT", "Reachable from V3 dependency graph.")
     if any(normalized == item or normalized.startswith(item) for item in PRESERVE_PATTERNS):
         return FileRecord(path, "UNKNOWN_REVIEW_REQUIRED", "Preserved artifact/data path; not moved by cleanup tooling.")
-    if ".codex_runtime/" in normalized or normalized.endswith(".log") or "__pycache__" in normalized:
+    if ".codex_runtime/" in normalized or normalized.startswith("runtime/") or normalized.endswith(".log") or "__pycache__" in normalized:
         return FileRecord(path, "STALE_RUNTIME", "Runtime/cache artifact.")
     if any(pattern.search(text) for pattern in (LEGACY_PATTERNS["test_signal"], LEGACY_PATTERNS["raw_action"], LEGACY_PATTERNS["direct_click"])):
         return FileRecord(path, "LEGACY_REFERENCED", "Contains legacy trigger/click vocabulary but is not moved automatically.")

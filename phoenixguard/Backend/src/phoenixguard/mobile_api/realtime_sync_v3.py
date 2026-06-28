@@ -179,9 +179,8 @@ def _heartbeat_path(session_id: str, *, surface_id: str = "dashboard", store_dir
 
 def _is_live_dashboard_heartbeat(heartbeat: Mapping[str, Any]) -> bool:
     route_key = _surface_key(_text(heartbeat.get("route")))
-    overlay_mode = _text(heartbeat.get("overlay_mode"), "CLEAN_LIVE").upper()
     route_live = route_key in {"live", "dashboard"} or "window_tracker_dashboard" in route_key
-    return bool(route_live and overlay_mode == "CLEAN_LIVE")
+    return bool(route_live)
 
 
 def _heartbeat_visible_count(heartbeat: Mapping[str, Any]) -> int:
@@ -416,6 +415,20 @@ def _state_chart_transform_id(backend_state: Mapping[str, Any]) -> str:
     return ""
 
 
+def _state_overlay_mode(backend_state: Mapping[str, Any]) -> str:
+    overlay_mode = _mapping(backend_state.get("overlay_mode"))
+    for value in (
+        overlay_mode.get("active"),
+        overlay_mode.get("requested"),
+        backend_state.get("active_overlay_mode"),
+        backend_state.get("overlay_mode"),
+    ):
+        text = _text(value).upper()
+        if text:
+            return text
+    return ""
+
+
 def build_frontend_sync_status(
     session_id: str,
     *,
@@ -439,9 +452,18 @@ def build_frontend_sync_status(
     heartbeat_frame = _int(heartbeat.get("frame_id"))
     rendered_frame = _int(heartbeat.get("rendered_frame_id"))
     heartbeat_is_live_dashboard = _is_live_dashboard_heartbeat(heartbeat)
+    backend_overlay_mode = _state_overlay_mode(backend_state)
+    heartbeat_overlay_mode = _text(heartbeat.get("overlay_mode"), "CLEAN_LIVE").upper()
+    heartbeat_mode_matches_backend = bool(
+        not backend_overlay_mode
+        or not heartbeat_overlay_mode
+        or backend_overlay_mode == heartbeat_overlay_mode
+    )
     backend_transform = _state_chart_transform_id(backend_state)
     heartbeat_transform = _text(heartbeat.get("chart_transform_id"))
-    if heartbeat_is_live_dashboard and backend_transform and heartbeat_transform and backend_transform != heartbeat_transform:
+    if heartbeat_is_live_dashboard and not heartbeat_mode_matches_backend:
+        mismatches.append(f"overlay_mode mismatch backend={backend_overlay_mode} frontend={heartbeat_overlay_mode}")
+    if heartbeat_is_live_dashboard and heartbeat_mode_matches_backend and backend_transform and heartbeat_transform and backend_transform != heartbeat_transform:
         mismatches.append(f"chart_transform_id mismatch backend={backend_transform} frontend={heartbeat_transform}")
     backend_overlay_count = _state_overlay_count(backend_state)
     heartbeat_overlay_count = _int(heartbeat.get("overlay_count", heartbeat.get("visible_overlay_count", 0)))
@@ -455,17 +477,17 @@ def build_frontend_sync_status(
     )
     frame_skew_tolerated = bool(overlay_count_matches and overlay_version_matches)
     frame_skew_tolerance = _frame_skew_tolerance()
-    if heartbeat_is_live_dashboard and backend_frame and heartbeat_frame and backend_frame != heartbeat_frame:
+    if heartbeat_is_live_dashboard and heartbeat_mode_matches_backend and backend_frame and heartbeat_frame and backend_frame != heartbeat_frame:
         frame_skew = abs(backend_frame - heartbeat_frame)
         if not frame_skew_tolerated or frame_skew > frame_skew_tolerance:
             mismatches.append(f"frame_id mismatch backend={backend_frame} frontend={heartbeat_frame}")
-    if heartbeat_is_live_dashboard and backend_frame and rendered_frame and backend_frame != rendered_frame:
+    if heartbeat_is_live_dashboard and heartbeat_mode_matches_backend and backend_frame and rendered_frame and backend_frame != rendered_frame:
         rendered_skew = abs(backend_frame - rendered_frame)
         if not frame_skew_tolerated or rendered_skew > frame_skew_tolerance:
             mismatches.append(f"rendered_frame_id mismatch backend={backend_frame} frontend={rendered_frame}")
-    if heartbeat_is_live_dashboard and not overlay_count_matches:
+    if heartbeat_is_live_dashboard and heartbeat_mode_matches_backend and not overlay_count_matches:
         mismatches.append(f"overlay_count mismatch backend={backend_overlay_count} frontend={heartbeat_overlay_count}")
-    if heartbeat_is_live_dashboard and backend_overlay_version and heartbeat_overlay_version and backend_overlay_version != heartbeat_overlay_version:
+    if heartbeat_is_live_dashboard and heartbeat_mode_matches_backend and backend_overlay_version and heartbeat_overlay_version and backend_overlay_version != heartbeat_overlay_version:
         mismatches.append(f"overlay_state_version mismatch backend={backend_overlay_version} frontend={heartbeat_overlay_version}")
     if age_sec > max_age_sec:
         mismatches.append(f"frontend heartbeat stale age_sec={age_sec:.1f}")
@@ -487,6 +509,9 @@ def build_frontend_sync_status(
             "frame_skew_tolerated": frame_skew_tolerated,
             "frame_skew_tolerance": frame_skew_tolerance,
             "heartbeat_live_dashboard": heartbeat_is_live_dashboard,
+            "overlay_mode": backend_overlay_mode,
+            "heartbeat_overlay_mode": heartbeat_overlay_mode,
+            "heartbeat_mode_matches_backend": heartbeat_mode_matches_backend,
         },
     }
 

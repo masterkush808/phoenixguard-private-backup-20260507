@@ -3,6 +3,7 @@ from _bootstrap import ensure_backend_paths
 ensure_backend_paths()
 
 import sys
+import os
 from pathlib import Path
 from typing import Any, Mapping, cast
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,6 +29,8 @@ out: dict[str, object] = {
     'language_scorecard': score,
 }
 print(json.dumps(out, indent=2))
-Path('.codex_runtime/visual_evidence').mkdir(parents=True, exist_ok=True)
-with open('.codex_runtime/visual_evidence/trace_alignment.json', 'w', encoding='utf-8') as fh:
+runtime_dir = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or ROOT / "runtime" / "live")
+visual_evidence_dir = runtime_dir / "visual_evidence"
+visual_evidence_dir.mkdir(parents=True, exist_ok=True)
+with (visual_evidence_dir / "trace_alignment.json").open('w', encoding='utf-8') as fh:
     json.dump(out, fh, indent=2)

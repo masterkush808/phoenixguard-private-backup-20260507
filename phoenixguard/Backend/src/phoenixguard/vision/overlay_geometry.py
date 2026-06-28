@@ -18,11 +18,12 @@ OVERLAY_LAYERS: tuple[str, ...] = (
     "major_swings",
     "local_swings",
     "supply_demand",
+    "trendlines",
+    "trigger_zones",
     "target_zones",
     "invalidation",
     "prediction_path",
     "historical_replay",
-    "trigger_zones",
     "active_council_decision",  # Council predictions RENDER ON TOP of candles and zones
     "broker_controls",
     "diagnostics",
@@ -34,6 +35,7 @@ DEFAULT_LAYER_VISIBILITY: dict[str, bool] = {
     "major_swings": False,
     "local_swings": False,
     "supply_demand": True,
+    "trendlines": True,
     "trigger_zones": True,
     "target_zones": True,
     "invalidation": True,
@@ -49,6 +51,7 @@ STATIC_OVERLAY_LAYERS: frozenset[str] = frozenset(
         "chart_bounds",
             "major_swings",
             "supply_demand",
+            "trendlines",
             "target_zones",
             "invalidation",
             "prediction_path",
@@ -940,7 +943,7 @@ def build_overlay_truth_audit(
         objects.append(
             {
                 "id": str(box.get("key") or box.get("id") or f"overlay_{index}"),
-                "type": str(box.get("role") or box.get("kind") or layer or "OVERLAY_OBJECT").upper(),
+                "type": _truth_audit_overlay_type(box, layer),
                 "layer": layer,
                 "bbox": list(box.get("bbox", [])),
                 "truth_score": round(truth_score, 4),
@@ -959,6 +962,20 @@ def build_overlay_truth_audit(
         "decision_invalid_object_count": decision_invalid_count,
         "minimum_truth_score": float(minimum_truth_score),
     }
+
+
+def _truth_audit_overlay_type(box: Mapping[str, Any], layer: str) -> str:
+    try:
+        from phoenixguard.vision.v3_overlay_contract import normalize_overlay_type
+
+        return normalize_overlay_type(
+            box.get("type") or box.get("overlay_type"),
+            layer=layer,
+            role=box.get("role") or box.get("kind"),
+            side=box.get("side") or box.get("direction"),
+        )
+    except Exception:
+        return str(box.get("type") or box.get("role") or box.get("kind") or layer or "DEBUG_RAW_DETECTION").upper()
 
 
 def _chart_bounds_from_size(chart_size: Sequence[Any]) -> list[float]:

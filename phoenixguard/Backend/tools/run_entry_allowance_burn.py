@@ -51,7 +51,7 @@ def runtime_root() -> Path:
     configured = os.getenv("PHOENIXGUARD_RUNTIME_DIR")
     if configured:
         return Path(configured)
-    return PROJECT_ROOT / ".codex_runtime"
+    return PROJECT_ROOT / "runtime" / "live"
 
 
 def local_root() -> Path:

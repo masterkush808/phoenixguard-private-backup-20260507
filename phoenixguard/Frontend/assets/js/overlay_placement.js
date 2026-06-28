@@ -8,6 +8,7 @@
     invalidation: 3,
     prediction_path: 2.5,
     major_swings: 2.5,
+    trendlines: 2.4,
     supply_demand: 2,
     local_swings: 2,
     recent_candles: 1.5,

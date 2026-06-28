@@ -13,9 +13,9 @@ from phoenixguard.vision.renderer import render_overlays_on_chart
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "visual_regression"
 
 EXPECTED = {
-    "v1_golden.png": ("800x600", "846f00ab9107be433bf5b30a5498b9bf2b1112859ce98b3850cf01d37c40468d"),
-    "v2_golden.png": ("800x600", "5134620b5bf84d3ef3212e7d75db32a7c7494d0ac8c2926d13b113b798828b33"),
-    "v3_restored.png": ("800x600", "502c31edfdf182ea6c6406e99757f27056fb8dc07d1355421c68dbc6a0d75438"),
+    "v1_golden.png": ("800x600", "f36cfe66c714ce5680a2898510579be57d7beaf46c81e2c794ed82fd1bf11bc2"),
+    "v2_golden.png": ("800x600", "643cbefa05457cae83b5e8dc7d53f8edeb67044d6925b6a446a238a95f5066e3"),
+    "v3_restored.png": ("800x600", "f5824e5132d569eeeb70d15c5b53bcbc69fe1dd8ac708aa11c0eadbbb97ad584"),
 }
 
 

@@ -1241,66 +1241,66 @@
     }
 
     .surface-hotspot {
-      background: rgba(242, 200, 102, var(--overlay-fill-opacity, 0.032));
+      background: rgba(242, 200, 102, var(--overlay-fill-opacity, 0.008));
     }
 
     .surface-hotspot.layer-chart-bounds {
-      background: rgba(242, 200, 102, var(--overlay-fill-opacity, 0.018));
+      background: rgba(242, 200, 102, var(--overlay-fill-opacity, 0));
     }
 
     .surface-hotspot.layer-recent-candles {
-      background: rgba(255, 255, 255, var(--overlay-fill-opacity, 0.028));
+      background: rgba(255, 255, 255, var(--overlay-fill-opacity, 0.006));
     }
 
     .surface-hotspot.layer-major-swings,
     .surface-hotspot.layer-local-swings {
-      background: rgba(107, 200, 255, var(--overlay-fill-opacity, 0.040));
+      background: rgba(107, 200, 255, var(--overlay-fill-opacity, 0.010));
     }
 
     .surface-hotspot.layer-supply-demand {
-      background: rgba(242, 200, 102, var(--overlay-fill-opacity, 0.045));
+      background: rgba(242, 200, 102, var(--overlay-fill-opacity, 0.010));
     }
 
     .surface-hotspot.layer-supply-demand.buy,
     .surface-hotspot.layer-supply-demand.semantic-demand,
     .surface-hotspot.layer-supply-demand[data-semantic-family="buy"],
     .surface-hotspot.layer-supply-demand[data-semantic-family="demand"] {
-      background: rgba(var(--overlay-demand-rgb), var(--overlay-fill-opacity, 0.050));
+      background: rgba(var(--overlay-demand-rgb), var(--overlay-fill-opacity, 0.012));
     }
 
     .surface-hotspot.layer-supply-demand.sell,
     .surface-hotspot.layer-supply-demand.semantic-supply,
     .surface-hotspot.layer-supply-demand[data-semantic-family="sell"],
     .surface-hotspot.layer-supply-demand[data-semantic-family="supply"] {
-      background: rgba(var(--overlay-supply-rgb), var(--overlay-fill-opacity, 0.052));
+      background: rgba(var(--overlay-supply-rgb), var(--overlay-fill-opacity, 0.012));
     }
 
     .surface-hotspot.layer-trigger-zones {
-      background: rgba(var(--overlay-trigger-rgb), var(--overlay-fill-opacity, 0.052));
+      background: rgba(var(--overlay-trigger-rgb), var(--overlay-fill-opacity, 0.010));
     }
 
     .surface-hotspot.layer-target-zones {
-      background: rgba(var(--overlay-target-rgb), var(--overlay-fill-opacity, 0.050));
+      background: rgba(var(--overlay-target-rgb), var(--overlay-fill-opacity, 0.010));
     }
 
     .surface-hotspot.layer-invalidation {
-      background: rgba(var(--overlay-invalid-rgb), var(--overlay-fill-opacity, 0.042));
+      background: rgba(var(--overlay-invalid-rgb), var(--overlay-fill-opacity, 0.008));
     }
 
     .surface-hotspot.layer-prediction-path {
-      background: rgba(175, 137, 255, var(--overlay-fill-opacity, 0.045));
+      background: rgba(175, 137, 255, var(--overlay-fill-opacity, 0.008));
     }
 
     .surface-hotspot.layer-active-council-decision {
-      background: rgba(var(--overlay-council-rgb), var(--overlay-fill-opacity, 0.070));
+      background: rgba(var(--overlay-council-rgb), var(--overlay-fill-opacity, 0.012));
     }
 
     .surface-hotspot.layer-broker-controls {
-      background: rgba(255, 255, 255, var(--overlay-fill-opacity, 0.070));
+      background: rgba(255, 255, 255, var(--overlay-fill-opacity, 0.010));
     }
 
     .surface-hotspot.layer-diagnostics {
-      background: rgba(180, 190, 204, var(--overlay-fill-opacity, 0.035));
+      background: rgba(180, 190, 204, var(--overlay-fill-opacity, 0.004));
     }
 
     .surface-hotspot[data-label-lane="below"] span,
@@ -2666,6 +2666,7 @@
             <span>Overlay</span>
             <select id="overlay-mode-select" aria-label="Overlay mode">
               <option value="clean_live">Clean Live</option>
+              <option value="chart_bounds">Chart Bounds</option>
               <option value="candles">Candles</option>
               <option value="global">Global</option>
               <option value="local">Local</option>
@@ -2673,7 +2674,9 @@
               <option value="trendlines">Trendlines</option>
               <option value="triggers">Triggers</option>
               <option value="targets">Targets</option>
+              <option value="invalidation">Invalidation</option>
               <option value="path">Path</option>
+              <option value="prediction">Prediction</option>
               <option value="active_context">Active Context</option>
               <option value="council_layers">Council Layers</option>
               <option value="full_history_read">Full History</option>
@@ -2681,6 +2684,8 @@
               <option value="two_candle_study">Two-Candle Study</option>
               <option value="lstm_study">LSTM Study</option>
               <option value="replay">Replay</option>
+              <option value="debug">Debug</option>
+              <option value="inspector">Inspector</option>
               <option value="deep_debug">Diagnostics</option>
             </select>
           </label>
@@ -3028,7 +3033,7 @@
         </div>
         <div class="overlay-control-row">
           <label for="overlay-edit-fill">Fill</label>
-          <input id="overlay-edit-fill" type="range" min="0" max="2.20" step="0.01" data-overlay-setting="fillScale">
+          <input id="overlay-edit-fill" type="range" min="0" max="1.00" step="0.01" data-overlay-setting="fillScale">
           <output data-overlay-output="fillScale">100%</output>
         </div>
       </section>
@@ -3141,7 +3146,7 @@
       opacityScale: 1,
       borderScale: 0.82,
       lineScale: 0.76,
-      fillScale: 0.82,
+      fillScale: 0.30,
       labelScale: 0.86,
       labelOpacity: 0.94,
       labelMaxWidth: 104,
@@ -3205,7 +3210,7 @@
         opacityScale: boundedSetting(saved.opacityScale, OVERLAY_EDITOR_DEFAULTS.opacityScale, 0.20, 1.25),
         borderScale: boundedSetting(saved.borderScale, OVERLAY_EDITOR_DEFAULTS.borderScale, 0.45, 1.80),
         lineScale: boundedSetting(saved.lineScale, OVERLAY_EDITOR_DEFAULTS.lineScale, 0.40, 2.20),
-        fillScale: boundedSetting(saved.fillScale, OVERLAY_EDITOR_DEFAULTS.fillScale, 0, 2.20),
+        fillScale: boundedSetting(saved.fillScale, OVERLAY_EDITOR_DEFAULTS.fillScale, 0, 1.00),
         labelScale: boundedSetting(saved.labelScale, OVERLAY_EDITOR_DEFAULTS.labelScale, 0.60, 1.85),
         labelOpacity: boundedSetting(saved.labelOpacity, OVERLAY_EDITOR_DEFAULTS.labelOpacity, 0.10, 1.20),
         labelMaxWidth: boundedSetting(saved.labelMaxWidth, OVERLAY_EDITOR_DEFAULTS.labelMaxWidth, 48, 180),
@@ -4535,6 +4540,7 @@
       const normalized = clean(mode, "clean_live").toLowerCase();
       const map = {
         clean_live: "CLEAN_LIVE",
+        chart_bounds: "CHART_BOUNDS",
         candles: "CANDLES",
         global: "GLOBAL",
         local: "LOCAL",
@@ -4544,6 +4550,7 @@
         targets: "TARGET",
         invalidation: "INVALIDATION",
         path: "PATH",
+        prediction: "PREDICTION",
         active_context: "ACTIVE_CONTEXT",
         council_layers: "COUNCIL",
         council_layer: "COUNCIL",
@@ -4556,6 +4563,8 @@
         broker: "BROKER",
         two_candle_study: "TWO_CANDLE_STUDY",
         lstm_study: "LSTM_STUDY",
+        debug: "DEBUG",
+        inspector: "INSPECTOR",
         deep_debug: "DIAGNOSTICS",
         calibration: "CALIBRATION",
         replay: "REPLAY",
@@ -4875,7 +4884,7 @@
           opacityScale: [0.20, 1.25],
           borderScale: [0.45, 1.80],
           lineScale: [0.40, 2.20],
-          fillScale: [0, 2.20],
+          fillScale: [0, 1.00],
           labelScale: [0.60, 1.85],
           labelOpacity: [0.10, 1.20],
           labelMaxWidth: [48, 180],
@@ -5943,6 +5952,7 @@
       };
       const presets = {
         clean_live: layerPreset("chart_bounds", "recent_candles", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision"),
+        chart_bounds: layerPreset("chart_bounds"),
         candles: layerPreset("chart_bounds", "recent_candles"),
         global: layerPreset("chart_bounds", "major_swings", "historical_replay"),
         local: layerPreset("chart_bounds", "recent_candles", "local_swings", "trigger_zones"),
@@ -5952,12 +5962,15 @@
         targets: layerPreset("target_zones", "invalidation", "supply_demand"),
         invalidation: layerPreset("supply_demand"),
         path: layerPreset("prediction_path", "historical_replay"),
+        prediction: layerPreset("chart_bounds", "supply_demand", "trigger_zones", "target_zones", "prediction_path", "active_council_decision"),
         active_context: layerPreset("chart_bounds", "recent_candles", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
         council_layers: layerPreset("recent_candles", "active_council_decision", "supply_demand", "trigger_zones", "target_zones"),
         full_history_read: layerPreset("chart_bounds", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
         broker: layerPreset("broker_controls"),
         two_candle_study: layerPreset("recent_candles", "active_council_decision"),
         lstm_study: layerPreset("recent_candles", "active_council_decision"),
+        debug: layerPreset(...allLayerKeys),
+        inspector: layerPreset(...allLayerKeys),
         deep_debug: layerPreset(...allLayerKeys),
         calibration: layerPreset("broker_controls", "diagnostics"),
         replay: layerPreset("chart_bounds", "major_swings", "local_swings", "supply_demand", "trendlines", "trigger_zones", "target_zones", "active_council_decision", "historical_replay"),
@@ -6839,7 +6852,7 @@
       if ((layer === "historical_replay" || ["PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"].includes(type) || lifecycle === "HISTORICAL") && !["REPLAY", "FULL_HISTORY_READ"].includes(mode)) {
         return false;
       }
-      if (["GHOSTED", "ICON_ONLY", "INSPECTOR_ONLY_LABEL"].includes(displayState) && !["REPLAY", "FULL_HISTORY_READ", "DIAGNOSTICS"].includes(mode)) {
+      if (["GHOSTED", "ICON_ONLY", "INSPECTOR_LABEL", "INSPECTOR_ONLY_LABEL"].includes(displayState) && !["REPLAY", "FULL_HISTORY_READ", "DIAGNOSTICS"].includes(mode)) {
         return false;
       }
       return true;
@@ -6859,7 +6872,7 @@
       if (!labelVisible && !explicit) {
         return "COMPACT";
       }
-      if (labelVisible && ["GHOSTED", "ICON_ONLY", "INSPECTOR_ONLY_LABEL"].includes(explicit)) {
+      if (labelVisible && ["GHOSTED", "ICON_ONLY", "INSPECTOR_LABEL", "INSPECTOR_ONLY_LABEL"].includes(explicit)) {
         if (layer === "historical_replay") {
           return "GROUPED";
         }
@@ -7812,12 +7825,14 @@
     }
 
     function overlayDisplayState(box = {}) {
-      const allowed = new Set(["FULL", "COMPACT", "GHOSTED", "ICON_ONLY", "GROUPED", "NESTED", "INSPECTOR_ONLY_LABEL", "FOCUS_EXPANDED"]);
+      const allowed = new Set(["FULL", "COMPACT", "GHOSTED", "ICON_ONLY", "GROUPED", "NESTED", "INSPECTOR_LABEL", "INSPECTOR_ONLY_LABEL", "FOCUS_EXPANDED"]);
       const raw = clean(box.display_state, "COMPACT").toUpperCase();
+      if (raw === "INSPECTOR_ONLY_LABEL") return "INSPECTOR_LABEL";
       return allowed.has(raw) ? raw : "COMPACT";
     }
 
     function overlayDisplayClassName(displayState) {
+      if (displayState === "INSPECTOR_LABEL") return "display-inspector-only-label";
       return `display-${clean(displayState, "COMPACT").toLowerCase().replace(/_/g, "-")}`;
     }
 
@@ -7851,12 +7866,78 @@
 
     function overlayLabelHiddenByDisplayState(box = {}) {
       const displayState = overlayDisplayState(box);
-      return ["GHOSTED", "ICON_ONLY", "INSPECTOR_ONLY_LABEL"].includes(displayState)
+      return ["GHOSTED", "ICON_ONLY", "INSPECTOR_LABEL", "INSPECTOR_ONLY_LABEL"].includes(displayState)
         || box.label_visible === false
         || box.label_visible === "false";
     }
 
-    function overlayStyleVars(box = {}) {
+    function overlayRenderedAreaRatio(renderedBounds = null) {
+      if (!renderedBounds || typeof renderedBounds !== "object") {
+        return 0;
+      }
+      const width = Number(renderedBounds.width || 0);
+      const height = Number(renderedBounds.height || 0);
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+        return 0;
+      }
+      return Math.max(0, Math.min(1, (width * height) / 10000));
+    }
+
+    function overlayDefaultFillOpacity(displayState, weight) {
+      const fillByState = {
+        FULL: 0.014,
+        FOCUS_EXPANDED: 0.016,
+        COMPACT: 0.010,
+        GROUPED: 0.007,
+        NESTED: 0.006,
+        GHOSTED: 0,
+        ICON_ONLY: 0,
+        INSPECTOR_LABEL: 0,
+        INSPECTOR_ONLY_LABEL: 0,
+      };
+      const fallback = fillByState[displayState] ?? 0.008;
+      return Math.max(0, Math.min(0.018, fallback + Math.max(0, Math.min(1, weight)) * 0.002));
+    }
+
+    function overlayFillCeiling(box = {}, displayState = overlayDisplayState(box), renderedBounds = null) {
+      if (["GHOSTED", "ICON_ONLY", "INSPECTOR_LABEL", "INSPECTOR_ONLY_LABEL"].includes(displayState)) {
+        return 0;
+      }
+      const layer = clean(box._layer || box.layer || "", "").toLowerCase();
+      if (["chart_bounds", "recent_candles", "diagnostics"].includes(layer)) {
+        return 0;
+      }
+      let ceiling = {
+        FULL: 0.018,
+        FOCUS_EXPANDED: 0.020,
+        COMPACT: 0.012,
+        GROUPED: 0.008,
+        NESTED: 0.006,
+      }[displayState] ?? 0.010;
+      if (layer === "historical_replay") {
+        ceiling = Math.min(ceiling, 0.004);
+      } else if (layer === "active_council_decision") {
+        ceiling = Math.min(ceiling, 0.012);
+      } else if (layer === "broker_controls") {
+        ceiling = Math.min(ceiling, 0.010);
+      }
+      const areaRatio = overlayRenderedAreaRatio(renderedBounds);
+      if (areaRatio >= 0.18) {
+        return 0;
+      }
+      if (areaRatio >= 0.10) {
+        return Math.min(ceiling, 0.003);
+      }
+      if (areaRatio >= 0.06) {
+        return Math.min(ceiling, 0.006);
+      }
+      if (areaRatio >= 0.035) {
+        return Math.min(ceiling, 0.009);
+      }
+      return ceiling;
+    }
+
+    function overlayStyleVars(box = {}, renderedBounds = null) {
       const style = objectOrEmpty(box.style);
       const displayState = overlayDisplayState(box);
       const weight = overlayVisualWeight(box);
@@ -7869,6 +7950,7 @@
         NESTED: 0.54,
         GHOSTED: 0.32,
         ICON_ONLY: 0.36,
+        INSPECTOR_LABEL: 0.40,
         INSPECTOR_ONLY_LABEL: 0.40,
       }[displayState] ?? 0.72;
       const borderFallback = {
@@ -7879,6 +7961,7 @@
         NESTED: 1.05,
         GHOSTED: 0.82,
         ICON_ONLY: 0.80,
+        INSPECTOR_LABEL: 0.80,
         INSPECTOR_ONLY_LABEL: 0.80,
       }[displayState] ?? 1.35;
       const requestedBorder = Number(style.border_width);
@@ -7886,17 +7969,28 @@
         ? Math.max(requestedBorder, borderFallback)
         : borderFallback;
       const baseOpacity = Math.max(0.18, Math.min(1, Number(style.opacity ?? opacityFallback) || opacityFallback));
-      const baseFill = Math.max(0, Math.min(0.10, Number(style.fill_opacity ?? (0.018 + weight * 0.025)) || 0.025));
+      const requestedFill = Number(style.fill_opacity);
+      const baseFill = Math.max(
+        0,
+        Math.min(
+          0.030,
+          Number.isFinite(requestedFill)
+            ? requestedFill
+            : overlayDefaultFillOpacity(displayState, weight),
+        ),
+      );
       const baseBorderWidth = Math.max(0.68, Math.min(3.2, resolvedBorder));
+      const fillScale = boundedSetting(editor.fillScale, OVERLAY_EDITOR_DEFAULTS.fillScale, 0, 1.00);
+      const fillCeiling = overlayFillCeiling(box, displayState, renderedBounds);
       return {
         opacity: Math.max(0.04, Math.min(1, baseOpacity * Number(editor.opacityScale || 1))),
         borderWidth: Math.max(0.45, Math.min(4.0, baseBorderWidth * Number(editor.borderScale || 1))),
-        fillOpacity: Math.max(0, Math.min(0.18, baseFill * Number(editor.fillScale || 1))),
+        fillOpacity: Math.max(0, Math.min(fillCeiling, baseFill * fillScale)),
       };
     }
 
-    function applyOverlayDisplayStyle(node, box = {}, displayState = overlayDisplayState(box)) {
-      const styleVars = overlayStyleVars(box);
+    function applyOverlayDisplayStyle(node, box = {}, displayState = overlayDisplayState(box), renderedBounds = null) {
+      const styleVars = overlayStyleVars(box, renderedBounds);
       const semanticFamily = overlaySemanticFamily(box);
       const labelLane = overlayLabelLane(box);
       const anchorEvidenceStatus = overlayAnchorEvidenceStatus(box);
@@ -7935,7 +8029,7 @@
       let width = 0;
       if (displayState === "FULL" || displayState === "FOCUS_EXPANDED") {
         width = Math.max(1.80, Math.min(2.60, 1.65 + weight * 0.72));
-      } else if (displayState === "GHOSTED" || displayState === "INSPECTOR_ONLY_LABEL") {
+      } else if (displayState === "GHOSTED" || displayState === "INSPECTOR_LABEL" || displayState === "INSPECTOR_ONLY_LABEL") {
         width = 1.15;
       } else {
         width = Math.max(1.35, Math.min(2.10, 1.20 + weight * 0.58));
@@ -8417,13 +8511,13 @@
         if (!bounds) {
           return;
         }
-        if (bounds.width < 4.0 || bounds.height < 2.2 || ["GHOSTED", "ICON_ONLY", "INSPECTOR_ONLY_LABEL"].includes(displayState)) {
+        if (bounds.width < 4.0 || bounds.height < 2.2 || ["GHOSTED", "ICON_ONLY", "INSPECTOR_LABEL", "INSPECTOR_ONLY_LABEL"].includes(displayState)) {
           effectiveLabelHidden = true;
         }
         const button = document.createElement("button");
         button.type = "button";
         button.className = `surface-hotspot ${layerClassName(layer)} ${colorClass(direction)}${effectiveLabelHidden ? " label-hidden" : ""}`;
-        applyOverlayDisplayStyle(button, box, displayState);
+        applyOverlayDisplayStyle(button, box, displayState, bounds);
         if (bounds.left < 2) {
           button.classList.add("edge-left");
         }

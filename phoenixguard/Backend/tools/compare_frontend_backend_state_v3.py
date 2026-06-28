@@ -129,7 +129,7 @@ def build_report(base_url: str, session_id: str, timeout: float, probe_heartbeat
     backend: dict[str, Any] = _digest_live_state(live_payload, session_id) if live.get("ok") else {"session_id": session_id}
     heartbeat: dict[str, Any] = {"ok": False, "status": 0, "payload": {}, "skipped": not probe_heartbeat}
     if probe_heartbeat:
-        heartbeat = _http_json("POST", f"{base}/v1/mobile/frontend/heartbeat/v3", timeout, _heartbeat_payload(session_id, backend, f"/v1/mobile/window-tracker/dashboard/{session_id}"))
+        heartbeat = _http_json("POST", f"{base}/v1/mobile/frontend/heartbeat/v3", timeout, _heartbeat_payload(session_id, backend, f"/v3/mobile/window-tracker/dashboard/{session_id}"))
 
     hard_mismatches: list[str] = []
     warnings: list[str] = []

@@ -18,7 +18,7 @@ DEFAULT_SESSION = "pocket-live-8788"
 DEFAULT_MAX_CAPTURE_SETS = 6
 HEAVY_ARTIFACT_KINDS = {"chart", "overlay", "full-overlay"}
 ROOT = Path(__file__).resolve().parents[2]
-HEARTBEAT_DIR = ROOT / "runtime" / "live" / "frontend_heartbeat_v3"
+HEARTBEAT_DIR = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or ROOT / "runtime" / "live") / "frontend_heartbeat_v3"
 ROUTE_DEFAULT_MODE = {
     "live": "CLEAN_LIVE",
     "chart": "ACTIVE_CONTEXT",
@@ -27,6 +27,7 @@ ROUTE_DEFAULT_MODE = {
 }
 BACKEND_MODE_TO_SELECT = {
     "CLEAN_LIVE": "clean_live",
+    "CHART_BOUNDS": "chart_bounds",
     "CANDLES": "candles",
     "GLOBAL": "global",
     "LOCAL": "local",
@@ -36,12 +37,15 @@ BACKEND_MODE_TO_SELECT = {
     "TARGET": "targets",
     "INVALIDATION": "invalidation",
     "PATH": "path",
+    "PREDICTION": "prediction",
     "ACTIVE_CONTEXT": "active_context",
-    "COUNCIL": "smc_council",
+    "COUNCIL": "council_layers",
     "FULL_HISTORY_READ": "full_history_read",
     "BROKER": "broker",
     "TWO_CANDLE_STUDY": "two_candle_study",
     "LSTM_STUDY": "lstm_study",
+    "DEBUG": "debug",
+    "INSPECTOR": "inspector",
     "DIAGNOSTICS": "deep_debug",
     "CALIBRATION": "calibration",
     "REPLAY": "replay",

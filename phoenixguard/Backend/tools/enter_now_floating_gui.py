@@ -46,8 +46,9 @@ def _mapping(value: Any) -> dict[str, Any]:
 
 DEFAULT_SESSION_ID = "pocket-live-8788"
 DEFAULT_BASE_URL = "http://127.0.0.1:8793"
-DEFAULT_SETTINGS_PATH = REPO_ROOT / ".codex_runtime" / "enter_now_floating_gui_settings.json"
-DEFAULT_LOG_PATH = REPO_ROOT / ".codex_runtime" / "enter_now_notifications.jsonl"
+DEFAULT_RUNTIME_DIR = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or REPO_ROOT / "runtime" / "live")
+DEFAULT_SETTINGS_PATH = DEFAULT_RUNTIME_DIR / "enter_now_floating_gui_settings.json"
+DEFAULT_LOG_PATH = DEFAULT_RUNTIME_DIR / "enter_now_notifications.jsonl"
 DEFAULT_WINDOW_SIZE = (430, 360)
 MIN_WINDOW_SIZE = (340, 300)
 MAX_WINDOW_SIZE = (900, 720)

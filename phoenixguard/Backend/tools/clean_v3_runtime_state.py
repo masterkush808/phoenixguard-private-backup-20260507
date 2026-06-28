@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-RUNTIME_DIR = ROOT / ".codex_runtime"
+RUNTIME_DIR = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or ROOT / "runtime" / "live").resolve()
 ARCHIVE_ROOT = ROOT / "_archive" / "runtime_backup"
 PRESERVE_RUNTIME_FILES = {
     "floating_window_v2.json",
@@ -26,6 +26,7 @@ SKIP_SCAN_DIR_NAMES = {
     "_archive",
     ".codex_runtime",
     ".hf_cache",
+    "runtime",
     "808 Memory",
     "book knowledge",
     "data",
@@ -104,7 +105,7 @@ def collect_runtime_paths() -> list[tuple[Path, str]]:
         for child in sorted(RUNTIME_DIR.iterdir()):
             if child.name in PRESERVE_RUNTIME_FILES:
                 continue
-            paths.append((child, "stale .codex_runtime artifact"))
+            paths.append((child, "stale active runtime artifact"))
     for dirpath, dirnames, filenames in os.walk(ROOT):
         current = Path(dirpath)
         dirnames[:] = [name for name in dirnames if name not in SKIP_SCAN_DIR_NAMES]
@@ -148,6 +149,7 @@ def main() -> int:
     log: dict[str, object] = {
         "applied": bool(args.apply),
         "action": "delete" if args.delete else "archive",
+        "runtime_dir": str(RUNTIME_DIR),
         "backup_root": "" if args.delete else backup_root.relative_to(ROOT).as_posix(),
         "preserved_runtime_files": sorted(PRESERVE_RUNTIME_FILES),
         "preserved_root_files": sorted(PRESERVE_ROOT_FILES),

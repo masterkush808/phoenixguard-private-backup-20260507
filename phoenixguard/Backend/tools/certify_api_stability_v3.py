@@ -8,6 +8,7 @@ from typing import Mapping, cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
+    DEFAULT_RUNTIME_DIR,
     DEFAULT_SESSION,
     command_line,
     find_processes,
@@ -31,7 +32,7 @@ def _write_crash_evidence(last_request: dict[str, object], process_rows: list[di
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "last_request_before_crash.json").write_text(json.dumps(last_request, indent=2, sort_keys=True, default=str), encoding="utf-8")
     (out_dir / "api_process_tree.json").write_text(json.dumps(process_rows, indent=2, sort_keys=True, default=str), encoding="utf-8")
-    logs = sorted(Path(".codex_runtime").glob("**/*.log"), key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+    logs = sorted(DEFAULT_RUNTIME_DIR.glob("**/*.log"), key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
     tail_lines: list[str] = []
     for path in logs[:5]:
         try:

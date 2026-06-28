@@ -8,8 +8,8 @@ from typing import cast
 
 from certification_common_v3 import (
     DEFAULT_BASE_URL,
+    DEFAULT_RUNTIME_DIR,
     DEFAULT_SESSION,
-    ROOT,
     command_line,
     find_processes,
     gate_report,
@@ -22,8 +22,8 @@ from certification_common_v3 import (
 
 
 HANDSHAKE_PATHS = (
-    ROOT / ".codex_runtime" / "shooter_handshake.json",
-    ROOT / ".codex_runtime" / "shooter_runtime" / "shooter_handshake.json",
+    DEFAULT_RUNTIME_DIR / "shooter_handshake.json",
+    DEFAULT_RUNTIME_DIR / "shooter_runtime" / "shooter_handshake.json",
 )
 
 

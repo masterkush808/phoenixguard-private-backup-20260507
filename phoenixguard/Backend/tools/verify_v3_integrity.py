@@ -7,6 +7,7 @@ ensure_backend_paths()
 import argparse
 import importlib
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence, cast
@@ -156,7 +157,7 @@ def main() -> int:
     if not profile_ok:
         failures.append("FINAL_LIVE package reporter launch profile")
 
-    runtime_dir = ROOT / ".codex_runtime"
+    runtime_dir = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or ROOT / "runtime" / "live").resolve()
     runtime_entries = [path for path in runtime_dir.iterdir() if runtime_entry_is_active(path)] if runtime_dir.exists() else []
     if runtime_entries:
         preview = ", ".join(path.name for path in runtime_entries[:6])
