@@ -23,24 +23,9 @@
   })();
 
   async function fetchActive(sessionId){
-    const resp = await fetch(apiPath(`/v1/mobile/live/state/v3/${sessionId}?compact=1`));
+    const resp = await fetch(apiPath(`/v1/mobile/registry/sessions/${sessionId}/active`));
     if(!resp.ok) return null;
-    const data = await resp.json();
-    const overlays = data && typeof data.overlays === 'object' ? data.overlays : {};
-    const liveVisualState = data && typeof data.live_visual_state === 'object' ? data.live_visual_state : {};
-    const liveVisualOverlays = liveVisualState && typeof liveVisualState.overlays === 'object' ? liveVisualState.overlays : {};
-    const activeOverlays = Array.isArray(data && data.active_overlays)
-      ? data.active_overlays
-      : (Array.isArray(data && data.overlay_objects)
-        ? data.overlay_objects
-        : (Array.isArray(overlays.objects) ? overlays.objects : (Array.isArray(liveVisualOverlays.objects) ? liveVisualOverlays.objects : [])));
-    const chartTransform = data && data.chart_transform
-      ? data.chart_transform
-      : (overlays.chart_transform || liveVisualState.chart_transform || liveVisualOverlays.chart_transform || null);
-    return Object.assign({}, data, {
-      active_overlays: activeOverlays,
-      chart_transform: chartTransform,
-    });
+    return await resp.json();
   }
   async function fetchFrame(sessionId){
     try{

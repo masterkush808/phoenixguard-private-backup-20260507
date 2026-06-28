@@ -97,6 +97,23 @@ Do not run PhoenixGuard with bare `python`, and do not point live runtime state 
 Use this when you want to stop stale sessions/processes, clear runtime cache, and start the live
 dashboard without any floating editor window.
 
+Preferred developer kill switch:
+
+```powershell
+.\.venv\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py
+```
+
+This Python wrapper asks the API to stop the tracker if it is reachable, kills detected PhoenixGuard
+parents and children, clears V3 runtime/cache state, then relaunches the canonical `FINAL_LIVE` stack
+through `Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser`. To inspect what it would stop
+without touching the running stack:
+
+```powershell
+.\.venv\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py --dry-run
+```
+
+Manual fallback:
+
 ```powershell
 $base = "http://127.0.0.1:8793"
 $session = "pocket-live-8788"
@@ -251,6 +268,17 @@ reports only fresh accepted allowance packages derived from a validated `PG_EXEC
 
 Run this from PowerShell when you need to kill all PhoenixGuard processes, clear runtime/cache
 state, and launch the production stack.
+
+```powershell
+Set-Location "C:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard"
+.\.venv\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py
+```
+
+Use `--kill-only` when you only want the stop step, `--skip-clean` when you want to preserve current
+runtime/cache state, `--disable-shooter` when you want the tracker/API without the package reporter,
+and `--open-browser` when you want the launcher to open the dashboard.
+
+Manual fallback:
 
 ```powershell
 Set-Location "C:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard"

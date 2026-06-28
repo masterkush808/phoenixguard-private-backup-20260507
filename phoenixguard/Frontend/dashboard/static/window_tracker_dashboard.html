@@ -6614,7 +6614,7 @@
         SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"]),
         TRENDLINES: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"]),
         TRIGGER: new Set(["SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"]),
-        TARGET: new Set(["TARGET_ZONE_BOX", "OPPOSING_FORCE"]),
+        TARGET: new Set(["TARGET_ZONE_BOX", "INVALIDATION_BOX", "INVALIDATION_ZONE", "OPPOSING_FORCE"]),
         INVALIDATION: new Set(["OPPOSING_FORCE"]),
         PATH: new Set(["PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"]),
         COUNCIL: new Set(["CURRENT_CANDLE", "SNIPER_ENTRY_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "MODEL_COUNCIL_MARKER", "REGIME_MARKER", "MARKET_PLAY_MARKER", "PRICE_LOCATION_MARKER", "TWO_CANDLE_STUDY", "LSTM_STUDY"]),
@@ -6668,8 +6668,8 @@
         types: new Set(["SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"]),
       },
       TARGET: {
-        layers: new Set(["target_zones", "supply_demand"]),
-        types: new Set(["TARGET_ZONE_BOX", "OPPOSING_FORCE"]),
+        layers: new Set(["target_zones", "invalidation", "supply_demand"]),
+        types: new Set(["TARGET_ZONE_BOX", "INVALIDATION_BOX", "INVALIDATION_ZONE", "OPPOSING_FORCE"]),
       },
       FULL_HISTORY_READ: {all: true},
       REPLAY: {all: true},
@@ -8293,20 +8293,7 @@
       }
       const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
       const nowMs = Date.now();
-      const artifactKind = clean(state.surface.visibleArtifactKind, "");
-      const domOverlayCount = Number(
-        renderMeta.domOverlayCount
-          ?? renderMeta.visibleOverlayCount
-          ?? els.hotspotLayer.querySelectorAll(".surface-hotspot").length,
-      ) || 0;
-      const serverArtifactLoaded = Boolean(
-        renderMeta.serverArtifactLoaded ?? ["full-overlay", "overlay"].includes(artifactKind),
-      );
-      const serverArtifactOverlayCount = Number(
-        renderMeta.serverArtifactOverlayCount
-          ?? (serverArtifactLoaded ? backendRenderableOverlayCount(session) : 0),
-      ) || 0;
-      const visibleOverlayCount = domOverlayCount;
+      const visibleOverlayCount = Number(renderMeta.visibleOverlayCount ?? els.hotspotLayer.querySelectorAll(".surface-hotspot").length) || 0;
       const routeName = normalizeRoute(state.route);
       const overlayMode = backendOverlayMode(state.overlayMode);
       const previousVisibleOverlayCount = Number(state.surface.lastHeartbeatVisibleOverlayCount || 0);
@@ -8354,9 +8341,6 @@
         state_version: clean(liveState.state_version || session.state_version || session.decision_version, ""),
         overlay_count: backendRenderableOverlayCount(session),
         visible_overlay_count: visibleOverlayCount,
-        dom_overlay_count: domOverlayCount,
-        server_artifact_loaded: serverArtifactLoaded,
-        server_artifact_overlay_count: serverArtifactOverlayCount,
         frontend_loaded_ms: nowMs,
         frontend_overlay_drawn_ms: nowMs,
         overlay_draw_ms: Number(renderMeta.overlayDrawMs || state.surface.lastOverlayRenderMs || 0),
@@ -8413,13 +8397,14 @@
         return;
       }
       const artifactKind = clean(state.surface.visibleArtifactKind, "");
-      const serverArtifactLoaded = ["full-overlay", "overlay"].includes(artifactKind);
-      const domOverlayCount = els.hotspotLayer.querySelectorAll(".surface-hotspot").length;
+      const backendVisibleCount = ["full-overlay", "overlay"].includes(artifactKind)
+        ? backendRenderableOverlayCount(state.session)
+        : 0;
       publishFrontendHeartbeat(state.session, {
-        visibleOverlayCount: domOverlayCount,
-        domOverlayCount,
-        serverArtifactLoaded,
-        serverArtifactOverlayCount: serverArtifactLoaded ? backendRenderableOverlayCount(state.session) : 0,
+        visibleOverlayCount: Math.max(
+          els.hotspotLayer.querySelectorAll(".surface-hotspot").length,
+          backendVisibleCount,
+        ),
         overlayDrawMs: state.surface.lastOverlayRenderMs,
       });
     }
@@ -8473,10 +8458,7 @@
         const fullOverlayVisibleCount = Math.max(boxes.length, backendRenderableOverlayCount(session));
         state.surface.lastOverlayRenderMs = performance.now() - startedAt;
         publishFrontendHeartbeat(session, {
-          visibleOverlayCount: 0,
-          domOverlayCount: 0,
-          serverArtifactLoaded: true,
-          serverArtifactOverlayCount: fullOverlayVisibleCount,
+          visibleOverlayCount: fullOverlayVisibleCount,
           overlayDrawMs: state.surface.lastOverlayRenderMs,
         });
         return;
