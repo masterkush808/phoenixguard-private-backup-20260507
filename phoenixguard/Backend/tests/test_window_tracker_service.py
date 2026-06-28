@@ -5104,7 +5104,9 @@ def test_tracker_dashboard_fits_selected_surface_without_width_only_crop() -> No
     assert "const useLockedWindowOverlayPlane = wantsOverlay" in dashboard_html
     assert 'useSurfaceImage(els.rawImg, "window", "window-locked-overlay", true);' in dashboard_html
     assert "if (normalizedKind === \"window\" && fileName)" in dashboard_html
-    assert "if (normalizedKind === \"full-overlay\")" in dashboard_html
+    assert "if (normalizedKind === \"full-overlay\" && fullOverlayUsesSavedArtifact())" in dashboard_html
+    assert "function interactiveDomOverlaySurfaceRequired" in dashboard_html
+    assert 'useSurfaceImage(els.rawImg, "window", "window-dom-overlay", true);' in dashboard_html
     assert "if (wantsOverlay && hasFullOverlay && !overlayStale)" in dashboard_html
     assert "} else if (useLockedWindowOverlayPlane)" in dashboard_html
     assert "function backendOverlayFrameAligned(session = {})" in dashboard_html

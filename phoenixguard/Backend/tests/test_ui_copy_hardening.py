@@ -177,6 +177,10 @@ def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> N
     assert "visible_artifact_kind" in dashboard
     assert "visible_image_src" in dashboard
     assert "const fullOverlayVisibleCount = Math.max(boxes.length, backendRenderableOverlayCount(session));" in dashboard
+    assert "function interactiveDomOverlaySurfaceRequired" in dashboard
+    assert 'useSurfaceImage(els.rawImg, "window", "window-dom-overlay", true);' in dashboard
+    assert "function frontendOverlayBoundsAllowed" in dashboard
+    assert '["PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT", "IMPULSE_BOX", "RETEST_BOX", "TRIGGER_BOX", "TRIGGER_ZONE"].includes(type)' in dashboard
     assert 'SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"])' in dashboard
     assert 'TRENDLINES: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"])' in dashboard
     assert "function isLineOverlay" in dashboard
