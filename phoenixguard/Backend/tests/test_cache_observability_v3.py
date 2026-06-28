@@ -56,6 +56,34 @@ def _clear_mobile_live_state_caches(*, direct_trace: bool = False) -> None:
         cast(MutableMapping[Any, Any], getattr(mobile_app, "_DIRECT_PERFORMANCE_TRACE_CACHE")).clear()
 
 
+def test_compact_live_state_cache_rejects_frame_behind_latest_complete_session() -> None:
+    can_reuse = cast(Callable[..., bool], getattr(mobile_app, "_compact_live_state_cache_can_reuse"))
+    cached_payload = {
+        "frame_id": 2,
+        "display_frame_id": 2,
+        "frame_index": 2,
+        "chart_frame_id": 2,
+        "overlay_frame_id": 2,
+        "full_overlay_frame_id": 2,
+        "model_vote_frame_id": 2,
+        "overlays": {"objects": [{"frame_id": 2, "id": "old-overlay"}]},
+    }
+    current_payload = {
+        **cached_payload,
+        "frame_id": 3,
+        "display_frame_id": 3,
+        "frame_index": 3,
+        "chart_frame_id": 3,
+        "overlay_frame_id": 3,
+        "full_overlay_frame_id": 3,
+        "model_vote_frame_id": 3,
+        "overlays": {"objects": [{"frame_id": 3, "id": "current-overlay"}]},
+    }
+
+    assert can_reuse(cached_payload, 1.0, latest_complete_frame_id=3) is False
+    assert can_reuse(current_payload, 1.0, latest_complete_frame_id=3) is True
+
+
 def _cache_record(**updates: Any) -> dict[str, Any]:
     record = attach_cache_v3_metadata(
         {"payload": "cached"},
@@ -983,8 +1011,8 @@ def test_compact_live_state_reuses_cached_response_for_display_heartbeat(
 
     assert second_response.status_code == 200
     payload = second_response.json()
-    assert payload["frame_id"] == 2
-    assert payload["last_display_window_path"] == str(next_window)
+    assert payload["frame_id"] == 1
+    assert payload["last_display_window_path"] == str(window)
     assert payload["provider_status"]["compact_cache_previous_signature_reused_v3"] is True
 
 
@@ -1268,7 +1296,7 @@ def test_compact_live_state_rebuilds_when_cached_overlay_frame_lags_chart_frame(
     assert payload["overlays"]["objects"][0]["bounds"] == [120, 220, 180, 260]
 
 
-def test_compact_live_state_promotes_fresh_display_epoch_over_stale_session(
+def test_compact_live_state_holds_complete_session_while_display_snapshot_is_incomplete(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -1334,16 +1362,18 @@ def test_compact_live_state_promotes_fresh_display_epoch_over_stale_session(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["frame_id"] == 2
-    assert payload["display_frame_id"] == 2
-    assert abs(float(payload["last_capture_epoch"]) - now_epoch) < 0.25
-    assert payload["last_window_path"] == str(fresh_window)
-    assert payload["frame_timing_trace_v3"]["frame_age_ms"] < 5000
+    assert payload["frame_id"] == 1
+    assert payload["display_frame_id"] == 1
+    assert abs(float(payload["last_capture_epoch"]) - stale_epoch) < 0.25
+    assert payload["last_window_path"] == str(stale_window)
+    assert payload["frame_timing_trace_v3"]["display_frame_id"] == 1
+    assert payload["frame_timing_trace_v3"]["overlay_frame_id"] == 1
+    assert payload["frame_timing_trace_v3"]["model_vote_frame_id"] == 1
     assert payload["frame_timing_trace_v3"]["backpressure"]["stale_limit_ms"] >= 30_000
     assert payload["frame_timing_trace_v3"]["backpressure"]["reject_limit_ms"] >= 45_000
 
 
-def test_compact_live_state_returns_studying_new_pair_when_surface_outruns_overlay_authority(
+def test_compact_live_state_holds_complete_session_when_surface_outruns_overlay_authority(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
@@ -1403,20 +1433,18 @@ def test_compact_live_state_returns_studying_new_pair_when_surface_outruns_overl
         encoding="utf-8",
     )
 
-    def fail_full_build(*_args: Any, **_kwargs: Any) -> dict[str, object]:
-        raise AssertionError("surface mismatch should return fast studying-new-pair payload")
-
-    monkeypatch.setattr(mobile_app, "build_live_state_v3", fail_full_build)
     client = TestClient(create_app())
 
     response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?mode=CLEAN_LIVE&compact=1")
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["frame_id"] == 1
+    assert payload["display_frame_id"] == 1
     assert payload["renderable_count"] == 0
     assert payload["overlays"]["objects"] == []
-    assert payload["provider_status"]["compact_studying_new_pair_fast_path_v3"] is True
-    assert payload["tracking_summary"]["market_selector_studying_new_pair"] is True
+    assert payload["provider_status"].get("compact_studying_new_pair_fast_path_v3") is not True
+    assert payload["provider_status"]["live_state_source"] == "direct_file"
 
 
 def test_compact_live_state_does_not_reuse_studying_new_pair_cache_after_overlay_recovers(
@@ -1576,11 +1604,11 @@ def test_performance_trace_v3_uses_direct_display_state_fast_path(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["frame_id"] == 2
-    assert payload["display_frame"]["frame_id"] == 2
-    assert payload["display_frame"]["age_ms"] < 2500
+    assert payload["frame_id"] == 1
+    assert payload["display_frame"]["frame_id"] == 1
+    assert payload["display_frame"]["age_ms"] >= 10000
     assert payload["timing_trace"]["frame_gap_status"] in {"ALIGNED", "AUTHORITY_LOCKED"}
-    assert payload["timing_trace"]["surface_signature_aligned"] is True
+    assert payload["timing_trace"]["surface_signature_aligned"] is False
     assert payload["display_frame"]["url"] == str(window)
 
 

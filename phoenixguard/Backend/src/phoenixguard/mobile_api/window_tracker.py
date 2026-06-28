@@ -478,6 +478,7 @@ _DISPLAY_STATE_KEYS = frozenset(
         "display_frame_id",
         "display_capture_epoch",
         "display_published_epoch",
+        "display_heartbeat_epoch",
         "last_display_capture_epoch",
         "last_display_published_epoch",
         "last_display_window_path",
@@ -493,6 +494,8 @@ _DISPLAY_STATE_KEYS = frozenset(
         "display_fast_path_v3",
         "display_busy_reuse_heartbeat_v3",
         "display_reuse_only_heartbeat_v3",
+        "frame_bundle_complete_v3",
+        "frame_bundle_pending_reason_v3",
     }
 )
 _DISPLAY_STATE_NONEMPTY_STRING_KEYS = frozenset(
@@ -750,6 +753,45 @@ _COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
         "model_council_result",
     }
 )
+
+
+def _atomic_display_state_required_v3() -> bool:
+    return str(os.getenv("PHOENIXGUARD_ATOMIC_DISPLAY_FRAME_BARRIER", "1") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+
+
+def _frame_bundle_complete_v3(payload: Mapping[str, Any]) -> bool:
+    if not _atomic_display_state_required_v3():
+        return True
+    if payload.get("frame_bundle_complete_v3") is False:
+        return False
+    fast_path = _mapping_to_dict(payload.get("display_fast_path_v3"))
+    if (
+        bool(payload.get("display_snapshot_only_v3"))
+        or bool(payload.get("display_busy_reuse_heartbeat_v3"))
+        or bool(payload.get("display_reuse_only_heartbeat_v3"))
+        or bool(fast_path.get("reuse_only_heartbeat"))
+        or bool(fast_path.get("reused_window_path") and str(fast_path.get("reason", "")).endswith("heartbeat"))
+    ):
+        return False
+    display_frame = int(_float_or(payload.get("display_frame_id"), 0.0) or 0)
+    chart_frame = int(_float_or(payload.get("chart_frame_id") or payload.get("frame_index"), 0.0) or 0)
+    overlay_frame = int(
+        _float_or(payload.get("overlay_frame_id") or payload.get("full_overlay_frame_id"), 0.0) or 0
+    )
+    full_overlay_frame = int(_float_or(payload.get("full_overlay_frame_id") or payload.get("overlay_frame_id"), 0.0) or 0)
+    model_frame = int(_float_or(payload.get("model_vote_frame_id"), 0.0) or 0)
+    return bool(
+        display_frame > 0
+        and chart_frame == display_frame
+        and overlay_frame == display_frame
+        and full_overlay_frame == display_frame
+        and model_frame == display_frame
+    )
 
 
 _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
@@ -20774,16 +20816,17 @@ class ContinuousWindowTrackerService:
                     current_frame = int(current.get("frame_index", current.get("frame_id", 0)) or 0)
                     current_capture = int(current.get("capture_count", current_frame) or 0)
                     current_display = int(current.get("display_frame_id", current_frame) or 0)
-                    display_frame_id = max(current_display, current_capture, current_frame) + 1
+                    display_frame_id = max(current_display, current_frame)
                     heartbeat_published_epoch = _now_epoch()
                     published_iso = _epoch_to_utc_iso(heartbeat_published_epoch)
                     current.setdefault("frame_index", current_frame)
                     if current_frame > 0:
                         current.setdefault("frame_id", current_frame)
                     current["display_frame_id"] = display_frame_id
-                    current["display_published_epoch"] = heartbeat_published_epoch
-                    current["last_display_published_epoch"] = heartbeat_published_epoch
+                    current["display_heartbeat_epoch"] = heartbeat_published_epoch
                     current["display_snapshot_only_v3"] = True
+                    current["frame_bundle_complete_v3"] = False
+                    current["frame_bundle_pending_reason_v3"] = "display_reuse_heartbeat_waiting_for_overlay_model_bundle"
                     current["last_display_window_path"] = previous_display_path
                     surface_signature = str(
                         current.get("last_display_surface_signature")
@@ -20800,7 +20843,11 @@ class ContinuousWindowTrackerService:
                             current.get("display_capture_epoch", current.get("last_display_capture_epoch", 0.0)),
                             0.0,
                         ),
-                        "published_epoch": heartbeat_published_epoch,
+                        "published_epoch": _float_or(
+                            current.get("display_published_epoch", current.get("last_display_published_epoch", 0.0)),
+                            0.0,
+                        ),
+                        "heartbeat_published_epoch": heartbeat_published_epoch,
                         "window_path": previous_display_path,
                         "surface_signature": surface_signature,
                         "reused_window_path": True,
@@ -20809,7 +20856,7 @@ class ContinuousWindowTrackerService:
                     current["display_reuse_only_heartbeat_v3"] = {
                         "schema_version": "PG_DISPLAY_REUSE_ONLY_HEARTBEAT_V1",
                         "display_frame_id": display_frame_id,
-                        "published_epoch": heartbeat_published_epoch,
+                        "heartbeat_published_epoch": heartbeat_published_epoch,
                         "window_path": previous_display_path,
                     }
                     current["updated_at"] = published_iso
@@ -20838,20 +20885,21 @@ class ContinuousWindowTrackerService:
                     current_frame = int(current.get("frame_index", current.get("frame_id", 0)) or 0)
                     current_capture = int(current.get("capture_count", current_frame) or 0)
                     current_display = int(current.get("display_frame_id", current_frame) or 0)
-                    display_frame_id = max(current_display, current_capture, current_frame) + 1
+                    display_frame_id = max(current_display, current_frame)
                     heartbeat_published_epoch = _now_epoch()
                     published_iso = _epoch_to_utc_iso(heartbeat_published_epoch)
                     current.setdefault("frame_index", current_frame)
                     if current_frame > 0:
                         current.setdefault("frame_id", current_frame)
                     current["display_frame_id"] = display_frame_id
-                    current["display_published_epoch"] = heartbeat_published_epoch
-                    current["last_display_published_epoch"] = heartbeat_published_epoch
+                    current["display_heartbeat_epoch"] = heartbeat_published_epoch
                     current["display_snapshot_only_v3"] = True
+                    current["frame_bundle_complete_v3"] = False
+                    current["frame_bundle_pending_reason_v3"] = "display_busy_reuse_heartbeat_waiting_for_overlay_model_bundle"
                     current["display_busy_reuse_heartbeat_v3"] = {
                         "schema_version": "PG_DISPLAY_BUSY_REUSE_HEARTBEAT_V1",
                         "display_frame_id": display_frame_id,
-                        "published_epoch": heartbeat_published_epoch,
+                        "heartbeat_published_epoch": heartbeat_published_epoch,
                         "window_path": previous_display_path,
                         "active_capture_started_epoch": active_started,
                         "active_capture_age_sec": round(active_age_sec, 3),
@@ -20937,6 +20985,8 @@ class ContinuousWindowTrackerService:
             current["last_display_capture_epoch"] = capture_started_epoch
             current["last_display_published_epoch"] = display_published_epoch
             current["display_snapshot_only_v3"] = True
+            current["frame_bundle_complete_v3"] = False
+            current["frame_bundle_pending_reason_v3"] = "display_snapshot_waiting_for_overlay_model_bundle"
             current["last_display_window_path"] = str(window_path)
             current["last_display_surface_signature"] = window_signature
             current["last_window_surface_signature"] = window_signature
@@ -24417,13 +24467,9 @@ class ContinuousWindowTrackerService:
             int(fresh_for_index.get("overlay_frame_id", 0) or 0),
             int(fresh_for_index.get("model_vote_frame_id", 0) or 0),
         )
-        base_display_frame = max(
-            int(payload.get("display_frame_id", 0) or 0),
-            int(fresh_for_index.get("display_frame_id", 0) or 0),
-        )
         frame_index = base_model_frame + 1
-        display_frame_id = max(max(base_display_frame, base_capture_count) + 1, frame_index)
-        capture_count = max(base_capture_count + 1, display_frame_id)
+        display_frame_id = frame_index
+        capture_count = max(base_capture_count + 1, frame_index)
         session_dir = self._session_dir(str(payload["session_id"]))
         artifact_dir = session_dir / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -24441,9 +24487,9 @@ class ContinuousWindowTrackerService:
             if display_payload:
                 current_capture_count = int(display_payload.get("capture_count", 0) or 0)
                 current_display_frame = int(display_payload.get("display_frame_id", 0) or 0)
-                if current_display_frame >= display_frame_id:
-                    display_frame_id = current_display_frame + 1
-                    capture_count = max(capture_count, current_capture_count + 1, display_frame_id)
+                if current_display_frame >= display_frame_id and not _frame_bundle_complete_v3(display_payload):
+                    display_frame_id = frame_index
+                capture_count = max(capture_count, current_capture_count + 1)
                 display_payload["capture_count"] = max(current_capture_count, capture_count)
                 display_payload["frame_index"] = max(int(display_payload.get("frame_index", 0) or 0), frame_index)
                 display_payload["last_capture_started_at"] = capture_started_iso
@@ -24454,6 +24500,8 @@ class ContinuousWindowTrackerService:
                 display_payload["last_display_capture_epoch"] = capture_started_epoch
                 display_payload["last_display_published_epoch"] = display_published_epoch
                 display_payload["display_snapshot_only_v3"] = True
+                display_payload["frame_bundle_complete_v3"] = False
+                display_payload["frame_bundle_pending_reason_v3"] = "display_artifact_ready_before_overlay_model_bundle"
                 display_payload["last_display_window_path"] = str(window_path)
                 display_payload["last_window_path"] = str(window_path)
                 display_payload["last_frame_path"] = str(window_path)
@@ -24484,6 +24532,8 @@ class ContinuousWindowTrackerService:
                         "last_display_capture_epoch": capture_started_epoch,
                         "last_display_published_epoch": display_published_epoch,
                         "display_snapshot_only_v3": True,
+                        "frame_bundle_complete_v3": False,
+                        "frame_bundle_pending_reason_v3": "display_artifact_ready_before_overlay_model_bundle",
                         "display_fast_path_v3": {
                             "schema_version": "PG_DISPLAY_FAST_PATH_V3",
                             "reason": "capture_and_analyze_display_publish",
@@ -24598,6 +24648,8 @@ class ContinuousWindowTrackerService:
                 guarded_payload["display_published_epoch"] = display_published_epoch
                 guarded_payload["last_display_capture_epoch"] = capture_started_epoch
                 guarded_payload["last_display_published_epoch"] = display_published_epoch
+                guarded_payload["frame_bundle_complete_v3"] = False
+                guarded_payload["frame_bundle_pending_reason_v3"] = "broker_surface_guard_blocked_before_overlay_model_bundle"
                 guarded_payload.pop("display_snapshot_only_v3", None)
                 guarded_payload.pop("display_fast_path_v3", None)
                 guarded_payload["last_window_surface_signature"] = window_signature
@@ -24787,7 +24839,8 @@ class ContinuousWindowTrackerService:
             latest_signal["market_confidence"] = 0.0
             payload["market"] = ""
         publish_visual_before_council = (
-            str(os.getenv("PHOENIXGUARD_PUBLISH_VISUAL_OVERLAY_BEFORE_COUNCIL", "1") or "1")
+            not _atomic_display_state_required_v3()
+            and str(os.getenv("PHOENIXGUARD_PUBLISH_VISUAL_OVERLAY_BEFORE_COUNCIL", "1") or "1")
             .strip()
             .lower()
             not in {"0", "false", "off", "no"}
@@ -25179,6 +25232,8 @@ class ContinuousWindowTrackerService:
             visual_payload["display_published_epoch"] = display_published_epoch
             visual_payload.pop("display_snapshot_only_v3", None)
             visual_payload.pop("display_fast_path_v3", None)
+            visual_payload["frame_bundle_complete_v3"] = True
+            visual_payload.pop("frame_bundle_pending_reason_v3", None)
             visual_payload["last_window_surface_signature"] = window_signature
             visual_payload["last_display_surface_signature"] = window_signature
             visual_payload["last_study_surface_signature"] = study_surface_signature
@@ -25461,6 +25516,8 @@ class ContinuousWindowTrackerService:
             payload["display_published_epoch"] = display_published_epoch
             payload.pop("display_snapshot_only_v3", None)
             payload.pop("display_fast_path_v3", None)
+            payload["frame_bundle_complete_v3"] = True
+            payload.pop("frame_bundle_pending_reason_v3", None)
             payload["last_window_surface_signature"] = window_signature
             payload["last_display_surface_signature"] = window_signature
             payload["last_study_surface_signature"] = study_surface_signature
@@ -25860,6 +25917,8 @@ class ContinuousWindowTrackerService:
         state_published_epoch = _float_or(display_state.get("display_published_epoch", 0.0), 0.0)
         if state_display_frame <= 0:
             return merged
+        if not _frame_bundle_complete_v3(display_state):
+            return merged
         if state_display_frame < base_display_frame:
             return merged
         if state_display_frame == base_display_frame and state_published_epoch + 0.001 < base_published_epoch:
@@ -25934,6 +25993,7 @@ class ContinuousWindowTrackerService:
             payload_overlay_frame = int(payload.get("overlay_frame_id", payload_frame) or 0)
             payload_model_frame = int(payload.get("model_vote_frame_id", payload_frame) or 0)
             payload_epoch = _float_or(payload.get("last_capture_epoch", 0.0), 0.0)
+            payload_frame_bundle_complete = _frame_bundle_complete_v3(payload)
             writes_capture_artifacts = any(
                 str(payload.get(key, "") or "").strip()
                 for key in ("last_window_path", "last_chart_path", "last_overlay_path", "last_full_overlay_path")
@@ -25965,7 +26025,7 @@ class ContinuousWindowTrackerService:
                 merged_payload = dict(payload)
                 merged_payload["capture_count"] = max(payload_capture_count, previous_capture_count)
                 merged_payload["frame_index"] = max(payload_frame, previous_frame)
-                if previous_display_frame > payload_display_frame:
+                if previous_display_frame > payload_display_frame and not payload_frame_bundle_complete:
                     merged_payload["display_frame_id"] = previous_display_frame
                     for key in (
                         "display_capture_epoch",

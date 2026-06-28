@@ -224,7 +224,18 @@ def _compact_live_state_response_cache_candidates(
     return candidates
 
 
-def _compact_live_state_cache_can_reuse(payload: Mapping[str, object], cached_age_sec: float) -> bool:
+def _compact_live_state_cache_can_reuse(
+    payload: Mapping[str, object],
+    cached_age_sec: float,
+    *,
+    latest_complete_frame_id: int = 0,
+) -> bool:
+    if _atomic_display_state_required_v3():
+        if not _display_state_frame_bundle_complete_v3(payload):
+            return False
+        cached_frame_id = int(_epoch_float(payload.get("display_frame_id") or payload.get("frame_id"), 0.0))
+        if latest_complete_frame_id > 0 and cached_frame_id != latest_complete_frame_id:
+            return False
     if _compact_live_state_renderable_count(payload) > 0:
         return True
     return cached_age_sec <= 2.0
@@ -290,6 +301,7 @@ _DIRECT_DISPLAY_STATE_KEYS = frozenset(
         "display_frame_id",
         "display_capture_epoch",
         "display_published_epoch",
+        "display_heartbeat_epoch",
         "last_display_capture_epoch",
         "last_display_published_epoch",
         "last_display_window_path",
@@ -305,6 +317,8 @@ _DIRECT_DISPLAY_STATE_KEYS = frozenset(
         "display_fast_path_v3",
         "display_busy_reuse_heartbeat_v3",
         "display_reuse_only_heartbeat_v3",
+        "frame_bundle_complete_v3",
+        "frame_bundle_pending_reason_v3",
     }
 )
 _DIRECT_DISPLAY_STATE_NONEMPTY_STRING_KEYS = frozenset(
@@ -320,6 +334,49 @@ _DIRECT_DISPLAY_STATE_NONEMPTY_STRING_KEYS = frozenset(
         "overlay_source_study_signature",
     }
 )
+
+
+def _atomic_display_state_required_v3() -> bool:
+    return str(os.getenv("PHOENIXGUARD_ATOMIC_DISPLAY_FRAME_BARRIER", "1") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+
+
+def _display_state_frame_bundle_complete_v3(payload: Mapping[str, object]) -> bool:
+    if not _atomic_display_state_required_v3():
+        return True
+    if payload.get("frame_bundle_complete_v3") is False:
+        return False
+    fast_path = _as_mapping(payload.get("display_fast_path_v3"))
+    if (
+        bool(payload.get("display_snapshot_only_v3"))
+        or bool(payload.get("display_busy_reuse_heartbeat_v3"))
+        or bool(payload.get("display_reuse_only_heartbeat_v3"))
+        or bool(fast_path.get("reuse_only_heartbeat"))
+        or bool(fast_path.get("reused_window_path") and str(fast_path.get("reason", "")).endswith("heartbeat"))
+    ):
+        return False
+    display_frame = int(_epoch_float(payload.get("display_frame_id"), 0.0))
+    chart_frame = int(_epoch_float(payload.get("chart_frame_id") or payload.get("frame_index"), 0.0))
+    overlay_frame = int(_epoch_float(payload.get("overlay_frame_id") or payload.get("full_overlay_frame_id"), 0.0))
+    full_overlay_frame = int(_epoch_float(payload.get("full_overlay_frame_id") or payload.get("overlay_frame_id"), 0.0))
+    model_frame = int(_epoch_float(payload.get("model_vote_frame_id"), 0.0))
+    return bool(
+        display_frame > 0
+        and chart_frame == display_frame
+        and overlay_frame == display_frame
+        and full_overlay_frame == display_frame
+        and model_frame == display_frame
+    )
+
+
+def _atomic_frame_id_v3(payload: Mapping[str, object]) -> int:
+    if not _display_state_frame_bundle_complete_v3(payload):
+        return 0
+    return int(_epoch_float(payload.get("display_frame_id") or payload.get("frame_id"), 0.0))
 
 
 def _slugify_session_id(value: str) -> str:
@@ -757,6 +814,8 @@ def _merge_direct_window_tracker_display_state(
     payload_epoch = _epoch_float(payload.get("display_published_epoch") or payload.get("last_capture_epoch"), 0.0)
     if display_frame <= 0:
         return payload
+    if not _display_state_frame_bundle_complete_v3(display_state):
+        return payload
     if display_frame < payload_frame:
         return payload
     if display_frame == payload_frame and display_epoch + 0.001 < payload_epoch:
@@ -922,6 +981,8 @@ def _direct_window_tracker_display_snapshot(
     raw_model_frame = int(_epoch_float(payload.get("model_vote_frame_id"), 0.0))
     if require_overlay_model and (raw_overlay_frame <= 0 or raw_model_frame <= 0):
         return None
+    if not _display_state_frame_bundle_complete_v3(payload):
+        return None
     overlay_frame = int(
         _epoch_float(raw_overlay_frame or frame_index, 0.0)
     )
@@ -955,6 +1016,13 @@ def _direct_window_tracker_display_snapshot(
     payload.setdefault("next_capture_in_sec", 0.0)
     payload.setdefault("effective_capture_interval_sec", _WINDOW_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC)
     return payload
+
+
+def _direct_complete_session_frame_id_v3(session_id: str) -> int:
+    snapshot = _direct_window_tracker_session_snapshot(session_id)
+    if snapshot is None:
+        return 0
+    return _atomic_frame_id_v3(snapshot)
 
 
 def _direct_performance_trace_cache_ttl_sec() -> float:
@@ -2110,27 +2178,25 @@ def create_app(
                 raw_display_mapping = cast(Mapping[str, object], raw_display)
             else:
                 raw_display_mapping = {}
-            if (
+            try:
+                raw_context_payload = json.loads(context_path.read_text(encoding="utf-8"))
+            except Exception:
+                raw_context_payload = None
+            if isinstance(raw_context_payload, Mapping):
+                raw_context = cast(dict[str, object], compact_session_payload(cast(Mapping[str, Any], raw_context_payload)))
+            display_state_complete = (
                 _epoch_float(raw_display_mapping.get("frame_index"), 0.0) > 0.0
                 and str(raw_display_mapping.get("last_display_window_path") or raw_display_mapping.get("last_window_path") or "").strip()
-            ):
-                try:
-                    raw_context_payload = json.loads(context_path.read_text(encoding="utf-8"))
-                except Exception:
-                    raw_context_payload = None
-                if isinstance(raw_context_payload, Mapping):
-                    raw_context = cast(dict[str, object], compact_session_payload(cast(Mapping[str, Any], raw_context_payload)))
+                and _display_state_frame_bundle_complete_v3(raw_display_mapping)
+            )
+            if display_state_complete:
                 raw_session = {**raw_context, **dict(raw_display_mapping)}
+            elif raw_context:
+                raw_session = raw_context
             else:
                 try:
-                    raw_context_payload = json.loads(context_path.read_text(encoding="utf-8"))
+                    raw_session = json.loads(path.read_text(encoding="utf-8"))
                 except Exception:
-                    raw_context_payload = None
-                if isinstance(raw_context_payload, Mapping):
-                    raw_context = cast(dict[str, object], compact_session_payload(cast(Mapping[str, Any], raw_context_payload)))
-                if raw_context:
-                    raw_session = raw_context
-                else:
                     return None
         else:
             try:
@@ -3184,7 +3250,14 @@ def create_app(
                 for key, (_cached_epoch, cached_payload) in _COMPACT_LIVE_STATE_RESPONSE_CACHE.items()
                 if key[0] == requested_session_id and key[2] == cache_signature
             ]
+        latest_complete_frame_id = _direct_complete_session_frame_id_v3(requested_session_id)
         for cached_payload in cached_candidates:
+            if not _compact_live_state_cache_can_reuse(
+                cached_payload,
+                0.0,
+                latest_complete_frame_id=latest_complete_frame_id,
+            ):
+                continue
             if _compact_overlay_payload_stale_for_display(cached_payload, display_snapshot):
                 continue
             projected = _project_compact_live_state_response(cached_payload, active_mode, now_epoch=now_epoch)
@@ -3563,6 +3636,7 @@ def create_app(
             cache_signature = _compact_live_state_response_cache_signature(requested_session_id)
             cache_key = (requested_session_id, active_mode, cache_signature)
             now_epoch = time.time()
+            latest_complete_frame_id = _direct_complete_session_frame_id_v3(requested_session_id)
             if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
                 refresh_source: dict[str, object] | None = None
                 with _LIVE_STATE_V3_CACHE_LOCK:
@@ -3573,7 +3647,11 @@ def create_app(
                             continue
                         cached_age = now_epoch - cached[0]
                         cached_payload = cached[1]
-                        cache_can_reuse = _compact_live_state_cache_can_reuse(cached_payload, cached_age)
+                        cache_can_reuse = _compact_live_state_cache_can_reuse(
+                            cached_payload,
+                            cached_age,
+                            latest_complete_frame_id=latest_complete_frame_id,
+                        )
                         if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC:
                             display_snapshot = _direct_window_tracker_display_snapshot(
                                 requested_session_id,
@@ -3639,7 +3717,11 @@ def create_app(
                                 continue
                             cached_age = now_epoch - cached[0]
                             cached_payload = cached[1]
-                            cache_can_reuse = _compact_live_state_cache_can_reuse(cached_payload, cached_age)
+                            cache_can_reuse = _compact_live_state_cache_can_reuse(
+                                cached_payload,
+                                cached_age,
+                                latest_complete_frame_id=latest_complete_frame_id,
+                            )
                             if cache_can_reuse and cached_age <= _COMPACT_LIVE_STATE_RESPONSE_HOT_TTL_SEC:
                                 display_snapshot = _direct_window_tracker_display_snapshot(
                                     requested_session_id,

@@ -4151,9 +4151,11 @@ def test_tracker_display_only_reuse_only_heartbeat_skips_capture_after_locked_ar
     second = tracker.capture_once(session_id, display_only=True)
 
     assert backend.capture_calls == 0
-    assert int(second["display_frame_id"]) > int(first["display_frame_id"])
+    assert int(second["display_frame_id"]) <= int(first["display_frame_id"])
     assert second["last_display_window_path"] == first["last_display_window_path"]
     assert second["display_fast_path_v3"]["reuse_only_heartbeat"] is True
+    assert second["display_fast_path_v3"]["heartbeat_published_epoch"] > 0.0
+    assert second["frame_bundle_complete_v3"] is False
     assert second["display_reuse_only_heartbeat_v3"]["window_path"] == first["last_display_window_path"]
 
 
@@ -4194,11 +4196,12 @@ def test_tracker_display_only_busy_reuses_last_display_heartbeat(
     second = tracker.capture_once(str(session["session_id"]), display_only=True)
 
     assert backend.capture_calls == 0
-    assert int(second["display_frame_id"]) > first_display
+    assert int(second["display_frame_id"]) <= first_display
     assert second["last_display_window_path"] == first_path
     assert second["display_snapshot_busy_v3"] is True
-    assert second["display_published_epoch"] == 1009.0
-    assert second["display_busy_reuse_heartbeat_v3"]["published_epoch"] == 1009.0
+    assert second["display_heartbeat_epoch"] == 1009.0
+    assert second["display_busy_reuse_heartbeat_v3"]["heartbeat_published_epoch"] == 1009.0
+    assert second["frame_bundle_complete_v3"] is False
     assert second["display_busy_reuse_heartbeat_v3"]["window_path"] == first_path
 
 

@@ -376,22 +376,23 @@ def _live_fast_display_file_heartbeat(script_dir: Path, session_id: str, *, now_
         previous_frame = 0
     if previous_frame <= 0:
         return False
-    next_frame = previous_frame + 1
     current["session_id"] = str(session_id)
     current.pop("last_capture_epoch", None)
     current.pop("last_capture_started_epoch", None)
-    current["display_frame_id"] = next_frame
-    current["display_published_epoch"] = float(now_epoch)
-    current["last_display_published_epoch"] = float(now_epoch)
+    current["display_frame_id"] = previous_frame
+    current["display_heartbeat_epoch"] = float(now_epoch)
     current["last_display_window_path"] = window_path
     current["display_snapshot_only_v3"] = True
+    current["frame_bundle_complete_v3"] = False
+    current["frame_bundle_pending_reason_v3"] = "supervisor_file_reuse_heartbeat_waiting_for_overlay_model_bundle"
     current["display_fast_path_v3"] = {
         "schema_version": "PG_DISPLAY_FAST_PATH_V3",
         "reason": "supervisor_file_reuse_heartbeat",
-        "display_frame_id": next_frame,
-        "capture_count": int(float(current.get("capture_count") or current.get("frame_index") or next_frame)),
+        "display_frame_id": previous_frame,
+        "capture_count": int(float(current.get("capture_count") or current.get("frame_index") or previous_frame)),
         "capture_epoch": float(current.get("display_capture_epoch") or current.get("last_display_capture_epoch") or now_epoch),
-        "published_epoch": float(now_epoch),
+        "published_epoch": float(current.get("display_published_epoch") or current.get("last_display_published_epoch") or 0.0),
+        "heartbeat_published_epoch": float(now_epoch),
         "window_path": window_path,
         "surface_signature": str(current.get("last_display_surface_signature") or current.get("last_window_surface_signature") or ""),
         "reused_window_path": True,
@@ -399,8 +400,8 @@ def _live_fast_display_file_heartbeat(script_dir: Path, session_id: str, *, now_
     }
     current["display_reuse_only_heartbeat_v3"] = {
         "schema_version": "PG_DISPLAY_REUSE_ONLY_HEARTBEAT_V1",
-        "display_frame_id": next_frame,
-        "published_epoch": float(now_epoch),
+        "display_frame_id": previous_frame,
+        "heartbeat_published_epoch": float(now_epoch),
         "window_path": window_path,
     }
     try:

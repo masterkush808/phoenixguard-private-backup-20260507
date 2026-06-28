@@ -328,9 +328,12 @@ def test_live_fast_display_heartbeat_prefers_display_state_file(monkeypatch: pyt
     payload = json.loads(state_path.read_text(encoding="utf-8"))
     assert next_epoch == 100.0
     assert calls == []
-    assert payload["display_frame_id"] == 5
-    assert payload["display_published_epoch"] == 100.0
+    assert payload["display_frame_id"] == 4
+    assert payload["display_published_epoch"] == 99.0
+    assert payload["display_heartbeat_epoch"] == 100.0
+    assert payload["frame_bundle_complete_v3"] is False
     assert payload["display_fast_path_v3"]["reason"] == "supervisor_file_reuse_heartbeat"
+    assert payload["display_fast_path_v3"]["heartbeat_published_epoch"] == 100.0
 
 
 def test_live_fast_display_heartbeat_respects_disable_env(monkeypatch: pytest.MonkeyPatch) -> None:
