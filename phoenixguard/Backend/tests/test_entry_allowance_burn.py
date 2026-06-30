@@ -230,7 +230,7 @@ def test_capture_entry_evidence_renders_current_json_when_overlay_artifact_is_st
     assert "_sell_entry_" in Path(event["overlay_evidence_path"]).name
 
 
-def test_capture_entry_evidence_labels_blocked_enter_now_filename(tmp_path: Path) -> None:
+def test_capture_entry_evidence_refuses_unresolved_marker_images(tmp_path: Path) -> None:
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
     overlay = artifact_dir / "000100_live_overlay.jpg"
@@ -255,22 +255,19 @@ def test_capture_entry_evidence_labels_blocked_enter_now_filename(tmp_path: Path
         "last_overlay_path": str(overlay),
         "last_display_window_path": str(window),
         "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
-        "overlay_objects": [
-            {
-                "type": "CURRENT_CANDLE",
-                "role": "current_candle",
-                "label": "NOW",
-                "bbox": [70, 40, 80, 100],
-                "frame_id": 100,
-            }
-        ],
+        "overlay_objects": [],
     }
 
     event = burn.capture_entry_evidence(tmp_path, sample, live, {}, "missing-session", "http://127.0.0.1:9", 0.01)
 
-    assert "_buy_blocked_enter_now_" in Path(event["overlay_evidence_path"]).name
+    assert event["error"] == "ENTRY_MARKER_UNRESOLVED"
+    assert event["evidence_images_written"] is False
+    assert event["overlay_evidence_path"] == ""
+    assert event["broker_evidence_path"] == ""
     assert event["entry"]["allowed"] is False
-    assert event["marker_source"] == "LATEST_CANDLE_NOW"
+    evidence_dir = tmp_path / "entry_evidence"
+    assert len(list(evidence_dir.glob("*.json"))) == 1
+    assert not list(evidence_dir.glob("*.jpg"))
 
 
 def test_prune_path_budget_preserves_protected_latest_artifact(tmp_path: Path) -> None:

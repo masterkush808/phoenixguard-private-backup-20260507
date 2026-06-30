@@ -5935,7 +5935,7 @@ class WindowsWindowCaptureBackend:
         pocket_fast_foreground_grab = (
             pocket_option_window
             and hwnd > 0
-            and str(os.getenv("PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB", "0") or "0").strip().lower()
+            and str(os.getenv("PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB", "1") or "1").strip().lower()
             not in {"0", "false", "off", "no"}
         )
         require_pocket_foreground = (
@@ -6012,6 +6012,7 @@ class WindowsWindowCaptureBackend:
             import ctypes
 
             user32 = ctypes.windll.user32
+            hwnd_ptr = ctypes.c_void_p(int(hwnd))
             try:
                 if bool(user32.IsIconic(hwnd)):
                     user32.ShowWindow(hwnd, 9)  # SW_RESTORE
@@ -6026,10 +6027,27 @@ class WindowsWindowCaptureBackend:
                 except Exception:
                     pass
             try:
+                topmost = ctypes.c_void_p(-1)
+                not_topmost = ctypes.c_void_p(-2)
+                swp_no_size = 0x0001
+                swp_no_move = 0x0002
+                swp_show_window = 0x0040
+                flags = swp_no_size | swp_no_move | swp_show_window
+                user32.SetWindowPos(hwnd_ptr, topmost, 0, 0, 0, 0, flags)
+                time.sleep(0.05)
+                user32.BringWindowToTop(hwnd_ptr)
+                switch_to_window = getattr(user32, "SwitchToThisWindow", None)
+                if switch_to_window is not None:
+                    switch_to_window(hwnd_ptr, True)
+                time.sleep(0.05)
+                user32.SetWindowPos(hwnd_ptr, not_topmost, 0, 0, 0, 0, flags)
+            except Exception:
+                pass
+            try:
                 user32.SetForegroundWindow(hwnd)
             except Exception:
                 pass
-            time.sleep(0.18)
+            time.sleep(0.35)
             try:
                 return int(user32.GetForegroundWindow()) == int(hwnd)
             except Exception:
@@ -20590,8 +20608,13 @@ class ContinuousWindowTrackerService:
         return self.get_session(str(payload["session_id"]))
 
     def latest_artifact_path(self, session_id: str, artifact_kind: str) -> Path:
-        payload = self._require_session(session_id)
         kind = str(artifact_kind or "").strip().lower()
+        if kind in {"window", "frame"}:
+            payload = self._load_session_with_display_state(session_id)
+            if not payload:
+                payload = self._require_session(session_id)
+        else:
+            payload = self._require_session(session_id)
         active_mode = str(payload.get("memory_projection_active_mode", "") or "").strip().lower()
         active_projection = self._normalized_session_memory_projection(
             payload,
@@ -20806,7 +20829,7 @@ class ContinuousWindowTrackerService:
         except ValueError:
             stale_reset_sec = 30.0
         reuse_only_enabled = str(
-            os.getenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "1") or "1"
+            os.getenv("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0") or "0"
         ).strip().lower() not in {"0", "false", "off", "no"}
         if reuse_only_enabled:
             with self._lock:
@@ -20878,7 +20901,7 @@ class ContinuousWindowTrackerService:
                 current["display_snapshot_busy_since_epoch"] = active_started
                 current["display_snapshot_busy_age_sec"] = round(active_age_sec, 3)
                 heartbeat_enabled = str(
-                    os.getenv("PHOENIXGUARD_DISPLAY_BUSY_REUSE_HEARTBEAT", "1") or "1"
+                    os.getenv("PHOENIXGUARD_DISPLAY_BUSY_REUSE_HEARTBEAT", "0") or "0"
                 ).strip().lower() not in {"0", "false", "off", "no"}
                 previous_display_path = str(current.get("last_display_window_path", "") or "").strip()
                 if heartbeat_enabled and previous_display_path and Path(previous_display_path).is_file():
@@ -25102,13 +25125,34 @@ class ContinuousWindowTrackerService:
                 and previous_fast_surface_source != "unread"
                 and not bool(previous_fast_surface.get("scan_skipped", False))
             )
+            scan_blocked_surface = str(
+                os.getenv("PHOENIXGUARD_SCAN_BROKER_SURFACE_WHEN_NOT_EXECUTABLE", "0") or "0"
+            ).strip().lower() not in {"0", "false", "off", "no"}
             can_reuse_identity_surface = bool(
                 previous_fast_surface
                 and str(previous_fast_surface.get("broker_surface_hash", "") or "").strip()
                 and previous_surface_age <= surface_identity_cache_limit
                 and previous_fast_surface_is_read
             )
-            if bool(fast_visual_controls.get("require_market_identity", True)) and can_reuse_identity_surface:
+            if not scan_blocked_surface:
+                fast_blocked_surface = dict(previous_fast_surface) if previous_fast_surface else _default_broker_surface_payload()
+                fast_blocked_surface["cached"] = bool(previous_fast_surface)
+                fast_blocked_surface["cache_age_sec"] = round(float(previous_surface_age), 3) if previous_fast_surface else 0.0
+                fast_blocked_surface["cache_limit_sec"] = round(float(surface_identity_cache_limit), 3)
+                fast_blocked_surface["cache_used_epoch"] = surface_now_epoch
+                fast_blocked_surface["read_epoch"] = surface_now_epoch
+                fast_blocked_surface["scan_skipped"] = True
+                fast_blocked_surface["scan_skip_reason"] = "model_council_packet_not_executable"
+                fast_blocked_surface["broker_surface_hash"] = str(
+                    previous_fast_surface.get("broker_surface_hash", "") or _surface_signature(window_image)
+                )
+                capture_plane = _mapping_to_dict(fast_blocked_surface.get("capture_plane", {}))
+                capture_plane.setdefault("source", "scan_skipped_model_council_packet_not_executable")
+                fast_blocked_surface["capture_plane"] = capture_plane
+                fast_blocked_surface["controls_ready"] = False
+                fast_blocked_surface["broker_click_safe"] = False
+                fast_blocked_surface["state"] = "blocked_packet_scan_skipped"
+            elif bool(fast_visual_controls.get("require_market_identity", True)) and can_reuse_identity_surface:
                 fast_blocked_surface = dict(previous_fast_surface)
                 fast_blocked_surface["cached"] = True
                 fast_blocked_surface["cache_age_sec"] = round(float(previous_surface_age), 3)
@@ -25184,6 +25228,7 @@ class ContinuousWindowTrackerService:
             tracking_summary["broker_surface"] = fast_blocked_surface
             tracking_summary["broker_execution_state"] = fast_blocked_state
             latest_signal["broker_execution_state"] = fast_blocked_state
+            mark_stage("fast_blocked_surface")
 
         visual_published_epoch = _now_epoch()
         visual_published_at = _epoch_to_utc_iso(visual_published_epoch)
@@ -25219,6 +25264,29 @@ class ContinuousWindowTrackerService:
         latest_signal["pipeline_timing"] = visual_pipeline_timing
         with self._lock:
             visual_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
+            visual_display_window_path = str(window_path)
+            visual_display_surface_signature = window_signature
+            visual_display_capture_epoch = capture_started_epoch
+            persisted_display_published_epoch = _float_or(visual_payload.get("display_published_epoch", 0.0), 0.0)
+            if persisted_display_published_epoch > float(display_published_epoch) + 0.001:
+                display_frame_id = int(visual_payload.get("display_frame_id", display_frame_id) or display_frame_id)
+                visual_display_capture_epoch = _float_or(
+                    visual_payload.get("display_capture_epoch", visual_display_capture_epoch),
+                    visual_display_capture_epoch,
+                )
+                display_published_epoch = persisted_display_published_epoch
+                visual_display_surface_signature = str(
+                    visual_payload.get("last_display_surface_signature")
+                    or visual_payload.get("last_window_surface_signature")
+                    or visual_display_surface_signature
+                )
+                persisted_display_window_path = str(
+                    visual_payload.get("last_display_window_path")
+                    or visual_payload.get("last_window_path")
+                    or ""
+                ).strip()
+                if persisted_display_window_path:
+                    visual_display_window_path = persisted_display_window_path
             if capture_started_with_tracking_enabled:
                 visual_payload["tracking_enabled"] = True
             visual_payload["capture_count"] = capture_count
@@ -25228,14 +25296,14 @@ class ContinuousWindowTrackerService:
             visual_payload["last_capture_at"] = visual_published_at
             visual_payload["last_capture_epoch"] = visual_published_epoch
             visual_payload["display_frame_id"] = display_frame_id
-            visual_payload["display_capture_epoch"] = capture_started_epoch
+            visual_payload["display_capture_epoch"] = visual_display_capture_epoch
             visual_payload["display_published_epoch"] = display_published_epoch
             visual_payload.pop("display_snapshot_only_v3", None)
             visual_payload.pop("display_fast_path_v3", None)
             visual_payload["frame_bundle_complete_v3"] = True
             visual_payload.pop("frame_bundle_pending_reason_v3", None)
             visual_payload["last_window_surface_signature"] = window_signature
-            visual_payload["last_display_surface_signature"] = window_signature
+            visual_payload["last_display_surface_signature"] = visual_display_surface_signature
             visual_payload["last_study_surface_signature"] = study_surface_signature
             visual_payload["overlay_source_window_signature"] = window_signature
             visual_payload["overlay_source_study_signature"] = study_surface_signature
@@ -25255,9 +25323,9 @@ class ContinuousWindowTrackerService:
             visual_payload["status"] = "running" if bool(visual_payload.get("tracking_enabled", False)) else "ready"
             visual_payload["locked_window"] = dict(descriptor)
             visual_payload["locked_title"] = str(descriptor.get("title", "") or "")
-            visual_payload["last_frame_path"] = str(window_path)
-            visual_payload["last_window_path"] = str(window_path)
-            visual_payload["last_display_window_path"] = str(window_path)
+            visual_payload["last_frame_path"] = visual_display_window_path
+            visual_payload["last_window_path"] = visual_display_window_path
+            visual_payload["last_display_window_path"] = visual_display_window_path
             visual_payload["last_chart_path"] = str(chart_path)
             visual_payload["last_full_overlay_path"] = str(full_overlay_path)
             visual_payload["last_display_chart_path"] = str(overlay_path)
@@ -25505,6 +25573,29 @@ class ContinuousWindowTrackerService:
             )
             tracking_summary["broker_execution_state"] = broker_execution_state
             latest_signal["broker_execution_state"] = broker_execution_state
+            display_window_path_for_payload = str(window_path)
+            display_surface_signature_for_payload = window_signature
+            display_capture_epoch_for_payload = capture_started_epoch
+            persisted_display_published_epoch = _float_or(persisted_payload.get("display_published_epoch", 0.0), 0.0)
+            if persisted_display_published_epoch > float(display_published_epoch) + 0.001:
+                display_frame_id = int(persisted_payload.get("display_frame_id", display_frame_id) or display_frame_id)
+                display_capture_epoch_for_payload = _float_or(
+                    persisted_payload.get("display_capture_epoch", display_capture_epoch_for_payload),
+                    display_capture_epoch_for_payload,
+                )
+                display_published_epoch = persisted_display_published_epoch
+                display_surface_signature_for_payload = str(
+                    persisted_payload.get("last_display_surface_signature")
+                    or persisted_payload.get("last_window_surface_signature")
+                    or display_surface_signature_for_payload
+                )
+                persisted_display_window_path = str(
+                    persisted_payload.get("last_display_window_path")
+                    or persisted_payload.get("last_window_path")
+                    or ""
+                ).strip()
+                if persisted_display_window_path:
+                    display_window_path_for_payload = persisted_display_window_path
             payload["capture_count"] = capture_count
             payload["frame_index"] = frame_index
             payload["last_capture_started_at"] = capture_started_iso
@@ -25512,14 +25603,14 @@ class ContinuousWindowTrackerService:
             payload["last_capture_at"] = published_at
             payload["last_capture_epoch"] = published_epoch
             payload["display_frame_id"] = display_frame_id
-            payload["display_capture_epoch"] = capture_started_epoch
+            payload["display_capture_epoch"] = display_capture_epoch_for_payload
             payload["display_published_epoch"] = display_published_epoch
             payload.pop("display_snapshot_only_v3", None)
             payload.pop("display_fast_path_v3", None)
             payload["frame_bundle_complete_v3"] = True
             payload.pop("frame_bundle_pending_reason_v3", None)
             payload["last_window_surface_signature"] = window_signature
-            payload["last_display_surface_signature"] = window_signature
+            payload["last_display_surface_signature"] = display_surface_signature_for_payload
             payload["last_study_surface_signature"] = study_surface_signature
             payload["overlay_source_window_signature"] = window_signature
             payload["overlay_source_study_signature"] = study_surface_signature
@@ -25536,9 +25627,9 @@ class ContinuousWindowTrackerService:
             payload["status"] = "running" if bool(payload.get("tracking_enabled", False)) else "ready"
             payload["locked_window"] = dict(descriptor)
             payload["locked_title"] = str(descriptor.get("title", "") or "")
-            payload["last_frame_path"] = str(window_path)
-            payload["last_window_path"] = str(window_path)
-            payload["last_display_window_path"] = str(window_path)
+            payload["last_frame_path"] = display_window_path_for_payload
+            payload["last_window_path"] = display_window_path_for_payload
+            payload["last_display_window_path"] = display_window_path_for_payload
             payload["last_chart_path"] = str(chart_path)
             payload["last_full_overlay_path"] = str(full_overlay_path)
             payload["last_display_chart_path"] = str(overlay_path)

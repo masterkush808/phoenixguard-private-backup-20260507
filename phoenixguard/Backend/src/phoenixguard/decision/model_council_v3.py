@@ -83,6 +83,11 @@ LANE_SOFT_MARKET_BLOCK_REASONS = {
     "PULLBACK_NOT_CONFIRMED",
     "DOMINANCE_WEAKENING",
 }
+LATE_CHASE_BLOCK_REASONS = {
+    "LATE_CHASE",
+    "LATE_CHASE_AFTER_IMPULSE",
+    "LATE_CHASE_STEEP_IMPULSE",
+}
 ENTRY_QUALITY_SOFT_STATES = {
     "EARLY_WATCH",
     "WATCH_ONLY",
@@ -729,6 +734,112 @@ def _nested_text(*containers: Mapping[str, Any], names: Sequence[str]) -> str:
             if text:
                 return text
     return ""
+
+
+LIVE_TRIGGER_ENTRY_STATES = {"SNIPER_READY", "TRIGGER_READY", "TRIGGERED", "ACTIVE", "EXECUTE"}
+LIVE_REACTION_TIMING_CLASSES = {
+    "MEASURED_REACTION_WINDOW",
+    "OPPOSING_FORCE_REACTION",
+    "FAILED_RETEST_REACTION",
+    "SNIPER_REACTION",
+    "HIGH_FREQUENCY_TWO_CANDLE_CYCLE",
+}
+
+
+def _live_trigger_reaction_evidence(
+    snapshot: Mapping[str, Any],
+    latest_signal: Mapping[str, Any],
+    tracking: Mapping[str, Any],
+    execution_timing: Mapping[str, Any],
+    current_candle: Mapping[str, Any],
+    side: str,
+) -> dict[str, Any]:
+    entry_state = _upper(
+        _nested_text(
+            snapshot,
+            latest_signal,
+            tracking,
+            execution_timing,
+            names=("entry_state", "setup_state", "trigger_state", "trigger", "decision_state", "state"),
+        )
+    )
+    timing_class = _upper(
+        execution_timing.get("timing_class")
+        or execution_timing.get("class")
+        or latest_signal.get("timing_class")
+        or tracking.get("timing_class")
+    )
+    trigger_side = _first_trade_side(
+        latest_signal.get("execution_action"),
+        latest_signal.get("action"),
+        latest_signal.get("candidate_action"),
+        tracking.get("execution_action"),
+        tracking.get("action"),
+        execution_timing.get("side"),
+        execution_timing.get("candidate_side"),
+        snapshot.get("execution_action"),
+        snapshot.get("candidate_side"),
+    )
+    expiry_seconds = _int(
+        execution_timing.get("expiry_seconds")
+        or execution_timing.get("recommended_expiry_seconds")
+        or execution_timing.get("target_seconds")
+        or latest_signal.get("expiry_seconds")
+        or tracking.get("expiry_seconds")
+        or snapshot.get("expiry_seconds"),
+        0,
+    )
+    candle_entry_allowed = bool(
+        current_candle.get("entry_allowed")
+        and not bool(current_candle.get("too_late"))
+        and not bool(current_candle.get("wick_reversal_risk"))
+    )
+    timing_entry_allowed = _bool(
+        execution_timing.get("entry_allowed")
+        or execution_timing.get("actionable")
+        or latest_signal.get("actionable")
+        or tracking.get("actionable")
+    )
+    trigger_state_ready = entry_state in LIVE_TRIGGER_ENTRY_STATES
+    timing_reaction_ready = bool(
+        timing_class in LIVE_REACTION_TIMING_CLASSES
+        or _upper(execution_timing.get("state") or execution_timing.get("entry_state")) in {"READY", "TRIGGER_READY", "SNIPER_READY"}
+    )
+    accepted = bool(
+        side in {"BUY", "SELL"}
+        and trigger_side == side
+        and trigger_state_ready
+        and timing_reaction_ready
+        and (timing_entry_allowed or timing_class in LIVE_REACTION_TIMING_CLASSES)
+        and candle_entry_allowed
+        and expiry_seconds > 0
+    )
+    blockers: list[str] = []
+    if side not in {"BUY", "SELL"}:
+        blockers.append("NO_DIRECTION_CANDIDATE")
+    if trigger_side != side:
+        blockers.append("TRIGGER_SIDE_MISMATCH")
+    if not trigger_state_ready:
+        blockers.append("TRIGGER_STATE_NOT_READY")
+    if not timing_reaction_ready:
+        blockers.append("REACTION_TIMING_NOT_READY")
+    if not timing_entry_allowed and timing_class not in LIVE_REACTION_TIMING_CLASSES:
+        blockers.append("TIMING_ENTRY_NOT_ALLOWED")
+    if not candle_entry_allowed:
+        blockers.append("CURRENT_CANDLE_NOT_ACCEPTED")
+    if expiry_seconds <= 0:
+        blockers.append("EXPLICIT_EXPIRY_MISSING")
+    return {
+        "accepted": accepted,
+        "side": side if side in {"BUY", "SELL"} else "HOLD",
+        "trigger_side": trigger_side,
+        "entry_state": entry_state,
+        "timing_class": timing_class,
+        "expiry_seconds": expiry_seconds,
+        "candle_entry_allowed": candle_entry_allowed,
+        "timing_entry_allowed": timing_entry_allowed,
+        "blockers": blockers,
+    }
 
 
 def _current_candle_acceptance(snapshot: Mapping[str, Any], market: Mapping[str, Any], side: str) -> dict[str, Any]:
@@ -1481,17 +1592,27 @@ def _resolve_execution_lane(
         execution_timing,
         names=("continuation_confirmed", "pullback_confirmed", "retest_confirmed", "current_flow_continuation_ready"),
     )
-    late_chase = bool(
+    late_chase_raw = bool(
         market_context.get("is_late_chase")
         or _bool(angle.get("late_chase_risk"))
         or _bool(angle.get("post_impulse_wait_required"))
     )
     angle_class = _upper(angle.get("angle_class"))
-    angle_ok = not late_chase and angle_class not in {"PARABOLIC_RISK", "VERTICAL_EXHAUSTION", "BROKEN_ANGLE"}
     path_score = _clip01(path_risk.get("score"), 0.72)
     path_ok = bool(path_risk.get("executable_allowed", True)) and opposing_force_ok and path_score >= 0.45
     current_candle = _current_candle_acceptance(snapshot, market, side)
     current_candle_ok = bool(current_candle.get("entry_allowed"))
+    live_trigger_reaction = _live_trigger_reaction_evidence(
+        snapshot,
+        latest_signal,
+        tracking,
+        execution_timing,
+        current_candle,
+        side,
+    )
+    stale_late_chase_overridden = bool(late_chase_raw and live_trigger_reaction.get("accepted"))
+    late_chase = bool(late_chase_raw and not stale_late_chase_overridden)
+    angle_ok = not late_chase and angle_class not in {"PARABOLIC_RISK", "VERTICAL_EXHAUSTION", "BROKEN_ANGLE"}
     history_success = (
         _upper(history.get("similarity_state")) in {"REPEATING_SUCCESSFUL_PATH", "SUCCESS_MATCH", "WINNING_ANALOG"}
         or _clip01(history.get("similarity_to_winning_setups"), 0.0) >= 0.72
@@ -1638,6 +1759,8 @@ def _resolve_execution_lane(
                 "wave_phase": wave_context.get("phase"),
                 "wave_score": wave_context.get("wave_score"),
                 "wave_context": wave_context,
+                "live_trigger_reaction": live_trigger_reaction,
+                "stale_late_chase_overridden": stale_late_chase_overridden,
                 "trap_ok": not trap_active,
                 "current_candle_ok": current_candle_ok,
                 "entry_quality_ok": bool(lane_entry_quality_ok),
@@ -1960,6 +2083,10 @@ def _resolve_execution_lane(
         "permission_override_allowed": bool(selected["accepted"] and selected.get("entry_quality_ok")),
         "opportunity_capture_mode": opportunity_capture,
         "current_candle_acceptance": current_candle,
+        "live_trigger_reaction": live_trigger_reaction,
+        "stale_late_chase_overridden": stale_late_chase_overridden,
+        "raw_late_chase": late_chase_raw,
+        "effective_late_chase": late_chase,
         "wave_context": wave_context,
         "high_frequency_candle_cycle": hf_cycle,
         "high_frequency_contribution": high_frequency_contribution,
@@ -2483,6 +2610,8 @@ def evaluate_model_council_v3(
     angle = _mapping(market.get("angle_context") or snapshot.get("angle_context") or snapshot.get("angle_features"))
     current_candle = _current_candle_acceptance(snapshot, market, candidate_side)
     current_candle_ok = bool(current_candle.get("entry_allowed"))
+    live_trigger_reaction = _mapping(execution_lane.get("live_trigger_reaction"))
+    stale_late_chase_overridden = bool(execution_lane.get("stale_late_chase_overridden"))
     lane_name = str(execution_lane.get("name") or "").strip().upper()
     current_candle_phase = _upper(
         current_candle.get("candle_phase")
@@ -2518,13 +2647,14 @@ def evaluate_model_council_v3(
         seconds_elapsed = max(0, timeframe_seconds - seconds_remaining)
     if seconds_remaining <= 0 and seconds_elapsed > 0:
         seconds_remaining = max(0, timeframe_seconds - seconds_elapsed)
-    late_chase = bool(
+    late_chase_raw = bool(
         market_context.get("is_late_chase")
         or _bool(angle.get("late_chase_risk"))
         or _bool(angle.get("post_impulse_wait_required"))
         or bool(current_candle.get("too_late"))
         or current_candle_phase in {"LATE_CANDLE", "CLOSE_PRESSURE"}
     )
+    late_chase = bool(late_chase_raw and not stale_late_chase_overridden)
     path_class = _timing_path_class(
         lane_name=lane_name,
         current_candle_ok=current_candle_ok,
@@ -2749,12 +2879,51 @@ def evaluate_model_council_v3(
     reasoning_bad_entry_class = _upper(bad_entry_filter.get("class"))
     market_bad_entry_class = _upper(
         bad_entry.get("class")
+        or bad_entry.get("class_id")
         or bad_entry.get("bad_entry_class")
         or bad_entry.get("reason")
     )
+    hard_bad_entry_classes = {
+        item
+        for item in (reasoning_bad_entry_class, market_bad_entry_class)
+        if item in WAVE_REASONING_HARD_BAD_CLASSES
+    }
+    late_chase_block_overridden = bool(
+        stale_late_chase_overridden
+        and live_trigger_reaction.get("accepted")
+        and market_block_reason in LATE_CHASE_BLOCK_REASONS
+        and current_candle_ok
+        and not trap_active
+        and opposing_force_ok
+    )
+    late_chase_bad_entry_override_allowed = bool(
+        stale_late_chase_overridden
+        and live_trigger_reaction.get("accepted")
+        and hard_bad_entry_classes
+        and hard_bad_entry_classes.issubset(LATE_CHASE_BLOCK_REASONS)
+        and current_candle_ok
+        and not trap_active
+        and opposing_force_ok
+    )
     hard_bad_entry_class_active = bool(
-        reasoning_bad_entry_class in WAVE_REASONING_HARD_BAD_CLASSES
-        or market_bad_entry_class in WAVE_REASONING_HARD_BAD_CLASSES
+        hard_bad_entry_classes
+        and not late_chase_bad_entry_override_allowed
+    )
+    bad_entry_filter_hard_active = bool(
+        bad_entry_filter.get("active")
+        and _clip01(bad_entry_filter.get("severity"), 0.0) >= 0.72
+        and not late_chase_bad_entry_override_allowed
+    )
+    bad_entry_detected_effective = bool(
+        bad_entry.get("detected")
+        and not (
+            stale_late_chase_overridden
+            and live_trigger_reaction.get("accepted")
+            and market_bad_entry_class in LATE_CHASE_BLOCK_REASONS
+            and current_candle_ok
+            and not trap_active
+            and opposing_force_ok
+        )
     )
     history_exit_active = _bool(
         _mapping(snapshot.get("historical_pattern")).get("would_have_exited_here")
@@ -2766,8 +2935,8 @@ def evaluate_model_council_v3(
         and reasoning_decision_state in WAVE_REASONING_SOFT_WAIT_STATES
         and not reasoning_side_mismatch
         and not hard_bad_entry_class_active
-        and not bool(bad_entry_filter.get("active") and _clip01(bad_entry_filter.get("severity"), 0.0) >= 0.72)
-        and not bool(bad_entry.get("detected"))
+        and not bad_entry_filter_hard_active
+        and not bad_entry_detected_effective
         and not trap_active
         and not late_chase
         and not history_exit_active
@@ -2799,17 +2968,25 @@ def evaluate_model_council_v3(
         and not bool(high_frequency_contribution_for_override.get("lane_authority"))
         and _upper(high_frequency_cycle_for_override.get("lane")) == "HIGH_FREQUENCY_TWO_CANDLE"
     )
+    high_frequency_wait_blocks_intraday = bool(
+        high_frequency_soft_wait_only
+        and not (
+            bool(live_trigger_reaction.get("accepted"))
+            and lane_name in INTRADAY_ENTER_NOW_LANES
+            and timing_mode == "ENTER_NOW"
+        )
+    )
     intraday_enter_now_reasoning_override_allowed = bool(
         entry_now_allowed
         and timing_mode == "ENTER_NOW"
         and lane_name in INTRADAY_ENTER_NOW_LANES
         and bool(execution_lane.get("accepted"))
         and reasoning_decision_state in INTRADAY_ENTER_NOW_REASONING_SOFT_WAIT_STATES
-        and not high_frequency_soft_wait_only
+        and not high_frequency_wait_blocks_intraday
         and not reasoning_side_mismatch
         and not hard_bad_entry_class_active
-        and not bool(bad_entry_filter.get("active") and _clip01(bad_entry_filter.get("severity"), 0.0) >= 0.72)
-        and not bool(bad_entry.get("detected"))
+        and not bad_entry_filter_hard_active
+        and not bad_entry_detected_effective
         and not trap_active
         and not late_chase
         and not history_exit_active
@@ -2829,8 +3006,8 @@ def evaluate_model_council_v3(
     lane_market_override = bool(
         execution_lane.get("accepted")
         and market_block_reason
-        and market_block_reason in LANE_SOFT_MARKET_BLOCK_REASONS
-        and not bad_entry.get("detected")
+        and (market_block_reason in LANE_SOFT_MARKET_BLOCK_REASONS or late_chase_block_overridden)
+        and not bad_entry_detected_effective
         and not trap_active
     )
     market_blocked_effective = bool(market_blocked and not lane_market_override)
@@ -3183,14 +3360,20 @@ def evaluate_model_council_v3(
         "permission": permission_state,
         "permission_override_allowed": lane_permission_override,
         "market_block_override_allowed": lane_market_override,
+        "reasoning_decision_state": reasoning_decision_state,
         "reasoning_execution_blocked": reasoning_execution_blocked,
         "reasoning_block_reason": reasoning_block_reason,
         "intraday_enter_now_reasoning_override_allowed": intraday_enter_now_reasoning_override_allowed,
         "high_frequency_soft_wait_only": high_frequency_soft_wait_only,
+        "high_frequency_wait_blocks_intraday": high_frequency_wait_blocks_intraday,
         "wave_reasoning_override_allowed": wave_reasoning_override_allowed,
         "reasoning_bad_entry_class": reasoning_bad_entry_class,
         "market_bad_entry_class": market_bad_entry_class,
+        "bad_entry_detected_effective": bad_entry_detected_effective,
+        "bad_entry_filter_hard_active": bad_entry_filter_hard_active,
         "hard_bad_entry_class_active": hard_bad_entry_class_active,
+        "late_chase_block_overridden": late_chase_block_overridden,
+        "late_chase_bad_entry_override_allowed": late_chase_bad_entry_override_allowed,
         "denied_at": (
             true_blocker
             if true_blocker != "NONE"
@@ -3212,6 +3395,10 @@ def evaluate_model_council_v3(
         "lane_accepted": bool(execution_lane.get("accepted")),
         "accepted_lanes": execution_lane.get("accepted_lanes", []),
         "stale_dominant_overridden": bool(execution_lane.get("stale_dominant_overridden")),
+        "raw_late_chase": bool(execution_lane.get("raw_late_chase", late_chase_raw)),
+        "effective_late_chase": bool(execution_lane.get("effective_late_chase", late_chase)),
+        "stale_late_chase_overridden": stale_late_chase_overridden,
+        "live_trigger_reaction": live_trigger_reaction,
         "structural_flow_ready": bool(execution_lane.get("structural_flow_ready")),
         "reversal_capture_mature": bool(execution_lane.get("reversal_capture_mature")),
         "mature_directional_flow_ready": bool(execution_lane.get("mature_directional_flow_ready")),

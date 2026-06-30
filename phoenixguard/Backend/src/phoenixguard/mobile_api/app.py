@@ -334,6 +334,27 @@ _DIRECT_DISPLAY_STATE_NONEMPTY_STRING_KEYS = frozenset(
         "overlay_source_study_signature",
     }
 )
+_DIRECT_DISPLAY_STATE_PARTIAL_FRAME_KEYS = frozenset(
+    {
+        "session_id",
+        "capture_count",
+        "display_frame_id",
+        "display_capture_epoch",
+        "display_published_epoch",
+        "display_heartbeat_epoch",
+        "last_display_capture_epoch",
+        "last_display_published_epoch",
+        "last_display_window_path",
+        "last_display_surface_signature",
+        "last_window_surface_signature",
+        "display_snapshot_only_v3",
+        "display_fast_path_v3",
+        "display_busy_reuse_heartbeat_v3",
+        "display_reuse_only_heartbeat_v3",
+        "frame_bundle_complete_v3",
+        "frame_bundle_pending_reason_v3",
+    }
+)
 
 
 def _atomic_display_state_required_v3() -> bool:
@@ -814,8 +835,7 @@ def _merge_direct_window_tracker_display_state(
     payload_epoch = _epoch_float(payload.get("display_published_epoch") or payload.get("last_capture_epoch"), 0.0)
     if display_frame <= 0:
         return payload
-    if not _display_state_frame_bundle_complete_v3(display_state):
-        return payload
+    display_bundle_complete = _display_state_frame_bundle_complete_v3(display_state)
     if display_frame < payload_frame:
         return payload
     if display_frame == payload_frame and display_epoch + 0.001 < payload_epoch:
@@ -830,6 +850,8 @@ def _merge_direct_window_tracker_display_state(
     study_signature = str(display_state.get("last_study_surface_signature") or "").strip()
     for key, value in display_state.items():
         if key in _DIRECT_DISPLAY_STATE_KEYS:
+            if not display_bundle_complete and key not in _DIRECT_DISPLAY_STATE_PARTIAL_FRAME_KEYS:
+                continue
             if key in _DIRECT_DISPLAY_STATE_NONEMPTY_STRING_KEYS:
                 value_text = str(value or "").strip()
                 if not value_text:

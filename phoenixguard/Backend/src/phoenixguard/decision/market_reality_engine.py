@@ -5,6 +5,14 @@ from typing import Any, Mapping, Sequence, cast
 
 PG_MARKET_REALITY_ENGINE_VERSION = "PG_MARKET_REALITY_ENGINE_V1"
 ACCEPTABLE_ENTRY = "ACCEPTABLE_ENTRY"
+LIVE_TRIGGER_ENTRY_STATES = {"SNIPER_READY", "TRIGGER_READY", "TRIGGERED", "ACTIVE", "EXECUTE"}
+LIVE_REACTION_TIMING_CLASSES = {
+    "MEASURED_REACTION_WINDOW",
+    "OPPOSING_FORCE_REACTION",
+    "FAILED_RETEST_REACTION",
+    "SNIPER_REACTION",
+    "HIGH_FREQUENCY_TWO_CANDLE_CYCLE",
+}
 
 ENTRY_QUALITY_RANKS = {
     "UNACCEPTABLE_ENTRY": 0,
@@ -127,6 +135,64 @@ def _nested(snapshot: Mapping[str, Any], *names: str) -> dict[str, Any]:
     return {}
 
 
+def _first_text_from(*containers: Mapping[str, Any], names: Sequence[str]) -> str:
+    for container in containers:
+        for name in names:
+            text = str(container.get(name) or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _measured_trigger_reaction_confirmed(snapshot: Mapping[str, Any], side: str) -> bool:
+    resolved_side = _side(side)
+    if resolved_side not in {"BUY", "SELL"}:
+        return False
+    latest_signal = _mapping(snapshot.get("latest_signal"))
+    tracking = _mapping(snapshot.get("tracking_summary"))
+    timing = _mapping(snapshot.get("execution_timing") or snapshot.get("timing_signal") or snapshot.get("timing"))
+    candle = _mapping(
+        snapshot.get("current_candle_acceptance")
+        or snapshot.get("current_candle_contract")
+        or snapshot.get("current_candle")
+        or latest_signal.get("current_candle_acceptance")
+        or tracking.get("current_candle_acceptance")
+    )
+    trigger_side = _side(
+        _first_text_from(
+            latest_signal,
+            tracking,
+            timing,
+            snapshot,
+            names=("execution_action", "action", "candidate_action", "side", "candidate_side"),
+        )
+    )
+    entry_state = _upper(
+        _first_text_from(
+            latest_signal,
+            tracking,
+            timing,
+            snapshot,
+            names=("entry_state", "setup_state", "trigger_state", "trigger", "decision_state", "state"),
+        )
+    )
+    timing_class = _upper(_first_text_from(timing, latest_signal, tracking, names=("timing_class", "class")))
+    timing_state = _upper(_first_text_from(timing, names=("state", "entry_state", "timing_state")))
+    candle_allowed = bool(
+        _bool(candle.get("entry_allowed"))
+        and not _bool(candle.get("too_late"))
+        and not _bool(candle.get("wick_reversal_risk"))
+    )
+    timing_allowed = _bool(timing.get("entry_allowed") or latest_signal.get("actionable") or tracking.get("actionable"))
+    return bool(
+        trigger_side == resolved_side
+        and entry_state in LIVE_TRIGGER_ENTRY_STATES
+        and (timing_class in LIVE_REACTION_TIMING_CLASSES or timing_state in {"READY", "TRIGGER_READY", "SNIPER_READY"})
+        and (timing_allowed or timing_class in LIVE_REACTION_TIMING_CLASSES)
+        and candle_allowed
+    )
+
+
 def _extract_side(snapshot: Mapping[str, Any], side: str | None, market_inputs: Mapping[str, Any]) -> str:
     resolved = _side(side)
     if resolved in {"BUY", "SELL"}:
@@ -189,6 +255,7 @@ def _entry_quality(
     history = _mapping(market_inputs.get("history_context") or snapshot.get("history_context") or snapshot.get("historical_pattern"))
     risk = _mapping(market_inputs.get("risk_context") or snapshot.get("risk_context") or snapshot.get("risk_opposing_force"))
     bad_entry = _mapping(market_inputs.get("bad_entry") or snapshot.get("bad_entry"))
+    measured_trigger_reaction = _measured_trigger_reaction_confirmed(snapshot, side)
 
     if explicit_state:
         canonical = ENTRY_QUALITY_CANONICAL.get(explicit_state, explicit_state)
@@ -208,14 +275,15 @@ def _entry_quality(
             or snapshot.get("continuation_confirmed")
             or snapshot.get("pullback_confirmed")
             or snapshot.get("retest_confirmed")
+            or measured_trigger_reaction
         )
         history_good = _upper(history.get("historical_entry_quality")) in {"GOOD", "GOOD_ENTRY", "ACCEPTABLE", "ACCEPTABLE_ENTRY"}
         late_or_bad = bool(
             trap_detected
-            or _bool(bad_entry.get("detected"))
-            or _bool(classifiers.get("late_chase_after_impulse"))
-            or _bool(market_context.get("is_late_chase"))
-            or _bool(angle.get("late_chase_risk"))
+            or (_bool(bad_entry.get("detected")) and not measured_trigger_reaction)
+            or (_bool(classifiers.get("late_chase_after_impulse")) and not measured_trigger_reaction)
+            or (_bool(market_context.get("is_late_chase")) and not measured_trigger_reaction)
+            or (_bool(angle.get("late_chase_risk")) and not measured_trigger_reaction)
             or _bool(classifiers.get("history_would_exit_here"))
             or _bool(market_context.get("history_would_exit_here"))
         )
@@ -272,15 +340,22 @@ def _market_trap(snapshot: Mapping[str, Any], market_inputs: Mapping[str, Any]) 
     market_context = _mapping(market_inputs.get("market_context") or snapshot.get("market_context"))
     angle = _mapping(market_inputs.get("angle_context") or snapshot.get("angle_context") or snapshot.get("angle_features") or snapshot.get("angle_dynamics"))
     history = _mapping(market_inputs.get("history_context") or snapshot.get("history_context") or snapshot.get("historical_pattern"))
+    measured_trigger_reaction = _measured_trigger_reaction_confirmed(
+        snapshot,
+        _extract_side(snapshot, None, market_inputs),
+    )
 
     explicit_type = _upper(explicit.get("trap_type") or explicit.get("type") or explicit.get("state"))
     explicit_detected = _bool(explicit.get("detected") or explicit.get("trap_detected"))
     if explicit_type in {"NONE", "CLEAR", "NO_TRAP"}:
         explicit_detected = False
     late_chase = bool(
-        _bool(classifiers.get("late_chase_after_impulse"))
-        or _bool(market_context.get("is_late_chase"))
-        or _bool(angle.get("late_chase_risk"))
+        not measured_trigger_reaction
+        and (
+            _bool(classifiers.get("late_chase_after_impulse"))
+            or _bool(market_context.get("is_late_chase"))
+            or _bool(angle.get("late_chase_risk"))
+        )
     )
     false_breakout = bool(_bool(classifiers.get("false_breakout_risk")) or _bool(market_context.get("false_breakout_risk")))
     history_exit = bool(_bool(classifiers.get("history_would_exit_here")) or _bool(history.get("would_have_exited_here")))

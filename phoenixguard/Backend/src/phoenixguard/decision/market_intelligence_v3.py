@@ -19,6 +19,14 @@ from phoenixguard.memory.visual_play_memory_bank import analyze_visual_play_memo
 BAD_ENTRY_CLASS_001 = "LATE_CHASE_STEEP_IMPULSE"
 PG_MARKET_INTELLIGENCE_VERSION = "PG_MARKET_INTELLIGENCE_V3"
 MARKET_CLASSIFIERS_VERSION = "PG_MARKET_CLASSIFIERS_V1"
+LIVE_TRIGGER_ENTRY_STATES = {"SNIPER_READY", "TRIGGER_READY", "TRIGGERED", "ACTIVE", "EXECUTE"}
+LIVE_REACTION_TIMING_CLASSES = {
+    "MEASURED_REACTION_WINDOW",
+    "OPPOSING_FORCE_REACTION",
+    "FAILED_RETEST_REACTION",
+    "SNIPER_REACTION",
+    "HIGH_FREQUENCY_TWO_CANDLE_CYCLE",
+}
 MARKET_CLASSIFIER_NAMES = (
     "late_chase_after_impulse",
     "near_opposing_force",
@@ -119,6 +127,75 @@ def _nested_mapping(snapshot: Mapping[str, Any], *names: str) -> dict[str, Any]:
         if candidate:
             return candidate
     return {}
+
+
+def _first_text_from(*containers: Mapping[str, Any], names: Sequence[str]) -> str:
+    for container in containers:
+        for name in names:
+            text = str(container.get(name) or "").strip()
+            if text:
+                return text
+    return ""
+
+
+def _measured_trigger_reaction_confirmed(snapshot: Mapping[str, Any], side: str) -> bool:
+    resolved_side = _side(side)
+    if resolved_side not in {"BUY", "SELL"}:
+        return False
+    latest_signal = _mapping(snapshot.get("latest_signal"))
+    tracking = _mapping(snapshot.get("tracking_summary"))
+    execution_timing = _mapping(snapshot.get("execution_timing") or snapshot.get("timing_signal") or snapshot.get("timing"))
+    candle = _mapping(
+        snapshot.get("current_candle_acceptance")
+        or snapshot.get("current_candle_contract")
+        or snapshot.get("current_candle")
+        or latest_signal.get("current_candle_acceptance")
+        or tracking.get("current_candle_acceptance")
+    )
+    trigger_side = _side(
+        _first_text_from(
+            latest_signal,
+            tracking,
+            execution_timing,
+            snapshot,
+            names=("execution_action", "action", "candidate_action", "side", "candidate_side"),
+        )
+    )
+    entry_state = _upper_text(
+        _first_text_from(
+            latest_signal,
+            tracking,
+            execution_timing,
+            snapshot,
+            names=("entry_state", "setup_state", "trigger_state", "trigger", "decision_state", "state"),
+        )
+    )
+    timing_class = _upper_text(
+        _first_text_from(
+            execution_timing,
+            latest_signal,
+            tracking,
+            names=("timing_class", "class"),
+        )
+    )
+    timing_state = _upper_text(_first_text_from(execution_timing, names=("state", "entry_state", "timing_state")))
+    candle_allowed = bool(
+        _bool(candle.get("entry_allowed"))
+        and not _bool(candle.get("too_late"))
+        and not _bool(candle.get("wick_reversal_risk"))
+    )
+    timing_allowed = _bool(
+        execution_timing.get("entry_allowed")
+        or latest_signal.get("actionable")
+        or tracking.get("actionable")
+    )
+    return bool(
+        trigger_side == resolved_side
+        and entry_state in LIVE_TRIGGER_ENTRY_STATES
+        and (timing_class in LIVE_REACTION_TIMING_CLASSES or timing_state in {"READY", "TRIGGER_READY", "SNIPER_READY"})
+        and (timing_allowed or timing_class in LIVE_REACTION_TIMING_CLASSES)
+        and candle_allowed
+    )
 
 
 def _candle_value(row: Mapping[str, Any], *names: str, default: float = 0.0) -> float:
@@ -571,8 +648,11 @@ def classify_market_conditions(snapshot: Mapping[str, Any], side: str = "HOLD") 
         or snapshot.get("continuation_confirmed")
         or market_context.get("is_continuation_confirmed")
     )
+    measured_trigger_reaction = _measured_trigger_reaction_confirmed(snapshot, resolved_side)
     continuation_probability = _clip01(snapshot.get("continuation_probability"), _clip01(market_context.get("continuation_probability"), 0.0))
     if continuation_probability >= 0.56:
+        pullback_confirmed = True
+    if measured_trigger_reaction:
         pullback_confirmed = True
 
     late_chase = bool(
@@ -810,7 +890,10 @@ def detect_bad_entry_class(snapshot: Mapping[str, Any], side: str = "HOLD") -> d
     risk = risk_opposing_force_agent(snapshot, side)
     zone = zone_liquidity_agent(snapshot)
     market_classifiers = classify_market_conditions(snapshot, side)
-    pullback_confirmed = _bool(snapshot.get("pullback_confirmed") or snapshot.get("retest_confirmed"))
+    pullback_confirmed = bool(
+        _bool(snapshot.get("pullback_confirmed") or snapshot.get("retest_confirmed"))
+        or _measured_trigger_reaction_confirmed(snapshot, side)
+    )
     valid_reentry = bool(zone["inside_valid_trigger_zone"]) and pullback_confirmed
     steep_no_pullback = bool(angle["late_chase_risk"] or angle["post_impulse_wait_required"]) and not valid_reentry
     history_blocks = not bool(history["executable_vote"])

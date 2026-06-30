@@ -172,20 +172,10 @@ def _live_fast_display_heartbeat(
     if now - float(last_heartbeat_epoch or 0.0) < interval_sec:
         return last_heartbeat_epoch
     resolved_script_dir = script_dir or PROJECT_ROOT
-    file_thread_enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "1") or "1").strip().lower() not in {
-        "0",
-        "false",
-        "off",
-        "no",
-    }
-    if file_thread_enabled and _display_state_has_locked_window(resolved_script_dir, session_id):
-        return now
-    if _live_fast_display_file_heartbeat(resolved_script_dir, session_id, now_epoch=now):
-        return now
     try:
-        timeout_sec = max(0.2, float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC", "1.0") or "1.0"))
+        timeout_sec = max(0.2, float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC", "4.0") or "4.0"))
     except ValueError:
-        timeout_sec = 1.0
+        timeout_sec = 4.0
     try:
         _request_json(
             base_url,
@@ -195,7 +185,10 @@ def _live_fast_display_heartbeat(
         )
         return now
     except Exception:
+        pass
+    if _live_fast_display_file_heartbeat(resolved_script_dir, session_id, now_epoch=now):
         return now
+    return now
 
 
 def _parse_focus_region(raw: str | None) -> list[float] | None:
@@ -351,7 +344,7 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _live_fast_display_file_heartbeat(script_dir: Path, session_id: str, *, now_epoch: float) -> bool:
-    enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "1") or "1").strip().lower()
+    enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "0") or "0").strip().lower()
     if enabled in {"0", "false", "off", "no"}:
         return False
     path = _display_state_path(script_dir, session_id)
@@ -430,7 +423,7 @@ def _display_state_has_locked_window(script_dir: Path, session_id: str) -> bool:
 
 
 def _start_live_fast_display_file_heartbeat_thread(script_dir: Path, session_id: str) -> threading.Event | None:
-    enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "1") or "1").strip().lower()
+    enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "0") or "0").strip().lower()
     if enabled in {"0", "false", "off", "no"}:
         return None
     stop_event = threading.Event()
@@ -839,9 +832,10 @@ def main() -> int:
     os.environ.setdefault("PHOENIXGUARD_FRONTEND_HEARTBEAT_STALE_SEC", "45.0")
     os.environ.setdefault("PHOENIXGUARD_CAPTURE_ONCE_FAST_DISPLAY", "1")
     os.environ.setdefault("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1")
-    os.environ.setdefault("PHOENIXGUARD_DISPLAY_REUSE_IDENTICAL_SURFACE", "1")
-    os.environ.setdefault("PHOENIXGUARD_DISPLAY_BUSY_REUSE_HEARTBEAT", "1")
-    os.environ.setdefault("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "1")
+    os.environ.setdefault("PHOENIXGUARD_DISPLAY_REUSE_IDENTICAL_SURFACE", "0")
+    os.environ.setdefault("PHOENIXGUARD_DISPLAY_BUSY_REUSE_HEARTBEAT", "0")
+    os.environ.setdefault("PHOENIXGUARD_DISPLAY_REUSE_ONLY_HEARTBEAT", "0")
+    os.environ.setdefault("PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB", "1")
     os.environ.setdefault("PHOENIXGUARD_DISPLAY_SNAPSHOT_STALE_RESET_SEC", "30.0")
     os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_POLL_SEC", "15.0")
     os.environ.setdefault("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC", "1.0")

@@ -774,14 +774,7 @@ def capture_entry_evidence(
         stamp = int(float(sample.get("captured_epoch") or time.time()) * 1000.0)
         evidence_kind = "entry_marker_unresolved" if entry_allowed else "blocked_enter_now_marker_unresolved"
         stem = f"{seq:05d}_{frame:06d}_{stamp}_{entry_side.lower()}_{evidence_kind}"
-        failure_overlay = evidence_dir / f"{stem}_overlay.jpg"
-        failure_broker = evidence_dir / f"{stem}_broker.jpg"
         failure_json = evidence_dir / f"{stem}.json"
-        failure_label = "ENTRY MARKER UNRESOLVED | NO FALLBACK"
-        warning_point = (max(24, overlay_image.size[0] - 240), max(24, overlay_image.size[1] // 2))
-        broker_warning_point = (max(24, window_image.size[0] - 240), max(24, window_image.size[1] // 2))
-        save_jpeg(annotate(overlay_image, entry_side, warning_point, failure_label, status_label=evidence_status_label), failure_overlay)
-        save_jpeg(annotate(window_image, entry_side, broker_warning_point, failure_label, status_label=evidence_status_label), failure_broker)
         meta: dict[str, Any] = {
             "schema_version": "PG_ENTRY_ALLOWANCE_EVIDENCE_V1",
             "seq": seq,
@@ -800,8 +793,9 @@ def capture_entry_evidence(
             "window_source_mode": window_source_mode,
             "overlay_freshness": overlay_freshness,
             "window_freshness": window_freshness,
-            "overlay_evidence_path": str(failure_overlay),
-            "broker_evidence_path": str(failure_broker),
+            "overlay_evidence_path": "",
+            "broker_evidence_path": "",
+            "evidence_images_written": False,
         }
         write_json(failure_json, meta)
         return meta
@@ -1986,7 +1980,7 @@ def main() -> int:
     raw_dir = out_dir / "raw"
     started = time.time()
     end = started + max(1.0, float(args.duration_sec))
-    capture_blocked_enter_now = os.getenv("PHOENIXGUARD_BURN_CAPTURE_BLOCKED_ENTER_NOW", "1") != "0"
+    capture_blocked_enter_now = os.getenv("PHOENIXGUARD_BURN_CAPTURE_BLOCKED_ENTER_NOW", "0") != "0"
     write_json(
         out_dir / "baseline.json",
         {
@@ -2044,7 +2038,11 @@ def main() -> int:
             enter_now_observation = bool(entry.get("entry_now_allowed")) and bool(entry.get("lane_accepted"))
             if enter_now_observation:
                 enter_now_observations += 1
-            allowed_observation = bool(entry.get("allowed"))
+            allowed_observation = bool(
+                entry.get("allowed")
+                and entry.get("execution_authorized")
+                and entry.get("packet_present")
+            )
             manual_alert = manual_entry_rearm_decision(entry, sample, manual_rearm_state, loop_started)
             sample["entry"]["manual_alert_allowed"] = bool(manual_alert.get("allowed"))
             sample["entry"]["manual_alert_suppressed"] = bool(manual_alert.get("suppressed"))
@@ -2060,7 +2058,7 @@ def main() -> int:
             entry = mapping(sample.get("entry"))
             append_jsonl(samples_path, sample)
             blocked_enter_now_observation = bool(capture_blocked_enter_now and enter_now_observation and not allowed_observation)
-            should_capture_evidence = bool(manual_alert.get("allowed")) or blocked_enter_now_observation
+            should_capture_evidence = allowed_observation or bool(manual_alert.get("allowed")) or blocked_enter_now_observation
             packet_episode_id = str(entry.get("packet_id") or "") if allowed_observation else ""
             alert_episode_id = text(manual_alert.get("key"))
             entry_key = "|".join(

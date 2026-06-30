@@ -52,6 +52,16 @@ STACK_PROCESS_NAMES = {
     "pythonw.exe",
 }
 
+NON_STACK_COMMAND_TOKENS = (
+    "\\.vscode\\extensions\\",
+    "\\microsoft python language server\\",
+    "\\pylance\\",
+    "lsp_server.py",
+    "pyright-langserver",
+    "ruff server",
+    "isort-",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ProcessRow:
@@ -164,6 +174,8 @@ def is_stack_process(row: ProcessRow, *, repo_root: Path, ancestor_pids: set[int
         return False
     command = _norm(row.command_line)
     if not command:
+        return False
+    if any(token in command for token in NON_STACK_COMMAND_TOKENS):
         return False
     token_match = any(token in command for token in KNOWN_STACK_TOKENS)
     if token_match:

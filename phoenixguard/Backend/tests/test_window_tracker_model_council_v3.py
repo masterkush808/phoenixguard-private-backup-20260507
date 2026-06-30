@@ -1093,6 +1093,149 @@ def test_actionable_broker_timing_becomes_model_council_execution_evidence(tmp_p
     assert packet["trade_permission"]["permission_state"] == "GRANTED"
 
 
+def test_measured_trigger_reaction_overrides_stale_late_chase_block(tmp_path: Path) -> None:
+    execution_backend = _FakeExecutionBackend()
+    service = _service(tmp_path, execution_backend)
+    payload: dict[str, Any] = {
+        "session_id": "pocket-live-8788",
+        "execution_controls": {
+            "live_execution_enabled": True,
+            "execution_mode": "live",
+            "allow_locked_surface_identity_fallback": True,
+            "swing_fallback_enabled": True,
+        },
+        "manual_focus_region": {"enabled": True, "pixel_bbox": [10, 20, 600, 380]},
+        "locked_window": {"hwnd": 123, "title": "Pocket Option", "bbox": [0, 0, 640, 420], "width": 640, "height": 420},
+        "broker_surface": {"controls_ready": True, "broker_surface_hash": "surface-a"},
+        "broker_execution_state": {
+            "status": "blocked_by_runtime",
+            "side": "SELL",
+            "lane": "TREND_FOLLOW",
+            "actionable": False,
+            "expiry_seconds": 900,
+            "execution_timing": {
+                "side": "SELL",
+                "candidate_side": "SELL",
+                "lane": "TREND_FOLLOW",
+                "state": "READY",
+                "entry_allowed": True,
+                "timing_class": "measured_reaction_window",
+                "entry_area_score": 1.0,
+                "opposing_force_risk": 0.12,
+                "clear_path_score": 0.78,
+                "p_target_before_invalidation": 0.72,
+                "p_trigger_next_1": 0.68,
+                "expiry_seconds": 900,
+                "recommended_expiry_seconds": 900,
+                "rationale": "Measured SELL reaction is underway at the accepted candle.",
+            },
+        },
+    }
+
+    snapshot = _build_model_council_v3_snapshot(
+        service,
+        payload=payload,
+        tracking_summary={
+            "detected_market": "",
+            "detected_timeframe": "M5",
+            "market_context": {
+                "dominant_side": "SELL",
+                "global_side": "SELL",
+                "local_side": "SELL",
+                "inside_valid_trigger_zone": True,
+                "opposing_force_distance_ok": True,
+                "is_late_chase": True,
+                "current_location": "SUPPLY_REACTION",
+            },
+        },
+        latest_signal={
+            "action": "SELL",
+            "candidate_action": "SELL",
+            "execution_action": "SELL",
+            "entry_state": "TRIGGER_READY",
+            "confidence": 0.86,
+            "effective_confidence": 0.86,
+            "focus_timeframe": "M5",
+            "execution_lane": "TREND_FOLLOW",
+            "current_candle_acceptance": {
+                "phase": "REJECTION",
+                "entry_allowed": True,
+                "too_late": False,
+                "wick_reversal_risk": False,
+                "close_progress": 0.58,
+            },
+            "angle_context": {
+                "angle_class": "STEEP_IMPULSE",
+                "late_chase_risk": True,
+                "post_impulse_wait_required": True,
+            },
+        },
+        frame_index=423,
+        capture_count=423,
+        input_frame_hash="measured-sell-a",
+        capture_started_epoch=1000.0,
+    )
+    snapshot["market_context"]["is_continuation_confirmed"] = True
+    snapshot["market_context"]["dominance_strengthening"] = True
+    snapshot["angle_context"] = {
+        "angle_class": "STEEP_IMPULSE",
+        "late_chase_risk": True,
+        "post_impulse_wait_required": True,
+    }
+    snapshot["angle_features"] = dict(snapshot["angle_context"])
+    snapshot["current_candle_acceptance"] = {
+        "phase": "REJECTION",
+        "entry_allowed": True,
+        "too_late": False,
+        "wick_reversal_risk": False,
+        "close_progress": 0.58,
+    }
+    measured_timing = dict(payload["broker_execution_state"]["execution_timing"])
+    snapshot["execution_timing"] = measured_timing
+    snapshot["timing"] = measured_timing
+    snapshot["timing_signal"] = measured_timing
+    snapshot["latest_signal"]["execution_timing"] = measured_timing
+    snapshot["tracking_summary"]["execution_timing"] = measured_timing
+    snapshot["latest_signal"]["entry_state"] = "TRIGGER_READY"
+    snapshot["latest_signal"]["execution_action"] = "SELL"
+    snapshot["tracking_summary"]["entry_state"] = "TRIGGER_READY"
+    snapshot["tracking_summary"]["execution_action"] = "SELL"
+    snapshot["risk_opposing_force"] = {
+        "side": "SELL",
+        "distance_to_opposing_force": 0.42,
+        "minimum_required_distance": 0.20,
+        "distance_ok": True,
+    }
+    snapshot["sequence_length"] = 50
+    snapshot["frames_used"] = 50
+    snapshot["frames_received"] = 50
+    snapshot["sequence_confidence"] = 0.92
+    snapshot["sequence_status"] = "COMPLETE"
+    snapshot["historical_structure"] = [{"key": "history_sell", "label": "H1 SELL", "bbox": [10, 20, 120, 180], "direction": "SELL"}]
+    snapshot["progression"] = [{"stage": "measured_reaction", "direction": "SELL", "confidence": 0.86}]
+    snapshot["entry_progression"] = {
+        "progression_stage": "TRIGGER_READY",
+        "maturity_score": 0.86,
+        "continuation_strength": 0.78,
+    }
+
+    council = ModelCouncilV3()
+    first = council.evaluate(snapshot, now_epoch=1000.0)
+    assert first["execution"]["enabled"] is False
+    second = dict(snapshot)
+    second["frame_id"] = 424
+    second["capture_count"] = 424
+    second["state_version"] = int(snapshot["state_version"]) + 1
+    second["input_frame_hash"] = "measured-sell-b"
+    packet = council.evaluate(second, now_epoch=1000.5)
+
+    assert packet["execution"]["enabled"] is True
+    assert packet["execution"]["side"] == "SELL"
+    assert packet["promotion_trace"]["stale_late_chase_overridden"] is True
+    assert packet["promotion_trace"]["live_trigger_reaction"]["accepted"] is True
+    assert packet["promotion_trace"]["effective_late_chase"] is False
+
+
 def test_near_trigger_kernel_candidate_becomes_model_council_execution_evidence(tmp_path: Path) -> None:
     execution_backend = _FakeExecutionBackend()
     service = _service(tmp_path, execution_backend)
