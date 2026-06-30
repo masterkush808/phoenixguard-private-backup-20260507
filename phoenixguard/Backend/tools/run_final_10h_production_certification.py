@@ -118,18 +118,45 @@ def _append_jsonl(path: Path, payload: Mapping[str, object]) -> None:
         handle.write(json.dumps(dict(payload), ensure_ascii=True, allow_nan=False, separators=(",", ":")) + "\n")
 
 
+def _replace_with_retry(tmp_path: Path, path: Path) -> None:
+    last_error: OSError | None = None
+    for attempt in range(12):
+        try:
+            tmp_path.replace(path)
+            return
+        except OSError as exc:
+            last_error = exc
+            if isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in {5, 32}:
+                time.sleep(min(0.5, 0.05 * (attempt + 1)))
+                continue
+            raise
+    raise last_error or PermissionError(f"Unable to replace {path}")
+
+
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
-    tmp_path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True, ensure_ascii=True, default=str), encoding="utf-8")
-    tmp_path.replace(path)
+    try:
+        tmp_path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True, ensure_ascii=True, default=str), encoding="utf-8")
+        _replace_with_retry(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
-    tmp_path.write_text(content, encoding="utf-8")
-    tmp_path.replace(path)
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        _replace_with_retry(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _get_json(url: str, timeout_sec: float) -> EndpointResult:
