@@ -78,31 +78,40 @@ def test_dashboard_capture_retention_prunes_old_timestamp_bundles(tmp_path: Path
 def test_dashboard_capture_probe_does_not_publish_frontend_heartbeat(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        dashboard_capture,
-        "_resolve_capture_context",
-        lambda *_args, **_kwargs: {
+    def fake_resolve_capture_context(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
             "route": "live",
             "backend_mode": "CLEAN_LIVE",
             "select_value": "clean_live",
             "expected_renderable_count": 0,
-        },
-    )
-    monkeypatch.setattr(
-        dashboard_capture,
-        "_http_bytes",
-        lambda *_args, **_kwargs: {
+        }
+
+    def fake_http_bytes(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
             "ok": True,
             "status": 200,
             "bytes": 13,
             "content_type": "text/html",
             "body": b"<html></html>",
-        },
+        }
+
+    def fake_http_json(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"ok": True, "status": 200, "payload": {"renderable_count": 0}}
+
+    monkeypatch.setattr(
+        dashboard_capture,
+        "_resolve_capture_context",
+        fake_resolve_capture_context,
+    )
+    monkeypatch.setattr(
+        dashboard_capture,
+        "_http_bytes",
+        fake_http_bytes,
     )
     monkeypatch.setattr(
         dashboard_capture,
         "_http_json",
-        lambda *_args, **_kwargs: {"ok": True, "status": 200, "payload": {"renderable_count": 0}},
+        fake_http_json,
     )
 
     report = dashboard_capture.build_capture(
@@ -146,7 +155,7 @@ def test_dashboard_capture_active_heartbeat_prefers_live_truth_source(tmp_path: 
     (tmp_path / f"{session}__dashboard_live.json").write_text(json.dumps(live), encoding="utf-8")
     (tmp_path / f"{session}__dashboard_replay_replay.json").write_text(json.dumps(replay), encoding="utf-8")
 
-    selected = dashboard_capture._latest_active_dashboard_heartbeat(session)
+    selected = dashboard_capture.latest_active_dashboard_heartbeat(session)
 
     assert selected["route"] == "live"
     assert selected["overlay_mode"] == "CLEAN_LIVE"
@@ -170,7 +179,7 @@ def test_dashboard_capture_active_heartbeat_does_not_promote_replay_without_live
     }
     (tmp_path / f"{session}__dashboard_replay_replay.json").write_text(json.dumps(replay), encoding="utf-8")
 
-    selected = dashboard_capture._latest_active_dashboard_heartbeat(session)
+    selected = dashboard_capture.latest_active_dashboard_heartbeat(session)
 
     assert selected == {}
 

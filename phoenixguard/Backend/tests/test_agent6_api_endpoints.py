@@ -17,6 +17,14 @@ def test_registry_active_endpoint(tmp_path: Path):
     payload = resp.json()
     assert payload.get("session_id") == session
     assert payload.get("count", 0) >= 1
+    assert payload.get("legacy_active_count", 0) >= 1
+    assert payload.get("precision_count") == 0
+
+    precision_resp = client.get(f"/v1/mobile/registry/sessions/{session}/active?precision_only=true")
+    assert precision_resp.status_code == 200
+    precision_payload = precision_resp.json()
+    assert precision_payload.get("count") == 0
+    assert precision_payload.get("precision_only") is True
 
 
 def test_visual_health_endpoint(tmp_path: Path):

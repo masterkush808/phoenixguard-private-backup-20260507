@@ -34,6 +34,17 @@ PROMOTION_FAILURE_AUDIT_SCHEMA_VERSION = "PG_PROMOTION_FAILURE_AUDIT_V3"
 ALLOWANCE_PACKAGE_SCHEMA_VERSION = "PG_ALLOWANCE_PACKAGE_V1"
 ALLOWANCE_PACKAGE_SWING = "SWING"
 ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW = "INTRADAY_ENTER_NOW"
+OPPORTUNITY_MATURITY_SCHEMA_VERSION = "PG_OPPORTUNITY_MATURITY_V3"
+OPPORTUNITY_MATURITY_STATES = {
+    "NO_OPPORTUNITY",
+    "EARLY_FORMING",
+    "VALID_WATCH",
+    "PREPARE",
+    "ENTER_NOW",
+    "LATE_CHASE",
+    "INVALIDATED",
+    "MISSED",
+}
 COUNCIL_STATES = {
     "NO_SETUP",
     "BUY_OBSERVATION",
@@ -576,6 +587,217 @@ def _maturity_stage(snapshot: Mapping[str, Any], side: str, market: Mapping[str,
     return "EXECUTION_MATURITY"
 
 
+def _opportunity_maturity_v3(
+    *,
+    candidate_side: str,
+    runtime_blocked: bool,
+    candidate_invalidated: bool,
+    side_ok: bool,
+    context_ok: bool,
+    lane_effective_timing_ready: bool,
+    lane_effective_mature: bool,
+    stable: bool,
+    final_score_passed: bool,
+    timing_has_explicit_expiry: bool,
+    timing_mode: str,
+    entry_now_allowed: bool,
+    current_candle_ok: bool,
+    trap_active: bool,
+    late_chase: bool,
+    opposing_force_ok: bool,
+    path_class: str,
+    reasoning_execution_blocked: bool,
+    reasoning_block_reason: str,
+    hard_bad_entry_class_active: bool,
+    bad_entry_filter_hard_active: bool,
+    bad_entry_detected_effective: bool,
+    history_exit_active: bool,
+    permission_denied_effective: bool,
+    permission_prepare_allowed: bool,
+    final_execution_score: float,
+    lane_required_score: float,
+    execution_lane: Mapping[str, Any],
+    release_condition: str = "",
+    next_required: str = "",
+) -> dict[str, Any]:
+    blockers: list[dict[str, Any]] = []
+    soft_pressure: list[dict[str, Any]] = []
+
+    def add_blocker(field: str, received: Any, required: Any, reason: str, *, hard: bool = False) -> None:
+        blockers.append(
+            {
+                "field": field,
+                "received": received,
+                "required": required,
+                "reason": reason,
+                "hard": bool(hard),
+            }
+        )
+
+    def add_soft(name: str, value: Any, effect: str) -> None:
+        soft_pressure.append({"name": name, "value": value, "effect": effect})
+
+    if runtime_blocked:
+        add_blocker("runtime", "blocked", "runtime_pass", "Hard runtime integrity is not clear.", hard=True)
+    if candidate_side not in {"BUY", "SELL"}:
+        add_blocker("candidate_side", candidate_side or "HOLD", "BUY or SELL", "No directional opportunity is mature enough.")
+    if candidate_invalidated:
+        add_blocker("candidate_invalidated", True, False, "The current candidate was invalidated.", hard=True)
+    if not context_ok:
+        add_blocker("execution_lane.accepted", False, True, str(execution_lane.get("reason") or "No accepted execution lane."))
+    if not lane_effective_mature:
+        add_blocker("candidate_maturity", False, True, "Candidate still needs mature/repeated confirmation.")
+    if not stable:
+        add_blocker("candidate_stability", False, True, "Candidate side/dominance is not stable enough.")
+    if not lane_effective_timing_ready or timing_mode != "ENTER_NOW":
+        add_blocker("timing_mode", timing_mode or "UNKNOWN", "ENTER_NOW", "Entry timing is not at the immediate-entry phase.")
+    if not timing_has_explicit_expiry:
+        add_blocker("timing.expiry_seconds", "missing", "explicit positive expiry", "Execution contract needs explicit expiry.", hard=True)
+    if not current_candle_ok:
+        add_blocker("current_candle.entry_allowed", False, True, "Current candle is not accepted for entry.")
+    if not final_score_passed:
+        add_blocker(
+            "final_execution_score",
+            round(float(final_execution_score), 4),
+            f">= {float(lane_required_score):.4f}",
+            "Lane score is below threshold.",
+        )
+    if trap_active:
+        add_blocker("market_trap", True, False, "Active trap blocks promotion.", hard=True)
+    if late_chase or path_class == "LATE_CHASE_REVERSAL_RISK":
+        add_blocker("late_chase", True, False, "Price is late/extended; do not chase.")
+    if not opposing_force_ok:
+        add_blocker("opposing_force_ok", False, True, "Opposing force is too close.")
+    if reasoning_execution_blocked:
+        add_blocker("reasoning_decision", reasoning_block_reason or "BLOCKED", "EXECUTE or soft override", "Reasoning layer is not released.")
+    if hard_bad_entry_class_active or bad_entry_filter_hard_active or bad_entry_detected_effective:
+        add_blocker(
+            "bad_entry_filter",
+            True,
+            False,
+            "Hard bad-entry class is active.",
+            hard=bool(hard_bad_entry_class_active or bad_entry_filter_hard_active),
+        )
+    if history_exit_active:
+        add_blocker("historical_pattern.would_have_exited_here", True, False, "History suggests this is an exit zone, not an entry.")
+    if permission_denied_effective and not permission_prepare_allowed:
+        add_blocker("trade_permission", "denied", "granted or prepare_allowed", "Trade permission hard-blocked.", hard=True)
+    elif permission_denied_effective:
+        add_soft("trade_permission", "prepare_only", "classification_reduced_to_prepare")
+
+    hard_blockers = [row for row in blockers if row.get("hard")]
+    score_gap = round(max(0.0, float(lane_required_score) - float(final_execution_score)), 4)
+    base_confidence = _clip01(float(final_execution_score) / max(0.01, float(lane_required_score)), 0.0)
+    confidence = _clip01(
+        base_confidence
+        - 0.10 * len(hard_blockers)
+        - 0.035 * max(0, len(blockers) - len(hard_blockers)),
+        0.0,
+    )
+
+    if candidate_invalidated or trap_active or hard_bad_entry_class_active or bad_entry_filter_hard_active or bad_entry_detected_effective:
+        state = "INVALIDATED"
+    elif late_chase or path_class == "LATE_CHASE_REVERSAL_RISK":
+        state = "LATE_CHASE"
+    elif not side_ok:
+        state = "NO_OPPORTUNITY"
+    elif runtime_blocked:
+        state = "VALID_WATCH" if context_ok else "EARLY_FORMING"
+    elif not context_ok:
+        state = "EARLY_FORMING"
+    elif not lane_effective_mature or not stable:
+        state = "VALID_WATCH"
+    elif (
+        entry_now_allowed
+        and timing_mode == "ENTER_NOW"
+        and current_candle_ok
+        and final_score_passed
+        and not reasoning_execution_blocked
+        and opposing_force_ok
+        and not history_exit_active
+        and not permission_denied_effective
+        and timing_has_explicit_expiry
+    ):
+        state = "ENTER_NOW"
+    else:
+        state = "PREPARE"
+
+    if state == "ENTER_NOW":
+        denied_at = "NONE"
+        next_step = "publish validated PG_EXECUTION_PACKET_V3"
+    else:
+        first_blocker = blockers[0] if blockers else {}
+        denied_at = str(first_blocker.get("field") or state).strip().upper().replace(".", "_")
+        next_step = str(next_required or release_condition or first_blocker.get("required") or "continue study").strip()
+
+    return {
+        "schema_version": OPPORTUNITY_MATURITY_SCHEMA_VERSION,
+        "state": state,
+        "confidence": round(float(confidence), 4),
+        "candidate_side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
+        "visual_integrity": "BLOCK" if any(row.get("hard") and row["field"] in {"runtime", "timing.expiry_seconds"} for row in blockers) else "PASS",
+        "hard_blockers": hard_blockers,
+        "blockers": blockers,
+        "soft_contributors": soft_pressure,
+        "entry_quality_factors": {
+            "context_ok": bool(context_ok),
+            "lane_timing_ready": bool(lane_effective_timing_ready),
+            "lane_mature": bool(lane_effective_mature),
+            "stable": bool(stable),
+            "final_score_passed": bool(final_score_passed),
+            "score_gap": score_gap,
+            "timing_mode": timing_mode,
+            "entry_now_allowed": bool(entry_now_allowed),
+            "current_candle_ok": bool(current_candle_ok),
+            "opposing_force_ok": bool(opposing_force_ok),
+            "path_class": path_class,
+        },
+        "denied_at": denied_at,
+        "next_required": next_step,
+    }
+
+
+def _mark_opportunity_maturity_blocked(
+    maturity: dict[str, Any],
+    *,
+    state: str,
+    denied_at: str,
+    next_required: str,
+    field: str,
+    received: Any,
+    required: Any,
+    reason: str,
+    hard: bool = True,
+) -> dict[str, Any]:
+    normalized_state = _upper(state, "VALID_WATCH")
+    if normalized_state not in OPPORTUNITY_MATURITY_STATES:
+        normalized_state = "VALID_WATCH"
+    blocker = {
+        "field": field,
+        "received": received,
+        "required": required,
+        "reason": reason,
+        "hard": bool(hard),
+    }
+    blockers = _rows(maturity.get("blockers"))
+    blockers.append(blocker)
+    hard_blockers = _rows(maturity.get("hard_blockers"))
+    if hard:
+        hard_blockers.append(blocker)
+    maturity.update(
+        {
+            "state": normalized_state,
+            "confidence": round(max(0.0, _clip01(maturity.get("confidence"), 0.0) - (0.16 if hard else 0.06)), 4),
+            "visual_integrity": "BLOCK" if hard else maturity.get("visual_integrity", "PASS"),
+            "blockers": blockers,
+            "hard_blockers": hard_blockers,
+            "denied_at": _upper(denied_at),
+            "next_required": str(next_required or reason or required or "").strip(),
+        }
+    )
+    return maturity
+
+
 def _upper(value: Any, default: str = "") -> str:
     text = str(value or "").strip().upper().replace(" ", "_").replace("-", "_")
     return text or default
@@ -604,8 +826,11 @@ def _build_allowance_package_v1(
     late_chase: bool,
     opposing_force_ok: bool,
     hard_bad_entry_class_active: bool,
+    opportunity_maturity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     entry_now_allowed = bool(_mapping(timing_decision).get("entry_now_allowed"))
+    maturity = _mapping(opportunity_maturity)
+    opportunity_state = _upper(maturity.get("state"), "NO_OPPORTUNITY")
     lane_name = _upper(execution_lane.get("name"))
     timing_mode_normalized = _upper(timing_mode or timing_decision.get("timing_mode"))
     package_type = (
@@ -636,6 +861,9 @@ def _build_allowance_package_v1(
         "decision_accepted": decision_accepted,
         "execution_ready": bool(executable),
         "executable": bool(executable),
+        "opportunity_maturity": opportunity_state,
+        "opportunity_maturity_confidence": round(_clip01(maturity.get("confidence"), 0.0), 4),
+        "visual_integrity": str(maturity.get("visual_integrity") or "UNKNOWN").upper(),
         "tracking_active": bool(package_type == ALLOWANCE_PACKAGE_SWING and decision_accepted and not executable),
         "intraday_capture_active": bool(package_type == ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW and decision_accepted),
         "entry_now_allowed": entry_now_allowed,
@@ -2324,6 +2552,18 @@ def build_promotion_failure_audit_v3(
         or "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
     ).strip()
     release_condition = str(promotion.get("release_condition") or next_required).strip()
+    opportunity = _mapping(promotion.get("opportunity_maturity"))
+    source_fields = dict(extra_source_fields or {})
+    opportunity_state = _upper(
+        promotion.get("opportunity_maturity_state")
+        or opportunity.get("state")
+        or source_fields.get("opportunity_maturity_state")
+    )
+    visual_integrity = _upper(
+        promotion.get("visual_integrity")
+        or opportunity.get("visual_integrity")
+        or source_fields.get("visual_integrity")
+    )
     score = float(final_score)
     score_threshold = float(threshold)
     mode = _upper(timing_mode or promotion.get("timing_mode"))
@@ -2386,8 +2626,10 @@ def build_promotion_failure_audit_v3(
         "lane_accepted": bool(lane.get("accepted")) if lane else None,
         "instrument_context_state": str(instrument.get("instrument_context_state") or instrument.get("identity_state_v2") or ""),
         "instrument_context_broker_click_safe": bool(instrument.get("broker_click_safe")) if instrument else None,
+        "opportunity_maturity_state": opportunity_state,
+        "visual_integrity": visual_integrity,
         "blocker_ranking": blockers,
-        "source_fields": dict(extra_source_fields or {}),
+        "source_fields": source_fields,
     }
 
 
@@ -3073,6 +3315,42 @@ def evaluate_model_council_v3(
     final_score_passed = final_execution_score >= lane_required_score
     stable = preliminary_stable
     permission_hard_block = bool(permission_denied_effective and not permission_prepare_allowed)
+    candidate_invalidated = _bool(
+        snapshot.get("candidate_invalidated")
+        or snapshot.get("previous_side_invalidated")
+        or snapshot.get("confirmed_reversal")
+    )
+    opportunity_maturity = _opportunity_maturity_v3(
+        candidate_side=candidate_side,
+        runtime_blocked=runtime_blocked,
+        candidate_invalidated=candidate_invalidated,
+        side_ok=side_ok,
+        context_ok=context_ok,
+        lane_effective_timing_ready=lane_effective_timing_ready,
+        lane_effective_mature=lane_effective_mature,
+        stable=stable,
+        final_score_passed=final_score_passed,
+        timing_has_explicit_expiry=timing_has_explicit_expiry,
+        timing_mode=timing_mode,
+        entry_now_allowed=entry_now_allowed,
+        current_candle_ok=current_candle_ok,
+        trap_active=trap_active,
+        late_chase=late_chase,
+        opposing_force_ok=opposing_force_ok,
+        path_class=path_class,
+        reasoning_execution_blocked=reasoning_execution_blocked,
+        reasoning_block_reason=reasoning_block_reason,
+        hard_bad_entry_class_active=hard_bad_entry_class_active,
+        bad_entry_filter_hard_active=bad_entry_filter_hard_active,
+        bad_entry_detected_effective=bad_entry_detected_effective,
+        history_exit_active=history_exit_active,
+        permission_denied_effective=permission_denied_effective,
+        permission_prepare_allowed=permission_prepare_allowed,
+        final_execution_score=final_execution_score,
+        lane_required_score=lane_required_score,
+        execution_lane=execution_lane,
+    )
+    opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "NO_OPPORTUNITY")
 
     final_state = "WATCHING"
     block_reason: str | None = None
@@ -3100,6 +3378,9 @@ def evaluate_model_council_v3(
         elif reasoning_execution_blocked:
             final_state = "PREPARING"
             block_reason = reasoning_block_reason
+        elif opportunity_maturity_state != "ENTER_NOW":
+            final_state = "PREPARING" if opportunity_maturity_state in {"PREPARE", "VALID_WATCH", "EARLY_FORMING"} else "WATCHING"
+            block_reason = f"OPPORTUNITY_MATURITY_{opportunity_maturity_state}"
         elif not timing_decision["entry_now_allowed"] or timing_mode != "ENTER_NOW":
             final_state = "PREPARING"
             block_reason = f"TIMING_MODE_{timing_mode}"
@@ -3125,11 +3406,6 @@ def evaluate_model_council_v3(
         side=candidate_side,
         market_context=market_context,
         entry_quality=entry_quality_surface,
-    )
-    candidate_invalidated = _bool(
-        snapshot.get("candidate_invalidated")
-        or snapshot.get("previous_side_invalidated")
-        or snapshot.get("confirmed_reversal")
     )
     entry_quality_label = _entry_quality_label(entry_quality_surface) or "UNKNOWN"
     effective_permission_state = "GRANTED" if executable or lane_permission_override else "DENIED" if permission_denied_effective else "PENDING"
@@ -3217,6 +3493,21 @@ def evaluate_model_council_v3(
         "INSTRUMENT_CONTEXT_NOT_BROKER_CLICK_SAFE",
     }:
         next_required = _instrument_release_requirement(instrument_context, instrument_release_condition)
+    if final_state == "BLOCKED_BY_RUNTIME" or true_blocker.startswith("INSTRUMENT_CONTEXT"):
+        runtime_field = "instrument_context" if true_blocker.startswith("INSTRUMENT_CONTEXT") else "runtime"
+        _mark_opportunity_maturity_blocked(
+            opportunity_maturity,
+            state="VALID_WATCH",
+            denied_at=true_blocker,
+            next_required=next_required,
+            field=runtime_field,
+            received=true_blocker,
+            required="hard runtime gates pass",
+            reason=next_required,
+            hard=True,
+        )
+        opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "VALID_WATCH")
+    opportunity_maturity["next_required"] = "publish validated PG_EXECUTION_PACKET_V3" if executable else next_required
     lane_blockers = [
         _upper(blocker)
         for blocker in execution_lane.get("blockers", [])
@@ -3281,6 +3572,8 @@ def evaluate_model_council_v3(
         "candidate_invalidated": candidate_invalidated,
         "entry_quality": entry_quality_label,
         "permission": permission_state,
+        "opportunity_maturity": opportunity_maturity_state,
+        "opportunity_maturity_confidence": opportunity_maturity["confidence"],
         "flip_flop_risk": flip_flop_contained,
         "release_allowed": flip_flop_release_allowed,
         "raw_recent_sides": raw_recent_sides,
@@ -3296,6 +3589,8 @@ def evaluate_model_council_v3(
             "raw_side_flips": raw_flip_count,
             "candidate_flip_count_10s": candidate_flip_count,
             "candidate_invalidated": candidate_invalidated,
+            "opportunity_maturity": opportunity_maturity,
+            "opportunity_maturity_state": opportunity_maturity_state,
             "flip_flop_risk": flip_flop_contained,
             "flip_flop_release_allowed": flip_flop_release_allowed,
         }
@@ -3322,6 +3617,7 @@ def evaluate_model_council_v3(
         late_chase=late_chase,
         opposing_force_ok=opposing_force_ok,
         hard_bad_entry_class_active=hard_bad_entry_class_active,
+        opportunity_maturity=opportunity_maturity,
     )
     promotion_trace: dict[str, Any] = {
         "packet_id": base["packet_id"],
@@ -3333,6 +3629,9 @@ def evaluate_model_council_v3(
         "previous_candidate_side": candidate_recent_sides[-2] if len(candidate_recent_sides) >= 2 else None,
         "candidate_id": active_candidate_id,
         "candidate_stage": candidate_stage,
+        "opportunity_maturity": opportunity_maturity,
+        "opportunity_maturity_state": opportunity_maturity_state,
+        "visual_integrity": opportunity_maturity.get("visual_integrity"),
         "candidate_stable_reads": candidate_stable_reads,
         "raw_flip_count_10s": raw_flip_count,
         "candidate_flip_count_10s": candidate_flip_count,
@@ -3450,6 +3749,8 @@ def evaluate_model_council_v3(
         "final_side": candidate_side if side_ok and final_state != "CONFLICT" else None,
         "decision_id": "mc_" + hashlib.sha1(f"{current_now}|{candidate_side}|{buy_score}|{sell_score}".encode("utf-8")).hexdigest()[:18],
         "maturity_stage": "EXECUTABLE_PACKET" if executable else maturity_stage,
+        "opportunity_maturity": opportunity_maturity,
+        "opportunity_maturity_state": opportunity_maturity_state,
         "arbitration_reason": (
             f"{candidate_side} executable via {execution_lane.get('name')}: {execution_lane.get('reason')}"
             if executable
@@ -3565,6 +3866,8 @@ def evaluate_model_council_v3(
         "release_state": release_state,
         "non_executable_state": None if executable else release_state,
         "missed_opportunity": missed_opportunity,
+        "opportunity_maturity": opportunity_maturity,
+        "opportunity_maturity_state": opportunity_maturity_state,
         "final_execution_score": round(float(final_execution_score), 4),
         "final_score": round(float(final_execution_score), 4),
         "execution_threshold": round(float(execution_threshold), 4),
@@ -3673,6 +3976,8 @@ def evaluate_model_council_v3(
         "ai_contribution_strengths": ai_contribution_strengths,
         "model_strength_profile": model_strength_profile,
         "missed_opportunity": missed_opportunity,
+        "opportunity_maturity": opportunity_maturity,
+        "opportunity_maturity_state": opportunity_maturity_state,
         "trade_candidate_queue": trade_candidate_queue,
         "council_scores": council_scores,
         "reality_adjustments": reality_adjustments,
@@ -3732,6 +4037,9 @@ def evaluate_model_council_v3(
                 "non_executable_state": promotion_trace.get("non_executable_state"),
                 "blocked_by": promotion_trace.get("blocked_by"),
                 "true_blocker": promotion_trace.get("true_blocker"),
+                "opportunity_maturity_state": opportunity_maturity_state,
+                "visual_integrity": opportunity_maturity.get("visual_integrity"),
+                "opportunity_maturity_denied_at": opportunity_maturity.get("denied_at"),
             },
         )
         promotion_trace["promotion_failure_audit_v3"] = audit
@@ -3757,12 +4065,30 @@ def evaluate_model_council_v3(
         true_blocker = block_reason
         next_required = str(sequence_readiness.get("next_required") or "sequence context incomplete")
         release_condition = next_required
+        _mark_opportunity_maturity_blocked(
+            opportunity_maturity,
+            state="VALID_WATCH",
+            denied_at=block_reason,
+            next_required=next_required,
+            field=str(sequence_readiness.get("failed_module") or "sequence_context"),
+            received=sequence_readiness.get("status") or "not_ready",
+            required="COMPLETE sequence context",
+            reason=next_required,
+            hard=True,
+        )
+        opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "VALID_WATCH")
+        allowance_package["opportunity_maturity"] = opportunity_maturity_state
+        allowance_package["opportunity_maturity_confidence"] = opportunity_maturity["confidence"]
+        allowance_package["visual_integrity"] = opportunity_maturity.get("visual_integrity")
         promotion_trace["denied_at"] = block_reason
         promotion_trace["blocked_by"] = block_reason
         promotion_trace["true_blocker"] = block_reason
         promotion_trace["next_required"] = next_required
         promotion_trace["release_condition"] = next_required
         promotion_trace["sequence_context_readiness"] = sequence_readiness
+        promotion_trace["opportunity_maturity"] = opportunity_maturity
+        promotion_trace["opportunity_maturity_state"] = opportunity_maturity_state
+        promotion_trace["visual_integrity"] = opportunity_maturity.get("visual_integrity")
         promotion_trace["promotion_result"] = "STUDY_PACKET_PUBLISHED"
         promotion_trace["packet_result"] = "STUDY_PACKET_PUBLISHED"
         _mark_allowance_package_blocked(
@@ -3781,8 +4107,12 @@ def evaluate_model_council_v3(
         study_packet["non_executable_state"] = release_state
         study_packet["block_reason"] = block_reason
         study_packet["allowance_package"] = allowance_package
+        study_packet["opportunity_maturity"] = opportunity_maturity
+        study_packet["opportunity_maturity_state"] = opportunity_maturity_state
         council["final_state"] = "WATCHING"
         council["allowance_package"] = allowance_package
+        council["opportunity_maturity"] = opportunity_maturity
+        council["opportunity_maturity_state"] = opportunity_maturity_state
         council["arbitration_reason"] = (
             f"BLOCKED_BY_SEQUENCE_CONTEXT: blocked_by={block_reason}; "
             f"failed_module={sequence_readiness.get('failed_module')}; next_required={next_required}"
@@ -3794,6 +4124,8 @@ def evaluate_model_council_v3(
         result["allowance_package"] = allowance_package
         result["model_council"] = council
         result["promotion_trace"] = promotion_trace
+        result["opportunity_maturity"] = opportunity_maturity
+        result["opportunity_maturity_state"] = opportunity_maturity_state
         result["study_packet"] = study_packet
         result["model_council_study_packet"] = study_packet
     if not executable:
@@ -3859,6 +4191,9 @@ def evaluate_model_council_v3(
         packet["market_listening_stream"] = result["market_listening_stream"]
         packet["council_debate"] = council_debate
         packet["promotion_trace"] = promotion_trace
+        packet["opportunity_maturity"] = opportunity_maturity
+        packet["opportunity_maturity_state"] = opportunity_maturity_state
+        packet["visual_integrity"] = opportunity_maturity.get("visual_integrity")
         validation = validate_execution_packet_v3(
             packet,
             now=current_now,
@@ -3872,6 +4207,21 @@ def evaluate_model_council_v3(
                 else f"runtime validation clears: {validation.first_reason}"
             )
             runtime_release_state = "INSTRUMENT_CONTEXT_WAIT" if validation.first_reason.startswith("INSTRUMENT_CONTEXT") else "WATCHING"
+            _mark_opportunity_maturity_blocked(
+                opportunity_maturity,
+                state="VALID_WATCH",
+                denied_at=validation.first_reason,
+                next_required=runtime_release_condition,
+                field="current_execution_packet",
+                received=validation.first_reason,
+                required="validate_execution_packet_v3 pass",
+                reason=runtime_release_condition,
+                hard=True,
+            )
+            opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "VALID_WATCH")
+            allowance_package["opportunity_maturity"] = opportunity_maturity_state
+            allowance_package["opportunity_maturity_confidence"] = opportunity_maturity["confidence"]
+            allowance_package["visual_integrity"] = opportunity_maturity.get("visual_integrity")
             _mark_allowance_package_blocked(
                 allowance_package,
                 block_reason=validation.first_reason,
@@ -3892,6 +4242,9 @@ def evaluate_model_council_v3(
                     "promotion_result": "BLOCKED_BY_RUNTIME",
                     "packet_result": "STUDY_PACKET_PUBLISHED",
                     "allowance_package": allowance_package,
+                    "opportunity_maturity": opportunity_maturity,
+                    "opportunity_maturity_state": opportunity_maturity_state,
+                    "visual_integrity": opportunity_maturity.get("visual_integrity"),
                 }
             )
             council.update(
@@ -3906,17 +4259,23 @@ def evaluate_model_council_v3(
                     "arbitration_reason": f"BLOCKED_BY_RUNTIME: blocked_by={validation.first_reason}; next_required={runtime_release_condition}",
                     "promotion_trace": promotion_trace,
                     "allowance_package": allowance_package,
+                    "opportunity_maturity": opportunity_maturity,
+                    "opportunity_maturity_state": opportunity_maturity_state,
                 }
             )
             study_packet["promotion_trace"] = promotion_trace
             study_packet["model_council"] = council
             study_packet["allowance_package"] = allowance_package
+            study_packet["opportunity_maturity"] = opportunity_maturity
+            study_packet["opportunity_maturity_state"] = opportunity_maturity_state
             study_packet["true_blocker"] = validation.first_reason
             study_packet["reason"] = council["arbitration_reason"]
             result["execution"] = {**execution, "enabled": False, "state": "BLOCKED_BY_RUNTIME"}
             result["allowance_package"] = allowance_package
             result["model_council"] = council
             result["promotion_trace"] = promotion_trace
+            result["opportunity_maturity"] = opportunity_maturity
+            result["opportunity_maturity_state"] = opportunity_maturity_state
             result["study_packet"] = study_packet
             result["model_council_study_packet"] = study_packet
             result["block_reason"] = validation.first_reason
@@ -3937,7 +4296,15 @@ def evaluate_model_council_v3(
         if not no_packet_reason or no_packet_reason == "NONE":
             no_packet_reason = "EXECUTION_PACKET_NOT_PUBLISHED"
         derived_no_packet_next_required = ""
-        if no_packet_reason in {"EXECUTION_PACKET_NOT_PUBLISHED", "WATCHING", "STUDY_PACKET_PUBLISHED"}:
+        late_chase_packet_block = bool(
+            opportunity_maturity_state == "LATE_CHASE"
+            or late_chase
+            or path_class == "LATE_CHASE_REVERSAL_RISK"
+        )
+        if late_chase_packet_block:
+            no_packet_reason = f"TIMING_MODE_{timing_mode or 'LATE_CHASE'}"
+            derived_no_packet_next_required = f"skip late chase; {timing_decision['entry_timing']['next_condition']}"
+        elif no_packet_reason in {"EXECUTION_PACKET_NOT_PUBLISHED", "WATCHING", "STUDY_PACKET_PUBLISHED"}:
             if not context_ok or not bool(execution_lane.get("accepted")):
                 no_packet_reason = "NO_EXECUTION_LANE_ACCEPTED"
                 derived_no_packet_next_required = lane_release_requirements
@@ -3963,7 +4330,12 @@ def evaluate_model_council_v3(
                 no_packet_reason = str(final_state).strip().upper()
                 derived_no_packet_next_required = str(next_required or release_condition or "continue study")
         raw_no_packet_next_required = str(promotion_trace.get("next_required") or next_required or "").strip()
-        if (
+        if late_chase_packet_block:
+            no_packet_next_required = str(
+                derived_no_packet_next_required
+                or "skip late chase; wait for a fresh trigger/retest"
+            ).strip()
+        elif (
             not raw_no_packet_next_required
             or raw_no_packet_next_required.lower() == "none"
             or raw_no_packet_next_required == "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
@@ -3976,6 +4348,53 @@ def evaluate_model_council_v3(
             no_packet_next_required = raw_no_packet_next_required
         if not no_packet_next_required or no_packet_next_required.lower() == "none":
             no_packet_next_required = "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
+        no_packet_reason_upper = _upper(no_packet_reason, "EXECUTION_PACKET_NOT_PUBLISHED")
+        if opportunity_maturity_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
+            no_packet_maturity_state = opportunity_maturity_state
+        elif no_packet_reason_upper == "NO_EXECUTION_LANE_ACCEPTED":
+            no_packet_maturity_state = "EARLY_FORMING"
+        elif no_packet_reason_upper in {"CANDIDATE_MATURITY", "CANDIDATE_STABILITY"}:
+            no_packet_maturity_state = "VALID_WATCH"
+        elif "LATE_CHASE" in no_packet_reason_upper or no_packet_reason_upper.startswith("TIMING_MODE_SKIP_LATE"):
+            no_packet_maturity_state = "LATE_CHASE"
+        elif "INVALID" in no_packet_reason_upper or "TRAP" in no_packet_reason_upper or "BAD_ENTRY" in no_packet_reason_upper:
+            no_packet_maturity_state = "INVALIDATED"
+        elif no_packet_reason_upper == "LANE_SCORE_BELOW_THRESHOLD" or no_packet_reason_upper.startswith("TIMING_MODE_"):
+            no_packet_maturity_state = "PREPARE"
+        elif no_packet_reason_upper in OPPORTUNITY_MATURITY_STATES:
+            no_packet_maturity_state = no_packet_reason_upper
+        else:
+            no_packet_maturity_state = opportunity_maturity_state if opportunity_maturity_state in OPPORTUNITY_MATURITY_STATES else "VALID_WATCH"
+        no_packet_hard_block = no_packet_reason_upper.startswith(
+            (
+                "INSTRUMENT_CONTEXT",
+                "SEQUENCE_CONTEXT",
+                "REQUIRED_MODELS",
+                "NOT_LIVE",
+                "CACHE",
+                "FRAME",
+                "CAPTURE",
+                "STATE",
+                "MISSING",
+                "MODEL_COUNCIL_EXPLICIT_EXPIRY",
+                "EXECUTION_PACKET_NOT_CURRENT",
+            )
+        )
+        _mark_opportunity_maturity_blocked(
+            opportunity_maturity,
+            state=no_packet_maturity_state,
+            denied_at=no_packet_reason_upper,
+            next_required=no_packet_next_required,
+            field=_promotion_exact_field(no_packet_reason_upper, sequence_readiness, instrument_context),
+            received=no_packet_reason_upper,
+            required=no_packet_next_required,
+            reason=no_packet_next_required,
+            hard=no_packet_hard_block,
+        )
+        opportunity_maturity_state = _upper(opportunity_maturity.get("state"), no_packet_maturity_state)
+        allowance_package["opportunity_maturity"] = opportunity_maturity_state
+        allowance_package["opportunity_maturity_confidence"] = opportunity_maturity["confidence"]
+        allowance_package["visual_integrity"] = opportunity_maturity.get("visual_integrity")
         _mark_allowance_package_blocked(
             allowance_package,
             block_reason=no_packet_reason,
@@ -4004,6 +4423,8 @@ def evaluate_model_council_v3(
         council["next_required"] = no_packet_next_required
         council["release_condition"] = str(promotion_trace.get("release_condition") or release_condition or no_packet_next_required)
         council["allowance_package"] = allowance_package
+        council["opportunity_maturity"] = opportunity_maturity
+        council["opportunity_maturity_state"] = opportunity_maturity_state
         promotion_trace.update(
             {
                 "denied_at": no_packet_reason,
@@ -4013,6 +4434,9 @@ def evaluate_model_council_v3(
                 "release_condition": council["release_condition"],
                 "packet_result": "STUDY_PACKET_PUBLISHED",
                 "allowance_package": allowance_package,
+                "opportunity_maturity": opportunity_maturity,
+                "opportunity_maturity_state": opportunity_maturity_state,
+                "visual_integrity": opportunity_maturity.get("visual_integrity"),
             }
         )
         if str(promotion_trace.get("promotion_result") or "").strip().upper() == "EXECUTABLE_PACKET_CREATED":
@@ -4022,6 +4446,8 @@ def evaluate_model_council_v3(
         study_packet["model_council"] = council
         study_packet["promotion_trace"] = promotion_trace
         study_packet["allowance_package"] = allowance_package
+        study_packet["opportunity_maturity"] = opportunity_maturity
+        study_packet["opportunity_maturity_state"] = opportunity_maturity_state
         study_packet["true_blocker"] = no_packet_reason
         study_packet["denied_at"] = no_packet_reason
         study_packet["next_required"] = no_packet_next_required
@@ -4030,6 +4456,8 @@ def evaluate_model_council_v3(
         result["model_council"] = council
         result["promotion_trace"] = promotion_trace
         result["allowance_package"] = allowance_package
+        result["opportunity_maturity"] = opportunity_maturity
+        result["opportunity_maturity_state"] = opportunity_maturity_state
         result["study_packet"] = study_packet
         result["model_council_study_packet"] = study_packet
         result["packet_result"] = "STUDY_PACKET_PUBLISHED"

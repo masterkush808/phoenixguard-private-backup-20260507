@@ -204,6 +204,10 @@ def _latest_active_dashboard_heartbeat(session_id: str) -> dict[str, Any]:
     return {}
 
 
+def latest_active_dashboard_heartbeat(session_id: str) -> dict[str, Any]:
+    return _latest_active_dashboard_heartbeat(session_id)
+
+
 def _resolve_capture_context(base_url: str, session_id: str, route: str, mode: str, timeout: float) -> dict[str, Any]:
     heartbeat = _latest_active_dashboard_heartbeat(session_id)
     route_requested = str(route or "active").strip().lower()

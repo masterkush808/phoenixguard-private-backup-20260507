@@ -404,24 +404,6 @@ def _live_fast_display_file_heartbeat(script_dir: Path, session_id: str, *, now_
     return True
 
 
-def _display_state_has_locked_window(script_dir: Path, session_id: str) -> bool:
-    try:
-        raw: Any = json.loads(_display_state_path(script_dir, session_id).read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    if not isinstance(raw, dict):
-        return False
-    display_state = cast(JsonDict, raw)
-    try:
-        display_frame_id = int(float(display_state.get("display_frame_id") or 0))
-    except (TypeError, ValueError):
-        display_frame_id = 0
-    return bool(
-        display_frame_id > 0
-        and str(display_state.get("last_display_window_path") or display_state.get("last_window_path") or display_state.get("last_frame_path") or "").strip()
-    )
-
-
 def _start_live_fast_display_file_heartbeat_thread(script_dir: Path, session_id: str) -> threading.Event | None:
     enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "0") or "0").strip().lower()
     if enabled in {"0", "false", "off", "no"}:

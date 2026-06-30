@@ -142,12 +142,17 @@ def list_processes() -> list[ProcessRow]:
 
 
 def list_port_owner_pids(ports: Sequence[int]) -> set[int]:
+    if not ports:
+        return set()
     joined = ",".join(str(int(port)) for port in ports)
-    payload = _powershell_json(
-        f"Get-NetTCPConnection -LocalPort {joined} -State Listen -ErrorAction SilentlyContinue | "
-        "Select-Object LocalAddress,LocalPort,OwningProcess,State | "
-        "ConvertTo-Json -Depth 5"
-    )
+    try:
+        payload = _powershell_json(
+            f"Get-NetTCPConnection -LocalPort {joined} -State Listen -ErrorAction SilentlyContinue | "
+            "Select-Object LocalAddress,LocalPort,OwningProcess,State | "
+            "ConvertTo-Json -Depth 5"
+        )
+    except RuntimeError:
+        return set()
     owners: set[int] = set()
     for item in _as_list(payload):
         if isinstance(item, dict):

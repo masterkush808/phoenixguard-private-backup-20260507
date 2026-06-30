@@ -1033,6 +1033,10 @@ def test_sequence_context_blocker_reports_exact_rejected_fields() -> None:
     assert trace["next_required"].startswith("sequence context incomplete:")
     assert trace["next_required"] != "full sequence context required"
     assert "sequence_length=12 required >=50" in trace["next_required"]
+    assert result["opportunity_maturity_state"] == "VALID_WATCH"
+    assert result["opportunity_maturity"]["visual_integrity"] == "BLOCK"
+    assert result["opportunity_maturity"]["denied_at"] == "SEQUENCE_CONTEXT"
+    assert result["allowance_package"]["visual_integrity"] == "BLOCK"
     assert readiness["sequence_length"] == 12
     assert readiness["frames_received"] == 12
     assert readiness["frames_used"] == 12
@@ -1042,6 +1046,8 @@ def test_sequence_context_blocker_reports_exact_rejected_fields() -> None:
     audit = result["study_packet"]["promotion_failure_audit_v3"]
     assert audit["top_blocker"] == "SEQUENCE_CONTEXT"
     assert audit["exact_field_preventing_execution_packet"] == "model_council_resolver"
+    assert audit["opportunity_maturity_state"] == "VALID_WATCH"
+    assert audit["visual_integrity"] == "BLOCK"
     assert {row["field"] for row in readiness["blocking_failures"]} >= {
         "sequence_status",
         "sequence_length",
@@ -1245,6 +1251,9 @@ def test_executable_ready_requires_broker_click_safe() -> None:
     assert result["execution"]["enabled"] is False
     assert result["promotion_trace"]["release_state"] == "INSTRUMENT_CONTEXT_WAIT"
     assert result["promotion_trace"]["true_blocker"] == "INSTRUMENT_CONTEXT_NOT_BROKER_CLICK_SAFE"
+    assert result["opportunity_maturity_state"] == "VALID_WATCH"
+    assert result["opportunity_maturity"]["visual_integrity"] == "BLOCK"
+    assert result["allowance_package"]["visual_integrity"] == "BLOCK"
     assert "execution_packet" not in result
 
 
@@ -1259,10 +1268,15 @@ def test_execution_packet_publishes_after_all_release_conditions_pass() -> None:
     assert packet["promotion_trace"]["final_score"] >= packet["promotion_trace"]["threshold"]
     assert packet["promotion_trace"]["lane_accepted"] is True
     assert packet["promotion_trace"]["release_condition"] == "none"
+    assert packet["opportunity_maturity_state"] == "ENTER_NOW"
+    assert packet["opportunity_maturity"]["visual_integrity"] == "PASS"
+    assert packet["promotion_trace"]["opportunity_maturity_state"] == "ENTER_NOW"
     allowance = packet["allowance_package"]
     assert allowance["package_type"] == "INTRADAY_ENTER_NOW"
     assert allowance["execution_authority"] == "PG_EXECUTION_PACKET_V3"
     assert allowance["execution_ready"] is True
+    assert allowance["opportunity_maturity"] == "ENTER_NOW"
+    assert allowance["visual_integrity"] == "PASS"
     assert packet["model_council"]["allowance_package"]["package_type"] == "INTRADAY_ENTER_NOW"
     assert packet["promotion_trace"]["allowance_package"]["package_type"] == "INTRADAY_ENTER_NOW"
 
@@ -1325,6 +1339,8 @@ def test_timing_wait_blocks_execution_packet() -> None:
     assert result["timing_decision"]["timing_mode"] in {"SKIP_LATE_ENTRY", "WAIT_FOR_CANDLE_CLOSE_BEHAVIOUR"}
     assert result["timing_decision"]["path_class"] in {"LATE_CHASE_REVERSAL_RISK", "ADVERSE_FIRST_THEN_TARGET"}
     assert result["model_council"]["final_state"] in {"WATCHING", "PREPARING"}
+    assert result["opportunity_maturity_state"] == "LATE_CHASE"
+    assert result["opportunity_maturity"]["denied_at"].startswith("TIMING_MODE")
     assert result["study_packet"]["timing_decision"]["entry_now_allowed"] is False
 
 
@@ -1855,6 +1871,9 @@ def test_execution_packet_v3_contains_required_fields() -> None:
         "council_debate",
         "promotion_trace",
         "allowance_package",
+        "opportunity_maturity",
+        "opportunity_maturity_state",
+        "visual_integrity",
         "block_reason",
     ):
         assert field in packet
@@ -1863,6 +1882,9 @@ def test_execution_packet_v3_contains_required_fields() -> None:
     assert packet["execution"]["amount_action"] == "DO_NOT_CHANGE_AMOUNT"
     assert packet["execution"]["allowance_package_type"] == "INTRADAY_ENTER_NOW"
     assert packet["allowance_package"]["selected_lane"] == packet["selected_execution_lane"]
+    assert packet["opportunity_maturity_state"] == "ENTER_NOW"
+    assert packet["opportunity_maturity"]["state"] == "ENTER_NOW"
+    assert packet["visual_integrity"] == "PASS"
     assert packet["execution"]["time_sequence"]["target_text"] == "00:05:00"
     assert packet["model_council"]["contributors_are_diagnostic"] is True
     assert packet["promotion_trace"]["promotion_result"] == "EXECUTABLE_PACKET_CREATED"

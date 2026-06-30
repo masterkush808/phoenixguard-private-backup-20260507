@@ -815,11 +815,41 @@ def _locked_registry_entries_from_entries(entries: Sequence[Mapping[str, Any]]) 
     return locked
 
 
+def _precision_visible_registry_entries(
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    mode: str,
+) -> list[Mapping[str, Any]]:
+    active_mode = normalize_view_mode(mode)
+    visible: list[Mapping[str, Any]] = []
+    for entry in entries:
+        overlay = entry.get("overlay")
+        if not isinstance(overlay, Mapping):
+            continue
+        overlay_payload = cast(Mapping[str, Any], overlay)
+        if bool(overlay_payload.get("precision_rejected", False)):
+            continue
+        try:
+            normalized = normalize_v3_overlay_object(overlay_payload, strict=False)
+        except Exception:
+            continue
+        try:
+            if not overlay_is_visible(normalized, active_mode):
+                continue
+        except Exception:
+            continue
+        row = dict(entry)
+        row["overlay"] = normalized
+        visible.append(row)
+    return visible
+
+
 def _merge_direct_window_tracker_display_state(
     requested_session_id: str,
     payload: dict[str, object],
     *,
     display_path: Path | None = None,
+    require_complete_display_bundle: bool = False,
 ) -> dict[str, object]:
     try:
         resolved_display_path = display_path or _direct_window_tracker_display_state_path(requested_session_id)
@@ -839,6 +869,21 @@ def _merge_direct_window_tracker_display_state(
     if display_frame < payload_frame:
         return payload
     if display_frame == payload_frame and display_epoch + 0.001 < payload_epoch:
+        return payload
+    if require_complete_display_bundle and not display_bundle_complete:
+        provider = _mapping_to_plain_dict(payload.get("provider_status"))
+        provider.update(
+            {
+                "direct_display_pending_frame_v3": True,
+                "direct_display_pending_frame_id_v3": display_frame,
+                "direct_display_pending_reason_v3": str(
+                    display_state.get("frame_bundle_pending_reason_v3")
+                    or "display/chart/overlay/model frame bundle incomplete"
+                ),
+            }
+        )
+        payload["provider_status"] = provider
+        payload["display_pending_frame_id_v3"] = display_frame
         return payload
     if not display_state.get("last_display_window_path"):
         legacy_window_path = display_state.get("last_window_path") or display_state.get("last_frame_path")
@@ -885,7 +930,11 @@ def _merge_direct_window_tracker_display_state(
     return payload
 
 
-def _direct_window_tracker_session_snapshot(session_id: str) -> dict[str, object] | None:
+def _direct_window_tracker_session_snapshot(
+    session_id: str,
+    *,
+    require_complete_display_bundle: bool = True,
+) -> dict[str, object] | None:
     if str(os.getenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "1") or "1").strip().lower() in {
         "0",
         "false",
@@ -913,6 +962,7 @@ def _direct_window_tracker_session_snapshot(session_id: str) -> dict[str, object
         requested_session_id,
         payload,
         display_path=path.with_name("display_state.json"),
+        require_complete_display_bundle=require_complete_display_bundle,
     )
     now_epoch = time.time()
     latest_signal = _mapping_to_plain_dict(payload.get("latest_signal"))
@@ -1003,7 +1053,8 @@ def _direct_window_tracker_display_snapshot(
     raw_model_frame = int(_epoch_float(payload.get("model_vote_frame_id"), 0.0))
     if require_overlay_model and (raw_overlay_frame <= 0 or raw_model_frame <= 0):
         return None
-    if not _display_state_frame_bundle_complete_v3(payload):
+    bundle_complete = _display_state_frame_bundle_complete_v3(payload)
+    if require_overlay_model and not bundle_complete:
         return None
     overlay_frame = int(
         _epoch_float(raw_overlay_frame or frame_index, 0.0)
@@ -2232,6 +2283,7 @@ def create_app(
             requested_session_id,
             dict(cast(Mapping[str, object], raw_session)),
             display_path=path.with_name("display_state.json"),
+            require_complete_display_bundle=compact_public,
         )
         session_payload.setdefault(
             "effective_capture_interval_sec",
@@ -3126,6 +3178,20 @@ def create_app(
         projected = _apply_compact_overlay_identity(dict(payload))
         if display_snapshot is None:
             return projected
+        if not _display_state_frame_bundle_complete_v3(display_snapshot):
+            provider = {
+                **_mapping_to_plain_dict(projected.get("provider_status")),
+                "compact_display_snapshot_pending_v3": True,
+                "compact_display_pending_frame_id_v3": int(
+                    _epoch_float(display_snapshot.get("display_frame_id"), 0.0)
+                ),
+                "compact_display_pending_reason_v3": str(
+                    display_snapshot.get("frame_bundle_pending_reason_v3")
+                    or "display/chart/overlay/model frame bundle incomplete"
+                ),
+            }
+            projected["provider_status"] = provider
+            return projected
         display_frame_id = int(
             _epoch_float(
                 display_snapshot.get("display_frame_id")
@@ -3372,8 +3438,11 @@ def create_app(
             )
             or ""
         ).strip()
+        overlay_artifact_path = str(
+            display_payload.get("last_full_overlay_path") or display_payload.get("last_overlay_path") or ""
+        ).strip()
         if display_signature and overlay_signature and display_signature != overlay_signature:
-            if rebind_pending:
+            if rebind_pending and overlay_artifact_path:
                 return (
                     "Studying new pair: the visible broker surface changed before overlay authority "
                     "rebuilt on the new frame."
@@ -3924,7 +3993,23 @@ def create_app(
         requested_session_id = str(session_id or "").strip()
         if not requested_session_id:
             return None
-        session = _direct_window_tracker_session_snapshot(requested_session_id)
+        allow_display_only_gap = False
+        try:
+            raw_session = json.loads(_direct_live_state_session_path(requested_session_id).read_text(encoding="utf-8"))
+        except Exception:
+            raw_session = None
+        if isinstance(raw_session, Mapping):
+            allow_display_only_gap = bool(
+                str(cast(Mapping[str, object], raw_session).get("last_full_overlay_path") or "").strip()
+                or str(cast(Mapping[str, object], raw_session).get("last_overlay_path") or "").strip()
+            )
+        try:
+            session = _direct_window_tracker_session_snapshot(
+                requested_session_id,
+                require_complete_display_bundle=not allow_display_only_gap,
+            )
+        except TypeError:
+            session = _direct_window_tracker_session_snapshot(requested_session_id)
         if session is None:
             selected_session_path = _direct_live_state_session_path(requested_session_id)
             selected_display_path = selected_session_path.with_name("display_state.json")
@@ -5419,9 +5504,15 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.")
 
     @app.get("/v1/mobile/registry/sessions/{session_id}/active")
-    def get_active_registry(session_id: str, min_truth_score: float = 0.0) -> dict[str, object]:
+    def get_active_registry(
+        session_id: str,
+        min_truth_score: float = 0.0,
+        mode: str = "CLEAN_LIVE",
+        precision_only: bool = False,
+    ) -> dict[str, object]:
         try:
             active: list[Mapping[str, Any]] = query_recent_active_objects(session_id, min_truth_score=float(min_truth_score))
+            precision_active = _precision_visible_registry_entries(active, mode=mode)
             chart_transform: object = None
             try:
                 entries = load_recent_market_objects(session_id)
@@ -5432,7 +5523,18 @@ def create_app(
                         break
             except Exception:
                 chart_transform = None
-            return {"session_id": session_id, "active_overlays": active, "count": len(active), "chart_transform": chart_transform}
+            visible_active = precision_active if precision_only else active
+            return {
+                "session_id": session_id,
+                "active_overlays": visible_active,
+                "count": len(visible_active),
+                "legacy_active_count": len(active),
+                "precision_active_overlays": precision_active,
+                "precision_count": len(precision_active),
+                "precision_mode": normalize_view_mode(mode),
+                "precision_only": bool(precision_only),
+                "chart_transform": chart_transform,
+            }
         except Exception:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registry session not found.")
 
@@ -5506,6 +5608,7 @@ def create_app(
             except Exception:
                 chart_path = None
             overlays = query_recent_active_objects(session_id, min_truth_score=0.0)
+            overlays = _precision_visible_registry_entries(overlays, mode="CLEAN_LIVE")
             # convert entries to overlay dicts
             overlay_dicts: list[Mapping[str, Any]] = []
             for entry in overlays:
