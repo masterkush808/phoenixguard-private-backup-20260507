@@ -133,6 +133,7 @@ def test_capture_job_timeout_records_finished_event(tmp_path: Path) -> None:
         timeout_sec=0.01,
     )
 
+    time.sleep(0.03)
     active = poll_capture_jobs_for_certification([job], log_path)
 
     assert active == []

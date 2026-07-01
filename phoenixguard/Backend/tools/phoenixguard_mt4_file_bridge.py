@@ -220,7 +220,8 @@ def _compact_allowance_package(
         "schema_version": str(source.get("schema_version") or "PG_ALLOWANCE_PACKAGE_V1"),
         "package_type": package_type,
         "allowance_family": allowance_family,
-        "execution_authority": str(source.get("execution_authority") or "PG_EXECUTION_PACKET_V3"),
+        "execution_authority": str(source.get("execution_authority") or "PLAYBOOK_FINAL_DECIDER_V3"),
+        "packet_authority": str(source.get("packet_authority") or "PG_EXECUTION_PACKET_V3"),
         "source_present": source_present,
         "inferred": not source_present,
         "side": str(source.get("side") or side),
@@ -389,11 +390,15 @@ def _validate_command(command: dict[str, object]) -> None:
     if allowance.get("schema_version") != "PG_ALLOWANCE_PACKAGE_V1":
         raise ValueError("MT4 command allowance_package schema_version mismatch")
     if allowance.get("source_present") is not True or allowance.get("inferred") is True:
-        raise ValueError("MT4 command allowance_package must be explicit from Model Council")
-    if allowance.get("package_type") not in {"SWING", "INTRADAY_ENTER_NOW"}:
-        raise ValueError("MT4 command allowance_package.package_type must be SWING or INTRADAY_ENTER_NOW")
-    if allowance.get("execution_authority") != "PG_EXECUTION_PACKET_V3":
-        raise ValueError("MT4 command allowance_package.execution_authority must be PG_EXECUTION_PACKET_V3")
+        raise ValueError("MT4 command allowance_package must be explicit from Playbook final decider")
+    if allowance.get("package_type") not in {"SWING", "SWING_ENTER_NOW", "INTRADAY_ENTER_NOW"}:
+        raise ValueError("MT4 command allowance_package.package_type must be SWING, SWING_ENTER_NOW, or INTRADAY_ENTER_NOW")
+    authority = str(allowance.get("execution_authority") or "").strip().upper()
+    packet_authority = str(allowance.get("packet_authority") or "PG_EXECUTION_PACKET_V3").strip().upper()
+    if authority != "PLAYBOOK_FINAL_DECIDER_V3":
+        raise ValueError("MT4 command allowance_package.execution_authority must be PLAYBOOK_FINAL_DECIDER_V3")
+    if packet_authority != "PG_EXECUTION_PACKET_V3":
+        raise ValueError("MT4 command allowance_package.packet_authority must be PG_EXECUTION_PACKET_V3")
     if allowance.get("accepted") is not True:
         raise ValueError("MT4 command allowance_package.accepted must be true")
     if allowance.get("execution_ready") is not True:

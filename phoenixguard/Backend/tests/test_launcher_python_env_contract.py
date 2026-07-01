@@ -49,8 +49,12 @@ def test_launchers_require_repo_venv_python_instead_of_global_python() -> None:
             assert fragment not in text
 
 
-def test_python_resolver_points_every_python_path_to_repo_venv() -> None:
+def test_python_resolver_points_every_python_path_to_profile_environment() -> None:
     text = _read("Backend/launch/Resolve-PhoenixGuardPython.ps1")
+    assert "Get-PhoenixGuardPythonEnvironmentName" in text
+    assert "'live' { return '.venv-live' }" in text
+    assert "'dev' { return '.venv-dev' }" in text
+    assert "$env:PHOENIXGUARD_PYTHON_ENV_NAME = $environmentName" in text
     assert "$venvPython = Join-Path -Path $venvPath -ChildPath 'Scripts\\python.exe'" in text
     assert "PHOENIXGUARD_PYTHON_PROCESS_EXE" not in text
     assert "ProcessPython" not in text
@@ -79,7 +83,7 @@ def test_runtime_environment_rejects_wrong_repo_python(monkeypatch: pytest.Monke
     status = build_python_environment_status(ROOT)
 
     assert status["ok"] is False
-    assert "PHOENIXGUARD_PYTHON_EXE is not repo .venv python" in status["reason"]
+    assert "PHOENIXGUARD_PYTHON_EXE is not configured PhoenixGuard python" in status["reason"]
 
 
 def test_certification_visual_tools_use_repo_venv_for_child_python() -> None:
@@ -96,17 +100,19 @@ def test_certification_visual_tools_use_repo_venv_for_child_python() -> None:
         assert "[sys.executable" not in text
 
 
-def test_profile_installers_never_create_secondary_or_recreated_envs() -> None:
-    for relative_path in (
-        "Backend/scripts_runtime/env/install_live.ps1",
-        "Backend/scripts_runtime/env/install_dev.ps1",
-        "Backend/scripts_runtime/env/install_training.ps1",
-        "Backend/scripts_runtime/env/install_business.ps1",
-    ):
+def test_profile_installers_use_separate_locked_environments() -> None:
+    expected_envs = {
+        "Backend/scripts_runtime/env/install_live.ps1": ".venv-live",
+        "Backend/scripts_runtime/env/install_dev.ps1": ".venv-dev",
+        "Backend/scripts_runtime/env/install_training.ps1": ".venv-training",
+        "Backend/scripts_runtime/env/install_business.ps1": ".venv-business",
+        "Backend/scripts_runtime/env/install_docs.ps1": ".venv-docs",
+    }
+    for relative_path, environment_name in expected_envs.items():
         text = _read(relative_path)
-        assert "py -3.11 -m venv" not in text
+        assert f"Join-Path $ProjectRoot '{environment_name}'" in text
+        assert "py -3.11 -m venv $venvPath" in text
         assert "Remove-Item -LiteralPath $venvPath -Recurse -Force" not in text
-        assert "Repo .venv Python not found" in text
         assert "phoenixguard_repo_paths.pth" in text
 
 
@@ -119,10 +125,10 @@ def test_final_certification_periodic_overlay_capture_is_lazy_loaded() -> None:
 def test_single_venv_runtime_verifier_documents_runtime_state_not_environment() -> None:
     text = _read("Backend/tools/verify_single_venv_runtime.py")
     assert "EXTRA_ENVIRONMENT_DIR_NAMES" in text
-    assert '".venv-live"' in text
-    assert '".venv-dev"' in text
-    assert '".venv-training"' in text
-    assert '".venv-business"' in text
+    assert '".venv-live"' not in text
+    assert '".venv-dev"' not in text
+    assert '".venv-training"' not in text
+    assert '".venv-business"' not in text
     assert "runtime_dir_is_environment=False" in text
     assert "process_scan_status" in text
     assert "port_scan_status" in text

@@ -17,7 +17,13 @@ ROOT = PROJECT_ROOT
 
 
 def runtime_root(root: Path) -> Path:
-    return Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or root / "runtime" / "live").resolve()
+    configured = os.getenv("PHOENIXGUARD_RUNTIME_DIR")
+    if configured:
+        return Path(configured).resolve()
+    codex_runtime = root / ".codex_runtime"
+    if codex_runtime.exists():
+        return codex_runtime.resolve()
+    return (root / "runtime" / "live").resolve()
 
 DIRECT_RUNTIME_DIRS = {
     "studies": "generated V3 runtime study records",

@@ -66,6 +66,7 @@ huggingface-hub==0.36.2
     #   -c requirements/constraints.in
     #   accelerate
     #   sentence-transformers
+    #   timm
     #   tokenizers
     #   transformers
 idna==3.18
@@ -194,6 +195,7 @@ pyyaml==6.0.3
     # via
     #   accelerate
     #   huggingface-hub
+    #   timm
     #   transformers
     #   ultralytics
 regex==2026.5.9
@@ -210,6 +212,7 @@ safetensors==0.7.0
     #   -c requirements/constraints.in
     #   -r requirements/training.in
     #   accelerate
+    #   timm
     #   transformers
 scikit-learn==1.8.0
     # via
@@ -237,6 +240,8 @@ sympy==1.14.0
     # via torch
 threadpoolctl==3.6.0
     # via scikit-learn
+timm==1.0.27
+    # via -r requirements/training.in
 tokenizers==0.22.2
     # via transformers
 torch==2.10.0
@@ -246,6 +251,7 @@ torch==2.10.0
     #   accelerate
     #   chronos-forecasting
     #   sentence-transformers
+    #   timm
     #   torchvision
     #   ultralytics
     #   ultralytics-thop
@@ -253,6 +259,7 @@ torchvision==0.25.0
     # via
     #   -c requirements/constraints.in
     #   -r requirements/vision.in
+    #   timm
     #   ultralytics
 tqdm==4.68.3
     # via

@@ -8558,6 +8558,25 @@
         els.readPath.textContent = story.path;
       }
       const microForecast = highFrequencyForecast(session, objectOrEmpty(session.latest_signal), objectOrEmpty(session.tracking_summary));
+      const strategyResult = objectOrEmpty(session.model_council_result);
+      const strategyCouncil = objectOrEmpty(strategyResult.model_council || session.model_council);
+      const strategyRaw = objectOrEmpty(strategyResult.book_strategy || strategyCouncil.book_strategy);
+      const strategyRead = objectOrEmpty(strategyResult.strategy_read || strategyCouncil.strategy_read || strategyRaw.strategy_read);
+      const strategyPlaybook = clean(strategyRead.playbook || strategyRaw.playbook || strategyResult.book_strategy_playbook || strategyCouncil.book_strategy_playbook, "");
+      const strategyMaturity = clean(strategyRead.maturity || strategyRaw.maturity_state || strategyRaw.state || strategyResult.book_strategy_state || strategyCouncil.book_strategy_state, "");
+      const strategyNext = clean(strategyRead.next_required || strategyRaw.next_required || strategyResult.next_required || strategyCouncil.next_required, "");
+      const strategyEntryProfile = clean(strategyRead.entry_profile || strategyRaw.entry_profile, "");
+      const strategyReactionType = clean(strategyRead.reaction_type || strategyRaw.reaction_type, "");
+      const strategyCombo = Array.isArray(strategyRead.strategy_combo || strategyRaw.strategy_combo)
+        ? (strategyRead.strategy_combo || strategyRaw.strategy_combo).slice(0, 4).map((item) => clean(item, "").replace(/_/g, " ")).filter(Boolean).join(" + ")
+        : "";
+      const strategyNote = [
+        clean(strategyPlaybook, "PLAYBOOK PENDING").replace(/_/g, " "),
+        strategyEntryProfile ? `profile ${strategyEntryProfile.replace(/_/g, " ")}` : "",
+        strategyReactionType ? `reaction ${strategyReactionType.replace(/_/g, " ")}` : "",
+        strategyCombo ? `combo ${strategyCombo}` : "",
+        clean(strategyNext, "Waiting for reaction proof."),
+      ].filter(Boolean).join(" | ");
       const rows = [
         ["Big picture", story.bigSide, story.thesisActive ? `${story.bigSide} remains the protected thesis.` : "Waiting for protected thesis."],
         ["Live pressure", story.livePressure, story.livePressureNote],
@@ -8565,6 +8584,17 @@
         ["Tactical read", story.label, story.tactical],
         ["Invalidation", story.thesisActive ? "Guardrail" : "Pending", story.invalidation],
       ];
+      if (strategyPlaybook || strategyMaturity) {
+        rows.splice(
+          3,
+          0,
+          [
+            "Strategy read",
+            clean(strategyMaturity, "VALID WATCH").replace(/_/g, " "),
+            strategyNote,
+          ],
+        );
+      }
       if (state.overlayMode === "two_candle_study") {
         rows.push(
           ["Study mode", clean(microForecast.status, "READING").toUpperCase(), clean(microForecast.display_as, "TEXT_AND_BANDS_ONLY")],

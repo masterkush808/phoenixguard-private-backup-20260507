@@ -2,12 +2,13 @@ param(
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 )
 
+$ErrorActionPreference = 'Stop'
 Set-Location $ProjectRoot
-$venvPath = Join-Path $ProjectRoot '.venv'
+$venvPath = Join-Path $ProjectRoot '.venv-training'
 $lockPath = Join-Path $ProjectRoot 'requirements\locks\training-win-py311.txt'
 if (-not (Test-Path $lockPath)) { throw "Missing lock file: $lockPath" }
 $python = Join-Path $venvPath 'Scripts\python.exe'
-if (-not (Test-Path $python)) { throw "Repo .venv Python not found at $python. Create .venv once, then rerun this installer." }
+if (-not (Test-Path $python)) { py -3.11 -m venv $venvPath }
 $sitePackages = Join-Path $venvPath 'Lib\site-packages'
 $repoPathFile = Join-Path $sitePackages 'phoenixguard_repo_paths.pth'
 @(

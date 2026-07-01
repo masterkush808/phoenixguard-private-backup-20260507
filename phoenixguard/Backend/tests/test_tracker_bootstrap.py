@@ -358,14 +358,14 @@ def test_live_fast_display_heartbeat_respects_disable_env(monkeypatch: pytest.Mo
     assert calls == []
 
 
-def test_resolve_python_launcher_uses_repo_venv_executable(tmp_path: Path) -> None:
-    venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+def test_resolve_python_launcher_uses_requested_profile_executable(tmp_path: Path) -> None:
+    venv_python = tmp_path / ".venv-live" / "Scripts" / "python.exe"
     base_python = tmp_path / "Python311" / "python.exe"
     venv_python.parent.mkdir(parents=True)
     base_python.parent.mkdir(parents=True)
     venv_python.write_text("", encoding="utf-8")
     base_python.write_text("", encoding="utf-8")
-    (tmp_path / ".venv" / "pyvenv.cfg").write_text(
+    (tmp_path / ".venv-live" / "pyvenv.cfg").write_text(
         f"home = {base_python.parent}\nexecutable = {base_python}\n",
         encoding="utf-8",
     )
@@ -379,8 +379,8 @@ def test_resolve_python_launcher_uses_repo_venv_executable(tmp_path: Path) -> No
     assert Path(pyvenv_launcher).resolve() == venv_python.resolve()
 
 
-def test_resolve_python_launcher_prefers_repo_venv_when_env_missing(tmp_path: Path) -> None:
-    venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+def test_resolve_python_launcher_prefers_live_profile_when_env_missing(tmp_path: Path) -> None:
+    venv_python = tmp_path / ".venv-live" / "Scripts" / "python.exe"
     venv_python.parent.mkdir(parents=True)
     venv_python.write_text("", encoding="utf-8")
 
@@ -391,8 +391,8 @@ def test_resolve_python_launcher_prefers_repo_venv_when_env_missing(tmp_path: Pa
 
 
 def test_resolve_python_launcher_ignores_process_host_when_present(tmp_path: Path) -> None:
-    venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
-    process_host = tmp_path / ".venv" / "Scripts" / "phoenixguard-python.exe"
+    venv_python = tmp_path / ".venv-live" / "Scripts" / "python.exe"
+    process_host = tmp_path / ".venv-live" / "Scripts" / "phoenixguard-python.exe"
     venv_python.parent.mkdir(parents=True)
     venv_python.write_text("", encoding="utf-8")
     process_host.write_text("", encoding="utf-8")

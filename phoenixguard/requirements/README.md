@@ -1,7 +1,7 @@
 # PhoenixGuard Requirements Profiles
 
-PhoenixGuard uses one repo virtual environment and profile-specific requirement files. Do not install
-random packages into global Python, Conda, nested venvs, or runtime folders.
+PhoenixGuard uses profile-specific virtual environments and locked requirement files. Do not install
+random packages into global Python, Conda, runtime folders, or the wrong profile environment.
 
 ## Production Profiles
 
@@ -13,9 +13,8 @@ random packages into global Python, Conda, nested venvs, or runtime folders.
 | Training | `requirements/training.in` | `requirements/locks/training-win-py311.txt` | Model training and export workflows. |
 | Docs/PDF | `requirements/docs-pdf.in` | `requirements/locks/docs-pdf-win-py311.txt` | Report and architecture PDF generation. |
 
-Launchers should prefer the locked profile for their surface and fall back to the matching `.in` file
-only when the lock is not present. The top-level `requirements.txt` is not the live production
-authority.
+Launchers should prefer the locked profile for their surface. The top-level `requirements.txt` is not
+the live production authority.
 
 ## Runtime Boundary
 
@@ -23,8 +22,19 @@ Runtime state belongs under `runtime/live`. It is not a dependency source and mu
 a Python environment. Use:
 
 ```powershell
-.\.venv\Scripts\python.exe .\Backend\tools\verify_single_venv_runtime.py
-.\.venv\Scripts\python.exe -m pip check
+.\.venv-live\Scripts\python.exe .\Backend\tools\verify_single_venv_runtime.py
+.\.venv-live\Scripts\python.exe -m pip check
+.\.venv-dev\Scripts\python.exe -m pip check
 ```
 
 before trusting a production launch.
+
+## Environment Targets
+
+```text
+.venv-live      requirements/locks/live-win-py311.txt
+.venv-dev       requirements/locks/dev-win-py311.txt
+.venv-training  requirements/locks/training-win-py311.txt
+.venv-business  requirements/locks/business-win-py311.txt
+.venv-docs      requirements/locks/docs-pdf-win-py311.txt
+```

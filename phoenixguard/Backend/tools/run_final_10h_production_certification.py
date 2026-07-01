@@ -215,9 +215,14 @@ def _python_executable() -> str:
     env_exe = os.getenv("PHOENIXGUARD_PYTHON_EXE", "").strip()
     if env_exe and Path(env_exe).exists():
         return env_exe
-    repo_python = _repo_root() / ".venv" / "Scripts" / "python.exe"
-    if repo_python.exists():
-        return str(repo_python)
+    env_name = os.getenv("PHOENIXGUARD_PYTHON_ENV_NAME", "").strip() or ".venv-live"
+    for repo_python in (
+        _repo_root() / env_name / "Scripts" / "python.exe",
+        _repo_root() / ".venv-live" / "Scripts" / "python.exe",
+        _repo_root() / ".venv" / "Scripts" / "python.exe",
+    ):
+        if repo_python.exists():
+            return str(repo_python)
     return sys.executable
 
 
@@ -550,11 +555,14 @@ def _execution_allowed(execution_payload: Mapping[str, Any]) -> tuple[bool, dict
     package_type = _upper(allowance.get("package_type"))
     state = _upper(execution.get("state"))
     side = _upper(execution.get("side"))
+    authority = _upper(allowance.get("execution_authority"))
+    packet_authority = _upper(allowance.get("packet_authority") or "PG_EXECUTION_PACKET_V3")
     allowed = bool(
         state == "EXECUTABLE"
         and side in {"BUY", "SELL"}
         and package_type in ALLOWED_PACKAGE_TYPES
-        and allowance.get("execution_authority") == "PG_EXECUTION_PACKET_V3"
+        and authority in {"PG_EXECUTION_PACKET_V3", "PLAYBOOK_FINAL_DECIDER_V3"}
+        and (authority != "PLAYBOOK_FINAL_DECIDER_V3" or packet_authority == "PG_EXECUTION_PACKET_V3")
         and allowance.get("accepted") is True
         and allowance.get("execution_ready") is True
         and permission.get("executable_allowed") is True

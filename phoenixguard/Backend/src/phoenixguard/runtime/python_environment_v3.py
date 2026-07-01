@@ -12,6 +12,8 @@ class PythonEnvironmentStatus(TypedDict):
     ok: bool
     reason: str
     project_root: str
+    environment_profile: str
+    environment_name: str
     expected_venv: str
     expected_venv_python: str
     process_executable: str
@@ -29,17 +31,55 @@ def project_root_from_runtime_module() -> Path:
     return Path(__file__).resolve().parents[4]
 
 
+PROFILE_ENVIRONMENTS: dict[str, str] = {
+    "live": ".venv-live",
+    "final_live": ".venv-live",
+    "final-live": ".venv-live",
+    "dev": ".venv-dev",
+    "test": ".venv-dev",
+    "testing": ".venv-dev",
+    "training": ".venv-training",
+    "train": ".venv-training",
+    "business": ".venv-business",
+    "share": ".venv-business",
+    "docs": ".venv-docs",
+    "docs-pdf": ".venv-docs",
+}
+
+
+def configured_python_profile() -> str:
+    return str(os.getenv("PHOENIXGUARD_PYTHON_PROFILE") or "live").strip().lower() or "live"
+
+
+def _safe_environment_name(value: str) -> str:
+    name = value.strip()
+    if not name:
+        return ".venv-live"
+    if "/" in name or "\\" in name or name in {".", ".."}:
+        return ".venv-live"
+    if not name.startswith(".venv"):
+        return ".venv-live"
+    return name
+
+
+def configured_python_environment_name() -> str:
+    explicit = str(os.getenv("PHOENIXGUARD_PYTHON_ENV_NAME") or "").strip()
+    if explicit:
+        return _safe_environment_name(explicit)
+    return PROFILE_ENVIRONMENTS.get(configured_python_profile(), ".venv-live")
+
+
 def expected_repo_venv(project_root: Path | None = None) -> Path:
     root = project_root or project_root_from_runtime_module()
-    return root / ".venv"
+    return root / configured_python_environment_name()
 
 
 def expected_repo_venv_python(project_root: Path | None = None) -> Path:
-    root = project_root or project_root_from_runtime_module()
-    scripts_python = root / ".venv" / "Scripts" / "python.exe"
+    expected_venv = expected_repo_venv(project_root)
+    scripts_python = expected_venv / "Scripts" / "python.exe"
     if scripts_python.exists() or os.name == "nt":
         return scripts_python
-    return root / ".venv" / "bin" / "python"
+    return expected_venv / "bin" / "python"
 
 
 def _same_path(left: Path | str, right: Path | str) -> bool:
@@ -69,20 +109,22 @@ def build_python_environment_status(project_root: Path | None = None) -> PythonE
     env_python_ok = not env_python or _same_path(env_python, expected_python)
     ok = bool(prefix_ok and virtual_env_ok and env_python_ok)
     if ok:
-        reason = "repo .venv runtime active"
+        reason = "configured PhoenixGuard Python environment active"
     elif not prefix_ok:
-        reason = f"sys.prefix is not repo .venv: {sys.prefix}"
+        reason = f"sys.prefix is not configured PhoenixGuard environment: {sys.prefix}"
     elif not virtual_env_ok:
-        reason = f"VIRTUAL_ENV is not repo .venv: {virtual_env}"
+        reason = f"VIRTUAL_ENV is not configured PhoenixGuard environment: {virtual_env}"
     elif not env_python_ok:
-        reason = f"PHOENIXGUARD_PYTHON_EXE is not repo .venv python: {env_python}"
+        reason = f"PHOENIXGUARD_PYTHON_EXE is not configured PhoenixGuard python: {env_python}"
     else:
-        reason = "repo .venv runtime status could not be classified"
+        reason = "configured PhoenixGuard Python environment status could not be classified"
     return {
         "schema_version": "PG_PYTHON_ENVIRONMENT_V3",
         "ok": ok,
         "reason": reason,
         "project_root": str(root),
+        "environment_profile": configured_python_profile(),
+        "environment_name": configured_python_environment_name(),
         "expected_venv": str(expected_venv),
         "expected_venv_python": str(expected_python),
         "process_executable": str(expected_python),
@@ -100,5 +142,5 @@ def build_python_environment_status(project_root: Path | None = None) -> PythonE
 def assert_repo_venv_runtime(component: str, project_root: Path | None = None) -> PythonEnvironmentStatus:
     status = build_python_environment_status(project_root)
     if strict_repo_venv_enabled() and not status["ok"]:
-        raise RuntimeError(f"PhoenixGuard {component} refused non-repo-venv Python runtime: {status['reason']}")
+        raise RuntimeError(f"PhoenixGuard {component} refused non-configured Python runtime: {status['reason']}")
     return status

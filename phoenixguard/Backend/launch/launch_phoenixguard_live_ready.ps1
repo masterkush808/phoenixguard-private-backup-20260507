@@ -358,10 +358,10 @@ if ($targetProcessIds.Count -gt 0) {
 Write-Host "  stopped_processes=$($targetProcessIds.Count)"
 
 Write-Host ""
-Write-Host "Preflight: single repo .venv runtime"
-& $pythonPath ".\Backend\tools\verify_single_venv_runtime.py" --cleanup-extra-envs
+Write-Host "Preflight: configured PhoenixGuard live Python environment"
+& $pythonPath ".\Backend\tools\verify_single_venv_runtime.py"
 if ($LASTEXITCODE -ne 0) {
-    throw "Single repo .venv verification failed. Launch aborted."
+    throw "Configured PhoenixGuard Python environment verification failed. Launch aborted."
 }
 
 Write-Host ""

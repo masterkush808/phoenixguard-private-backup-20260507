@@ -5,13 +5,36 @@ import sys
 from pathlib import Path
 
 
+def _configured_environment_name() -> str:
+    explicit = str(os.environ.get("PHOENIXGUARD_PYTHON_ENV_NAME") or "").strip()
+    if explicit:
+        return explicit if explicit.startswith(".venv") and "/" not in explicit and "\\" not in explicit else ".venv-live"
+    profile = str(os.environ.get("PHOENIXGUARD_PYTHON_PROFILE") or "live").strip().lower()
+    return {
+        "live": ".venv-live",
+        "final_live": ".venv-live",
+        "final-live": ".venv-live",
+        "dev": ".venv-dev",
+        "test": ".venv-dev",
+        "testing": ".venv-dev",
+        "training": ".venv-training",
+        "train": ".venv-training",
+        "business": ".venv-business",
+        "share": ".venv-business",
+        "docs": ".venv-docs",
+        "docs-pdf": ".venv-docs",
+    }.get(profile, ".venv-live")
+
+
 def _pin_repo_python_environment(project_root: Path) -> None:
-    repo_python = project_root / ".venv" / "Scripts" / "python.exe"
-    repo_venv = project_root / ".venv"
+    environment_name = _configured_environment_name()
+    repo_python = project_root / environment_name / "Scripts" / "python.exe"
+    repo_venv = project_root / environment_name
     scripts_dir = repo_venv / "Scripts"
     if not repo_python.exists():
         return
     python_text = str(repo_python)
+    os.environ["PHOENIXGUARD_PYTHON_ENV_NAME"] = environment_name
     os.environ["PHOENIXGUARD_PYTHON_EXE"] = python_text
     os.environ["PHOENIXGUARD_PYVENV_LAUNCHER"] = python_text
     os.environ["VIRTUAL_ENV"] = str(repo_venv)

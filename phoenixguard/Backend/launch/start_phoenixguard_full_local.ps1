@@ -329,10 +329,10 @@ if (-not $NoKillExisting) {
 }
 
 Write-Host ""
-Write-Host "Preflight: single repo .venv runtime"
-& $pythonPath ".\Backend\tools\verify_single_venv_runtime.py" --cleanup-extra-envs
+Write-Host "Preflight: configured PhoenixGuard Python environment"
+& $pythonPath ".\Backend\tools\verify_single_venv_runtime.py"
 if ($LASTEXITCODE -ne 0) {
-    throw "Single repo .venv verification failed. Launch aborted."
+    throw "Configured PhoenixGuard Python environment verification failed. Launch aborted."
 }
 
 Write-Host "Starting PhoenixGuard tracker on $baseUrl"

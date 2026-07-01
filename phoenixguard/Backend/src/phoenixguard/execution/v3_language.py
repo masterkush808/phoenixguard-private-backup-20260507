@@ -457,7 +457,8 @@ def public_language_scorecard() -> dict[str, Any]:
     return {
         "version": LANGUAGE_CONSTITUTION_VERSION,
         "active_packet_contracts": [STUDY_PACKET_TYPE, EXECUTION_PACKET_TYPE],
-        "execution_authority": "validated PG_EXECUTION_PACKET_V3 only",
+        "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3 strategy authority with PG_EXECUTION_PACKET_V3 packet validation",
+        "model_council_role": "MODEL_COUNCIL_CONTRIBUTOR_GATE_V3",
         "action_authority": "MT4 bridge or external executor only; shooter reports allowed packages",
         "operator_truth": "FloatingStateV2 reducer only",
         "side_hierarchy": ["raw_side", "candidate_side", "final_side", "execution.side"],

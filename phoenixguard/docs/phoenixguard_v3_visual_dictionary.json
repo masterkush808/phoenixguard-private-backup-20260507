@@ -3,7 +3,7 @@
   "purpose": "Approved PhoenixGuard V3 overlay vocabulary for backend filtering, dashboard rendering, diagnostics, and certification.",
   "knowledge_dictionary": "docs/phoenixguard_v3_market_knowledge_dictionary.json",
   "rules": {
-    "execution_authority": "Overlays explain the decision surface only. Execution authority remains PG_EXECUTION_PACKET_V3 and ShooterActionSequencerV2.",
+    "execution_authority": "Overlays explain the decision surface only. PLAYBOOK_FINAL_DECIDER_V3 is the strategy authority; PG_EXECUTION_PACKET_V3 is the required validated packet contract.",
     "unknown_live_labels": "Labels outside approved_labels must not render in live modes. They are collected as unknown_or_unmapped_terms and exposed in diagnostics.",
     "clean_live_now_budget": "CLEAN_LIVE may show at most one CURRENT/NOW label.",
     "council_mode": "COUNCIL renders reasoning markers only, not chart box spam."

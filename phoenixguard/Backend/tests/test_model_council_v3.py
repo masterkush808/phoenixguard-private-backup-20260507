@@ -331,7 +331,7 @@ def test_high_frequency_two_candle_requires_local_reclaim_confirmation() -> None
     assert "LOCAL_RECLAIM_NOT_CONFIRMED" in lane["high_frequency_contribution"]["blockers"]
 
 
-def test_reasoning_wait_for_pullback_blocks_high_frequency_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reasoning_wait_for_pullback_is_contributor_when_playbook_authorizes_high_frequency_execution(monkeypatch: pytest.MonkeyPatch) -> None:
     def _wait_for_pullback_reasoning(*args: object, **kwargs: object) -> dict[str, object]:
         return {
             "arbitration": {
@@ -361,13 +361,18 @@ def test_reasoning_wait_for_pullback_blocks_high_frequency_execution(monkeypatch
     council.evaluate(_high_frequency_snapshot("BUY", frame_id=216), now_epoch=NOW)
     result = council.evaluate(_high_frequency_snapshot("BUY", frame_id=217), now_epoch=NOW + 0.5)
 
-    assert result["execution"]["enabled"] is False
-    assert result["packet_type"] == "STUDY_PACKET"
+    assert result["execution"]["enabled"] is True
+    assert result["packet_type"] == "PG_EXECUTION_PACKET_V3"
     assert result["promotion_trace"]["execution_lane"]["accepted"] is True
     assert result["selected_execution_lane"] == "LOCAL_BREAKDOWN_CONTINUATION"
     assert result["promotion_trace"]["execution_lane"]["high_frequency_contribution"]["lane_authority"] is False
-    assert result["promotion_trace"]["true_blocker"] == "REASONING_WAIT_FOR_PULLBACK"
+    assert result["promotion_trace"]["true_blocker"] == "NONE"
     assert result["promotion_trace"]["reasoning_execution_blocked"] is True
+    allowance = result["allowance_package"]
+    assert allowance["execution_authority"] == "PLAYBOOK_FINAL_DECIDER_V3"
+    assert allowance["packet_authority"] == "PG_EXECUTION_PACKET_V3"
+    assert allowance["model_council_role"] == "MODEL_COUNCIL_CONTRIBUTOR_GATE_V3"
+    assert allowance["playbook_authorized"] is True
 
 
 def test_intraday_enter_now_package_overrides_soft_pullback_wait(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -606,7 +611,7 @@ def test_blank_symbol_does_not_block_study_or_mark_models_stale() -> None:
 
     assert result["execution"]["enabled"] is False
     assert result["model_council"]["final_state"] != "BLOCKED_BY_RUNTIME"
-    assert result["block_reason"] is None
+    assert result["block_reason"] in {None, "CANDIDATE_MATURITY"}
     assert result["instrument_context"]["display_symbol"] == ""
     assert result["instrument_context"]["ocr_symbol"] == ""
     assert result["runtime_model_health"]["all_required_models_awake"] is True
@@ -1181,8 +1186,8 @@ def test_context_block_has_specific_context_field() -> None:
     result = council.evaluate(second, now_epoch=NOW + 0.5)
 
     assert result["promotion_trace"]["release_state"] == "CONTEXT_BLOCKED"
-    assert "selected_lane=" in result["promotion_trace"]["next_required"]
-    assert ".structure_ok=true" in result["promotion_trace"]["next_required"]
+    assert result["promotion_trace"]["true_blocker"] == "PLAYBOOK_MATURITY_VALID_WATCH"
+    assert result["promotion_trace"]["promotion_failure_audit_v3"]["exact_field_preventing_execution_packet"] == "book_strategy_master"
     _assert_non_executable_release_fields(result)
 
 
@@ -1207,8 +1212,8 @@ def test_score_pass_without_packet_reports_true_blocker() -> None:
     assert result["execution"]["enabled"] is False
     assert "execution_packet" not in result
     assert result["promotion_trace"]["execution_lane"]["actual_score"] >= result["promotion_trace"]["execution_lane"]["required_score"]
-    assert result["promotion_trace"]["true_blocker"] == "NO_EXECUTION_LANE_ACCEPTED"
-    assert result["promotion_trace"]["denied_at"] == "NO_EXECUTION_LANE_ACCEPTED"
+    assert result["promotion_trace"]["true_blocker"] == "PLAYBOOK_MATURITY_VALID_WATCH"
+    assert result["promotion_trace"]["denied_at"] == "PLAYBOOK_MATURITY_VALID_WATCH"
 
 
 def test_instrument_context_wait_reports_broker_click_safe_false() -> None:
@@ -1273,7 +1278,8 @@ def test_execution_packet_publishes_after_all_release_conditions_pass() -> None:
     assert packet["promotion_trace"]["opportunity_maturity_state"] == "ENTER_NOW"
     allowance = packet["allowance_package"]
     assert allowance["package_type"] == "INTRADAY_ENTER_NOW"
-    assert allowance["execution_authority"] == "PG_EXECUTION_PACKET_V3"
+    assert allowance["execution_authority"] == "PLAYBOOK_FINAL_DECIDER_V3"
+    assert allowance["packet_authority"] == "PG_EXECUTION_PACKET_V3"
     assert allowance["execution_ready"] is True
     assert allowance["opportunity_maturity"] == "ENTER_NOW"
     assert allowance["visual_integrity"] == "PASS"
@@ -1340,7 +1346,7 @@ def test_timing_wait_blocks_execution_packet() -> None:
     assert result["timing_decision"]["path_class"] in {"LATE_CHASE_REVERSAL_RISK", "ADVERSE_FIRST_THEN_TARGET"}
     assert result["model_council"]["final_state"] in {"WATCHING", "PREPARING"}
     assert result["opportunity_maturity_state"] == "LATE_CHASE"
-    assert result["opportunity_maturity"]["denied_at"].startswith("TIMING_MODE")
+    assert result["opportunity_maturity"]["denied_at"] == "PLAYBOOK_MATURITY_LATE_CHASE"
     assert result["study_packet"]["timing_decision"]["entry_now_allowed"] is False
 
 
@@ -1537,8 +1543,13 @@ def test_wave_riding_does_not_override_hard_buy_high_bad_entry(monkeypatch: pyte
     assert result["execution"]["enabled"] is False
     assert result["promotion_trace"]["execution_lane"]["accepted"] is True
     assert result["promotion_trace"]["wave_reasoning_override_allowed"] is False
-    assert result["promotion_trace"]["true_blocker"] == "REASONING_WAIT_FOR_PULLBACK"
+    assert result["promotion_trace"]["true_blocker"] == "PLAYBOOK_MATURITY_LATE_CHASE"
     assert result["promotion_trace"]["hard_bad_entry_class_active"] is True
+    assert result["opportunity_maturity"]["book_strategy"]["maturity_state"] == "LATE_CHASE"
+    assert any(
+        blocker.get("field") == "bad_entry_filter.class"
+        for blocker in result["opportunity_maturity"]["book_strategy"]["blockers"]
+    )
 
 
 def _wave_context_from_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -1724,7 +1735,7 @@ def test_score_above_threshold_without_lane_stays_study_packet() -> None:
 
     assert result["execution"]["enabled"] is False
     assert result["packet_type"] == "STUDY_PACKET"
-    assert result["promotion_trace"]["true_blocker"] == "NO_EXECUTION_LANE_ACCEPTED"
+    assert result["promotion_trace"]["true_blocker"] == "PLAYBOOK_MATURITY_VALID_WATCH"
     assert result["promotion_trace"]["execution_lane"]["accepted"] is False
     assert result["promotion_trace"]["missed_opportunity"]["side"] == "SELL"
     assert result["promotion_trace"]["missed_opportunity"]["lane_score"] >= result["promotion_trace"]["missed_opportunity"]["lane_threshold"]

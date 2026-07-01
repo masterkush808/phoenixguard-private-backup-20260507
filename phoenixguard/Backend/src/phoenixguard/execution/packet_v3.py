@@ -30,6 +30,7 @@ from phoenixguard.execution.sequence_context import (
 
 EXECUTION_PACKET_SCHEMA_VERSION = "PG_EXECUTION_PACKET_V3"
 PG_EXECUTION_PACKET_SCHEMA_VERSION = EXECUTION_PACKET_SCHEMA_VERSION
+PLAYBOOK_EXECUTION_AUTHORITY = "PLAYBOOK_FINAL_DECIDER_V3"
 ALLOWANCE_PACKAGE_SCHEMA_VERSION = "PG_ALLOWANCE_PACKAGE_V1"
 STUDY_PACKET_SCHEMA_VERSION = "PG_MODEL_COUNCIL_STUDY_V3"
 STUDY_PACKET_TYPE = "STUDY_PACKET"
@@ -40,7 +41,8 @@ FRESH_CACHE_STATUS = "fresh"
 VALID_SIDE_VALUES = {member.value for member in Side}
 VALID_EXECUTION_SIDES = {"BUY", "SELL"}
 VALID_PACKET_TYPES = {member.value for member in PacketType}
-VALID_ALLOWANCE_PACKAGE_TYPES = {"SWING", "INTRADAY_ENTER_NOW"}
+VALID_ALLOWANCE_PACKAGE_TYPES = {"SWING", "SWING_ENTER_NOW", "INTRADAY_ENTER_NOW"}
+VALID_ALLOWANCE_EXECUTION_AUTHORITIES = {PLAYBOOK_EXECUTION_AUTHORITY}
 MAX_REASONABLE_EPOCH_SECONDS = 10_000_000_000.0
 RUNTIME_INTEGRITY_CATEGORY = "RUNTIME_INTEGRITY"
 RUNTIME_INTEGRITY = RUNTIME_INTEGRITY_CATEGORY
@@ -462,6 +464,7 @@ def build_execution_packet_v3(
     if resolved_allowance_package:
         resolved_allowance_package.setdefault("schema_version", ALLOWANCE_PACKAGE_SCHEMA_VERSION)
         resolved_allowance_package.setdefault("execution_authority", EXECUTION_PACKET_SCHEMA_VERSION)
+        resolved_allowance_package.setdefault("packet_authority", EXECUTION_PACKET_SCHEMA_VERSION)
         council.setdefault("allowance_package", resolved_allowance_package)
     resolved_sequence_context = _mapping(sequence_context)
     if resolved_sequence_context:
@@ -589,6 +592,18 @@ def build_execution_packet_v3(
         packet["execution"]["allowance_package_type"] = _clean_str(
             resolved_allowance_package.get("package_type")
         )
+    book_strategy = _mapping(council.get("book_strategy"))
+    if book_strategy:
+        packet["book_strategy"] = book_strategy
+        packet["book_strategy_state"] = _clean_str(
+            council.get("book_strategy_state") or book_strategy.get("maturity_state") or book_strategy.get("state")
+        )
+        packet["book_strategy_playbook"] = _clean_str(
+            council.get("book_strategy_playbook") or book_strategy.get("playbook")
+        )
+        strategy_read = _mapping(council.get("strategy_read") or book_strategy.get("strategy_read"))
+        if strategy_read:
+            packet["strategy_read"] = strategy_read
     return packet
 
 
@@ -834,14 +849,33 @@ def validate_execution_packet_v3(
         allowance_schema = _clean_str(allowance_package.get("schema_version"))
         allowance_type = _enum_text(allowance_package.get("package_type"))
         allowance_authority = _clean_str(allowance_package.get("execution_authority"))
+        allowance_packet_authority = _clean_str(allowance_package.get("packet_authority"))
         if allowance_schema != ALLOWANCE_PACKAGE_SCHEMA_VERSION:
             add("INVALID_ALLOWANCE_PACKAGE_SCHEMA", MODEL_COUNCIL, "allowance_package.schema_version is invalid.")
         if allowance_type not in VALID_ALLOWANCE_PACKAGE_TYPES:
-            add("INVALID_ALLOWANCE_PACKAGE_TYPE", MODEL_COUNCIL, "allowance_package.package_type must be SWING or INTRADAY_ENTER_NOW.")
-        if allowance_authority and allowance_authority != EXECUTION_PACKET_SCHEMA_VERSION:
-            add("INVALID_ALLOWANCE_EXECUTION_AUTHORITY", MODEL_COUNCIL, "allowance_package.execution_authority must be PG_EXECUTION_PACKET_V3.")
-        if require_executable and allowance_authority != EXECUTION_PACKET_SCHEMA_VERSION:
-            add("MISSING_ALLOWANCE_EXECUTION_AUTHORITY", MODEL_COUNCIL, "allowance_package.execution_authority must be PG_EXECUTION_PACKET_V3.")
+            add(
+                "INVALID_ALLOWANCE_PACKAGE_TYPE",
+                MODEL_COUNCIL,
+                "allowance_package.package_type must be SWING, SWING_ENTER_NOW, or INTRADAY_ENTER_NOW.",
+            )
+        if allowance_authority and allowance_authority not in VALID_ALLOWANCE_EXECUTION_AUTHORITIES:
+            add(
+                "INVALID_ALLOWANCE_EXECUTION_AUTHORITY",
+                MODEL_COUNCIL,
+                "allowance_package.execution_authority must be PLAYBOOK_FINAL_DECIDER_V3.",
+            )
+        if require_executable and not allowance_authority:
+            add(
+                "MISSING_ALLOWANCE_EXECUTION_AUTHORITY",
+                MODEL_COUNCIL,
+                "allowance_package.execution_authority must name PLAYBOOK_FINAL_DECIDER_V3.",
+            )
+        if allowance_authority == PLAYBOOK_EXECUTION_AUTHORITY and allowance_packet_authority != EXECUTION_PACKET_SCHEMA_VERSION:
+            add(
+                "MISSING_ALLOWANCE_PACKET_AUTHORITY",
+                MODEL_COUNCIL,
+                "playbook-authorized allowance packages must keep packet_authority=PG_EXECUTION_PACKET_V3.",
+            )
         if require_executable and allowance_package.get("accepted") is not True:
             add("ALLOWANCE_PACKAGE_NOT_ACCEPTED", MODEL_COUNCIL, "allowance_package.accepted must be true for executable packets.")
         if require_executable and allowance_package.get("execution_ready") is not True:

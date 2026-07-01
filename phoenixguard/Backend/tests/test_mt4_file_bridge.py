@@ -61,7 +61,8 @@ def _sample_execution_packet() -> dict[str, object]:
             "schema_version": "PG_ALLOWANCE_PACKAGE_V1",
             "package_type": "INTRADAY_ENTER_NOW",
             "allowance_family": "INTRADAY",
-            "execution_authority": "PG_EXECUTION_PACKET_V3",
+            "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3",
+            "packet_authority": "PG_EXECUTION_PACKET_V3",
             "side": "BUY",
             "accepted": True,
             "decision_accepted": True,
@@ -112,7 +113,8 @@ def test_mt4_bridge_compact_command_preserves_swing_allowance_package() -> None:
         "schema_version": "PG_ALLOWANCE_PACKAGE_V1",
         "package_type": "SWING",
         "allowance_family": "SWING",
-        "execution_authority": "PG_EXECUTION_PACKET_V3",
+            "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3",
+            "packet_authority": "PG_EXECUTION_PACKET_V3",
         "side": "BUY",
         "accepted": True,
         "decision_accepted": True,
@@ -145,7 +147,7 @@ def test_mt4_bridge_rejects_inferred_allowance_package() -> None:
     try:
         bridge._validate_command(command)
     except ValueError as exc:
-        assert "explicit from Model Council" in str(exc)
+        assert "explicit from Playbook final decider" in str(exc)
     else:
         raise AssertionError("bridge accepted an inferred allowance package")
 

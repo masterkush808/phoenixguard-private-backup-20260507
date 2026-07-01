@@ -172,6 +172,8 @@ def _live_fast_display_heartbeat(
     if now - float(last_heartbeat_epoch or 0.0) < interval_sec:
         return last_heartbeat_epoch
     resolved_script_dir = script_dir or PROJECT_ROOT
+    if _live_fast_display_file_heartbeat(resolved_script_dir, session_id, now_epoch=now):
+        return now
     try:
         timeout_sec = max(0.2, float(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC", "4.0") or "4.0"))
     except ValueError:
@@ -186,8 +188,6 @@ def _live_fast_display_heartbeat(
         return now
     except Exception:
         pass
-    if _live_fast_display_file_heartbeat(resolved_script_dir, session_id, now_epoch=now):
-        return now
     return now
 
 
@@ -246,9 +246,12 @@ def _stop_process(proc: subprocess.Popen[str], *, timeout_sec: float = 8.0) -> N
 
 
 def _repo_venv_python(script_dir: Path) -> Path | None:
+    env_name = os.getenv("PHOENIXGUARD_PYTHON_ENV_NAME", "").strip() or ".venv-live"
     candidates = (
-        script_dir / ".venv" / "Scripts" / "python.exe",
-        script_dir / ".venv" / "bin" / "python",
+        script_dir / env_name / "Scripts" / "python.exe",
+        script_dir / env_name / "bin" / "python",
+        script_dir / ".venv-live" / "Scripts" / "python.exe",
+        script_dir / ".venv-live" / "bin" / "python",
     )
     for candidate in candidates:
         if candidate.exists():
@@ -344,7 +347,7 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _live_fast_display_file_heartbeat(script_dir: Path, session_id: str, *, now_epoch: float) -> bool:
-    enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "0") or "0").strip().lower()
+    enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "1") or "1").strip().lower()
     if enabled in {"0", "false", "off", "no"}:
         return False
     path = _display_state_path(script_dir, session_id)

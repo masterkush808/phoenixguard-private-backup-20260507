@@ -255,7 +255,10 @@ def test_no_direct_pyautogui_action_outside_low_level_adapter() -> None:
 
 def test_public_language_scorecard_names_v3_authorities() -> None:
     scorecard = public_language_scorecard()
-    assert scorecard["execution_authority"] == "validated PG_EXECUTION_PACKET_V3 only"
+    assert scorecard["execution_authority"] == (
+        "PLAYBOOK_FINAL_DECIDER_V3 strategy authority with PG_EXECUTION_PACKET_V3 packet validation"
+    )
+    assert scorecard["model_council_role"] == "MODEL_COUNCIL_CONTRIBUTOR_GATE_V3"
     assert scorecard["action_authority"] == "MT4 bridge or external executor only; shooter reports allowed packages"
     assert scorecard["operator_truth"] == "FloatingStateV2 reducer only"
 

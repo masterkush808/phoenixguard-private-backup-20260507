@@ -80,7 +80,8 @@ candidate or side context when available, score/threshold, `denied_at` or `block
 
 `PG_EXECUTION_PACKET_V3`
 
-The only execution-authority packet. It must include `schema_version`,
+The only execution packet contract accepted downstream. It must be authorized by
+`PLAYBOOK_FINAL_DECIDER_V3` through a `PG_ALLOWANCE_PACKAGE_V1`, and it must include `schema_version`,
 `packet_id`, `execution.enabled=true`, `execution.state=EXECUTABLE`, `execution.side`,
 `execution.expiry_seconds`, `execution.time_sequence`, live integrity, model health,
 instrument context, and Model Council final state/side.
@@ -134,9 +135,12 @@ but does not set broker controls.
 
 `allowance_package`
 
-The Model Council package that classifies executable permission as `INTRADAY_ENTER_NOW`
+The allowance package that classifies executable permission as `INTRADAY_ENTER_NOW`
 or `SWING`. The shooter package reporter publishes a handshake only when this package is
-accepted, execution-ready, authority-bound to `PG_EXECUTION_PACKET_V3`, and not stale.
+accepted, execution-ready, strategy-authority-bound to `PLAYBOOK_FINAL_DECIDER_V3`
+or legacy packet-authority-bound to `PG_EXECUTION_PACKET_V3`, and not stale. When
+the playbook is the strategy authority, `packet_authority` must remain
+`PG_EXECUTION_PACKET_V3`.
 
 `runtime_integrity`
 

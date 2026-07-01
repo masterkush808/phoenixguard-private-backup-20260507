@@ -5,6 +5,11 @@ import json
 import time
 from typing import Any, Mapping, Sequence, cast
 
+from phoenixguard.decision.book_strategy_master_v3 import (
+    BOOK_STRATEGY_EXECUTION_AUTHORITY,
+    MODEL_COUNCIL_CONTRIBUTOR_ROLE,
+    evaluate_book_strategy_master_v3,
+)
 from phoenixguard.decision.reasoning_arbitrator_v3 import analyze_reasoning_arbitration_v3
 from phoenixguard.decision.market_intelligence_v3 import analyze_market_intelligence
 from phoenixguard.execution.packet_v3 import (
@@ -34,6 +39,7 @@ PROMOTION_FAILURE_AUDIT_SCHEMA_VERSION = "PG_PROMOTION_FAILURE_AUDIT_V3"
 ALLOWANCE_PACKAGE_SCHEMA_VERSION = "PG_ALLOWANCE_PACKAGE_V1"
 ALLOWANCE_PACKAGE_SWING = "SWING"
 ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW = "INTRADAY_ENTER_NOW"
+PLAYBOOK_FINAL_DECIDER = BOOK_STRATEGY_EXECUTION_AUTHORITY
 OPPORTUNITY_MATURITY_SCHEMA_VERSION = "PG_OPPORTUNITY_MATURITY_V3"
 OPPORTUNITY_MATURITY_STATES = {
     "NO_OPPORTUNITY",
@@ -98,6 +104,11 @@ LATE_CHASE_BLOCK_REASONS = {
     "LATE_CHASE",
     "LATE_CHASE_AFTER_IMPULSE",
     "LATE_CHASE_STEEP_IMPULSE",
+}
+BAD_TIMING_PATH_CLASSES = {
+    "ADVERSE_FIRST_THEN_TARGET",
+    "OPPOSING_FORCE_FIRST",
+    "LATE_CHASE_REVERSAL_RISK",
 }
 ENTRY_QUALITY_SOFT_STATES = {
     "EARLY_WATCH",
@@ -831,18 +842,24 @@ def _build_allowance_package_v1(
     entry_now_allowed = bool(_mapping(timing_decision).get("entry_now_allowed"))
     maturity = _mapping(opportunity_maturity)
     opportunity_state = _upper(maturity.get("state"), "NO_OPPORTUNITY")
+    book_strategy = _mapping(maturity.get("book_strategy"))
+    book_strategy_state = _upper(book_strategy.get("maturity_state") or book_strategy.get("state"))
+    playbook_authorized = bool(
+        maturity.get("execution_authority") == PLAYBOOK_FINAL_DECIDER
+        and opportunity_state == "ENTER_NOW"
+        and book_strategy_state == "ENTER_NOW"
+    )
     lane_name = _upper(execution_lane.get("name"))
     timing_mode_normalized = _upper(timing_mode or timing_decision.get("timing_mode"))
     package_type = (
         ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW
-        if entry_now_allowed and timing_mode_normalized == "ENTER_NOW"
+        if playbook_authorized or (entry_now_allowed and timing_mode_normalized == "ENTER_NOW")
         else ALLOWANCE_PACKAGE_SWING
     )
     decision_accepted = bool(
         candidate_side in {"BUY", "SELL"}
-        and bool(execution_lane.get("accepted"))
-        and final_score_passed
-        and (entry_now_allowed if package_type == ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW else True)
+        and bool(executable)
+        and playbook_authorized
     )
     blocker = _upper(true_blocker)
     accepted_lanes_raw = execution_lane.get("accepted_lanes", [])
@@ -855,7 +872,10 @@ def _build_allowance_package_v1(
         "schema_version": ALLOWANCE_PACKAGE_SCHEMA_VERSION,
         "package_type": package_type,
         "allowance_family": "INTRADAY" if package_type == ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW else "SWING",
-        "execution_authority": PG_EXECUTION_PACKET_SCHEMA_VERSION,
+        "execution_authority": PLAYBOOK_FINAL_DECIDER,
+        "packet_authority": PG_EXECUTION_PACKET_SCHEMA_VERSION,
+        "model_council_role": MODEL_COUNCIL_CONTRIBUTOR_ROLE,
+        "playbook_authorized": playbook_authorized,
         "side": candidate_side if candidate_side in {"BUY", "SELL"} else None,
         "accepted": decision_accepted,
         "decision_accepted": decision_accepted,
@@ -871,6 +891,7 @@ def _build_allowance_package_v1(
         "path_class": _upper(path_class),
         "selected_lane": lane_name,
         "lane_accepted": bool(execution_lane.get("accepted")),
+        "lane_is_contributor": True,
         "accepted_lanes": accepted_lanes,
         "score": round(float(final_execution_score), 4),
         "threshold": round(float(lane_required_score), 4),
@@ -2468,6 +2489,20 @@ def _non_executable_release_state(
         packet_identity_mode == "broker_click" and not bool(instrument_context.get("broker_click_safe"))
     ):
         return "INSTRUMENT_CONTEXT_WAIT"
+    if blocker.startswith("PLAYBOOK_MATURITY_"):
+        if blocker in {"PLAYBOOK_MATURITY_LATE_CHASE", "PLAYBOOK_MATURITY_INVALIDATED", "PLAYBOOK_MATURITY_MISSED"} and (
+            not lane_effective_timing_ready or timing_mode != "ENTER_NOW"
+        ):
+            return "TIMING_WAIT"
+        if not context_ok:
+            return "CONTEXT_BLOCKED"
+        if not lane_effective_timing_ready or timing_mode != "ENTER_NOW":
+            return "TIMING_WAIT"
+        return "PREPARING" if blocker in {"PLAYBOOK_MATURITY_VALID_WATCH", "PLAYBOOK_MATURITY_PREPARE"} else "WATCHING"
+    if blocker.startswith("PLAYBOOK_"):
+        if not lane_effective_timing_ready or timing_mode != "ENTER_NOW":
+            return "TIMING_WAIT"
+        return "WATCHING"
     if flip_flop_contained or blocker == "FLIP_FLOP_CONTAINED":
         return "FLIP_FLOP_CONTAINED"
     if final_state == "PREPARING" and blocker in {"CANDIDATE_MATURITY", "NONE"}:
@@ -2504,6 +2539,8 @@ def _promotion_exact_field(blocker: str, sequence: Mapping[str, Any], instrument
         return "instrument_context"
     if blocker_upper in {"MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING", "MISSING_TIME_SEQUENCE"}:
         return "timing.expiry_seconds"
+    if blocker_upper.startswith("PLAYBOOK_"):
+        return "book_strategy_master"
     if "TIMING" in blocker_upper or blocker_upper.startswith("CURRENT_CANDLE"):
         return "timing_mode"
     if blocker_upper in {"NO_EXECUTION_LANE_ACCEPTED", "LANE_SCORE_BELOW_THRESHOLD"}:
@@ -2589,11 +2626,12 @@ def build_promotion_failure_audit_v3(
     add(denied_at, reason=next_required, weight=1.0)
     if sequence and not bool(sequence.get("ready")):
         add("SEQUENCE_CONTEXT", field=str(sequence.get("failed_module") or "sequence_context"), reason=str(sequence.get("next_required") or next_required), weight=0.92)
-    if mode and mode != "ENTER_NOW":
+    playbook_denial = denied_at.startswith("PLAYBOOK_")
+    if mode and mode != "ENTER_NOW" and not playbook_denial:
         add(f"TIMING_MODE_{mode}", field="timing_mode", reason=next_required, weight=0.88)
-    if score_threshold > 0.0 and score < score_threshold:
+    if score_threshold > 0.0 and score < score_threshold and not playbook_denial:
         add("LANE_SCORE_BELOW_THRESHOLD", field="final_execution_score", reason=f"final_score={score:.4f} < threshold={score_threshold:.4f}", weight=0.82)
-    if lane and not bool(lane.get("accepted")):
+    if lane and not bool(lane.get("accepted")) and not playbook_denial:
         add("NO_EXECUTION_LANE_ACCEPTED", field="execution_lane.accepted", reason=str(lane.get("reason") or lane.get("next_required") or next_required), weight=0.8)
     if instrument and not bool(instrument.get("broker_click_safe")) and denied_at.startswith("INSTRUMENT_CONTEXT"):
         add("INSTRUMENT_CONTEXT_NOT_BROKER_CLICK_SAFE", field="instrument_context.broker_click_safe", reason=next_required, weight=0.95)
@@ -2961,7 +2999,7 @@ def evaluate_model_council_v3(
         and current_candle_ok
         and not trap_active
         and opposing_force_ok
-        and path_class not in {"ADVERSE_FIRST_THEN_TARGET", "OPPOSING_FORCE_FIRST", "LATE_CHASE_REVERSAL_RISK"}
+        and path_class not in BAD_TIMING_PATH_CLASSES
         and not late_chase
     )
     timing_mode = _timing_entry_mode(
@@ -2973,7 +3011,9 @@ def evaluate_model_council_v3(
         too_late=bool(current_candle.get("too_late")),
     )
     expiry_band = _timing_expiry_band(preferred_expiry_seconds)
-    drawdown_first_warning_active = bool(not entry_now_allowed or path_class in {"ADVERSE_FIRST_THEN_TARGET", "OPPOSING_FORCE_FIRST", "LATE_CHASE_REVERSAL_RISK"})
+    bad_timing_path_active = path_class in BAD_TIMING_PATH_CLASSES
+    hard_timing_path_active = path_class in {"OPPOSING_FORCE_FIRST", "LATE_CHASE_REVERSAL_RISK"}
+    drawdown_first_warning_active = bool(not entry_now_allowed or bad_timing_path_active)
     timing_forecast: dict[str, Any] = {
         "side": candidate_side if candidate_side in {"BUY", "SELL"} else None,
         "best_entry_mode": timing_mode,
@@ -3351,6 +3391,57 @@ def evaluate_model_council_v3(
         execution_lane=execution_lane,
     )
     opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "NO_OPPORTUNITY")
+    book_strategy = evaluate_book_strategy_master_v3(
+        snapshot,
+        market=market,
+        candidate_side=candidate_side,
+        execution_lane=execution_lane,
+        timing_decision=timing_decision,
+        current_candle=current_candle,
+        timing_mode=timing_mode,
+        final_score_passed=final_score_passed,
+        timing_enter_now=bool(timing_decision.get("entry_now_allowed") and timing_mode == "ENTER_NOW"),
+        lane_score=final_execution_score,
+        lane_required_score=lane_required_score,
+        bad_entry_filter=bad_entry_filter,
+        bad_entry=bad_entry,
+    )
+    book_strategy_state = _upper(book_strategy.get("maturity_state"), "VALID_WATCH")
+    if book_strategy_state in OPPORTUNITY_MATURITY_STATES:
+        opportunity_maturity["state"] = book_strategy_state
+        opportunity_maturity_state = book_strategy_state
+    opportunity_maturity["book_strategy"] = book_strategy
+    opportunity_maturity["execution_authority"] = PLAYBOOK_FINAL_DECIDER
+    opportunity_maturity["final_decider"] = "book_strategy_master_v3"
+    opportunity_maturity["model_council_role"] = MODEL_COUNCIL_CONTRIBUTOR_ROLE
+    opportunity_maturity["confidence"] = round(
+        max(_clip01(opportunity_maturity.get("confidence"), 0.0), _clip01(book_strategy.get("confidence"), 0.0)),
+        4,
+    )
+    if book_strategy_state == "ENTER_NOW":
+        opportunity_maturity["denied_at"] = "NONE"
+        opportunity_maturity["next_required"] = "publish validated PG_EXECUTION_PACKET_V3"
+    else:
+        opportunity_maturity["denied_at"] = "BOOK_STRATEGY_MASTER"
+        opportunity_maturity["next_required"] = str(book_strategy.get("next_required") or "book strategy reaction proof required")
+
+    playbook_enter_now = bool(book_strategy_state == "ENTER_NOW" and candidate_side in {"BUY", "SELL"})
+    playbook_wait_state = book_strategy_state if book_strategy_state in OPPORTUNITY_MATURITY_STATES else "VALID_WATCH"
+    playbook_hard_gate_reason = ""
+    if book_strategy_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
+        playbook_hard_gate_reason = f"PLAYBOOK_{book_strategy_state}"
+    elif both_executable_requested or (buy_score >= 0.62 and sell_score >= 0.62):
+        playbook_hard_gate_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
+    elif runtime_blocked:
+        playbook_hard_gate_reason = "REQUIRED_MODELS_NOT_AWAKE" if models_not_awake else study_identity_validation.first_reason
+    elif candidate_invalidated:
+        playbook_hard_gate_reason = "CANDIDATE_INVALIDATED"
+    elif permission_hard_block:
+        playbook_hard_gate_reason = str(permission_block_reason or "TRADE_PERMISSION_DENIED")
+    elif not timing_has_explicit_expiry:
+        playbook_hard_gate_reason = "MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING"
+    elif trap_active:
+        playbook_hard_gate_reason = "MARKET_TRAP"
 
     final_state = "WATCHING"
     block_reason: str | None = None
@@ -3365,6 +3456,31 @@ def evaluate_model_council_v3(
     elif flip_flop_contained:
         final_state = "WATCHING"
         block_reason = "FLIP_FLOP_CONTAINED"
+    elif playbook_enter_now:
+        if not stable or not lane_effective_mature:
+            final_state = "PREPARING"
+            block_reason = "CANDIDATE_MATURITY"
+        elif permission_denied_effective and permission_prepare_allowed:
+            final_state = "PREPARING"
+            block_reason = permission_block_reason
+        elif playbook_hard_gate_reason:
+            final_state = "BLOCKED_BY_RUNTIME" if playbook_hard_gate_reason in {
+                "MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING",
+                "REQUIRED_MODELS_NOT_AWAKE",
+            } or playbook_hard_gate_reason.startswith("INSTRUMENT_CONTEXT") else "WATCHING"
+            block_reason = playbook_hard_gate_reason
+        elif hard_timing_path_active:
+            final_state = "PREPARING"
+            block_reason = "TIMING_PATH_BAD"
+        elif packet_identity_validation.ok:
+            final_state = "EXECUTABLE"
+            executable = True
+        else:
+            final_state = "BLOCKED_BY_RUNTIME"
+            block_reason = packet_identity_validation.first_reason
+    elif side_ok and playbook_wait_state in {"EARLY_FORMING", "VALID_WATCH", "PREPARE", "NO_OPPORTUNITY", "LATE_CHASE", "INVALIDATED", "MISSED"}:
+        final_state = "PREPARING" if playbook_wait_state in {"VALID_WATCH", "PREPARE"} else "WATCHING"
+        block_reason = reasoning_block_reason if reasoning_execution_blocked and context_ok else f"PLAYBOOK_MATURITY_{playbook_wait_state}"
     elif market_blocked_effective or permission_hard_block:
         final_state = "WATCHING"
         block_reason = str(market_block_reason or permission_block_reason or "BLOCKED_BY_MARKET")
@@ -3464,6 +3580,8 @@ def evaluate_model_council_v3(
         next_required = (
             f"candidate_stage=CANDIDATE_STABLE; same candidate side for {max(0, _int(snapshot.get('flip_flop_release_stable_reads'), 2) - candidate_stable_reads)} more read(s); dominance_margin >= {min_dominance_margin:.2f}; entry_quality_ok=true; timing_mode=ENTER_NOW"
         )
+    elif true_blocker.startswith("PLAYBOOK_"):
+        next_required = str(book_strategy.get("next_required") or "playbook reaction proof required")
     elif not context_ok:
         next_required = lane_release_requirements
     elif not lane_effective_mature:
@@ -3532,6 +3650,8 @@ def evaluate_model_council_v3(
         release_condition = "none"
     elif true_blocker.startswith("INSTRUMENT_CONTEXT") or final_state == "BLOCKED_BY_RUNTIME":
         release_condition = next_required
+    elif true_blocker.startswith("PLAYBOOK_"):
+        release_condition = str(book_strategy.get("next_required") or next_required or "playbook reaction proof required")
     elif flip_flop_contained:
         release_condition = "candidate_stage=CANDIDATE_STABLE + same candidate side + stable dominance + acceptable entry + timing_mode=ENTER_NOW"
     elif not context_ok:
@@ -3574,6 +3694,8 @@ def evaluate_model_council_v3(
         "permission": permission_state,
         "opportunity_maturity": opportunity_maturity_state,
         "opportunity_maturity_confidence": opportunity_maturity["confidence"],
+        "book_strategy_playbook": book_strategy.get("playbook"),
+        "book_strategy_maturity": book_strategy_state,
         "flip_flop_risk": flip_flop_contained,
         "release_allowed": flip_flop_release_allowed,
         "raw_recent_sides": raw_recent_sides,
@@ -3591,6 +3713,8 @@ def evaluate_model_council_v3(
             "candidate_invalidated": candidate_invalidated,
             "opportunity_maturity": opportunity_maturity,
             "opportunity_maturity_state": opportunity_maturity_state,
+            "book_strategy": book_strategy,
+            "book_strategy_state": book_strategy_state,
             "flip_flop_risk": flip_flop_contained,
             "flip_flop_release_allowed": flip_flop_release_allowed,
         }
@@ -3619,6 +3743,9 @@ def evaluate_model_council_v3(
         hard_bad_entry_class_active=hard_bad_entry_class_active,
         opportunity_maturity=opportunity_maturity,
     )
+    allowance_package["book_strategy"] = book_strategy.get("strategy_read")
+    allowance_package["book_strategy_playbook"] = book_strategy.get("playbook")
+    allowance_package["book_strategy_maturity"] = book_strategy_state
     promotion_trace: dict[str, Any] = {
         "packet_id": base["packet_id"],
         "release_state": release_state,
@@ -3631,6 +3758,9 @@ def evaluate_model_council_v3(
         "candidate_stage": candidate_stage,
         "opportunity_maturity": opportunity_maturity,
         "opportunity_maturity_state": opportunity_maturity_state,
+        "book_strategy": book_strategy,
+        "book_strategy_state": book_strategy_state,
+        "book_strategy_playbook": book_strategy.get("playbook"),
         "visual_integrity": opportunity_maturity.get("visual_integrity"),
         "candidate_stable_reads": candidate_stable_reads,
         "raw_flip_count_10s": raw_flip_count,
@@ -3751,6 +3881,10 @@ def evaluate_model_council_v3(
         "maturity_stage": "EXECUTABLE_PACKET" if executable else maturity_stage,
         "opportunity_maturity": opportunity_maturity,
         "opportunity_maturity_state": opportunity_maturity_state,
+        "book_strategy": book_strategy,
+        "book_strategy_state": book_strategy_state,
+        "book_strategy_playbook": book_strategy.get("playbook"),
+        "strategy_read": book_strategy.get("strategy_read"),
         "arbitration_reason": (
             f"{candidate_side} executable via {execution_lane.get('name')}: {execution_lane.get('reason')}"
             if executable
@@ -3868,6 +4002,10 @@ def evaluate_model_council_v3(
         "missed_opportunity": missed_opportunity,
         "opportunity_maturity": opportunity_maturity,
         "opportunity_maturity_state": opportunity_maturity_state,
+        "book_strategy": book_strategy,
+        "book_strategy_state": book_strategy_state,
+        "book_strategy_playbook": book_strategy.get("playbook"),
+        "strategy_read": book_strategy.get("strategy_read"),
         "final_execution_score": round(float(final_execution_score), 4),
         "final_score": round(float(final_execution_score), 4),
         "execution_threshold": round(float(execution_threshold), 4),
@@ -3978,6 +4116,10 @@ def evaluate_model_council_v3(
         "missed_opportunity": missed_opportunity,
         "opportunity_maturity": opportunity_maturity,
         "opportunity_maturity_state": opportunity_maturity_state,
+        "book_strategy": book_strategy,
+        "book_strategy_state": book_strategy_state,
+        "book_strategy_playbook": book_strategy.get("playbook"),
+        "strategy_read": book_strategy.get("strategy_read"),
         "trade_candidate_queue": trade_candidate_queue,
         "council_scores": council_scores,
         "reality_adjustments": reality_adjustments,
@@ -4040,6 +4182,8 @@ def evaluate_model_council_v3(
                 "opportunity_maturity_state": opportunity_maturity_state,
                 "visual_integrity": opportunity_maturity.get("visual_integrity"),
                 "opportunity_maturity_denied_at": opportunity_maturity.get("denied_at"),
+                "book_strategy_state": book_strategy_state,
+                "book_strategy_playbook": book_strategy.get("playbook"),
             },
         )
         promotion_trace["promotion_failure_audit_v3"] = audit
@@ -4193,6 +4337,10 @@ def evaluate_model_council_v3(
         packet["promotion_trace"] = promotion_trace
         packet["opportunity_maturity"] = opportunity_maturity
         packet["opportunity_maturity_state"] = opportunity_maturity_state
+        packet["book_strategy"] = book_strategy
+        packet["book_strategy_state"] = book_strategy_state
+        packet["book_strategy_playbook"] = book_strategy.get("playbook")
+        packet["strategy_read"] = book_strategy.get("strategy_read")
         packet["visual_integrity"] = opportunity_maturity.get("visual_integrity")
         validation = validate_execution_packet_v3(
             packet,
@@ -4302,8 +4450,16 @@ def evaluate_model_council_v3(
             or path_class == "LATE_CHASE_REVERSAL_RISK"
         )
         if late_chase_packet_block:
-            no_packet_reason = f"TIMING_MODE_{timing_mode or 'LATE_CHASE'}"
-            derived_no_packet_next_required = f"skip late chase; {timing_decision['entry_timing']['next_condition']}"
+            if opportunity_maturity_state == "LATE_CHASE":
+                no_packet_reason = "PLAYBOOK_MATURITY_LATE_CHASE"
+                derived_no_packet_next_required = str(
+                    opportunity_maturity.get("next_required")
+                    or _mapping(opportunity_maturity.get("book_strategy")).get("next_required")
+                    or "skip late chase; wait for pullback/retest or a new structure sequence"
+                )
+            else:
+                no_packet_reason = f"TIMING_MODE_{timing_mode or 'LATE_CHASE'}"
+                derived_no_packet_next_required = f"skip late chase; {timing_decision['entry_timing']['next_condition']}"
         elif no_packet_reason in {"EXECUTION_PACKET_NOT_PUBLISHED", "WATCHING", "STUDY_PACKET_PUBLISHED"}:
             if not context_ok or not bool(execution_lane.get("accepted")):
                 no_packet_reason = "NO_EXECUTION_LANE_ACCEPTED"
@@ -4351,6 +4507,12 @@ def evaluate_model_council_v3(
         no_packet_reason_upper = _upper(no_packet_reason, "EXECUTION_PACKET_NOT_PUBLISHED")
         if opportunity_maturity_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
             no_packet_maturity_state = opportunity_maturity_state
+        elif no_packet_reason_upper.startswith("PLAYBOOK_MATURITY_"):
+            candidate_state = no_packet_reason_upper.removeprefix("PLAYBOOK_MATURITY_")
+            no_packet_maturity_state = candidate_state if candidate_state in OPPORTUNITY_MATURITY_STATES else "VALID_WATCH"
+        elif no_packet_reason_upper.startswith("PLAYBOOK_"):
+            candidate_state = no_packet_reason_upper.removeprefix("PLAYBOOK_")
+            no_packet_maturity_state = candidate_state if candidate_state in OPPORTUNITY_MATURITY_STATES else opportunity_maturity_state
         elif no_packet_reason_upper == "NO_EXECUTION_LANE_ACCEPTED":
             no_packet_maturity_state = "EARLY_FORMING"
         elif no_packet_reason_upper in {"CANDIDATE_MATURITY", "CANDIDATE_STABILITY"}:

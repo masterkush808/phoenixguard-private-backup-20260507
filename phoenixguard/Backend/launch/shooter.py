@@ -36,10 +36,11 @@ from phoenixguard.runtime.singleton_guard_v3 import PhoenixRuntimeSingletonGuard
 
 
 JsonDict = dict[str, object]
-ALLOWED_PACKAGE_TYPES = frozenset({"INTRADAY_ENTER_NOW", "SWING"})
+ALLOWED_PACKAGE_TYPES = frozenset({"INTRADAY_ENTER_NOW", "SWING_ENTER_NOW", "SWING"})
 REPORT_SCHEMA_VERSION = "PG_SHOOTER_PACKAGE_REPORT_V1"
 PACKAGE_SCHEMA_VERSION = "PG_ALLOWANCE_PACKAGE_V1"
 EXECUTION_AUTHORITY = "PG_EXECUTION_PACKET_V3"
+PLAYBOOK_EXECUTION_AUTHORITY = "PLAYBOOK_FINAL_DECIDER_V3"
 DEFAULT_BASE_URL = "http://127.0.0.1:8793"
 DEFAULT_SESSION_ID = "pocket-live-8788"
 DEFAULT_POLL_SECONDS = 15.0
@@ -148,8 +149,12 @@ def review_allowed_package(packet: Mapping[str, object], *, now_epoch: float | N
         return {"allowed": False, "reason": "INVALID_ALLOWANCE_PACKAGE_SCHEMA", "allowance_package": allowance}
     if package_type not in ALLOWED_PACKAGE_TYPES:
         return {"allowed": False, "reason": "UNKNOWN_ALLOWANCE_PACKAGE", "allowance_package": allowance}
-    if allowance.get("execution_authority") != EXECUTION_AUTHORITY:
+    authority = _upper(allowance.get("execution_authority"))
+    packet_authority = _upper(allowance.get("packet_authority") or EXECUTION_AUTHORITY)
+    if authority != PLAYBOOK_EXECUTION_AUTHORITY:
         return {"allowed": False, "reason": "INVALID_ALLOWANCE_EXECUTION_AUTHORITY", "allowance_package": allowance}
+    if packet_authority != EXECUTION_AUTHORITY:
+        return {"allowed": False, "reason": "INVALID_ALLOWANCE_PACKET_AUTHORITY", "allowance_package": allowance}
     if allowance.get("accepted") is not True:
         return {"allowed": False, "reason": "ALLOWANCE_PACKAGE_NOT_ACCEPTED", "allowance_package": allowance}
     if allowance.get("execution_ready") is not True:
@@ -392,7 +397,7 @@ def run_reporter(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog=r".\.venv\Scripts\python.exe Backend\launch\shooter.py",
+        prog=r".\.venv-live\Scripts\python.exe Backend\launch\shooter.py",
         description="Report allowed PhoenixGuard intraday/swing packages; broker execution is retired.",
     )
     parser.add_argument("command", nargs="?", default="signal")

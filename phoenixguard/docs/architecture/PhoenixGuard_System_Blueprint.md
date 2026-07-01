@@ -6,7 +6,9 @@ Runtime profile: PhoenixGuard V3 / FINAL_LIVE
 
 Primary launcher: `Backend/launch/launch_phoenixguard_live_ready.ps1`
 
-Primary execution authority: `PG_EXECUTION_PACKET_V3`
+Primary strategy authority: `PLAYBOOK_FINAL_DECIDER_V3`
+
+Primary packet authority: `PG_EXECUTION_PACKET_V3`
 
 Architecture baseline: final V3 hardening checkpoint `final-v3-architecture-20260621`, README
 developer runbook commit, runtime code, V3 language constitution, API routes, tests, burn tools,
@@ -19,8 +21,8 @@ launch scripts, and architecture documents present in this workspace.
 PhoenixGuard is a local-first chart intelligence and execution-control workstation. It watches a
 locked broker or study surface, extracts chart state from live screenshots, evaluates that state
 through multiple reasoning and model layers, publishes non-executable study packets while a setup is
-forming, and permits an external execution handoff only when a validated V3 execution packet carries
-an accepted Model Council allowance package.
+forming, and permits an external execution handoff only when the playbook signs an `ENTER_NOW`
+decision and a validated V3 execution packet carries an accepted allowance package.
 
 The system is built around one strict doctrine: observation is not execution. Raw BUY or SELL
 signals, legacy `action` fields, old skill gate outputs, memory confidence, dashboard displays, and
@@ -88,7 +90,7 @@ The upgraded architecture therefore has two complementary loops:
 
 ```text
 Live authority loop:
-Broker window -> tracker -> Model Council -> STUDY_PACKET or PG_EXECUTION_PACKET_V3 -> package reporter -> MT4/external bridge
+Broker window -> tracker -> Model Council contributor gates -> Playbook final decider -> STUDY_PACKET or PG_EXECUTION_PACKET_V3 -> package reporter -> MT4/external bridge
 
 Hardening evidence loop:
 Live/council/performance endpoints -> entry evidence screenshots -> progression gallery -> outcome scoring -> forensic report
@@ -110,9 +112,9 @@ PhoenixGuard performs these jobs as one coordinated system:
   setups.
 - Scores market reality, trap risk, entry quality, price location, regime, continuation probability,
   and target-before-invalidation probabilities.
-- Promotes a setup through Model Council stages from observation to executable packet.
+- Promotes a setup through Model Council contributor gates and the playbook maturity ladder.
 - Publishes study packets for visibility while a setup is not executable.
-- Publishes a V3 execution packet only when the council and runtime contract agree.
+- Publishes a V3 execution packet only when the playbook signs `ENTER_NOW` and the runtime packet contract agrees.
 - Uses a separate package reporter to validate the packet and publish accepted allowance packages
   for the MT4/external bridge.
 - Serves live dashboard, floating-state, health, trace, and packet endpoints through FastAPI.
@@ -166,7 +168,7 @@ replay, or deployment assistance.
 ## High-Level Architecture Map
 
 | Layer                             | Core Files                                                                                                         | Responsibility                                                                                                                                                                                                                                         |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| --------------------------------- | --- |
 | Launch and profile                | `Backend/launch/launch_phoenixguard_live_ready.ps1`, `Backend/launch/start_phoenixguard_full_local.ps1`, `Backend/launch/start_phoenixguard_24_7_tracker.py`    | Starts the production live stack, pins the FINAL_LIVE profile, prepares runtime state, and launches API/tracker/shooter components.                                                                                                                    |
 | Capture and tracker               | `Backend/src/phoenixguard/mobile_api/window_tracker.py`                                                                        | Locks a window, captures frames, builds live session state, derives chart structure, publishes artifacts, and feeds Model Council.                                                                                                                     |
 | Vision and overlay                | `Backend/src/phoenixguard/vision/*`, `Backend/src/phoenixguard/tracking/market_object_tracker_v3.py`                                       | Performs preprocessing, source-lock checks, chart transforms, object tracking, overlays, layer management, visual health, and registry persistence.                                                                                                    |
@@ -604,10 +606,10 @@ model-role votes, memory confirmation, and council promotion stages.
 
 ### Model Council V3
 
-Model Council V3 is the live arbitration layer. It scores BUY and SELL candidates from the current
-snapshot, attaches market intelligence, evaluates maturity, selects an execution lane, computes
-release requirements, and returns either a non-executable study packet or an executable packet
-candidate.
+Model Council V3 is the live contributor-gate layer. It scores BUY and SELL candidates from the current
+snapshot, attaches market intelligence, evaluates freshness/runtime evidence, selects diagnostic
+lanes, computes release requirements, and returns either a non-executable study packet or an
+executable packet candidate when the playbook authority signs `ENTER_NOW`.
 
 The maturity ladder is:
 
@@ -756,8 +758,8 @@ Key reporter stages:
 - Rejects missing packets and leaves the previous handshake untouched.
 - Validates V3 packet schema and runtime integrity.
 - Extracts `PG_ALLOWANCE_PACKAGE_V1` from the packet or Model Council payload.
-- Rejects missing, inferred, stale, non-accepted, non-execution-ready, wrong-authority, or
-  side-mismatched packages.
+- Rejects missing, inferred, stale, non-accepted, non-execution-ready, wrong strategy authority,
+  wrong packet authority, or side-mismatched packages.
 - Writes `runtime/live/shooter_handshake.json` only for accepted `INTRADAY_ENTER_NOW` or `SWING`
   packages.
 - Never reads calibration files, moves the mouse, activates windows, sets broker time, edits amount,
@@ -767,7 +769,7 @@ Key reporter stages:
 
 The MT4 bridge and EA are the downstream execution boundary. They must reject any command whose
 allowance package is missing, inferred, not accepted, not execution-ready, or not authority-bound to
-`PG_EXECUTION_PACKET_V3`.
+`PLAYBOOK_FINAL_DECIDER_V3` with `packet_authority=PG_EXECUTION_PACKET_V3`.
 
 - Local live mode keeps `PHOENIXGUARD_ALLOW_LIVE_BROKER_CLICKS=0`; external bridge enablement is
   separate from dashboard/tracker live reporting.

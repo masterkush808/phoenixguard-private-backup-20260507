@@ -108,21 +108,21 @@ def main() -> int:
     if len(api_processes) != 1:
         failures.append(f"expected one API process, found {len(api_processes)}")
         corrections.append(
-            r"Stop stale mobile API processes, then relaunch via .\.venv\Scripts\python.exe Backend\launch\start_phoenixguard_24_7_tracker.py --port 8793."
+            r"Stop stale mobile API processes, then relaunch via .\.venv-live\Scripts\python.exe Backend\launch\start_phoenixguard_24_7_tracker.py --port 8793."
         )
     if fallback_rows:
         failures.append(f"fallback API port {args.fallback_port} is listening: {fallback_rows}")
     if len(tracker_processes) != 1:
         failures.append(f"expected one tracker worker process, found {len(tracker_processes)}")
         corrections.append(
-            r"Start tracker with: .\.venv\Scripts\python.exe Backend\launch\start_phoenixguard_24_7_tracker.py --host 127.0.0.1 --port 8793 --session-id pocket-live-8788 --capture-interval 15 --no-open-dashboard"
+            r"Start tracker with: .\.venv-live\Scripts\python.exe Backend\launch\start_phoenixguard_24_7_tracker.py --host 127.0.0.1 --port 8793 --session-id pocket-live-8788 --capture-interval 15 --no-open-dashboard"
         )
     elif args.session not in command_line(tracker_processes[0]):
         failures.append(f"tracker process does not include expected session id {args.session}")
     if not shooter_processes and not args.allow_missing_shooter:
         failures.append("shooter process is not running")
         corrections.append(
-            r"Start shooter with: .\.venv\Scripts\python.exe Backend\launch\shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 15.0 --heartbeat 4.0"
+            r"Start shooter with: .\.venv-live\Scripts\python.exe Backend\launch\shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 15.0 --heartbeat 4.0"
         )
     if len(shooter_processes) > 1:
         failures.append(f"expected at most one shooter process, found {len(shooter_processes)}")

@@ -13,6 +13,11 @@ __pycache__/
 
 # Local environments
 .venv/
+.venv-live/
+.venv-dev/
+.venv-training/
+.venv-business/
+.venv-docs/
 venv/
 env/
 ENV/

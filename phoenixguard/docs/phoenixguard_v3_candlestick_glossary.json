@@ -3,7 +3,7 @@
   "purpose": "PhoenixGuard V3 candlestick vocabulary for model features, study payloads, replay explanations, and future VLM narration. This glossary is explanatory only and does not authorize new visible chart labels.",
   "authority_rules": {
     "visible_labels": "Candlestick pattern names must not render as chart overlay labels unless separately approved in docs/phoenixguard_v3_visual_dictionary.json.",
-    "execution_authority": "Candlestick patterns are tactical evidence. Execution authority remains the model council packet and shooter sequencer.",
+    "execution_authority": "Candlestick patterns are tactical evidence. The Book Strategy Master playbook is the final strategy decider, and only a fresh validated PG_EXECUTION_PACKET_V3 can authorize action.",
     "filter_rule": "A candlestick pattern is meaningful only when morphology, location, trend context, confirmation, and freshness agree."
   },
   "primitive_measurements": [

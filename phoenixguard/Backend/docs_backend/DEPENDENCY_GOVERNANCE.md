@@ -2,9 +2,9 @@
 
 ## Clear Answer
 
-PhoenixGuard dependencies are grouped by responsibility, but they install into one repo environment:
-`.venv`. Backend, frontend tooling, business tooling, training, docs, and live runtime must not create
-competing Python environments inside the project.
+PhoenixGuard dependencies are grouped by responsibility and install into separate profile
+environments. Live runtime uses `.venv-live`; full repo diagnostics use `.venv-dev`; training,
+business, and docs/PDF use `.venv-training`, `.venv-business`, and `.venv-docs`.
 
 ## Why This Exists
 
@@ -12,26 +12,25 @@ The global Python interpreter on this machine has unrelated package conflicts ac
 protobuf, transformers, scikit-learn, plotly, pillow, LangChain, Streamlit, mitmproxy, PyCaret, and
 other tooling. PhoenixGuard should not depend on that global environment.
 
-The repo `.venv` currently passes:
+The live profile currently passes:
 
 ```text
-.\.venv\Scripts\python.exe -m pip check
-.\.venv\Scripts\python.exe -m pipdeptree --warn fail
-.\.venv\Scripts\python.exe .\Backend\tools\verify_single_venv_runtime.py
+.\.venv-live\Scripts\python.exe -m pip check
+.\.venv-live\Scripts\python.exe .\Backend\tools\verify_single_venv_runtime.py
 ```
 
 The dependency policy is therefore:
 
 ```text
-Use the repo .venv only.
+Use .venv-live for live runtime only.
 Do not run PhoenixGuard from global Python.
-Do not create .venv-live, .venv-dev, .venv-training, or .venv-business.
-Do not auto-create .venv from runtime launchers; if the repo .venv is missing, launch must fail
-with a clear setup error.
-Use logical requirement groups, but keep the interpreter and installed site-packages rooted in .venv.
-Launchers, background workers, certification monitors, and tools all resolve through
-.\.venv\Scripts\python.exe. PhoenixGuard must not create or prefer a copied process-host executable
-or any second virtual environment.
+Do not install training, business, docs, or dev-only packages into .venv-live.
+Do not auto-create environments from runtime launchers; if .venv-live is missing, live launch must
+fail with a clear setup error.
+Use logical requirement groups and keep each profile rooted in its own locked environment.
+Live launchers, background workers, certification monitors, and package reporters resolve through
+.\.venv-live\Scripts\python.exe unless PHOENIXGUARD_PYTHON_ENV_NAME explicitly selects another profile.
+PhoenixGuard must not create or prefer a copied process-host executable.
 .codex_runtime is runtime state only. It stores locks, logs, tracker state, screenshots, and
 certification evidence; it is not an environment and must not be used as a dependency source.
 ```
@@ -72,23 +71,27 @@ Profile installers live under:
 Backend/scripts_runtime/env/
 ```
 
-The scripts all target:
+The scripts target:
 
 ```text
-.venv
+install_live.ps1     -> .venv-live
+install_dev.ps1      -> .venv-dev
+install_training.ps1 -> .venv-training
+install_business.ps1 -> .venv-business
+install_docs.ps1     -> .venv-docs
 ```
 
-They install the selected lock into `.venv`, then run `pip check` and
-`Backend/tools/verify_dependency_profile.py`. Run `Backend/tools/verify_single_venv_runtime.py`
-after launch to prove all PhoenixGuard Python processes are using `.venv\Scripts\python.exe`.
-They do not create secondary virtual environments. Runtime launchers do not create `.venv`; the
+They install the selected lock into its matching profile environment, then run `pip check` and, where
+applicable, `Backend/tools/verify_dependency_profile.py`. Run
+`Backend/tools/verify_single_venv_runtime.py` after launch to prove all PhoenixGuard Python processes
+are using the configured profile environment. Runtime launchers do not create `.venv-live`; the live
 environment must already exist before PhoenixGuard is started.
 
 ## Live Runtime Boundary
 
-The single `.venv` may contain training, docs, business, and dev packages. Live runtime safety is
-therefore enforced by launcher paths, lazy imports, optional adapters, and runtime profile checks,
-not by creating a second Python environment.
+The live `.venv-live` must not contain training, docs, business, and dev-only package stacks. Live
+runtime safety is enforced by launcher paths, lazy imports, optional adapters, runtime profile checks,
+and the separate locked environment boundary.
 
 The following packages must not become required imports for live startup unless the live runtime
 actually needs them:
@@ -117,8 +120,8 @@ chronos-forecasting
 ultralytics
 ```
 
-Training and dev may include some of those model-development packages inside `.venv`, but live startup
-must stay lean by not importing them on the hot path.
+Training and dev may include some of those model-development packages inside their own profile
+environments, but live startup must stay lean by not importing them on the hot path.
 
 ## Optional Adapter Rule
 
@@ -127,5 +130,6 @@ must degrade to the existing fallback path, not break import-time startup.
 
 ## Disk Caveat
 
-Do not duplicate Torch/OpenCV/ML wheels into multiple project virtual environments. The supported
-PhoenixGuard development layout is one `.venv` plus logical dependency lock files.
+Only install a profile environment when that role is needed on the machine. The supported
+PhoenixGuard development layout is split locked environments with `.venv-live` as the only live
+runtime interpreter.

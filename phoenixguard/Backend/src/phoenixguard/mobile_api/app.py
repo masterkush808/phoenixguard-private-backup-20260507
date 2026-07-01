@@ -1444,8 +1444,12 @@ def _latest_shooter_handshake(session_id: str | None = None) -> dict[str, object
             raise KeyError("Shooter package report allowance schema mismatch.")
         if package_type not in {"INTRADAY_ENTER_NOW", "SWING"}:
             raise KeyError("Shooter package report allowance type is not allowed.")
-        if allowance.get("execution_authority") != "PG_EXECUTION_PACKET_V3":
+        authority = str(allowance.get("execution_authority") or "").strip().upper()
+        packet_authority = str(allowance.get("packet_authority") or "PG_EXECUTION_PACKET_V3").strip().upper()
+        if authority not in {"PG_EXECUTION_PACKET_V3", "PLAYBOOK_FINAL_DECIDER_V3"}:
             raise KeyError("Shooter package report authority mismatch.")
+        if authority == "PLAYBOOK_FINAL_DECIDER_V3" and packet_authority != "PG_EXECUTION_PACKET_V3":
+            raise KeyError("Shooter package report packet authority mismatch.")
         if allowance.get("accepted") is not True or allowance.get("execution_ready") is not True:
             raise KeyError("Shooter package report allowance is not execution-ready.")
         if package_type == "INTRADAY_ENTER_NOW" and allowance.get("entry_now_allowed") is not True:

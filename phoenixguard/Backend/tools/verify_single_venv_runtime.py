@@ -22,12 +22,9 @@ from phoenixguard.runtime.python_environment_v3 import (
 
 
 EXTRA_ENVIRONMENT_DIR_NAMES = (
-    ".venv-live",
-    ".venv-dev",
-    ".venv-training",
-    ".venv-business",
     "venv",
     "env",
+    "ENV",
 )
 
 
@@ -210,13 +207,13 @@ def build_single_venv_runtime_report(*, cleanup_extra_envs: bool = False) -> Sin
     non_repo_processes = [row for row in processes if not row.uses_repo_venv_python]
     ok = bool(environment_status.get("ok") is True and not extra_dirs and not non_repo_processes)
     if ok:
-        reason = "single repo .venv runtime policy is clean"
+        reason = "configured PhoenixGuard Python environment policy is clean"
     elif environment_status.get("ok") is not True:
-        reason = str(environment_status.get("reason") or "current process is not repo .venv")
+        reason = str(environment_status.get("reason") or "current process is not the configured PhoenixGuard environment")
     elif extra_dirs:
         reason = "extra virtual environment directories exist"
     else:
-        reason = "one or more PhoenixGuard Python processes are not using repo .venv"
+        reason = "one or more PhoenixGuard Python processes are not using the configured Python environment"
     return SingleVenvRuntimeReport(
         schema_version="PG_SINGLE_VENV_RUNTIME_REPORT_V1",
         ok=ok,
@@ -240,8 +237,8 @@ def build_single_venv_runtime_report(*, cleanup_extra_envs: bool = False) -> Sin
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Verify PhoenixGuard is using only the repo .venv runtime.")
-    parser.add_argument("--cleanup-extra-envs", action="store_true", help="Delete only known extra top-level venv dirs.")
+    parser = argparse.ArgumentParser(description="Verify PhoenixGuard is using the configured profile Python environment.")
+    parser.add_argument("--cleanup-extra-envs", action="store_true", help="Delete only known legacy top-level venv/env dirs.")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -251,7 +248,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True))
     else:
         verdict = "PASS" if report.ok else "FAIL"
-        print(f"SINGLE_REPO_VENV_RUNTIME: {verdict}")
+        print(f"PHOENIXGUARD_PROFILE_ENV_RUNTIME: {verdict}")
         print(f"reason={report.reason}")
         print(f"expected_python={report.expected_python}")
         print(f"runtime_dir={report.runtime_dir}")

@@ -8,9 +8,10 @@ Set-Location "C:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard
 Set-ExecutionPolicy -Scope Process Bypass -Force
 ```
 
-Do not activate nested shells for normal PhoenixGuard work. Invoke the repo interpreter directly
-through `.\.venv\Scripts\python.exe`; launchers, background workers, certification monitors, and
-tools all resolve to that same executable.
+Do not activate nested shells for normal PhoenixGuard work. Invoke the intended profile interpreter
+directly. Live tracker/API/package-reporter work uses `.\.venv-live\Scripts\python.exe`; full repo
+testing and Pyright use `.\.venv-dev\Scripts\python.exe`. Training, business, and docs/PDF work stay
+in their own profile environments.
 
 ## Dependency Profiles
 
@@ -34,10 +35,9 @@ requirements/locks/
 ```
 
 Use `requirements/locks/live-win-py311.txt` for the `FINAL_LIVE` tracker/API/package-reporter
-runtime package set. Use `requirements/locks/dev-win-py311.txt` for full repo testing and Pyright.
-Training, business, and docs/PDF have separate lock files as install profiles, but they still target
-the same repo `.venv`; PhoenixGuard no longer creates `.venv-live`, `.venv-dev`, or nested runtime
-environments.
+runtime package set in `.venv-live`. Use `requirements/locks/dev-win-py311.txt` for full repo testing
+and Pyright in `.venv-dev`. Training, business, and docs/PDF use `.venv-training`, `.venv-business`,
+and `.venv-docs`.
 
 Environment installers live under `Backend/scripts_runtime/env/`:
 
@@ -46,25 +46,27 @@ Environment installers live under `Backend/scripts_runtime/env/`:
 .\Backend\scripts_runtime\env\install_dev.ps1
 .\Backend\scripts_runtime\env\install_training.ps1
 .\Backend\scripts_runtime\env\install_business.ps1
+.\Backend\scripts_runtime\env\install_docs.ps1
 ```
 
 Before trusting an environment:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip check
-.\.venv\Scripts\python.exe -m pipdeptree --warn fail
-.\.venv\Scripts\python.exe .\Backend\tools\verify_dependency_profile.py --profile dev
-.\.venv\Scripts\python.exe .\Backend\tools\verify_single_venv_runtime.py
+.\.venv-live\Scripts\python.exe -m pip check
+.\.venv-live\Scripts\python.exe .\Backend\tools\verify_single_venv_runtime.py
+.\.venv-dev\Scripts\python.exe -m pip check
+.\.venv-dev\Scripts\python.exe -m pipdeptree --warn fail
+.\.venv-dev\Scripts\python.exe .\Backend\tools\verify_dependency_profile.py --profile dev
 ```
 
-PhoenixGuard should be launched with the repo virtual environment only:
+PhoenixGuard live should be launched with the live virtual environment only:
 
 ```text
-.\.venv\Scripts\python.exe
+.\.venv-live\Scripts\python.exe
 ```
 
-Do not use bare `python`, global Python, Conda, or a second virtual environment for PhoenixGuard
-runtime. If a launcher cannot find the repo `.venv`, it stops instead of creating a new environment.
+Do not use bare `python`, global Python, Conda, or the dev/training/business/docs environments for
+live runtime. If a launcher cannot find `.venv-live`, it stops with a clear setup error.
 
 Runtime state is stored under the project runtime root:
 
@@ -76,16 +78,16 @@ Runtime state is stored under the project runtime root:
 Python environment and must not be treated as a dependency source. Deleting it while PhoenixGuard is
 running will remove active tracker state and evidence.
 
-If Windows appears to show a base-Python child under a repo `.venv` parent, verify before changing
-anything:
+If Windows appears to show a base-Python child under a PhoenixGuard profile environment parent,
+verify before changing anything:
 
 ```powershell
-.\.venv\Scripts\python.exe .\Backend\tools\verify_single_venv_runtime.py --cleanup-extra-envs
+.\.venv-live\Scripts\python.exe .\Backend\tools\verify_single_venv_runtime.py
 ```
 
-The verifier deletes only known extra top-level venv folders such as `.venv-live`, `.venv-dev`,
-`.venv-training`, and `.venv-business` when they exist. It does not delete `runtime\live`, because
-that directory is runtime state, not a package environment.
+The verifier does not delete `.venv-live`, `.venv-dev`, `.venv-training`, `.venv-business`, or
+`.venv-docs`. It also does not delete `runtime\live`, because that directory is runtime state, not a
+package environment.
 
 Do not run PhoenixGuard with bare `python`, and do not point live runtime state at
 `%LOCALAPPDATA%\PhoenixGuard\codex_runtime`. The launchers set
@@ -100,7 +102,7 @@ dashboard without any floating editor window.
 Preferred developer kill switch:
 
 ```powershell
-.\.venv\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py
+.\.venv-live\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py
 ```
 
 This Python wrapper asks the API to stop the tracker if it is reachable, kills detected PhoenixGuard
@@ -109,7 +111,7 @@ through `Backend\launch\launch_phoenixguard_live_ready.ps1 -NoBrowser`. To inspe
 without touching the running stack:
 
 ```powershell
-.\.venv\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py --dry-run
+.\.venv-live\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py --dry-run
 ```
 
 Manual fallback:
@@ -142,7 +144,7 @@ Start-Sleep -Seconds 3
 
 # Back up and clear stale runtime/cache state. This preserves models, memory,
 # user configuration, reports, and current package-reporter state boundaries.
-.\.venv\Scripts\python.exe .\Backend\tools\clean_v3_runtime_state.py --apply
+.\.venv-live\Scripts\python.exe .\Backend\tools\clean_v3_runtime_state.py --apply
 if ($LASTEXITCODE -ne 0) { throw "Runtime cleanup failed. Launch aborted." }
 
 # Canonical final V3 live launch. -NoBrowser prevents popup/editor launch.
@@ -177,9 +179,9 @@ Invoke-RestMethod "$base/v1/mobile/runtime/trace/v3?session_id=$session" |
     ConvertTo-Json -Depth 16
 
 # CLI summaries for quick pass/fail reads.
-.\.venv\Scripts\python.exe .\Backend\tools\runtime_trace_v3.py --base-url $base --session $session --timeout 20
-.\.venv\Scripts\python.exe .\Backend\tools\trace_sequence_context_v3.py --base-url $base --session $session --timeout 20
-.\.venv\Scripts\python.exe .\Backend\tools\verify_v3_integrity.py
+.\.venv-live\Scripts\python.exe .\Backend\tools\runtime_trace_v3.py --base-url $base --session $session --timeout 20
+.\.venv-live\Scripts\python.exe .\Backend\tools\trace_sequence_context_v3.py --base-url $base --session $session --timeout 20
+.\.venv-live\Scripts\python.exe .\Backend\tools\verify_v3_integrity.py
 ```
 
 `verify_v3_integrity.py` should report `Overall: PASS` before you treat the runtime as
@@ -221,7 +223,7 @@ shooter process.
 
 ```powershell
 $env:PYTHONPATH = "$(Resolve-Path 'Backend/src');$(Resolve-Path 'Backend');$(Resolve-Path '.')"
-.\.venv\Scripts\python.exe -m uvicorn phoenixguard.mobile_api.app:create_app --factory --host 127.0.0.1 --port 8793 --log-level info
+.\.venv-live\Scripts\python.exe -m uvicorn phoenixguard.mobile_api.app:create_app --factory --host 127.0.0.1 --port 8793 --log-level info
 ```
 
 ## File To Launch Safely
@@ -271,7 +273,7 @@ state, and launch the production stack.
 
 ```powershell
 Set-Location "C:\Users\thaba\OneDrive\Documents\The 808 Vision 2026\phoenixguard"
-.\.venv\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py
+.\.venv-live\Scripts\python.exe .\Developer\developer_tools\phoenixguard_kill_switch.py
 ```
 
 Use `--kill-only` when you only want the stop step, `--skip-clean` when you want to preserve current
@@ -303,7 +305,7 @@ Get-CimInstance Win32_Process |
 Start-Sleep -Seconds 3
 
 # Use the repo environment directly. Do not activate a nested shell.
-$python = ".\.venv\Scripts\python.exe"
+$python = ".\.venv-live\Scripts\python.exe"
 
 # Clear V3 runtime/cache state before a cold launch.
 & $python .\Backend\tools\clean_v3_runtime_state.py --apply
@@ -366,9 +368,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Backend\launch\launch_phoe
 After launch, verify runtime trace, sequence context, and canonical integrity:
 
 ```powershell
-.\.venv\Scripts\python.exe .\Backend\tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
-.\.venv\Scripts\python.exe .\Backend\tools\trace_sequence_context_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
-.\.venv\Scripts\python.exe .\Backend\tools\verify_v3_integrity.py
+.\.venv-live\Scripts\python.exe .\Backend\tools\runtime_trace_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
+.\.venv-live\Scripts\python.exe .\Backend\tools\trace_sequence_context_v3.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --timeout 20
+.\.venv-live\Scripts\python.exe .\Backend\tools\verify_v3_integrity.py
 ```
 
 `verify_v3_integrity.py` must report `Overall: PASS` before treating the runtime as
@@ -377,7 +379,7 @@ production-ready.
 Two-hour activated burn-in:
 
 ```powershell
-.\.venv\Scripts\python.exe .\Backend\tools\certify_v3_full_system_burn_in.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --duration-sec 7200 --interval-sec 10 --warmup-sec 60 --status-every-sec 60 --timeout 20 --mode FULL_ACTIVATED --max-frame-age-ms 2500 --max-consecutive-stale-frames 12 --max-consecutive-process-misses 5 --no-stop-on-stale-frame --no-stop-on-stale-execution-packet --out reports\FINAL_FULL_SYSTEM_ACTIVATED_BURN_IN_OVERLAYFIXED_FINAL_REPORT.md
+.\.venv-live\Scripts\python.exe .\Backend\tools\certify_v3_full_system_burn_in.py --base-url http://127.0.0.1:8793 --session pocket-live-8788 --duration-sec 7200 --interval-sec 10 --warmup-sec 60 --status-every-sec 60 --timeout 20 --mode FULL_ACTIVATED --max-frame-age-ms 2500 --max-consecutive-stale-frames 12 --max-consecutive-process-misses 5 --no-stop-on-stale-frame --no-stop-on-stale-execution-packet --out reports\FINAL_FULL_SYSTEM_ACTIVATED_BURN_IN_OVERLAYFIXED_FINAL_REPORT.md
 ```
 
 For long live observation runs where transient Windows capture latency should be logged but not
@@ -401,21 +403,22 @@ The old calibrated broker-click shooter has been retired. `Backend/launch/shoote
 To run the reporter once after verification:
 
 ```powershell
-.\.venv\Scripts\python.exe Backend\launch\shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --once
+.\.venv-live\Scripts\python.exe Backend\launch\shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --once
 ```
 
 To keep the reporter polling:
 
 ```powershell
-.\.venv\Scripts\python.exe Backend\launch\shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 15.0 --heartbeat 4.0
+.\.venv-live\Scripts\python.exe Backend\launch\shooter.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 15.0 --heartbeat 4.0
 ```
 
 Package authority:
 
-- `PG_EXECUTION_PACKET_V3` remains the only execution-authority packet.
-- `PG_ALLOWANCE_PACKAGE_V1` classifies the allowed package as `INTRADAY_ENTER_NOW` or `SWING`.
+- `PLAYBOOK_FINAL_DECIDER_V3` is the final strategy authority.
+- `PG_EXECUTION_PACKET_V3` remains the required packet-validation contract.
+- `PG_ALLOWANCE_PACKAGE_V1` classifies the allowed package as `INTRADAY_ENTER_NOW`, `SWING_ENTER_NOW`, or `SWING`.
 - The reporter rejects missing, inferred, stale, non-accepted, or non-execution-ready packages.
-- MT4 bridge commands must carry the explicit Model Council allowance package.
+- MT4 bridge commands must carry the explicit Playbook allowance package with `packet_authority=PG_EXECUTION_PACKET_V3`.
 
 ## Core Runtime Contracts
 
@@ -424,7 +427,7 @@ Package authority:
 - `final_side`: Model Council arbitration result.
 - `execution.side`: the only actionable side.
 - `STUDY_PACKET`: explanatory, never executable.
-- `PG_EXECUTION_PACKET_V3`: only valid execution authority.
+- `PG_EXECUTION_PACKET_V3`: only valid execution packet contract.
 
 Every execution packet must carry provenance:
 
@@ -442,11 +445,11 @@ packet contract, shooter persistence, and burn-in evidence.
 Focused Grade A\* hardening checks:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest Backend/tests/test_execution_packet_schema_v3.py Backend/tests/test_model_council_v3.py Backend/tests/test_market_reality_engine.py Backend/tests/test_market_intelligence_v3.py Backend/tests/test_v3_language_contracts.py Backend/tests/test_simulation_paper_execution.py Backend/tests/test_mt4_file_bridge.py -q
-.\.venv\Scripts\python.exe -m pytest Backend/tests/test_entry_allowance_burn.py Backend/tests/test_business_commands.py -q
-.\.venv\Scripts\python.exe -m pytest Backend/tests/test_cache_observability_v3.py Backend/tests/test_runtime_telemetry_v3.py Backend/tests/test_manual_inference_queue.py -q
-.\.venv\Scripts\python.exe -m compileall -q Frontend\dashboard\main.py Backend\launch\shooter.py Backend\src\phoenixguard\decision Backend\src\phoenixguard\execution Backend\src\phoenixguard\mobile_api Backend\src\phoenixguard\runtime Backend\tools\runtime_trace_v3.py Backend\tools\certification_common_v3.py
-.\.venv\Scripts\python.exe Backend\tools\verify_v3_integrity.py
+.\.venv-dev\Scripts\python.exe -m pytest Backend/tests/test_execution_packet_schema_v3.py Backend/tests/test_model_council_v3.py Backend/tests/test_market_reality_engine.py Backend/tests/test_market_intelligence_v3.py Backend/tests/test_v3_language_contracts.py Backend/tests/test_simulation_paper_execution.py Backend/tests/test_mt4_file_bridge.py -q
+.\.venv-dev\Scripts\python.exe -m pytest Backend/tests/test_entry_allowance_burn.py Backend/tests/test_business_commands.py -q
+.\.venv-dev\Scripts\python.exe -m pytest Backend/tests/test_cache_observability_v3.py Backend/tests/test_runtime_telemetry_v3.py Backend/tests/test_manual_inference_queue.py -q
+.\.venv-dev\Scripts\python.exe -m compileall -q Frontend\dashboard\main.py Backend\launch\shooter.py Backend\src\phoenixguard\decision Backend\src\phoenixguard\execution Backend\src\phoenixguard\mobile_api Backend\src\phoenixguard\runtime Backend\tools\runtime_trace_v3.py Backend\tools\certification_common_v3.py
+.\.venv-live\Scripts\python.exe Backend\tools\verify_v3_integrity.py
 ```
 
 ## TradingView Study Source
@@ -455,7 +458,7 @@ TradingView may be used as a chart-study source while any real execution path re
 the local package reporter. Keep study sessions separated from broker/external bridge sessions:
 
 ```powershell
-.\.venv\Scripts\python.exe Backend\launch\start_phoenixguard_24_7_tracker.py --session-id tradingview-study --window-query "TradingView" --focus-region ""
+.\.venv-live\Scripts\python.exe Backend\launch\start_phoenixguard_24_7_tracker.py --session-id tradingview-study --window-query "TradingView" --focus-region ""
 ```
 
 ## Production Artifacts

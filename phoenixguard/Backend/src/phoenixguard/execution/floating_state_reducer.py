@@ -23,6 +23,7 @@ class FloatingStateV2:
     state_chip: str
     packet: dict[str, Any] = field(default_factory=_empty_mapping)
     council: dict[str, Any] = field(default_factory=_empty_mapping)
+    strategy: dict[str, Any] = field(default_factory=_empty_mapping)
     timing: dict[str, Any] = field(default_factory=_empty_mapping)
     instrument: dict[str, Any] = field(default_factory=_empty_mapping)
     scores: dict[str, Any] = field(default_factory=_empty_mapping)
@@ -39,6 +40,7 @@ class FloatingStateV2:
             state_chip=_text(state.get("state_chip"), "WAITING").upper(),
             packet=dict(_mapping(state.get("packet"))),
             council=dict(_mapping(state.get("council"))),
+            strategy=dict(_mapping(state.get("strategy"))),
             timing=dict(_mapping(state.get("timing"))),
             instrument=dict(_mapping(state.get("instrument"))),
             scores=dict(_mapping(state.get("scores"))),
@@ -56,6 +58,7 @@ class FloatingStateV2:
             "state_chip": self.state_chip,
             "packet": self.packet,
             "council": self.council,
+            "strategy": self.strategy,
             "timing": self.timing,
             "instrument": self.instrument,
             "scores": self.scores,
@@ -312,6 +315,8 @@ def build_floating_state(
     execution = _mapping(payload.get("execution"))
     council = _mapping(payload.get("model_council"))
     promotion = _mapping(payload.get("promotion_trace"))
+    book_strategy = _mapping(payload.get("book_strategy") or council.get("book_strategy") or promotion.get("book_strategy"))
+    strategy_read = _mapping(payload.get("strategy_read") or council.get("strategy_read") or book_strategy.get("strategy_read"))
     lane_payload = _mapping(payload.get("execution_lane") or council.get("execution_lane") or promotion.get("execution_lane"))
     timing_decision = _mapping(payload.get("timing_decision") or council.get("timing_decision") or promotion.get("timing_decision"))
     timing_forecast = _mapping(payload.get("timing_forecast") or council.get("timing_forecast") or timing_decision.get("timing_forecast"))
@@ -452,6 +457,40 @@ def build_floating_state(
             "score_gap": score_gap,
             "next_required": _short_reason(next_required or reason),
             "reason_short": _short_reason(reason or next_required),
+        },
+        "strategy": {
+            "playbook": _text(
+                payload.get("book_strategy_playbook")
+                or council.get("book_strategy_playbook")
+                or promotion.get("book_strategy_playbook")
+                or book_strategy.get("playbook"),
+                "PLAYBOOK_PENDING",
+            ),
+            "maturity": _text(
+                payload.get("book_strategy_state")
+                or council.get("book_strategy_state")
+                or promotion.get("book_strategy_state")
+                or book_strategy.get("maturity_state")
+                or book_strategy.get("state"),
+                "VALID_WATCH",
+            ),
+            "side": _side(strategy_read.get("side") or book_strategy.get("side") or side),
+            "confidence": _number(strategy_read.get("confidence") or book_strategy.get("confidence")),
+            "next_required": _short_reason(
+                strategy_read.get("next_required")
+                or book_strategy.get("next_required")
+                or next_required
+            ),
+            "headline": _short_reason(strategy_read.get("headline") or book_strategy.get("playbook") or lane or "Strategy read pending"),
+            "signal": _side(strategy_read.get("signal") or book_strategy.get("playbook_signal") or ""),
+            "entry_profile": _text(strategy_read.get("entry_profile") or book_strategy.get("entry_profile")),
+            "reaction_type": _text(strategy_read.get("reaction_type") or book_strategy.get("reaction_type")),
+            "strategy_combo": [
+                _text(item)
+                for item in _sequence(strategy_read.get("strategy_combo") or book_strategy.get("strategy_combo"))
+                if _text(item)
+            ][:8],
+            "single_timeframe_mode": book_strategy.get("single_timeframe_mode") is True or strategy_read.get("doctrine") == "single_timeframe_visible_history_only",
         },
         "timing": {
             "mode": timing_mode,

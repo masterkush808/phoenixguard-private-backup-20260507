@@ -553,6 +553,9 @@ def _compact_selected_mapping(value: Mapping[str, Any], keys: set[str]) -> dict[
 def _compact_persisted_council_payload(value: Mapping[str, Any]) -> dict[str, Any]:
     selected = {
         "accepted_lanes",
+        "book_strategy",
+        "book_strategy_state",
+        "book_strategy_playbook",
         "candidate_id",
         "candidate_stage",
         "denied_at",
@@ -587,6 +590,7 @@ def _compact_persisted_council_payload(value: Mapping[str, Any]) -> dict[str, An
         "side",
         "skill_contributions",
         "state",
+        "strategy_read",
         "symbol_context",
         "timing_decision",
         "trade_permission",
@@ -606,6 +610,9 @@ def _compact_persisted_study_packet(value: Mapping[str, Any]) -> dict[str, Any]:
         "created_epoch_sec",
         "denied_at",
         "entry_quality",
+        "book_strategy",
+        "book_strategy_state",
+        "book_strategy_playbook",
         "execution",
         "execution_lane",
         "execution_state",
@@ -635,6 +642,7 @@ def _compact_persisted_study_packet(value: Mapping[str, Any]) -> dict[str, Any]:
         "side",
         "signal_thesis_v3",
         "skill_contributions",
+        "strategy_read",
         "symbol",
         "symbol_context",
         "timeframe",
@@ -838,6 +846,9 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
 _COMPACT_LIVE_STATE_COUNCIL_KEYS: frozenset[str] = frozenset(
     {
         "accepted_lanes",
+        "book_strategy",
+        "book_strategy_state",
+        "book_strategy_playbook",
         "candidate_stage",
         "confidence",
         "denied_at",
@@ -854,6 +865,7 @@ _COMPACT_LIVE_STATE_COUNCIL_KEYS: frozenset[str] = frozenset(
         "selected_execution_lane",
         "side",
         "state",
+        "strategy_read",
         "true_blocker",
     }
 )
@@ -4598,6 +4610,7 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     controls["model_strength_profile"] = _mapping_to_dict(controls.get("model_strength_profile", {}))
     controls["live_momentum_memory_advisory"] = bool(controls.get("live_momentum_memory_advisory", True))
     controls["scenario_generation_enabled"] = bool(controls.get("scenario_generation_enabled", False))
+    controls["live_hot_path_explicit_v3"] = bool(controls.get("live_hot_path_explicit_v3", False))
     controls["auto_memory_projection"] = bool(controls.get("auto_memory_projection", True))
     controls["require_memory_projection"] = bool(controls.get("require_memory_projection", True))
     controls["require_market_identity"] = bool(controls.get("require_market_identity", True))
@@ -4609,6 +4622,7 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     max_interval = max(min_interval, float(controls.get("max_capture_interval_sec", _EXECUTION_DEFAULT_MAX_CAPTURE_INTERVAL_SEC) or _EXECUTION_DEFAULT_MAX_CAPTURE_INTERVAL_SEC))
     controls["min_capture_interval_sec"] = min_interval
     controls["max_capture_interval_sec"] = max_interval
+    controls["max_capture_interval_explicit_v3"] = bool(controls.get("max_capture_interval_explicit_v3", False))
     controls["max_executions_per_window"] = max(1, int(controls.get("max_executions_per_window", 5) or 5))
     controls["execution_window_sec"] = max(60.0, float(controls.get("execution_window_sec", 300) or 300))
     controls["min_market_confidence"] = _clip01(controls.get("min_market_confidence", 0.42))
@@ -5953,19 +5967,6 @@ class WindowsWindowCaptureBackend:
                 LOGGER.debug("Fast live ImageGrab capture failed; falling back to native window capture.", exc_info=True)
 
         if pocket_option_window and hwnd > 0 and self._is_windows():
-            if fast_visible_grab and pocket_fast_foreground_grab:
-                try:
-                    foreground_ready = self._activate_window_for_visible_capture(hwnd)
-                    if foreground_ready or not require_pocket_foreground:
-                        live_capture = self._capture_window_imagegrab(descriptor)
-                        if (
-                            not self._looks_blank(live_capture)
-                            and not self._looks_browser_content_blank(live_capture)
-                            and _capture_looks_like_pocket_option_visible_surface(live_capture, descriptor)
-                        ):
-                            return live_capture.convert("RGB")
-                except Exception:
-                    LOGGER.debug("Pocket Option foreground ImageGrab failed; falling back to PrintWindow.", exc_info=True)
             offscreen = self._capture_window_printwindow(hwnd, descriptor)
             if (
                 offscreen is not None
@@ -5978,18 +5979,19 @@ class WindowsWindowCaptureBackend:
                 and _capture_looks_like_pocket_option_visible_surface(offscreen, descriptor)
             ):
                 return offscreen.convert("RGB")
-            try:
-                foreground_ready = self._activate_window_for_visible_capture(hwnd)
-                if foreground_ready or not require_pocket_foreground:
-                    live_capture = self._capture_window_imagegrab(descriptor)
-                    if (
-                        not self._looks_blank(live_capture)
-                        and not self._looks_browser_content_blank(live_capture)
-                        and _capture_looks_like_pocket_option_visible_surface(live_capture, descriptor)
-                    ):
-                        return live_capture.convert("RGB")
-            except Exception:
-                LOGGER.debug("Pocket Option live ImageGrab fallback failed.", exc_info=True)
+            if fast_visible_grab and pocket_fast_foreground_grab:
+                try:
+                    foreground_ready = self._activate_window_for_visible_capture(hwnd)
+                    if foreground_ready or not require_pocket_foreground:
+                        live_capture = self._capture_window_imagegrab(descriptor)
+                        if (
+                            not self._looks_blank(live_capture)
+                            and not self._looks_browser_content_blank(live_capture)
+                            and _capture_looks_like_pocket_option_visible_surface(live_capture, descriptor)
+                        ):
+                            return live_capture.convert("RGB")
+                except Exception:
+                    LOGGER.debug("Pocket Option live ImageGrab fallback failed.", exc_info=True)
             if offscreen is not None:
                 raise CaptureSurfaceUnavailableError("Pocket Option capture did not include the broker/chart surface.")
         elif prefer_imagegrab:
@@ -8972,7 +8974,10 @@ class PhoenixGuardWindowTrackingAdapter:
             fast_market_selector_skip_context
             and _env_bool("PHOENIXGUARD_LIVE_PAIR_SWITCH_FAST_REBIND", True)
         )
-        scan_selector_on_pair_switch = _env_bool("PHOENIXGUARD_LIVE_SCAN_SELECTOR_ON_PAIR_SWITCH", True)
+        scan_selector_on_pair_switch = _env_bool(
+            "PHOENIXGUARD_LIVE_SCAN_SELECTOR_ON_PAIR_SWITCH",
+            not locked_window_context,
+        )
         scan_selector_when_unknown = _env_bool("PHOENIXGUARD_LIVE_SCAN_SELECTOR_WHEN_UNKNOWN", False)
         previous_tracking: dict[str, Any] = {}
         previous_signal: dict[str, Any] = {}
@@ -15143,7 +15148,7 @@ class PhoenixGuardWindowTrackingAdapter:
         controls: Mapping[str, Any],
     ) -> dict[str, Any]:
         requested_enabled = bool(controls.get("scenario_generation_enabled", False))
-        live_hot_path = bool(controls.get("live_execution_enabled", False)) and (
+        live_hot_path = bool(controls.get("live_hot_path_explicit_v3", False)) and bool(controls.get("live_execution_enabled", False)) and (
             str(controls.get("execution_mode", "") or "").strip().lower() == "live"
         )
         live_override = str(os.getenv("PHOENIXGUARD_ENABLE_LIVE_SCENARIO_GENERATION", "") or "").strip().lower()
@@ -15433,6 +15438,12 @@ class PhoenixGuardWindowTrackingAdapter:
                     merged[-1] = (previous_start, previous_rows + segment_rows[1:])
                 else:
                     merged.append((segment_start, list(segment_rows)))
+            if len(merged) == 1 and len(rows) >= 8:
+                midpoint = max(3, min(len(rows) - 3, len(rows) // 2))
+                return [
+                    (0, list(rows[: midpoint + 1])),
+                    (midpoint, list(rows[midpoint:])),
+                ]
             if len(merged) <= max_segments:
                 return merged
             while len(merged) > max_segments:
@@ -17823,6 +17834,7 @@ class ContinuousWindowTrackerService:
         self._active_study_started_epoch: dict[str, float] = {}
         self._display_snapshot_started_epoch: dict[str, float] = {}
         self._force_market_selector_scan_sessions: set[str] = set()
+        self._focus_preview_capture_sessions: set[str] = set()
         self._capture_watchdog_v3 = CaptureWatchdogV3()
         self._last_artifact_prune_epoch: dict[str, float] = {}
         self._resolved_window_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -17930,12 +17942,9 @@ class ContinuousWindowTrackerService:
         # These are generated by the capture pipeline and may not exist at validation time
         # but will exist when needed
         if path.is_absolute():
-            path_str = str(path).replace("\\", "/")  # Normalize path separators for checking
-            is_runtime_artifact = (
-                "/runtime/live/" in path_str
-                or path_str.endswith("/runtime/live")
-            )
-            if is_runtime_artifact and ("artifacts" in path_str or ".png" in path_str.lower()):
+            path_parts = {part.lower() for part in path.parts}
+            artifact_suffixes = {".json", ".jpeg", ".jpg", ".png", ".webp"}
+            if "artifacts" in path_parts and path.suffix.lower() in artifact_suffixes:
                 return str(path)
         # For other paths, validate existence before returning
         return str(path) if path.exists() else ""
@@ -20446,7 +20455,14 @@ class ContinuousWindowTrackerService:
                 if preview_payload:
                     return self._public_session_payload(preview_payload)
             try:
-                self._capture_and_analyze(str(payload["session_id"]), force=True)
+                preview_session_id = str(payload["session_id"])
+                with self._lock:
+                    self._focus_preview_capture_sessions.add(preview_session_id)
+                try:
+                    self._capture_and_analyze(preview_session_id, force=True)
+                finally:
+                    with self._lock:
+                        self._focus_preview_capture_sessions.discard(preview_session_id)
             except CaptureSurfaceUnavailableError as exc:
                 LOGGER.info("Initial focus capture deferred for session %s: %s", session_id, exc)
                 return self.get_session(str(payload["session_id"]))
@@ -20819,6 +20835,14 @@ class ContinuousWindowTrackerService:
         descriptor = self._resolve_window_descriptor(payload)
         if descriptor is None:
             return {}
+
+        def load_current_display_payload() -> dict[str, Any]:
+            current_payload = _mapping_to_dict(_read_json(self._session_path(normalized_session_id), {})) or dict(payload)
+            display_payload = self._load_display_state(normalized_session_id)
+            if display_payload:
+                current_payload.update(display_payload)
+            return current_payload
+
         capture_started_epoch = _now_epoch()
         capture_started_iso = _epoch_to_utc_iso(capture_started_epoch)
         try:
@@ -20833,7 +20857,7 @@ class ContinuousWindowTrackerService:
         ).strip().lower() not in {"0", "false", "off", "no"}
         if reuse_only_enabled:
             with self._lock:
-                current = self._load_session_with_display_state(normalized_session_id) or dict(payload)
+                current = load_current_display_payload()
                 previous_display_path = str(current.get("last_display_window_path", "") or "").strip()
                 if previous_display_path and Path(previous_display_path).is_file():
                     current_frame = int(current.get("frame_index", current.get("frame_id", 0)) or 0)
@@ -20896,7 +20920,7 @@ class ContinuousWindowTrackerService:
             active_started = float(self._display_snapshot_started_epoch.get(normalized_session_id, 0.0) or 0.0)
             active_age_sec = max(0.0, capture_started_epoch - active_started) if active_started > 0.0 else 0.0
             if active_started > 0.0 and active_age_sec < stale_reset_sec:
-                current = self._load_session_with_display_state(normalized_session_id) or dict(payload)
+                current = load_current_display_payload()
                 current["display_snapshot_busy_v3"] = True
                 current["display_snapshot_busy_since_epoch"] = active_started
                 current["display_snapshot_busy_age_sec"] = round(active_age_sec, 3)
@@ -20956,7 +20980,7 @@ class ContinuousWindowTrackerService:
                     self._display_snapshot_started_epoch.pop(normalized_session_id, None)
             raise
         with self._lock:
-            current = self._load_session_with_display_state(normalized_session_id) or dict(payload)
+            current = load_current_display_payload()
             current_frame = int(current.get("frame_index", current.get("frame_id", 0)) or 0)
             current_capture = int(current.get("capture_count", current_frame) or 0)
             current_display = int(current.get("display_frame_id", current_frame) or 0)
@@ -20971,7 +20995,7 @@ class ContinuousWindowTrackerService:
         previous_display_path = ""
         if reuse_identical_surface:
             with self._lock:
-                current_for_reuse = self._load_session_with_display_state(normalized_session_id) or dict(payload)
+                current_for_reuse = load_current_display_payload()
             previous_signature = str(current_for_reuse.get("last_display_surface_signature", "") or "")
             candidate_path = str(current_for_reuse.get("last_display_window_path", "") or "").strip()
             if previous_signature == window_signature and candidate_path and Path(candidate_path).is_file():
@@ -20989,7 +21013,7 @@ class ContinuousWindowTrackerService:
         display_published_epoch = _now_epoch()
         display_published_iso = _epoch_to_utc_iso(display_published_epoch)
         with self._lock:
-            current = self._load_session_with_display_state(normalized_session_id) or dict(payload)
+            current = load_current_display_payload()
             current_frame = int(current.get("frame_index", current.get("frame_id", 0)) or 0)
             current_capture = int(current.get("capture_count", current_frame) or 0)
             current_display = int(current.get("display_frame_id", current_frame) or 0)
@@ -21056,11 +21080,14 @@ class ContinuousWindowTrackerService:
         fast_after_payload: dict[str, Any] | None = None
         error_message = ""
         try:
+            with self._lock:
+                worker_busy_at_start = normalized_session_id in self._active_studies
             controls = _normalize_execution_controls(payload.get("execution_controls", {}))
             fast_display_capture = (
                 bool(payload.get("tracking_enabled", False))
                 and str(os.getenv("PHOENIXGUARD_CAPTURE_ONCE_FAST_DISPLAY", "1") or "1").strip().lower()
                 not in {"0", "false", "off", "no"}
+                and (bool(display_only) or worker_busy_at_start)
                 and (
                     bool(controls.get("live_execution_enabled", False))
                     or str(controls.get("execution_mode", "shadow") or "shadow").lower() == "live"
@@ -21074,9 +21101,7 @@ class ContinuousWindowTrackerService:
                 attempted = bool(fast_snapshot)
                 if fast_snapshot:
                     fast_after_payload = fast_snapshot
-                with self._lock:
-                    worker_busy = normalized_session_id in self._active_studies
-                if not display_only and not worker_busy:
+                if not display_only and not worker_busy_at_start:
                     self._ensure_worker(normalized_session_id, capture_now=True)
             elif display_only:
                 fast_snapshot = self._publish_display_snapshot_only(
@@ -21685,6 +21710,11 @@ class ContinuousWindowTrackerService:
                 controls["live_execution_enabled"] = bool(live_execution_enabled)
             if execution_mode is not None:
                 controls["execution_mode"] = "live" if str(execution_mode or "").strip().lower() == "live" else "shadow"
+            if live_execution_enabled is not None or execution_mode is not None:
+                controls["live_hot_path_explicit_v3"] = bool(
+                    controls.get("live_execution_enabled", False)
+                    and str(controls.get("execution_mode", "shadow") or "shadow").strip().lower() == "live"
+                )
             if allow_countertrend_scalp is not None:
                 controls["allow_countertrend_scalp"] = bool(allow_countertrend_scalp)
             if allow_location_sniper_entries is not None:
@@ -21760,6 +21790,7 @@ class ContinuousWindowTrackerService:
             if max_capture_interval_sec is not None:
                 min_interval = float(controls.get("min_capture_interval_sec", _EXECUTION_DEFAULT_MIN_CAPTURE_INTERVAL_SEC) or _EXECUTION_DEFAULT_MIN_CAPTURE_INTERVAL_SEC)
                 controls["max_capture_interval_sec"] = max(min_interval, float(max_capture_interval_sec))
+                controls["max_capture_interval_explicit_v3"] = True
             if max_executions_per_window is not None:
                 controls["max_executions_per_window"] = max(1, int(max_executions_per_window))
             if execution_window_sec is not None:
@@ -22080,12 +22111,19 @@ class ContinuousWindowTrackerService:
             _EXECUTION_DEFAULT_MIN_CAPTURE_INTERVAL_SEC,
             float(payload.get("capture_interval_sec", _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC) or _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC),
         )
-        controls = _normalize_execution_controls(payload.get("execution_controls", {}))
+        raw_controls = _mapping_to_dict(payload.get("execution_controls", {}))
+        controls = _normalize_execution_controls(raw_controls)
         if not bool(controls.get("adaptive_timer_enabled", True)):
             return {"interval_sec": base_interval, "reason": "fixed_timer"}
 
         min_interval = max(_EXECUTION_DEFAULT_MIN_CAPTURE_INTERVAL_SEC, float(controls.get("min_capture_interval_sec", _EXECUTION_DEFAULT_MIN_CAPTURE_INTERVAL_SEC) or _EXECUTION_DEFAULT_MIN_CAPTURE_INTERVAL_SEC))
-        max_interval = max(min_interval, float(controls.get("max_capture_interval_sec", _EXECUTION_DEFAULT_MAX_CAPTURE_INTERVAL_SEC) or _EXECUTION_DEFAULT_MAX_CAPTURE_INTERVAL_SEC))
+        default_adaptive_max_interval = 10.0
+        raw_max_interval = (
+            raw_controls.get("max_capture_interval_sec", default_adaptive_max_interval)
+            if bool(raw_controls.get("max_capture_interval_explicit_v3", False))
+            else default_adaptive_max_interval
+        )
+        max_interval = max(min_interval, float(raw_max_interval or default_adaptive_max_interval))
 
         manual_focus = _public_manual_focus_region(payload.get("manual_focus_region", {}))
         if not bool(manual_focus.get("enabled", False)):
@@ -23394,7 +23432,8 @@ class ContinuousWindowTrackerService:
         previous_active_trade_live = bool(previous_active_until > surface_now_epoch)
         selected_actionable = bool(selected.get("actionable", False))
         state = _normalize_broker_execution_state(previous_state)
-        live_execution_enabled = bool(controls.get("live_execution_enabled", False))
+        focus_preview_capture = bool(payload.get("_focus_preview_capture_v3", False))
+        live_execution_enabled = bool(controls.get("live_execution_enabled", False)) and not focus_preview_capture
         execution_mode = str(controls.get("execution_mode", "shadow") or "shadow")
         state["enabled"] = live_execution_enabled
         state["mode"] = execution_mode
@@ -23571,6 +23610,11 @@ class ContinuousWindowTrackerService:
                         manual_focus_region=_public_manual_focus_region(payload.get("manual_focus_region", {})),
                         window_query=payload.get("window_query", ""),
                     )
+                    capture_plane = _mapping_to_dict(broker_surface.get("capture_plane", {}))
+                    if capture_plane:
+                        capture_plane["source"] = "full_window_gui"
+                        capture_plane["uses_manual_focus_crop"] = False
+                        broker_surface["capture_plane"] = capture_plane
                     broker_surface["cached"] = False
                     broker_surface["scan_skipped"] = False
                 if isinstance(tracking_summary, dict) and isinstance(latest_signal, dict):
@@ -24125,7 +24169,7 @@ class ContinuousWindowTrackerService:
         controls: Mapping[str, Any],
     ) -> dict[str, Any]:
         requested_enabled = bool(controls.get("scenario_generation_enabled", False))
-        live_hot_path = bool(controls.get("live_execution_enabled", False)) and (
+        live_hot_path = bool(controls.get("live_hot_path_explicit_v3", False)) and bool(controls.get("live_execution_enabled", False)) and (
             str(controls.get("execution_mode", "") or "").strip().lower() == "live"
         )
         live_override = str(os.getenv("PHOENIXGUARD_ENABLE_LIVE_SCENARIO_GENERATION", "") or "").strip().lower()
@@ -24415,6 +24459,11 @@ class ContinuousWindowTrackerService:
             self._last_capture_time[session_id] = capture_started_at
         mark_stage("rate_limit")
         payload = self._require_session(session_id)
+        focus_preview_capture = False
+        with self._lock:
+            focus_preview_capture = session_id in self._focus_preview_capture_sessions
+        if focus_preview_capture:
+            payload["_focus_preview_capture_v3"] = True
         with self._lock:
             if session_id in self._force_market_selector_scan_sessions:
                 payload["_force_market_selector_scan_once"] = True
@@ -24732,7 +24781,8 @@ class ContinuousWindowTrackerService:
 
         pre_artifact_controls = _normalize_execution_controls(payload.get("execution_controls", {}))
         live_minimal_artifacts = (
-            bool(pre_artifact_controls.get("live_execution_enabled", False))
+            bool(payload.get("tracking_enabled", False))
+            and bool(pre_artifact_controls.get("live_execution_enabled", False))
             and str(pre_artifact_controls.get("execution_mode", "shadow") or "shadow") == "live"
             and str(os.getenv("PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS", "0") or "0").strip().lower()
             not in {"0", "false", "off", "no"}
@@ -25045,6 +25095,7 @@ class ContinuousWindowTrackerService:
         fast_visual_controls = _normalize_execution_controls(payload.get("execution_controls", {}))
         fast_visual_only_when_blocked = (
             not model_council_packet
+            and capture_started_with_tracking_enabled
             and bool(fast_visual_controls.get("live_execution_enabled", False))
             and str(fast_visual_controls.get("execution_mode", "shadow") or "shadow") == "live"
             and str(os.getenv("PHOENIXGUARD_FAST_VISUAL_ONLY_WHEN_NOT_EXECUTABLE", "1") or "1").strip().lower()
@@ -25351,6 +25402,32 @@ class ContinuousWindowTrackerService:
                 visual_payload.pop("execution_packet", None)
             self._save_session(visual_payload)
         if fast_visual_only_when_blocked:
+            blocked_decision_model_council_result = (
+                _compact_persisted_model_council_result(model_council_result)
+                if not _env_bool("PHOENIXGUARD_FULL_DECISION_ARTIFACTS", False)
+                else model_council_result
+            )
+            blocked_decision_payload: dict[str, Any] = {
+                "session_id": str(payload["session_id"]),
+                "captured_at": capture_started_iso,
+                "published_at": visual_published_at,
+                "pipeline_latency_sec": visual_pipeline_latency_sec,
+                "locked_window": dict(descriptor),
+                "focus_region": study_focus_meta,
+                "selected_focus_region": focus_meta,
+                "tracking_summary": _compact_live_nested_payload(tracking_summary),
+                "latest_signal": _compact_live_nested_payload(latest_signal),
+                "broker_surface": fast_blocked_surface or _default_broker_surface_payload(),
+                "broker_execution_state": fast_blocked_state or _normalize_broker_execution_state({}),
+                "scenario_analysis": _mapping_to_dict(tracking_summary.get("scenario_analysis", {})),
+                "model_council_result": blocked_decision_model_council_result,
+                "model_council": _compact_persisted_council_payload(_mapping_to_dict(model_council_result.get("model_council"))),
+                "decision_artifact_state": "visual_only_blocked_no_execution_packet",
+            }
+            if model_council_study_packet:
+                blocked_decision_payload["model_council_study_packet"] = model_council_study_packet
+            _write_json_atomic(decision_path, blocked_decision_payload)
+            mark_stage("decision_write")
             mark_stage("fast_blocked_return")
             self._write_session_event_log(
                 str(payload["session_id"]),
@@ -26060,6 +26137,7 @@ class ContinuousWindowTrackerService:
         control_write = bool(payload.get("__control_write_v3", False))
         payload = dict(payload)
         payload.pop("__control_write_v3", None)
+        payload.pop("_focus_preview_capture_v3", None)
         session_id = str(payload.get("session_id", "") or "")
         if not session_id:
             raise ValueError("Session payload is missing a session_id.")

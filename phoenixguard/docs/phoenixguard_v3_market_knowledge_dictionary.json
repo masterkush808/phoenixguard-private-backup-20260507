@@ -2,7 +2,7 @@
   "schema_version": "PG_V3_MARKET_KNOWLEDGE_DICTIONARY_V1",
   "purpose": "Codable PhoenixGuard V3 market-knowledge vocabulary for supply/demand, trendlines, candlestick filters, replay explanation, and future VLM narration.",
   "authority_rules": {
-    "execution_authority": "This dictionary explains and scores context only. Execution authority remains PG_EXECUTION_PACKET_V3 and ShooterActionSequencerV2.",
+    "execution_authority": "This dictionary explains and scores context only. The Book Strategy Master playbook is the final strategy decider, and only a fresh validated PG_EXECUTION_PACKET_V3 can authorize action.",
     "visible_labels": "Operator-visible overlay labels must still come from docs/phoenixguard_v3_visual_dictionary.json.",
     "vlm_role": "The VLM explains PhoenixGuard state in English. It must not invent independent predictions or create unapproved labels."
   },

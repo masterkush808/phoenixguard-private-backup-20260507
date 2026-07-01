@@ -162,7 +162,7 @@ def main() -> int:
             "sample_count": len(samples),
             "samples": samples[-300:],
             "handshake_paths": [str(path) for path in HANDSHAKE_PATHS],
-            "launch_command": r".\.venv\Scripts\python.exe Backend\launch\shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 15.0 --heartbeat 4.0",
+            "launch_command": r".\.venv-live\Scripts\python.exe Backend\launch\shooter.py signal --base-url http://127.0.0.1:8793 --session-id pocket-live-8788 --poll 15.0 --heartbeat 4.0",
         },
     )
     out = write_report("gate8_shooter_persistence_v3.json", report)
