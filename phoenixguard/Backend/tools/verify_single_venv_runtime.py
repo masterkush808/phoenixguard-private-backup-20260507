@@ -35,6 +35,7 @@ class PhoenixProcessRow:
     command_line: str
     executable_path: str
     uses_repo_venv_python: bool
+    environment_authority: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +117,26 @@ def _powershell_json(command: str) -> PowerShellJsonResult:
     return PowerShellJsonResult(ok=True, payload=parsed, error="")
 
 
+def _direct_uses_expected_python(command_line: str, executable_path: str, expected_python: Path) -> bool:
+    expected_text = str(expected_python).lower()
+    return expected_text in command_line.lower() or _same_path(executable_path, expected_python)
+
+
+def _has_expected_python_ancestor(
+    process_id: int,
+    parent_by_pid: dict[int, int],
+    direct_expected_by_pid: dict[int, bool],
+) -> bool:
+    seen: set[int] = set()
+    parent_id = parent_by_pid.get(process_id, 0)
+    while parent_id and parent_id not in seen:
+        seen.add(parent_id)
+        if direct_expected_by_pid.get(parent_id) is True:
+            return True
+        parent_id = parent_by_pid.get(parent_id, 0)
+    return False
+
+
 def _phoenix_python_processes(expected_python: Path) -> tuple[list[PhoenixProcessRow], str]:
     command = (
         "Get-CimInstance Win32_Process -Filter \"name = 'python.exe'\" | "
@@ -123,23 +144,45 @@ def _phoenix_python_processes(expected_python: Path) -> tuple[list[PhoenixProces
         "Select-Object ProcessId,ParentProcessId,CommandLine,ExecutablePath | "
         "ConvertTo-Json -Depth 5"
     )
-    rows: list[PhoenixProcessRow] = []
-    expected_text = str(expected_python).lower()
+    raw_rows: list[dict[str, object]] = []
     result = _powershell_json(command)
     if not result.ok:
         return [], result.error
     for item in _as_list(result.payload):
         payload = _as_mapping(item)
+        raw_rows.append(payload)
+    parent_by_pid: dict[int, int] = {}
+    direct_expected_by_pid: dict[int, bool] = {}
+    for payload in raw_rows:
         command_line = _str_from_mapping(payload, "CommandLine")
         executable_path = _str_from_mapping(payload, "ExecutablePath")
-        uses_repo_venv_python = expected_text in command_line.lower() or _same_path(executable_path, expected_python)
+        process_id = _int_from_mapping(payload, "ProcessId")
+        parent_process_id = _int_from_mapping(payload, "ParentProcessId")
+        parent_by_pid[process_id] = parent_process_id
+        direct_expected_by_pid[process_id] = _direct_uses_expected_python(command_line, executable_path, expected_python)
+    rows: list[PhoenixProcessRow] = []
+    for payload in raw_rows:
+        command_line = _str_from_mapping(payload, "CommandLine")
+        executable_path = _str_from_mapping(payload, "ExecutablePath")
+        process_id = _int_from_mapping(payload, "ProcessId")
+        parent_process_id = _int_from_mapping(payload, "ParentProcessId")
+        direct_expected = direct_expected_by_pid.get(process_id) is True
+        launcher_child = _has_expected_python_ancestor(process_id, parent_by_pid, direct_expected_by_pid)
+        uses_repo_venv_python = direct_expected or launcher_child
+        if direct_expected:
+            environment_authority = "CONFIGURED_PROFILE_ENV"
+        elif launcher_child:
+            environment_authority = "WINDOWS_VENV_LAUNCHER_CHILD"
+        else:
+            environment_authority = "NON_CONFIGURED_PYTHON"
         rows.append(
             PhoenixProcessRow(
-                process_id=_int_from_mapping(payload, "ProcessId"),
-                parent_process_id=_int_from_mapping(payload, "ParentProcessId"),
+                process_id=process_id,
+                parent_process_id=parent_process_id,
                 command_line=command_line,
                 executable_path=executable_path,
                 uses_repo_venv_python=uses_repo_venv_python,
+                environment_authority=environment_authority,
             )
         )
     return rows, ""
@@ -213,7 +256,7 @@ def build_single_venv_runtime_report(*, cleanup_extra_envs: bool = False) -> Sin
     elif extra_dirs:
         reason = "extra virtual environment directories exist"
     else:
-        reason = "one or more PhoenixGuard Python processes are not using the configured Python environment"
+        reason = "one or more PhoenixGuard Python processes are not owned by the configured Python environment"
     return SingleVenvRuntimeReport(
         schema_version="PG_SINGLE_VENV_RUNTIME_REPORT_V1",
         ok=ok,
