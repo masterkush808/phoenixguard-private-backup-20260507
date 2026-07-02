@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import stat as stat_module
+import subprocess
 import time
 import urllib.request
 from collections import Counter
@@ -23,6 +24,18 @@ from PIL import Image, ImageDraw, ImageFont
 
 SCHEMA_VERSION = "PG_ENTRY_ALLOWANCE_BURN_V1"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PLAYBOOK_EXECUTION_AUTHORITY = "PLAYBOOK_FINAL_DECIDER_V3"
+PLAYBOOK_ENTER_NOW_STATES = {"ENTER_NOW", "SWING_ENTER_NOW", "INTRADAY_ENTER_NOW"}
+STRATEGY_HARD_BLOCKERS = {
+    "CANDIDATE_INVALIDATED",
+    "MARKET_TRAP",
+    "REQUIRED_MODELS_NOT_AWAKE",
+    "SOURCE_IDENTITY_JUST_SWITCHED",
+    "SOURCE_LOCK_MISMATCH",
+    "STALE_RUNTIME_GUARD",
+    "WRONG_SYMBOL",
+    "WRONG_TIMEFRAME",
+}
 SOFT_BLOCKED_STUDY_REASONS = {
     "REASONING_WATCH",
     "REASONING_WAIT_FOR_PULLBACK",
@@ -149,6 +162,37 @@ def fetch_runtime_bundle(base_url: str, session_id: str, timeout: float) -> tupl
     with ThreadPoolExecutor(max_workers=3, thread_name_prefix="pg-burn-fetch") as pool:
         futures = {name: pool.submit(fetch_json, base_url, path, timeout) for name, path in paths.items()}
         return futures["live"].result(), futures["council"].result(), futures["perf"].result()
+
+
+def candle_movement_context(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str, Any]:
+    tracking = mapping(live.get("tracking_summary"))
+    latest_signal = mapping(live.get("latest_signal"))
+    model_packet = mapping(council.get("model_council_packet"))
+    execution_packet = mapping(council.get("execution_packet"))
+    allowance = mapping(council.get("allowance_package"))
+    promotion = mapping(council.get("promotion_trace"))
+    council_payload = mapping(council.get("model_council"))
+    for source in (tracking, latest_signal, live, execution_packet, model_packet, allowance, promotion, council, council_payload):
+        context = mapping(source.get("candle_movement_context_v3") or source.get("candle_movement_context"))
+        if context:
+            return context
+    return {}
+
+
+def candle_movement_brief(context: Mapping[str, Any]) -> dict[str, Any]:
+    current_leg = mapping(context.get("current_leg"))
+    return {
+        "visible_candle_count": context.get("visible_candle_count"),
+        "tracked_candle_count": context.get("tracked_candle_count"),
+        "current_leg_side": current_leg.get("side"),
+        "current_leg_candle_count": current_leg.get("candle_count"),
+        "current_leg_stage": context.get("move_stage") or current_leg.get("move_stage"),
+        "move_duration": context.get("move_duration") or current_leg.get("duration"),
+        "opposing_force_room": context.get("opposing_force_room") or current_leg.get("opposing_force_room"),
+        "candles_per_leg": context.get("candles_per_leg"),
+        "boxes_with_anchors": context.get("boxes_with_anchors"),
+        "boxes_with_candles": context.get("boxes_with_candles"),
+    }
 
 
 def font(size: int, bold: bool = False) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
@@ -318,6 +362,160 @@ def annotate(
 def save_jpeg(image: Image.Image, path: Path, quality: int = 82) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     image.convert("RGB").save(path, format="JPEG", quality=max(40, min(95, int(quality))), optimize=False, progressive=False)
+
+
+def ps_single_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def operator_alert_classification(entry: Mapping[str, Any]) -> str:
+    entry_side = side(entry.get("side"), "UNKNOWN")
+    expected = mapping(entry.get("expected_move_time"))
+    candle = mapping(entry.get("candle_movement"))
+    leg_side = side(expected.get("current_leg_side") or candle.get("current_leg_side"), "")
+    leg_stage = text(expected.get("current_leg_stage") or candle.get("current_leg_stage")).upper()
+    lane = text(entry.get("lane_name") or entry.get("allowance_mode")).upper()
+    if entry_side and leg_side and entry_side != leg_side:
+        return "COUNTERTREND_RETRACEMENT_SCALP"
+    if "SNIPER" in lane:
+        return "AGGRESSIVE_SNIPER_ENTRY"
+    if leg_stage in {"LATE", "EXHAUSTED"}:
+        return "LATE_DISTRIBUTION_CONTINUATION"
+    if leg_stage in {"MATURE", "STILL_RECLAIMING"}:
+        return "DISTRIBUTION_CONTINUATION"
+    return "PLAYBOOK_ENTER_NOW"
+
+
+def operator_alert_message(entry: Mapping[str, Any], sample: Mapping[str, Any]) -> str:
+    expected = mapping(entry.get("expected_move_time"))
+    candle = mapping(entry.get("candle_movement"))
+    frames = mapping(sample.get("frames"))
+    freshness = mapping(sample.get("freshness"))
+    entry_side = side(entry.get("side"), "UNKNOWN")
+    duration = text(expected.get("expected_duration_text"), "duration unavailable")
+    expected_candles = text(expected.get("expected_candle_count"), "?")
+    timeframe = text(expected.get("timeframe"), "M5")
+    leg_side = text(expected.get("current_leg_side") or candle.get("current_leg_side"), "unknown")
+    leg_count = text(expected.get("current_leg_candle_count") or candle.get("current_leg_candle_count"), "?")
+    leg_stage = text(expected.get("current_leg_stage") or candle.get("current_leg_stage"), "unknown")
+    packet_id = text(entry.get("packet_id"), "missing")
+    classification = operator_alert_classification(entry)
+    score = number(entry.get("final_score"))
+    score_text = f"{score:.2f}" if score is not None else "n/a"
+    lines = [
+        "PHOENIXGUARD TRADE PACKAGE",
+        "",
+        f"ACTION: ENTER {entry_side}",
+        f"EXPECTED MOVE TIME: {duration} ({expected_candles} {timeframe} candle(s))",
+        f"CLASSIFICATION: {classification}",
+        "",
+        f"PACKET: {packet_id}",
+        f"FRAME: {frames.get('display_frame_id')} | CAPTURE: {frames.get('capture_count')}",
+        f"LANE: {text(entry.get('lane_name'), 'unknown')}",
+        f"AUTHORITY: {text(entry.get('allowance_authority'), PLAYBOOK_EXECUTION_AUTHORITY)}",
+        f"SCORE: {score_text}",
+        "",
+        f"CURRENT LEG: {leg_side} | candles={leg_count} | stage={leg_stage}",
+        f"VISIBLE CANDLES: {text(candle.get('visible_candle_count'), '?')}",
+        f"BOXES WITH ANCHORS: {text(candle.get('boxes_with_anchors'), '?')}",
+        f"BOXES WITH CANDLES: {text(candle.get('boxes_with_candles'), '?')}",
+        "",
+        f"FRESHNESS: {'PASS' if freshness.get('fresh') is not False else 'FAIL'}",
+        f"BLOCKER: {text(entry.get('blocked_by'), 'NONE')}",
+        f"NEXT REQUIRED: {text(entry.get('next_required'), 'none')}",
+        "",
+        "This alert stays open until you confirm I SEE IT.",
+    ]
+    return "\n".join(lines)
+
+
+def launch_operator_alert(out_dir: Path, entry: Mapping[str, Any], sample: Mapping[str, Any]) -> dict[str, Any]:
+    alerts_dir = out_dir / "operator_alerts"
+    alerts_dir.mkdir(parents=True, exist_ok=True)
+    seq = int(sample.get("seq", 0) or 0)
+    frame = int(mapping(sample.get("frames")).get("display_frame_id") or 0)
+    entry_side = side(entry.get("side"), "UNKNOWN")
+    packet_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", text(entry.get("packet_id"), "no_packet"))
+    stamp = int(float(sample.get("captured_epoch") or time.time()) * 1000.0)
+    stem = f"{seq:05d}_{frame:06d}_{stamp}_{entry_side.lower()}_{packet_id}"
+    message_path = alerts_dir / f"{stem}_message.txt"
+    script_path = alerts_dir / f"{stem}_alert.ps1"
+    meta_path = alerts_dir / f"{stem}.json"
+    message = operator_alert_message(entry, sample)
+    message_path.write_text(message, encoding="utf-8")
+    title = f"PhoenixGuard ENTER {entry_side} | {text(mapping(entry.get('expected_move_time')).get('expected_duration_text'), 'duration')}"
+    script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Media.SystemSounds]::Exclamation.Play()
+$message = Get-Content -LiteralPath {ps_single_quote(str(message_path))} -Raw
+$form = New-Object System.Windows.Forms.Form
+$form.Text = {ps_single_quote(title)}
+$form.TopMost = $true
+$form.StartPosition = 'CenterScreen'
+$form.Size = New-Object System.Drawing.Size(720, 520)
+$form.BackColor = [System.Drawing.Color]::FromArgb(15, 15, 12)
+$form.ForeColor = [System.Drawing.Color]::FromArgb(255, 230, 170)
+$label = New-Object System.Windows.Forms.TextBox
+$label.Multiline = $true
+$label.ReadOnly = $true
+$label.BorderStyle = 'None'
+$label.BackColor = $form.BackColor
+$label.ForeColor = $form.ForeColor
+$label.Font = New-Object System.Drawing.Font('Consolas', 13)
+$label.ScrollBars = 'Vertical'
+$label.Text = $message
+$label.Dock = 'Fill'
+$button = New-Object System.Windows.Forms.Button
+$button.Text = 'I SEE IT'
+$button.Height = 46
+$button.Dock = 'Bottom'
+$button.BackColor = [System.Drawing.Color]::FromArgb(255, 205, 95)
+$button.ForeColor = [System.Drawing.Color]::Black
+$button.Font = New-Object System.Drawing.Font('Segoe UI', 14, [System.Drawing.FontStyle]::Bold)
+$button.Add_Click({{$form.Close()}})
+$form.Controls.Add($label)
+$form.Controls.Add($button)
+$form.Add_Shown({{$form.Activate(); $form.BringToFront()}})
+[void]$form.ShowDialog()
+"""
+    script_path.write_text(script.strip() + "\n", encoding="utf-8")
+    meta: dict[str, Any] = {
+        "schema_version": "PG_OPERATOR_ALERT_V1",
+        "created_at_utc": utc_now(),
+        "seq": seq,
+        "frame": frame,
+        "side": entry_side,
+        "packet_id": text(entry.get("packet_id"), ""),
+        "expected_move_time": mapping(entry.get("expected_move_time")),
+        "classification": operator_alert_classification(entry),
+        "message_path": str(message_path),
+        "script_path": str(script_path),
+        "launched": False,
+    }
+    try:
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-STA",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-File",
+                str(script_path),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        meta["launched"] = True
+    except Exception as exc:
+        meta["error"] = f"{type(exc).__name__}: {exc}"
+    write_json(meta_path, meta)
+    meta["meta_path"] = str(meta_path)
+    return meta
 
 
 def local_artifact_path(value: Any) -> Path | None:
@@ -657,6 +855,49 @@ def session_artifact_payloads(session_id: str) -> list[dict[str, Any]]:
     return rows
 
 
+def council_with_session_packet(council: Mapping[str, Any], session_id: str) -> dict[str, Any]:
+    """Merge the canonical session packet into the API council sample.
+
+    The compact council endpoint may wrap or omit the latest execution packet
+    while the session state already exposes it to the package reporter. Burn
+    evidence must follow that same package source to avoid missed entries.
+    """
+    merged = dict(council)
+    for payload in session_artifact_payloads(session_id):
+        for packet_key in ("execution_packet", "model_council_packet"):
+            if mapping(merged.get(packet_key)):
+                continue
+            packet = mapping(payload.get(packet_key))
+            if not packet:
+                continue
+            merged[packet_key] = packet
+            merged["execution_packet_present"] = True
+            if text(packet.get("packet_id")):
+                merged["execution_packet_id"] = text(packet.get("packet_id"))
+            for key in (
+                "allowance_package",
+                "book_strategy",
+                "book_strategy_state",
+                "book_strategy_playbook",
+                "opportunity_maturity",
+                "opportunity_maturity_state",
+                "promotion_trace",
+                "execution_lane",
+                "timing_decision",
+                "candle_movement_context_v3",
+                "candle_movement",
+            ):
+                if mapping(merged.get(key)) or sequence(merged.get(key)) or text(merged.get(key)):
+                    continue
+                value = packet.get(key)
+                if mapping(value) or sequence(value) or text(value):
+                    merged[key] = value
+        result = mapping(payload.get("model_council_result"))
+        if result:
+            merged.setdefault("model_council_result", result)
+    return merged
+
+
 def capture_entry_evidence(
     out_dir: Path,
     sample: Mapping[str, Any],
@@ -667,6 +908,9 @@ def capture_entry_evidence(
     timeout_sec: float,
 ) -> dict[str, Any]:
     entry = mapping(sample.get("entry"))
+    candle_context = mapping(sample.get("candle_movement_context_v3") or sample.get("candle_movement_context"))
+    if not candle_context:
+        candle_context = candle_movement_context(live, council)
     entry_side = side(entry.get("side"))
     if entry_side not in {"BUY", "SELL"}:
         return {}
@@ -774,7 +1018,11 @@ def capture_entry_evidence(
         stamp = int(float(sample.get("captured_epoch") or time.time()) * 1000.0)
         evidence_kind = "entry_marker_unresolved" if entry_allowed else "blocked_enter_now_marker_unresolved"
         stem = f"{seq:05d}_{frame:06d}_{stamp}_{entry_side.lower()}_{evidence_kind}"
+        overlay_out = evidence_dir / f"{stem}_overlay_unmarked.jpg"
+        broker_out = evidence_dir / f"{stem}_broker_unmarked.jpg"
         failure_json = evidence_dir / f"{stem}.json"
+        save_jpeg(overlay_image, overlay_out)
+        save_jpeg(window_image, broker_out)
         meta: dict[str, Any] = {
             "schema_version": "PG_ENTRY_ALLOWANCE_EVIDENCE_V1",
             "seq": seq,
@@ -783,6 +1031,8 @@ def capture_entry_evidence(
             "captured_at_utc": sample.get("captured_at_utc"),
             "captured_epoch": sample.get("captured_epoch"),
             "entry": entry,
+            "candle_movement_context_v3": candle_context,
+            "candle_movement": candle_movement_brief(candle_context),
             "error": "ENTRY_MARKER_UNRESOLVED",
             "marker_policy": "NO_FALLBACK_ONLY_LATEST_CANDLE_NOW",
             "rejected_fallbacks": ["SUPPORT", "RESISTANCE", "SUPPLY", "DEMAND", "ENTRY_ZONE", "CURRENT_BOX", "PRICE_PROXY"],
@@ -793,9 +1043,10 @@ def capture_entry_evidence(
             "window_source_mode": window_source_mode,
             "overlay_freshness": overlay_freshness,
             "window_freshness": window_freshness,
-            "overlay_evidence_path": "",
-            "broker_evidence_path": "",
-            "evidence_images_written": False,
+            "overlay_evidence_path": str(overlay_out),
+            "broker_evidence_path": str(broker_out),
+            "evidence_images_written": True,
+            "marker_unresolved": True,
         }
         write_json(failure_json, meta)
         return meta
@@ -823,6 +1074,8 @@ def capture_entry_evidence(
         "captured_at_utc": sample.get("captured_at_utc"),
         "captured_epoch": sample.get("captured_epoch"),
         "entry": entry,
+        "candle_movement_context_v3": candle_context,
+        "candle_movement": candle_movement_brief(candle_context),
         "chart_point": {"x": chart_point[0], "y": chart_point[1], "source": chart_point[2]},
         "marker_source": chart_point[2],
         "window_point": {"x": window_point[0], "y": window_point[1]},
@@ -835,6 +1088,117 @@ def capture_entry_evidence(
         "window_freshness": window_freshness,
         "overlay_evidence_path": str(overlay_out),
         "broker_evidence_path": str(broker_out),
+    }
+    write_json(meta_out, meta)
+    return meta
+
+
+def capture_periodic_visual_evidence(
+    out_dir: Path,
+    sample: Mapping[str, Any],
+    live: Mapping[str, Any],
+    session_id: str,
+    base_url: str,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    session_payloads = session_artifact_payloads(session_id)
+    artifact_sources: list[Mapping[str, Any]] = [live, *session_payloads]
+    overlay_path = newest_local_artifact_path(
+        [
+            row.get("last_overlay_path") or row.get("last_full_overlay_path") or row.get("last_chart_path")
+            for row in artifact_sources
+        ]
+        + [row.get("last_full_overlay_path") for row in artifact_sources]
+        + [row.get("last_chart_path") for row in artifact_sources]
+    )
+    window_path = newest_local_artifact_path(
+        [
+            row.get("last_display_window_path") or row.get("last_window_path") or row.get("last_frame_path")
+            for row in artifact_sources
+        ]
+        + [row.get("last_window_path") for row in artifact_sources]
+        + [row.get("last_frame_path") for row in artifact_sources]
+    )
+    overlay_image: Image.Image | None = None
+    window_image: Image.Image | None = None
+    overlay_source_mode = "none"
+    window_source_mode = "none"
+    if overlay_path is not None:
+        try:
+            overlay_image = Image.open(overlay_path).convert("RGB")
+            overlay_source_mode = "local_artifact"
+        except Exception:
+            overlay_image = None
+    if window_path is not None:
+        try:
+            window_image = Image.open(window_path).convert("RGB")
+            window_source_mode = "local_artifact"
+        except Exception:
+            window_image = None
+    if window_image is None:
+        window_image = fetch_image(base_url, f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-window", timeout_sec)
+        if window_image is not None:
+            window_source_mode = "http_latest_window"
+    window_freshness = artifact_frame_age(window_path, live, sample, frame_keys=("frame_index", "frame_id"))
+    if window_image is not None and window_freshness.get("status") == "STALE":
+        fetched_window = fetch_image(base_url, f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-window", timeout_sec)
+        if fetched_window is not None:
+            window_image = fetched_window
+            window_source_mode = "http_latest_window_after_stale_local"
+            window_path = None
+            window_freshness = {
+                "current_frame": current_artifact_frame(live, sample),
+                "artifact_frame": None,
+                "age_frames": None,
+                "status": "HTTP_LATEST_UNNUMBERED",
+            }
+    overlay_freshness = artifact_frame_age(
+        overlay_path,
+        live,
+        sample,
+        frame_keys=("overlay_frame_id", "chart_frame_id", "frame_index", "frame_id"),
+    )
+    if window_image is not None and (overlay_image is None or overlay_freshness.get("status") == "STALE"):
+        rendered = render_live_json_overlay(live, window_image)
+        if rendered is not None:
+            overlay_image = rendered
+            overlay_source_mode = "rendered_live_json_on_current_window_crop"
+        elif overlay_freshness.get("status") == "STALE":
+            overlay_image = None
+            overlay_source_mode = "stale_overlay_rejected"
+    if overlay_image is None and overlay_freshness.get("status") != "STALE":
+        overlay_image = fetch_image(base_url, f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-overlay", timeout_sec)
+        if overlay_image is not None:
+            overlay_source_mode = "http_latest_overlay"
+
+    evidence_dir = out_dir / "periodic_evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    seq = int(sample.get("seq", 0) or 0)
+    frame = int(mapping(sample.get("frames")).get("display_frame_id") or 0)
+    stamp = int(float(sample.get("captured_epoch") or time.time()) * 1000.0)
+    stem = f"{seq:05d}_{frame:06d}_{stamp}_periodic"
+    broker_out = evidence_dir / f"{stem}_broker.jpg"
+    overlay_out = evidence_dir / f"{stem}_overlay.jpg"
+    meta_out = evidence_dir / f"{stem}.json"
+    if window_image is not None:
+        save_jpeg(window_image, broker_out)
+    if overlay_image is not None:
+        save_jpeg(overlay_image, overlay_out)
+    meta: dict[str, Any] = {
+        "schema_version": "PG_ENTRY_BURN_PERIODIC_VISUAL_EVIDENCE_V1",
+        "seq": seq,
+        "frame": frame,
+        "captured_at_utc": sample.get("captured_at_utc"),
+        "captured_epoch": sample.get("captured_epoch"),
+        "broker_evidence_path": str(broker_out) if window_image is not None else "",
+        "overlay_evidence_path": str(overlay_out) if overlay_image is not None else "",
+        "source_window_path": str(window_path or "http_latest_window"),
+        "source_overlay_path": str(overlay_path or "http_latest_overlay"),
+        "window_source_mode": window_source_mode,
+        "overlay_source_mode": overlay_source_mode,
+        "window_freshness": window_freshness,
+        "overlay_freshness": overlay_freshness,
+        "evidence_images_written": bool(window_image is not None or overlay_image is not None),
     }
     write_json(meta_out, meta)
     return meta
@@ -1169,9 +1533,16 @@ def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str
     promotion = mapping(council.get("promotion_trace"))
     timing = mapping(promotion.get("timing_decision"))
     lane = mapping(promotion.get("execution_lane"))
+    opportunity = mapping(promotion.get("opportunity_maturity") or council.get("opportunity_maturity"))
+    allowance_package = mapping(promotion.get("allowance_package") or council.get("allowance_package"))
+    book_strategy = mapping(
+        promotion.get("book_strategy")
+        or council.get("book_strategy")
+        or opportunity.get("book_strategy")
+        or allowance_package.get("book_strategy")
+    )
     wave_context = mapping(promotion.get("wave_context") or lane.get("wave_context"))
     packet_present = bool(council.get("execution_packet_present") or council.get("execution_packet") or council.get("model_council_packet"))
-    entry_now = bool(timing.get("entry_now_allowed"))
     lane_name = text(lane.get("name") or promotion.get("selected_lane") or council.get("selected_execution_lane")).upper()
     legacy_hf_lane_rejected = lane_name == "HIGH_FREQUENCY_TWO_CANDLE"
     lane_accepted = bool(lane.get("accepted") or promotion.get("lane_accepted")) and not legacy_hf_lane_rejected
@@ -1180,20 +1551,76 @@ def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str
         cycle = mapping(lane.get("high_frequency_candle_cycle") or promotion.get("high_frequency_candle_cycle"))
         next1 = mapping(cycle.get("next_candle_forecast"))
         candidate = side(next1.get("direction"))
-    execution_authorized = bool(lane_accepted and packet_present)
-    allowed = bool(candidate in {"BUY", "SELL"} and entry_now and lane_accepted and packet_present)
+    playbook_state = text(
+        promotion.get("book_strategy_state")
+        or council.get("book_strategy_state")
+        or allowance_package.get("book_strategy_maturity")
+        or book_strategy.get("maturity_state")
+        or book_strategy.get("state")
+    ).upper()
+    opportunity_state = text(
+        promotion.get("opportunity_maturity_state")
+        or council.get("opportunity_maturity_state")
+        or allowance_package.get("opportunity_maturity")
+        or opportunity.get("state")
+    ).upper()
+    allowance_authority = text(allowance_package.get("execution_authority")).upper()
+    allowance_accepted = bool(allowance_package.get("accepted") or allowance_package.get("decision_accepted"))
+    allowance_execution_ready = bool(allowance_package.get("execution_ready"))
+    expected_move_time = mapping(allowance_package.get("expected_move_time"))
+    playbook_enter_now = bool(playbook_state in PLAYBOOK_ENTER_NOW_STATES)
+    playbook_authorized = bool(
+        timing.get("playbook_strategy_authorized")
+        or (allowance_authority == PLAYBOOK_EXECUTION_AUTHORITY and allowance_accepted and allowance_execution_ready)
+        or playbook_enter_now
+    )
+    entry_now = bool(timing.get("entry_now_allowed") or playbook_authorized)
+    blocked_by = text(promotion.get("blocked_by") or promotion.get("denied_at")).upper()
+    runtime_or_strategy_blocked = bool(
+        blocked_by.startswith("INSTRUMENT_CONTEXT")
+        or blocked_by in STRATEGY_HARD_BLOCKERS
+        or blocked_by.startswith("PLAYBOOK_HARD_")
+        or blocked_by.startswith("RUNTIME_")
+    )
+    opportunity_enter_now = bool(opportunity_state in {"", "ENTER_NOW", "SWING_ENTER_NOW", "INTRADAY_ENTER_NOW"})
+    strategy_allowed = bool(
+        candidate in {"BUY", "SELL"}
+        and playbook_enter_now
+        and opportunity_enter_now
+        and not runtime_or_strategy_blocked
+    )
+    legacy_timing_allowed = bool(
+        candidate in {"BUY", "SELL"}
+        and entry_now
+        and lane_accepted
+        and packet_present
+        and not playbook_state
+        and not runtime_or_strategy_blocked
+    )
+    allowed = bool(strategy_allowed or legacy_timing_allowed)
+    execution_authorized = bool(allowed and packet_present)
     return {
         "allowed": allowed,
         "side": candidate,
         "entry_now_allowed": entry_now,
+        "strategy_allowed": strategy_allowed,
+        "playbook_entry_allowed": strategy_allowed,
+        "playbook_strategy_authorized": playbook_authorized,
+        "playbook_state": playbook_state,
+        "opportunity_maturity_state": opportunity_state,
         "lane_accepted": lane_accepted,
         "lane_name": lane_name,
         "legacy_hf_lane_rejected": legacy_hf_lane_rejected,
         "packet_present": packet_present,
+        "packet_export_present": packet_present,
         "execution_authorized": execution_authorized,
-        "allowance_mode": "timing_entry_now",
+        "allowance_mode": "playbook_strategy_entry" if strategy_allowed else "legacy_timing_entry" if legacy_timing_allowed else "watching",
+        "allowance_authority": allowance_authority,
+        "allowance_package_accepted": allowance_accepted,
+        "allowance_package_execution_ready": allowance_execution_ready,
+        "expected_move_time": expected_move_time,
         "timing_mode": text(timing.get("timing_mode") or mapping(timing.get("entry_timing")).get("mode")),
-        "blocked_by": text(promotion.get("blocked_by") or promotion.get("denied_at")),
+        "blocked_by": blocked_by,
         "candidate_id": text(promotion.get("candidate_id")),
         "packet_id": text(promotion.get("packet_id") or council.get("execution_packet_id")),
         "final_score": number(promotion.get("final_score") or promotion.get("final_execution_score")),
@@ -1225,7 +1652,7 @@ def runtime_freshness_state(
     perf: Mapping[str, Any],
 ) -> dict[str, Any]:
     max_frame_age_ms = float(os.getenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500") or "2500")
-    max_capture_age_sec = float(os.getenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "4") or "4")
+    max_capture_age_sec = float(os.getenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "120") or "120")
     reject_published_age_warning = os.getenv("PHOENIXGUARD_BURN_REJECT_PUBLISHED_AGE_WARNING", "1") != "0"
     reject_capture_age_warning = os.getenv("PHOENIXGUARD_BURN_REJECT_CAPTURE_AGE_WARNING", "1") != "0"
     timing = mapping(perf.get("timing_trace"))
@@ -1282,6 +1709,7 @@ def runtime_freshness_state(
     session_status = text(live.get("status")).upper()
     stale_flags = [text(item).upper() for item in sequence(visual.get("stale_flags")) if text(item)]
     reasons: list[str] = []
+    warnings: list[str] = []
     if not bool(live_resp.get("ok")):
         reasons.append("LIVE_ENDPOINT_NOT_OK")
     if not bool(council_resp.get("ok")):
@@ -1301,6 +1729,12 @@ def runtime_freshness_state(
         and float(frame_age_ms) <= max_frame_age_ms
         and stale_status not in {"STALE", "FAIL", "FAILED", "ERROR"}
     )
+    age_within_slow_budget = bool(
+        frame_age_ms is not None
+        and float(frame_age_ms) <= max_frame_age_ms
+        and (published_age_sec is None or float(published_age_sec) <= max_capture_age_sec)
+        and (capture_age_sec is None or float(capture_age_sec) <= max_capture_age_sec)
+    )
     published_age_warning = None
     if published_age_sec is not None and float(published_age_sec) > max_capture_age_sec:
         published_age_warning = f"PUBLISHED_AGE_{round(float(published_age_sec), 3)}S_GT_{round(max_capture_age_sec, 3)}S"
@@ -1314,13 +1748,26 @@ def runtime_freshness_state(
         capture_age_warning = f"CAPTURE_START_AGE_{round(float(capture_age_sec), 3)}S_GT_{round(max_capture_age_sec, 3)}S"
         if reject_capture_age_warning or not published_frame_fresh:
             reasons.append(f"CAPTURE_AGE_{round(float(capture_age_sec), 3)}S_GT_{round(max_capture_age_sec, 3)}S")
+    lag_only_flags = {"FRAME", "OVERLAY", "MODEL_VOTE", "PACKET", "FRONTEND_RENDER"}
+    stale_status_is_hard = stale_status in {"FAIL", "FAILED", "ERROR"} or (
+        stale_status == "STALE" and not age_within_slow_budget
+    )
     if stale_status in {"STALE", "FAIL", "FAILED", "ERROR"}:
-        reasons.append(f"STALE_STATUS_{stale_status}")
+        if stale_status_is_hard:
+            reasons.append(f"STALE_STATUS_{stale_status}")
+        else:
+            warnings.append(f"STALE_STATUS_{stale_status}_SLOW_BUT_ADVANCING")
     if stale_flags:
-        reasons.append("VISUAL_STALE_FLAGS_" + ",".join(stale_flags[:4]))
+        stale_flag_set = set(stale_flags)
+        if age_within_slow_budget and stale_flag_set.issubset(lag_only_flags):
+            warnings.append("VISUAL_STALE_FLAGS_" + ",".join(stale_flags[:4]) + "_SLOW_BUT_ADVANCING")
+        else:
+            reasons.append("VISUAL_STALE_FLAGS_" + ",".join(stale_flags[:4]))
     return {
         "fresh": not reasons,
         "reasons": reasons,
+        "warnings": warnings,
+        "slow_but_advancing": bool(warnings and not reasons),
         "max_frame_age_ms": max_frame_age_ms,
         "max_capture_age_sec": max_capture_age_sec,
         "frame_age_ms": frame_age_ms,
@@ -1342,8 +1789,10 @@ def apply_freshness_guard(entry: Mapping[str, Any], freshness: Mapping[str, Any]
     guarded = dict(entry)
     raw_allowed = bool(guarded.get("allowed"))
     raw_authorized = bool(guarded.get("execution_authorized"))
+    raw_strategy_allowed = bool(guarded.get("strategy_allowed") or guarded.get("playbook_entry_allowed"))
     guarded["raw_allowed_without_freshness_guard"] = raw_allowed
     guarded["raw_execution_authorized_without_freshness_guard"] = raw_authorized
+    guarded["raw_strategy_allowed_without_freshness_guard"] = raw_strategy_allowed
     guarded["freshness"] = dict(freshness)
     if bool(freshness.get("fresh")):
         guarded["freshness_rejected"] = False
@@ -1351,11 +1800,14 @@ def apply_freshness_guard(entry: Mapping[str, Any], freshness: Mapping[str, Any]
     guarded["freshness_rejected"] = bool(
         raw_allowed
         or raw_authorized
+        or raw_strategy_allowed
         or guarded.get("entry_now_allowed")
         or guarded.get("lane_accepted")
         or guarded.get("packet_present")
     )
     guarded["allowed"] = False
+    guarded["strategy_allowed"] = False
+    guarded["playbook_entry_allowed"] = False
     guarded["execution_authorized"] = False
     guarded["blocked_by"] = "STALE_RUNTIME_GUARD"
     guarded["next_required"] = "Fresh tracker frame required before any entry package can be accepted."
@@ -1528,7 +1980,7 @@ def no_silent_failure_status(
 
 def compact_sample(seq: int, live_resp: Mapping[str, Any], council_resp: Mapping[str, Any], perf_resp: Mapping[str, Any], session_id: str) -> dict[str, Any]:
     live = mapping(live_resp.get("json"))
-    council = mapping(council_resp.get("json"))
+    council = council_with_session_packet(mapping(council_resp.get("json")), session_id)
     perf = mapping(perf_resp.get("json"))
     thesis = mapping(live.get("signal_thesis_v3"))
     promotion = mapping(council.get("promotion_trace"))
@@ -1554,6 +2006,8 @@ def compact_sample(seq: int, live_resp: Mapping[str, Any], council_resp: Mapping
     ]
     freshness = runtime_freshness_state(live_resp, council_resp, perf_resp, live, perf)
     entry = apply_freshness_guard(entry_state(live, council), freshness)
+    candle_context = candle_movement_context(live, council)
+    entry["candle_movement"] = candle_movement_brief(candle_context)
     blocked_study = blocked_trend_aligned_study(entry)
     entry["blocked_trend_aligned_study"] = bool(blocked_study.get("active"))
     entry["blocked_trend_aligned_reason"] = text(blocked_study.get("reason"))
@@ -1585,6 +2039,8 @@ def compact_sample(seq: int, live_resp: Mapping[str, Any], council_resp: Mapping
         "freshness": freshness,
         "market_identity": market_identity,
         "entry": entry,
+        "candle_movement_context_v3": candle_context,
+        "candle_movement": candle_movement_brief(candle_context),
         "grade_a_star_audit": {
             "schema_version": "PG_GRADE_A_STAR_BURN_AUDIT_V1",
             "promotion_failure_audit_v3": audit,
@@ -1597,6 +2053,7 @@ def compact_sample(seq: int, live_resp: Mapping[str, Any], council_resp: Mapping
             "blocked_trend_aligned_study": blocked_study,
             "timing_decision": timing,
             "execution_lane": lane,
+            "candle_movement": candle_movement_brief(candle_context),
             "next_candle_forecast": {
                 "next1": next1,
                 "next2": next2,
@@ -1931,6 +2388,12 @@ def main() -> int:
     parser.add_argument("--storage-guard-interval-sec", type=float, default=float(os.getenv("PHOENIXGUARD_BURN_STORAGE_GUARD_INTERVAL_SEC", "60") or "60"))
     parser.add_argument("--raw-every-sec", type=float, default=float(os.getenv("PHOENIXGUARD_BURN_RAW_EVERY_SEC", "60") or "60"))
     parser.add_argument(
+        "--periodic-screenshot-sec",
+        type=float,
+        default=float(os.getenv("PHOENIXGUARD_BURN_PERIODIC_SCREENSHOT_SEC", "600") or "600"),
+        help="Capture broker and overlay visual evidence on this cadence during the burn.",
+    )
+    parser.add_argument(
         "--entry-evidence-min-sec",
         type=float,
         default=float(os.getenv("PHOENIXGUARD_BURN_ENTRY_EVIDENCE_MIN_SEC", "60") or "60"),
@@ -1955,6 +2418,19 @@ def main() -> int:
         action="store_false",
         help="Keep old hardening study folders before this burn starts.",
     )
+    parser.add_argument(
+        "--operator-alert",
+        dest="operator_alert",
+        action="store_true",
+        default=os.getenv("PHOENIXGUARD_BURN_OPERATOR_ALERT", "0") != "0",
+        help="Open a persistent Windows confirmation dialog for each new packet-backed execution authorization.",
+    )
+    parser.add_argument(
+        "--no-operator-alert",
+        dest="operator_alert",
+        action="store_false",
+        help="Disable persistent operator trade alerts.",
+    )
     parser.add_argument("--out-dir", default="")
     args = parser.parse_args()
     os.environ["PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS"] = str(float(args.max_frame_age_ms))
@@ -1975,6 +2451,8 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     samples_path = out_dir / "samples.jsonl"
     entries_path = out_dir / "entry_events.jsonl"
+    periodic_path = out_dir / "periodic_visual_evidence.jsonl"
+    operator_alerts_path = out_dir / "operator_alerts.jsonl"
     storage_path = out_dir / "storage_events.jsonl"
     status_path = out_dir / "status.json"
     raw_dir = out_dir / "raw"
@@ -1991,9 +2469,11 @@ def main() -> int:
             "interval_sec": args.interval_sec,
             "storage_guard_interval_sec": args.storage_guard_interval_sec,
             "raw_every_sec": args.raw_every_sec,
+            "periodic_screenshot_sec": args.periodic_screenshot_sec,
             "entry_evidence_min_sec": args.entry_evidence_min_sec,
             "max_frame_age_ms": args.max_frame_age_ms,
             "capture_blocked_enter_now": capture_blocked_enter_now,
+            "operator_alert": bool(args.operator_alert),
             "preflight_cleanup": preflight_cleanup,
             "base_url": args.base_url,
             "session_id": args.session_id,
@@ -2006,16 +2486,20 @@ def main() -> int:
     samples: list[dict[str, Any]] = []
     entries: list[dict[str, Any]] = []
     storage_events: list[dict[str, Any]] = []
+    periodic_events: list[dict[str, Any]] = []
     seq = 0
     enter_now_observations = 0
     blocked_enter_now_evidence_count = 0
     manual_alert_observations = 0
     manual_alert_suppressed_observations = 0
+    operator_alert_count = 0
     blocked_trend_aligned_study_observations = 0
     last_storage = 0.0
     last_raw = 0.0
+    last_periodic_screenshot = 0.0
     pixel_freeze_state: dict[str, Any] = {}
     manual_rearm_state: dict[str, dict[str, Any]] = {}
+    operator_alert_packets: set[str] = set()
     try:
         while time.time() < end:
             loop_started = time.time()
@@ -2035,11 +2519,23 @@ def main() -> int:
                 write_json(raw_dir / f"{seq:05d}_{raw_stamp}_council.json", {"response": council_resp})
                 write_json(raw_dir / f"{seq:05d}_{raw_stamp}_perf.json", {"response": perf_resp, "visual_health": mapping(perf.get("visual_health"))})
                 last_raw = loop_started
-            enter_now_observation = bool(entry.get("entry_now_allowed")) and bool(entry.get("lane_accepted"))
+            if args.periodic_screenshot_sec > 0 and (
+                loop_started - last_periodic_screenshot >= float(args.periodic_screenshot_sec) or seq == 1
+            ):
+                periodic_event = capture_periodic_visual_evidence(out_dir, sample, live, args.session_id, args.base_url, args.timeout_sec)
+                periodic_events.append(periodic_event)
+                append_jsonl(periodic_path, periodic_event)
+                last_periodic_screenshot = loop_started
+            enter_now_observation = bool(
+                entry.get("entry_now_allowed")
+                or entry.get("strategy_allowed")
+                or entry.get("playbook_entry_allowed")
+            )
             if enter_now_observation:
                 enter_now_observations += 1
-            allowed_observation = bool(
-                entry.get("allowed")
+            allowed_observation = bool(entry.get("allowed"))
+            packet_backed_allowed_observation = bool(
+                allowed_observation
                 and entry.get("execution_authorized")
                 and entry.get("packet_present")
             )
@@ -2059,7 +2555,7 @@ def main() -> int:
             append_jsonl(samples_path, sample)
             blocked_enter_now_observation = bool(capture_blocked_enter_now and enter_now_observation and not allowed_observation)
             should_capture_evidence = allowed_observation or bool(manual_alert.get("allowed")) or blocked_enter_now_observation
-            packet_episode_id = str(entry.get("packet_id") or "") if allowed_observation else ""
+            packet_episode_id = str(entry.get("packet_id") or "") if packet_backed_allowed_observation else ""
             alert_episode_id = text(manual_alert.get("key"))
             entry_key = "|".join(
                 [
@@ -2122,6 +2618,15 @@ def main() -> int:
                 event["manual_alert_observations"] = manual_alert_observations
                 event["manual_alert_suppressed_observations"] = manual_alert_suppressed_observations
                 event["blocked_trend_aligned_study_observations"] = blocked_trend_aligned_study_observations
+                if bool(args.operator_alert) and packet_backed_allowed_observation:
+                    alert_packet_key = text(entry.get("packet_id")) or entry_key
+                    if alert_packet_key and alert_packet_key not in operator_alert_packets:
+                        operator_alert_packets.add(alert_packet_key)
+                        operator_alert = launch_operator_alert(out_dir, entry, sample)
+                        operator_alert_count += 1
+                        event["operator_alert"] = operator_alert
+                        event["operator_alert_count"] = operator_alert_count
+                        append_jsonl(operator_alerts_path, operator_alert)
                 if blocked_enter_now_observation:
                     blocked_enter_now_evidence_count += 1
                     event["blocked_enter_now_evidence_count"] = blocked_enter_now_evidence_count
@@ -2144,11 +2649,13 @@ def main() -> int:
                     "seq": seq,
                     "sample_count": len(samples),
                     "entry_event_count": len(entries),
+                    "periodic_visual_evidence_count": len(periodic_events),
                     "entry_allowed_observation_count": entry_allowed_observations,
                     "enter_now_observation_count": enter_now_observations,
                     "blocked_enter_now_evidence_count": blocked_enter_now_evidence_count,
                     "manual_alert_observation_count": manual_alert_observations,
                     "manual_alert_suppressed_observation_count": manual_alert_suppressed_observations,
+                    "operator_alert_count": operator_alert_count,
                     "blocked_trend_aligned_study_observation_count": blocked_trend_aligned_study_observations,
                     "elapsed_sec": round(time.time() - started, 3),
                     "remaining_sec": round(max(0.0, end - time.time()), 3),
@@ -2172,11 +2679,13 @@ def main() -> int:
                 "seq": seq,
                 "sample_count": len(samples),
                 "entry_event_count": len(entries),
+                "periodic_visual_evidence_count": len(periodic_events),
                 "entry_allowed_observation_count": entry_allowed_observations,
                 "enter_now_observation_count": enter_now_observations,
                 "blocked_enter_now_evidence_count": blocked_enter_now_evidence_count,
                 "manual_alert_observation_count": manual_alert_observations,
                 "manual_alert_suppressed_observation_count": manual_alert_suppressed_observations,
+                "operator_alert_count": operator_alert_count,
                 "blocked_trend_aligned_study_observation_count": blocked_trend_aligned_study_observations,
                 "elapsed_sec": round(time.time() - started, 3),
                 "remaining_sec": 0.0,
@@ -2187,7 +2696,7 @@ def main() -> int:
                 "entry_gallery_path": str(out_dir / "entry_gallery.html"),
             },
         )
-    print(json.dumps({"out_dir": str(out_dir), "samples": len(samples), "entry_events": len(entries)}, indent=2))
+    print(json.dumps({"out_dir": str(out_dir), "samples": len(samples), "entry_events": len(entries), "periodic_visual_evidence": len(periodic_events)}, indent=2))
     return 0
 
 

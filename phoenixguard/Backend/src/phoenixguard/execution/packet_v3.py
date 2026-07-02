@@ -463,7 +463,7 @@ def build_execution_packet_v3(
     resolved_allowance_package = dict(allowance_package or council.get("allowance_package") or {})
     if resolved_allowance_package:
         resolved_allowance_package.setdefault("schema_version", ALLOWANCE_PACKAGE_SCHEMA_VERSION)
-        resolved_allowance_package.setdefault("execution_authority", EXECUTION_PACKET_SCHEMA_VERSION)
+        resolved_allowance_package.setdefault("execution_authority", PLAYBOOK_EXECUTION_AUTHORITY)
         resolved_allowance_package.setdefault("packet_authority", EXECUTION_PACKET_SCHEMA_VERSION)
         council.setdefault("allowance_package", resolved_allowance_package)
     resolved_sequence_context = _mapping(sequence_context)
@@ -904,17 +904,18 @@ def validate_execution_packet_v3(
                     add("AMBIGUOUS_SEQUENCE_CONTEXT", MODEL_COUNCIL, f"{field_name} must match model_council.sequence_context.")
             if _clean_str(sequence_context_fields.get("sequence_signature")) == "":
                 add("MISSING_SEQUENCE_SIGNATURE", MODEL_COUNCIL, "sequence_signature is required in model_council.sequence_context.")
-            if _clean_str(sequence_context_fields.get("sequence_status")) != "COMPLETE":
+            sequence_strict_for_execution = bool(require_executable)
+            if sequence_strict_for_execution and _clean_str(sequence_context_fields.get("sequence_status")) != "COMPLETE":
                 add("PARTIAL_SEQUENCE_NOT_EXECUTABLE", MODEL_COUNCIL, "Only COMPLETE sequence context may execute.")
-            if _int(sequence_context_fields.get("sequence_length"), 0) < 50:
+            if sequence_strict_for_execution and _int(sequence_context_fields.get("sequence_length"), 0) < 50:
                 add("PARTIAL_SEQUENCE_NOT_EXECUTABLE", MODEL_COUNCIL, "Sequence length is below the live execution minimum.")
-            if _float(sequence_context_fields.get("sequence_confidence"), 0.0) < SEQUENCE_CONTEXT_MIN_CONFIDENCE:
+            if sequence_strict_for_execution and _float(sequence_context_fields.get("sequence_confidence"), 0.0) < SEQUENCE_CONTEXT_MIN_CONFIDENCE:
                 add("SEQUENCE_CONFIDENCE_TOO_LOW", MODEL_COUNCIL, "sequence_confidence is below the live execution minimum.")
-            if len(_sequence(sequence_context_fields.get("box_history"))) < SEQUENCE_CONTEXT_MIN_BOX_HISTORY_LEN:
+            if sequence_strict_for_execution and len(_sequence(sequence_context_fields.get("box_history"))) < SEQUENCE_CONTEXT_MIN_BOX_HISTORY_LEN:
                 add("SEQUENCE_BOX_HISTORY_INSUFFICIENT", MODEL_COUNCIL, "box_history is required for executable sequence context.")
-            if len(_sequence(sequence_context_fields.get("progression"))) < SEQUENCE_CONTEXT_MIN_PROGRESSION_LEN:
+            if sequence_strict_for_execution and len(_sequence(sequence_context_fields.get("progression"))) < SEQUENCE_CONTEXT_MIN_PROGRESSION_LEN:
                 add("SEQUENCE_PROGRESSION_INSUFFICIENT", MODEL_COUNCIL, "progression is required for executable sequence context.")
-            if not _mapping(sequence_context_fields.get("entry_progression")):
+            if sequence_strict_for_execution and not _mapping(sequence_context_fields.get("entry_progression")):
                 add("SEQUENCE_ENTRY_PROGRESSION_MISSING", MODEL_COUNCIL, "entry_progression is required for executable sequence context.")
             if provenance and _clean_str(provenance.get("sequence_id")) != _clean_str(sequence_context_fields.get("sequence_id")):
                 add(

@@ -1691,6 +1691,8 @@ def _compact_tracking_summary(tracking: Mapping[str, Any]) -> dict[str, Any]:
         "broker_source_lock",
         "broker_surface",
         "candle_extraction",
+        "candle_movement_context",
+        "candle_movement_context_v3",
         "candle_statistics",
         "chart_region",
         "current_box",
@@ -1734,6 +1736,8 @@ def _compact_latest_signal(signal: Mapping[str, Any]) -> dict[str, Any]:
         "broker_source",
         "broker_source_lock",
         "candle_extraction",
+        "candle_movement_context",
+        "candle_movement_context_v3",
         "countertrend_lane",
         "decision_kernel",
         "entry_distance",
@@ -1770,6 +1774,8 @@ def _compact_latest_signal(signal: Mapping[str, Any]) -> dict[str, Any]:
 def _compact_model_council_result(result: Mapping[str, Any]) -> dict[str, Any]:
     selected = {
         "angle_context",
+        "candle_movement",
+        "candle_movement_context_v3",
         "current_candle_contract",
         "entry_quality",
         "execution_lane",
@@ -1805,6 +1811,8 @@ def _compact_model_council_result(result: Mapping[str, Any]) -> dict[str, Any]:
             council,
             {
                 "execution",
+                "candle_movement",
+                "candle_movement_context_v3",
                 "trade_permission",
                 "entry_quality",
                 "book_strategy",

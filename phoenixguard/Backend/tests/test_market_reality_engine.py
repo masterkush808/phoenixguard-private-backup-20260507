@@ -237,7 +237,8 @@ def test_path_risk_weak_denies_execution() -> None:
 
 def test_candidate_queue_prevents_flip_flop_executable() -> None:
     council = ModelCouncilV3()
-    assert council.evaluate(_strong_snapshot("BUY", frame_id=210), now_epoch=NOW)["execution"]["enabled"] is False
+    seed = council.evaluate(_strong_snapshot("BUY", frame_id=210), now_epoch=NOW)
+    assert seed["execution"]["enabled"] is True
     assert council.evaluate(_strong_snapshot("SELL", frame_id=211), now_epoch=NOW + 0.5)["execution"]["enabled"] is False
 
     result = council.evaluate(_strong_snapshot("BUY", frame_id=212), now_epoch=NOW + 1.0)

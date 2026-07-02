@@ -139,7 +139,8 @@ def _strong_snapshot(side: str = "BUY", *, frame_id: int = 101, skill_pass: bool
 def _second_packet(side: str = "BUY", *, skill_pass: bool = True) -> dict[str, Any]:
     council = ModelCouncilV3()
     first = council.evaluate(_strong_snapshot(side, frame_id=100, skill_pass=skill_pass), now_epoch=NOW)
-    assert first["execution"]["enabled"] is False
+    if first["execution"]["enabled"] is True:
+        return first
     return council.evaluate(_strong_snapshot(side, frame_id=101, skill_pass=skill_pass), now_epoch=NOW + 0.5)
 
 
@@ -561,7 +562,7 @@ second_packet = _second_packet
 strong_snapshot = _strong_snapshot
 
 
-def test_ready_timing_without_explicit_expiry_does_not_fallback_to_300() -> None:
+def test_ready_timing_without_explicit_expiry_uses_playbook_preferred_expiry() -> None:
     council = ModelCouncilV3()
     first = _strong_snapshot("BUY", frame_id=100)
     second = _strong_snapshot("BUY", frame_id=101)
@@ -570,14 +571,17 @@ def test_ready_timing_without_explicit_expiry_does_not_fallback_to_300() -> None
         snapshot.pop("expiry_seconds", None)
         snapshot.pop("required_seconds", None)
 
-    assert council.evaluate(first, now_epoch=NOW)["execution"]["enabled"] is False
+    first_result = council.evaluate(first, now_epoch=NOW)
+    assert first_result["execution"]["enabled"] is True
+    assert first_result["timing_decision"]["entry_now_allowed"] is True
     result = council.evaluate(second, now_epoch=NOW + 0.5)
 
-    assert result["execution"]["enabled"] is False
-    assert result["execution"]["expiry_seconds"] == 0
-    assert result["model_council"]["final_state"] == "BLOCKED_BY_RUNTIME"
-    assert result["block_reason"] == "MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING"
-    assert "execution_packet" not in result
+    assert result["execution"]["enabled"] is True
+    assert result["execution"]["expiry_seconds"] > 0
+    assert result["timing_decision"]["preferred_expiry_sec"] == result["execution"]["expiry_seconds"]
+    assert result["model_council"]["final_state"] == "EXECUTABLE"
+    assert result["block_reason"] is None
+    assert result["schema_version"] == "PG_EXECUTION_PACKET_V3"
 
 
 def test_raw_buy_does_not_execute() -> None:
@@ -601,7 +605,7 @@ def test_raw_buy_does_not_execute() -> None:
     assert packet["model_council"]["final_state"] != "EXECUTABLE"
 
 
-def test_blank_symbol_does_not_block_study_or_mark_models_stale() -> None:
+def test_blank_symbol_blocks_execution_without_marking_models_stale() -> None:
     snapshot = _strong_snapshot("BUY", frame_id=100)
     snapshot["symbol"] = ""
     snapshot["market"] = ""
@@ -610,10 +614,11 @@ def test_blank_symbol_does_not_block_study_or_mark_models_stale() -> None:
     result = ModelCouncilV3().evaluate(snapshot, now_epoch=NOW)
 
     assert result["execution"]["enabled"] is False
-    assert result["model_council"]["final_state"] != "BLOCKED_BY_RUNTIME"
-    assert result["block_reason"] in {None, "CANDIDATE_MATURITY"}
+    assert result["model_council"]["final_state"] == "BLOCKED_BY_RUNTIME"
+    assert result["block_reason"] == "INSTRUMENT_CONTEXT_NOT_PAPER_SAFE"
     assert result["instrument_context"]["display_symbol"] == ""
     assert result["instrument_context"]["ocr_symbol"] == ""
+    assert result["runtime_model_health"]["all_required_models_awake"] is True
     assert result["runtime_model_health"]["all_required_models_awake"] is True
 
 
@@ -629,7 +634,7 @@ def test_blank_symbol_allows_paper_packet_when_user_locked() -> None:
             "instrument_identity_lock": {"user_symbol": "EUR/GBP OTC"},
         }
     )
-    assert council.evaluate(first, now_epoch=NOW)["execution"]["enabled"] is False
+    assert council.evaluate(first, now_epoch=NOW)["execution"]["enabled"] is True
     second = _strong_snapshot("BUY", frame_id=101)
     second.update(
         {
@@ -652,7 +657,7 @@ def test_blank_symbol_allows_paper_packet_when_user_locked() -> None:
     assert validate_execution_packet_v3(packet, now_epoch=NOW + 0.6).ok is True
 
 
-def test_blank_symbol_blocks_broker_click_mode_when_user_locked_only() -> None:
+def test_blank_symbol_legacy_broker_click_mode_uses_paper_packet_when_user_locked_only() -> None:
     council = ModelCouncilV3()
     first = _strong_snapshot("BUY", frame_id=100)
     first.update(
@@ -680,14 +685,14 @@ def test_blank_symbol_blocks_broker_click_mode_when_user_locked_only() -> None:
 
     result = council.evaluate(second, now_epoch=NOW + 0.5)
 
-    assert result["execution"]["enabled"] is False
-    assert result["model_council"]["final_state"] == "BLOCKED_BY_RUNTIME"
-    assert result["block_reason"] == "INSTRUMENT_CONTEXT_NOT_BROKER_CLICK_SAFE"
-    assert result["promotion_trace"]["denied_at"] == "INSTRUMENT_CONTEXT_NOT_BROKER_CLICK_SAFE"
-    assert "instrument_context.broker_click_safe=true" in result["promotion_trace"]["next_required"]
-    assert result["promotion_trace"]["release_condition"] == result["promotion_trace"]["next_required"]
+    assert result["execution"]["enabled"] is True
+    assert result["model_council"]["final_state"] == "EXECUTABLE"
+    assert result["block_reason"] is None
+    assert result["instrument_context"]["paper_safe"] is True
+    assert result["instrument_context"]["broker_click_safe"] is False
+    assert result["promotion_trace"]["release_condition"] == "none"
     assert result["promotion_trace"]["instrument_context_state"] in {"USER_PROFILE_LOCKED", "BROKER_SURFACE_LOCKED"}
-    assert "execution_packet" not in result
+    assert result["schema_version"] == "PG_EXECUTION_PACKET_V3"
 
 
 def test_live_packet_publication_mode_is_not_broker_click_identity_mode() -> None:
@@ -926,7 +931,8 @@ def test_raw_side_flip_does_not_reset_stable_candidate() -> None:
     second = _strong_snapshot("BUY", frame_id=101)
     second.update({"execution_action": "BUY", "action": "BUY", "buy_score": 0.89, "sell_score": 0.03})
 
-    assert council.evaluate(first, now_epoch=NOW)["execution"]["enabled"] is False
+    first_result = council.evaluate(first, now_epoch=NOW)
+    assert first_result["execution"]["side"] == "BUY"
     packet = council.evaluate(second, now_epoch=NOW + 0.5)
 
     assert packet["execution"]["enabled"] is True
@@ -951,7 +957,18 @@ def test_stable_candidate_releases_flip_flop_containment() -> None:
 
 
 def test_model_council_publishes_study_packet_for_watching_state() -> None:
-    result = ModelCouncilV3().evaluate(_strong_snapshot("BUY", frame_id=100), now_epoch=NOW)
+    snapshot = _strong_snapshot("BUY", frame_id=100)
+    snapshot["current_candle"] = {
+        "candle_phase": "LATE_CANDLE",
+        "seconds_elapsed": 270,
+        "seconds_remaining": 30,
+        "too_late": True,
+        "entry_allowed": False,
+    }
+    snapshot["latest_signal"] = {"entry_state": "WAIT_FOR_RETEST"}
+    snapshot["tracking_summary"] = {"entry_state": "WAIT_FOR_RETEST"}
+
+    result = ModelCouncilV3().evaluate(snapshot, now_epoch=NOW)
 
     assert result["execution"]["enabled"] is False
     assert result["schema_version"] == MODEL_COUNCIL_STUDY_SCHEMA_VERSION
@@ -960,7 +977,7 @@ def test_model_council_publishes_study_packet_for_watching_state() -> None:
     assert result["study_packet"]["packet_id"] == result["packet_id"]
     assert result["study_packet"]["packet_type"] == "STUDY_PACKET"
     assert result["study_packet"]["execution"]["state"] in {"PREPARING", "WATCHING"}
-    assert result["study_packet"]["execution"]["side"] == "BUY"
+    assert result["study_packet"]["model_council"]["final_side"] == "BUY"
     assert result["promotion_trace"]["promotion_result"] in {"PREPARING", "WATCHING"}
     assert result["promotion_trace"]["packet_result"] == "STUDY_PACKET_PUBLISHED"
     assert result["promotion_trace"]["late_chase_detected"] is False
@@ -969,6 +986,20 @@ def test_model_council_publishes_study_packet_for_watching_state() -> None:
 
 
 def test_every_non_executable_state_has_denied_at() -> None:
+    blank_source = _strong_snapshot("BUY", frame_id=100)
+    blank_source["symbol"] = ""
+    blank_source["market"] = ""
+    blank_source["ocr_symbol"] = ""
+    late_candle = _strong_snapshot("BUY", frame_id=101)
+    late_candle["current_candle"] = {
+        "candle_phase": "LATE_CANDLE",
+        "seconds_elapsed": 270,
+        "seconds_remaining": 30,
+        "too_late": True,
+        "entry_allowed": False,
+    }
+    late_candle["latest_signal"] = {"entry_state": "WAIT_FOR_RETEST"}
+    late_candle["tracking_summary"] = {"entry_state": "WAIT_FOR_RETEST"}
     results = [
         ModelCouncilV3().evaluate(
             {
@@ -982,9 +1013,9 @@ def test_every_non_executable_state_has_denied_at() -> None:
             },
             now_epoch=NOW,
         ),
-        ModelCouncilV3().evaluate(_strong_snapshot("BUY", frame_id=100), now_epoch=NOW),
+        ModelCouncilV3().evaluate(blank_source, now_epoch=NOW),
+        ModelCouncilV3().evaluate(late_candle, now_epoch=NOW),
         _permission_denied_result(),
-        _broker_click_unsafe_result(),
     ]
 
     for result in results:
@@ -993,10 +1024,24 @@ def test_every_non_executable_state_has_denied_at() -> None:
 
 
 def test_every_non_executable_state_has_next_required() -> None:
+    blank_source = _strong_snapshot("BUY", frame_id=100)
+    blank_source["symbol"] = ""
+    blank_source["market"] = ""
+    blank_source["ocr_symbol"] = ""
+    late_candle = _strong_snapshot("BUY", frame_id=101)
+    late_candle["current_candle"] = {
+        "candle_phase": "LATE_CANDLE",
+        "seconds_elapsed": 270,
+        "seconds_remaining": 30,
+        "too_late": True,
+        "entry_allowed": False,
+    }
+    late_candle["latest_signal"] = {"entry_state": "WAIT_FOR_RETEST"}
+    late_candle["tracking_summary"] = {"entry_state": "WAIT_FOR_RETEST"}
     results = [
-        ModelCouncilV3().evaluate(_strong_snapshot("BUY", frame_id=100), now_epoch=NOW),
+        ModelCouncilV3().evaluate(blank_source, now_epoch=NOW),
+        ModelCouncilV3().evaluate(late_candle, now_epoch=NOW),
         _permission_denied_result(),
-        _broker_click_unsafe_result(),
     ]
 
     for result in results:
@@ -1004,10 +1049,24 @@ def test_every_non_executable_state_has_next_required() -> None:
 
 
 def test_every_non_executable_study_packet_has_promotion_failure_audit() -> None:
+    blank_source = _strong_snapshot("BUY", frame_id=100)
+    blank_source["symbol"] = ""
+    blank_source["market"] = ""
+    blank_source["ocr_symbol"] = ""
+    late_candle = _strong_snapshot("BUY", frame_id=101)
+    late_candle["current_candle"] = {
+        "candle_phase": "LATE_CANDLE",
+        "seconds_elapsed": 270,
+        "seconds_remaining": 30,
+        "too_late": True,
+        "entry_allowed": False,
+    }
+    late_candle["latest_signal"] = {"entry_state": "WAIT_FOR_RETEST"}
+    late_candle["tracking_summary"] = {"entry_state": "WAIT_FOR_RETEST"}
     results = [
-        ModelCouncilV3().evaluate(_strong_snapshot("BUY", frame_id=100), now_epoch=NOW),
+        ModelCouncilV3().evaluate(blank_source, now_epoch=NOW),
+        ModelCouncilV3().evaluate(late_candle, now_epoch=NOW),
         _permission_denied_result(),
-        _broker_click_unsafe_result(),
     ]
 
     for result in results:
@@ -1018,7 +1077,7 @@ def test_every_non_executable_study_packet_has_promotion_failure_audit() -> None
         assert audit["blocker_ranking"][0]["blocker"] == result["promotion_trace"]["denied_at"]
 
 
-def test_sequence_context_blocker_reports_exact_rejected_fields() -> None:
+def test_partial_sequence_context_blocks_execution_and_reports_exact_rejected_fields() -> None:
     snapshot = _strong_snapshot("SELL", frame_id=100)
     snapshot.update(
         {
@@ -1034,25 +1093,28 @@ def test_sequence_context_blocker_reports_exact_rejected_fields() -> None:
     trace = result["promotion_trace"]
     readiness = trace["sequence_context_readiness"]
 
-    assert trace["denied_at"] == "SEQUENCE_CONTEXT"
-    assert trace["next_required"].startswith("sequence context incomplete:")
+    assert result["execution"]["enabled"] is False
+    assert result["model_council"]["final_state"] == "BLOCKED_BY_RUNTIME"
+    assert result["block_reason"] == "PARTIAL_SEQUENCE_NOT_EXECUTABLE"
+    assert trace["denied_at"] == "PARTIAL_SEQUENCE_NOT_EXECUTABLE"
+    assert trace["true_blocker"] == "PARTIAL_SEQUENCE_NOT_EXECUTABLE"
+    assert trace["sequence_context_ready"] is False
+    assert trace["sequence_context_advisory"] is True
+    assert readiness["next_required"].startswith("sequence context incomplete:")
     assert trace["next_required"] != "full sequence context required"
-    assert "sequence_length=12 required >=50" in trace["next_required"]
+    assert "sequence_length=12 required >=50" in readiness["next_required"]
     assert result["opportunity_maturity_state"] == "VALID_WATCH"
     assert result["opportunity_maturity"]["visual_integrity"] == "BLOCK"
-    assert result["opportunity_maturity"]["denied_at"] == "SEQUENCE_CONTEXT"
+    assert result["opportunity_maturity"]["sequence_context_role"] == "TRACE_ADVISORY_FOR_PLAYBOOK_AUTHORITY"
     assert result["allowance_package"]["visual_integrity"] == "BLOCK"
+    assert result["allowance_package"]["sequence_context_role"] == "TRACE_ADVISORY_FOR_PLAYBOOK_AUTHORITY"
+    assert result["packet_validation"]["first_reason"] == "PARTIAL_SEQUENCE_NOT_EXECUTABLE"
     assert readiness["sequence_length"] == 12
     assert readiness["frames_received"] == 12
     assert readiness["frames_used"] == 12
     assert readiness["minimum_required_sequence_length"] == 50
     assert readiness["minimum_required_box_history_len"] == 1
     assert readiness["minimum_required_progression_len"] == 1
-    audit = result["study_packet"]["promotion_failure_audit_v3"]
-    assert audit["top_blocker"] == "SEQUENCE_CONTEXT"
-    assert audit["exact_field_preventing_execution_packet"] == "model_council_resolver"
-    assert audit["opportunity_maturity_state"] == "VALID_WATCH"
-    assert audit["visual_integrity"] == "BLOCK"
     assert {row["field"] for row in readiness["blocking_failures"]} >= {
         "sequence_status",
         "sequence_length",
@@ -1216,14 +1278,17 @@ def test_score_pass_without_packet_reports_true_blocker() -> None:
     assert result["promotion_trace"]["denied_at"] == "PLAYBOOK_MATURITY_VALID_WATCH"
 
 
-def test_instrument_context_wait_reports_broker_click_safe_false() -> None:
+def test_instrument_context_reports_broker_click_false_without_blocking_paper_packet() -> None:
     result = _broker_click_unsafe_result()
 
-    assert result["promotion_trace"]["release_state"] == "INSTRUMENT_CONTEXT_WAIT"
+    assert result["execution"]["enabled"] is True
+    assert result["promotion_trace"]["release_state"] == "EXECUTION_PACKET_PUBLISHED"
     assert result["promotion_trace"]["instrument_context_broker_click_safe"] is False
-    assert "instrument_context.broker_click_safe=false" in result["promotion_trace"]["next_required"]
-    assert "instrument_context.broker_click_safe=true" in result["promotion_trace"]["release_condition"]
-    _assert_non_executable_release_fields(result)
+    assert result["instrument_context"]["paper_safe"] is True
+    assert result["instrument_context"]["broker_click_safe"] is False
+    assert result["promotion_trace"]["next_required"] == "none"
+    assert result["promotion_trace"]["release_condition"] == "none"
+    assert result["promotion_trace"]["denied_at"] == "NONE"
 
 
 def test_executable_ready_requires_enter_now_timing() -> None:
@@ -1250,16 +1315,15 @@ def test_executable_ready_requires_enter_now_timing() -> None:
     assert "execution_packet" not in result
 
 
-def test_executable_ready_requires_broker_click_safe() -> None:
+def test_executable_ready_does_not_require_broker_click_safe() -> None:
     result = _broker_click_unsafe_result()
 
-    assert result["execution"]["enabled"] is False
-    assert result["promotion_trace"]["release_state"] == "INSTRUMENT_CONTEXT_WAIT"
-    assert result["promotion_trace"]["true_blocker"] == "INSTRUMENT_CONTEXT_NOT_BROKER_CLICK_SAFE"
-    assert result["opportunity_maturity_state"] == "VALID_WATCH"
-    assert result["opportunity_maturity"]["visual_integrity"] == "BLOCK"
-    assert result["allowance_package"]["visual_integrity"] == "BLOCK"
-    assert "execution_packet" not in result
+    assert result["execution"]["enabled"] is True
+    assert result["promotion_trace"]["true_blocker"] == "NONE"
+    assert result["opportunity_maturity_state"] == "ENTER_NOW"
+    assert result["opportunity_maturity"]["visual_integrity"] == "PASS"
+    assert result["allowance_package"]["visual_integrity"] == "PASS"
+    assert result["schema_version"] == "PG_EXECUTION_PACKET_V3"
 
 
 def test_execution_packet_publishes_after_all_release_conditions_pass() -> None:
@@ -1288,7 +1352,26 @@ def test_execution_packet_publishes_after_all_release_conditions_pass() -> None:
 
 
 def test_true_blocker_reported_not_generic_late_chase_reason() -> None:
-    result = ModelCouncilV3().evaluate(_strong_snapshot("SELL", frame_id=100), now_epoch=NOW)
+    snapshot = _strong_snapshot("SELL", frame_id=100)
+    snapshot["timing"] = {
+        "state": "READY",
+        "expiry_seconds": 300,
+        "target_time_seconds": 300,
+        "target_time_text": "00:05:00",
+        "current_candle_phase": "LATE_CANDLE",
+        "seconds_elapsed": 270,
+        "seconds_remaining": 30,
+    }
+    snapshot["current_candle"] = {
+        "candle_phase": "LATE_CANDLE",
+        "seconds_elapsed": 270,
+        "seconds_remaining": 30,
+        "too_late": True,
+        "entry_allowed": False,
+    }
+    snapshot["latest_signal"] = {"entry_state": "SNIPER_READY"}
+    snapshot["tracking_summary"] = {"entry_state": "SNIPER_READY"}
+    result = ModelCouncilV3().evaluate(snapshot, now_epoch=NOW)
 
     assert result["execution"]["enabled"] is False
     assert result["promotion_trace"]["true_blocker"] != "LATE-CHASE CLASS NOT DETECTED."

@@ -10,7 +10,7 @@ from PIL import Image
 from tools import run_entry_allowance_burn as burn
 
 
-def test_entry_state_requires_execution_package_authority() -> None:
+def test_entry_state_does_not_promote_timing_without_playbook_or_packet_authority() -> None:
     live: dict[str, Any] = {}
     council: dict[str, Any] = {
         "promotion_trace": {
@@ -26,7 +26,8 @@ def test_entry_state_requires_execution_package_authority() -> None:
     assert entry["allowed"] is False
     assert entry["side"] == "BUY"
     assert entry["execution_authorized"] is False
-    assert entry["allowance_mode"] == "timing_entry_now"
+    assert entry["strategy_allowed"] is False
+    assert entry["allowance_mode"] == "watching"
 
 
 def test_entry_state_allows_only_lane_accepted_packet_present() -> None:
@@ -46,6 +47,82 @@ def test_entry_state_allows_only_lane_accepted_packet_present() -> None:
     assert entry["allowed"] is True
     assert entry["side"] == "SELL"
     assert entry["execution_authorized"] is True
+    assert entry["strategy_allowed"] is False
+    assert entry["allowance_mode"] == "legacy_timing_entry"
+
+
+def test_entry_state_allows_playbook_enter_now_without_legacy_lane_or_packet() -> None:
+    live: dict[str, Any] = {}
+    council: dict[str, Any] = {
+        "promotion_trace": {
+            "candidate_side": "BUY",
+            "book_strategy_state": "ENTER_NOW",
+            "opportunity_maturity_state": "ENTER_NOW",
+            "lane_accepted": False,
+            "timing_decision": {
+                "entry_now_allowed": True,
+                "playbook_strategy_authorized": True,
+                "timing_mode": "ENTER_NOW",
+            },
+            "execution_lane": {"accepted": False, "name": "SNIPER_ZONE_ENTRY"},
+            "allowance_package": {
+                "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3",
+                "accepted": True,
+                "execution_ready": True,
+                "opportunity_maturity": "ENTER_NOW",
+            },
+        }
+    }
+
+    entry = burn.entry_state(live, council)
+
+    assert entry["allowed"] is True
+    assert entry["strategy_allowed"] is True
+    assert entry["playbook_entry_allowed"] is True
+    assert entry["execution_authorized"] is False
+    assert entry["packet_present"] is False
+    assert entry["allowance_mode"] == "playbook_strategy_entry"
+
+
+def test_compact_sample_preserves_candle_movement_context() -> None:
+    context: dict[str, Any] = {
+        "schema_version": "PG_CANDLE_MOVEMENT_CONTEXT_V3",
+        "visible_candle_count": 28,
+        "tracked_candle_count": 28,
+        "move_stage": "MATURE",
+        "move_duration": {"seconds": 4200, "minutes": 70.0, "text": "70.0m"},
+        "current_leg": {
+            "side": "BUY",
+            "candle_count": 14,
+            "duration": {"seconds": 4200, "minutes": 70.0, "text": "70.0m"},
+            "move_stage": "MATURE",
+        },
+        "opposing_force_room": {"room_ok": True, "distance_norm": 0.31},
+        "candles_per_leg": [{"label": "H2 BUY", "side": "BUY", "candle_count": 14}],
+        "boxes_with_anchors": 3,
+        "boxes_with_candles": 4,
+    }
+    live_resp: dict[str, Any] = {
+        "ok": True,
+        "latency_ms": 12.0,
+        "json": {
+            "status": "running",
+            "tracking_enabled": True,
+            "tracking_summary": {"candle_movement_context_v3": context},
+        },
+    }
+    council_resp: dict[str, Any] = {
+        "ok": True,
+        "latency_ms": 10.0,
+        "json": {"promotion_trace": {"candidate_side": "BUY", "timing_decision": {"entry_now_allowed": False}}},
+    }
+    perf_resp: dict[str, Any] = {"ok": True, "latency_ms": 8.0, "json": {}}
+
+    sample = burn.compact_sample(2, live_resp, council_resp, perf_resp, "pocket-live-8788")
+
+    assert sample["candle_movement_context_v3"] == context
+    assert sample["candle_movement"]["current_leg_candle_count"] == 14
+    assert sample["entry"]["candle_movement"]["move_duration"]["minutes"] == 70.0
 
 
 def test_runtime_freshness_prefers_fresh_published_frame_over_old_display_capture(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -261,13 +338,14 @@ def test_capture_entry_evidence_refuses_unresolved_marker_images(tmp_path: Path)
     event = burn.capture_entry_evidence(tmp_path, sample, live, {}, "missing-session", "http://127.0.0.1:9", 0.01)
 
     assert event["error"] == "ENTRY_MARKER_UNRESOLVED"
-    assert event["evidence_images_written"] is False
-    assert event["overlay_evidence_path"] == ""
-    assert event["broker_evidence_path"] == ""
+    assert event["evidence_images_written"] is True
+    assert event["marker_unresolved"] is True
+    assert Path(str(event["overlay_evidence_path"])).exists()
+    assert Path(str(event["broker_evidence_path"])).exists()
     assert event["entry"]["allowed"] is False
     evidence_dir = tmp_path / "entry_evidence"
     assert len(list(evidence_dir.glob("*.json"))) == 1
-    assert not list(evidence_dir.glob("*.jpg"))
+    assert len(list(evidence_dir.glob("*.jpg"))) == 2
 
 
 def test_prune_path_budget_preserves_protected_latest_artifact(tmp_path: Path) -> None:

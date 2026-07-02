@@ -22,6 +22,11 @@ MARKET_PLAY_CLASSES = {
     "MID_RANGE_NO_EDGE",
     "SUPPLY_REJECTION",
     "DEMAND_REJECTION",
+    "FAILED_SUPPLY_RECLAIM_BUY_CONTINUATION",
+    "FAILED_DEMAND_RECLAIM_SELL_CONTINUATION",
+    "FAILED_SELL_INTO_DEMAND_BUY_REVERSAL",
+    "FAILED_BUY_INTO_SUPPLY_SELL_REVERSAL",
+    "COUNTERTREND_SCALP_ONLY",
     "TREND_CONTINUATION",
     "TREND_EXHAUSTION",
 }
@@ -108,7 +113,34 @@ def analyze_market_play_v3(
     liquidity_sweep = _bool(source.get("liquidity_sweep_detected") or market_context.get("liquidity_sweep_detected"))
     false_breakout = _bool(source.get("false_breakout_risk") or source.get("fake_breakout_risk") or market_context.get("false_breakout_risk"))
     breakout_confirmed = _bool(source.get("breakout_confirmed") or source.get("breakout_phase"))
+    role_flip_confirmed = _bool(source.get("role_flip_confirmed") or market_context.get("role_flip_confirmed"))
+    zone_liquidity = _mapping(source.get("zone_liquidity") or market_context.get("zone_liquidity"))
+    active_zone_type = _upper(
+        source.get("active_zone_type")
+        or market_context.get("active_zone_type")
+        or zone_liquidity.get("zone_type")
+        or zone_liquidity.get("type")
+    )
+    current_location = _upper(market_context.get("current_location") or (price_location or {}).get("relative_location"))
+    at_demand_extreme = bool(
+        active_zone_type in {"DEMAND", "SUPPORT", "DEMAND_ZONE", "SUPPORT_ZONE"}
+        or relative_location == "LOCAL_LOW"
+        or current_location in {"DEMAND", "DEMAND_ZONE", "SUPPORT", "SUPPORT_ZONE", "LOCAL_LOW", "RANGE_LOW"}
+    )
+    at_supply_extreme = bool(
+        active_zone_type in {"SUPPLY", "RESISTANCE", "SUPPLY_ZONE", "RESISTANCE_ZONE"}
+        or relative_location == "LOCAL_HIGH"
+        or current_location in {"SUPPLY", "SUPPLY_ZONE", "RESISTANCE", "RESISTANCE_ZONE", "LOCAL_HIGH", "RANGE_HIGH"}
+    )
     reversal_forming = _bool(source.get("reversal_confirmed") or source.get("reversal_forming") or market_context.get("is_reversal_confirmed"))
+    countertrend_without_reclaim = bool(
+        resolved_side in {"BUY", "SELL"}
+        and (
+            (global_side in {"BUY", "SELL"} and resolved_side == _opposite(global_side))
+            or (local_side in {"BUY", "SELL"} and resolved_side == _opposite(local_side))
+        )
+        and not (role_flip_confirmed or liquidity_sweep or reversal_forming or breakout_confirmed)
+    )
 
     primary_play = "MID_RANGE_NO_EDGE"
     secondary_play = "NONE"
@@ -116,8 +148,65 @@ def analyze_market_play_v3(
     local_context = "FORMING"
     entry_logic = "WAIT_FOR_CLEAR_PLAY"
     confidence = 0.42
+    bearish_pullback_continuation = bool(
+        resolved_side == "SELL"
+        and continuation
+        and (global_side in {"SELL", "HOLD"} or local_side == "SELL")
+        and local_range_position >= 0.55
+    )
+    bullish_pullback_continuation = bool(
+        resolved_side == "BUY"
+        and continuation
+        and (global_side in {"BUY", "HOLD"} or local_side == "BUY")
+        and local_range_position <= 0.45
+    )
 
-    if false_breakout and resolved_side == "BUY":
+    if (
+        resolved_side == "BUY"
+        and at_demand_extreme
+        and not bullish_pullback_continuation
+        and (rejection_score >= 0.38 or liquidity_sweep or reversal_forming)
+    ):
+        primary_play = "FAILED_SELL_INTO_DEMAND_BUY_REVERSAL" if countertrend_without_reclaim else "DEMAND_REJECTION"
+        secondary_play = "LIQUIDITY_SWEEP_REVERSAL" if liquidity_sweep else "BULLISH_REVERSAL_FORMING"
+        play_stage = "AGGRESSIVE_REVERSAL_ARMED" if rejection_score >= 0.45 else "REACTION_FORMING"
+        local_context = "SELL_CONTINUATION_FAILING_AT_DEMAND" if countertrend_without_reclaim else "DEMAND_REJECTING"
+        entry_logic = "AGGRESSIVE_BUY_ON_DEMAND_REJECTION_OR_CONSERVATIVE_RETEST"
+        confidence = 0.66 + 0.16 * rejection_score + 0.06 * float(liquidity_sweep or reversal_forming)
+    elif (
+        resolved_side == "SELL"
+        and at_supply_extreme
+        and not bearish_pullback_continuation
+        and (rejection_score >= 0.38 or liquidity_sweep or reversal_forming)
+    ):
+        primary_play = "FAILED_BUY_INTO_SUPPLY_SELL_REVERSAL" if countertrend_without_reclaim else "SUPPLY_REJECTION"
+        secondary_play = "LIQUIDITY_SWEEP_REVERSAL" if liquidity_sweep else "BEARISH_REVERSAL_FORMING"
+        play_stage = "AGGRESSIVE_REVERSAL_ARMED" if rejection_score >= 0.45 else "REACTION_FORMING"
+        local_context = "BUY_CONTINUATION_FAILING_AT_SUPPLY" if countertrend_without_reclaim else "SUPPLY_REJECTING"
+        entry_logic = "AGGRESSIVE_SELL_ON_SUPPLY_REJECTION_OR_CONSERVATIVE_RETEST"
+        confidence = 0.66 + 0.16 * rejection_score + 0.06 * float(liquidity_sweep or reversal_forming)
+    elif countertrend_without_reclaim:
+        primary_play = "COUNTERTREND_SCALP_ONLY"
+        secondary_play = "TREND_EXHAUSTION" if impulse_length >= 0.62 else "NONE"
+        play_stage = "MINOR_COUNTERTREND_REACTION"
+        local_context = "INNER_REACTION_AGAINST_VISIBLE_BIAS"
+        entry_logic = "WAIT_FOR_RECLAIM_ROLE_FLIP_OR_BIAS_ALIGNMENT"
+        confidence = 0.68
+    elif resolved_side == "BUY" and role_flip_confirmed and active_zone_type in {"SUPPLY", "RESISTANCE", "SUPPLY_ZONE"}:
+        primary_play = "FAILED_SUPPLY_RECLAIM_BUY_CONTINUATION"
+        secondary_play = "TREND_CONTINUATION"
+        play_stage = "ROLE_FLIP_RECLAIM_CONFIRMED"
+        local_context = "FAILED_SUPPLY_ACCEPTING_BUY"
+        entry_logic = "BUY_AFTER_SUPPLY_RECLAIM_RETEST_HOLD"
+        confidence = 0.74 + 0.08 * float(global_side in {"BUY", "HOLD"})
+    elif resolved_side == "SELL" and role_flip_confirmed and active_zone_type in {"DEMAND", "SUPPORT", "DEMAND_ZONE"}:
+        primary_play = "FAILED_DEMAND_RECLAIM_SELL_CONTINUATION"
+        secondary_play = "TREND_CONTINUATION"
+        play_stage = "ROLE_FLIP_RECLAIM_CONFIRMED"
+        local_context = "FAILED_DEMAND_ACCEPTING_SELL"
+        entry_logic = "SELL_AFTER_DEMAND_RECLAIM_RETEST_HOLD"
+        confidence = 0.74 + 0.08 * float(global_side in {"SELL", "HOLD"})
+    elif false_breakout and resolved_side == "BUY":
         primary_play = "FAKE_BREAKOUT"
         play_stage = "RECLAIM_NOT_CONFIRMED"
         local_context = "BREAKOUT_UNSTABLE"
@@ -159,14 +248,14 @@ def analyze_market_play_v3(
         entry_logic = "SELL_HIGH_AFTER_SUPPLY_REACTION"
         resolved_side = "SELL" if resolved_side == "HOLD" else resolved_side
         confidence = 0.62 + 0.16 * rejection_score
-    elif resolved_side == "SELL" and continuation and (global_side in {"SELL", "HOLD"} or local_side == "SELL") and local_range_position >= 0.55:
+    elif bearish_pullback_continuation:
         primary_play = "BEARISH_PULLBACK_CONTINUATION"
         secondary_play = "SUPPLY_REJECTION" if relative_location == "LOCAL_HIGH" or rejection_score >= 0.40 else "TREND_CONTINUATION"
         play_stage = "REJECTION_CONFIRMED" if rejection_score >= 0.45 else "PULLBACK_FAILING"
         local_context = "PULLBACK_FAILING"
         entry_logic = "SELL_HIGH_AFTER_PULLBACK_FAILURE"
         confidence = 0.66 + 0.08 * float(global_side == "SELL") + 0.10 * rejection_score
-    elif resolved_side == "BUY" and continuation and (global_side in {"BUY", "HOLD"} or local_side == "BUY") and local_range_position <= 0.45:
+    elif bullish_pullback_continuation:
         primary_play = "BULLISH_PULLBACK_CONTINUATION"
         secondary_play = "DEMAND_REJECTION" if relative_location == "LOCAL_LOW" or rejection_score >= 0.40 else "TREND_CONTINUATION"
         play_stage = "REJECTION_CONFIRMED" if rejection_score >= 0.45 else "PULLBACK_HOLDING"
@@ -239,6 +328,11 @@ def analyze_market_play_v3(
         "LATE_CHASE_AFTER_IMPULSE": "The move is already expanded and needs a pullback or retest before execution.",
         "FAKE_BREAKOUT": "Breakout evidence exists, but reclaim/retest confirmation is missing.",
         "FAKE_BREAKDOWN": "Breakdown evidence exists, but reclaim/retest confirmation is missing.",
+        "FAILED_SUPPLY_RECLAIM_BUY_CONTINUATION": "Former supply has failed as resistance and is accepting BUY continuation after reclaim/role flip.",
+        "FAILED_DEMAND_RECLAIM_SELL_CONTINUATION": "Former demand has failed as support and is accepting SELL continuation after reclaim/role flip.",
+        "FAILED_SELL_INTO_DEMAND_BUY_REVERSAL": "SELL continuation is failing at demand; aggressive BUY reaction is armed before conservative reclaim.",
+        "FAILED_BUY_INTO_SUPPLY_SELL_REVERSAL": "BUY continuation is failing at supply; aggressive SELL reaction is armed before conservative reclaim.",
+        "COUNTERTREND_SCALP_ONLY": "The reaction is against visible bias without reclaim or role-flip proof, so it is minor/watch-only.",
         "LIQUIDITY_SWEEP_REVERSAL": "A liquidity sweep is rejecting and reversal evidence is forming.",
         "MID_RANGE_NO_EDGE": "Price is in the middle of the structure with no clear buy-low/sell-high edge.",
     }.get(primary_play, "The visible evidence is being classified as a structured market play.")

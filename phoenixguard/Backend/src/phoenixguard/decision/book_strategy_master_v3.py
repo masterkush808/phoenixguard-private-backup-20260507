@@ -79,6 +79,10 @@ BOOK_STRATEGY_PLAYBOOKS: tuple[str, ...] = (
     "DEMAND_REJECTION",
     "SUPPLY_BREAK_RETEST_CONTINUATION",
     "DEMAND_BREAK_RETEST_CONTINUATION",
+    "FAILED_SUPPLY_RECLAIM_BUY_CONTINUATION",
+    "FAILED_DEMAND_RECLAIM_SELL_CONTINUATION",
+    "FAILED_SELL_INTO_DEMAND_BUY_REVERSAL",
+    "FAILED_BUY_INTO_SUPPLY_SELL_REVERSAL",
     "TRENDLINE_CONFLUENCE_BOUNCE",
     "TRENDLINE_BREAK_RETEST",
     "CHANNEL_EDGE_REACTION",
@@ -86,6 +90,7 @@ BOOK_STRATEGY_PLAYBOOKS: tuple[str, ...] = (
     "PIVOT_ROUND_NUMBER_REACTION",
     "SLINGSHOT_FALSE_BREAK",
     "CANDLE_CONFIRMATION_AT_ZONE",
+    "COUNTERTREND_SCALP_ONLY",
     "CHOP_NO_TRADE",
 )
 
@@ -148,6 +153,13 @@ def _float(value: Any, default: float = 0.0) -> float:
     return float(parsed)
 
 
+def _int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _clip01(value: Any, default: float = 0.0) -> float:
     parsed = _float(value, default)
     return max(0.0, min(1.0, parsed))
@@ -166,10 +178,22 @@ def _upper(value: Any, default: str = "") -> str:
 
 def _side(value: Any) -> str:
     text = _upper(value)
-    if text in {"BUY", "BULL", "BULLISH", "UP", "CALL", "DEMAND"}:
+    if text in {"BUY", "BULL", "BULLISH", "UP", "UPTREND", "CALL", "DEMAND"}:
         return "BUY"
-    if text in {"SELL", "BEAR", "BEARISH", "DOWN", "PUT", "SUPPLY"}:
+    if text in {"SELL", "BEAR", "BEARISH", "DOWN", "DOWNTREND", "PUT", "SUPPLY"}:
         return "SELL"
+    return "HOLD"
+
+
+def _opposite_side(side: str) -> str:
+    return "SELL" if side == "BUY" else "BUY" if side == "SELL" else "HOLD"
+
+
+def _first_side(*values: Any) -> str:
+    for value in values:
+        side = _side(value)
+        if side in {"BUY", "SELL"}:
+            return side
     return "HOLD"
 
 
@@ -249,6 +273,49 @@ def _nearest_zone_for_side(zones: Sequence[Mapping[str, Any]], side: str) -> dic
 def _opposing_zone_for_side(zones: Sequence[Mapping[str, Any]], side: str) -> dict[str, Any]:
     opposite = "SELL" if side == "BUY" else "BUY" if side == "SELL" else "HOLD"
     return _nearest_zone_for_side(zones, opposite)
+
+
+def _location_supports_side(side: str, location: Any, zone: Mapping[str, Any]) -> bool:
+    text = _upper(location)
+    zone_type = _zone_type(zone) if zone else ""
+    if side == "BUY":
+        return bool(zone_type == "DEMAND" or _contains_any(text, ("DEMAND", "SUPPORT", "LOCAL_LOW", "RANGE_LOW", "LOW")))
+    if side == "SELL":
+        return bool(zone_type == "SUPPLY" or _contains_any(text, ("SUPPLY", "RESISTANCE", "LOCAL_HIGH", "RANGE_HIGH", "HIGH")))
+    return False
+
+
+def _short_horizon_side(snapshot: Mapping[str, Any]) -> tuple[str, float]:
+    study = _first_mapping(
+        snapshot.get("two_candle_study"),
+        _mapping(snapshot.get("decision_kernel")).get("two_candle_study"),
+        _mapping(snapshot.get("tracking_summary")).get("two_candle_study"),
+    )
+    lstm = _first_mapping(
+        snapshot.get("lstm_contribution"),
+        study.get("lstm_contribution"),
+        _mapping(snapshot.get("decision_kernel")).get("lstm_contribution"),
+    )
+    next_candle = _first_mapping(
+        _mapping(snapshot.get("decision_kernel")).get("next_candle"),
+        _mapping(snapshot.get("latest_signal")).get("next_candle"),
+    )
+    for source in (study, lstm, next_candle):
+        side = _first_side(
+            source.get("next_1_direction"),
+            source.get("next_candle_bias"),
+            source.get("primary_pressure"),
+            source.get("side"),
+        )
+        if side in {"BUY", "SELL"}:
+            probability = max(
+                _clip01(source.get("next_1_probability"), 0.0),
+                _clip01(source.get("probability"), 0.0),
+                _clip01(source.get("confidence"), 0.0),
+                _clip01(source.get(f"p_next_{side.lower()}"), 0.0),
+            )
+            return side, probability
+    return "HOLD", 0.0
 
 
 def _explicit_false(mapping: Mapping[str, Any], *keys: str) -> bool:
@@ -362,6 +429,17 @@ def _select_significant_structure(
 ) -> dict[str, Any]:
     zone_score = _zone_significance(active_zone) if active_zone else 0.0
     trend_score = _trendline_significance(trendline) if trendline else 0.0
+    zone_role_flip = _zone_role_flip_confirmed(active_zone) if active_zone else False
+    if role_flip_confirmed and (retest_confirmed or zone_role_flip or break_of_structure_confirmed):
+        return {
+            "source": "role_flip",
+            "structure_type": "ROLE_FLIP_RETEST",
+            "source_id": str(active_zone.get("zone_id") or active_zone.get("id") or active_zone.get("key") or ""),
+            "significance_score": 0.76,
+            "current_touch": bool(retest_confirmed or _zone_current_price_inside(active_zone)),
+            "reason": "Broken structure is acting as a role-flip retest.",
+            "significant": True,
+        }
     if active_zone and (inside_trigger or zone_score >= 0.55):
         structure_type = _zone_type(active_zone) or ("DEMAND" if side == "BUY" else "SUPPLY")
         current_touch = bool(inside_trigger or _zone_current_price_inside(active_zone))
@@ -584,10 +662,11 @@ def _select_entry_profile(
     late_chase: bool,
     opposing_force_ok: bool,
     conflict_market: bool,
+    structural_extreme_reversal: bool,
 ) -> BookEntryProfile:
     if side not in {"BUY", "SELL"} or conflict_market:
         return "NO_TRADE"
-    if late_chase or not opposing_force_ok:
+    if (late_chase and not structural_extreme_reversal) or not opposing_force_ok:
         return "NO_TRADE"
     reaction_type = _upper(candle_reaction.get("reaction_type"))
     current_touch = _bool(significant_structure.get("current_touch"))
@@ -595,7 +674,7 @@ def _select_entry_profile(
     if (
         significant
         and current_touch
-        and (inside_trigger or trendline_confluence)
+        and (inside_trigger or trendline_confluence or structural_extreme_reversal)
         and reaction_type in {"WICK_REJECTION", "RECLAIM_AFTER_SWEEP", "BODY_ACCEPTANCE"}
         and current_candle_ok
     ):
@@ -668,6 +747,10 @@ def _select_playbook(
     play_stage = _upper(market_play.get("play_stage") or market_context.get("play_stage"))
     if _bool(evidence.get("conflict_market")):
         return "CHOP_NO_TRADE"
+    if _bool(evidence.get("failed_continuation_reversal")):
+        return "FAILED_SELL_INTO_DEMAND_BUY_REVERSAL" if side == "BUY" else "FAILED_BUY_INTO_SUPPLY_SELL_REVERSAL"
+    if _bool(evidence.get("countertrend_scalp_only")):
+        return "COUNTERTREND_SCALP_ONLY"
     if _bool(evidence.get("liquidity_sweep_detected")) and _bool(evidence.get("break_of_structure_confirmed")):
         return "SMC_SH_BMS_RTO" if _bool(evidence.get("retest_confirmed")) else "SMC_TURTLE_SOUP"
     if _bool(evidence.get("structure_shift_confirmed")) and _bool(evidence.get("break_of_structure_confirmed")):
@@ -675,6 +758,11 @@ def _select_playbook(
     if _bool(evidence.get("liquidity_sweep_detected")) or _bool(evidence.get("false_breakout_risk")):
         return "SLINGSHOT_FALSE_BREAK"
     if _bool(evidence.get("role_flip_confirmed")):
+        active_zone_type = _upper(evidence.get("active_zone_type"))
+        if side == "BUY" and active_zone_type == "SUPPLY":
+            return "FAILED_SUPPLY_RECLAIM_BUY_CONTINUATION"
+        if side == "SELL" and active_zone_type == "DEMAND":
+            return "FAILED_DEMAND_RECLAIM_SELL_CONTINUATION"
         return "SUPPLY_BREAK_RETEST_CONTINUATION" if side == "BUY" else "DEMAND_BREAK_RETEST_CONTINUATION"
     if lane_name == "FAILED_RETEST_ENTRY":
         return "SUPPLY_BREAK_RETEST_CONTINUATION" if side == "BUY" else "DEMAND_BREAK_RETEST_CONTINUATION"
@@ -748,6 +836,20 @@ def evaluate_book_strategy_master_v3(
     zone_context = _first_mapping(snapshot.get("zone_liquidity"), market_context.get("zone_liquidity"))
     risk_context = _first_mapping(market.get("risk_context"), snapshot.get("risk_context"), snapshot.get("risk_opposing_force"))
     angle_context = _first_mapping(market.get("angle_context"), snapshot.get("angle_context"), snapshot.get("angle_features"))
+    tracking_summary = _mapping(snapshot.get("tracking_summary"))
+    candle_movement_context = _first_mapping(
+        snapshot.get("candle_movement_context_v3"),
+        snapshot.get("candle_movement_context"),
+        market.get("candle_movement_context_v3"),
+        market.get("candle_movement_context"),
+        tracking_summary.get("candle_movement_context_v3"),
+        tracking_summary.get("candle_movement_context"),
+    )
+    current_leg_context = _mapping(candle_movement_context.get("current_leg"))
+    opposing_force_room_context = _mapping(
+        candle_movement_context.get("opposing_force_room")
+        or current_leg_context.get("opposing_force_room")
+    )
     side = _side(candidate_side or market_context.get("dominant_side") or snapshot.get("candidate_side"))
     lane_name = _upper(execution_lane.get("name") or execution_lane.get("lane") or snapshot.get("selected_execution_lane"))
     lane_authority_ready = bool(_bool(execution_lane.get("accepted")) and lane_name in ENTER_NOW_LANES)
@@ -793,6 +895,7 @@ def evaluate_book_strategy_master_v3(
     )
     raw_playbook_hard_bad_entry = bool(bad_entry_active and bad_entry_class in PLAYBOOK_HARD_BAD_ENTRY_CLASSES)
     raw_playbook_late_chase_bad_entry = bool(bad_entry_active and bad_entry_class in PLAYBOOK_LATE_CHASE_BAD_ENTRY_CLASSES)
+    late_chase_bad_entry_class = bool(bad_entry_class in PLAYBOOK_LATE_CHASE_BAD_ENTRY_CLASSES)
     measured_reaction_accepted = bool(
         _bool(live_trigger_reaction.get("accepted"))
         or (
@@ -866,13 +969,34 @@ def evaluate_book_strategy_master_v3(
         or risk_context.get("distance_ok")
         or execution_lane.get("opposing_force_ok")
     )
+    if "room_ok" in opposing_force_room_context:
+        opposing_force_ok = bool(_bool(opposing_force_room_context.get("room_ok")))
+    movement_stage = _upper(candle_movement_context.get("move_stage") or current_leg_context.get("move_stage"), "UNKNOWN")
+    current_leg_side = _side(current_leg_context.get("side"))
+    current_leg_candle_count = _int(current_leg_context.get("candle_count"), 0)
+    visible_candle_count = _int(candle_movement_context.get("visible_candle_count"), 0)
+    estimated_candles_to_force = _int(opposing_force_room_context.get("estimated_candles_to_force"), 0)
+    same_side_current_leg = bool(side in {"BUY", "SELL"} and current_leg_side == side)
+    movement_context_present = bool(candle_movement_context)
+    movement_stage_late = movement_stage in {"LATE", "EXHAUSTED"}
+    movement_stage_reclaiming = movement_stage in {"EARLY", "STILL_RECLAIMING"}
+    movement_stage_mature_with_room = bool(movement_stage == "MATURE" and opposing_force_ok)
+    current_leg_extended = bool(same_side_current_leg and current_leg_candle_count >= 14)
+    current_leg_exhausted = bool(
+        same_side_current_leg
+        and (
+            movement_stage_late
+            or current_leg_candle_count >= 18
+            or (estimated_candles_to_force > 0 and estimated_candles_to_force <= 2 and current_leg_candle_count >= 6)
+        )
+    )
     raw_late_chase = _bool(
         market_context.get("is_late_chase")
         or snapshot.get("late_chase")
         or angle_context.get("late_chase_risk")
         or current_candle.get("too_late")
     )
-    late_chase = bool((raw_late_chase and not measured_reaction_accepted) or playbook_late_chase_bad_entry)
+    preliminary_late_chase = bool((raw_late_chase and not measured_reaction_accepted) or playbook_late_chase_bad_entry)
     history_exit_here = _bool(
         market_context.get("history_would_exit_here")
         or history_context.get("would_have_exited_here")
@@ -891,6 +1015,99 @@ def evaluate_book_strategy_master_v3(
         or snapshot.get("confirmed_reversal")
         or market_context.get("candidate_invalidated")
     )
+    global_structure = _mapping(snapshot.get("global_structure"))
+    local_micro_structure = _mapping(snapshot.get("local_micro_structure"))
+    wave_context = _first_mapping(
+        snapshot.get("wave_context"),
+        snapshot.get("wave_riding_context"),
+        market_context.get("wave_context"),
+        market.get("wave_context"),
+    )
+    global_side = _first_side(
+        snapshot.get("global_side"),
+        market_context.get("global_side"),
+        global_structure.get("global_side"),
+        global_structure.get("side"),
+        market_play.get("global_context"),
+    )
+    local_side = _first_side(
+        snapshot.get("local_side"),
+        market_context.get("local_side"),
+        local_micro_structure.get("local_side"),
+        local_micro_structure.get("side"),
+        wave_context.get("local_side"),
+        wave_context.get("wave_side"),
+        wave_context.get("current_wave_side"),
+    )
+    dominant_side = _first_side(
+        market_context.get("dominant_side"),
+        snapshot.get("dominant_side"),
+        market_play.get("side_bias"),
+        global_side,
+        local_side,
+    )
+    primary_bias_side = global_side if global_side in {"BUY", "SELL"} else dominant_side if dominant_side in {"BUY", "SELL"} else local_side
+    countertrend_against_global = bool(global_side in {"BUY", "SELL"} and side == _opposite_side(global_side))
+    countertrend_against_local = bool(local_side in {"BUY", "SELL"} and side == _opposite_side(local_side))
+    countertrend_against_primary = bool(primary_bias_side in {"BUY", "SELL"} and side == _opposite_side(primary_bias_side))
+    aligned_with_primary_bias = bool(side in {"BUY", "SELL"} and primary_bias_side in {"BUY", "SELL"} and side == primary_bias_side)
+    short_horizon_side, short_horizon_probability = _short_horizon_side(snapshot)
+    price_location_label = _upper(price_location.get("relative_location") or market_context.get("current_location"))
+    structural_extreme_for_side = _location_supports_side(side, price_location_label, active_zone)
+    opposite_pressure_warning = bool(short_horizon_side == side and short_horizon_probability >= 0.52)
+    explicit_reversal_play_hint = bool(
+        _contains_any(market_play.get("primary_play"), ("FAILED_SELL", "FAILED_BUY", "REVERSAL", "SWEEP", "STOP_HUNT", "TURTLE"))
+        or _contains_any(market_play.get("play_stage"), ("REVERSAL", "AGGRESSIVE_REVERSAL", "SWEEP"))
+    )
+    failed_continuation_reversal = bool(
+        side in {"BUY", "SELL"}
+        and structural_extreme_for_side
+        and current_candle_ok
+        and (inside_trigger or measured_reaction_accepted or liquidity_sweep_detected or opposite_pressure_warning)
+        and (
+            countertrend_against_global
+            or countertrend_against_primary
+            or explicit_reversal_play_hint
+        )
+        and not aligned_with_primary_bias
+    )
+    late_chase = preliminary_late_chase
+    late_chase_softened_by_extreme_reversal = False
+    late_chase_softened_by_book_reaction = False
+    book_reaction_overrides_late_chase_bad_entry = False
+    countertrend_reversal_override = bool(
+        role_flip_confirmed
+        or structure_shift_confirmed
+        or (break_of_structure_confirmed and retest_confirmed)
+        or (liquidity_sweep_detected and (retest_confirmed or current_candle_ok or measured_reaction_accepted))
+        or failed_continuation_reversal
+    )
+    timing_waiting = bool(_upper(timing_mode) != "ENTER_NOW" or not timing_enter_now)
+    local_counter_without_reclaim = bool(countertrend_against_local and not countertrend_reversal_override)
+    primary_counter_without_reclaim = bool(countertrend_against_primary and not countertrend_reversal_override)
+    weak_countertrend_conditions = bool(timing_waiting or not final_score_passed or not lane_authority_ready)
+    countertrend_scalp_only = bool(
+        side in {"BUY", "SELL"}
+        and (primary_counter_without_reclaim or local_counter_without_reclaim)
+        and weak_countertrend_conditions
+    )
+    large_move_bias_aligned = bool(
+        side in {"BUY", "SELL"}
+        and not countertrend_scalp_only
+        and (aligned_with_primary_bias or countertrend_reversal_override)
+    )
+    if side not in {"BUY", "SELL"}:
+        bias_alignment = "NO_DIRECTION"
+    elif countertrend_scalp_only:
+        bias_alignment = "COUNTERTREND_SCALP_ONLY"
+    elif countertrend_reversal_override and (countertrend_against_global or countertrend_against_local or countertrend_against_primary):
+        bias_alignment = "REVERSAL_OVERRIDE"
+    elif aligned_with_primary_bias:
+        bias_alignment = "PRIMARY_BIAS_ALIGNED"
+    elif countertrend_against_global or countertrend_against_local or countertrend_against_primary:
+        bias_alignment = "COUNTERTREND_WATCH"
+    else:
+        bias_alignment = "BIAS_UNRESOLVED"
     live_integrity = _mapping(snapshot.get("live_integrity") or market.get("live_integrity"))
     runtime_model_health = _mapping(snapshot.get("runtime_model_health") or market.get("runtime_model_health") or snapshot.get("model_health"))
     api_health = _mapping(snapshot.get("api_health") or market.get("api_health"))
@@ -924,6 +1141,89 @@ def evaluate_book_strategy_master_v3(
         continuation_confirmed=continuation_confirmed,
         liquidity_sweep_detected=liquidity_sweep_detected,
     )
+    reaction_type = _upper(candle_reaction.get("reaction_type"))
+    significant_structure_touch = bool(
+        _bool(significant_structure.get("significant"))
+        and (
+            _bool(significant_structure.get("current_touch"))
+            or inside_trigger
+            or trendline_confluence
+            or retest_confirmed
+            or role_flip_confirmed
+            or liquidity_sweep_detected
+        )
+    )
+    book_valid_reaction = bool(
+        side in {"BUY", "SELL"}
+        and current_candle_ok
+        and opposing_force_ok
+        and reaction_type not in {"", "NO_REACTION", "EXHAUSTION"}
+        and (
+            significant_structure_touch
+            or continuation_confirmed
+            or break_of_structure_confirmed
+            or structure_shift_confirmed
+            or measured_reaction_accepted
+            or failed_continuation_reversal
+            or lane_name in ENTER_NOW_LANES
+        )
+    )
+    movement_supports_book_reaction = bool(
+        failed_continuation_reversal
+        or (
+            movement_context_present
+            and (
+                movement_stage_reclaiming
+                or movement_stage_mature_with_room
+                or (not same_side_current_leg and current_leg_candle_count <= 6)
+            )
+        )
+    )
+    current_move_true_extension = bool(
+        not movement_context_present
+        or current_leg_exhausted
+        or (same_side_current_leg and current_leg_extended and not movement_stage_reclaiming)
+        or (movement_stage_late and not book_valid_reaction)
+    )
+    book_reaction_overrides_late_chase_bad_entry = bool(
+        late_chase_bad_entry_class
+        and book_valid_reaction
+        and movement_supports_book_reaction
+        and not current_leg_exhausted
+    )
+    late_chase_softened_by_extreme_reversal = bool(
+        preliminary_late_chase
+        and failed_continuation_reversal
+        and opposing_force_ok
+        and not current_leg_exhausted
+        and not (raw_playbook_hard_bad_entry and not late_chase_bad_entry_class)
+    )
+    late_chase_softened_by_book_reaction = bool(
+        preliminary_late_chase
+        and book_valid_reaction
+        and movement_supports_book_reaction
+        and not current_leg_exhausted
+        and not (raw_playbook_hard_bad_entry and not late_chase_bad_entry_class)
+    )
+    late_chase_reaction_override_allowed = bool(
+        measured_reaction_overrides_stale_late_chase
+        or late_chase_softened_by_extreme_reversal
+        or late_chase_softened_by_book_reaction
+        or book_reaction_overrides_late_chase_bad_entry
+    )
+    playbook_hard_bad_entry = bool(
+        raw_playbook_hard_bad_entry
+        and not (late_chase_bad_entry_class and late_chase_reaction_override_allowed)
+    )
+    playbook_late_chase_bad_entry = bool(
+        raw_playbook_late_chase_bad_entry
+        and not late_chase_reaction_override_allowed
+    )
+    late_chase = bool(
+        preliminary_late_chase
+        and current_move_true_extension
+        and not late_chase_reaction_override_allowed
+    )
     play_evidence: dict[str, Any] = {
         "side": side,
         "lane": lane_name,
@@ -950,10 +1250,46 @@ def evaluate_book_strategy_master_v3(
         "trendline_confluence": trendline_confluence,
         "opposing_force_ok": opposing_force_ok,
         "late_chase": late_chase,
+        "raw_late_chase": raw_late_chase,
+        "preliminary_late_chase": preliminary_late_chase,
+        "current_move_true_extension": current_move_true_extension,
+        "late_chase_softened_by_extreme_reversal": late_chase_softened_by_extreme_reversal,
+        "late_chase_softened_by_book_reaction": late_chase_softened_by_book_reaction,
+        "book_valid_reaction": book_valid_reaction,
+        "book_reaction_overrides_late_chase_bad_entry": book_reaction_overrides_late_chase_bad_entry,
+        "movement_context_present": movement_context_present,
+        "movement_stage": movement_stage,
+        "movement_stage_reclaiming": movement_stage_reclaiming,
+        "movement_stage_mature_with_room": movement_stage_mature_with_room,
+        "current_leg_side": current_leg_side,
+        "current_leg_candle_count": current_leg_candle_count,
+        "current_leg_extended": current_leg_extended,
+        "current_leg_exhausted": current_leg_exhausted,
+        "visible_candle_count": visible_candle_count,
+        "estimated_candles_to_force": estimated_candles_to_force,
+        "candle_movement_summary": candle_movement_context.get("summary"),
+        "candle_movement_context_v3": candle_movement_context,
         "history_exit_here": history_exit_here,
         "conflict_market": conflict_market,
         "pullback_not_confirmed": pullback_not_confirmed,
         "middle_safe": middle_safe,
+        "short_horizon_side": short_horizon_side,
+        "short_horizon_probability": round(float(short_horizon_probability), 4),
+        "structural_extreme_for_side": structural_extreme_for_side,
+        "opposite_pressure_warning": opposite_pressure_warning,
+        "failed_continuation_reversal": failed_continuation_reversal,
+        "global_side": global_side,
+        "local_side": local_side,
+        "dominant_side": dominant_side,
+        "primary_bias_side": primary_bias_side,
+        "bias_alignment": bias_alignment,
+        "aligned_with_primary_bias": aligned_with_primary_bias,
+        "countertrend_against_global": countertrend_against_global,
+        "countertrend_against_local": countertrend_against_local,
+        "countertrend_against_primary": countertrend_against_primary,
+        "countertrend_reversal_override": countertrend_reversal_override,
+        "countertrend_scalp_only": countertrend_scalp_only,
+        "large_move_bias_aligned": large_move_bias_aligned,
         "active_zone_id": str(active_zone.get("zone_id") or active_zone.get("id") or active_zone.get("key") or ""),
         "active_zone_type": _zone_type(active_zone) if active_zone else "",
         "opposing_zone_id": str(opposing_zone.get("zone_id") or opposing_zone.get("id") or opposing_zone.get("key") or ""),
@@ -985,11 +1321,22 @@ def evaluate_book_strategy_master_v3(
     def add_warning(field: str, received: Any, effect: str) -> None:
         soft_warnings.append({"field": field, "received": received, "effect": effect})
 
+    measured_reaction_can_override_timing = bool(
+        measured_reaction_accepted
+        and not countertrend_scalp_only
+        and (large_move_bias_aligned or countertrend_reversal_override or lane_authority_ready)
+    )
     timing_supportive = bool(
         (_upper(timing_mode) == "ENTER_NOW" and timing_enter_now)
-        or measured_reaction_accepted
-        or (current_candle_ok and (inside_trigger or retest_confirmed or continuation_confirmed))
+        or measured_reaction_can_override_timing
+        or (
+            current_candle_ok
+            and not countertrend_scalp_only
+            and (inside_trigger or retest_confirmed or continuation_confirmed or failed_continuation_reversal)
+        )
     )
+    play_evidence["measured_reaction_can_override_timing"] = measured_reaction_can_override_timing
+    play_evidence["timing_supportive"] = timing_supportive
     score_supportive = bool(final_score_passed or lane_score >= max(0.55, lane_required_score * 0.80))
     entry_profile = _select_entry_profile(
         side=side,
@@ -1008,6 +1355,7 @@ def evaluate_book_strategy_master_v3(
         late_chase=late_chase,
         opposing_force_ok=opposing_force_ok,
         conflict_market=conflict_market,
+        structural_extreme_reversal=failed_continuation_reversal,
     )
     strategy_combo = _strategy_combo(
         playbook=playbook,
@@ -1058,7 +1406,24 @@ def evaluate_book_strategy_master_v3(
     if conflict_market:
         add_blocker("conflict_market", True, False, "BUY and SELL evidence conflict; do not force a trade.")
     if late_chase:
-        add_blocker("late_chase", True, False, "Price already expanded; skip chase and wait for pullback/retest.", hard=True)
+        late_reason = (
+            f"True late chase: current {current_leg_side or side} leg has {current_leg_candle_count} candle(s), "
+            f"stage={movement_stage}, room_to_force={estimated_candles_to_force or 'unknown'} candle(s); "
+            "wait for pullback/retest/reclaim or fresh structure reaction."
+        )
+        add_blocker("late_chase", True, False, late_reason, hard=True)
+    elif late_chase_softened_by_extreme_reversal:
+        add_warning(
+            "late_chase",
+            "FIRST_REJECTION_FROM_EXTREME",
+            "late-chase warning softened because current price rejected a structural extreme in the opposite direction",
+        )
+    elif late_chase_softened_by_book_reaction:
+        add_warning(
+            "late_chase",
+            "BOOK_VALID_REACTION",
+            "late-chase warning softened because candle movement, structure touch, reaction, and path room support an active book entry",
+        )
     if playbook_hard_bad_entry:
         add_blocker(
             "bad_entry_filter.class",
@@ -1066,6 +1431,19 @@ def evaluate_book_strategy_master_v3(
             "no buy-high/sell-low/late-chase/path-room violation",
             "The playbook rejects this entry location; wait for a cleaner pullback, retest, or path-room reset.",
             hard=True,
+        )
+    if countertrend_scalp_only:
+        add_blocker(
+            "bias_alignment",
+            bias_alignment,
+            "primary-bias aligned entry or confirmed reclaim/role-flip reversal",
+            "Local reaction is only a minor countertrend/scalp read; wait for bias-aligned continuation or a confirmed reclaim/role flip.",
+        )
+    elif (countertrend_against_global or countertrend_against_local or countertrend_against_primary) and not countertrend_reversal_override:
+        add_warning(
+            "bias_alignment",
+            bias_alignment,
+            "countertrend read remains watch-only until reclaim, role flip, or major structure invalidation confirms adaptation",
         )
     if history_exit_here:
         add_blocker("history_exit_here", True, False, "Historical analog says this area is closer to exit/protection than entry.")
@@ -1106,6 +1484,7 @@ def evaluate_book_strategy_master_v3(
             or trendline_confluence
             or break_of_structure_confirmed
             or middle_safe
+            or failed_continuation_reversal
             or lane_name in ENTER_NOW_LANES
         )
     )
@@ -1129,6 +1508,7 @@ def evaluate_book_strategy_master_v3(
             or structure_shift_confirmed
             or liquidity_sweep_detected
             or measured_reaction_accepted
+            or failed_continuation_reversal
             or _upper(candle_reaction.get("reaction_type")) not in {"", "NO_REACTION", "EXHAUSTION"}
             or lane_name in ENTER_NOW_LANES
         )
@@ -1163,17 +1543,20 @@ def evaluate_book_strategy_master_v3(
     evidence_score += 0.08 if role_flip_confirmed else 0.0
     evidence_score += 0.08 if trendline_confluence else 0.0
     evidence_score += 0.08 if break_of_structure_confirmed or structure_shift_confirmed else 0.0
+    evidence_score += 0.10 if failed_continuation_reversal else 0.0
     evidence_score += 0.08 if _bool(significant_structure.get("significant")) else 0.0
     evidence_score += 0.10 * _clip01(candle_reaction.get("reaction_quality"), 0.0)
     evidence_score += 0.06 if entry_profile in {"AGGRESSIVE_SNIPER", "CONSERVATIVE_RETEST", "CONTINUATION_RETEST", "REVERSAL_RECLAIM"} else 0.0
+    evidence_score += 0.10 if large_move_bias_aligned else 0.0
     evidence_score += 0.10 if opposing_force_ok else -0.08
     evidence_score += 0.12 if final_score_passed else -0.08
     evidence_score += 0.10 if timing_enter_now and _upper(timing_mode) == "ENTER_NOW" else -0.05
+    evidence_score -= 0.16 if countertrend_scalp_only else 0.0
     evidence_score -= 0.18 if late_chase else 0.0
     evidence_score -= 0.14 if history_exit_here else 0.0
     evidence_score -= 0.12 if conflict_market else 0.0
     confidence = _clip01(0.25 + evidence_score - (0.10 * len(hard_blockers)) - (0.025 * max(0, len(blockers) - len(hard_blockers))))
-    if state == "ENTER_NOW":
+    if state == "ENTER_NOW" and not countertrend_scalp_only:
         confidence = max(confidence, min(0.99, _clip01(lane_score, 0.0)))
     next_required = _next_required_for_state(state, blockers, playbook)
     if state != "ENTER_NOW" and not blockers and soft_warnings:
@@ -1231,7 +1614,12 @@ def evaluate_book_strategy_master_v3(
             "zones_are_reaction_areas_not_entries",
             "after_bms_wait_for_retracement",
             "avoid_late_chase",
+            "late_chase_requires_true_extension_no_room_or_no_fresh_reaction",
+            "aggressive_entries_require_structure_touch_candle_reaction_and_path_room",
+            "conservative_entries_require_retest_reclaim_or_role_flip",
             "avoid_opposing_force_without_path_room",
+            "major_visible_bias_dominates_inner_reactions",
+            "countertrend_scalps_require_reclaim_role_flip_or_major_invalidation",
             "do_not_require_multiple_timeframes",
         ],
     }

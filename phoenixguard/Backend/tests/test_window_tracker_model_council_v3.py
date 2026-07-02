@@ -1080,12 +1080,18 @@ def test_actionable_broker_timing_becomes_model_council_execution_evidence(tmp_p
 
     council = ModelCouncilV3()
     first = council.evaluate(snapshot, now_epoch=1000.0)
-    assert first["execution"]["enabled"] is False
+    assert first["execution"]["enabled"] is True
+    assert first["execution"]["side"] == "SELL"
     second = dict(snapshot)
     second["frame_id"] = 11
     second["capture_count"] = 12
     second["state_version"] = int(snapshot["state_version"]) + 1
     second["input_frame_hash"] = "frame-b"
+    second["live_integrity"] = {
+        **cast(Mapping[str, Any], snapshot["live_integrity"]),
+        "input_frame_hash": "frame-b",
+        "previous_frame_hash": "frame-a",
+    }
     packet = council.evaluate(second, now_epoch=1000.5)
     # removed temporary debug prints
     assert packet["execution"]["enabled"] is True
@@ -1222,12 +1228,18 @@ def test_measured_trigger_reaction_overrides_stale_late_chase_block(tmp_path: Pa
 
     council = ModelCouncilV3()
     first = council.evaluate(snapshot, now_epoch=1000.0)
-    assert first["execution"]["enabled"] is False
+    assert first["execution"]["enabled"] is True
+    assert first["execution"]["side"] == "SELL"
     second = dict(snapshot)
     second["frame_id"] = 424
     second["capture_count"] = 424
     second["state_version"] = int(snapshot["state_version"]) + 1
     second["input_frame_hash"] = "measured-sell-b"
+    second["live_integrity"] = {
+        **cast(Mapping[str, Any], snapshot["live_integrity"]),
+        "input_frame_hash": "measured-sell-b",
+        "previous_frame_hash": "measured-sell-a",
+    }
     packet = council.evaluate(second, now_epoch=1000.5)
 
     assert packet["execution"]["enabled"] is True
@@ -1308,12 +1320,18 @@ def test_near_trigger_kernel_candidate_becomes_model_council_execution_evidence(
 
     council = ModelCouncilV3()
     first = council.evaluate(snapshot, now_epoch=1000.0)
-    assert first["execution"]["enabled"] is False
+    assert first["execution"]["enabled"] is True
+    assert first["execution"]["side"] == "SELL"
     second = dict(snapshot)
     second["frame_id"] = 21
     second["capture_count"] = 22
     second["state_version"] = int(snapshot["state_version"]) + 1
     second["input_frame_hash"] = "kernel-frame-b"
+    second["live_integrity"] = {
+        **cast(Mapping[str, Any], snapshot["live_integrity"]),
+        "input_frame_hash": "kernel-frame-b",
+        "previous_frame_hash": "kernel-frame-a",
+    }
     packet = council.evaluate(second, now_epoch=1000.5)
     # removed temporary debug prints
     assert packet["execution"]["enabled"] is True

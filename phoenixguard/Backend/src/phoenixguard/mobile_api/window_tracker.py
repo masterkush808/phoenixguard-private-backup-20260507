@@ -27,6 +27,7 @@ from phoenixguard.core.decision_state import build_trade_intent, derive_state_ve
 
 from phoenixguard.core.config import RUNTIME
 from phoenixguard.core.utils import utc_now_iso
+from phoenixguard.decision.candle_movement_context_v3 import build_candle_movement_context_v3
 from phoenixguard.decision.decision_kernel import analyze_decision_kernel
 from phoenixguard.decision.high_frequency_candle_predictor import build_high_frequency_candle_forecast
 from phoenixguard.decision.lstm_candle_sequence_contributor_v3 import build_lstm_candle_sequence_contribution
@@ -14128,6 +14129,9 @@ class PhoenixGuardWindowTrackingAdapter:
             "major_trend_direction": major_trend_side,
             "major_trend_confidence": major_trend_confidence,
         }
+        candle_movement_context = build_candle_movement_context_v3(tracking_summary)
+        tracking_summary["candle_movement_context_v3"] = candle_movement_context
+        tracking_summary["candle_movement_context"] = candle_movement_context
         signal: dict[str, Any] = {
             "signal_id": f"tracker_{uuid4().hex}",
             "action": candidate_action,
@@ -14190,6 +14194,8 @@ class PhoenixGuardWindowTrackingAdapter:
             "support_resistance_zones": support_resistance_zones,
             "support_resistance_context": support_resistance_context,
             "smart_money_context": smart_money_context,
+            "candle_movement_context_v3": candle_movement_context,
+            "candle_movement_context": candle_movement_context,
             "timing_signal": {
                 "entry_state": str(entry_plan.get("timing_state", "WATCH") or "WATCH"),
                 "timing_score": _clip01(entry_plan.get("timing_score", 0.0)),

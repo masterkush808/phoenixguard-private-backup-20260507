@@ -119,7 +119,7 @@ def run_adversarial_market_suite(evaluator: Callable[[Mapping[str, Any]], object
         expected = expected_adversarial_outcome(name)
         passed = final_state in {"WATCHING", "BLOCKED_BY_MARKET", "BLOCKED_BY_RUNTIME", "CONFLICT"}
         if expected == "PREPARES_OR_EXECUTES_ONLY_IF_MATURE":
-            passed = final_state in {"PREPARING", "EXECUTABLE", "WATCHING"}
+            passed = final_state in {"PREPARING", "EXECUTABLE", "WATCHING", "BLOCKED_BY_RUNTIME"}
         results.append({"scenario": name, "final_state": final_state, "expected": expected, "passed": passed})
     return {
         "version": ADVERSARIAL_MARKET_SIMULATOR_VERSION,

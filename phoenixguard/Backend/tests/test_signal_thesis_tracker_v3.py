@@ -197,3 +197,71 @@ def test_generic_locked_chart_thesis_resets_on_strong_opposite_executable_read()
     assert updated["replaced_by"]["countertrend_blocked"] is True
     assert updated["replaced_by"]["blocked_countertrend_side"] == "BUY"
     assert thesis_blocks_countertrend(updated, {"side": "SELL"}) is False
+
+
+def test_confirmed_book_reclaim_releases_old_opposite_thesis() -> None:
+    thesis = update_signal_thesis_v3(
+        None,
+        snapshot=_snapshot("SELL", y=110.0, frame_id=10),
+        model_council_result=_result("SELL"),
+        now_epoch=100.0,
+    )
+
+    buy_result = _result("BUY", score=0.86, state="PREPARING")
+    buy_result["book_strategy"] = {
+        "playbook": "FAILED_SUPPLY_RECLAIM_BUY_CONTINUATION",
+        "maturity_state": "ENTER_NOW",
+        "evidence": {
+            "bias_alignment": "REVERSAL_OVERRIDE",
+            "countertrend_reversal_override": True,
+        },
+    }
+
+    updated = update_signal_thesis_v3(
+        thesis,
+        snapshot=_snapshot("BUY", y=80.0, frame_id=15),
+        model_council_result=buy_result,
+        now_epoch=105.0,
+    )
+
+    assert updated["active"] is False
+    assert updated["status"] == "INVALIDATED"
+    assert updated["countertrend_blocked"] is False
+    assert updated["replaced_by"]["active"] is True
+    assert updated["replaced_by"]["side"] == "BUY"
+    assert thesis_blocks_countertrend(updated, {"side": "BUY"}) is False
+
+
+def test_book_armed_failed_continuation_reversal_releases_old_thesis() -> None:
+    thesis = update_signal_thesis_v3(
+        None,
+        snapshot=_snapshot("SELL", y=110.0, frame_id=10),
+        model_council_result=_result("SELL"),
+        now_epoch=100.0,
+    )
+
+    buy_result = _result("BUY", score=0.58, state="PREPARING")
+    buy_result["book_strategy"] = {
+        "playbook": "FAILED_SELL_INTO_DEMAND_BUY_REVERSAL",
+        "maturity_state": "PREPARE",
+        "evidence": {
+            "failed_continuation_reversal": True,
+            "countertrend_reversal_override": True,
+            "structural_extreme_for_side": True,
+        },
+    }
+
+    updated = update_signal_thesis_v3(
+        thesis,
+        snapshot=_snapshot("BUY", y=96.0, frame_id=16),
+        model_council_result=buy_result,
+        now_epoch=106.0,
+    )
+
+    assert updated["active"] is False
+    assert updated["status"] == "INVALIDATED"
+    assert updated["countertrend_blocked"] is False
+    assert "structural opposite reversal" in updated["invalidation_reason"]
+    assert updated["replaced_by"]["active"] is True
+    assert updated["replaced_by"]["side"] == "BUY"
+    assert thesis_blocks_countertrend(updated, {"side": "BUY"}) is False

@@ -290,6 +290,34 @@ def _candidate_from_payloads(
     trace = _mapping(result.get("promotion_trace") or council.get("promotion_trace"))
     signal = _mapping(snapshot.get("latest_signal"))
     tracking = _mapping(snapshot.get("tracking_summary"))
+    book_strategy = _mapping(
+        result.get("book_strategy")
+        or council.get("book_strategy")
+        or study_packet.get("book_strategy")
+        or execution_packet.get("book_strategy")
+    )
+    book_evidence = _mapping(book_strategy.get("evidence"))
+    book_playbook = str(book_strategy.get("playbook") or "").upper()
+    book_state = str(book_strategy.get("maturity_state") or book_strategy.get("state") or "").upper()
+    book_reversal_play = book_playbook in {
+        "FAILED_SELL_INTO_DEMAND_BUY_REVERSAL",
+        "FAILED_BUY_INTO_SUPPLY_SELL_REVERSAL",
+        "FAILED_SUPPLY_RECLAIM_BUY_CONTINUATION",
+        "FAILED_DEMAND_RECLAIM_SELL_CONTINUATION",
+        "SMC_TURTLE_SOUP",
+        "SMC_SH_BMS_RTO",
+        "SMC_SMS_BMS_RTO",
+    }
+    book_reversal_armed = bool(
+        book_reversal_play
+        and book_state in {"VALID_WATCH", "PREPARE", "ENTER_NOW"}
+        and (
+            bool(book_evidence.get("failed_continuation_reversal"))
+            or bool(book_evidence.get("countertrend_reversal_override"))
+            or bool(book_evidence.get("liquidity_sweep_detected"))
+            or bool(book_evidence.get("structure_shift_confirmed"))
+        )
+    )
     timing = _first_mapping(
         result.get("timing_decision"),
         result.get("execution_timing"),
@@ -387,7 +415,18 @@ def _candidate_from_payloads(
             or snapshot.get("previous_side_invalidated")
             or snapshot.get("candidate_invalidated")
             or trace.get("candidate_invalidated")
+            or (
+                book_state == "ENTER_NOW"
+                and book_playbook in {"FAILED_SUPPLY_RECLAIM_BUY_CONTINUATION", "FAILED_DEMAND_RECLAIM_SELL_CONTINUATION"}
+                and bool(book_evidence.get("countertrend_reversal_override"))
+            )
         ),
+        "book_strategy_playbook": book_playbook,
+        "book_strategy_state": book_state,
+        "bias_alignment": str(book_evidence.get("bias_alignment") or "").upper(),
+        "countertrend_reversal_override": bool(book_evidence.get("countertrend_reversal_override")),
+        "book_reversal_armed": book_reversal_armed,
+        "book_failed_continuation_reversal": bool(book_evidence.get("failed_continuation_reversal")),
         "entry_now_allowed": bool(timing.get("entry_now_allowed") or timing.get("entry_allowed")),
         "execution_enabled": bool(execution.get("enabled") or execution_packet),
     }
@@ -601,6 +640,12 @@ def _update_active_thesis(
         or candidate_stage not in {"", "OBSERVATION", "CANDIDATE_CREATED"}
     )
     reversal_confirmed = bool(opposite_read and score >= 0.72 and executable_like)
+    book_reversal_release = bool(
+        opposite_read
+        and bool(candidate.get("book_reversal_armed"))
+        and score >= 0.55
+        and str(candidate.get("book_strategy_state") or "").upper() in {"PREPARE", "ENTER_NOW"}
+    )
     previous_symbol_generic = _symbol_is_generic(previous.get("symbol") or previous.get("symbol_key"))
     current_symbol_generic = bool(candidate.get("generic_symbol"))
     generic_locked_flip = bool(
@@ -619,6 +664,7 @@ def _update_active_thesis(
     )
     invalidated = bool(
         explicit_invalidated
+        or book_reversal_release
         or (zone_breached and reversal_confirmed)
         or generic_locked_flip
         or fallback_breach
@@ -635,6 +681,8 @@ def _update_active_thesis(
             )
         elif fallback_breach:
             reason = "Active thesis invalidated by a strong opposite executable read after price moved beyond the allowed room."
+        elif book_reversal_release:
+            reason = "Active thesis released because the playbook armed a structural opposite reversal at a valid demand/supply extreme."
         elif zone_breached and reversal_confirmed:
             reason = "Active thesis invalidated by confirmed opposite read and invalidation-zone breach."
         else:

@@ -10,6 +10,7 @@ from phoenixguard.decision.book_strategy_master_v3 import (
     MODEL_COUNCIL_CONTRIBUTOR_ROLE,
     evaluate_book_strategy_master_v3,
 )
+from phoenixguard.decision.candle_movement_context_v3 import build_candle_movement_context_v3
 from phoenixguard.decision.reasoning_arbitrator_v3 import analyze_reasoning_arbitration_v3
 from phoenixguard.decision.market_intelligence_v3 import analyze_market_intelligence
 from phoenixguard.execution.packet_v3 import (
@@ -184,6 +185,14 @@ def _int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _duration_text(seconds: int) -> str:
+    bounded = max(0, int(seconds))
+    minutes, remainder = divmod(bounded, 60)
+    if minutes <= 0:
+        return f"{remainder}s"
+    return f"{minutes}m {remainder:02d}s"
+
+
 def _side(value: Any) -> str:
     text = str(value or "").strip().upper()
     if text in {"BUY", "BULL", "BULLISH", "UP", "CALL"}:
@@ -262,6 +271,45 @@ def _now() -> float:
     return float(time.time())
 
 
+def _first_mapping(*values: Any) -> dict[str, Any]:
+    for value in values:
+        mapped = _mapping(value)
+        if mapped:
+            return mapped
+    return {}
+
+
+def _short_horizon_direction_from_snapshot(snapshot: Mapping[str, Any]) -> tuple[str, float]:
+    kernel = _mapping(snapshot.get("decision_kernel") or _mapping(snapshot.get("tracking_summary")).get("decision_kernel"))
+    study = _first_mapping(
+        snapshot.get("two_candle_study"),
+        kernel.get("two_candle_study"),
+        _mapping(snapshot.get("tracking_summary")).get("two_candle_study"),
+    )
+    lstm = _first_mapping(
+        snapshot.get("lstm_contribution"),
+        study.get("lstm_contribution"),
+        kernel.get("lstm_contribution"),
+    )
+    next_candle = _first_mapping(kernel.get("next_candle"), _mapping(snapshot.get("latest_signal")).get("next_candle"))
+    for source in (study, lstm, next_candle):
+        side = _first_trade_side(
+            source.get("next_1_direction"),
+            source.get("next_candle_bias"),
+            source.get("primary_pressure"),
+            source.get("side"),
+        )
+        if side in {"BUY", "SELL"}:
+            probability = max(
+                _clip01(source.get("next_1_probability"), 0.0),
+                _clip01(source.get("probability"), 0.0),
+                _clip01(source.get("confidence"), 0.0),
+                _clip01(source.get(f"p_next_{side.lower()}"), 0.0),
+            )
+            return side, probability
+    return "HOLD", 0.0
+
+
 def _score_from_snapshot(snapshot: Mapping[str, Any], side: str) -> float:
     key = "buy_score" if side == "BUY" else "sell_score"
     explicit_score: float | None = None
@@ -273,6 +321,30 @@ def _score_from_snapshot(snapshot: Mapping[str, Any], side: str) -> float:
     market_context = _mapping(snapshot.get("market_context"))
     global_structure = _mapping(snapshot.get("global_structure"))
     local_micro = _mapping(snapshot.get("local_micro_structure"))
+    current_location = _upper(market_context.get("current_location") or snapshot.get("current_location"))
+    at_demand_extreme = current_location in {"DEMAND", "DEMAND_ZONE", "SUPPORT", "SUPPORT_ZONE", "LOCAL_LOW", "RANGE_LOW"}
+    at_supply_extreme = current_location in {"SUPPLY", "SUPPLY_ZONE", "RESISTANCE", "RESISTANCE_ZONE", "LOCAL_HIGH", "RANGE_HIGH"}
+    role_flip_or_break_retest = bool(
+        _bool(snapshot.get("role_flip_confirmed") or market_context.get("role_flip_confirmed"))
+        or (
+            _bool(snapshot.get("break_of_structure_confirmed") or snapshot.get("bms_confirmed"))
+            and _bool(snapshot.get("retest_confirmed") or snapshot.get("pullback_confirmed"))
+        )
+    )
+    next_side, next_probability = _short_horizon_direction_from_snapshot(snapshot)
+    wrong_side_at_extreme = bool(
+        (side == "SELL" and at_demand_extreme and next_side == "BUY")
+        or (side == "BUY" and at_supply_extreme and next_side == "SELL")
+    )
+    if wrong_side_at_extreme and next_probability >= 0.56 and not role_flip_or_break_retest:
+        return min(explicit_score if explicit_score is not None else 0.45, 0.58)
+    right_side_reversal_warning = bool(
+        (side == "BUY" and at_demand_extreme and next_side == "BUY")
+        or (side == "SELL" and at_supply_extreme and next_side == "SELL")
+    )
+    if right_side_reversal_warning and next_probability >= 0.52 and not role_flip_or_break_retest:
+        warning_score = min(0.78, 0.68 + max(0.0, next_probability - 0.52))
+        return max(explicit_score if explicit_score is not None else 0.0, warning_score)
     context_global_side = _side(market_context.get("global_side"))
     context_local_side = _side(market_context.get("local_side"))
     dominant_side = _side(market_context.get("dominant_side") or snapshot.get("dominant_side"))
@@ -385,16 +457,8 @@ def _instrument_packet_mode(snapshot: Mapping[str, Any]) -> str:
         or controls.get("execution_mode")
         or ""
     ).strip().lower()
-    broker_click_enabled = _bool(
-        snapshot.get("allow_live_broker_clicks")
-        or snapshot.get("broker_click_enabled")
-        or controls.get("allow_live_broker_clicks")
-        or controls.get("broker_click_enabled")
-    )
     if raw_mode in {"broker_click", "broker", "live_click"}:
-        return "broker_click"
-    if raw_mode == "live" and broker_click_enabled:
-        return "broker_click"
+        return "paper"
     return "paper"
 
 
@@ -2460,10 +2524,10 @@ def _instrument_release_requirement(instrument_context: Mapping[str, Any], fallb
     if bool(evidence.get("profile_mismatch")):
         missing.append("profile_mismatch=false")
     if missing:
-        return f"instrument_context.broker_click_safe=false; next_required {' + '.join(missing)}; release requires instrument_context.broker_click_safe=true"
+        return f"instrument_context.paper_safe=false; next_required {' + '.join(missing)}; release requires instrument_context.paper_safe=true"
     if fallback and fallback.lower() != "none":
-        return f"instrument_context.broker_click_safe=false; next_required {fallback}; release requires instrument_context.broker_click_safe=true"
-    return "instrument_context.broker_click_safe=false; next_required stable viewport + broker surface lock; release requires instrument_context.broker_click_safe=true"
+        return f"instrument_context.paper_safe=false; next_required {fallback}; release requires instrument_context.paper_safe=true"
+    return "instrument_context.paper_safe=false; next_required stable viewport + broker surface lock; release requires instrument_context.paper_safe=true"
 
 
 def _non_executable_release_state(
@@ -2743,7 +2807,16 @@ def evaluate_model_council_v3(
     study_identity_validation = validate_instrument_context(instrument_context, mode="study")
     packet_identity_mode = _instrument_packet_mode(snapshot)
     packet_identity_validation = validate_instrument_context(instrument_context, mode=packet_identity_mode)
+    live_integrity = _mapping(snapshot.get("live_integrity"))
+    top_input_frame_hash = str(snapshot.get("input_frame_hash") or snapshot.get("frame_hash") or "").strip()
+    live_integrity_frame_hash = str(live_integrity.get("input_frame_hash") or live_integrity.get("frame_hash") or "").strip()
+    live_integrity_hash_mismatch = bool(
+        top_input_frame_hash
+        and live_integrity_frame_hash
+        and top_input_frame_hash != live_integrity_frame_hash
+    )
     market_context = _mapping(market.get("market_context"))
+    candle_movement_context = build_candle_movement_context_v3(snapshot)
     two_candle_study = _mapping(snapshot.get("two_candle_study") or _mapping(snapshot.get("decision_kernel")).get("two_candle_study"))
     ai_contribution_strengths = _ai_contribution_strengths(snapshot)
     ai_strength_multiplier = _ai_strength_multiplier(ai_contribution_strengths)
@@ -2836,7 +2909,15 @@ def evaluate_model_council_v3(
     flip_flop = _recent_flip_flop(snapshot, candidate_side, previous_state)
     maturity_stage = _maturity_stage(snapshot, candidate_side, market, timing)
     models_not_awake = not bool(health.get("all_required_models_awake", False))
-    runtime_blocked = models_not_awake or not study_identity_validation.ok
+    if models_not_awake:
+        runtime_block_reason = "REQUIRED_MODELS_NOT_AWAKE"
+    elif not study_identity_validation.ok:
+        runtime_block_reason = study_identity_validation.first_reason
+    elif live_integrity_hash_mismatch:
+        runtime_block_reason = "LIVE_INTEGRITY_HASH_MISMATCH"
+    else:
+        runtime_block_reason = ""
+    runtime_blocked = bool(runtime_block_reason)
     market_block_reason = _upper(market.get("block_reason"))
     market_blocked = bool(market_block_reason or bad_entry.get("detected"))
     timing_ready = str(timing.get("state", "")).upper() == "READY"
@@ -3012,7 +3093,6 @@ def evaluate_model_council_v3(
     )
     expiry_band = _timing_expiry_band(preferred_expiry_seconds)
     bad_timing_path_active = path_class in BAD_TIMING_PATH_CLASSES
-    hard_timing_path_active = path_class in {"OPPOSING_FORCE_FIRST", "LATE_CHASE_REVERSAL_RISK"}
     drawdown_first_warning_active = bool(not entry_now_allowed or bad_timing_path_active)
     timing_forecast: dict[str, Any] = {
         "side": candidate_side if candidate_side in {"BUY", "SELL"} else None,
@@ -3391,9 +3471,11 @@ def evaluate_model_council_v3(
         execution_lane=execution_lane,
     )
     opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "NO_OPPORTUNITY")
+    book_strategy_snapshot: dict[str, Any] = {**snapshot, "candle_movement_context_v3": candle_movement_context}
+    book_strategy_market: dict[str, Any] = {**market, "candle_movement_context_v3": candle_movement_context}
     book_strategy = evaluate_book_strategy_master_v3(
-        snapshot,
-        market=market,
+        book_strategy_snapshot,
+        market=book_strategy_market,
         candidate_side=candidate_side,
         execution_lane=execution_lane,
         timing_decision=timing_decision,
@@ -3427,21 +3509,51 @@ def evaluate_model_council_v3(
 
     playbook_enter_now = bool(book_strategy_state == "ENTER_NOW" and candidate_side in {"BUY", "SELL"})
     playbook_wait_state = book_strategy_state if book_strategy_state in OPPORTUNITY_MATURITY_STATES else "VALID_WATCH"
+    playbook_required_stable_reads = max(1, _int(snapshot.get("playbook_required_stable_reads"), 2))
+    playbook_candidate_stable = bool(_bool(snapshot.get("execution_mature")) or candidate_stable_reads >= playbook_required_stable_reads)
     playbook_hard_gate_reason = ""
     if book_strategy_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
         playbook_hard_gate_reason = f"PLAYBOOK_{book_strategy_state}"
     elif both_executable_requested or (buy_score >= 0.62 and sell_score >= 0.62):
         playbook_hard_gate_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
     elif runtime_blocked:
-        playbook_hard_gate_reason = "REQUIRED_MODELS_NOT_AWAKE" if models_not_awake else study_identity_validation.first_reason
+        playbook_hard_gate_reason = runtime_block_reason
+    elif _bool(snapshot.get("source_identity_just_switched")):
+        playbook_hard_gate_reason = "SOURCE_IDENTITY_JUST_SWITCHED"
     elif candidate_invalidated:
         playbook_hard_gate_reason = "CANDIDATE_INVALIDATED"
     elif permission_hard_block:
         playbook_hard_gate_reason = str(permission_block_reason or "TRADE_PERMISSION_DENIED")
-    elif not timing_has_explicit_expiry:
-        playbook_hard_gate_reason = "MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING"
+    elif permission_denied_effective:
+        playbook_hard_gate_reason = str(permission_block_reason or "TRADE_PERMISSION_DENIED")
     elif trap_active:
         playbook_hard_gate_reason = "MARKET_TRAP"
+
+    if playbook_enter_now and not playbook_hard_gate_reason:
+        entry_now_allowed = True
+        timing_mode = "ENTER_NOW"
+        timing_forecast["entry_now_quality"] = "GOOD"
+        timing_forecast["reason"] = "Playbook final decider accepted immediate execution after current source-truth gates."
+        timing_decision["entry_now_allowed"] = True
+        timing_decision["timing_mode"] = "ENTER_NOW"
+        timing_decision["timing_forecast"] = timing_forecast
+        timing_entry = _mapping(timing_decision.get("entry_timing"))
+        timing_entry.update(
+            {
+                "mode": "ENTER_NOW",
+                "side": candidate_side if candidate_side in {"BUY", "SELL"} else None,
+                "reason": "Playbook final decider accepted immediate execution.",
+                "next_condition": "none",
+            }
+        )
+        timing_decision["entry_timing"] = timing_entry
+        timing_decision["playbook_strategy_authorized"] = True
+        timing_decision["lane_is_contributor"] = True
+        timing_decision["packet_requires_current_source_truth"] = True
+        if timing_expiry <= 0:
+            timing_expiry = max(1, preferred_expiry_seconds)
+            timing_decision["preferred_expiry_sec"] = timing_expiry
+        timing_has_explicit_expiry = True
 
     final_state = "WATCHING"
     block_reason: str | None = None
@@ -3452,26 +3564,23 @@ def evaluate_model_council_v3(
         block_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
     elif runtime_blocked:
         final_state = "BLOCKED_BY_RUNTIME"
-        block_reason = "REQUIRED_MODELS_NOT_AWAKE" if models_not_awake else study_identity_validation.first_reason
+        block_reason = runtime_block_reason
     elif flip_flop_contained:
         final_state = "WATCHING"
         block_reason = "FLIP_FLOP_CONTAINED"
     elif playbook_enter_now:
-        if not stable or not lane_effective_mature:
-            final_state = "PREPARING"
-            block_reason = "CANDIDATE_MATURITY"
-        elif permission_denied_effective and permission_prepare_allowed:
-            final_state = "PREPARING"
-            block_reason = permission_block_reason
-        elif playbook_hard_gate_reason:
-            final_state = "BLOCKED_BY_RUNTIME" if playbook_hard_gate_reason in {
-                "MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING",
+        if playbook_hard_gate_reason:
+            if playbook_hard_gate_reason in {
                 "REQUIRED_MODELS_NOT_AWAKE",
-            } or playbook_hard_gate_reason.startswith("INSTRUMENT_CONTEXT") else "WATCHING"
+                "SOURCE_IDENTITY_JUST_SWITCHED",
+                "LIVE_INTEGRITY_HASH_MISMATCH",
+            } or playbook_hard_gate_reason.startswith("INSTRUMENT_CONTEXT"):
+                final_state = "BLOCKED_BY_RUNTIME"
+            elif permission_denied_effective and permission_prepare_allowed:
+                final_state = "PREPARING"
+            else:
+                final_state = "WATCHING"
             block_reason = playbook_hard_gate_reason
-        elif hard_timing_path_active:
-            final_state = "PREPARING"
-            block_reason = "TIMING_PATH_BAD"
         elif packet_identity_validation.ok:
             final_state = "EXECUTABLE"
             executable = True
@@ -3743,6 +3852,39 @@ def evaluate_model_council_v3(
         hard_bad_entry_class_active=hard_bad_entry_class_active,
         opportunity_maturity=opportunity_maturity,
     )
+    timeframe_seconds = max(0, _int(candle_movement_context.get("timeframe_seconds"), 0))
+    expected_move_candles = (
+        max(1, (int(max(0, preferred_expiry_seconds)) + timeframe_seconds - 1) // timeframe_seconds)
+        if timeframe_seconds > 0 and preferred_expiry_seconds > 0
+        else 0
+    )
+    current_leg_payload = _mapping(candle_movement_context.get("current_leg"))
+    current_leg_candle_count = _int(current_leg_payload.get("candle_count"), 0)
+    expected_move_time = {
+        "expected_duration_sec": int(max(0, preferred_expiry_seconds)),
+        "expected_duration_text": _duration_text(int(max(0, preferred_expiry_seconds))),
+        "timeframe": str(candle_movement_context.get("timeframe") or "").upper(),
+        "timeframe_seconds": timeframe_seconds,
+        "expected_candle_count": expected_move_candles,
+        "current_leg_candle_count": current_leg_candle_count,
+        "projected_total_current_leg_candles": current_leg_candle_count + expected_move_candles,
+        "current_leg_side": current_leg_payload.get("side"),
+        "current_leg_stage": candle_movement_context.get("move_stage"),
+        "basis": "preferred_expiry_seconds_to_timeframe_candles",
+    }
+    candle_movement_brief = {
+        "visible_candle_count": candle_movement_context.get("visible_candle_count"),
+        "tracked_candle_count": candle_movement_context.get("tracked_candle_count"),
+        "current_leg_candle_count": current_leg_candle_count,
+        "current_leg_side": current_leg_payload.get("side"),
+        "current_leg_stage": candle_movement_context.get("move_stage"),
+        "move_duration": candle_movement_context.get("move_duration"),
+        "opposing_force_room": candle_movement_context.get("opposing_force_room"),
+        "expected_move_time": expected_move_time,
+    }
+    allowance_package["candle_movement_context_v3"] = candle_movement_context
+    allowance_package["candle_movement"] = candle_movement_brief
+    allowance_package["expected_move_time"] = expected_move_time
     allowance_package["book_strategy"] = book_strategy.get("strategy_read")
     allowance_package["book_strategy_playbook"] = book_strategy.get("playbook")
     allowance_package["book_strategy_maturity"] = book_strategy_state
@@ -3761,8 +3903,16 @@ def evaluate_model_council_v3(
         "book_strategy": book_strategy,
         "book_strategy_state": book_strategy_state,
         "book_strategy_playbook": book_strategy.get("playbook"),
+        "candle_movement_context_v3": candle_movement_context,
+        "candle_movement": candle_movement_brief,
         "visual_integrity": opportunity_maturity.get("visual_integrity"),
         "candidate_stable_reads": candidate_stable_reads,
+        "playbook_required_stable_reads": playbook_required_stable_reads,
+        "playbook_candidate_stable": playbook_candidate_stable,
+        "runtime_block_reason": runtime_block_reason,
+        "live_integrity_hash_mismatch": live_integrity_hash_mismatch,
+        "top_input_frame_hash": top_input_frame_hash,
+        "live_integrity_frame_hash": live_integrity_frame_hash,
         "raw_flip_count_10s": raw_flip_count,
         "candidate_flip_count_10s": candidate_flip_count,
         "dominance_margin": round(float(dominance_margin), 4),
@@ -3804,7 +3954,9 @@ def evaluate_model_council_v3(
         "late_chase_block_overridden": late_chase_block_overridden,
         "late_chase_bad_entry_override_allowed": late_chase_bad_entry_override_allowed,
         "denied_at": (
-            true_blocker
+            "NONE"
+            if executable
+            else true_blocker
             if true_blocker != "NONE"
             else blocked_by
             if blocked_by != "NONE"
@@ -3835,9 +3987,9 @@ def evaluate_model_council_v3(
         "current_candle_acceptance": execution_lane.get("current_candle_acceptance", {}),
         "wave_context": execution_lane.get("wave_context", {}),
         "release_allowed": flip_flop_release_allowed,
-        "blocked_by": blocked_by,
-        "true_blocker": true_blocker,
-        "next_required": next_required,
+        "blocked_by": "NONE" if executable else blocked_by,
+        "true_blocker": "NONE" if executable else true_blocker,
+        "next_required": "none" if executable else next_required,
         "release_condition": release_condition,
         "promotion_result": promotion_result,
         "packet_result": "PG_EXECUTION_PACKET_V3_PUBLISHED" if executable else "STUDY_PACKET_PUBLISHED",
@@ -3884,6 +4036,8 @@ def evaluate_model_council_v3(
         "book_strategy": book_strategy,
         "book_strategy_state": book_strategy_state,
         "book_strategy_playbook": book_strategy.get("playbook"),
+        "candle_movement_context_v3": candle_movement_context,
+        "candle_movement": candle_movement_brief,
         "strategy_read": book_strategy.get("strategy_read"),
         "arbitration_reason": (
             f"{candidate_side} executable via {execution_lane.get('name')}: {execution_lane.get('reason')}"
@@ -4005,6 +4159,8 @@ def evaluate_model_council_v3(
         "book_strategy": book_strategy,
         "book_strategy_state": book_strategy_state,
         "book_strategy_playbook": book_strategy.get("playbook"),
+        "candle_movement_context_v3": candle_movement_context,
+        "candle_movement": candle_movement_brief,
         "strategy_read": book_strategy.get("strategy_read"),
         "final_execution_score": round(float(final_execution_score), 4),
         "final_score": round(float(final_execution_score), 4),
@@ -4119,6 +4275,8 @@ def evaluate_model_council_v3(
         "book_strategy": book_strategy,
         "book_strategy_state": book_strategy_state,
         "book_strategy_playbook": book_strategy.get("playbook"),
+        "candle_movement_context_v3": candle_movement_context,
+        "candle_movement": candle_movement_brief,
         "strategy_read": book_strategy.get("strategy_read"),
         "trade_candidate_queue": trade_candidate_queue,
         "council_scores": council_scores,
@@ -4202,7 +4360,7 @@ def evaluate_model_council_v3(
         result["model_council_study_packet"] = study_packet
         return audit
 
-    if not bool(sequence_readiness.get("ready")):
+    if not bool(sequence_readiness.get("ready")) and not (executable and playbook_enter_now):
         executable = False
         block_reason = "SEQUENCE_CONTEXT"
         blocked_by = block_reason
@@ -4272,6 +4430,17 @@ def evaluate_model_council_v3(
         result["opportunity_maturity_state"] = opportunity_maturity_state
         result["study_packet"] = study_packet
         result["model_council_study_packet"] = study_packet
+    elif not bool(sequence_readiness.get("ready")):
+        promotion_trace["sequence_context_readiness"] = sequence_readiness
+        promotion_trace["sequence_context_ready"] = False
+        promotion_trace["sequence_context_advisory"] = True
+        opportunity_maturity["sequence_context_readiness"] = sequence_readiness
+        opportunity_maturity["sequence_context_ready"] = False
+        opportunity_maturity["sequence_context_role"] = "TRACE_ADVISORY_FOR_PLAYBOOK_AUTHORITY"
+        allowance_package["sequence_context_ready"] = False
+        allowance_package["sequence_context_role"] = "TRACE_ADVISORY_FOR_PLAYBOOK_AUTHORITY"
+        council["sequence_context_readiness"] = sequence_readiness
+        council["sequence_context_ready"] = False
     if not executable:
         _refresh_promotion_failure_audit()
     if executable:
@@ -4337,6 +4506,8 @@ def evaluate_model_council_v3(
         packet["promotion_trace"] = promotion_trace
         packet["opportunity_maturity"] = opportunity_maturity
         packet["opportunity_maturity_state"] = opportunity_maturity_state
+        packet["candle_movement_context_v3"] = candle_movement_context
+        packet["candle_movement"] = candle_movement_brief
         packet["book_strategy"] = book_strategy
         packet["book_strategy_state"] = book_strategy_state
         packet["book_strategy_playbook"] = book_strategy.get("playbook")
@@ -4346,7 +4517,7 @@ def evaluate_model_council_v3(
             packet,
             now=current_now,
             require_executable=True,
-            require_broker_click_safe_identity=packet_identity_mode == "broker_click",
+            require_broker_click_safe_identity=False,
         )
         if not validation.ok:
             runtime_release_condition = (
@@ -4689,9 +4860,12 @@ class ModelCouncilV3:
             self._stable_candidate_count = 0
             self._recent_candidate_sides = []
             self._recent_raw_sides = []
+            working["source_identity_just_switched"] = True
             working["execution_mature"] = False
             working["candidate_stable_reads"] = 0
             working["stability_frames"] = 0
+        else:
+            working["source_identity_just_switched"] = False
         if context_symbol_for_switch or context_timeframe:
             stored_symbol = context_symbol_for_switch
             if not stored_symbol and previous_symbol and not context_switched:
