@@ -54,6 +54,14 @@ HARD_BLOCKED_STUDY_TOKENS = (
     "RESISTANCE_LOCATION_GUARD",
     "BUY_LOW_SELL_HIGH",
 )
+NON_BLOCKING_BAD_ENTRY_CLASSES = {"", "NONE", "OK", "PASS", "CLEAR"}
+DIRECT_ALERT_HARD_BAD_ENTRY_CLASSES = {
+    "AGAINST_GLOBAL_STRUCTURE",
+    "BUY_HIGH_AFTER_IMPULSE",
+    "SELL_LOW_AFTER_DROP",
+    "LATE_CHASE",
+    "LATE_CHASE_STEEP_IMPULSE",
+}
 
 
 def utc_now() -> str:
@@ -456,7 +464,6 @@ def operator_alert_quality_decision(entry: Mapping[str, Any], sample: Mapping[st
     estimated_candles_to_force = number(room.get("estimated_candles_to_force"))
     max_mature_leg = int(number(os.getenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_MAX_MATURE_LEG_CANDLES", "7"), 7) or 7)
     bad_class = text(entry.get("reasoning_bad_entry_class") or entry.get("market_bad_entry_class")).upper()
-    allowed_bad_classes = {"", "NONE", "OK", "PASS", "CLEAR"}
     packet_authority_passed = bool(
         entry.get("allowed")
         and entry.get("execution_authorized")
@@ -465,6 +472,12 @@ def operator_alert_quality_decision(entry: Mapping[str, Any], sample: Mapping[st
     )
     reasons: list[str] = []
     warnings: list[str] = []
+    if bool(entry.get("reasoning_execution_blocked")):
+        reasons.append("REASONING_EXECUTION_BLOCKED")
+    if bool(entry.get("hard_bad_entry_class_active")):
+        reasons.append(f"HARD_BAD_ENTRY_CLASS_{bad_class or 'ACTIVE'}")
+    if bad_class in DIRECT_ALERT_HARD_BAD_ENTRY_CLASSES:
+        reasons.append(f"HARD_BAD_ENTRY_CLASS_{bad_class}")
     if entry_side not in {"BUY", "SELL"}:
         reasons.append("NO_DIRECT_SIDE")
     if freshness.get("fresh") is False:
@@ -479,7 +492,7 @@ def operator_alert_quality_decision(entry: Mapping[str, Any], sample: Mapping[st
         (warnings if packet_authority_passed else reasons).append("LATE_DISTRIBUTION_CONTINUATION")
     if classification == "DISTRIBUTION_CONTINUATION" and leg_stage == "MATURE" and leg_count is not None and leg_count > max_mature_leg:
         (warnings if packet_authority_passed else reasons).append(f"MATURE_CONTINUATION_TOO_EXTENDED_{int(leg_count)}_GT_{max_mature_leg}")
-    if os.getenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_BLOCK_BAD_ENTRY", "1") != "0" and bad_class not in allowed_bad_classes:
+    if os.getenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_BLOCK_BAD_ENTRY", "1") != "0" and bad_class not in NON_BLOCKING_BAD_ENTRY_CLASSES:
         (warnings if packet_authority_passed else reasons).append(f"BAD_ENTRY_CLASS_{bad_class}")
     if estimated_candles_to_force is not None and expected_candles > 0 and estimated_candles_to_force < expected_candles:
         (warnings if packet_authority_passed else reasons).append(
@@ -1754,12 +1767,28 @@ def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str
     )
     entry_now = bool(timing.get("entry_now_allowed") or playbook_authorized)
     blocked_by = text(promotion.get("blocked_by") or promotion.get("denied_at")).upper()
+    reasoning_execution_blocked = bool(promotion.get("reasoning_execution_blocked"))
+    reasoning_bad_entry_class = text(promotion.get("reasoning_bad_entry_class")).upper()
+    market_bad_entry_class = text(promotion.get("market_bad_entry_class")).upper()
+    hard_bad_entry_class_active = bool(promotion.get("hard_bad_entry_class_active")) or (
+        reasoning_bad_entry_class not in NON_BLOCKING_BAD_ENTRY_CLASSES
+        and reasoning_bad_entry_class not in SOFT_BLOCKED_STUDY_REASONS
+    ) or reasoning_bad_entry_class in DIRECT_ALERT_HARD_BAD_ENTRY_CLASSES or market_bad_entry_class in DIRECT_ALERT_HARD_BAD_ENTRY_CLASSES
+    internal_blockers: list[str] = []
+    if reasoning_execution_blocked:
+        internal_blockers.append("REASONING_EXECUTION_BLOCKED")
+    if hard_bad_entry_class_active:
+        internal_blockers.append(f"BAD_ENTRY_CLASS_{reasoning_bad_entry_class or market_bad_entry_class or 'ACTIVE'}")
     runtime_or_strategy_blocked = bool(
         blocked_by.startswith("INSTRUMENT_CONTEXT")
         or blocked_by in STRATEGY_HARD_BLOCKERS
         or blocked_by.startswith("PLAYBOOK_HARD_")
         or blocked_by.startswith("RUNTIME_")
+        or bool(internal_blockers)
     )
+    reported_blocked_by = blocked_by
+    if runtime_or_strategy_blocked and reported_blocked_by in {"", "NONE"} and internal_blockers:
+        reported_blocked_by = internal_blockers[0]
     opportunity_enter_now = bool(opportunity_state in {"", "ENTER_NOW", "SWING_ENTER_NOW", "INTRADAY_ENTER_NOW"})
     strategy_allowed = bool(
         candidate in {"BUY", "SELL"}
@@ -1798,17 +1827,17 @@ def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str
         "allowance_package_execution_ready": allowance_execution_ready,
         "expected_move_time": expected_move_time,
         "timing_mode": text(timing.get("timing_mode") or mapping(timing.get("entry_timing")).get("mode")),
-        "blocked_by": blocked_by,
+        "blocked_by": reported_blocked_by,
         "candidate_id": text(promotion.get("candidate_id")),
         "packet_id": text(promotion.get("packet_id") or council.get("execution_packet_id")),
         "final_score": number(promotion.get("final_score") or promotion.get("final_execution_score")),
         "threshold": number(promotion.get("threshold") or promotion.get("execution_threshold")),
         "next_required": text(promotion.get("next_required") or lane.get("reason")),
         "reasoning_state": text(promotion.get("reasoning_state") or mapping(council.get("final_reasoning_decision")).get("decision")).upper(),
-        "reasoning_execution_blocked": bool(promotion.get("reasoning_execution_blocked")),
-        "hard_bad_entry_class_active": bool(promotion.get("hard_bad_entry_class_active")),
-        "reasoning_bad_entry_class": text(promotion.get("reasoning_bad_entry_class")).upper(),
-        "market_bad_entry_class": text(promotion.get("market_bad_entry_class")).upper(),
+        "reasoning_execution_blocked": reasoning_execution_blocked,
+        "hard_bad_entry_class_active": hard_bad_entry_class_active,
+        "reasoning_bad_entry_class": reasoning_bad_entry_class,
+        "market_bad_entry_class": market_bad_entry_class,
         "opposing_force_ok": bool(promotion.get("opposing_force_ok")),
         "wave_phase": text(wave_context.get("phase")).upper(),
         "wave_entry_ok": bool(wave_context.get("wave_entry_ok")),

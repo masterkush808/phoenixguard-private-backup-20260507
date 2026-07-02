@@ -84,6 +84,44 @@ def test_entry_state_allows_playbook_enter_now_without_legacy_lane_or_packet() -
     assert entry["allowance_mode"] == "playbook_strategy_entry"
 
 
+def test_entry_state_blocks_playbook_enter_now_when_internal_bad_entry_guard_is_active() -> None:
+    live: dict[str, Any] = {}
+    council: dict[str, Any] = {
+        "execution_packet_present": True,
+        "promotion_trace": {
+            "candidate_side": "SELL",
+            "book_strategy_state": "ENTER_NOW",
+            "opportunity_maturity_state": "ENTER_NOW",
+            "blocked_by": "NONE",
+            "timing_decision": {
+                "entry_now_allowed": True,
+                "playbook_strategy_authorized": True,
+                "timing_mode": "ENTER_NOW",
+            },
+            "execution_lane": {"accepted": True, "name": "SNIPER_ZONE_ENTRY"},
+            "allowance_package": {
+                "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3",
+                "accepted": True,
+                "execution_ready": True,
+                "opportunity_maturity": "ENTER_NOW",
+            },
+            "reasoning_execution_blocked": True,
+            "hard_bad_entry_class_active": True,
+            "reasoning_bad_entry_class": "AGAINST_GLOBAL_STRUCTURE",
+            "market_bad_entry_class": "LATE_CHASE_STEEP_IMPULSE",
+        }
+    }
+
+    entry = burn.entry_state(live, council)
+
+    assert entry["allowed"] is False
+    assert entry["execution_authorized"] is False
+    assert entry["playbook_entry_allowed"] is False
+    assert entry["blocked_by"] == "REASONING_EXECUTION_BLOCKED"
+    assert entry["hard_bad_entry_class_active"] is True
+    assert entry["reasoning_bad_entry_class"] == "AGAINST_GLOBAL_STRUCTURE"
+
+
 def test_compact_sample_preserves_candle_movement_context() -> None:
     context: dict[str, Any] = {
         "schema_version": "PG_CANDLE_MOVEMENT_CONTEXT_V3",
@@ -218,6 +256,31 @@ def test_operator_alert_quality_blocks_low_score_without_packet_authority(monkey
     assert decision["allowed"] is False
     assert decision["packet_authority_passed"] is False
     assert "SCORE_BELOW_DIRECT_ALERT_0.66_LT_0.82" in decision["reasons"]
+
+
+def test_operator_alert_quality_blocks_internal_bad_entry_even_after_packet_authority() -> None:
+    entry = _operator_alert_entry(score=0.9, threshold=0.7, leg_count=4, leg_stage="MATURE")
+    entry["reasoning_execution_blocked"] = True
+    entry["hard_bad_entry_class_active"] = True
+    entry["reasoning_bad_entry_class"] = "AGAINST_GLOBAL_STRUCTURE"
+
+    decision = burn.operator_alert_quality_decision(entry, _operator_alert_sample())
+
+    assert decision["allowed"] is False
+    assert decision["packet_authority_passed"] is True
+    assert "REASONING_EXECUTION_BLOCKED" in decision["reasons"]
+    assert "HARD_BAD_ENTRY_CLASS_AGAINST_GLOBAL_STRUCTURE" in decision["reasons"]
+
+
+def test_operator_alert_quality_blocks_hard_bad_entry_class_even_without_flag() -> None:
+    entry = _operator_alert_entry(score=0.9, threshold=0.7, leg_count=4, leg_stage="MATURE")
+    entry["reasoning_bad_entry_class"] = "AGAINST_GLOBAL_STRUCTURE"
+
+    decision = burn.operator_alert_quality_decision(entry, _operator_alert_sample())
+
+    assert decision["allowed"] is False
+    assert decision["packet_authority_passed"] is True
+    assert "HARD_BAD_ENTRY_CLASS_AGAINST_GLOBAL_STRUCTURE" in decision["reasons"]
 
 
 def test_operator_alert_quality_allows_fresh_strong_reclaim() -> None:
