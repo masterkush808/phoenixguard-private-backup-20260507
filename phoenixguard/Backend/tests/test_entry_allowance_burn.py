@@ -179,26 +179,45 @@ def _operator_alert_sample() -> dict[str, Any]:
     }
 
 
-def test_operator_alert_quality_blocks_low_score_against_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_operator_alert_quality_warns_low_score_after_packet_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_MIN_SCORE", "0.70")
     decision = burn.operator_alert_quality_decision(
         _operator_alert_entry(score=0.6641, threshold=0.82, leg_count=5),
         _operator_alert_sample(),
     )
 
-    assert decision["allowed"] is False
-    assert "SCORE_BELOW_DIRECT_ALERT_0.66_LT_0.82" in decision["reasons"]
+    assert decision["allowed"] is True
+    assert decision["packet_authority_passed"] is True
+    assert decision["reasons"] == []
+    assert "SCORE_BELOW_DIRECT_ALERT_0.66_LT_0.82" in decision["warnings"]
 
 
-def test_operator_alert_quality_blocks_mature_distribution_continuation(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_operator_alert_quality_warns_mature_distribution_continuation_after_packet_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_MAX_MATURE_LEG_CANDLES", "7")
     decision = burn.operator_alert_quality_decision(
         _operator_alert_entry(score=0.9, threshold=0.82, leg_count=9, leg_stage="MATURE"),
         _operator_alert_sample(),
     )
 
+    assert decision["allowed"] is True
+    assert decision["packet_authority_passed"] is True
+    assert decision["reasons"] == []
+    assert "MATURE_CONTINUATION_TOO_EXTENDED_9_GT_7" in decision["warnings"]
+
+
+def test_operator_alert_quality_blocks_low_score_without_packet_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_MIN_SCORE", "0.70")
+    entry = _operator_alert_entry(score=0.6641, threshold=0.82, leg_count=5)
+    entry["packet_present"] = False
+    entry["execution_authorized"] = False
+
+    decision = burn.operator_alert_quality_decision(entry, _operator_alert_sample())
+
     assert decision["allowed"] is False
-    assert "MATURE_CONTINUATION_TOO_EXTENDED_9_GT_7" in decision["reasons"]
+    assert decision["packet_authority_passed"] is False
+    assert "SCORE_BELOW_DIRECT_ALERT_0.66_LT_0.82" in decision["reasons"]
 
 
 def test_operator_alert_quality_allows_fresh_strong_reclaim() -> None:

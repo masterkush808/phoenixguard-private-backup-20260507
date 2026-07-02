@@ -457,6 +457,12 @@ def operator_alert_quality_decision(entry: Mapping[str, Any], sample: Mapping[st
     max_mature_leg = int(number(os.getenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_MAX_MATURE_LEG_CANDLES", "7"), 7) or 7)
     bad_class = text(entry.get("reasoning_bad_entry_class") or entry.get("market_bad_entry_class")).upper()
     allowed_bad_classes = {"", "NONE", "OK", "PASS", "CLEAR"}
+    packet_authority_passed = bool(
+        entry.get("allowed")
+        and entry.get("execution_authorized")
+        and entry.get("packet_present")
+        and text(entry.get("blocked_by"), "NONE").upper() in {"", "NONE"}
+    )
     reasons: list[str] = []
     warnings: list[str] = []
     if entry_side not in {"BUY", "SELL"}:
@@ -466,17 +472,19 @@ def operator_alert_quality_decision(entry: Mapping[str, Any], sample: Mapping[st
     if duration_sec <= 0:
         reasons.append("NO_EXPECTED_MOVE_WINDOW")
     if score is None:
-        reasons.append("MISSING_SCORE")
+        (warnings if packet_authority_passed else reasons).append("MISSING_SCORE")
     elif score < required_score:
-        reasons.append(f"SCORE_BELOW_DIRECT_ALERT_{score:.2f}_LT_{required_score:.2f}")
+        (warnings if packet_authority_passed else reasons).append(f"SCORE_BELOW_DIRECT_ALERT_{score:.2f}_LT_{required_score:.2f}")
     if classification == "LATE_DISTRIBUTION_CONTINUATION":
-        reasons.append("LATE_DISTRIBUTION_CONTINUATION_DIRECT_ALERT_BLOCKED")
+        (warnings if packet_authority_passed else reasons).append("LATE_DISTRIBUTION_CONTINUATION")
     if classification == "DISTRIBUTION_CONTINUATION" and leg_stage == "MATURE" and leg_count is not None and leg_count > max_mature_leg:
-        reasons.append(f"MATURE_CONTINUATION_TOO_EXTENDED_{int(leg_count)}_GT_{max_mature_leg}")
+        (warnings if packet_authority_passed else reasons).append(f"MATURE_CONTINUATION_TOO_EXTENDED_{int(leg_count)}_GT_{max_mature_leg}")
     if os.getenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_BLOCK_BAD_ENTRY", "1") != "0" and bad_class not in allowed_bad_classes:
-        reasons.append(f"BAD_ENTRY_CLASS_{bad_class}")
+        (warnings if packet_authority_passed else reasons).append(f"BAD_ENTRY_CLASS_{bad_class}")
     if estimated_candles_to_force is not None and expected_candles > 0 and estimated_candles_to_force < expected_candles:
-        reasons.append(f"OPPOSING_FORCE_ROOM_{estimated_candles_to_force:.1f}_LT_EXPECTED_{expected_candles}")
+        (warnings if packet_authority_passed else reasons).append(
+            f"OPPOSING_FORCE_ROOM_{estimated_candles_to_force:.1f}_LT_EXPECTED_{expected_candles}"
+        )
     if text(room.get("risk_state")).upper() == "TIGHT":
         warnings.append("OPPOSING_FORCE_RISK_TIGHT")
     valid_until_epoch = operator_alert_valid_until_epoch(entry, sample)
@@ -496,6 +504,7 @@ def operator_alert_quality_decision(entry: Mapping[str, Any], sample: Mapping[st
         "current_leg_stage": leg_stage,
         "estimated_candles_to_force": estimated_candles_to_force,
         "bad_entry_class": bad_class,
+        "packet_authority_passed": packet_authority_passed,
     }
 
 
