@@ -386,7 +386,126 @@ def operator_alert_classification(entry: Mapping[str, Any]) -> str:
     return "PLAYBOOK_ENTER_NOW"
 
 
-def operator_alert_message(entry: Mapping[str, Any], sample: Mapping[str, Any]) -> str:
+def timeframe_seconds(value: Any) -> int:
+    raw = text(value, "M5").upper()
+    match = re.fullmatch(r"([MHD])\s*(\d+)", raw)
+    if not match:
+        return 300
+    unit = match.group(1)
+    count = max(1, int(match.group(2)))
+    if unit == "H":
+        return count * 3600
+    if unit == "D":
+        return count * 86400
+    return count * 60
+
+
+def operator_alert_expected_duration_sec(entry: Mapping[str, Any]) -> int:
+    expected = mapping(entry.get("expected_move_time"))
+    duration = number(expected.get("expected_duration_sec"))
+    if duration is not None and duration > 0:
+        return int(round(duration))
+    candle_count = number(expected.get("expected_candle_count"))
+    if candle_count is None or candle_count <= 0:
+        return 0
+    seconds = number(expected.get("timeframe_seconds"))
+    if seconds is None or seconds <= 0:
+        seconds = float(timeframe_seconds(expected.get("timeframe")))
+    return int(round(candle_count * seconds))
+
+
+def operator_alert_expected_candle_count(entry: Mapping[str, Any]) -> int:
+    expected = mapping(entry.get("expected_move_time"))
+    candle_count = number(expected.get("expected_candle_count"))
+    if candle_count is not None and candle_count > 0:
+        return int(round(candle_count))
+    duration = operator_alert_expected_duration_sec(entry)
+    if duration <= 0:
+        return 0
+    seconds = number(expected.get("timeframe_seconds"))
+    if seconds is None or seconds <= 0:
+        seconds = float(timeframe_seconds(expected.get("timeframe")))
+    return max(1, int(math.ceil(float(duration) / max(1.0, seconds))))
+
+
+def epoch_utc_text(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="seconds")
+
+
+def operator_alert_valid_until_epoch(entry: Mapping[str, Any], sample: Mapping[str, Any]) -> float:
+    captured_epoch = number(sample.get("captured_epoch"), time.time())
+    duration = operator_alert_expected_duration_sec(entry)
+    return float(captured_epoch or time.time()) + float(max(0, duration))
+
+
+def operator_alert_quality_decision(entry: Mapping[str, Any], sample: Mapping[str, Any]) -> dict[str, Any]:
+    expected = mapping(entry.get("expected_move_time"))
+    candle = mapping(entry.get("candle_movement"))
+    freshness = mapping(sample.get("freshness"))
+    classification = operator_alert_classification(entry)
+    entry_side = side(entry.get("side"), "")
+    score = number(entry.get("final_score"))
+    threshold = number(entry.get("threshold"))
+    min_score = number(os.getenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_MIN_SCORE", "0.70"), 0.70) or 0.70
+    required_score = max(min_score, threshold if threshold is not None else min_score)
+    duration_sec = operator_alert_expected_duration_sec(entry)
+    expected_candles = operator_alert_expected_candle_count(entry)
+    leg_count = number(expected.get("current_leg_candle_count") or candle.get("current_leg_candle_count"))
+    leg_stage = text(expected.get("current_leg_stage") or candle.get("current_leg_stage")).upper()
+    room = mapping(candle.get("opposing_force_room") or expected.get("opposing_force_room"))
+    estimated_candles_to_force = number(room.get("estimated_candles_to_force"))
+    max_mature_leg = int(number(os.getenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_MAX_MATURE_LEG_CANDLES", "7"), 7) or 7)
+    bad_class = text(entry.get("reasoning_bad_entry_class") or entry.get("market_bad_entry_class")).upper()
+    allowed_bad_classes = {"", "NONE", "OK", "PASS", "CLEAR"}
+    reasons: list[str] = []
+    warnings: list[str] = []
+    if entry_side not in {"BUY", "SELL"}:
+        reasons.append("NO_DIRECT_SIDE")
+    if freshness.get("fresh") is False:
+        reasons.append("FRESHNESS_NOT_PASSING")
+    if duration_sec <= 0:
+        reasons.append("NO_EXPECTED_MOVE_WINDOW")
+    if score is None:
+        reasons.append("MISSING_SCORE")
+    elif score < required_score:
+        reasons.append(f"SCORE_BELOW_DIRECT_ALERT_{score:.2f}_LT_{required_score:.2f}")
+    if classification == "LATE_DISTRIBUTION_CONTINUATION":
+        reasons.append("LATE_DISTRIBUTION_CONTINUATION_DIRECT_ALERT_BLOCKED")
+    if classification == "DISTRIBUTION_CONTINUATION" and leg_stage == "MATURE" and leg_count is not None and leg_count > max_mature_leg:
+        reasons.append(f"MATURE_CONTINUATION_TOO_EXTENDED_{int(leg_count)}_GT_{max_mature_leg}")
+    if os.getenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_BLOCK_BAD_ENTRY", "1") != "0" and bad_class not in allowed_bad_classes:
+        reasons.append(f"BAD_ENTRY_CLASS_{bad_class}")
+    if estimated_candles_to_force is not None and expected_candles > 0 and estimated_candles_to_force < expected_candles:
+        reasons.append(f"OPPOSING_FORCE_ROOM_{estimated_candles_to_force:.1f}_LT_EXPECTED_{expected_candles}")
+    if text(room.get("risk_state")).upper() == "TIGHT":
+        warnings.append("OPPOSING_FORCE_RISK_TIGHT")
+    valid_until_epoch = operator_alert_valid_until_epoch(entry, sample)
+    return {
+        "allowed": not reasons,
+        "reasons": reasons,
+        "warnings": warnings,
+        "classification": classification,
+        "score": score,
+        "threshold": threshold,
+        "required_score": required_score,
+        "expected_duration_sec": duration_sec,
+        "expected_candle_count": expected_candles,
+        "valid_until_epoch": valid_until_epoch,
+        "valid_until_utc": epoch_utc_text(valid_until_epoch),
+        "current_leg_candle_count": leg_count,
+        "current_leg_stage": leg_stage,
+        "estimated_candles_to_force": estimated_candles_to_force,
+        "bad_entry_class": bad_class,
+    }
+
+
+def operator_alert_message(
+    entry: Mapping[str, Any],
+    sample: Mapping[str, Any],
+    quality_gate: Mapping[str, Any] | None = None,
+    *,
+    expired: bool = False,
+) -> str:
     expected = mapping(entry.get("expected_move_time"))
     candle = mapping(entry.get("candle_movement"))
     frames = mapping(sample.get("frames"))
@@ -399,37 +518,57 @@ def operator_alert_message(entry: Mapping[str, Any], sample: Mapping[str, Any]) 
     leg_count = text(expected.get("current_leg_candle_count") or candle.get("current_leg_candle_count"), "?")
     leg_stage = text(expected.get("current_leg_stage") or candle.get("current_leg_stage"), "unknown")
     packet_id = text(entry.get("packet_id"), "missing")
-    classification = operator_alert_classification(entry)
+    gate = mapping(quality_gate) if quality_gate is not None else operator_alert_quality_decision(entry, sample)
+    classification = text(gate.get("classification"), operator_alert_classification(entry))
     score = number(entry.get("final_score"))
     score_text = f"{score:.2f}" if score is not None else "n/a"
+    status = "EXPIRED - DO NOT ENTER" if expired else "ACTIVE DIRECT ENTRY WINDOW"
+    valid_until_epoch = number(gate.get("valid_until_epoch"))
+    valid_until_text = epoch_utc_text(valid_until_epoch) if valid_until_epoch is not None else "unknown"
+    required_score = number(gate.get("required_score"))
+    required_score_text = f"{required_score:.2f}" if required_score is not None else "n/a"
+    room = mapping(candle.get("opposing_force_room"))
+    room_text = text(room.get("estimated_candles_to_force"), "unknown")
     lines = [
         "PHOENIXGUARD TRADE PACKAGE",
         "",
+        f"STATUS: {status}",
         f"ACTION: ENTER {entry_side}",
         f"EXPECTED MOVE TIME: {duration} ({expected_candles} {timeframe} candle(s))",
+        f"VALID UNTIL UTC: {valid_until_text}",
         f"CLASSIFICATION: {classification}",
         "",
         f"PACKET: {packet_id}",
         f"FRAME: {frames.get('display_frame_id')} | CAPTURE: {frames.get('capture_count')}",
         f"LANE: {text(entry.get('lane_name'), 'unknown')}",
         f"AUTHORITY: {text(entry.get('allowance_authority'), PLAYBOOK_EXECUTION_AUTHORITY)}",
-        f"SCORE: {score_text}",
+        f"SCORE: {score_text} | DIRECT ALERT REQUIRED: {required_score_text}",
         "",
         f"CURRENT LEG: {leg_side} | candles={leg_count} | stage={leg_stage}",
         f"VISIBLE CANDLES: {text(candle.get('visible_candle_count'), '?')}",
         f"BOXES WITH ANCHORS: {text(candle.get('boxes_with_anchors'), '?')}",
         f"BOXES WITH CANDLES: {text(candle.get('boxes_with_candles'), '?')}",
+        f"ROOM TO OPPOSING FORCE: {room_text} candle(s)",
         "",
         f"FRESHNESS: {'PASS' if freshness.get('fresh') is not False else 'FAIL'}",
         f"BLOCKER: {text(entry.get('blocked_by'), 'NONE')}",
         f"NEXT REQUIRED: {text(entry.get('next_required'), 'none')}",
         "",
-        "This alert stays open until you confirm I SEE IT.",
+        (
+            "DO NOT ENTER FROM THIS WINDOW. The packet window expired; keep it only as historical evidence."
+            if expired
+            else "This alert stays open until you confirm I SEE IT, but it expires automatically if the packet window passes."
+        ),
     ]
     return "\n".join(lines)
 
 
-def launch_operator_alert(out_dir: Path, entry: Mapping[str, Any], sample: Mapping[str, Any]) -> dict[str, Any]:
+def launch_operator_alert(
+    out_dir: Path,
+    entry: Mapping[str, Any],
+    sample: Mapping[str, Any],
+    quality_gate: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     alerts_dir = out_dir / "operator_alerts"
     alerts_dir.mkdir(parents=True, exist_ok=True)
     seq = int(sample.get("seq", 0) or 0)
@@ -439,18 +578,26 @@ def launch_operator_alert(out_dir: Path, entry: Mapping[str, Any], sample: Mappi
     stamp = int(float(sample.get("captured_epoch") or time.time()) * 1000.0)
     stem = f"{seq:05d}_{frame:06d}_{stamp}_{entry_side.lower()}_{packet_id}"
     message_path = alerts_dir / f"{stem}_message.txt"
+    expired_message_path = alerts_dir / f"{stem}_expired_message.txt"
     script_path = alerts_dir / f"{stem}_alert.ps1"
     meta_path = alerts_dir / f"{stem}.json"
-    message = operator_alert_message(entry, sample)
+    gate = mapping(quality_gate) if quality_gate is not None else operator_alert_quality_decision(entry, sample)
+    message = operator_alert_message(entry, sample, gate)
+    expired_message = operator_alert_message(entry, sample, gate, expired=True)
     message_path.write_text(message, encoding="utf-8")
+    expired_message_path.write_text(expired_message, encoding="utf-8")
     title = f"PhoenixGuard ENTER {entry_side} | {text(mapping(entry.get('expected_move_time')).get('expected_duration_text'), 'duration')}"
+    valid_until_epoch = number(gate.get("valid_until_epoch"), time.time()) or time.time()
     script = f"""
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Media.SystemSounds]::Exclamation.Play()
 $message = Get-Content -LiteralPath {ps_single_quote(str(message_path))} -Raw
+$expiredMessage = Get-Content -LiteralPath {ps_single_quote(str(expired_message_path))} -Raw
+$validUntilEpoch = [double]{valid_until_epoch:.3f}
+$baseTitle = {ps_single_quote(title)}
 $form = New-Object System.Windows.Forms.Form
-$form.Text = {ps_single_quote(title)}
+$form.Text = $baseTitle
 $form.TopMost = $true
 $form.StartPosition = 'CenterScreen'
 $form.Size = New-Object System.Drawing.Size(720, 520)
@@ -476,8 +623,25 @@ $button.Font = New-Object System.Drawing.Font('Segoe UI', 14, [System.Drawing.Fo
 $button.Add_Click({{$form.Close()}})
 $form.Controls.Add($label)
 $form.Controls.Add($button)
+$expired = $false
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 1000
+$timer.Add_Tick({{
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0
+    if ((-not $expired) -and $now -ge $validUntilEpoch) {{
+        $expired = $true
+        $form.Text = 'PhoenixGuard EXPIRED - DO NOT ENTER'
+        $form.BackColor = [System.Drawing.Color]::FromArgb(32, 10, 10)
+        $label.BackColor = $form.BackColor
+        $label.ForeColor = [System.Drawing.Color]::FromArgb(255, 180, 150)
+        $label.Text = $expiredMessage
+        [System.Media.SystemSounds]::Hand.Play()
+    }}
+}})
 $form.Add_Shown({{$form.Activate(); $form.BringToFront()}})
+$timer.Start()
 [void]$form.ShowDialog()
+$timer.Stop()
 """
     script_path.write_text(script.strip() + "\n", encoding="utf-8")
     meta: dict[str, Any] = {
@@ -488,8 +652,13 @@ $form.Add_Shown({{$form.Activate(); $form.BringToFront()}})
         "side": entry_side,
         "packet_id": text(entry.get("packet_id"), ""),
         "expected_move_time": mapping(entry.get("expected_move_time")),
-        "classification": operator_alert_classification(entry),
+        "classification": text(gate.get("classification"), operator_alert_classification(entry)),
+        "quality_gate": gate,
+        "expected_duration_sec": gate.get("expected_duration_sec"),
+        "valid_until_epoch": gate.get("valid_until_epoch"),
+        "valid_until_utc": gate.get("valid_until_utc"),
         "message_path": str(message_path),
+        "expired_message_path": str(expired_message_path),
         "script_path": str(script_path),
         "launched": False,
     }
@@ -2619,10 +2788,27 @@ def main() -> int:
                 event["manual_alert_suppressed_observations"] = manual_alert_suppressed_observations
                 event["blocked_trend_aligned_study_observations"] = blocked_trend_aligned_study_observations
                 if bool(args.operator_alert) and packet_backed_allowed_observation:
+                    alert_quality = operator_alert_quality_decision(entry, sample)
+                    event["operator_alert_quality"] = alert_quality
                     alert_packet_key = text(entry.get("packet_id")) or entry_key
-                    if alert_packet_key and alert_packet_key not in operator_alert_packets:
+                    if not bool(alert_quality.get("allowed")):
+                        blocked_alert = {
+                            "schema_version": "PG_OPERATOR_ALERT_V1",
+                            "created_at_utc": utc_now(),
+                            "seq": seq,
+                            "frame": mapping(sample.get("frames")).get("display_frame_id"),
+                            "side": entry.get("side"),
+                            "packet_id": text(entry.get("packet_id"), ""),
+                            "launched": False,
+                            "suppressed": True,
+                            "suppressed_reason": text(";".join(str(item) for item in sequence(alert_quality.get("reasons"))), "QUALITY_GATE_BLOCKED"),
+                            "quality_gate": alert_quality,
+                        }
+                        event["operator_alert"] = blocked_alert
+                        append_jsonl(operator_alerts_path, blocked_alert)
+                    elif alert_packet_key and alert_packet_key not in operator_alert_packets:
                         operator_alert_packets.add(alert_packet_key)
-                        operator_alert = launch_operator_alert(out_dir, entry, sample)
+                        operator_alert = launch_operator_alert(out_dir, entry, sample, alert_quality)
                         operator_alert_count += 1
                         event["operator_alert"] = operator_alert
                         event["operator_alert_count"] = operator_alert_count

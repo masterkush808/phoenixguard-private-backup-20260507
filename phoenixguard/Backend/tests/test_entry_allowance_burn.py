@@ -125,6 +125,109 @@ def test_compact_sample_preserves_candle_movement_context() -> None:
     assert sample["entry"]["candle_movement"]["move_duration"]["minutes"] == 70.0
 
 
+def _operator_alert_entry(
+    *,
+    score: float,
+    threshold: float = 0.82,
+    leg_count: int = 5,
+    leg_stage: str = "STILL_RECLAIMING",
+    bad_class: str = "",
+) -> dict[str, Any]:
+    return {
+        "allowed": True,
+        "execution_authorized": True,
+        "packet_present": True,
+        "side": "BUY",
+        "packet_id": "pgpkt_test",
+        "lane_name": "MOMENTUM_ACCEPTANCE_ENTRY",
+        "allowance_authority": burn.PLAYBOOK_EXECUTION_AUTHORITY,
+        "final_score": score,
+        "threshold": threshold,
+        "reasoning_bad_entry_class": bad_class,
+        "expected_move_time": {
+            "expected_duration_sec": 600,
+            "expected_duration_text": "10m 00s",
+            "timeframe": "M5",
+            "timeframe_seconds": 300,
+            "expected_candle_count": 2,
+            "current_leg_candle_count": leg_count,
+            "current_leg_side": "BUY",
+            "current_leg_stage": leg_stage,
+        },
+        "candle_movement": {
+            "visible_candle_count": 49,
+            "current_leg_side": "BUY",
+            "current_leg_candle_count": leg_count,
+            "current_leg_stage": leg_stage,
+            "boxes_with_anchors": 25,
+            "boxes_with_candles": 27,
+            "opposing_force_room": {
+                "room_ok": True,
+                "risk_state": "OPEN",
+                "estimated_candles_to_force": 6,
+            },
+        },
+    }
+
+
+def _operator_alert_sample() -> dict[str, Any]:
+    return {
+        "seq": 10,
+        "captured_epoch": 1000.0,
+        "frames": {"display_frame_id": 194, "capture_count": 194},
+        "freshness": {"fresh": True},
+    }
+
+
+def test_operator_alert_quality_blocks_low_score_against_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_MIN_SCORE", "0.70")
+    decision = burn.operator_alert_quality_decision(
+        _operator_alert_entry(score=0.6641, threshold=0.82, leg_count=5),
+        _operator_alert_sample(),
+    )
+
+    assert decision["allowed"] is False
+    assert "SCORE_BELOW_DIRECT_ALERT_0.66_LT_0.82" in decision["reasons"]
+
+
+def test_operator_alert_quality_blocks_mature_distribution_continuation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_BURN_OPERATOR_ALERT_MAX_MATURE_LEG_CANDLES", "7")
+    decision = burn.operator_alert_quality_decision(
+        _operator_alert_entry(score=0.9, threshold=0.82, leg_count=9, leg_stage="MATURE"),
+        _operator_alert_sample(),
+    )
+
+    assert decision["allowed"] is False
+    assert "MATURE_CONTINUATION_TOO_EXTENDED_9_GT_7" in decision["reasons"]
+
+
+def test_operator_alert_quality_allows_fresh_strong_reclaim() -> None:
+    decision = burn.operator_alert_quality_decision(
+        _operator_alert_entry(score=0.9, threshold=0.82, leg_count=5, leg_stage="STILL_RECLAIMING"),
+        _operator_alert_sample(),
+    )
+
+    assert decision["allowed"] is True
+    assert decision["classification"] == "DISTRIBUTION_CONTINUATION"
+    assert decision["expected_duration_sec"] == 600
+    assert decision["valid_until_epoch"] == 1600.0
+
+
+def test_operator_alert_message_explicitly_expires_packet_window() -> None:
+    entry = _operator_alert_entry(score=0.9, threshold=0.82, leg_count=5, leg_stage="STILL_RECLAIMING")
+    sample = _operator_alert_sample()
+    gate = burn.operator_alert_quality_decision(entry, sample)
+
+    active = burn.operator_alert_message(entry, sample, gate)
+    expired = burn.operator_alert_message(entry, sample, gate, expired=True)
+
+    assert "STATUS: ACTIVE DIRECT ENTRY WINDOW" in active
+    assert "VALID UNTIL UTC:" in active
+    assert "SCORE: 0.90 | DIRECT ALERT REQUIRED: 0.82" in active
+    assert "STATUS: EXPIRED - DO NOT ENTER" in expired
+    assert "DO NOT ENTER FROM THIS WINDOW" in expired
+
+
 def test_runtime_freshness_prefers_fresh_published_frame_over_old_display_capture(monkeypatch: pytest.MonkeyPatch) -> None:
     now = time.time()
     monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "4")
