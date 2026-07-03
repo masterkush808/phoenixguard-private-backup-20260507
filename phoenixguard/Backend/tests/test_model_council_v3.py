@@ -302,7 +302,9 @@ def test_high_frequency_two_candle_contributes_to_local_breakdown_without_lane_a
 
     assert result["packet_type"] == "PG_EXECUTION_PACKET_V3"
     assert result["execution"]["side"] == "BUY"
-    assert result["execution"]["expiry_seconds"] == 600
+    assert result["execution"]["expiry_seconds"] >= 60 * 60
+    assert result["allowance_package"]["entry_window"]["duration_sec"] == 600
+    assert result["allowance_package"]["thesis_horizon"]["expected_candle_count"] >= 12
     assert result["selected_execution_lane"] == "LOCAL_BREAKDOWN_CONTINUATION"
     lane = result["model_council"]["execution_lane"]
     assert "HIGH_FREQUENCY_TWO_CANDLE" not in lane["accepted_lanes"]
@@ -1351,6 +1353,130 @@ def test_execution_packet_publishes_after_all_release_conditions_pass() -> None:
     assert packet["promotion_trace"]["allowance_package"]["package_type"] == "INTRADAY_ENTER_NOW"
 
 
+def test_strategy_package_uses_visible_swing_horizon_not_one_candle_scalp() -> None:
+    council = ModelCouncilV3()
+    first = _strong_snapshot("BUY", frame_id=100)
+    second = _strong_snapshot("BUY", frame_id=101)
+    for snapshot in (first, second):
+        snapshot["candidate_side"] = "BUY"
+        snapshot["tracking_summary"] = {
+            "entry_state": "SNIPER_READY",
+            "local_direction": "BUY",
+            "global_direction": "BUY",
+            "visible_candle_count": 52,
+            "historical_structure": [
+                {"label": "H1 SELL", "direction": "SELL", "candle_count": 7},
+                {"label": "H2 BUY", "direction": "BUY", "candle_count": 10},
+                {"label": "H3 SELL", "direction": "SELL", "candle_count": 6},
+                {"label": "H4 BUY", "direction": "BUY", "candle_count": 9},
+            ],
+        }
+        snapshot["risk_opposing_force"]["distance_to_opposing_force"] = 0.34
+        snapshot["risk_opposing_force"]["distance_ok"] = True
+        snapshot["timing"]["expiry_seconds"] = 300
+        snapshot["timing"]["target_time_text"] = "00:05:00"
+
+    council.evaluate(first, now_epoch=NOW)
+    packet = council.evaluate(second, now_epoch=NOW + 0.5)
+
+    expected = packet["allowance_package"]["expected_move_time"]
+    assert packet["execution"]["enabled"] is True
+    assert packet["execution"]["expiry_seconds"] >= 60 * 60
+    assert packet["allowance_package"]["entry_window"]["duration_sec"] == 300
+    assert packet["allowance_package"]["entry_window"]["candle_count"] == 1
+    assert packet["allowance_package"]["thesis_horizon"]["expected_candle_count"] >= 12
+    assert packet["allowance_package"]["professional_trade_plan"]["professional_grade"] is True
+    assert expected["expected_candle_count"] >= 12
+    assert expected["basis"] == "professional_visible_history_memory_trend_plan"
+    assert expected["projection_horizon"]["basis"] == "visible_swing_leg_room_projection"
+    assert expected["projection_horizon"]["applied"] is True
+
+
+def test_unresolved_countertrend_cannot_publish_professional_package() -> None:
+    council = ModelCouncilV3()
+    first = _strong_snapshot("BUY", frame_id=140)
+    second = _strong_snapshot("BUY", frame_id=141)
+    for snapshot in (first, second):
+        snapshot["global_structure"]["global_side"] = "SELL"
+        snapshot["candidate_side"] = "BUY"
+        snapshot["action"] = "BUY"
+        snapshot["buy_score"] = 0.90
+        snapshot["sell_score"] = 0.02
+        snapshot["market_context"]["global_side"] = "SELL"
+        snapshot["market_context"]["dominant_side"] = "SELL"
+        snapshot["local_micro_structure"]["local_side"] = "BUY"
+        snapshot["market_context"]["local_side"] = "BUY"
+        snapshot["role_flip_confirmed"] = False
+        snapshot["break_of_structure_confirmed"] = False
+        snapshot["retest_confirmed"] = False
+        snapshot["liquidity_sweep_detected"] = False
+        snapshot["tracking_summary"] = {
+            "entry_state": "SNIPER_READY",
+            "local_direction": "BUY",
+            "global_direction": "SELL",
+            "visible_candle_count": 50,
+            "historical_structure": [
+                {"label": "H1 SELL", "direction": "SELL", "candle_count": 15},
+                {"label": "H2 BUY", "direction": "BUY", "candle_count": 4},
+            ],
+        }
+
+    council.evaluate(first, now_epoch=NOW)
+    result = council.evaluate(second, now_epoch=NOW + 0.5)
+
+    assert result["packet_type"] != "PG_EXECUTION_PACKET_V3"
+    assert result["opportunity_maturity"]["professional_trade_plan"]["professional_grade"] is False
+    assert result["opportunity_maturity"]["professional_trade_plan"]["blocker"] == "PROFESSIONAL_COUNTERTREND_NOT_CONFIRMED"
+
+
+def test_against_global_structure_blocks_playbook_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _against_structure_reasoning(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "arbitration": {"state": "BLOCKED"},
+            "final_reasoning_decision": {
+                "decision": "EXECUTE",
+                "side": "SELL",
+                "confidence": 0.82,
+                "reason": "Forced test fixture.",
+            },
+            "bad_entry_filter": {
+                "active": True,
+                "class": "AGAINST_GLOBAL_STRUCTURE",
+                "severity": 0.68,
+                "action": "WAIT_FOR_REJECTION",
+                "reason": "Candidate side is against global structure without reversal confirmation.",
+            },
+            "model_role_outputs": [],
+        }
+
+    monkeypatch.setattr(
+        "phoenixguard.decision.model_council_v3.analyze_reasoning_arbitration_v3",
+        _against_structure_reasoning,
+    )
+    council = ModelCouncilV3()
+    first = _strong_snapshot("SELL", frame_id=100)
+    second = _strong_snapshot("SELL", frame_id=101)
+    for snapshot in (first, second):
+        snapshot["candidate_side"] = "SELL"
+        snapshot["global_structure"]["global_side"] = "BUY"
+        snapshot["market_context"]["global_side"] = "BUY"
+        snapshot["market_context"]["dominant_side"] = "SELL"
+
+    council.evaluate(first, now_epoch=NOW)
+    result = council.evaluate(second, now_epoch=NOW + 0.5)
+
+    assert result["execution"]["enabled"] is False
+    assert result["packet_type"] == "STUDY_PACKET"
+    assert result["promotion_trace"]["hard_bad_entry_class_active"] is True
+    assert result["promotion_trace"]["reasoning_bad_entry_class"] == "AGAINST_GLOBAL_STRUCTURE"
+    assert result["promotion_trace"]["true_blocker"] in {
+        "PLAYBOOK_MATURITY_NO_OPPORTUNITY",
+        "PLAYBOOK_MATURITY_INVALIDATED",
+        "BAD_ENTRY_FILTER",
+        "PLAYBOOK_INVALIDATED",
+    }
+
+
 def test_true_blocker_reported_not_generic_late_chase_reason() -> None:
     snapshot = _strong_snapshot("SELL", frame_id=100)
     snapshot["timing"] = {
@@ -1979,7 +2105,9 @@ def test_execution_packet_v3_contains_required_fields() -> None:
     assert packet["opportunity_maturity_state"] == "ENTER_NOW"
     assert packet["opportunity_maturity"]["state"] == "ENTER_NOW"
     assert packet["visual_integrity"] == "PASS"
-    assert packet["execution"]["time_sequence"]["target_text"] == "00:05:00"
+    assert packet["execution"]["expiry_seconds"] >= 60 * 60
+    assert packet["allowance_package"]["entry_window"]["duration_sec"] == 300
+    assert packet["allowance_package"]["thesis_horizon"]["expected_candle_count"] >= 12
     assert packet["model_council"]["contributors_are_diagnostic"] is True
     assert packet["promotion_trace"]["promotion_result"] == "EXECUTABLE_PACKET_CREATED"
     assert packet["instrument_context"]["identity_state"] == "IDENTITY_CONFIRMED"

@@ -39,6 +39,25 @@ BookReactionType = Literal[
     "NO_REACTION",
 ]
 
+MarketPhaseV3 = Literal[
+    "BUY_TREND",
+    "BUY_IN_BUY_CONTINUATION",
+    "SELL_IN_BUY_PULLBACK",
+    "SELL_IN_BUY_DISTRIBUTION",
+    "SELL_IN_BUY_REVERSAL_ATTEMPT",
+    "BUY_PAUSE_IN_BUY",
+    "SELL_TREND",
+    "SELL_IN_SELL_CONTINUATION",
+    "BUY_IN_SELL_PULLBACK",
+    "BUY_IN_SELL_ACCUMULATION",
+    "BUY_IN_SELL_REVERSAL_ATTEMPT",
+    "SELL_PAUSE_IN_SELL",
+    "RANGE_ACCUMULATION",
+    "RANGE_DISTRIBUTION",
+    "CHOP_NO_TRADE",
+    "UNKNOWN",
+]
+
 BOOK_STRATEGY_MATURITY_STATES: tuple[BookMaturityState, ...] = (
     "NO_OPPORTUNITY",
     "EARLY_FORMING",
@@ -83,6 +102,8 @@ BOOK_STRATEGY_PLAYBOOKS: tuple[str, ...] = (
     "FAILED_DEMAND_RECLAIM_SELL_CONTINUATION",
     "FAILED_SELL_INTO_DEMAND_BUY_REVERSAL",
     "FAILED_BUY_INTO_SUPPLY_SELL_REVERSAL",
+    "SELL_IN_BUY_PROFESSIONAL_COUNTER_LEG",
+    "BUY_IN_SELL_PROFESSIONAL_COUNTER_LEG",
     "TRENDLINE_CONFLUENCE_BOUNCE",
     "TRENDLINE_BREAK_RETEST",
     "CHANNEL_EDGE_REACTION",
@@ -92,6 +113,25 @@ BOOK_STRATEGY_PLAYBOOKS: tuple[str, ...] = (
     "CANDLE_CONFIRMATION_AT_ZONE",
     "COUNTERTREND_SCALP_ONLY",
     "CHOP_NO_TRADE",
+)
+
+MARKET_PHASES_V3: tuple[MarketPhaseV3, ...] = (
+    "BUY_TREND",
+    "BUY_IN_BUY_CONTINUATION",
+    "SELL_IN_BUY_PULLBACK",
+    "SELL_IN_BUY_DISTRIBUTION",
+    "SELL_IN_BUY_REVERSAL_ATTEMPT",
+    "BUY_PAUSE_IN_BUY",
+    "SELL_TREND",
+    "SELL_IN_SELL_CONTINUATION",
+    "BUY_IN_SELL_PULLBACK",
+    "BUY_IN_SELL_ACCUMULATION",
+    "BUY_IN_SELL_REVERSAL_ATTEMPT",
+    "SELL_PAUSE_IN_SELL",
+    "RANGE_ACCUMULATION",
+    "RANGE_DISTRIBUTION",
+    "CHOP_NO_TRADE",
+    "UNKNOWN",
 )
 
 ENTER_NOW_LANES: frozenset[str] = frozenset(
@@ -106,6 +146,7 @@ ENTER_NOW_LANES: frozenset[str] = frozenset(
 )
 PLAYBOOK_HARD_BAD_ENTRY_CLASSES: frozenset[str] = frozenset(
     {
+        "AGAINST_GLOBAL_STRUCTURE",
         "BUY_HIGH_AFTER_IMPULSE",
         "SELL_LOW_AFTER_DROP",
         "LATE_CHASE",
@@ -187,6 +228,48 @@ def _side(value: Any) -> str:
 
 def _opposite_side(side: str) -> str:
     return "SELL" if side == "BUY" else "BUY" if side == "SELL" else "HOLD"
+
+
+def _market_phase_v3(
+    *,
+    side: str,
+    primary_bias_side: str,
+    current_leg_side: str,
+    current_leg_candle_count: int,
+    movement_stage: str,
+    professional_counter_leg: bool,
+    countertrend_reversal_override: bool,
+    conflict_market: bool,
+) -> MarketPhaseV3:
+    if conflict_market:
+        return "CHOP_NO_TRADE"
+    if primary_bias_side == "BUY":
+        if side == "BUY" and current_leg_side == "BUY":
+            return "BUY_IN_BUY_CONTINUATION"
+        if current_leg_side == "SELL" or side == "SELL":
+            if professional_counter_leg:
+                return "SELL_IN_BUY_DISTRIBUTION"
+            if countertrend_reversal_override:
+                return "SELL_IN_BUY_REVERSAL_ATTEMPT"
+            return "SELL_IN_BUY_PULLBACK"
+        if current_leg_candle_count <= 1 or movement_stage in {"PAUSE", "RANGE", "UNKNOWN"}:
+            return "BUY_PAUSE_IN_BUY"
+        return "BUY_TREND"
+    if primary_bias_side == "SELL":
+        if side == "SELL" and current_leg_side == "SELL":
+            return "SELL_IN_SELL_CONTINUATION"
+        if current_leg_side == "BUY" or side == "BUY":
+            if professional_counter_leg:
+                return "BUY_IN_SELL_ACCUMULATION"
+            if countertrend_reversal_override:
+                return "BUY_IN_SELL_REVERSAL_ATTEMPT"
+            return "BUY_IN_SELL_PULLBACK"
+        if current_leg_candle_count <= 1 or movement_stage in {"PAUSE", "RANGE", "UNKNOWN"}:
+            return "SELL_PAUSE_IN_SELL"
+        return "SELL_TREND"
+    if movement_stage in {"RANGE", "CHOP", "CONSOLIDATION"}:
+        return "RANGE_ACCUMULATION" if side == "BUY" else "RANGE_DISTRIBUTION" if side == "SELL" else "CHOP_NO_TRADE"
+    return "UNKNOWN"
 
 
 def _first_side(*values: Any) -> str:
@@ -747,6 +830,8 @@ def _select_playbook(
     play_stage = _upper(market_play.get("play_stage") or market_context.get("play_stage"))
     if _bool(evidence.get("conflict_market")):
         return "CHOP_NO_TRADE"
+    if _bool(evidence.get("counter_leg_is_current_truth")):
+        return "SELL_IN_BUY_PROFESSIONAL_COUNTER_LEG" if side == "SELL" else "BUY_IN_SELL_PROFESSIONAL_COUNTER_LEG"
     if _bool(evidence.get("failed_continuation_reversal")):
         return "FAILED_SELL_INTO_DEMAND_BUY_REVERSAL" if side == "BUY" else "FAILED_BUY_INTO_SUPPLY_SELL_REVERSAL"
     if _bool(evidence.get("countertrend_scalp_only")):
@@ -1082,6 +1167,23 @@ def evaluate_book_strategy_master_v3(
         or (liquidity_sweep_detected and (retest_confirmed or current_candle_ok or measured_reaction_accepted))
         or failed_continuation_reversal
     )
+    professional_thesis_resolution = _mapping(snapshot.get("professional_thesis_resolution_v3"))
+    professional_thesis_state = _upper(professional_thesis_resolution.get("thesis_state"))
+    professional_counter_leg = bool(
+        professional_thesis_state
+        in {
+            "SELL_IN_BUY_TRADEABLE_COUNTER_LEG",
+            "BUY_IN_SELL_TRADEABLE_COUNTER_LEG",
+        }
+    )
+    counter_leg_is_current_truth = bool(
+        professional_counter_leg
+        and current_leg_side == side
+        and side in {"BUY", "SELL"}
+        and primary_bias_side == _opposite_side(side)
+        and not current_leg_exhausted
+        and opposing_force_ok
+    )
     timing_waiting = bool(_upper(timing_mode) != "ENTER_NOW" or not timing_enter_now)
     local_counter_without_reclaim = bool(countertrend_against_local and not countertrend_reversal_override)
     primary_counter_without_reclaim = bool(countertrend_against_primary and not countertrend_reversal_override)
@@ -1090,16 +1192,19 @@ def evaluate_book_strategy_master_v3(
         side in {"BUY", "SELL"}
         and (primary_counter_without_reclaim or local_counter_without_reclaim)
         and weak_countertrend_conditions
+        and not counter_leg_is_current_truth
     )
     large_move_bias_aligned = bool(
         side in {"BUY", "SELL"}
         and not countertrend_scalp_only
-        and (aligned_with_primary_bias or countertrend_reversal_override)
+        and (aligned_with_primary_bias or countertrend_reversal_override or counter_leg_is_current_truth)
     )
     if side not in {"BUY", "SELL"}:
         bias_alignment = "NO_DIRECTION"
     elif countertrend_scalp_only:
         bias_alignment = "COUNTERTREND_SCALP_ONLY"
+    elif counter_leg_is_current_truth:
+        bias_alignment = professional_thesis_state
     elif countertrend_reversal_override and (countertrend_against_global or countertrend_against_local or countertrend_against_primary):
         bias_alignment = "REVERSAL_OVERRIDE"
     elif aligned_with_primary_bias:
@@ -1165,11 +1270,13 @@ def evaluate_book_strategy_master_v3(
             or structure_shift_confirmed
             or measured_reaction_accepted
             or failed_continuation_reversal
+            or counter_leg_is_current_truth
             or lane_name in ENTER_NOW_LANES
         )
     )
     movement_supports_book_reaction = bool(
         failed_continuation_reversal
+        or counter_leg_is_current_truth
         or (
             movement_context_present
             and (
@@ -1288,6 +1395,9 @@ def evaluate_book_strategy_master_v3(
         "countertrend_against_local": countertrend_against_local,
         "countertrend_against_primary": countertrend_against_primary,
         "countertrend_reversal_override": countertrend_reversal_override,
+        "professional_thesis_state": professional_thesis_state,
+        "professional_counter_leg": professional_counter_leg,
+        "counter_leg_is_current_truth": counter_leg_is_current_truth,
         "countertrend_scalp_only": countertrend_scalp_only,
         "large_move_bias_aligned": large_move_bias_aligned,
         "active_zone_id": str(active_zone.get("zone_id") or active_zone.get("id") or active_zone.get("key") or ""),
@@ -1305,6 +1415,17 @@ def evaluate_book_strategy_master_v3(
         "runtime_model_health_present": bool(runtime_model_health),
         "api_health_present": bool(api_health),
     }
+    market_phase = _market_phase_v3(
+        side=side,
+        primary_bias_side=primary_bias_side,
+        current_leg_side=current_leg_side,
+        current_leg_candle_count=current_leg_candle_count,
+        movement_stage=movement_stage,
+        professional_counter_leg=counter_leg_is_current_truth,
+        countertrend_reversal_override=countertrend_reversal_override,
+        conflict_market=conflict_market,
+    )
+    play_evidence["market_phase_v3"] = market_phase
     playbook = _select_playbook(
         side=side,
         lane_name=lane_name,
@@ -1323,7 +1444,7 @@ def evaluate_book_strategy_master_v3(
 
     measured_reaction_can_override_timing = bool(
         measured_reaction_accepted
-        and not countertrend_scalp_only
+        and (not countertrend_scalp_only or counter_leg_is_current_truth)
         and (large_move_bias_aligned or countertrend_reversal_override or lane_authority_ready)
     )
     timing_supportive = bool(
@@ -1331,8 +1452,8 @@ def evaluate_book_strategy_master_v3(
         or measured_reaction_can_override_timing
         or (
             current_candle_ok
-            and not countertrend_scalp_only
-            and (inside_trigger or retest_confirmed or continuation_confirmed or failed_continuation_reversal)
+            and (not countertrend_scalp_only or counter_leg_is_current_truth)
+            and (inside_trigger or retest_confirmed or continuation_confirmed or failed_continuation_reversal or counter_leg_is_current_truth)
         )
     )
     play_evidence["measured_reaction_can_override_timing"] = measured_reaction_can_override_timing
@@ -1432,18 +1553,31 @@ def evaluate_book_strategy_master_v3(
             "The playbook rejects this entry location; wait for a cleaner pullback, retest, or path-room reset.",
             hard=True,
         )
-    if countertrend_scalp_only:
+    if countertrend_scalp_only and not counter_leg_is_current_truth:
         add_blocker(
             "bias_alignment",
             bias_alignment,
             "primary-bias aligned entry or confirmed reclaim/role-flip reversal",
             "Local reaction is only a minor countertrend/scalp read; wait for bias-aligned continuation or a confirmed reclaim/role flip.",
+            hard=True,
         )
-    elif (countertrend_against_global or countertrend_against_local or countertrend_against_primary) and not countertrend_reversal_override:
+    elif (
+        countertrend_against_global
+        or countertrend_against_local
+        or countertrend_against_primary
+    ) and not countertrend_reversal_override and not counter_leg_is_current_truth:
+        add_blocker(
+            "bias_alignment",
+            bias_alignment,
+            "primary-bias aligned entry or confirmed reclaim/role-flip reversal",
+            "Countertrend read remains watch-only until reclaim, role flip, or major structure invalidation confirms adaptation.",
+            hard=True,
+        )
+    elif counter_leg_is_current_truth:
         add_warning(
             "bias_alignment",
             bias_alignment,
-            "countertrend read remains watch-only until reclaim, role flip, or major structure invalidation confirms adaptation",
+            "professional_counter_leg_is_allowed_because_current_leg_truth_overrides_bias_marriage",
         )
     if history_exit_here:
         add_blocker("history_exit_here", True, False, "Historical analog says this area is closer to exit/protection than entry.")
@@ -1544,6 +1678,7 @@ def evaluate_book_strategy_master_v3(
     evidence_score += 0.08 if trendline_confluence else 0.0
     evidence_score += 0.08 if break_of_structure_confirmed or structure_shift_confirmed else 0.0
     evidence_score += 0.10 if failed_continuation_reversal else 0.0
+    evidence_score += 0.10 if counter_leg_is_current_truth else 0.0
     evidence_score += 0.08 if _bool(significant_structure.get("significant")) else 0.0
     evidence_score += 0.10 * _clip01(candle_reaction.get("reaction_quality"), 0.0)
     evidence_score += 0.06 if entry_profile in {"AGGRESSIVE_SNIPER", "CONSERVATIVE_RETEST", "CONTINUATION_RETEST", "REVERSAL_RECLAIM"} else 0.0
@@ -1556,7 +1691,7 @@ def evaluate_book_strategy_master_v3(
     evidence_score -= 0.14 if history_exit_here else 0.0
     evidence_score -= 0.12 if conflict_market else 0.0
     confidence = _clip01(0.25 + evidence_score - (0.10 * len(hard_blockers)) - (0.025 * max(0, len(blockers) - len(hard_blockers))))
-    if state == "ENTER_NOW" and not countertrend_scalp_only:
+    if state == "ENTER_NOW" and (not countertrend_scalp_only or counter_leg_is_current_truth):
         confidence = max(confidence, min(0.99, _clip01(lane_score, 0.0)))
     next_required = _next_required_for_state(state, blockers, playbook)
     if state != "ENTER_NOW" and not blockers and soft_warnings:
@@ -1571,6 +1706,7 @@ def evaluate_book_strategy_master_v3(
         "signal": playbook_signal,
         "playbook": playbook,
         "entry_profile": entry_profile,
+        "market_phase_v3": market_phase,
         "reaction_type": candle_reaction.get("reaction_type"),
         "structure_type": significant_structure.get("structure_type"),
         "strategy_combo": strategy_combo,
@@ -1593,6 +1729,7 @@ def evaluate_book_strategy_master_v3(
         "side": side,
         "playbook_signal": playbook_signal,
         "entry_profile": entry_profile,
+        "market_phase_v3": market_phase,
         "reaction_type": candle_reaction.get("reaction_type"),
         "significant_structure": significant_structure,
         "candlestick_reaction": candle_reaction,
@@ -1619,7 +1756,9 @@ def evaluate_book_strategy_master_v3(
             "conservative_entries_require_retest_reclaim_or_role_flip",
             "avoid_opposing_force_without_path_room",
             "major_visible_bias_dominates_inner_reactions",
-            "countertrend_scalps_require_reclaim_role_flip_or_major_invalidation",
+            "buy_and_sell_books_run_in_parallel",
+            "professional_counter_legs_are_not_scalps_when_current_leg_truth_is_visible",
+            "countertrend_scalps_require_reclaim_role_flip_major_invalidation_or_professional_counter_leg",
             "do_not_require_multiple_timeframes",
         ],
     }
@@ -1628,6 +1767,7 @@ def evaluate_book_strategy_master_v3(
 __all__ = [
     "BOOK_ENTRY_PROFILES",
     "BOOK_REACTION_TYPES",
+    "MARKET_PHASES_V3",
     "BOOK_STRATEGY_MATURITY_STATES",
     "BOOK_STRATEGY_PLAYBOOKS",
     "BOOK_STRATEGY_SCHEMA_VERSION",

@@ -62,6 +62,7 @@ def test_window_tracker_persists_model_strength_controls(tmp_path: Path) -> None
             ai_contribution_strengths={"lstm_sequence": 1.7},
             execution_lane_thresholds={"SNIPER_ZONE_ENTRY": 0.58},
             model_strength_profile={"schema_version": 1, "execution_threshold": 0.63},
+            high_frequency_timeframe="M1",
             high_frequency_expiry_seconds=180,
             high_frequency_horizon_candles=4,
             allow_live_momentum_entries=False,
@@ -80,6 +81,7 @@ def test_window_tracker_persists_model_strength_controls(tmp_path: Path) -> None
         assert controls["ai_contribution_strengths"]["lstm_sequence"] == 1.7
         assert controls["execution_lane_thresholds"]["SNIPER_ZONE_ENTRY"] == 0.58
         assert controls["model_strength_profile"]["execution_threshold"] == 0.63
+        assert controls["high_frequency_timeframe"] == "M1"
         assert controls["high_frequency_expiry_seconds"] == 180
         assert controls["high_frequency_horizon_candles"] == 4
         assert controls["allow_live_momentum_entries"] is False
@@ -88,5 +90,18 @@ def test_window_tracker_persists_model_strength_controls(tmp_path: Path) -> None
         assert controls["packet_valid_for_seconds"] == 90.0
         assert controls["risk_min_pct"] == 1.2
         assert controls["risk_max_pct"] == 3.0
+    finally:
+        service.shutdown()
+
+
+def test_window_tracker_defaults_two_candle_to_study_only(tmp_path: Path) -> None:
+    service = ContinuousWindowTrackerService(root_dir=tmp_path)
+    try:
+        session = service.create_session(session_id="professional-defaults-test")
+        controls = session["execution_controls"]
+
+        assert controls["two_candle_execution_allowed"] is False
+        assert controls["allow_high_frequency_kernel_override"] is False
+        assert controls["high_frequency_enabled"] is True
     finally:
         service.shutdown()

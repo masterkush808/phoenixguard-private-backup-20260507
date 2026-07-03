@@ -83,6 +83,7 @@ def main() -> int:
     parser.add_argument("--fallback-port", type=int, default=8787)
     parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR))
     parser.add_argument("--allow-missing-shooter", action="store_true")
+    parser.add_argument("--require-bridge", action="store_true")
     args = parser.parse_args()
 
     processes = python_processes()
@@ -91,6 +92,7 @@ def main() -> int:
     api_processes = leaf_processes(raw_api_processes)
     tracker_processes = leaf_processes(find_processes(processes, "start_phoenixguard_24_7_tracker.py"))
     shooter_processes = leaf_processes(find_processes(processes, "shooter.py"))
+    bridge_processes = leaf_processes(find_processes(processes, "phoenixguard_mt4_file_bridge.py"))
     listener_rows = [row for row in listeners if int(row.get("LocalPort") or 0) == int(args.port)]
     fallback_rows = [row for row in listeners if int(row.get("LocalPort") or 0) == int(args.fallback_port)]
     failures: list[str] = []
@@ -132,6 +134,19 @@ def main() -> int:
             failures.append(f"shooter base_url mismatch: expected {args.base_url}, command={shooter_cmd}")
         if args.session not in shooter_cmd:
             failures.append(f"shooter session mismatch: expected {args.session}, command={shooter_cmd}")
+    if args.require_bridge and not bridge_processes:
+        failures.append("MT4 file bridge process is not running")
+        corrections.append(
+            r"Start bridge with: .\.venv-live\Scripts\python.exe Backend\tools\phoenixguard_mt4_file_bridge.py --base-url http://127.0.0.1:8793 --session-id pocket-live-8788"
+        )
+    if len(bridge_processes) > 1:
+        failures.append(f"expected at most one MT4 bridge process, found {len(bridge_processes)}")
+    if bridge_processes:
+        bridge_cmd = command_line(bridge_processes[0])
+        if args.base_url not in bridge_cmd:
+            failures.append(f"MT4 bridge base_url mismatch: expected {args.base_url}, command={bridge_cmd}")
+        if args.session not in bridge_cmd:
+            failures.append(f"MT4 bridge session mismatch: expected {args.session}, command={bridge_cmd}")
     if not singleton_lock:
         failures.append(f"runtime singleton lock missing: {singleton_guard.lock_path}")
         corrections.append("Relaunch through Backend/launch/start_phoenixguard_24_7_tracker.py so PhoenixRuntimeSingletonGuardV3 owns the stack.")
@@ -203,6 +218,7 @@ def main() -> int:
                 "api_raw": raw_api_processes,
                 "tracker": tracker_processes,
                 "shooter": shooter_processes,
+                "bridge": bridge_processes,
             },
             "listeners": listeners,
             "correction_commands": corrections,

@@ -1723,6 +1723,7 @@ class WindowTrackerControlUpdateRequest(BaseModel):
     continuous_model_feed_enabled: bool | None = None
     model_confidence_floor: float | None = Field(default=None, ge=0.0, le=1.0)
     high_frequency_min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    high_frequency_timeframe: str | None = None
     high_frequency_entry_grace_sec: float | None = Field(default=None, ge=0.0, le=180.0)
     high_frequency_expiry_seconds: int | None = Field(default=None, ge=60, le=3600)
     high_frequency_horizon_candles: int | None = Field(default=None, ge=1, le=12)
@@ -5963,6 +5964,7 @@ def create_app(
                 continuous_model_feed_enabled=request.continuous_model_feed_enabled,
                 model_confidence_floor=request.model_confidence_floor,
                 high_frequency_min_confidence=request.high_frequency_min_confidence,
+                high_frequency_timeframe=request.high_frequency_timeframe,
                 high_frequency_entry_grace_sec=request.high_frequency_entry_grace_sec,
                 high_frequency_expiry_seconds=request.high_frequency_expiry_seconds,
                 high_frequency_horizon_candles=request.high_frequency_horizon_candles,

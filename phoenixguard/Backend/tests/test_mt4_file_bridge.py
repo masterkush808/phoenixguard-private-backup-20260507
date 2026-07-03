@@ -16,6 +16,26 @@ def _load_bridge_module():
 
 
 def _sample_execution_packet() -> dict[str, object]:
+    professional_plan: dict[str, object] = {
+        "schema_version": "PG_PROFESSIONAL_TRADE_PLAN_V3",
+        "side": "BUY",
+        "authority_side": "BUY",
+        "professional_grade": True,
+        "blocker": "",
+        "next_required": "none",
+        "thesis_class": "TREND_ALIGNED_CONTINUATION",
+        "professional_thesis_state": "PRIMARY_BIAS_ALIGNED",
+        "entry_window": {"duration_sec": 300, "candle_count": 1},
+        "thesis_horizon": {
+            "expected_duration_sec": 3600,
+            "expected_candle_count": 12,
+            "minimum_professional_candles": 8,
+            "current_leg_candle_count": 6,
+            "current_leg_side": "BUY",
+            "current_leg_stage": "MATURE",
+            "estimated_candles_to_force": 18,
+        },
+    }
     return {
         "schema_version": "PG_EXECUTION_PACKET_V3",
         "packet_id": "pgpkt_test_001",
@@ -72,6 +92,15 @@ def _sample_execution_packet() -> dict[str, object]:
             "selected_lane": "SNIPER_ZONE_ENTRY",
             "score": 0.83,
             "threshold": 0.70,
+            "entry_window": {"duration_sec": 300, "candle_count": 1},
+            "thesis_horizon": professional_plan["thesis_horizon"],
+            "expected_move_time": {
+                "expected_duration_sec": 3600,
+                "expected_candle_count": 12,
+            },
+            "professional_trade_plan": professional_plan,
+            "professional_thesis_state": "PRIMARY_BIAS_ALIGNED",
+            "professional_authority_side": "BUY",
         },
     }
 
@@ -97,6 +126,8 @@ def test_mt4_bridge_compact_command_preserves_ea_contract() -> None:
     assert decoded["allowance_package"]["source_present"] is True
     assert decoded["allowance_package"]["inferred"] is False
     assert decoded["allowance_package"]["selected_lane"] == "SNIPER_ZONE_ENTRY"
+    assert decoded["allowance_package"]["professional_grade"] is True
+    assert decoded["allowance_package"]["professional_trade_plan"]["expected_candle_count"] == 12
     assert decoded["execution"]["allowance_package_type"] == "INTRADAY_ENTER_NOW"
     assert decoded["permission_state"]["entry_eligible"] is True
     assert decoded["reason_codes"] == ["CLEAN_WAVE"]
@@ -124,6 +155,36 @@ def test_mt4_bridge_compact_command_preserves_swing_allowance_package() -> None:
         "selected_lane": "SNIPER_ZONE_ENTRY",
         "score": 0.79,
         "threshold": 0.70,
+        "entry_window": {"duration_sec": 300, "candle_count": 1},
+        "thesis_horizon": {
+            "expected_duration_sec": 3600,
+            "expected_candle_count": 12,
+            "minimum_professional_candles": 8,
+            "current_leg_candle_count": 6,
+            "current_leg_side": "BUY",
+            "current_leg_stage": "MATURE",
+            "estimated_candles_to_force": 18,
+        },
+        "professional_trade_plan": {
+            "schema_version": "PG_PROFESSIONAL_TRADE_PLAN_V3",
+            "side": "BUY",
+            "authority_side": "BUY",
+            "professional_grade": True,
+            "blocker": "",
+            "next_required": "none",
+            "thesis_class": "TREND_ALIGNED_CONTINUATION",
+            "professional_thesis_state": "PRIMARY_BIAS_ALIGNED",
+            "entry_window": {"duration_sec": 300, "candle_count": 1},
+            "thesis_horizon": {
+                "expected_duration_sec": 3600,
+                "expected_candle_count": 12,
+                "minimum_professional_candles": 8,
+                "current_leg_candle_count": 6,
+                "current_leg_side": "BUY",
+                "current_leg_stage": "MATURE",
+                "estimated_candles_to_force": 18,
+            },
+        },
     }
 
     command = bridge._compact_command(packet, bridge_sequence=9)

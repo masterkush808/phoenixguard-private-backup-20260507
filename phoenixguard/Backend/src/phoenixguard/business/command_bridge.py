@@ -294,6 +294,23 @@ def build_connector_command(
         )
         return CommandBuildResult(False, command, reasons, STATUS_NO_EXECUTION_PACKET, validation.as_dict())
 
+    professional_reasons = _professional_authority_rejection_reasons(execution_packet)
+    if professional_reasons:
+        command = build_status_command(
+            STATUS_NO_EXECUTION_PACKET,
+            account_state=account,
+            signer=resolved_signer,
+            now_epoch=current,
+            detail_code=professional_reasons[0],
+        )
+        return CommandBuildResult(
+            False,
+            command,
+            professional_reasons,
+            STATUS_NO_EXECUTION_PACKET,
+            validation.as_dict(),
+        )
+
     packet_id = validation.packet_id or _clean_str(execution_packet.get("packet_id"))
     if replay_ledger is not None and not replay_ledger.accept_packet(packet_id):
         command = build_status_command(
@@ -435,6 +452,7 @@ def validate_connector_command(
     execution = _mapping(command.get("execution"))
     if command_type == EXECUTION_COMMAND_TYPE:
         _validate_execution_authority(execution, reasons)
+        _validate_strategy_authority(_mapping(command.get("strategy_authority")), execution, reasons)
     elif command_type == STATUS_COMMAND_TYPE:
         if status_code not in STATUS_CODES:
             reasons.append("INVALID_STATUS_CODE")
@@ -541,6 +559,77 @@ def canonical_command_bytes(command: Mapping[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def _allowance_package_from_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
+    council = _mapping(packet.get("model_council"))
+    return _mapping(packet.get("allowance_package") or council.get("allowance_package"))
+
+
+def _professional_trade_plan_from_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
+    allowance = _allowance_package_from_packet(packet)
+    council = _mapping(packet.get("model_council"))
+    return _mapping(
+        allowance.get("professional_trade_plan")
+        or packet.get("professional_trade_plan")
+        or council.get("professional_trade_plan")
+    )
+
+
+def _professional_authority_rejection_reasons(packet: Mapping[str, Any]) -> tuple[str, ...]:
+    allowance = _allowance_package_from_packet(packet)
+    plan = _professional_trade_plan_from_packet(packet)
+    reasons: list[str] = []
+    if not plan:
+        reasons.append("MISSING_PROFESSIONAL_TRADE_PLAN")
+        return tuple(reasons)
+    if plan.get("professional_grade") is not True:
+        reasons.append("PROFESSIONAL_TRADE_PLAN_NOT_GRADE_READY")
+    blocker = _clean_str(plan.get("blocker")).upper()
+    if blocker not in {"", "NONE"}:
+        reasons.append("PROFESSIONAL_TRADE_PLAN_BLOCKED")
+    plan_side = _clean_str(plan.get("authority_side") or plan.get("side")).upper()
+    allowance_side = _clean_str(allowance.get("side")).upper()
+    if plan_side not in {"BUY", "SELL"}:
+        reasons.append("PROFESSIONAL_TRADE_PLAN_SIDE_INVALID")
+    elif allowance_side in {"BUY", "SELL"} and plan_side != allowance_side:
+        reasons.append("PROFESSIONAL_TRADE_PLAN_SIDE_MISMATCH")
+    horizon = _mapping(plan.get("thesis_horizon") or allowance.get("thesis_horizon"))
+    expected_candles = _int(horizon.get("expected_candle_count"), 0)
+    minimum_candles = max(1, _int(horizon.get("minimum_professional_candles"), 1))
+    if expected_candles < minimum_candles:
+        reasons.append("PROFESSIONAL_THESIS_HORIZON_TOO_SHORT")
+    return tuple(dict.fromkeys(reasons))
+
+
+def _professional_authority_ref(packet: Mapping[str, Any]) -> dict[str, Any]:
+    allowance = _allowance_package_from_packet(packet)
+    plan = _professional_trade_plan_from_packet(packet)
+    horizon = _mapping(plan.get("thesis_horizon") or allowance.get("thesis_horizon"))
+    resolution = _mapping(
+        plan.get("professional_thesis_resolution")
+        or allowance.get("professional_thesis_resolution")
+        or packet.get("professional_thesis_resolution")
+    )
+    return {
+        "schema_version": "PG_MT4_PROFESSIONAL_AUTHORITY_REF_V1",
+        "execution_authority": _clean_str(allowance.get("execution_authority") or "PLAYBOOK_FINAL_DECIDER_V3"),
+        "packet_authority": _clean_str(allowance.get("packet_authority") or PG_EXECUTION_PACKET_SCHEMA_VERSION),
+        "professional_grade": bool(plan.get("professional_grade")),
+        "side": _clean_str(plan.get("side") or allowance.get("side")).upper(),
+        "authority_side": _clean_str(plan.get("authority_side") or plan.get("side") or allowance.get("side")).upper(),
+        "thesis_class": _clean_str(plan.get("thesis_class")),
+        "professional_thesis_state": _clean_str(plan.get("professional_thesis_state") or resolution.get("thesis_state")),
+        "expected_duration_sec": _int(horizon.get("expected_duration_sec"), 0),
+        "expected_candle_count": _int(horizon.get("expected_candle_count"), 0),
+        "minimum_professional_candles": _int(horizon.get("minimum_professional_candles"), 0),
+        "current_leg_candle_count": _int(horizon.get("current_leg_candle_count"), 0),
+        "current_leg_side": _clean_str(horizon.get("current_leg_side")),
+        "current_leg_stage": _clean_str(horizon.get("current_leg_stage")),
+        "blocker": _clean_str(plan.get("blocker")),
+        "next_required": _clean_str(plan.get("next_required")),
+        "thesis_resolution": resolution,
+    }
+
+
 def _build_unsigned_execution_command(
     packet: Mapping[str, Any],
     *,
@@ -581,6 +670,7 @@ def _build_unsigned_execution_command(
             "amount_action": "DO_NOT_CHANGE_AMOUNT",
             "risk_controls": _execution_risk_controls(),
         },
+        "strategy_authority": _professional_authority_ref(packet),
         "connector_binding": _public_account_binding(account_state),
         "connector_contract": _connector_contract_block(command_kind=EXECUTION_COMMAND_TYPE),
     }
@@ -661,6 +751,33 @@ def _validate_execution_authority(execution: Mapping[str, Any], reasons: list[st
             break
     if risk_controls.get("amount_override_allowed") is not False:
         reasons.append("AMOUNT_OVERRIDE_NOT_LOCKED")
+
+
+def _validate_strategy_authority(strategy_authority: Mapping[str, Any], execution: Mapping[str, Any], reasons: list[str]) -> None:
+    if not strategy_authority:
+        reasons.append("MISSING_STRATEGY_AUTHORITY")
+        return
+    if strategy_authority.get("schema_version") != "PG_MT4_PROFESSIONAL_AUTHORITY_REF_V1":
+        reasons.append("INVALID_STRATEGY_AUTHORITY_SCHEMA")
+    if _clean_str(strategy_authority.get("execution_authority")).upper() != "PLAYBOOK_FINAL_DECIDER_V3":
+        reasons.append("INVALID_STRATEGY_EXECUTION_AUTHORITY")
+    if _clean_str(strategy_authority.get("packet_authority")).upper() != PG_EXECUTION_PACKET_SCHEMA_VERSION:
+        reasons.append("INVALID_STRATEGY_PACKET_AUTHORITY")
+    if strategy_authority.get("professional_grade") is not True:
+        reasons.append("STRATEGY_NOT_PROFESSIONAL_GRADE")
+    execution_side = _clean_str(execution.get("side")).upper()
+    authority_side = _clean_str(strategy_authority.get("authority_side") or strategy_authority.get("side")).upper()
+    if authority_side not in {"BUY", "SELL"}:
+        reasons.append("INVALID_STRATEGY_AUTHORITY_SIDE")
+    elif execution_side in {"BUY", "SELL"} and authority_side != execution_side:
+        reasons.append("STRATEGY_SIDE_EXECUTION_MISMATCH")
+    blocker = _clean_str(strategy_authority.get("blocker")).upper()
+    if blocker not in {"", "NONE"}:
+        reasons.append("STRATEGY_AUTHORITY_BLOCKED")
+    expected_candles = _int(strategy_authority.get("expected_candle_count"), 0)
+    minimum_candles = max(1, _int(strategy_authority.get("minimum_professional_candles"), 1))
+    if expected_candles < minimum_candles:
+        reasons.append("STRATEGY_THESIS_HORIZON_TOO_SHORT")
 
 
 def _public_account_binding(account_state: ConnectorAccountState) -> dict[str, Any]:

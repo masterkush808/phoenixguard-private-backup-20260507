@@ -436,6 +436,29 @@ if ($LASTEXITCODE -ne 0) {
     Write-Warning "Runtime trace reported a non-executable live state after launch. The tracker remains running; shooter arming still requires fresh frame readiness."
 }
 
+Write-Host ""
+Write-Host "Postflight: single logical process topology"
+$topologyArgs = @(
+    'Backend\tools\certify_process_topology_v3.py',
+    '--base-url',
+    $baseUrl,
+    '--session',
+    $SessionId,
+    '--port',
+    '8793',
+    '--data-dir',
+    $env:PHOENIXGUARD_DATA_DIR
+)
+if ($DisableShooter) {
+    $topologyArgs += '--allow-missing-shooter'
+} else {
+    $topologyArgs += '--require-bridge'
+}
+& $pythonPath @topologyArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Process topology certification failed after launch. Clean stack was not proven."
+}
+
 if (-not $DisableShooter) {
     Write-Host ""
     Write-Host "Shooter reporter: PACKAGE_REPORTER is attached by FINAL_LIVE; separate shooter execution arming is retired."

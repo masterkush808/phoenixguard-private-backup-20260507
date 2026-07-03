@@ -287,6 +287,7 @@ def build_two_candle_study_v3(
         payload["two_candle_study"] = {
             "schema_version": TWO_CANDLE_STUDY_SCHEMA_VERSION,
             "status": "WARMING",
+            "timeframe": timeframe_label,
             "frame_id": frame_id,
             "sequence_id": sequence_id or f"seq_{frame_id}",
             "current_candle_state": "WARMING",
@@ -441,6 +442,7 @@ def build_two_candle_study_v3(
     two_candle_study: dict[str, Any] = {
         "schema_version": TWO_CANDLE_STUDY_SCHEMA_VERSION,
         "status": "READY",
+        "timeframe": timeframe_label,
         "frame_id": frame_id,
         "sequence_id": sequence_id or f"seq_{frame_id}",
         "current_candle_state": "DEVELOPING",

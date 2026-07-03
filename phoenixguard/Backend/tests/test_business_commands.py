@@ -30,6 +30,24 @@ NOW = 1_800_000_000.0
 
 
 def _allowance_package() -> dict[str, object]:
+    professional_plan: dict[str, object] = {
+        "schema_version": "PG_PROFESSIONAL_TRADE_PLAN_V3",
+        "side": "BUY",
+        "authority_side": "BUY",
+        "professional_grade": True,
+        "blocker": "",
+        "next_required": "none",
+        "thesis_class": "TREND_ALIGNED_CONTINUATION",
+        "professional_thesis_state": "PRIMARY_BIAS_ALIGNED",
+        "thesis_horizon": {
+            "expected_duration_sec": 3600,
+            "expected_candle_count": 12,
+            "minimum_professional_candles": 8,
+            "current_leg_candle_count": 7,
+            "current_leg_side": "BUY",
+            "current_leg_stage": "MATURE",
+        },
+    }
     return {
         "schema_version": "PG_ALLOWANCE_PACKAGE_V1",
         "package_type": "INTRADAY_ENTER_NOW",
@@ -45,6 +63,10 @@ def _allowance_package() -> dict[str, object]:
         "selected_lane": "SNIPER_ZONE_ENTRY",
         "score": 0.84,
         "threshold": 0.70,
+        "thesis_horizon": professional_plan["thesis_horizon"],
+        "professional_trade_plan": professional_plan,
+        "professional_thesis_state": "PRIMARY_BIAS_ALIGNED",
+        "professional_authority_side": "BUY",
     }
 
 

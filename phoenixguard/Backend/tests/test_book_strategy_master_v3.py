@@ -361,6 +361,56 @@ def test_book_strategy_downgrades_local_countertrend_reaction_to_scalp_watch() -
     assert any(row["field"] == "bias_alignment" for row in result["blockers"])
 
 
+def test_book_strategy_allows_professional_sell_leg_inside_buy_bias() -> None:
+    snapshot = _strategy_snapshot("SELL")
+    _attach_candle_movement_fixture(snapshot, "SELL")
+    snapshot["global_structure"]["global_side"] = "BUY"
+    snapshot["local_micro_structure"]["local_side"] = "BUY"
+    snapshot["market_context"]["global_side"] = "BUY"
+    snapshot["market_context"]["local_side"] = "BUY"
+    snapshot["market_context"]["dominant_side"] = "BUY"
+    snapshot["professional_thesis_resolution_v3"] = {
+        "thesis_state": "SELL_IN_BUY_TRADEABLE_COUNTER_LEG",
+        "authority_side": "SELL",
+        "primary_bias_side": "BUY",
+        "tradeable_counter_leg": True,
+        "current_leg_side": "SELL",
+        "current_leg_candle_count": 8,
+    }
+
+    result = evaluate_book_strategy_master_v3(
+        snapshot,
+        market={
+            "market_context": snapshot["market_context"],
+            "market_play": {"primary_play": "SELL_IN_BUY_COUNTER_LEG", "play_stage": "CURRENT_LEG_ACCEPTED"},
+            "price_location": {"relative_location": "SUPPLY_ZONE"},
+            "zones": snapshot["zones"],
+        },
+        candidate_side="SELL",
+        execution_lane={
+            "name": "SNIPER_ZONE_ENTRY",
+            "accepted": False,
+            "live_trigger_reaction": {"accepted": True},
+        },
+        timing_decision={"entry_now_allowed": False, "entry_timing": {"next_condition": "professional counter-leg accepted"}},
+        current_candle=snapshot["current_candle_acceptance"],
+        timing_mode="WAIT_FOR_PULLBACK",
+        final_score_passed=False,
+        timing_enter_now=False,
+        lane_score=0.60,
+        lane_required_score=0.70,
+    )
+
+    assert result["maturity_state"] == "ENTER_NOW"
+    assert result["playbook_signal"] == "SELL"
+    assert result["playbook"] == "SELL_IN_BUY_PROFESSIONAL_COUNTER_LEG"
+    assert result["market_phase_v3"] == "SELL_IN_BUY_DISTRIBUTION"
+    assert result["evidence"]["counter_leg_is_current_truth"] is True
+    assert result["evidence"]["countertrend_scalp_only"] is False
+    assert result["evidence"]["bias_alignment"] == "SELL_IN_BUY_TRADEABLE_COUNTER_LEG"
+    assert not result["hard_blockers"]
+
+
 def test_book_strategy_promotes_failed_supply_reclaim_buy_continuation() -> None:
     snapshot = _strategy_snapshot("BUY")
     snapshot["market_context"]["inside_valid_trigger_zone"] = False
@@ -621,6 +671,52 @@ def test_model_council_promotes_short_horizon_buy_warning_at_demand_to_candidate
     assert result["book_strategy"]["evidence"]["failed_continuation_reversal"] is True
 
 
+def test_model_council_reframes_suppressed_current_leg_as_professional_counter_leg() -> None:
+    council = ModelCouncilV3()
+    first_snapshot = _strategy_snapshot("BUY")
+    second_snapshot = _strategy_snapshot("BUY")
+    for snapshot in (first_snapshot, second_snapshot):
+        _attach_candle_movement_fixture(snapshot, "SELL")
+        snapshot["candidate_side"] = "BUY"
+        snapshot["action"] = "BUY"
+        snapshot["buy_score"] = 0.70
+        snapshot["sell_score"] = 0.52
+        snapshot["global_structure"]["global_side"] = "BUY"
+        snapshot["local_micro_structure"]["local_side"] = "BUY"
+        snapshot["market_context"]["global_side"] = "BUY"
+        snapshot["market_context"]["local_side"] = "BUY"
+        snapshot["market_context"]["dominant_side"] = "BUY"
+        snapshot["market_context"]["current_location"] = "SUPPLY_ZONE"
+        snapshot["zone_liquidity"] = {
+            "side": "SELL",
+            "zone_type": "SUPPLY",
+            "inside_valid_trigger_zone": True,
+        }
+        snapshot["zones"] = [
+            _zone("active_supply_001", "SUPPLY", side="SELL", inside=True),
+            _zone("opposing_demand_001", "DEMAND", side="BUY", distance=0.42),
+        ]
+    council.evaluate(first_snapshot, now_epoch=NOW)
+    second_snapshot["frame_id"] = 952
+    second_snapshot["capture_count"] = 954
+    second_snapshot["state_version"] = 1952
+    second_snapshot["input_frame_hash"] = "frame_952"
+    second_snapshot["previous_frame_hash"] = "frame_951"
+
+    result = council.evaluate(second_snapshot, now_epoch=NOW + 0.5)
+    resolution = result["model_council"]["professional_thesis_resolution"]
+    plan = result["model_council"]["professional_trade_plan"]
+
+    assert result["model_council"]["final_side"] == "SELL"
+    assert resolution["thesis_state"] == "SELL_IN_BUY_TRADEABLE_COUNTER_LEG"
+    assert resolution["side_reframed"] is True
+    assert resolution["tradeable_counter_leg"] is True
+    assert result["book_strategy"]["playbook"] == "SELL_IN_BUY_PROFESSIONAL_COUNTER_LEG"
+    assert result["book_strategy"]["evidence"]["counter_leg_is_current_truth"] is True
+    assert plan["professional_grade"] is True
+    assert plan["trend_alignment"]["professional_counter_leg"] is True
+
+
 def test_model_council_carries_book_strategy_in_study_and_packet() -> None:
     council = ModelCouncilV3()
     first_snapshot = _strategy_snapshot("BUY")
@@ -642,9 +738,13 @@ def test_model_council_carries_book_strategy_in_study_and_packet() -> None:
     assert second["allowance_package"]["execution_authority"] == BOOK_STRATEGY_EXECUTION_AUTHORITY
     assert second["allowance_package"]["candle_movement"]["visible_candle_count"] == 12
     assert second["allowance_package"]["candle_movement"]["current_leg_candle_count"] == 8
-    assert second["allowance_package"]["expected_move_time"]["expected_duration_sec"] == 300
-    assert second["allowance_package"]["expected_move_time"]["expected_candle_count"] == 1
-    assert second["allowance_package"]["expected_move_time"]["projected_total_current_leg_candles"] == 9
+    assert second["allowance_package"]["entry_window"]["duration_sec"] == 300
+    assert second["allowance_package"]["entry_window"]["candle_count"] == 1
+    assert second["allowance_package"]["thesis_horizon"]["expected_candle_count"] >= 4
+    assert second["allowance_package"]["expected_move_time"]["expected_duration_sec"] >= 20 * 60
+    assert second["allowance_package"]["expected_move_time"]["expected_candle_count"] >= 4
+    assert second["allowance_package"]["expected_move_time"]["projected_total_current_leg_candles"] >= 12
+    assert second["allowance_package"]["professional_trade_plan"]["professional_grade"] is True
     assert second["candle_movement_context_v3"]["move_stage"] == "MATURE"
     assert second["model_council"]["strategy_read"]["doctrine"] == "single_timeframe_visible_history_only"
 

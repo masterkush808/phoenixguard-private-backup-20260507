@@ -60,6 +60,12 @@ def _clip01(value: Any, default: float = 0.0) -> float:
     return max(0.0, min(1.0, _float(value, default)))
 
 
+def _bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on", "pass", "passed"}
+    return bool(value)
+
+
 def _side(value: Any) -> str:
     text = str(value or "").strip().upper()
     if text in {"BUY", "BULL", "BULLISH", "UP", "CALL"}:
@@ -878,6 +884,33 @@ def thesis_blocks_countertrend(thesis: Mapping[str, Any], packet_or_result: Mapp
 
     row = _mapping(packet_or_result)
     if not bool(thesis.get("countertrend_blocked")):
+        return False
+    allowance = _mapping(row.get("allowance_package"))
+    professional_plan = _mapping(
+        row.get("professional_trade_plan")
+        or allowance.get("professional_trade_plan")
+        or _mapping(row.get("opportunity_maturity")).get("professional_trade_plan")
+    )
+    professional_resolution = _mapping(
+        row.get("professional_thesis_resolution")
+        or allowance.get("professional_thesis_resolution")
+        or professional_plan.get("professional_thesis_resolution")
+    )
+    thesis_state = str(
+        professional_resolution.get("thesis_state")
+        or professional_plan.get("professional_thesis_state")
+        or allowance.get("professional_thesis_state")
+        or ""
+    ).strip().upper()
+    professional_counter_leg = bool(
+        thesis_state
+        in {
+            "SELL_IN_BUY_TRADEABLE_COUNTER_LEG",
+            "BUY_IN_SELL_TRADEABLE_COUNTER_LEG",
+        }
+        or _bool(_mapping(professional_plan.get("trend_alignment")).get("professional_counter_leg"))
+    )
+    if professional_counter_leg:
         return False
     thesis_side = _side(thesis.get("side"))
     attempted_side = _side(

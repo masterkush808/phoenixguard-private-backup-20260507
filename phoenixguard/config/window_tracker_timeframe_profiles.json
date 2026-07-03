@@ -1,0 +1,26 @@
+{
+  "schema_version": "PG_WINDOW_TRACKER_TIMEFRAME_PROFILES_V1",
+  "default_profile": "M5_EXECUTION",
+  "profiles": {
+    "M5_EXECUTION": {
+      "description": "Default professional M5 read profile. Two-candle output is study-only unless explicitly enabled for a lab run.",
+      "high_frequency_timeframe": "M5",
+      "high_frequency_horizon_candles": 2,
+      "high_frequency_expiry_seconds": 600,
+      "high_frequency_entry_grace_sec": 45.0,
+      "high_frequency_min_confidence": 0.44,
+      "two_candle_execution_allowed": false,
+      "allow_high_frequency_kernel_override": false
+    },
+    "M1_REACTION_STUDY": {
+      "description": "One-minute candle reaction study profile for clear next-candle read accuracy burns.",
+      "high_frequency_timeframe": "M1",
+      "high_frequency_horizon_candles": 2,
+      "high_frequency_expiry_seconds": 120,
+      "high_frequency_entry_grace_sec": 12.0,
+      "high_frequency_min_confidence": 0.44,
+      "two_candle_execution_allowed": false,
+      "allow_high_frequency_kernel_override": false
+    }
+  }
+}

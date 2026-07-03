@@ -164,6 +164,13 @@ def _nested(payload: dict[str, object], key: str) -> dict[str, object]:
     return dict(cast(Mapping[str, object], value)) if isinstance(value, dict) else {}
 
 
+def _int(value: object, default: int = 0) -> int:
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _collect_reason_codes(*sources: dict[str, object]) -> list[str]:
     reasons: list[str] = []
     for source in sources:
@@ -187,6 +194,52 @@ def _allowance_source(payload: dict[str, object], execution: dict[str, object], 
         if source:
             return source
     return {}
+
+
+def _compact_professional_trade_plan(source: dict[str, object]) -> dict[str, object]:
+    plan = _nested(source, "professional_trade_plan")
+    resolution = _nested(source, "professional_thesis_resolution") or _nested(plan, "professional_thesis_resolution")
+    horizon = _nested(source, "thesis_horizon") or _nested(plan, "thesis_horizon")
+    entry_window = _nested(source, "entry_window") or _nested(plan, "entry_window")
+    expected = _nested(source, "expected_move_time")
+    movement = _nested(source, "candle_movement")
+    return {
+        "schema_version": str(plan.get("schema_version") or "PG_PROFESSIONAL_TRADE_PLAN_V3"),
+        "professional_grade": bool(plan.get("professional_grade", source.get("professional_grade", False))),
+        "side": str(plan.get("side") or source.get("side") or ""),
+        "authority_side": str(plan.get("authority_side") or source.get("professional_authority_side") or source.get("side") or ""),
+        "thesis_class": str(plan.get("thesis_class") or ""),
+        "professional_thesis_state": str(
+            plan.get("professional_thesis_state")
+            or source.get("professional_thesis_state")
+            or resolution.get("thesis_state")
+            or ""
+        ),
+        "blocker": str(plan.get("blocker") or ""),
+        "next_required": str(plan.get("next_required") or source.get("next_required") or ""),
+        "expected_duration_sec": _int(
+            horizon.get("expected_duration_sec")
+            or expected.get("expected_duration_sec")
+            or 0
+        ),
+        "expected_candle_count": _int(
+            horizon.get("expected_candle_count")
+            or expected.get("expected_candle_count")
+            or 0
+        ),
+        "minimum_professional_candles": _int(horizon.get("minimum_professional_candles"), 0),
+        "current_leg_candle_count": _int(
+            horizon.get("current_leg_candle_count")
+            or movement.get("current_leg_candle_count")
+            or 0
+        ),
+        "current_leg_side": str(horizon.get("current_leg_side") or movement.get("current_leg_side") or ""),
+        "current_leg_stage": str(horizon.get("current_leg_stage") or movement.get("current_leg_stage") or ""),
+        "estimated_candles_to_force": _int(horizon.get("estimated_candles_to_force"), 0),
+        "entry_window_duration_sec": _int(entry_window.get("duration_sec"), 0),
+        "entry_window_candle_count": _int(entry_window.get("candle_count"), 0),
+        "thesis_resolution": resolution,
+    }
 
 
 def _compact_allowance_package(
@@ -216,6 +269,7 @@ def _compact_allowance_package(
     allowance_family = str(source.get("allowance_family") or "").upper()
     if not allowance_family:
         allowance_family = "INTRADAY" if package_type == "INTRADAY_ENTER_NOW" else "SWING"
+    professional_plan = _compact_professional_trade_plan(source)
     return {
         "schema_version": str(source.get("schema_version") or "PG_ALLOWANCE_PACKAGE_V1"),
         "package_type": package_type,
@@ -239,6 +293,11 @@ def _compact_allowance_package(
         "threshold": source.get("threshold", council.get("threshold", payload.get("threshold", 0.0))),
         "true_blocker": source.get("true_blocker", ""),
         "next_required": source.get("next_required", ""),
+        "professional_trade_plan": professional_plan,
+        "professional_grade": professional_plan["professional_grade"],
+        "professional_thesis_state": professional_plan["professional_thesis_state"],
+        "professional_authority_side": professional_plan["authority_side"],
+        "expected_move_time": _nested(source, "expected_move_time"),
     }
 
 
@@ -403,6 +462,23 @@ def _validate_command(command: dict[str, object]) -> None:
         raise ValueError("MT4 command allowance_package.accepted must be true")
     if allowance.get("execution_ready") is not True:
         raise ValueError("MT4 command allowance_package.execution_ready must be true")
+    professional_plan = _nested(allowance, "professional_trade_plan")
+    if not professional_plan:
+        raise ValueError("MT4 command allowance_package.professional_trade_plan is required")
+    if professional_plan.get("professional_grade") is not True:
+        raise ValueError("MT4 command professional_trade_plan.professional_grade must be true")
+    professional_side = str(professional_plan.get("authority_side") or professional_plan.get("side") or "").strip().upper()
+    if professional_side not in {"BUY", "SELL"}:
+        raise ValueError("MT4 command professional_trade_plan authority side must be BUY or SELL")
+    if professional_side != str(allowance.get("side") or "").strip().upper():
+        raise ValueError("MT4 command professional_trade_plan side must match allowance side")
+    professional_blocker = str(professional_plan.get("blocker") or "").strip().upper()
+    if professional_blocker not in {"", "NONE"}:
+        raise ValueError("MT4 command professional_trade_plan must not carry a blocker")
+    expected_candles = _int(professional_plan.get("expected_candle_count"), 0)
+    minimum_candles = max(1, _int(professional_plan.get("minimum_professional_candles"), 1))
+    if expected_candles < minimum_candles:
+        raise ValueError("MT4 command professional_trade_plan expected candles are below professional minimum")
     live = _nested(command, "live_integrity")
     if live.get("is_live") is not True:
         raise ValueError("MT4 command live_integrity.is_live must be true")

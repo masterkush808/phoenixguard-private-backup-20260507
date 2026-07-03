@@ -433,6 +433,30 @@ try {
     throw "Tracker API did not become healthy at $baseUrl. Start output: $($_.Exception.Message)"
 }
 
+Write-Host ""
+Write-Host "Postflight: single logical process topology"
+$topologyArgs = @(
+    'Backend\tools\certify_process_topology_v3.py',
+    '--base-url',
+    $baseUrl,
+    '--session',
+    $SessionId,
+    '--port',
+    "$ApiPort",
+    '--data-dir',
+    $env:PHOENIXGUARD_DATA_DIR
+)
+if (-not $launchShooter) {
+    $topologyArgs += '--allow-missing-shooter'
+}
+if ($launchMt4Bridge) {
+    $topologyArgs += '--require-bridge'
+}
+& $pythonPath @topologyArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Process topology certification failed after launch. Clean stack was not proven."
+}
+
 if (-not $NoBrowser) {
     Start-PhoenixGuardDashboardBrowser -Url $dashboardUrl -BrowserName $DashboardBrowser
 }

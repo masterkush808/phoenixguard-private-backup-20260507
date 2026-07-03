@@ -143,6 +143,12 @@ function Get-BurnSnapshot {
     )
 
     $statusPath = Join-Path $BurnDir "entry_allowance_burn\status.json"
+    if (-not (Test-Path -LiteralPath $statusPath)) {
+        $rootStatusPath = Join-Path $BurnDir "status.json"
+        if (Test-Path -LiteralPath $rootStatusPath) {
+            $statusPath = $rootStatusPath
+        }
+    }
     $status = $null
     if (Test-Path -LiteralPath $statusPath) {
         try {

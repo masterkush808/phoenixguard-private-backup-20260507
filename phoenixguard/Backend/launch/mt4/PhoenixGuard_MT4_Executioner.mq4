@@ -106,6 +106,9 @@ input bool                  InpUsePackageAwareManagement           = true;
 input bool                  InpRequireKnownAllowancePackage        = true;
 input bool                  InpAllowIntradayEnterNowPackages       = true;
 input bool                  InpAllowSwingPackages                  = true;
+input bool                  InpRequireProfessionalTradePlan        = true;
+input int                   InpMinProfessionalCandles              = 8;
+input int                   InpMinProfessionalExpectedMinutes      = 30;
 input double                InpIntradayRiskPercent                 = 0.35;
 input double                InpSwingRiskPercent                    = 0.50;
 input double                InpIntradayMaxSpreadPips               = 2.0;
@@ -159,6 +162,13 @@ struct PgPacket
    bool     allowance_accepted;
    bool     allowance_execution_ready;
    bool     allowance_entry_now_allowed;
+   bool     professional_grade;
+   string   professional_authority_side;
+   string   professional_thesis_state;
+   string   professional_thesis_class;
+   int      professional_expected_candles;
+   int      professional_expected_duration_sec;
+   int      professional_minimum_candles;
 };
 
 string   g_lastAcceptedPacketId = "";
@@ -555,6 +565,23 @@ bool ValidatePhoenixPacket(const string raw, PgPacket &packet)
       packet.allowance_family = Upper(Trim(packet.allowance_family));
       packet.allowance_selected_lane = Upper(Trim(packet.allowance_selected_lane));
       packet.allowance_timing_mode = Upper(Trim(packet.allowance_timing_mode));
+
+      string professional = JsonGetObject(allowance, "professional_trade_plan");
+      if(StringLen(professional) > 0)
+      {
+         JsonGetBool(professional, "professional_grade", packet.professional_grade);
+         JsonGetString(professional, "authority_side", packet.professional_authority_side);
+         if(StringLen(packet.professional_authority_side) <= 0)
+            JsonGetString(professional, "side", packet.professional_authority_side);
+         JsonGetString(professional, "professional_thesis_state", packet.professional_thesis_state);
+         JsonGetString(professional, "thesis_class", packet.professional_thesis_class);
+         JsonGetInt(professional, "expected_candle_count", packet.professional_expected_candles);
+         JsonGetInt(professional, "expected_duration_sec", packet.professional_expected_duration_sec);
+         JsonGetInt(professional, "minimum_professional_candles", packet.professional_minimum_candles);
+         packet.professional_authority_side = Upper(Trim(packet.professional_authority_side));
+         packet.professional_thesis_state = Upper(Trim(packet.professional_thesis_state));
+         packet.professional_thesis_class = Upper(Trim(packet.professional_thesis_class));
+      }
    }
    if(StringLen(packet.allowance_package_type) <= 0)
       packet.allowance_package_type = "LEGACY_EXECUTION";
@@ -572,6 +599,20 @@ bool ValidatePhoenixPacket(const string raw, PgPacket &packet)
       return Reject(packet, "SWING_PACKAGE_DISABLED");
    if(packet.allowance_package_type == "INTRADAY_ENTER_NOW" && !packet.allowance_entry_now_allowed)
       return Reject(packet, "INTRADAY_PACKAGE_NOT_ENTRY_NOW_ALLOWED");
+   if(InpRequireProfessionalTradePlan)
+   {
+      if(!packet.professional_grade)
+         return Reject(packet, "PROFESSIONAL_TRADE_PLAN_NOT_GRADE_READY");
+      if(packet.professional_authority_side != "BUY" && packet.professional_authority_side != "SELL")
+         return Reject(packet, "PROFESSIONAL_AUTHORITY_SIDE_INVALID");
+      if(packet.professional_authority_side != packet.side)
+         return Reject(packet, "PROFESSIONAL_AUTHORITY_SIDE_MISMATCH");
+      int min_professional_candles = MathMax(1, MathMax(InpMinProfessionalCandles, packet.professional_minimum_candles));
+      if(packet.professional_expected_candles < min_professional_candles)
+         return Reject(packet, "PROFESSIONAL_THESIS_CANDLES_TOO_SHORT");
+      if(InpMinProfessionalExpectedMinutes > 0 && packet.professional_expected_duration_sec < InpMinProfessionalExpectedMinutes * 60)
+         return Reject(packet, "PROFESSIONAL_THESIS_DURATION_TOO_SHORT");
+   }
 
    if(InpRequireCompleteSequence)
    {
@@ -635,6 +676,13 @@ void ResetPacket(PgPacket &packet)
    packet.allowance_accepted = false;
    packet.allowance_execution_ready = false;
    packet.allowance_entry_now_allowed = false;
+   packet.professional_grade = false;
+   packet.professional_authority_side = "";
+   packet.professional_thesis_state = "";
+   packet.professional_thesis_class = "";
+   packet.professional_expected_candles = 0;
+   packet.professional_expected_duration_sec = 0;
+   packet.professional_minimum_candles = 0;
 }
 
 //+------------------------------------------------------------------+
@@ -647,6 +695,8 @@ bool OpenPacketTrade(PgPacket &packet, const double lots, const double sl_pips, 
       Print("PhoenixGuard DRY RUN accepted packet ", packet.packet_id, " side=", packet.side,
             " package=", packet.allowance_package_type, " lane=", packet.allowance_selected_lane,
             " timing=", packet.allowance_timing_mode,
+            " thesis=", packet.professional_thesis_state,
+            " expected_candles=", IntegerToString(packet.professional_expected_candles),
             " lots=", DoubleToString(lots, 2), " sl=", DoubleToString(sl_pips, 1), " tp=", DoubleToString(tp_pips, 1));
       return(true);
    }
@@ -724,7 +774,10 @@ bool OpenPacketTrade(PgPacket &packet, const double lots, const double sl_pips, 
 
    Print("PhoenixGuard opened ticket ", ticket, " packet=", packet.packet_id, " side=", packet.side,
          " package=", packet.allowance_package_type, " lane=", packet.allowance_selected_lane,
-         " timing=", packet.allowance_timing_mode, " lots=", DoubleToString(lots, 2));
+         " timing=", packet.allowance_timing_mode,
+         " thesis=", packet.professional_thesis_state,
+         " expected_candles=", IntegerToString(packet.professional_expected_candles),
+         " lots=", DoubleToString(lots, 2));
    return(true);
 }
 

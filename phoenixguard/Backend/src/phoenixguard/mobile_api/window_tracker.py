@@ -253,8 +253,10 @@ _HIGH_FREQUENCY_LANE = "HIGH_FREQUENCY_TWO_CANDLE"
 _HIGH_FREQUENCY_TRADE_PROFILE = "HIGH_FREQUENCY"
 _HIGH_FREQUENCY_FALLBACK_PROFILE = "AUTO"
 _HIGH_FREQUENCY_TIMEFRAME = "M5"
+_HIGH_FREQUENCY_SUPPORTED_TIMEFRAMES = frozenset({"M1", "M5"})
 _HIGH_FREQUENCY_HORIZON_CANDLES = 2
 _HIGH_FREQUENCY_FIXED_EXPIRY_SEC = 10 * 60
+_HIGH_FREQUENCY_M1_EXPIRY_SEC = 2 * 60
 _HIGH_FREQUENCY_ENTRY_GRACE_SEC = 45.0
 _HIGH_FREQUENCY_MIN_CONFIDENCE = 0.44
 _CALIBRATED_SHOOTER_PACKET_VALID_SEC = 60.0
@@ -361,6 +363,15 @@ def _timeframe_seconds(timeframe: Any, default: int = 300) -> int:
         "D1": 86400,
     }.get(label, int(default))
     return max(1, int(seconds))
+
+
+def _normalize_high_frequency_timeframe(value: Any) -> str:
+    label = str(value or "").strip().upper()
+    return label if label in _HIGH_FREQUENCY_SUPPORTED_TIMEFRAMES else _HIGH_FREQUENCY_TIMEFRAME
+
+
+def _high_frequency_profile_expiry_seconds(timeframe: Any) -> int:
+    return _HIGH_FREQUENCY_M1_EXPIRY_SEC if _normalize_high_frequency_timeframe(timeframe) == "M1" else _HIGH_FREQUENCY_FIXED_EXPIRY_SEC
 
 
 _EXECUTION_TIMEFRAME_SECONDS = {
@@ -1012,9 +1023,9 @@ def _build_high_frequency_candle_cycle_context(
     profile = _execution_trade_profile(controls.get("trade_profile") or controls.get("execution_profile"))
     enabled = bool(controls.get("high_frequency_enabled", True)) and profile != "SWING"
     swing_fallback_enabled = bool(controls.get("swing_fallback_enabled", False))
-    configured_timeframe = str(
-        controls.get("high_frequency_timeframe", _HIGH_FREQUENCY_TIMEFRAME) or _HIGH_FREQUENCY_TIMEFRAME
-    ).strip().upper()
+    configured_timeframe = _normalize_high_frequency_timeframe(
+        controls.get("high_frequency_timeframe", _HIGH_FREQUENCY_TIMEFRAME)
+    )
     timeframe_label = str(timeframe or "").strip().upper()
     timeframe_seconds = _timeframe_seconds(timeframe_label or configured_timeframe, default=300)
     grace_seconds = max(
@@ -1082,12 +1093,13 @@ def _build_high_frequency_candle_cycle_context(
         controls.get("high_frequency_min_confidence", _HIGH_FREQUENCY_MIN_CONFIDENCE)
         or _HIGH_FREQUENCY_MIN_CONFIDENCE
     )
+    profile_expiry_seconds = _high_frequency_profile_expiry_seconds(configured_timeframe)
     expiry_seconds = max(
-        _HIGH_FREQUENCY_FIXED_EXPIRY_SEC,
+        profile_expiry_seconds,
         int(
             float(
-                controls.get("high_frequency_expiry_seconds", _HIGH_FREQUENCY_FIXED_EXPIRY_SEC)
-                or _HIGH_FREQUENCY_FIXED_EXPIRY_SEC
+                controls.get("high_frequency_expiry_seconds", profile_expiry_seconds)
+                or profile_expiry_seconds
             )
         ),
     )
@@ -1117,7 +1129,7 @@ def _build_high_frequency_candle_cycle_context(
     elif not candle_closed:
         reason = f"Current {timeframe_label or configured_timeframe} candle is still open; {clock['seconds_remaining']:.1f}s until close."
     else:
-        reason = f"{side} two-candle cycle is ready for a fixed {expiry_seconds}s entry."
+        reason = f"{side} two-candle cycle is ready for a fixed {expiry_seconds}s {configured_timeframe} read."
     closed_epoch = float(clock.get("last_closed_epoch", now_epoch) or now_epoch)
     return {
         "schema_version": "PG_HIGH_FREQUENCY_CANDLE_CYCLE_V1",
@@ -1585,7 +1597,7 @@ def _build_execution_timing_profile(
         countertrend_window = 0
 
     if lane_key == _HIGH_FREQUENCY_LANE:
-        fixed_expiry = int(_HIGH_FREQUENCY_FIXED_EXPIRY_SEC)
+        fixed_expiry = int(_high_frequency_profile_expiry_seconds(timeframe))
         fixed_horizon = int(_HIGH_FREQUENCY_HORIZON_CANDLES)
         return {
             "version": "high_frequency_two_candle_timing_v1",
@@ -1616,7 +1628,7 @@ def _build_execution_timing_profile(
             "timing_class": "high_frequency_two_candle_cycle",
             "entry_allowed": True,
             "block_reason": "",
-            "rationale": "current M5 candle closed; study the next two-candle window with a fixed 10-minute expiry",
+            "rationale": f"current {str(timeframe or _HIGH_FREQUENCY_TIMEFRAME).upper()} candle closed; study the next two-candle window with a fixed profile expiry",
             "quick_profit_mode": True,
             "hold_intent": "next_two_candle_window",
             "price_position": {},
@@ -4453,13 +4465,15 @@ def _default_execution_controls() -> dict[str, Any]:
         "fixed_amount": "preserve",
         "amount_policy": _BROKER_AMOUNT_POLICY,
         "allow_countertrend_scalp": False,
+        "allow_professional_counter_leg_entries": True,
         "allow_location_sniper_entries": False,
         "allow_live_momentum_entries": True,
         "allow_opposing_force_reactions": True,
         "trade_profile": _HIGH_FREQUENCY_TRADE_PROFILE,
         "execution_profile": _HIGH_FREQUENCY_TRADE_PROFILE,
         "high_frequency_enabled": True,
-        "two_candle_execution_allowed": True,
+        "two_candle_execution_allowed": False,
+        "allow_high_frequency_kernel_override": False,
         "swing_fallback_enabled": False,
         "continuous_model_feed_enabled": True,
         "high_frequency_timeframe": _HIGH_FREQUENCY_TIMEFRAME,
@@ -4554,6 +4568,9 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     controls["amount_policy"] = _BROKER_AMOUNT_POLICY
     controls["live_execution_enabled"] = bool(controls.get("live_execution_enabled", False))
     controls["allow_countertrend_scalp"] = False
+    controls["allow_professional_counter_leg_entries"] = bool(
+        controls.get("allow_professional_counter_leg_entries", True)
+    )
     controls["allow_location_sniper_entries"] = bool(controls.get("allow_location_sniper_entries", False))
     controls["allow_live_momentum_entries"] = bool(controls.get("allow_live_momentum_entries", True))
     controls["allow_opposing_force_reactions"] = bool(controls.get("allow_opposing_force_reactions", True))
@@ -4561,14 +4578,13 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
     controls["trade_profile"] = trade_profile
     controls["execution_profile"] = trade_profile
     controls["high_frequency_enabled"] = bool(controls.get("high_frequency_enabled", True)) and trade_profile != "SWING"
-    controls["two_candle_execution_allowed"] = bool(controls.get("two_candle_execution_allowed", True))
+    controls["two_candle_execution_allowed"] = bool(controls.get("two_candle_execution_allowed", False))
+    controls["allow_high_frequency_kernel_override"] = bool(controls.get("allow_high_frequency_kernel_override", False))
     controls["swing_fallback_enabled"] = bool(controls.get("swing_fallback_enabled", False))
     controls["continuous_model_feed_enabled"] = bool(controls.get("continuous_model_feed_enabled", True))
-    controls["high_frequency_timeframe"] = str(
-        controls.get("high_frequency_timeframe", _HIGH_FREQUENCY_TIMEFRAME) or _HIGH_FREQUENCY_TIMEFRAME
-    ).strip().upper()
-    if controls["high_frequency_timeframe"] != _HIGH_FREQUENCY_TIMEFRAME:
-        controls["high_frequency_timeframe"] = _HIGH_FREQUENCY_TIMEFRAME
+    controls["high_frequency_timeframe"] = _normalize_high_frequency_timeframe(
+        controls.get("high_frequency_timeframe", _HIGH_FREQUENCY_TIMEFRAME)
+    )
     controls["high_frequency_horizon_candles"] = max(
         1,
         min(
@@ -4580,7 +4596,13 @@ def _normalize_execution_controls(value: Any) -> dict[str, Any]:
         _EXECUTION_MIN_LIVE_EXPIRY_SEC,
         min(
             _EXECUTION_MAX_LIVE_EXPIRY_SEC,
-            int(controls.get("high_frequency_expiry_seconds", _HIGH_FREQUENCY_FIXED_EXPIRY_SEC) or _HIGH_FREQUENCY_FIXED_EXPIRY_SEC),
+            int(
+                controls.get(
+                    "high_frequency_expiry_seconds",
+                    _high_frequency_profile_expiry_seconds(controls["high_frequency_timeframe"]),
+                )
+                or _high_frequency_profile_expiry_seconds(controls["high_frequency_timeframe"])
+            ),
         ),
     )
     controls["high_frequency_entry_grace_sec"] = max(
@@ -13656,6 +13678,9 @@ class PhoenixGuardWindowTrackingAdapter:
         execution_controls = _normalize_execution_controls(
             _mapping_to_dict(session_row.get("execution_controls", {}))
         )
+        configured_high_frequency_timeframe = _normalize_high_frequency_timeframe(
+            execution_controls.get("high_frequency_timeframe", _HIGH_FREQUENCY_TIMEFRAME)
+        )
         frame_index = int(session_row.get("frame_index", session_row.get("display_frame_id", 0)) or 0)
         sequence_id = f"seq_{str(session_row.get('session_id', '') or 'tracker').strip()}_{frame_index}"
         timeframe = str(timeframe_selector.get("value", "") or "").upper()
@@ -13664,6 +13689,12 @@ class PhoenixGuardWindowTrackingAdapter:
         if not timeframe:
             timeframe = "M5"
             timeframe_source = "default_m5_policy"
+        high_frequency_study_timeframe = configured_high_frequency_timeframe
+        high_frequency_timeframe_source = (
+            "execution_controls_high_frequency_timeframe"
+            if high_frequency_study_timeframe != timeframe
+            else timeframe_source
+        )
         market_row = _mapping_to_dict(market_selector)
         market = _normalize_fx_market_candidate(market_row.get("value", ""))
         market_source = str(market_row.get("source", "unconfirmed") or "unconfirmed")
@@ -13683,6 +13714,9 @@ class PhoenixGuardWindowTrackingAdapter:
             tracking["detected_timeframe"] = timeframe
             tracking["timeframe_source"] = timeframe_source
             tracking["timeframe_confidence"] = timeframe_confidence
+            tracking["configured_high_frequency_timeframe"] = configured_high_frequency_timeframe
+            tracking["high_frequency_study_timeframe"] = high_frequency_study_timeframe
+            tracking["high_frequency_timeframe_source"] = high_frequency_timeframe_source
             tracking["detected_market"] = market
             tracking["market_source"] = market_source
             tracking["market_confidence"] = market_confidence
@@ -13697,6 +13731,9 @@ class PhoenixGuardWindowTrackingAdapter:
             )
             signal["focus_timeframe"] = timeframe
             signal["focus_timeframe_source"] = timeframe_source
+            signal["configured_high_frequency_timeframe"] = configured_high_frequency_timeframe
+            signal["high_frequency_study_timeframe"] = high_frequency_study_timeframe
+            signal["high_frequency_timeframe_source"] = high_frequency_timeframe_source
             signal["market"] = market
             signal["market_source"] = market_source
             signal["market_confidence"] = market_confidence
@@ -13962,14 +13999,14 @@ class PhoenixGuardWindowTrackingAdapter:
         lstm_contribution = build_lstm_candle_sequence_contribution(
             candles=candles,
             image_size=chart_image.size,
-            timeframe=timeframe,
+            timeframe=high_frequency_study_timeframe,
             sequence_phase=str(behavior_payload.get("current_state", setup) or setup),
             market_play_label=setup,
         )
         high_frequency_forecast = build_high_frequency_candle_forecast(
             candles=candles,
             image_size=chart_image.size,
-            timeframe=timeframe,
+            timeframe=high_frequency_study_timeframe,
             candidate_action=candidate_action,
             global_direction=global_direction,
             local_direction=local_direction,
@@ -14076,6 +14113,9 @@ class PhoenixGuardWindowTrackingAdapter:
             "detected_timeframe": timeframe,
             "timeframe_source": timeframe_source,
             "timeframe_confidence": timeframe_confidence,
+            "configured_high_frequency_timeframe": configured_high_frequency_timeframe,
+            "high_frequency_study_timeframe": high_frequency_study_timeframe,
+            "high_frequency_timeframe_source": high_frequency_timeframe_source,
             "detected_market": market,
             "market_source": market_source,
             "market_confidence": market_confidence,
@@ -14163,6 +14203,9 @@ class PhoenixGuardWindowTrackingAdapter:
             "setup": setup,
             "focus_timeframe": timeframe,
             "focus_timeframe_source": timeframe_source,
+            "configured_high_frequency_timeframe": configured_high_frequency_timeframe,
+            "high_frequency_study_timeframe": high_frequency_study_timeframe,
+            "high_frequency_timeframe_source": high_frequency_timeframe_source,
             "market": market,
             "market_source": market_source,
             "market_confidence": market_confidence,
@@ -18408,13 +18451,24 @@ class ContinuousWindowTrackerService:
             tracking=tracking,
             controls=execution_controls,
             symbol=symbol,
-            timeframe=timeframe,
+            timeframe=str(
+                signal.get("high_frequency_study_timeframe")
+                or tracking.get("high_frequency_study_timeframe")
+                or timeframe
+            ),
             now_epoch=float(capture_started_epoch),
         )
         signal["high_frequency_candle_cycle"] = dict(high_frequency_cycle)
         tracking["high_frequency_candle_cycle"] = dict(high_frequency_cycle)
         two_candle_execution_allowed = bool(execution_controls.get("two_candle_execution_allowed", False))
-        if bool(high_frequency_cycle.get("ready", False)) and two_candle_execution_allowed:
+        high_frequency_kernel_override_allowed = bool(
+            execution_controls.get("allow_high_frequency_kernel_override", False)
+        )
+        if (
+            bool(high_frequency_cycle.get("ready", False))
+            and two_candle_execution_allowed
+            and high_frequency_kernel_override_allowed
+        ):
             hf_side = _upper_action(high_frequency_cycle.get("side"), fallback="HOLD")
             hf_confidence = max(
                 _clip01(high_frequency_cycle.get("confidence") or 0.0),
@@ -18423,6 +18477,8 @@ class ContinuousWindowTrackerService:
             hf_expiry = int(high_frequency_cycle.get("expiry_seconds", _HIGH_FREQUENCY_FIXED_EXPIRY_SEC) or _HIGH_FREQUENCY_FIXED_EXPIRY_SEC)
             hf_horizon = int(high_frequency_cycle.get("horizon_candles", _HIGH_FREQUENCY_HORIZON_CANDLES) or _HIGH_FREQUENCY_HORIZON_CANDLES)
             hf_clock = _mapping_to_dict(high_frequency_cycle.get("clock"))
+            hf_timeframe = str(high_frequency_cycle.get("configured_timeframe") or high_frequency_cycle.get("timeframe") or timeframe or _HIGH_FREQUENCY_TIMEFRAME).upper()
+            hf_timeframe_seconds = int(high_frequency_cycle.get("timeframe_seconds", _timeframe_seconds(hf_timeframe, default=300)) or _timeframe_seconds(hf_timeframe, default=300))
             hf_current_candle: dict[str, Any] = {
                 "state": "VALID",
                 "phase": "VALID",
@@ -18433,11 +18489,11 @@ class ContinuousWindowTrackerService:
                 "current_candle_closed": True,
                 "closed_candle_epoch": high_frequency_cycle.get("closed_candle_epoch"),
                 "seconds_elapsed": 0,
-                "seconds_remaining": int(_timeframe_seconds(timeframe or _HIGH_FREQUENCY_TIMEFRAME, default=300)),
+                "seconds_remaining": hf_timeframe_seconds,
                 "close_progress": 1.0,
                 "max_entry_progress": 1.0,
                 "requires_closed_candle": True,
-                "reason": "The previously developing M5 candle has closed; the next two-candle study window is now the execution target.",
+                "reason": f"The previously developing {hf_timeframe} candle has closed; the next two-candle study window is now the execution target.",
             }
             decision_kernel = {
                 **decision_kernel,
@@ -18474,11 +18530,11 @@ class ContinuousWindowTrackerService:
                 "recommended_expiry_seconds": hf_expiry,
                 "preferred_expiry_seconds": hf_expiry,
                 "target_seconds": hf_expiry,
-                "timeframe": timeframe or _HIGH_FREQUENCY_TIMEFRAME,
-                "timeframe_seconds": int(_timeframe_seconds(timeframe or _HIGH_FREQUENCY_TIMEFRAME, default=300)),
+                "timeframe": hf_timeframe,
+                "timeframe_seconds": hf_timeframe_seconds,
                 "target_horizon_candles": hf_horizon,
                 "target_horizon_seconds": hf_expiry,
-                "recommended_candles": round(float(hf_expiry) / float(max(1, _timeframe_seconds(timeframe or _HIGH_FREQUENCY_TIMEFRAME, default=300))), 3),
+                "recommended_candles": round(float(hf_expiry) / float(max(1, hf_timeframe_seconds)), 3),
                 "entry_allowed": True,
                 "timing_class": "high_frequency_two_candle_cycle",
                 "current_candle_closed": True,
@@ -21630,6 +21686,7 @@ class ContinuousWindowTrackerService:
         continuous_model_feed_enabled: bool | None = None,
         model_confidence_floor: float | None = None,
         high_frequency_min_confidence: float | None = None,
+        high_frequency_timeframe: str | None = None,
         high_frequency_entry_grace_sec: float | None = None,
         high_frequency_expiry_seconds: int | None = None,
         high_frequency_horizon_candles: int | None = None,
@@ -21740,6 +21797,8 @@ class ContinuousWindowTrackerService:
                 controls["model_confidence_floor"] = _clip01(model_confidence_floor)
             if high_frequency_min_confidence is not None:
                 controls["high_frequency_min_confidence"] = _clip01(high_frequency_min_confidence)
+            if high_frequency_timeframe is not None:
+                controls["high_frequency_timeframe"] = _normalize_high_frequency_timeframe(high_frequency_timeframe)
             if high_frequency_entry_grace_sec is not None:
                 controls["high_frequency_entry_grace_sec"] = max(0.0, float(high_frequency_entry_grace_sec))
             if high_frequency_expiry_seconds is not None:
@@ -22531,6 +22590,73 @@ class ContinuousWindowTrackerService:
                 _EXECUTION_MIN_PRIMARY_TARGET_CANDLES,
                 int(controls.get("min_primary_target_candles", _EXECUTION_MIN_PRIMARY_TARGET_CANDLES) or _EXECUTION_MIN_PRIMARY_TARGET_CANDLES),
             )
+            council_result = _mapping_to_dict(
+                tracking_summary.get("model_council_result")
+                or latest_signal.get("model_council_result")
+                or {}
+            )
+            allowance_package = _mapping_to_dict(
+                council_result.get("allowance_package")
+                or latest_signal.get("allowance_package")
+                or tracking_summary.get("allowance_package")
+                or {}
+            )
+            professional_plan = _mapping_to_dict(
+                allowance_package.get("professional_trade_plan")
+                or council_result.get("professional_trade_plan")
+                or latest_signal.get("professional_trade_plan")
+                or tracking_summary.get("professional_trade_plan")
+                or {}
+            )
+            professional_alignment = _mapping_to_dict(professional_plan.get("trend_alignment", {}))
+            professional_state = str(
+                professional_plan.get("professional_thesis_state")
+                or allowance_package.get("professional_thesis_state")
+                or ""
+            ).upper()
+            professional_counter_leg_ready = bool(
+                controls.get("allow_professional_counter_leg_entries", True)
+                and execution_side in {"BUY", "SELL"}
+                and (
+                    bool(professional_alignment.get("professional_counter_leg", False))
+                    or professional_state
+                    in {
+                        "SELL_IN_BUY_TRADEABLE_COUNTER_LEG",
+                        "BUY_IN_SELL_TRADEABLE_COUNTER_LEG",
+                    }
+                )
+                and bool(professional_plan.get("professional_grade", False))
+            )
+            if professional_counter_leg_ready:
+                thesis_horizon = _mapping_to_dict(professional_plan.get("thesis_horizon", {}))
+                professional_horizon = int(thesis_horizon.get("expected_candle_count", target_horizon) or target_horizon)
+                if professional_horizon < min_target_candles:
+                    return {
+                        "side": "HOLD",
+                        "lane": "PROFESSIONAL_COUNTER_LEG_WAIT",
+                        "actionable": False,
+                        "reason": f"Professional counter-leg horizon is only {professional_horizon} candle(s); waiting for a fuller move.",
+                    }
+                risk_gate = self._execution_risk_gate(execution_side, latest_signal, tracking_summary, lane="PROFESSIONAL_COUNTER_LEG")
+                if not bool(risk_gate.get("accepted", True)):
+                    LOGGER.info(f"Professional counter-leg {execution_side} blocked by risk gate: {risk_gate.get('reason', '')}")
+                    return {
+                        "side": "HOLD",
+                        "lane": "RISK_GATE",
+                        "actionable": False,
+                        "reason": str(risk_gate.get("reason", "Execution risk gate blocked the professional counter-leg.") or ""),
+                    }
+                LOGGER.info(f"Professional counter-leg {execution_side} ACTIVATED - proceeding to broker execution")
+                return {
+                    "side": execution_side,
+                    "lane": "PROFESSIONAL_COUNTER_LEG",
+                    "actionable": True,
+                    "reason": str(
+                        professional_plan.get("next_required")
+                        or latest_signal.get("summary", "")
+                        or "Professional counter-leg playbook gate is ready."
+                    ),
+                }
             if kernel_trade_mode != "TREND_FOLLOW":
                 entry_state = str(latest_signal.get("entry_state", tracking_summary.get("entry_state", "")) or "").upper()
                 pullback_reload_ready = (
