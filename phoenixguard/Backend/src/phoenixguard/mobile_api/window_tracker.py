@@ -749,7 +749,7 @@ def _compact_session_persisted_payload(payload: Mapping[str, Any]) -> dict[str, 
     study_packet = compact.get("model_council_study_packet")
     if isinstance(study_packet, Mapping):
         compact["model_council_study_packet"] = _compact_persisted_study_packet(cast(Mapping[str, Any], study_packet))
-    for packet_key in ("model_council_packet", "execution_packet"):
+    for packet_key in ("model_council_packet", "execution_packet", "latest_model_council_packet", "latest_execution_packet"):
         packet = compact.get(packet_key)
         if isinstance(packet, Mapping):
             compact[packet_key] = _compact_persisted_execution_packet(cast(Mapping[str, Any], packet))
@@ -19046,6 +19046,7 @@ class ContinuousWindowTrackerService:
         council = self._model_council_for_session(session_id)
         result = council.evaluate(snapshot, now_epoch=publication_epoch)
         result_payload = _mapping_to_dict(result)
+        previous_execution_packet = _model_council_packet_from_payload(payload)
         packet = _model_council_packet_from_payload(result_payload)
         study_packet = _mapping_to_dict(
             result_payload.get("model_council_study_packet") or result_payload.get("study_packet")
@@ -19296,16 +19297,48 @@ class ContinuousWindowTrackerService:
             packet["signal_thesis_v3"] = _mapping_to_dict(signal_thesis)
             result_payload["model_council_packet"] = packet
             result_payload["execution_packet"] = packet
+            result_payload["latest_model_council_packet"] = packet
+            result_payload["latest_execution_packet"] = packet
             result_payload["execution_packet_present"] = True
             latest_signal["model_council_packet"] = packet
             latest_signal["execution_packet"] = packet
+            latest_signal["latest_model_council_packet"] = packet
+            latest_signal["latest_execution_packet"] = packet
             tracking_summary["model_council_packet"] = packet
             tracking_summary["execution_packet"] = packet
+            tracking_summary["latest_model_council_packet"] = packet
+            tracking_summary["latest_execution_packet"] = packet
+            if isinstance(payload, dict):
+                payload["model_council_packet"] = packet
+                payload["execution_packet"] = packet
+                payload["latest_model_council_packet"] = packet
+                payload["latest_execution_packet"] = packet
+        elif previous_execution_packet:
+            result_payload["latest_model_council_packet"] = previous_execution_packet
+            result_payload["latest_execution_packet"] = previous_execution_packet
+            result_payload["execution_packet_present"] = True
+            result_payload["execution_packet_retained_v3"] = True
+            latest_signal["latest_model_council_packet"] = previous_execution_packet
+            latest_signal["latest_execution_packet"] = previous_execution_packet
+            tracking_summary["latest_model_council_packet"] = previous_execution_packet
+            tracking_summary["latest_execution_packet"] = previous_execution_packet
+            if isinstance(payload, dict):
+                payload["latest_model_council_packet"] = previous_execution_packet
+                payload["latest_execution_packet"] = previous_execution_packet
         else:
             latest_signal.pop("model_council_packet", None)
             latest_signal.pop("execution_packet", None)
+            latest_signal.pop("latest_model_council_packet", None)
+            latest_signal.pop("latest_execution_packet", None)
             tracking_summary.pop("model_council_packet", None)
             tracking_summary.pop("execution_packet", None)
+            tracking_summary.pop("latest_model_council_packet", None)
+            tracking_summary.pop("latest_execution_packet", None)
+            if isinstance(payload, dict):
+                payload.pop("model_council_packet", None)
+                payload.pop("execution_packet", None)
+                payload.pop("latest_model_council_packet", None)
+                payload.pop("latest_execution_packet", None)
         return result_payload
 
     def _append_trade_outcome_memory(self, session_id: str, outcome: Mapping[str, Any]) -> None:
