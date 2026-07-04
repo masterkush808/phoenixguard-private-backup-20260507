@@ -177,12 +177,29 @@ def fetch_runtime_bundle(base_url: str, session_id: str, timeout: float) -> tupl
     """Read live, council, and performance state without serial endpoint delay."""
     paths = {
         "live": f"/v1/mobile/live/state/v3/{session_id}?compact=1&monitor=1",
-        "council": f"/v1/mobile/model-council/latest?session_id={session_id}",
-        "perf": f"/v1/mobile/performance/trace/v3/{session_id}",
+        "health": "/v1/mobile/health",
     }
-    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="pg-burn-fetch") as pool:
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pg-burn-fetch") as pool:
         futures = {name: pool.submit(fetch_json, base_url, path, timeout) for name, path in paths.items()}
-        return futures["live"].result(), futures["council"].result(), futures["perf"].result()
+        live_resp = futures["live"].result()
+        health_resp = futures["health"].result()
+    live_json = mapping(live_resp.get("json"))
+    council_json = mapping(live_json.get("model_council_result"))
+    packet = mapping(live_json.get("latest_execution_packet") or live_json.get("execution_packet"))
+    if packet:
+        council_json.setdefault("execution_packet", packet)
+        council_json.setdefault("model_council_packet", packet)
+        council_json["execution_packet_present"] = True
+        council_json.setdefault("execution_packet_id", text(packet.get("packet_id")))
+    council_resp: dict[str, Any] = {
+        "ok": bool(live_resp.get("ok")),
+        "url": f"{base_url.rstrip('/')}/v1/mobile/live/state/v3/{session_id}?compact=1&monitor=1#model_council_result",
+        "latency_ms": live_resp.get("latency_ms"),
+        "json": council_json,
+    }
+    if not bool(live_resp.get("ok")):
+        council_resp["error"] = live_resp.get("error")
+    return live_resp, council_resp, health_resp
 
 
 def candle_movement_context(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str, Any]:

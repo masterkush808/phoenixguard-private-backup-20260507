@@ -677,7 +677,6 @@ _COMPACT_LIVE_STATE_PROMOTION_TRACE_KEYS: frozenset[str] = frozenset(
         "candidate_side",
         "timing_decision",
         "entry_quality",
-        "opportunity_maturity",
         "maturity",
         "score",
         "threshold",
@@ -1305,6 +1304,17 @@ def _compact_live_state_sidecar_payload(payload: Mapping[str, Any]) -> dict[str,
         packet = compact.get(packet_key)
         if isinstance(packet, Mapping):
             compact[packet_key] = _compact_live_state_execution_packet(cast(Mapping[str, Any], packet))
+    current_packet: dict[str, Any] | None = None
+    for packet_key in ("latest_execution_packet", "execution_packet", "latest_model_council_packet", "model_council_packet"):
+        packet = compact.get(packet_key)
+        if isinstance(packet, Mapping):
+            current_packet = dict(cast(Mapping[str, Any], packet))
+            break
+    for packet_key in ("model_council_packet", "execution_packet", "latest_model_council_packet"):
+        compact.pop(packet_key, None)
+    if current_packet:
+        compact["latest_execution_packet"] = current_packet
+        compact["execution_packet_present"] = True
     return compact
 
 
