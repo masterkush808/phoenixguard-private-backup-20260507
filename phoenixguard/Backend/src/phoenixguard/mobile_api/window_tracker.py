@@ -967,6 +967,91 @@ def _compact_live_state_council_result(value: Any) -> Any:
     return payload
 
 
+def _compact_live_state_allowance_package(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    selected = {
+        "schema_version",
+        "package_type",
+        "allowance_family",
+        "execution_authority",
+        "packet_authority",
+        "accepted",
+        "execution_ready",
+        "decision_accepted",
+        "side",
+        "selected_lane",
+        "score",
+        "threshold",
+        "book_strategy_maturity",
+        "professional_grade",
+        "professional_trade_plan",
+        "professional_thesis_state",
+        "expected_move_time",
+        "entry_window",
+        "thesis_horizon",
+    }
+    return _strip_packet_self_references(_compact_selected_mapping(mapping, selected))
+
+
+def _compact_live_state_execution_packet(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    selected = {
+        "schema_version",
+        "packet_type",
+        "packet_id",
+        "session_id",
+        "symbol",
+        "timeframe",
+        "frame_id",
+        "capture_count",
+        "state_version",
+        "created_epoch_sec",
+        "valid_until_epoch_sec",
+        "created_epoch",
+        "valid_until_epoch",
+        "ttl_sec",
+        "valid_for_seconds",
+        "provenance",
+        "execution",
+        "market_context",
+        "instrument_context",
+        "symbol_context",
+        "sequence_id",
+        "sequence_signature",
+        "sequence_length",
+        "frames_used",
+        "sequence_status",
+        "live_integrity",
+        "runtime_model_health",
+        "visual_integrity",
+        "selected_execution_lane",
+        "execution_lane",
+        "book_strategy_state",
+        "book_strategy_playbook",
+        "strategy_read",
+        "candle_movement",
+    }
+    packet_raw = _strip_packet_self_references(_compact_selected_mapping(mapping, selected))
+    if not isinstance(packet_raw, dict):
+        return {}
+    packet = cast(dict[str, Any], packet_raw)
+    council = mapping.get("model_council")
+    if isinstance(council, Mapping):
+        compact_council = _compact_persisted_council_payload(cast(Mapping[str, Any], council))
+        allowance = _compact_live_state_allowance_package(cast(Mapping[str, Any], council).get("allowance_package"))
+        if allowance:
+            compact_council["allowance_package"] = allowance
+        packet["model_council"] = compact_council
+    allowance = _compact_live_state_allowance_package(mapping.get("allowance_package"))
+    if allowance:
+        packet["allowance_package"] = allowance
+    return packet
+
+
 def _compact_live_state_sidecar_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     compact: dict[str, Any] = {}
     for key in _COMPACT_LIVE_STATE_SIDECAR_KEYS:
@@ -981,7 +1066,7 @@ def _compact_live_state_sidecar_payload(payload: Mapping[str, Any]) -> dict[str,
     for packet_key in ("model_council_packet", "execution_packet", "latest_model_council_packet", "latest_execution_packet"):
         packet = compact.get(packet_key)
         if isinstance(packet, Mapping):
-            compact[packet_key] = _compact_persisted_execution_packet(cast(Mapping[str, Any], packet))
+            compact[packet_key] = _compact_live_state_execution_packet(cast(Mapping[str, Any], packet))
     return compact
 
 
