@@ -116,6 +116,39 @@ def test_opposite_read_is_watch_only_until_buy_thesis_invalidates() -> None:
     assert thesis_blocks_countertrend(updated, {"side": "BUY"}) is False
 
 
+def test_professional_opposing_force_reaction_packet_bypasses_old_thesis_block() -> None:
+    thesis = update_signal_thesis_v3(
+        None,
+        snapshot=_snapshot("BUY", y=110.0, frame_id=10),
+        model_council_result=_result("BUY"),
+        now_epoch=100.0,
+    )
+    professional_sell_packet: dict[str, Any] = {
+        "packet_type": "PG_EXECUTION_PACKET_V3",
+        "side": "SELL",
+        "execution": {"enabled": True, "state": "EXECUTABLE", "side": "SELL"},
+        "allowance_package": {
+            "accepted": True,
+            "execution_ready": True,
+            "professional_authority_side": "SELL",
+            "professional_trade_plan": {
+                "professional_grade": True,
+                "authority_side": "SELL",
+                "professional_thesis_state": "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+                "trend_alignment": {"professional_opposing_force_reaction": True},
+            },
+            "professional_thesis_resolution": {
+                "thesis_state": "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+                "authority_side": "SELL",
+            },
+        },
+        "execution_lane": {"professional_reaction_lane_authority": True},
+    }
+
+    assert thesis_blocks_countertrend(thesis, {"side": "SELL"}) is True
+    assert thesis_blocks_countertrend(thesis, professional_sell_packet) is False
+
+
 def test_thesis_invalidates_only_after_zone_breach_and_confirmed_opposite() -> None:
     thesis = update_signal_thesis_v3(
         None,

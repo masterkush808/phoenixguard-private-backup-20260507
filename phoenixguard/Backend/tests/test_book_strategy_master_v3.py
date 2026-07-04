@@ -163,6 +163,39 @@ def _attach_candle_movement_fixture(snapshot: dict[str, Any], side: str) -> None
     snapshot["candle_movement_context_v3"] = build_candle_movement_context_v3(snapshot)
 
 
+def _attach_executable_identity_lock(snapshot: dict[str, Any]) -> None:
+    identity_lock: dict[str, Any] = {
+        "user_symbol": "EUR/GBP OTC",
+        "session_id": "pocket-live-8788",
+        "timeframe": "M5",
+        "viewport_hash": "chart-viewport-a",
+        "broker_surface_hash": "broker-a",
+        "window_handle": "hwnd-1",
+        "window_rect": [0, 0, 640, 420],
+        "calibration_layout_id": "layout-a",
+        "expected_calibration_layout_id": "layout-a",
+        "window_handle_stable": True,
+        "window_rect_stable": True,
+        "viewport_hash_stable": True,
+        "broker_surface_hash_stable": True,
+        "calibration_layout_match": True,
+        "session_active": True,
+        "packet_fresh": True,
+        "models_awake": True,
+        "profile_mismatch": False,
+    }
+    snapshot.update(
+        {
+            "symbol": "",
+            "market": "",
+            "ocr_symbol": "",
+            "viewport_hash": "chart-viewport-a",
+            "broker_surface_hash": "broker-a",
+            "instrument_identity_lock": identity_lock,
+        }
+    )
+
+
 def test_book_strategy_master_signs_valid_single_timeframe_reaction() -> None:
     snapshot = _strategy_snapshot("BUY")
     snapshot["pullback_confirmed"] = False
@@ -715,6 +748,273 @@ def test_model_council_reframes_suppressed_current_leg_as_professional_counter_l
     assert result["book_strategy"]["evidence"]["counter_leg_is_current_truth"] is True
     assert plan["professional_grade"] is True
     assert plan["trend_alignment"]["professional_counter_leg"] is True
+
+
+def test_model_council_reframes_buy_bias_at_tested_resistance_to_sell_reaction() -> None:
+    council = ModelCouncilV3()
+    first_snapshot = _strategy_snapshot("BUY")
+    second_snapshot = _strategy_snapshot("BUY")
+    for snapshot in (first_snapshot, second_snapshot):
+        _attach_candle_movement_fixture(snapshot, "BUY")
+        snapshot["candidate_side"] = "BUY"
+        snapshot["action"] = "BUY"
+        snapshot["buy_score"] = 0.72
+        snapshot["sell_score"] = 0.66
+        snapshot["global_structure"]["global_side"] = "BUY"
+        snapshot["local_micro_structure"]["local_side"] = "BUY"
+        snapshot["market_context"]["global_side"] = "BUY"
+        snapshot["market_context"]["local_side"] = "BUY"
+        snapshot["market_context"]["dominant_side"] = "BUY"
+        snapshot["market_context"]["current_location"] = "SUPPLY_ZONE"
+        snapshot["market_context"]["inside_valid_trigger_zone"] = False
+        snapshot["market_context"]["opposing_force_distance_ok"] = False
+        snapshot["zone_liquidity"] = {
+            "side": "HOLD",
+            "zone_type": "REFERENCE",
+            "inside_valid_trigger_zone": False,
+        }
+        snapshot["zones"] = [
+            {
+                **_zone("tested_supply_001", "SUPPLY", side="SELL", inside=True, distance=0.02),
+                "role": "resistance",
+                "zone_family": "SUPPLY_ZONE",
+                "touch_count": 6,
+                "reaction_count": 3,
+                "retest_count": 6,
+                "last_touch_age_candles": 1,
+                "freshness_state": "TESTED_TWICE",
+                "zone_pattern": "DROP_BASE_DROP",
+                "significance_score": 0.86,
+            },
+            _zone("demand_target_001", "DEMAND", side="BUY", distance=0.46),
+        ]
+        snapshot["risk_opposing_force"] = {
+            "side": "BUY",
+            "distance_to_opposing_force": 0.04,
+            "opposing_force_distance_norm": 0.04,
+            "minimum_required_distance": 0.22,
+            "distance_ok": False,
+            "risk_state": "NEAR_OPPOSING_FORCE",
+            "zone": snapshot["zones"][0],
+        }
+        snapshot["current_candle_acceptance"]["upper_shadow_range_ratio"] = 0.43
+        snapshot["current_candle_acceptance"]["close_location_value"] = 0.28
+        snapshot["continuation_confirmed"] = False
+        snapshot["pullback_confirmed"] = False
+        snapshot["retest_confirmed"] = False
+
+    council.evaluate(first_snapshot, now_epoch=NOW)
+    second_snapshot["frame_id"] = 962
+    second_snapshot["capture_count"] = 964
+    second_snapshot["state_version"] = 1962
+    second_snapshot["input_frame_hash"] = "frame_962"
+    second_snapshot["previous_frame_hash"] = "frame_961"
+
+    result = council.evaluate(second_snapshot, now_epoch=NOW + 0.5)
+    resolution = result["model_council"]["professional_thesis_resolution"]
+    book_strategy = result["book_strategy"]
+    plan = result["model_council"]["professional_trade_plan"]
+
+    assert result["model_council"]["final_side"] == "SELL"
+    assert resolution["thesis_state"] == "SELL_IN_BUY_OPPOSING_FORCE_REACTION"
+    assert resolution["opposing_force_reaction_ready"] is True
+    assert resolution["side_reframed"] is True
+    assert book_strategy["playbook"] == "SELL_IN_BUY_OPPOSING_FORCE_REACTION"
+    assert book_strategy["evidence"]["professional_reaction_is_current_truth"] is True
+    assert book_strategy["evidence"]["opposing_force_ok"] is True
+    assert book_strategy["evidence"]["bad_entry_overridden_by_professional_reaction"] is True
+    assert result["model_council"].get("blocked_by") != "BUY_AND_SELL_EXECUTABLE_CONFLICT"
+    assert plan["professional_grade"] is True
+    assert plan["trend_alignment"]["professional_opposing_force_reaction"] is True
+
+
+def test_model_council_publishes_packet_for_tested_resistance_sell_reaction_with_room() -> None:
+    council = ModelCouncilV3()
+    first_snapshot = _strategy_snapshot("BUY")
+    second_snapshot = _strategy_snapshot("BUY")
+    for snapshot in (first_snapshot, second_snapshot):
+        _attach_candle_movement_fixture(snapshot, "SELL")
+        _attach_executable_identity_lock(snapshot)
+        snapshot["candidate_side"] = "SELL"
+        snapshot["action"] = "SELL"
+        snapshot["buy_score"] = 0.72
+        snapshot["sell_score"] = 0.7205
+        snapshot["global_structure"]["global_side"] = "BUY"
+        snapshot["local_micro_structure"]["local_side"] = "SELL"
+        snapshot["market_context"]["global_side"] = "BUY"
+        snapshot["market_context"]["local_side"] = "SELL"
+        snapshot["market_context"]["dominant_side"] = "BUY"
+        snapshot["market_context"]["current_location"] = "SUPPLY_ZONE"
+        snapshot["market_context"]["inside_valid_trigger_zone"] = False
+        snapshot["market_context"]["opposing_force_distance_ok"] = False
+        snapshot["market_context"]["is_late_chase"] = True
+        snapshot["market_context"]["middle_safe"] = False
+        snapshot["zone_liquidity"] = {
+            "side": "HOLD",
+            "zone_type": "REFERENCE",
+            "inside_valid_trigger_zone": False,
+        }
+        tested_supply = {
+            **_zone("tested_supply_001", "SUPPLY", side="SELL", inside=True, distance=0.02),
+            "role": "resistance",
+            "zone_family": "SUPPLY_ZONE",
+            "touch_count": 19,
+            "reaction_count": 14,
+            "retest_count": 24,
+            "last_touch_age_candles": 0,
+            "freshness_state": "TESTED_TWICE",
+            "zone_pattern": "DROP_BASE_DROP",
+            "significance_score": 1.0,
+        }
+        snapshot["zones"] = [
+            tested_supply,
+            _zone("demand_target_001", "DEMAND", side="BUY", distance=0.46),
+        ]
+        snapshot["risk_opposing_force"] = {
+            "side": "BUY",
+            "distance_to_opposing_force": 0.04,
+            "opposing_force_distance_norm": 0.04,
+            "minimum_required_distance": 0.22,
+            "distance_ok": False,
+            "risk_state": "NEAR_OPPOSING_FORCE",
+            "zone": tested_supply,
+        }
+        snapshot["current_candle_acceptance"]["phase"] = "VALID"
+        snapshot["current_candle_acceptance"]["candle_phase"] = "VALID"
+        snapshot["current_candle_acceptance"]["entry_allowed"] = True
+        snapshot["current_candle_acceptance"]["upper_shadow_range_ratio"] = 0.43
+        snapshot["current_candle_acceptance"]["close_location_value"] = 0.28
+        snapshot["angle_features"]["late_chase_risk"] = True
+        snapshot["angle_features"]["post_impulse_wait_required"] = True
+        snapshot["timing"] = {"state": "READY", "side": "SELL", "expiry_seconds": 300}
+        snapshot["timing_decision"] = {
+            "entry_now_allowed": True,
+            "side": "SELL",
+            "entry_timing": {
+                "entry_window": "READY",
+                "valid_until_epoch_ms": int((NOW + 300) * 1000),
+                "expiry_seconds": 300,
+            },
+        }
+        candle_context = snapshot["candle_movement_context_v3"]
+        candle_context["current_leg"] = {
+            "side": "SELL",
+            "candle_count": 4,
+            "stage": "STILL_RECLAIMING",
+            "strength": 0.74,
+        }
+        candle_context["move_stage"] = "MATURE"
+        candle_context["visible_candle_count"] = 56
+        candle_context["opposing_force_room"] = {
+            "estimated_room_candles": 5,
+            "opposing_force_ok": False,
+        }
+        snapshot["candle_movement_context"] = candle_context
+
+    council.evaluate(first_snapshot, now_epoch=NOW)
+    second_snapshot["frame_id"] = 1964
+    second_snapshot["capture_count"] = 1964
+    second_snapshot["state_version"] = 2964
+    second_snapshot["input_frame_hash"] = "frame_1964"
+    second_snapshot["previous_frame_hash"] = "frame_1963"
+
+    result = council.evaluate(second_snapshot, now_epoch=NOW + 0.5)
+    council_state = result["model_council"]
+    expected_move = result["allowance_package"]["expected_move_time"]
+
+    assert result["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert result["execution"]["enabled"] is True
+    assert result["allowance_package"]["executable"] is True
+    assert council_state["final_state"] == "EXECUTABLE"
+    assert council_state["final_side"] == "SELL"
+    assert council_state["true_blocker"] == "NONE"
+    assert council_state["execution_lane"]["professional_reaction_lane_authority"] is True
+    assert council_state["trade_permission"]["permission_state"] == "GRANTED"
+    assert result["book_strategy"]["state"] == "ENTER_NOW"
+    assert result["book_strategy"]["playbook"] == "SELL_IN_BUY_OPPOSING_FORCE_REACTION"
+    assert expected_move["expected_candle_count"] == 4
+    assert expected_move["expected_duration_sec"] == 1200
+
+
+def test_model_council_allows_sell_resumption_when_buy_pullback_rejects_supply() -> None:
+    council = ModelCouncilV3()
+    first_snapshot = _strategy_snapshot("SELL")
+    second_snapshot = _strategy_snapshot("SELL")
+    for snapshot in (first_snapshot, second_snapshot):
+        _attach_candle_movement_fixture(snapshot, "BUY")
+        snapshot["candidate_side"] = "BUY"
+        snapshot["action"] = "BUY"
+        snapshot["buy_score"] = 0.78
+        snapshot["sell_score"] = 0.72
+        snapshot["global_structure"]["global_side"] = "SELL"
+        snapshot["local_micro_structure"]["local_side"] = "BUY"
+        snapshot["market_context"]["global_side"] = "SELL"
+        snapshot["market_context"]["local_side"] = "BUY"
+        snapshot["market_context"]["dominant_side"] = "SELL"
+        snapshot["market_context"]["current_location"] = "SUPPLY_ZONE"
+        snapshot["market_context"]["inside_valid_trigger_zone"] = True
+        snapshot["market_context"]["opposing_force_distance_ok"] = False
+        snapshot["zone_liquidity"] = {
+            "side": "SELL",
+            "zone_type": "SUPPLY",
+            "inside_valid_trigger_zone": True,
+        }
+        snapshot["zones"] = [
+            {
+                **_zone("tested_supply_resume_001", "SUPPLY", side="SELL", inside=True, distance=0.01),
+                "role": "resistance",
+                "zone_family": "SUPPLY_ZONE",
+                "touch_count": 4,
+                "reaction_count": 2,
+                "retest_count": 4,
+                "last_touch_age_candles": 1,
+                "freshness_state": "TESTED_TWICE",
+                "zone_pattern": "RALLY_BASE_DROP",
+                "significance_score": 0.82,
+            },
+            _zone("demand_target_resume_001", "DEMAND", side="BUY", distance=0.44),
+        ]
+        snapshot["risk_opposing_force"] = {
+            "side": "BUY",
+            "distance_to_opposing_force": 0.03,
+            "opposing_force_distance_norm": 0.03,
+            "minimum_required_distance": 0.22,
+            "distance_ok": False,
+            "risk_state": "NEAR_OPPOSING_FORCE",
+            "zone": snapshot["zones"][0],
+        }
+        snapshot["current_candle_acceptance"]["upper_shadow_range_ratio"] = 0.45
+        snapshot["current_candle_acceptance"]["close_location_value"] = 0.24
+        snapshot["continuation_confirmed"] = False
+        snapshot["pullback_confirmed"] = False
+        snapshot["retest_confirmed"] = False
+
+    council.evaluate(first_snapshot, now_epoch=NOW)
+    second_snapshot["frame_id"] = 972
+    second_snapshot["capture_count"] = 974
+    second_snapshot["state_version"] = 1972
+    second_snapshot["input_frame_hash"] = "frame_972"
+    second_snapshot["previous_frame_hash"] = "frame_971"
+
+    result = council.evaluate(second_snapshot, now_epoch=NOW + 0.5)
+    resolution = result["model_council"]["professional_thesis_resolution"]
+    book_strategy = result["book_strategy"]
+    plan = result["model_council"]["professional_trade_plan"]
+
+    assert result["model_council"]["final_side"] == "SELL"
+    assert resolution["thesis_state"] == "SELL_TREND_RESUMPTION_FROM_SUPPLY"
+    assert resolution["primary_bias_zone_rejection_ready"] is True
+    assert resolution["side_reframed"] is True
+    assert book_strategy["playbook"] == "SELL_TREND_RESUMPTION_FROM_SUPPLY"
+    assert book_strategy["maturity_state"] == "ENTER_NOW"
+    assert book_strategy["evidence"]["professional_bias_resumption_reaction"] is True
+    assert book_strategy["evidence"]["professional_reaction_is_current_truth"] is True
+    assert book_strategy["evidence"]["countertrend_scalp_only"] is False
+    assert plan["professional_grade"] is True
+    assert plan["trend_alignment"]["professional_bias_resumption_reaction"] is True
+    assert result["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert result["promotion_trace"]["reasoning_execution_blocked"] is False
+    assert result["promotion_trace"]["hard_bad_entry_class_active"] is False
 
 
 def test_model_council_carries_book_strategy_in_study_and_packet() -> None:

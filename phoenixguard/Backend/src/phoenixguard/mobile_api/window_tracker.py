@@ -476,6 +476,14 @@ _SESSION_NESTED_DUPLICATE_KEYS = frozenset(
         "model_council_packet",
     }
 )
+_PACKET_SELF_REFERENCE_KEYS = frozenset(
+    {
+        "model_council_packet",
+        "execution_packet",
+        "latest_model_council_packet",
+        "latest_execution_packet",
+    }
+)
 
 _DISPLAY_STATE_KEYS = frozenset(
     {
@@ -552,6 +560,28 @@ def _compact_live_nested_payload(value: Mapping[str, Any]) -> dict[str, Any]:
     for key in _SESSION_NESTED_DUPLICATE_KEYS:
         payload.pop(key, None)
     return payload
+
+
+def _strip_packet_self_references(value: Any, *, depth: int = 0) -> Any:
+    """Copy packet data without nested packet containers."""
+
+    if depth > 24:
+        return str(value)
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in cast(Mapping[Any, Any], value).items():
+            text_key = str(key)
+            if text_key in _PACKET_SELF_REFERENCE_KEYS:
+                continue
+            result[text_key] = _strip_packet_self_references(item, depth=depth + 1)
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_strip_packet_self_references(item, depth=depth + 1) for item in cast(Sequence[Any], value)]
+    return value
+
+
+def _compact_persisted_execution_packet(value: Mapping[str, Any]) -> dict[str, Any]:
+    return cast(dict[str, Any], _strip_packet_self_references(value))
 
 
 def _compact_selected_mapping(value: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -719,6 +749,10 @@ def _compact_session_persisted_payload(payload: Mapping[str, Any]) -> dict[str, 
     study_packet = compact.get("model_council_study_packet")
     if isinstance(study_packet, Mapping):
         compact["model_council_study_packet"] = _compact_persisted_study_packet(cast(Mapping[str, Any], study_packet))
+    for packet_key in ("model_council_packet", "execution_packet"):
+        packet = compact.get(packet_key)
+        if isinstance(packet, Mapping):
+            compact[packet_key] = _compact_persisted_execution_packet(cast(Mapping[str, Any], packet))
     return compact
 
 
@@ -3764,7 +3798,8 @@ def _model_council_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, 
             return {}
         row = _mapping_to_dict(candidate)
         if row.get("schema_version") == PG_EXECUTION_PACKET_SCHEMA_VERSION:
-            return row if packet_is_executable(row) else {}
+            packet = _compact_persisted_execution_packet(row)
+            return packet if packet_is_executable(packet) else {}
         for key in (
             "model_council_packet",
             "execution_packet",

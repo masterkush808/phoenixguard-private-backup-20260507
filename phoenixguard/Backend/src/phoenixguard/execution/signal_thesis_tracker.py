@@ -8,6 +8,17 @@ from typing import Any, Mapping, Sequence, cast
 SIGNAL_THESIS_SCHEMA_VERSION = "PG_SIGNAL_THESIS_V3"
 _ACTIVE_STATES = {"TRACKING", "ALLOW_PULLBACK", "PROTECT_WIN", "TARGET_REACHED"}
 _TERMINAL_STATES = {"INVALIDATED", "PAIR_SWITCH_RESET", "NO_ACTIVE_THESIS"}
+_PROFESSIONAL_COUNTER_THESIS_STATES = {
+    "SELL_IN_BUY_TRADEABLE_COUNTER_LEG",
+    "BUY_IN_SELL_TRADEABLE_COUNTER_LEG",
+}
+_PROFESSIONAL_REACTION_THESIS_STATES = {
+    "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+    "BUY_IN_SELL_OPPOSING_FORCE_REACTION",
+    "OPPOSING_FORCE_REACTION",
+    "SELL_TREND_RESUMPTION_FROM_SUPPLY",
+    "BUY_TREND_RESUMPTION_FROM_DEMAND",
+}
 _GENERIC_SYMBOL_KEYS = {
     "",
     "ACTIVECHART",
@@ -902,21 +913,41 @@ def thesis_blocks_countertrend(thesis: Mapping[str, Any], packet_or_result: Mapp
         or allowance.get("professional_thesis_state")
         or ""
     ).strip().upper()
-    professional_counter_leg = bool(
-        thesis_state
-        in {
-            "SELL_IN_BUY_TRADEABLE_COUNTER_LEG",
-            "BUY_IN_SELL_TRADEABLE_COUNTER_LEG",
-        }
-        or _bool(_mapping(professional_plan.get("trend_alignment")).get("professional_counter_leg"))
+    execution_lane = _mapping(
+        row.get("execution_lane")
+        or allowance.get("execution_lane")
+        or _mapping(row.get("model_council")).get("execution_lane")
+        or _mapping(row.get("promotion_trace")).get("execution_lane")
     )
-    if professional_counter_leg:
-        return False
-    thesis_side = _side(thesis.get("side"))
+    authority_side = _side(
+        professional_resolution.get("authority_side")
+        or professional_plan.get("authority_side")
+        or allowance.get("professional_authority_side")
+        or allowance.get("authority_side")
+    )
     attempted_side = _side(
         row.get("side")
         or _mapping(row.get("execution")).get("side")
         or _mapping(row.get("model_council")).get("final_side")
         or row.get("final_side")
     )
+    professional_packet_ready = bool(
+        _bool(professional_plan.get("professional_grade"))
+        or _bool(allowance.get("accepted"))
+        or _bool(allowance.get("execution_ready"))
+        or _bool(execution_lane.get("professional_reaction_lane_authority"))
+    )
+    professional_counter_leg = bool(
+        thesis_state in _PROFESSIONAL_COUNTER_THESIS_STATES
+        or _bool(_mapping(professional_plan.get("trend_alignment")).get("professional_counter_leg"))
+    )
+    professional_reaction = bool(
+        thesis_state in _PROFESSIONAL_REACTION_THESIS_STATES
+        or _bool(_mapping(professional_plan.get("trend_alignment")).get("professional_opposing_force_reaction"))
+        or _bool(_mapping(professional_plan.get("trend_alignment")).get("professional_bias_resumption_reaction"))
+    )
+    side_matches_professional_authority = bool(authority_side in {"HOLD", attempted_side} or authority_side == attempted_side)
+    if (professional_counter_leg or professional_reaction) and professional_packet_ready and side_matches_professional_authority:
+        return False
+    thesis_side = _side(thesis.get("side"))
     return bool(thesis_side in {"BUY", "SELL"} and attempted_side == _opposite(thesis_side))

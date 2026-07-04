@@ -62,6 +62,19 @@ DIRECT_ALERT_HARD_BAD_ENTRY_CLASSES = {
     "LATE_CHASE",
     "LATE_CHASE_STEEP_IMPULSE",
 }
+PROFESSIONAL_PLAYBOOK_SOFT_BAD_ENTRY_CLASSES = {
+    "",
+    "NONE",
+    "OK",
+    "PASS",
+    "CLEAR",
+    "AGAINST_GLOBAL_STRUCTURE",
+    "INTO_OPPOSING_FORCE",
+    "MIDDLE_RANGE_NO_EDGE",
+    "LATE_CHASE",
+    "LATE_CHASE_AFTER_IMPULSE",
+    "LATE_CHASE_STEEP_IMPULSE",
+}
 
 
 def utc_now() -> str:
@@ -1770,10 +1783,36 @@ def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str
     reasoning_execution_blocked = bool(promotion.get("reasoning_execution_blocked"))
     reasoning_bad_entry_class = text(promotion.get("reasoning_bad_entry_class")).upper()
     market_bad_entry_class = text(promotion.get("market_bad_entry_class")).upper()
-    hard_bad_entry_class_active = bool(promotion.get("hard_bad_entry_class_active")) or (
-        reasoning_bad_entry_class not in NON_BLOCKING_BAD_ENTRY_CLASSES
+    professional_plan = mapping(
+        promotion.get("professional_trade_plan")
+        or allowance_package.get("professional_trade_plan")
+        or opportunity.get("professional_trade_plan")
+    )
+    professional_playbook_override = bool(
+        promotion.get("professional_playbook_reasoning_override_allowed")
+        or promotion.get("professional_reaction_reasoning_override_allowed")
+        or (
+            allowance_authority == PLAYBOOK_EXECUTION_AUTHORITY
+            and bool(professional_plan.get("professional_grade"))
+            and allowance_accepted
+            and allowance_execution_ready
+        )
+    )
+    if professional_playbook_override:
+        reasoning_execution_blocked = False
+    class_present = bool(reasoning_bad_entry_class and reasoning_bad_entry_class not in NON_BLOCKING_BAD_ENTRY_CLASSES)
+    raw_hard_bad_entry_class_active = bool(promotion.get("hard_bad_entry_class_active")) or (
+        class_present
         and reasoning_bad_entry_class not in SOFT_BLOCKED_STUDY_REASONS
     ) or reasoning_bad_entry_class in DIRECT_ALERT_HARD_BAD_ENTRY_CLASSES or market_bad_entry_class in DIRECT_ALERT_HARD_BAD_ENTRY_CLASSES
+    hard_bad_entry_class_active = bool(
+        raw_hard_bad_entry_class_active
+        and not (
+            professional_playbook_override
+            and reasoning_bad_entry_class in PROFESSIONAL_PLAYBOOK_SOFT_BAD_ENTRY_CLASSES
+            and market_bad_entry_class in PROFESSIONAL_PLAYBOOK_SOFT_BAD_ENTRY_CLASSES
+        )
+    )
     internal_blockers: list[str] = []
     if reasoning_execution_blocked:
         internal_blockers.append("REASONING_EXECUTION_BLOCKED")

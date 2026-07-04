@@ -96,6 +96,12 @@ DEFAULT_AI_CONTRIBUTION_STRENGTHS = {
 LANE_SOFT_PERMISSION_REASONS = {
     "ENTRY_QUALITY_BELOW_ACCEPTABLE",
 }
+PROFESSIONAL_REACTION_SOFT_PERMISSION_REASONS = {
+    "ENTRY_QUALITY_BELOW_ACCEPTABLE",
+    "LATE_CHASE_TRAP",
+    "IDEAL_PATH_HOLD",
+    "PATH_RISK_WEAK",
+}
 LANE_SOFT_MARKET_BLOCK_REASONS = {
     "CONFLICT_MARKET",
     "PULLBACK_NOT_CONFIRMED",
@@ -144,10 +150,30 @@ WAVE_REASONING_HARD_BAD_CLASSES = {
     "DRAWDOWN_FIRST",
     "DRAWDOWN_FIRST_EXPECTED",
 }
+PROFESSIONAL_REACTION_SOFT_BAD_CLASSES = {
+    "AGAINST_GLOBAL_STRUCTURE",
+    "INTO_OPPOSING_FORCE",
+    "MIDDLE_RANGE_NO_EDGE",
+    "LATE_CHASE",
+    "LATE_CHASE_AFTER_IMPULSE",
+    "LATE_CHASE_STEEP_IMPULSE",
+}
+PROFESSIONAL_PLAYBOOK_AUTHORITY_STATES = {
+    "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+    "BUY_IN_SELL_OPPOSING_FORCE_REACTION",
+    "OPPOSING_FORCE_REACTION",
+    "SELL_TREND_RESUMPTION_FROM_SUPPLY",
+    "BUY_TREND_RESUMPTION_FROM_DEMAND",
+    "SELL_IN_BUY_TRADEABLE_COUNTER_LEG",
+    "BUY_IN_SELL_TRADEABLE_COUNTER_LEG",
+    "PROVEN_REVERSAL_RECLAIM",
+}
 PROFESSIONAL_MEMORY_MEDIAN_LEG_CANDLES = 15
 PROFESSIONAL_MIN_VISIBLE_CANDLES = 20
 PROFESSIONAL_MIN_THESIS_CANDLES = 8
 PROFESSIONAL_MIN_THESIS_CANDLES_LOW_CONTEXT = 4
+PROFESSIONAL_MIN_REACTION_ROOM_CANDLES = 4
+PROFESSIONAL_MAX_REACTION_ROOM_CANDLES = 8
 PROFESSIONAL_TREND_THESIS_CANDLES = 15
 PROFESSIONAL_REVERSAL_THESIS_CANDLES = 12
 PROFESSIONAL_MAX_THESIS_CANDLES = 36
@@ -193,6 +219,19 @@ def _int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _estimated_force_room_candles(room_context: Mapping[str, Any], *, default: int = 0) -> int:
+    return _int(
+        _first_visible_value(
+            room_context.get("estimated_candles_to_force"),
+            room_context.get("estimated_room_candles"),
+            room_context.get("room_candles"),
+            room_context.get("candles_to_force"),
+            room_context.get("candles_to_opposing_force"),
+        ),
+        default,
+    )
+
+
 def _duration_text(seconds: int) -> str:
     bounded = max(0, int(seconds))
     minutes, remainder = divmod(bounded, 60)
@@ -217,6 +256,46 @@ def _opposite(side: str) -> str:
     if normalized == "SELL":
         return "BUY"
     return "HOLD"
+
+
+def _zone_side_from_evidence(zone: Mapping[str, Any]) -> str:
+    resolved = _side(
+        zone.get("side")
+        or zone.get("direction")
+        or zone.get("trade_side")
+        or zone.get("expected_reaction_side")
+    )
+    if resolved in {"BUY", "SELL"}:
+        return resolved
+    text = " ".join(
+        str(zone.get(key) or "")
+        for key in (
+            "zone_type",
+            "type",
+            "kind",
+            "role",
+            "zone_family",
+            "label",
+            "entry_relevance",
+            "current_location",
+        )
+    ).upper()
+    if any(token in text for token in ("DEMAND", "SUPPORT", "LOCAL_LOW", "RANGE_LOW")):
+        return "BUY"
+    if any(token in text for token in ("SUPPLY", "RESISTANCE", "LOCAL_HIGH", "RANGE_HIGH")):
+        return "SELL"
+    return "HOLD"
+
+
+def _zone_strength_from_evidence(zone: Mapping[str, Any]) -> float:
+    return max(
+        _clip01(zone.get("significance_score"), 0.0),
+        _clip01(zone.get("historical_significance"), 0.0),
+        _clip01(zone.get("confidence"), 0.0),
+        min(1.0, _float(zone.get("touch_count") or zone.get("touches"), 0.0) / 4.0),
+        min(1.0, _float(zone.get("reaction_count"), 0.0) / 3.0),
+        min(1.0, _float(zone.get("retest_count"), 0.0) / 3.0),
+    )
 
 
 def _first_trade_side(*values: Any) -> str:
@@ -914,6 +993,7 @@ def _build_allowance_package_v1(
     final_score_passed: bool,
     intraday_reasoning_override_allowed: bool,
     wave_reasoning_override_allowed: bool,
+    professional_reaction_reasoning_override_allowed: bool,
     trap_active: bool,
     late_chase: bool,
     opposing_force_ok: bool,
@@ -983,9 +1063,14 @@ def _build_allowance_package_v1(
         "release_state": release_state,
         "true_blocker": None if blocker in {"", "NONE"} else blocker,
         "next_required": "" if str(next_required or "").lower() == "none" else str(next_required or ""),
-        "reasoning_override_allowed": bool(intraday_reasoning_override_allowed or wave_reasoning_override_allowed),
+        "reasoning_override_allowed": bool(
+            intraday_reasoning_override_allowed
+            or wave_reasoning_override_allowed
+            or professional_reaction_reasoning_override_allowed
+        ),
         "intraday_reasoning_override_allowed": bool(intraday_reasoning_override_allowed),
         "wave_reasoning_override_allowed": bool(wave_reasoning_override_allowed),
+        "professional_reaction_reasoning_override_allowed": bool(professional_reaction_reasoning_override_allowed),
         "safety": {
             "trap_clear": not trap_active,
             "late_chase_clear": not late_chase,
@@ -1324,7 +1409,7 @@ def _movement_projection_horizon(
     current_leg_side = _side(current_leg.get("side"))
     current_stage = _upper(candle_movement_context.get("move_stage") or current_leg.get("move_stage"))
     room = _mapping(candle_movement_context.get("opposing_force_room") or current_leg.get("opposing_force_room"))
-    estimated_room_candles = _int(room.get("estimated_candles_to_force"), 0)
+    estimated_room_candles = _estimated_force_room_candles(room)
 
     if visible_count < 20 or len(legs) < 2:
         return {
@@ -1422,8 +1507,38 @@ def _professional_thesis_resolution_v3(
     current_leg_candle_count = _int(current_leg.get("candle_count"), 0)
     current_stage = _upper(candle_movement_context.get("move_stage") or current_leg.get("move_stage"), "UNKNOWN")
     room_context = _mapping(candle_movement_context.get("opposing_force_room") or current_leg.get("opposing_force_room"))
-    estimated_candles_to_force = _int(room_context.get("estimated_candles_to_force"), 0)
-    room_ok = bool(room_context.get("room_ok", True))
+    risk_context = _mapping(snapshot.get("risk_opposing_force") or snapshot.get("risk_context"))
+    opposing_force_zone = _mapping(room_context.get("zone")) or _mapping(risk_context.get("zone"))
+    opposing_force_zone_side = _zone_side_from_evidence(opposing_force_zone)
+    opposing_force_zone_strength = _zone_strength_from_evidence(opposing_force_zone)
+    opposing_force_risk_state = _upper(
+        risk_context.get("risk_state")
+        or room_context.get("risk_state")
+        or opposing_force_zone.get("risk_state")
+    )
+    opposing_force_distance = _float(
+        risk_context.get("opposing_force_distance_norm")
+        or risk_context.get("distance_to_opposing_force")
+        or room_context.get("distance_norm"),
+        -1.0,
+    )
+    opposing_force_touch_count = _int(opposing_force_zone.get("touch_count") or opposing_force_zone.get("touches"), 0)
+    opposing_force_reaction_count = _int(opposing_force_zone.get("reaction_count"), 0)
+    opposing_force_retest_count = _int(opposing_force_zone.get("retest_count"), 0)
+    opposing_force_last_touch_age = _int(opposing_force_zone.get("last_touch_age_candles"), 999)
+    opposing_force_freshness = _upper(
+        opposing_force_zone.get("freshness_state")
+        or opposing_force_zone.get("freshness")
+        or opposing_force_zone.get("zone_freshness")
+    )
+    opposing_force_pattern = _upper(opposing_force_zone.get("zone_pattern") or opposing_force_zone.get("pattern"))
+    estimated_candles_to_force = _estimated_force_room_candles(room_context)
+    if "distance_ok" in risk_context:
+        room_ok = _bool(risk_context.get("distance_ok"))
+    elif "opposing_force_ok" in risk_context:
+        room_ok = _bool(risk_context.get("opposing_force_ok"))
+    else:
+        room_ok = _bool(room_context.get("room_ok", True))
     visible_candle_count = _int(candle_movement_context.get("visible_candle_count"), 0)
     leg_totals = {
         "BUY": sum(_int(row.get("candle_count"), 0) for row in legs[-7:] if _side(row.get("side")) == "BUY"),
@@ -1448,11 +1563,55 @@ def _professional_thesis_resolution_v3(
     candidate = candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD"
     scored_side = "BUY" if buy_score > sell_score else "SELL" if sell_score > buy_score else "HOLD"
     current_candle = _mapping(snapshot.get("current_candle_acceptance") or snapshot.get("current_candle_contract"))
-    zone_side = _side(zone_liquidity.get("side") or zone_liquidity.get("zone_type") or snapshot_context.get("current_location"))
+    zone_side = _zone_side_from_evidence(zone_liquidity)
+    if zone_side not in {"BUY", "SELL"}:
+        zone_side = _zone_side_from_evidence({"current_location": snapshot_context.get("current_location")})
     short_horizon_side = _side(two_candle.get("next_1_direction") or two_candle.get("side"))
     short_horizon_probability = _clip01(two_candle.get("next_1_probability") or two_candle.get("probability"), 0.0)
     current_candle_entry_allowed = (
         True if current_candle.get("entry_allowed") is None else _bool(current_candle.get("entry_allowed"))
+    )
+    opposing_force_is_near = bool(
+        not room_ok
+        or opposing_force_risk_state in {"NEAR_OPPOSING_FORCE", "OPPOSING_FORCE_CLOSE", "TIGHT", "INTO_OPPOSING_FORCE"}
+        or (estimated_candles_to_force > 0 and estimated_candles_to_force <= 3)
+        or (opposing_force_distance >= 0.0 and opposing_force_distance <= 0.18)
+        or opposing_force_last_touch_age <= 2
+    )
+    opposing_force_is_proven = bool(
+        opposing_force_touch_count >= 2
+        or opposing_force_retest_count >= 2
+        or opposing_force_reaction_count >= 1
+        or "TESTED" in opposing_force_freshness
+        or "RETEST" in opposing_force_freshness
+        or opposing_force_zone_strength >= 0.55
+    )
+    active_opposing_force_reaction = bool(
+        opposing_force_zone_side in {"BUY", "SELL"}
+        and primary_bias_side in {"BUY", "SELL"}
+        and opposing_force_zone_side != primary_bias_side
+        and current_candle_entry_allowed
+        and opposing_force_is_near
+        and opposing_force_is_proven
+    )
+    active_primary_bias_zone_rejection = bool(
+        opposing_force_zone_side in {"BUY", "SELL"}
+        and primary_bias_side in {"BUY", "SELL"}
+        and opposing_force_zone_side == primary_bias_side
+        and (
+            current_leg_side == _opposite(primary_bias_side)
+            or local_side == _opposite(primary_bias_side)
+            or candidate == _opposite(primary_bias_side)
+            or raw_side == _opposite(primary_bias_side)
+            or scored_side == _opposite(primary_bias_side)
+        )
+        and current_candle_entry_allowed
+        and opposing_force_is_near
+        and opposing_force_is_proven
+    )
+    opposing_force_reaction_min_room_candles = max(
+        PROFESSIONAL_MIN_REACTION_ROOM_CANDLES,
+        min(PROFESSIONAL_MAX_REACTION_ROOM_CANDLES, int(round(max(1, visible_candle_count) * 0.08))),
     )
     structural_reversal_warning = bool(
         zone_side in {"BUY", "SELL"}
@@ -1472,6 +1631,8 @@ def _professional_thesis_resolution_v3(
             and (_bool(snapshot.get("retest_confirmed")) or _bool(current_candle.get("entry_allowed")))
         )
         or structural_reversal_warning
+        or active_opposing_force_reaction
+        or active_primary_bias_zone_rejection
     )
     counter_to_primary = bool(
         candidate in {"BUY", "SELL"}
@@ -1531,7 +1692,33 @@ def _professional_thesis_resolution_v3(
     authority_side = candidate
     thesis_state = "LOCAL_CANDIDATE_AUTHORITY"
     reason = "candidate side is allowed to reach the playbook"
-    if structural_reversal_warning:
+    if active_opposing_force_reaction:
+        authority_side = opposing_force_zone_side
+        thesis_state = (
+            "SELL_IN_BUY_OPPOSING_FORCE_REACTION"
+            if primary_bias_side == "BUY" and opposing_force_zone_side == "SELL"
+            else "BUY_IN_SELL_OPPOSING_FORCE_REACTION"
+            if primary_bias_side == "SELL" and opposing_force_zone_side == "BUY"
+            else "OPPOSING_FORCE_REACTION"
+        )
+        reason = (
+            f"active {opposing_force_zone_side} reaction from tested opposing force; "
+            f"touches={opposing_force_touch_count}, retests={opposing_force_retest_count}, "
+            f"reactions={opposing_force_reaction_count}, age={opposing_force_last_touch_age} candle(s)"
+        )
+    elif active_primary_bias_zone_rejection:
+        authority_side = primary_bias_side
+        thesis_state = (
+            "SELL_TREND_RESUMPTION_FROM_SUPPLY"
+            if primary_bias_side == "SELL"
+            else "BUY_TREND_RESUMPTION_FROM_DEMAND"
+        )
+        reason = (
+            f"active {primary_bias_side} trend-resumption rejection from tested pullback zone; "
+            f"touches={opposing_force_touch_count}, retests={opposing_force_retest_count}, "
+            f"reactions={opposing_force_reaction_count}, age={opposing_force_last_touch_age} candle(s)"
+        )
+    elif structural_reversal_warning:
         authority_side = zone_side
         thesis_state = "PROVEN_REVERSAL_RECLAIM"
         reason = "candidate is pushing into an opposing zone with short-horizon rejection pressure"
@@ -1598,6 +1785,24 @@ def _professional_thesis_resolution_v3(
         "reversal_override": reversal_override,
         "structural_reversal_warning": structural_reversal_warning,
         "zone_side": zone_side,
+        "opposing_force_reaction_ready": active_opposing_force_reaction,
+        "opposing_force_reaction_side": opposing_force_zone_side if active_opposing_force_reaction else "HOLD",
+        "primary_bias_zone_rejection_ready": active_primary_bias_zone_rejection,
+        "primary_bias_zone_rejection_side": primary_bias_side if active_primary_bias_zone_rejection else "HOLD",
+        "opposing_force_reaction_min_room_candles": opposing_force_reaction_min_room_candles,
+        "opposing_force_is_near": opposing_force_is_near,
+        "opposing_force_is_proven": opposing_force_is_proven,
+        "opposing_force_zone_side": opposing_force_zone_side,
+        "opposing_force_zone_strength": round(float(opposing_force_zone_strength), 4),
+        "opposing_force_zone_role": str(opposing_force_zone.get("role") or opposing_force_zone.get("zone_type") or opposing_force_zone.get("zone_family") or ""),
+        "opposing_force_zone_touch_count": opposing_force_touch_count,
+        "opposing_force_zone_reaction_count": opposing_force_reaction_count,
+        "opposing_force_zone_retest_count": opposing_force_retest_count,
+        "opposing_force_zone_last_touch_age_candles": opposing_force_last_touch_age,
+        "opposing_force_zone_pattern": opposing_force_pattern,
+        "opposing_force_zone_freshness_state": opposing_force_freshness,
+        "opposing_force_risk_state": opposing_force_risk_state,
+        "opposing_force_distance_norm": None if opposing_force_distance < 0.0 else round(float(opposing_force_distance), 4),
         "short_horizon_side": short_horizon_side,
         "short_horizon_probability": round(float(short_horizon_probability), 4),
         "authority_score": round(float(authority_score), 4),
@@ -1629,8 +1834,9 @@ def _professional_trade_plan_v3(
     visible_count = _int(candle_movement_context.get("visible_candle_count"), 0)
     legs = _rows(candle_movement_context.get("candles_per_leg") or candle_movement_context.get("legs"))
     room = _mapping(candle_movement_context.get("opposing_force_room") or current_leg.get("opposing_force_room"))
-    estimated_room_candles = _int(room.get("estimated_candles_to_force"), 0)
-    room_ok = bool(room.get("room_ok", True))
+    estimated_room_candles = _estimated_force_room_candles(room)
+    room_candidate_side = _side(room.get("candidate_side"))
+    room_ok = _bool(room.get("room_ok", True))
     side = candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD"
     side_counts = [_int(row.get("candle_count"), 0) for row in legs if _side(row.get("side")) == side]
     all_counts = [_int(row.get("candle_count"), 0) for row in legs if _side(row.get("side")) in {"BUY", "SELL"}]
@@ -1647,6 +1853,40 @@ def _professional_trade_plan_v3(
     aligned_with_primary = _bool(evidence.get("aligned_with_primary_bias"))
     reversal_override = _bool(evidence.get("countertrend_reversal_override"))
     countertrend_scalp = _bool(evidence.get("countertrend_scalp_only"))
+    professional_opposing_force_reaction = bool(
+        str(thesis_resolution.get("thesis_state") or "").upper()
+        in {
+            "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+            "BUY_IN_SELL_OPPOSING_FORCE_REACTION",
+            "OPPOSING_FORCE_REACTION",
+        }
+        and _side(thesis_resolution.get("authority_side")) == side
+    )
+    professional_bias_resumption_reaction = bool(
+        str(thesis_resolution.get("thesis_state") or "").upper()
+        in {
+            "SELL_TREND_RESUMPTION_FROM_SUPPLY",
+            "BUY_TREND_RESUMPTION_FROM_DEMAND",
+        }
+        and _side(thesis_resolution.get("authority_side")) == side
+    )
+    reaction_min_room_candles = max(
+        PROFESSIONAL_MIN_REACTION_ROOM_CANDLES,
+        min(
+            PROFESSIONAL_MAX_REACTION_ROOM_CANDLES,
+            _int(
+                thesis_resolution.get("opposing_force_reaction_min_room_candles"),
+                PROFESSIONAL_MIN_REACTION_ROOM_CANDLES,
+            ),
+        ),
+    )
+    reaction_trade = bool(professional_opposing_force_reaction or professional_bias_resumption_reaction)
+    room_overridden_by_reaction = False
+    if reaction_trade and (
+        not room_ok or (room_candidate_side in {"BUY", "SELL"} and room_candidate_side != side)
+    ):
+        room_ok = bool(estimated_room_candles <= 0 or estimated_room_candles >= reaction_min_room_candles)
+        room_overridden_by_reaction = True
     professional_counter_leg = bool(
         _bool(evidence.get("counter_leg_is_current_truth"))
         or str(thesis_resolution.get("thesis_state") or "").upper()
@@ -1663,10 +1903,21 @@ def _professional_trade_plan_v3(
         )
         and not reversal_override
         and not professional_counter_leg
+        and not professional_opposing_force_reaction
+        and not professional_bias_resumption_reaction
     )
     if aligned_with_primary:
         thesis_class = "TREND_ALIGNED_CONTINUATION"
         base_target = max(PROFESSIONAL_TREND_THESIS_CANDLES, reference_count)
+    elif professional_bias_resumption_reaction:
+        thesis_class = str(thesis_resolution.get("thesis_state") or "TREND_RESUMPTION_REJECTION")
+        base_target = max(PROFESSIONAL_TREND_THESIS_CANDLES, reference_count)
+    elif professional_opposing_force_reaction:
+        thesis_class = str(thesis_resolution.get("thesis_state") or "OPPOSING_FORCE_REACTION")
+        base_target = max(
+            PROFESSIONAL_REVERSAL_THESIS_CANDLES,
+            min(reference_count + 2, PROFESSIONAL_TREND_THESIS_CANDLES),
+        )
     elif professional_counter_leg:
         thesis_class = str(thesis_resolution.get("thesis_state") or "PROFESSIONAL_COUNTER_LEG")
         base_target = max(PROFESSIONAL_REVERSAL_THESIS_CANDLES, min(reference_count + 2, PROFESSIONAL_TREND_THESIS_CANDLES))
@@ -1678,11 +1929,12 @@ def _professional_trade_plan_v3(
         base_target = max(min_thesis_candles, min(reference_count, PROFESSIONAL_REVERSAL_THESIS_CANDLES))
 
     max_context_candles = max(min_thesis_candles, min(PROFESSIONAL_MAX_THESIS_CANDLES, max(base_target, visible_count)))
-    target_candles = max(min_thesis_candles, min(max_context_candles, base_target))
+    target_floor_candles = reaction_min_room_candles if reaction_trade else min_thesis_candles
+    target_candles = max(target_floor_candles, min(max_context_candles, base_target))
     room_cap_applied = False
     if estimated_room_candles > 0:
         room_limit = max(1, estimated_room_candles - 1)
-        if room_limit < min_thesis_candles:
+        if room_limit < target_floor_candles:
             target_candles = room_limit
         else:
             target_candles = min(target_candles, room_limit)
@@ -1701,7 +1953,7 @@ def _professional_trade_plan_v3(
         and current_stage in {"LATE", "EXHAUSTED"}
         and not reversal_override
     )
-    tiny_scalp_window = bool(target_candles < min_thesis_candles)
+    tiny_scalp_window = bool(target_candles < target_floor_candles)
     professional_grade = bool(
         side in {"BUY", "SELL"}
         and room_ok
@@ -1709,7 +1961,13 @@ def _professional_trade_plan_v3(
         and not countertrend_unresolved
         and not late_leg_no_fresh_entry
         and not tiny_scalp_window
-        and (aligned_with_primary or reversal_override or professional_counter_leg)
+        and (
+            aligned_with_primary
+            or reversal_override
+            or professional_counter_leg
+            or professional_opposing_force_reaction
+            or professional_bias_resumption_reaction
+        )
     )
     blocker = ""
     next_required = "none"
@@ -1721,11 +1979,17 @@ def _professional_trade_plan_v3(
         next_required = "wait for primary-trend continuation or confirmed reclaim/role-flip reversal"
     elif not room_ok or tiny_scalp_window:
         blocker = "PROFESSIONAL_THESIS_ROOM_TOO_SHORT"
-        next_required = f"wait for at least {min_thesis_candles} candle(s) of room before opposing force"
+        next_required = f"wait for at least {target_floor_candles} candle(s) of room before opposing force"
     elif late_leg_no_fresh_entry:
         blocker = "PROFESSIONAL_LATE_LEG_NO_FRESH_ENTRY"
         next_required = "wait for pullback, retest, reclaim, or a new structure reaction"
-    elif not (aligned_with_primary or reversal_override or professional_counter_leg):
+    elif not (
+        aligned_with_primary
+        or reversal_override
+        or professional_counter_leg
+        or professional_opposing_force_reaction
+        or professional_bias_resumption_reaction
+    ):
         blocker = "PROFESSIONAL_TREND_OR_REVERSAL_THESIS_MISSING"
         next_required = "wait for trend-aligned continuation or proven reversal context"
 
@@ -1767,8 +2031,11 @@ def _professional_trade_plan_v3(
             "aligned_with_primary_bias": aligned_with_primary,
             "countertrend_reversal_override": reversal_override,
             "professional_counter_leg": professional_counter_leg,
+            "professional_opposing_force_reaction": professional_opposing_force_reaction,
+            "professional_bias_resumption_reaction": professional_bias_resumption_reaction,
             "countertrend_scalp_only": countertrend_scalp,
             "countertrend_unresolved": countertrend_unresolved,
+            "room_overridden_by_reaction": room_overridden_by_reaction,
             "global_side": evidence.get("global_side"),
             "local_side": evidence.get("local_side"),
             "dominant_side": evidence.get("dominant_side"),
@@ -1790,6 +2057,8 @@ def _professional_trade_plan_v3(
             "reference_candle_count": reference_count,
             "memory_prior_candles": PROFESSIONAL_MEMORY_MEDIAN_LEG_CANDLES,
             "minimum_professional_candles": min_thesis_candles,
+            "minimum_reaction_room_candles": reaction_min_room_candles,
+            "minimum_current_trade_candles": target_floor_candles,
             "maximum_professional_candles": max_context_candles,
             "current_leg_candle_count": current_leg_count,
             "projected_total_current_leg_candles": current_leg_count + target_candles,
@@ -2020,6 +2289,69 @@ def _wave_riding_context(
         execution_timing.get("favorable_history_rejection")
         or market_context.get("favorable_history_rejection")
     )
+    professional_thesis = _mapping(snapshot.get("professional_thesis_resolution_v3"))
+    professional_thesis_state = _upper(professional_thesis.get("thesis_state"))
+    professional_authority_side = _side(professional_thesis.get("authority_side"))
+    professional_opposing_force_reaction = bool(
+        professional_authority_side == side
+        and professional_thesis_state
+        in {
+            "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+            "BUY_IN_SELL_OPPOSING_FORCE_REACTION",
+            "OPPOSING_FORCE_REACTION",
+        }
+    )
+    professional_bias_resumption_reaction = bool(
+        professional_authority_side == side
+        and professional_thesis_state
+        in {
+            "SELL_TREND_RESUMPTION_FROM_SUPPLY",
+            "BUY_TREND_RESUMPTION_FROM_DEMAND",
+        }
+    )
+    professional_reaction_candidate = bool(professional_opposing_force_reaction or professional_bias_resumption_reaction)
+    professional_zone_touch_age = _int(
+        _first_visible_value(
+            professional_thesis.get("opposing_force_zone_last_touch_age_candles"),
+            professional_thesis.get("primary_bias_zone_last_touch_age_candles"),
+        ),
+        999,
+    )
+    professional_zone_touch_count = _int(
+        _first_visible_value(
+            professional_thesis.get("opposing_force_zone_touch_count"),
+            professional_thesis.get("primary_bias_zone_touch_count"),
+        ),
+        0,
+    )
+    professional_zone_reaction_count = _int(
+        _first_visible_value(
+            professional_thesis.get("opposing_force_zone_reaction_count"),
+            professional_thesis.get("primary_bias_zone_reaction_count"),
+        ),
+        0,
+    )
+    professional_zone_proven = bool(
+        _bool(professional_thesis.get("opposing_force_is_proven"))
+        or _bool(professional_thesis.get("primary_bias_zone_rejection_ready"))
+        or professional_zone_touch_count >= 2
+        or professional_zone_reaction_count >= 1
+    )
+    professional_estimated_room_candles = _estimated_force_room_candles(professional_thesis)
+    professional_min_room_candles = max(
+        PROFESSIONAL_MIN_REACTION_ROOM_CANDLES,
+        min(
+            PROFESSIONAL_MAX_REACTION_ROOM_CANDLES,
+            _int(
+                professional_thesis.get("opposing_force_reaction_min_room_candles"),
+                PROFESSIONAL_MIN_REACTION_ROOM_CANDLES,
+            ),
+        ),
+    )
+    professional_reaction_has_actionable_room = bool(
+        professional_estimated_room_candles <= 0
+        or professional_estimated_room_candles >= professional_min_room_candles
+    )
 
     entry_keywords = {
         "BUY": {"DEMAND", "SUPPORT", "LOW", "LOWER", "DISCOUNT", "PULLBACK", "RETEST", "SSL", "BUY_ZONE"},
@@ -2052,7 +2384,12 @@ def _wave_riding_context(
     adverse_entry_location = bool(opposing_location_match)
     sell_low_history_risk = bool(
         side == "SELL"
-        and not favorable_history_rejection
+        and not (
+            favorable_history_rejection
+            or history_area_label in {"UPPER_STUDIED_HISTORY", "STUDIED_HIGH_EXTREME", "HIGH_EXTREME", "UPPER_HISTORY"}
+            or professional_opposing_force_reaction
+            or professional_bias_resumption_reaction
+        )
         and (
             history_area_label in {"LOWER_STUDIED_HISTORY", "STUDIED_LOW_EXTREME", "LOW_EXTREME", "LOWER_HISTORY"}
             or history_area_risk >= 0.58
@@ -2062,7 +2399,12 @@ def _wave_riding_context(
     )
     buy_high_history_risk = bool(
         side == "BUY"
-        and not favorable_history_reclaim
+        and not (
+            favorable_history_reclaim
+            or history_area_label in {"LOWER_STUDIED_HISTORY", "STUDIED_LOW_EXTREME", "LOW_EXTREME", "LOWER_HISTORY"}
+            or professional_opposing_force_reaction
+            or professional_bias_resumption_reaction
+        )
         and (
             history_area_label in {"UPPER_STUDIED_HISTORY", "STUDIED_HIGH_EXTREME", "HIGH_EXTREME", "UPPER_HISTORY"}
             or history_area_risk >= 0.58
@@ -2116,6 +2458,21 @@ def _wave_riding_context(
         and p_target_before_invalidation >= 0.55
         and flow_conflict_count <= 1
     )
+    professional_reaction_path_ready = bool(
+        clear_path_ready
+        or clear_path_score >= 0.58
+        or p_target_before_invalidation >= 0.55
+        or professional_reaction_has_actionable_room
+    )
+    professional_reaction_ready = bool(
+        professional_reaction_candidate
+        and bool(current_candle.get("entry_allowed"))
+        and professional_zone_proven
+        and (professional_zone_touch_age <= 1 or reaction_confirmed)
+        and (reaction_confirmed or professional_zone_reaction_count >= 1)
+        and not history_exit_here
+        and professional_reaction_path_ready
+    )
     continuation_ready = bool(
         local_reclaim_confirmed
         and side_aligned
@@ -2145,7 +2502,7 @@ def _wave_riding_context(
         and p_target_before_invalidation >= 0.52
         and flow_conflict_count <= 1
     )
-    directional_location_ok = bool(not directional_location_chase_risk or breakout_role_flip_ready)
+    directional_location_ok = bool(professional_reaction_ready or not directional_location_chase_risk or breakout_role_flip_ready)
     pullback_reclaim_ready = bool(
         entry_area_valid
         and directional_location_ok
@@ -2156,12 +2513,15 @@ def _wave_riding_context(
         and (clear_path_ready or p_trigger >= 0.58 or lane_score >= 0.84)
     )
     force_reaction_ready = bool(
-        near_opposing_force
-        and not adverse_entry_location
-        and directional_location_ok
-        and reaction_confirmed
-        and local_reclaim_confirmed
-        and (clear_path_ready or breakout_role_flip_ready)
+        professional_reaction_ready
+        or (
+            near_opposing_force
+            and not adverse_entry_location
+            and directional_location_ok
+            and reaction_confirmed
+            and local_reclaim_confirmed
+            and (clear_path_ready or breakout_role_flip_ready)
+        )
     )
     strong_confluence_override = bool(
         lane_score >= 0.88
@@ -2175,35 +2535,47 @@ def _wave_riding_context(
         and directional_location_ok
     )
     buy_low_sell_high_ok = bool(
-        directional_location_ok
-        and (
-            entry_area_valid
-            or pullback_reclaim_ready
-            or breakout_role_flip_ready
-            or strong_confluence_override
-            or (continuation_ready and clear_path_ready and not near_opposing_force)
+        professional_reaction_ready
+        or (
+            directional_location_ok
+            and (
+                entry_area_valid
+                or pullback_reclaim_ready
+                or breakout_role_flip_ready
+                or strong_confluence_override
+                or (continuation_ready and clear_path_ready and not near_opposing_force)
+            )
         )
     )
     granular_entry_ok = bool(
-        local_reclaim_confirmed
-        and current_flow_continuation_ready
-        and buy_low_sell_high_ok
-        and not near_opposing_force
-        and clear_path_score >= 0.58
+        professional_reaction_ready
+        or (
+            local_reclaim_confirmed
+            and current_flow_continuation_ready
+            and buy_low_sell_high_ok
+            and not near_opposing_force
+            and clear_path_score >= 0.58
+        )
     )
 
     blockers: list[str] = []
     if side not in {"BUY", "SELL"}:
         blockers.append("NO_DIRECTION_CANDIDATE")
-    if local_side in {"BUY", "SELL"} and side in {"BUY", "SELL"} and local_side != side and not local_reclaim_confirmed:
+    if (
+        local_side in {"BUY", "SELL"}
+        and side in {"BUY", "SELL"}
+        and local_side != side
+        and not local_reclaim_confirmed
+        and not professional_reaction_ready
+    ):
         blockers.append("LOCAL_WAVE_AGAINST_ENTRY")
-    if near_opposing_force and not (force_reaction_ready or breakout_role_flip_ready):
+    if near_opposing_force and not (force_reaction_ready or breakout_role_flip_ready or professional_reaction_ready):
         blockers.append("OPPOSING_FORCE_DECISION_UNRESOLVED")
     if not directional_location_ok:
         blockers.append("SELL_LOW_SUPPORT_LOCATION_GUARD" if side == "SELL" else "BUY_HIGH_RESISTANCE_LOCATION_GUARD" if side == "BUY" else "DIRECTIONAL_LOCATION_GUARD")
     if not buy_low_sell_high_ok:
         blockers.append("BUY_LOW_SELL_HIGH_LOCATION_NOT_READY")
-    if not clear_path_ready and not (breakout_role_flip_ready or pullback_reclaim_ready or strong_confluence_override):
+    if not clear_path_ready and not (breakout_role_flip_ready or pullback_reclaim_ready or strong_confluence_override or professional_reaction_ready):
         blockers.append("WAVE_PATH_NOT_CLEAR")
     if history_exit_here:
         blockers.append("HISTORY_EXIT_ZONE")
@@ -2211,10 +2583,12 @@ def _wave_riding_context(
         blockers.append("ANGLE_OR_LATE_CHASE_RISK")
     if not bool(current_candle.get("entry_allowed")):
         blockers.append("CURRENT_CANDLE_NOT_ACCEPTED")
-    if not entry_area_valid and not continuation_ready and not breakout_role_flip_ready:
+    if not entry_area_valid and not continuation_ready and not breakout_role_flip_ready and not professional_reaction_ready:
         blockers.append("MID_RANGE_NEEDS_FLOW_PROOF")
 
-    if near_opposing_force and not (force_reaction_ready or breakout_role_flip_ready):
+    if professional_reaction_ready:
+        phase = professional_thesis_state or "PROFESSIONAL_REACTION"
+    elif near_opposing_force and not (force_reaction_ready or breakout_role_flip_ready):
         phase = "WAIT_AT_OPPOSING_FORCE"
     elif breakout_role_flip_ready:
         phase = "BREAKOUT_ROLE_FLIP"
@@ -2234,7 +2608,9 @@ def _wave_riding_context(
         and bool(current_candle.get("entry_allowed"))
         and not blockers
         and (
-            pullback_reclaim_ready
+            professional_reaction_ready
+            or granular_entry_ok
+            or pullback_reclaim_ready
             or force_reaction_ready
             or breakout_role_flip_ready
             or (continuation_ready and clear_path_ready)
@@ -2263,7 +2639,8 @@ def _wave_riding_context(
             + 0.18 * (1.0 if local_reclaim_confirmed else 0.0)
             + 0.14 * (1.0 if reaction_confirmed else 0.0)
             + 0.12 * (1.0 if continuation_ready else 0.0)
-            + 0.10 * (1.0 if breakout_role_flip_ready else 0.0),
+            + 0.10 * (1.0 if breakout_role_flip_ready else 0.0)
+            + 0.10 * (1.0 if professional_reaction_ready else 0.0),
         ),
     )
     return {
@@ -2295,6 +2672,17 @@ def _wave_riding_context(
         "pullback_reclaim_ready": pullback_reclaim_ready,
         "breakout_role_flip_ready": breakout_role_flip_ready,
         "force_reaction_ready": force_reaction_ready,
+        "professional_reaction_ready": professional_reaction_ready,
+        "professional_thesis_state": professional_thesis_state,
+        "professional_opposing_force_reaction": professional_opposing_force_reaction,
+        "professional_bias_resumption_reaction": professional_bias_resumption_reaction,
+        "professional_zone_touch_age": professional_zone_touch_age,
+        "professional_zone_touch_count": professional_zone_touch_count,
+        "professional_zone_reaction_count": professional_zone_reaction_count,
+        "professional_estimated_room_candles": professional_estimated_room_candles,
+        "professional_min_room_candles": professional_min_room_candles,
+        "professional_reaction_has_actionable_room": professional_reaction_has_actionable_room,
+        "professional_reaction_path_ready": professional_reaction_path_ready,
         "continuation_ready": continuation_ready,
         "strong_confluence_override": strong_confluence_override,
         "local_reclaim_confirmed": local_reclaim_confirmed,
@@ -2566,29 +2954,66 @@ def _resolve_execution_lane(
         wave_ok: bool,
     ) -> None:
         required = thresholds.get(name, execution_threshold)
-        accepted = bool(
-            structure_ok
+        professional_lane_context_ready = bool(
+            wave_context.get("professional_reaction_ready")
+            or (
+                (
+                    wave_context.get("professional_bias_resumption_reaction")
+                    or wave_context.get("professional_opposing_force_reaction")
+                )
+                and _int(wave_context.get("professional_zone_touch_count"), 0) >= 2
+                and _int(wave_context.get("professional_zone_reaction_count"), 0) >= 1
+                and wave_context.get("professional_reaction_path_ready")
+                and wave_context.get("professional_reaction_has_actionable_room")
+            )
+        )
+        professional_reaction_lane_authority = bool(
+            professional_lane_context_ready
+            and name in {"SNIPER_ZONE_ENTRY", "FAILED_RETEST_ENTRY", "WAVE_RIDING_CONTINUATION"}
             and side in {"BUY", "SELL"}
-            and path_ok
-            and wave_ok
+            and current_candle_ok
+            and not trap_active
+            and (
+                path_ok
+                or (
+                    wave_context.get("professional_reaction_path_ready")
+                    and wave_context.get("professional_reaction_has_actionable_room")
+                )
+            )
+        )
+        professional_reaction_score_floor = max(0.62, float(required) - 0.08)
+        professional_reaction_score_relief = bool(
+            professional_reaction_lane_authority
+            and lane_score >= professional_reaction_score_floor
+        )
+        effective_structure_ok = bool(structure_ok or professional_reaction_lane_authority)
+        effective_path_ok = bool(path_ok or professional_reaction_lane_authority)
+        effective_wave_ok = bool(wave_ok or professional_reaction_lane_authority)
+        effective_timing_ready = bool(lane_timing_ready or professional_reaction_lane_authority)
+        effective_maturity_ok = bool(lane_maturity_ok or professional_reaction_lane_authority)
+        accepted = bool(
+            effective_structure_ok
+            and side in {"BUY", "SELL"}
+            and effective_path_ok
+            and effective_wave_ok
             and not trap_active
             and current_candle_ok
-            and lane_score >= required
+            and (lane_score >= required or professional_reaction_score_relief)
         )
         blockers: list[str] = []
         if side not in {"BUY", "SELL"}:
             blockers.append("NO_DIRECTION_CANDIDATE")
-        if not structure_ok:
+        if not effective_structure_ok:
             blockers.append(f"{name}_STRUCTURE_NOT_READY")
-        if not path_ok:
+        if not effective_path_ok:
             blockers.append("PATH_RISK_OR_OPPOSING_FORCE")
-        if not wave_ok:
+        if not effective_wave_ok:
             blockers.append("WAVE_CONTEXT_NOT_READY")
         if trap_active:
             blockers.append("TRAP_ACTIVE")
         if not current_candle_ok:
             blockers.append("CURRENT_CANDLE_NOT_ACCEPTED")
-        if lane_score < required:
+        if lane_score < required and not professional_reaction_score_relief:
             blockers.append("LANE_SCORE_BELOW_THRESHOLD")
         lane_rows.append(
             {
@@ -2599,9 +3024,12 @@ def _resolve_execution_lane(
                 "strictness": strictness,
                 "required_score": round(float(required), 4),
                 "actual_score": round(float(lane_score), 4),
-                "structure_ok": bool(structure_ok),
-                "path_ok": bool(path_ok),
-                "wave_ok": bool(wave_ok),
+                "structure_ok": effective_structure_ok,
+                "raw_structure_ok": bool(structure_ok),
+                "path_ok": effective_path_ok,
+                "raw_path_ok": bool(path_ok),
+                "wave_ok": effective_wave_ok,
+                "raw_wave_ok": bool(wave_ok),
                 "wave_phase": wave_context.get("phase"),
                 "wave_score": wave_context.get("wave_score"),
                 "wave_context": wave_context,
@@ -2610,8 +3038,13 @@ def _resolve_execution_lane(
                 "trap_ok": not trap_active,
                 "current_candle_ok": current_candle_ok,
                 "entry_quality_ok": bool(lane_entry_quality_ok),
-                "timing_ready": bool(lane_timing_ready),
-                "maturity_ok": bool(lane_maturity_ok),
+                "timing_ready": effective_timing_ready,
+                "raw_timing_ready": bool(lane_timing_ready),
+                "maturity_ok": effective_maturity_ok,
+                "raw_maturity_ok": bool(lane_maturity_ok),
+                "professional_reaction_lane_authority": professional_reaction_lane_authority,
+                "professional_reaction_score_relief": professional_reaction_score_relief,
+                "professional_reaction_score_floor": round(float(professional_reaction_score_floor), 4),
                 "blockers": blockers,
             }
         )
@@ -2925,14 +3358,26 @@ def _resolve_execution_lane(
         "accepted_lanes": [lane["name"] for lane in accepted],
         "evaluated_lanes": lane_rows,
         "blockers": selected.get("blockers", []),
-        "lane_entry_quality_ok": bool(selected.get("entry_quality_ok")),
+        "structure_ok": bool(selected.get("structure_ok")),
+        "raw_structure_ok": bool(selected.get("raw_structure_ok")),
+        "path_ok": bool(selected.get("path_ok")),
+        "raw_path_ok": bool(selected.get("raw_path_ok")),
+        "wave_ok": bool(selected.get("wave_ok")),
+        "raw_wave_ok": bool(selected.get("raw_wave_ok")),
+        "lane_entry_quality_ok": bool(selected.get("entry_quality_ok") or selected.get("professional_reaction_lane_authority")),
         "lane_timing_ready": bool(selected.get("timing_ready")),
         "lane_maturity_ok": bool(selected.get("maturity_ok")),
+        "professional_reaction_lane_authority": bool(selected.get("professional_reaction_lane_authority")),
+        "professional_reaction_score_relief": bool(selected.get("professional_reaction_score_relief")),
+        "professional_reaction_score_floor": selected.get("professional_reaction_score_floor"),
         "reversal_capture_mature": bool(lane_reversal_capture_mature),
         "stale_dominant_overridden": bool(stale_dominant_overridden),
         "structural_flow_ready": bool(structural_flow_ready),
         "mature_directional_flow_ready": bool(mature_directional_flow_ready),
-        "permission_override_allowed": bool(selected["accepted"] and selected.get("entry_quality_ok")),
+        "permission_override_allowed": bool(
+            selected["accepted"]
+            and (selected.get("entry_quality_ok") or selected.get("professional_reaction_lane_authority"))
+        ),
         "opportunity_capture_mode": opportunity_capture,
         "current_candle_acceptance": current_candle,
         "live_trigger_reaction": live_trigger_reaction,
@@ -3344,6 +3789,16 @@ def evaluate_model_council_v3(
             "professional_thesis_resolution_v3": professional_thesis_resolution,
         }
         market = analyze_market_intelligence(snapshot, candidate_side=candidate_side)
+        authority_context_source = {
+            **snapshot,
+            "market_context": {
+                **_mapping(snapshot.get("market_context")),
+                **_mapping(market.get("market_context")),
+            },
+            "risk_context": _mapping(market.get("risk_context")) or _mapping(snapshot.get("risk_context")),
+            "risk_opposing_force": _mapping(market.get("risk_context")) or _mapping(snapshot.get("risk_opposing_force")),
+        }
+        candle_movement_context = build_candle_movement_context_v3(authority_context_source)
     else:
         professional_thesis_resolution["market_recomputed_for_authority_side"] = False
         snapshot = {**snapshot, "professional_thesis_resolution_v3": professional_thesis_resolution}
@@ -3453,7 +3908,36 @@ def evaluate_model_council_v3(
     candidate_flip_count = _side_flip_count(candidate_recent_sides)
     candidate_stable_reads = _int(snapshot.get("candidate_stable_reads"), _int(snapshot.get("stability_frames"), 0))
     entry_quality_ok = _entry_quality_acceptable(entry_quality_surface)
-    trap_active = bool(
+    market_trap_class = _upper(
+        market_trap.get("trap_type")
+        or market_trap.get("primary_trap")
+        or market_trap.get("deny_reason")
+        or market_trap.get("reason")
+    )
+    trap_professional_thesis_state = _upper(professional_thesis_resolution.get("thesis_state"))
+    trap_professional_reaction_allowed = bool(
+        market_trap_class
+        in {
+            "LATE_CHASE_TRAP",
+            "LATE_CHASE",
+            "LATE_CHASE_AFTER_IMPULSE",
+            "LATE_CHASE_STEEP_IMPULSE",
+        }
+        and _side(professional_thesis_resolution.get("authority_side")) == candidate_side
+        and trap_professional_thesis_state
+        in {
+            "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+            "BUY_IN_SELL_OPPOSING_FORCE_REACTION",
+            "OPPOSING_FORCE_REACTION",
+            "SELL_TREND_RESUMPTION_FROM_SUPPLY",
+            "BUY_TREND_RESUMPTION_FROM_DEMAND",
+        }
+        and (
+            _bool(professional_thesis_resolution.get("opposing_force_reaction_ready"))
+            or _bool(professional_thesis_resolution.get("primary_bias_zone_rejection_ready"))
+        )
+    )
+    trap_active_raw = bool(
         market_trap.get("detected")
         or market_trap.get("trap_active")
         or market_trap.get("trap_free") is False
@@ -3461,6 +3945,25 @@ def evaluate_model_council_v3(
         or market_trap.get("executable_allowed") is False
         or bool(market_trap.get("active_traps"))
     )
+    trap_active = bool(trap_active_raw and not trap_professional_reaction_allowed)
+    execution_market_trap = dict(market_trap)
+    if trap_professional_reaction_allowed:
+        execution_market_trap.update(
+            {
+                "raw_trap_active": trap_active_raw,
+                "trap_active": False,
+                "trap_free": True,
+                "execution_allowed": True,
+                "executable_allowed": True,
+                "active_traps": [],
+                "professional_reaction_override": True,
+                "professional_reaction_override_reason": str(
+                    professional_thesis_resolution.get("reason")
+                    or "Playbook accepted a tested opposing-force reaction with current source truth."
+                ),
+                "professional_thesis_state": trap_professional_thesis_state,
+            }
+        )
     opposing_force_ok = _bool(
         market_context.get("opposing_force_distance_ok")
         or snapshot.get("opposing_force_distance_ok")
@@ -3525,10 +4028,22 @@ def evaluate_model_council_v3(
         dominance_margin=dominance_margin,
     )
     context_ok = bool(execution_lane.get("accepted"))
-    lane_effective_entry_quality_ok = bool(entry_quality_ok or execution_lane.get("lane_entry_quality_ok"))
-    lane_effective_timing_ready = bool(timing_ready or execution_lane.get("lane_timing_ready"))
-    lane_effective_mature = bool(mature or execution_lane.get("lane_maturity_ok"))
+    professional_reaction_lane_authority = bool(execution_lane.get("professional_reaction_lane_authority"))
+    lane_effective_entry_quality_ok = bool(
+        entry_quality_ok
+        or execution_lane.get("lane_entry_quality_ok")
+        or professional_reaction_lane_authority
+    )
+    lane_effective_timing_ready = bool(timing_ready or execution_lane.get("lane_timing_ready") or professional_reaction_lane_authority)
+    lane_effective_mature = bool(mature or execution_lane.get("lane_maturity_ok") or professional_reaction_lane_authority)
     lane_required_score = _float(execution_lane.get("required_score"), execution_threshold)
+    if execution_lane.get("professional_reaction_score_relief"):
+        lane_score = max(lane_score, lane_required_score)
+        execution_lane = {
+            **execution_lane,
+            "actual_score": round(float(lane_score), 4),
+            "score_relief_applied": True,
+        }
     final_score_passed = lane_score >= lane_required_score
     angle = _mapping(market.get("angle_context") or snapshot.get("angle_context") or snapshot.get("angle_features"))
     current_candle = _current_candle_acceptance(snapshot, market, candidate_side)
@@ -3643,12 +4158,13 @@ def evaluate_model_council_v3(
     )
     if invalidation_seconds <= 0:
         invalidation_seconds = max(30, int(preferred_expiry_seconds * (0.3 if path_class in {"DIRECT_CONTINUATION", "PULLBACK_THEN_CONTINUATION"} else 0.2)))
+    stable_for_authority = bool(stable or professional_reaction_lane_authority)
     entry_now_allowed = bool(
         side_ok
         and context_ok
         and lane_effective_timing_ready
         and lane_effective_mature
-        and stable
+        and stable_for_authority
         and final_score_passed
         and timing_has_explicit_expiry
         and current_candle_ok
@@ -3930,14 +4446,60 @@ def evaluate_model_council_v3(
         and opposing_force_ok
         and path_class in {"DIRECT_CONTINUATION", "PULLBACK_THEN_CONTINUATION"}
     )
-    if wave_reasoning_override_allowed or intraday_enter_now_reasoning_override_allowed:
+    professional_reaction_reasoning_override_allowed = bool(
+        entry_now_allowed
+        and timing_mode == "ENTER_NOW"
+        and lane_name in INTRADAY_ENTER_NOW_LANES
+        and bool(execution_lane.get("accepted"))
+        and bool(execution_lane.get("professional_reaction_lane_authority"))
+        and bool(selected_wave_context.get("professional_reaction_ready"))
+        and reasoning_decision_state in {
+            "WATCH",
+            "WAIT_FOR_PULLBACK",
+            "WAIT_FOR_RETEST",
+            "WAIT_FOR_REJECTION",
+            "WAIT_FOR_BREAK_CONFIRMATION",
+            "PREPARE",
+            "TRACK_CANDIDATE",
+        }
+        and not reasoning_side_mismatch
+        and not high_frequency_wait_blocks_intraday
+        and not trap_active
+        and not history_exit_active
+        and current_candle_ok
+        and opposing_force_ok
+        and path_class in {"DIRECT_CONTINUATION", "PULLBACK_THEN_CONTINUATION"}
+        and hard_bad_entry_classes.issubset(PROFESSIONAL_REACTION_SOFT_BAD_CLASSES)
+        and (
+            not bad_entry_filter_hard_active
+            or reasoning_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES
+        )
+        and (
+            not bad_entry_detected_effective
+            or market_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES
+        )
+    )
+    if wave_reasoning_override_allowed or intraday_enter_now_reasoning_override_allowed or professional_reaction_reasoning_override_allowed:
         reasoning_execution_blocked = False
         reasoning_block_reason = ""
+    if professional_reaction_reasoning_override_allowed:
+        if hard_bad_entry_classes.issubset(PROFESSIONAL_REACTION_SOFT_BAD_CLASSES):
+            hard_bad_entry_class_active = False
+        if reasoning_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES:
+            bad_entry_filter_hard_active = False
+        if market_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES:
+            bad_entry_detected_effective = False
     permission_failed_reasons = _permission_failed_reasons(trade_permission)
+    professional_reaction_permission_override = bool(
+        execution_lane.get("professional_reaction_lane_authority")
+        and permission_failed_reasons
+        and permission_failed_reasons.issubset(PROFESSIONAL_REACTION_SOFT_PERMISSION_REASONS)
+    )
     lane_permission_override = bool(
         execution_lane.get("permission_override_allowed")
         and permission_failed_reasons
         and permission_failed_reasons.issubset(LANE_SOFT_PERMISSION_REASONS)
+        or professional_reaction_permission_override
     )
     lane_market_override = bool(
         execution_lane.get("accepted")
@@ -4022,7 +4584,7 @@ def evaluate_model_council_v3(
         context_ok=context_ok,
         lane_effective_timing_ready=lane_effective_timing_ready,
         lane_effective_mature=lane_effective_mature,
-        stable=stable,
+        stable=stable_for_authority,
         final_score_passed=final_score_passed,
         timing_has_explicit_expiry=timing_has_explicit_expiry,
         timing_mode=timing_mode,
@@ -4127,12 +4689,82 @@ def evaluate_model_council_v3(
     opportunity_maturity["professional_trade_plan"] = professional_trade_plan
     opportunity_maturity["professional_thesis_resolution"] = professional_thesis_resolution
     opportunity_maturity["professional_thesis_candles"] = professional_thesis_candles
+    professional_thesis_state = _upper(professional_trade_plan.get("professional_thesis_state"))
+    professional_playbook_reasoning_override_allowed = bool(
+        playbook_enter_now
+        and professional_plan_ok
+        and candidate_side in {"BUY", "SELL"}
+        and professional_thesis_state in PROFESSIONAL_PLAYBOOK_AUTHORITY_STATES
+        and bool(execution_lane.get("accepted"))
+        and not runtime_blocked
+        and not candidate_invalidated
+        and not trap_active
+        and not history_exit_active
+        and current_candle_ok
+        and opposing_force_ok
+        and timing_has_explicit_expiry
+        and timing_mode == "ENTER_NOW"
+        and (
+            not permission_denied_effective
+            or permission_prepare_allowed
+            or lane_permission_override
+            or bool(professional_trade_plan.get("professional_grade"))
+        )
+        and hard_bad_entry_classes.issubset(PROFESSIONAL_REACTION_SOFT_BAD_CLASSES)
+        and (
+            not bad_entry_filter_hard_active
+            or reasoning_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES
+        )
+        and (
+            not bad_entry_detected_effective
+            or market_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES
+        )
+    )
+    if professional_playbook_reasoning_override_allowed:
+        reasoning_execution_blocked = False
+        reasoning_block_reason = ""
+        professional_reaction_reasoning_override_allowed = True
+        if hard_bad_entry_classes.issubset(PROFESSIONAL_REACTION_SOFT_BAD_CLASSES):
+            hard_bad_entry_class_active = False
+        if reasoning_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES:
+            bad_entry_filter_hard_active = False
+        if market_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES:
+            bad_entry_detected_effective = False
+        opportunity_maturity["professional_playbook_reasoning_override_allowed"] = True
+        opportunity_maturity["reasoning_override_reason"] = (
+            "Professional playbook accepted a current source-truth trade plan; "
+            "legacy reasoning warnings are diagnostic only for this package."
+        )
     playbook_required_stable_reads = max(1, _int(snapshot.get("playbook_required_stable_reads"), 2))
     playbook_candidate_stable = bool(_bool(snapshot.get("execution_mature")) or candidate_stable_reads >= playbook_required_stable_reads)
+    professional_thesis_state = _upper(professional_thesis_resolution.get("thesis_state"))
+    side_conflict_requested = bool(both_executable_requested or (buy_score >= 0.62 and sell_score >= 0.62))
+    professional_conflict_resolution = bool(
+        side_conflict_requested
+        and (
+            _bool(professional_thesis_resolution.get("side_reframed"))
+            or _bool(professional_thesis_resolution.get("opposing_force_reaction_ready"))
+            or _bool(professional_thesis_resolution.get("primary_bias_zone_rejection_ready"))
+        )
+        and professional_thesis_state
+        in {
+            "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+            "BUY_IN_SELL_OPPOSING_FORCE_REACTION",
+            "SELL_IN_BUY_TRADEABLE_COUNTER_LEG",
+            "BUY_IN_SELL_TRADEABLE_COUNTER_LEG",
+            "SELL_TREND_RESUMPTION_FROM_SUPPLY",
+            "BUY_TREND_RESUMPTION_FROM_DEMAND",
+            "PROVEN_REVERSAL_RECLAIM",
+        }
+        and candidate_side in {"BUY", "SELL"}
+    )
+    side_conflict_unresolved = bool(side_conflict_requested and not professional_conflict_resolution)
+    opportunity_maturity["side_conflict_requested"] = side_conflict_requested
+    opportunity_maturity["side_conflict_resolved_by_professional_thesis"] = professional_conflict_resolution
     playbook_hard_gate_reason = ""
     if book_strategy_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
         playbook_hard_gate_reason = f"PLAYBOOK_{book_strategy_state}"
-    elif both_executable_requested or (buy_score >= 0.62 and sell_score >= 0.62):
+    elif side_conflict_unresolved:
         playbook_hard_gate_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
     elif runtime_blocked:
         playbook_hard_gate_reason = runtime_block_reason
@@ -4188,12 +4820,16 @@ def evaluate_model_council_v3(
             "PULLBACK_IN_PRIMARY_TREND",
             "TREND_ALIGNED_CONTINUATION",
             "PROVEN_REVERSAL_RECLAIM",
+            "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+            "BUY_IN_SELL_OPPOSING_FORCE_REACTION",
+            "SELL_TREND_RESUMPTION_FROM_SUPPLY",
+            "BUY_TREND_RESUMPTION_FROM_DEMAND",
         }
     )
     final_state = "WATCHING"
     block_reason: str | None = None
     executable = False
-    if both_executable_requested or (buy_score >= 0.62 and sell_score >= 0.62):
+    if side_conflict_unresolved:
         final_state = "CONFLICT"
         candidate_side = "HOLD"
         block_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
@@ -4286,7 +4922,9 @@ def evaluate_model_council_v3(
         promotion_result = "WAITING"
     else:
         promotion_result = final_state
-    if block_reason:
+    if executable:
+        blocked_by = None
+    elif block_reason:
         blocked_by = block_reason
     elif flip_flop_contained and not professional_flip_flop_override:
         blocked_by = "candidate_flip_count"
@@ -4378,11 +5016,16 @@ def evaluate_model_council_v3(
         )
         opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "VALID_WATCH")
     opportunity_maturity["next_required"] = "publish validated PG_EXECUTION_PACKET_V3" if executable else next_required
-    lane_blockers = [
-        _upper(blocker)
-        for blocker in execution_lane.get("blockers", [])
-        if str(blocker or "").strip()
-    ] if isinstance(execution_lane.get("blockers"), Sequence) and not isinstance(execution_lane.get("blockers"), (str, bytes, bytearray)) else []
+    raw_lane_blockers = execution_lane.get("blockers")
+    lane_blockers = (
+        [
+            _upper(blocker)
+            for blocker in cast(Sequence[Any], raw_lane_blockers)
+            if str(blocker or "").strip()
+        ]
+        if isinstance(raw_lane_blockers, Sequence) and not isinstance(raw_lane_blockers, (str, bytes, bytearray))
+        else []
+    )
     release_state = _non_executable_release_state(
         executable=executable,
         true_blocker=true_blocker,
@@ -4499,6 +5142,7 @@ def evaluate_model_council_v3(
         final_score_passed=final_score_passed,
         intraday_reasoning_override_allowed=intraday_enter_now_reasoning_override_allowed,
         wave_reasoning_override_allowed=wave_reasoning_override_allowed,
+        professional_reaction_reasoning_override_allowed=professional_reaction_reasoning_override_allowed,
         trap_active=trap_active,
         late_chase=late_chase,
         opposing_force_ok=opposing_force_ok,
@@ -4618,6 +5262,8 @@ def evaluate_model_council_v3(
         "high_frequency_soft_wait_only": high_frequency_soft_wait_only,
         "high_frequency_wait_blocks_intraday": high_frequency_wait_blocks_intraday,
         "wave_reasoning_override_allowed": wave_reasoning_override_allowed,
+        "professional_reaction_reasoning_override_allowed": professional_reaction_reasoning_override_allowed,
+        "professional_playbook_reasoning_override_allowed": professional_playbook_reasoning_override_allowed,
         "reasoning_bad_entry_class": reasoning_bad_entry_class,
         "market_bad_entry_class": market_bad_entry_class,
         "bad_entry_detected_effective": bad_entry_detected_effective,
@@ -4794,6 +5440,7 @@ def evaluate_model_council_v3(
         "reasoning_block_reason": reasoning_block_reason,
         "intraday_enter_now_reasoning_override_allowed": intraday_enter_now_reasoning_override_allowed,
         "wave_reasoning_override_allowed": wave_reasoning_override_allowed,
+        "professional_reaction_reasoning_override_allowed": professional_reaction_reasoning_override_allowed,
         "allowance_package": allowance_package,
     }
     council_debate = _council_debate(
@@ -4860,7 +5507,8 @@ def evaluate_model_council_v3(
         "market_reality": market_reality,
         "entry_quality": entry_quality_surface,
         "trade_permission": trade_permission,
-        "market_trap": market_trap,
+        "market_trap": execution_market_trap,
+        "raw_market_trap": market_trap,
         "ideal_trade_path": market.get("ideal_trade_path", _mapping(market_reality.get("ideal_trade_path"))),
         "path_risk": market.get("path_risk", _mapping(market_reality.get("path_risk"))),
         "regime_playbook": market.get("regime_playbook", _mapping(market_reality.get("regime_playbook"))),

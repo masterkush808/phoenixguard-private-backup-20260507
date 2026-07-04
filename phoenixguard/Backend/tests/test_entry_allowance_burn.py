@@ -122,6 +122,49 @@ def test_entry_state_blocks_playbook_enter_now_when_internal_bad_entry_guard_is_
     assert entry["reasoning_bad_entry_class"] == "AGAINST_GLOBAL_STRUCTURE"
 
 
+def test_entry_state_allows_professional_playbook_package_over_legacy_reasoning_warning() -> None:
+    live: dict[str, Any] = {}
+    council: dict[str, Any] = {
+        "execution_packet_present": True,
+        "promotion_trace": {
+            "candidate_side": "SELL",
+            "book_strategy_state": "ENTER_NOW",
+            "opportunity_maturity_state": "ENTER_NOW",
+            "blocked_by": "NONE",
+            "professional_playbook_reasoning_override_allowed": True,
+            "timing_decision": {
+                "entry_now_allowed": True,
+                "playbook_strategy_authorized": True,
+                "timing_mode": "ENTER_NOW",
+            },
+            "execution_lane": {"accepted": True, "name": "SNIPER_ZONE_ENTRY"},
+            "allowance_package": {
+                "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3",
+                "accepted": True,
+                "execution_ready": True,
+                "opportunity_maturity": "ENTER_NOW",
+                "professional_trade_plan": {
+                    "professional_grade": True,
+                    "professional_thesis_state": "SELL_TREND_RESUMPTION_FROM_SUPPLY",
+                },
+            },
+            "reasoning_execution_blocked": True,
+            "hard_bad_entry_class_active": True,
+            "reasoning_bad_entry_class": "MIDDLE_RANGE_NO_EDGE",
+            "market_bad_entry_class": "LATE_CHASE_STEEP_IMPULSE",
+        }
+    }
+
+    entry = burn.entry_state(live, council)
+
+    assert entry["allowed"] is True
+    assert entry["execution_authorized"] is True
+    assert entry["playbook_entry_allowed"] is True
+    assert entry["blocked_by"] == "NONE"
+    assert entry["reasoning_execution_blocked"] is False
+    assert entry["hard_bad_entry_class_active"] is False
+
+
 def test_compact_sample_preserves_candle_movement_context() -> None:
     context: dict[str, Any] = {
         "schema_version": "PG_CANDLE_MOVEMENT_CONTEXT_V3",
