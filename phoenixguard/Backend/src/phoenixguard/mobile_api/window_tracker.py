@@ -3768,6 +3768,22 @@ def _model_council_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, 
     """Find a V3 executable packet without accepting legacy raw signals."""
 
     now_epoch = _now_epoch()
+    packet_keys = (
+        "model_council_packet",
+        "execution_packet",
+        "latest_model_council_packet",
+        "latest_execution_packet",
+    )
+
+    def declares_no_current_packet(candidate: Mapping[str, Any]) -> bool:
+        if any(isinstance(candidate.get(key), Mapping) for key in packet_keys):
+            return False
+        result = _mapping_to_dict(candidate.get("model_council_result"))
+        if any(isinstance(result.get(key), Mapping) for key in packet_keys):
+            return False
+        if result.get("execution_packet_present") is False:
+            return True
+        return candidate.get("execution_packet_present") is False
 
     def packet_valid_until(packet: Mapping[str, Any]) -> float:
         direct = _float_or(packet.get("valid_until_epoch_sec") or packet.get("valid_until_epoch"), 0.0)
@@ -3805,20 +3821,12 @@ def _model_council_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, 
         if depth > 4 or not isinstance(candidate, Mapping):
             return {}
         row = _mapping_to_dict(candidate)
+        if depth == 0 and declares_no_current_packet(row):
+            return {}
         if row.get("schema_version") == PG_EXECUTION_PACKET_SCHEMA_VERSION:
             packet = _compact_persisted_execution_packet(row)
             return packet if packet_is_executable(packet) else {}
-        for key in (
-            "model_council_packet",
-            "execution_packet",
-            "latest_model_council_packet",
-            "latest_execution_packet",
-            "model_council_result",
-            "model_council_state",
-            "model_council",
-            "latest_signal",
-            "tracking_summary",
-        ):
+        for key in (*packet_keys, "model_council_result", "model_council_state", "model_council", "latest_signal", "tracking_summary"):
             nested = row.get(key)
             found = walk(nested, depth + 1)
             if found:
