@@ -569,7 +569,7 @@ def main() -> int:
     parser.add_argument("--metrics-file", default=r"PhoenixGuard\mt4_bridge_metrics.jsonl")
     parser.add_argument("--poll-sec", type=float, default=15.0)
     parser.add_argument("--timeout-sec", type=float, default=8.0)
-    parser.add_argument("--max-live-age-sec", type=float, default=120.0)
+    parser.add_argument("--max-live-age-sec", type=float, default=180.0)
     parser.add_argument("--max-packet-frame-lag", type=int, default=2)
     parser.add_argument("--print-every", type=float, default=30.0)
     parser.add_argument("--metrics-every", type=float, default=15.0)
