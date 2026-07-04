@@ -3724,14 +3724,73 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
 
+    def _monitor_compact_live_state_response(
+        requested_session_id: str,
+        active_mode: str,
+        *,
+        now_epoch: float,
+    ) -> dict[str, object] | None:
+        compact_path = _direct_live_state_session_path(requested_session_id).with_name("compact_live_state.json")
+        try:
+            raw = json.loads(compact_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(raw, Mapping):
+            return None
+        payload = dict(cast(Mapping[str, object], raw))
+        if str(payload.get("session_id", requested_session_id) or requested_session_id) != requested_session_id:
+            return None
+        if payload.get("tracking_enabled") is False:
+            return None
+        display_snapshot = _direct_window_tracker_display_snapshot(
+            requested_session_id,
+            require_overlay_model=False,
+        )
+        payload = _apply_display_snapshot_to_projected_payload(
+            payload,
+            display_snapshot,
+            now_epoch=now_epoch,
+        )
+        frame_id = int(
+            _epoch_float(
+                payload.get("frame_id")
+                or payload.get("display_frame_id")
+                or payload.get("frame_index")
+                or payload.get("capture_count"),
+                0.0,
+            )
+        )
+        if frame_id > 0:
+            payload["frame_id"] = frame_id
+        payload["active_mode"] = active_mode
+        payload["requested_mode"] = active_mode
+        provider = {
+            **_mapping_to_plain_dict(payload.get("provider_status")),
+            "monitor_compact_sidecar_v3": True,
+            "monitor_compact_sidecar_path": str(compact_path),
+            "monitor_compact_sidecar_size_bytes": compact_path.stat().st_size,
+            "monitor_compact_sidecar_epoch": compact_path.stat().st_mtime,
+            "monitor_compact_sidecar_age_ms": round(max(0.0, now_epoch - compact_path.stat().st_mtime) * 1000.0, 3),
+        }
+        payload["provider_status"] = provider
+        return _public_compact_live_state_response(payload)
+
     @app.get("/v1/mobile/live/state/v3/{session_id}")
-    def live_state_v3_for_session(session_id: str, mode: str = "CLEAN_LIVE", compact: bool = False) -> dict[str, object]:
+    def live_state_v3_for_session(session_id: str, mode: str = "CLEAN_LIVE", compact: bool = False, monitor: bool = False) -> dict[str, object]:
         if compact:
             requested_session_id = str(session_id or "").strip() or resolve_window_tracker_dashboard_session_id(None)
             active_mode = normalize_view_mode(mode)
+            now_epoch = time.time()
+            if monitor:
+                monitor_response = _monitor_compact_live_state_response(
+                    requested_session_id,
+                    active_mode,
+                    now_epoch=now_epoch,
+                )
+                if monitor_response is not None:
+                    return monitor_response
             cache_signature = _compact_live_state_response_cache_signature(requested_session_id)
             cache_key = (requested_session_id, active_mode, cache_signature)
-            now_epoch = time.time()
             latest_complete_frame_id = _direct_complete_session_frame_id_v3(requested_session_id)
             if _COMPACT_LIVE_STATE_RESPONSE_CACHE_TTL_SEC > 0.0:
                 refresh_source: dict[str, object] | None = None
@@ -3944,10 +4003,10 @@ def create_app(
         return live_state
 
     @app.get("/v1/mobile/live/state/v3")
-    def live_state_v3(session_id: str | None = None, mode: str = "CLEAN_LIVE", compact: bool = False) -> dict[str, object]:
+    def live_state_v3(session_id: str | None = None, mode: str = "CLEAN_LIVE", compact: bool = False, monitor: bool = False) -> dict[str, object]:
         if compact:
             requested_session_id = session_id or resolve_window_tracker_dashboard_session_id(None)
-            return live_state_v3_for_session(requested_session_id, mode=mode, compact=True)
+            return live_state_v3_for_session(requested_session_id, mode=mode, compact=True, monitor=monitor)
         live_state = build_live_state_v3_for_session(
             session_id or resolve_window_tracker_dashboard_session_id(None),
             overlay_mode=mode,

@@ -176,7 +176,7 @@ def fetch_json(base_url: str, path: str, timeout: float) -> dict[str, Any]:
 def fetch_runtime_bundle(base_url: str, session_id: str, timeout: float) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Read live, council, and performance state without serial endpoint delay."""
     paths = {
-        "live": f"/v1/mobile/live/state/v3/{session_id}?compact=1",
+        "live": f"/v1/mobile/live/state/v3/{session_id}?compact=1&monitor=1",
         "council": f"/v1/mobile/model-council/latest?session_id={session_id}",
         "perf": f"/v1/mobile/performance/trace/v3/{session_id}",
     }
