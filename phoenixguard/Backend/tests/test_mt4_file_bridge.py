@@ -230,6 +230,56 @@ def test_mt4_bridge_rejects_non_ready_allowance_package() -> None:
         raise AssertionError("bridge accepted a non-ready allowance package")
 
 
+def test_mt4_bridge_live_monitor_rejects_stale_packet_frame() -> None:
+    bridge = _load_bridge_module()
+    packet = _sample_execution_packet()
+    live = {
+        "tracking_enabled": True,
+        "status": "running",
+        "frame_id": 18,
+        "display_frame_id": 18,
+        "capture_count": 18,
+        "display_published_epoch": 1000.0,
+        "latest_execution_packet": {"packet_id": packet["packet_id"], "side": "BUY"},
+    }
+
+    ok, reason = bridge._packet_current_in_live_monitor(
+        packet,
+        live,
+        now_epoch=1002.0,
+        max_live_age_sec=120.0,
+        max_packet_frame_lag=2,
+    )
+
+    assert ok is False
+    assert "packet frame lag" in reason
+
+
+def test_mt4_bridge_live_monitor_accepts_current_packet() -> None:
+    bridge = _load_bridge_module()
+    packet = _sample_execution_packet()
+    live = {
+        "tracking_enabled": True,
+        "status": "running",
+        "frame_id": packet["frame_id"],
+        "display_frame_id": packet["frame_id"],
+        "capture_count": packet["capture_count"],
+        "display_published_epoch": 1000.0,
+        "latest_execution_packet": {"packet_id": packet["packet_id"], "side": "BUY"},
+    }
+
+    ok, reason = bridge._packet_current_in_live_monitor(
+        packet,
+        live,
+        now_epoch=1002.0,
+        max_live_age_sec=120.0,
+        max_packet_frame_lag=2,
+    )
+
+    assert ok is True
+    assert "passed" in reason
+
+
 def test_mt4_bridge_rejects_compacted_command_that_would_fail_ea_contract() -> None:
     bridge = _load_bridge_module()
     packet = _sample_execution_packet()

@@ -171,6 +171,14 @@ def _int(value: object, default: int = 0) -> int:
         return int(default)
 
 
+def _float(value: object, default: float = 0.0) -> float:
+    try:
+        result = float(str(value))
+    except (TypeError, ValueError):
+        return float(default)
+    return result if math.isfinite(result) else float(default)
+
+
 def _collect_reason_codes(*sources: dict[str, object]) -> list[str]:
     reasons: list[str] = []
     for source in sources:
@@ -181,6 +189,57 @@ def _collect_reason_codes(*sources: dict[str, object]) -> list[str]:
             elif isinstance(raw, str) and raw:
                 reasons.append(raw)
     return list(dict.fromkeys(reasons))
+
+
+def _packet_current_in_live_monitor(
+    packet: Mapping[str, object],
+    live: Mapping[str, object],
+    *,
+    now_epoch: float,
+    max_live_age_sec: float,
+    max_packet_frame_lag: int,
+) -> tuple[bool, str]:
+    if live.get("tracking_enabled") is not True:
+        return False, "live monitor tracking_enabled is not true"
+    if str(live.get("status") or "").strip().upper() not in {"RUNNING", "ACTIVE", "LIVE"}:
+        return False, "live monitor status is not running"
+    packet_id = str(packet.get("packet_id") or "").strip()
+    live_packet = _nested(dict(live), "latest_execution_packet")
+    live_packet_id = str(live_packet.get("packet_id") or "").strip()
+    if packet_id and live_packet_id and packet_id != live_packet_id:
+        return False, f"live monitor packet id changed: {live_packet_id}"
+    packet_frame = _int(packet.get("frame_id") or packet.get("capture_count"), 0)
+    live_frame = _int(live.get("frame_id") or live.get("display_frame_id") or live.get("frame_index"), 0)
+    if packet_frame <= 0 or live_frame <= 0:
+        return False, "packet/live frame id missing"
+    if live_frame < packet_frame:
+        return False, f"live frame {live_frame} is behind packet frame {packet_frame}"
+    frame_lag = live_frame - packet_frame
+    if frame_lag > max(0, int(max_packet_frame_lag)):
+        return False, f"packet frame lag {frame_lag} exceeds {max_packet_frame_lag}"
+    packet_capture = _int(packet.get("capture_count"), packet_frame)
+    live_capture = _int(live.get("capture_count"), live_frame)
+    if live_capture < packet_capture:
+        return False, f"live capture {live_capture} is behind packet capture {packet_capture}"
+    capture_epoch = _float(
+        live.get("last_display_published_epoch")
+        or live.get("display_published_epoch")
+        or live.get("last_capture_epoch")
+        or live.get("display_capture_epoch"),
+        0.0,
+    )
+    if capture_epoch <= 0.0:
+        return False, "live monitor capture epoch missing"
+    capture_age = max(0.0, now_epoch - capture_epoch)
+    if capture_age > max_live_age_sec:
+        return False, f"live monitor capture age {capture_age:.1f}s exceeds {max_live_age_sec:.1f}s"
+    execution = _nested(dict(packet), "execution")
+    side = str(packet.get("side") or execution.get("side") or "").strip().upper()
+    live_execution = _nested(live_packet, "execution")
+    live_side = str(live_packet.get("side") or live_execution.get("side") or "").strip().upper()
+    if side in {"BUY", "SELL"} and live_side in {"BUY", "SELL"} and side != live_side:
+        return False, f"live monitor packet side changed: {live_side}"
+    return True, "live monitor freshness passed"
 
 
 def _allowance_source(payload: dict[str, object], execution: dict[str, object], council: dict[str, object]) -> dict[str, object]:
@@ -510,6 +569,8 @@ def main() -> int:
     parser.add_argument("--metrics-file", default=r"PhoenixGuard\mt4_bridge_metrics.jsonl")
     parser.add_argument("--poll-sec", type=float, default=15.0)
     parser.add_argument("--timeout-sec", type=float, default=8.0)
+    parser.add_argument("--max-live-age-sec", type=float, default=120.0)
+    parser.add_argument("--max-packet-frame-lag", type=int, default=2)
     parser.add_argument("--print-every", type=float, default=30.0)
     parser.add_argument("--metrics-every", type=float, default=15.0)
     args = parser.parse_args()
@@ -524,8 +585,15 @@ def main() -> int:
         + urllib.parse.quote(str(args.session_id), safe="")
         + "/execution/latest"
     )
+    live_url = (
+        args.base_url.rstrip("/")
+        + "/v1/mobile/live/state/v3/"
+        + urllib.parse.quote(str(args.session_id), safe="")
+        + "?compact=1&monitor=1"
+    )
 
     print(f"PhoenixGuard MT4 bridge polling: {url}", flush=True)
+    print(f"PhoenixGuard MT4 bridge freshness monitor: {live_url}", flush=True)
     print(f"MT4 signal file: {signal_path}", flush=True)
     print(f"MT4 status file: {status_path}", flush=True)
     if metrics_path:
@@ -551,25 +619,57 @@ def main() -> int:
             metric_http_status = status
             if status == 200 and payload.get("schema_version") == "PG_EXECUTION_PACKET_V3":
                 packet_id = str(payload.get("packet_id") or "")
-                command = _compact_command(payload, bridge_sequence=bridge_sequence)
-                _validate_command(command)
-                body = _json_dumps(command, sort_keys=False)
-                write_ms += _write_text_shared(signal_path, body)
-                write_ms += _write_text_shared(
-                    status_path,
-                    _json_dumps(
-                        _status(
-                            "EXECUTION_PACKET",
-                            detail=packet_id,
-                            http_status=status,
-                            bridge_sequence=bridge_sequence,
-                        ),
-                        sort_keys=True,
-                    ),
+                live_status, live_payload = _get_json(live_url, args.timeout_sec)
+                live_ok, live_reason = (
+                    _packet_current_in_live_monitor(
+                        payload,
+                        live_payload,
+                        now_epoch=time.time(),
+                        max_live_age_sec=max(1.0, float(args.max_live_age_sec)),
+                        max_packet_frame_lag=max(0, int(args.max_packet_frame_lag)),
+                    )
+                    if live_status == 200
+                    else (False, f"live monitor unavailable HTTP {live_status}")
                 )
-                last_status = f"EXECUTION_PACKET {packet_id}"
-                last_packet_id = packet_id
-                metric_status = "EXECUTION_PACKET"
+                if not live_ok:
+                    detail = f"freshness rejected packet {packet_id}: {live_reason}"
+                    status_body = _json_dumps(
+                        _status("NO_EXECUTION_PACKET", detail=detail, http_status=status, bridge_sequence=bridge_sequence),
+                        sort_keys=True,
+                    )
+                    write_ms += _write_text_shared(signal_path, status_body)
+                    write_ms += _write_text_shared(status_path, status_body)
+                    last_status = "NO_EXECUTION_PACKET"
+                    metric_status = "NO_EXECUTION_PACKET"
+                    metric_error = detail
+                else:
+                    command = _compact_command(payload, bridge_sequence=bridge_sequence)
+                    command["bridge_live_freshness"] = {
+                        "status": "PASS",
+                        "detail": live_reason,
+                        "monitor_frame_id": _int(live_payload.get("frame_id") or live_payload.get("display_frame_id"), 0),
+                        "monitor_capture_count": _int(live_payload.get("capture_count"), 0),
+                        "max_live_age_sec": max(1.0, float(args.max_live_age_sec)),
+                        "max_packet_frame_lag": max(0, int(args.max_packet_frame_lag)),
+                    }
+                    _validate_command(command)
+                    body = _json_dumps(command, sort_keys=False)
+                    write_ms += _write_text_shared(signal_path, body)
+                    write_ms += _write_text_shared(
+                        status_path,
+                        _json_dumps(
+                            _status(
+                                "EXECUTION_PACKET",
+                                detail=packet_id,
+                                http_status=status,
+                                bridge_sequence=bridge_sequence,
+                            ),
+                            sort_keys=True,
+                        ),
+                    )
+                    last_status = f"EXECUTION_PACKET {packet_id}"
+                    last_packet_id = packet_id
+                    metric_status = "EXECUTION_PACKET"
             elif status == 404:
                 detail = str(payload.get("detail") or "Model Council executable packet not found.")
                 status_body = _json_dumps(
