@@ -452,16 +452,16 @@ def test_runtime_freshness_warning_relaxation_is_explicit(monkeypatch: pytest.Mo
     assert freshness["reasons"] == []
 
 
-def test_marker_point_refuses_contextual_fallback() -> None:
+def test_marker_point_uses_current_box_contextual_fallback() -> None:
     live: dict[str, Any] = {
         "signal_thesis_v3": {"current_price_proxy": 120},
         "tracking_summary": {
             "entry_zone": {"label": "SUPPORT 6T", "bbox": [10, 20, 30, 40]},
-            "current_box": {"label": "RESISTANCE 5T", "bbox": [50, 60, 70, 80]},
+            "current_box": {"label": "RESISTANCE 5T", "side": "SELL", "bbox": [50, 60, 70, 80]},
         },
     }
 
-    assert burn.marker_point(live, {}, (400, 300), "SELL") is None
+    assert burn.marker_point(live, {}, (400, 300), "SELL") == (70, 80, "TRACKING_CURRENT_BOX")
 
 
 def test_marker_point_uses_latest_candle_now_right_edge() -> None:
@@ -533,6 +533,58 @@ def test_capture_entry_evidence_renders_current_json_when_overlay_artifact_is_st
     assert Path(event["overlay_evidence_path"]).exists()
     assert Path(event["broker_evidence_path"]).exists()
     assert "_sell_entry_" in Path(event["overlay_evidence_path"]).name
+
+
+def test_capture_entry_evidence_marks_package_current_box_without_live_candle(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    overlay = artifact_dir / "000100_live_overlay.jpg"
+    window = artifact_dir / "000100_live_window.jpg"
+    Image.new("RGB", (200, 140), (25, 25, 28)).save(overlay)
+    Image.new("RGB", (200, 140), (12, 16, 24)).save(window)
+    sample: dict[str, Any] = {
+        "seq": 8,
+        "captured_at_utc": "2026-06-20T00:00:00+00:00",
+        "captured_epoch": 1001.0,
+        "frames": {"display_frame_id": 100},
+        "entry": {
+            "allowed": True,
+            "side": "SELL",
+            "entry_now_allowed": True,
+            "lane_accepted": True,
+            "packet_present": True,
+        },
+        "candle_movement_context_v3": {
+            "current_leg": {"side": "SELL", "bbox": [88.0, 24.0, 132.0, 96.0]},
+            "box_candle_counts": [
+                {
+                    "source_path": "tracking_summary.current_box",
+                    "type": "CURRENT",
+                    "label": "CURRENT",
+                    "side": "SELL",
+                    "bbox": [100.0, 40.0, 150.0, 110.0],
+                    "contained_candle_count": 4,
+                }
+            ],
+        },
+    }
+    live: dict[str, Any] = {
+        "frame_index": 100,
+        "last_overlay_path": str(overlay),
+        "last_display_window_path": str(window),
+        "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
+        "overlay_objects": [],
+    }
+
+    event = burn.capture_entry_evidence(tmp_path, sample, live, {}, "missing-session", "http://127.0.0.1:9", 0.01)
+
+    assert "error" not in event
+    assert event["marker_source"] == "PACKAGE_CURRENT_LEG_ENDPOINT"
+    assert event["chart_point"] == {"x": 132, "y": 96, "source": "PACKAGE_CURRENT_LEG_ENDPOINT"}
+    assert "_unmarked" not in Path(event["overlay_evidence_path"]).name
+    assert "_sell_entry_" in Path(event["overlay_evidence_path"]).name
+    assert Path(event["overlay_evidence_path"]).exists()
+    assert Path(event["broker_evidence_path"]).exists()
 
 
 def test_capture_entry_evidence_refuses_unresolved_marker_images(tmp_path: Path) -> None:

@@ -249,6 +249,16 @@ def _point_from_row(row: Mapping[str, Any], width: int, height: int) -> tuple[in
     if x is None:
         x = number(row.get("line_x"), None)
     if x is None:
+        x = number(row.get("entry_x"), None)
+    if x is None:
+        x = number(row.get("current_x"), None)
+    if x is None:
+        x = number(row.get("latest_x"), None)
+    if x is None:
+        x = number(row.get("close_x"), None)
+    if x is None:
+        x = number(row.get("price_x"), None)
+    if x is None:
         x = number(row.get("x"), None)
     if x is None:
         x = center_x
@@ -266,6 +276,133 @@ def _point_from_row(row: Mapping[str, Any], width: int, height: int) -> tuple[in
     if x is None or y is None:
         return None
     return max(0, min(width - 1, int(round(x)))), max(0, min(height - 1, int(round(y))))
+
+
+def _row_side_matches(row: Mapping[str, Any], entry_side: str) -> bool:
+    row_side = side(row.get("side"))
+    direction = side(row.get("direction"))
+    candidate_side = side(row.get("candidate_side"))
+    if row_side and row_side != entry_side:
+        return False
+    if not row_side and direction and direction != entry_side:
+        return False
+    if not row_side and not direction and candidate_side and candidate_side != entry_side:
+        return False
+    return True
+
+
+def _marker_from_row(row: Mapping[str, Any], width: int, height: int, entry_side: str, source: str) -> tuple[int, int, str] | None:
+    if not row or not _row_side_matches(row, entry_side):
+        return None
+    point = _current_price_point_from_now_object(row, width, height, entry_side)
+    if point:
+        return point[0], point[1], source
+    return None
+
+
+def _explicit_marker_from_sources(
+    sources: Sequence[tuple[str, Mapping[str, Any]]],
+    width: int,
+    height: int,
+    entry_side: str,
+) -> tuple[int, int, str] | None:
+    marker_keys = (
+        "chart_point",
+        "entry_marker",
+        "entry_point",
+        "trigger_point",
+        "current_point",
+        "current_price_point",
+        "latest_price_point",
+        "price_point",
+    )
+    for source_name, source in sources:
+        direct = _marker_from_row(source, width, height, entry_side, f"{source_name.upper()}_EXPLICIT_POINT")
+        if direct:
+            return direct
+        for key in marker_keys:
+            row = mapping(source.get(key))
+            point = _marker_from_row(row, width, height, entry_side, f"{source_name.upper()}_{key.upper()}")
+            if point:
+                return point
+    return None
+
+
+def _package_context_marker(
+    candle_context: Mapping[str, Any],
+    width: int,
+    height: int,
+    entry_side: str,
+) -> tuple[int, int, str] | None:
+    current_leg = mapping(candle_context.get("current_leg"))
+    point = _marker_from_row(current_leg, width, height, entry_side, "PACKAGE_CURRENT_LEG_ENDPOINT")
+    if point:
+        return point
+
+    candidates: list[tuple[int, int, Mapping[str, Any], str]] = []
+    for index, row_value in enumerate(sequence(candle_context.get("box_candle_counts"))):
+        row = mapping(row_value)
+        if not _row_side_matches(row, entry_side):
+            continue
+        source_path = text(row.get("source_path")).lower()
+        label = text(row.get("label")).upper()
+        row_type = text(row.get("type")).upper()
+        key = f"{source_path} {label} {row_type}"
+        priority = 99
+        source = "PACKAGE_SIDE_MATCHED_BOX"
+        if "current_box" in key or row_type == "CURRENT" or label == "CURRENT":
+            priority = 0
+            source = "PACKAGE_CURRENT_BOX"
+        elif "sniper" in key:
+            priority = 1
+            source = "PACKAGE_SNIPER_BOX"
+        elif "trigger" in key:
+            priority = 2
+            source = "PACKAGE_TRIGGER_BOX"
+        elif "entry_area_zone" in key or "entry" in key:
+            priority = 3
+            source = "PACKAGE_ENTRY_ZONE"
+        elif "historical_structure" in key:
+            priority = 4
+            source = "PACKAGE_STRUCTURE_LEG_BOX"
+        elif any(token in key for token in ("SUPPLY", "DEMAND", "SUPPORT", "RESISTANCE")):
+            priority = 5
+            source = "PACKAGE_SIDE_ZONE"
+        if priority < 99:
+            candidates.append((priority, index, row, source))
+
+    for _priority, _index, row, source in sorted(candidates, key=lambda item: (item[0], item[1])):
+        point = _marker_from_row(row, width, height, entry_side, source)
+        if point:
+            return point
+    return None
+
+
+def _tracking_summary_marker(
+    live: Mapping[str, Any],
+    width: int,
+    height: int,
+    entry_side: str,
+) -> tuple[int, int, str] | None:
+    tracking = mapping(live.get("tracking_summary"))
+    for key, source in (
+        ("current_box", "TRACKING_CURRENT_BOX"),
+        ("entry_box", "TRACKING_ENTRY_BOX"),
+        ("entry_zone", "TRACKING_ENTRY_ZONE"),
+        ("active_entry_box", "TRACKING_ACTIVE_ENTRY_BOX"),
+    ):
+        point = _marker_from_row(mapping(tracking.get(key)), width, height, entry_side, source)
+        if point:
+            return point
+
+    structures: list[Mapping[str, Any]] = [mapping(item) for item in sequence(tracking.get("historical_structure")) if mapping(item)]
+    side_structures = [row for row in structures if _row_side_matches(row, entry_side)]
+    if side_structures:
+        latest = max(side_structures, key=lambda row: number(row.get("end_index"), -1.0) or -1.0)
+        point = _marker_from_row(latest, width, height, entry_side, "TRACKING_LATEST_SIDE_STRUCTURE")
+        if point:
+            return point
+    return None
 
 
 def _current_price_point_from_now_object(
@@ -315,10 +452,40 @@ def _current_candle_marker(live: Mapping[str, Any], image_size: tuple[int, int],
 
 
 def marker_point(live: Mapping[str, Any], council: Mapping[str, Any], image_size: tuple[int, int], entry_side: str) -> tuple[int, int, str] | None:
-    del council
+    return marker_point_from_context(live, council, image_size, entry_side)
+
+
+def marker_point_from_context(
+    live: Mapping[str, Any],
+    council: Mapping[str, Any],
+    image_size: tuple[int, int],
+    entry_side: str,
+    *,
+    entry: Mapping[str, Any] | None = None,
+    candle_context: Mapping[str, Any] | None = None,
+) -> tuple[int, int, str] | None:
+    width, height = image_size
     latest_candle = _current_candle_marker(live, image_size, entry_side)
     if latest_candle:
         return latest_candle
+    sources = (
+        ("entry", mapping(entry)),
+        ("latest_signal", mapping(live.get("latest_signal"))),
+        ("execution_packet", mapping(council.get("execution_packet"))),
+        ("allowance_package", mapping(council.get("allowance_package"))),
+        ("promotion_trace", mapping(council.get("promotion_trace"))),
+        ("model_council_packet", mapping(council.get("model_council_packet"))),
+    )
+    explicit = _explicit_marker_from_sources(sources, width, height, entry_side)
+    if explicit:
+        return explicit
+    context = mapping(candle_context) or candle_movement_context(live, council)
+    package_marker = _package_context_marker(context, width, height, entry_side)
+    if package_marker:
+        return package_marker
+    tracking_marker = _tracking_summary_marker(live, width, height, entry_side)
+    if tracking_marker:
+        return tracking_marker
     return None
 
 
@@ -1213,7 +1380,7 @@ def capture_entry_evidence(
         }
     evidence_dir = out_dir / "entry_evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    chart_point = marker_point(live, council, overlay_image.size, entry_side)
+    chart_point = marker_point_from_context(live, council, overlay_image.size, entry_side, entry=entry, candle_context=candle_context)
     entry_allowed = bool(entry.get("allowed"))
     evidence_status_label = "ENTRY ALLOWED" if entry_allowed else "ENTER NOW BLOCKED"
     if chart_point is None:
@@ -1238,8 +1405,18 @@ def capture_entry_evidence(
             "candle_movement_context_v3": candle_context,
             "candle_movement": candle_movement_brief(candle_context),
             "error": "ENTRY_MARKER_UNRESOLVED",
-            "marker_policy": "NO_FALLBACK_ONLY_LATEST_CANDLE_NOW",
-            "rejected_fallbacks": ["SUPPORT", "RESISTANCE", "SUPPLY", "DEMAND", "ENTRY_ZONE", "CURRENT_BOX", "PRICE_PROXY"],
+            "marker_policy": "LATEST_CANDLE_THEN_PACKAGE_CONTEXT",
+            "fallback_sources_checked": [
+                "LATEST_CANDLE_NOW",
+                "EXPLICIT_ENTRY_POINT",
+                "PACKAGE_CURRENT_LEG_ENDPOINT",
+                "PACKAGE_CURRENT_BOX",
+                "PACKAGE_SNIPER_BOX",
+                "PACKAGE_TRIGGER_BOX",
+                "PACKAGE_ENTRY_ZONE",
+                "TRACKING_CURRENT_BOX",
+                "TRACKING_LATEST_SIDE_STRUCTURE",
+            ],
             "source_overlay_path": overlay_source_ref,
             "source_window_path": window_source_ref,
             "source_overlay_artifact_path": str(overlay_path or ""),
