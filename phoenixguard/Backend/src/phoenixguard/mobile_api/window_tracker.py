@@ -592,7 +592,7 @@ def _compact_selected_mapping(value: Mapping[str, Any], keys: set[str]) -> dict[
     }
 
 
-_COMPACT_LIVE_STATE_MAX_SEQUENCE_ITEMS = 24
+_COMPACT_LIVE_STATE_MAX_SEQUENCE_ITEMS = 8
 _COMPACT_LIVE_STATE_MAX_STRING_CHARS = 4096
 _COMPACT_LIVE_STATE_MAX_OBSERVABILITY_DEPTH = 8
 _COMPACT_LIVE_STATE_HEAVY_DIAGNOSTIC_KEYS = frozenset(
@@ -638,6 +638,77 @@ def _compact_live_state_observability_value(value: Any, *, depth: int = 0) -> An
     if isinstance(value, str) and len(value) > _COMPACT_LIVE_STATE_MAX_STRING_CHARS:
         return value[:_COMPACT_LIVE_STATE_MAX_STRING_CHARS]
     return value
+
+
+_COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS: frozenset[str] = frozenset(
+    {
+        "action",
+        "confidence",
+        "detected_market",
+        "detected_timeframe",
+        "effective_confidence",
+        "execution_action",
+        "focus_timeframe",
+        "market",
+        "market_selector_rebind_required",
+        "market_selector_studying_new_pair",
+        "market_selector_visual_changed",
+        "side",
+        "signal_thesis_v3",
+        "status",
+        "summary",
+        "symbol",
+        "timeframe",
+    }
+)
+
+_COMPACT_LIVE_STATE_PROMOTION_TRACE_KEYS: frozenset[str] = frozenset(
+    {
+        "state",
+        "final_state",
+        "promotion_result",
+        "denied_at",
+        "next_required",
+        "true_blocker",
+        "first_reason",
+        "runtime_release_condition",
+        "exact_field_preventing_execution_packet",
+        "candidate_stage",
+        "candidate_side",
+        "timing_decision",
+        "entry_quality",
+        "opportunity_maturity",
+        "maturity",
+        "score",
+        "threshold",
+        "blocker",
+        "reason",
+    }
+)
+
+
+def _compact_live_state_latest_signal_payload(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return value
+    mapping = cast(Mapping[str, Any], value)
+    payload: dict[str, Any] = {}
+    for key in _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS:
+        item = mapping.get(key)
+        if item not in (None, "", [], {}):
+            payload[key] = _compact_live_state_observability_value(item)
+    return payload
+
+
+def _compact_live_state_promotion_trace(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    payload: dict[str, Any] = {}
+    for key in _COMPACT_LIVE_STATE_PROMOTION_TRACE_KEYS:
+        item = mapping.get(key)
+        if item not in (None, "", [], {}):
+            payload[key] = _compact_live_state_observability_value(item)
+    return payload
 
 
 def _compact_persisted_council_payload(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -925,7 +996,6 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
         "overlay_source_window_signature",
         "overlay_truth_audit",
         "pair",
-        "projection",
         "signal_thesis_v3",
         "smart_money_context",
         "status",
@@ -990,15 +1060,19 @@ def _compact_live_state_council_result(value: Any) -> Any:
     for key in _COMPACT_LIVE_STATE_COUNCIL_KEYS:
         item = mapping.get(key)
         if item not in (None, "", [], {}):
-            payload[key] = _compact_live_state_observability_value(item)
+            if key == "promotion_trace":
+                compact_trace = _compact_live_state_promotion_trace(item)
+                if compact_trace:
+                    payload[key] = compact_trace
+            elif key == "execution_lane":
+                compact_lane = _compact_live_state_execution_lane(item)
+                if compact_lane:
+                    payload[key] = compact_lane
+            else:
+                payload[key] = _compact_live_state_observability_value(item)
     council = mapping.get("model_council")
     if isinstance(council, Mapping):
-        council_mapping = cast(Mapping[str, Any], council)
-        compact_council: dict[str, Any] = {}
-        for key in _COMPACT_LIVE_STATE_COUNCIL_KEYS:
-            item = council_mapping.get(key)
-            if item not in (None, "", [], {}):
-                compact_council[key] = _compact_live_state_observability_value(item)
+        compact_council = _compact_live_state_model_council_for_packet(council)
         if compact_council:
             payload["model_council"] = compact_council
     payload["study_packet_present"] = bool(
@@ -1221,9 +1295,10 @@ def _compact_live_state_sidecar_payload(payload: Mapping[str, Any]) -> dict[str,
         value = payload.get(key)
         if value not in (None, "", [], {}):
             compact[key] = value
-    for key in ("tracking_summary", "latest_signal"):
-        if key in compact:
-            compact[key] = _compact_live_state_market_payload(compact[key])
+    if "tracking_summary" in compact:
+        compact["tracking_summary"] = _compact_live_state_market_payload(compact["tracking_summary"])
+    if "latest_signal" in compact:
+        compact["latest_signal"] = _compact_live_state_latest_signal_payload(compact["latest_signal"])
     if "model_council_result" in compact:
         compact["model_council_result"] = _compact_live_state_council_result(compact["model_council_result"])
     for packet_key in ("model_council_packet", "execution_packet", "latest_model_council_packet", "latest_execution_packet"):
