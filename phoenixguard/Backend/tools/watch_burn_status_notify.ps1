@@ -158,7 +158,7 @@ function Get-BurnSnapshot {
         }
     }
 
-    $sessionResult = Get-JsonEndpoint -Uri "$BaseUrl/v1/mobile/live/state/v3/$SessionId`?compact=1&monitor=1" -TimeoutSec 10
+    $sessionResult = Get-JsonEndpoint -Uri "$BaseUrl/v1/mobile/live/state/v3/$SessionId`?compact=1&monitor=1" -TimeoutSec 30
     $perfResult = Get-JsonEndpoint -Uri "$BaseUrl/v1/mobile/performance/trace/v3/$SessionId" -TimeoutSec 20
 
     $mt4Dir = Join-Path $env:APPDATA "MetaQuotes\Terminal\Common\Files\PhoenixGuard"
