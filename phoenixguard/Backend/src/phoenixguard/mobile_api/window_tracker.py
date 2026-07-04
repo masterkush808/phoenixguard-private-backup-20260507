@@ -995,6 +995,122 @@ def _compact_live_state_allowance_package(value: Any) -> dict[str, Any]:
     return _strip_packet_self_references(_compact_selected_mapping(mapping, selected))
 
 
+def _compact_live_state_sequence_context(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    selected = {
+        "schema_version",
+        "sequence_id",
+        "session_id",
+        "sequence_signature",
+        "sequence_status",
+        "status",
+        "sequence_index",
+        "sequence_length",
+        "frames_received",
+        "frames_used",
+        "frame_start",
+        "frame_end",
+        "frame_range",
+        "candle_count",
+        "candle_range",
+        "timeframe",
+        "sequence_confidence",
+        "progression_score",
+        "global_direction",
+        "local_direction",
+        "current_phase",
+        "entry_progression",
+        "sequence_age_ms",
+        "packet_age_ms",
+        "decision_age_ms",
+        "model_vote_age_ms",
+    }
+    compact = _compact_selected_mapping(mapping, selected)
+    for history_key in ("box_history", "progression"):
+        history = mapping.get(history_key)
+        if isinstance(history, Sequence) and not isinstance(history, (str, bytes, bytearray)):
+            rows = [
+                _strip_packet_self_references(item)
+                for item in cast(Sequence[Any], history)[-3:]
+                if isinstance(item, Mapping)
+            ]
+            if rows:
+                compact[history_key] = rows
+    motifs = mapping.get("motifs")
+    if isinstance(motifs, Sequence) and not isinstance(motifs, (str, bytes, bytearray)):
+        compact["motifs"] = list(cast(Sequence[Any], motifs)[-5:])
+    return _strip_packet_self_references(compact)
+
+
+def _compact_live_state_execution_lane(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    selected = {
+        "name",
+        "lane",
+        "lane_id",
+        "side",
+        "accepted",
+        "score",
+        "threshold",
+        "reason",
+        "blocker",
+        "next_required",
+        "maturity",
+        "opportunity_maturity",
+        "classification",
+        "entry_type",
+        "entry_window",
+        "expected_move_time",
+        "thesis_horizon",
+    }
+    return _strip_packet_self_references(_compact_selected_mapping(mapping, selected))
+
+
+def _compact_live_state_model_council_for_packet(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    selected = {
+        "candidate_id",
+        "candidate_stage",
+        "denied_at",
+        "entry_quality",
+        "execution",
+        "execution_threshold",
+        "final_execution_score",
+        "final_side",
+        "final_state",
+        "lane_accepted",
+        "next_required",
+        "packet_result",
+        "release_condition",
+        "release_state",
+        "score",
+        "selected_execution_lane",
+        "side",
+        "state",
+        "strategy_read",
+        "timing_decision",
+        "trade_permission",
+        "true_blocker",
+    }
+    compact = _compact_selected_mapping(mapping, selected)
+    sequence_context = _compact_live_state_sequence_context(mapping.get("sequence_context"))
+    if sequence_context:
+        compact["sequence_context"] = sequence_context
+    allowance = _compact_live_state_allowance_package(mapping.get("allowance_package"))
+    if allowance:
+        compact["allowance_package"] = allowance
+    execution_lane = _compact_live_state_execution_lane(mapping.get("execution_lane"))
+    if execution_lane:
+        compact["execution_lane"] = execution_lane
+    return _strip_packet_self_references(compact)
+
+
 def _compact_live_state_execution_packet(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
@@ -1039,13 +1155,11 @@ def _compact_live_state_execution_packet(value: Any) -> dict[str, Any]:
     if not isinstance(packet_raw, dict):
         return {}
     packet = cast(dict[str, Any], packet_raw)
+    if isinstance(packet.get("execution_lane"), Mapping):
+        packet["execution_lane"] = _compact_live_state_execution_lane(packet.get("execution_lane"))
     council = mapping.get("model_council")
     if isinstance(council, Mapping):
-        compact_council = _compact_persisted_council_payload(cast(Mapping[str, Any], council))
-        allowance = _compact_live_state_allowance_package(cast(Mapping[str, Any], council).get("allowance_package"))
-        if allowance:
-            compact_council["allowance_package"] = allowance
-        packet["model_council"] = compact_council
+        packet["model_council"] = _compact_live_state_model_council_for_packet(council)
     allowance = _compact_live_state_allowance_package(mapping.get("allowance_package"))
     if allowance:
         packet["allowance_package"] = allowance
