@@ -592,6 +592,54 @@ def _compact_selected_mapping(value: Mapping[str, Any], keys: set[str]) -> dict[
     }
 
 
+_COMPACT_LIVE_STATE_MAX_SEQUENCE_ITEMS = 24
+_COMPACT_LIVE_STATE_MAX_STRING_CHARS = 4096
+_COMPACT_LIVE_STATE_MAX_OBSERVABILITY_DEPTH = 8
+_COMPACT_LIVE_STATE_HEAVY_DIAGNOSTIC_KEYS = frozenset(
+    {
+        "raw",
+        "raw_payload",
+        "raw_response",
+        "raw_result",
+        "image",
+        "image_b64",
+        "image_base64",
+        "pixels",
+        "mask",
+        "heatmap",
+        "debug_image",
+        "debug_frames",
+        "candidate_debug",
+        "all_candidates",
+        "all_votes",
+        "all_model_outputs",
+        "all_predictions",
+        "dense_history",
+    }
+)
+
+
+def _compact_live_state_observability_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > _COMPACT_LIVE_STATE_MAX_OBSERVABILITY_DEPTH:
+        return str(value)[:_COMPACT_LIVE_STATE_MAX_STRING_CHARS]
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, item in cast(Mapping[Any, Any], value).items():
+            text_key = str(key)
+            if text_key in _PACKET_SELF_REFERENCE_KEYS or text_key in _COMPACT_LIVE_STATE_HEAVY_DIAGNOSTIC_KEYS:
+                continue
+            result[text_key] = _compact_live_state_observability_value(item, depth=depth + 1)
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items = list(cast(Sequence[Any], value))
+        if len(items) > _COMPACT_LIVE_STATE_MAX_SEQUENCE_ITEMS:
+            items = items[-_COMPACT_LIVE_STATE_MAX_SEQUENCE_ITEMS:]
+        return [_compact_live_state_observability_value(item, depth=depth + 1) for item in items]
+    if isinstance(value, str) and len(value) > _COMPACT_LIVE_STATE_MAX_STRING_CHARS:
+        return value[:_COMPACT_LIVE_STATE_MAX_STRING_CHARS]
+    return value
+
+
 def _compact_persisted_council_payload(value: Mapping[str, Any]) -> dict[str, Any]:
     selected = {
         "accepted_lanes",
@@ -860,6 +908,7 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
         "broker_source",
         "broker_source_lock",
         "candle_extraction",
+        "candle_movement_context_v3",
         "confidence",
         "detected_market",
         "detected_timeframe",
@@ -929,7 +978,7 @@ def _compact_live_state_market_payload(value: Any) -> Any:
     for key in _COMPACT_LIVE_STATE_MARKET_KEYS:
         item = mapping.get(key)
         if item not in (None, "", [], {}):
-            payload[key] = item
+            payload[key] = _compact_live_state_observability_value(item)
     return payload
 
 
@@ -941,7 +990,7 @@ def _compact_live_state_council_result(value: Any) -> Any:
     for key in _COMPACT_LIVE_STATE_COUNCIL_KEYS:
         item = mapping.get(key)
         if item not in (None, "", [], {}):
-            payload[key] = item
+            payload[key] = _compact_live_state_observability_value(item)
     council = mapping.get("model_council")
     if isinstance(council, Mapping):
         council_mapping = cast(Mapping[str, Any], council)
@@ -949,7 +998,7 @@ def _compact_live_state_council_result(value: Any) -> Any:
         for key in _COMPACT_LIVE_STATE_COUNCIL_KEYS:
             item = council_mapping.get(key)
             if item not in (None, "", [], {}):
-                compact_council[key] = item
+                compact_council[key] = _compact_live_state_observability_value(item)
         if compact_council:
             payload["model_council"] = compact_council
     payload["study_packet_present"] = bool(
