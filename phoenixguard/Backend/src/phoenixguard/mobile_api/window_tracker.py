@@ -20682,6 +20682,14 @@ class ContinuousWindowTrackerService:
         ).as_dict()
 
     def latest_model_council_packet(self, session_id: str) -> dict[str, Any]:
+        compact_payload = _mapping_to_dict(_read_json(self._compact_live_state_path(session_id), {}))
+        if compact_payload and str(compact_payload.get("session_id", session_id) or session_id) == str(session_id):
+            packet = _model_council_packet_from_payload(compact_payload)
+            if packet:
+                return packet
+            compact_result = _mapping_to_dict(compact_payload.get("model_council_result"))
+            if compact_payload.get("execution_packet_present") is False or compact_result.get("execution_packet_present") is False:
+                raise KeyError(session_id)
         payload = self._require_session(session_id)
         packet = _model_council_packet_from_payload(payload)
         if not packet:
