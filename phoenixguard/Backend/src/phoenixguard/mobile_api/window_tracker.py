@@ -805,6 +805,10 @@ _COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
         "descriptor",
         "model_health",
         "model_council_result",
+        "model_council_packet",
+        "execution_packet",
+        "latest_model_council_packet",
+        "latest_execution_packet",
     }
 )
 
@@ -974,6 +978,10 @@ def _compact_live_state_sidecar_payload(payload: Mapping[str, Any]) -> dict[str,
             compact[key] = _compact_live_state_market_payload(compact[key])
     if "model_council_result" in compact:
         compact["model_council_result"] = _compact_live_state_council_result(compact["model_council_result"])
+    for packet_key in ("model_council_packet", "execution_packet", "latest_model_council_packet", "latest_execution_packet"):
+        packet = compact.get(packet_key)
+        if isinstance(packet, Mapping):
+            compact[packet_key] = _compact_persisted_execution_packet(cast(Mapping[str, Any], packet))
     return compact
 
 
