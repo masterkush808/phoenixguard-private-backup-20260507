@@ -5771,6 +5771,16 @@ def evaluate_model_council_v3(
         council["sequence_context_ready"] = False
     if not executable:
         _refresh_promotion_failure_audit()
+    packet_valid_for_seconds = max(
+        8.0,
+        _float(snapshot.get("packet_valid_for_seconds"), 0.0),
+        float(max(0, int(timing_expiry or 0))),
+        _float(professional_entry_window.get("duration_sec"), 0.0),
+        _float(_mapping(allowance_package.get("entry_window")).get("duration_sec"), 0.0),
+    )
+    if executable:
+        promotion_trace["packet_valid_for_seconds"] = packet_valid_for_seconds
+        promotion_trace["packet_validity_source"] = "playbook_entry_window"
     if executable:
         packet = build_execution_packet_v3(
             packet_id=base["packet_id"],
@@ -5785,7 +5795,7 @@ def evaluate_model_council_v3(
             input_frame_hash=base["input_frame_hash"],
             previous_frame_hash=base["previous_frame_hash"],
             created_epoch=current_now,
-            valid_for_seconds=_float(snapshot.get("packet_valid_for_seconds"), 8.0),
+            valid_for_seconds=packet_valid_for_seconds,
             live_integrity=_mapping(snapshot.get("live_integrity")),
             model_council=council,
             market_context=market_context,
