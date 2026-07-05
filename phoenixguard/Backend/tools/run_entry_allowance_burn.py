@@ -2103,7 +2103,13 @@ def runtime_freshness_state(
         or visual.get("stale_status")
         or visual.get("status")
     ).upper()
-    frame_age_ms = number(timing.get("frame_age_ms"))
+    frame_age_ms = number(
+        timing.get("frame_age_ms")
+        or live.get("frame_age_ms")
+        or live.get("display_frame_age_ms")
+        or live.get("monitor_frame_age_ms")
+    )
+    frame_age_source = "explicit" if frame_age_ms is not None else ""
     published_epoch_ms = number(
         timing.get("display_published_epoch_ms")
         or timing.get("capture_epoch_ms")
@@ -2145,6 +2151,9 @@ def runtime_freshness_state(
     capture_age_sec = None
     if last_capture_epoch and last_capture_epoch > 0:
         capture_age_sec = max(0.0, time.time() - float(last_capture_epoch))
+    if frame_age_ms is None and capture_age_sec is not None:
+        frame_age_ms = float(capture_age_sec) * 1000.0
+        frame_age_source = f"derived_from_{capture_epoch_source or 'capture_epoch'}"
     tracking_enabled = bool(live.get("tracking_enabled"))
     session_status = text(live.get("status")).upper()
     stale_flags = [text(item).upper() for item in sequence(visual.get("stale_flags")) if text(item)]
@@ -2211,6 +2220,7 @@ def runtime_freshness_state(
         "max_frame_age_ms": max_frame_age_ms,
         "max_capture_age_sec": max_capture_age_sec,
         "frame_age_ms": frame_age_ms,
+        "frame_age_source": frame_age_source,
         "capture_age_sec": round(float(capture_age_sec), 3) if capture_age_sec is not None else None,
         "capture_epoch_source": capture_epoch_source,
         "published_age_sec": round(float(published_age_sec), 3) if published_age_sec is not None else None,

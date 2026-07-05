@@ -452,6 +452,37 @@ def test_runtime_freshness_warning_relaxation_is_explicit(monkeypatch: pytest.Mo
     assert freshness["reasons"] == []
 
 
+def test_runtime_freshness_derives_frame_age_from_live_capture_epoch(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = time.time()
+    monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "180")
+    monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "180000")
+    live: dict[str, Any] = {
+        "tracking_enabled": True,
+        "status": "running",
+        "last_capture_epoch": now - 25.0,
+    }
+    perf: dict[str, Any] = {
+        "generated_epoch": now - 0.2,
+        "timing_trace": {
+            "stale_status": "PASS",
+        },
+    }
+
+    freshness = burn.runtime_freshness_state(
+        {"ok": True},
+        {"ok": True},
+        {"ok": True},
+        live,
+        perf,
+    )
+
+    assert freshness["fresh"] is True
+    assert freshness["frame_age_source"] == "derived_from_live.last_capture_epoch"
+    frame_age_ms = burn.number(freshness["frame_age_ms"], 0.0) or 0.0
+    assert 23_500.0 <= frame_age_ms <= 26_500.0
+    assert "FRAME_AGE_MISSING" not in freshness["reasons"]
+
+
 def test_marker_point_uses_current_box_contextual_fallback() -> None:
     live: dict[str, Any] = {
         "signal_thesis_v3": {"current_price_proxy": 120},
