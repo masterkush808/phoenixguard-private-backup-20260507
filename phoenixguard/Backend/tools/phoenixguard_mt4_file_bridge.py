@@ -529,7 +529,17 @@ def _compact_allowance_package(
     }
 
 
-def _compact_command(payload: dict[str, object], *, bridge_sequence: int = 0) -> dict[str, object]:
+def _clean_override(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _compact_command(
+    payload: dict[str, object],
+    *,
+    bridge_sequence: int = 0,
+    symbol_override: object = "",
+    timeframe_override: object = "",
+) -> dict[str, object]:
     execution = _nested(payload, "execution")
     council = _nested(payload, "model_council")
     live = _nested(payload, "live_integrity")
@@ -551,14 +561,16 @@ def _compact_command(payload: dict[str, object], *, bridge_sequence: int = 0) ->
         side=side,
     )
     bridge_written_epoch = time.time()
+    symbol = _clean_override(symbol_override) or str(payload.get("symbol", ""))
+    timeframe = _clean_override(timeframe_override) or str(payload.get("timeframe", ""))
     return {
         "schema_version": "PG_MT4_EXECUTION_COMMAND_V1",
         "source_schema_version": payload.get("schema_version", ""),
         "bridge_sequence": bridge_sequence,
         "packet_id": payload.get("packet_id", ""),
         "session_id": payload.get("session_id", ""),
-        "symbol": payload.get("symbol", ""),
-        "timeframe": payload.get("timeframe", ""),
+        "symbol": symbol,
+        "timeframe": timeframe,
         "frame_id": payload.get("frame_id", 0),
         "capture_count": payload.get("capture_count", 0),
         "state_version": payload.get("state_version", 0),
@@ -741,6 +753,8 @@ def main() -> int:
     parser.add_argument("--metrics-file", default=r"PhoenixGuard\mt4_bridge_metrics.jsonl")
     parser.add_argument("--poll-sec", type=float, default=15.0)
     parser.add_argument("--timeout-sec", type=float, default=8.0)
+    parser.add_argument("--symbol-override", default=os.getenv("PHOENIXGUARD_MT4_SYMBOL", ""))
+    parser.add_argument("--timeframe-override", default=os.getenv("PHOENIXGUARD_MT4_TIMEFRAME", ""))
     parser.add_argument("--max-live-age-sec", type=float, default=180.0)
     parser.add_argument("--max-packet-frame-lag", type=int, default=2)
     parser.add_argument("--print-every", type=float, default=30.0)
@@ -826,7 +840,12 @@ def main() -> int:
                     metric_status = "NO_EXECUTION_PACKET"
                     metric_error = detail
                 else:
-                    command = _compact_command(payload, bridge_sequence=bridge_sequence)
+                    command = _compact_command(
+                        payload,
+                        bridge_sequence=bridge_sequence,
+                        symbol_override=args.symbol_override,
+                        timeframe_override=args.timeframe_override,
+                    )
                     command["bridge_live_freshness"] = {
                         "status": "PASS",
                         "detail": live_reason,

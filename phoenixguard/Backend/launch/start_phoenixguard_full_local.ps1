@@ -408,8 +408,9 @@ try {
     }
     if ($session -and $launchMt4Bridge) {
         Write-Host "Starting MT4 file bridge against $baseUrl"
-        $bridgePollText = ([string][double]$ShooterPollSec).Replace(',', '.')
-        $bridgeTimeoutSec = if ($env:PHOENIXGUARD_MT4_BRIDGE_TIMEOUT_SEC) { [double]$env:PHOENIXGUARD_MT4_BRIDGE_TIMEOUT_SEC } else { 30.0 }
+        $bridgePollSec = if ($env:PHOENIXGUARD_MT4_BRIDGE_POLL_SEC) { [double]$env:PHOENIXGUARD_MT4_BRIDGE_POLL_SEC } else { 1.0 }
+        $bridgePollText = ([string][double]$bridgePollSec).Replace(',', '.')
+        $bridgeTimeoutSec = if ($env:PHOENIXGUARD_MT4_BRIDGE_TIMEOUT_SEC) { [double]$env:PHOENIXGUARD_MT4_BRIDGE_TIMEOUT_SEC } else { 20.0 }
         $bridgeTimeoutText = ([string]$bridgeTimeoutSec).Replace(',', '.')
         $bridgeLogDir = Join-Path -Path $runtimeDir -ChildPath 'logs'
         New-Item -ItemType Directory -Force -Path $bridgeLogDir | Out-Null
@@ -431,6 +432,12 @@ try {
             '--metrics-every',
             '15.0'
         )
+        if ($env:PHOENIXGUARD_MT4_SYMBOL) {
+            $bridgeArgs += @('--symbol-override', $env:PHOENIXGUARD_MT4_SYMBOL)
+        }
+        if ($env:PHOENIXGUARD_MT4_TIMEFRAME) {
+            $bridgeArgs += @('--timeframe-override', $env:PHOENIXGUARD_MT4_TIMEFRAME)
+        }
         Start-Process -FilePath $pythonPath -ArgumentList $bridgeArgs -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $bridgeOutPath -RedirectStandardError $bridgeErrPath | Out-Null
         Write-Host "MT4 file bridge log: $bridgeOutPath"
     } elseif ($session) {

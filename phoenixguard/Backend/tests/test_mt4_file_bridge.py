@@ -143,6 +143,22 @@ def test_mt4_bridge_compact_command_preserves_ea_contract() -> None:
     assert decoded["live_integrity"]["input_frame_hash"] == "frame_hash_test"
 
 
+def test_mt4_bridge_compact_command_accepts_mt4_symbol_and_timeframe_override() -> None:
+    bridge = _load_bridge_module()
+    command = bridge._compact_command(
+        _sample_execution_packet(),
+        bridge_sequence=8,
+        symbol_override="EURCADm",
+        timeframe_override="M5",
+    )
+
+    bridge._validate_command(command)
+
+    assert command["symbol"] == "EURCADm"
+    assert command["timeframe"] == "M5"
+    assert command["packet_id"] == "pgpkt_test_001"
+
+
 def test_mt4_bridge_compact_command_preserves_expected_move_time_from_professional_plan() -> None:
     bridge = _load_bridge_module()
     packet = json.loads(json.dumps(_sample_execution_packet()))
@@ -507,3 +523,13 @@ def test_mt4_executioner_default_packet_age_matches_live_pipeline() -> None:
     source = source_path.read_text(encoding="utf-8")
 
     assert "input int                   InpPacketMaxAgeMs                      = 180000;" in source
+
+
+def test_mt4_executioner_accepts_current_allowance_types_and_professional_holds() -> None:
+    source_path = Path(__file__).resolve().parents[2] / "Backend" / "launch" / "mt4" / "PhoenixGuard_MT4_Executioner.mq4"
+    source = source_path.read_text(encoding="utf-8")
+
+    assert 'normalized == "SWING_ENTER_NOW"' in source
+    assert "input int                   InpIntradayMaxHoldMinutes              = 0;" in source
+    assert "if(packet.packet_id == g_lastAcceptedPacketId)" in source
+    assert "packet.packet_id == g_lastAcceptedPacketId || packet.packet_id == g_lastSeenPacketId" not in source

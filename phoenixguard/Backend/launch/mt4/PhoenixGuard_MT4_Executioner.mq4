@@ -117,7 +117,7 @@ input double                InpIntradayMaxStopLossPips             = 18.0;
 input double                InpSwingMaxStopLossPips                = 35.0;
 input double                InpIntradayRewardRiskRatio             = 1.25;
 input double                InpSwingRewardRiskRatio                = 1.80;
-input int                   InpIntradayMaxHoldMinutes              = 12;
+input int                   InpIntradayMaxHoldMinutes              = 0;
 input int                   InpSwingMaxHoldMinutes                 = 0;
 input double                InpIntradayBreakEvenTriggerPips        = 5.0;
 input double                InpIntradayBreakEvenLockPips           = 0.5;
@@ -273,12 +273,11 @@ void PollAndProcess()
       return;
    }
 
-   if(packet.packet_id == g_lastAcceptedPacketId || packet.packet_id == g_lastSeenPacketId)
+   if(packet.packet_id == g_lastAcceptedPacketId)
    {
-      SetStatus("duplicate packet ignored: " + packet.packet_id);
+      SetStatus("accepted packet already processed: " + packet.packet_id);
       return;
    }
-   g_lastSeenPacketId = packet.packet_id;
 
    if(InpCloseOnOppositePacket || InpCloseOppositePositionsBeforeEntry)
       CloseOppositeOrders(packet.side, "opposite packet " + packet.packet_id);
@@ -304,6 +303,7 @@ void PollAndProcess()
    bool opened = OpenPacketTrade(packet, lots, sl_pips, tp_pips);
    if(opened)
    {
+      g_lastSeenPacketId = packet.packet_id;
       g_lastAcceptedPacketId = packet.packet_id;
       g_lastAcceptedFrame = packet.frame_id;
       g_lastAcceptedCapture = packet.capture_count;
@@ -1974,7 +1974,7 @@ string NormalizeAllowancePackageType(const string value)
    string normalized = Upper(Trim(value));
    if(normalized == "INTRADAY" || normalized == "ENTER_NOW" || normalized == "INTRADAY_ENTER_NOW" || normalized == "PGI")
       return("INTRADAY_ENTER_NOW");
-   if(normalized == "SWING" || normalized == "SWING_DISCIPLINED" || normalized == "PGS")
+   if(normalized == "SWING" || normalized == "SWING_ENTER_NOW" || normalized == "SWING_DISCIPLINED" || normalized == "PGS")
       return("SWING");
    if(StringFind(normalized, "PGI ", 0) == 0)
       return("INTRADAY_ENTER_NOW");
