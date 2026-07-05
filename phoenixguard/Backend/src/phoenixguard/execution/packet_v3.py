@@ -229,6 +229,91 @@ def _first_clean_text(*values: Any) -> str:
     return ""
 
 
+def _first_number(*values: Any) -> float | None:
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed == parsed and parsed not in {float("inf"), float("-inf")}:
+            return float(parsed)
+    return None
+
+
+def _playbook_exports_from_allowance(
+    allowance_package: Mapping[str, Any],
+    council: Mapping[str, Any],
+) -> dict[str, Any]:
+    allowance = _mapping(allowance_package)
+    if not allowance:
+        return {}
+    professional_trade_plan = _mapping(
+        allowance.get("professional_trade_plan")
+        or council.get("professional_trade_plan")
+    )
+    thesis_horizon = _mapping(
+        allowance.get("thesis_horizon")
+        or professional_trade_plan.get("thesis_horizon")
+    )
+    expected_move_time = _mapping(
+        allowance.get("expected_move_time")
+        or professional_trade_plan.get("expected_move_time")
+        or thesis_horizon
+    )
+    score = _first_number(
+        allowance.get("score"),
+        council.get("final_execution_score"),
+        council.get("final_score"),
+        council.get("score"),
+    )
+    threshold = _first_number(
+        allowance.get("threshold"),
+        council.get("threshold"),
+        council.get("execution_threshold"),
+        council.get("lane_threshold"),
+    )
+    expected_duration_sec = _first_number(
+        allowance.get("expected_duration_sec"),
+        expected_move_time.get("expected_duration_sec"),
+        thesis_horizon.get("expected_duration_sec"),
+    )
+    expected_candle_count = _first_number(
+        allowance.get("expected_candle_count"),
+        expected_move_time.get("expected_candle_count"),
+        thesis_horizon.get("expected_candle_count"),
+    )
+    exports: dict[str, Any] = {}
+    if professional_trade_plan:
+        exports["professional_trade_plan"] = professional_trade_plan
+    if thesis_horizon:
+        exports["thesis_horizon"] = thesis_horizon
+    if expected_move_time:
+        exports["expected_move_time"] = expected_move_time
+    if expected_duration_sec is not None:
+        exports["expected_duration_sec"] = int(round(expected_duration_sec))
+    if expected_candle_count is not None:
+        exports["expected_candle_count"] = int(round(expected_candle_count))
+    expected_duration_text = _first_clean_text(
+        allowance.get("expected_duration_text"),
+        expected_move_time.get("expected_duration_text"),
+        thesis_horizon.get("expected_duration_text"),
+    )
+    if expected_duration_text:
+        exports["expected_duration_text"] = expected_duration_text
+    if score is not None:
+        rounded_score = round(float(score), 4)
+        exports["score"] = rounded_score
+        exports["final_score"] = rounded_score
+        exports["final_execution_score"] = rounded_score
+    if threshold is not None:
+        rounded_threshold = round(float(threshold), 4)
+        exports["threshold"] = rounded_threshold
+        exports["execution_threshold"] = rounded_threshold
+    return exports
+
+
 def _entry_quality_allows_execution(entry_quality: Mapping[str, Any]) -> bool:
     state = _clean_str(
         entry_quality.get("state")
@@ -465,6 +550,7 @@ def build_execution_packet_v3(
         resolved_allowance_package.setdefault("schema_version", ALLOWANCE_PACKAGE_SCHEMA_VERSION)
         resolved_allowance_package.setdefault("execution_authority", PLAYBOOK_EXECUTION_AUTHORITY)
         resolved_allowance_package.setdefault("packet_authority", EXECUTION_PACKET_SCHEMA_VERSION)
+        resolved_allowance_package.setdefault("packet_id", str(packet_id))
         council.setdefault("allowance_package", resolved_allowance_package)
     resolved_sequence_context = _mapping(sequence_context)
     if resolved_sequence_context:
@@ -592,6 +678,11 @@ def build_execution_packet_v3(
         packet["execution"]["allowance_package_type"] = _clean_str(
             resolved_allowance_package.get("package_type")
         )
+        playbook_exports = _playbook_exports_from_allowance(resolved_allowance_package, council)
+        for key, value in playbook_exports.items():
+            packet.setdefault(key, value)
+            council.setdefault(key, value)
+            resolved_allowance_package.setdefault(key, value)
     book_strategy = _mapping(council.get("book_strategy"))
     if book_strategy:
         packet["book_strategy"] = book_strategy

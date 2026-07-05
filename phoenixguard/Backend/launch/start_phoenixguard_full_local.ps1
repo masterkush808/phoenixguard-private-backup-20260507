@@ -44,6 +44,13 @@ $env:PHOENIXGUARD_DASHBOARD_BROWSER = $DashboardBrowser
 . (Join-Path -Path $PSScriptRoot -ChildPath 'Resolve-PhoenixGuardPython.ps1')
 $pythonRuntime = Resolve-PhoenixGuardPythonRuntime -ProjectRoot $ProjectRoot
 $pythonPath = [string]$pythonRuntime.VenvPython
+$env:PHOENIXGUARD_PYTHON_EXE = $pythonPath
+$env:PHOENIXGUARD_PYVENV_LAUNCHER = $pythonPath
+$env:VIRTUAL_ENV = Split-Path -Parent (Split-Path -Parent $pythonPath)
+$pythonScriptsDir = Split-Path -Parent $pythonPath
+if ($pythonScriptsDir -and -not ([string]$env:PATH).ToLowerInvariant().StartsWith($pythonScriptsDir.ToLowerInvariant() + [System.IO.Path]::PathSeparator)) {
+    $env:PATH = $pythonScriptsDir + [System.IO.Path]::PathSeparator + $env:PATH
+}
 
 $defaultRuntimeDir = Join-Path -Path $ProjectRoot -ChildPath 'runtime\live'
 $runtimeDir = $defaultRuntimeDir

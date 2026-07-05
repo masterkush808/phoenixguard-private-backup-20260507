@@ -269,8 +269,18 @@ def _python_venv_dir(python_exe: str) -> Path | None:
 
 def _resolve_python_launcher(env: dict[str, str], script_dir: Path | None = None) -> tuple[str, str]:
     repo_python = _repo_venv_python(script_dir) if script_dir is not None else None
-    requested_exe = env.get("PHOENIXGUARD_PYTHON_EXE") or (str(repo_python) if repo_python is not None else sys.executable)
-    pyvenv_launcher = env.get("PHOENIXGUARD_PYVENV_LAUNCHER") or (str(repo_python) if repo_python is not None else requested_exe)
+    allow_external = str(env.get("PHOENIXGUARD_ALLOW_EXTERNAL_PYTHON", "") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if repo_python is not None and not allow_external:
+        requested_exe = str(repo_python)
+        pyvenv_launcher = str(repo_python)
+    else:
+        requested_exe = env.get("PHOENIXGUARD_PYTHON_EXE") or (str(repo_python) if repo_python is not None else sys.executable)
+        pyvenv_launcher = env.get("PHOENIXGUARD_PYVENV_LAUNCHER") or (str(repo_python) if repo_python is not None else requested_exe)
     process_exe = requested_exe
     if script_dir is not None and repo_python is not None:
         expected_python = expected_repo_venv_python(script_dir)

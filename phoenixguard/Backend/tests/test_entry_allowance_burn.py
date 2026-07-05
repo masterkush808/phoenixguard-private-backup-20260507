@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Any
+import json
 import pytest
 
 import time
@@ -8,6 +9,52 @@ from pathlib import Path
 from PIL import Image
 
 from tools import run_entry_allowance_burn as burn
+
+
+def test_write_json_recovers_when_parent_directory_disappears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "entry_evidence" / "sample.json"
+    original_write_text = Path.write_text
+    calls = {"count": 0}
+
+    def flaky_write_text(self: Path, data: str, *args: Any, **kwargs: Any) -> int:
+        if self.name.startswith(".tmp_") and calls["count"] == 0:
+            calls["count"] += 1
+            if self.parent.exists():
+                self.parent.rmdir()
+            raise FileNotFoundError(str(self))
+        return original_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", flaky_write_text)
+
+    burn.write_json(target, {"ok": True})
+
+    assert calls["count"] == 1
+    assert json.loads(target.read_text(encoding="utf-8")) == {"ok": True}
+
+
+def test_write_json_uses_short_temp_name_for_long_evidence_filename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "entry_evidence" / "00006_000021_1783229207445_buy_blocked_enter_now.json"
+    original_write_text = Path.write_text
+    written_paths: list[Path] = []
+
+    def capture_write_text(self: Path, data: str, *args: Any, **kwargs: Any) -> int:
+        written_paths.append(self)
+        return original_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", capture_write_text)
+
+    burn.write_json(target, {"ok": True})
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"ok": True}
+    assert written_paths
+    assert all(path.name.startswith(".tmp_") for path in written_paths)
+    assert all(len(path.name) < 64 for path in written_paths)
 
 
 def test_entry_state_does_not_promote_timing_without_playbook_or_packet_authority() -> None:
@@ -82,6 +129,114 @@ def test_entry_state_allows_playbook_enter_now_without_legacy_lane_or_packet() -
     assert entry["execution_authorized"] is False
     assert entry["packet_present"] is False
     assert entry["allowance_mode"] == "playbook_strategy_entry"
+
+
+def test_entry_state_blocks_playbook_packet_when_entry_quality_is_not_clean() -> None:
+    live: dict[str, Any] = {}
+    council: dict[str, Any] = {
+        "execution_packet_present": True,
+        "execution_packet_id": "pgpkt_quality_blocked",
+        "promotion_trace": {
+            "candidate_side": "BUY",
+            "book_strategy_state": "ENTER_NOW",
+            "opportunity_maturity_state": "ENTER_NOW",
+            "blocked_by": "ENTRY_QUALITY_BELOW_ACCEPTABLE",
+            "timing_decision": {
+                "entry_now_allowed": True,
+                "playbook_strategy_authorized": True,
+                "timing_mode": "ENTER_NOW",
+            },
+            "execution_lane": {"accepted": False, "name": "MOMENTUM_ACCEPTANCE_ENTRY"},
+            "allowance_package": {
+                "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3",
+                "accepted": False,
+                "execution_ready": False,
+                "opportunity_maturity": "ENTER_NOW",
+            },
+        },
+    }
+
+    entry = burn.entry_state(live, council)
+
+    assert entry["allowed"] is False
+    assert entry["execution_authorized"] is False
+    assert entry["strategy_allowed"] is False
+    assert entry["blocked_by"] == "ENTRY_QUALITY_BELOW_ACCEPTABLE"
+    assert entry["allowance_mode"] == "watching"
+
+
+def test_entry_state_blocks_playbook_packet_when_timing_waits_for_pullback() -> None:
+    live: dict[str, Any] = {}
+    council: dict[str, Any] = {
+        "execution_packet_present": True,
+        "execution_packet_id": "pgpkt_waiting",
+        "promotion_trace": {
+            "candidate_side": "SELL",
+            "book_strategy_state": "ENTER_NOW",
+            "opportunity_maturity_state": "ENTER_NOW",
+            "blocked_by": "NONE",
+            "timing_decision": {
+                "entry_now_allowed": True,
+                "playbook_strategy_authorized": True,
+                "timing_mode": "WAIT_FOR_PULLBACK",
+            },
+            "execution_lane": {"accepted": False, "name": "SNIPER_ZONE_ENTRY"},
+            "allowance_package": {
+                "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3",
+                "accepted": True,
+                "execution_ready": True,
+                "opportunity_maturity": "ENTER_NOW",
+            },
+        },
+    }
+
+    entry = burn.entry_state(live, council)
+
+    assert entry["allowed"] is False
+    assert entry["execution_authorized"] is False
+    assert entry["strategy_allowed"] is False
+    assert entry["timing_mode"] == "WAIT_FOR_PULLBACK"
+    assert entry["allowance_mode"] == "watching"
+
+
+def test_council_with_session_packet_backfills_allowance_from_existing_execution_packet() -> None:
+    council: dict[str, Any] = {
+        "execution_packet_present": True,
+        "execution_packet_id": "pgpkt_existing",
+        "execution_packet": {
+            "packet_id": "pgpkt_existing",
+            "allowance_package": {
+                "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3",
+                "accepted": True,
+                "execution_ready": True,
+                "book_strategy_maturity": "ENTER_NOW",
+                "expected_move_time": {
+                    "expected_duration_text": "85m 00s",
+                    "expected_duration_sec": 5100,
+                },
+            },
+            "book_strategy_state": "ENTER_NOW",
+            "execution_lane": {"accepted": True, "name": "SNIPER_ZONE_ENTRY"},
+            "timing_decision": {"entry_now_allowed": True, "timing_mode": "ENTER_NOW"},
+        },
+        "promotion_trace": {
+            "candidate_side": "BUY",
+            "book_strategy_state": "ENTER_NOW",
+            "opportunity_maturity_state": "ENTER_NOW",
+            "blocked_by": "NONE",
+        },
+    }
+
+    merged = burn.council_with_session_packet(council, "missing-session")
+    entry = burn.entry_state({}, merged)
+
+    assert merged["allowance_package"]["accepted"] is True
+    assert entry["allowed"] is True
+    assert entry["execution_authorized"] is True
+    assert entry["allowance_package_accepted"] is True
+    assert entry["allowance_package_execution_ready"] is True
+    assert entry["allowance_authority"] == "PLAYBOOK_FINAL_DECIDER_V3"
+    assert entry["expected_move_time"]["expected_duration_text"] == "85m 00s"
 
 
 def test_entry_state_blocks_playbook_enter_now_when_internal_bad_entry_guard_is_active() -> None:
@@ -163,6 +318,54 @@ def test_entry_state_allows_professional_playbook_package_over_legacy_reasoning_
     assert entry["blocked_by"] == "NONE"
     assert entry["reasoning_execution_blocked"] is False
     assert entry["hard_bad_entry_class_active"] is False
+
+
+def test_entry_state_derives_alert_horizon_from_professional_trade_plan() -> None:
+    live: dict[str, Any] = {}
+    council: dict[str, Any] = {
+        "execution_packet_present": True,
+        "promotion_trace": {
+            "candidate_side": "BUY",
+            "book_strategy_state": "ENTER_NOW",
+            "opportunity_maturity_state": "ENTER_NOW",
+            "timing_decision": {
+                "entry_now_allowed": True,
+                "playbook_strategy_authorized": True,
+                "timing_mode": "ENTER_NOW",
+            },
+            "execution_lane": {"accepted": False, "name": "SNIPER_ZONE_ENTRY"},
+            "allowance_package": {
+                "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3",
+                "accepted": True,
+                "execution_ready": True,
+                "opportunity_maturity": "ENTER_NOW",
+                "score": 0.91,
+                "threshold": 0.70,
+                "professional_trade_plan": {
+                    "professional_grade": True,
+                    "side": "BUY",
+                    "expected_duration_sec": 4800,
+                    "expected_candle_count": 16,
+                    "timeframe": "M5",
+                    "timeframe_seconds": 300,
+                    "current_leg_candle_count": 8,
+                    "current_leg_side": "BUY",
+                    "current_leg_stage": "MATURE",
+                },
+            },
+        },
+    }
+
+    entry = burn.entry_state(live, council)
+
+    assert entry["allowed"] is True
+    assert entry["final_score"] == 0.91
+    assert entry["threshold"] == 0.70
+    expected = entry["expected_move_time"]
+    assert expected["expected_duration_sec"] == 4800
+    assert expected["expected_duration_text"] == "1h 20m 00s"
+    assert expected["expected_candle_count"] == 16
+    assert burn.operator_alert_quality_decision(entry, {"freshness": {"fresh": True}})["allowed"] is True
 
 
 def test_compact_sample_preserves_candle_movement_context() -> None:

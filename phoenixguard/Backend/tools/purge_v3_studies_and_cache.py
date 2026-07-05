@@ -7,6 +7,7 @@ ensure_backend_paths()
 import argparse
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -43,6 +44,13 @@ DATA_LIVE_DIR_NAMES = {
     "studies": "generated data_live V3 study records",
     "study_packets": "generated data_live V3 study packets",
 }
+CERTIFICATION_BURN_PREFIXES = (
+    "adaptive_reaction_cert_burn_",
+    "final_8h_certification_burn_",
+    "final_10h_certification_burn_",
+    "post_patch_playbook_authority_sanity_",
+)
+DEFAULT_CERTIFICATION_BURN_MIN_AGE_HOURS = 24.0
 
 PROTECTED_EXACT_NAMES = {
     "808_shooter_boxes.json",
@@ -209,7 +217,46 @@ def _dedupe_targets(targets: Iterable[tuple[Path, str]]) -> list[tuple[Path, str
     return deduped
 
 
-def iter_purge_records(root: Path) -> tuple[PurgeRecord, ...]:
+def _latest_mtime(path: Path) -> float:
+    latest = path.stat().st_mtime
+    if path.is_dir():
+        for child in path.rglob("*"):
+            try:
+                latest = max(latest, child.stat().st_mtime)
+            except OSError:
+                continue
+    return latest
+
+
+def _certification_burn_targets(root: Path, *, min_age_hours: float) -> list[tuple[Path, str]]:
+    codex_runtime = root / ".codex_runtime"
+    if not codex_runtime.exists() or codex_runtime.is_symlink():
+        return []
+
+    now = time.time()
+    min_age_sec = max(0.0, float(min_age_hours)) * 3600.0
+    targets: list[tuple[Path, str]] = []
+    for path in sorted(codex_runtime.iterdir()):
+        if not path.is_dir() or path.is_symlink():
+            continue
+        if not any(path.name.startswith(prefix) for prefix in CERTIFICATION_BURN_PREFIXES):
+            continue
+        try:
+            age_sec = now - _latest_mtime(path)
+        except OSError:
+            continue
+        if age_sec < min_age_sec:
+            continue
+        targets.append((path, f"generated certification burn workspace older than {min_age_hours:g}h"))
+    return targets
+
+
+def iter_purge_records(
+    root: Path,
+    *,
+    include_certification_burns: bool = False,
+    certification_burn_min_age_hours: float = DEFAULT_CERTIFICATION_BURN_MIN_AGE_HOURS,
+) -> tuple[PurgeRecord, ...]:
     root = root.resolve()
     runtime = runtime_root(root)
     if not runtime.exists() or runtime.is_symlink():
@@ -232,6 +279,15 @@ def iter_purge_records(root: Path) -> tuple[PurgeRecord, ...]:
         record = _build_record(target, root, runtime, reason)
         if record is not None:
             records.append(record)
+
+    if include_certification_burns:
+        codex_runtime = (root / ".codex_runtime").resolve()
+        for target, reason in _dedupe_targets(
+            _certification_burn_targets(root, min_age_hours=certification_burn_min_age_hours)
+        ):
+            record = _build_record(target, root, codex_runtime, reason)
+            if record is not None:
+                records.append(record)
     return tuple(records)
 
 
@@ -335,18 +391,36 @@ def write_report(result: PurgeResult) -> None:
     result.report_path.write_text(render_report(result), encoding="utf-8")
 
 
-def run_purge(root: Path, *, confirm_delete: bool = False, report_path: Path | None = None) -> PurgeResult:
+def _delete_guard_for_record(record: PurgeRecord, root: Path, primary_runtime: Path) -> Path:
+    codex_runtime = (root / ".codex_runtime").resolve()
+    if codex_runtime.exists() and _is_under_runtime(record.path, codex_runtime):
+        return codex_runtime
+    return primary_runtime
+
+
+def run_purge(
+    root: Path,
+    *,
+    confirm_delete: bool = False,
+    report_path: Path | None = None,
+    include_certification_burns: bool = False,
+    certification_burn_min_age_hours: float = DEFAULT_CERTIFICATION_BURN_MIN_AGE_HOURS,
+) -> PurgeResult:
     root = root.resolve()
     runtime = runtime_root(root)
     report_path = (
         report_path or root / "reports" / "FINAL_PURGED_STUDIES_AND_CACHE_REPORT.md"
     ).resolve()
-    records = iter_purge_records(root)
+    records = iter_purge_records(
+        root,
+        include_certification_burns=include_certification_burns,
+        certification_burn_min_age_hours=certification_burn_min_age_hours,
+    )
     result = PurgeResult(root=root, report_path=report_path, confirm_delete=confirm_delete, records=records)
 
     if confirm_delete:
         for record in records:
-            _delete_record(record, root, runtime)
+            _delete_record(record, root, _delete_guard_for_record(record, root, runtime))
 
     write_report(result)
     return result
@@ -368,12 +442,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Markdown report path. Defaults to reports/FINAL_PURGED_STUDIES_AND_CACHE_REPORT.md under --root.",
     )
+    parser.add_argument(
+        "--include-certification-burns",
+        action="store_true",
+        help=(
+            "Include generated .codex_runtime certification burn workspaces. "
+            "Only directories older than --certification-burn-min-age-hours are eligible."
+        ),
+    )
+    parser.add_argument(
+        "--certification-burn-min-age-hours",
+        type=float,
+        default=DEFAULT_CERTIFICATION_BURN_MIN_AGE_HOURS,
+        help="Minimum age for certification burn workspaces when --include-certification-burns is set.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    result = run_purge(args.root, confirm_delete=args.confirm_delete, report_path=args.report)
+    result = run_purge(
+        args.root,
+        confirm_delete=args.confirm_delete,
+        report_path=args.report,
+        include_certification_burns=args.include_certification_burns,
+        certification_burn_min_age_hours=args.certification_burn_min_age_hours,
+    )
     action = "deleted" if args.confirm_delete else "planned"
     print(f"V3 studies/cache purge {action}: {result.total_file_count} files, {result.total_size} bytes")
     print(f"Report: {result.report_path}")

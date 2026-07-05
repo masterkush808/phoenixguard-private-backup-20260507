@@ -117,6 +117,9 @@ def test_mt4_bridge_compact_command_preserves_ea_contract() -> None:
     assert decoded["packet_id"] == "pgpkt_test_001"
     assert decoded["symbol"] == "EURJPY-OTC"
     assert decoded["bridge_sequence"] == 7
+    assert decoded["created_epoch_sec"] > decoded["source_created_epoch_sec"]
+    assert decoded["source_created_epoch_sec"] == 1782000000.0
+    assert decoded["heartbeat"]["source_created_epoch_sec"] == 1782000000.0
     assert decoded["execution"]["state"] == "EXECUTABLE"
     assert decoded["execution"]["side"] == "BUY"
     assert decoded["entry_eligibility"]["eligible"] is True
@@ -128,6 +131,9 @@ def test_mt4_bridge_compact_command_preserves_ea_contract() -> None:
     assert decoded["allowance_package"]["selected_lane"] == "SNIPER_ZONE_ENTRY"
     assert decoded["allowance_package"]["professional_grade"] is True
     assert decoded["allowance_package"]["professional_trade_plan"]["expected_candle_count"] == 12
+    assert decoded["allowance_package"]["expected_move_time"]["expected_duration_sec"] == 3600
+    assert decoded["expected_move_time"] == decoded["allowance_package"]["expected_move_time"]
+    assert decoded["professional_trade_plan"] == decoded["allowance_package"]["professional_trade_plan"]
     assert decoded["execution"]["allowance_package_type"] == "INTRADAY_ENTER_NOW"
     assert decoded["permission_state"]["entry_eligible"] is True
     assert decoded["reason_codes"] == ["CLEAN_WAVE"]
@@ -135,6 +141,26 @@ def test_mt4_bridge_compact_command_preserves_ea_contract() -> None:
     assert decoded["execution"]["amount_action"] == "DO_NOT_CHANGE_AMOUNT"
     assert decoded["live_integrity"]["source"] == "model_council"
     assert decoded["live_integrity"]["input_frame_hash"] == "frame_hash_test"
+
+
+def test_mt4_bridge_compact_command_preserves_expected_move_time_from_professional_plan() -> None:
+    bridge = _load_bridge_module()
+    packet = json.loads(json.dumps(_sample_execution_packet()))
+    allowance = cast(dict[str, object], packet["allowance_package"])
+    allowance.pop("expected_move_time")
+    professional = cast(dict[str, object], allowance["professional_trade_plan"])
+    professional["expected_move_time"] = {
+        "expected_duration_text": "40m",
+        "expected_duration_sec": 2400,
+        "expected_candle_count": 8,
+    }
+
+    command = bridge._compact_command(packet, bridge_sequence=12)
+
+    bridge._validate_command(command)
+    assert command["allowance_package"]["expected_move_time"]["expected_duration_text"] == "40m"
+    assert command["allowance_package"]["expected_move_time"]["expected_duration_sec"] == 2400
+    assert command["expected_move_time"] == command["allowance_package"]["expected_move_time"]
 
 
 def test_mt4_bridge_compact_command_preserves_swing_allowance_package() -> None:
@@ -255,6 +281,58 @@ def test_mt4_bridge_live_monitor_rejects_stale_packet_frame() -> None:
     assert "packet frame lag" in reason
 
 
+def test_mt4_bridge_live_monitor_rejects_missing_current_packet_identity() -> None:
+    bridge = _load_bridge_module()
+    packet = _sample_execution_packet()
+    live = {
+        "tracking_enabled": True,
+        "status": "running",
+        "frame_id": packet["frame_id"],
+        "display_frame_id": packet["frame_id"],
+        "capture_count": packet["capture_count"],
+        "display_published_epoch": 1000.0,
+        "latest_execution_packet": {"side": "BUY"},
+    }
+
+    ok, reason = bridge._packet_current_in_live_monitor(
+        packet,
+        live,
+        now_epoch=1002.0,
+        max_live_age_sec=120.0,
+        max_packet_frame_lag=2,
+    )
+
+    assert ok is False
+    assert "packet id missing" in reason
+
+
+def test_mt4_bridge_live_monitor_rejects_expired_packet_window() -> None:
+    bridge = _load_bridge_module()
+    packet = _sample_execution_packet()
+    packet["created_epoch_sec"] = 900.0
+    packet["valid_until_epoch_sec"] = 1001.0
+    live = {
+        "tracking_enabled": True,
+        "status": "running",
+        "frame_id": packet["frame_id"],
+        "display_frame_id": packet["frame_id"],
+        "capture_count": packet["capture_count"],
+        "display_published_epoch": 1000.0,
+        "latest_execution_packet": {"packet_id": packet["packet_id"], "side": "BUY"},
+    }
+
+    ok, reason = bridge._packet_current_in_live_monitor(
+        packet,
+        live,
+        now_epoch=1002.0,
+        max_live_age_sec=120.0,
+        max_packet_frame_lag=2,
+    )
+
+    assert ok is False
+    assert "expired" in reason
+
+
 def test_mt4_bridge_live_monitor_accepts_current_packet() -> None:
     bridge = _load_bridge_module()
     packet = _sample_execution_packet()
@@ -278,6 +356,91 @@ def test_mt4_bridge_live_monitor_accepts_current_packet() -> None:
 
     assert ok is True
     assert "passed" in reason
+
+
+def test_mt4_bridge_live_monitor_prefers_fresh_capture_over_stale_display_epoch() -> None:
+    bridge = _load_bridge_module()
+    packet = _sample_execution_packet()
+    packet["valid_until_epoch_sec"] = 1782001000.0
+    live = {
+        "tracking_enabled": True,
+        "status": "running",
+        "frame_id": packet["frame_id"],
+        "display_frame_id": packet["frame_id"],
+        "capture_count": packet["capture_count"],
+        "display_published_epoch": 1781999000.0,
+        "last_capture_epoch": 1782000000.0,
+        "latest_execution_packet": {"packet_id": packet["packet_id"], "side": "BUY"},
+    }
+
+    ok, reason = bridge._packet_current_in_live_monitor(
+        packet,
+        live,
+        now_epoch=1782000002.0,
+        max_live_age_sec=120.0,
+        max_packet_frame_lag=2,
+    )
+
+    assert ok is True
+    assert "live.last_capture_epoch" in reason
+
+
+def test_mt4_bridge_live_monitor_accepts_fresh_performance_when_compact_live_display_lags() -> None:
+    bridge = _load_bridge_module()
+    packet = _sample_execution_packet()
+    packet["valid_until_epoch_sec"] = 1782001000.0
+    live = {
+        "tracking_enabled": True,
+        "status": "running",
+        "frame_id": packet["frame_id"],
+        "display_frame_id": packet["frame_id"],
+        "capture_count": packet["capture_count"],
+        "display_published_epoch": 1781999000.0,
+        "latest_execution_packet": {"packet_id": packet["packet_id"], "side": "BUY"},
+    }
+    performance = {
+        "frame_id": packet["frame_id"],
+        "capture_count": packet["capture_count"],
+        "frame_age_ms": 1500.0,
+    }
+
+    ok, reason = bridge._packet_current_in_live_monitor(
+        packet,
+        live,
+        performance=performance,
+        now_epoch=1782000002.0,
+        max_live_age_sec=120.0,
+        max_packet_frame_lag=2,
+    )
+
+    assert ok is True
+    assert "performance.frame_age_ms" in reason
+
+
+def test_mt4_bridge_live_monitor_rejects_stale_display_without_fresh_witness() -> None:
+    bridge = _load_bridge_module()
+    packet = _sample_execution_packet()
+    packet["valid_until_epoch_sec"] = 1782001000.0
+    live = {
+        "tracking_enabled": True,
+        "status": "running",
+        "frame_id": packet["frame_id"],
+        "display_frame_id": packet["frame_id"],
+        "capture_count": packet["capture_count"],
+        "display_published_epoch": 1781999000.0,
+        "latest_execution_packet": {"packet_id": packet["packet_id"], "side": "BUY"},
+    }
+
+    ok, reason = bridge._packet_current_in_live_monitor(
+        packet,
+        live,
+        now_epoch=1782000002.0,
+        max_live_age_sec=120.0,
+        max_packet_frame_lag=2,
+    )
+
+    assert ok is False
+    assert "capture age" in reason
 
 
 def test_mt4_bridge_rejects_compacted_command_that_would_fail_ea_contract() -> None:
@@ -321,3 +484,26 @@ def test_mt4_bridge_atomic_write_replaces_longer_previous_payload(tmp_path: Path
     assert decoded["schema_version"] == "PG_MT4_BRIDGE_STATUS_V1"
     assert decoded["bridge_status"] == "NO_EXECUTION_PACKET"
     assert decoded["bridge_sequence"] == 8
+
+
+def test_mt4_alert_watcher_reads_v1_command_contract() -> None:
+    script_path = Path(__file__).resolve().parents[2] / "Backend" / "tools" / "watch_trade_package_ack_alerts.ps1"
+    script = script_path.read_text(encoding="utf-8")
+
+    for expected in (
+        'PG_MT4_EXECUTION_COMMAND_V1',
+        'Get-NestedProperty $command "execution"',
+        'Get-Mt4CommandValidUntil',
+        'expected_move_time',
+        'professional_trade_plan',
+        'EXPECTED MOVE TIME:',
+        'PROFESSIONAL PLAN:',
+    ):
+        assert expected in script
+
+
+def test_mt4_executioner_default_packet_age_matches_live_pipeline() -> None:
+    source_path = Path(__file__).resolve().parents[2] / "Backend" / "launch" / "mt4" / "PhoenixGuard_MT4_Executioner.mq4"
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "input int                   InpPacketMaxAgeMs                      = 180000;" in source

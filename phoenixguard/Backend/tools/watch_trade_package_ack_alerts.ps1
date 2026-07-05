@@ -25,6 +25,15 @@ $firstScan = $true
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+$focusSource = @'
+using System;
+using System.Runtime.InteropServices;
+public static class PhoenixGuardAlertFocus {
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+}
+'@
+Add-Type -TypeDefinition $focusSource -ErrorAction SilentlyContinue
 
 function Add-JsonLine {
     param(
@@ -68,14 +77,30 @@ function Get-EntryKey {
     return "entry|seq_$($EventRow.seq)|frame_$($EventRow.frame)|$($entry.side)|$($entry.lane_name)|$($EventRow.captured_at_utc)"
 }
 
+function Get-NestedProperty {
+    param($Object, [string]$Name)
+    if ($null -eq $Object -or [string]::IsNullOrWhiteSpace($Name)) {
+        return $null
+    }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+    return $property.Value
+}
+
 function Get-Mt4CommandKey {
     param($Command)
     $packet = Get-TextValue $Command.packet_id
-    $updated = Get-TextValue $Command.timestamp_utc
+    $heartbeat = Get-NestedProperty $Command "heartbeat"
+    $validUntil = Get-TextValue (Get-NestedProperty $Command "valid_until_epoch_sec") (Get-TextValue (Get-NestedProperty $heartbeat "valid_until_epoch_sec") "")
+    $updated = Get-TextValue $Command.timestamp_utc (Get-TextValue $Command.bridge_written_epoch "")
     if ($packet.Length -gt 0) {
-        return "mt4_command|$packet|$updated"
+        return "mt4_command|$packet|$validUntil"
     }
-    return "mt4_command|$($Command.bridge_sequence)|$updated|$($Command.action)|$($Command.side)"
+    $execution = Get-NestedProperty $Command "execution"
+    $side = Get-TextValue (Get-NestedProperty $execution "side") (Get-TextValue $Command.side "")
+    return "mt4_command|$($Command.bridge_sequence)|$updated|$($Command.action)|$side"
 }
 
 function Get-ValidUntil {
@@ -97,7 +122,136 @@ function Get-ValidUntil {
         } catch {
         }
     }
+    foreach ($candidate in @(
+        $EventRow.captured_at_utc,
+        $EventRow.captured_at,
+        $entry.captured_at_utc,
+        $entry.captured_at
+    )) {
+        $text = Get-TextValue $candidate
+        if (-not $text) {
+            continue
+        }
+        try {
+            return ([DateTimeOffset]::Parse($text).ToLocalTime()).AddSeconds([Math]::Max(60, $DefaultValidSeconds))
+        } catch {
+        }
+    }
+    foreach ($candidate in @(
+        $EventRow.captured_epoch,
+        $entry.captured_epoch
+    )) {
+        $captured = Get-DateTimeFromUnixSeconds $candidate
+        if ($null -ne $captured) {
+            return $captured.AddSeconds([Math]::Max(60, $DefaultValidSeconds))
+        }
+    }
     return [DateTimeOffset]::Now.AddSeconds([Math]::Max(60, $DefaultValidSeconds))
+}
+
+function Get-DateTimeFromUnixSeconds {
+    param($Value)
+    if ($null -eq $Value) {
+        return $null
+    }
+    try {
+        $seconds = [double]$Value
+        if ($seconds -le 0) {
+            return $null
+        }
+        $milliseconds = [int64][Math]::Round($seconds * 1000.0)
+        return [DateTimeOffset]::FromUnixTimeMilliseconds($milliseconds).ToLocalTime()
+    } catch {
+        return $null
+    }
+}
+
+function Focus-BrokerWindowForCapture {
+    $query = Get-TextValue $env:PHOENIXGUARD_ALERT_REFOCUS_WINDOW_QUERY "The Most Innovative Trading Platform"
+    if (-not $query) {
+        return
+    }
+    try {
+        $process = Get-Process msedge,chrome -ErrorAction SilentlyContinue |
+            Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like "*$query*" } |
+            Select-Object -First 1
+        if ($null -eq $process) {
+            return
+        }
+        [PhoenixGuardAlertFocus]::ShowWindowAsync($process.MainWindowHandle, 3) | Out-Null
+        Start-Sleep -Milliseconds 150
+        [PhoenixGuardAlertFocus]::SetForegroundWindow($process.MainWindowHandle) | Out-Null
+    } catch {
+    }
+}
+
+function Get-Mt4CommandValidUntil {
+    param($Command)
+    $heartbeat = Get-NestedProperty $Command "heartbeat"
+    foreach ($candidate in @(
+        (Get-NestedProperty $Command "valid_until_epoch_sec"),
+        (Get-NestedProperty $heartbeat "valid_until_epoch_sec")
+    )) {
+        $parsed = Get-DateTimeFromUnixSeconds $candidate
+        if ($null -ne $parsed) {
+            return $parsed
+        }
+    }
+    foreach ($candidate in @(
+        (Get-NestedProperty $Command "valid_until_utc"),
+        (Get-NestedProperty $Command "expires_at_utc")
+    )) {
+        $text = Get-TextValue $candidate
+        if (-not $text) {
+            continue
+        }
+        try {
+            return [DateTimeOffset]::Parse($text).ToLocalTime()
+        } catch {
+        }
+    }
+    return [DateTimeOffset]::Now.AddSeconds([Math]::Max(60, $DefaultValidSeconds))
+}
+
+function Format-Mt4ExpectedMoveTime {
+    param($Expected, $Professional)
+    if ($Expected -is [string] -and -not [string]::IsNullOrWhiteSpace($Expected)) {
+        return [string]$Expected
+    }
+    $duration = Get-TextValue (Get-NestedProperty $Expected "expected_duration_text") ""
+    $seconds = Get-TextValue (Get-NestedProperty $Expected "expected_duration_sec") (Get-TextValue (Get-NestedProperty $Professional "expected_duration_sec") "")
+    if (-not $duration -and $seconds) {
+        $duration = "$seconds sec"
+    }
+    $candles = Get-TextValue (Get-NestedProperty $Expected "expected_candle_count") (Get-TextValue (Get-NestedProperty $Professional "expected_candle_count") "")
+    $stage = Get-TextValue (Get-NestedProperty $Expected "current_leg_stage") ""
+    $parts = @()
+    if ($duration) {
+        $parts += $duration
+    }
+    if ($candles) {
+        $parts += "candles=$candles"
+    }
+    if ($stage) {
+        $parts += "stage=$stage"
+    }
+    if ($parts.Count -gt 0) {
+        return ($parts -join " | ")
+    }
+    return "unknown"
+}
+
+function Format-Mt4ProfessionalTradePlan {
+    param($Professional)
+    if ($null -eq $Professional) {
+        return "missing"
+    }
+    $grade = Get-TextValue (Get-NestedProperty $Professional "professional_grade") "unknown"
+    $authority = Get-TextValue (Get-NestedProperty $Professional "authority_side") (Get-TextValue (Get-NestedProperty $Professional "side") "unknown")
+    $state = Get-TextValue (Get-NestedProperty $Professional "professional_thesis_state") "unknown"
+    $class = Get-TextValue (Get-NestedProperty $Professional "thesis_class") "unknown"
+    $candles = Get-TextValue (Get-NestedProperty $Professional "expected_candle_count") "unknown"
+    return "grade=$grade | authority_side=$authority | state=$state | class=$class | expected_candles=$candles"
 }
 
 function Show-AckAlert {
@@ -115,7 +269,8 @@ function Show-AckAlert {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = $Title
     $form.StartPosition = "CenterScreen"
-    $form.TopMost = $true
+    $topMostSetting = (Get-TextValue $env:PHOENIXGUARD_ALERT_TOPMOST "0").ToLowerInvariant()
+    $form.TopMost = @("1", "true", "yes", "on") -contains $topMostSetting
     $form.Width = 900
     $form.Height = 690
     $form.BackColor = [System.Drawing.Color]::FromArgb(10, 10, 8)
@@ -158,16 +313,27 @@ function Show-AckAlert {
             $form.Close()
         }
     })
+    $refocusTimer = New-Object System.Windows.Forms.Timer
+    $refocusTimer.Interval = 1500
+    $refocusTimer.Add_Tick({
+        $refocusTimer.Stop()
+        Focus-BrokerWindowForCapture
+    })
 
     $form.Controls.Add($textBox)
     $form.Controls.Add($button)
     $form.Add_Shown({
-        $form.Activate()
+        if ($form.TopMost) {
+            $form.Activate()
+        }
         $timer.Start()
+        $refocusTimer.Start()
     })
     $form.Add_FormClosed({
         $timer.Stop()
         $timer.Dispose()
+        $refocusTimer.Stop()
+        $refocusTimer.Dispose()
     })
 
     Add-JsonLine -Path $AlertLog -Payload ([ordered]@{
@@ -272,7 +438,11 @@ function Scan-EntryEvents {
         $seen[$key] = $true
         $side = Get-TextValue $entry.side "UNKNOWN"
         $title = "PhoenixGuard ENTER $side"
-        Show-AckAlert -Title $title -Body (Format-EntryAlertBody $row) -ValidUntil (Get-ValidUntil $row) -Payload $row
+        $validUntil = Get-ValidUntil $row
+        if ([DateTimeOffset]::Now -gt $validUntil) {
+            continue
+        }
+        Show-AckAlert -Title $title -Body (Format-EntryAlertBody $row) -ValidUntil $validUntil -Payload $row
     }
 }
 
@@ -285,24 +455,66 @@ function Scan-Mt4Command {
     } catch {
         return
     }
+    $schema = Get-TextValue $command.schema_version
     $status = Get-TextValue $command.bridge_status
+    $packet = Get-TextValue $command.packet_id
+    if ($status -eq "NO_EXECUTION_PACKET" -or $status -eq "BRIDGE_ERROR") {
+        return
+    }
     $action = Get-TextValue $command.action
     $side = Get-TextValue $command.side
-    $packet = Get-TextValue $command.packet_id
-    if (-not $packet -and ($status -eq "NO_EXECUTION_PACKET" -or -not $action)) {
-        return
-    }
-    $key = Get-Mt4CommandKey $command
-    if ($seen.ContainsKey($key)) {
-        return
-    }
-    if ($firstScan -and $IgnoreExisting) {
-        $seen[$key] = $true
-        return
-    }
-    $seen[$key] = $true
     $validUntil = [DateTimeOffset]::Now.AddSeconds([Math]::Max(60, $DefaultValidSeconds))
-    $body = @"
+    $body = ""
+    if ($schema -eq "PG_MT4_EXECUTION_COMMAND_V1") {
+        $execution = Get-NestedProperty $command "execution"
+        $signal = Get-NestedProperty $command "signal_state"
+        $allowance = Get-NestedProperty $command "allowance_package"
+        $state = (Get-TextValue (Get-NestedProperty $execution "state") (Get-TextValue (Get-NestedProperty $signal "state") "")).ToUpperInvariant()
+        $side = (Get-TextValue (Get-NestedProperty $execution "side") (Get-TextValue (Get-NestedProperty $signal "side") "UNKNOWN")).ToUpperInvariant()
+        if ($state -ne "EXECUTABLE" -or ($side -ne "BUY" -and $side -ne "SELL")) {
+            return
+        }
+        $validUntil = Get-Mt4CommandValidUntil $command
+        if ([DateTimeOffset]::Now -gt $validUntil) {
+            return
+        }
+        $action = "ENTER"
+        $status = "EXECUTION_PACKET"
+        $expected = Get-NestedProperty $allowance "expected_move_time"
+        if ($null -eq $expected) {
+            $expected = Get-NestedProperty $command "expected_move_time"
+        }
+        $professional = Get-NestedProperty $allowance "professional_trade_plan"
+        if ($null -eq $professional) {
+            $professional = Get-NestedProperty $command "professional_trade_plan"
+        }
+        $written = Get-TextValue $command.timestamp_utc
+        if (-not $written) {
+            $writtenLocal = Get-DateTimeFromUnixSeconds $command.bridge_written_epoch
+            if ($null -ne $writtenLocal) {
+                $written = $writtenLocal.ToString("yyyy-MM-dd HH:mm:ss zzz")
+            }
+        }
+        $body = @"
+PHOENIXGUARD MT4 BRIDGE ATTEMPT
+
+ACTION: $action $side
+PACKET: $packet
+STATUS: $status
+BRIDGE SEQUENCE: $($command.bridge_sequence)
+VALID UNTIL LOCAL: $($validUntil.ToString("yyyy-MM-dd HH:mm:ss zzz"))
+WRITTEN: $written
+
+EXPECTED MOVE TIME: $(Format-Mt4ExpectedMoveTime -Expected $expected -Professional $professional)
+PROFESSIONAL PLAN: $(Format-Mt4ProfessionalTradePlan $professional)
+
+This alert means PhoenixGuard wrote or updated the MT4 bridge command file.
+Check MT4 for EA acceptance/rejection and open trade state.
+"@
+    } elseif (-not $packet -and (-not $action)) {
+        return
+    } else {
+        $body = @"
 PHOENIXGUARD MT4 BRIDGE ATTEMPT
 
 ACTION: $action $side
@@ -314,7 +526,27 @@ TIMESTAMP UTC: $($command.timestamp_utc)
 This alert means PhoenixGuard wrote or updated the MT4 bridge command file.
 Check MT4 for EA acceptance/rejection and open trade state.
 "@
-    Show-AckAlert -Title "PhoenixGuard MT4 Attempt" -Body $body -ValidUntil $validUntil -Payload $command
+    }
+    $key = Get-Mt4CommandKey $command
+    if ($seen.ContainsKey($key)) {
+        return
+    }
+    if ($firstScan -and $IgnoreExisting) {
+        $seen[$key] = $true
+        return
+    }
+    $seen[$key] = $true
+    Add-JsonLine -Path $AlertLog -Payload ([ordered]@{
+        at = (Get-Date).ToString("o")
+        status = "MT4_COMMAND_OBSERVED"
+        title = "PhoenixGuard MT4 Attempt"
+        valid_until = $validUntil.ToString("o")
+        payload = $command
+    })
+    $mt4PopupSetting = (Get-TextValue $env:PHOENIXGUARD_ALERT_MT4_POPUP "0").ToLowerInvariant()
+    if (@("1", "true", "yes", "on") -contains $mt4PopupSetting) {
+        Show-AckAlert -Title "PhoenixGuard MT4 Attempt" -Body $body -ValidUntil $validUntil -Payload $command
+    }
 }
 
 while ($true) {

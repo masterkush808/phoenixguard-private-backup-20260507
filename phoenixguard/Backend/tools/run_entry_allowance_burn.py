@@ -26,6 +26,8 @@ SCHEMA_VERSION = "PG_ENTRY_ALLOWANCE_BURN_V1"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PLAYBOOK_EXECUTION_AUTHORITY = "PLAYBOOK_FINAL_DECIDER_V3"
 PLAYBOOK_ENTER_NOW_STATES = {"ENTER_NOW", "SWING_ENTER_NOW", "INTRADAY_ENTER_NOW"}
+DEFAULT_BURN_MAX_FRAME_AGE_MS = 120_000.0
+DEFAULT_BURN_MAX_CAPTURE_AGE_SEC = 180.0
 STRATEGY_HARD_BLOCKERS = {
     "CANDIDATE_INVALIDATED",
     "MARKET_TRAP",
@@ -100,8 +102,9 @@ def write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(dict(payload), indent=2, ensure_ascii=True, default=str)
     last_error: OSError | None = None
+    temp_key = hashlib.sha1(str(path).encode("utf-8", errors="ignore")).hexdigest()[:12]
     for attempt in range(12):
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
+        tmp = path.parent / f".tmp_{temp_key}_{os.getpid()}_{attempt}_{time.monotonic_ns() % 1_000_000}.json"
         try:
             tmp.write_text(content, encoding="utf-8")
             tmp.replace(path)
@@ -112,6 +115,10 @@ def write_json(path: Path, payload: Mapping[str, Any]) -> None:
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
+            if isinstance(exc, FileNotFoundError) or getattr(exc, "winerror", None) in {2, 3}:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                time.sleep(min(0.5, 0.05 * (attempt + 1)))
+                continue
             # Windows can briefly deny os.replace while dashboards or monitors
             # read status.json. A bounded retry keeps long burns alive.
             if isinstance(exc, PermissionError) or getattr(exc, "winerror", None) in {5, 32}:
@@ -177,13 +184,21 @@ def fetch_runtime_bundle(base_url: str, session_id: str, timeout: float) -> tupl
     """Read live, council, and performance state without serial endpoint delay."""
     paths = {
         "live": f"/v1/mobile/live/state/v3/{session_id}?compact=1&monitor=1",
+        "perf": f"/v1/mobile/performance/trace/v3/{session_id}",
         "health": "/v1/mobile/health",
     }
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pg-burn-fetch") as pool:
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="pg-burn-fetch") as pool:
         futures = {name: pool.submit(fetch_json, base_url, path, timeout) for name, path in paths.items()}
         live_resp = futures["live"].result()
+        perf_resp = futures["perf"].result()
         health_resp = futures["health"].result()
     live_json = mapping(live_resp.get("json"))
+    live_json["_health"] = {
+        "ok": bool(health_resp.get("ok")),
+        "latency_ms": health_resp.get("latency_ms"),
+        "status": text(mapping(health_resp.get("json")).get("status")),
+        "error": text(health_resp.get("error")),
+    }
     council_json = mapping(live_json.get("model_council_result"))
     packet = mapping(live_json.get("latest_execution_packet") or live_json.get("execution_packet"))
     if packet:
@@ -199,7 +214,7 @@ def fetch_runtime_bundle(base_url: str, session_id: str, timeout: float) -> tupl
     }
     if not bool(live_resp.get("ok")):
         council_resp["error"] = live_resp.get("error")
-    return live_resp, council_resp, health_resp
+    return live_resp, council_resp, perf_resp
 
 
 def candle_movement_context(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str, Any]:
@@ -603,6 +618,15 @@ def timeframe_seconds(value: Any) -> int:
     if unit == "D":
         return count * 86400
     return count * 60
+
+
+def format_duration(seconds: int | float) -> str:
+    total = max(0, int(round(float(seconds))))
+    minutes, sec = divmod(total, 60)
+    hours, minute = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minute:02d}m {sec:02d}s"
+    return f"{minute}m {sec:02d}s"
 
 
 def operator_alert_expected_duration_sec(entry: Mapping[str, Any]) -> int:
@@ -1251,35 +1275,42 @@ def council_with_session_packet(council: Mapping[str, Any], session_id: str) -> 
     evidence must follow that same package source to avoid missed entries.
     """
     merged = dict(council)
+
+    def backfill_from_packet(packet: Mapping[str, Any]) -> None:
+        if not packet:
+            return
+        merged["execution_packet_present"] = True
+        if text(packet.get("packet_id")) and not text(merged.get("execution_packet_id")):
+            merged["execution_packet_id"] = text(packet.get("packet_id"))
+        for key in (
+            "allowance_package",
+            "book_strategy",
+            "book_strategy_state",
+            "book_strategy_playbook",
+            "opportunity_maturity",
+            "opportunity_maturity_state",
+            "promotion_trace",
+            "execution_lane",
+            "timing_decision",
+            "candle_movement_context_v3",
+            "candle_movement",
+        ):
+            if mapping(merged.get(key)) or sequence(merged.get(key)) or text(merged.get(key)):
+                continue
+            value = packet.get(key)
+            if mapping(value) or sequence(value) or text(value):
+                merged[key] = value
+
+    for packet_key in ("execution_packet", "model_council_packet"):
+        backfill_from_packet(mapping(merged.get(packet_key)))
+
     for payload in session_artifact_payloads(session_id):
         for packet_key in ("execution_packet", "model_council_packet"):
-            if mapping(merged.get(packet_key)):
-                continue
-            packet = mapping(payload.get(packet_key))
+            packet = mapping(merged.get(packet_key) or payload.get(packet_key))
             if not packet:
                 continue
-            merged[packet_key] = packet
-            merged["execution_packet_present"] = True
-            if text(packet.get("packet_id")):
-                merged["execution_packet_id"] = text(packet.get("packet_id"))
-            for key in (
-                "allowance_package",
-                "book_strategy",
-                "book_strategy_state",
-                "book_strategy_playbook",
-                "opportunity_maturity",
-                "opportunity_maturity_state",
-                "promotion_trace",
-                "execution_lane",
-                "timing_decision",
-                "candle_movement_context_v3",
-                "candle_movement",
-            ):
-                if mapping(merged.get(key)) or sequence(merged.get(key)) or text(merged.get(key)):
-                    continue
-                value = packet.get(key)
-                if mapping(value) or sequence(value) or text(value):
-                    merged[key] = value
+            merged.setdefault(packet_key, packet)
+            backfill_from_packet(packet)
         result = mapping(payload.get("model_council_result"))
         if result:
             merged.setdefault("model_council_result", result)
@@ -1965,23 +1996,58 @@ def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str
     allowance_authority = text(allowance_package.get("execution_authority")).upper()
     allowance_accepted = bool(allowance_package.get("accepted") or allowance_package.get("decision_accepted"))
     allowance_execution_ready = bool(allowance_package.get("execution_ready"))
-    expected_move_time = mapping(allowance_package.get("expected_move_time"))
-    playbook_enter_now = bool(playbook_state in PLAYBOOK_ENTER_NOW_STATES)
-    playbook_authorized = bool(
-        timing.get("playbook_strategy_authorized")
-        or (allowance_authority == PLAYBOOK_EXECUTION_AUTHORITY and allowance_accepted and allowance_execution_ready)
-        or playbook_enter_now
-    )
-    entry_now = bool(timing.get("entry_now_allowed") or playbook_authorized)
-    blocked_by = text(promotion.get("blocked_by") or promotion.get("denied_at")).upper()
-    reasoning_execution_blocked = bool(promotion.get("reasoning_execution_blocked"))
-    reasoning_bad_entry_class = text(promotion.get("reasoning_bad_entry_class")).upper()
-    market_bad_entry_class = text(promotion.get("market_bad_entry_class")).upper()
     professional_plan = mapping(
         promotion.get("professional_trade_plan")
         or allowance_package.get("professional_trade_plan")
         or opportunity.get("professional_trade_plan")
     )
+    thesis_horizon = mapping(
+        professional_plan.get("expected_move_time")
+        or professional_plan.get("thesis_horizon")
+        or allowance_package.get("thesis_horizon")
+    )
+    expected_move_time = mapping(allowance_package.get("expected_move_time") or thesis_horizon)
+    if not expected_move_time and professional_plan:
+        expected_duration_sec = number(professional_plan.get("expected_duration_sec"))
+        expected_candle_count = number(professional_plan.get("expected_candle_count"))
+        if expected_duration_sec is not None or expected_candle_count is not None:
+            timeframe = text(professional_plan.get("timeframe"), "M5")
+            timeframe_sec = number(professional_plan.get("timeframe_seconds"), float(timeframe_seconds(timeframe))) or float(timeframe_seconds(timeframe))
+            duration_sec = int(round(float(expected_duration_sec or 0.0)))
+            candle_count = int(round(float(expected_candle_count or 0.0)))
+            if duration_sec <= 0 and candle_count > 0:
+                duration_sec = int(round(candle_count * timeframe_sec))
+            if candle_count <= 0 and duration_sec > 0:
+                candle_count = max(1, int(math.ceil(float(duration_sec) / max(1.0, timeframe_sec))))
+            expected_move_time = {
+                "expected_duration_sec": duration_sec,
+                "expected_duration_text": format_duration(duration_sec),
+                "timeframe": timeframe,
+                "timeframe_seconds": int(round(timeframe_sec)),
+                "expected_candle_count": candle_count,
+                "current_leg_candle_count": professional_plan.get("current_leg_candle_count"),
+                "current_leg_side": professional_plan.get("current_leg_side") or professional_plan.get("side"),
+                "current_leg_stage": professional_plan.get("current_leg_stage"),
+                "estimated_candles_to_force": professional_plan.get("estimated_candles_to_force"),
+                "basis": "professional_trade_plan_fallback",
+            }
+    playbook_enter_now = bool(playbook_state in PLAYBOOK_ENTER_NOW_STATES)
+    blocked_by = text(promotion.get("blocked_by") or promotion.get("denied_at")).upper()
+    clean_blocker = blocked_by in {"", "NONE"}
+    clean_timing_mode = text(timing.get("timing_mode") or mapping(timing.get("entry_timing")).get("mode")).upper()
+    playbook_package_ready = bool(
+        allowance_authority == PLAYBOOK_EXECUTION_AUTHORITY
+        and allowance_accepted
+        and allowance_execution_ready
+    )
+    playbook_authorized = bool(
+        timing.get("playbook_strategy_authorized")
+        or playbook_package_ready
+    )
+    entry_now = bool(timing.get("entry_now_allowed") or playbook_authorized)
+    reasoning_execution_blocked = bool(promotion.get("reasoning_execution_blocked"))
+    reasoning_bad_entry_class = text(promotion.get("reasoning_bad_entry_class")).upper()
+    market_bad_entry_class = text(promotion.get("market_bad_entry_class")).upper()
     professional_playbook_override = bool(
         promotion.get("professional_playbook_reasoning_override_allowed")
         or promotion.get("professional_reaction_reasoning_override_allowed")
@@ -2027,6 +2093,9 @@ def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str
         candidate in {"BUY", "SELL"}
         and playbook_enter_now
         and opportunity_enter_now
+        and playbook_package_ready
+        and clean_blocker
+        and clean_timing_mode in {"", "ENTER_NOW", "SWING_ENTER_NOW", "INTRADAY_ENTER_NOW"}
         and not runtime_or_strategy_blocked
     )
     legacy_timing_allowed = bool(
@@ -2059,12 +2128,12 @@ def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str
         "allowance_package_accepted": allowance_accepted,
         "allowance_package_execution_ready": allowance_execution_ready,
         "expected_move_time": expected_move_time,
-        "timing_mode": text(timing.get("timing_mode") or mapping(timing.get("entry_timing")).get("mode")),
+        "timing_mode": clean_timing_mode,
         "blocked_by": reported_blocked_by,
         "candidate_id": text(promotion.get("candidate_id")),
         "packet_id": text(promotion.get("packet_id") or council.get("execution_packet_id")),
-        "final_score": number(promotion.get("final_score") or promotion.get("final_execution_score")),
-        "threshold": number(promotion.get("threshold") or promotion.get("execution_threshold")),
+        "final_score": number(promotion.get("final_score") or promotion.get("final_execution_score") or allowance_package.get("score")),
+        "threshold": number(promotion.get("threshold") or promotion.get("execution_threshold") or allowance_package.get("threshold")),
         "next_required": text(promotion.get("next_required") or lane.get("reason")),
         "reasoning_state": text(promotion.get("reasoning_state") or mapping(council.get("final_reasoning_decision")).get("decision")).upper(),
         "reasoning_execution_blocked": reasoning_execution_blocked,
@@ -2091,8 +2160,8 @@ def runtime_freshness_state(
     live: Mapping[str, Any],
     perf: Mapping[str, Any],
 ) -> dict[str, Any]:
-    max_frame_age_ms = float(os.getenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500") or "2500")
-    max_capture_age_sec = float(os.getenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "120") or "120")
+    max_frame_age_ms = float(os.getenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", str(DEFAULT_BURN_MAX_FRAME_AGE_MS)) or DEFAULT_BURN_MAX_FRAME_AGE_MS)
+    max_capture_age_sec = float(os.getenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", str(DEFAULT_BURN_MAX_CAPTURE_AGE_SEC)) or DEFAULT_BURN_MAX_CAPTURE_AGE_SEC)
     reject_published_age_warning = os.getenv("PHOENIXGUARD_BURN_REJECT_PUBLISHED_AGE_WARNING", "1") != "0"
     reject_capture_age_warning = os.getenv("PHOENIXGUARD_BURN_REJECT_CAPTURE_AGE_WARNING", "1") != "0"
     timing = mapping(perf.get("timing_trace"))
@@ -2852,7 +2921,7 @@ def main() -> int:
     parser.add_argument(
         "--max-frame-age-ms",
         type=float,
-        default=float(os.getenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "2500") or "2500"),
+        default=float(os.getenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", str(DEFAULT_BURN_MAX_FRAME_AGE_MS)) or DEFAULT_BURN_MAX_FRAME_AGE_MS),
         help="Maximum allowed tracker frame age before entry observations are hard-blocked as stale.",
     )
     parser.add_argument(

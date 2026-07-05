@@ -41,7 +41,7 @@ input string                InpCommonSignalFile                    = "PhoenixGua
 input int                   InpCommonFileOpenRetries               = 4;
 input int                   InpCommonFileRetryDelayMs              = 25;
 input int                   InpPollMilliseconds                    = 200;
-input int                   InpPacketMaxAgeMs                      = 2500;
+input int                   InpPacketMaxAgeMs                      = 180000;
 input int                   InpPacketExpiryGraceMs                 = 250;
 input int                   InpClockSkewToleranceSec               = 3;
 

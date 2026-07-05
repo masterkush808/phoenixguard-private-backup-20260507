@@ -176,8 +176,46 @@ Get-CimInstance Win32_Process -Filter "name = 'python.exe'" |
     try:
         rows = run_powershell_json(script)
     except Exception as exc:
-        return _python_processes_wmic(str(exc))
+        return _python_processes_psutil(str(exc))
     return [dict(cast(Mapping[str, Any], row)) for row in rows if isinstance(row, Mapping)]
+
+
+def _python_processes_psutil(primary_error: str) -> list[dict[str, Any]]:
+    try:
+        import psutil  # type: ignore[import-untyped]
+    except Exception as exc:
+        return _python_processes_wmic(f"{primary_error}; psutil fallback unavailable: {error_text(exc)}")
+
+    rows: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for process in psutil.process_iter(["pid", "ppid", "name", "cmdline"]):
+        try:
+            info = process.info
+            name = str(info.get("name") or "").lower()
+            if name not in {"python.exe", "pythonw.exe"}:
+                continue
+            raw_cmdline: object = info.get("cmdline")
+            cmdline_sequence = cast(list[object], raw_cmdline) if isinstance(raw_cmdline, list) else []
+            cmdline_parts = [str(part) for part in cmdline_sequence]
+            cmdline = " ".join(cmdline_parts)
+            rows.append(
+                {
+                    "ProcessId": int(info.get("pid") or 0),
+                    "ParentProcessId": int(info.get("ppid") or 0),
+                    "CommandLine": cmdline,
+                }
+            )
+        except (psutil.AccessDenied, psutil.NoSuchProcess) as exc:
+            errors.append(error_text(exc))
+            continue
+    if rows:
+        return rows
+    fallback_error = primary_error
+    if errors:
+        fallback_error = f"{fallback_error}; psutil fallback access errors: {'; '.join(errors[:3])}"
+    else:
+        fallback_error = f"{fallback_error}; psutil fallback found no python processes"
+    return _python_processes_wmic(fallback_error)
 
 
 def _python_processes_wmic(primary_error: str) -> list[dict[str, Any]]:

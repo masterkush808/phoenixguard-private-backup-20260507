@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 from tools.purge_v3_studies_and_cache import run_purge
@@ -9,6 +11,11 @@ def _write(path: Path, content: str = "runtime") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def _touch_tree(path: Path, mtime: float) -> None:
+    for candidate in (path, *path.rglob("*")):
+        os.utime(candidate, (mtime, mtime))
 
 
 def test_dry_run_reports_allowlisted_runtime_paths_without_deleting(tmp_path: Path) -> None:
@@ -94,3 +101,39 @@ def test_unapproved_and_non_runtime_paths_are_retained(tmp_path: Path) -> None:
 
     assert not deleted_path.exists()
     assert all(path.exists() for path in retained_paths)
+
+
+def test_certification_burn_purge_requires_explicit_include_and_age_gate(tmp_path: Path) -> None:
+    old_burn_dir = tmp_path / ".codex_runtime" / "final_8h_certification_burn_20260705_000539"
+    recent_burn_dir = tmp_path / ".codex_runtime" / "final_8h_certification_burn_20260705_024329"
+    _write(old_burn_dir / "samples.jsonl", "old sample")
+    _write(old_burn_dir / "raw" / "00001_council.json", "{}")
+    _write(recent_burn_dir / "samples.jsonl", "recent sample")
+    _write(tmp_path / ".codex_runtime" / "custom_debug_dir" / "sample.json", "keep")
+
+    now = time.time()
+    _touch_tree(old_burn_dir, now - 25 * 3600)
+    _touch_tree(recent_burn_dir, now)
+
+    default_result = run_purge(tmp_path)
+    assert old_burn_dir not in {record.path for record in default_result.records}
+
+    dry_result = run_purge(
+        tmp_path,
+        include_certification_burns=True,
+        certification_burn_min_age_hours=24,
+    )
+    assert old_burn_dir in {record.path for record in dry_result.records}
+    assert recent_burn_dir not in {record.path for record in dry_result.records}
+    assert old_burn_dir.exists()
+
+    delete_result = run_purge(
+        tmp_path,
+        confirm_delete=True,
+        include_certification_burns=True,
+        certification_burn_min_age_hours=24,
+    )
+    assert old_burn_dir in {record.path for record in delete_result.records}
+    assert not old_burn_dir.exists()
+    assert recent_burn_dir.exists()
+    assert (tmp_path / ".codex_runtime" / "custom_debug_dir" / "sample.json").exists()

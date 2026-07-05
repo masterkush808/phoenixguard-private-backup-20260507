@@ -1099,6 +1099,10 @@ def test_actionable_broker_timing_becomes_model_council_execution_evidence(tmp_p
     assert packet["execution"]["expiry_seconds"] >= 30 * 60
     assert packet["allowance_package"]["professional_trade_plan"]["professional_grade"] is True
     assert packet["allowance_package"]["thesis_horizon"]["expected_candle_count"] >= 8
+    assert packet["allowance_package"]["packet_id"] == packet["packet_id"]
+    assert packet["expected_move_time"]["expected_candle_count"] == packet["allowance_package"]["expected_candle_count"]
+    assert packet["expected_duration_sec"] == packet["allowance_package"]["expected_duration_sec"]
+    assert packet["score"] == packet["allowance_package"]["score"]
     assert packet["trade_permission"]["permission_state"] == "GRANTED"
 
 
@@ -1341,4 +1345,8 @@ def test_near_trigger_kernel_candidate_becomes_model_council_execution_evidence(
     assert packet["execution"]["expiry_seconds"] >= 30 * 60
     assert packet["allowance_package"]["professional_trade_plan"]["professional_grade"] is True
     assert packet["allowance_package"]["thesis_horizon"]["expected_candle_count"] >= 8
+    assert packet["allowance_package"]["packet_id"] == packet["packet_id"]
+    assert packet["expected_move_time"]["expected_candle_count"] == packet["allowance_package"]["expected_candle_count"]
+    assert packet["expected_duration_sec"] == packet["allowance_package"]["expected_duration_sec"]
+    assert packet["score"] == packet["allowance_package"]["score"]
     assert packet["trade_permission"]["permission_state"] == "GRANTED"

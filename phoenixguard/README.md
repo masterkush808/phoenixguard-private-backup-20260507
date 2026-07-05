@@ -94,6 +94,20 @@ Do not run PhoenixGuard with bare `python`, and do not point live runtime state 
 `PHOENIXGUARD_RUNTIME_DIR`, `PHOENIXGUARD_DATA_DIR`, `PHOENIXGUARD_LOGS_DIR`, and
 `PHOENIXGUARD_TRACKER_STATUS_FILE` to the repo `runtime\live` tree.
 
+### Live-Safe Payload Retention
+
+During a live burn, do not run broad runtime cleanup against `runtime\live`; that tree contains the
+active tracker session, handshakes, and evidence. Use the generated-runtime purge tool in dry-run
+mode for local studies/cache and old certification burn workspaces:
+
+```powershell
+.\.venv-live\Scripts\python.exe .\Backend\tools\purge_v3_studies_and_cache.py --include-certification-burns --certification-burn-min-age-hours 24 --report .\reports\runtime_payload_purge_dry_run.md
+```
+
+After the burn is complete and the report has been reviewed, add `--confirm-delete` to delete only
+the allowlisted generated paths older than the age gate. This purge does not target
+`runtime\live\data_live\mobile_api\window_tracker\sessions\...` active session files.
+
 ## Fast Safe Restart
 
 Use this when you want to stop stale sessions/processes, clear runtime cache, and start the live

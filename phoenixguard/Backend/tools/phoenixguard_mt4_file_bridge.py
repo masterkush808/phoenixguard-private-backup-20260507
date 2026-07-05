@@ -164,6 +164,14 @@ def _nested(payload: dict[str, object], key: str) -> dict[str, object]:
     return dict(cast(Mapping[str, object], value)) if isinstance(value, dict) else {}
 
 
+def _first_nested(key: str, *sources: dict[str, object]) -> dict[str, object]:
+    for source in sources:
+        value = _nested(source, key)
+        if value:
+            return value
+    return {}
+
+
 def _int(value: object, default: int = 0) -> int:
     try:
         return int(float(str(value)))
@@ -177,6 +185,118 @@ def _float(value: object, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return float(default)
     return result if math.isfinite(result) else float(default)
+
+
+def _epoch_seconds(value: object) -> float:
+    epoch = _float(value, 0.0)
+    if epoch > 100_000_000_000.0:
+        return epoch / 1000.0
+    return epoch
+
+
+def _epoch_candidates_from(source_name: str, payload: Mapping[str, object]) -> list[tuple[str, float]]:
+    candidates: list[tuple[str, float]] = []
+    for key in (
+        "last_capture_epoch",
+        "capture_epoch",
+        "display_capture_epoch",
+        "last_display_published_epoch",
+        "display_published_epoch",
+        "generated_epoch",
+        "snapshot_epoch",
+        "timestamp_epoch",
+        "updated_epoch",
+        "last_update_epoch",
+    ):
+        epoch = _epoch_seconds(payload.get(key))
+        if epoch > 0.0:
+            candidates.append((f"{source_name}.{key}", epoch))
+    for key in (
+        "last_capture_epoch_ms",
+        "capture_epoch_ms",
+        "display_capture_epoch_ms",
+        "last_display_published_epoch_ms",
+        "display_published_epoch_ms",
+        "generated_epoch_ms",
+        "snapshot_epoch_ms",
+        "timestamp_epoch_ms",
+        "updated_epoch_ms",
+        "last_update_epoch_ms",
+    ):
+        epoch = _epoch_seconds(payload.get(key))
+        if epoch > 0.0:
+            candidates.append((f"{source_name}.{key}", epoch))
+    return candidates
+
+
+def _latest_monitor_capture_epoch(
+    live: Mapping[str, object],
+    performance: Mapping[str, object] | None,
+    *,
+    now_epoch: float,
+) -> tuple[float, str]:
+    candidates = _epoch_candidates_from("live", live)
+    provider_status = live.get("provider_status")
+    if isinstance(provider_status, dict):
+        candidates.extend(_epoch_candidates_from("live.provider_status", cast(Mapping[str, object], provider_status)))
+    timing_trace: Mapping[str, object] = {}
+    if performance is not None:
+        candidates.extend(_epoch_candidates_from("performance", performance))
+        timing_raw = performance.get("timing_trace")
+        if isinstance(timing_raw, dict):
+            timing_trace = cast(Mapping[str, object], timing_raw)
+            candidates.extend(_epoch_candidates_from("performance.timing_trace", timing_trace))
+        frame_age_ms = _float(performance.get("frame_age_ms"), -1.0)
+        if frame_age_ms < 0.0:
+            frame_age_ms = _float(timing_trace.get("frame_age_ms"), -1.0)
+        if 0.0 <= frame_age_ms <= 86_400_000.0:
+            candidates.append(("performance.frame_age_ms", now_epoch - (frame_age_ms / 1000.0)))
+
+    bounded = [(label, epoch) for label, epoch in candidates if epoch > 0.0 and epoch <= now_epoch + 5.0]
+    if not bounded:
+        return 0.0, ""
+    label, epoch = max(bounded, key=lambda item: item[1])
+    return epoch, label
+
+
+def _monitor_frame_id(live: Mapping[str, object], performance: Mapping[str, object] | None) -> int:
+    frame = max(
+        _int(live.get("frame_id"), 0),
+        _int(live.get("display_frame_id"), 0),
+        _int(live.get("frame_index"), 0),
+    )
+    if performance is None:
+        return frame
+    timing_raw = performance.get("timing_trace")
+    timing_trace: Mapping[str, object] = {}
+    if isinstance(timing_raw, dict):
+        timing_trace = cast(Mapping[str, object], timing_raw)
+    return max(
+        frame,
+        _int(performance.get("frame_id"), 0),
+        _int(performance.get("display_frame_id"), 0),
+        _int(performance.get("frame_index"), 0),
+        _int(timing_trace.get("frame_id"), 0),
+        _int(timing_trace.get("display_frame_id"), 0),
+        _int(timing_trace.get("display_frame_index"), 0),
+    )
+
+
+def _monitor_capture_count(live: Mapping[str, object], performance: Mapping[str, object] | None, fallback: int) -> int:
+    capture = max(_int(live.get("capture_count"), 0), _int(live.get("display_capture_count"), 0))
+    if performance is not None:
+        timing_raw = performance.get("timing_trace")
+        timing_trace: Mapping[str, object] = {}
+        if isinstance(timing_raw, dict):
+            timing_trace = cast(Mapping[str, object], timing_raw)
+        capture = max(
+            capture,
+            _int(performance.get("capture_count"), 0),
+            _int(performance.get("display_capture_count"), 0),
+            _int(timing_trace.get("capture_count"), 0),
+            _int(timing_trace.get("display_capture_count"), 0),
+        )
+    return capture if capture > 0 else fallback
 
 
 def _collect_reason_codes(*sources: dict[str, object]) -> list[str]:
@@ -195,6 +315,7 @@ def _packet_current_in_live_monitor(
     packet: Mapping[str, object],
     live: Mapping[str, object],
     *,
+    performance: Mapping[str, object] | None = None,
     now_epoch: float,
     max_live_age_sec: float,
     max_packet_frame_lag: int,
@@ -204,12 +325,26 @@ def _packet_current_in_live_monitor(
     if str(live.get("status") or "").strip().upper() not in {"RUNNING", "ACTIVE", "LIVE"}:
         return False, "live monitor status is not running"
     packet_id = str(packet.get("packet_id") or "").strip()
+    if not packet_id:
+        return False, "packet id missing"
+    created_epoch = _float(packet.get("created_epoch_sec") or packet.get("created_epoch"), 0.0)
+    if created_epoch <= 0.0:
+        return False, "packet created_epoch missing"
+    valid_until = _float(packet.get("valid_until_epoch_sec") or packet.get("valid_until_epoch"), 0.0)
+    if valid_until <= 0.0:
+        return False, "packet valid_until missing"
+    if valid_until <= created_epoch:
+        return False, "packet valid_until is not after created_epoch"
+    if now_epoch >= valid_until:
+        return False, f"packet expired {now_epoch - valid_until:.1f}s ago"
     live_packet = _nested(dict(live), "latest_execution_packet")
     live_packet_id = str(live_packet.get("packet_id") or "").strip()
-    if packet_id and live_packet_id and packet_id != live_packet_id:
+    if not live_packet_id:
+        return False, "live monitor latest execution packet id missing"
+    if packet_id != live_packet_id:
         return False, f"live monitor packet id changed: {live_packet_id}"
     packet_frame = _int(packet.get("frame_id") or packet.get("capture_count"), 0)
-    live_frame = _int(live.get("frame_id") or live.get("display_frame_id") or live.get("frame_index"), 0)
+    live_frame = _monitor_frame_id(live, performance)
     if packet_frame <= 0 or live_frame <= 0:
         return False, "packet/live frame id missing"
     if live_frame < packet_frame:
@@ -218,28 +353,28 @@ def _packet_current_in_live_monitor(
     if frame_lag > max(0, int(max_packet_frame_lag)):
         return False, f"packet frame lag {frame_lag} exceeds {max_packet_frame_lag}"
     packet_capture = _int(packet.get("capture_count"), packet_frame)
-    live_capture = _int(live.get("capture_count"), live_frame)
+    live_capture = _monitor_capture_count(live, performance, live_frame)
     if live_capture < packet_capture:
         return False, f"live capture {live_capture} is behind packet capture {packet_capture}"
-    capture_epoch = _float(
-        live.get("last_display_published_epoch")
-        or live.get("display_published_epoch")
-        or live.get("last_capture_epoch")
-        or live.get("display_capture_epoch"),
-        0.0,
-    )
+    capture_epoch, capture_epoch_source = _latest_monitor_capture_epoch(live, performance, now_epoch=now_epoch)
     if capture_epoch <= 0.0:
         return False, "live monitor capture epoch missing"
     capture_age = max(0.0, now_epoch - capture_epoch)
     if capture_age > max_live_age_sec:
-        return False, f"live monitor capture age {capture_age:.1f}s exceeds {max_live_age_sec:.1f}s"
+        return False, (
+            f"live monitor capture age {capture_age:.1f}s exceeds {max_live_age_sec:.1f}s"
+            + (f" from {capture_epoch_source}" if capture_epoch_source else "")
+        )
     execution = _nested(dict(packet), "execution")
     side = str(packet.get("side") or execution.get("side") or "").strip().upper()
     live_execution = _nested(live_packet, "execution")
     live_side = str(live_packet.get("side") or live_execution.get("side") or "").strip().upper()
     if side in {"BUY", "SELL"} and live_side in {"BUY", "SELL"} and side != live_side:
         return False, f"live monitor packet side changed: {live_side}"
-    return True, "live monitor freshness passed"
+    detail = "live monitor freshness passed"
+    if capture_epoch_source:
+        detail += f" using {capture_epoch_source}"
+    return True, detail
 
 
 def _allowance_source(payload: dict[str, object], execution: dict[str, object], council: dict[str, object]) -> dict[str, object]:
@@ -255,13 +390,14 @@ def _allowance_source(payload: dict[str, object], execution: dict[str, object], 
     return {}
 
 
-def _compact_professional_trade_plan(source: dict[str, object]) -> dict[str, object]:
-    plan = _nested(source, "professional_trade_plan")
-    resolution = _nested(source, "professional_thesis_resolution") or _nested(plan, "professional_thesis_resolution")
-    horizon = _nested(source, "thesis_horizon") or _nested(plan, "thesis_horizon")
-    entry_window = _nested(source, "entry_window") or _nested(plan, "entry_window")
-    expected = _nested(source, "expected_move_time")
-    movement = _nested(source, "candle_movement")
+def _compact_professional_trade_plan(source: dict[str, object], *fallback_sources: dict[str, object]) -> dict[str, object]:
+    sources = (source, *fallback_sources)
+    plan = _first_nested("professional_trade_plan", *sources)
+    resolution = _first_nested("professional_thesis_resolution", *sources, plan)
+    horizon = _first_nested("thesis_horizon", *sources, plan)
+    entry_window = _first_nested("entry_window", *sources, plan)
+    expected = _first_nested("expected_move_time", *sources, plan)
+    movement = _first_nested("candle_movement", *sources, plan)
     return {
         "schema_version": str(plan.get("schema_version") or "PG_PROFESSIONAL_TRADE_PLAN_V3"),
         "professional_grade": bool(plan.get("professional_grade", source.get("professional_grade", False))),
@@ -301,6 +437,38 @@ def _compact_professional_trade_plan(source: dict[str, object]) -> dict[str, obj
     }
 
 
+def _compact_expected_move_time(
+    source: dict[str, object],
+    professional_plan: dict[str, object],
+    *fallback_sources: dict[str, object],
+) -> dict[str, object]:
+    raw_professional_plan = _first_nested("professional_trade_plan", source, *fallback_sources)
+    sources = (source, raw_professional_plan, *fallback_sources, professional_plan)
+    expected = _first_nested("expected_move_time", *sources)
+    if expected:
+        return expected
+    horizon = _first_nested("thesis_horizon", *sources)
+    if not horizon:
+        return {}
+    compact: dict[str, object] = {}
+    for key in (
+        "expected_duration_sec",
+        "expected_duration_text",
+        "expected_candle_count",
+        "minimum_professional_candles",
+        "current_leg_candle_count",
+        "current_leg_side",
+        "current_leg_stage",
+        "estimated_candles_to_force",
+        "projected_total_current_leg_candles",
+    ):
+        if key in horizon:
+            compact[key] = horizon[key]
+    if compact and "basis" not in compact:
+        compact["basis"] = "thesis_horizon"
+    return compact
+
+
 def _compact_allowance_package(
     payload: dict[str, object],
     *,
@@ -328,7 +496,8 @@ def _compact_allowance_package(
     allowance_family = str(source.get("allowance_family") or "").upper()
     if not allowance_family:
         allowance_family = "INTRADAY" if package_type == "INTRADAY_ENTER_NOW" else "SWING"
-    professional_plan = _compact_professional_trade_plan(source)
+    professional_plan = _compact_professional_trade_plan(source, payload, execution, council, timing_decision)
+    expected_move_time = _compact_expected_move_time(source, professional_plan, payload, execution, council, timing_decision)
     return {
         "schema_version": str(source.get("schema_version") or "PG_ALLOWANCE_PACKAGE_V1"),
         "package_type": package_type,
@@ -356,7 +525,7 @@ def _compact_allowance_package(
         "professional_grade": professional_plan["professional_grade"],
         "professional_thesis_state": professional_plan["professional_thesis_state"],
         "professional_authority_side": professional_plan["authority_side"],
-        "expected_move_time": _nested(source, "expected_move_time"),
+        "expected_move_time": expected_move_time,
     }
 
 
@@ -393,7 +562,8 @@ def _compact_command(payload: dict[str, object], *, bridge_sequence: int = 0) ->
         "frame_id": payload.get("frame_id", 0),
         "capture_count": payload.get("capture_count", 0),
         "state_version": payload.get("state_version", 0),
-        "created_epoch_sec": created_epoch,
+        "created_epoch_sec": bridge_written_epoch,
+        "source_created_epoch_sec": created_epoch,
         "valid_until_epoch_sec": valid_until,
         "signal_state": {
             "state": execution_state or str(council.get("final_state", "")),
@@ -416,6 +586,8 @@ def _compact_command(payload: dict[str, object], *, bridge_sequence: int = 0) ->
             "allowance_family": allowance_package["allowance_family"],
         },
         "allowance_package": allowance_package,
+        "expected_move_time": allowance_package["expected_move_time"],
+        "professional_trade_plan": allowance_package["professional_trade_plan"],
         "reason_codes": _collect_reason_codes(payload, execution, council, permission),
         "confidence_score": council.get("confidence")
         or council.get("final_confidence")
@@ -591,9 +763,15 @@ def main() -> int:
         + urllib.parse.quote(str(args.session_id), safe="")
         + "?compact=1&monitor=1"
     )
+    performance_url = (
+        args.base_url.rstrip("/")
+        + "/v1/mobile/performance/trace/v3/"
+        + urllib.parse.quote(str(args.session_id), safe="")
+    )
 
     print(f"PhoenixGuard MT4 bridge polling: {url}", flush=True)
     print(f"PhoenixGuard MT4 bridge freshness monitor: {live_url}", flush=True)
+    print(f"PhoenixGuard MT4 bridge performance witness: {performance_url}", flush=True)
     print(f"MT4 signal file: {signal_path}", flush=True)
     print(f"MT4 status file: {status_path}", flush=True)
     if metrics_path:
@@ -620,10 +798,15 @@ def main() -> int:
             if status == 200 and payload.get("schema_version") == "PG_EXECUTION_PACKET_V3":
                 packet_id = str(payload.get("packet_id") or "")
                 live_status, live_payload = _get_json(live_url, args.timeout_sec)
+                performance_status, performance_payload = _get_json(performance_url, args.timeout_sec)
+                performance_for_freshness: Mapping[str, object] | None = (
+                    performance_payload if performance_status == 200 else None
+                )
                 live_ok, live_reason = (
                     _packet_current_in_live_monitor(
                         payload,
                         live_payload,
+                        performance=performance_for_freshness,
                         now_epoch=time.time(),
                         max_live_age_sec=max(1.0, float(args.max_live_age_sec)),
                         max_packet_frame_lag=max(0, int(args.max_packet_frame_lag)),
@@ -647,8 +830,16 @@ def main() -> int:
                     command["bridge_live_freshness"] = {
                         "status": "PASS",
                         "detail": live_reason,
-                        "monitor_frame_id": _int(live_payload.get("frame_id") or live_payload.get("display_frame_id"), 0),
-                        "monitor_capture_count": _int(live_payload.get("capture_count"), 0),
+                        "monitor_frame_id": _monitor_frame_id(live_payload, performance_for_freshness),
+                        "monitor_capture_count": _monitor_capture_count(
+                            live_payload,
+                            performance_for_freshness,
+                            _monitor_frame_id(live_payload, performance_for_freshness),
+                        ),
+                        "performance_http_status": performance_status,
+                        "performance_frame_id": (
+                            _monitor_frame_id({}, performance_for_freshness) if performance_for_freshness else 0
+                        ),
                         "max_live_age_sec": max(1.0, float(args.max_live_age_sec)),
                         "max_packet_frame_lag": max(0, int(args.max_packet_frame_lag)),
                     }

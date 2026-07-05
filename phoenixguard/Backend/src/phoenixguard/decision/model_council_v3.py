@@ -5177,6 +5177,10 @@ def evaluate_model_council_v3(
         "professional_trade_plan": professional_trade_plan,
         "projection_horizon": movement_projection_horizon,
     }
+    allowance_package["packet_id"] = base["packet_id"]
+    allowance_package["expected_duration_sec"] = expected_duration_sec
+    allowance_package["expected_duration_text"] = expected_move_time["expected_duration_text"]
+    allowance_package["expected_candle_count"] = expected_move_candles
     candle_movement_brief = {
         "visible_candle_count": candle_movement_context.get("visible_candle_count"),
         "tracked_candle_count": candle_movement_context.get("tracked_candle_count"),
@@ -5219,6 +5223,10 @@ def evaluate_model_council_v3(
         "professional_thesis_resolution": professional_thesis_resolution,
         "professional_flip_flop_override": professional_flip_flop_override,
         "professional_thesis_horizon": professional_thesis_horizon,
+        "thesis_horizon": professional_thesis_horizon,
+        "expected_move_time": expected_move_time,
+        "expected_duration_sec": expected_duration_sec,
+        "expected_candle_count": expected_move_candles,
         "candle_movement_context_v3": candle_movement_context,
         "candle_movement": candle_movement_brief,
         "visual_integrity": opportunity_maturity.get("visual_integrity"),
@@ -5355,6 +5363,10 @@ def evaluate_model_council_v3(
         "book_strategy_state": book_strategy_state,
         "book_strategy_playbook": book_strategy.get("playbook"),
         "professional_trade_plan": professional_trade_plan,
+        "thesis_horizon": professional_thesis_horizon,
+        "expected_move_time": expected_move_time,
+        "expected_duration_sec": expected_duration_sec,
+        "expected_candle_count": expected_move_candles,
         "professional_thesis_resolution": professional_thesis_resolution,
         "professional_flip_flop_override": professional_flip_flop_override,
         "candle_movement_context_v3": candle_movement_context,
@@ -5484,6 +5496,10 @@ def evaluate_model_council_v3(
         "book_strategy_state": book_strategy_state,
         "book_strategy_playbook": book_strategy.get("playbook"),
         "professional_trade_plan": professional_trade_plan,
+        "thesis_horizon": professional_thesis_horizon,
+        "expected_move_time": expected_move_time,
+        "expected_duration_sec": expected_duration_sec,
+        "expected_candle_count": expected_move_candles,
         "professional_thesis_resolution": professional_thesis_resolution,
         "professional_flip_flop_override": professional_flip_flop_override,
         "candle_movement_context_v3": candle_movement_context,
@@ -5603,6 +5619,11 @@ def evaluate_model_council_v3(
         "book_strategy": book_strategy,
         "book_strategy_state": book_strategy_state,
         "book_strategy_playbook": book_strategy.get("playbook"),
+        "professional_trade_plan": professional_trade_plan,
+        "thesis_horizon": professional_thesis_horizon,
+        "expected_move_time": expected_move_time,
+        "expected_duration_sec": expected_duration_sec,
+        "expected_candle_count": expected_move_candles,
         "candle_movement_context_v3": candle_movement_context,
         "candle_movement": candle_movement_brief,
         "strategy_read": book_strategy.get("strategy_read"),

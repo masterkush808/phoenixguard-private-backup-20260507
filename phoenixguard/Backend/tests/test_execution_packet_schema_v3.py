@@ -32,6 +32,28 @@ def _allowance_package(
     accepted: bool = True,
     execution_ready: bool = True,
 ) -> Payload:
+    thesis_horizon: Payload = {
+        "expected_duration_sec": 1800,
+        "expected_duration_text": "30m 00s",
+        "expected_candle_count": 6,
+        "timeframe": "M5",
+        "timeframe_seconds": 300,
+        "minimum_professional_candles": 4,
+        "basis": "test_professional_visible_history_memory_trend_plan",
+    }
+    professional_trade_plan: Payload = {
+        "schema_version": "PG_PROFESSIONAL_TRADE_PLAN_V3",
+        "side": side,
+        "authority_side": side,
+        "professional_grade": True,
+        "blocker": "",
+        "professional_thesis_state": "TREND_ALIGNED_CONTINUATION",
+        "thesis_horizon": thesis_horizon,
+    }
+    expected_move_time: Payload = {
+        **thesis_horizon,
+        "professional_trade_plan": professional_trade_plan,
+    }
     return {
         "schema_version": "PG_ALLOWANCE_PACKAGE_V1",
         "package_type": package_type,
@@ -47,6 +69,9 @@ def _allowance_package(
         "selected_lane": "SNIPER_ZONE_ENTRY",
         "score": 0.83,
         "threshold": 0.70,
+        "professional_trade_plan": professional_trade_plan,
+        "thesis_horizon": thesis_horizon,
+        "expected_move_time": expected_move_time,
     }
 
 
@@ -132,6 +157,20 @@ def test_execution_packet_schema_v3_valid() -> None:
     assert payload["instrument_context"]["identity_state"] == "IDENTITY_CONFIRMED"
     assert payload["instrument_context"]["display_symbol"] == "EUR/GBP OTC"
     assert payload["instrument_context"]["ocr_symbol"] == ""
+
+
+def test_execution_packet_exports_playbook_horizon_and_score() -> None:
+    payload = _packet()
+
+    assert payload["allowance_package"]["packet_id"] == payload["packet_id"]
+    assert payload["expected_move_time"]["expected_duration_sec"] == 1800
+    assert payload["expected_move_time"]["expected_candle_count"] == 6
+    assert payload["expected_duration_sec"] == 1800
+    assert payload["expected_candle_count"] == 6
+    assert payload["score"] == 0.83
+    assert payload["final_score"] == 0.83
+    assert payload["model_council"]["expected_move_time"]["expected_candle_count"] == 6
+    assert payload["model_council"]["professional_trade_plan"]["professional_grade"] is True
 
 
 def test_executable_packet_requires_explicit_allowance_package() -> None:

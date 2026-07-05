@@ -23,6 +23,13 @@ env/
 ENV/
 node_modules/
 
+# Nested frontend build/test caches
+.next/
+out/
+playwright-report/
+test-results/
+*.tsbuildinfo
+
 # Runtime/capture/debug output
 .codex_runtime/
 .codex_logs/
@@ -44,6 +51,7 @@ _archive/runtime_backup/
 *.tmp
 linter_output.txt
 scan_results.txt
+cleanup_reports/
 808_shooter_boxes.json
 user_calibration_manifest.json
 shooter_3_gate_state.json
