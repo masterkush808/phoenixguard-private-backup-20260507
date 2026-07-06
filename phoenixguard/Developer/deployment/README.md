@@ -13,7 +13,12 @@ windows_worker_watchdog.ps1
 
 cloudflare_tunnel_config.example.yml
   Example tunnel mapping from a public HTTPS hostname to the worker API.
+
+edge_frame_agent.py
+  Lightweight feed agent that sends chart screenshots or image-folder frames to
+  the PhoenixGuard cloud brain through /v1/mobile/frame-ingest.
 ```
 
-Run these on the rented Windows VPS, not on the local developer machine unless
-you are testing the deployment flow.
+Run the worker bootstrap/watchdog on the rented Windows VPS. Run
+edge_frame_agent.py on whichever machine owns the chart pixels when the source
+is not the managed VPS browser.

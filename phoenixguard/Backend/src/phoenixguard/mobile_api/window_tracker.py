@@ -3290,6 +3290,78 @@ def _broker_source_lock_is_study_only(lock: Mapping[str, Any]) -> bool:
     return bool(evidence.get("study_source_expected", False) or evidence.get("chart_source_like", False))
 
 
+def _external_frame_source_lock_v3(
+    source: Mapping[str, Any],
+    window_image: Image.Image,
+    *,
+    window_signature: str,
+) -> dict[str, Any]:
+    source_id = str(source.get("source_id", "external-frame-feed") or "external-frame-feed").strip()
+    source_url = str(source.get("source_url", "") or "").strip()
+    sequence_id = str(source.get("sequence_id", "") or "").strip()
+    symbol = str(source.get("symbol", "") or "").strip().upper()
+    timeframe = str(source.get("timeframe", "") or "").strip().upper()
+    lock_basis = f"{source_id}|{source_url}|{symbol}|{timeframe}|{window_signature}"
+    lock_id = hashlib.sha256(lock_basis.encode("utf-8", errors="ignore")).hexdigest()[:24]
+    return {
+        "schema_version": "BROKER_SOURCE_LOCK_V3",
+        "status": "VALID",
+        "valid": True,
+        "broker_source_locked": True,
+        "reason": "External frame feed supplied a fresh chart image through the frame-ingest contract.",
+        "reason_codes": ["EXTERNAL_FRAME_FEED_LOCKED", "CHART_STUDY_SOURCE_LOCKED"],
+        "selected_target": {
+            "browser": "external_frame_feed",
+            "url": source_url,
+            "title": source_id,
+            "window_handle": "",
+            "target_id": lock_id,
+            "viewport": {"width": int(window_image.width), "height": int(window_image.height)},
+            "candidate_id": lock_id,
+        },
+        "candidate_count": 1,
+        "matching_candidate_count": 1,
+        "surface_guard": {
+            "schema_version": "DASHBOARD_WINDOW_CAPTURE_GUARD_V3",
+            "surface_class": "BROKER_SURFACE",
+            "wrong_surface": False,
+            "capture_safe": True,
+            "broker_like_pixels": True,
+            "confidence": 1.0,
+            "reason": "External feed is accepted as a study source after API token and freshness validation.",
+            "reason_codes": ["EXTERNAL_FRAME_SOURCE"],
+            "evidence": {
+                "source_id": source_id,
+                "source_url": source_url,
+                "sequence_id": sequence_id,
+                "symbol": symbol,
+                "timeframe": timeframe,
+            },
+        },
+        "broker_pixel_fingerprint": window_signature,
+        "broker_control_fingerprint": lock_id,
+        "viewport_fingerprint": lock_id,
+        "evidence": {
+            "source_type": "external_frame_feed",
+            "source_id": source_id,
+            "source_url": source_url,
+            "sequence_id": sequence_id,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "study_source_expected": True,
+            "chart_source_like": True,
+            "study_source_only": True,
+            "broker_click_safe": False,
+            "chart": {
+                "chart_like_pixels": True,
+                "source": "frame_ingest_contract",
+                "width": int(window_image.width),
+                "height": int(window_image.height),
+            },
+        },
+    }
+
+
 def _browser_family(title: Any) -> str:
     lowered = str(title or "").strip().lower()
     compact = _compact_text(lowered)
@@ -21109,6 +21181,117 @@ class ContinuousWindowTrackerService:
         payload = self._require_session(session_id)
         return self._public_session_payload(payload)
 
+    def ingest_external_frame(
+        self,
+        session_id: str,
+        image: Image.Image,
+        *,
+        source_id: str,
+        symbol: str = "",
+        timeframe: str = "",
+        source_url: str = "",
+        sequence_id: str = "",
+        capture_epoch_ms: int = 0,
+        frame_id: int = 0,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run the normal tracker pipeline from a frame supplied by an edge feed."""
+        if image.width < 64 or image.height < 64:
+            raise ValueError("External frame is too small to study.")
+        now_epoch = _now_epoch()
+        capture_epoch = float(capture_epoch_ms) / 1000.0 if int(capture_epoch_ms or 0) > 0 else now_epoch
+        max_age_sec = _env_float("PHOENIXGUARD_FRAME_INGEST_MAX_SOURCE_AGE_SEC", 180.0, 5.0)
+        if capture_epoch > now_epoch + 5.0:
+            raise ValueError("External frame capture time is in the future.")
+        if now_epoch - capture_epoch > max_age_sec:
+            raise ValueError("External frame is older than the configured ingest freshness window.")
+
+        normalized_session_id = _slugify(str(session_id or "").strip(), "external-frame-feed")
+        normalized_source_id = str(source_id or "external-frame-feed").strip() or "external-frame-feed"
+        normalized_symbol = str(symbol or "").strip().upper()
+        normalized_timeframe = str(timeframe or "").strip().upper()
+        source_payload: dict[str, Any] = {
+            "source_id": normalized_source_id,
+            "source_url": str(source_url or "").strip(),
+            "sequence_id": str(sequence_id or "").strip(),
+            "symbol": normalized_symbol,
+            "timeframe": normalized_timeframe,
+            "frame_id": int(frame_id or 0),
+            "capture_epoch_ms": int(round(capture_epoch * 1000.0)),
+            "metadata": dict(metadata or {}),
+        }
+
+        try:
+            self._require_session(normalized_session_id)
+        except KeyError:
+            self.create_session(
+                session_id=normalized_session_id,
+                name=normalized_session_id,
+                market=normalized_symbol,
+                window_query="External Frame Feed",
+                layout_profile="external_frame_feed",
+                capture_interval_sec=_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC,
+                auto_start=False,
+                observer_settings={},
+                observer_policy={
+                    "single_surface_mode": True,
+                    "min_actionable_confidence": 0.58,
+                    "min_thesis_confidence": 0.46,
+                    "signal_cooldown_sec": 8.0,
+                },
+            )
+
+        with self._lock:
+            payload = self._require_session(normalized_session_id)
+            payload["window_query"] = "External Frame Feed"
+            payload["layout_profile"] = "external_frame_feed"
+            payload["effective_layout_profile"] = "external_frame_feed"
+            payload["status"] = "external_frame_feed"
+            payload["tracking_enabled"] = False
+            if normalized_symbol:
+                payload["market"] = normalized_symbol
+            payload["manual_focus_region"] = {
+                "enabled": True,
+                "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+                "source": "external_frame_ingest",
+                "updated_at": _epoch_to_utc_iso(now_epoch),
+            }
+            payload["external_frame_feed"] = {
+                "schema_version": "PG_EXTERNAL_FRAME_FEED_V1",
+                "source_id": normalized_source_id,
+                "source_url": source_payload["source_url"],
+                "sequence_id": source_payload["sequence_id"],
+                "symbol": normalized_symbol,
+                "timeframe": normalized_timeframe,
+                "frame_id": int(frame_id or 0),
+                "last_ingest_epoch": now_epoch,
+                "last_capture_epoch": capture_epoch,
+                "last_ingest_at": _epoch_to_utc_iso(now_epoch),
+                "study_source_only": True,
+            }
+            payload["updated_at"] = _epoch_to_utc_iso(now_epoch)
+            self._save_session(payload)
+
+        accepted = self._capture_and_analyze(
+            normalized_session_id,
+            force=True,
+            external_window_image=image.convert("RGB"),
+            external_source=source_payload,
+            external_capture_epoch=capture_epoch,
+        )
+        snapshot = self.get_session_snapshot(normalized_session_id)
+        snapshot["frame_ingest"] = {
+            "schema_version": "PG_FRAME_INGEST_RESULT_V1",
+            "accepted": bool(accepted),
+            "source_id": normalized_source_id,
+            "source_url": source_payload["source_url"],
+            "sequence_id": source_payload["sequence_id"],
+            "frame_id": int(frame_id or 0),
+            "capture_epoch_ms": int(round(capture_epoch * 1000.0)),
+            "ingested_epoch_ms": int(round(now_epoch * 1000.0)),
+        }
+        return snapshot
+
     def capture_worker_health_v3(self, session_id: str) -> dict[str, Any]:
         payload = self._require_session(session_id)
         normalized_session_id = str(payload.get("session_id", session_id) or session_id)
@@ -25269,12 +25452,26 @@ class ContinuousWindowTrackerService:
                 overlay_frame_id=int(payload.get("overlay_frame_id", 0) or 0),
             )
 
-    def _capture_and_analyze(self, session_id: str, *, force: bool = False) -> bool:
+    def _capture_and_analyze(
+        self,
+        session_id: str,
+        *,
+        force: bool = False,
+        external_window_image: Image.Image | None = None,
+        external_source: Mapping[str, Any] | None = None,
+        external_capture_epoch: float = 0.0,
+    ) -> bool:
         if not self._begin_study_gate(session_id):
             LOGGER.debug("Study gate skipped overlapping capture for session %s.", session_id)
             return False
         try:
-            self._capture_and_analyze_claimed(session_id, force=force)
+            self._capture_and_analyze_claimed(
+                session_id,
+                force=force,
+                external_window_image=external_window_image,
+                external_source=external_source,
+                external_capture_epoch=external_capture_epoch,
+            )
             return True
         except CaptureSurfaceUnavailableError as exc:
             message = str(exc) or "Pocket Option capture did not include the broker/chart surface."
@@ -25284,9 +25481,21 @@ class ContinuousWindowTrackerService:
         finally:
             self._finish_study_gate(session_id)
 
-    def _capture_and_analyze_claimed(self, session_id: str, *, force: bool = False) -> None:
+    def _capture_and_analyze_claimed(
+        self,
+        session_id: str,
+        *,
+        force: bool = False,
+        external_window_image: Image.Image | None = None,
+        external_source: Mapping[str, Any] | None = None,
+        external_capture_epoch: float = 0.0,
+    ) -> None:
         capture_started_at = time.monotonic()
-        capture_started_epoch = _now_epoch()
+        external_frame_source = _mapping_to_dict(external_source or {})
+        using_external_frame = external_window_image is not None
+        capture_started_epoch = float(external_capture_epoch or _now_epoch())
+        if capture_started_epoch <= 0.0 or capture_started_epoch > _now_epoch() + 5.0:
+            capture_started_epoch = _now_epoch()
         capture_started_iso = _epoch_to_utc_iso(capture_started_epoch)
         stage_timings: list[dict[str, Any]] = []
         last_stage_mark = capture_started_at
@@ -25345,7 +25554,15 @@ class ContinuousWindowTrackerService:
                 payload["status"] = "running"
         capture_started_with_tracking_enabled = bool(payload.get("tracking_enabled", False))
         manual_focus = _public_manual_focus_region(payload.get("manual_focus_region", {}))
-        if not bool(manual_focus.get("enabled", False)):
+        if using_external_frame and not bool(manual_focus.get("enabled", False)):
+            manual_focus = {
+                "enabled": True,
+                "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+                "source": "external_frame_ingest",
+                "updated_at": capture_started_iso,
+            }
+            payload["manual_focus_region"] = dict(manual_focus)
+        elif not bool(manual_focus.get("enabled", False)):
             with self._lock:
                 payload["tracking_enabled"] = False
                 payload["status"] = "awaiting_focus"
@@ -25358,26 +25575,43 @@ class ContinuousWindowTrackerService:
                 self._save_session(payload)
             return
 
-        descriptor = self._resolve_window_descriptor(payload)
-        mark_stage("resolve_window")
-        if descriptor is None:
-            with self._lock:
-                payload["status"] = "waiting_for_window"
-                payload["tracking_summary"] = _default_tracking_summary(message="The locked broker window is not visible right now.")
-                payload["latest_signal"] = _default_signal(
-                    message="The locked broker window is not visible right now.",
-                    status="waiting_for_window",
-                )
-                payload["last_error"] = "The locked broker window is not visible right now."
-                payload["updated_at"] = _now_iso()
-                self._save_session(payload)
-            return
-
-        payload["locked_window"] = dict(descriptor)
-        payload["locked_title"] = str(descriptor.get("title", "") or payload.get("locked_title", "") or "")
-        window_image = self.capture_backend.capture_window(descriptor).convert("RGB")
-        window_signature = _surface_signature(window_image)
-        mark_stage("capture_window")
+        if using_external_frame:
+            assert external_window_image is not None
+            source_id = str(external_frame_source.get("source_id", "external-frame-feed") or "external-frame-feed").strip()
+            descriptor: dict[str, Any] = {
+                "hwnd": 0,
+                "title": source_id,
+                "source": "external_frame_ingest",
+                "width": int(external_window_image.width),
+                "height": int(external_window_image.height),
+                "url": str(external_frame_source.get("source_url", "") or ""),
+            }
+            payload["locked_window"] = dict(descriptor)
+            payload["locked_title"] = source_id
+            window_image = external_window_image.convert("RGB")
+            window_signature = _surface_signature(window_image)
+            mark_stage("ingest_external_frame")
+        else:
+            resolved_descriptor = self._resolve_window_descriptor(payload)
+            mark_stage("resolve_window")
+            if resolved_descriptor is None:
+                with self._lock:
+                    payload["status"] = "waiting_for_window"
+                    payload["tracking_summary"] = _default_tracking_summary(message="The locked broker window is not visible right now.")
+                    payload["latest_signal"] = _default_signal(
+                        message="The locked broker window is not visible right now.",
+                        status="waiting_for_window",
+                    )
+                    payload["last_error"] = "The locked broker window is not visible right now."
+                    payload["updated_at"] = _now_iso()
+                    self._save_session(payload)
+                return
+            descriptor = dict(resolved_descriptor)
+            payload["locked_window"] = dict(descriptor)
+            payload["locked_title"] = str(descriptor.get("title", "") or payload.get("locked_title", "") or "")
+            window_image = self.capture_backend.capture_window(descriptor).convert("RGB")
+            window_signature = _surface_signature(window_image)
+            mark_stage("capture_window")
         surface_image, focus_meta = _crop_normalized_bbox(window_image, cast(Sequence[Any], manual_focus.get("normalized_bbox", [])))
         study_surface_image, study_focus_meta = self._derive_study_surface(
             window_image=window_image,
@@ -25485,17 +25719,25 @@ class ContinuousWindowTrackerService:
                     }
                 )
         mark_stage("display_artifact_write")
-        source_lock_controls = _normalize_execution_controls(payload.get("execution_controls", {}))
-        source_lock_study_source_expected = not (
-            bool(source_lock_controls.get("live_execution_enabled", False))
-            and str(source_lock_controls.get("execution_mode", "shadow") or "shadow").strip().lower() == "live"
-        )
-        broker_source_lock = _broker_source_lock_dict_v3(
-            descriptor,
-            window_image,
-            window_query=payload.get("window_query", ""),
-            study_source_expected=source_lock_study_source_expected,
-        )
+        source_lock_study_source_expected = True
+        if using_external_frame:
+            broker_source_lock = _external_frame_source_lock_v3(
+                external_frame_source,
+                window_image,
+                window_signature=window_signature,
+            )
+        else:
+            source_lock_controls = _normalize_execution_controls(payload.get("execution_controls", {}))
+            source_lock_study_source_expected = not (
+                bool(source_lock_controls.get("live_execution_enabled", False))
+                and str(source_lock_controls.get("execution_mode", "shadow") or "shadow").strip().lower() == "live"
+            )
+            broker_source_lock = _broker_source_lock_dict_v3(
+                descriptor,
+                window_image,
+                window_query=payload.get("window_query", ""),
+                study_source_expected=source_lock_study_source_expected,
+            )
         broker_source_study_only = _broker_source_lock_is_study_only(broker_source_lock)
         broker_source_summary: dict[str, Any] = {
             "lock_id": str(broker_source_lock.get("viewport_fingerprint") or broker_source_lock.get("broker_pixel_fingerprint") or ""),
@@ -26361,13 +26603,20 @@ class ContinuousWindowTrackerService:
             latest_signal["market"] = ""
             latest_signal["market_confidence"] = 0.0
             payload["market"] = ""
-        broker_source_lock = _broker_source_lock_dict_v3(
-            descriptor,
-            window_image,
-            broker_surface=broker_surface,
-            window_query=payload.get("window_query", ""),
-            study_source_expected=source_lock_study_source_expected,
-        )
+        if using_external_frame:
+            broker_source_lock = _external_frame_source_lock_v3(
+                external_frame_source,
+                window_image,
+                window_signature=window_signature,
+            )
+        else:
+            broker_source_lock = _broker_source_lock_dict_v3(
+                descriptor,
+                window_image,
+                broker_surface=broker_surface,
+                window_query=payload.get("window_query", ""),
+                study_source_expected=source_lock_study_source_expected,
+            )
         broker_source_guard = _mapping_to_dict(broker_source_lock.get("surface_guard", {}))
         broker_source_evidence = _mapping_to_dict(broker_source_lock.get("evidence", {}))
         broker_source_study_only = _broker_source_lock_is_study_only(broker_source_lock)

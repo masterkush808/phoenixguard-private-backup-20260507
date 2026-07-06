@@ -7,10 +7,10 @@ infrastructure while preserving the core live-tracker truth:
 broker/browser chart surface -> PhoenixGuard tracker worker -> V3 API/dashboard -> playbook/MT4 bridge
 ```
 
-PhoenixGuard currently depends on a real browser/window capture loop. That means
-the live tracker cannot be replaced by static hosting or serverless functions
-alone. A public dashboard can be hosted globally, but the chart-capture worker
-must run on an always-on Windows desktop host.
+PhoenixGuard can now study either a managed browser/window capture loop or
+external chart frames pushed through the secured frame-ingest contract. Static
+hosting or serverless functions still cannot run the full Python/CV/model brain,
+but the chart source is no longer limited to the developer PC.
 
 ## Deployment Shape
 
@@ -20,15 +20,23 @@ Use this production shape:
 Users worldwide
   -> HTTPS dashboard/API domain
   -> secure tunnel or load balancer
-  -> Windows tracker worker(s)
-       - Edge/Chrome broker session
-       - PhoenixGuard live tracker
-       - V3 Model Council and Playbook
-       - package reporter
-       - optional MT4 bridge/terminal
+  -> PhoenixGuard brain worker(s)
+       - V3 tracker, overlays, Model Council, Playbook
+       - package reporter and optional MT4 bridge
+       - managed Edge/Chrome broker session, or
+       - external frame feeds from user/edge agents
 ```
 
-There are two valid access models.
+The source contract is:
+
+```text
+chart pixels from any trusted feed
+  -> POST /v1/mobile/frame-ingest/sessions/{session_id}/frames
+  -> PhoenixGuard tracker study
+  -> same V3 overlay/playbook/package path
+```
+
+There are three valid access models.
 
 ## Model A: Managed Cloud Worker
 
@@ -60,23 +68,95 @@ Start CPU-only unless live latency proves that GPU inference is required. GPU
 workers are materially more expensive and should be added only after measuring
 real model latency.
 
-## Model B: User Edge Agent
+## Model B: Universal Edge Frame Feed
 
-If users must track a browser on their own PC, the cloud cannot directly see
-their local screen. They need a small local PhoenixGuard capture agent that sends
-frames/state to the cloud API. Your PC can still be off, but each user providing
-their own broker screen must keep their own machine/session online.
+PhoenixGuard runs off-machine as the cloud brain. A user machine, browser host,
+MT4 chart box, cloud browser worker, or any trusted feed sends chart images into
+PhoenixGuard every configured interval. Your PC can be off. A user who supplies
+their own private broker screen must keep that feed online.
 
 Best for:
 
 ```text
 user-owned broker sessions
+TradingView, Pocket Option, MT4, or future chart surfaces
 different brokers/regions/accounts
 no broker credentials stored centrally
+cloud brain with replaceable frame input
 ```
 
-This requires a separate installable lightweight edge agent. The current repo is
-ready for the managed-worker model first.
+The API is intentionally token-gated:
+
+```text
+POST /v1/mobile/frame-ingest/sessions/{session_id}/frames
+Authorization: Bearer <PHOENIXGUARD_FRAME_INGEST_TOKEN>
+multipart field: frame=<png/jpg/webp>
+form fields: source_id, symbol, timeframe, source_url, sequence_id, capture_epoch_ms, frame_id, metadata_json
+```
+
+Required production env:
+
+```powershell
+$env:PHOENIXGUARD_FRAME_INGEST_TOKEN = "<long-random-secret>"
+$env:PHOENIXGUARD_FRAME_INGEST_MAX_SOURCE_AGE_SEC = "180"
+```
+
+Run the edge feed agent from a user/worker machine:
+
+```powershell
+python .\Developer\deployment\edge_frame_agent.py `
+  --base-url "https://phoenixguard.example.com" `
+  --session-id "edge-eurcad-m5" `
+  --token "<long-random-secret>" `
+  --source-id "user-001-edge" `
+  --source-url "https://pocketoption.com/en/cabinet/demo-quick-high-low/" `
+  --symbol "EURCAD" `
+  --timeframe "M5" `
+  --bbox "80,140,1520,920" `
+  --interval-sec 15
+```
+
+This mode is study/feed only. It does not make the remote frame source a local
+click target. MT4 execution still consumes fresh validated V3 packages through
+the bridge path.
+
+## Model C: Public Advisory Dashboard
+
+Users consume PhoenixGuard decisions, charts, and package evidence through a
+web dashboard while one or more managed feeds supply frames.
+
+Best for:
+
+```text
+worldwide access
+public/private subscriptions
+manual-trade advisory mode
+centralized uptime and evidence retention
+```
+
+Long-term production shape:
+
+```text
+Cloudflare Access / auth gateway
+  -> PhoenixGuard API
+  -> session registry
+  -> object storage for screenshots/evidence
+  -> worker queue for frame jobs
+  -> optional MT4 bridge nodes
+```
+
+## Legacy Managed-Window Shape
+
+The original shape remains valid when PhoenixGuard owns the broker window:
+
+```text
+Windows tracker worker
+       - Edge/Chrome broker session
+       - PhoenixGuard live tracker
+       - V3 Model Council and Playbook
+       - package reporter
+       - optional MT4 bridge/terminal
+```
 
 ## MVP Production Deployment
 

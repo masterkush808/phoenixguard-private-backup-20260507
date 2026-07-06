@@ -61,6 +61,7 @@ from .live_state_v3 import (
     build_live_state_v3_from_tracker_service,
     compact_session_payload,
 )
+from .frame_ingest import build_frame_ingest_router
 from .model_strength import (
     model_strength_settings_to_execution_controls,
     read_model_strength_settings,
@@ -2038,6 +2039,8 @@ def create_app(
         tracker_session = read_window_tracker_session(resolved_session_id)
         market_context = build_market_context_from_tracker_session(tracker_session)
         return tracker_session, market_context
+
+    app.include_router(build_frame_ingest_router(get_window_tracker_service))
 
     @app.get("/v1/mobile/health")
     async def health() -> dict[str, str]:
