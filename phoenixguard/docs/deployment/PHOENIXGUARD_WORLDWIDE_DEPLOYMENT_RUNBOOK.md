@@ -160,6 +160,65 @@ Windows tracker worker
 
 ## MVP Production Deployment
 
+### Cheapest Current Path
+
+Use the Linux cloud-brain deployment first:
+
+```text
+Contabo Cloud VPS 20 or equivalent
+Ubuntu 24.04 LTS
+4 vCPU minimum
+12 GB RAM preferred minimum
+200 GB SSD/NVMe preferred
+Cloudflare Tunnel for public HTTPS
+edge_frame_agent.py for chart frames
+```
+
+This avoids Windows licensing cost and avoids paying for GPU before measured
+latency proves that GPU is needed.
+
+Server bootstrap:
+
+```bash
+sudo apt-get update && sudo apt-get install -y git
+git clone https://github.com/masterkush808/phoenixguard-private-backup-20260507.git /tmp/phoenixguard-deploy
+cd /tmp/phoenixguard-deploy
+sudo REPO_URL="https://github.com/masterkush808/phoenixguard-private-backup-20260507.git" \
+  BRANCH="main" \
+  DOMAIN="phoenixguard.example.com" \
+  CLOUDFLARED_TOKEN="<cloudflare-tunnel-token>" \
+  FRAME_INGEST_TOKEN="<long-random-secret>" \
+  bash Developer/deployment/linux_cloud_brain_bootstrap.sh
+```
+
+Asset package from the current development machine:
+
+```powershell
+.\Developer\deployment\package_cloud_assets.ps1
+```
+
+Upload that zip to the VPS, then restore:
+
+```bash
+sudo bash /opt/phoenixguard/phoenixguard/Developer/deployment/restore_cloud_assets.sh /tmp/phoenixguard_cloud_assets.zip
+```
+
+Run an edge chart feed from the machine that owns chart pixels:
+
+```powershell
+python .\Developer\deployment\edge_frame_agent.py `
+  --base-url "https://phoenixguard.example.com" `
+  --session-id "edge-live" `
+  --token "<long-random-secret>" `
+  --source-id "user-001-edge" `
+  --symbol "EURCAD" `
+  --timeframe "M5" `
+  --bbox "80,140,1520,920" `
+  --interval-sec 15
+```
+
+### Managed Windows Worker
+
 1. Rent one Windows VPS.
 2. RDP into it as the dedicated PhoenixGuard Windows user.
 3. Install Git, Python 3.11 x64, Chrome or Edge, and MT4 if bridge execution is
