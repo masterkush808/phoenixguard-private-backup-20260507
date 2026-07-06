@@ -105,6 +105,74 @@ def _sample_execution_packet() -> dict[str, object]:
     }
 
 
+def _sample_playbook_ai_intelligence() -> dict[str, object]:
+    return {
+        "schema_version": "PG_PLAYBOOK_AI_INTELLIGENCE_V3",
+        "semantic_graph": {
+            "interpretation": "FULL_OVERLAY_SUITE_THESIS",
+            "coverage": {
+                "rows_total": 42,
+                "actionable_count": 30,
+                "same_side_actionable_count": 24,
+                "entry_window_count": 4,
+                "same_side_entry_window_count": 4,
+                "target_window_count": 3,
+                "opposing_force_count": 2,
+                "invalidation_count": 2,
+                "prediction_path_count": 2,
+                "structure_box_count": 4,
+                "trendline_count": 2,
+                "overlay_arsenal_score": 0.91,
+                "expected_move_candles": 12,
+                "full_suite_ready": True,
+            },
+        },
+        "regime_router": {
+            "regime": "STRUCTURE_CONFIRMED_TREND_CONTINUATION",
+            "route": "TREND_CONTINUATION_THESIS",
+            "route_side": "BUY",
+            "confidence": 0.84,
+            "current_leg_side": "BUY",
+            "current_leg_stage": "MATURE",
+        },
+        "thesis_arbitration": {
+            "candidate_side": "BUY",
+            "winner": "BUY",
+            "winning_score": 0.86,
+            "margin": 0.31,
+            "candidate_score": 0.86,
+            "candidate_supported": True,
+            "conflict": False,
+            "state": "CANDIDATE_THESIS_LEADS",
+            "scores": {
+                "BUY": {"side": "BUY", "score": 0.86, "components": {}},
+                "SELL": {"side": "SELL", "score": 0.55, "components": {}},
+            },
+        },
+        "meta_label": {
+            "selected_side": "BUY",
+            "candidate_tradeable": True,
+            "selected": {
+                "target_before_invalidation_probability": 0.72,
+                "invalidation_first_risk": 0.28,
+                "label": "TARGET_BEFORE_INVALIDATION_LIKELY",
+            },
+        },
+        "horizon": {
+            "selected_side": "BUY",
+            "selected": {
+                "optimized_candle_count": 12,
+                "optimized_duration_sec": 3600,
+                "optimized_duration_text": "1h",
+                "horizon_class": "STRUCTURE_LEG_6_12_CANDLES",
+                "basis": "professional_trade_plan_thesis_horizon",
+                "target_before_invalidation_probability": 0.72,
+            },
+        },
+        "rules_applied": ["buy_and_sell_theses_scored_simultaneously"],
+    }
+
+
 def test_mt4_bridge_compact_command_preserves_ea_contract() -> None:
     bridge = _load_bridge_module()
     command = bridge._compact_command(_sample_execution_packet(), bridge_sequence=7)
@@ -141,6 +209,32 @@ def test_mt4_bridge_compact_command_preserves_ea_contract() -> None:
     assert decoded["execution"]["amount_action"] == "DO_NOT_CHANGE_AMOUNT"
     assert decoded["live_integrity"]["source"] == "model_council"
     assert decoded["live_integrity"]["input_frame_hash"] == "frame_hash_test"
+
+
+def test_mt4_bridge_compacts_playbook_ai_summary_without_full_nested_payload() -> None:
+    bridge = _load_bridge_module()
+    packet = _sample_execution_packet()
+    ai_intelligence = _sample_playbook_ai_intelligence()
+    packet["playbook_ai_intelligence_v3"] = ai_intelligence
+    allowance = cast(dict[str, object], packet["allowance_package"])
+    allowance["playbook_ai_intelligence_v3"] = ai_intelligence
+
+    command = bridge._compact_command(packet, bridge_sequence=9)
+
+    bridge._validate_command(command)
+    summary = cast(dict[str, object], command["playbook_ai_summary_v3"])
+    arbitration = cast(dict[str, object], summary["thesis_arbitration"])
+    meta = cast(dict[str, object], summary["meta_label"])
+    horizon = cast(dict[str, object], summary["horizon"])
+    assert summary["schema_version"] == "PG_PLAYBOOK_AI_SUMMARY_V3"
+    assert arbitration["winner"] == "BUY"
+    assert meta["target_before_invalidation_probability"] == 0.72
+    assert horizon["optimized_candle_count"] == 12
+    assert "semantic_graph" not in summary
+    assert "playbook_ai_intelligence_v3" not in command
+    command_allowance = cast(dict[str, object], command["allowance_package"])
+    assert command_allowance["playbook_ai_summary_v3"] == summary
+    assert len(bridge._json_dumps(command).encode("utf-8")) < bridge.SLOT_BYTES
 
 
 def test_mt4_bridge_compact_command_accepts_mt4_symbol_and_timeframe_override() -> None:

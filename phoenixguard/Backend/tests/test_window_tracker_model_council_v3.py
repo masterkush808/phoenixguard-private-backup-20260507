@@ -483,6 +483,38 @@ def test_study_packet_resolver_demotes_executable_claim_without_execution_packet
     assert study["promotion_failure_audit_v3"]["exact_field_preventing_execution_packet"] == "current_execution_packet"
 
 
+def test_study_packet_resolver_preserves_dual_thesis_report_when_synthesized() -> None:
+    now = time.time()
+    dual_report = {
+        "schema_version": "PG_DUAL_THESIS_REPORT_V3",
+        "selected_authority_side": "BUY",
+        "current_pressure_side": "BUY",
+        "buy": {"side": "BUY", "score": 0.73, "status": "CURRENT_PRESSURE_DEFENDED"},
+        "sell": {"side": "SELL", "score": 0.61, "status": "WAITING_FOR_REJECTION_PROOF"},
+    }
+
+    study = _model_council_study_packet_from_payload(
+        {
+            "session_id": "pocket-live-8788",
+            "last_capture_epoch": now,
+            "decision_valid_until_epoch": now + 30.0,
+            "model_council_result": {
+                "packet_id": "pgpkt-dual-visible",
+                "execution": {"enabled": False, "state": "WATCHING", "side": "BUY"},
+                "model_council": {
+                    "final_state": "WATCHING",
+                    "final_side": "BUY",
+                    "dual_thesis_report_v3": dual_report,
+                },
+                "promotion_trace": {"packet_result": "STUDY_PACKET_PUBLISHED"},
+            },
+        }
+    )
+
+    assert study["dual_thesis_report_v3"]["current_pressure_side"] == "BUY"
+    assert study["model_council"]["dual_thesis_report_v3"]["sell"]["status"] == "WAITING_FOR_REJECTION_PROOF"
+
+
 def test_tracker_publish_demotes_executable_study_result_without_execution_packet(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

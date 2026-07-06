@@ -39,6 +39,7 @@
     "cleanup_reports",
     "_archive",
     "_backups",
+    "Backend/src/phoenixguard/decision/book_strategy/legacy_engine.py",
     "DataAnalysisExpert",
     "node_modules",
     "Business/web"

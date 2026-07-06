@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 os.environ.setdefault("PHOENIXGUARD_TRACING_DISABLED", "1")
+os.environ.setdefault("PHOENIXGUARD_PYTHON_PROFILE", "test")
 
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:

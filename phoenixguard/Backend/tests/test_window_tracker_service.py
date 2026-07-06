@@ -7029,6 +7029,37 @@ def test_real_tracking_adapter_reads_buy_pressure_from_uptrend_surface() -> None
     assert "BUY" in str(result.latest_signal["setup"])
 
 
+def test_historical_structure_path_uses_body_center_not_wick_spike() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    candles: list[dict[str, Any]] = []
+    for index in range(10):
+        x_value = 80 + index * 30
+        center_y = 420 + index * 12
+        wick_top = 4 if index in {0, 9} else center_y - 42
+        candles.append(
+            {
+                "index": index,
+                "center_x": x_value,
+                "center_y": center_y,
+                "bbox": [x_value - 5, wick_top, x_value + 5, center_y + 42],
+                "direction": "SELL",
+                "price_proxy": 1.0 - index * 0.04,
+            }
+        )
+
+    history = adapter._build_historical_structure(candles, (720, 640))  # noqa: SLF001 - verifies tracker geometry contract
+    points = [
+        point
+        for segment in history
+        for point in cast(Sequence[Sequence[int]], segment.get("line_points", []))
+        if len(point) >= 2
+    ]
+
+    assert points
+    assert min(int(point[1]) for point in points) > 300
+    assert all(int(point[1]) != 4 for point in points)
+
+
 def test_real_tracking_adapter_reuses_cached_locked_shadow_selectors(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     image = _synthetic_chart_surface("buy")

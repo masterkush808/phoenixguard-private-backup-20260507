@@ -1867,6 +1867,50 @@ def _normalize_overlay_points(value: object) -> list[list[float]]:
     return points
 
 
+def _sanitize_progression_path_points(points: Sequence[Sequence[float]]) -> list[list[float]]:
+    normalized: list[list[float]] = []
+    for point in points:
+        if len(point) < 2:
+            continue
+        x_value = _float(point[0], float("nan"))
+        y_value = _float(point[1], float("nan"))
+        if math.isfinite(x_value) and math.isfinite(y_value):
+            normalized.append([round(float(x_value), 6), round(float(y_value), 6)])
+    if len(normalized) < 3:
+        return normalized
+    ys = [point[1] for point in normalized]
+    min_y = min(ys)
+    max_y = max(ys)
+    span_y = max_y - min_y
+    if span_y < 280.0:
+        return normalized
+    jump_limit = max(120.0, span_y * 0.55)
+    edge_band = max(10.0, span_y * 0.035)
+    cleaned: list[list[float]] = []
+    for index, point in enumerate(normalized):
+        y_value = point[1]
+        near_extreme_edge = y_value <= min_y + edge_band or y_value >= max_y - edge_band
+        if not near_extreme_edge:
+            cleaned.append(point)
+            continue
+        if index == 0:
+            next_y = normalized[index + 1][1]
+            if abs(next_y - y_value) >= jump_limit:
+                continue
+        elif index == len(normalized) - 1:
+            prev_y = normalized[index - 1][1]
+            if abs(prev_y - y_value) >= jump_limit:
+                continue
+        else:
+            prev_y = normalized[index - 1][1]
+            next_y = normalized[index + 1][1]
+            if abs(prev_y - y_value) >= jump_limit and abs(next_y - y_value) >= jump_limit:
+                cleaned.append([point[0], round(float((prev_y + next_y) * 0.5), 6)])
+                continue
+        cleaned.append(point)
+    return cleaned if len(cleaned) >= 2 else normalized
+
+
 def normalize_overlay_type(raw: Any, *, layer: Any = "", role: Any = "", side: Any = "") -> str:
     normalized = _canonical_token(raw)
     if normalized in TYPE_ALIASES:
@@ -2293,6 +2337,8 @@ def normalize_v3_overlay_object(
         "PREDICTION_PATH",
     }
     if geometry_points and overlay_type in line_geometry_types:
+        if overlay_type == "PROGRESSION_PATH":
+            geometry_points = _sanitize_progression_path_points(geometry_points)
         geometry_bounds = normalize_bounds(geometry_points)
         row["points"] = geometry_points
         row["line_points"] = geometry_points
@@ -2502,6 +2548,27 @@ def overlay_is_visible(
     return not overlay_rejection_reasons(overlay, mode, now_ms=now_ms, layer_overrides=layer_overrides)
 
 
+def _live_geometry_spike_reason(overlay: Mapping[str, Any]) -> str:
+    overlay_type = str(overlay.get("type") or "").strip().upper()
+    if overlay_type in {"", "CHART_BOUNDS", "CURRENT_CANDLE"}:
+        return ""
+    bounds = normalize_bounds(overlay.get("bounds") or overlay.get("bbox") or overlay.get("line_points") or overlay.get("path"))
+    if bounds is None:
+        return ""
+    width = max(0.0, float(bounds[2]) - float(bounds[0]))
+    height = max(0.0, float(bounds[3]) - float(bounds[1]))
+    if width <= 0.0 or height <= 0.0:
+        return ""
+    max_coord = max(abs(float(value)) for value in bounds)
+    if max_coord <= 2.0:
+        skinny_vertical = height >= 0.42 and width <= max(0.025, height * 0.08)
+    else:
+        skinny_vertical = height >= 180.0 and width <= max(18.0, height * 0.08)
+    if skinny_vertical:
+        return f"geometry_spike_vertical:{overlay_type}:w={width:.1f}:h={height:.1f}"
+    return ""
+
+
 def overlay_rejection_reasons(
     overlay: Mapping[str, Any],
     mode: str,
@@ -2554,6 +2621,10 @@ def overlay_rejection_reasons(
         reasons.append("prediction_overlay_disabled")
     if normalized["type"] == "INVALIDATION_BOX" and normalized_mode not in {"DEBUG", "INSPECTOR"}:
         reasons.append("invalidation_overlay_disabled")
+    if normalized_mode in LIVE_VIEW_MODES:
+        spike_reason = _live_geometry_spike_reason(normalized)
+        if spike_reason:
+            reasons.append(spike_reason)
     raw_precision_flags = {_canonical_token(item) for item in _sequence(overlay.get("precision_flags"))}
     if normalized_mode == "CLEAN_LIVE" and "DUPLICATE_NOW_MAPPED_TO_HISTORY" in raw_precision_flags:
         reasons.append("historical_now_marker_hidden_from_clean_live")

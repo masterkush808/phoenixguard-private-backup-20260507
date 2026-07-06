@@ -302,15 +302,24 @@ function Show-AckAlert {
 
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 1000
+    $expiryState = @{ NoticeShown = $false }
     $timer.Add_Tick({
         try {
             [console]::beep(1200, 250)
             [console]::beep(900, 180)
         } catch {
         }
-        if ([DateTimeOffset]::Now -gt $ValidUntil) {
-            $form.Tag = "EXPIRED"
-            $form.Close()
+        if ((-not [bool]$expiryState.NoticeShown) -and [DateTimeOffset]::Now -gt $ValidUntil) {
+            $expiryState.NoticeShown = $true
+            $textBox.Text = @"
+PHOENIXGUARD TRADE PACKAGE - EXPIRED
+
+DO NOT ENTER FROM THIS WINDOW.
+The packet window has passed. This alert is retained as operator evidence
+and will remain visible until you click I SEE IT.
+
+$Body
+"@
         }
     })
     $refocusTimer = New-Object System.Windows.Forms.Timer

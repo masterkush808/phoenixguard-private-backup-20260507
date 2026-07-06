@@ -7,6 +7,7 @@ from typing import Any, Callable, Mapping, Sequence, cast
 
 from PIL import Image
 
+from phoenixguard.decision.playbook_ai_intelligence_v3 import compact_playbook_ai_intelligence_v3
 from phoenixguard.mobile_api.realtime_sync_v3 import build_visual_health_v3
 from phoenixguard.runtime.realtime_performance_v3 import (
     build_frame_timing_trace_v3,
@@ -1655,6 +1656,16 @@ def _compact_scalar_and_selected(payload: Mapping[str, Any], selected_keys: set[
     return compact
 
 
+def _compact_playbook_ai_summary(value: Mapping[str, Any]) -> dict[str, Any]:
+    summary = value.get("playbook_ai_summary_v3")
+    if isinstance(summary, Mapping):
+        return dict(cast(Mapping[str, Any], summary))
+    intelligence = value.get("playbook_ai_intelligence_v3")
+    if isinstance(intelligence, Mapping):
+        return compact_playbook_ai_intelligence_v3(cast(Mapping[str, Any], intelligence))
+    return {}
+
+
 def _compact_recent_studies(rows: Any, *, limit: int = 12) -> list[dict[str, Any]]:
     studies = _sequence_of_mappings(rows)
     compact_rows: list[dict[str, Any]] = []
@@ -1788,6 +1799,7 @@ def _compact_model_council_result(result: Mapping[str, Any]) -> dict[str, Any]:
         "market_reality",
         "pair_profile",
         "price_location",
+        "playbook_ai_summary_v3",
         "reality_adjustments",
         "reasoning_arbitration",
         "regime",
@@ -1805,6 +1817,9 @@ def _compact_model_council_result(result: Mapping[str, Any]) -> dict[str, Any]:
         "lstm_contribution",
     }
     compact = _compact_scalar_and_selected(result, selected)
+    playbook_ai_summary = _compact_playbook_ai_summary(result)
+    if playbook_ai_summary:
+        compact["playbook_ai_summary_v3"] = playbook_ai_summary
     council = _mapping(result.get("model_council"))
     if council:
         compact["model_council"] = _compact_scalar_and_selected(
@@ -1819,12 +1834,16 @@ def _compact_model_council_result(result: Mapping[str, Any]) -> dict[str, Any]:
                 "book_strategy_state",
                 "book_strategy_playbook",
                 "strategy_read",
+                "playbook_ai_summary_v3",
                 "market_reality",
                 "promotion_trace",
                 "sequence_context",
                 "sequence_context_readiness",
             },
         )
+        council_summary = _compact_playbook_ai_summary(council)
+        if council_summary:
+            compact["model_council"]["playbook_ai_summary_v3"] = council_summary
     compact["study_packet_present"] = bool(result.get("study_packet") or result.get("model_council_study_packet"))
     return compact
 
@@ -2113,11 +2132,15 @@ def _compact_live_poll_session_payload(session: Mapping[str, Any]) -> dict[str, 
                 "book_strategy_state",
                 "book_strategy_playbook",
                 "strategy_read",
+                "playbook_ai_summary_v3",
                 "denied_at",
                 "next_required",
                 "promotion_failure_audit_v3",
             },
         )
+        playbook_ai_summary = _compact_playbook_ai_summary(model_result)
+        if playbook_ai_summary:
+            compact["model_council_result"]["playbook_ai_summary_v3"] = playbook_ai_summary
     return compact
 
 

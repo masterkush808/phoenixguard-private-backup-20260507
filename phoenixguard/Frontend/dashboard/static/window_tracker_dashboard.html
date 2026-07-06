@@ -8164,8 +8164,58 @@
         .filter((point) => point && point.every(Number.isFinite));
     }
 
+    function sanitizeHistoricalProgressionLinePoints(points = [], box = {}) {
+      const type = clean(box.type || box.overlay_type || box.kind, "").toUpperCase();
+      const layer = clean(box.layer || box._layer, "").toLowerCase();
+      if (!["PROGRESSION_PATH", "HISTORICAL_PROGRESSION", "HISTORICAL_REPLAY"].includes(type) && layer !== "historical_replay") {
+        return points;
+      }
+      if (!Array.isArray(points) || points.length < 3) {
+        return points;
+      }
+      const ys = points.map((point) => Number(point[1])).filter(Number.isFinite);
+      if (ys.length < 3) {
+        return points;
+      }
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      const spanY = maxY - minY;
+      const normalized = Math.max(...points.flat().map((value) => Math.abs(Number(value) || 0))) <= 1.0001;
+      const minSpan = normalized ? 0.28 : 280;
+      if (spanY < minSpan) {
+        return points;
+      }
+      const jumpLimit = Math.max(normalized ? 0.12 : 120, spanY * 0.55);
+      const edgeBand = Math.max(normalized ? 0.01 : 10, spanY * 0.035);
+      const cleaned = [];
+      points.forEach((point, index) => {
+        const y = Number(point[1]);
+        const nearExtreme = y <= minY + edgeBand || y >= maxY - edgeBand;
+        if (!nearExtreme) {
+          cleaned.push(point);
+          return;
+        }
+        if (index === 0 && Math.abs(Number(points[1][1]) - y) >= jumpLimit) {
+          return;
+        }
+        if (index === points.length - 1 && Math.abs(Number(points[index - 1][1]) - y) >= jumpLimit) {
+          return;
+        }
+        if (index > 0 && index < points.length - 1) {
+          const prevY = Number(points[index - 1][1]);
+          const nextY = Number(points[index + 1][1]);
+          if (Math.abs(prevY - y) >= jumpLimit && Math.abs(nextY - y) >= jumpLimit) {
+            cleaned.push([Number(point[0]), (prevY + nextY) / 2]);
+            return;
+          }
+        }
+        cleaned.push(point);
+      });
+      return cleaned.length >= 2 ? cleaned : points;
+    }
+
     function resolveLinePoints(box, tracking, image) {
-      const points = rawLinePoints(box);
+      const points = sanitizeHistoricalProgressionLinePoints(rawLinePoints(box), box);
       if (points.length < 2) {
         return null;
       }

@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Mapping, Sequence, cast
+from typing import Any, Mapping, Sequence, cast
 
 _PROJECT_ROOT_BOOTSTRAP = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT_BOOTSTRAP) not in sys.path:
@@ -22,6 +22,7 @@ from _pg_bootstrap import ensure_project_paths
 PROJECT_ROOT = ensure_project_paths()
 
 from phoenixguard.runtime.python_environment_v3 import assert_repo_venv_runtime
+from phoenixguard.decision.playbook_ai_intelligence_v3 import compact_playbook_ai_intelligence_v3
 
 _PYTHON_ENVIRONMENT_STATUS = assert_repo_venv_runtime("mt4_bridge", PROJECT_ROOT)
 
@@ -390,6 +391,16 @@ def _allowance_source(payload: dict[str, object], execution: dict[str, object], 
     return {}
 
 
+def _compact_playbook_ai_summary(*sources: dict[str, object]) -> dict[str, object]:
+    summary = _first_nested("playbook_ai_summary_v3", *sources)
+    if summary:
+        return summary
+    intelligence = _first_nested("playbook_ai_intelligence_v3", *sources)
+    if not intelligence:
+        return {}
+    return cast(dict[str, object], compact_playbook_ai_intelligence_v3(cast(Mapping[str, Any], intelligence)))
+
+
 def _compact_professional_trade_plan(source: dict[str, object], *fallback_sources: dict[str, object]) -> dict[str, object]:
     sources = (source, *fallback_sources)
     plan = _first_nested("professional_trade_plan", *sources)
@@ -398,6 +409,7 @@ def _compact_professional_trade_plan(source: dict[str, object], *fallback_source
     entry_window = _first_nested("entry_window", *sources, plan)
     expected = _first_nested("expected_move_time", *sources, plan)
     movement = _first_nested("candle_movement", *sources, plan)
+    playbook_ai_summary = _compact_playbook_ai_summary(*sources, plan, resolution, horizon, entry_window, expected, movement)
     return {
         "schema_version": str(plan.get("schema_version") or "PG_PROFESSIONAL_TRADE_PLAN_V3"),
         "professional_grade": bool(plan.get("professional_grade", source.get("professional_grade", False))),
@@ -434,6 +446,7 @@ def _compact_professional_trade_plan(source: dict[str, object], *fallback_source
         "entry_window_duration_sec": _int(entry_window.get("duration_sec"), 0),
         "entry_window_candle_count": _int(entry_window.get("candle_count"), 0),
         "thesis_resolution": resolution,
+        "playbook_ai_summary_v3": playbook_ai_summary,
     }
 
 
@@ -498,6 +511,7 @@ def _compact_allowance_package(
         allowance_family = "INTRADAY" if package_type == "INTRADAY_ENTER_NOW" else "SWING"
     professional_plan = _compact_professional_trade_plan(source, payload, execution, council, timing_decision)
     expected_move_time = _compact_expected_move_time(source, professional_plan, payload, execution, council, timing_decision)
+    playbook_ai_summary = _compact_playbook_ai_summary(source, professional_plan, payload, execution, council, timing_decision)
     return {
         "schema_version": str(source.get("schema_version") or "PG_ALLOWANCE_PACKAGE_V1"),
         "package_type": package_type,
@@ -522,6 +536,7 @@ def _compact_allowance_package(
         "true_blocker": source.get("true_blocker", ""),
         "next_required": source.get("next_required", ""),
         "professional_trade_plan": professional_plan,
+        "playbook_ai_summary_v3": playbook_ai_summary,
         "professional_grade": professional_plan["professional_grade"],
         "professional_thesis_state": professional_plan["professional_thesis_state"],
         "professional_authority_side": professional_plan["authority_side"],
@@ -598,6 +613,7 @@ def _compact_command(
             "allowance_family": allowance_package["allowance_family"],
         },
         "allowance_package": allowance_package,
+        "playbook_ai_summary_v3": allowance_package["playbook_ai_summary_v3"],
         "expected_move_time": allowance_package["expected_move_time"],
         "professional_trade_plan": allowance_package["professional_trade_plan"],
         "reason_codes": _collect_reason_codes(payload, execution, council, permission),

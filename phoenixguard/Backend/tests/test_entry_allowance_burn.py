@@ -131,6 +131,43 @@ def test_entry_state_allows_playbook_enter_now_without_legacy_lane_or_packet() -
     assert entry["allowance_mode"] == "playbook_strategy_entry"
 
 
+def test_entry_state_preserves_dual_buy_sell_thesis_report() -> None:
+    dual_report = {
+        "schema_version": "PG_DUAL_THESIS_REPORT_V3",
+        "selected_authority_side": "SELL",
+        "current_pressure_side": "BUY",
+        "buy": {"side": "BUY", "score": 0.74, "role": "CURRENT_PRESSURE_COMPETING", "status": "CURRENT_PRESSURE_ACTIVE"},
+        "sell": {"side": "SELL", "score": 0.82, "role": "SELECTED_AUTHORITY", "status": "AUTHORITY_ACTIVE"},
+    }
+    live: dict[str, Any] = {}
+    council: dict[str, Any] = {
+        "promotion_trace": {
+            "candidate_side": "SELL",
+            "book_strategy_state": "ENTER_NOW",
+            "opportunity_maturity_state": "ENTER_NOW",
+            "timing_decision": {
+                "entry_now_allowed": True,
+                "playbook_strategy_authorized": True,
+                "timing_mode": "ENTER_NOW",
+            },
+            "execution_lane": {"accepted": False, "name": "SNIPER_ZONE_ENTRY"},
+            "dual_thesis_report_v3": dual_report,
+            "allowance_package": {
+                "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3",
+                "accepted": True,
+                "execution_ready": True,
+                "opportunity_maturity": "ENTER_NOW",
+            },
+        }
+    }
+
+    entry = burn.entry_state(live, council)
+
+    assert entry["dual_thesis_report_v3"]["selected_authority_side"] == "SELL"
+    assert entry["dual_thesis_report_v3"]["current_pressure_side"] == "BUY"
+    assert entry["dual_thesis_report_v3"]["buy"]["status"] == "CURRENT_PRESSURE_ACTIVE"
+
+
 def test_entry_state_blocks_playbook_packet_when_entry_quality_is_not_clean() -> None:
     live: dict[str, Any] = {}
     council: dict[str, Any] = {
@@ -653,6 +690,36 @@ def test_runtime_freshness_warning_relaxation_is_explicit(monkeypatch: pytest.Mo
     assert freshness["fresh"] is True
     assert freshness["capture_age_warning"].startswith("CAPTURE_START_AGE_")
     assert freshness["reasons"] == []
+
+
+def test_runtime_freshness_reject_status_is_never_operator_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = time.time()
+    monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_CAPTURE_AGE_SEC", "180")
+    monkeypatch.setenv("PHOENIXGUARD_BURN_MAX_FRAME_AGE_MS", "180000")
+    live: dict[str, Any] = {
+        "tracking_enabled": True,
+        "status": "running",
+    }
+    perf: dict[str, Any] = {
+        "generated_epoch": now - 0.2,
+        "timing_trace": {
+            "frame_age_ms": 220,
+            "stale_status": "REJECT",
+            "display_published_epoch_ms": int((now - 0.2) * 1000),
+        },
+    }
+
+    freshness = burn.runtime_freshness_state(
+        {"ok": True},
+        {"ok": True},
+        {"ok": True},
+        live,
+        perf,
+    )
+
+    assert freshness["fresh"] is False
+    assert freshness["slow_but_advancing"] is False
+    assert "STALE_STATUS_REJECT" in freshness["reasons"]
 
 
 def test_runtime_freshness_derives_frame_age_from_live_capture_epoch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1205,6 +1272,48 @@ def test_blocked_trend_aligned_study_requires_soft_non_stale_blocker() -> None:
     assert soft["active"] is True
     assert stale["active"] is False
     assert location_risk["active"] is False
+
+
+def test_missed_live_opportunity_study_captures_long_horizon_wait_state() -> None:
+    missed = burn.missed_live_opportunity_study(
+        {
+            "allowed": False,
+            "side": "BUY",
+            "timing_mode": "WAIT_FOR_PULLBACK",
+            "blocked_by": "PLAYBOOK_MATURITY_PREPARE",
+            "next_required": "wait for pullback to local demand or retest hold",
+            "freshness": {"fresh": True},
+        },
+        {
+            "direction_side": "BUY",
+            "direction_confidence": 0.644,
+            "preferred_expiry_sec": 3300,
+            "timing_mode": "WAIT_FOR_PULLBACK",
+        },
+        {},
+    )
+    stale = burn.missed_live_opportunity_study(
+        {
+            "allowed": False,
+            "side": "BUY",
+            "timing_mode": "WAIT_FOR_PULLBACK",
+            "blocked_by": "STALE_RUNTIME_GUARD",
+            "freshness_rejected": True,
+        },
+        {"direction_side": "BUY", "direction_confidence": 0.8, "preferred_expiry_sec": 3300},
+        {},
+    )
+    short_horizon = burn.missed_live_opportunity_study(
+        {"allowed": False, "side": "SELL", "timing_mode": "WAIT_FOR_RETEST", "blocked_by": "REASONING_WATCH"},
+        {"direction_side": "SELL", "direction_confidence": 0.7, "preferred_expiry_sec": 600},
+        {},
+    )
+
+    assert missed["active"] is True
+    assert missed["side"] == "BUY"
+    assert missed["preferred_expiry_sec"] == 3300
+    assert stale["active"] is False
+    assert short_horizon["active"] is False
 
 
 def test_manual_entry_rearm_suppresses_same_candidate_until_rearmed(monkeypatch: pytest.MonkeyPatch) -> None:

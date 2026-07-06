@@ -81,6 +81,57 @@ def test_contract_normalizes_complete_overlay_and_keeps_renderer_bbox_alias() ->
     assert validate_v3_overlay_object(overlay).ok is True
 
 
+def test_contract_sanitizes_historical_progression_edge_spikes() -> None:
+    overlay = normalize_v3_overlay_object(
+        _base_overlay(
+            type="PROGRESSION_PATH",
+            side="SELL",
+            layer="historical_replay",
+            lifecycle_state="HISTORICAL",
+            label="HISTORICAL PROGRESSION",
+            bounds=[221, 7, 435, 668],
+            path=[
+                [221, 7],
+                [252, 505],
+                [291, 530],
+                [394, 668],
+                [415, 597],
+                [435, 7],
+            ],
+            anchor_candles=list(range(7, 18)),
+            source_indices=list(range(7, 18)),
+        )
+    )
+
+    points = cast(Sequence[Sequence[float]], overlay["line_points"])
+
+    assert points[0] == [252.0, 505.0]
+    assert points[-1] == [415.0, 597.0]
+    assert all(point[1] != 7.0 for point in points)
+    assert overlay["bounds"][1] > 400.0
+
+
+def test_live_modes_reject_skinny_vertical_spike_overlays() -> None:
+    overlay = _base_overlay(
+        overlay_id="bad-spike-1",
+        object_id="bad-spike-1",
+        track_id="bad-spike-1",
+        type="PROGRESSION_PATH",
+        side="SELL",
+        layer="historical_replay",
+        label="HISTORICAL PROGRESSION",
+        bounds=[320, 8, 332, 650],
+        anchor_candles=list(range(10, 18)),
+        source_indices=list(range(10, 18)),
+        visible_modes=["REPLAY", "FULL_HISTORY_READ", "ACTIVE_CONTEXT", "INSPECTOR"],
+    )
+
+    reasons = overlay_rejection_reasons(overlay, "REPLAY")
+
+    assert any(reason.startswith("geometry_spike_vertical") for reason in reasons)
+    assert overlay_is_visible(overlay, "REPLAY") is False
+
+
 def test_contract_normalizes_professional_required_fields_and_aliases() -> None:
     overlay = normalize_v3_overlay_object(
         _base_overlay(

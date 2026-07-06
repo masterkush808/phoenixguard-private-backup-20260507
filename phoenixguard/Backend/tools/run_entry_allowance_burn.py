@@ -579,9 +579,32 @@ def annotate(
     return img
 
 
+def windows_open_path(path: Path) -> str | Path:
+    if os.name != "nt":
+        return path
+    resolved = str(path.resolve())
+    if resolved.startswith("\\\\?\\"):
+        return resolved
+    if resolved.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + resolved[2:]
+    return "\\\\?\\" + resolved
+
+
 def save_jpeg(image: Image.Image, path: Path, quality: int = 82) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    image.convert("RGB").save(path, format="JPEG", quality=max(40, min(95, int(quality))), optimize=False, progressive=False)
+    rgb = image.convert("RGB")
+    options: dict[str, Any] = {
+        "format": "JPEG",
+        "quality": max(40, min(95, int(quality))),
+        "optimize": False,
+        "progressive": False,
+    }
+    save_path = windows_open_path(path)
+    try:
+        rgb.save(save_path, **options)
+    except FileNotFoundError:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rgb.save(save_path, **options)
 
 
 def ps_single_quote(value: str) -> str:
@@ -763,6 +786,13 @@ def operator_alert_message(
     packet_id = text(entry.get("packet_id"), "missing")
     gate = mapping(quality_gate) if quality_gate is not None else operator_alert_quality_decision(entry, sample)
     classification = text(gate.get("classification"), operator_alert_classification(entry))
+    dual = mapping(entry.get("dual_thesis_report_v3"))
+    dual_buy = mapping(dual.get("buy") or mapping(dual.get("sides")).get("BUY"))
+    dual_sell = mapping(dual.get("sell") or mapping(dual.get("sides")).get("SELL"))
+    buy_score = number(dual_buy.get("score"))
+    sell_score = number(dual_sell.get("score"))
+    buy_score_text = f"{buy_score:.2f}" if buy_score is not None else "n/a"
+    sell_score_text = f"{sell_score:.2f}" if sell_score is not None else "n/a"
     score = number(entry.get("final_score"))
     score_text = f"{score:.2f}" if score is not None else "n/a"
     status = "EXPIRED - DO NOT ENTER" if expired else "ACTIVE DIRECT ENTRY WINDOW"
@@ -786,6 +816,10 @@ def operator_alert_message(
         f"LANE: {text(entry.get('lane_name'), 'unknown')}",
         f"AUTHORITY: {text(entry.get('allowance_authority'), PLAYBOOK_EXECUTION_AUTHORITY)}",
         f"SCORE: {score_text} | DIRECT ALERT REQUIRED: {required_score_text}",
+        "",
+        f"DUAL READ: authority={text(dual.get('selected_authority_side'), entry_side)} | current_pressure={text(dual.get('current_pressure_side'), leg_side)}",
+        f"BUY STUDY: score={buy_score_text} | {text(dual_buy.get('role'), 'STUDY')} | {text(dual_buy.get('status'), 'STUDYING')}",
+        f"SELL STUDY: score={sell_score_text} | {text(dual_sell.get('role'), 'STUDY')} | {text(dual_sell.get('status'), 'STUDYING')}",
         "",
         f"CURRENT LEG: {leg_side} | candles={leg_count} | stage={leg_stage}",
         f"VISIBLE CANDLES: {text(candle.get('visible_candle_count'), '?')}",
@@ -2001,6 +2035,13 @@ def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str
         or allowance_package.get("professional_trade_plan")
         or opportunity.get("professional_trade_plan")
     )
+    dual_thesis_report = mapping(
+        promotion.get("dual_thesis_report_v3")
+        or council.get("dual_thesis_report_v3")
+        or allowance_package.get("dual_thesis_report_v3")
+        or professional_plan.get("dual_thesis_report_v3")
+        or opportunity.get("dual_thesis_report_v3")
+    )
     thesis_horizon = mapping(
         professional_plan.get("expected_move_time")
         or professional_plan.get("thesis_horizon")
@@ -2127,6 +2168,7 @@ def entry_state(live: Mapping[str, Any], council: Mapping[str, Any]) -> dict[str
         "allowance_authority": allowance_authority,
         "allowance_package_accepted": allowance_accepted,
         "allowance_package_execution_ready": allowance_execution_ready,
+        "dual_thesis_report_v3": dual_thesis_report,
         "expected_move_time": expected_move_time,
         "timing_mode": clean_timing_mode,
         "blocked_by": reported_blocked_by,
@@ -2242,10 +2284,11 @@ def runtime_freshness_state(
         reasons.append("FRAME_AGE_MISSING")
     elif float(frame_age_ms) > max_frame_age_ms:
         reasons.append(f"FRAME_AGE_{round(float(frame_age_ms), 1)}MS_GT_{round(max_frame_age_ms, 1)}MS")
+    hard_reject_statuses = {"FAIL", "FAILED", "ERROR", "REJECT", "REJECTED", "BLOCK", "BLOCKED"}
     published_frame_fresh = bool(
         frame_age_ms is not None
         and float(frame_age_ms) <= max_frame_age_ms
-        and stale_status not in {"STALE", "FAIL", "FAILED", "ERROR"}
+        and stale_status not in {"STALE", *hard_reject_statuses}
     )
     age_within_slow_budget = bool(
         frame_age_ms is not None
@@ -2267,10 +2310,10 @@ def runtime_freshness_state(
         if reject_capture_age_warning or not published_frame_fresh:
             reasons.append(f"CAPTURE_AGE_{round(float(capture_age_sec), 3)}S_GT_{round(max_capture_age_sec, 3)}S")
     lag_only_flags = {"FRAME", "OVERLAY", "MODEL_VOTE", "PACKET", "FRONTEND_RENDER"}
-    stale_status_is_hard = stale_status in {"FAIL", "FAILED", "ERROR"} or (
+    stale_status_is_hard = stale_status in hard_reject_statuses or (
         stale_status == "STALE" and not age_within_slow_budget
     )
-    if stale_status in {"STALE", "FAIL", "FAILED", "ERROR"}:
+    if stale_status in {"STALE", *hard_reject_statuses}:
         if stale_status_is_hard:
             reasons.append(f"STALE_STATUS_{stale_status}")
         else:
@@ -2375,6 +2418,35 @@ def blocked_trend_aligned_study(entry: Mapping[str, Any]) -> dict[str, Any]:
         "timing_mode": text(entry.get("timing_mode")).upper(),
         "final_score": entry.get("final_score"),
         "threshold": entry.get("threshold"),
+    }
+
+
+def missed_live_opportunity_study(entry: Mapping[str, Any], timing: Mapping[str, Any], audit: Mapping[str, Any]) -> dict[str, Any]:
+    blocked = text(entry.get("blocked_by") or audit.get("top_blocker") or audit.get("denied_at")).upper()
+    if bool(entry.get("allowed")):
+        return {"active": False, "reason": "already_allowed"}
+    trade_side = side(entry.get("side") or timing.get("direction_side"))
+    if trade_side not in {"BUY", "SELL"}:
+        return {"active": False, "reason": "no_trade_side"}
+    if bool(entry.get("freshness_rejected")) or "STALE" in blocked:
+        return {"active": False, "reason": "freshness_or_stale_guard"}
+    if any(token in blocked for token in ("BAD_ENTRY", "TRAP", "NO_PATH", "OPPOSING", "LATE", "INVALID")):
+        return {"active": False, "reason": f"hard_or_dangerous_blocker:{blocked}"}
+    confidence = number(timing.get("direction_confidence"), 0.0) or 0.0
+    expiry_sec = number(timing.get("preferred_expiry_sec"), 0.0) or 0.0
+    timing_mode = text(entry.get("timing_mode") or timing.get("timing_mode")).upper()
+    if confidence < 0.60 or expiry_sec < 1800:
+        return {"active": False, "reason": "not_long_horizon_or_confident_enough"}
+    if timing_mode not in {"WAIT_FOR_PULLBACK", "WAIT_FOR_RETEST", "WAIT_FOR_BREAK_CONFIRMATION", "PREPARE"}:
+        return {"active": False, "reason": f"timing_not_a_missed_watch:{timing_mode}"}
+    return {
+        "active": True,
+        "reason": blocked or "LONG_HORIZON_LIVE_OPPORTUNITY_BLOCKED_AS_WAIT",
+        "side": trade_side,
+        "timing_mode": timing_mode,
+        "direction_confidence": round(float(confidence), 4),
+        "preferred_expiry_sec": round(float(expiry_sec), 3),
+        "next_required": text(entry.get("next_required") or audit.get("next_required")),
     }
 
 
@@ -2530,6 +2602,9 @@ def compact_sample(seq: int, live_resp: Mapping[str, Any], council_resp: Mapping
     blocked_study = blocked_trend_aligned_study(entry)
     entry["blocked_trend_aligned_study"] = bool(blocked_study.get("active"))
     entry["blocked_trend_aligned_reason"] = text(blocked_study.get("reason"))
+    missed_study = missed_live_opportunity_study(entry, timing, audit)
+    entry["missed_live_opportunity_study"] = bool(missed_study.get("active"))
+    entry["missed_live_opportunity_reason"] = text(missed_study.get("reason"))
     opportunity = opportunity_class(entry, audit)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -2570,6 +2645,7 @@ def compact_sample(seq: int, live_resp: Mapping[str, Any], council_resp: Mapping
                 "reason": text(entry.get("next_required") or audit.get("next_required") or entry.get("blocked_by"), opportunity),
             },
             "blocked_trend_aligned_study": blocked_study,
+            "missed_live_opportunity_study": missed_study,
             "timing_decision": timing,
             "execution_lane": lane,
             "candle_movement": candle_movement_brief(candle_context),
@@ -3013,6 +3089,7 @@ def main() -> int:
     manual_alert_suppressed_observations = 0
     operator_alert_count = 0
     blocked_trend_aligned_study_observations = 0
+    missed_live_opportunity_observations = 0
     last_storage = 0.0
     last_raw = 0.0
     last_periodic_screenshot = 0.0
@@ -3070,10 +3147,18 @@ def main() -> int:
             blocked_trend_aligned_observation = bool(entry.get("blocked_trend_aligned_study"))
             if blocked_trend_aligned_observation:
                 blocked_trend_aligned_study_observations += 1
+            missed_live_opportunity_observation = bool(entry.get("missed_live_opportunity_study"))
+            if missed_live_opportunity_observation:
+                missed_live_opportunity_observations += 1
             entry = mapping(sample.get("entry"))
             append_jsonl(samples_path, sample)
             blocked_enter_now_observation = bool(capture_blocked_enter_now and enter_now_observation and not allowed_observation)
-            should_capture_evidence = allowed_observation or bool(manual_alert.get("allowed")) or blocked_enter_now_observation
+            should_capture_evidence = bool(
+                allowed_observation
+                or bool(manual_alert.get("allowed"))
+                or blocked_enter_now_observation
+                or missed_live_opportunity_observation
+            )
             packet_episode_id = str(entry.get("packet_id") or "") if packet_backed_allowed_observation else ""
             alert_episode_id = text(manual_alert.get("key"))
             entry_key = "|".join(
@@ -3086,6 +3171,7 @@ def main() -> int:
                     f"packet_id={packet_episode_id}",
                     f"manual_alert_key={alert_episode_id}",
                     f"blocked_trend_aligned={blocked_trend_aligned_observation}",
+                    f"missed_live_opportunity={missed_live_opportunity_observation}",
                     str(entry.get("blocked_by") or ""),
                 ]
             )
@@ -3119,12 +3205,16 @@ def main() -> int:
                 event["manual_alert_key"] = text(manual_alert.get("key"))
                 event["blocked_entry_capture"] = bool(blocked_enter_now_observation)
                 event["blocked_trend_aligned_study_capture"] = bool(blocked_trend_aligned_observation)
+                event["missed_live_opportunity_capture"] = bool(missed_live_opportunity_observation)
                 event["execution_authorized"] = bool(entry.get("execution_authorized"))
                 event["packet_present"] = bool(entry.get("packet_present"))
                 event["evidence_reason"] = (
                     "blocked_enter_now_observation"
                     if blocked_enter_now_observation
                     else (
+                        "missed_live_opportunity_study"
+                        if missed_live_opportunity_observation
+                        else
                         "manual_alert_rearmed_entry"
                         if bool(manual_alert.get("allowed"))
                         else "new_entry_episode"
@@ -3137,6 +3227,7 @@ def main() -> int:
                 event["manual_alert_observations"] = manual_alert_observations
                 event["manual_alert_suppressed_observations"] = manual_alert_suppressed_observations
                 event["blocked_trend_aligned_study_observations"] = blocked_trend_aligned_study_observations
+                event["missed_live_opportunity_observations"] = missed_live_opportunity_observations
                 if bool(args.operator_alert) and packet_backed_allowed_observation:
                     alert_quality = operator_alert_quality_decision(entry, sample)
                     event["operator_alert_quality"] = alert_quality
@@ -3193,6 +3284,7 @@ def main() -> int:
                     "manual_alert_suppressed_observation_count": manual_alert_suppressed_observations,
                     "operator_alert_count": operator_alert_count,
                     "blocked_trend_aligned_study_observation_count": blocked_trend_aligned_study_observations,
+                    "missed_live_opportunity_observation_count": missed_live_opportunity_observations,
                     "elapsed_sec": round(time.time() - started, 3),
                     "remaining_sec": round(max(0.0, end - time.time()), 3),
                     "last_frame": mapping(sample.get("frames")).get("display_frame_id"),
@@ -3223,6 +3315,7 @@ def main() -> int:
                 "manual_alert_suppressed_observation_count": manual_alert_suppressed_observations,
                 "operator_alert_count": operator_alert_count,
                 "blocked_trend_aligned_study_observation_count": blocked_trend_aligned_study_observations,
+                "missed_live_opportunity_observation_count": missed_live_opportunity_observations,
                 "elapsed_sec": round(time.time() - started, 3),
                 "remaining_sec": 0.0,
                 "updated_at_utc": utc_now(),

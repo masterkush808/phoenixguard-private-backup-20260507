@@ -37,6 +37,7 @@ from phoenixguard.decision.model_council_v3 import (
     ModelCouncilV3,
     build_promotion_failure_audit_v3,
 )
+from phoenixguard.decision.playbook_ai_intelligence_v3 import compact_playbook_ai_intelligence_v3
 from phoenixguard.runtime.instrument_context import (
     build_instrument_context,
     symbol_context_from_instrument_context,
@@ -469,11 +470,16 @@ def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
 
 _SESSION_NESTED_DUPLICATE_KEYS = frozenset(
     {
+        "latest_execution_packet",
+        "latest_model_council_packet",
+        "latest_model_council_study_packet",
+        "latest_study_packet",
         "model_council_result",
         "model_council_study_packet",
         "model_council",
         "execution_packet",
         "model_council_packet",
+        "study_packet",
     }
 )
 _PACKET_SELF_REFERENCE_KEYS = frozenset(
@@ -581,7 +587,95 @@ def _strip_packet_self_references(value: Any, *, depth: int = 0) -> Any:
 
 
 def _compact_persisted_execution_packet(value: Mapping[str, Any]) -> dict[str, Any]:
-    return cast(dict[str, Any], _strip_packet_self_references(value))
+    selected = {
+        "action",
+        "allowance_authority",
+        "allowance_mode",
+        "allowance_package",
+        "book_strategy_playbook",
+        "book_strategy_state",
+        "broker_source_lock_id",
+        "capture_count",
+        "chart_transform_id",
+        "classification",
+        "confidence",
+        "created_epoch",
+        "created_epoch_ms",
+        "created_epoch_sec",
+        "denied_at",
+        "dual_thesis_report_v3",
+        "entry_window",
+        "execution",
+        "execution_authority",
+        "execution_authorized",
+        "execution_ready",
+        "execution_timing",
+        "expected_move_time",
+        "expiry_seconds",
+        "frame_id",
+        "frames_used",
+        "history_context",
+        "instrument_context",
+        "lane",
+        "lane_accepted",
+        "lane_name",
+        "live_integrity",
+        "market",
+        "market_context",
+        "model_council",
+        "next_required",
+        "opportunity_maturity",
+        "opportunity_maturity_state",
+        "packet_id",
+        "packet_result",
+        "packet_type",
+        "playbook_ai_summary_v3",
+        "professional_grade",
+        "professional_thesis_state",
+        "professional_trade_plan",
+        "promotion_trace",
+        "provenance",
+        "quality_gate",
+        "recommended_expiry_seconds",
+        "runtime_model_health",
+        "schema_version",
+        "score",
+        "selected_lane",
+        "sequence_id",
+        "sequence_length",
+        "sequence_signature",
+        "sequence_status",
+        "session_id",
+        "side",
+        "source_lock_id",
+        "state_version",
+        "symbol",
+        "symbol_context",
+        "thesis_horizon",
+        "threshold",
+        "timeframe",
+        "trade_permission",
+        "valid_until_epoch",
+        "valid_until_epoch_ms",
+        "valid_until_epoch_sec",
+        "valid_until_utc",
+    }
+    packet = _compact_live_nested_payload(_compact_selected_mapping(value, selected))
+    allowance = _compact_live_state_allowance_package(value.get("allowance_package"))
+    if allowance:
+        packet["allowance_package"] = allowance
+    promotion = _compact_live_state_promotion_trace(value.get("promotion_trace"))
+    if promotion:
+        packet["promotion_trace"] = promotion
+    council = value.get("model_council")
+    if isinstance(council, Mapping):
+        compact_council = _compact_live_state_model_council_for_packet(council)
+        if compact_council:
+            packet["model_council"] = compact_council
+    playbook_ai_summary = _compact_live_state_playbook_ai_summary(value)
+    if playbook_ai_summary:
+        packet["playbook_ai_summary_v3"] = playbook_ai_summary
+    return cast(dict[str, Any], _strip_packet_self_references(packet))
 
 
 def _compact_selected_mapping(value: Mapping[str, Any], keys: set[str]) -> dict[str, Any]:
@@ -590,6 +684,19 @@ def _compact_selected_mapping(value: Mapping[str, Any], keys: set[str]) -> dict[
         for key in keys
         if value.get(key) not in (None, "", [], {})
     }
+
+
+def _compact_live_state_playbook_ai_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    summary = mapping.get("playbook_ai_summary_v3")
+    if isinstance(summary, Mapping):
+        return cast(dict[str, Any], _strip_packet_self_references(summary))
+    intelligence = mapping.get("playbook_ai_intelligence_v3")
+    if isinstance(intelligence, Mapping):
+        return compact_playbook_ai_intelligence_v3(cast(Mapping[str, Any], intelligence))
+    return {}
 
 
 _COMPACT_LIVE_STATE_MAX_SEQUENCE_ITEMS = 8
@@ -719,6 +826,7 @@ def _compact_persisted_council_payload(value: Mapping[str, Any]) -> dict[str, An
         "candidate_id",
         "candidate_stage",
         "denied_at",
+        "dual_thesis_report_v3",
         "entry_quality",
         "execution",
         "execution_lane",
@@ -736,6 +844,7 @@ def _compact_persisted_council_payload(value: Mapping[str, Any]) -> dict[str, An
         "non_executable_state",
         "packet_result",
         "pair_profile",
+        "playbook_ai_summary_v3",
         "price_location",
         "promotion_failure_audit_v3",
         "promotion_trace",
@@ -758,6 +867,9 @@ def _compact_persisted_council_payload(value: Mapping[str, Any]) -> dict[str, An
         "two_candle_study",
     }
     payload = _compact_selected_mapping(value, selected)
+    playbook_ai_summary = _compact_live_state_playbook_ai_summary(value)
+    if playbook_ai_summary:
+        payload["playbook_ai_summary_v3"] = playbook_ai_summary
     return _compact_live_nested_payload(payload)
 
 
@@ -769,6 +881,7 @@ def _compact_persisted_study_packet(value: Mapping[str, Any]) -> dict[str, Any]:
         "created_epoch",
         "created_epoch_sec",
         "denied_at",
+        "dual_thesis_report_v3",
         "entry_quality",
         "book_strategy",
         "book_strategy_state",
@@ -789,6 +902,7 @@ def _compact_persisted_study_packet(value: Mapping[str, Any]) -> dict[str, Any]:
         "packet_id",
         "packet_result",
         "packet_type",
+        "playbook_ai_summary_v3",
         "price_location",
         "promotion_failure_audit_v3",
         "promotion_trace",
@@ -815,6 +929,9 @@ def _compact_persisted_study_packet(value: Mapping[str, Any]) -> dict[str, Any]:
         "valid_until_epoch_sec",
     }
     payload = _compact_selected_mapping(value, selected)
+    playbook_ai_summary = _compact_live_state_playbook_ai_summary(value)
+    if playbook_ai_summary:
+        payload["playbook_ai_summary_v3"] = playbook_ai_summary
     council = value.get("model_council")
     if isinstance(council, Mapping):
         payload["model_council"] = _compact_persisted_council_payload(cast(Mapping[str, Any], council))
@@ -822,21 +939,74 @@ def _compact_persisted_study_packet(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _compact_persisted_model_council_result(value: Mapping[str, Any]) -> dict[str, Any]:
-    payload = dict(value)
-    for key in (
-        "model_council_study_packet",
-        "study_packet",
-        "latest_model_council_study_packet",
-        "latest_study_packet",
-        "model_council_packet",
-        "execution_packet",
-        "latest_model_council_packet",
-        "latest_execution_packet",
-    ):
-        payload.pop(key, None)
-    council = payload.get("model_council")
+    selected = {
+        "accepted_lanes",
+        "allowance_mode",
+        "allowance_package",
+        "book_strategy",
+        "book_strategy_playbook",
+        "book_strategy_state",
+        "broker_execution_state",
+        "candidate_id",
+        "candidate_stage",
+        "classification",
+        "confidence",
+        "denied_at",
+        "dual_thesis_report_v3",
+        "entry_quality",
+        "execution",
+        "execution_authorized",
+        "execution_lane",
+        "execution_threshold",
+        "expected_move_time",
+        "final_execution_score",
+        "final_side",
+        "final_state",
+        "instrument_context",
+        "lane_accepted",
+        "market_play",
+        "market_reality",
+        "memory_confirmation",
+        "next_required",
+        "non_executable_state",
+        "opportunity_maturity",
+        "packet_export_present",
+        "packet_present",
+        "packet_result",
+        "pair_profile",
+        "playbook_ai_decision",
+        "playbook_ai_summary_v3",
+        "price_location",
+        "professional_thesis_resolution",
+        "professional_trade_plan",
+        "promotion_failure_audit_v3",
+        "promotion_trace",
+        "quality_gate",
+        "reasoning_arbitration",
+        "regime",
+        "release_condition",
+        "release_state",
+        "score",
+        "sequence_context",
+        "sequence_context_readiness",
+        "selected_execution_lane",
+        "side",
+        "state",
+        "strategy_read",
+        "symbol_context",
+        "thesis_horizon",
+        "timing_decision",
+        "trade_permission",
+        "true_blocker",
+        "two_candle_study",
+    }
+    payload = _compact_live_nested_payload(_compact_selected_mapping(value, selected))
+    council = value.get("model_council")
     if isinstance(council, Mapping):
         payload["model_council"] = _compact_persisted_council_payload(cast(Mapping[str, Any], council))
+    playbook_ai_summary = _compact_live_state_playbook_ai_summary(value)
+    if playbook_ai_summary:
+        payload["playbook_ai_summary_v3"] = playbook_ai_summary
     payload["study_packet_present"] = bool(
         value.get("model_council_study_packet")
         or value.get("study_packet")
@@ -1020,6 +1190,7 @@ _COMPACT_LIVE_STATE_COUNCIL_KEYS: frozenset[str] = frozenset(
         "candidate_stage",
         "confidence",
         "denied_at",
+        "dual_thesis_report_v3",
         "execution_lane",
         "final_side",
         "final_state",
@@ -1109,12 +1280,18 @@ def _compact_live_state_allowance_package(value: Any) -> dict[str, Any]:
         "book_strategy_maturity",
         "professional_grade",
         "professional_trade_plan",
+        "playbook_ai_summary_v3",
+        "dual_thesis_report_v3",
         "professional_thesis_state",
         "expected_move_time",
         "entry_window",
         "thesis_horizon",
     }
-    return _strip_packet_self_references(_compact_selected_mapping(mapping, selected))
+    compact = _compact_selected_mapping(mapping, selected)
+    playbook_ai_summary = _compact_live_state_playbook_ai_summary(mapping)
+    if playbook_ai_summary:
+        compact["playbook_ai_summary_v3"] = playbook_ai_summary
+    return _strip_packet_self_references(compact)
 
 
 def _compact_live_state_sequence_context(value: Any) -> dict[str, Any]:
@@ -1200,6 +1377,7 @@ def _compact_live_state_model_council_for_packet(value: Any) -> dict[str, Any]:
         "candidate_id",
         "candidate_stage",
         "denied_at",
+        "dual_thesis_report_v3",
         "entry_quality",
         "execution",
         "execution_threshold",
@@ -1216,11 +1394,15 @@ def _compact_live_state_model_council_for_packet(value: Any) -> dict[str, Any]:
         "side",
         "state",
         "strategy_read",
+        "playbook_ai_summary_v3",
         "timing_decision",
         "trade_permission",
         "true_blocker",
     }
     compact = _compact_selected_mapping(mapping, selected)
+    playbook_ai_summary = _compact_live_state_playbook_ai_summary(mapping)
+    if playbook_ai_summary:
+        compact["playbook_ai_summary_v3"] = playbook_ai_summary
     sequence_context = _compact_live_state_sequence_context(mapping.get("sequence_context"))
     if sequence_context:
         compact["sequence_context"] = sequence_context
@@ -1270,6 +1452,7 @@ def _compact_live_state_execution_packet(value: Any) -> dict[str, Any]:
         "execution_lane",
         "book_strategy_state",
         "book_strategy_playbook",
+        "playbook_ai_summary_v3",
         "strategy_read",
         "candle_movement",
     }
@@ -1279,6 +1462,9 @@ def _compact_live_state_execution_packet(value: Any) -> dict[str, Any]:
     packet = cast(dict[str, Any], packet_raw)
     if isinstance(packet.get("execution_lane"), Mapping):
         packet["execution_lane"] = _compact_live_state_execution_lane(packet.get("execution_lane"))
+    playbook_ai_summary = _compact_live_state_playbook_ai_summary(mapping)
+    if playbook_ai_summary:
+        packet["playbook_ai_summary_v3"] = playbook_ai_summary
     council = mapping.get("model_council")
     if isinstance(council, Mapping):
         packet["model_council"] = _compact_live_state_model_council_for_packet(council)
@@ -4532,6 +4718,19 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
         row = _mapping_to_dict(packet)
         if not row:
             return {}
+        council_for_dual = _mapping_to_dict(row.get("model_council"))
+        dual_thesis_report = _mapping_to_dict(
+            row.get("dual_thesis_report_v3")
+            or council_for_dual.get("dual_thesis_report_v3")
+            or _mapping_to_dict(row.get("allowance_package")).get("dual_thesis_report_v3")
+            or _mapping_to_dict(row.get("opportunity_maturity")).get("dual_thesis_report_v3")
+            or _mapping_to_dict(row.get("book_strategy")).get("dual_thesis_report_v3")
+        )
+        if dual_thesis_report:
+            row["dual_thesis_report_v3"] = dual_thesis_report
+            if council_for_dual:
+                council_for_dual["dual_thesis_report_v3"] = dual_thesis_report
+                row["model_council"] = council_for_dual
         row.setdefault("packet_type", "STUDY_PACKET")
         row.setdefault("schema_version", str(row.get("schema_version") or "PG_MODEL_COUNCIL_STUDY_V3"))
         created = _float_or(row.get("created_epoch") or row.get("created_epoch_sec"), 0.0)
@@ -4674,6 +4873,13 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
     )
     if valid_until_epoch <= created_epoch:
         valid_until_epoch = created_epoch + study_ttl_sec
+    dual_thesis_report = _mapping_to_dict(
+        result.get("dual_thesis_report_v3")
+        or council.get("dual_thesis_report_v3")
+        or _mapping_to_dict(result.get("allowance_package")).get("dual_thesis_report_v3")
+        or _mapping_to_dict(result.get("opportunity_maturity")).get("dual_thesis_report_v3")
+        or _mapping_to_dict(result.get("book_strategy")).get("dual_thesis_report_v3")
+    )
     return normalize(
         {
             "packet_id": packet_id,
@@ -4685,6 +4891,7 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
             "ttl_sec": max(0.1, valid_until_epoch - created_epoch),
             "execution": {"enabled": False, "state": state, "side": side if side in {"BUY", "SELL"} else None},
             "model_council": council,
+            "dual_thesis_report_v3": dual_thesis_report,
             "promotion_trace": _mapping_to_dict(result.get("promotion_trace") or council.get("promotion_trace")),
             "block_reason": result.get("block_reason") or council.get("arbitration_reason") or "study packet synthesized from council state",
         }
@@ -15790,10 +15997,18 @@ class PhoenixGuardWindowTrackingAdapter:
                 try:
                     x0, y0, x1, y1 = [float(value) for value in bbox[:4]]
                     center_x = float(candle.get("center_x", (x0 + x1) * 0.5) or (x0 + x1) * 0.5)
-                    if direction_value == "BUY":
-                        center_y = max(y0, y1)
-                    elif direction_value == "SELL":
-                        center_y = min(y0, y1)
+                    body_bbox = cast(Sequence[Any], candle.get("body_bbox") or candle.get("body_box") or [])
+                    candle_direction = str(candle.get("direction") or direction_value or "").upper()
+                    if len(body_bbox) >= 4:
+                        _bx0, by0, _bx1, by1 = [float(value) for value in body_bbox[:4]]
+                        body_top = min(by0, by1)
+                        body_bottom = max(by0, by1)
+                        if candle_direction == "BUY":
+                            center_y = body_top
+                        elif candle_direction == "SELL":
+                            center_y = body_bottom
+                        else:
+                            center_y = (body_top + body_bottom) * 0.5
                     else:
                         center_y = float(candle.get("center_y", (y0 + y1) * 0.5) or (y0 + y1) * 0.5)
                 except (TypeError, ValueError):
@@ -15802,6 +16017,36 @@ class PhoenixGuardWindowTrackingAdapter:
                 int(round(max(0.0, min(float(image_w - 1), center_x)))),
                 int(round(max(0.0, min(float(image_h - 1), center_y)))),
             ]
+
+        def suppress_isolated_wick_spike_points(points: Sequence[Sequence[int]]) -> list[list[int]]:
+            if len(points) < 3:
+                return [list(point[:2]) for point in points if len(point) >= 2]
+            cleaned: list[list[int]] = []
+            edge_band = max(8.0, float(image_h) * 0.035)
+            hard_vertical_jump = max(90.0, float(image_h) * 0.22)
+            for index, point in enumerate(points):
+                if len(point) < 2:
+                    continue
+                x_value = int(point[0])
+                y_value = int(point[1])
+                if 0 < index < len(points) - 1:
+                    prev_point = points[index - 1]
+                    next_point = points[index + 1]
+                    if len(prev_point) >= 2 and len(next_point) >= 2:
+                        prev_y = float(prev_point[1])
+                        next_y = float(next_point[1])
+                        y_float = float(y_value)
+                        near_chart_edge = y_float <= edge_band or y_float >= float(image_h - 1) - edge_band
+                        isolated_from_neighbors = (
+                            abs(prev_y - y_float) >= hard_vertical_jump
+                            and abs(next_y - y_float) >= hard_vertical_jump
+                        )
+                        if near_chart_edge and isolated_from_neighbors:
+                            replacement_y = int(round((prev_y + next_y) * 0.5))
+                            cleaned.append([x_value, max(0, min(image_h - 1, replacement_y))])
+                            continue
+                cleaned.append([x_value, y_value])
+            return cleaned
 
         def dedupe_points(points: Sequence[Sequence[int]]) -> list[list[int]]:
             output: list[list[int]] = []
@@ -15900,7 +16145,9 @@ class PhoenixGuardWindowTrackingAdapter:
                 if direction not in {"BUY", "SELL"}:
                     direction = "HOLD"
             previous_direction = direction if direction in {"BUY", "SELL"} else previous_direction
-            path_points = dedupe_points([candle_path_point(candle, direction) for candle in segment])
+            path_points = suppress_isolated_wick_spike_points(
+                dedupe_points([candle_path_point(candle, direction) for candle in segment])
+            )
             if len(path_points) < 2:
                 path_points = dedupe_points(
                     [
@@ -17646,11 +17893,61 @@ class PhoenixGuardWindowTrackingAdapter:
                 ]
             return []
 
+        def sanitize_historical_path_points(points: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+            if len(points) < 3:
+                return list(points)
+            ys = [float(point[1]) for point in points]
+            min_y = min(ys)
+            max_y = max(ys)
+            span_y = max_y - min_y
+            if span_y < max(120.0, float(chart_bounds[3] - chart_bounds[1]) * 0.28):
+                return list(points)
+            jump_limit = max(120.0, span_y * 0.55)
+            edge_band = max(10.0, span_y * 0.035)
+            cleaned: list[tuple[int, int]] = []
+            for index, point in enumerate(points):
+                y_value = float(point[1])
+                near_extreme_edge = y_value <= min_y + edge_band or y_value >= max_y - edge_band
+                if not near_extreme_edge:
+                    cleaned.append(point)
+                    continue
+                if index == 0 and abs(float(points[1][1]) - y_value) >= jump_limit:
+                    continue
+                if index == len(points) - 1 and abs(float(points[index - 1][1]) - y_value) >= jump_limit:
+                    continue
+                if 0 < index < len(points) - 1:
+                    prev_y = float(points[index - 1][1])
+                    next_y = float(points[index + 1][1])
+                    if abs(prev_y - y_value) >= jump_limit and abs(next_y - y_value) >= jump_limit:
+                        cleaned.append((int(point[0]), int(round((prev_y + next_y) * 0.5))))
+                        continue
+                cleaned.append(point)
+            return cleaned if len(cleaned) >= 2 else list(points)
+
+        def bbox_from_points(points: Sequence[tuple[int, int]], *, pad: int = 6) -> tuple[int, int, int, int] | None:
+            if len(points) < 2:
+                return None
+            xs = [int(point[0]) for point in points]
+            ys = [int(point[1]) for point in points]
+            clipped_bbox = _clip_bbox_to_bounds(
+                chart_bounds,
+                (
+                    min(xs) - pad,
+                    min(ys) - pad,
+                    max(xs) + pad,
+                    max(ys) + pad,
+                ),
+            )
+            return (
+                int(clipped_bbox[0]),
+                int(clipped_bbox[1]),
+                int(clipped_bbox[2]),
+                int(clipped_bbox[3]),
+            )
+
         for raw_segment in historical_structure:
             segment = _mapping_to_dict(raw_segment)
             raw_bbox = cast(Sequence[Any], segment.get("path_bounds") or segment.get("bbox", []))
-            if len(raw_bbox) < 4:
-                continue
             direction = str(segment.get("direction", "HOLD") or "HOLD").upper()
             color: ColorRGB = (
                 (96, 218, 145)
@@ -17659,11 +17956,17 @@ class PhoenixGuardWindowTrackingAdapter:
                 if direction == "SELL"
                 else (138, 160, 181)
             )
-            bbox = _clip_bbox_to_bounds(chart_bounds, _translate_bbox(raw_bbox, offset_x=offset_x, offset_y=offset_y))
+            path_points = sanitize_historical_path_points(segment_path_points(segment))
+            point_bbox = bbox_from_points(path_points)
+            if point_bbox is not None:
+                bbox = point_bbox
+            elif len(raw_bbox) >= 4:
+                bbox = _clip_bbox_to_bounds(chart_bounds, _translate_bbox(raw_bbox, offset_x=offset_x, offset_y=offset_y))
+            else:
+                continue
             width = max(1, int(bbox[2] - bbox[0]))
             height = max(1, int(bbox[3] - bbox[1]))
             radius = max(8, min(14, int(round(min(width, height) * 0.10))))
-            path_points = segment_path_points(segment)
             if len(path_points) >= 2:
                 for first, second in zip(path_points, path_points[1:]):
                     self._draw_dashed_line(draw, first, second, _rgba(color, 168), width=2, dash=7, gap=5)
@@ -25982,7 +26285,11 @@ class ContinuousWindowTrackerService:
                 "decision_artifact_state": "visual_only_blocked_no_execution_packet",
             }
             if model_council_study_packet:
-                blocked_decision_payload["model_council_study_packet"] = model_council_study_packet
+                blocked_decision_payload["model_council_study_packet"] = (
+                    _compact_persisted_study_packet(model_council_study_packet)
+                    if not _env_bool("PHOENIXGUARD_FULL_DECISION_ARTIFACTS", False)
+                    else model_council_study_packet
+                )
             _write_json_atomic(decision_path, blocked_decision_payload)
             mark_stage("decision_write")
             mark_stage("fast_blocked_return")
@@ -26165,10 +26472,19 @@ class ContinuousWindowTrackerService:
             else _mapping_to_dict(model_council_result.get("model_council")),
         }
         if model_council_study_packet:
-            decision_payload["model_council_study_packet"] = model_council_study_packet
+            decision_payload["model_council_study_packet"] = (
+                _compact_persisted_study_packet(model_council_study_packet)
+                if compact_decision_artifacts
+                else model_council_study_packet
+            )
         if model_council_packet:
-            decision_payload["model_council_packet"] = model_council_packet
-            decision_payload["execution_packet"] = model_council_packet
+            compact_packet = (
+                _compact_persisted_execution_packet(model_council_packet)
+                if compact_decision_artifacts
+                else model_council_packet
+            )
+            decision_payload["model_council_packet"] = compact_packet
+            decision_payload["execution_packet"] = compact_packet
         _write_json_atomic(decision_path, decision_payload)
         mark_stage("decision_write")
 

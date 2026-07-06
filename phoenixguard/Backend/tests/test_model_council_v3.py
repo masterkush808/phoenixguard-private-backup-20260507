@@ -2,8 +2,9 @@ from __future__ import annotations
 import pytest
 
 from copy import deepcopy
-from typing import Any, Mapping, cast
+from typing import Any, Callable, Mapping, cast
 
+from phoenixguard.decision import model_council_v3 as model_council_module
 from phoenixguard.decision.model_council_v3 import (
     MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
     PG_EXECUTION_PACKET_SCHEMA_VERSION,
@@ -142,6 +143,19 @@ def _second_packet(side: str = "BUY", *, skill_pass: bool = True) -> dict[str, A
     if first["execution"]["enabled"] is True:
         return first
     return council.evaluate(_strong_snapshot(side, frame_id=101, skill_pass=skill_pass), now_epoch=NOW + 0.5)
+
+
+def test_model_council_carries_astar_authorization_survival_trace() -> None:
+    result = _second_packet("BUY")
+
+    allowance = cast(Mapping[str, Any], result["allowance_package"])
+    maturity = cast(Mapping[str, Any], result["opportunity_maturity"])
+    trace = cast(Mapping[str, Any], allowance["authorization_survival_trace_v3"])
+
+    assert allowance["astar_decision_state_v3"]["schema_version"] == "PG_ASTAR_DECISION_STATE_V3"
+    assert maturity["authorization_survival_trace_v3"] == trace
+    assert trace["final_state"] in {"ENTER_NOW", "PREPARING", "BLOCKED_BY_RUNTIME", "WATCHING"}
+    assert "trace_steps" in trace
 
 
 def _high_frequency_snapshot(side: str = "BUY", *, frame_id: int = 201) -> dict[str, Any]:
@@ -1392,6 +1406,243 @@ def test_strategy_package_uses_visible_swing_horizon_not_one_candle_scalp() -> N
     assert expected["projection_horizon"]["applied"] is True
 
 
+def test_strategy_package_uses_full_overlay_suite_projection_horizon() -> None:
+    council = ModelCouncilV3()
+    first = _strong_snapshot("BUY", frame_id=120)
+    second = _strong_snapshot("BUY", frame_id=121)
+    for snapshot in (first, second):
+        snapshot["candidate_side"] = "BUY"
+        snapshot["tracking_summary"] = {
+            "entry_state": "SNIPER_READY",
+            "local_direction": "BUY",
+            "global_direction": "BUY",
+            "visible_candle_count": 54,
+            "structure_boxes": [
+                {
+                    "id": "overlay_wave_buy",
+                    "label": "IMPULSE",
+                    "direction": "BUY",
+                    "bbox": [180, 240, 420, 90],
+                    "sniper_window": [184, 212, 224, 246],
+                    "target_window": [430, 84, 506, 118],
+                    "invalidation_y": 260,
+                    "source_indices": list(range(24)),
+                    "confidence": 0.9,
+                }
+            ],
+            "support_resistance_zones": [
+                {
+                    "zone_id": "demand_overlay_suite",
+                    "role": "DEMAND",
+                    "side": "BUY",
+                    "bbox": [180, 210, 250, 252],
+                    "current_price_inside": True,
+                    "distance_from_current": 0.03,
+                    "confidence": 0.88,
+                },
+                {
+                    "zone_id": "supply_overlay_suite",
+                    "role": "SUPPLY",
+                    "side": "SELL",
+                    "bbox": [430, 84, 506, 118],
+                    "distance_from_current": 0.44,
+                    "confidence": 0.82,
+                },
+            ],
+            "projection": {
+                "direction": "BUY",
+                "zones": [
+                    {
+                        "id": "projected_overlay_suite_buy",
+                        "kind": "sniper",
+                        "direction": "BUY",
+                        "bbox": [184, 212, 224, 246],
+                        "target_bbox": [430, 84, 506, 118],
+                        "path": [[184, 236], [246, 202], [318, 158], [430, 96]],
+                        "expected_move_candles": 24,
+                        "confidence": 0.91,
+                    }
+                ],
+            },
+            "angle_vectors": [
+                {
+                    "id": "overlay_angle_buy",
+                    "direction": "BUY",
+                    "line_points": [[184, 236], [430, 96]],
+                    "confidence": 0.8,
+                }
+            ],
+        }
+
+    council.evaluate(first, now_epoch=NOW)
+    packet = council.evaluate(second, now_epoch=NOW + 0.5)
+
+    plan = packet["opportunity_maturity"]["professional_trade_plan"]
+    book = packet["opportunity_maturity"]["book_strategy"]
+    assert plan["trend_alignment"]["overlay_suite_thesis"] is True
+    assert plan["trade_hierarchy"]["local_distribution"]["overlay_suite_expected_candles"] >= 24
+    assert plan["thesis_horizon"]["overlay_suite_expected_candles"] >= 24
+    assert plan["thesis_horizon"]["expected_candle_count"] >= 24
+    assert "OVERLAY_SUITE_FULL_READ" in book["strategy_combo"]
+    assert "OVERLAY_ENTRY_TARGET_MAP" in book["strategy_combo"]
+    assert "OVERLAY_PROJECTION_PATH" in book["strategy_combo"]
+    ai_summary = packet["playbook_ai_summary_v3"]
+    assert ai_summary["schema_version"] == "PG_PLAYBOOK_AI_SUMMARY_V3"
+    assert ai_summary["full_suite_ready"] is True
+    assert ai_summary["thesis_arbitration"]["winner"] == "BUY"
+    assert ai_summary["meta_label"]["candidate_tradeable"] is True
+    assert ai_summary["horizon"]["optimized_candle_count"] >= 8
+    assert packet["allowance_package"]["playbook_ai_summary_v3"]["thesis_arbitration"]["winner"] == "BUY"
+    assert packet["opportunity_maturity"]["playbook_ai_summary_v3"]["full_suite_ready"] is True
+    assert packet["model_council"]["playbook_ai_summary_v3"]["horizon"]["optimized_duration_sec"] >= 300
+
+
+def test_professional_plan_honors_book_full_suite_room_override() -> None:
+    candle_context: dict[str, Any] = {
+        "timeframe": "M5",
+        "timeframe_seconds": 300,
+        "visible_candle_count": 54,
+        "current_leg": {"side": "BUY", "candle_count": 9, "move_stage": "MATURE"},
+        "move_stage": "MATURE",
+        "opposing_force_room": {
+            "candidate_side": "BUY",
+            "room_ok": True,
+            "estimated_candles_to_force": 2,
+        },
+        "candles_per_leg": [
+            {"side": "BUY", "candle_count": 6},
+            {"side": "SELL", "candle_count": 7},
+            {"side": "BUY", "candle_count": 9},
+        ],
+    }
+    book_strategy: dict[str, Any] = {
+        "maturity_state": "ENTER_NOW",
+        "entry_profile": "AGGRESSIVE_SNIPER",
+        "reaction_type": "CONTINUATION_PRESSURE",
+        "evidence": {
+            "aligned_with_primary_bias": True,
+            "professional_profit_room_ok": True,
+            "professional_profit_room_candles": 18,
+            "professional_profit_room_source": "full_overlay_suite_projection_overrides_near_zone",
+            "full_suite_room_override_ready": True,
+            "overlay_suite_evidence_v3": {
+                "entry_ready": True,
+                "full_suite_ready": True,
+                "target_ready": True,
+                "expected_move_candles_from_projection": 18,
+            },
+        },
+    }
+
+    professional_trade_plan_v3 = cast(
+        Callable[..., dict[str, Any]],
+        getattr(model_council_module, "_professional_trade_plan_v3"),
+    )
+    plan = professional_trade_plan_v3(
+        candle_context,
+        book_strategy,
+        candidate_side="BUY",
+        entry_window_seconds=300,
+        path_class="DIRECT_CONTINUATION",
+        professional_thesis_resolution={
+            "authority_side": "BUY",
+            "directional_target_room_candles": 2,
+            "directional_target_room_source": "directional_opposing_zone",
+        },
+    )
+
+    assert plan["professional_grade"] is True
+    assert plan["blocker"] == ""
+    assert plan["trade_hierarchy"]["local_distribution"]["effective_room_candles"] == 18
+    assert plan["trade_hierarchy"]["local_distribution"]["room_overridden_by_book_profit"] is True
+    assert plan["thesis_horizon"]["expected_candle_count"] >= 8
+
+
+def test_playbook_ai_wait_route_is_warning_when_playbook_strike_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _confirmed_wait_route_intelligence(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": "PG_PLAYBOOK_AI_INTELLIGENCE_V3",
+            "semantic_graph": {
+                "coverage": {
+                    "full_suite_ready": True,
+                    "overlay_arsenal_score": 0.91,
+                }
+            },
+            "thesis_arbitration": {
+                "winner": "BUY",
+                "winning_score": 0.74,
+                "margin": 0.16,
+                "conflict": True,
+            },
+            "meta_label": {
+                "selected_side": "BUY",
+                "candidate_tradeable": True,
+                "selected": {
+                    "target_before_invalidation_probability": 0.81,
+                },
+            },
+            "horizon": {
+                "selected_side": "BUY",
+                "selected": {
+                    "optimized_candle_count": 12,
+                    "optimized_duration_sec": 3600,
+                    "basis": "test_professional_projection",
+                },
+            },
+            "regime_router": {
+                "route": "WAIT_FOR_CLEARER_THESIS",
+                "regime": "CONFLICT_OR_RANGE_ARBITRATION",
+            },
+        }
+
+    def _confirmed_wait_route_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": "PG_PLAYBOOK_AI_SUMMARY_V3",
+            "full_suite_ready": True,
+            "thesis_arbitration": {
+                "winner": "BUY",
+                "winning_score": 0.74,
+                "margin": 0.16,
+            },
+            "meta_label": {
+                "candidate_tradeable": True,
+                "target_before_invalidation_probability": 0.81,
+            },
+            "horizon": {
+                "optimized_candle_count": 12,
+                "optimized_duration_sec": 3600,
+            },
+            "regime_router": {
+                "route": "WAIT_FOR_CLEARER_THESIS",
+            },
+        }
+
+    monkeypatch.setattr(
+        "phoenixguard.decision.model_council_v3.build_playbook_ai_intelligence_v3",
+        _confirmed_wait_route_intelligence,
+    )
+    monkeypatch.setattr(
+        "phoenixguard.decision.model_council_v3.compact_playbook_ai_intelligence_v3",
+        _confirmed_wait_route_summary,
+    )
+
+    council = ModelCouncilV3()
+    first = _strong_snapshot("BUY", frame_id=130)
+    second = _strong_snapshot("BUY", frame_id=131)
+
+    council.evaluate(first, now_epoch=NOW)
+    packet = council.evaluate(second, now_epoch=NOW + 0.5)
+
+    assert packet["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    decision = packet["professional_trade_plan"]["playbook_ai_decision"]
+    assert decision["block_reason"] == ""
+    assert decision["warning_reason"] == "SOFT_WAIT_FOR_CLEARER_THESIS"
+    assert decision["strike_override_ready"] is True
+    assert packet["opportunity_maturity"]["denied_at"] == "NONE"
+
+
 def test_unresolved_countertrend_cannot_publish_professional_package() -> None:
     council = ModelCouncilV3()
     first = _strong_snapshot("BUY", frame_id=140)
@@ -1990,7 +2241,7 @@ def test_aligned_buy_structure_needs_wave_proof_before_stale_sell_reload() -> No
     assert packet["promotion_trace"]["wave_context"]["phase"] == "MID_RANGE_TIMING_ONLY"
 
 
-def test_mature_high_score_directional_flow_publishes_momentum_packet() -> None:
+def test_mature_high_score_directional_flow_without_wave_proof_stays_study() -> None:
     council = ModelCouncilV3()
     snapshots = [_strong_snapshot("BUY", frame_id=100 + index) for index in range(3)]
     for snapshot in snapshots:
@@ -2022,18 +2273,22 @@ def test_mature_high_score_directional_flow_publishes_momentum_packet() -> None:
     council.evaluate(snapshots[1], now_epoch=NOW + 0.5)
     packet = council.evaluate(snapshots[2], now_epoch=NOW + 1.0)
 
-    assert packet["packet_type"] == "PG_EXECUTION_PACKET_V3"
-    assert packet["execution"]["enabled"] is True
-    assert packet["execution"]["side"] == "BUY"
-    assert packet["selected_execution_lane"] == "MOMENTUM_ACCEPTANCE_ENTRY"
-    assert packet["promotion_trace"]["mature_directional_flow_ready"] is True
-    assert packet["promotion_trace"]["permission_override_allowed"] is True
+    assert packet["packet_type"] == "STUDY_PACKET"
+    assert packet["execution"]["enabled"] is False
+    lane = packet["promotion_trace"]["execution_lane"]
+    momentum_lane = next(
+        row for row in lane["evaluated_lanes"] if row["name"] == "MOMENTUM_ACCEPTANCE_ENTRY"
+    )
+    assert momentum_lane["accepted"] is False
+    assert momentum_lane["momentum_context_ready"] is False
+    assert "MID_RANGE_NEEDS_FLOW_PROOF" in momentum_lane["momentum_wave_blockers"]
+    assert packet["book_strategy"]["maturity_state"] in {"VALID_WATCH", "PREPARE"}
 
 
-def test_momentum_acceptance_requires_high_lane_score() -> None:
+def test_momentum_acceptance_requires_high_lane_score_and_clean_wave_context() -> None:
     council = ModelCouncilV3()
-    first = _strong_snapshot("BUY", frame_id=100)
-    second = _strong_snapshot("BUY", frame_id=101)
+    first = _wave_riding_snapshot("BUY", frame_id=100)
+    second = _wave_riding_snapshot("BUY", frame_id=101)
     for snapshot, score in ((first, 0.78), (second, 0.95)):
         snapshot["buy_score"] = score
         snapshot["sell_score"] = 0.01
@@ -2041,7 +2296,8 @@ def test_momentum_acceptance_requires_high_lane_score() -> None:
         snapshot["market_context"]["inside_valid_trigger_zone"] = False
         snapshot["market_context"]["current_location"] = "MIDDLE_SAFE"
         snapshot["entry_quality"] = "EARLY_WATCH"
-        snapshot["timing"]["state"] = "WAIT"
+        snapshot["timing"]["state"] = "READY"
+        snapshot["execution_timing"]["lane"] = "MOMENTUM_ACCEPTANCE_ENTRY"
         snapshot["path_risk"] = {"state": "STRONG", "score": 0.84, "executable_allowed": True}
         snapshot["latest_signal"] = {"entry_state": "ACTIVE"}
         snapshot["tracking_summary"] = {"entry_state": "ACTIVE", "local_direction": "BUY"}
@@ -2052,7 +2308,15 @@ def test_momentum_acceptance_requires_high_lane_score() -> None:
 
     packet = council.evaluate(second, now_epoch=NOW + 0.5)
     assert packet["execution"]["enabled"] is True
-    assert packet["selected_execution_lane"] == "MOMENTUM_ACCEPTANCE_ENTRY"
+    lane = packet["promotion_trace"]["execution_lane"]
+    momentum_lane = next(
+        row for row in lane["evaluated_lanes"] if row["name"] == "MOMENTUM_ACCEPTANCE_ENTRY"
+    )
+    assert "MOMENTUM_ACCEPTANCE_ENTRY" in lane["accepted_lanes"]
+    assert momentum_lane["accepted"] is True
+    assert momentum_lane["momentum_context_ready"] is True
+    assert momentum_lane["momentum_wave_blockers"] == []
+    assert packet["book_strategy"]["maturity_state"] == "ENTER_NOW"
 
 
 def test_execution_packet_v3_contains_required_fields() -> None:
