@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 from io import BytesIO
+import json
+import time
 from typing import Any, Mapping
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -81,6 +86,44 @@ def _bmp_bytes(width: int = 160, height: int = 120) -> bytes:
     output = BytesIO()
     image.save(output, format="BMP")
     return output.getvalue()
+
+
+def _signature_headers(
+    *,
+    frame_bytes: bytes,
+    session_id: str = "external-live",
+    source_id: str = "edge-agent",
+    sequence_id: str = "",
+    frame_id: int = 1,
+    capture_epoch_ms: int = 1_780_000_000_000,
+    secret: str = "signing-secret",
+    nonce: str | None = None,
+) -> dict[str, str]:
+    timestamp = str(int(round(time.time() * 1000.0)))
+    resolved_nonce = nonce or uuid4().hex
+    frame_sha256 = hashlib.sha256(frame_bytes).hexdigest()
+    canonical = "\n".join(
+        [
+            "PG_FRAME_INGEST_V1",
+            "POST",
+            f"/v1/mobile/frame-ingest/sessions/{session_id}/frames",
+            session_id,
+            source_id,
+            sequence_id,
+            str(frame_id),
+            str(capture_epoch_ms),
+            frame_sha256,
+            timestamp,
+            resolved_nonce,
+        ]
+    )
+    signature = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    return {
+        "X-PhoenixGuard-Signature-Alg": "HMAC-SHA256-V1",
+        "X-PhoenixGuard-Timestamp": timestamp,
+        "X-PhoenixGuard-Nonce": resolved_nonce,
+        "X-PhoenixGuard-Signature": f"v1={signature}",
+    }
 
 
 def test_frame_ingest_config_reports_contract(monkeypatch: Any) -> None:
@@ -167,6 +210,75 @@ def test_frame_ingest_accepts_authenticated_chart_frame(monkeypatch: Any) -> Non
     assert call["timeframe"] == "M5"
     assert call["frame_id"] == 42
     assert call["metadata"]["plane"] == "chart"
+
+
+def test_frame_ingest_requires_hmac_signature_when_enabled(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_SIGNING_SECRET", "signing-secret")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE", "1")
+    client = _client()
+
+    response = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/frames",
+        headers={"Authorization": "Bearer secret-token"},
+        files={"frame": ("chart.png", _png_bytes(), "image/png")},
+        data={"source_id": "edge-agent", "capture_epoch_ms": "1780000000000", "frame_id": "1"},
+    )
+
+    assert response.status_code == 401
+    assert "signature headers" in response.json()["detail"]
+
+
+def test_frame_ingest_accepts_valid_signature_and_writes_audit(monkeypatch: Any, tmp_path: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_SIGNING_SECRET", "signing-secret")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE", "1")
+    audit_log = tmp_path / "security_audit.jsonl"
+    monkeypatch.setenv("PHOENIXGUARD_SECURITY_AUDIT_LOG", str(audit_log))
+    frame_bytes = _png_bytes()
+    tracker = _FakeFrameTracker()
+    client = _client(tracker)
+
+    response = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/frames",
+        headers={"Authorization": "Bearer secret-token", **_signature_headers(frame_bytes=frame_bytes)},
+        files={"frame": ("chart.png", frame_bytes, "image/png")},
+        data={"source_id": "edge-agent", "capture_epoch_ms": "1780000000000", "frame_id": "1"},
+    )
+
+    assert response.status_code == 202
+    entries = [json.loads(line) for line in audit_log.read_text(encoding="utf-8").splitlines()]
+    assert entries[-1]["event"] == "frame_ingest_accepted"
+    assert entries[-1]["frame_sha256"] == hashlib.sha256(frame_bytes).hexdigest()
+
+
+def test_frame_ingest_rejects_signature_nonce_replay(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_SIGNING_SECRET", "signing-secret")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE", "1")
+    frame_bytes = _png_bytes()
+    headers = {"Authorization": "Bearer secret-token", **_signature_headers(frame_bytes=frame_bytes, nonce="replay-nonce")}
+    client = _client()
+
+    first = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/frames",
+        headers=headers,
+        files={"frame": ("chart.png", frame_bytes, "image/png")},
+        data={"source_id": "edge-agent", "capture_epoch_ms": "1780000000000", "frame_id": "1"},
+    )
+    second = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/frames",
+        headers=headers,
+        files={"frame": ("chart.png", frame_bytes, "image/png")},
+        data={"source_id": "edge-agent", "capture_epoch_ms": "1780000000000", "frame_id": "1"},
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 409
+    assert "nonce" in second.json()["detail"]
 
 
 def test_frame_ingest_requires_capture_epoch_and_frame_id(monkeypatch: Any) -> None:

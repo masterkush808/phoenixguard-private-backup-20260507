@@ -1,0 +1,8 @@
+account_id = "replace-with-cloudflare-account-id"
+zone_id = "replace-with-cloudflare-zone-id"
+dashboard_hostname = "phoenixguard.example.com"
+admin_allowed_emails = [
+  "owner@example.com"
+]
+frame_ingest_rate_limit_requests = 30
+frame_ingest_rate_limit_period = 60

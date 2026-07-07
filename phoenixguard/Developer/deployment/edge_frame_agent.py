@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+import hashlib
+import hmac
 from io import BytesIO
 import json
 import mimetypes
@@ -10,7 +12,7 @@ from pathlib import Path
 import sys
 import time
 from typing import Any, Iterator, Mapping, cast
-from urllib import error, request
+from urllib import error, parse, request
 from uuid import uuid4
 
 from PIL import Image
@@ -25,6 +27,7 @@ class AgentProfile:
     base_url: str = ""
     session_id: str = "external-live"
     token: str = ""
+    signing_secret: str = ""
     source_id: str = "edge-agent"
     source_type: str = "pc_screen_capture"
     source_url: str = ""
@@ -44,6 +47,7 @@ _PROFILE_FIELDS: tuple[str, ...] = (
     "base_url",
     "session_id",
     "token",
+    "signing_secret",
     "source_id",
     "source_type",
     "source_url",
@@ -168,6 +172,73 @@ def _multipart_body(fields: dict[str, str], file_field: str, filename: str, data
     return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
+def _canonical_frame_signature_payload(
+    *,
+    method: str,
+    path: str,
+    session_id: str,
+    source_id: str,
+    sequence_id: str,
+    frame_id: int,
+    capture_epoch_ms: str,
+    frame_sha256: str,
+    timestamp: str,
+    nonce: str,
+) -> str:
+    return "\n".join(
+        [
+            "PG_FRAME_INGEST_V1",
+            method.upper(),
+            path,
+            str(session_id or "").strip(),
+            str(source_id or "").strip(),
+            str(sequence_id or "").strip(),
+            str(int(frame_id or 0)),
+            str(int(capture_epoch_ms or "0")),
+            str(frame_sha256 or "").strip().lower(),
+            str(timestamp or "").strip(),
+            str(nonce or "").strip(),
+        ]
+    )
+
+
+def _signature_headers(
+    *,
+    endpoint: str,
+    session_id: str,
+    source_id: str,
+    sequence_id: str,
+    frame_id: int,
+    capture_epoch_ms: str,
+    frame_bytes: bytes,
+    signing_secret: str,
+) -> dict[str, str]:
+    if not signing_secret:
+        return {}
+    timestamp = str(int(round(time.time() * 1000.0)))
+    nonce = uuid4().hex
+    frame_sha256 = hashlib.sha256(frame_bytes).hexdigest()
+    canonical = _canonical_frame_signature_payload(
+        method="POST",
+        path=parse.urlparse(endpoint).path,
+        session_id=session_id,
+        source_id=source_id,
+        sequence_id=sequence_id,
+        frame_id=frame_id,
+        capture_epoch_ms=capture_epoch_ms,
+        frame_sha256=frame_sha256,
+        timestamp=timestamp,
+        nonce=nonce,
+    )
+    signature = hmac.new(signing_secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    return {
+        "X-PhoenixGuard-Signature-Alg": "HMAC-SHA256-V1",
+        "X-PhoenixGuard-Timestamp": timestamp,
+        "X-PhoenixGuard-Nonce": nonce,
+        "X-PhoenixGuard-Signature": f"v1={signature}",
+    }
+
+
 def _post_frame(
     *,
     base_url: str,
@@ -183,15 +254,17 @@ def _post_frame(
     frame_id: int,
     timeout_sec: float,
     metadata: Mapping[str, Any],
+    signing_secret: str = "",
 ) -> dict[str, object]:
     endpoint = f"{base_url.rstrip('/')}/v1/mobile/frame-ingest/sessions/{session_id}/frames"
+    capture_epoch_ms = str(int(round(time.time() * 1000.0)))
     fields = {
         "source_id": source_id,
         "source_url": source_url,
         "symbol": symbol,
         "timeframe": timeframe,
         "sequence_id": sequence_id,
-        "capture_epoch_ms": str(int(round(time.time() * 1000.0))),
+        "capture_epoch_ms": capture_epoch_ms,
         "frame_id": str(frame_id),
         "metadata_json": json.dumps(
             {"agent": "edge_frame_agent.py", "filename": filename, **dict(metadata)},
@@ -206,6 +279,16 @@ def _post_frame(
             "Authorization": f"Bearer {token}",
             "Content-Type": content_type,
             "User-Agent": "PhoenixGuardEdgeFrameAgent/1.0",
+            **_signature_headers(
+                endpoint=endpoint,
+                session_id=session_id,
+                source_id=source_id,
+                sequence_id=sequence_id,
+                frame_id=frame_id,
+                capture_epoch_ms=capture_epoch_ms,
+                frame_bytes=frame_bytes,
+                signing_secret=signing_secret,
+            ),
         },
         method="POST",
     )
@@ -225,6 +308,7 @@ def main() -> int:
     parser.add_argument("--base-url", default="", help="PhoenixGuard API base URL, for example https://pg.example.com")
     parser.add_argument("--session-id", default="", help="Tracker session id to feed.")
     parser.add_argument("--token", default="", help="Frame ingest token. Defaults to PHOENIXGUARD_FRAME_INGEST_TOKEN.")
+    parser.add_argument("--signing-secret", default="", help="Frame HMAC signing secret. Defaults to PHOENIXGUARD_FRAME_INGEST_SIGNING_SECRET.")
     parser.add_argument("--source-id", default="", help="Stable feed identity for source locking.")
     parser.add_argument("--source-type", default="", help="Feed source type, for example pc_screen_capture.")
     parser.add_argument("--source-url", default="", help="Broker/chart URL being represented by the frame feed.")
@@ -276,6 +360,9 @@ def main() -> int:
     if not token:
         print("Missing ingest token. Pass --token or set PHOENIXGUARD_FRAME_INGEST_TOKEN.", file=sys.stderr)
         return 2
+    signing_secret = pick_text(args.signing_secret, profile.signing_secret)
+    if not signing_secret:
+        signing_secret = str(os.getenv("PHOENIXGUARD_FRAME_INGEST_SIGNING_SECRET", "") or "").strip()
 
     bbox = _parse_bbox(bbox_text)
     sequence_id = pick_text(args.sequence_id, profile.sequence_id, source_id)
@@ -313,6 +400,7 @@ def main() -> int:
                 frame_id=frame_id,
                 timeout_sec=timeout_sec,
                 metadata=metadata,
+                signing_secret=signing_secret,
             )
             print(
                 json.dumps(

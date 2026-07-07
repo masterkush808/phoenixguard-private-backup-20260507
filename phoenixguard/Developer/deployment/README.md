@@ -24,11 +24,12 @@ frame_feed_profiles.example.json / run_pc_frame_feed.ps1
 
 frame_ingest_token_registry.example.json / generate_frame_feed_token.py
   Scoped feed-token workflow for per-user/session/source authorization without
-  committing secrets.
+  committing secrets. Production feed tokens should also have a separate
+  signing_secret_env so uploads are HMAC-signed and nonce protected.
 
 verify_universal_frame_feed.py
   Deployment verifier for API health, frame-ingest readiness, and optional
-  synthetic frame upload smoke testing after the VPS is live.
+  synthetic signed-frame upload smoke testing after the VPS is live.
 
 verify_release_readiness.py
   Static release gate for deployment contracts: locks, bootstrap references,
@@ -43,8 +44,17 @@ phoenixguard_cloud_watchdog.py / phoenixguard-cloud-watchdog.service
 linux_cloud_brain_bootstrap.sh
   Ubuntu VPS bootstrap for the cheapest cloud-brain deployment: clone repo,
   create .venv-live with Python 3.11 from requirements/locks/live-linux-py311.txt,
-  install the live stack, write systemd, enable the watchdog, optionally install
-  Cloudflare Tunnel, and start the API.
+  install the live stack, write signed-ingest env, enable the watchdog,
+  optionally install Cloudflare Tunnel, verify model assets when a manifest is
+  supplied, and start the API.
+
+cloudflare_security/
+  Terraform template for Cloudflare Access, WAF custom rules, and frame-ingest
+  rate limits. Fill variables only after the Cloudflare account/zone are ready.
+
+model_asset_manifest.py
+  Generates and verifies SHA-256 manifests for ignored model/memory/runtime
+  assets so the VPS can fail before launch when assets are missing or altered.
 
 phoenixguard-cloud-brain.service / phoenixguard-cloud-brain.env.example
   systemd and env-file references for the Linux cloud-brain service.
@@ -69,6 +79,16 @@ Before a release or migration, run:
 ```text
 python Developer/deployment/verify_release_readiness.py
 python Developer/deployment/verify_universal_frame_feed.py --base-url http://127.0.0.1:8793
+```
+
+For production upload smoke tests where signatures are required:
+
+```text
+python Developer/deployment/verify_universal_frame_feed.py ^
+  --base-url https://phoenixguard.example.com ^
+  --token "<feed-token>" ^
+  --signing-secret "<feed-signing-secret>" ^
+  --upload-smoke
 ```
 
 The mobile/browser feed uploader is served by the API at:

@@ -12,6 +12,12 @@ external chart frames pushed through the secured frame-ingest contract. Static
 hosting or serverless functions still cannot run the full Python/CV/model brain,
 but the chart source is no longer limited to the developer PC.
 
+Security gate:
+
+```text
+docs/deployment/PHOENIXGUARD_SECURITY_HARDENING_GATE.md
+```
+
 ## Deployment Shape
 
 Use this production shape:
@@ -96,6 +102,10 @@ The API is intentionally token-gated:
 ```text
 POST /v1/mobile/frame-ingest/sessions/{session_id}/frames
 Authorization: Bearer <PHOENIXGUARD_FRAME_INGEST_TOKEN>
+X-PhoenixGuard-Signature-Alg: HMAC-SHA256-V1
+X-PhoenixGuard-Timestamp: <epoch-ms>
+X-PhoenixGuard-Nonce: <unique nonce>
+X-PhoenixGuard-Signature: v1=<hmac-sha256>
 multipart field: frame=<png/jpg/webp>
 form fields: source_id, symbol, timeframe, source_url, sequence_id, capture_epoch_ms, frame_id, metadata_json
 ```
@@ -104,6 +114,8 @@ Required production env:
 
 ```powershell
 $env:PHOENIXGUARD_FRAME_INGEST_TOKEN = "<long-random-secret>"
+$env:PHOENIXGUARD_FRAME_INGEST_SIGNING_SECRET = "<separate-long-random-signing-secret>"
+$env:PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE = "1"
 $env:PHOENIXGUARD_FRAME_INGEST_MAX_SOURCE_AGE_SEC = "180"
 ```
 
@@ -114,6 +126,7 @@ python .\Developer\deployment\edge_frame_agent.py `
   --base-url "https://phoenixguard.example.com" `
   --session-id "edge-eurcad-m5" `
   --token "<long-random-secret>" `
+  --signing-secret "<separate-long-random-signing-secret>" `
   --source-id "user-001-edge" `
   --source-url "https://pocketoption.com/en/cabinet/demo-quick-high-low/" `
   --symbol "EURCAD" `
@@ -194,6 +207,7 @@ sudo REPO_URL="https://github.com/masterkush808/phoenixguard-private-backup-2026
   DOMAIN="phoenixguard.example.com" \
   CLOUDFLARED_TOKEN="<cloudflare-tunnel-token>" \
   FRAME_INGEST_TOKEN="<long-random-secret>" \
+  FRAME_INGEST_SIGNING_SECRET="<separate-long-random-signing-secret>" \
   bash Developer/deployment/linux_cloud_brain_bootstrap.sh
 ```
 
@@ -216,6 +230,7 @@ python .\Developer\deployment\edge_frame_agent.py `
   --base-url "https://phoenixguard.example.com" `
   --session-id "edge-live" `
   --token "<long-random-secret>" `
+  --signing-secret "<separate-long-random-signing-secret>" `
   --source-id "user-001-edge" `
   --symbol "EURCAD" `
   --timeframe "M5" `
@@ -258,6 +273,21 @@ Preferred MVP:
 ```text
 Cloudflare Tunnel or Tailscale Funnel
 public HTTPS domain -> localhost:8793 on the Windows worker
+```
+
+For Cloudflare, use the security-as-code template before public traffic:
+
+```text
+Developer/deployment/cloudflare_security/
+```
+
+Minimum Cloudflare controls:
+
+```text
+Access for dashboard/admin
+Service token or mTLS-capable feed agents for frame-ingest
+WAF custom rules
+rate limits on /v1/mobile/frame-ingest/*
 ```
 
 Later production:
@@ -330,6 +360,7 @@ Do not commit broker credentials.
 Do not expose the raw mobile API port publicly.
 Use HTTPS.
 Use authentication before allowing dashboard access.
+Require signed frame-ingest uploads before accepting worldwide feeds.
 Use fresh package TTLs for MT4.
 Fail closed if source lock, frame freshness, or bridge heartbeat fails.
 Keep production runtime separate from dev/training environments.

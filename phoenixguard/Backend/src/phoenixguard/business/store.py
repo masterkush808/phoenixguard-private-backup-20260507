@@ -13,6 +13,7 @@ from typing import Any, Mapping, cast
 from .packages import (
     DEFAULT_PAID_PLAN_CODE,
     FREE_PREVIEW_PLAN_CODE,
+    INTERNAL_FAMILY_LIFETIME_PLAN_CODE,
     package_profile_for_plan,
     package_catalog_payload,
     phoenix_guard_settings_for_plan,
@@ -687,6 +688,55 @@ class BusinessStore:
             target_type="license",
             target_id=license_record.id,
             metadata=profile.public_payload(),
+        )
+        return license_record
+
+    def grant_internal_family_lifetime_license(self, *, customer: Customer, admin: Customer) -> License:
+        now = time.time()
+        profile = package_profile_for_plan(INTERNAL_FAMILY_LIFETIME_PLAN_CODE)
+        existing = next(
+            (
+                item
+                for item in self.customer_licenses(customer.id)
+                if item.plan_code == INTERNAL_FAMILY_LIFETIME_PLAN_CODE
+                and item.status in {"active", "trialing", "grace"}
+                and float(item.expires_at_epoch or 0.0) > now
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+
+        provider_subscription_id = f"internal_family_lifetime_{customer.id}"
+        subscription = Subscription(
+            id=_stable_id("sub", provider_subscription_id),
+            customer_id=customer.id,
+            provider_subscription_id=provider_subscription_id,
+            plan_code=INTERNAL_FAMILY_LIFETIME_PLAN_CODE,
+            status=profile.subscription_status,
+            current_period_end_epoch=now + 86400 * profile.license_duration_days,
+        )
+        self.subscriptions[subscription.id] = subscription
+        license_key = f"PG-FAMILY-{secrets.token_hex(8).upper()}"
+        license_record = License(
+            id=_stable_id("lic", f"{customer.id}:{provider_subscription_id}"),
+            customer_id=customer.id,
+            subscription_id=subscription.id,
+            license_key_hash=_hash_secret(license_key),
+            license_key_hint=license_key[-6:],
+            plan_code=subscription.plan_code,
+            status=profile.license_status,
+            expires_at_epoch=subscription.current_period_end_epoch,
+        )
+        self.licenses[license_record.id] = license_record
+        self.license_keys[license_record.id] = license_key
+        self.audit(
+            actor_type="admin",
+            actor_id=admin.id,
+            action="license.internal_family_lifetime_granted",
+            target_type="license",
+            target_id=license_record.id,
+            metadata={"customer_id": customer.id, "package_profile": profile.public_payload()},
         )
         return license_record
 

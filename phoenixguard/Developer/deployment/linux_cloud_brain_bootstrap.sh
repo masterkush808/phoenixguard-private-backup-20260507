@@ -11,7 +11,9 @@ API_PORT="${API_PORT:-8793}"
 DOMAIN="${DOMAIN:-}"
 CLOUDFLARED_TOKEN="${CLOUDFLARED_TOKEN:-}"
 FRAME_INGEST_TOKEN="${FRAME_INGEST_TOKEN:-}"
+FRAME_INGEST_SIGNING_SECRET="${FRAME_INGEST_SIGNING_SECRET:-}"
 ASSET_ARCHIVE_URL="${ASSET_ARCHIVE_URL:-}"
+MODEL_ASSET_MANIFEST="${MODEL_ASSET_MANIFEST:-}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "Run as root on the VPS: sudo -E bash Developer/deployment/linux_cloud_brain_bootstrap.sh" >&2
@@ -20,6 +22,9 @@ fi
 
 if [[ -z "${FRAME_INGEST_TOKEN}" ]]; then
   FRAME_INGEST_TOKEN="$(openssl rand -hex 32)"
+fi
+if [[ -z "${FRAME_INGEST_SIGNING_SECRET}" ]]; then
+  FRAME_INGEST_SIGNING_SECRET="$(openssl rand -hex 32)"
 fi
 
 REPO_ROOT="${INSTALL_ROOT}/phoenixguard"
@@ -83,6 +88,15 @@ if [[ -n "${ASSET_ARCHIVE_URL}" ]]; then
   rm -f "${tmp_asset}"
 fi
 
+if [[ -n "${MODEL_ASSET_MANIFEST}" ]]; then
+  echo "[PhoenixGuard Cloud Brain] Verifying model/runtime asset manifest."
+  sudo -u "${SERVICE_USER}" "${REPO_ROOT}/.venv-live/bin/python" \
+    "${REPO_ROOT}/Developer/deployment/model_asset_manifest.py" \
+    --root "${REPO_ROOT}" \
+    --manifest "${MODEL_ASSET_MANIFEST}" \
+    --mode verify
+fi
+
 sudo -u "${SERVICE_USER}" mkdir -p \
   "${REPO_ROOT}/runtime/live/logs_live" \
   "${REPO_ROOT}/runtime/live/data_live"
@@ -103,6 +117,7 @@ cat > "${FEED_TOKEN_REGISTRY}" <<EOF
       "enabled": true,
       "user_id": "deployment-admin",
       "token_env": "PHOENIXGUARD_FEED_TOKEN_ADMIN",
+      "signing_secret_env": "PHOENIXGUARD_FEED_SIGNING_SECRET_ADMIN",
       "max_active_feeds": 1,
       "min_interval_sec": 10
     }
@@ -124,6 +139,10 @@ PHOENIXGUARD_DATA_DIR=${REPO_ROOT}/runtime/live/data_live
 PHOENIXGUARD_LOGS_DIR=${REPO_ROOT}/runtime/live/logs_live
 PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY=${FEED_TOKEN_REGISTRY}
 PHOENIXGUARD_FEED_TOKEN_ADMIN=${FRAME_INGEST_TOKEN}
+PHOENIXGUARD_FEED_SIGNING_SECRET_ADMIN=${FRAME_INGEST_SIGNING_SECRET}
+PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE=1
+PHOENIXGUARD_FRAME_INGEST_SIGNATURE_MAX_SKEW_SEC=300
+PHOENIXGUARD_FRAME_INGEST_SIGNATURE_NONCE_TTL_SEC=600
 PHOENIXGUARD_FRAME_INGEST_MAX_SOURCE_AGE_SEC=180
 PHOENIXGUARD_FRAME_INGEST_REQUIRE_CAPTURE_EPOCH=1
 PHOENIXGUARD_FRAME_INGEST_REQUIRE_FRAME_ID=1
@@ -233,6 +252,8 @@ if [[ -n "${DOMAIN}" ]]; then
 fi
 echo "Frame ingest token:"
 echo "${FRAME_INGEST_TOKEN}"
+echo "Frame ingest signing secret:"
+echo "${FRAME_INGEST_SIGNING_SECRET}"
 echo ""
-echo "Store that token securely. Edge frame agents need it to feed the cloud brain."
+echo "Store the token and signing secret securely. Edge frame agents need both to feed the cloud brain."
 echo "Token registry: ${FEED_TOKEN_REGISTRY}"

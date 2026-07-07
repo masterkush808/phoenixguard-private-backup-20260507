@@ -142,6 +142,35 @@ Connector may write status files:
 - Device refresh tokens must be revocable.
 - Log enough to investigate fraud, but do not log broker passwords or card data.
 
+## Internal Family Lifetime Access
+
+Family or owner-approved unpaid access must not be implemented as a public
+checkout coupon.
+
+Use a hidden internal plan:
+
+```text
+plan_code: internal-family-lifetime
+public_visible: false
+self_service: false
+billing_kind: internal-lifetime
+```
+
+Only admin users can grant it:
+
+```text
+POST /v1/admin/customers/{customer_id}/family-lifetime-license
+```
+
+The license is lifetime from a billing perspective, but it still obeys:
+
+- risk disclosure acceptance.
+- broker account binding.
+- device binding and freshness.
+- command freshness.
+- account/server/license matching.
+- admin revocation.
+
 ## Secret Handling
 
 Keep out of the EA and connector:
@@ -158,4 +187,3 @@ Allowed in the EA:
 - public API base URL.
 - build channel.
 - default risk settings.
-

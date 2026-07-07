@@ -6,6 +6,7 @@
       "enabled": true,
       "user_id": "user001",
       "token_env": "PHOENIXGUARD_FEED_TOKEN_USER001",
+      "signing_secret_env": "PHOENIXGUARD_FEED_SIGNING_SECRET_USER001",
       "allowed_session_prefixes": ["user001-"],
       "allowed_source_ids": ["user001-desktop-chart", "user001-mobile-pwa", "user001-folder-replay"],
       "allowed_symbols": ["EURCAD", "EURUSD", "GBPUSD", "AUDUSD"],

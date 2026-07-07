@@ -8,6 +8,7 @@ from typing import Any, Mapping
 FREE_PREVIEW_PLAN_CODE = "hybrid-free-2h"
 STANDARD_PLAN_CODE = "hybrid-standard-6h"
 PROFESSIONAL_PLAN_CODE = "hybrid-professional-24x7"
+INTERNAL_FAMILY_LIFETIME_PLAN_CODE = "internal-family-lifetime"
 SCALE_REVIEW_PLAN_CODE = "scale-review"
 DEFAULT_PAID_PLAN_CODE = STANDARD_PLAN_CODE
 
@@ -33,6 +34,7 @@ class PackageProfile:
     certification_level: str
     self_service: bool = True
     payment_required: bool = False
+    public_visible: bool = True
 
     @property
     def daily_runtime_seconds(self) -> int:
@@ -143,6 +145,28 @@ PACKAGE_PROFILES: dict[str, PackageProfile] = {
         certification_level="professional-certified",
         payment_required=True,
     ),
+    INTERNAL_FAMILY_LIFETIME_PLAN_CODE: PackageProfile(
+        code=INTERNAL_FAMILY_LIFETIME_PLAN_CODE,
+        name="Internal Family Lifetime",
+        tier="internal-family",
+        price_label="Internal lifetime access",
+        billing_kind="internal-lifetime",
+        daily_runtime_hours=24,
+        runtime_label="24/7 internal lifetime",
+        license_status="active",
+        subscription_status="internal_lifetime",
+        license_duration_days=36500,
+        max_devices=4,
+        max_broker_accounts=4,
+        heartbeat_freshness_seconds=180,
+        command_freshness_seconds=15,
+        stale_market_data_seconds=8,
+        release_channel="stable",
+        certification_level="internal-certified",
+        self_service=False,
+        payment_required=False,
+        public_visible=False,
+    ),
     SCALE_REVIEW_PLAN_CODE: PackageProfile(
         code=SCALE_REVIEW_PLAN_CODE,
         name="Scale Review",
@@ -191,7 +215,7 @@ def package_profile_for_plan(plan_code: str | None) -> PackageProfile:
 
 
 def package_catalog_payload() -> list[dict[str, Any]]:
-    return [profile.public_payload() for profile in PACKAGE_PROFILES.values()]
+    return [profile.public_payload() for profile in PACKAGE_PROFILES.values() if profile.public_visible]
 
 
 def runtime_policy_for_plan(plan_code: str | None) -> dict[str, Any]:

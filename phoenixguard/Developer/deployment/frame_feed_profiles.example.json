@@ -4,6 +4,7 @@
   "profiles": {
     "desktop-pocket-m5": {
       "base_url": "https://phoenixguard.example.com",
+      "signing_secret": "replace-with-feed-signing-secret-or-use-env",
       "session_id": "user001-pocket-m5",
       "source_id": "user001-desktop-chart",
       "source_type": "pc_screen_capture",
@@ -23,6 +24,7 @@
     },
     "folder-replay-smoke": {
       "base_url": "https://phoenixguard.example.com",
+      "signing_secret": "replace-with-feed-signing-secret-or-use-env",
       "session_id": "user001-replay-smoke",
       "source_id": "user001-folder-replay",
       "source_type": "replay_upload",

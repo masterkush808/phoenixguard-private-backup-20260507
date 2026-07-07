@@ -12,6 +12,7 @@ def main() -> int:
     args = parser.parse_args()
 
     token = secrets.token_urlsafe(36)
+    signing_secret = secrets.token_urlsafe(36)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     if args.hash_only:
         print(token_hash)
@@ -19,7 +20,8 @@ def main() -> int:
     print(f"name={args.name}")
     print(f"token={token}")
     print(f"token_sha256={token_hash}")
-    print("Store the token in a secret manager or VPS env file. Commit only token_sha256 or token_env references.")
+    print(f"signing_secret={signing_secret}")
+    print("Store the token and signing secret in a secret manager or VPS env file. Commit only token_sha256, token_env, or signing_secret_env references.")
     return 0
 
 

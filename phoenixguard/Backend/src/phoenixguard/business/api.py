@@ -259,6 +259,8 @@ def register_business_routes(app: FastAPI, store: BusinessStore | None = None) -
             package_profile = package_profile_for_plan(plan_code)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported package selection.") from exc
+        if not package_profile.public_visible:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported package selection.")
         if package_profile.code == FREE_PREVIEW_PLAN_CODE:
             license_record = business_store.grant_free_preview_license(customer=customer)
             session = business_store.record_checkout_session(
@@ -720,6 +722,22 @@ def register_business_routes(app: FastAPI, store: BusinessStore | None = None) -
         )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
+    @app.post("/v1/admin/customers/{customer_id}/family-lifetime-license", status_code=status.HTTP_201_CREATED)
+    def admin_grant_family_lifetime_license(
+        customer_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        admin = _require_admin(business_store, authorization)
+        customer = business_store.customers.get(customer_id)
+        if customer is None or customer.is_admin:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found.")
+        license_record = business_store.grant_internal_family_lifetime_license(customer=customer, admin=admin)
+        return {
+            "customer": _public_customer(customer),
+            "license": business_store.license_payload(license_record),
+            "message": "Internal family lifetime license granted. Disclosure, broker binding, device freshness, and command freshness gates still apply.",
+        }
+
     app.state.business_route_handler_names = tuple(
         handler.__name__
         for handler in (
@@ -743,5 +761,6 @@ def register_business_routes(app: FastAPI, store: BusinessStore | None = None) -
             stripe_webhook,
             admin_customers,
             admin_revoke_license,
+            admin_grant_family_lifetime_license,
         )
     )

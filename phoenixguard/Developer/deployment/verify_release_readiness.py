@@ -23,10 +23,14 @@ def _check(name: str, passed: bool, detail: str = "") -> dict[str, object]:
 def verify_release_readiness() -> dict[str, object]:
     linux_bootstrap = _text("Developer/deployment/linux_cloud_brain_bootstrap.sh")
     frame_ingest = _text("Backend/src/phoenixguard/mobile_api/frame_ingest.py")
+    edge_agent = _text("Developer/deployment/edge_frame_agent.py")
     app = _text("Backend/src/phoenixguard/mobile_api/app.py")
     dashboard = _text("Frontend/dashboard/static/window_tracker_dashboard.html")
     pyright = _text("pyrightconfig.json")
     readme = _text("Developer/deployment/README.md")
+    business_packages = _text("Backend/src/phoenixguard/business/packages.py")
+    business_api = _text("Backend/src/phoenixguard/business/api.py")
+    cloudflare_security = _text("Developer/deployment/cloudflare_security/main.tf") if _exists("Developer/deployment/cloudflare_security/main.tf") else ""
 
     checks = [
         _check("live_windows_lock_exists", _exists("requirements/locks/live-win-py311.txt")),
@@ -40,9 +44,15 @@ def verify_release_readiness() -> dict[str, object]:
         _check("linux_bootstrap_enables_watchdog", "phoenixguard-cloud-watchdog.service" in linux_bootstrap),
         _check("frame_ingest_requires_auth", "Frame ingest is not armed" in frame_ingest and "Invalid frame ingest token" in frame_ingest),
         _check("frame_ingest_has_decode_safety", "PHOENIXGUARD_FRAME_INGEST_MAX_PIXELS" in frame_ingest and "Animated frame uploads are not allowed" in frame_ingest),
+        _check("frame_ingest_has_hmac_signature_and_nonce_replay_defense", "PG_FRAME_INGEST_V1" in frame_ingest and "hmac.compare_digest" in frame_ingest and "SIGNATURE_NONCES" in frame_ingest),
+        _check("frame_ingest_security_audit_log_exists", "PG_SECURITY_AUDIT_V1" in frame_ingest and "PHOENIXGUARD_SECURITY_AUDIT_LOG" in frame_ingest),
+        _check("edge_frame_agent_can_sign_uploads", "X-PhoenixGuard-Signature" in edge_agent and "HMAC-SHA256-V1" in edge_agent),
         _check("frame_ingest_commits_runtime_after_acceptance", "commit=False" in frame_ingest and "commit=True" in frame_ingest),
         _check("api_has_origin_and_host_controls", "CORSMiddleware" in app and "TrustedHostMiddleware" in app),
         _check("dashboard_overlay_payload_does_not_shadow_objects", "overlayPayloadWithObjects(session)" in dashboard and "session.overlays || liveState.overlays" not in dashboard),
+        _check("cloudflare_security_template_exists", "cloudflare_zero_trust_access_application" in cloudflare_security and "http_ratelimit" in cloudflare_security and "http_request_firewall_custom" in cloudflare_security),
+        _check("model_asset_manifest_tool_exists", _exists("Developer/deployment/model_asset_manifest.py") and "PG_MODEL_ASSET_MANIFEST_V1" in _text("Developer/deployment/model_asset_manifest.py")),
+        _check("business_internal_family_lifetime_is_admin_only", "INTERNAL_FAMILY_LIFETIME_PLAN_CODE" in business_packages and "public_visible=False" in business_packages and "family-lifetime-license" in business_api),
         _check("overlay_contract_validator_exists", _exists("Backend/tools/validate_overlay_contract_v3.py")),
         _check("v3_integrity_verifier_exists", _exists("Backend/tools/verify_v3_integrity.py")),
         _check("deployment_verifier_exists", _exists("Developer/deployment/verify_universal_frame_feed.py")),

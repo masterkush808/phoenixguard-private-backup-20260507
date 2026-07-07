@@ -41,6 +41,7 @@ def test_package_catalog_exposes_certified_runtime_profiles() -> None:
     assert packages["hybrid-professional-24x7"]["runtime_policy"]["daily_runtime_hours"] == 24
     assert packages["hybrid-standard-6h"]["phoenix_guard_settings"]["requires_verified_email"] is True
     assert packages["hybrid-professional-24x7"]["certification_level"] == "professional-certified"
+    assert "internal-family-lifetime" not in packages
 
 
 def test_commercial_portal_snapshot_and_mock_login() -> None:
@@ -358,6 +359,35 @@ def test_customer_cannot_access_admin_surface_but_admin_can() -> None:
     assert denied.status_code == 403
     assert allowed.status_code == 200
     assert len(allowed.json()["customers"]) >= 4
+
+
+def test_internal_family_lifetime_license_is_admin_only_and_hidden_from_checkout() -> None:
+    client = _client()
+    store = business_store_module.get_business_store()
+    customer = next(item for item in store.customers.values() if item.email == "operator@808fx.mock")
+
+    denied_checkout = client.post(
+        "/v1/public/checkout/start",
+        headers={"Authorization": "Bearer mock-customer-active"},
+        json={"plan_code": "internal-family-lifetime"},
+    )
+    denied_customer = client.post(
+        f"/v1/admin/customers/{customer.id}/family-lifetime-license",
+        headers={"Authorization": "Bearer mock-customer-active"},
+    )
+    granted = client.post(
+        f"/v1/admin/customers/{customer.id}/family-lifetime-license",
+        headers={"Authorization": "Bearer mock-admin"},
+    )
+
+    assert denied_checkout.status_code == 400
+    assert "Unsupported package" in denied_checkout.json()["detail"]
+    assert denied_customer.status_code == 403
+    assert granted.status_code == 201
+    payload = granted.json()
+    assert payload["license"]["plan_code"] == "internal-family-lifetime"
+    assert payload["license"]["runtime_policy"]["daily_runtime_hours"] == 24
+    assert payload["license"]["license_key"].startswith("PG-FAMILY-")
 
 
 def test_mock_stripe_signature_path_rejects_and_accepts_events() -> None:

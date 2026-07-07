@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import hashlib
+import hmac
 from io import BytesIO
 import json
 import os
@@ -26,6 +27,8 @@ DEFAULT_MIN_INTERVAL_SEC = 10
 DEFAULT_ACTIVE_FEED_WINDOW_SEC = 240
 DEFAULT_MAX_ACTIVE_FEEDS_TOTAL = 3
 DEFAULT_MAX_ACTIVE_FEEDS_PER_TOKEN = 1
+DEFAULT_SIGNATURE_MAX_SKEW_SEC = 300
+DEFAULT_SIGNATURE_NONCE_TTL_SEC = 600
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +36,7 @@ class FeedAuthContext:
     token_name: str
     user_id: str
     global_token: bool
+    signing_secret: str = ""
     allowed_session_prefixes: tuple[str, ...] = ()
     allowed_source_ids: tuple[str, ...] = ()
     allowed_symbols: tuple[str, ...] = ()
@@ -57,11 +61,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[4]
 _MOBILE_UPLOADER_PATH = _REPO_ROOT / "Frontend" / "dashboard" / "static" / "frame_ingest" / "mobile_frame_uploader.html"
 _FEED_STATE_LOCK = threading.Lock()
 _FEED_RUNTIME_STATE: dict[str, FeedRuntimeState] = {}
+_SIGNATURE_NONCE_LOCK = threading.Lock()
+_SIGNATURE_NONCES: dict[str, float] = {}
+_SECURITY_AUDIT_LOCK = threading.Lock()
 
 
 def reset_frame_ingest_runtime_state_for_tests() -> None:
     with _FEED_STATE_LOCK:
         _FEED_RUNTIME_STATE.clear()
+    with _SIGNATURE_NONCE_LOCK:
+        _SIGNATURE_NONCES.clear()
 
 
 class FrameIngestTracker(Protocol):
@@ -167,6 +176,13 @@ def _rule_secret(rule: Mapping[str, Any]) -> str:
     return str(rule.get("token") or "").strip()
 
 
+def _rule_signing_secret(rule: Mapping[str, Any]) -> str:
+    secret_env = str(rule.get("signing_secret_env") or "").strip()
+    if secret_env:
+        return str(os.getenv(secret_env, "") or "").strip()
+    return str(rule.get("signing_secret") or "").strip()
+
+
 def _rule_matches_token(rule: Mapping[str, Any], supplied: str) -> bool:
     if not bool(rule.get("enabled", True)):
         return False
@@ -191,6 +207,7 @@ def _context_from_rule(rule: Mapping[str, Any]) -> FeedAuthContext:
         token_name=str(rule.get("name") or "scoped-feed-token").strip() or "scoped-feed-token",
         user_id=str(rule.get("user_id") or "").strip(),
         global_token=False,
+        signing_secret=_rule_signing_secret(rule),
         allowed_session_prefixes=_tuple_from_raw(rule.get("allowed_session_prefixes")),
         allowed_source_ids=_tuple_from_raw(rule.get("allowed_source_ids")),
         allowed_symbols=_tuple_from_raw(rule.get("allowed_symbols"), upper=True),
@@ -224,6 +241,7 @@ def _require_ingest_token(authorization: str | None, x_phoenixguard_token: str |
             token_name="global",
             user_id="",
             global_token=True,
+            signing_secret=str(os.getenv("PHOENIXGUARD_FRAME_INGEST_SIGNING_SECRET", "") or "").strip(),
             max_active_feeds=_env_int(
                 "PHOENIXGUARD_FRAME_INGEST_MAX_ACTIVE_FEEDS_PER_TOKEN",
                 DEFAULT_MAX_ACTIVE_FEEDS_PER_TOKEN,
@@ -235,6 +253,145 @@ def _require_ingest_token(authorization: str | None, x_phoenixguard_token: str |
         if _rule_matches_token(rule, supplied):
             return _context_from_rule(rule)
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid frame ingest token.")
+
+
+def _security_audit_log_path() -> Path:
+    raw_path = str(os.getenv("PHOENIXGUARD_SECURITY_AUDIT_LOG", "") or "").strip()
+    if raw_path:
+        return Path(raw_path).expanduser()
+    return _REPO_ROOT / "runtime" / "live" / "logs_live" / "security_audit.jsonl"
+
+
+def _security_audit(event: str, context: FeedAuthContext | None, fields: Mapping[str, object]) -> None:
+    if not _env_bool("PHOENIXGUARD_SECURITY_AUDIT_LOG_ENABLED", True):
+        return
+    payload: dict[str, object] = {
+        "schema_version": "PG_SECURITY_AUDIT_V1",
+        "event": event,
+        "epoch_ms": int(round(time.time() * 1000.0)),
+        "token_name": context.token_name if context is not None else "",
+        "user_id": context.user_id if context is not None else "",
+    }
+    payload.update({str(key): value for key, value in fields.items()})
+    try:
+        path = _security_audit_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        with _SECURITY_AUDIT_LOCK:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+    except OSError:
+        # Audit logging must never make the live tracker unavailable. The
+        # watchdog/readiness checks validate log-path configuration before prod.
+        return
+
+
+def _signature_required(context: FeedAuthContext) -> bool:
+    if _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE", False):
+        return True
+    if context.signing_secret:
+        return _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE_WHEN_SECRET_SET", True)
+    return False
+
+
+def _canonical_frame_signature_payload(
+    *,
+    method: str,
+    path: str,
+    session_id: str,
+    source_id: str,
+    sequence_id: str,
+    frame_id: int,
+    capture_epoch_ms: int,
+    frame_sha256: str,
+    timestamp: str,
+    nonce: str,
+) -> str:
+    return "\n".join(
+        [
+            "PG_FRAME_INGEST_V1",
+            method.upper(),
+            path,
+            str(session_id or "").strip(),
+            str(source_id or "").strip(),
+            str(sequence_id or "").strip(),
+            str(int(frame_id or 0)),
+            str(int(capture_epoch_ms or 0)),
+            str(frame_sha256 or "").strip().lower(),
+            str(timestamp or "").strip(),
+            str(nonce or "").strip(),
+        ]
+    )
+
+
+def _normalize_signature(raw_signature: str) -> str:
+    text = str(raw_signature or "").strip()
+    if text.startswith("v1="):
+        text = text[3:]
+    return text.lower()
+
+
+def _prune_signature_nonces(now_monotonic: float) -> None:
+    expired = [key for key, expiry in _SIGNATURE_NONCES.items() if expiry <= now_monotonic]
+    for key in expired:
+        _SIGNATURE_NONCES.pop(key, None)
+
+
+def _record_or_reject_signature_nonce(context: FeedAuthContext, nonce: str) -> None:
+    ttl_sec = _env_int("PHOENIXGUARD_FRAME_INGEST_SIGNATURE_NONCE_TTL_SEC", DEFAULT_SIGNATURE_NONCE_TTL_SEC, 60)
+    now_monotonic = time.monotonic()
+    nonce_key = f"{context.token_name}:{context.user_id}:{nonce}"
+    with _SIGNATURE_NONCE_LOCK:
+        _prune_signature_nonces(now_monotonic)
+        if nonce_key in _SIGNATURE_NONCES:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Frame ingest signature nonce was already used.")
+        _SIGNATURE_NONCES[nonce_key] = now_monotonic + float(ttl_sec)
+
+
+def _require_frame_signature(
+    context: FeedAuthContext,
+    request: Request,
+    *,
+    session_id: str,
+    source_id: str,
+    sequence_id: str,
+    capture_epoch_ms: int,
+    frame_id: int,
+    frame_sha256: str,
+) -> None:
+    if not _signature_required(context):
+        return
+    if not context.signing_secret:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Frame ingest signature is required but no signing secret is configured.")
+    timestamp = str(request.headers.get("x-phoenixguard-timestamp") or "").strip()
+    nonce = str(request.headers.get("x-phoenixguard-nonce") or "").strip()
+    supplied_signature = _normalize_signature(str(request.headers.get("x-phoenixguard-signature") or ""))
+    if not timestamp or not nonce or not supplied_signature:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Frame ingest signature headers are required.")
+    try:
+        timestamp_ms = int(float(timestamp))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Frame ingest signature timestamp is invalid.") from exc
+    now_ms = int(round(time.time() * 1000.0))
+    max_skew_ms = _env_int("PHOENIXGUARD_FRAME_INGEST_SIGNATURE_MAX_SKEW_SEC", DEFAULT_SIGNATURE_MAX_SKEW_SEC, 30) * 1000
+    if abs(now_ms - timestamp_ms) > max_skew_ms:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Frame ingest signature timestamp is outside the allowed skew.")
+    canonical = _canonical_frame_signature_payload(
+        method=request.method,
+        path=request.url.path,
+        session_id=session_id,
+        source_id=source_id,
+        sequence_id=sequence_id,
+        capture_epoch_ms=int(capture_epoch_ms or 0),
+        frame_id=int(frame_id or 0),
+        frame_sha256=frame_sha256,
+        timestamp=timestamp,
+        nonce=nonce,
+    )
+    expected_signature = hmac.new(context.signing_secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(supplied_signature, expected_signature):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Frame ingest signature is invalid.")
+    _record_or_reject_signature_nonce(context, nonce)
 
 
 def _require_scope_allowed(context: FeedAuthContext, session_id: str, source_id: str, symbol: str, timeframe: str) -> None:
@@ -394,6 +551,14 @@ def _readiness_payload() -> dict[str, object]:
         "max_source_age_sec": _env_int("PHOENIXGUARD_FRAME_INGEST_MAX_SOURCE_AGE_SEC", 180, 5),
         "require_capture_epoch": _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_CAPTURE_EPOCH", True),
         "require_frame_id": _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_FRAME_ID", True),
+        "signature_required": _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE", False),
+        "signature_nonce_ttl_sec": _env_int(
+            "PHOENIXGUARD_FRAME_INGEST_SIGNATURE_NONCE_TTL_SEC",
+            DEFAULT_SIGNATURE_NONCE_TTL_SEC,
+            60,
+        ),
+        "security_audit_log_enabled": _env_bool("PHOENIXGUARD_SECURITY_AUDIT_LOG_ENABLED", True),
+        "security_audit_log_path": str(_security_audit_log_path()),
         "allowed_origins_configured": bool(_env_csv("PHOENIXGUARD_FRAME_INGEST_ALLOWED_ORIGINS")),
     }
 
@@ -493,27 +658,50 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
         authorization: str | None = Header(default=None),
         x_phoenixguard_token: str | None = Header(default=None),
     ) -> dict[str, object]:
-        _require_origin_allowed(request.headers.get("origin"))
-        auth_context = _require_ingest_token(authorization, x_phoenixguard_token)
-        _require_scope_allowed(auth_context, session_id, source_id, symbol, timeframe)
-        _record_or_reject_feed_runtime(
-            auth_context,
-            session_id=session_id,
-            source_id=source_id,
-            sequence_id=sequence_id,
-            capture_epoch_ms=int(capture_epoch_ms or 0),
-            frame_id=int(frame_id or 0),
-            commit=False,
-        )
-        image, frame_sha256, frame_bytes = await _read_image_upload(frame)
-        metadata = _metadata_from_json(metadata_json)
-        metadata.setdefault("client_host", request.client.host if request.client else "")
-        metadata.setdefault("filename", frame.filename or "")
-        metadata.setdefault("feed_token_name", auth_context.token_name)
-        metadata.setdefault("feed_user_id", auth_context.user_id)
-        metadata.setdefault("frame_sha256", frame_sha256)
-        metadata.setdefault("frame_bytes", frame_bytes)
+        auth_context: FeedAuthContext | None = None
+        audit_base: dict[str, object] = {
+            "session_id": session_id,
+            "source_id": source_id,
+            "sequence_id": sequence_id,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "frame_id": int(frame_id or 0),
+            "capture_epoch_ms": int(capture_epoch_ms or 0),
+            "client_host": request.client.host if request.client else "",
+        }
         try:
+            _require_origin_allowed(request.headers.get("origin"))
+            auth_context = _require_ingest_token(authorization, x_phoenixguard_token)
+            _require_scope_allowed(auth_context, session_id, source_id, symbol, timeframe)
+            image, frame_sha256, frame_bytes = await _read_image_upload(frame)
+            audit_base["frame_sha256"] = frame_sha256
+            audit_base["frame_bytes"] = frame_bytes
+            _require_frame_signature(
+                auth_context,
+                request,
+                session_id=session_id,
+                source_id=source_id,
+                sequence_id=sequence_id,
+                capture_epoch_ms=int(capture_epoch_ms or 0),
+                frame_id=int(frame_id or 0),
+                frame_sha256=frame_sha256,
+            )
+            _record_or_reject_feed_runtime(
+                auth_context,
+                session_id=session_id,
+                source_id=source_id,
+                sequence_id=sequence_id,
+                capture_epoch_ms=int(capture_epoch_ms or 0),
+                frame_id=int(frame_id or 0),
+                commit=False,
+            )
+            metadata = _metadata_from_json(metadata_json)
+            metadata.setdefault("client_host", request.client.host if request.client else "")
+            metadata.setdefault("filename", frame.filename or "")
+            metadata.setdefault("feed_token_name", auth_context.token_name)
+            metadata.setdefault("feed_user_id", auth_context.user_id)
+            metadata.setdefault("frame_sha256", frame_sha256)
+            metadata.setdefault("frame_bytes", frame_bytes)
             response = get_tracker().ingest_external_frame(
                 session_id,
                 image,
@@ -535,10 +723,28 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
                 frame_id=int(frame_id or 0),
                 commit=True,
             )
+            _security_audit("frame_ingest_accepted", auth_context, audit_base)
             return response
+        except HTTPException as exc:
+            _security_audit(
+                "frame_ingest_rejected",
+                auth_context,
+                {**audit_base, "status_code": exc.status_code, "detail": str(exc.detail)},
+            )
+            raise
         except KeyError as exc:
+            _security_audit(
+                "frame_ingest_rejected",
+                auth_context,
+                {**audit_base, "status_code": status.HTTP_404_NOT_FOUND, "detail": "Window tracker session not found."},
+            )
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         except ValueError as exc:
+            _security_audit(
+                "frame_ingest_rejected",
+                auth_context,
+                {**audit_base, "status_code": status.HTTP_400_BAD_REQUEST, "detail": str(exc)},
+            )
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     def frame_ingest_status(

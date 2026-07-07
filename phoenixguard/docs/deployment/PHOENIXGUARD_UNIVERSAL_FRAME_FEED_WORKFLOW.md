@@ -30,6 +30,10 @@ max source-age rejection
 non-advancing source timestamp rejection
 max frame byte/size limits
 max metadata size limit
+HMAC-SHA256 signed uploads
+timestamp skew rejection
+nonce replay rejection
+append-only security audit JSONL
 optional Origin allowlist
 optional TrustedHost allowlist
 deployment readiness endpoint
@@ -93,6 +97,9 @@ PHOENIXGUARD_FRAME_INGEST_REQUIRE_FRAME_ID=1
 PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC=10
 PHOENIXGUARD_FRAME_INGEST_MAX_ACTIVE_FEEDS_TOTAL=3
 PHOENIXGUARD_FRAME_INGEST_MAX_ACTIVE_FEEDS_PER_TOKEN=1
+PHOENIXGUARD_FRAME_INGEST_REQUIRE_SIGNATURE=1
+PHOENIXGUARD_FRAME_INGEST_SIGNATURE_MAX_SKEW_SEC=300
+PHOENIXGUARD_FRAME_INGEST_SIGNATURE_NONCE_TTL_SEC=600
 PHOENIXGUARD_ALLOWED_ORIGINS=https://your-domain.example
 PHOENIXGUARD_TRUSTED_HOSTS=your-domain.example,127.0.0.1,localhost
 Cloudflare Tunnel public HTTPS access
@@ -109,6 +116,7 @@ Set:
 ```text
 PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY=/etc/phoenixguard/frame_ingest_token_registry.json
 PHOENIXGUARD_FEED_TOKEN_USER001=<secret>
+PHOENIXGUARD_FEED_SIGNING_SECRET_USER001=<separate-signing-secret>
 ```
 
 The registry limits each token to allowed session prefixes, source IDs, symbols, and timeframes.
@@ -119,6 +127,7 @@ Before declaring the VPS ready, run:
 python Developer/deployment/verify_universal_frame_feed.py `
   --base-url "https://your-domain.example" `
   --token "<admin-or-user-feed-token>" `
+  --signing-secret "<admin-or-user-feed-signing-secret>" `
   --session-id "deployment-verify" `
   --upload-smoke
 ```
@@ -140,13 +149,14 @@ The serious production feed for launch is the PC screen/chart-region agent:
 python Developer/deployment/edge_frame_agent.py `
   --config Developer/deployment/frame_feed_profiles.example.json `
   --profile desktop-pocket-m5 `
-  --token "<user feed token>"
+  --token "<user feed token>" `
+  --signing-secret "<user feed signing secret>"
 ```
 
 Or:
 
 ```powershell
-Developer/deployment/run_pc_frame_feed.ps1 -Profile desktop-pocket-m5 -Token "<user feed token>"
+Developer/deployment/run_pc_frame_feed.ps1 -Profile desktop-pocket-m5 -Token "<user feed token>" -SigningSecret "<user feed signing secret>"
 ```
 
 The user keeps their chart visible. The agent captures only the configured chart region and pushes it every 15 seconds.
@@ -176,6 +186,11 @@ The later Android/iOS apps should not invent a new PhoenixGuard path. They must 
 
 ```text
 POST /v1/mobile/frame-ingest/sessions/{session_id}/frames
+Authorization: Bearer <token>
+X-PhoenixGuard-Signature-Alg: HMAC-SHA256-V1
+X-PhoenixGuard-Timestamp: <epoch-ms>
+X-PhoenixGuard-Nonce: <unique nonce>
+X-PhoenixGuard-Signature: v1=<hmac-sha256>
 ```
 
 Android should use a native screen-capture/feed adapter. iOS should use a ReplayKit-style capture adapter. Both must preserve the same frame metadata and source-lock contract.
