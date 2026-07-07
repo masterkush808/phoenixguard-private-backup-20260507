@@ -20,7 +20,7 @@ onnxruntime==1.27.0
 opencv-python-headless==4.11.0.86
 reportlab==4.4.10
 pytest==9.0.2
-pyright==1.1.410
+pyright==1.1.411
 playwright==1.60.0
 pytest-playwright==0.8.0
 gradio==6.9.0

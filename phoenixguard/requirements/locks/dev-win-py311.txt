@@ -394,7 +394,7 @@ pyproject-hooks==1.2.0
     # via
     #   build
     #   pip-tools
-pyright==1.1.410
+pyright==1.1.411
     # via
     #   -c requirements/constraints.in
     #   -r requirements/dev.in
