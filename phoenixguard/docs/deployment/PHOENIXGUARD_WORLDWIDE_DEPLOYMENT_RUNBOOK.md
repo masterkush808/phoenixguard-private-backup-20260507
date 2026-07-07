@@ -43,6 +43,12 @@ There are three valid access models.
 PhoenixGuard runs the broker browser on a Windows VPS. Users access the
 PhoenixGuard dashboard through a public HTTPS URL. Your PC can be off.
 
+For the managed PC/mobile source-feed workflow, see:
+
+```text
+docs/deployment/PHOENIXGUARD_UNIVERSAL_FRAME_FEED_WORKFLOW.md
+```
+
 Best for:
 
 ```text

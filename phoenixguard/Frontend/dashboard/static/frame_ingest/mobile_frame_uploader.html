@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PhoenixGuard Frame Feed</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080806;
+      --panel: #14130f;
+      --panel-soft: #1d1a13;
+      --text: #f5edda;
+      --muted: #a99d84;
+      --line: #3a321f;
+      --gold: #f2bd55;
+      --green: #48d17c;
+      --red: #ff6b52;
+      --blue: #6ab5ff;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        linear-gradient(115deg, rgba(242, 189, 85, 0.06), transparent 28%),
+        linear-gradient(240deg, rgba(72, 209, 124, 0.045), transparent 36%),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, Segoe UI, system-ui, sans-serif;
+      letter-spacing: 0;
+    }
+    main {
+      width: min(1040px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: 28px 0 40px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 0 24px;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 6vw, 52px);
+      line-height: 0.95;
+    }
+    .status {
+      min-width: 172px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(20, 19, 15, 0.72);
+      font: 700 12px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+    .status strong {
+      display: block;
+      color: var(--gold);
+      font-size: 18px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+      gap: 18px;
+      margin-top: 22px;
+    }
+    section {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(20, 19, 15, 0.78);
+      overflow: hidden;
+    }
+    section h2 {
+      margin: 0;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      color: var(--gold);
+      font: 800 13px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+      text-transform: uppercase;
+    }
+    form {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      padding: 16px;
+    }
+    label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font: 700 11px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+      text-transform: uppercase;
+    }
+    label.full {
+      grid-column: 1 / -1;
+    }
+    input,
+    select,
+    button {
+      min-height: 42px;
+      border-radius: 6px;
+      border: 1px solid var(--line);
+      background: #0c0b08;
+      color: var(--text);
+      font: 600 14px/1.2 Inter, Segoe UI, system-ui, sans-serif;
+    }
+    input,
+    select {
+      width: 100%;
+      padding: 10px 12px;
+    }
+    button {
+      padding: 0 14px;
+      cursor: pointer;
+      background: #2b2212;
+      border-color: #6f5524;
+      color: var(--gold);
+      text-transform: uppercase;
+      font: 800 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    button.secondary {
+      background: #12110e;
+      color: var(--muted);
+    }
+    button.danger {
+      border-color: #7a2d24;
+      color: var(--red);
+      background: #21100d;
+    }
+    .actions {
+      grid-column: 1 / -1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .preview {
+      display: grid;
+      min-height: 320px;
+      place-items: center;
+      padding: 12px;
+      background: #0a0a08;
+    }
+    video,
+    canvas,
+    img {
+      display: none;
+      width: 100%;
+      max-height: 68vh;
+      object-fit: contain;
+      border-radius: 6px;
+      border: 1px solid #262116;
+      background: #050504;
+    }
+    .preview[data-mode="video"] video,
+    .preview[data-mode="canvas"] canvas,
+    .preview[data-mode="image"] img {
+      display: block;
+    }
+    .placeholder {
+      max-width: 440px;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.5;
+    }
+    .log {
+      height: 320px;
+      overflow: auto;
+      padding: 12px;
+      background: #070706;
+      font: 700 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
+    .ok {
+      color: var(--green);
+    }
+    .bad {
+      color: var(--red);
+    }
+    .info {
+      color: var(--blue);
+    }
+    @media (max-width: 820px) {
+      header,
+      .grid {
+        grid-template-columns: 1fr;
+        display: grid;
+      }
+      form {
+        grid-template-columns: 1fr;
+      }
+      .status {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>PhoenixGuard<br>Frame Feed</h1>
+    </div>
+    <div class="status">
+      Feed status
+      <strong id="feedStatus">Idle</strong>
+    </div>
+  </header>
+  <div class="grid">
+    <section>
+      <h2>Live Frame Source</h2>
+      <div id="preview" class="preview">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="canvas"></canvas>
+        <img id="still" alt="selected chart frame">
+        <p class="placeholder" id="placeholder">Select a chart screenshot, use camera capture, or start screen capture where the browser supports it. Native Android/iOS feed apps should post to the same frame-ingest contract.</p>
+      </div>
+    </section>
+    <section>
+      <h2>Connection</h2>
+      <form id="feedForm">
+        <label class="full">Server URL
+          <input id="baseUrl" autocomplete="url" placeholder="https://phoenixguard.example.com">
+        </label>
+        <label>Session ID
+          <input id="sessionId" value="mobile-live">
+        </label>
+        <label>Source ID
+          <input id="sourceId" value="mobile-pwa">
+        </label>
+        <label class="full">Token
+          <input id="token" type="password" autocomplete="off" placeholder="paste feed token">
+        </label>
+        <label>Symbol
+          <input id="symbol" placeholder="EURCAD">
+        </label>
+        <label>Timeframe
+          <input id="timeframe" placeholder="M5">
+        </label>
+        <label class="full">Source URL
+          <input id="sourceUrl" autocomplete="url" placeholder="broker or chart URL">
+        </label>
+        <label>Interval
+          <select id="intervalSec">
+            <option value="15">15 seconds</option>
+            <option value="30">30 seconds</option>
+            <option value="60">60 seconds</option>
+          </select>
+        </label>
+        <label>Frame File
+          <input id="frameFile" type="file" accept="image/*" capture="environment">
+        </label>
+        <div class="actions">
+          <button type="button" id="uploadOnce">Upload Frame</button>
+          <button type="button" id="startScreen">Start Screen</button>
+          <button type="button" id="startLoop">Start Loop</button>
+          <button type="button" class="danger" id="stopLoop">Stop</button>
+        </div>
+      </form>
+      <div class="log" id="log"></div>
+    </section>
+  </div>
+</main>
+<script>
+  const els = {
+    feedStatus: document.getElementById("feedStatus"),
+    preview: document.getElementById("preview"),
+    placeholder: document.getElementById("placeholder"),
+    video: document.getElementById("video"),
+    canvas: document.getElementById("canvas"),
+    still: document.getElementById("still"),
+    baseUrl: document.getElementById("baseUrl"),
+    sessionId: document.getElementById("sessionId"),
+    sourceId: document.getElementById("sourceId"),
+    token: document.getElementById("token"),
+    symbol: document.getElementById("symbol"),
+    timeframe: document.getElementById("timeframe"),
+    sourceUrl: document.getElementById("sourceUrl"),
+    intervalSec: document.getElementById("intervalSec"),
+    frameFile: document.getElementById("frameFile"),
+    uploadOnce: document.getElementById("uploadOnce"),
+    startScreen: document.getElementById("startScreen"),
+    startLoop: document.getElementById("startLoop"),
+    stopLoop: document.getElementById("stopLoop"),
+    log: document.getElementById("log")
+  };
+  let stream = null;
+  let loopHandle = null;
+  let frameId = 0;
+  const sequenceId = `mobile-${Date.now().toString(36)}`;
+
+  function setStatus(text, className = "") {
+    els.feedStatus.textContent = text;
+    els.feedStatus.className = className;
+  }
+
+  function log(message, className = "") {
+    const line = document.createElement("div");
+    line.className = className;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+    els.log.prepend(line);
+  }
+
+  function clean(value) {
+    return String(value || "").trim();
+  }
+
+  function endpoint() {
+    const base = clean(els.baseUrl.value).replace(/\/+$/, "");
+    const session = encodeURIComponent(clean(els.sessionId.value) || "mobile-live");
+    return `${base}/v1/mobile/frame-ingest/sessions/${session}/frames`;
+  }
+
+  function requireConnection() {
+    if (!clean(els.baseUrl.value)) throw new Error("Server URL is required.");
+    if (!clean(els.token.value)) throw new Error("Feed token is required.");
+  }
+
+  function drawVideoFrame() {
+    const width = els.video.videoWidth || 1280;
+    const height = els.video.videoHeight || 720;
+    els.canvas.width = width;
+    els.canvas.height = height;
+    const ctx = els.canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas is unavailable.");
+    ctx.drawImage(els.video, 0, 0, width, height);
+    els.preview.dataset.mode = "canvas";
+  }
+
+  async function blobFromCurrentSource() {
+    const file = els.frameFile.files && els.frameFile.files[0];
+    if (file) return file;
+    if (stream) {
+      drawVideoFrame();
+      return await new Promise((resolve, reject) => {
+        els.canvas.toBlob((blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error("Could not encode captured frame."));
+        }, "image/png", 0.92);
+      });
+    }
+    throw new Error("Select an image or start screen capture first.");
+  }
+
+  async function uploadFrame() {
+    requireConnection();
+    const blob = await blobFromCurrentSource();
+    frameId += 1;
+    const form = new FormData();
+    form.append("frame", blob, `mobile_frame_${String(frameId).padStart(6, "0")}.png`);
+    form.append("source_id", clean(els.sourceId.value) || "mobile-pwa");
+    form.append("source_url", clean(els.sourceUrl.value));
+    form.append("symbol", clean(els.symbol.value).toUpperCase());
+    form.append("timeframe", clean(els.timeframe.value).toUpperCase());
+    form.append("sequence_id", sequenceId);
+    form.append("capture_epoch_ms", String(Date.now()));
+    form.append("frame_id", String(frameId));
+    form.append("metadata_json", JSON.stringify({
+      source_type: stream ? "mobile_pwa_screen_capture" : "mobile_manual_upload",
+      device_type: /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? "mobile" : "browser",
+      user_agent: navigator.userAgent
+    }));
+    const response = await fetch(endpoint(), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${clean(els.token.value)}` },
+      body: form
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.detail || `upload failed with status ${response.status}`);
+    }
+    setStatus("Live", "ok");
+    log(`accepted frame=${frameId} capture=${payload.capture_count || "--"} state=${payload.state_version || "--"}`, "ok");
+  }
+
+  els.frameFile.addEventListener("change", () => {
+    const file = els.frameFile.files && els.frameFile.files[0];
+    if (!file) return;
+    els.still.src = URL.createObjectURL(file);
+    els.preview.dataset.mode = "image";
+    setStatus("Ready", "info");
+  });
+
+  els.uploadOnce.addEventListener("click", async () => {
+    try {
+      await uploadFrame();
+    } catch (error) {
+      setStatus("Error", "bad");
+      log(error.message || String(error), "bad");
+    }
+  });
+
+  els.startScreen.addEventListener("click", async () => {
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        throw new Error("This browser does not support screen capture. Use screenshot upload or a native feed app.");
+      }
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      els.video.srcObject = stream;
+      els.preview.dataset.mode = "video";
+      setStatus("Screen", "info");
+      log("screen capture started", "info");
+    } catch (error) {
+      setStatus("Error", "bad");
+      log(error.message || String(error), "bad");
+    }
+  });
+
+  els.startLoop.addEventListener("click", async () => {
+    if (loopHandle) return;
+    const interval = Math.max(15, Number(els.intervalSec.value || 15)) * 1000;
+    const tick = async () => {
+      try {
+        await uploadFrame();
+      } catch (error) {
+        setStatus("Warning", "bad");
+        log(error.message || String(error), "bad");
+      }
+    };
+    await tick();
+    loopHandle = window.setInterval(tick, interval);
+    log(`loop started every ${Math.round(interval / 1000)}s`, "info");
+  });
+
+  els.stopLoop.addEventListener("click", () => {
+    if (loopHandle) window.clearInterval(loopHandle);
+    loopHandle = null;
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+      stream = null;
+    }
+    setStatus("Stopped");
+    log("feed stopped", "info");
+  });
+</script>
+</body>
+</html>

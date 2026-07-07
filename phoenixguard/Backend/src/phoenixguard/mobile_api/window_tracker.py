@@ -21243,6 +21243,23 @@ class ContinuousWindowTrackerService:
 
         with self._lock:
             payload = self._require_session(normalized_session_id)
+            previous_feed = _mapping_to_dict(payload.get("external_frame_feed"))
+            previous_source_id = str(previous_feed.get("source_id") or "").strip()
+            previous_sequence_id = str(previous_feed.get("sequence_id") or "").strip()
+            previous_frame_id = int(_float_or(previous_feed.get("frame_id"), 0.0) or 0)
+            previous_capture_epoch = float(_float_or(previous_feed.get("last_capture_epoch"), 0.0) or 0.0)
+            same_feed_sequence = (
+                bool(previous_feed)
+                and previous_source_id == normalized_source_id
+                and previous_sequence_id == str(source_payload["sequence_id"] or "").strip()
+            )
+            incoming_frame_id = int(frame_id or 0)
+            frame_did_not_advance = incoming_frame_id > 0 and previous_frame_id > 0 and incoming_frame_id <= previous_frame_id
+            capture_did_not_advance = previous_capture_epoch > 0.0 and capture_epoch <= previous_capture_epoch
+            if same_feed_sequence and capture_did_not_advance:
+                raise ValueError("External frame capture time did not advance for this source/sequence.")
+            if same_feed_sequence and frame_did_not_advance and capture_did_not_advance:
+                raise ValueError("External frame_id and capture time did not advance for this source/sequence.")
             payload["window_query"] = "External Frame Feed"
             payload["layout_profile"] = "external_frame_feed"
             payload["effective_layout_profile"] = "external_frame_feed"

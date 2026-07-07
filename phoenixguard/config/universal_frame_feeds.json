@@ -1,0 +1,55 @@
+{
+  "schema_version": "PG_UNIVERSAL_FRAME_FEEDS_V1",
+  "defaults": {
+    "min_interval_sec": 15,
+    "max_frame_age_sec": 180,
+    "max_frame_bytes": 15728640,
+    "max_active_feeds_per_user": 1,
+    "launch_active_feed_capacity": 3
+  },
+  "source_types": {
+    "pc_screen_capture": {
+      "status": "production_first",
+      "recommended_interval_sec": 15,
+      "notes": "Preferred serious live feed. User keeps chart visible on their PC and the lightweight agent posts frames to the cloud brain."
+    },
+    "mobile_manual_upload": {
+      "status": "supported",
+      "recommended_interval_sec": 15,
+      "notes": "Manual screenshot/camera/file upload from phone or browser. Good for testing, not ideal for unattended live tracking."
+    },
+    "mobile_pwa_screen_capture": {
+      "status": "best_effort",
+      "recommended_interval_sec": 15,
+      "notes": "Works only where the browser supports display capture. Use native apps for dependable continuous mobile capture."
+    },
+    "android_native_capture": {
+      "status": "planned_native_app",
+      "recommended_interval_sec": 15,
+      "notes": "Future Android app should use MediaProjection and post to the same frame-ingest endpoint."
+    },
+    "ios_replaykit_capture": {
+      "status": "planned_native_app",
+      "recommended_interval_sec": 15,
+      "notes": "Future iOS app should use ReplayKit/Broadcast Upload and post to the same frame-ingest endpoint."
+    },
+    "browser_extension_capture": {
+      "status": "planned",
+      "recommended_interval_sec": 15,
+      "notes": "Future browser extension can capture chart tab content without requiring full desktop screenshots."
+    },
+    "mt4_chart_screenshot": {
+      "status": "planned",
+      "recommended_interval_sec": 15,
+      "notes": "Future MT4/MT5 chart capture adapter can post screenshots and metadata into the universal contract."
+    }
+  },
+  "fair_usage_policy": {
+    "normal_user_active_feeds": 1,
+    "starter_vps_total_active_feeds": 3,
+    "reject_stale_frames": true,
+    "reject_wrong_source_scope": true,
+    "reject_duplicate_capture_times": true,
+    "dashboard_viewers_are_not_live_feeds": true
+  }
+}

@@ -18,6 +18,14 @@ edge_frame_agent.py
   Lightweight feed agent that sends chart screenshots or image-folder frames to
   the PhoenixGuard cloud brain through /v1/mobile/frame-ingest.
 
+frame_feed_profiles.example.json / run_pc_frame_feed.ps1
+  Managed PC feed profiles and a Windows launcher for users who supply chart
+  frames from their own machines.
+
+frame_ingest_token_registry.example.json / generate_frame_feed_token.py
+  Scoped feed-token workflow for per-user/session/source authorization without
+  committing secrets.
+
 linux_cloud_brain_bootstrap.sh
   Ubuntu VPS bootstrap for the cheapest cloud-brain deployment: clone repo,
   create .venv-live with Python 3.11, install the live stack, write systemd,
@@ -40,3 +48,15 @@ is not the managed VPS browser.
 
 For the lowest-cost off-machine deployment, use linux_cloud_brain_bootstrap.sh
 on an Ubuntu VPS and expose it with Cloudflare Tunnel.
+
+The mobile/browser feed uploader is served by the API at:
+
+```text
+/v1/mobile/frame-ingest/mobile-uploader
+```
+
+The full universal feed workflow is documented in:
+
+```text
+docs/deployment/PHOENIXGUARD_UNIVERSAL_FRAME_FEED_WORKFLOW.md
+```

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, field
 from io import BytesIO
 import json
 import mimetypes
+import os
 from pathlib import Path
 import sys
 import time
@@ -12,6 +14,50 @@ from urllib import error, request
 from uuid import uuid4
 
 from PIL import Image
+
+
+def _empty_metadata() -> dict[str, Any]:
+    return {}
+
+
+@dataclass(slots=True)
+class AgentProfile:
+    base_url: str = ""
+    session_id: str = "external-live"
+    token: str = ""
+    source_id: str = "edge-agent"
+    source_type: str = "pc_screen_capture"
+    source_url: str = ""
+    symbol: str = ""
+    timeframe: str = ""
+    sequence_id: str = ""
+    interval_sec: float = 15.0
+    bbox: str = ""
+    image_dir: str = ""
+    timeout_sec: float = 30.0
+    user_id: str = ""
+    device_id: str = ""
+    metadata: dict[str, Any] = field(default_factory=_empty_metadata)
+
+
+_PROFILE_FIELDS: tuple[str, ...] = (
+    "base_url",
+    "session_id",
+    "token",
+    "source_id",
+    "source_type",
+    "source_url",
+    "symbol",
+    "timeframe",
+    "sequence_id",
+    "interval_sec",
+    "bbox",
+    "image_dir",
+    "timeout_sec",
+    "user_id",
+    "device_id",
+    "metadata",
+)
 
 
 def _parse_bbox(raw: str) -> tuple[int, int, int, int] | None:
@@ -25,6 +71,49 @@ def _parse_bbox(raw: str) -> tuple[int, int, int, int] | None:
     if right <= left or bottom <= top:
         raise ValueError("--bbox right/bottom must be larger than left/top")
     return left, top, right, bottom
+
+
+def _load_profile(path: Path, profile_name: str) -> AgentProfile:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read feed profile config: {path}") from exc
+    if not isinstance(parsed, Mapping):
+        raise ValueError("Feed profile config must be a JSON object.")
+    parsed_mapping = cast(Mapping[str, object], parsed)
+    profiles_obj = parsed_mapping.get("profiles", {})
+    if not isinstance(profiles_obj, Mapping):
+        raise ValueError("Feed profile config must contain a profiles object.")
+    profiles = cast(Mapping[str, object], profiles_obj)
+    selected_name = profile_name or str(parsed_mapping.get("default_profile") or "").strip()
+    if not selected_name:
+        raise ValueError("Pass --profile or set default_profile in the feed profile config.")
+    selected_obj = profiles.get(selected_name)
+    if not isinstance(selected_obj, Mapping):
+        raise ValueError(f"Feed profile not found: {selected_name}")
+    selected = cast(Mapping[str, object], selected_obj)
+    profile = AgentProfile()
+    for field_name in _PROFILE_FIELDS:
+        if field_name not in selected:
+            continue
+        value = selected[field_name]
+        if field_name == "metadata":
+            profile.metadata = dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
+        elif field_name in {"interval_sec", "timeout_sec"}:
+            setattr(profile, field_name, float(str(value or "0")))
+        else:
+            setattr(profile, field_name, str(value or ""))
+    return profile
+
+
+def _metadata_from_json(raw_json: str) -> dict[str, Any]:
+    text = str(raw_json or "").strip()
+    if not text:
+        return {}
+    parsed = json.loads(text)
+    if not isinstance(parsed, Mapping):
+        raise ValueError("--metadata-json must be a JSON object.")
+    return {str(key): value for key, value in cast(Mapping[str, Any], parsed).items()}
 
 
 def _iter_images(image_dir: Path) -> Iterator[Path]:
@@ -93,6 +182,7 @@ def _post_frame(
     sequence_id: str,
     frame_id: int,
     timeout_sec: float,
+    metadata: Mapping[str, Any],
 ) -> dict[str, object]:
     endpoint = f"{base_url.rstrip('/')}/v1/mobile/frame-ingest/sessions/{session_id}/frames"
     fields = {
@@ -103,7 +193,10 @@ def _post_frame(
         "sequence_id": sequence_id,
         "capture_epoch_ms": str(int(round(time.time() * 1000.0))),
         "frame_id": str(frame_id),
-        "metadata_json": json.dumps({"agent": "edge_frame_agent.py", "filename": filename}, separators=(",", ":")),
+        "metadata_json": json.dumps(
+            {"agent": "edge_frame_agent.py", "filename": filename, **dict(metadata)},
+            separators=(",", ":"),
+        ),
     }
     body, content_type = _multipart_body(fields, "frame", filename, frame_bytes)
     req = request.Request(
@@ -127,34 +220,75 @@ def _post_frame(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Push chart frames into a PhoenixGuard cloud brain.")
-    parser.add_argument("--base-url", required=True, help="PhoenixGuard API base URL, for example https://pg.example.com")
-    parser.add_argument("--session-id", default="external-live", help="Tracker session id to feed.")
+    parser.add_argument("--config", default="", help="Optional JSON file containing feed profiles.")
+    parser.add_argument("--profile", default="", help="Profile name inside --config.")
+    parser.add_argument("--base-url", default="", help="PhoenixGuard API base URL, for example https://pg.example.com")
+    parser.add_argument("--session-id", default="", help="Tracker session id to feed.")
     parser.add_argument("--token", default="", help="Frame ingest token. Defaults to PHOENIXGUARD_FRAME_INGEST_TOKEN.")
-    parser.add_argument("--source-id", default="edge-agent", help="Stable feed identity for source locking.")
+    parser.add_argument("--source-id", default="", help="Stable feed identity for source locking.")
+    parser.add_argument("--source-type", default="", help="Feed source type, for example pc_screen_capture.")
     parser.add_argument("--source-url", default="", help="Broker/chart URL being represented by the frame feed.")
     parser.add_argument("--symbol", default="", help="Optional symbol label, for example EURCAD.")
     parser.add_argument("--timeframe", default="", help="Optional timeframe label, for example M5.")
     parser.add_argument("--sequence-id", default="", help="Optional stable sequence id. Defaults to source-id.")
-    parser.add_argument("--interval-sec", type=float, default=15.0, help="Seconds between frame uploads in screen mode.")
+    parser.add_argument("--interval-sec", type=float, default=0.0, help="Seconds between frame uploads in screen mode.")
     parser.add_argument("--bbox", default="", help="Screen capture crop: left,top,right,bottom. Omit for full screen.")
     parser.add_argument("--image-dir", default="", help="Read frames from this folder instead of screen capture.")
+    parser.add_argument("--user-id", default="", help="Optional platform user id for server-side feed tracing.")
+    parser.add_argument("--device-id", default="", help="Optional device id for server-side feed tracing.")
+    parser.add_argument("--metadata-json", default="{}", help="Extra JSON object sent with every frame.")
     parser.add_argument("--once", action="store_true", help="Upload one frame and exit.")
-    parser.add_argument("--timeout-sec", type=float, default=30.0, help="HTTP upload timeout.")
+    parser.add_argument("--timeout-sec", type=float, default=0.0, help="HTTP upload timeout.")
     args = parser.parse_args()
+
+    profile = AgentProfile()
+    if str(args.config or "").strip():
+        profile = _load_profile(Path(str(args.config)).expanduser(), str(args.profile or "").strip())
+
+    def pick_text(arg_value: object, profile_value: str, default: str = "") -> str:
+        return str(arg_value or profile_value or default).strip()
+
+    def pick_float(arg_value: float, profile_value: float, default: float) -> float:
+        return float(arg_value or profile_value or default)
+
+    base_url = pick_text(args.base_url, profile.base_url)
+    if not base_url:
+        print("Missing --base-url or profile base_url.", file=sys.stderr)
+        return 2
+    session_id = pick_text(args.session_id, profile.session_id, "external-live")
+    source_id = pick_text(args.source_id, profile.source_id, "edge-agent")
+    source_type = pick_text(args.source_type, profile.source_type, "pc_screen_capture")
+    source_url = pick_text(args.source_url, profile.source_url)
+    symbol = pick_text(args.symbol, profile.symbol)
+    timeframe = pick_text(args.timeframe, profile.timeframe)
+    interval_sec = pick_float(float(args.interval_sec or 0.0), profile.interval_sec, 15.0)
+    timeout_sec = pick_float(float(args.timeout_sec or 0.0), profile.timeout_sec, 30.0)
+    bbox_text = pick_text(args.bbox, profile.bbox)
+    image_dir_text = pick_text(args.image_dir, profile.image_dir)
+    user_id = pick_text(args.user_id, profile.user_id)
+    device_id = pick_text(args.device_id, profile.device_id)
 
     token = str(args.token or "").strip()
     if not token:
-        import os
-
+        token = profile.token.strip()
+    if not token:
         token = str(os.getenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "") or "").strip()
     if not token:
         print("Missing ingest token. Pass --token or set PHOENIXGUARD_FRAME_INGEST_TOKEN.", file=sys.stderr)
         return 2
 
-    bbox = _parse_bbox(args.bbox)
-    sequence_id = str(args.sequence_id or args.source_id or "edge-agent")
-    image_dir = Path(args.image_dir).expanduser() if str(args.image_dir or "").strip() else None
+    bbox = _parse_bbox(bbox_text)
+    sequence_id = pick_text(args.sequence_id, profile.sequence_id, source_id)
+    image_dir = Path(image_dir_text).expanduser() if image_dir_text else None
     image_iter = _iter_images(image_dir) if image_dir else None
+    metadata = {
+        **profile.metadata,
+        **_metadata_from_json(str(args.metadata_json or "{}")),
+        "source_type": source_type,
+        "user_id": user_id,
+        "device_id": device_id,
+        "capture_mode": "image_dir" if image_iter is not None else "screen",
+    }
     frame_id = 0
     while True:
         frame_id += 1
@@ -166,18 +300,19 @@ def main() -> int:
             filename = f"frame_{frame_id:08d}.png"
         try:
             result = _post_frame(
-                base_url=args.base_url,
-                session_id=args.session_id,
+                base_url=base_url,
+                session_id=session_id,
                 token=token,
                 frame_bytes=frame_bytes,
                 filename=filename,
-                source_id=args.source_id,
-                source_url=args.source_url,
-                symbol=args.symbol,
-                timeframe=args.timeframe,
+                source_id=source_id,
+                source_url=source_url,
+                symbol=symbol,
+                timeframe=timeframe,
                 sequence_id=sequence_id,
                 frame_id=frame_id,
-                timeout_sec=args.timeout_sec,
+                timeout_sec=timeout_sec,
+                metadata=metadata,
             )
             print(
                 json.dumps(
@@ -195,7 +330,7 @@ def main() -> int:
             print(f"upload_failed frame_id={frame_id} error={exc}", file=sys.stderr, flush=True)
         if args.once:
             return 0
-        time.sleep(max(1.0, float(args.interval_sec or 15.0)))
+        time.sleep(max(1.0, interval_sec))
 
 
 if __name__ == "__main__":

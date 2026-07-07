@@ -79,7 +79,18 @@ def test_frame_ingest_config_reports_contract() -> None:
     payload = response.json()
     assert payload["schema_version"] == "PG_FRAME_INGEST_CONFIG_V1"
     assert payload["token_required"] is True
+    assert payload["scoped_tokens_supported"] is True
     assert "edge_agent_screenshot" in payload["supported_sources"]
+    assert "mobile_manual_upload" in payload["supported_sources"]
+
+
+def test_frame_ingest_mobile_uploader_serves_html() -> None:
+    client = TestClient(create_app(window_tracker_service=_FakeFrameTracker()))
+
+    response = client.get("/v1/mobile/frame-ingest/mobile-uploader")
+
+    assert response.status_code == 200
+    assert "PhoenixGuard Frame Feed" in response.text
 
 
 def test_frame_ingest_requires_token(monkeypatch: Any) -> None:
@@ -97,6 +108,7 @@ def test_frame_ingest_requires_token(monkeypatch: Any) -> None:
 
 
 def test_frame_ingest_accepts_authenticated_chart_frame(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
     monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
     tracker = _FakeFrameTracker()
     client = TestClient(create_app(window_tracker_service=tracker))
@@ -128,3 +140,81 @@ def test_frame_ingest_accepts_authenticated_chart_frame(monkeypatch: Any) -> Non
     assert call["timeframe"] == "M5"
     assert call["frame_id"] == 42
     assert call["metadata"]["plane"] == "chart"
+
+
+def test_frame_ingest_accepts_scoped_token_registry(monkeypatch: Any, tmp_path: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", raising=False)
+    registry_path = tmp_path / "frame_tokens.json"
+    registry_path.write_text(
+        """
+{
+  "schema_version": "PG_FRAME_INGEST_TOKEN_REGISTRY_V1",
+  "tokens": [
+    {
+      "name": "user001-feed",
+      "enabled": true,
+      "user_id": "user001",
+      "token_env": "TEST_FEED_TOKEN_USER001",
+      "allowed_session_prefixes": ["user001-"],
+      "allowed_source_ids": ["user001-desktop"],
+      "allowed_symbols": ["EURCAD"],
+      "allowed_timeframes": ["M5"]
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", str(registry_path))
+    monkeypatch.setenv("TEST_FEED_TOKEN_USER001", "scoped-token")
+    tracker = _FakeFrameTracker()
+    client = TestClient(create_app(window_tracker_service=tracker))
+
+    response = client.post(
+        "/v1/mobile/frame-ingest/sessions/user001-live/frames",
+        headers={"Authorization": "Bearer scoped-token"},
+        files={"frame": ("chart.png", _png_bytes(), "image/png")},
+        data={
+            "source_id": "user001-desktop",
+            "symbol": "EURCAD",
+            "timeframe": "M5",
+            "capture_epoch_ms": "1780000000000",
+            "frame_id": "5",
+        },
+    )
+
+    assert response.status_code == 202
+    assert tracker.calls[0]["metadata"]["feed_token_name"] == "user001-feed"
+    assert tracker.calls[0]["metadata"]["feed_user_id"] == "user001"
+
+
+def test_frame_ingest_rejects_scoped_source_mismatch(monkeypatch: Any, tmp_path: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", raising=False)
+    registry_path = tmp_path / "frame_tokens.json"
+    registry_path.write_text(
+        """
+{
+  "tokens": [
+    {
+      "name": "user001-feed",
+      "token": "scoped-token",
+      "allowed_session_prefixes": ["user001-"],
+      "allowed_source_ids": ["user001-desktop"]
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", str(registry_path))
+    client = TestClient(create_app(window_tracker_service=_FakeFrameTracker()))
+
+    response = client.post(
+        "/v1/mobile/frame-ingest/sessions/user001-live/frames",
+        headers={"Authorization": "Bearer scoped-token"},
+        files={"frame": ("chart.png", _png_bytes(), "image/png")},
+        data={"source_id": "other-source"},
+    )
+
+    assert response.status_code == 403
+    assert "source_id" in response.json()["detail"]

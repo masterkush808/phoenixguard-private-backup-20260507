@@ -1,0 +1,15 @@
+{
+  "schema_version": "PG_FRAME_INGEST_TOKEN_REGISTRY_V1",
+  "tokens": [
+    {
+      "name": "user001-main-feed",
+      "enabled": true,
+      "user_id": "user001",
+      "token_env": "PHOENIXGUARD_FEED_TOKEN_USER001",
+      "allowed_session_prefixes": ["user001-"],
+      "allowed_source_ids": ["user001-desktop-chart", "user001-mobile-pwa", "user001-folder-replay"],
+      "allowed_symbols": ["EURCAD", "EURUSD", "GBPUSD", "AUDUSD"],
+      "allowed_timeframes": ["M1", "M5", "M15"]
+    }
+  ]
+}
