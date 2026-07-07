@@ -78,6 +78,8 @@ def test_runtime_environment_rejects_wrong_repo_python(monkeypatch: pytest.Monke
     wrong_python = tmp_path / "Python311" / "python.exe"
     wrong_python.parent.mkdir(parents=True)
     wrong_python.write_text("", encoding="utf-8")
+    monkeypatch.setenv("PHOENIXGUARD_PYTHON_ENV_NAME", ".venv")
+    monkeypatch.setenv("VIRTUAL_ENV", str(ROOT / ".venv"))
     monkeypatch.setenv("PHOENIXGUARD_PYTHON_EXE", str(wrong_python))
 
     status = build_python_environment_status(ROOT)

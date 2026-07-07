@@ -16266,6 +16266,14 @@ class PhoenixGuardWindowTrackingAdapter:
             )
         return segments
 
+    def build_historical_structure_for_diagnostics(
+        self,
+        candles: Sequence[Mapping[str, Any]],
+        image_size: tuple[int, int],
+    ) -> list[dict[str, Any]]:
+        """Expose historical structure geometry for contract tests and tools."""
+        return self._build_historical_structure(candles, image_size)
+
     def _historical_segment_story(self, direction: str, net_move: float, candle_count: int, segment_index: int) -> str:
         normalized = str(direction or "HOLD").upper()
         if normalized == "BUY":

@@ -4409,19 +4409,40 @@ def create_app(
         )
         tracking_summary = _mapping_to_plain_dict(tracker_payload.get("tracking_summary"))
         overlay_geometry = _mapping_to_plain_dict(tracking_summary.get("overlay_geometry"))
-        overlay_geometry_boxes = overlay_geometry.get("boxes")
-        overlay_geometry_count = (
-            len(cast(Sequence[object], overlay_geometry_boxes))
-            if isinstance(overlay_geometry_boxes, list)
-            else 0
+        def drawable_overlay_rows(value: object) -> list[dict[str, object]]:
+            if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+                return []
+            rows: list[dict[str, object]] = []
+            for item in cast(Sequence[object], value):
+                if isinstance(item, Mapping):
+                    item_map = cast(Mapping[object, object], item)
+                    rows.append({str(key): row_value for key, row_value in item_map.items()})
+            return rows
+
+        live_visual_state = _mapping_to_plain_dict(
+            tracker_payload.get("live_visual_state") or tracker_payload.get("live_state_v3")
         )
-        session_overlay_objects = tracker_payload.get("overlay_objects")
-        session_overlay_count = (
-            len(cast(Sequence[object], session_overlay_objects))
-            if isinstance(session_overlay_objects, list)
-            else 0
+        top_overlay_payload = _mapping_to_plain_dict(tracker_payload.get("overlays"))
+        live_overlay_payload = _mapping_to_plain_dict(live_visual_state.get("overlays"))
+        overlay_object_sources = (
+            tracker_payload.get("overlay_objects"),
+            top_overlay_payload.get("objects"),
+            top_overlay_payload.get("all_objects"),
+            live_overlay_payload.get("objects"),
+            live_overlay_payload.get("all_objects"),
+            overlay_geometry.get("objects"),
         )
-        clean_object_count = max(overlay_geometry_count, session_overlay_count)
+        overlay_objects: list[dict[str, object]] = []
+        seen_overlay_object_ids: set[str] = set()
+        for source in overlay_object_sources:
+            for row in drawable_overlay_rows(source):
+                overlay_id = str(row.get("overlay_id") or row.get("id") or row.get("object_id") or "").strip()
+                dedupe_key = overlay_id or json.dumps(row, sort_keys=True, default=str)
+                if dedupe_key in seen_overlay_object_ids:
+                    continue
+                seen_overlay_object_ids.add(dedupe_key)
+                overlay_objects.append(row)
+        clean_object_count = len(overlay_objects)
         renderable_count = int(
             _epoch_float(
                 tracker_payload.get("renderable_count")
@@ -4434,6 +4455,8 @@ def create_app(
                 0.0,
             )
         )
+        if not overlay_objects and renderable_count > 0:
+            renderable_count = 0
         if clean_object_count > 0 and renderable_count <= 0:
             renderable_count = clean_object_count
         if renderable_count > 0 or clean_object_count > 0:
@@ -4451,13 +4474,32 @@ def create_app(
             state_payload["overlay_frame_id"] = tracker_payload.get("overlay_frame_id") or tracker_payload.get("overlay_object_frame_id")
             state_payload["frame_id"] = tracker_payload.get("frame_id") or tracker_payload.get("frame_index")
             state_payload["state_version"] = tracker_payload.get("state_version")
+            overlay_object_frame_id = (
+                tracker_payload.get("overlay_object_frame_id")
+                or top_overlay_payload.get("overlay_object_frame_id")
+                or live_overlay_payload.get("overlay_object_frame_id")
+                or state_payload.get("overlay_frame_id")
+            )
+            chart_transform_id = (
+                tracker_payload.get("chart_transform_id")
+                or top_overlay_payload.get("chart_transform_id")
+                or live_overlay_payload.get("chart_transform_id")
+                or _mapping_to_plain_dict(overlay_geometry.get("chart_transform")).get("chart_transform_id")
+            )
             state_payload["overlays"] = {
                 "overlay_count": overlay_count,
                 "renderable_count": renderable_count,
+                "objects": overlay_objects,
+                "all_objects": overlay_objects,
                 "frame_id": state_payload.get("frame_id"),
                 "overlay_frame_id": state_payload.get("overlay_frame_id"),
-                "chart_transform_id": tracker_payload.get("chart_transform_id")
-                or _mapping_to_plain_dict(overlay_geometry.get("chart_transform")).get("chart_transform_id"),
+                "overlay_object_frame_id": overlay_object_frame_id,
+                "chart_transform_id": chart_transform_id,
+                "artifact_frame_aligned": (
+                    int(_epoch_float(overlay_object_frame_id, 0.0)) <= 0
+                    or int(_epoch_float(state_payload.get("frame_id"), 0.0)) <= 0
+                    or int(_epoch_float(overlay_object_frame_id, 0.0)) == int(_epoch_float(state_payload.get("frame_id"), 0.0))
+                ),
                 "source": "tracker_payload_overlay_summary",
             }
         if not include_inspector:

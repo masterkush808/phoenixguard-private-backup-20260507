@@ -168,9 +168,21 @@ function Stop-PhoenixGuardMonitorChildren {
         'start_phoenixguard_mobile_api.py',
         'shooter.py'
     )
+    $projectRootNeedle = ([IO.Path]::GetFullPath($ProjectRoot)).ToLowerInvariant()
+    $runtimeRootNeedle = ([IO.Path]::GetFullPath($RuntimeRoot)).ToLowerInvariant()
+    $sessionNeedle = [string]$SessionId
     Get-CimInstance Win32_Process | Where-Object {
         $commandLine = [string]$_.CommandLine
-        -not [string]::IsNullOrWhiteSpace($commandLine) -and ($patterns | Where-Object { $commandLine -like "*$_*" })
+        if ([string]::IsNullOrWhiteSpace($commandLine)) {
+            $false
+        } else {
+            $lowerCommandLine = $commandLine.ToLowerInvariant()
+            $isPhoenixGuardProcess = [bool]($patterns | Where-Object { $commandLine -like "*$_*" })
+            $matchesThisRepo = $lowerCommandLine.Contains($projectRootNeedle)
+            $matchesRuntime = $lowerCommandLine.Contains($runtimeRootNeedle)
+            $matchesSession = [string]::IsNullOrWhiteSpace($sessionNeedle) -or $commandLine.Contains($sessionNeedle)
+            ($isPhoenixGuardProcess -and $matchesThisRepo -and ($matchesRuntime -or $matchesSession))
+        }
     } | ForEach-Object {
         Write-MonitorLog "Stopping existing PhoenixGuard process $($_.ProcessId)."
         Stop-Process -Id ([int]$_.ProcessId) -Force -ErrorAction SilentlyContinue

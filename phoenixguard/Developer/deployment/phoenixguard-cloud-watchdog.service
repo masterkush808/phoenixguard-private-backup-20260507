@@ -1,0 +1,18 @@
+[Unit]
+Description=PhoenixGuard Cloud Brain watchdog
+After=network-online.target phoenixguard-cloud-brain.service
+Wants=network-online.target phoenixguard-cloud-brain.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/phoenixguard/phoenixguard
+EnvironmentFile=/etc/phoenixguard/cloud-brain.env
+ExecStart=/bin/sh -lc 'exec /opt/phoenixguard/phoenixguard/.venv-live/bin/python Developer/deployment/phoenixguard_cloud_watchdog.py --base-url "http://127.0.0.1:${PHOENIXGUARD_MOBILE_API_PORT:-8793}" --session-id "${PHOENIXGUARD_TRACKER_SESSION_ID:-cloud-live}" --service-name phoenixguard-cloud-brain.service --log-path /opt/phoenixguard/phoenixguard/runtime/live/logs_live/cloud_watchdog.jsonl --interval-sec 30 --failure-threshold 3'
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

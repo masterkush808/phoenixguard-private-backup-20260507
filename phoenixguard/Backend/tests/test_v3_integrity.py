@@ -111,6 +111,73 @@ def test_floating_state_endpoint_uses_clean_contract() -> None:
     assert "inspector" in inspector_response.json()
 
 
+def test_floating_state_carries_drawable_overlay_objects_when_counts_are_positive() -> None:
+    overlay_object: dict[str, object] = {
+        "overlay_id": "demand-1",
+        "object_id": "demand-1",
+        "track_id": "demand-1",
+        "type": "DEMAND_ZONE",
+        "side": "BUY",
+        "source_agent": "model_council_v3",
+        "source_version": "PG_V3_OVERLAY_OBJECT_V1",
+        "broker_source_lock_id": "broker-lock-1",
+        "frame_id": 10,
+        "sequence_id": "seq-10",
+        "chart_transform_id": "ct-10",
+        "coordinate_mode": "CHART_IMAGE_SPACE",
+        "anchor_type": "CANDLES",
+        "anchor_candles": [4, 5],
+        "anchor_candle_indices": [4, 5],
+        "anchor_price_band": {"top_y": 100, "bottom_y": 120},
+        "anchor_time_span": {"left_x": 20, "right_x": 80},
+        "anchor_evidence": {"valid": True, "evidence_type": "support_reclaim"},
+        "bounds": [20, 100, 80, 120],
+        "truth_score": 0.84,
+        "confidence": 0.88,
+        "lifecycle_state": "ACTIVE",
+        "layer": "supply_demand",
+        "visible_modes": ["CLEAN_LIVE", "SUPPLY_DEMAND"],
+        "ttl_ms": 9000,
+        "reason": "anchored demand",
+        "display_state": "FULL",
+        "style": {"stroke": "#00a676", "fill_opacity": 0.08},
+    }
+
+    class FakeTracker:
+        def get_session(self, session_id: str) -> dict[str, object]:
+            return {
+                "session_id": session_id,
+                "status": "running",
+                "frame_id": 10,
+                "frame_index": 10,
+                "state_version": 10,
+                "overlay_count": 1,
+                "renderable_count": 1,
+                "overlay_object_frame_id": 10,
+                "chart_transform_id": "ct-10",
+                "overlay_objects": [overlay_object],
+                "model_health": {"models_awake": 7, "models_total": 7},
+            }
+
+        def latest_model_council_packet(self, session_id: str) -> dict[str, object]:
+            raise KeyError(session_id)
+
+        def latest_model_council_study_packet(self, session_id: str) -> dict[str, object]:
+            raise KeyError(session_id)
+
+    client = TestClient(create_app(window_tracker_service=FakeTracker()))  # type: ignore[arg-type]
+    response = client.get("/v1/mobile/floating/state?session_id=pocket-live-8788")
+
+    assert response.status_code == 200
+    payload = response.json()
+    overlays = payload["overlays"]
+    assert overlays["renderable_count"] == 1
+    assert overlays["overlay_object_frame_id"] == 10
+    assert overlays["chart_transform_id"] == "ct-10"
+    assert len(overlays["objects"]) == 1
+    assert overlays["objects"][0]["overlay_id"] == "demand-1"
+
+
 def test_tracker_artifact_endpoint_handles_pruned_file_race(tmp_path: Path) -> None:
     missing_path = tmp_path / "already_pruned_chart.png"
 

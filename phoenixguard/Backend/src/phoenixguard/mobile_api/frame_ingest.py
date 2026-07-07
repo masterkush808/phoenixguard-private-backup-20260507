@@ -18,6 +18,7 @@ from PIL import Image
 
 
 DEFAULT_MAX_FRAME_BYTES = 15 * 1024 * 1024
+DEFAULT_MAX_FRAME_PIXELS = 36_000_000
 DEFAULT_MIN_FRAME_SIDE = 64
 DEFAULT_MAX_FRAME_SIDE = 8192
 DEFAULT_MAX_METADATA_BYTES = 8192
@@ -319,6 +320,7 @@ def _record_or_reject_feed_runtime(
     sequence_id: str,
     capture_epoch_ms: int,
     frame_id: int,
+    commit: bool = True,
 ) -> None:
     if _env_bool("PHOENIXGUARD_FRAME_INGEST_REQUIRE_CAPTURE_EPOCH", True) and int(capture_epoch_ms or 0) <= 0:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="capture_epoch_ms is required for live frame ingest.")
@@ -346,16 +348,17 @@ def _record_or_reject_feed_runtime(
         total_limit = _env_int("PHOENIXGUARD_FRAME_INGEST_MAX_ACTIVE_FEEDS_TOTAL", DEFAULT_MAX_ACTIVE_FEEDS_TOTAL, 1)
         if existing is None and len(active_states) >= total_limit:
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="PhoenixGuard active frame feed capacity is full.")
-        _FEED_RUNTIME_STATE[key] = FeedRuntimeState(
-            token_name=context.token_name,
-            user_id=context.user_id,
-            session_id=str(session_id or "").strip(),
-            source_id=str(source_id or "").strip(),
-            sequence_id=str(sequence_id or "").strip(),
-            last_capture_epoch_ms=int(capture_epoch_ms or 0),
-            last_frame_id=int(frame_id or 0),
-            last_seen_monotonic=now_monotonic,
-        )
+        if commit:
+            _FEED_RUNTIME_STATE[key] = FeedRuntimeState(
+                token_name=context.token_name,
+                user_id=context.user_id,
+                session_id=str(session_id or "").strip(),
+                source_id=str(source_id or "").strip(),
+                sequence_id=str(sequence_id or "").strip(),
+                last_capture_epoch_ms=int(capture_epoch_ms or 0),
+                last_frame_id=int(frame_id or 0),
+                last_seen_monotonic=now_monotonic,
+            )
 
 
 def _readiness_payload() -> dict[str, object]:
@@ -395,15 +398,30 @@ def _readiness_payload() -> dict[str, object]:
     }
 
 
-async def _read_image_upload(frame: UploadFile) -> Image.Image:
+async def _read_image_upload(frame: UploadFile) -> tuple[Image.Image, str, int]:
     data = await frame.read()
     max_bytes = _env_int("PHOENIXGUARD_FRAME_INGEST_MAX_BYTES", DEFAULT_MAX_FRAME_BYTES, 1024 * 1024)
     if not data:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Frame upload is empty.")
     if len(data) > max_bytes:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Frame upload is too large.")
+    max_pixels = _env_int("PHOENIXGUARD_FRAME_INGEST_MAX_PIXELS", DEFAULT_MAX_FRAME_PIXELS, 1024 * 1024)
+    Image.MAX_IMAGE_PIXELS = max_pixels
+    allowed_formats = {item.upper() for item in (_env_csv("PHOENIXGUARD_FRAME_INGEST_ALLOWED_FORMATS") or ("PNG", "JPEG", "WEBP"))}
     try:
-        image = Image.open(BytesIO(data)).convert("RGB")
+        with Image.open(BytesIO(data)) as probe:
+            detected_format = str(probe.format or "").upper()
+            if detected_format not in allowed_formats:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Frame upload format is not allowed.")
+            if getattr(probe, "is_animated", False):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Animated frame uploads are not allowed.")
+            probe.verify()
+        with Image.open(BytesIO(data)) as reopened:
+            image = reopened.convert("RGB")
+    except HTTPException:
+        raise
+    except Image.DecompressionBombError as exc:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Frame upload exceeds the configured pixel safety limit.") from exc
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Frame upload is not a readable image.") from exc
     min_side = _env_int("PHOENIXGUARD_FRAME_INGEST_MIN_SIDE", DEFAULT_MIN_FRAME_SIDE, 16)
@@ -412,7 +430,7 @@ async def _read_image_upload(frame: UploadFile) -> Image.Image:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Frame is too small to be a chart.")
     if image.width > max_side or image.height > max_side:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Frame is larger than the configured ingest limit.")
-    return image
+    return image, hashlib.sha256(data).hexdigest(), len(data)
 
 
 def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> APIRouter:
@@ -485,15 +503,18 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
             sequence_id=sequence_id,
             capture_epoch_ms=int(capture_epoch_ms or 0),
             frame_id=int(frame_id or 0),
+            commit=False,
         )
-        image = await _read_image_upload(frame)
+        image, frame_sha256, frame_bytes = await _read_image_upload(frame)
         metadata = _metadata_from_json(metadata_json)
         metadata.setdefault("client_host", request.client.host if request.client else "")
         metadata.setdefault("filename", frame.filename or "")
         metadata.setdefault("feed_token_name", auth_context.token_name)
         metadata.setdefault("feed_user_id", auth_context.user_id)
+        metadata.setdefault("frame_sha256", frame_sha256)
+        metadata.setdefault("frame_bytes", frame_bytes)
         try:
-            return get_tracker().ingest_external_frame(
+            response = get_tracker().ingest_external_frame(
                 session_id,
                 image,
                 source_id=source_id,
@@ -505,6 +526,16 @@ def build_frame_ingest_router(get_tracker: Callable[[], FrameIngestTracker]) -> 
                 frame_id=frame_id,
                 metadata=metadata,
             )
+            _record_or_reject_feed_runtime(
+                auth_context,
+                session_id=session_id,
+                source_id=source_id,
+                sequence_id=sequence_id,
+                capture_epoch_ms=int(capture_epoch_ms or 0),
+                frame_id=int(frame_id or 0),
+                commit=True,
+            )
+            return response
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         except ValueError as exc:

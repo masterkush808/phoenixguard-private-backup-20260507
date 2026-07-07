@@ -107,8 +107,10 @@ def test_contract_sanitizes_historical_progression_edge_spikes() -> None:
 
     assert points[0] == [252.0, 505.0]
     assert points[-1] == [415.0, 597.0]
+    bounds = cast(Sequence[float], overlay["bounds"])
+
     assert all(point[1] != 7.0 for point in points)
-    assert overlay["bounds"][1] > 400.0
+    assert bounds[1] > 400.0
 
 
 def test_live_modes_reject_skinny_vertical_spike_overlays() -> None:

@@ -40,6 +40,7 @@
     "_archive",
     "_backups",
     "Backend/src/phoenixguard/decision/book_strategy/legacy_engine.py",
+    "Backend/src/phoenixguard/decision/model_council/legacy_engine.py",
     "DataAnalysisExpert",
     "node_modules",
     "Business/web"

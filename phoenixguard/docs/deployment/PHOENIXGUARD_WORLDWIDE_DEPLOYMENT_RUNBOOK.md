@@ -339,7 +339,7 @@ Keep production runtime separate from dev/training environments.
 
 ```text
 repo is pushed to main
-.venv-live installs from requirements/locks/live-win-py311.txt
+.venv-live installs from requirements/locks/live-linux-py311.txt on Ubuntu VPS hosts and requirements/locks/live-win-py311.txt on Windows workers
 PhoenixGuard health endpoint returns ok
 single API listener on 8793
 tracker captures fresh frames every configured interval
@@ -348,6 +348,6 @@ package reporter is running
 MT4 bridge is running only if intended
 Cloudflare/Tailscale tunnel is authenticated
 public URL requires authentication
-watchdog task is enabled
+watchdog service/task is enabled and writes health/restart evidence to runtime/live/logs_live
 VM snapshot is configured
 ```

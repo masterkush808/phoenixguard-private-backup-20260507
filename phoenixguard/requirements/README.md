@@ -5,9 +5,9 @@ random packages into global Python, Conda, runtime folders, or the wrong profile
 
 ## Production Profiles
 
-| Profile | Source | Locked Windows file | Intended use |
+| Profile | Source | Locked file(s) | Intended use |
 | --- | --- | --- | --- |
-| Live | `requirements/live.in` | `requirements/locks/live-win-py311.txt` | `FINAL_LIVE` tracker, mobile API, overlay dashboard, and package reporter. |
+| Live | `requirements/live.in` | `requirements/locks/live-win-py311.txt`, `requirements/locks/live-linux-py311.txt` | `FINAL_LIVE` tracker, mobile API, overlay dashboard, package reporter, and Ubuntu cloud brain. |
 | Business | `requirements/business.in` | `requirements/locks/business-win-py311.txt` | Protected share desk and business API surfaces. |
 | Dev | `requirements/dev.in` | `requirements/locks/dev-win-py311.txt` | Full repo tests, Pyright, and developer tooling. |
 | Training | `requirements/training.in` | `requirements/locks/training-win-py311.txt` | Model training and export workflows. |
@@ -33,6 +33,7 @@ before trusting a production launch.
 
 ```text
 .venv-live      requirements/locks/live-win-py311.txt
+.venv-live      requirements/locks/live-linux-py311.txt on Ubuntu VPS hosts
 .venv-dev       requirements/locks/dev-win-py311.txt
 .venv-training  requirements/locks/training-win-py311.txt
 .venv-business  requirements/locks/business-win-py311.txt

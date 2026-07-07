@@ -69,7 +69,7 @@ fi
 
 echo "[PhoenixGuard Cloud Brain] Creating .venv-live."
 sudo -u "${SERVICE_USER}" uv venv "${REPO_ROOT}/.venv-live" --python 3.11
-sudo -u "${SERVICE_USER}" uv pip install --python "${REPO_ROOT}/.venv-live/bin/python" -r "${REPO_ROOT}/requirements/locks/live-win-py311.txt"
+sudo -u "${SERVICE_USER}" uv pip install --python "${REPO_ROOT}/.venv-live/bin/python" -r "${REPO_ROOT}/requirements/locks/live-linux-py311.txt"
 
 if [[ -n "${ASSET_ARCHIVE_URL}" ]]; then
   echo "[PhoenixGuard Cloud Brain] Downloading asset archive."
@@ -158,6 +158,30 @@ TimeoutStopSec=30
 NoNewPrivileges=true
 UMask=0077
 LimitNOFILE=65535
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=${REPO_ROOT}/runtime
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/phoenixguard-cloud-watchdog.service <<EOF
+[Unit]
+Description=PhoenixGuard Cloud Brain watchdog
+After=network-online.target phoenixguard-cloud-brain.service
+Wants=network-online.target phoenixguard-cloud-brain.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${REPO_ROOT}
+EnvironmentFile=${ENV_FILE}
+ExecStart=${REPO_ROOT}/.venv-live/bin/python Developer/deployment/phoenixguard_cloud_watchdog.py --base-url http://${API_HOST}:${API_PORT} --session-id ${SESSION_ID} --service-name phoenixguard-cloud-brain.service --log-path ${REPO_ROOT}/runtime/live/logs_live/cloud_watchdog.jsonl --interval-sec 30 --failure-threshold 3
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
@@ -165,6 +189,7 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now phoenixguard-cloud-brain.service
+systemctl enable --now phoenixguard-cloud-watchdog.service
 
 if [[ -n "${CLOUDFLARED_TOKEN}" ]]; then
   echo "[PhoenixGuard Cloud Brain] Installing Cloudflare Tunnel service."

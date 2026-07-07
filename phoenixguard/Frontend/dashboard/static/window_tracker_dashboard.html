@@ -3913,7 +3913,7 @@
 
     function overlayArtifactFrame(session = {}) {
       const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
-      const overlaysPayload = objectOrEmpty(session.overlays || liveState.overlays);
+      const overlaysPayload = overlayPayloadWithObjects(session);
       const modePayload = objectOrEmpty(session.overlay_mode || liveState.overlay_mode);
       return Math.max(
         artifactPathFrame(session.last_overlay_path),
@@ -3929,7 +3929,7 @@
 
     function overlayObjectFrame(session = {}) {
       const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
-      const overlaysPayload = objectOrEmpty(session.overlays || liveState.overlays);
+      const overlaysPayload = overlayPayloadWithObjects(session);
       const modePayload = objectOrEmpty(session.overlay_mode || liveState.overlay_mode);
       return Math.max(
         frameNumber(session.overlay_object_frame_id),
@@ -3977,7 +3977,7 @@
       const chartTransform = objectOrEmpty(session.chart_transform || liveState.chart_transform);
       const chartPayload = objectOrEmpty(session.chart || liveState.chart);
       const chartPayloadTransform = objectOrEmpty(chartPayload.chart_transform);
-      const overlaysPayload = objectOrEmpty(session.overlays || liveState.overlays);
+      const overlaysPayload = overlayPayloadWithObjects(session);
       const firstOverlay = Array.isArray(overlaysPayload.objects) && overlaysPayload.objects.length
         ? objectOrEmpty(overlaysPayload.objects[0])
         : {};
@@ -4014,7 +4014,7 @@
 
     function backendOverlayFrameAligned(session = {}) {
       const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
-      const overlaysPayload = objectOrEmpty(session.overlays || liveState.overlays);
+      const overlaysPayload = overlayPayloadWithObjects(session);
       const modePayload = objectOrEmpty(session.overlay_mode || liveState.overlay_mode);
       const explicitArtifactAligned = explicitBoolean([
         session.overlay_artifact_frame_aligned,
@@ -4465,7 +4465,7 @@
 
     function backendRenderableOverlayCount(session = {}) {
       const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
-      const overlaysPayload = objectOrEmpty(session.overlays || liveState.overlays);
+      const overlaysPayload = overlayPayloadWithObjects(session);
       return Number(
         session.renderable_count
         || liveState.renderable_count
@@ -5124,6 +5124,21 @@
 
     function objectOrEmpty(value) {
       return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    }
+
+    function overlayPayloadWithObjects(session = {}) {
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const topLevel = objectOrEmpty(session.overlays);
+      const liveNested = objectOrEmpty(liveState.overlays);
+      const topHasObjects = Array.isArray(topLevel.objects) || Array.isArray(topLevel.all_objects);
+      if (topHasObjects) {
+        return topLevel;
+      }
+      const liveHasObjects = Array.isArray(liveNested.objects) || Array.isArray(liveNested.all_objects);
+      if (liveHasObjects) {
+        return liveNested;
+      }
+      return Object.keys(topLevel).length > 0 ? topLevel : liveNested;
     }
 
     function oppositeSide(side = "") {
@@ -7013,7 +7028,7 @@
       const tracking = session.tracking_summary || {};
       const signal = session.latest_signal || {};
       const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
-      const overlayPayload = objectOrEmpty(session.overlays || liveState.overlays);
+      const overlayPayload = overlayPayloadWithObjects(session);
       const overlayGeometry = tracking.overlay_geometry || signal.overlay_geometry || {};
       const memoryProjection = currentMemoryProjection(session);
       const brokerSurface = session.broker_surface || {};

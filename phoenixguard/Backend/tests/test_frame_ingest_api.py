@@ -76,6 +76,13 @@ def _png_bytes(width: int = 160, height: int = 120) -> bytes:
     return output.getvalue()
 
 
+def _bmp_bytes(width: int = 160, height: int = 120) -> bytes:
+    image = Image.new("RGB", (width, height), (8, 12, 18))
+    output = BytesIO()
+    image.save(output, format="BMP")
+    return output.getvalue()
+
+
 def test_frame_ingest_config_reports_contract(monkeypatch: Any) -> None:
     monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", raising=False)
     monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
@@ -199,6 +206,45 @@ def test_frame_ingest_rejects_too_fast_feed(monkeypatch: Any) -> None:
 
     assert first.status_code == 202
     assert second.status_code == 429
+
+
+def test_frame_ingest_rejected_image_does_not_poison_feed_interval(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC", "60")
+    client = _client()
+
+    bad = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/frames",
+        headers={"Authorization": "Bearer secret-token"},
+        files={"frame": ("chart.txt", b"not an image", "text/plain")},
+        data={"source_id": "edge-agent", "capture_epoch_ms": "1780000000000", "frame_id": "1"},
+    )
+    good = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/frames",
+        headers={"Authorization": "Bearer secret-token"},
+        files={"frame": ("chart.png", _png_bytes(), "image/png")},
+        data={"source_id": "edge-agent", "capture_epoch_ms": "1780000000000", "frame_id": "1"},
+    )
+
+    assert bad.status_code == 400
+    assert good.status_code == 202
+
+
+def test_frame_ingest_rejects_unsupported_image_format(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_FRAME_INGEST_TOKEN", "secret-token")
+    client = _client()
+
+    response = client.post(
+        "/v1/mobile/frame-ingest/sessions/external-live/frames",
+        headers={"Authorization": "Bearer secret-token"},
+        files={"frame": ("chart.bmp", _bmp_bytes(), "image/bmp")},
+        data={"source_id": "edge-agent", "capture_epoch_ms": "1780000000000", "frame_id": "1"},
+    )
+
+    assert response.status_code == 400
+    assert "format is not allowed" in response.json()["detail"]
 
 
 def test_frame_ingest_accepts_scoped_token_registry(monkeypatch: Any, tmp_path: Any) -> None:

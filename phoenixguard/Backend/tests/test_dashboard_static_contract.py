@@ -28,3 +28,12 @@ def test_dashboard_heartbeat_fetch_uses_keepalive() -> None:
 
     assert 'keepalive: true' in text
     assert 'window.fetch("/v1/mobile/frontend/heartbeat/v3"' in text
+
+
+def test_dashboard_overlay_payload_selection_requires_drawable_objects() -> None:
+    text = _dashboard_text()
+
+    assert "function overlayPayloadWithObjects(session = {})" in text
+    assert "Array.isArray(topLevel.objects) || Array.isArray(topLevel.all_objects)" in text
+    assert "Array.isArray(liveNested.objects) || Array.isArray(liveNested.all_objects)" in text
+    assert "objectOrEmpty(session.overlays || liveState.overlays)" not in text

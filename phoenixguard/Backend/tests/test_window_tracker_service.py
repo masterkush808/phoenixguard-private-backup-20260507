@@ -7047,7 +7047,7 @@ def test_historical_structure_path_uses_body_center_not_wick_spike() -> None:
             }
         )
 
-    history = adapter._build_historical_structure(candles, (720, 640))  # noqa: SLF001 - verifies tracker geometry contract
+    history = adapter.build_historical_structure_for_diagnostics(candles, (720, 640))
     points = [
         point
         for segment in history

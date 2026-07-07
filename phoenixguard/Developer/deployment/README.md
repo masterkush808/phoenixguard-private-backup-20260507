@@ -30,10 +30,21 @@ verify_universal_frame_feed.py
   Deployment verifier for API health, frame-ingest readiness, and optional
   synthetic frame upload smoke testing after the VPS is live.
 
+verify_release_readiness.py
+  Static release gate for deployment contracts: locks, bootstrap references,
+  watchdog units, frame-ingest hardening, overlay payload routing, and Pyright
+  runtime exclusions.
+
+phoenixguard_cloud_watchdog.py / phoenixguard-cloud-watchdog.service
+  Cloud watchdog that probes health, frame-ingest readiness, and compact live
+  state, writes JSONL maintenance logs, and restarts the cloud-brain service
+  after repeated failures.
+
 linux_cloud_brain_bootstrap.sh
   Ubuntu VPS bootstrap for the cheapest cloud-brain deployment: clone repo,
-  create .venv-live with Python 3.11, install the live stack, write systemd,
-  optionally install Cloudflare Tunnel, and start the API.
+  create .venv-live with Python 3.11 from requirements/locks/live-linux-py311.txt,
+  install the live stack, write systemd, enable the watchdog, optionally install
+  Cloudflare Tunnel, and start the API.
 
 phoenixguard-cloud-brain.service / phoenixguard-cloud-brain.env.example
   systemd and env-file references for the Linux cloud-brain service.
@@ -52,6 +63,13 @@ is not the managed VPS browser.
 
 For the lowest-cost off-machine deployment, use linux_cloud_brain_bootstrap.sh
 on an Ubuntu VPS and expose it with Cloudflare Tunnel.
+
+Before a release or migration, run:
+
+```text
+python Developer/deployment/verify_release_readiness.py
+python Developer/deployment/verify_universal_frame_feed.py --base-url http://127.0.0.1:8793
+```
 
 The mobile/browser feed uploader is served by the API at:
 

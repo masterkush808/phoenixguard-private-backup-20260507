@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import sys
-
-from phoenixguard.decision.model_council import (
+from phoenixguard.decision.model_council.legacy_engine import (
     ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW,
     ALLOWANCE_PACKAGE_SCHEMA_VERSION,
     ALLOWANCE_PACKAGE_SWING,
@@ -22,7 +20,6 @@ from phoenixguard.decision.model_council import (
     publish_model_council_packet_v3,
     validate_execution_packet_v3,
 )
-from phoenixguard.decision.model_council import legacy_engine as _legacy_engine
 
 __all__ = [
     "ALLOWANCE_PACKAGE_INTRADAY_ENTER_NOW",
@@ -44,5 +41,3 @@ __all__ = [
     "publish_model_council_packet_v3",
     "validate_execution_packet_v3",
 ]
-
-sys.modules[__name__] = _legacy_engine
