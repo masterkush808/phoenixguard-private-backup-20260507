@@ -12,6 +12,40 @@ chart source on user device
 
 The server is the brain. The user device is only the chart-pixel supplier.
 
+## Production Guard Rails
+
+The deployment now treats frame ingest as a protected production surface, not a loose upload endpoint.
+
+Implemented server-side guards:
+
+```text
+scoped feed tokens
+per-token session/source/symbol/timeframe limits
+global active-feed capacity limit
+per-token active-feed limit
+minimum frame interval protection
+required capture_epoch_ms
+required frame_id
+max source-age rejection
+non-advancing source timestamp rejection
+max frame byte/size limits
+max metadata size limit
+optional Origin allowlist
+optional TrustedHost allowlist
+deployment readiness endpoint
+deployment verifier script
+```
+
+Important endpoints:
+
+```text
+GET /v1/mobile/frame-ingest/config
+GET /v1/mobile/frame-ingest/readiness
+GET /v1/mobile/frame-ingest/mobile-uploader
+POST /v1/mobile/frame-ingest/sessions/{session_id}/frames
+GET /v1/mobile/frame-ingest/sessions/{session_id}/status
+```
+
 ## Source Of Truth Contract
 
 Every frame feed must provide:
@@ -40,6 +74,8 @@ too large
 not readable as an image
 outside the scoped token permissions
 repeated with a non-advancing capture timestamp
+sent faster than the configured minimum interval
+over the active-feed capacity limit
 ```
 
 The normal tracker pipeline then treats the uploaded frame as the current chart surface for that session.
@@ -52,6 +88,13 @@ The VPS runs:
 phoenixguard-cloud-brain.service
 PHOENIXGUARD_FRAME_INGEST_TOKEN or PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY
 PHOENIXGUARD_FRAME_INGEST_MAX_SOURCE_AGE_SEC=180
+PHOENIXGUARD_FRAME_INGEST_REQUIRE_CAPTURE_EPOCH=1
+PHOENIXGUARD_FRAME_INGEST_REQUIRE_FRAME_ID=1
+PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC=10
+PHOENIXGUARD_FRAME_INGEST_MAX_ACTIVE_FEEDS_TOTAL=3
+PHOENIXGUARD_FRAME_INGEST_MAX_ACTIVE_FEEDS_PER_TOKEN=1
+PHOENIXGUARD_ALLOWED_ORIGINS=https://your-domain.example
+PHOENIXGUARD_TRUSTED_HOSTS=your-domain.example,127.0.0.1,localhost
 Cloudflare Tunnel public HTTPS access
 ```
 
@@ -69,6 +112,25 @@ PHOENIXGUARD_FEED_TOKEN_USER001=<secret>
 ```
 
 The registry limits each token to allowed session prefixes, source IDs, symbols, and timeframes.
+
+Before declaring the VPS ready, run:
+
+```powershell
+python Developer/deployment/verify_universal_frame_feed.py `
+  --base-url "https://your-domain.example" `
+  --token "<admin-or-user-feed-token>" `
+  --session-id "deployment-verify" `
+  --upload-smoke
+```
+
+This proves:
+
+```text
+API health responds
+frame-ingest is armed
+one synthetic frame can be uploaded
+the server returns accepted state
+```
 
 ## PC Feed Agent
 

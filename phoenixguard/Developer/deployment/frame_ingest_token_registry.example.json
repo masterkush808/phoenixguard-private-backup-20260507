@@ -9,7 +9,9 @@
       "allowed_session_prefixes": ["user001-"],
       "allowed_source_ids": ["user001-desktop-chart", "user001-mobile-pwa", "user001-folder-replay"],
       "allowed_symbols": ["EURCAD", "EURUSD", "GBPUSD", "AUDUSD"],
-      "allowed_timeframes": ["M1", "M5", "M15"]
+      "allowed_timeframes": ["M1", "M5", "M15"],
+      "max_active_feeds": 1,
+      "min_interval_sec": 10
     }
   ]
 }

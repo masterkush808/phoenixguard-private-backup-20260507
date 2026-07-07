@@ -25,6 +25,7 @@ fi
 REPO_ROOT="${INSTALL_ROOT}/phoenixguard"
 ENV_DIR="/etc/phoenixguard"
 ENV_FILE="${ENV_DIR}/cloud-brain.env"
+FEED_TOKEN_REGISTRY="${ENV_DIR}/frame_ingest_token_registry.json"
 
 echo "[PhoenixGuard Cloud Brain] Installing OS packages."
 apt-get update
@@ -32,6 +33,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   ca-certificates \
   curl \
   git \
+  openssl \
   build-essential \
   libgomp1 \
   libglib2.0-0 \
@@ -85,6 +87,31 @@ sudo -u "${SERVICE_USER}" mkdir -p \
   "${REPO_ROOT}/runtime/live/logs_live" \
   "${REPO_ROOT}/runtime/live/data_live"
 
+ALLOWED_ORIGINS=""
+TRUSTED_HOSTS="127.0.0.1,localhost"
+if [[ -n "${DOMAIN}" ]]; then
+  ALLOWED_ORIGINS="https://${DOMAIN}"
+  TRUSTED_HOSTS="${DOMAIN},127.0.0.1,localhost"
+fi
+
+cat > "${FEED_TOKEN_REGISTRY}" <<EOF
+{
+  "schema_version": "PG_FRAME_INGEST_TOKEN_REGISTRY_V1",
+  "tokens": [
+    {
+      "name": "deployment-admin-feed",
+      "enabled": true,
+      "user_id": "deployment-admin",
+      "token_env": "PHOENIXGUARD_FEED_TOKEN_ADMIN",
+      "max_active_feeds": 1,
+      "min_interval_sec": 10
+    }
+  ]
+}
+EOF
+chmod 0640 "${FEED_TOKEN_REGISTRY}"
+chown root:"${SERVICE_USER}" "${FEED_TOKEN_REGISTRY}"
+
 cat > "${ENV_FILE}" <<EOF
 PHOENIXGUARD_PYTHON_PROFILE=live
 PHOENIXGUARD_PYTHON_ENV_NAME=.venv-live
@@ -95,8 +122,17 @@ PHOENIXGUARD_TRACKER_SESSION_ID=${SESSION_ID}
 PHOENIXGUARD_RUNTIME_DIR=${REPO_ROOT}/runtime/live
 PHOENIXGUARD_DATA_DIR=${REPO_ROOT}/runtime/live/data_live
 PHOENIXGUARD_LOGS_DIR=${REPO_ROOT}/runtime/live/logs_live
-PHOENIXGUARD_FRAME_INGEST_TOKEN=${FRAME_INGEST_TOKEN}
+PHOENIXGUARD_FRAME_INGEST_TOKEN_REGISTRY=${FEED_TOKEN_REGISTRY}
+PHOENIXGUARD_FEED_TOKEN_ADMIN=${FRAME_INGEST_TOKEN}
 PHOENIXGUARD_FRAME_INGEST_MAX_SOURCE_AGE_SEC=180
+PHOENIXGUARD_FRAME_INGEST_REQUIRE_CAPTURE_EPOCH=1
+PHOENIXGUARD_FRAME_INGEST_REQUIRE_FRAME_ID=1
+PHOENIXGUARD_FRAME_INGEST_MIN_INTERVAL_SEC=10
+PHOENIXGUARD_FRAME_INGEST_MAX_ACTIVE_FEEDS_TOTAL=3
+PHOENIXGUARD_FRAME_INGEST_MAX_ACTIVE_FEEDS_PER_TOKEN=1
+PHOENIXGUARD_FRAME_INGEST_ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+PHOENIXGUARD_ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+PHOENIXGUARD_TRUSTED_HOSTS=${TRUSTED_HOSTS}
 PHOENIXGUARD_ENABLE_OTEL=0
 PHOENIXGUARD_RUNTIME_SINGLETON_DISABLE=0
 EOF
@@ -120,6 +156,8 @@ Restart=always
 RestartSec=8
 TimeoutStopSec=30
 NoNewPrivileges=true
+UMask=0077
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
@@ -134,18 +172,33 @@ if [[ -n "${CLOUDFLARED_TOKEN}" ]]; then
     curl -L --output /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
     chmod +x /usr/local/bin/cloudflared
   fi
-  cloudflared service install "${CLOUDFLARED_TOKEN}" || true
+  cloudflared service install "${CLOUDFLARED_TOKEN}"
   systemctl enable --now cloudflared
 fi
 
 echo "[PhoenixGuard Cloud Brain] Waiting for health endpoint."
+api_healthy=0
 for _ in $(seq 1 40); do
   if curl -fsS "http://${API_HOST}:${API_PORT}/v1/mobile/health" >/dev/null; then
     echo "[PhoenixGuard Cloud Brain] API is healthy."
+    api_healthy=1
     break
   fi
   sleep 3
 done
+if [[ "${api_healthy}" != "1" ]]; then
+  echo "[PhoenixGuard Cloud Brain] API did not become healthy." >&2
+  journalctl -u phoenixguard-cloud-brain.service --no-pager -n 120 >&2 || true
+  exit 1
+fi
+
+echo "[PhoenixGuard Cloud Brain] Checking frame-ingest readiness."
+if ! curl -fsS "http://${API_HOST}:${API_PORT}/v1/mobile/frame-ingest/readiness" >/dev/null; then
+  echo "[PhoenixGuard Cloud Brain] Frame ingest is not ready." >&2
+  curl -sS "http://${API_HOST}:${API_PORT}/v1/mobile/frame-ingest/config" >&2 || true
+  journalctl -u phoenixguard-cloud-brain.service --no-pager -n 120 >&2 || true
+  exit 1
+fi
 
 echo ""
 echo "PhoenixGuard cloud brain installed."
@@ -157,3 +210,4 @@ echo "Frame ingest token:"
 echo "${FRAME_INGEST_TOKEN}"
 echo ""
 echo "Store that token securely. Edge frame agents need it to feed the cloud brain."
+echo "Token registry: ${FEED_TOKEN_REGISTRY}"

@@ -12,8 +12,10 @@ import urllib.error
 import urllib.request
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from phoenixguard.core.config import RUNTIME, VOICE, VoiceConfig
 from phoenixguard.business import register_business_routes
@@ -119,6 +121,13 @@ def _env_float_at_least(name: str, default: float, minimum: float) -> float:
         return max(float(minimum), float(raw))
     except ValueError:
         return float(default)
+
+
+def _env_csv(name: str) -> list[str]:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def _env_int_at_least(name: str, default: int, minimum: int) -> int:
@@ -1929,6 +1938,18 @@ def create_app(
         version="1.0.0",
         summary="Android-facing quartet analysis API and continuous observer surface for PhoenixGuard.",
     )
+    allowed_origins = _env_csv("PHOENIXGUARD_ALLOWED_ORIGINS")
+    if allowed_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=allowed_origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "X-PhoenixGuard-Token"],
+        )
+    trusted_hosts = _env_csv("PHOENIXGUARD_TRUSTED_HOSTS")
+    if trusted_hosts:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
     app.state.mobile_service = service
     app.state.observer_service = observer_service
     app.state.window_tracker_service = window_tracker_service

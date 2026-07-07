@@ -26,6 +26,10 @@ frame_ingest_token_registry.example.json / generate_frame_feed_token.py
   Scoped feed-token workflow for per-user/session/source authorization without
   committing secrets.
 
+verify_universal_frame_feed.py
+  Deployment verifier for API health, frame-ingest readiness, and optional
+  synthetic frame upload smoke testing after the VPS is live.
+
 linux_cloud_brain_bootstrap.sh
   Ubuntu VPS bootstrap for the cheapest cloud-brain deployment: clone repo,
   create .venv-live with Python 3.11, install the live stack, write systemd,
