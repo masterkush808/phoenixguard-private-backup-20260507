@@ -3427,97 +3427,6 @@
         <button type="button" class="workspace-link" data-route="council">Settings</button>
       </nav>
 
-      <section class="signal-deck" aria-label="Signal overview">
-        <button type="button" class="signal-primary" id="signal-card">
-          <span class="overline">Signal Read</span>
-          <span class="signal-action hold" id="signal-action">HOLD</span>
-          <span class="signal-conf" id="signal-confidence">conf 0.00</span>
-          <span class="confidence-track" aria-hidden="true"><span class="confidence-fill" id="confidence-fill"></span></span>
-        </button>
-
-        <div class="signal-brief">
-          <span class="overline">Current Thesis</span>
-          <p class="signal-summary" id="signal-summary">Awaiting locked broker focus.</p>
-          <div class="chip-grid" id="signal-pills"></div>
-        </div>
-
-        <div class="metric-grid" aria-label="Session metrics">
-          <button type="button" class="metric-tile" id="metric-status-tile">
-            <span class="tile-label">Tracker Status</span>
-            <span class="tile-value" id="metric-status">Awaiting</span>
-            <span class="tile-note" id="metric-status-note">Engine idle</span>
-          </button>
-          <button type="button" class="metric-tile" id="metric-next-tile">
-            <span class="tile-label">Next Study</span>
-            <span class="tile-value" id="metric-next">0.0s</span>
-            <span class="tile-note">Capture cadence</span>
-          </button>
-          <button type="button" class="metric-tile" id="metric-focus-tile">
-            <span class="tile-label">Focus Lock</span>
-            <span class="tile-value" id="metric-focus">Not locked</span>
-            <span class="tile-note" id="metric-focus-note">Region pending</span>
-          </button>
-          <button type="button" class="metric-tile" id="metric-captures-tile">
-            <span class="tile-label">Capture Count</span>
-            <span class="tile-value" id="metric-captures">0</span>
-            <span class="tile-note">Completed studies</span>
-          </button>
-        </div>
-      </section>
-
-      <section class="kernel-deck" aria-label="Decision kernel">
-        <button type="button" class="kernel-story" id="kernel-story-card">
-          <span class="overline">Decision Kernel</span>
-          <span class="kernel-headline">
-            <span class="kernel-side hold" id="kernel-side">HOLD</span>
-            <span class="kernel-state" id="kernel-state">IDLE</span>
-          </span>
-          <p class="kernel-copy" id="kernel-story">Waiting for the computer vision tracker to build a valid setup story.</p>
-        </button>
-        <div class="kernel-metrics" aria-label="Decision event clocks">
-          <button type="button" class="kernel-tile" id="kernel-bias-tile">
-            <span class="tile-label">Bias Strength</span>
-            <span class="kernel-value" id="kernel-bias">0%</span>
-            <span class="kernel-note" id="kernel-bias-note">buy 0.00 | sell 0.00</span>
-          </button>
-          <button type="button" class="kernel-tile" id="kernel-candle-tile">
-            <span class="tile-label">Candle Exec</span>
-            <span class="kernel-value" id="kernel-candle">--</span>
-            <span class="kernel-note" id="kernel-candle-note">buy 0% | sell 0%</span>
-          </button>
-          <button type="button" class="kernel-tile" id="kernel-hf-tile">
-            <span class="tile-label">Next 2 Candles</span>
-            <span class="kernel-value" id="kernel-hf">--</span>
-            <span class="kernel-note" id="kernel-hf-note">two-candle study warming</span>
-          </button>
-          <button type="button" class="kernel-tile" id="kernel-mode-tile">
-            <span class="tile-label">Trade Mode</span>
-            <span class="kernel-value" id="kernel-mode">--</span>
-            <span class="kernel-note" id="kernel-mode-note">hold 0c</span>
-          </button>
-          <button type="button" class="kernel-tile" id="kernel-trigger-tile">
-            <span class="tile-label">Trigger ETA</span>
-            <span class="kernel-value" id="kernel-trigger">--</span>
-            <span class="kernel-note" id="kernel-trigger-note">p1 0% | p3 0%</span>
-          </button>
-          <button type="button" class="kernel-tile" id="kernel-target-tile">
-            <span class="tile-label">Target ETA</span>
-            <span class="kernel-value" id="kernel-target">--</span>
-            <span class="kernel-note" id="kernel-target-note">target-first 0%</span>
-          </button>
-          <button type="button" class="kernel-tile" id="kernel-stale-tile">
-            <span class="tile-label">Setup Life</span>
-            <span class="kernel-value" id="kernel-stale">--</span>
-            <span class="kernel-note" id="kernel-stale-note">freshness 0%</span>
-          </button>
-          <button type="button" class="kernel-tile" id="kernel-event-tile">
-            <span class="tile-label">Next Event</span>
-            <span class="kernel-value" id="kernel-event">--</span>
-            <span class="kernel-note" id="kernel-event-note">trigger | invalidation | stale</span>
-          </button>
-        </div>
-      </section>
-
       <nav class="control-ribbon" aria-label="Tracker controls">
         <div class="command-strip">
           <label class="select-control">
@@ -3694,36 +3603,8 @@
             </div>
           </div>
         </aside>
-
-        <aside class="inspector-module" id="inspector-panel" data-tone="hold" aria-label="Adaptive detail inspector">
-          <div class="inspector-head">
-            <span class="panel-title">Adaptive Inspector</span>
-            <button type="button" class="inspector-toggle" id="inspector-toggle" aria-expanded="true">Compact</button>
-            <span class="panel-title" id="inspector-updated">Live</span>
-          </div>
-          <div class="inspector-title">
-            <span class="overline" id="inspector-eyebrow">Signal</span>
-            <h2 id="inspector-title">Awaiting Study</h2>
-            <span class="inspector-state" id="inspector-state">HOLD</span>
-            <p class="inspector-summary" id="inspector-summary">Select any metric, study row, history record, or overlay box to expand the operating context here.</p>
-          </div>
-          <div class="detail-rows" id="inspector-rows"></div>
-        </aside>
       </section>
 
-      <section class="read-deck" aria-label="Plain English trading read">
-        <article class="read-panel" id="read-main" data-tone="hold">
-          <div class="read-copy">
-            <div>
-              <span class="overline">Current Read</span>
-              <h2 class="read-title" id="read-title">Awaiting thesis</h2>
-              <p class="read-summary" id="read-summary">Waiting for Phoenix to lock the chart story.</p>
-            </div>
-            <p class="read-path" id="read-path">Big picture, live pressure, tactical read, and invalidation will appear here.</p>
-          </div>
-          <div class="read-dictionary" id="read-dictionary" aria-label="Trading read dictionary"></div>
-        </article>
-      </section>
       <section class="lower-grid" aria-label="Study details">
         <section class="event-timeline-module" aria-label="Event timeline">
           <div class="history-head">
@@ -3891,33 +3772,6 @@
               <span class="telemetry-value" id="telemetry-avoided">--</span>
               <span class="telemetry-note" id="telemetry-avoided-note">no-trade value pending</span>
             </button>
-          </div>
-        </section>
-
-        <section class="history-module">
-          <div class="history-head">
-            <span class="panel-title">Recent Studies</span>
-            <p id="history-caption">Latest 12</p>
-          </div>
-          <div class="history" id="history-list">
-            <button type="button" class="history-item">
-              <span class="history-action hold">No studies yet</span>
-              <span class="history-copy">Completed studies will appear here.</span>
-            </button>
-          </div>
-        </section>
-
-        <section class="report-module">
-          <div class="history-head">
-            <span class="panel-title">PhoenixGuard Read</span>
-            <p id="report-caption">warming</p>
-          </div>
-          <div class="report-stack" id="report-list">
-            <div class="report-item">
-              <span class="report-title hold">PhoenixGuard report</span>
-              <span class="report-body">The live A-G report will appear here after a valid chart study.</span>
-              <span class="report-meta">memory + structure + timing + forward path</span>
-            </div>
           </div>
         </section>
 
@@ -7150,6 +7004,9 @@
 
     function setInspector({eyebrow, title, stateLabel, summary, rows = [], stateTone = "hold", contentHtml = "", contentClass = "", hideSummary = false}) {
       applyInspectorMode(state.inspectorMode);
+      if (!els.inspectorPanel || !els.inspectorEyebrow || !els.inspectorTitle || !els.inspectorState || !els.inspectorSummary || !els.inspectorRows || !els.inspectorUpdated) {
+        return;
+      }
       els.inspectorPanel.dataset.tone = stateTone;
       els.inspectorEyebrow.textContent = clean(eyebrow, "Detail");
       els.inspectorTitle.textContent = clean(title, "Selected Detail");
@@ -9734,6 +9591,9 @@
     }
 
     function renderKernelDeck(signal = {}, tracking = {}) {
+      if (!els.kernelStoryCard || !els.kernelSide || !els.kernelState || !els.kernelStory) {
+        return;
+      }
       const kernel = kernelPayload(signal, tracking);
       const microForecast = highFrequencyForecast(state.session || {}, signal, tracking);
       const side = kernelSideAction(kernel, signal);
@@ -9769,6 +9629,9 @@
     }
 
     function renderPills(signal = {}, tracking = {}, focus = {}) {
+      if (!els.signalPills) {
+        return;
+      }
       const kernel = kernelPayload(signal, tracking);
       const mapTiming = tracking.map_timing || signal.map_timing || {};
       const executionTiming = tracking.execution_timing || signal.execution_timing || ((state.session || {}).broker_execution_state || {}).execution_timing || {};
@@ -9803,6 +9666,9 @@
     }
 
     function renderHistory(history = []) {
+      if (!els.historyCaption || !els.historyList) {
+        return;
+      }
       if (!Array.isArray(history) || history.length === 0) {
         els.historyCaption.textContent = "Latest 12";
         els.historyList.innerHTML = `
@@ -9835,6 +9701,9 @@
     }
 
     function renderPhoenixguardReport(report = {}, memoryProjection = {}) {
+      if (!els.reportCaption || !els.reportList) {
+        return;
+      }
       const trackingPayload = (state.session && state.session.tracking_summary) || {};
       const scenarioAnalysis = trackingPayload.scenario_analysis || (state.session && state.session.scenario_analysis) || {};
       const decisionState = clean(report.decision_state, "warming");
@@ -10311,26 +10180,35 @@
       const effectiveInterval = Number(payload.effective_capture_interval_sec || baseInterval);
       const adaptiveTimer = executionControls.adaptive_timer_enabled !== false;
 
-      els.metricStatus.textContent = trackerStatus;
-      els.metricStatusMini.textContent = fullAuto ? `Auto ${formatSeconds(effectiveInterval)}` : "Semi Auto";
-      els.metricStatusNote.textContent = fullAuto ? `${adaptiveTimer ? "Adaptive" : "Fixed"} capture cycle` : "Semi auto manual capture";
-      els.metricNext.textContent = `${nextSec.toFixed(1)}s`;
-      els.metricFocus.textContent = focusLocked ? "Locked" : "Not locked";
-      els.metricFocusNote.textContent = focusLocked ? "Manual region active" : "Region pending";
-      els.metricCaptures.textContent = String(payload.capture_count || 0);
+      setText(els.metricStatus, trackerStatus);
+      setText(els.metricStatusMini, fullAuto ? `Auto ${formatSeconds(effectiveInterval)}` : "Semi Auto");
+      setText(els.metricStatusNote, fullAuto ? `${adaptiveTimer ? "Adaptive" : "Fixed"} capture cycle` : "Semi auto manual capture");
+      setText(els.metricNext, `${nextSec.toFixed(1)}s`);
+      setText(els.metricFocus, focusLocked ? "Locked" : "Not locked");
+      setText(els.metricFocusNote, focusLocked ? "Manual region active" : "Region pending");
+      setText(els.metricCaptures, String(payload.capture_count || 0));
 
       els.liveDot.classList.toggle("running", fullAuto);
       els.liveDot.classList.toggle("error", trackerStatus.toLowerCase() === "error");
 
-      els.signalAction.textContent = action;
-      els.signalAction.className = `signal-action ${colorClass(action)}`;
-      els.signalCard.dataset.tone = colorClass(action);
-      els.signalConfidence.textContent = `conf ${confidence.toFixed(2)}`;
-      els.confidenceFill.style.setProperty("--confidence", `${percent(confidence)}%`);
+      if (els.signalAction) {
+        els.signalAction.textContent = action;
+        els.signalAction.className = `signal-action ${colorClass(action)}`;
+      }
+      if (els.signalCard) {
+        els.signalCard.dataset.tone = colorClass(action);
+      }
+      setText(els.signalConfidence, `conf ${confidence.toFixed(2)}`);
+      if (els.confidenceFill) {
+        els.confidenceFill.style.setProperty("--confidence", `${percent(confidence)}%`);
+      }
       const traderStory = buildTraderStory(payload);
-      els.signalSummary.textContent = diagnosticsViewActive()
-        ? clean(signal.summary, "Awaiting live chart study.")
-        : traderStory.plain;
+      setText(
+        els.signalSummary,
+        diagnosticsViewActive()
+          ? clean(signal.summary, "Awaiting live chart study.")
+          : traderStory.plain,
+      );
       renderTraderRead(payload);
 
       els.studyGlobal.textContent = clean(tracking.global_direction, "HOLD");
