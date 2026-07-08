@@ -314,38 +314,6 @@ def _playbook_exports_from_allowance(
     return exports
 
 
-def _entry_quality_allows_execution(entry_quality: Mapping[str, Any]) -> bool:
-    state = _clean_str(
-        entry_quality.get("state")
-        or entry_quality.get("entry_grade")
-        or entry_quality.get("grade")
-        or entry_quality.get("quality")
-    ).upper()
-    if not state:
-        return True
-    if state in {"PERFECT_ENTRY", "IDEAL_ENTRY", "A_PLUS_ENTRY", "GOOD_ENTRY", "VALID_ENTRY", "AGGRESSIVE_VALID_ENTRY", "ACCEPTABLE_ENTRY"}:
-        return True
-    if entry_quality.get("passes_executable_threshold") is True:
-        return True
-    return False
-
-
-def _market_trap_blocks_execution(trap: Mapping[str, Any]) -> bool:
-    if not trap:
-        return False
-    if trap.get("execution_allowed") is False or trap.get("executable_allowed") is False:
-        return True
-    if trap.get("trap_free") is False:
-        return True
-    active_traps = _sequence(trap.get("active_traps") or trap.get("traps"))
-    for raw in active_traps:
-        item = _mapping(raw)
-        severity = _float(item.get("severity"), 1.0)
-        if severity >= 0.5:
-            return True
-    return False
-
-
 def _overlay_truth_blocks_execution(overlay: Mapping[str, Any]) -> bool:
     if not overlay:
         return False
@@ -910,13 +878,6 @@ def validate_execution_packet_v3(
     allowance_package = _mapping(packet.get("allowance_package") or council.get("allowance_package"))
     health = _mapping(packet.get("runtime_model_health"))
     sequence_context = _mapping(council.get("sequence_context"))
-    trade_permission = _mapping(packet.get("trade_permission") or council.get("trade_permission"))
-    entry_quality = _mapping(packet.get("entry_quality") or council.get("entry_quality"))
-    market_trap = _mapping(
-        packet.get("market_trap")
-        or packet.get("trap_assessment")
-        or _mapping(packet.get("market_reality")).get("market_trap")
-    )
     overlay_truth = _mapping(packet.get("overlay_truth_audit") or packet.get("overlay_geometry") or packet.get("overlay_context"))
     execution_side = normalize_side(execution.get("side"))
     final_side = normalize_side(council.get("final_side"))
@@ -1099,24 +1060,9 @@ def validate_execution_packet_v3(
             add("COUNCIL_STATE_NOT_EXECUTABLE", "MODEL_COUNCIL", "model_council.final_state must be EXECUTABLE.")
     if health.get("all_required_models_awake") is not True:
         add("REQUIRED_MODELS_NOT_AWAKE", RUNTIME_INTEGRITY_CATEGORY, "All required runtime models must be awake.")
-    if require_executable and trade_permission and trade_permission.get("executable_allowed") is not True:
-        add(
-            "TRADE_PERMISSION_DENIED",
-            MODEL_COUNCIL,
-            "trade_permission.executable_allowed must be true for executable packets.",
-        )
-    if require_executable and entry_quality and not _entry_quality_allows_execution(entry_quality):
-        add(
-            "ENTRY_QUALITY_BELOW_ACCEPTABLE",
-            MODEL_COUNCIL,
-            "entry_quality must be ACCEPTABLE_ENTRY or better for executable packets.",
-        )
-    if require_executable and _market_trap_blocks_execution(market_trap):
-        add(
-            "MARKET_TRAP_EXECUTION_DENIED",
-            MODEL_COUNCIL,
-            "Active market trap assessment prevents executable packets.",
-        )
+    # Trade permission, entry-quality, and trap reads are strategy diagnostics under
+    # overlay-truth authority. Runtime identity, model health, packet state, and
+    # overlay-truth safety remain the hard execution contract below.
     if require_executable and _overlay_truth_blocks_execution(overlay_truth):
         add(
             "OVERLAY_TRUTH_NOT_EXECUTION_SAFE",

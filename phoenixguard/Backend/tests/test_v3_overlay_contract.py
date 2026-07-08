@@ -134,6 +134,30 @@ def test_live_modes_reject_skinny_vertical_spike_overlays() -> None:
     assert overlay_is_visible(overlay, "REPLAY") is False
 
 
+def test_live_modes_reject_full_surface_lines_crossing_broker_chrome() -> None:
+    overlay = _base_overlay(
+        overlay_id="bad-header-line-1",
+        object_id="bad-header-line-1",
+        track_id="bad-header-line-1",
+        type="RESISTANCE_TRENDLINE",
+        side="SELL",
+        layer="trendlines",
+        label="RESISTANCE TRENDLINE",
+        coordinate_mode="FULL_BROKER_SURFACE",
+        bounds=[820, 48, 1040, 430],
+        line_points=[[820, 48], [1040, 430]],
+        touch_points=[[820, 48], [1040, 430]],
+        anchor_candles=[2, 8],
+        anchor_candle_indices=[2, 8],
+        visible_modes=["CLEAN_LIVE", "TRENDLINES", "ACTIVE_CONTEXT", "INSPECTOR"],
+    )
+
+    reasons = overlay_rejection_reasons(overlay, "CLEAN_LIVE")
+
+    assert any(reason.startswith("geometry_crosses_broker_chrome") for reason in reasons)
+    assert overlay_is_visible(overlay, "CLEAN_LIVE") is False
+
+
 def test_contract_normalizes_professional_required_fields_and_aliases() -> None:
     overlay = normalize_v3_overlay_object(
         _base_overlay(

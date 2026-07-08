@@ -14,12 +14,9 @@ CONSTITUTION_RULES: tuple[str, ...] = (
     "NO_SIDE_MISMATCH_CAN_EXECUTE",
     "NO_MISSING_TIME_SEQUENCE_CAN_EXECUTE",
     "NO_AMOUNT_CHANGE_ALLOWED",
-    "NO_LATE_CHASE_TRAP_CAN_EXECUTE",
     "NO_SIMULTANEOUS_BUY_SELL_CAN_EXECUTE",
     "NO_MODEL_HEALTH_FAILURE_CAN_EXECUTE",
     "NO_UNVERIFIED_OVERLAY_GEOMETRY_CAN_EXECUTE",
-    "NO_PERMISSION_DENIED_PACKET_CAN_EXECUTE",
-    "NO_BAD_ENTRY_QUALITY_CAN_EXECUTE",
 )
 
 
@@ -83,30 +80,6 @@ def _side(value: Any) -> str:
     return ""
 
 
-def _trap_active(packet: Mapping[str, Any]) -> bool:
-    for container_name in ("market_reality", "trap_assessment", "market_context"):
-        container = _mapping(packet.get(container_name))
-        if not container:
-            continue
-        if _bool(container.get("late_chase_risk")) or _bool(container.get("is_late_chase")):
-            return True
-        active_traps = _sequence(container.get("active_traps"))
-        for raw in active_traps:
-            trap = _mapping(raw)
-            name = _upper(trap.get("trap") or trap.get("name") or raw)
-            if name in {
-                "LATE_CHASE_AFTER_IMPULSE",
-                "NO_PULLBACK_AFTER_VERTICAL_MOVE",
-                "HISTORY_SAYS_EXIT_NOT_ENTRY",
-                "OPPOSITE_FORCE_TOO_CLOSE",
-                "TREND_ANGLE_BREAK_RISK",
-            } and _float(trap.get("severity"), 1.0) >= 0.5:
-                return True
-        if container.get("execution_allowed") is False:
-            return True
-    return False
-
-
 def _overlay_verified(packet: Mapping[str, Any]) -> bool:
     overlay = _mapping(packet.get("overlay_truth_audit") or packet.get("overlay_geometry") or packet.get("overlay_context"))
     if not overlay:
@@ -120,34 +93,6 @@ def _overlay_verified(packet: Mapping[str, Any]) -> bool:
     if not decision_objects:
         return True
     return all(_bool(_mapping(obj).get("valid_for_decision")) for obj in decision_objects)
-
-
-def _permission_allows_execution(packet: Mapping[str, Any]) -> bool:
-    council = _mapping(packet.get("model_council"))
-    permission = _mapping(packet.get("trade_permission") or council.get("trade_permission"))
-    if not permission:
-        return True
-    return permission.get("executable_allowed") is True
-
-
-def _entry_quality_allows_execution(packet: Mapping[str, Any]) -> bool:
-    council = _mapping(packet.get("model_council"))
-    entry_quality = _mapping(packet.get("entry_quality") or council.get("entry_quality"))
-    if not entry_quality:
-        return True
-    state = _upper(
-        entry_quality.get("state")
-        or entry_quality.get("entry_grade")
-        or entry_quality.get("grade")
-        or entry_quality.get("quality")
-    )
-    if not state:
-        return True
-    if state in {"A_PLUS_ENTRY", "GOOD_ENTRY", "ACCEPTABLE_ENTRY"}:
-        return True
-    if entry_quality.get("passes_executable_threshold") is True:
-        return True
-    return False
 
 
 def evaluate_execution_constitution(
@@ -196,9 +141,6 @@ def evaluate_execution_constitution(
     if _upper(execution.get("amount_action") or "DO_NOT_CHANGE_AMOUNT") != "DO_NOT_CHANGE_AMOUNT":
         violations.append("NO_AMOUNT_CHANGE_ALLOWED")
 
-    if _trap_active(packet):
-        violations.append("NO_LATE_CHASE_TRAP_CAN_EXECUTE")
-
     if _bool(execution.get("buy_executable") and execution.get("sell_executable")):
         violations.append("NO_SIMULTANEOUS_BUY_SELL_CAN_EXECUTE")
     for key in ("sides", "executable_sides", "final_sides"):
@@ -213,12 +155,6 @@ def evaluate_execution_constitution(
 
     if not _overlay_verified(packet):
         violations.append("NO_UNVERIFIED_OVERLAY_GEOMETRY_CAN_EXECUTE")
-
-    if not _permission_allows_execution(packet):
-        violations.append("NO_PERMISSION_DENIED_PACKET_CAN_EXECUTE")
-
-    if not _entry_quality_allows_execution(packet):
-        violations.append("NO_BAD_ENTRY_QUALITY_CAN_EXECUTE")
 
     unique = tuple(dict.fromkeys(violations))
     return ConstitutionResult(not unique, unique, unique[0] if unique else "OK")

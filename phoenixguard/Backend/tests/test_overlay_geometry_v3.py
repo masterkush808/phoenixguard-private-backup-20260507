@@ -380,6 +380,26 @@ def test_live_overlay_renderer_honors_visible_default_for_hidden_layers(monkeypa
     )
 
 
+def test_live_regression_lines_are_clipped_to_chart_plane() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    canvas = Image.new("RGBA", (320, 240), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    candles: list[dict[str, Any]] = [
+        {"bbox": [48, -44, 58, 4], "center_x": 53, "center_y": -20, "direction": "BUY"},
+        {"bbox": [250, 152, 260, 210], "center_x": 255, "center_y": 181, "direction": "BUY"},
+    ]
+
+    adapter.draw_regression_line(
+        draw,
+        candles,
+        (242, 200, 102, 255),
+        bounds=[0, 80, 320, 230],
+    )
+
+    assert canvas.crop((0, 0, 320, 76)).getchannel("A").getbbox() is None
+    assert canvas.crop((0, 80, 320, 230)).getchannel("A").getbbox() is not None
+
+
 def test_overlay_geometry_keeps_prediction_zones_out_of_live_boxes() -> None:
     prepared = prepare_overlay_geometry(
         {

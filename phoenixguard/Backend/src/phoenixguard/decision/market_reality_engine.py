@@ -663,24 +663,10 @@ def _permission_stack(
     if first_reason is None and failed_reasons:
         first_reason = failed_reasons[0]
 
-    hard_prepare_reasons = {
-        "NO_DIRECTION_CANDIDATE",
-        "LATE_CHASE_TRAP",
-        "MARKET_TRAP_DETECTED",
-        "IDEAL_PATH_PROTECT",
-        "IDEAL_PATH_HOLD",
-        "IDEAL_PATH_WAIT",
-        "PATH_RISK_WEAK",
-        "CANDIDATE_QUEUE_UNSTABLE",
-        "REGIME_PLAYBOOK_DENIES_ENTRY",
-    }
-    hard_entry_quality = (
-        "ENTRY_QUALITY_BELOW_ACCEPTABLE" in failed_reasons
-        and str(entry_quality.get("state") or "").upper() in {"BAD_NOW", "UNACCEPTABLE_ENTRY"}
-    )
-    prepare_allowed = bool(not hard_entry_quality and not any(reason in hard_prepare_reasons for reason in failed_reasons))
-    executable_allowed = not failed_reasons
-    denied_layer = next((layer for layer in layers if not layer["passed"]), None)
+    blocking_reasons = [reason for reason in failed_reasons if reason == "NO_DIRECTION_CANDIDATE"]
+    prepare_allowed = not blocking_reasons
+    executable_allowed = not blocking_reasons
+    denied_layer = next((layer for layer in layers if not layer["passed"] and layer.get("deny_reason") in blocking_reasons), None)
     next_condition_by_reason = {
         "NO_DIRECTION_CANDIDATE": "Wait for BUY or SELL dominance to become measurable.",
         "ENTRY_QUALITY_BELOW_ACCEPTABLE": str(entry_quality.get("recommended_wait_condition") or "Wait for entry quality to reach ACCEPTABLE_ENTRY."),
@@ -700,11 +686,17 @@ def _permission_stack(
         "study_allowed": True,
         "prepare_allowed": prepare_allowed,
         "executable_allowed": executable_allowed,
-        "deny_reason": first_reason,
+        "deny_reason": first_reason if not executable_allowed else None,
         "next_required_condition": next_condition_by_reason.get(str(first_reason), "Wait for all permission layers to pass.") if not executable_allowed else "All permission layers passed.",
         "failed_reasons": failed_reasons,
+        "advisory_failed_reasons": failed_reasons,
+        "blocking_reasons": blocking_reasons,
         "layers": layers,
-        "reason": "Execution permission granted." if executable_allowed else f"Execution permission denied: {first_reason}.",
+        "reason": (
+            "Execution permission granted; strategy caution remains advisory under overlay-truth authority."
+            if executable_allowed
+            else f"Execution permission denied: {first_reason}."
+        ),
     }
 
 

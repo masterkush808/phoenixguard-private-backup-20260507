@@ -391,14 +391,131 @@ def _allowance_source(payload: dict[str, object], execution: dict[str, object], 
     return {}
 
 
+def _compact_list(value: object, *, limit: int = 12) -> list[str]:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [str(item) for item in cast(Sequence[object], value)[:limit]]
+    return []
+
+
+def _compact_side_score(value: object) -> dict[str, object]:
+    score = dict(cast(Mapping[str, object], value)) if isinstance(value, dict) else {}
+    components = _nested(score, "components")
+    return {
+        "side": str(score.get("side") or ""),
+        "score": _float(score.get("score"), 0.0),
+        "overlay_score": _float(_nested(components, "overlay").get("score"), 0.0),
+        "professional_score": _float(_nested(components, "professional").get("score"), 0.0),
+        "candle_score": _float(_nested(components, "candle_movement").get("score"), 0.0),
+        "market_score": _float(_nested(components, "market").get("score"), 0.0),
+    }
+
+
+def _sanitize_playbook_ai_summary(summary: dict[str, object]) -> dict[str, object]:
+    coverage = _nested(summary, "coverage")
+    router = _nested(summary, "regime_router")
+    arbitration = _nested(summary, "thesis_arbitration")
+    scores = _nested(arbitration, "scores")
+    meta = _nested(summary, "meta_label")
+    horizon = _nested(summary, "horizon")
+    return {
+        "schema_version": "PG_PLAYBOOK_AI_SUMMARY_V3",
+        "source_schema_version": str(summary.get("source_schema_version") or summary.get("schema_version") or ""),
+        "semantic_interpretation": str(summary.get("semantic_interpretation") or summary.get("interpretation") or ""),
+        "full_suite_ready": bool(summary.get("full_suite_ready", coverage.get("full_suite_ready", False))),
+        "coverage": {
+            "rows_total": _int(coverage.get("rows_total"), 0),
+            "actionable_count": _int(coverage.get("actionable_count"), 0),
+            "same_side_actionable_count": _int(coverage.get("same_side_actionable_count"), 0),
+            "entry_window_count": _int(coverage.get("entry_window_count"), 0),
+            "same_side_entry_window_count": _int(coverage.get("same_side_entry_window_count"), 0),
+            "target_window_count": _int(coverage.get("target_window_count"), 0),
+            "opposing_force_count": _int(coverage.get("opposing_force_count"), 0),
+            "invalidation_count": _int(coverage.get("invalidation_count"), 0),
+            "prediction_path_count": _int(coverage.get("prediction_path_count"), 0),
+            "structure_box_count": _int(coverage.get("structure_box_count"), 0),
+            "trendline_count": _int(coverage.get("trendline_count"), 0),
+            "overlay_arsenal_score": _float(coverage.get("overlay_arsenal_score"), 0.0),
+            "expected_move_candles": _int(coverage.get("expected_move_candles"), 0),
+        },
+        "missing_first_class_feeds": _compact_list(summary.get("missing_first_class_feeds"), limit=12),
+        "regime_router": {
+            "regime": str(router.get("regime") or ""),
+            "route": str(router.get("route") or ""),
+            "route_side": str(router.get("route_side") or ""),
+            "confidence": _float(router.get("confidence"), 0.0),
+            "current_leg_side": str(router.get("current_leg_side") or ""),
+            "current_leg_stage": str(router.get("current_leg_stage") or ""),
+        },
+        "thesis_arbitration": {
+            "candidate_side": str(arbitration.get("candidate_side") or ""),
+            "winner": str(arbitration.get("winner") or ""),
+            "winning_score": _float(arbitration.get("winning_score"), 0.0),
+            "margin": _float(arbitration.get("margin"), 0.0),
+            "candidate_score": _float(arbitration.get("candidate_score"), 0.0),
+            "candidate_supported": bool(arbitration.get("candidate_supported", False)),
+            "conflict": bool(arbitration.get("conflict", False)),
+            "state": str(arbitration.get("state") or ""),
+            "scores": {
+                "BUY": _compact_side_score(scores.get("BUY")),
+                "SELL": _compact_side_score(scores.get("SELL")),
+            },
+        },
+        "meta_label": {
+            "selected_side": str(meta.get("selected_side") or ""),
+            "candidate_tradeable": bool(meta.get("candidate_tradeable", False)),
+            "target_before_invalidation_probability": _float(meta.get("target_before_invalidation_probability"), 0.0),
+            "invalidation_first_risk": _float(meta.get("invalidation_first_risk"), 0.0),
+            "label": str(meta.get("label") or ""),
+        },
+        "horizon": {
+            "selected_side": str(horizon.get("selected_side") or ""),
+            "optimized_candle_count": _int(horizon.get("optimized_candle_count"), 0),
+            "optimized_duration_sec": _int(horizon.get("optimized_duration_sec"), 0),
+            "optimized_duration_text": str(horizon.get("optimized_duration_text") or ""),
+            "horizon_class": str(horizon.get("horizon_class") or ""),
+            "basis": str(horizon.get("basis") or ""),
+            "target_before_invalidation_probability": _float(
+                horizon.get("target_before_invalidation_probability"), 0.0
+            ),
+        },
+        "rules_applied": _compact_list(summary.get("rules_applied"), limit=12),
+    }
+
+
 def _compact_playbook_ai_summary(*sources: dict[str, object]) -> dict[str, object]:
     summary = _first_nested("playbook_ai_summary_v3", *sources)
     if summary:
-        return summary
+        if "semantic_graph" in summary:
+            return cast(dict[str, object], compact_playbook_ai_intelligence_v3(cast(Mapping[str, Any], summary)))
+        return _sanitize_playbook_ai_summary(summary)
     intelligence = _first_nested("playbook_ai_intelligence_v3", *sources)
     if not intelligence:
         return {}
     return cast(dict[str, object], compact_playbook_ai_intelligence_v3(cast(Mapping[str, Any], intelligence)))
+
+
+def _compact_thesis_resolution(resolution: dict[str, object]) -> dict[str, object]:
+    if not resolution:
+        return {}
+    return {
+        "schema_version": str(resolution.get("schema_version") or ""),
+        "authority_side": str(resolution.get("authority_side") or ""),
+        "raw_candidate_side": str(resolution.get("raw_candidate_side") or ""),
+        "thesis_state": str(resolution.get("thesis_state") or ""),
+        "reason": str(resolution.get("reason") or "")[:280],
+        "global_side": str(resolution.get("global_side") or ""),
+        "local_side": str(resolution.get("local_side") or ""),
+        "dominant_side": str(resolution.get("dominant_side") or ""),
+        "primary_bias_side": str(resolution.get("primary_bias_side") or ""),
+        "current_leg_side": str(resolution.get("current_leg_side") or ""),
+        "current_leg_candle_count": _int(resolution.get("current_leg_candle_count"), 0),
+        "current_leg_stage": str(resolution.get("current_leg_stage") or ""),
+        "directional_target_room_candles": _int(resolution.get("directional_target_room_candles"), 0),
+        "room_ok": bool(resolution.get("room_ok", False)),
+        "side_reframed": bool(resolution.get("side_reframed", False)),
+        "opposing_force_reaction_ready": bool(resolution.get("opposing_force_reaction_ready", False)),
+        "opposing_force_rejection_confirmed": bool(resolution.get("opposing_force_rejection_confirmed", False)),
+    }
 
 
 def _compact_professional_trade_plan(source: dict[str, object], *fallback_sources: dict[str, object]) -> dict[str, object]:
@@ -445,8 +562,61 @@ def _compact_professional_trade_plan(source: dict[str, object], *fallback_source
         "estimated_candles_to_force": _int(horizon.get("estimated_candles_to_force"), 0),
         "entry_window_duration_sec": _int(entry_window.get("duration_sec"), 0),
         "entry_window_candle_count": _int(entry_window.get("candle_count"), 0),
-        "thesis_resolution": resolution,
+        "thesis_resolution": _compact_thesis_resolution(resolution),
         "playbook_ai_summary_v3": playbook_ai_summary,
+    }
+
+
+def _sanitize_expected_move_time(expected: dict[str, object], horizon: dict[str, object]) -> dict[str, object]:
+    entry_window = _nested(expected, "entry_window")
+    thesis_horizon = _nested(expected, "thesis_horizon") or horizon
+    professional_plan = _nested(expected, "professional_trade_plan")
+    return {
+        "expected_duration_sec": _int(
+            expected.get("expected_duration_sec")
+            or thesis_horizon.get("expected_duration_sec")
+            or professional_plan.get("expected_duration_sec"),
+            0,
+        ),
+        "expected_duration_text": str(expected.get("expected_duration_text") or thesis_horizon.get("expected_duration_text") or ""),
+        "expected_candle_count": _int(
+            expected.get("expected_candle_count")
+            or thesis_horizon.get("expected_candle_count")
+            or professional_plan.get("expected_candle_count"),
+            0,
+        ),
+        "timeframe": str(expected.get("timeframe") or thesis_horizon.get("timeframe") or ""),
+        "timeframe_seconds": _int(expected.get("timeframe_seconds") or thesis_horizon.get("timeframe_seconds"), 0),
+        "current_leg_candle_count": _int(
+            expected.get("current_leg_candle_count")
+            or thesis_horizon.get("current_leg_candle_count")
+            or professional_plan.get("current_leg_candle_count"),
+            0,
+        ),
+        "current_leg_side": str(
+            expected.get("current_leg_side")
+            or thesis_horizon.get("current_leg_side")
+            or professional_plan.get("current_leg_side")
+            or ""
+        ),
+        "current_leg_stage": str(
+            expected.get("current_leg_stage")
+            or thesis_horizon.get("current_leg_stage")
+            or professional_plan.get("current_leg_stage")
+            or ""
+        ),
+        "projected_total_current_leg_candles": _int(
+            expected.get("projected_total_current_leg_candles")
+            or thesis_horizon.get("projected_total_current_leg_candles"),
+            0,
+        ),
+        "entry_window": {
+            "duration_sec": _int(entry_window.get("duration_sec"), 0),
+            "duration_text": str(entry_window.get("duration_text") or ""),
+            "candle_count": _int(entry_window.get("candle_count"), 0),
+            "purpose": str(entry_window.get("purpose") or "immediate entry validity window only"),
+        },
+        "basis": str(expected.get("basis") or thesis_horizon.get("basis") or ""),
     }
 
 
@@ -458,9 +628,9 @@ def _compact_expected_move_time(
     raw_professional_plan = _first_nested("professional_trade_plan", source, *fallback_sources)
     sources = (source, raw_professional_plan, *fallback_sources, professional_plan)
     expected = _first_nested("expected_move_time", *sources)
-    if expected:
-        return expected
     horizon = _first_nested("thesis_horizon", *sources)
+    if expected:
+        return _sanitize_expected_move_time(expected, horizon)
     if not horizon:
         return {}
     compact: dict[str, object] = {}
@@ -546,6 +716,20 @@ def _compact_allowance_package(
 
 def _clean_override(value: object) -> str:
     return str(value or "").strip()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.getenv(name, str(default))).strip())
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(str(os.getenv(name, str(default))).strip())
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _compact_command(
@@ -771,8 +955,12 @@ def main() -> int:
     parser.add_argument("--timeout-sec", type=float, default=8.0)
     parser.add_argument("--symbol-override", default=os.getenv("PHOENIXGUARD_MT4_SYMBOL", ""))
     parser.add_argument("--timeframe-override", default=os.getenv("PHOENIXGUARD_MT4_TIMEFRAME", ""))
-    parser.add_argument("--max-live-age-sec", type=float, default=180.0)
-    parser.add_argument("--max-packet-frame-lag", type=int, default=2)
+    parser.add_argument("--max-live-age-sec", type=float, default=_env_float("PHOENIXGUARD_MT4_MAX_LIVE_AGE_SEC", 180.0))
+    parser.add_argument(
+        "--max-packet-frame-lag",
+        type=int,
+        default=_env_int("PHOENIXGUARD_MT4_MAX_PACKET_FRAME_LAG", 8),
+    )
     parser.add_argument("--print-every", type=float, default=30.0)
     parser.add_argument("--metrics-every", type=float, default=15.0)
     args = parser.parse_args()

@@ -684,8 +684,8 @@ def classify_blockers_v3(snapshot: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def _virtual_blocker(code: str, field: str, reason: str, taxonomy: BlockerTaxonomyV3) -> ClassifiedBlockerV3:
-    return ClassifiedBlockerV3(code=code, field=field, reason=reason, taxonomy=taxonomy, hard=True)
+def _virtual_warning(code: str, field: str, reason: str, taxonomy: BlockerTaxonomyV3) -> ClassifiedBlockerV3:
+    return ClassifiedBlockerV3(code=code, field=field, reason=reason, taxonomy=taxonomy, hard=False)
 
 
 def _layer_for_blocker(blocker: ClassifiedBlockerV3) -> str:
@@ -709,48 +709,49 @@ def _compute_authorization(snapshot: Mapping[str, object]) -> _AuthorizationDeci
     phase = derive_pullback_phase_v3(snapshot)
     records = _classified_blockers(snapshot)
     hard_blockers = list(row for row in records if row.hard)
-    soft_warnings = tuple(row for row in records if not row.hard)
+    soft_warnings = list(row for row in records if not row.hard)
     mid_range = evaluate_mid_range_decision_discipline_v3(snapshot)
     side = _normalize_side(_get_value(snapshot, "candidate_side", "side", "action", "execution_action"))
 
     if _bool(mid_range.get("blocked")):
-        hard_blockers.append(
-            _virtual_blocker(
+        soft_warnings.append(
+            _virtual_warning(
                 "MID_RANGE_NEEDS_STRONG_CONFIRMATION",
                 "MARKET_LOCATION",
                 _text(mid_range.get("reason")),
-                BlockerTaxonomyV3.HARD_CONFIRMATION_FAILURE,
+                BlockerTaxonomyV3.STRATEGY_CAUTION,
             )
         )
     if phase == PullbackPhaseV3.PULLBACK_FAILED:
-        hard_blockers.append(
-            _virtual_blocker(
+        soft_warnings.append(
+            _virtual_warning(
                 "PULLBACK_FAILED",
                 "PULLBACK_PHASE",
                 "Pullback failed or invalidated the candidate.",
-                BlockerTaxonomyV3.HARD_TIMING_FAILURE,
+                BlockerTaxonomyV3.WAIT_STATE,
             )
         )
     elif phase == PullbackPhaseV3.WAITING_FOR_PULLBACK and _entry_now_intent(snapshot, phase):
-        hard_blockers.append(
-            _virtual_blocker(
+        soft_warnings.append(
+            _virtual_warning(
                 "WAIT_FOR_PULLBACK",
                 "PULLBACK_PHASE",
                 "Pullback is still pending.",
-                BlockerTaxonomyV3.HARD_TIMING_FAILURE,
+                BlockerTaxonomyV3.WAIT_STATE,
             )
         )
     if _has_explicit_false(snapshot, "current_candle_accepted", "current_candle_entry_allowed", "current_candle_ok"):
-        hard_blockers.append(
-            _virtual_blocker(
+        soft_warnings.append(
+            _virtual_warning(
                 "CURRENT_CANDLE_NOT_ACCEPTED",
                 "CURRENT_CANDLE",
                 "Current candle is not accepted for entry.",
-                BlockerTaxonomyV3.HARD_CONFIRMATION_FAILURE,
+                BlockerTaxonomyV3.SOFT_WARNING,
             )
         )
 
     hard_tuple = _dedupe_blockers(hard_blockers)
+    soft_tuple = _dedupe_blockers(soft_warnings)
     runtime_blocker = next(
         (
             row
@@ -767,7 +768,7 @@ def _compute_authorization(snapshot: Mapping[str, object]) -> _AuthorizationDeci
             downgrade_layer=_layer_for_blocker(runtime_blocker),
             downgrade_reason=runtime_blocker.reason,
             hard_blockers=hard_tuple,
-            soft_warnings=soft_warnings,
+            soft_warnings=soft_tuple,
         )
     if hard_tuple:
         first = hard_tuple[0]
@@ -779,7 +780,7 @@ def _compute_authorization(snapshot: Mapping[str, object]) -> _AuthorizationDeci
             downgrade_layer=_layer_for_blocker(first),
             downgrade_reason=first.reason,
             hard_blockers=hard_tuple,
-            soft_warnings=soft_warnings,
+            soft_warnings=soft_tuple,
         )
     if side not in VALID_DECISION_SIDES:
         return _AuthorizationDecisionV3(
@@ -789,7 +790,7 @@ def _compute_authorization(snapshot: Mapping[str, object]) -> _AuthorizationDeci
             downgrade_layer="CANDIDATE_SIDE",
             downgrade_reason="No BUY or SELL candidate side was supplied.",
             hard_blockers=hard_tuple,
-            soft_warnings=soft_warnings,
+            soft_warnings=soft_tuple,
         )
     if _entry_now_intent(snapshot, phase):
         return _AuthorizationDecisionV3(
@@ -799,7 +800,7 @@ def _compute_authorization(snapshot: Mapping[str, object]) -> _AuthorizationDeci
             downgrade_layer="NONE",
             downgrade_reason="",
             hard_blockers=hard_tuple,
-            soft_warnings=soft_warnings,
+            soft_warnings=soft_tuple,
         )
     return _AuthorizationDecisionV3(
         requested_state=requested,
@@ -808,7 +809,7 @@ def _compute_authorization(snapshot: Mapping[str, object]) -> _AuthorizationDeci
         downgrade_layer="TIMING_MODE",
         downgrade_reason="Candidate has not reached ENTER_NOW timing.",
         hard_blockers=hard_tuple,
-        soft_warnings=soft_warnings,
+        soft_warnings=soft_tuple,
     )
 
 

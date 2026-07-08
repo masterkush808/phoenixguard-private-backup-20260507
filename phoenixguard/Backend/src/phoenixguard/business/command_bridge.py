@@ -581,22 +581,12 @@ def _professional_authority_rejection_reasons(packet: Mapping[str, Any]) -> tupl
     if not plan:
         reasons.append("MISSING_PROFESSIONAL_TRADE_PLAN")
         return tuple(reasons)
-    if plan.get("professional_grade") is not True:
-        reasons.append("PROFESSIONAL_TRADE_PLAN_NOT_GRADE_READY")
-    blocker = _clean_str(plan.get("blocker")).upper()
-    if blocker not in {"", "NONE"}:
-        reasons.append("PROFESSIONAL_TRADE_PLAN_BLOCKED")
     plan_side = _clean_str(plan.get("authority_side") or plan.get("side")).upper()
     allowance_side = _clean_str(allowance.get("side")).upper()
     if plan_side not in {"BUY", "SELL"}:
         reasons.append("PROFESSIONAL_TRADE_PLAN_SIDE_INVALID")
     elif allowance_side in {"BUY", "SELL"} and plan_side != allowance_side:
         reasons.append("PROFESSIONAL_TRADE_PLAN_SIDE_MISMATCH")
-    horizon = _mapping(plan.get("thesis_horizon") or allowance.get("thesis_horizon"))
-    expected_candles = _int(horizon.get("expected_candle_count"), 0)
-    minimum_candles = max(1, _int(horizon.get("minimum_professional_candles"), 1))
-    if expected_candles < minimum_candles:
-        reasons.append("PROFESSIONAL_THESIS_HORIZON_TOO_SHORT")
     return tuple(dict.fromkeys(reasons))
 
 
@@ -763,21 +753,12 @@ def _validate_strategy_authority(strategy_authority: Mapping[str, Any], executio
         reasons.append("INVALID_STRATEGY_EXECUTION_AUTHORITY")
     if _clean_str(strategy_authority.get("packet_authority")).upper() != PG_EXECUTION_PACKET_SCHEMA_VERSION:
         reasons.append("INVALID_STRATEGY_PACKET_AUTHORITY")
-    if strategy_authority.get("professional_grade") is not True:
-        reasons.append("STRATEGY_NOT_PROFESSIONAL_GRADE")
     execution_side = _clean_str(execution.get("side")).upper()
     authority_side = _clean_str(strategy_authority.get("authority_side") or strategy_authority.get("side")).upper()
     if authority_side not in {"BUY", "SELL"}:
         reasons.append("INVALID_STRATEGY_AUTHORITY_SIDE")
     elif execution_side in {"BUY", "SELL"} and authority_side != execution_side:
         reasons.append("STRATEGY_SIDE_EXECUTION_MISMATCH")
-    blocker = _clean_str(strategy_authority.get("blocker")).upper()
-    if blocker not in {"", "NONE"}:
-        reasons.append("STRATEGY_AUTHORITY_BLOCKED")
-    expected_candles = _int(strategy_authority.get("expected_candle_count"), 0)
-    minimum_candles = max(1, _int(strategy_authority.get("minimum_professional_candles"), 1))
-    if expected_candles < minimum_candles:
-        reasons.append("STRATEGY_THESIS_HORIZON_TOO_SHORT")
 
 
 def _public_account_binding(account_state: ConnectorAccountState) -> dict[str, Any]:

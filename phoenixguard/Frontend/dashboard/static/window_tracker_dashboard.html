@@ -2948,47 +2948,6 @@
           </div>
         </section>
 
-        <section class="prediction-module">
-          <div class="matrix-head">
-            <span class="panel-title">Prediction Images</span>
-            <span class="panel-title" id="prediction-caption">model inference</span>
-          </div>
-          <div class="prediction-gallery" id="prediction-gallery">
-            <div class="prediction-card">
-              <img src="" alt="Input image" id="prediction-input-img" class="prediction-img-hidden">
-              <div class="prediction-card-label" id="prediction-input-label">Live Input</div>
-            </div>
-            <div class="prediction-card">
-              <img src="" alt="Retrieved memory image" id="prediction-memory-img" class="prediction-img-hidden">
-              <div class="prediction-card-label" id="prediction-memory-label">MEMORY MATCH</div>
-            </div>
-            <div class="prediction-card">
-              <img src="" alt="Prediction runway image" id="prediction-overlay-img" class="prediction-img-hidden">
-              <div class="prediction-card-label" id="prediction-overlay-label">Study Output</div>
-            </div>
-          </div>
-          <div class="prediction-metadata" id="prediction-metadata">
-            <div class="prediction-stat">
-              <span class="prediction-stat-label">Signal</span>
-              <span class="prediction-stat-value" id="prediction-signal">HOLD</span>
-            </div>
-            <div class="prediction-stat">
-              <span class="prediction-stat-label">Precision</span>
-              <span class="prediction-stat-value" id="prediction-conf">0.00</span>
-            </div>
-            <div class="prediction-stat">
-              <span class="prediction-stat-label">Edge</span>
-              <span class="prediction-stat-value" id="prediction-gates">+0.000</span>
-            </div>
-            <div class="prediction-stat">
-              <span class="prediction-stat-label">Memory</span>
-              <span class="prediction-stat-value" id="prediction-memory">0.000</span>
-            </div>
-          </div>
-          <div class="scenario-heatmap" id="scenario-heatmap">
-            <div class="scenario-heatmap-empty">Scenario heatmap appears when Scenarios is on.</div>
-          </div>
-        </section>
       </section>
     </section>
   </main>
@@ -7511,6 +7470,9 @@
       }
     }
     function renderPredictionImages() {
+      if (!$("prediction-gallery") || !$("prediction-metadata")) {
+        return;
+      }
       const session = state.session || {};
       const signal = session.latest_signal || {};
       const memoryProjection = currentMemoryProjection(session);
@@ -8229,6 +8191,71 @@
       return cleaned.length >= 2 ? cleaned : points;
     }
 
+    function lineOverlayPlaneBoundsPercent(tracking, image) {
+      const session = state.session || {};
+      const liveState = objectOrEmpty(session.live_visual_state || session.live_state_v3);
+      const chartPayload = objectOrEmpty(liveState.chart || session.chart);
+      const sceneGraph = objectOrEmpty(
+        session.broker_scene_graph_v3
+        || session.scene_graph
+        || liveState.broker_scene_graph_v3
+        || liveState.scene_graph
+        || chartPayload.scene_graph
+      );
+      const imageWidth = Number(image.naturalWidth || image.clientWidth || 0);
+      const imageHeight = Number(image.naturalHeight || image.clientHeight || 0);
+      if (!imageWidth || !imageHeight) {
+        return null;
+      }
+      const sceneBounds = (key) => {
+        const values = Array.isArray(sceneGraph[key]) ? sceneGraph[key].map(Number) : [];
+        return values.length >= 4 && values.every(Number.isFinite) && values[2] > values[0] && values[3] > values[1]
+          ? values
+          : [];
+      };
+      const region = tracking.chart_region || tracking.display_region || {};
+      const pixelBounds = state.surfaceUsesFullOverlay
+        ? (sceneBounds("plot_area_bounds").length >= 4 ? sceneBounds("plot_area_bounds") : sceneBounds("chart_region_bounds"))
+        : (sceneBounds("plot_area_chart_bounds").length >= 4 ? sceneBounds("plot_area_chart_bounds") : sceneBounds("chart_region_chart_bounds"));
+      if (pixelBounds.length < 4) {
+        const regionBox = Array.isArray(region.pixel_bbox) ? region.pixel_bbox.map(Number) : [];
+        if (regionBox.length < 4 || !regionBox.every(Number.isFinite) || regionBox[2] <= regionBox[0] || regionBox[3] <= regionBox[1]) {
+          return null;
+        }
+        return {
+          left: Math.max(0, Math.min(100, (regionBox[0] / imageWidth) * 100)),
+          top: Math.max(0, Math.min(100, (regionBox[1] / imageHeight) * 100)),
+          right: Math.max(0, Math.min(100, (regionBox[2] / imageWidth) * 100)),
+          bottom: Math.max(0, Math.min(100, (regionBox[3] / imageHeight) * 100)),
+        };
+      }
+      return {
+        left: Math.max(0, Math.min(100, (pixelBounds[0] / imageWidth) * 100)),
+        top: Math.max(0, Math.min(100, (pixelBounds[1] / imageHeight) * 100)),
+        right: Math.max(0, Math.min(100, (pixelBounds[2] / imageWidth) * 100)),
+        bottom: Math.max(0, Math.min(100, (pixelBounds[3] / imageHeight) * 100)),
+      };
+    }
+
+    function linePointsStayInsideMarketPlane(points = [], planeBounds = null) {
+      if (!planeBounds || !Array.isArray(points) || points.length < 2) {
+        return true;
+      }
+      const tolerance = 1.35;
+      const left = Math.min(planeBounds.left, planeBounds.right) - tolerance;
+      const right = Math.max(planeBounds.left, planeBounds.right) + tolerance;
+      const top = Math.min(planeBounds.top, planeBounds.bottom) - tolerance;
+      const bottom = Math.max(planeBounds.top, planeBounds.bottom) + tolerance;
+      return points.every((point) => (
+        Number.isFinite(point.x)
+        && Number.isFinite(point.y)
+        && point.x >= left
+        && point.x <= right
+        && point.y >= top
+        && point.y <= bottom
+      ));
+    }
+
     function resolveLinePoints(box, tracking, image) {
       const points = sanitizeHistoricalProgressionLinePoints(rawLinePoints(box), box);
       if (points.length < 2) {
@@ -8254,6 +8281,10 @@
         }
       });
       if (mapped.length < 2) {
+        return null;
+      }
+      const planeBounds = lineOverlayPlaneBoundsPercent(tracking, image);
+      if (!linePointsStayInsideMarketPlane(mapped, planeBounds)) {
         return null;
       }
       const xs = mapped.map((point) => point.x);

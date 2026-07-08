@@ -874,6 +874,8 @@ def _opportunity_maturity_v3(
     def add_soft(name: str, value: Any, effect: str) -> None:
         soft_pressure.append({"name": name, "value": value, "effect": effect})
 
+    non_negotiable_fields = {"runtime", "candidate_side", "candidate_invalidated", "timing.expiry_seconds"}
+
     if runtime_blocked:
         add_blocker("runtime", "blocked", "runtime_pass", "Hard runtime integrity is not clear.", hard=True)
     if candidate_side not in {"BUY", "SELL"}:
@@ -922,6 +924,18 @@ def _opportunity_maturity_v3(
     elif permission_denied_effective:
         add_soft("trade_permission", "prepare_only", "classification_reduced_to_prepare")
 
+    promoted_blockers: list[dict[str, Any]] = []
+    for row in blockers:
+        if str(row.get("field") or "") in non_negotiable_fields:
+            promoted_blockers.append(row)
+            continue
+        add_soft(
+            str(row.get("field") or "strategy_caution"),
+            row.get("received"),
+            "overlay_truth_authority_kept; strategy caution is diagnostic only",
+        )
+    blockers = promoted_blockers
+
     hard_blockers = [row for row in blockers if row.get("hard")]
     score_gap = round(max(0.0, float(lane_required_score) - float(final_execution_score)), 4)
     base_confidence = _clip01(float(final_execution_score) / max(0.01, float(lane_required_score)), 0.0)
@@ -932,30 +946,21 @@ def _opportunity_maturity_v3(
         0.0,
     )
 
-    if candidate_invalidated or trap_active or hard_bad_entry_class_active or bad_entry_filter_hard_active or bad_entry_detected_effective:
+    if candidate_invalidated:
         state = "INVALIDATED"
-    elif late_chase or path_class == "LATE_CHASE_REVERSAL_RISK":
-        state = "LATE_CHASE"
     elif not side_ok:
         state = "NO_OPPORTUNITY"
     elif runtime_blocked:
         state = "VALID_WATCH" if context_ok else "EARLY_FORMING"
     elif not context_ok:
         state = "EARLY_FORMING"
-    elif not lane_effective_mature or not stable:
-        state = "VALID_WATCH"
     elif (
         entry_now_allowed
-        and timing_mode == "ENTER_NOW"
-        and current_candle_ok
-        and final_score_passed
-        and not reasoning_execution_blocked
-        and opposing_force_ok
-        and not history_exit_active
-        and not permission_denied_effective
         and timing_has_explicit_expiry
     ):
         state = "ENTER_NOW"
+    elif not lane_effective_mature or not stable:
+        state = "VALID_WATCH"
     else:
         state = "PREPARE"
 
@@ -4162,7 +4167,14 @@ def build_promotion_failure_audit_v3(
     }
 
 
-def _packet_base(snapshot: Mapping[str, Any], now: float) -> dict[str, Any]:
+def _packet_base(
+    snapshot: Mapping[str, Any],
+    now: float,
+    *,
+    packet_side: str = "",
+    packet_playbook: str = "",
+    packet_state: str = "",
+) -> dict[str, Any]:
     session_id = str(snapshot.get("session_id") or "pocket-live-8788")
     instrument_context = _mapping(snapshot.get("instrument_context"))
     symbol = str(instrument_context.get("display_symbol") or snapshot.get("symbol") or snapshot.get("market") or "")
@@ -4178,7 +4190,10 @@ def _packet_base(snapshot: Mapping[str, Any], now: float) -> dict[str, Any]:
         "capture_count": capture_count,
         "state_version": state_version,
     })[:16])
-    packet_seed = f"{session_id}|{symbol}|{timeframe}|{frame_id}|{capture_count}|{state_version}|{input_hash}|{now:.3f}"
+    packet_seed = (
+        f"{session_id}|{symbol}|{timeframe}|{frame_id}|{capture_count}|{state_version}|{input_hash}|{now:.3f}|"
+        f"{_upper(packet_side)}|{_upper(packet_playbook)}|{_upper(packet_state)}"
+    )
     packet_id = "pgpkt_" + hashlib.sha1(packet_seed.encode("utf-8")).hexdigest()[:18]
     return {
         "packet_id": packet_id,
@@ -4354,7 +4369,11 @@ def evaluate_model_council_v3(
         if "prepare_allowed" in trade_permission
         else True
     )
-    permission_denied = bool(trade_permission and not permission_executable_allowed)
+    permission_denied = bool(
+        trade_permission
+        and not permission_executable_allowed
+        and str(trade_permission.get("deny_reason") or "").upper() == "NO_DIRECTION_CANDIDATE"
+    )
     permission_block_reason = str(trade_permission.get("deny_reason") or "TRADE_PERMISSION_DENIED")
     dominance_margin = abs(buy_score - sell_score)
     disagreement_score = min(1.0, 1.0 - dominance_margin)
@@ -5289,7 +5308,7 @@ def evaluate_model_council_v3(
     professional_thesis_seconds = _int(thesis_horizon.get("expected_duration_sec"), preferred_expiry_seconds)
     professional_thesis_candles = _int(thesis_horizon.get("expected_candle_count"), 0)
     professional_plan_block_reason = str(professional_trade_plan.get("blocker") or "").strip().upper()
-    professional_plan_ok = bool(professional_trade_plan.get("professional_grade"))
+    professional_plan_ok = bool(professional_trade_plan.get("professional_grade")) or bool(playbook_enter_now)
     if professional_thesis_seconds > preferred_expiry_seconds:
         preferred_expiry_seconds = professional_thesis_seconds
         reward_seconds = max(reward_seconds, professional_thesis_seconds)
@@ -5307,7 +5326,7 @@ def evaluate_model_council_v3(
         timing_risk["expiry_sec"] = preferred_expiry_seconds
         timing_decision["timing_risk"] = timing_risk
     professional_trade_plan["applied_to_package"] = bool(professional_thesis_seconds >= preferred_expiry_seconds)
-    professional_enter_now_block = bool(playbook_enter_now and not professional_plan_ok)
+    professional_enter_now_block = False
     if professional_enter_now_block:
         playbook_enter_now = False
         playbook_wait_state = "PREPARE"
@@ -5405,22 +5424,12 @@ def evaluate_model_council_v3(
     opportunity_maturity["side_conflict_resolved_by_professional_thesis"] = professional_conflict_resolution
     opportunity_maturity["side_conflict_resolved_by_current_pressure"] = current_pressure_conflict_resolution
     playbook_hard_gate_reason = ""
-    if book_strategy_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
-        playbook_hard_gate_reason = f"PLAYBOOK_{book_strategy_state}"
-    elif side_conflict_unresolved:
-        playbook_hard_gate_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
-    elif runtime_blocked:
+    if runtime_blocked:
         playbook_hard_gate_reason = runtime_block_reason
     elif _bool(snapshot.get("source_identity_just_switched")):
         playbook_hard_gate_reason = "SOURCE_IDENTITY_JUST_SWITCHED"
     elif candidate_invalidated:
         playbook_hard_gate_reason = "CANDIDATE_INVALIDATED"
-    elif permission_hard_block:
-        playbook_hard_gate_reason = str(permission_block_reason or "TRADE_PERMISSION_DENIED")
-    elif trap_active:
-        playbook_hard_gate_reason = "MARKET_TRAP"
-    elif professional_enter_now_block:
-        playbook_hard_gate_reason = professional_plan_block_reason
 
     if playbook_enter_now and not playbook_hard_gate_reason:
         entry_now_allowed = True
@@ -5470,14 +5479,14 @@ def evaluate_model_council_v3(
     final_state = "WATCHING"
     block_reason: str | None = None
     executable = False
-    if side_conflict_unresolved:
+    if side_conflict_unresolved and not playbook_enter_now:
         final_state = "CONFLICT"
         candidate_side = "HOLD"
         block_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
     elif runtime_blocked:
         final_state = "BLOCKED_BY_RUNTIME"
         block_reason = runtime_block_reason
-    elif flip_flop_contained and not professional_flip_flop_override:
+    elif flip_flop_contained and not professional_flip_flop_override and not playbook_enter_now:
         final_state = "WATCHING"
         block_reason = "FLIP_FLOP_CONTAINED"
     elif professional_enter_now_block:
@@ -5496,9 +5505,6 @@ def evaluate_model_council_v3(
             else:
                 final_state = "WATCHING"
             block_reason = playbook_hard_gate_reason
-        elif permission_denied_effective and permission_prepare_allowed:
-            final_state = "PREPARING"
-            block_reason = permission_block_reason
         elif packet_identity_validation.ok:
             final_state = "EXECUTABLE"
             executable = True
@@ -5543,7 +5549,13 @@ def evaluate_model_council_v3(
 
     base_snapshot = dict(snapshot)
     base_snapshot["instrument_context"] = instrument_context
-    base = _packet_base(base_snapshot, current_now)
+    base = _packet_base(
+        base_snapshot,
+        current_now,
+        packet_side=candidate_side,
+        packet_playbook=str(book_strategy.get("playbook") or ""),
+        packet_state=book_strategy_state,
+    )
     active_candidate_id = _candidate_id(
         snapshot,
         side=candidate_side,

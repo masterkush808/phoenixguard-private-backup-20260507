@@ -3103,6 +3103,53 @@ def test_window_tracker_filters_top_strip_noise_from_candle_tracks() -> None:
     assert all(int(track["track_id"]) < 900 for track in filtered)
 
 
+def test_window_tracker_adds_top_broker_chrome_exclusion_for_locked_focus_surface() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    surface = Image.new("RGB", (1628, 861), color=(18, 24, 34))
+
+    boxes = adapter.chart_space_broker_exclusion_boxes(
+        surface,
+        [0, 0, 1628, 861],
+        session_payload={
+            "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
+            "locked_window": {"hwnd": 123, "title": "Pocket Option"},
+        },
+    )
+
+    assert any(box[0] <= 1 and box[1] <= 1 and box[2] >= 1620 and 80 <= box[3] <= 130 for box in boxes)
+
+
+def test_window_tracker_filters_tall_broker_tab_spike_before_signal_build() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    real_tracks = _manual_candle_tracks(
+        [620, 594, 568, 542, 516, 490, 464, 438],
+        image_width=1628,
+        image_height=861,
+    )
+    for index, track in enumerate(real_tracks):
+        center_x = 260.0 + float(index) * 42.0
+        track["center_x"] = center_x
+        track["bbox"] = [int(center_x - 5.0), int(track["bbox"][1]), int(center_x + 5.0), int(track["bbox"][3])]
+    tab_spike = {
+        "track_id": 901,
+        "bbox": [820, 0, 832, 324],
+        "center_x": 826.0,
+        "center_y": 162.0,
+        "direction": "SELL",
+        "color": "magenta",
+        "width": 12,
+        "height": 324,
+    }
+
+    filtered = adapter.filter_candle_tracks_against_broker_exclusions(
+        [*real_tracks, tab_spike],
+        [[0, 0, 1628, 102]],
+    )
+
+    assert len(filtered) == len(real_tracks)
+    assert all(int(track["track_id"]) != 901 for track in filtered)
+
+
 def test_window_tracker_projection_zones_fit_inside_candle_bounds_near_right_edge() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     build_projection = cast(Callable[..., dict[str, Any]], getattr(adapter, "_build_projection_payload"))

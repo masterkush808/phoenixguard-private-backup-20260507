@@ -2566,6 +2566,26 @@ def _live_geometry_spike_reason(overlay: Mapping[str, Any]) -> str:
         skinny_vertical = height >= 180.0 and width <= max(18.0, height * 0.08)
     if skinny_vertical:
         return f"geometry_spike_vertical:{overlay_type}:w={width:.1f}:h={height:.1f}"
+    line_geometry_types = {
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+        "INNER_TRENDLINE",
+        "ANGLE_VECTOR",
+        "PROGRESSION_PATH",
+        "PREDICTION_PATH",
+    }
+    coordinate_mode = str(overlay.get("coordinate_mode") or overlay.get("space") or "").strip().upper()
+    full_surface_line = overlay_type in line_geometry_types and (
+        "FULL_BROKER_SURFACE" in coordinate_mode or "WINDOW_SPACE" in coordinate_mode
+    )
+    if full_surface_line:
+        top_value = float(bounds[1])
+        if max_coord <= 2.0:
+            crosses_broker_chrome = top_value < 0.10 and height >= 0.20
+        else:
+            crosses_broker_chrome = top_value < 120.0 and height >= 120.0
+        if crosses_broker_chrome:
+            return f"geometry_crosses_broker_chrome:{overlay_type}:top={top_value:.1f}:h={height:.1f}"
     return ""
 
 
