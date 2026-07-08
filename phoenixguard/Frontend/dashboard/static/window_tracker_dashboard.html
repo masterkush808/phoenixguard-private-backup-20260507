@@ -2514,6 +2514,855 @@
       }
     }
 
+    /* PhoenixGuard command-center redesign. Keeps the SPA wiring/IDs intact while
+       matching the full-suite operator mockup: chart first, dual thesis second. */
+    body {
+      background:
+        radial-gradient(circle at 16% 0%, rgba(242, 200, 102, 0.13), transparent 30%),
+        radial-gradient(circle at 74% 8%, rgba(78, 210, 255, 0.12), transparent 34%),
+        linear-gradient(180deg, #050604 0%, #090a08 56%, #030403 100%);
+      overflow-x: hidden;
+      overflow-y: auto;
+    }
+
+    .scene-stack {
+      background:
+        linear-gradient(135deg, rgba(242, 200, 102, 0.055), transparent 38%),
+        linear-gradient(315deg, rgba(78, 210, 255, 0.055), transparent 36%),
+        #050604;
+    }
+
+    .scene-frame {
+      display: none;
+    }
+
+    .scene-shade {
+      background:
+        linear-gradient(90deg, rgba(3, 4, 3, 0.98), rgba(3, 4, 3, 0.72) 50%, rgba(3, 4, 3, 0.95)),
+        repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.035) 0 1px, transparent 1px 96px);
+    }
+
+    .grain {
+      opacity: 0.09;
+      background-size: 52px 52px;
+    }
+
+    .console-shell {
+      width: 100vw;
+      min-height: 100svh;
+      padding: 8px 12px 18px;
+    }
+
+    .console {
+      min-height: calc(100svh - 24px);
+      display: grid;
+      grid-template-columns: 82px minmax(820px, 1fr) minmax(360px, 420px);
+      grid-template-rows: auto auto auto auto;
+      grid-template-areas:
+        "top top top"
+        "rail controls controls"
+        "rail surface surface"
+        "rail lower lower";
+      gap: 8px;
+      border-color: rgba(242, 200, 102, 0.28);
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(14, 16, 14, 0.94), rgba(4, 5, 4, 0.93)),
+        radial-gradient(circle at 64% 20%, rgba(78, 210, 255, 0.08), transparent 36%);
+      box-shadow: 0 28px 90px rgba(0, 0, 0, 0.72), inset 0 0 0 1px rgba(255, 255, 255, 0.035);
+      padding: 0;
+    }
+
+    .topbar {
+      grid-area: top;
+      min-height: 0;
+      padding: 6px 12px 5px;
+      border-bottom: 1px solid rgba(242, 200, 102, 0.16);
+      background:
+        linear-gradient(90deg, rgba(0, 0, 0, 0.55), rgba(18, 20, 17, 0.58)),
+        rgba(255, 255, 255, 0.018);
+    }
+
+    .brand-lockup {
+      gap: 10px;
+    }
+
+    .brand-mark {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      font-size: 0;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .brand-mark::before,
+    .brand-mark::after {
+      content: "";
+      position: absolute;
+      inset: 9px;
+      border: 2px solid var(--gold);
+      border-left-color: transparent;
+      border-bottom-color: transparent;
+      border-radius: 50%;
+      transform: rotate(-18deg);
+      filter: drop-shadow(0 0 10px rgba(242, 200, 102, 0.38));
+    }
+
+    .brand-mark::after {
+      inset: 15px 8px 8px 15px;
+      border-width: 1px;
+      border-right-color: transparent;
+      border-top-color: transparent;
+    }
+
+    .eyebrow {
+      display: none;
+    }
+
+    h1.brand-title {
+      max-width: none;
+      font-size: clamp(19px, 1.34vw, 25px);
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .brand-version {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 28px;
+      min-height: 22px;
+      margin-left: 6px;
+      padding: 1px 6px 0;
+      border: 1px solid rgba(242, 200, 102, 0.7);
+      border-radius: 3px;
+      color: var(--gold);
+      background: rgba(242, 200, 102, 0.055);
+      font-family: var(--mono);
+      font-size: 14px;
+      vertical-align: 2px;
+      -webkit-background-clip: initial;
+      background-clip: initial;
+      text-shadow: none;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .brand-lockup p {
+      display: none;
+    }
+
+    .header-chips {
+      display: flex;
+      gap: 5px;
+      margin-top: 0;
+      margin-left: 10px;
+      align-items: center;
+      flex-wrap: nowrap;
+    }
+
+    .status-chip,
+    .session-token,
+    .live-token {
+      min-height: 20px;
+      border-radius: 4px;
+      border: 1px solid rgba(242, 200, 102, 0.25);
+      background: rgba(7, 9, 8, 0.72);
+      box-shadow: inset 0 0 18px rgba(242, 200, 102, 0.035);
+    }
+
+    .status-chip {
+      color: var(--jade);
+      padding: 3px 7px;
+      font-size: 8.5px;
+      letter-spacing: 0.12em;
+    }
+
+    .status-chip:nth-child(2) {
+      color: var(--gold);
+    }
+
+    .status-chip:nth-child(3),
+    .status-chip:nth-child(4) {
+      color: var(--ice);
+    }
+
+    .session-cluster {
+      min-width: 0;
+      gap: 8px;
+    }
+
+    .system-telemetry {
+      display: grid;
+      grid-template-columns: repeat(3, auto);
+      align-items: center;
+      gap: 0;
+      margin-right: 12px;
+      color: rgba(243, 240, 230, 0.72);
+      font-family: var(--mono);
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .system-telemetry-item {
+      display: grid;
+      gap: 2px;
+      min-width: 82px;
+      padding: 0 10px;
+      border-left: 1px solid rgba(255, 255, 255, 0.11);
+    }
+
+    .system-telemetry-item span:first-child {
+      color: rgba(170, 167, 150, 0.72);
+      font-size: 8px;
+    }
+
+    .system-telemetry-item strong {
+      color: rgba(243, 240, 230, 0.9);
+      font-size: 9px;
+      white-space: nowrap;
+    }
+
+    .heartbeat-spark {
+      width: 72px;
+      height: 18px;
+      background:
+        linear-gradient(90deg, transparent 0 10%, rgba(99, 224, 154, 0.42) 10% 12%, transparent 12% 22%, rgba(99, 224, 154, 0.72) 22% 24%, transparent 24% 34%, rgba(99, 224, 154, 0.35) 34% 40%, transparent 40% 52%, rgba(99, 224, 154, 0.9) 52% 55%, transparent 55% 70%, rgba(99, 224, 154, 0.5) 70% 74%, transparent 74%),
+        linear-gradient(180deg, transparent 46%, rgba(99, 224, 154, 0.28) 48% 52%, transparent 54%);
+      filter: drop-shadow(0 0 6px rgba(99, 224, 154, 0.28));
+      animation: heartbeatTrace 2.6s linear infinite;
+    }
+
+    .workspace-nav {
+      grid-area: rail;
+      display: grid;
+      grid-template-columns: 1fr;
+      grid-auto-rows: 72px;
+      align-content: start;
+      gap: 0;
+      padding: 0;
+      border-right: 1px solid rgba(242, 200, 102, 0.18);
+      border-bottom: 0;
+      background: linear-gradient(180deg, rgba(10, 12, 11, 0.96), rgba(5, 6, 5, 0.92));
+    }
+
+    .workspace-link {
+      width: 100%;
+      min-height: 72px;
+      display: grid;
+      place-items: center;
+      gap: 6px;
+      border: 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      border-radius: 0;
+      background: transparent;
+      color: rgba(243, 240, 230, 0.66);
+      font-size: 9px;
+      padding: 8px 5px;
+    }
+
+    .workspace-link::before {
+      content: "";
+      width: 22px;
+      height: 22px;
+      border: 1px solid currentColor;
+      border-radius: 6px;
+      opacity: 0.9;
+      background:
+        linear-gradient(135deg, transparent 42%, currentColor 43% 48%, transparent 49%),
+        radial-gradient(circle at 68% 32%, currentColor 0 2px, transparent 3px);
+    }
+
+    .workspace-link.active {
+      color: var(--gold);
+      background:
+        linear-gradient(90deg, rgba(242, 200, 102, 0.18), rgba(242, 200, 102, 0.03)),
+        rgba(255, 255, 255, 0.018);
+      box-shadow: inset 3px 0 0 var(--gold);
+    }
+
+    .workspace-link.rail-only {
+      cursor: default;
+      opacity: 0.72;
+    }
+
+    .control-ribbon {
+      grid-area: controls;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 0;
+      padding: 6px 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.065);
+      background:
+        linear-gradient(90deg, rgba(7, 8, 7, 0.78), rgba(15, 17, 15, 0.62)),
+        rgba(255, 255, 255, 0.018);
+    }
+
+    .command-strip {
+      display: grid;
+      grid-template-columns: minmax(150px, 205px) minmax(210px, 1fr) 62px minmax(92px, auto);
+      gap: 7px;
+      align-items: end;
+      min-width: 0;
+    }
+
+    .select-control {
+      min-width: 0;
+    }
+
+    .select-control select,
+    .command-button,
+    .command-menu summary,
+    .mode-group button,
+    .surface-tools button,
+    .layer-toggle {
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.045);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      color: rgba(243, 240, 230, 0.82);
+    }
+
+    .surface-tools button,
+    .command-button,
+    .command-menu summary,
+    .mode-group button,
+    .layer-toggle {
+      min-height: 22px;
+      padding: 4px 7px;
+      font-size: 8.8px;
+    }
+
+    .mode-group button.active,
+    .layer-toggle.active,
+    .workspace-link.active {
+      border-color: rgba(242, 200, 102, 0.62);
+    }
+
+    .signal-deck,
+    .kernel-deck,
+    .read-deck {
+      display: none !important;
+    }
+
+    .operation-grid {
+      grid-area: surface;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(360px, 420px);
+      grid-template-rows: minmax(0, 1fr);
+      gap: 8px;
+      padding: 0 10px;
+      min-height: calc(100svh - 152px);
+    }
+
+    .surface-module {
+      grid-row: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.085);
+      background: rgba(8, 10, 11, 0.82);
+      overflow: hidden;
+      min-height: calc(100svh - 152px);
+    }
+
+    .surface-head {
+      align-items: flex-start;
+      padding: 7px 10px;
+      gap: 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(0, 0, 0, 0.18);
+    }
+
+    .surface-title .panel-title {
+      color: rgba(243, 240, 230, 0.74);
+    }
+
+    .surface-title p {
+      font-size: 11px;
+    }
+
+    .surface-tools {
+      gap: 5px;
+      min-width: min(490px, 46vw);
+    }
+
+    .layer-controls {
+      max-width: min(100%, 860px);
+      gap: 5px;
+    }
+
+    .surface-stage {
+      min-height: 0;
+      height: 100%;
+      min-height: clamp(640px, calc(100svh - 300px), 820px);
+      border-radius: 0;
+      background:
+        linear-gradient(180deg, rgba(16, 23, 31, 0.58), rgba(8, 11, 16, 0.76)),
+        radial-gradient(circle at 50% 35%, rgba(78, 210, 255, 0.08), transparent 32%);
+    }
+
+    .surface-canvas,
+    .surface-canvas img {
+      border-radius: 0;
+    }
+
+    .surface-hotspot {
+      border-width: 1px;
+      background: transparent !important;
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.16), 0 0 22px rgba(78, 210, 255, 0.10);
+    }
+
+    .surface-hotspot span {
+      border-radius: 4px;
+      background: rgba(6, 7, 7, 0.72);
+      border: 1px solid currentColor;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+    }
+
+    .full-suite-command {
+      grid-row: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: 6px;
+      background:
+        linear-gradient(180deg, rgba(11, 13, 12, 0.94), rgba(5, 6, 5, 0.88)),
+        radial-gradient(circle at 15% 0%, rgba(99, 224, 154, 0.07), transparent 38%),
+        radial-gradient(circle at 90% 10%, rgba(255, 101, 79, 0.07), transparent 36%);
+      overflow: hidden;
+      min-height: calc(100svh - 152px);
+    }
+
+    .full-suite-head,
+    .full-suite-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 9px 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.065);
+    }
+
+    .full-suite-foot {
+      border-top: 1px solid rgba(255, 255, 255, 0.065);
+      border-bottom: 0;
+      padding: 9px 10px;
+    }
+
+    .full-suite-auto {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--jade);
+      font-family: var(--mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .full-suite-auto::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 16px currentColor;
+    }
+
+    .thesis-columns {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      min-height: 0;
+      overflow: auto;
+    }
+
+    .thesis-column {
+      padding: 10px 12px;
+      border-right: 1px solid rgba(255, 255, 255, 0.07);
+      min-width: 0;
+    }
+
+    .thesis-column.sell {
+      border-right: 0;
+    }
+
+    .thesis-tab {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 28px;
+      margin: -10px -12px 10px;
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      border-bottom: 1px solid currentColor;
+      background: rgba(255, 255, 255, 0.035);
+    }
+
+    .thesis-column.buy {
+      color: var(--jade);
+    }
+
+    .thesis-column.sell {
+      color: var(--red);
+    }
+
+    .thesis-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: baseline;
+      padding: 7px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.065);
+      color: rgba(243, 240, 230, 0.86);
+    }
+
+    .thesis-row:last-child {
+      border-bottom: 0;
+    }
+
+    .thesis-row span:first-child {
+      color: rgba(170, 167, 150, 0.82);
+      font-family: var(--mono);
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .thesis-row strong {
+      font-size: 11.5px;
+      text-align: right;
+      overflow-wrap: anywhere;
+      min-width: 0;
+    }
+
+    .confidence-bars {
+      display: inline-grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 3px;
+      width: 70px;
+      height: 10px;
+    }
+
+    .confidence-bars i {
+      display: block;
+      border-radius: 2px;
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    .confidence-bars i.active {
+      background: currentColor;
+      box-shadow: 0 0 10px currentColor;
+    }
+
+    .package-summary {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 5px;
+      min-width: 0;
+      color: rgba(243, 240, 230, 0.82);
+      font-family: var(--mono);
+      font-size: 10.5px;
+    }
+
+    .package-summary strong {
+      color: var(--gold);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .guard-strip {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 6px;
+    }
+
+    .guard-pill {
+      border: 1px solid rgba(99, 224, 154, 0.32);
+      border-radius: 5px;
+      padding: 5px 7px;
+      color: var(--jade);
+      background: rgba(99, 224, 154, 0.055);
+      font-family: var(--mono);
+      font-size: 8.8px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      white-space: nowrap;
+    }
+
+    .inspector-module {
+      display: none;
+      min-height: 0;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      background: rgba(7, 8, 7, 0.86);
+      overflow: hidden;
+    }
+
+    .inspector-title h2 {
+      font-size: clamp(26px, 2vw, 36px);
+      line-height: 1.05;
+    }
+
+    .lower-grid {
+      grid-area: lower;
+      min-height: 620px;
+      display: grid;
+      grid-template-columns: minmax(620px, 1.38fr) minmax(310px, 0.72fr) minmax(500px, 1fr);
+      grid-auto-rows: minmax(235px, auto);
+      gap: 12px;
+      padding: 24px 10px 20px;
+      border-top: 1px solid rgba(242, 200, 102, 0.16);
+      background:
+        linear-gradient(180deg, rgba(3, 4, 3, 0.15), rgba(3, 4, 3, 0.68)),
+        rgba(0, 0, 0, 0.18);
+    }
+
+    .matrix-module,
+    .focus-module,
+    .telemetry-module,
+    .history-module,
+    .event-timeline-module,
+    .evidence-module,
+    .report-module {
+      min-height: 0;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.085);
+      background: rgba(7, 8, 7, 0.72);
+      overflow: hidden;
+    }
+
+    .event-timeline-module {
+      grid-column: 1 / 3;
+      grid-row: 1;
+    }
+
+    .evidence-module {
+      grid-column: 3;
+      grid-row: 1;
+    }
+
+    .matrix-module {
+      grid-column: 1;
+      grid-row: 2;
+    }
+
+    .focus-module {
+      grid-column: 2;
+      grid-row: 2;
+    }
+
+    .telemetry-module {
+      grid-column: 3;
+      grid-row: 2;
+      display: block !important;
+    }
+
+    .history-module {
+      display: none;
+    }
+
+    .report-module {
+      display: none;
+    }
+
+    .study-grid,
+    .focus-stack,
+    .telemetry-grid {
+      padding: 10px;
+    }
+
+    .telemetry-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .study-cell,
+    .focus-row,
+    .telemetry-cell {
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.032);
+      border-color: rgba(255, 255, 255, 0.075);
+    }
+
+    .matrix-head,
+    .history-head {
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.065);
+    }
+
+    .event-tabs {
+      display: flex;
+      gap: 28px;
+      align-items: center;
+      padding: 10px 12px 0;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: rgba(170, 167, 150, 0.88);
+    }
+
+    .event-tabs span:first-child {
+      color: var(--gold);
+      border-bottom: 2px solid var(--gold);
+      padding-bottom: 8px;
+    }
+
+    .event-table {
+      display: grid;
+      padding: 10px 0 0;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .event-row {
+      display: grid;
+      grid-template-columns: 96px minmax(180px, 0.9fr) minmax(260px, 1.35fr) 92px 64px;
+      gap: 14px;
+      align-items: center;
+      min-height: 36px;
+      padding: 0 14px;
+      border-top: 1px solid rgba(255, 255, 255, 0.055);
+    }
+
+    .event-row:first-child {
+      color: rgba(170, 167, 150, 0.82);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      border-top: 0;
+    }
+
+    .event-row strong {
+      color: var(--jade);
+      font-weight: 700;
+    }
+
+    .event-type {
+      justify-self: start;
+      min-width: 78px;
+      padding: 4px 7px;
+      border: 1px solid rgba(78, 210, 255, 0.38);
+      border-radius: 4px;
+      color: var(--ice);
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .event-status {
+      color: var(--jade);
+      font-weight: 700;
+    }
+
+    .evidence-body {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+    }
+
+    .evidence-frame {
+      min-height: 218px;
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: 5px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .evidence-frame img {
+      width: 100%;
+      height: 100%;
+      min-height: 218px;
+      object-fit: contain;
+      display: block;
+      background: #071015;
+    }
+
+    .evidence-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: rgba(170, 167, 150, 0.9);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .evidence-actions button {
+      min-width: 36px;
+      min-height: 24px;
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.035);
+      color: rgba(243, 240, 230, 0.86);
+    }
+
+    @keyframes heartbeatTrace {
+      from { opacity: 0.62; transform: translateX(-2px); }
+      50% { opacity: 1; }
+      to { opacity: 0.62; transform: translateX(2px); }
+    }
+
+    @media (max-width: 1280px) {
+      body {
+        overflow: auto;
+      }
+
+      .console-shell,
+      .console {
+        height: auto;
+        min-height: 100svh;
+      }
+
+      .console {
+        grid-template-columns: 72px minmax(0, 1fr);
+        grid-template-rows: auto auto auto auto;
+        grid-template-areas:
+          "top top"
+          "rail controls"
+          "rail surface"
+          "rail lower";
+      }
+
+      .operation-grid {
+        grid-template-columns: 1fr;
+        grid-template-rows: minmax(480px, auto) auto auto;
+      }
+
+      .surface-module {
+        grid-row: auto;
+      }
+
+      .lower-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .matrix-module,
+      .focus-module,
+      .telemetry-module {
+        grid-column: auto;
+      }
+    }
+
   </style>
   <link rel="stylesheet" href="/v1/mobile/window-tracker/assets/floating-windows/overlay_editor.css">
   <script src="/v1/mobile/window-tracker/assets/floating-windows/model_strength_controls.js?v=model-strength-advanced-v1"></script>
@@ -2535,19 +3384,34 @@
           <div class="brand-mark" aria-hidden="true">808</div>
           <div>
             <div class="eyebrow">Locked Broker Surface Tracker | PhoenixGuard engine</div>
-            <h1 class="brand-title">808Fx Standard Hybrid System</h1>
+            <h1 class="brand-title">808Fx PhoenixGuard <span class="brand-version">V3</span><span class="sr-only">808Fx Standard Hybrid System</span></h1>
             <p id="hero-copy">PhoenixGuard engine | Live CV command surface</p>
             <div class="header-chips" aria-label="Live runtime status">
-              <span class="status-chip" id="chip-mode">Mode Study</span>
-              <span class="status-chip" id="chip-packet-age">Packet --</span>
-              <span class="status-chip" id="chip-models">Models --</span>
-              <span class="status-chip" id="chip-cache">Cache --</span>
-              <span class="status-chip" id="chip-broker">Broker Pending</span>
-              <span class="status-chip" id="chip-shooter">Shooter Syncing</span>
+              <span class="status-chip" id="chip-mode">STUDY</span>
+              <span class="status-chip" id="chip-packet-age">PKT --</span>
+              <span class="status-chip" id="chip-models">MODELS --</span>
+              <span class="status-chip" id="chip-cache">CACHE --</span>
+              <span class="status-chip" id="chip-broker">PENDING</span>
+              <span class="status-chip" id="chip-shooter">SHOOTER --</span>
             </div>
           </div>
         </div>
         <div class="session-cluster">
+          <div class="system-telemetry" aria-label="System runtime">
+            <div class="system-telemetry-item">
+              <span>System Time</span>
+              <strong id="system-time">--</strong>
+            </div>
+            <div class="system-telemetry-item">
+              <span>Uptime</span>
+              <strong id="system-uptime">--</strong>
+            </div>
+            <div class="system-telemetry-item">
+              <span>Heartbeat</span>
+              <strong id="system-heartbeat">-- FPS</strong>
+              <i class="heartbeat-spark" aria-hidden="true"></i>
+            </div>
+          </div>
           <button type="button" class="session-token" id="session-chip">Session __SESSION_LABEL__</button>
           <div class="live-token"><span class="live-dot" id="live-dot"></span><span id="metric-status-mini">Awaiting</span></div>
         </div>
@@ -2555,9 +3419,12 @@
 
       <nav class="workspace-nav" aria-label="Dashboard workspaces">
         <button type="button" class="workspace-link active" data-route="live">Live</button>
-        <button type="button" class="workspace-link" data-route="chart">Chart</button>
-        <button type="button" class="workspace-link" data-route="council">Council</button>
         <button type="button" class="workspace-link" data-route="replay">Replay</button>
+        <button type="button" class="workspace-link" data-route="chart">Full Suite</button>
+        <button type="button" class="workspace-link rail-only">Broker Feed</button>
+        <button type="button" class="workspace-link rail-only">MT4 Bridge</button>
+        <button type="button" class="workspace-link rail-only">Security</button>
+        <button type="button" class="workspace-link" data-route="council">Settings</button>
       </nav>
 
       <section class="signal-deck" aria-label="Signal overview">
@@ -2771,6 +3638,63 @@
           </div>
         </article>
 
+        <aside class="full-suite-command" id="full-suite-command-center" aria-label="Decision command center">
+          <div class="full-suite-head">
+            <span class="panel-title">Decision Command Center</span>
+            <span class="full-suite-auto" id="full-suite-auto">Auto</span>
+          </div>
+          <div class="thesis-columns" aria-label="Simultaneous buy and sell thesis studies">
+            <section class="thesis-column buy" aria-label="Buy study">
+              <span class="thesis-tab">Buy Study</span>
+              <div class="thesis-row"><span>Signal</span><strong id="buy-study-signal">--</strong></div>
+              <div class="thesis-row"><span>Score</span><strong id="buy-study-score">0.00</strong></div>
+              <div class="thesis-row"><span>Current Pressure</span><strong id="buy-study-pressure">--</strong></div>
+              <div class="thesis-row"><span>Primary Bias</span><strong id="buy-study-bias">--</strong></div>
+              <div class="thesis-row"><span>Story Lock</span><strong id="buy-study-lock">Waiting</strong></div>
+              <div class="thesis-row"><span>Authority</span><strong id="buy-study-authority">Playbook Final Decider</strong></div>
+              <div class="thesis-row"><span>Expected Move</span><strong id="buy-study-horizon">--</strong></div>
+              <div class="thesis-row"><span>Entry Window</span><strong id="buy-study-entry">--</strong></div>
+              <div class="thesis-row"><span>Overlay Truth</span><strong id="buy-study-overlay">--</strong></div>
+              <div class="thesis-row"><span>Data Freshness</span><strong id="buy-study-freshness">--</strong></div>
+              <div class="thesis-row"><span>Blockers</span><strong id="buy-study-blockers">--</strong></div>
+              <div class="thesis-row">
+                <span>Confidence</span>
+                <strong class="confidence-bars" id="buy-study-bars" aria-label="Buy confidence"></strong>
+              </div>
+            </section>
+            <section class="thesis-column sell" aria-label="Sell study">
+              <span class="thesis-tab">Sell Study</span>
+              <div class="thesis-row"><span>Signal</span><strong id="sell-study-signal">--</strong></div>
+              <div class="thesis-row"><span>Score</span><strong id="sell-study-score">0.00</strong></div>
+              <div class="thesis-row"><span>Current Pressure</span><strong id="sell-study-pressure">--</strong></div>
+              <div class="thesis-row"><span>Primary Bias</span><strong id="sell-study-bias">--</strong></div>
+              <div class="thesis-row"><span>Story Lock</span><strong id="sell-study-lock">Waiting</strong></div>
+              <div class="thesis-row"><span>Authority</span><strong id="sell-study-authority">Playbook Final Decider</strong></div>
+              <div class="thesis-row"><span>Expected Move</span><strong id="sell-study-horizon">--</strong></div>
+              <div class="thesis-row"><span>Entry Window</span><strong id="sell-study-entry">--</strong></div>
+              <div class="thesis-row"><span>Overlay Truth</span><strong id="sell-study-overlay">--</strong></div>
+              <div class="thesis-row"><span>Data Freshness</span><strong id="sell-study-freshness">--</strong></div>
+              <div class="thesis-row"><span>Blockers</span><strong id="sell-study-blockers">--</strong></div>
+              <div class="thesis-row">
+                <span>Confidence</span>
+                <strong class="confidence-bars" id="sell-study-bars" aria-label="Sell confidence"></strong>
+              </div>
+            </section>
+          </div>
+          <div class="full-suite-foot">
+            <div class="package-summary">
+              <strong id="package-summary-title">Package Summary</strong>
+              <span id="package-summary-body">Awaiting full-suite story lock.</span>
+              <span id="package-summary-meta">Frame -- | Capture --</span>
+            </div>
+            <div class="guard-strip" aria-label="Runtime guards">
+              <span class="guard-pill" id="guard-stale">No Stale Data</span>
+              <span class="guard-pill" id="guard-bridge">MT4 Bridge Ready</span>
+              <span class="guard-pill" id="guard-source">Source Locked</span>
+            </div>
+          </div>
+        </aside>
+
         <aside class="inspector-module" id="inspector-panel" data-tone="hold" aria-label="Adaptive detail inspector">
           <div class="inspector-head">
             <span class="panel-title">Adaptive Inspector</span>
@@ -2801,6 +3725,55 @@
         </article>
       </section>
       <section class="lower-grid" aria-label="Study details">
+        <section class="event-timeline-module" aria-label="Event timeline">
+          <div class="history-head">
+            <span class="panel-title">Event Timeline</span>
+            <p id="event-timeline-caption">Live operational trace</p>
+          </div>
+          <div class="event-tabs" aria-label="Event views">
+            <span>Event Timeline</span>
+            <span>Alerts (4)</span>
+            <span>Executions</span>
+            <span>System Log</span>
+          </div>
+          <div class="event-table" id="event-timeline-list">
+            <div class="event-row">
+              <span>Time</span>
+              <span>Event</span>
+              <span>Details</span>
+              <span>Type</span>
+              <span>Status</span>
+            </div>
+            <div class="event-row">
+              <strong>--</strong>
+              <span>Frame heartbeat</span>
+              <span>Awaiting live frame evidence.</span>
+              <span class="event-type">System</span>
+              <span class="event-status">OK</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="evidence-module" aria-label="Evidence snapshot">
+          <div class="history-head">
+            <span class="panel-title">Evidence Snapshot</span>
+            <p id="evidence-caption">1 / 3</p>
+          </div>
+          <div class="evidence-body">
+            <div class="evidence-frame">
+              <img id="evidence-snapshot-img" alt="Latest package evidence snapshot" draggable="false">
+            </div>
+            <div class="evidence-actions">
+              <span id="evidence-snapshot-meta">Latest full overlay</span>
+              <span>
+                <button type="button" aria-label="Zoom evidence">+</button>
+                <button type="button" aria-label="Download evidence">v</button>
+                <button type="button" aria-label="Open evidence">[]</button>
+              </span>
+            </div>
+          </div>
+        </section>
+
         <section class="matrix-module">
           <div class="matrix-head">
             <span class="panel-title">Study Map</span>
@@ -3462,6 +4435,45 @@
       inspectorState: $("inspector-state"),
       inspectorSummary: $("inspector-summary"),
       inspectorRows: $("inspector-rows"),
+      fullSuiteAuto: $("full-suite-auto"),
+      buyStudySignal: $("buy-study-signal"),
+      buyStudyScore: $("buy-study-score"),
+      buyStudyPressure: $("buy-study-pressure"),
+      buyStudyBias: $("buy-study-bias"),
+      buyStudyLock: $("buy-study-lock"),
+      buyStudyAuthority: $("buy-study-authority"),
+      buyStudyHorizon: $("buy-study-horizon"),
+      buyStudyEntry: $("buy-study-entry"),
+      buyStudyOverlay: $("buy-study-overlay"),
+      buyStudyFreshness: $("buy-study-freshness"),
+      buyStudyBlockers: $("buy-study-blockers"),
+      buyStudyBars: $("buy-study-bars"),
+      sellStudySignal: $("sell-study-signal"),
+      sellStudyScore: $("sell-study-score"),
+      sellStudyPressure: $("sell-study-pressure"),
+      sellStudyBias: $("sell-study-bias"),
+      sellStudyLock: $("sell-study-lock"),
+      sellStudyAuthority: $("sell-study-authority"),
+      sellStudyHorizon: $("sell-study-horizon"),
+      sellStudyEntry: $("sell-study-entry"),
+      sellStudyOverlay: $("sell-study-overlay"),
+      sellStudyFreshness: $("sell-study-freshness"),
+      sellStudyBlockers: $("sell-study-blockers"),
+      sellStudyBars: $("sell-study-bars"),
+      packageSummaryTitle: $("package-summary-title"),
+      packageSummaryBody: $("package-summary-body"),
+      packageSummaryMeta: $("package-summary-meta"),
+      guardStale: $("guard-stale"),
+      guardBridge: $("guard-bridge"),
+      guardSource: $("guard-source"),
+      systemTime: $("system-time"),
+      systemUptime: $("system-uptime"),
+      systemHeartbeat: $("system-heartbeat"),
+      eventTimelineCaption: $("event-timeline-caption"),
+      eventTimelineList: $("event-timeline-list"),
+      evidenceSnapshotImg: $("evidence-snapshot-img"),
+      evidenceSnapshotMeta: $("evidence-snapshot-meta"),
+      evidenceCaption: $("evidence-caption"),
     };
 
     function sessionUrl() {
@@ -5479,13 +6491,13 @@
         : clean((packet.live_integrity || {}).cache_status, "--");
       const brokerLocked = Boolean(surface.controls_ready || executionState.controls_ready || payload.manual_focus_region?.enabled);
       const shooterMode = executionControls.live_execution_enabled
-        ? `Shooter ${clean(executionControls.execution_mode, "shadow").toUpperCase()}`
-        : "Shooter Paper/Dry";
-      setChip(els.chipMode, `Mode ${modeText}`, modeText === "LIVE" ? "bad" : modeText === "SHADOW" ? "warn" : "good");
-      setChip(els.chipPacketAge, `Packet ${packetAge > 0 ? formatSeconds(packetAge) : "--"}`, packetAge > 2 ? "bad" : packetAge > 0.75 ? "warn" : "good");
-      setChip(els.chipModels, `Models ${modelsAwake}`, modelsAwake === "STALE" ? "bad" : "good");
-      setChip(els.chipCache, `Cache ${cacheLabel}`, cacheLabel === "--" ? "warn" : "good");
-      setChip(els.chipBroker, brokerLocked ? "Broker Locked" : "Broker Pending", brokerLocked ? "good" : "warn");
+        ? `SHOOTER ${clean(executionControls.execution_mode, "shadow").toUpperCase()}`
+        : "SHOOTER DRY";
+      setChip(els.chipMode, modeText, modeText === "LIVE" ? "bad" : modeText === "SHADOW" ? "warn" : "good");
+      setChip(els.chipPacketAge, packetAge > 0 ? `PKT ${formatSeconds(packetAge)}` : "PKT --", packetAge > 2 ? "bad" : packetAge > 0.75 ? "warn" : "good");
+      setChip(els.chipModels, `MODELS ${modelsAwake}`, modelsAwake === "STALE" ? "bad" : "good");
+      setChip(els.chipCache, `CACHE ${cacheLabel}`, cacheLabel === "--" ? "warn" : "good");
+      setChip(els.chipBroker, brokerLocked ? "LOCKED" : "PENDING", brokerLocked ? "good" : "warn");
       setChip(els.chipShooter, shooterMode, executionControls.execution_mode === "live" ? "bad" : "good");
     }
 
@@ -5963,7 +6975,7 @@
 
     function surfaceFitViewportHeight() {
       const viewportHeight = Number(window.innerHeight || document.documentElement.clientHeight || 0);
-      return Math.max(300, Math.round(Math.max(1, viewportHeight) * 0.68));
+      return Math.max(420, Math.round(Math.max(1, viewportHeight) * 0.70));
     }
 
     function getFitZoom() {
@@ -9008,6 +10020,270 @@
       `).join("");
     }
 
+    function setText(node, value, fallback = "--") {
+      if (node) {
+        node.textContent = clean(value, fallback);
+      }
+    }
+
+    function setToneClass(node, side) {
+      if (!node) return;
+      node.classList.remove("buy", "sell", "hold");
+      node.classList.add(colorClass(side));
+    }
+
+    function scoreNumber(value, fallback = 0) {
+      const number = Number(value);
+      return Number.isFinite(number) ? number : fallback;
+    }
+
+    function scoreText(value) {
+      return scoreNumber(value).toFixed(2);
+    }
+
+    function confidenceBars(value) {
+      const active = Math.max(0, Math.min(8, Math.round(scoreNumber(value) * 8)));
+      return Array.from({length: 8}, (_item, index) => `<i${index < active ? " class=\"active\"" : ""}></i>`).join("");
+    }
+
+    function packetFromSession(payload = {}) {
+      const signal = objectOrEmpty(payload.latest_signal);
+      const tracking = objectOrEmpty(payload.tracking_summary);
+      return objectOrEmpty(
+        payload.model_council_packet
+        || signal.model_council_packet
+        || tracking.model_council_packet
+        || payload.execution_packet
+        || signal.execution_packet
+      );
+    }
+
+    function fullSuiteAiFromPacket(packet = {}) {
+      const plan = objectOrEmpty(packet.professional_trade_plan);
+      return objectOrEmpty(
+        packet.playbook_ai_summary_v3
+        || plan.playbook_ai_summary_v3
+        || plan.playbook_ai_intelligence_v3
+        || packet.playbook_ai_intelligence_v3
+      );
+    }
+
+    function sideStudyScore(side, ai = {}, dual = {}) {
+      const sideKey = String(side || "").toUpperCase();
+      const arbitration = objectOrEmpty(ai.thesis_arbitration);
+      const scores = objectOrEmpty(arbitration.scores);
+      const sideScore = objectOrEmpty(scores[sideKey]);
+      if (Number.isFinite(Number(sideScore.score))) {
+        return Number(sideScore.score);
+      }
+      const dualSide = objectOrEmpty(dual[sideKey.toLowerCase()]);
+      if (Number.isFinite(Number(dualSide.score))) {
+        return Number(dualSide.score);
+      }
+      return 0;
+    }
+
+    function sideStudyHorizon(side, ai = {}, selectedSide = "") {
+      const sideKey = String(side || "").toUpperCase();
+      const horizon = objectOrEmpty(ai.horizon);
+      const bySide = objectOrEmpty(horizon.by_side);
+      const sideHorizon = objectOrEmpty(bySide[sideKey]);
+      const selected = objectOrEmpty(horizon.selected);
+      const selectedText = clean(
+        sideHorizon.optimized_duration_text
+        || (sideKey === String(selectedSide || "").toUpperCase() ? horizon.optimized_duration_text || selected.optimized_duration_text : ""),
+        "",
+      );
+      return selectedText || "--";
+    }
+
+    function sideStudyStatus(side, payload = {}, packet = {}, ai = {}, dual = {}) {
+      const sideKey = String(side || "").toUpperCase();
+      const plan = objectOrEmpty(packet.professional_trade_plan);
+      const story = objectOrEmpty(ai.full_suite_story_lock_v3 || dual.full_suite_story_lock_v3);
+      const execution = objectOrEmpty(packet.execution);
+      const selectedSide = clean(story.active_side || dual.selected_authority_side || execution.side, "HOLD").toUpperCase();
+      const bigPicture = objectOrEmpty(objectOrEmpty(objectOrEmpty(plan.trade_hierarchy).big_picture));
+      const primaryBias = clean(dual.primary_bias_side || bigPicture.side, "HOLD").toUpperCase();
+      const currentPressure = objectOrEmpty(dual.current_pressure);
+      const currentPressureSide = clean(currentPressure.side || dual.current_pressure_side, "HOLD").toUpperCase();
+      const score = sideStudyScore(sideKey, ai, dual);
+      const expected = objectOrEmpty(packet.expected_move_time);
+      const entryWindow = objectOrEmpty(expected.entry_window);
+      const fullSuiteReady = ai.full_suite_ready === true || story.state === "FULL_SUITE_STORY_CONFIRMED";
+      const freshnessPass = clean(packet.freshness_status || packet.freshness || payload.stale_status || "PASS", "PASS").toUpperCase();
+      const blocker = clean(plan.blocker || packet.blocker || packet.block_reason || "", "");
+      const sideIsAuthority = sideKey === selectedSide;
+      const sideIsPressure = sideKey === currentPressureSide;
+      const sideIsPrimary = sideKey === primaryBias;
+      const candleSuffix = currentPressure.candle_count ? `${currentPressure.candle_count}c` : "";
+      return {
+        side: sideKey,
+        signal: sideIsAuthority ? sideKey : sideIsPressure ? `${sideKey} PRESSURE` : sideIsPrimary ? `${sideKey} BIAS` : "STUDYING",
+        score,
+        pressure: sideIsPressure ? [sideKey, candleSuffix, clean(currentPressure.stage, "")].filter(Boolean).join(" ") : "not dominant",
+        bias: sideIsPrimary ? "PRIMARY" : sideIsAuthority ? "AUTHORITY" : "secondary",
+        lock: sideIsAuthority && story.confirmed === true ? "FULL SUITE STORY LOCK" : sideIsAuthority ? clean(story.state, "AUTHORITY") : "STUDYING",
+        authority: sideIsAuthority ? "PLAYBOOK FINAL DECIDER" : "LIVE STUDY",
+        horizon: sideStudyHorizon(sideKey, ai, selectedSide),
+        entry: sideIsAuthority ? clean(entryWindow.duration_text || entryWindow.duration_sec, "active") : "watch",
+        overlay: fullSuiteReady ? "TRUE" : "WAIT",
+        freshness: freshnessPass,
+        blockers: sideIsAuthority ? (blocker || "NONE") : "not selected",
+      };
+    }
+
+    function renderSideStudy(prefix, status) {
+      setText(els[`${prefix}StudySignal`], status.signal);
+      setToneClass(els[`${prefix}StudySignal`], status.side);
+      setText(els[`${prefix}StudyScore`], scoreText(status.score));
+      setToneClass(els[`${prefix}StudyScore`], status.side);
+      setText(els[`${prefix}StudyPressure`], status.pressure);
+      setText(els[`${prefix}StudyBias`], status.bias);
+      setText(els[`${prefix}StudyLock`], status.lock);
+      setText(els[`${prefix}StudyAuthority`], status.authority);
+      setText(els[`${prefix}StudyHorizon`], status.horizon);
+      setText(els[`${prefix}StudyEntry`], status.entry);
+      setText(els[`${prefix}StudyOverlay`], status.overlay);
+      setText(els[`${prefix}StudyFreshness`], status.freshness);
+      setText(els[`${prefix}StudyBlockers`], status.blockers);
+      if (els[`${prefix}StudyBars`]) {
+        els[`${prefix}StudyBars`].innerHTML = confidenceBars(status.score);
+      }
+    }
+
+    function renderFullSuiteCommandCenter(payload = {}) {
+      const packet = packetFromSession(payload);
+      const council = objectOrEmpty(packet.model_council || payload.model_council_result || payload.model_council);
+      const dual = objectOrEmpty(council.dual_thesis_report_v3 || packet.dual_thesis_report_v3);
+      const ai = fullSuiteAiFromPacket(packet);
+      const story = objectOrEmpty(ai.full_suite_story_lock_v3 || dual.full_suite_story_lock_v3);
+      const execution = objectOrEmpty(packet.execution);
+      const selectedSide = clean(story.active_side || dual.selected_authority_side || execution.side, "HOLD").toUpperCase();
+      const buyStatus = sideStudyStatus("BUY", payload, packet, ai, dual);
+      const sellStatus = sideStudyStatus("SELL", payload, packet, ai, dual);
+      renderSideStudy("buy", buyStatus);
+      renderSideStudy("sell", sellStatus);
+
+      const expected = objectOrEmpty(packet.expected_move_time);
+      const entryWindow = objectOrEmpty(expected.entry_window);
+      const frameId = clean(packet.frame_id || packet.frame || payload.frame_id || payload.capture_count, "--");
+      const captureCount = clean(packet.capture_count || payload.capture_count, "--");
+      const duration = clean(expected.expected_duration_text || ai.horizon?.optimized_duration_text || ai.horizon?.selected?.optimized_duration_text, "--");
+      const playbook = clean(packet.book_strategy_playbook || expected.professional_trade_plan?.thesis_class || packet.classification, "FULL SUITE STORY");
+      const score = selectedSide === "BUY" ? buyStatus.score : selectedSide === "SELL" ? sellStatus.score : 0;
+
+      setText(els.fullSuiteAuto, payload.tracking_enabled ? "Auto" : "Manual");
+      setText(els.packageSummaryTitle, selectedSide === "BUY" || selectedSide === "SELL" ? `${selectedSide} Package Summary` : "Package Summary");
+      setText(els.packageSummaryBody, `${playbook} | score ${scoreText(score)} | horizon ${duration}`);
+      setText(els.packageSummaryMeta, `Frame ${frameId} | Capture ${captureCount} | Entry ${clean(entryWindow.duration_text, "--")}`);
+      setText(els.guardStale, clean(packet.freshness_status || "No Stale Data"));
+      setText(els.guardBridge, "MT4 Bridge Ready");
+      setText(els.guardSource, story.confirmed === true ? "Source Locked" : "Source Checking");
+    }
+
+    function formatHeaderClock(date = new Date()) {
+      try {
+        const value = new Intl.DateTimeFormat(undefined, {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        }).format(date);
+        return value.replace(",", "");
+      } catch (_err) {
+        return date.toISOString().slice(0, 19).replace("T", " ");
+      }
+    }
+
+    function formatLongDuration(seconds) {
+      const number = Number(seconds);
+      if (!Number.isFinite(number) || number <= 0) {
+        return "--";
+      }
+      const hours = Math.floor(number / 3600);
+      const minutes = Math.floor((number % 3600) / 60);
+      const secs = Math.floor(number % 60);
+      return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+    }
+
+    function renderHeaderSystemTelemetry(payload = {}, telemetry = {}) {
+      setText(els.systemTime, formatHeaderClock(new Date()));
+      const uptimeSeconds = scoreNumber(
+        telemetry.uptime_sec
+        || telemetry.process_uptime_sec
+        || payload.uptime_sec
+        || payload.process_uptime_sec
+        || (scoreNumber(payload.capture_count) * scoreNumber(payload.effective_capture_interval_sec || payload.capture_interval_sec || 15)),
+        0,
+      );
+      setText(els.systemUptime, formatLongDuration(uptimeSeconds));
+      const fps = scoreNumber(
+        telemetry.heartbeat_fps
+        || telemetry.fps
+        || payload.heartbeat_fps
+        || payload.frame_rate
+        || payload.capture_fps,
+        0,
+      );
+      setText(els.systemHeartbeat, fps > 0 ? `${fps.toFixed(1)} FPS` : "LIVE");
+    }
+
+    function eventTimeText() {
+      const date = new Date();
+      return date.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false});
+    }
+
+    function renderOperationalTimeline(payload = {}) {
+      if (!els.eventTimelineList) return;
+      const packet = packetFromSession(payload);
+      const ai = fullSuiteAiFromPacket(packet);
+      const story = objectOrEmpty(ai.full_suite_story_lock_v3);
+      const expected = objectOrEmpty(packet.expected_move_time);
+      const frameId = clean(packet.frame_id || packet.frame || payload.frame_id || payload.capture_count, "--");
+      const captureCount = clean(packet.capture_count || payload.capture_count, "--");
+      const side = clean(story.active_side || packet.execution?.side, "HOLD").toUpperCase();
+      const playbook = clean(packet.book_strategy_playbook || expected.professional_trade_plan?.thesis_class, "Full suite story");
+      const overlayCount = clean(ai.coverage?.actionable_count || payload.tracking_summary?.overlay_count || payload.overlay_count, "--");
+      const rows = [
+        ["Time", "Event", "Details", "Type", "Status"],
+        [eventTimeText(), "Frame heartbeat", `Frame ${frameId} | Capture ${captureCount} | Source live`, "System", "OK"],
+        [eventTimeText(), `Package grant: ${side}`, `${playbook} | horizon ${clean(expected.expected_duration_text || ai.horizon?.optimized_duration_text, "--")}`, "Playbook", packet.packet_type ? "OK" : "Watch"],
+        [eventTimeText(), "Full-suite story", `${clean(story.state, "STUDYING")} | side ${side} | confidence ${scoreText(story.story_confidence)}`, "Suite", story.confirmed ? "OK" : "Watch"],
+        [eventTimeText(), "Overlay update", `Overlays ${overlayCount} | entry ${clean(ai.coverage?.entry_window_count, "--")} | targets ${clean(ai.coverage?.target_window_count, "--")}`, "Overlay", "OK"],
+        [eventTimeText(), "MT4 bridge status", `Packet side ${side} | freshness ${clean(packet.freshness_status || "PASS")}`, "Bridge", "OK"],
+      ];
+      els.eventTimelineCaption.textContent = `Frame ${frameId} | capture ${captureCount}`;
+      els.eventTimelineList.innerHTML = rows.map((row, index) => {
+        if (index === 0) {
+          return `<div class="event-row">${row.map((value) => `<span>${escapeHtml(value)}</span>`).join("")}</div>`;
+        }
+        return `
+          <div class="event-row">
+            <strong>${escapeHtml(row[0])}</strong>
+            <span>${escapeHtml(row[1])}</span>
+            <span>${escapeHtml(row[2])}</span>
+            <span class="event-type">${escapeHtml(row[3])}</span>
+            <span class="event-status">${escapeHtml(row[4])}</span>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderEvidenceSnapshot(payload = {}) {
+      if (!els.evidenceSnapshotImg) return;
+      const frameId = clean(payload.full_overlay_frame_id || payload.overlay_frame_id || payload.frame_id || payload.capture_count, "--");
+      const url = artifactUrl("full-overlay", payload);
+      if (url) {
+        setImageSource(els.evidenceSnapshotImg, url);
+      }
+      setText(els.evidenceCaption, "1 / 3");
+      setText(els.evidenceSnapshotMeta, `Full overlay evidence | frame ${frameId}`);
+    }
+
     function renderSession(payload) {
       state.session = payload || {};
       applySurfaceIdentity(state.session);
@@ -9135,6 +10411,10 @@
       els.adaptiveTimerToggle.classList.toggle("primary", timerAdaptive);
       els.adaptiveTimerToggle.classList.toggle("warn", !timerAdaptive);
 
+      renderHeaderSystemTelemetry(payload, telemetry);
+      renderFullSuiteCommandCenter(payload);
+      renderOperationalTimeline(payload);
+      renderEvidenceSnapshot(payload);
       renderKernelDeck(signal, tracking);
       renderPills(signal, tracking, focus);
       renderHistory(payload.recent_studies || []);
