@@ -432,6 +432,51 @@ def _location_supports_side(side: str, location: Any, zone: Mapping[str, Any]) -
     return False
 
 
+def _zone_is_current_area(zone: Mapping[str, Any]) -> bool:
+    if not zone:
+        return False
+    if _zone_current_price_inside(zone):
+        return True
+    distance = _zone_distance_norm(zone, default=1.0)
+    if distance <= 0.12:
+        return True
+    relevance = _upper(zone.get("entry_relevance") or zone.get("relevance") or zone.get("current_relevance"))
+    return relevance in {"ENTRY_SUPPORT", "ENTRY_RESISTANCE", "ACTIVE_SUPPORT", "ACTIVE_RESISTANCE"}
+
+
+def _wrong_side_entry_location(
+    *,
+    side: str,
+    price_location_label: str,
+    active_zone: Mapping[str, Any],
+    opposing_zone: Mapping[str, Any],
+) -> dict[str, Any]:
+    if side not in {"BUY", "SELL"}:
+        return {}
+    wrong_zone_type = "SUPPLY" if side == "BUY" else "DEMAND"
+    wrong_label_terms = ("SUPPLY", "RESISTANCE") if side == "BUY" else ("DEMAND", "SUPPORT")
+    if _contains_any(price_location_label, wrong_label_terms):
+        return {
+            "source": "price_location",
+            "side": side,
+            "location": price_location_label,
+            "wrong_zone_type": wrong_zone_type,
+        }
+    for source, zone in (("active_zone", active_zone), ("opposing_zone", opposing_zone)):
+        if not zone or _zone_type(zone) != wrong_zone_type or not _zone_is_current_area(zone):
+            continue
+        return {
+            "source": source,
+            "side": side,
+            "zone_id": str(zone.get("zone_id") or zone.get("id") or zone.get("key") or ""),
+            "zone_type": _zone_type(zone),
+            "distance_norm": round(float(_zone_distance_norm(zone, default=1.0)), 4),
+            "current_price_inside": _zone_current_price_inside(zone),
+            "wrong_zone_type": wrong_zone_type,
+        }
+    return {}
+
+
 def _short_horizon_side(snapshot: Mapping[str, Any]) -> tuple[str, float]:
     study = _first_mapping(
         snapshot.get("two_candle_study"),
@@ -976,6 +1021,21 @@ def _overlay_summary_row(row: Mapping[str, Any], normalized: Mapping[str, Any]) 
     }
 
 
+def _looks_like_overlay_row(row: Mapping[str, Any]) -> bool:
+    return bool(
+        row.get("object_type")
+        or row.get("overlay_type")
+        or row.get("type")
+        or row.get("kind")
+        or row.get("role")
+        or row.get("bbox")
+        or row.get("bounds")
+        or row.get("line_points")
+        or row.get("points")
+        or row.get("path")
+    )
+
+
 def _overlay_suite_evidence_v3(
     *,
     snapshot: Mapping[str, Any],
@@ -1014,8 +1074,28 @@ def _overlay_suite_evidence_v3(
             "target_bbox",
         )
         bounds = list(bounds_tuple) if bounds_tuple is not None else []
+        object_identity = _first_present(
+            mapped,
+            "id",
+            "key",
+            "zone_id",
+            "trendline_id",
+            "object_id",
+            "track_id",
+            "source_key",
+        )
+        original_source_path = str(mapped.get("source_path") or "")
         signature = "|".join(
-            str((source_path, _first_present(mapped, "id", "key", "zone_id", "trendline_id", "object_id"), bounds))
+            str(
+                (
+                    resolved_type,
+                    resolved_side,
+                    object_identity,
+                    original_source_path,
+                    bounds,
+                    "" if object_identity or original_source_path or bounds else source_path,
+                )
+            )
             .strip()
             .split()
         )
@@ -1040,6 +1120,57 @@ def _overlay_suite_evidence_v3(
         for index, row in enumerate(_rows(value)):
             add_row(row, f"{source_prefix}[{index}]", overlay_type=overlay_type, side_override=side_override)
 
+    def add_registry_rows(value: Any, source_prefix: str, *, depth: int = 0) -> None:
+        if depth > 4 or value in (None, "", [], {}, ()):
+            return
+        mapping = _mapping(value)
+        if mapping:
+            if _looks_like_overlay_row(mapping):
+                add_row(mapping, source_prefix)
+            for key in (
+                "objects",
+                "object_registry",
+                "tracked_objects",
+                "overlays",
+                "overlay_objects",
+                "rows",
+                "overlay_rows",
+                "normalized_rows",
+                "active_objects",
+                "items",
+            ):
+                child = mapping.get(key)
+                if child in (None, "", [], {}, ()):
+                    continue
+                for index, row in enumerate(_rows(child)):
+                    add_row(row, f"{source_prefix}.{key}[{index}]")
+            for key in (
+                "market_objects",
+                "market_object_registry",
+                "registry",
+                "overlay_geometry",
+                "truth_audit",
+                "overlay_truth_audit",
+            ):
+                child = mapping.get(key)
+                if child not in (None, "", [], {}, ()):
+                    add_registry_rows(child, f"{source_prefix}.{key}", depth=depth + 1)
+            return
+        for index, row in enumerate(_rows(value)):
+            add_row(row, f"{source_prefix}[{index}]")
+
+    add_registry_rows(snapshot.get("market_objects"), "snapshot.market_objects")
+    add_registry_rows(snapshot.get("market_object_registry"), "snapshot.market_object_registry")
+    add_registry_rows(snapshot.get("overlay_geometry"), "snapshot.overlay_geometry")
+    add_registry_rows(snapshot.get("overlay_truth_audit"), "snapshot.overlay_truth_audit")
+    add_registry_rows(market.get("market_objects"), "market.market_objects")
+    add_registry_rows(market.get("market_object_registry"), "market.market_object_registry")
+    add_registry_rows(market.get("overlay_geometry"), "market.overlay_geometry")
+    add_registry_rows(market.get("overlay_truth_audit"), "market.overlay_truth_audit")
+    add_registry_rows(tracking_summary.get("market_objects"), "tracking_summary.market_objects")
+    add_registry_rows(tracking_summary.get("market_object_registry"), "tracking_summary.market_object_registry")
+    add_registry_rows(tracking_summary.get("overlay_geometry"), "tracking_summary.overlay_geometry")
+    add_registry_rows(tracking_summary.get("overlay_truth_audit"), "tracking_summary.overlay_truth_audit")
     add_rows(tracking_summary.get("tracked_candles"), "tracking_summary.tracked_candles", overlay_type="CURRENT_CANDLE")
     current_box = _mapping(tracking_summary.get("current_box"))
     if current_box:
@@ -1301,7 +1432,8 @@ def _overlay_suite_evidence_v3(
     projection_ready = prediction_path_count > 0 or best_expected_move_candles > 0
     trendline_ready = trendline_count > 0
     structure_ready = structure_box_count > 0
-    angle_ready = angle_vector_count > 0
+    angle_evidence_count = angle_vector_count + trendline_count + prediction_path_count
+    angle_ready = angle_evidence_count > 0
     opposing_force_ready = opposing_force_count > 0
     full_suite_ready = bool(
         entry_ready
@@ -1341,6 +1473,9 @@ def _overlay_suite_evidence_v3(
         "schema_version": "PG_PLAYBOOK_OVERLAY_SUITE_EVIDENCE_V3",
         "side": side,
         "rows_total": len(normalized_rows),
+        "raw_overlay_rows_seen": len(normalized_rows),
+        "rows": normalized_rows,
+        "normalized_rows": normalized_rows,
         "counts_by_type": counts_by_type,
         "counts_by_layer": counts_by_layer,
         "actionable_count": actionable_count,
@@ -1352,6 +1487,7 @@ def _overlay_suite_evidence_v3(
         "invalidation_count": invalidation_count,
         "prediction_path_count": prediction_path_count,
         "angle_vector_count": angle_vector_count,
+        "angle_evidence_count": angle_evidence_count,
         "supply_demand_count": supply_demand_count,
         "structure_box_count": structure_box_count,
         "trendline_count": trendline_count,
@@ -1727,9 +1863,7 @@ def _select_entry_profile(
     conflict_market: bool,
     structural_extreme_reversal: bool,
 ) -> BookEntryProfile:
-    if side not in {"BUY", "SELL"} or conflict_market:
-        return "NO_TRADE"
-    if (late_chase and not structural_extreme_reversal) or not opposing_force_ok:
+    if side not in {"BUY", "SELL"}:
         return "NO_TRADE"
     reaction_type = _upper(candle_reaction.get("reaction_type"))
     if (
@@ -2299,6 +2433,21 @@ def evaluate_book_strategy_master_v3(
     )
     short_horizon_side, short_horizon_probability = _short_horizon_side(snapshot)
     price_location_label = _upper(price_location.get("relative_location") or market_context.get("current_location"))
+    wrong_side_location_evidence = _wrong_side_entry_location(
+        side=side,
+        price_location_label=price_location_label,
+        active_zone=active_zone,
+        opposing_zone=opposing_zone,
+    )
+    wrong_side_location_role_flip_exception = bool(
+        wrong_side_location_evidence
+        and (
+            role_flip_confirmed
+            or (break_of_structure_confirmed and retest_confirmed)
+            or live_overlay_reclaim_is_current_truth
+        )
+    )
+    wrong_side_location_blocked = bool(wrong_side_location_evidence and not wrong_side_location_role_flip_exception)
     structural_extreme_for_side = _location_supports_side(side, price_location_label, active_zone)
     opposite_pressure_warning = bool(short_horizon_side == side and short_horizon_probability >= 0.52)
     explicit_reversal_play_hint = bool(
@@ -2852,6 +3001,9 @@ def evaluate_book_strategy_master_v3(
         "middle_safe": middle_safe,
         "short_horizon_side": short_horizon_side,
         "short_horizon_probability": round(float(short_horizon_probability), 4),
+        "wrong_side_location_evidence": wrong_side_location_evidence,
+        "wrong_side_location_role_flip_exception": wrong_side_location_role_flip_exception,
+        "wrong_side_location_blocked": wrong_side_location_blocked,
         "structural_extreme_for_side": structural_extreme_for_side,
         "opposite_pressure_warning": opposite_pressure_warning,
         "failed_continuation_reversal": failed_continuation_reversal,
@@ -2919,8 +3071,31 @@ def evaluate_book_strategy_master_v3(
     )
     blockers: list[dict[str, Any]] = []
     soft_warnings: list[dict[str, Any]] = []
+    non_negotiable_blocker_fields = {
+        "api_health",
+        "cache_state",
+        "candidate_invalidated",
+        "candidate_side",
+        "live_integrity",
+        "runtime",
+        "runtime_model_health",
+        "wrong_side_location",
+    }
 
     def add_blocker(field: str, received: Any, required: Any, reason: str, *, hard: bool = False) -> None:
+        field_key = str(field or "").strip().lower()
+        if field_key not in non_negotiable_blocker_fields:
+            soft_warnings.append(
+                {
+                    "field": field,
+                    "received": received,
+                    "required": required,
+                    "effect": "overlay_truth_authority_kept; strategy caution downgraded from blocker",
+                    "reason": reason,
+                    "former_hard": bool(hard),
+                }
+            )
+            return
         blockers.append(_build_blocker(field, received, required, reason, hard=hard))
 
     def add_warning(field: str, received: Any, effect: str) -> None:
@@ -3045,6 +3220,18 @@ def evaluate_book_strategy_master_v3(
         add_blocker("candidate_side", side, "BUY or SELL", "No directional opportunity exists.", hard=True)
     if candidate_invalidated:
         add_blocker("candidate_invalidated", True, False, "Candidate was invalidated by current structure.", hard=True)
+    if wrong_side_location_blocked:
+        required_area = "demand/support or accepted role-flip support" if side == "BUY" else "supply/resistance or accepted role-flip resistance"
+        add_blocker(
+            "wrong_side_location",
+            wrong_side_location_evidence,
+            required_area,
+            (
+                "Location safety blocked the package: PhoenixGuard does not buy into active resistance/supply "
+                "or sell into active support/demand unless the area has already been accepted as a role-flip/reclaim."
+            ),
+            hard=True,
+        )
     if professional_counter_reaction_needs_confirmation:
         add_blocker(
             "professional_counter_reaction_confirmation",
@@ -3344,12 +3531,8 @@ def evaluate_book_strategy_master_v3(
         state: BookMaturityState = "NO_OPPORTUNITY"
     elif candidate_invalidated:
         state = "INVALIDATED"
-    elif late_chase or history_exit_here or (
-        replay_template_late_chase_risk and not replay_template_late_chase_softened_by_current_transition
-    ):
-        state = "LATE_CHASE"
-    elif conflict_market:
-        state = "NO_OPPORTUNITY"
+    elif conflict_market and not (current_pressure_is_current_truth or professional_reaction_is_current_truth or live_overlay_reclaim_is_current_truth):
+        state = "VALID_WATCH"
     elif hard_blockers:
         state = "PREPARE"
     elif not has_context:
@@ -3358,7 +3541,7 @@ def evaluate_book_strategy_master_v3(
         state = "VALID_WATCH"
     elif blockers:
         state = "PREPARE"
-    elif bool(reaction_ready and timing_supportive and not hard_blockers):
+    elif bool(reaction_ready and not hard_blockers):
         state = "ENTER_NOW"
     else:
         state = "PREPARE"

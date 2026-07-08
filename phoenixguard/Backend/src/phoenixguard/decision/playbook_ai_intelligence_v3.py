@@ -352,6 +352,11 @@ def _build_semantic_graph(
             or overlay_suite.get("overlay_rows")
         )
     )
+    if raw_overlay_rows_seen <= 0:
+        raw_overlay_rows_seen = max(
+            _int(overlay_suite.get("raw_overlay_rows_seen"), 0),
+            _int(overlay_suite.get("rows_total"), 0),
+        )
     missing_first_class_feeds_value = overlay_suite.get("missing_first_class_feeds")
     missing_first_class_feeds = (
         [str(item) for item in cast(Sequence[Any], missing_first_class_feeds_value)]

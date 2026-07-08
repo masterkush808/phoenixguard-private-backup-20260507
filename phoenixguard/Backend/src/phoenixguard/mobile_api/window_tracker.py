@@ -47,6 +47,7 @@ from phoenixguard.runtime.realtime_performance_v3 import (
     CaptureWorkerV3Health,
     SessionAtomicWriterV3,
 )
+from phoenixguard.tracking.market_object_tracker_v3 import build_market_object_registry_v3
 from phoenixguard.vision.broker_source_lock_v3 import build_broker_source_lock_v3
 from phoenixguard.decision.scenario_integration import (
     predict_scenarios_from_chart_and_forecast,
@@ -565,7 +566,7 @@ def _compact_live_nested_payload(value: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(value)
     for key in _SESSION_NESTED_DUPLICATE_KEYS:
         payload.pop(key, None)
-    return payload
+    return cast(dict[str, Any], _compact_public_model_council_payload(payload))
 
 
 def _strip_packet_self_references(value: Any, *, depth: int = 0) -> Any:
@@ -684,6 +685,144 @@ def _compact_selected_mapping(value: Mapping[str, Any], keys: set[str]) -> dict[
         for key in keys
         if value.get(key) not in (None, "", [], {})
     }
+
+
+_PUBLIC_OVERLAY_SUITE_ROW_LIMIT = 12
+_PUBLIC_OVERLAY_SUITE_SUMMARY_KEYS = frozenset(
+    {
+        "schema_version",
+        "side",
+        "rows_total",
+        "raw_overlay_rows_seen",
+        "actionable_count",
+        "same_side_actionable_count",
+        "opposite_actionable_count",
+        "entry_window_count",
+        "same_side_entry_window_count",
+        "target_window_count",
+        "invalidation_count",
+        "prediction_path_count",
+        "structure_box_count",
+        "trendline_count",
+        "replay_path_count",
+        "memory_path_count",
+        "angle_vector_count",
+        "angle_evidence_count",
+        "opposing_force_count",
+        "overlay_arsenal_score",
+        "entry_ready",
+        "current_entry_touch",
+        "target_ready",
+        "invalidation_ready",
+        "projection_ready",
+        "structure_ready",
+        "trendline_ready",
+        "angle_ready",
+        "replay_ready",
+        "path_ready",
+        "full_suite_ready",
+        "expected_move_candles",
+        "first_class_feeds",
+        "missing_first_class_feeds",
+    }
+)
+_PUBLIC_OVERLAY_ROW_KEYS = frozenset(
+    {
+        "source_path",
+        "type",
+        "resolved_type",
+        "object_type",
+        "side",
+        "resolved_side",
+        "id",
+        "object_id",
+        "label",
+        "quality",
+        "confidence",
+        "current_touch",
+        "expected_move_candles",
+        "contained_candle_count",
+        "bounds",
+        "bbox",
+    }
+)
+
+
+def _compact_public_overlay_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: row.get(key)
+        for key in _PUBLIC_OVERLAY_ROW_KEYS
+        if row.get(key) not in (None, "", [], {})
+    }
+
+
+def _compact_public_overlay_suite_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep full-suite truth visible without shipping every raw overlay body."""
+
+    compact = {
+        key: value.get(key)
+        for key in _PUBLIC_OVERLAY_SUITE_SUMMARY_KEYS
+        if value.get(key) not in (None, "", [], {})
+    }
+    rows = _sequence_of_mappings(value.get("normalized_rows")) or _sequence_of_mappings(value.get("rows"))
+    type_counts: dict[str, int] = {}
+    representative_rows: list[dict[str, Any]] = []
+    if rows:
+        for row in rows:
+            row_type = str(
+                row.get("resolved_type")
+                or row.get("type")
+                or row.get("object_type")
+                or row.get("label")
+                or "UNKNOWN"
+            ).strip() or "UNKNOWN"
+            type_counts[row_type] = type_counts.get(row_type, 0) + 1
+        ranked_rows = sorted(
+            rows,
+            key=lambda row: (
+                bool(row.get("current_touch")),
+                _float_or(row.get("quality") or row.get("confidence"), 0.0),
+                _float_or(row.get("contained_candle_count"), 0.0),
+            ),
+            reverse=True,
+        )
+        representative_rows = [
+            _compact_public_overlay_row(row)
+            for row in ranked_rows[:_PUBLIC_OVERLAY_SUITE_ROW_LIMIT]
+        ]
+    if type_counts:
+        compact["type_counts"] = dict(sorted(type_counts.items()))
+    if representative_rows:
+        compact["representative_rows"] = representative_rows
+        compact["representative_row_limit"] = _PUBLIC_OVERLAY_SUITE_ROW_LIMIT
+    compact["raw_rows_omitted_from_public_payload"] = bool(rows)
+    return compact
+
+
+def _compact_public_model_council_payload(value: Any, *, depth: int = 0) -> Any:
+    """Strip raw full-suite rows from API/display payloads only.
+
+    The decision engine and persisted runtime payload still receive the full raw
+    suite. This function is intentionally used only on public response shapes.
+    """
+
+    if depth > 18:
+        return str(value)[:_COMPACT_LIVE_STATE_MAX_STRING_CHARS]
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for raw_key, item in cast(Mapping[Any, Any], value).items():
+            key = str(raw_key)
+            if key == "overlay_suite_evidence_v3" and isinstance(item, Mapping):
+                result[key] = _compact_public_overlay_suite_evidence(cast(Mapping[str, Any], item))
+                continue
+            result[key] = _compact_public_model_council_payload(item, depth=depth + 1)
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [
+            _compact_public_model_council_payload(item, depth=depth + 1)
+            for item in cast(Sequence[Any], value)
+        ]
+    return value
 
 
 def _compact_live_state_playbook_ai_summary(value: Any) -> dict[str, Any]:
@@ -1279,11 +1418,9 @@ def _compact_live_state_allowance_package(value: Any) -> dict[str, Any]:
         "threshold",
         "book_strategy_maturity",
         "professional_grade",
-        "professional_trade_plan",
         "playbook_ai_summary_v3",
         "dual_thesis_report_v3",
         "professional_thesis_state",
-        "expected_move_time",
         "entry_window",
         "thesis_horizon",
     }
@@ -1291,6 +1428,12 @@ def _compact_live_state_allowance_package(value: Any) -> dict[str, Any]:
     playbook_ai_summary = _compact_live_state_playbook_ai_summary(mapping)
     if playbook_ai_summary:
         compact["playbook_ai_summary_v3"] = playbook_ai_summary
+    professional_plan = _compact_live_state_professional_trade_plan(mapping.get("professional_trade_plan"))
+    if professional_plan:
+        compact["professional_trade_plan"] = professional_plan
+    expected_move_time = _compact_live_state_expected_move_time(mapping.get("expected_move_time"))
+    if expected_move_time:
+        compact["expected_move_time"] = expected_move_time
     return _strip_packet_self_references(compact)
 
 
@@ -1367,6 +1510,81 @@ def _compact_live_state_execution_lane(value: Any) -> dict[str, Any]:
         "thesis_horizon",
     }
     return _strip_packet_self_references(_compact_selected_mapping(mapping, selected))
+
+
+def _compact_live_state_professional_trade_plan(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    selected = {
+        "schema_version",
+        "side",
+        "authority_side",
+        "professional_grade",
+        "blocker",
+        "next_required",
+        "thesis_class",
+        "professional_thesis_state",
+        "path_class",
+        "counter_reaction_confirmation",
+        "trade_hierarchy",
+        "trend_alignment",
+        "entry_window",
+        "profit_discipline",
+        "thesis_horizon",
+        "interpretation",
+        "playbook_ai_summary_v3",
+        "dual_thesis_report_v3",
+        "applied_to_package",
+    }
+    compact = _compact_selected_mapping(mapping, selected)
+    resolution = _mapping_to_dict(mapping.get("professional_thesis_resolution"))
+    if resolution:
+        compact["professional_thesis_resolution"] = _compact_selected_mapping(
+            resolution,
+            {
+                "schema_version",
+                "authority_side",
+                "raw_candidate_side",
+                "raw_observed_side",
+                "scored_side",
+                "side_reframed",
+                "thesis_state",
+                "reason",
+                "warning",
+            },
+        )
+    playbook_ai_summary = _compact_live_state_playbook_ai_summary(mapping)
+    if playbook_ai_summary:
+        compact["playbook_ai_summary_v3"] = playbook_ai_summary
+    return cast(dict[str, Any], _strip_packet_self_references(_compact_public_model_council_payload(compact)))
+
+
+def _compact_live_state_expected_move_time(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    selected = {
+        "expected_duration_sec",
+        "expected_duration_text",
+        "timeframe",
+        "timeframe_seconds",
+        "expected_candle_count",
+        "current_leg_candle_count",
+        "projected_total_current_leg_candles",
+        "current_leg_side",
+        "current_leg_stage",
+        "basis",
+        "entry_window",
+        "thesis_horizon",
+        "projection_horizon",
+    }
+    return cast(
+        dict[str, Any],
+        _strip_packet_self_references(
+            _compact_public_model_council_payload(_compact_selected_mapping(mapping, selected))
+        ),
+    )
 
 
 def _compact_live_state_model_council_for_packet(value: Any) -> dict[str, Any]:
@@ -3750,6 +3968,55 @@ def _clip_point_to_bounds(bounds: Sequence[Any], point: Sequence[Any], *, pad: i
     x = max(inner_left, min(inner_right, int(round(float(point[0])))))
     y = max(inner_top, min(inner_bottom, int(round(float(point[1])))))
     return x, y
+
+
+def _clip_line_segment_to_bounds(
+    bounds: Sequence[Any],
+    start: Sequence[Any],
+    end: Sequence[Any],
+    *,
+    pad: int = 0,
+    min_length: float = 6.0,
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    left, top, right, bottom = [float(value) for value in bounds[:4]]
+    pad_value = max(0.0, float(pad))
+    left += pad_value
+    top += pad_value
+    right -= pad_value
+    bottom -= pad_value
+    if right <= left or bottom <= top:
+        return None
+    x0 = float(start[0])
+    y0 = float(start[1])
+    x1 = float(end[0])
+    y1 = float(end[1])
+    dx = x1 - x0
+    dy = y1 - y0
+    p = (-dx, dx, -dy, dy)
+    q = (x0 - left, right - x0, y0 - top, bottom - y0)
+    u0 = 0.0
+    u1 = 1.0
+    for p_value, q_value in zip(p, q):
+        if abs(p_value) <= 1e-9:
+            if q_value < 0.0:
+                return None
+            continue
+        ratio = q_value / p_value
+        if p_value < 0.0:
+            if ratio > u1:
+                return None
+            u0 = max(u0, ratio)
+        else:
+            if ratio < u0:
+                return None
+            u1 = min(u1, ratio)
+    clipped_start = (x0 + u0 * dx, y0 + u0 * dy)
+    clipped_end = (x0 + u1 * dx, y0 + u1 * dy)
+    clipped_dx = clipped_end[0] - clipped_start[0]
+    clipped_dy = clipped_end[1] - clipped_start[1]
+    if (clipped_dx * clipped_dx + clipped_dy * clipped_dy) ** 0.5 < min_length:
+        return None
+    return clipped_start, clipped_end
 
 
 def _expand_bbox(
@@ -9255,6 +9522,17 @@ class PhoenixGuardWindowTrackingAdapter:
             session_payload=session_payload,
         )
 
+    def filter_candle_tracks_against_broker_exclusions(
+        self,
+        tracks: Sequence[Mapping[str, Any]],
+        broker_exclusion_boxes: Sequence[Sequence[Any]],
+    ) -> list[dict[str, Any]]:
+        filtered, _removed_count = self._filter_candle_tracks_against_broker_exclusions(
+            tracks,
+            broker_exclusion_boxes,
+        )
+        return filtered
+
     def derive_support_resistance_zones(
         self,
         candle_tracks: Sequence[Mapping[str, Any]],
@@ -9326,8 +9604,9 @@ class PhoenixGuardWindowTrackingAdapter:
         color: ColorRGBA,
         *,
         offset: tuple[float, float] = (0.0, 0.0),
+        bounds: Sequence[Any] | None = None,
     ) -> None:
-        self._draw_regression_line(draw, candles, color, offset=offset)
+        self._draw_regression_line(draw, candles, color, offset=offset, bounds=bounds)
 
     @cached_property
     def _timeframe_template_bank(self) -> dict[str, list[ArrayND]]:
@@ -9857,22 +10136,39 @@ class PhoenixGuardWindowTrackingAdapter:
                 candle_scale_y = float(chart_image.height) / float(resized_height)
                 candle_image_resized = True
                 candle_extraction_mode = "fast_resized"
+        broker_exclusion_boxes = self._chart_space_broker_exclusion_boxes(
+            surface,
+            chart_bbox,
+            session_payload=session_payload,
+        )
         tracked_candles = _rescale_candle_tracks(
             self._extract_candle_tracks(candle_image),
             scale_x=candle_scale_x,
             scale_y=candle_scale_y,
         )
         resized_candle_track_count = len(tracked_candles)
+        tracked_candles, broker_chrome_filtered_count = self._filter_candle_tracks_against_broker_exclusions(
+            tracked_candles,
+            broker_exclusion_boxes,
+        )
+        full_resolution_broker_chrome_filtered_count = 0
         if (
             fast_locked_context
             and candle_image_resized
             and len(tracked_candles) < _PHOENIXGUARD_MIN_PRECISION_CANDLE_TRACKS
         ):
             full_resolution_tracks = self._extract_candle_tracks(chart_image)
+            full_resolution_tracks, full_resolution_broker_chrome_filtered_count = (
+                self._filter_candle_tracks_against_broker_exclusions(
+                    full_resolution_tracks,
+                    broker_exclusion_boxes,
+                )
+            )
             full_resolution_fallback_count = len(full_resolution_tracks)
             if len(full_resolution_tracks) > len(tracked_candles):
                 tracked_candles = full_resolution_tracks
                 candle_extraction_mode = "full_resolution_fallback"
+                broker_chrome_filtered_count = full_resolution_broker_chrome_filtered_count
         if fast_locked_context:
             try:
                 live_controls = _normalize_execution_controls(
@@ -9897,7 +10193,6 @@ class PhoenixGuardWindowTrackingAdapter:
             if len(tracked_candles) > live_max_tracked_candles:
                 tracked_candles = tracked_candles[-live_max_tracked_candles:]
         mark_study_stage("extract_candle_tracks")
-        broker_exclusion_boxes = self._chart_space_broker_exclusion_boxes(surface, chart_bbox, session_payload=session_payload)
         tracking_summary, latest_signal = self._build_signal_payloads(
             chart_image,
             chart_region,
@@ -9916,6 +10211,9 @@ class PhoenixGuardWindowTrackingAdapter:
             "analysis_height": int(candle_image.height),
             "resized_track_count": int(resized_candle_track_count),
             "full_resolution_fallback_count": int(full_resolution_fallback_count),
+            "broker_exclusion_count": int(len(broker_exclusion_boxes)),
+            "broker_chrome_filtered_count": int(broker_chrome_filtered_count),
+            "full_resolution_broker_chrome_filtered_count": int(full_resolution_broker_chrome_filtered_count),
             "final_track_count": int(len(tracked_candles)),
             "min_precision_track_count": int(_PHOENIXGUARD_MIN_PRECISION_CANDLE_TRACKS),
         }
@@ -12758,6 +13056,52 @@ class PhoenixGuardWindowTrackingAdapter:
             seen.add(key)
             rows.append([float(value) for value in clipped])
 
+        session = _mapping_to_dict(session_payload)
+        broker_surface = _mapping_to_dict(session.get("broker_surface", {}))
+        focus_context_present = any(
+            bool(_mapping_to_dict(session.get(key)))
+            for key in ("_study_focus_region", "study_focus_region", "focus_region", "manual_focus_region")
+        ) or bool(_mapping_to_dict(session.get("locked_window"))) or bool(broker_surface)
+        full_focus_chart = (
+            int(chart_box[0]) <= 2
+            and int(chart_box[1]) <= 2
+            and int(chart_box[2]) >= int(surface.width) - 2
+            and int(chart_box[3]) >= int(surface.height) - 2
+        )
+        wide_focus_chart = (
+            chart_width >= int(round(surface.width * 0.86))
+            and chart_height >= int(round(surface.height * 0.72))
+            and int(chart_box[1]) <= int(round(surface.height * 0.08))
+        )
+        if focus_context_present and (full_focus_chart or wide_focus_chart) and chart_width >= 640 and chart_height >= 360:
+            scene_graph = _mapping_to_dict(
+                session.get("broker_scene_graph_v3")
+                or session.get("scene_graph")
+                or _mapping_to_dict(session.get("chart", {})).get("scene_graph")
+            )
+            top_candidates: list[float] = []
+            for key in ("plot_area_chart_bounds", "plot_area_bounds"):
+                raw_bounds = scene_graph.get(key)
+                if not isinstance(raw_bounds, Sequence) or isinstance(raw_bounds, (str, bytes, bytearray)):
+                    continue
+                bounds = cast(Sequence[Any], raw_bounds)
+                if len(bounds) < 4:
+                    continue
+                try:
+                    raw_top = float(bounds[1])
+                except (TypeError, ValueError):
+                    continue
+                local_top = raw_top - float(chart_box[1]) if raw_top > float(chart_height) * 0.5 else raw_top
+                if 30.0 <= local_top <= float(chart_height) * 0.30:
+                    top_candidates.append(local_top)
+            top_chrome_bottom = max(52.0, min(float(chart_height) * 0.16, float(chart_height) * 0.118))
+            if top_candidates:
+                top_chrome_bottom = max(top_chrome_bottom, min(float(chart_height) * 0.24, max(top_candidates) + 4.0))
+            append([0.0, 0.0, float(chart_width), top_chrome_bottom])
+
+            left_chrome_right = max(44.0, min(float(chart_width) * 0.11, float(chart_width) * 0.066))
+            append([0.0, 0.0, left_chrome_right, float(chart_height)])
+
         try:
             arr = np.asarray(surface.convert("RGB"), dtype=np.uint8)
             panel_limit = self._detect_order_panel_left_boundary(arr)
@@ -12768,8 +13112,6 @@ class PhoenixGuardWindowTrackingAdapter:
             local_left = float(panel_limit - chart_box[0] - pad)
             append([local_left, 0.0, float(chart_width), float(chart_height)])
 
-        session = _mapping_to_dict(session_payload)
-        broker_surface = _mapping_to_dict(session.get("broker_surface", {}))
         if not broker_surface:
             return rows
         capture_plane = _mapping_to_dict(broker_surface.get("capture_plane", {}))
@@ -13019,6 +13361,86 @@ class PhoenixGuardWindowTrackingAdapter:
 
         filtered.sort(key=lambda item: float(item.get("center_x", 0.0) or 0.0))
         return filtered
+
+    def _filter_candle_tracks_against_broker_exclusions(
+        self,
+        tracks: Sequence[Mapping[str, Any]],
+        broker_exclusion_boxes: Sequence[Sequence[Any]],
+    ) -> tuple[list[dict[str, Any]], int]:
+        rows: list[dict[str, Any]] = [dict(item) for item in tracks]
+        if not rows or not broker_exclusion_boxes:
+            return rows, 0
+
+        exclusions: list[list[float]] = []
+        for raw_box in broker_exclusion_boxes:
+            if len(raw_box) < 4:
+                continue
+            try:
+                left, top, right, bottom = [float(raw_box[index]) for index in range(4)]
+            except (TypeError, ValueError):
+                continue
+            x0, x1 = sorted((left, right))
+            y0, y1 = sorted((top, bottom))
+            if x1 <= x0 or y1 <= y0:
+                continue
+            exclusions.append([x0, y0, x1, y1])
+        if not exclusions:
+            return rows, 0
+
+        kept: list[dict[str, Any]] = []
+        removed_count = 0
+        for row in rows:
+            bbox = row.get("bbox", [])
+            if not isinstance(bbox, Sequence) or isinstance(bbox, (str, bytes, bytearray)):
+                kept.append(row)
+                continue
+            bbox_values = cast(Sequence[Any], bbox)
+            if len(bbox_values) < 4:
+                kept.append(row)
+                continue
+            try:
+                raw_x0, raw_y0, raw_x1, raw_y1 = [float(bbox_values[index]) for index in range(4)]
+            except (TypeError, ValueError):
+                kept.append(row)
+                continue
+            candle_left, candle_right = sorted((raw_x0, raw_x1))
+            candle_top, candle_bottom = sorted((raw_y0, raw_y1))
+            candle_width = max(1.0, candle_right - candle_left)
+            candle_height = max(1.0, candle_bottom - candle_top)
+            center_x = float(row.get("center_x", (candle_left + candle_right) * 0.5) or (candle_left + candle_right) * 0.5)
+            center_y = float(row.get("center_y", (candle_top + candle_bottom) * 0.5) or (candle_top + candle_bottom) * 0.5)
+
+            drop = False
+            for exclusion in exclusions:
+                ex_left, ex_top, ex_right, ex_bottom = exclusion
+                overlap_x = max(0.0, min(candle_right, ex_right) - max(candle_left, ex_left))
+                overlap_y = max(0.0, min(candle_bottom, ex_bottom) - max(candle_top, ex_top))
+                horizontal_coverage = overlap_x / candle_width
+                vertical_coverage = overlap_y / candle_height
+                overlap_ratio = self._bbox_overlap_ratio([candle_left, candle_top, candle_right, candle_bottom], exclusion)
+                center_inside = ex_left <= center_x <= ex_right and ex_top <= center_y <= ex_bottom
+                starts_in_exclusion = (
+                    candle_top <= ex_bottom
+                    and candle_bottom >= ex_top
+                    and horizontal_coverage >= 0.18
+                    and overlap_y >= min(12.0, max(4.0, candle_height * 0.14))
+                )
+                mostly_exclusion = overlap_ratio >= 0.18 or (horizontal_coverage >= 0.55 and vertical_coverage >= 0.26)
+                if center_inside or starts_in_exclusion or mostly_exclusion:
+                    drop = True
+                    break
+            if drop:
+                removed_count += 1
+                continue
+            kept.append(row)
+
+        if removed_count <= 0:
+            return rows, 0
+        min_keep = min(5, len(rows))
+        if len(kept) < min_keep:
+            return rows, 0
+        kept.sort(key=lambda item: float(item.get("center_x", 0.0) or 0.0))
+        return kept, removed_count
 
     def _derive_support_resistance_zones(
         self,
@@ -17675,18 +18097,21 @@ class PhoenixGuardWindowTrackingAdapter:
             tracked_candles,
             _rgba(role_colors["global"], 232),
             offset=(chart_offset_x, chart_offset_y),
+            bounds=chart_box,
         )
         self._draw_regression_line(
             draw,
             tracked_candles[-8:],
             _rgba(role_colors["local"], 236),
             offset=(chart_offset_x, chart_offset_y),
+            bounds=chart_box,
         )
         self._draw_regression_line(
             draw,
             tracked_candles[-4:],
             _rgba(action_rgb, 244),
             offset=(chart_offset_x, chart_offset_y),
+            bounds=chart_box,
         )
         if bool(layer_visibility.get("historical_replay", False)):
             self._draw_historical_structure_layer(
@@ -18378,6 +18803,7 @@ class PhoenixGuardWindowTrackingAdapter:
         color: ColorRGBA,
         *,
         offset: tuple[float, float] = (0.0, 0.0),
+        bounds: Sequence[Any] | None = None,
     ) -> None:
         if len(candles) < 2:
             return
@@ -18427,6 +18853,29 @@ class PhoenixGuardWindowTrackingAdapter:
         end_x = float(xs.max())
         start_y = float(slope * start_x + intercept)
         end_y = float(slope * end_x + intercept)
+        if bounds is not None:
+            base_bounds = [float(value) for value in bounds[:4]]
+            candle_top = min(float(row["_line_top_y"]) for row in valid_rows)
+            candle_bottom = max(float(row["_line_bottom_y"]) for row in valid_rows)
+            candle_span = max(1.0, candle_bottom - candle_top)
+            vertical_pad = max(18.0, min(64.0, candle_span * 0.22))
+            line_bounds = [
+                base_bounds[0],
+                max(base_bounds[1], candle_top - vertical_pad),
+                base_bounds[2],
+                min(base_bounds[3], candle_bottom + vertical_pad),
+            ]
+            if line_bounds[3] <= line_bounds[1] + 8.0:
+                return
+            clipped_segment = _clip_line_segment_to_bounds(
+                line_bounds,
+                (start_x, start_y),
+                (end_x, end_y),
+                pad=4,
+            )
+            if clipped_segment is None:
+                return
+            (start_x, start_y), (end_x, end_y) = clipped_segment
         line_width = 3
         point_radius = 4
         draw.line((start_x, start_y, end_x, end_y), fill=(0, 0, 0, 88), width=line_width + 3)
@@ -19531,6 +19980,17 @@ class ContinuousWindowTrackerService:
             _float_or(signal.get("freshness_window_sec") or tracking.get("freshness_window_sec"), 0.0),
             _float_or(signal.get("pipeline_latency_sec") or tracking.get("pipeline_latency_sec"), 0.0) * 3.0,
         )
+        market_object_registry_payload: dict[str, Any] = {}
+        try:
+            market_object_registry_payload = build_market_object_registry_v3(
+                {
+                    **_mapping_to_dict(payload),
+                    "tracking_summary": tracking,
+                    "latest_signal": signal,
+                }
+            ).as_dict()
+        except Exception:
+            LOGGER.debug("Unable to build market object registry for Model Council V3 snapshot.", exc_info=True)
         snapshot: dict[str, Any] = {
             "session_id": str(payload.get("session_id", "")),
             "symbol": symbol,
@@ -19650,6 +20110,8 @@ class ContinuousWindowTrackerService:
             ),
             "tracking_summary": tracking,
             "latest_signal": signal,
+            "market_objects": market_object_registry_payload,
+            "market_object_registry": market_object_registry_payload,
             "market_context": market_context,
             "global_structure": _mapping_to_dict(signal.get("global_structure") or tracking.get("global_structure")),
             "local_micro_structure": _mapping_to_dict(signal.get("local_micro_structure") or tracking.get("local_micro_structure")),
@@ -21349,7 +21811,7 @@ class ContinuousWindowTrackerService:
         packet = _model_council_study_packet_from_payload(payload)
         if not packet:
             raise KeyError(session_id)
-        return packet
+        return cast(dict[str, Any], _compact_public_model_council_payload(packet))
 
     def latest_model_council_state(self, session_id: str) -> dict[str, Any]:
         payload = self._require_session(session_id)
@@ -21360,9 +21822,9 @@ class ContinuousWindowTrackerService:
         packet = _model_council_packet_from_payload(payload)
         return {
             "session_id": str(payload.get("session_id", session_id) or session_id),
-            "model_council_result": result,
-            "model_council_study_packet": study_packet,
-            "model_council_packet": packet,
+            "model_council_result": _compact_persisted_model_council_result(result),
+            "model_council_study_packet": _compact_persisted_study_packet(study_packet) if study_packet else {},
+            "model_council_packet": _compact_persisted_execution_packet(packet) if packet else {},
             "execution_packet_present": bool(packet),
             "execution_packet_id": str(packet.get("packet_id", "") or "") if packet else "",
             "promotion_trace": _mapping_to_dict(
