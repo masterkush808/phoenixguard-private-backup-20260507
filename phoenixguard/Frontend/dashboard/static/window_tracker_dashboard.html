@@ -2514,7 +2514,21 @@
       }
     }
 
-    /* PhoenixGuard command-center redesign. Keeps the SPA wiring/IDs intact while
+    @media (max-width: 1400px) {
+      .workspace-panel-grid,
+      .settings-actions-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 720px) {
+      .workspace-panel-grid,
+      .settings-actions-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* 808Fx command-center redesign. Keeps the SPA wiring/IDs intact while
        matching the full-suite operator mockup: chart first, dual thesis second. */
     body {
       background:
@@ -3111,6 +3125,135 @@
       white-space: nowrap;
     }
 
+    .workspace-panel {
+      display: none;
+      grid-column: 1 / -1;
+      min-height: 420px;
+      border: 1px solid rgba(255, 255, 255, 0.085);
+      border-radius: 6px;
+      background:
+        linear-gradient(180deg, rgba(10, 12, 11, 0.92), rgba(5, 6, 5, 0.84)),
+        radial-gradient(circle at 9% 0%, rgba(242, 200, 102, 0.08), transparent 42%),
+        radial-gradient(circle at 86% 12%, rgba(78, 210, 255, 0.07), transparent 34%);
+      overflow: hidden;
+    }
+
+    .workspace-panel-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 14px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+      background: rgba(0, 0, 0, 0.18);
+    }
+
+    .workspace-panel-head p {
+      margin-top: 5px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .workspace-state {
+      min-height: 25px;
+      display: inline-flex;
+      align-items: center;
+      padding: 5px 8px;
+      border: 1px solid rgba(99, 224, 154, 0.32);
+      border-radius: 5px;
+      color: var(--jade);
+      background: rgba(99, 224, 154, 0.055);
+      font-family: var(--mono);
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.09em;
+      white-space: nowrap;
+    }
+
+    .workspace-panel-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      padding: 14px;
+    }
+
+    .ops-card {
+      min-width: 0;
+      min-height: 138px;
+      display: grid;
+      align-content: start;
+      gap: 10px;
+      padding: 13px;
+      border: 1px solid rgba(255, 255, 255, 0.085);
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.032);
+      color: var(--text);
+      text-align: left;
+    }
+
+    .ops-card strong {
+      color: var(--gold);
+      font-size: 19px;
+      line-height: 1.1;
+      overflow-wrap: anywhere;
+    }
+
+    .ops-card span:last-child {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .ops-action {
+      cursor: pointer;
+      transition: transform 160ms ease, border-color 160ms ease, background-color 160ms ease;
+    }
+
+    .ops-action:hover {
+      transform: translateY(-1px);
+      border-color: rgba(242, 200, 102, 0.42);
+      background: rgba(242, 200, 102, 0.055);
+    }
+
+    .settings-actions-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    body.route-broker .event-timeline-module,
+    body.route-broker .evidence-module,
+    body.route-broker .matrix-module,
+    body.route-broker .focus-module,
+    body.route-broker .telemetry-module,
+    body.route-bridge .event-timeline-module,
+    body.route-bridge .evidence-module,
+    body.route-bridge .matrix-module,
+    body.route-bridge .focus-module,
+    body.route-bridge .telemetry-module,
+    body.route-security .event-timeline-module,
+    body.route-security .evidence-module,
+    body.route-security .matrix-module,
+    body.route-security .focus-module,
+    body.route-security .telemetry-module,
+    body.route-settings .event-timeline-module,
+    body.route-settings .evidence-module,
+    body.route-settings .matrix-module,
+    body.route-settings .focus-module,
+    body.route-settings .telemetry-module {
+      display: none !important;
+    }
+
+    body.route-broker .workspace-panel[data-panel-route="broker"],
+    body.route-bridge .workspace-panel[data-panel-route="bridge"],
+    body.route-security .workspace-panel[data-panel-route="security"],
+    body.route-settings .workspace-panel[data-panel-route="settings"] {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+    }
+
     .inspector-module {
       display: none;
       min-height: 0;
@@ -3383,9 +3526,9 @@
         <div class="brand-lockup">
           <div class="brand-mark" aria-hidden="true">808</div>
           <div>
-            <div class="eyebrow">Locked Broker Surface Tracker | PhoenixGuard engine</div>
-            <h1 class="brand-title">808Fx PhoenixGuard <span class="brand-version">V3</span><span class="sr-only">808Fx Standard Hybrid System</span></h1>
-            <p id="hero-copy">PhoenixGuard engine | Live CV command surface</p>
+            <div class="eyebrow">Powered by the Phoenix Guard V3 engine</div>
+            <h1 class="brand-title">808Fx Standard Hybrid System <span class="brand-version">V3</span></h1>
+            <p id="hero-copy">Powered by the Phoenix Guard V3 engine | Live CV command surface</p>
             <div class="header-chips" aria-label="Live runtime status">
               <span class="status-chip" id="chip-mode">STUDY</span>
               <span class="status-chip" id="chip-packet-age">PKT --</span>
@@ -3421,10 +3564,10 @@
         <button type="button" class="workspace-link active" data-route="live">Live</button>
         <button type="button" class="workspace-link" data-route="replay">Replay</button>
         <button type="button" class="workspace-link" data-route="chart">Full Suite</button>
-        <button type="button" class="workspace-link rail-only">Broker Feed</button>
-        <button type="button" class="workspace-link rail-only">MT4 Bridge</button>
-        <button type="button" class="workspace-link rail-only">Security</button>
-        <button type="button" class="workspace-link" data-route="council">Settings</button>
+        <button type="button" class="workspace-link" data-route="broker">Broker Feed</button>
+        <button type="button" class="workspace-link" data-route="bridge">MT4 Bridge</button>
+        <button type="button" class="workspace-link" data-route="security">Security</button>
+        <button type="button" class="workspace-link" data-route="settings">Settings</button>
       </nav>
 
       <nav class="control-ribbon" aria-label="Tracker controls">
@@ -3434,8 +3577,11 @@
             <select id="workspace-select" aria-label="Workspace route">
               <option value="live">Live</option>
               <option value="chart">Chart</option>
-              <option value="council">Council</option>
               <option value="replay">Replay</option>
+              <option value="broker">Broker Feed</option>
+              <option value="bridge">MT4 Bridge</option>
+              <option value="security">Security</option>
+              <option value="settings">Settings</option>
             </select>
           </label>
           <label class="select-control">
@@ -3775,12 +3921,160 @@
           </div>
         </section>
 
+        <section class="workspace-panel" data-panel-route="broker" aria-label="Broker feed operations">
+          <div class="workspace-panel-head">
+            <div>
+              <span class="panel-title">Broker Feed</span>
+              <p>Locked source, chart cadence, frame alignment, and overlay feed state.</p>
+            </div>
+            <span class="workspace-state" id="broker-feed-state">waiting</span>
+          </div>
+          <div class="workspace-panel-grid">
+            <div class="ops-card">
+              <span class="tile-label">Source Window</span>
+              <strong id="broker-feed-window">--</strong>
+              <span id="broker-feed-window-note">waiting for source lock</span>
+            </div>
+            <div class="ops-card">
+              <span class="tile-label">Frame / Capture</span>
+              <strong id="broker-feed-frame">--</strong>
+              <span id="broker-feed-frame-note">fresh frame guard</span>
+            </div>
+            <div class="ops-card">
+              <span class="tile-label">Cadence</span>
+              <strong id="broker-feed-cadence">--</strong>
+              <span id="broker-feed-cadence-note">live capture loop</span>
+            </div>
+            <div class="ops-card">
+              <span class="tile-label">Overlay Feed</span>
+              <strong id="broker-feed-overlay">--</strong>
+              <span id="broker-feed-overlay-note">frame alignment</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="workspace-panel" data-panel-route="bridge" aria-label="MT4 bridge operations">
+          <div class="workspace-panel-head">
+            <div>
+              <span class="panel-title">MT4 Bridge</span>
+              <p>Package reporter, bridge adapter, execution mode, and last packet state.</p>
+            </div>
+            <span class="workspace-state" id="bridge-feed-state">waiting</span>
+          </div>
+          <div class="workspace-panel-grid">
+            <div class="ops-card">
+              <span class="tile-label">Execution Mode</span>
+              <strong id="bridge-execution-mode">--</strong>
+              <span id="bridge-execution-note">shadow/live adapter state</span>
+            </div>
+            <div class="ops-card">
+              <span class="tile-label">Latest Packet</span>
+              <strong id="bridge-packet-state">--</strong>
+              <span id="bridge-packet-note">package authority</span>
+            </div>
+            <div class="ops-card">
+              <span class="tile-label">Bridge Writer</span>
+              <strong id="bridge-writer-state">--</strong>
+              <span id="bridge-writer-note">MT4 file bridge status</span>
+            </div>
+            <div class="ops-card">
+              <span class="tile-label">Package Reporter</span>
+              <strong id="bridge-reporter-state">--</strong>
+              <span id="bridge-reporter-note">notification and alarm path</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="workspace-panel" data-panel-route="security" aria-label="Runtime security and integrity">
+          <div class="workspace-panel-head">
+            <div>
+              <span class="panel-title">Security</span>
+              <p>Freshness, source lock, packet contract, model wake state, and stale-data controls.</p>
+            </div>
+            <span class="workspace-state" id="security-state">guarding</span>
+          </div>
+          <div class="workspace-panel-grid">
+            <div class="ops-card">
+              <span class="tile-label">Freshness Contract</span>
+              <strong id="security-freshness">--</strong>
+              <span id="security-freshness-note">stale data cannot become live truth</span>
+            </div>
+            <div class="ops-card">
+              <span class="tile-label">Source Lock</span>
+              <strong id="security-source-lock">--</strong>
+              <span id="security-source-note">broker surface identity</span>
+            </div>
+            <div class="ops-card">
+              <span class="tile-label">Models</span>
+              <strong id="security-models">--</strong>
+              <span id="security-models-note">engine wake state</span>
+            </div>
+            <div class="ops-card">
+              <span class="tile-label">Packet Contract</span>
+              <strong id="security-packet">--</strong>
+              <span id="security-packet-note">V3 allowance authority</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="workspace-panel" data-panel-route="settings" aria-label="System settings">
+          <div class="workspace-panel-head">
+            <div>
+              <span class="panel-title">Settings</span>
+              <p>Live controls for tracker cadence, focus, overlays, model strength, and execution safety.</p>
+            </div>
+            <span class="workspace-state" id="settings-state">ready</span>
+          </div>
+          <div class="workspace-panel-grid settings-actions-grid">
+            <button type="button" class="ops-card ops-action" data-proxy-click="tracker-toggle">
+              <span class="tile-label">Tracker Loop</span>
+              <strong id="settings-tracker">--</strong>
+              <span>Start or stop the live 15 second study loop.</span>
+            </button>
+            <button type="button" class="ops-card ops-action" data-proxy-click="capture-now">
+              <span class="tile-label">Capture</span>
+              <strong id="settings-capture">--</strong>
+              <span>Request a fresh broker-frame capture.</span>
+            </button>
+            <button type="button" class="ops-card ops-action" data-proxy-click="refresh-now">
+              <span class="tile-label">Refresh State</span>
+              <strong id="settings-refresh">API</strong>
+              <span>Refresh dashboard state from the backend.</span>
+            </button>
+            <button type="button" class="ops-card ops-action" data-proxy-click="focus-clear">
+              <span class="tile-label">Focus</span>
+              <strong id="settings-focus">--</strong>
+              <span>Clear the locked broker focus region.</span>
+            </button>
+            <button type="button" class="ops-card ops-action" data-proxy-click="overlay-editor-open">
+              <span class="tile-label">Overlay Editor</span>
+              <strong id="settings-overlay">--</strong>
+              <span>Adjust overlay line, label, color, and fill behavior.</span>
+            </button>
+            <button type="button" class="ops-card ops-action" data-proxy-click="model-strength-open">
+              <span class="tile-label">Model Strength</span>
+              <strong id="settings-strength">--</strong>
+              <span>Open model weighting and overlay confidence controls.</span>
+            </button>
+            <button type="button" class="ops-card ops-action" data-proxy-click="execution-toggle">
+              <span class="tile-label">Execution Gate</span>
+              <strong id="settings-execution">--</strong>
+              <span>Toggle package execution safety state.</span>
+            </button>
+            <button type="button" class="ops-card ops-action" data-proxy-click="emergency-stop">
+              <span class="tile-label">Emergency Stop</span>
+              <strong id="settings-stop">Ctrl Alt End</strong>
+              <span>Stop tracker and execution flow immediately.</span>
+            </button>
+          </div>
+        </section>
+
       </section>
     </section>
   </main>
 
   <div class="command-palette-overlay" id="command-palette-overlay" hidden>
-    <div class="command-palette" role="dialog" aria-modal="true" aria-label="PhoenixGuard command palette">
+    <div class="command-palette" role="dialog" aria-modal="true" aria-label="808Fx command palette">
       <input id="command-palette-input" type="text" autocomplete="off" placeholder="Type a command">
       <div class="command-palette-list" id="command-palette-list"></div>
     </div>
@@ -4328,6 +4622,42 @@
       evidenceSnapshotImg: $("evidence-snapshot-img"),
       evidenceSnapshotMeta: $("evidence-snapshot-meta"),
       evidenceCaption: $("evidence-caption"),
+      brokerFeedState: $("broker-feed-state"),
+      brokerFeedWindow: $("broker-feed-window"),
+      brokerFeedWindowNote: $("broker-feed-window-note"),
+      brokerFeedFrame: $("broker-feed-frame"),
+      brokerFeedFrameNote: $("broker-feed-frame-note"),
+      brokerFeedCadence: $("broker-feed-cadence"),
+      brokerFeedCadenceNote: $("broker-feed-cadence-note"),
+      brokerFeedOverlay: $("broker-feed-overlay"),
+      brokerFeedOverlayNote: $("broker-feed-overlay-note"),
+      bridgeFeedState: $("bridge-feed-state"),
+      bridgeExecutionMode: $("bridge-execution-mode"),
+      bridgeExecutionNote: $("bridge-execution-note"),
+      bridgePacketState: $("bridge-packet-state"),
+      bridgePacketNote: $("bridge-packet-note"),
+      bridgeWriterState: $("bridge-writer-state"),
+      bridgeWriterNote: $("bridge-writer-note"),
+      bridgeReporterState: $("bridge-reporter-state"),
+      bridgeReporterNote: $("bridge-reporter-note"),
+      securityState: $("security-state"),
+      securityFreshness: $("security-freshness"),
+      securityFreshnessNote: $("security-freshness-note"),
+      securitySourceLock: $("security-source-lock"),
+      securitySourceNote: $("security-source-note"),
+      securityModels: $("security-models"),
+      securityModelsNote: $("security-models-note"),
+      securityPacket: $("security-packet"),
+      securityPacketNote: $("security-packet-note"),
+      settingsState: $("settings-state"),
+      settingsTracker: $("settings-tracker"),
+      settingsCapture: $("settings-capture"),
+      settingsRefresh: $("settings-refresh"),
+      settingsFocus: $("settings-focus"),
+      settingsOverlay: $("settings-overlay"),
+      settingsStrength: $("settings-strength"),
+      settingsExecution: $("settings-execution"),
+      settingsStop: $("settings-stop"),
     };
 
     function sessionUrl() {
@@ -4339,7 +4669,8 @@
     }
 
     function routeUrl(route) {
-      return `/dashboard/${encodeURIComponent(route || "live")}/${encodeURIComponent(SESSION_ID)}`;
+      const basePath = window.location.pathname || `/v3/mobile/window-tracker/dashboard/${encodeURIComponent(SESSION_ID)}`;
+      return `${basePath}#${encodeURIComponent(route || "live")}`;
     }
 
     function currentMemoryProjection(session) {
@@ -8216,9 +8547,33 @@
 
     function normalizeRoute(raw) {
       const route = String(raw || "").trim().toLowerCase().replace(/[^a-z]/g, "");
-      return ["live", "chart", "council", "replay"].includes(route)
-        ? route
-        : "live";
+      const normalized = route === "council" ? "settings" : route;
+      return ["live", "chart", "replay", "broker", "bridge", "security", "settings"].includes(normalized)
+        ? normalized
+        : route === "mt" || route === "mtbridge"
+          ? "bridge"
+          : "live";
+    }
+
+    function routeIsOperational(route) {
+      return ["broker", "bridge", "security", "settings"].includes(route);
+    }
+
+    function currentRoutePanel(route = state.route) {
+      return document.querySelector(`[data-panel-route="${normalizeRoute(route)}"]`);
+    }
+
+    function scrollRoutePanelIntoView(route) {
+      if (!routeIsOperational(route)) {
+        return;
+      }
+      const panel = currentRoutePanel(route);
+      if (!panel || typeof panel.scrollIntoView !== "function") {
+        return;
+      }
+      window.setTimeout(() => {
+        panel.scrollIntoView({behavior: "smooth", block: "start"});
+      }, 80);
     }
 
     function routeFromLocation() {
@@ -8265,6 +8620,7 @@
       if (updateUrl && window.history && window.history.pushState) {
         window.history.pushState({route: nextRoute}, "", routeUrl(nextRoute));
       }
+      scrollRoutePanelIntoView(nextRoute);
       refreshSurfaceViewportIfNeeded(true, true);
       renderHotspots();
     }
@@ -10051,6 +10407,80 @@
       setText(els.guardSource, story.confirmed === true ? "Source Locked" : "Source Checking");
     }
 
+    function renderWorkspacePanels(payload = {}) {
+      const signal = objectOrEmpty(payload.latest_signal);
+      const tracking = objectOrEmpty(payload.tracking_summary);
+      const focus = objectOrEmpty(payload.focus_selector);
+      const manualFocus = objectOrEmpty(payload.manual_focus_region);
+      const executionControls = objectOrEmpty(payload.execution_controls);
+      const executionState = objectOrEmpty(payload.broker_execution_state);
+      const executionSurface = objectOrEmpty(payload.broker_surface);
+      const overlayMode = objectOrEmpty(payload.overlay_mode);
+      const packet = packetFromSession(payload);
+      const packetId = clean(packet.packet_id || packet.id || packet.package_id, "");
+      const status = clean(payload.status, "idle");
+      const activeMode = clean(overlayMode.active || state.overlayMode, "CLEAN_LIVE").toUpperCase();
+      const aligned = overlayMode.artifact_frame_aligned === true;
+      const frameId = clean(payload.frame_id || packet.frame_id || packet.frame, "--");
+      const captureCount = clean(payload.capture_count || packet.capture_count, "--");
+      const nextCapture = Number(payload.next_capture_in_sec || 0);
+      const interval = Number(payload.effective_capture_interval_sec || payload.capture_interval_sec || 15);
+      const fullAuto = Boolean(payload.tracking_enabled);
+      const focusLocked = Boolean(manualFocus.enabled);
+      const sourceTitle = clean(payload.locked_title || payload.window_query, "Unmatched");
+      const detected = [clean(signal.focus_timeframe || tracking.detected_timeframe, ""), clean(tracking.detected_market || signal.market || payload.market, "")]
+        .filter(Boolean)
+        .join(" | ");
+      const executionMode = clean(executionControls.execution_mode, "shadow").toUpperCase();
+      const executionEnabled = executionControls.live_execution_enabled === true;
+      const bridgeStatus = clean(executionState.bridge_status || executionState.status, executionSurface.controls_ready ? "READY" : "WATCHING").toUpperCase();
+      const reporterStatus = clean(payload.shooter_status || executionState.reporter_status || "PACKAGE REPORTER").toUpperCase();
+      const freshness = clean(packet.freshness_status || payload.stale_status || (aligned ? "PASS" : "CHECKING"), aligned ? "PASS" : "CHECKING").toUpperCase();
+      const sourceLock = focusLocked || aligned ? "LOCKED" : "CHECKING";
+      const modelState = clean(payload.models_status || tracking.model_health || tracking.model_warm_state || "AWAKE", "AWAKE").toUpperCase();
+      const packetState = packetId ? "PACKET READY" : clean(signal.phoenixguard_decision_state || "STUDY ONLY", "STUDY ONLY").toUpperCase();
+
+      setText(els.brokerFeedState, fullAuto ? "live" : "paused");
+      setText(els.brokerFeedWindow, sourceTitle);
+      setText(els.brokerFeedWindowNote, detected || clean(focus.status, "focus pending"));
+      setText(els.brokerFeedFrame, `frame ${frameId} | capture ${captureCount}`);
+      setText(els.brokerFeedFrameNote, aligned ? "overlay frame aligned" : "overlay alignment checking");
+      setText(els.brokerFeedCadence, `${formatSeconds(interval)} loop`);
+      setText(els.brokerFeedCadenceNote, fullAuto ? `next capture ${formatSeconds(nextCapture || interval)}` : "manual capture mode");
+      setText(els.brokerFeedOverlay, `${activeMode} | ${Number(payload.overlay_count || 0)} overlays`);
+      setText(els.brokerFeedOverlayNote, aligned ? "same frame authority" : "waiting for current artifact");
+
+      setText(els.bridgeFeedState, bridgeStatus);
+      setText(els.bridgeExecutionMode, executionEnabled ? `${executionMode} ENABLED` : `${executionMode} GUARD`);
+      setText(els.bridgeExecutionNote, clean(executionControls.trade_profile || executionControls.execution_profile || "package safety profile"));
+      setText(els.bridgePacketState, packetId || "No active package");
+      setText(els.bridgePacketNote, packetId ? clean(packet.classification || packet.lane || packet.playbook, "validated package") : packetState);
+      setText(els.bridgeWriterState, bridgeStatus);
+      setText(els.bridgeWriterNote, executionSurface.controls_ready ? "controls visible and bridge ready" : "waiting for bridge/control readiness");
+      setText(els.bridgeReporterState, reporterStatus);
+      setText(els.bridgeReporterNote, "alerts remain separate from retired shooter clicking");
+
+      setText(els.securityState, freshness === "PASS" ? "protected" : "checking");
+      setText(els.securityFreshness, freshness);
+      setText(els.securityFreshnessNote, `frame ${frameId} | capture ${captureCount}`);
+      setText(els.securitySourceLock, sourceLock);
+      setText(els.securitySourceNote, sourceTitle);
+      setText(els.securityModels, modelState);
+      setText(els.securityModelsNote, "model and council wake state");
+      setText(els.securityPacket, packetState);
+      setText(els.securityPacketNote, packetId ? packetId : "no stale package accepted as live truth");
+
+      setText(els.settingsState, status);
+      setText(els.settingsTracker, fullAuto ? `Auto ${formatSeconds(interval)}` : "Manual");
+      setText(els.settingsCapture, `Capture ${captureCount}`);
+      setText(els.settingsRefresh, "API live");
+      setText(els.settingsFocus, focusLocked ? "Locked" : "Clear pending");
+      setText(els.settingsOverlay, activeMode);
+      setText(els.settingsStrength, modelState);
+      setText(els.settingsExecution, executionEnabled ? executionMode : "Guarded");
+      setText(els.settingsStop, "Stop stack");
+    }
+
     function formatHeaderClock(date = new Date()) {
       try {
         const value = new Intl.DateTimeFormat(undefined, {
@@ -10234,8 +10664,8 @@
 
       els.sessionChip.textContent = `Session ${clean(payload.session_id || SESSION_ID)}`;
       els.heroCopy.textContent = focusLocked
-        ? `PhoenixGuard engine | ${[detectedMarket, detectedTimeframe].filter(Boolean).join(" ") || "market pending"} | locked to saved broker surface`
-        : "PhoenixGuard engine | live focus pending";
+        ? `Powered by the Phoenix Guard V3 engine | ${[detectedMarket, detectedTimeframe].filter(Boolean).join(" ") || "market pending"} | locked broker surface`
+        : "Powered by the Phoenix Guard V3 engine | live focus pending";
 
       els.trackerToggle.textContent = fullAuto ? `Auto ${formatSeconds(effectiveInterval)} Off` : `Auto ${formatSeconds(effectiveInterval)} On`;
       els.trackingModeLabel.textContent = fullAuto
@@ -10291,6 +10721,7 @@
 
       renderHeaderSystemTelemetry(payload, telemetry);
       renderFullSuiteCommandCenter(payload);
+      renderWorkspacePanels(payload);
       renderOperationalTimeline(payload);
       renderEvidenceSnapshot(payload);
       renderKernelDeck(signal, tracking);
@@ -10574,6 +11005,15 @@
 
     document.querySelectorAll("[data-route]").forEach((button) => {
       on(button, "click", () => applyRoute(button.getAttribute("data-route") || "live"));
+    });
+    document.querySelectorAll("[data-proxy-click]").forEach((button) => {
+      on(button, "click", () => {
+        const targetId = button.getAttribute("data-proxy-click") || "";
+        const target = $(targetId);
+        if (target && typeof target.click === "function") {
+          target.click();
+        }
+      });
     });
     on(els.workspaceSelect, "change", () => applyRoute(els.workspaceSelect.value));
     on(els.overlayModeSelect, "change", () => applyOverlayPreset(els.overlayModeSelect.value));
