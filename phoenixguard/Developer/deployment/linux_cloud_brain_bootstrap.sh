@@ -14,6 +14,7 @@ FRAME_INGEST_TOKEN="${FRAME_INGEST_TOKEN:-}"
 FRAME_INGEST_SIGNING_SECRET="${FRAME_INGEST_SIGNING_SECRET:-}"
 ASSET_ARCHIVE_URL="${ASSET_ARCHIVE_URL:-}"
 MODEL_ASSET_MANIFEST="${MODEL_ASSET_MANIFEST:-}"
+GITHUB_DEPLOY_KEY_B64="${GITHUB_DEPLOY_KEY_B64:-}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "Run as root on the VPS: sudo -E bash Developer/deployment/linux_cloud_brain_bootstrap.sh" >&2
@@ -39,6 +40,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   curl \
   git \
   openssl \
+  openssh-client \
   build-essential \
   libgomp1 \
   libglib2.0-0 \
@@ -56,6 +58,24 @@ fi
 mkdir -p "${INSTALL_ROOT}" "${ENV_DIR}"
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}"
 
+SERVICE_HOME="$(getent passwd "${SERVICE_USER}" | cut -d: -f6)"
+GIT_ENV=()
+if [[ -n "${GITHUB_DEPLOY_KEY_B64}" ]]; then
+  if [[ -z "${SERVICE_HOME}" || ! -d "${SERVICE_HOME}" ]]; then
+    echo "Cannot resolve home directory for service user ${SERVICE_USER}." >&2
+    exit 1
+  fi
+  echo "[PhoenixGuard Cloud Brain] Installing read-only GitHub deploy key for ${SERVICE_USER}."
+  install -d -m 0700 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${SERVICE_HOME}/.ssh"
+  printf '%s' "${GITHUB_DEPLOY_KEY_B64}" | base64 -d > "${SERVICE_HOME}/.ssh/phoenixguard_deploy_key"
+  chmod 0600 "${SERVICE_HOME}/.ssh/phoenixguard_deploy_key"
+  chown "${SERVICE_USER}:${SERVICE_USER}" "${SERVICE_HOME}/.ssh/phoenixguard_deploy_key"
+  ssh-keyscan github.com > "${SERVICE_HOME}/.ssh/known_hosts"
+  chmod 0644 "${SERVICE_HOME}/.ssh/known_hosts"
+  chown "${SERVICE_USER}:${SERVICE_USER}" "${SERVICE_HOME}/.ssh/known_hosts"
+  GIT_ENV=("GIT_SSH_COMMAND=ssh -i ${SERVICE_HOME}/.ssh/phoenixguard_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes")
+fi
+
 echo "[PhoenixGuard Cloud Brain] Installing uv and Python 3.11."
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
@@ -64,12 +84,12 @@ uv python install 3.11
 
 if [[ ! -d "${REPO_ROOT}/.git" ]]; then
   echo "[PhoenixGuard Cloud Brain] Cloning ${REPO_URL}."
-  sudo -u "${SERVICE_USER}" git clone --branch "${BRANCH}" "${REPO_URL}" "${REPO_ROOT}"
+  sudo -u "${SERVICE_USER}" env "${GIT_ENV[@]}" git clone --branch "${BRANCH}" "${REPO_URL}" "${REPO_ROOT}"
 else
   echo "[PhoenixGuard Cloud Brain] Updating ${REPO_ROOT}."
-  sudo -u "${SERVICE_USER}" git -C "${REPO_ROOT}" fetch origin
-  sudo -u "${SERVICE_USER}" git -C "${REPO_ROOT}" checkout "${BRANCH}"
-  sudo -u "${SERVICE_USER}" git -C "${REPO_ROOT}" pull --ff-only origin "${BRANCH}"
+  sudo -u "${SERVICE_USER}" env "${GIT_ENV[@]}" git -C "${REPO_ROOT}" fetch origin
+  sudo -u "${SERVICE_USER}" env "${GIT_ENV[@]}" git -C "${REPO_ROOT}" checkout "${BRANCH}"
+  sudo -u "${SERVICE_USER}" env "${GIT_ENV[@]}" git -C "${REPO_ROOT}" pull --ff-only origin "${BRANCH}"
 fi
 
 echo "[PhoenixGuard Cloud Brain] Creating .venv-live."

@@ -8,13 +8,12 @@ from typing import Iterable, Mapping, TypedDict, cast
 
 
 DEFAULT_PATTERNS = (
-    "models/**/*.pt",
-    "models/**/*.pth",
-    "models/**/*.onnx",
-    "models/**/*.safetensors",
+    "models/**/*",
     "memory_bank/**/*",
     "adapters/**/*",
     ".hf_cache/**/*",
+    "*.pt",
+    "data/*.bin",
 )
 
 
