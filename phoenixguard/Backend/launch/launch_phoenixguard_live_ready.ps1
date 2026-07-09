@@ -38,6 +38,22 @@ if ($pythonScriptsDir -and -not ([string]$env:PATH).ToLowerInvariant().StartsWit
 $baseUrl = 'http://127.0.0.1:8793'
 $dashboardUrl = "$baseUrl/v3/mobile/window-tracker/dashboard/$SessionId"
 
+function ConvertTo-ProcessArgumentString {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    return (($Arguments | ForEach-Object {
+        $value = [string]$_
+        if ($value -match '[\s"]') {
+            '"' + ($value -replace '"', '\"') + '"'
+        } else {
+            $value
+        }
+    }) -join ' ')
+}
+
 function Get-LiveReadinessSnapshot {
     param(
         [Parameter(Mandatory = $true)]
@@ -229,7 +245,7 @@ function Start-LiveReadyShooter {
         '--heartbeat',
         '4.0'
     )
-    Start-Process -FilePath $pythonPath -ArgumentList $args -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $outPath -RedirectStandardError $errPath | Out-Null
+    Start-Process -FilePath $pythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $args) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $outPath -RedirectStandardError $errPath | Out-Null
     Write-Host "Shooter package reporter log: $errPath"
 }
 
@@ -280,6 +296,21 @@ $env:PHOENIXGUARD_RUNTIME_DIR = $runtimeDir
 $env:PHOENIXGUARD_DATA_DIR = Join-Path -Path $runtimeDir -ChildPath 'data_live'
 $env:PHOENIXGUARD_LOGS_DIR = Join-Path -Path $runtimeDir -ChildPath 'logs_live'
 $env:PHOENIXGUARD_TRACKER_STATUS_FILE = Join-Path -Path $runtimeDir -ChildPath 'tracker_status.json'
+if (-not $env:PHOENIXGUARD_DISK_GUARD_ENABLED) {
+    $env:PHOENIXGUARD_DISK_GUARD_ENABLED = '1'
+}
+if (-not $env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES) {
+    $env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES = '2GB'
+}
+if (-not $env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES) {
+    $env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES = '1536MB'
+}
+if (-not $env:PHOENIXGUARD_DISK_GUARD_INTERVAL_SEC) {
+    $env:PHOENIXGUARD_DISK_GUARD_INTERVAL_SEC = '300'
+}
+if (-not $env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS) {
+    $env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS = '1'
+}
 
 Write-Host ""
 Write-Host "Preflight: stop existing live stack"
@@ -290,6 +321,7 @@ $targetPatterns = @(
     '*start_phoenixguard_24_7_tracker.py*',
     '*shooter.py*',
     '*phoenixguard.runtime.model_council_daemon*',
+    '*phoenixguard_disk_growth_guard.py*',
     '*uvicorn phoenixguard.mobile_api.app*',
     '*phoenixguard_mt4_file_bridge.py*',
     '*run_entry_allowance_burn.py*',
@@ -387,6 +419,41 @@ Write-Host "Preflight: V3 integrity"
 & $pythonPath 'Backend\tools\verify_v3_integrity.py'
 if ($LASTEXITCODE -ne 0) {
     throw "V3 integrity preflight failed."
+}
+
+Write-Host ""
+Write-Host "Preflight: disk growth guard"
+if ($env:PHOENIXGUARD_DISK_GUARD_ENABLED -eq '0') {
+    Write-Warning "Disk growth guard is disabled by PHOENIXGUARD_DISK_GUARD_ENABLED=0"
+} elseif (Test-Path ".\Backend\tools\phoenixguard_disk_growth_guard.py") {
+    $guardLimit = [string]$env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES
+    $guardLowWater = [string]$env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES
+    $guardInterval = [string]$env:PHOENIXGUARD_DISK_GUARD_INTERVAL_SEC
+    $guardArgs = @(
+        (Join-Path -Path $ProjectRoot -ChildPath 'Backend\tools\phoenixguard_disk_growth_guard.py'),
+        '--apply',
+        '--limit',
+        $guardLimit,
+        '--low-water',
+        $guardLowWater,
+        '--interval-sec',
+        $guardInterval
+    )
+    if ($env:PHOENIXGUARD_DISK_GUARD_INCLUDE_CODEX_SESSIONS -ne '0') {
+        $guardArgs += '--include-codex-sessions'
+    }
+    $guardLogDir = $env:PHOENIXGUARD_LOGS_DIR
+    if (-not (Test-Path -LiteralPath $guardLogDir)) {
+        New-Item -ItemType Directory -Path $guardLogDir -Force | Out-Null
+    }
+    $guardStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $guardOutPath = Join-Path -Path $guardLogDir -ChildPath "disk-growth-guard-$guardStamp.out.log"
+    $guardErrPath = Join-Path -Path $guardLogDir -ChildPath "disk-growth-guard-$guardStamp.err.log"
+    Start-Process -FilePath $pythonPath -ArgumentList (ConvertTo-ProcessArgumentString -Arguments $guardArgs) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $guardOutPath -RedirectStandardError $guardErrPath | Out-Null
+    Write-Host "  enabled=true cap=$guardLimit low_water=$guardLowWater interval_sec=$guardInterval"
+    Write-Host "  guard_log=$guardErrPath"
+} else {
+    Write-Warning "Backend\tools\phoenixguard_disk_growth_guard.py not found. Disk cap worker not started."
 }
 
 Write-Host ""
@@ -493,6 +560,10 @@ $summaryPayload = [ordered]@{
     shooter_execution_path = 'retired_reporter_only'
     shooter_poll_sec = $ShooterPollSec
     live_execution_enabled = $env:PHOENIXGUARD_LIVE_EXECUTION_ENABLED
+    disk_growth_guard_enabled = $env:PHOENIXGUARD_DISK_GUARD_ENABLED
+    disk_growth_guard_max_bytes = $env:PHOENIXGUARD_DISK_GUARD_MAX_BYTES
+    disk_growth_guard_low_water_bytes = $env:PHOENIXGUARD_DISK_GUARD_LOW_WATER_BYTES
+    disk_growth_guard_interval_sec = $env:PHOENIXGUARD_DISK_GUARD_INTERVAL_SEC
 }
 $summaryPayload | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
 

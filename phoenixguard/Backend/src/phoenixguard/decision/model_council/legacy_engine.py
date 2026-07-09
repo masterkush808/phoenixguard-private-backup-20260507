@@ -676,6 +676,20 @@ def _raw_observed_side_from_snapshot(snapshot: Mapping[str, Any]) -> str:
     return direct if direct in {"BUY", "SELL"} else "HOLD"
 
 
+def _full_suite_story_side_from_snapshot(snapshot: Mapping[str, Any]) -> str:
+    side = _side(snapshot.get("full_suite_story_side"))
+    if side not in {"BUY", "SELL"}:
+        return "HOLD"
+    if not _bool(snapshot.get("full_suite_story_confirmed")):
+        return "HOLD"
+    confidence = _clip01(snapshot.get("full_suite_story_confidence"), 0.0)
+    margin = _clip01(snapshot.get("full_suite_story_margin"), 0.0)
+    horizon_candles = _int(snapshot.get("full_suite_story_horizon_candles"), 0)
+    if confidence < 0.60 or margin < 0.06 or horizon_candles <= 0:
+        return "HOLD"
+    return side
+
+
 def _scored_candidate_side(
     snapshot: Mapping[str, Any],
     *,
@@ -683,6 +697,9 @@ def _scored_candidate_side(
     buy_score: float,
     sell_score: float,
 ) -> str:
+    full_suite_story_side = _full_suite_story_side_from_snapshot(snapshot)
+    if full_suite_story_side in {"BUY", "SELL"}:
+        return full_suite_story_side
     if buy_score > sell_score:
         return "BUY"
     if sell_score > buy_score:
@@ -5158,9 +5175,14 @@ def evaluate_model_council_v3(
     ai_meta_label = _mapping(playbook_ai_intelligence.get("meta_label"))
     ai_horizon = _mapping(playbook_ai_intelligence.get("horizon"))
     ai_regime_router = _mapping(playbook_ai_intelligence.get("regime_router"))
+    ai_story_lock = _mapping(playbook_ai_intelligence.get("full_suite_story_lock_v3"))
     ai_selected_meta = _mapping(ai_meta_label.get("selected"))
     ai_selected_horizon = _mapping(ai_horizon.get("selected"))
-    ai_selected_side = _side(ai_meta_label.get("selected_side") or ai_horizon.get("selected_side"))
+    ai_selected_side = _side(
+        ai_story_lock.get("active_side")
+        or ai_meta_label.get("selected_side")
+        or ai_horizon.get("selected_side")
+    )
     ai_route = _upper(ai_regime_router.get("route"))
     ai_full_suite_ready = _bool(ai_semantic_coverage.get("full_suite_ready"))
     ai_candidate_tradeable = (
@@ -5174,6 +5196,46 @@ def evaluate_model_council_v3(
     )
     ai_thesis_margin = _clip01(ai_thesis_arbitration.get("margin"), 0.0)
     ai_winning_score = _clip01(ai_thesis_arbitration.get("winning_score"), 0.0)
+    ai_selected_horizon_candles = _int(ai_selected_horizon.get("optimized_candle_count"), 0)
+    ai_selected_horizon_seconds = _int(ai_selected_horizon.get("optimized_duration_sec"), 0)
+    ai_story_lock_confirmed = bool(
+        _bool(ai_story_lock.get("confirmed"))
+        and ai_selected_side in {"BUY", "SELL"}
+        and ai_winning_score >= 0.60
+        and ai_thesis_margin >= 0.06
+        and _int(ai_story_lock.get("horizon_candles"), ai_selected_horizon_candles) > 0
+    )
+    ai_story_lock_reframes_candidate = bool(
+        ai_story_lock_confirmed
+        and ai_selected_side in {"BUY", "SELL"}
+        and candidate_side in {"BUY", "SELL"}
+        and ai_selected_side != candidate_side
+    )
+    if ai_story_lock_reframes_candidate and not _bool(snapshot.get("full_suite_story_reframe_attempted")):
+        story_reframe_snapshot = {
+            **snapshot,
+            "candidate_side": ai_selected_side,
+            "full_suite_story_side": ai_selected_side,
+            "full_suite_story_confirmed": True,
+            "full_suite_story_confidence": ai_winning_score,
+            "full_suite_story_margin": ai_thesis_margin,
+            "full_suite_story_horizon_candles": max(
+                _int(ai_story_lock.get("horizon_candles"), 0),
+                ai_selected_horizon_candles,
+            ),
+            "full_suite_story_reframed_from": candidate_side,
+            "full_suite_story_reframe_attempted": True,
+            "execution_mature": True,
+            "candidate_stable_reads": max(candidate_stable_reads, 2),
+            "stability_frames": max(_int(snapshot.get("stability_frames"), 0), 2),
+            "recent_candidate_sides": [ai_selected_side, ai_selected_side],
+            "full_suite_story_lock_v3": ai_story_lock,
+        }
+        return evaluate_model_council_v3(
+            story_reframe_snapshot,
+            previous_state=previous_state,
+            now=current_now,
+        )
     ai_opposite_thesis_leads = bool(
         ai_full_suite_ready
         and candidate_side in {"BUY", "SELL"}
@@ -5181,6 +5243,7 @@ def evaluate_model_council_v3(
         and ai_selected_side != candidate_side
         and ai_thesis_margin >= 0.10
         and ai_winning_score >= 0.58
+        and not ai_story_lock_reframes_candidate
     )
     ai_wait_route_active = bool(
         ai_full_suite_ready
@@ -5191,8 +5254,6 @@ def evaluate_model_council_v3(
             "WAIT_FOR_CONTEXT",
         }
     )
-    ai_selected_horizon_candles = _int(ai_selected_horizon.get("optimized_candle_count"), 0)
-    ai_selected_horizon_seconds = _int(ai_selected_horizon.get("optimized_duration_sec"), 0)
     thesis_horizon = _mapping(professional_trade_plan.get("thesis_horizon"))
     thesis_horizon_candles = _int(thesis_horizon.get("expected_candle_count"), 0)
     thesis_horizon_seconds = _int(thesis_horizon.get("expected_duration_sec"), 0)
@@ -5285,6 +5346,9 @@ def evaluate_model_council_v3(
         "wait_route_active": ai_wait_route_active,
         "strike_override_ready": playbook_ai_strike_override_ready,
         "full_suite_ready": ai_full_suite_ready,
+        "full_suite_story_lock_confirmed": ai_story_lock_confirmed,
+        "full_suite_story_lock_state": str(ai_story_lock.get("state") or ""),
+        "full_suite_story_side": ai_selected_side if ai_story_lock_confirmed else "HOLD",
         "horizon_candles": ai_selected_horizon_candles,
         "horizon_seconds": ai_selected_horizon_seconds,
         "effective_horizon_candles": ai_effective_horizon_candles,
@@ -5301,6 +5365,8 @@ def evaluate_model_council_v3(
         "playbook_ai_route": ai_route,
         "playbook_ai_opposite_thesis_leads": ai_opposite_thesis_leads,
         "playbook_ai_candidate_tradeable": ai_candidate_tradeable,
+        "full_suite_story_lock_v3": ai_story_lock,
+        "full_suite_story_controls_package_side": ai_story_lock_confirmed,
     }
     opportunity_maturity["dual_thesis_report_v3"] = dual_thesis_report
     book_strategy["dual_thesis_report_v3"] = dual_thesis_report
@@ -5895,6 +5961,7 @@ def evaluate_model_council_v3(
         "candidate_stable_reads": candidate_stable_reads,
         "playbook_required_stable_reads": playbook_required_stable_reads,
         "playbook_candidate_stable": playbook_candidate_stable,
+        "candidate_stability_policy_v3": _mapping(snapshot.get("candidate_stability_policy_v3")),
         "runtime_block_reason": runtime_block_reason,
         "live_integrity_hash_mismatch": live_integrity_hash_mismatch,
         "top_input_frame_hash": top_input_frame_hash,
@@ -6088,6 +6155,7 @@ def evaluate_model_council_v3(
         "expected_candle_count": expected_move_candles,
         "professional_thesis_resolution": professional_thesis_resolution,
         "dual_thesis_report_v3": dual_thesis_report,
+        "candidate_stability_policy_v3": _mapping(snapshot.get("candidate_stability_policy_v3")),
         "professional_flip_flop_override": professional_flip_flop_override,
         "candle_movement_context_v3": candle_movement_context,
         "candle_movement": candle_movement_brief,
@@ -6127,6 +6195,8 @@ def evaluate_model_council_v3(
         "release_condition": release_condition,
         "candidate_id": active_candidate_id,
         "candidate_stage": candidate_stage,
+        "candidate_stable_reads": candidate_stable_reads,
+        "stability_frames": _int(snapshot.get("stability_frames"), candidate_stable_reads),
         "final_score": round(float(final_execution_score), 4),
         "threshold": round(float(lane_required_score), 4),
         "selected_lane": execution_lane.get("name"),
@@ -6981,6 +7051,7 @@ class ModelCouncilV3:
             self._recent_raw_sides = self._recent_raw_sides[-5:]
             working["recent_raw_sides"] = list(self._recent_raw_sides)
         if candidate in {"BUY", "SELL"}:
+            candidate_changed = bool(self._stable_candidate_side in {"BUY", "SELL"} and self._stable_candidate_side != candidate)
             if self._stable_candidate_side == candidate:
                 self._stable_candidate_count += 1
             else:
@@ -6990,9 +7061,26 @@ class ModelCouncilV3:
             self._recent_candidate_sides = self._recent_candidate_sides[-5:]
             working["candidate_side"] = candidate
             working["recent_candidate_sides"] = list(self._recent_candidate_sides)
-            effective_stable_count = max(self._stable_candidate_count, 2 if locked_surface_maturity else 0)
+            full_suite_story_confirmed = _full_suite_story_side_from_snapshot(working) == candidate
+            full_suite_can_mature_candidate = bool(full_suite_story_confirmed and not context_switched)
+            locked_surface_can_mature_candidate = bool(
+                locked_surface_maturity
+                and (not candidate_changed or full_suite_story_confirmed)
+            )
+            effective_stable_count = max(
+                self._stable_candidate_count,
+                2 if locked_surface_can_mature_candidate or full_suite_can_mature_candidate else 0,
+            )
             working["candidate_stable_reads"] = effective_stable_count
             working["stability_frames"] = max(_int(working.get("stability_frames"), 0), effective_stable_count)
+            working["candidate_stability_policy_v3"] = {
+                "locked_surface_maturity": locked_surface_maturity,
+                "candidate_changed": candidate_changed,
+                "full_suite_story_confirmed": full_suite_story_confirmed,
+                "full_suite_can_mature_candidate": full_suite_can_mature_candidate,
+                "locked_surface_can_mature_candidate": locked_surface_can_mature_candidate,
+                "single_opposite_candle_cannot_mature_new_story": True,
+            }
             if effective_stable_count >= 2:
                 working["execution_mature"] = True
         result = evaluate_model_council_v3(

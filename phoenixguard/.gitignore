@@ -33,7 +33,7 @@ test-results/
 # Runtime/capture/debug output
 .codex_runtime/
 .codex_logs/
-runtime/
+/runtime/
 .backups/
 _backups/
 .gradio/

@@ -4600,6 +4600,102 @@ def test_tracker_accepts_pocket_chart_as_shadow_study_source(tmp_path: Path) -> 
     assert broker_execution_state["status"] not in {"armed", "ready_to_click"}
 
 
+def test_tracker_accepts_chart_study_when_live_broker_guard_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chart = _synthetic_chart_surface("buy", width=1280, height=720)
+    backend = _ListedWindowCaptureBackend(
+        [
+            {
+                "hwnd": 808,
+                "title": "The Most Innovative Trading Platform - Microsoft Edge",
+                "bbox": [0, 0, 1280, 720],
+                "width": 1280,
+                "height": 720,
+            }
+        ],
+        image=chart,
+    )
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    def _force_pocket_guard(_payload: Mapping[str, Any]) -> bool:
+        return True
+
+    monkeypatch.setattr(tracker, "_pocket_option_surface_guard_enabled", _force_pocket_guard)
+
+    session = tracker.create_session(session_id="chart-live-study", window_query="The Most Innovative Trading Platform")
+    tracker.set_focus_region(str(session["session_id"]), [0.0, 0.0, 1.0, 1.0], source="test")
+    tracker.update_session_controls(str(session["session_id"]), live_execution_enabled=True, execution_mode="live")
+
+    payload = tracker.capture_once(str(session["session_id"]))
+
+    tracking_summary = cast(dict[str, Any], payload["tracking_summary"])
+    broker_source_lock = cast(dict[str, Any], tracking_summary["broker_source_lock"])
+    broker_source = cast(dict[str, Any], tracking_summary["broker_source"])
+    broker_surface = cast(dict[str, Any], payload["broker_surface"])
+    broker_execution_state = cast(dict[str, Any], payload["broker_execution_state"])
+    assert payload["status"] != "waiting_for_broker_surface"
+    assert broker_source_lock["valid"] is True
+    assert broker_source_lock["status"] == "VALID"
+    assert "CHART_STUDY_SOURCE_LOCKED" in broker_source_lock["reason_codes"]
+    assert broker_source["valid"] is True
+    assert broker_source["wrong_surface"] is False
+    assert broker_source["study_source_only"] is True
+    assert broker_source["broker_click_safe"] is False
+    assert broker_surface["study_source_only"] is True
+    assert broker_surface["broker_click_safe"] is False
+    assert broker_execution_state["status"] not in {"armed", "ready_to_click"}
+
+
+def test_tracker_accepts_generic_chart_title_as_live_study_source(tmp_path: Path) -> None:
+    chart = _synthetic_chart_surface("buy", width=1280, height=720)
+    backend = _ListedWindowCaptureBackend(
+        [
+            {
+                "hwnd": 909,
+                "title": "AUDUSD 0.69380 - Microsoft Edge",
+                "bbox": [0, 0, 1280, 720],
+                "width": 1280,
+                "height": 720,
+            }
+        ],
+        image=chart,
+    )
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    session = tracker.create_session(session_id="audusd-live-study", window_query="AUDUSD")
+    tracker.set_focus_region(str(session["session_id"]), [0.0, 0.0, 1.0, 1.0], source="test")
+    tracker.update_session_controls(str(session["session_id"]), live_execution_enabled=True, execution_mode="live")
+
+    payload = tracker.capture_once(str(session["session_id"]))
+
+    tracking_summary = cast(dict[str, Any], payload["tracking_summary"])
+    broker_source_lock = cast(dict[str, Any], tracking_summary["broker_source_lock"])
+    broker_source = cast(dict[str, Any], tracking_summary["broker_source"])
+    broker_surface = cast(dict[str, Any], payload["broker_surface"])
+    broker_execution_state = cast(dict[str, Any], payload["broker_execution_state"])
+    assert payload["status"] != "waiting_for_broker_surface"
+    assert broker_source_lock["valid"] is True
+    assert broker_source_lock["status"] == "VALID"
+    assert broker_source_lock["reason_codes"] == ["CHART_STUDY_SOURCE_LOCKED"]
+    assert broker_source["valid"] is True
+    assert broker_source["wrong_surface"] is False
+    assert broker_source["study_source_only"] is True
+    assert broker_source["broker_click_safe"] is False
+    assert broker_surface["study_source_only"] is True
+    assert broker_surface["broker_click_safe"] is False
+    assert broker_execution_state["status"] not in {"armed", "ready_to_click"}
+
+
 def test_tracker_scenario_generation_runs_when_enabled(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path,

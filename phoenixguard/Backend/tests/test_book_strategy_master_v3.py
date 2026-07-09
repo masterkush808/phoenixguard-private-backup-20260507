@@ -11,6 +11,7 @@ from phoenixguard.decision.book_strategy_master_v3 import (
 from phoenixguard.decision.candle_movement_context_v3 import build_candle_movement_context_v3
 from phoenixguard.decision.market_play_engine_v3 import analyze_market_play_v3
 from phoenixguard.decision.model_council_v3 import ModelCouncilV3
+from phoenixguard.decision.playbook_ai_intelligence_v3 import build_playbook_ai_intelligence_v3
 
 
 NOW = 1_800_010_000.0
@@ -194,6 +195,46 @@ def _attach_executable_identity_lock(snapshot: dict[str, Any]) -> None:
             "instrument_identity_lock": identity_lock,
         }
     )
+
+
+def _full_suite_story_fixture(side: str = "BUY") -> dict[str, Any]:
+    opposite = "SELL" if side == "BUY" else "BUY"
+    return {
+        "side": side,
+        "rows_total": 96,
+        "raw_overlay_rows_seen": 96,
+        "actionable_count": 68,
+        "same_side_actionable_count": 49,
+        "opposite_actionable_count": 19,
+        "entry_window_count": 18,
+        "same_side_entry_window_count": 14,
+        "target_window_count": 8,
+        "opposing_force_count": 3,
+        "invalidation_count": 5,
+        "prediction_path_count": 4,
+        "structure_box_count": 6,
+        "trendline_count": 3,
+        "replay_path_count": 12,
+        "memory_path_count": 5,
+        "angle_vector_count": 2,
+        "overlay_arsenal_score": 0.94,
+        "entry_ready": True,
+        "target_ready": True,
+        "invalidation_ready": True,
+        "projection_ready": True,
+        "structure_ready": True,
+        "trendline_ready": True,
+        "angle_ready": True,
+        "replay_ready": True,
+        "current_entry_touch": True,
+        "current_entry_touch_count": 3,
+        "expected_move_candles_from_projection": 12,
+        "best_entry": {"type": "DEMAND_ZONE" if side == "BUY" else "SUPPLY_ZONE", "side": side},
+        "best_target": {"type": "TARGET_ZONE_BOX", "side": side},
+        "best_prediction_path": {"type": "PREDICTION_PATH", "side": side},
+        "best_opposing_force": {"type": "OPPOSING_FORCE", "side": opposite},
+        "full_suite_ready": True,
+    }
 
 
 def test_book_strategy_master_signs_valid_single_timeframe_reaction() -> None:
@@ -1725,6 +1766,115 @@ def test_model_council_preserves_current_buy_pressure_until_resistance_rejects()
     study_dual = result["model_council_study_packet"]["dual_thesis_report_v3"]
     assert study_dual["current_pressure_side"] == "BUY"
     assert result["model_council_study_packet"]["model_council"]["dual_thesis_report_v3"]["buy"]["status"] == "CURRENT_PRESSURE_DEFENDED"
+
+
+def test_playbook_ai_locks_confirmed_full_suite_story_over_old_candidate_thesis() -> None:
+    overlay_suite = _full_suite_story_fixture("BUY")
+    result = build_playbook_ai_intelligence_v3(
+        {
+            "candle_movement_context_v3": {
+                "timeframe": "M5",
+                "timeframe_seconds": 300,
+                "visible_candle_count": 56,
+                "move_stage": "MATURE",
+                "current_leg": {"side": "BUY", "candle_count": 8, "move_stage": "MATURE"},
+            },
+        },
+        {
+            "market_context": {
+                "model_council": {"buy_score": 0.78, "sell_score": 0.52},
+                "price_location": {"buy_quality": 0.82, "sell_quality": 0.34},
+                "reasoning_arbitration": {"coherence_score": 0.76},
+                "entry_quality": {"score": 0.78},
+            }
+        },
+        {
+            "side": "SELL",
+            "evidence": {
+                "dominant_side": "SELL",
+                "global_side": "SELL",
+                "local_side": "SELL",
+                "overlay_suite_evidence_v3": overlay_suite,
+            },
+            "professional_trade_plan": {
+                "side": "SELL",
+                "authority_side": "SELL",
+                "professional_grade": True,
+                "thesis_horizon": {"expected_candle_count": 8, "expected_duration_sec": 2400},
+                "profit_discipline": {"room_ok": True, "effective_room_candles": 12},
+            },
+        },
+        "SELL",
+    )
+
+    story_lock = result["full_suite_story_lock_v3"]
+    arbitration = result["thesis_arbitration"]
+
+    assert arbitration["winner"] == "BUY"
+    assert story_lock["active_side"] == "BUY"
+    assert story_lock["candidate_side"] == "SELL"
+    assert story_lock["confirmed"] is True
+    assert story_lock["transition_confirmed"] is True
+    assert story_lock["raw_candle_cannot_flip_story"] is True
+
+
+def test_model_council_honors_confirmed_full_suite_story_side_before_package_build() -> None:
+    council = ModelCouncilV3()
+    snapshot = _strategy_snapshot("SELL")
+    _attach_candle_movement_fixture(snapshot, "BUY")
+    _attach_executable_identity_lock(snapshot)
+    snapshot["candidate_side"] = "SELL"
+    snapshot["action"] = "SELL"
+    snapshot["buy_score"] = 0.48
+    snapshot["sell_score"] = 0.79
+    snapshot["global_structure"]["global_side"] = "SELL"
+    snapshot["local_micro_structure"]["local_side"] = "SELL"
+    snapshot["market_context"]["global_side"] = "SELL"
+    snapshot["market_context"]["local_side"] = "SELL"
+    snapshot["market_context"]["dominant_side"] = "SELL"
+    snapshot["full_suite_story_side"] = "BUY"
+    snapshot["full_suite_story_confirmed"] = True
+    snapshot["full_suite_story_confidence"] = 0.73
+    snapshot["full_suite_story_margin"] = 0.14
+    snapshot["full_suite_story_horizon_candles"] = 12
+
+    result = council.evaluate(snapshot, now_epoch=NOW)
+    council_state = result["model_council"]
+    policy = council_state["candidate_stability_policy_v3"]
+
+    assert council_state["final_side"] == "BUY"
+    assert council_state["candidate_stable_reads"] >= 2
+    assert policy["full_suite_story_confirmed"] is True
+    assert policy["full_suite_can_mature_candidate"] is True
+
+
+def test_model_council_does_not_mature_single_raw_opposite_flip_without_full_suite_story() -> None:
+    council = ModelCouncilV3()
+    first_snapshot = _strategy_snapshot("BUY")
+    _attach_candle_movement_fixture(first_snapshot, "BUY")
+    _attach_executable_identity_lock(first_snapshot)
+    first_snapshot["buy_score"] = 0.80
+    first_snapshot["sell_score"] = 0.42
+    council.evaluate(first_snapshot, now_epoch=NOW)
+
+    second_snapshot = _strategy_snapshot("SELL")
+    _attach_candle_movement_fixture(second_snapshot, "SELL")
+    _attach_executable_identity_lock(second_snapshot)
+    second_snapshot["frame_id"] = 964
+    second_snapshot["capture_count"] = 966
+    second_snapshot["state_version"] = 1964
+    second_snapshot["input_frame_hash"] = "frame_964"
+    second_snapshot["previous_frame_hash"] = "frame_963"
+    second_snapshot["buy_score"] = 0.44
+    second_snapshot["sell_score"] = 0.82
+
+    result = council.evaluate(second_snapshot, now_epoch=NOW + 0.5)
+    policy = result["model_council"]["candidate_stability_policy_v3"]
+
+    assert policy["candidate_changed"] is True
+    assert policy["full_suite_story_confirmed"] is False
+    assert policy["locked_surface_can_mature_candidate"] is False
+    assert result["model_council"]["candidate_stable_reads"] == 1
 
 
 def test_model_council_publishes_packet_for_tested_resistance_sell_reaction_with_room() -> None:

@@ -782,6 +782,33 @@ def _build_thesis_arbitration(
         )
         for side in SIDES
     }
+    overlay_side = _side(overlay_suite.get("side"))
+    story_controls_side = bool(
+        _bool(layers.get("full_suite_ready"))
+        and overlay_side in SIDES
+        and _int(layers.get("rows_total"), 0) > 0
+        and _ratio(layers.get("same_side_actionable_count"), max(1, _int(layers.get("actionable_count"), 0)), 0.0) >= 0.55
+        and _bool(layers.get("entry_ready"))
+        and _bool(layers.get("target_ready"))
+        and _bool(layers.get("path_ready"))
+    )
+    if story_controls_side:
+        for side in SIDES:
+            side_score = _mapping(scores.get(side))
+            raw_score = _float(side_score.get("score"), 0.0)
+            story_adjustment = 0.18 if side == overlay_side else -0.12
+            components = _mapping(side_score.get("components"))
+            components["full_suite_story_weight"] = {
+                "applied": True,
+                "overlay_side": overlay_side,
+                "adjustment": _round4(story_adjustment),
+                "reason": "confirmed raw full-suite overlay story controls thesis arbitration",
+            }
+            scores[side] = {
+                **side_score,
+                "score": _round4(_clip01(raw_score + story_adjustment)),
+                "components": components,
+            }
     buy_score = _float(scores["BUY"].get("score"), 0.0)
     sell_score = _float(scores["SELL"].get("score"), 0.0)
     margin = abs(buy_score - sell_score)
@@ -813,6 +840,8 @@ def _build_thesis_arbitration(
         "candidate_supported": bool(candidate_side in SIDES and winner == candidate_side and candidate_score >= 0.56),
         "state": state,
         "buy_sell_scored_simultaneously": True,
+        "full_suite_story_controls_side": story_controls_side,
+        "full_suite_story_side": overlay_side if story_controls_side else "HOLD",
     }
 
 
@@ -1250,6 +1279,76 @@ def _build_horizon(
     }
 
 
+def _build_full_suite_story_lock(
+    semantic_graph: Mapping[str, Any],
+    thesis_arbitration: Mapping[str, Any],
+    meta_label: Mapping[str, Any],
+    horizon: Mapping[str, Any],
+    candle_context: Mapping[str, Any],
+    candidate_side: str,
+) -> dict[str, Any]:
+    layers = _mapping(semantic_graph.get("coverage"))
+    selected_meta = _mapping(meta_label.get("selected"))
+    selected_horizon = _mapping(horizon.get("selected"))
+    current_leg = _mapping(candle_context.get("current_leg"))
+    winner = _side(thesis_arbitration.get("winner"))
+    selected_side = _side(meta_label.get("selected_side") or horizon.get("selected_side") or winner)
+    target_probability = _clip01(selected_meta.get("target_before_invalidation_probability"), 0.0)
+    winning_score = _clip01(thesis_arbitration.get("winning_score"), 0.0)
+    margin = _clip01(thesis_arbitration.get("margin"), 0.0)
+    horizon_candles = _int(selected_horizon.get("optimized_candle_count"), 0)
+    rows_total = _int(layers.get("rows_total"), 0)
+    current_leg_side = _side(current_leg.get("side"))
+    current_leg_stage = _upper(candle_context.get("move_stage") or current_leg.get("move_stage"), "UNKNOWN")
+    opposite_leg_warning = bool(
+        selected_side in SIDES
+        and current_leg_side == _opposite(selected_side)
+        and _int(current_leg.get("candle_count"), 0) <= 1
+    )
+    story_confirmed = bool(
+        _bool(layers.get("full_suite_ready"))
+        and selected_side in SIDES
+        and winner == selected_side
+        and rows_total > 0
+        and winning_score >= 0.60
+        and margin >= 0.06
+        and target_probability >= 0.54
+        and horizon_candles > 0
+    )
+    if story_confirmed and selected_side != candidate_side:
+        state = "FULL_SUITE_TRANSITION_CONFIRMED"
+    elif story_confirmed:
+        state = "FULL_SUITE_STORY_CONFIRMED"
+    elif selected_side in SIDES:
+        state = "FULL_SUITE_STORY_DEVELOPING"
+    else:
+        state = "FULL_SUITE_STORY_UNCLEAR"
+    return {
+        "schema_version": "PG_FULL_SUITE_STORY_LOCK_V3",
+        "active_side": selected_side if selected_side in SIDES else "HOLD",
+        "candidate_side": candidate_side if candidate_side in SIDES else "HOLD",
+        "state": state,
+        "confirmed": story_confirmed,
+        "transition_confirmed": bool(story_confirmed and selected_side != candidate_side),
+        "story_confidence": _round4(winning_score),
+        "story_margin": _round4(margin),
+        "target_before_invalidation_probability": _round4(target_probability),
+        "horizon_candles": horizon_candles,
+        "rows_total": rows_total,
+        "current_leg_side": current_leg_side,
+        "current_leg_stage": current_leg_stage,
+        "opposite_single_candle_warning": opposite_leg_warning,
+        "opposite_single_candle_policy": "warning_only_until_full_suite_transition",
+        "raw_candle_cannot_flip_story": True,
+        "package_side_source": "full_suite_story" if story_confirmed else "developing_full_suite_story",
+        "reason": (
+            "Full overlay suite has enough entry/target/projection evidence to control package side."
+            if story_confirmed
+            else "Full overlay suite is present but has not crossed the story lock threshold."
+        ),
+    }
+
+
 def build_playbook_ai_intelligence_v3(
     snapshot: Mapping[str, Any] | None,
     market: Mapping[str, Any] | None,
@@ -1305,6 +1404,14 @@ def build_playbook_ai_intelligence_v3(
         candle_context,
         regime_router,
     )
+    full_suite_story_lock = _build_full_suite_story_lock(
+        semantic_graph,
+        thesis_arbitration,
+        meta_label,
+        horizon,
+        candle_context,
+        side,
+    )
 
     rules = [
         "overlay_suite_evidence_v3_consumed_as_semantic_market_structure",
@@ -1315,6 +1422,8 @@ def build_playbook_ai_intelligence_v3(
         "market_context_used_for_regime_and_risk_routing",
         "target_before_invalidation_meta_label_estimated",
         "horizon_optimized_from_professional_plan_overlay_projection_and_room",
+        "full_suite_story_lock_controls_package_side_when_confirmed",
+        "single_opposite_candle_is_warning_not_story_flip",
     ]
     if not overlay_suite:
         rules.append("missing_overlay_suite_evidence_handled_as_empty_context")
@@ -1332,6 +1441,7 @@ def build_playbook_ai_intelligence_v3(
         "thesis_arbitration": thesis_arbitration,
         "meta_label": meta_label,
         "horizon": horizon,
+        "full_suite_story_lock_v3": full_suite_story_lock,
         "rules_applied": _dedupe_rules(rules),
     }
 
@@ -1371,6 +1481,7 @@ def compact_playbook_ai_intelligence_v3(value: Mapping[str, Any] | None) -> dict
     selected_meta = _mapping(meta.get("selected"))
     horizon = _mapping(payload.get("horizon"))
     selected_horizon = _mapping(horizon.get("selected"))
+    story_lock = _mapping(payload.get("full_suite_story_lock_v3"))
     rules_value = payload.get("rules_applied")
     rules = (
         [str(item) for item in cast(Sequence[Any], rules_value)[:12]]
@@ -1442,6 +1553,21 @@ def compact_playbook_ai_intelligence_v3(value: Mapping[str, Any] | None) -> dict
             "target_before_invalidation_probability": _round4(
                 selected_horizon.get("target_before_invalidation_probability")
             ),
+        },
+        "full_suite_story_lock_v3": {
+            "active_side": _side(story_lock.get("active_side")),
+            "candidate_side": _side(story_lock.get("candidate_side")),
+            "state": str(story_lock.get("state") or ""),
+            "confirmed": _bool(story_lock.get("confirmed")),
+            "transition_confirmed": _bool(story_lock.get("transition_confirmed")),
+            "story_confidence": _round4(story_lock.get("story_confidence")),
+            "story_margin": _round4(story_lock.get("story_margin")),
+            "target_before_invalidation_probability": _round4(
+                story_lock.get("target_before_invalidation_probability")
+            ),
+            "horizon_candles": _int(story_lock.get("horizon_candles"), 0),
+            "opposite_single_candle_policy": str(story_lock.get("opposite_single_candle_policy") or ""),
+            "raw_candle_cannot_flip_story": _bool(story_lock.get("raw_candle_cannot_flip_story")),
         },
         "rules_applied": rules,
     }

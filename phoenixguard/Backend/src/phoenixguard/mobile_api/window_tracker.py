@@ -3470,12 +3470,18 @@ def _broker_source_lock_payload_v3(
             "broker_url_tokens": ["tradingview.com", "tradingview"],
         }
     elif study_source_expected:
+        pocket_source = _is_pocket_option_query(query_text) or _is_pocket_option_like_title(title)
+        generic_title_tokens = [query_text] if query_text else ([title] if title else [])
         row["expected_broker_source_lock"] = {
             "source_role": "study",
-            "source_kind": "pocket_option_chart" if _is_pocket_option_query(query_text) or _is_pocket_option_like_title(title) else "visible_chart",
-            "required_browser": "edge",
-            "broker_title_tokens": ["pocket option", "pocketoption", "the most innovative trading platform"],
-            "broker_url_tokens": ["pocketoption.com", "pocketoption"],
+            "source_kind": "pocket_option_chart" if pocket_source else "visible_chart",
+            "required_browser": "edge" if pocket_source else "any",
+            "broker_title_tokens": (
+                ["pocket option", "pocketoption", "the most innovative trading platform"]
+                if pocket_source
+                else generic_title_tokens
+            ),
+            "broker_url_tokens": ["pocketoption.com", "pocketoption"] if pocket_source else [],
         }
     return row
 
@@ -26215,10 +26221,14 @@ class ContinuousWindowTrackerService:
             )
         else:
             source_lock_controls = _normalize_execution_controls(payload.get("execution_controls", {}))
-            source_lock_study_source_expected = not (
-                bool(source_lock_controls.get("live_execution_enabled", False))
-                and str(source_lock_controls.get("execution_mode", "shadow") or "shadow").strip().lower() == "live"
-            )
+            source_query_text = str(payload.get("window_query", "") or "").strip()
+            if _is_pocket_option_query(source_query_text):
+                source_lock_study_source_expected = not (
+                    bool(source_lock_controls.get("live_execution_enabled", False))
+                    and str(source_lock_controls.get("execution_mode", "shadow") or "shadow").strip().lower() == "live"
+                )
+            else:
+                source_lock_study_source_expected = True
             broker_source_lock = _broker_source_lock_dict_v3(
                 descriptor,
                 window_image,
@@ -26248,12 +26258,56 @@ class ContinuousWindowTrackerService:
             chart_evidence = _mapping_to_dict(surface_guard_evidence.get("chart", {}))
         allow_chart_study_when_guard_blocked = bool(
             broker_guard_invalid
-            and bool(manual_focus.get("enabled", False))
             and bool(chart_evidence.get("chart_like_pixels", False))
             and str(os.getenv("PHOENIXGUARD_ALLOW_CHART_STUDY_WHEN_BROKER_GUARD_BLOCKS", "1") or "1").strip().lower()
             not in {"0", "false", "off", "no"}
         )
         if broker_guard_invalid and allow_chart_study_when_guard_blocked:
+            broker_source_lock = dict(broker_source_lock)
+            broker_source_lock["status"] = "VALID"
+            broker_source_lock["valid"] = True
+            broker_source_lock["wrong_surface"] = False
+            broker_source_lock["visual_study_source_only"] = True
+            broker_source_lock["broker_click_safe"] = False
+            broker_source_lock["reason"] = (
+                "Chart pixels are valid for visual study; broker controls are not proven, so broker execution remains blocked."
+            )
+            reason_codes = [
+                str(item)
+                for item in cast(Sequence[Any], broker_source_lock.get("reason_codes", []))
+                if str(item).strip()
+            ]
+            for code in ("CHART_STUDY_SOURCE_LOCKED", "BROKER_CLICK_UNSAFE"):
+                if code not in reason_codes:
+                    reason_codes.append(code)
+            broker_source_lock["reason_codes"] = reason_codes
+            broker_source_lock["study_source_expected"] = True
+            broker_source_lock["chart_source_like"] = True
+            broker_source_lock["evidence"] = {
+                **_mapping_to_dict(broker_source_lock.get("evidence", {})),
+                "study_source_expected": True,
+                "chart_source_like": True,
+                "chart": chart_evidence,
+            }
+            surface_guard = _mapping_to_dict(broker_source_lock.get("surface_guard", {}))
+            if surface_guard:
+                surface_guard["wrong_surface"] = False
+                surface_guard["capture_safe"] = True
+                surface_guard["reason"] = "Captured pixels include a chart study surface with visible candle evidence."
+                surface_guard["reason_codes"] = ["CHART_SOURCE_PIXELS_CONFIRMED"]
+                broker_source_lock["surface_guard"] = surface_guard
+            broker_source_study_only = True
+            broker_source_summary.update(
+                {
+                    "valid": True,
+                    "status": "VALID",
+                    "wrong_surface": False,
+                    "pixel_fingerprint_valid": True,
+                    "study_source_only": True,
+                    "broker_click_safe": False,
+                    "reason": str(broker_source_lock.get("reason", "")),
+                }
+            )
             LOGGER.info(
                 "Broker source guard is not click-safe for %s, but chart pixels are valid; continuing visual study and blocking broker execution.",
                 payload.get("session_id", session_id),
@@ -27106,6 +27160,52 @@ class ContinuousWindowTrackerService:
             )
         broker_source_guard = _mapping_to_dict(broker_source_lock.get("surface_guard", {}))
         broker_source_evidence = _mapping_to_dict(broker_source_lock.get("evidence", {}))
+        surface_guard_evidence = _mapping_to_dict(broker_source_guard.get("evidence", {}))
+        final_chart_evidence = _mapping_to_dict(broker_source_evidence.get("chart", {}))
+        if not final_chart_evidence:
+            final_chart_evidence = _mapping_to_dict(surface_guard_evidence.get("chart", {}))
+        final_broker_guard_invalid = self._pocket_option_surface_guard_enabled(payload) and not bool(broker_source_lock.get("valid", False))
+        final_allow_chart_study = bool(
+            final_broker_guard_invalid
+            and bool(final_chart_evidence.get("chart_like_pixels", False))
+            and str(os.getenv("PHOENIXGUARD_ALLOW_CHART_STUDY_WHEN_BROKER_GUARD_BLOCKS", "1") or "1").strip().lower()
+            not in {"0", "false", "off", "no"}
+        )
+        if final_allow_chart_study:
+            broker_source_lock = dict(broker_source_lock)
+            broker_source_lock["status"] = "VALID"
+            broker_source_lock["valid"] = True
+            broker_source_lock["wrong_surface"] = False
+            broker_source_lock["visual_study_source_only"] = True
+            broker_source_lock["broker_click_safe"] = False
+            broker_source_lock["reason"] = (
+                "Chart pixels are valid for visual study; broker controls are not proven, so broker execution remains blocked."
+            )
+            reason_codes = [
+                str(item)
+                for item in cast(Sequence[Any], broker_source_lock.get("reason_codes", []))
+                if str(item).strip()
+            ]
+            for code in ("CHART_STUDY_SOURCE_LOCKED", "BROKER_CLICK_UNSAFE"):
+                if code not in reason_codes:
+                    reason_codes.append(code)
+            broker_source_lock["reason_codes"] = reason_codes
+            broker_source_lock["study_source_expected"] = True
+            broker_source_lock["chart_source_like"] = True
+            broker_source_lock["evidence"] = {
+                **_mapping_to_dict(broker_source_lock.get("evidence", {})),
+                "study_source_expected": True,
+                "chart_source_like": True,
+                "chart": final_chart_evidence,
+            }
+            broker_source_guard = _mapping_to_dict(broker_source_lock.get("surface_guard", {}))
+            if broker_source_guard:
+                broker_source_guard["wrong_surface"] = False
+                broker_source_guard["capture_safe"] = True
+                broker_source_guard["reason"] = "Captured pixels include a chart study surface with visible candle evidence."
+                broker_source_guard["reason_codes"] = ["CHART_SOURCE_PIXELS_CONFIRMED"]
+                broker_source_lock["surface_guard"] = broker_source_guard
+            broker_source_evidence = _mapping_to_dict(broker_source_lock.get("evidence", {}))
         broker_source_study_only = _broker_source_lock_is_study_only(broker_source_lock)
         broker_source: dict[str, Any] = {
             "lock_id": str(

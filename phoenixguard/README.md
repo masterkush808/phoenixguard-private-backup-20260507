@@ -108,6 +108,20 @@ After the burn is complete and the report has been reviewed, add `--confirm-dele
 the allowlisted generated paths older than the age gate. This purge does not target
 `runtime\live\data_live\mobile_api\window_tracker\sessions\...` active session files.
 
+The canonical live launcher also starts a disk-growth guard by default. It caps generated
+runtime/session memory at `2GB` per target and prunes down to `1536MB` when a target crosses the
+cap. This is the behind-the-scenes protection for long burns and VPS deployments:
+
+```powershell
+.\.venv-live\Scripts\python.exe .\Backend\tools\phoenixguard_disk_growth_guard.py --once --apply --limit 2GB --low-water 1536MB
+```
+
+The guard only targets generated artifacts: `runtime\live` tracker artifacts/logs,
+`.codex_runtime`, `reports`, `_archive`, `Business\web\.next`, and optional operator
+`.codex\sessions` history. It refuses protected roots such as `models`, `book knowledge`,
+`808 Memory`, `memory_bank`, `data`, `config`, and source code. Disable it only for a deliberate
+maintenance run with `PHOENIXGUARD_DISK_GUARD_ENABLED=0`.
+
 ## Fast Safe Restart
 
 Use this when you want to stop stale sessions/processes, clear runtime cache, and start the live
