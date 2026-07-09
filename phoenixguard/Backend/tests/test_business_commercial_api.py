@@ -6,6 +6,7 @@ import json
 from fastapi.testclient import TestClient
 
 import phoenixguard.business.store as business_store_module
+from phoenixguard.business.providers import PayPalCheckoutProvider
 from phoenixguard.business.store import FREE_PREVIEW_PLAN_CODE, BusinessStore, set_business_store_for_test
 from phoenixguard.mobile_api.app import create_app
 
@@ -411,3 +412,85 @@ def test_mock_stripe_signature_path_rejects_and_accepts_events() -> None:
     assert rejected.status_code == 400
     assert accepted.status_code == 200
     assert accepted.json()["status"] == "accepted"
+
+
+def test_paypal_checkout_provider_creates_order_payload(monkeypatch: Any) -> None:
+    monkeypatch.setenv("PAYPAL_CLIENT_ID", "paypal_client_test")
+    monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "paypal_secret_test")
+    monkeypatch.setenv("PAYPAL_WEBHOOK_ID", "paypal_webhook_test")
+    monkeypatch.setenv("PAYPAL_SUCCESS_URL", "https://808fx.example/checkout/success")
+    monkeypatch.setenv("PAYPAL_CANCEL_URL", "https://808fx.example/checkout/cancel")
+    monkeypatch.setenv("PAYPAL_MERCHANT_EMAIL", "thabangkush.masoabi@gmail.com")
+    captured: list[Any] = []
+
+    class FakeResponse:
+        def __init__(self, body: dict[str, Any]) -> None:
+            self._body = body
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(self._body).encode("utf-8")
+
+    def fake_open(request: Any, timeout: int = 20) -> FakeResponse:
+        captured.append(request)
+        url = str(request.full_url)
+        if url.endswith("/v1/oauth2/token"):
+            return FakeResponse({"access_token": "access_token_test"})
+        return FakeResponse(
+            {
+                "id": "paypal_order_123",
+                "status": "CREATED",
+                "links": [{"rel": "approve", "href": "https://paypal.test/checkoutnow?token=paypal_order_123"}],
+            }
+        )
+
+    provider = PayPalCheckoutProvider(opener=fake_open)
+    checkout = provider.create_subscription_checkout(
+        customer_id="cus_paypal_test",
+        email="customer@example.test",
+        plan_code="hybrid-standard-6h",
+    )
+
+    assert checkout["provider"] == "paypal"
+    assert checkout["url"].startswith("https://paypal.test/checkoutnow")
+    assert checkout["custom_id"] == "pg:cus_paypal_test:hybrid-standard-6h"
+    order_body = json.loads(captured[1].data.decode("utf-8"))
+    assert order_body["intent"] == "CAPTURE"
+    assert order_body["purchase_units"][0]["custom_id"] == "pg:cus_paypal_test:hybrid-standard-6h"
+    assert order_body["purchase_units"][0]["amount"] == {"currency_code": "USD", "value": "20.00"}
+    assert order_body["payment_source"]["paypal"]["experience_context"]["user_action"] == "PAY_NOW"
+
+
+def test_paypal_webhook_capture_completed_activates_paid_license(monkeypatch: Any) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_PAYMENT_PROVIDER", "paypal")
+    monkeypatch.setenv("PAYPAL_WEBHOOK_SIGNATURE_MODE", "mock")
+    client = _client()
+    store = business_store_module.get_business_store()
+    customer = next(item for item in store.customers.values() if item.email == "expired@808fx.mock")
+    before = len(store.customer_licenses(customer.id))
+    event = {
+        "id": "evt_paypal_completed",
+        "event_type": "PAYMENT.CAPTURE.COMPLETED",
+        "resource": {
+            "id": "capture_paypal_completed",
+            "status": "COMPLETED",
+            "custom_id": f"pg:{customer.id}:hybrid-standard-6h",
+        },
+    }
+
+    response = client.post(
+        "/v1/webhooks/paypal",
+        content=json.dumps(event),
+        headers={"PayPal-Transmission-Sig": "mock-valid"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "accepted"
+    licenses = store.customer_licenses(customer.id)
+    assert len(licenses) == before + 1
+    assert any(item.plan_code == "hybrid-standard-6h" and item.status == "active" for item in licenses)

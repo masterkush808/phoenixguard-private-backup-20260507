@@ -1643,6 +1643,116 @@ def test_playbook_ai_wait_route_is_warning_when_playbook_strike_is_confirmed(
     assert packet["opportunity_maturity"]["denied_at"] == "NONE"
 
 
+def test_full_suite_story_flip_requires_second_fresh_same_side_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call_count = 0
+
+    def _story_lock_intelligence(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        side = "SELL" if call_count <= 2 else "BUY"
+        return {
+            "schema_version": "PG_PLAYBOOK_AI_INTELLIGENCE_V3",
+            "semantic_graph": {"coverage": {"full_suite_ready": True, "rows_total": 30}},
+            "thesis_arbitration": {
+                "winner": side,
+                "winning_score": 0.76,
+                "margin": 0.18,
+                "scores": {
+                    "BUY": {"side": "BUY", "score": 0.76 if side == "BUY" else 0.44},
+                    "SELL": {"side": "SELL", "score": 0.76 if side == "SELL" else 0.44},
+                },
+            },
+            "meta_label": {
+                "selected_side": side,
+                "candidate_tradeable": True,
+                "selected": {"target_before_invalidation_probability": 0.82},
+            },
+            "horizon": {
+                "selected_side": side,
+                "selected": {
+                    "optimized_candle_count": 8,
+                    "optimized_duration_sec": 2400,
+                    "basis": "test_full_suite_story",
+                },
+            },
+            "regime_router": {"route": "TRADEABLE_CURRENT_TRUTH", "regime": "TEST"},
+            "full_suite_story_lock_v3": {
+                "schema_version": "PG_FULL_SUITE_STORY_LOCK_V3",
+                "active_side": side,
+                "candidate_side": "HOLD",
+                "state": "FULL_SUITE_STORY_CONFIRMED",
+                "confirmed": True,
+                "transition_confirmed": False,
+                "story_confidence": 0.76,
+                "story_margin": 0.18,
+                "target_before_invalidation_probability": 0.82,
+                "horizon_candles": 8,
+                "rows_total": 30,
+            },
+        }
+
+    def _story_lock_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+        ai = dict(payload)
+        return {
+            "schema_version": "PG_PLAYBOOK_AI_SUMMARY_V3",
+            "full_suite_ready": True,
+            "thesis_arbitration": dict(cast(Mapping[str, Any], ai["thesis_arbitration"])),
+            "meta_label": {
+                "candidate_tradeable": True,
+                "target_before_invalidation_probability": 0.82,
+            },
+            "horizon": {
+                "optimized_candle_count": 8,
+                "optimized_duration_sec": 2400,
+            },
+            "regime_router": {"route": "TRADEABLE_CURRENT_TRUTH"},
+            "full_suite_story_lock_v3": dict(cast(Mapping[str, Any], ai["full_suite_story_lock_v3"])),
+        }
+
+    def _story_from_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        paths = (
+            ("playbook_ai_intelligence_v3", "full_suite_story_lock_v3"),
+            ("playbook_ai_summary_v3", "full_suite_story_lock_v3"),
+            ("dual_thesis_report_v3", "full_suite_story_lock_v3"),
+            ("model_council", "playbook_ai_summary_v3", "full_suite_story_lock_v3"),
+        )
+        for path in paths:
+            node: Any = payload
+            for key in path:
+                mapping_node: Mapping[str, Any] = cast(Mapping[str, Any], node) if isinstance(node, Mapping) else {}
+                node = mapping_node.get(key)
+            if isinstance(node, Mapping):
+                return cast(Mapping[str, Any], node)
+        return {}
+
+    monkeypatch.setattr(
+        "phoenixguard.decision.model_council_v3.build_playbook_ai_intelligence_v3",
+        _story_lock_intelligence,
+    )
+    monkeypatch.setattr(
+        "phoenixguard.decision.model_council_v3.compact_playbook_ai_intelligence_v3",
+        _story_lock_summary,
+    )
+
+    council = ModelCouncilV3()
+    council.evaluate(_strong_snapshot("SELL", frame_id=160), now_epoch=NOW)
+    sell_packet = council.evaluate(_strong_snapshot("SELL", frame_id=161), now_epoch=NOW + 0.5)
+    assert _story_from_payload(sell_packet)["effective_side"] == "SELL"
+
+    pending = council.evaluate(_strong_snapshot("SELL", frame_id=162), now_epoch=NOW + 1.0)
+    pending_story = _story_from_payload(pending)
+    assert pending_story["raw_active_side"] == "BUY"
+    assert pending_story["effective_side"] == "SELL"
+    assert pending_story["side_flip_pending"] is True
+
+    confirmed = council.evaluate(_strong_snapshot("SELL", frame_id=163), now_epoch=NOW + 1.5)
+    confirmed_story = _story_from_payload(confirmed)
+    assert confirmed_story["effective_side"] == "BUY"
+    assert confirmed_story["side_flip_pending"] is False
+
+
 def test_unresolved_countertrend_cannot_publish_professional_package() -> None:
     council = ModelCouncilV3()
     first = _strong_snapshot("BUY", frame_id=140)

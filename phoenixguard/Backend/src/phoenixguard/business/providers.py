@@ -3,13 +3,14 @@ from __future__ import annotations
 import html
 import json
 import os
+import base64
 import smtplib
 import ssl
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from email.message import EmailMessage
-from typing import Any, Mapping, cast
+from typing import Any, Mapping, Protocol, cast
 
 from .packages import package_profile_for_plan
 
@@ -36,6 +37,20 @@ class ProviderStatus:
             "mode": self.mode,
             "missing": list(self.missing),
         }
+
+
+class CheckoutProvider(Protocol):
+    def status(self) -> ProviderStatus:
+        ...
+
+    def create_subscription_checkout(
+        self,
+        *,
+        customer_id: str,
+        email: str,
+        plan_code: str = "hybrid-standard-6h",
+    ) -> dict[str, Any]:
+        ...
 
 
 class StripeCheckoutProvider:
@@ -133,6 +148,217 @@ class StripeCheckoutProvider:
         if not payload_map.get("url"):
             raise ProviderRequestError("Stripe checkout response did not include a hosted URL.")
         return dict(payload_map)
+
+
+class PayPalCheckoutProvider:
+    plan_amount_env: dict[str, str] = {
+        "hybrid-standard-6h": "PAYPAL_AMOUNT_STANDARD_6H",
+        "hybrid-professional-24x7": "PAYPAL_AMOUNT_PRO_24X7",
+        "hybrid-standard": "PAYPAL_AMOUNT_STANDARD_6H",
+    }
+
+    plan_default_amounts: dict[str, str] = {
+        "hybrid-standard-6h": "20.00",
+        "hybrid-professional-24x7": "100.00",
+        "hybrid-standard": "20.00",
+    }
+
+    def __init__(self, *, opener: Any | None = None) -> None:
+        self.client_id = os.getenv("PAYPAL_CLIENT_ID", "").strip()
+        self.client_secret = os.getenv("PAYPAL_CLIENT_SECRET", "").strip()
+        self.webhook_id = os.getenv("PAYPAL_WEBHOOK_ID", "").strip()
+        self.mode = os.getenv("PAYPAL_MODE", "sandbox").strip().lower()
+        self.currency = os.getenv("PAYPAL_CURRENCY", "USD").strip().upper() or "USD"
+        self.merchant_email = os.getenv("PAYPAL_MERCHANT_EMAIL", "").strip()
+        default_base = (
+            "https://api-m.paypal.com"
+            if self.mode == "live"
+            else "https://api-m.sandbox.paypal.com"
+        )
+        self.api_base_url = os.getenv("PAYPAL_API_BASE_URL", default_base).strip().rstrip("/")
+        self.success_url = (
+            os.getenv("PAYPAL_SUCCESS_URL", "").strip()
+            or os.getenv("PHOENIXGUARD_CHECKOUT_SUCCESS_URL", "").strip()
+        )
+        self.cancel_url = (
+            os.getenv("PAYPAL_CANCEL_URL", "").strip()
+            or os.getenv("PHOENIXGUARD_CHECKOUT_CANCEL_URL", "").strip()
+        )
+        self.plan_amounts = {
+            plan_code: os.getenv(env_name, "").strip()
+            for plan_code, env_name in self.plan_amount_env.items()
+        }
+        self._opener = opener or urllib.request.urlopen
+
+    def status(self) -> ProviderStatus:
+        missing: list[str] = []
+        if not self.client_id:
+            missing.append("PAYPAL_CLIENT_ID")
+        if not self.client_secret:
+            missing.append("PAYPAL_CLIENT_SECRET")
+        if not self.success_url:
+            missing.append("PAYPAL_SUCCESS_URL")
+        if not self.cancel_url:
+            missing.append("PAYPAL_CANCEL_URL")
+        if not self.webhook_id:
+            missing.append("PAYPAL_WEBHOOK_ID")
+        if not self.merchant_email:
+            missing.append("PAYPAL_MERCHANT_EMAIL")
+        return ProviderStatus(
+            provider="paypal",
+            configured=not missing,
+            mode="live" if self.mode == "live" else "sandbox",
+            missing=tuple(missing),
+        )
+
+    def _amount_for_plan(self, plan_code: str) -> str:
+        normalized = package_profile_for_plan(plan_code).code
+        raw = self.plan_amounts.get(normalized) or self.plan_default_amounts.get(normalized, "20.00")
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ProviderConfigurationError(f"Invalid PayPal amount for {normalized}: {raw}") from exc
+        if value <= 0:
+            raise ProviderConfigurationError(f"Invalid PayPal amount for {normalized}: {raw}")
+        return f"{value:.2f}"
+
+    def _access_token(self) -> str:
+        if not self.client_id or not self.client_secret:
+            raise ProviderConfigurationError("PayPal checkout is not configured: missing PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET.")
+        credentials = f"{self.client_id}:{self.client_secret}".encode("utf-8")
+        auth = base64.b64encode(credentials).decode("ascii")
+        request = urllib.request.Request(
+            f"{self.api_base_url}/v1/oauth2/token",
+            data=urllib.parse.urlencode({"grant_type": "client_credentials"}).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Basic {auth}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        )
+        try:
+            with self._opener(request, timeout=20) as response:
+                payload: object = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:  # pragma: no cover - network errors are environment-specific.
+            raise ProviderRequestError(f"PayPal token request failed: {exc}") from exc
+        if not isinstance(payload, Mapping):
+            raise ProviderRequestError("PayPal token response was not a JSON object.")
+        token = str(cast(Mapping[str, Any], payload).get("access_token") or "").strip()
+        if not token:
+            raise ProviderRequestError("PayPal token response did not include access_token.")
+        return token
+
+    def create_subscription_checkout(self, *, customer_id: str, email: str, plan_code: str = "hybrid-standard-6h") -> dict[str, Any]:
+        profile = package_profile_for_plan(plan_code)
+        status = self.status()
+        if not status.configured:
+            raise ProviderConfigurationError(f"PayPal checkout is not configured: missing {', '.join(status.missing)}.")
+        token = self._access_token()
+        custom_id = f"pg:{customer_id}:{profile.code}"
+        payload: dict[str, Any] = {
+            "intent": "CAPTURE",
+            "purchase_units": [
+                {
+                    "reference_id": custom_id,
+                    "custom_id": custom_id,
+                    "description": profile.name,
+                    "amount": {
+                        "currency_code": self.currency,
+                        "value": self._amount_for_plan(profile.code),
+                    },
+                }
+            ],
+            "payment_source": {
+                "paypal": {
+                    "experience_context": {
+                        "brand_name": "808Fx Standard Hybrid",
+                        "landing_page": "LOGIN",
+                        "user_action": "PAY_NOW",
+                        "return_url": self.success_url,
+                        "cancel_url": self.cancel_url,
+                    }
+                }
+            },
+        }
+        request = urllib.request.Request(
+            f"{self.api_base_url}/v2/checkout/orders",
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+        )
+        try:
+            with self._opener(request, timeout=20) as response:
+                response_payload: object = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:  # pragma: no cover - network errors are environment-specific.
+            raise ProviderRequestError(f"PayPal order request failed: {exc}") from exc
+        if not isinstance(response_payload, Mapping):
+            raise ProviderRequestError("PayPal order response was not a JSON object.")
+        order = dict(cast(Mapping[str, Any], response_payload))
+        approval_url = ""
+        links = order.get("links")
+        if isinstance(links, list):
+            for raw_link in cast(list[Any], links):
+                link = dict(cast(Mapping[str, Any], raw_link)) if isinstance(raw_link, Mapping) else {}
+                if str(link.get("rel") or "").lower() in {"approve", "payer-action"}:
+                    approval_url = str(link.get("href") or "").strip()
+                    break
+        if not approval_url:
+            raise ProviderRequestError("PayPal order response did not include an approval URL.")
+        order["provider"] = "paypal"
+        order["url"] = approval_url
+        order["plan_code"] = profile.code
+        order["customer_id"] = customer_id
+        order["customer_email"] = email
+        order["custom_id"] = custom_id
+        return order
+
+    def verify_webhook_signature(self, *, payload: bytes, headers: Mapping[str, str]) -> bool:
+        if os.getenv("PAYPAL_WEBHOOK_SIGNATURE_MODE", "").strip().lower() == "mock":
+            return str(headers.get("paypal-transmission-sig") or headers.get("PayPal-Transmission-Sig") or "") == "mock-valid"
+        if not self.webhook_id:
+            return False
+        token = self._access_token()
+        try:
+            webhook_event: object = json.loads(payload.decode("utf-8") or "{}")
+        except ValueError:
+            return False
+        verification_payload = {
+            "auth_algo": str(headers.get("paypal-auth-algo") or headers.get("PayPal-Auth-Algo") or ""),
+            "cert_url": str(headers.get("paypal-cert-url") or headers.get("PayPal-Cert-Url") or ""),
+            "transmission_id": str(headers.get("paypal-transmission-id") or headers.get("PayPal-Transmission-Id") or ""),
+            "transmission_sig": str(headers.get("paypal-transmission-sig") or headers.get("PayPal-Transmission-Sig") or ""),
+            "transmission_time": str(headers.get("paypal-transmission-time") or headers.get("PayPal-Transmission-Time") or ""),
+            "webhook_id": self.webhook_id,
+            "webhook_event": webhook_event,
+        }
+        request = urllib.request.Request(
+            f"{self.api_base_url}/v1/notifications/verify-webhook-signature",
+            data=json.dumps(verification_payload).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with self._opener(request, timeout=20) as response:
+                response_payload: object = json.loads(response.read().decode("utf-8"))
+        except Exception:  # pragma: no cover - network errors are environment-specific.
+            return False
+        if not isinstance(response_payload, Mapping):
+            return False
+        return str(cast(Mapping[str, Any], response_payload).get("verification_status") or "").upper() == "SUCCESS"
+
+
+def checkout_provider_from_env() -> CheckoutProvider:
+    provider = os.getenv("PHOENIXGUARD_PAYMENT_PROVIDER", "stripe").strip().lower()
+    if provider == "paypal":
+        return PayPalCheckoutProvider()
+    return StripeCheckoutProvider()
 
 
 class ResendEmailProvider:

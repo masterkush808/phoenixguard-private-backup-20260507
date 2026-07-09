@@ -5210,6 +5210,8 @@ def evaluate_model_council_v3(
         and ai_selected_side in {"BUY", "SELL"}
         and candidate_side in {"BUY", "SELL"}
         and ai_selected_side != candidate_side
+        and _side(snapshot.get("full_suite_story_stable_side")) == ai_selected_side
+        and _int(snapshot.get("full_suite_story_stable_reads"), 0) >= 1
     )
     if ai_story_lock_reframes_candidate and not _bool(snapshot.get("full_suite_story_reframe_attempted")):
         story_reframe_snapshot = {
@@ -5349,6 +5351,8 @@ def evaluate_model_council_v3(
         "full_suite_story_lock_confirmed": ai_story_lock_confirmed,
         "full_suite_story_lock_state": str(ai_story_lock.get("state") or ""),
         "full_suite_story_side": ai_selected_side if ai_story_lock_confirmed else "HOLD",
+        "full_suite_story_stable_side": _side(snapshot.get("full_suite_story_stable_side")),
+        "full_suite_story_stable_reads": _int(snapshot.get("full_suite_story_stable_reads"), 0),
         "horizon_candles": ai_selected_horizon_candles,
         "horizon_seconds": ai_selected_horizon_seconds,
         "effective_horizon_candles": ai_effective_horizon_candles,
@@ -6987,6 +6991,120 @@ class ModelCouncilV3:
         self._recent_candidate_sides: list[str] = []
         self._recent_raw_sides: list[str] = []
         self._stable_context_key: str | None = None
+        self._full_suite_story_side: str | None = None
+        self._full_suite_story_count = 0
+        self._full_suite_effective_side: str | None = None
+
+    def _full_suite_story_lock_refs(self, value: dict[str, Any]) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        paths = (
+            ("playbook_ai_intelligence_v3", "full_suite_story_lock_v3"),
+            ("playbook_ai_summary_v3", "full_suite_story_lock_v3"),
+            ("dual_thesis_report_v3", "full_suite_story_lock_v3"),
+            ("model_council", "playbook_ai_summary_v3", "full_suite_story_lock_v3"),
+            ("model_council", "dual_thesis_report_v3", "full_suite_story_lock_v3"),
+            ("opportunity_maturity", "playbook_ai_summary_v3", "full_suite_story_lock_v3"),
+            ("opportunity_maturity", "dual_thesis_report_v3", "full_suite_story_lock_v3"),
+            ("allowance_package", "playbook_ai_intelligence_v3", "full_suite_story_lock_v3"),
+            ("allowance_package", "playbook_ai_summary_v3", "full_suite_story_lock_v3"),
+            ("execution_packet", "playbook_ai_intelligence_v3", "full_suite_story_lock_v3"),
+            ("execution_packet", "playbook_ai_summary_v3", "full_suite_story_lock_v3"),
+            ("execution_packet", "dual_thesis_report_v3", "full_suite_story_lock_v3"),
+        )
+        for path in paths:
+            node: Any = value
+            for key in path:
+                if not isinstance(node, dict):
+                    node = None
+                    break
+                node = node.get(key)
+            if isinstance(node, dict) and node not in refs:
+                refs.append(node)
+        return refs
+
+    def _annotate_full_suite_story_stability(self, result: dict[str, Any], *, context_switched: bool) -> None:
+        refs = self._full_suite_story_lock_refs(result)
+        if not refs:
+            return
+        story = refs[0]
+        active_side = _side(story.get("active_side"))
+        confirmed = bool(_bool(story.get("confirmed")) and active_side in {"BUY", "SELL"})
+        previous_effective = self._full_suite_effective_side if self._full_suite_effective_side in {"BUY", "SELL"} else "HOLD"
+        if context_switched:
+            previous_effective = "HOLD"
+        if confirmed:
+            if self._full_suite_story_side == active_side:
+                self._full_suite_story_count += 1
+            else:
+                self._full_suite_story_side = active_side
+                self._full_suite_story_count = 1
+            if previous_effective not in {"BUY", "SELL"} or self._full_suite_story_count >= 2:
+                effective_side = active_side
+            else:
+                effective_side = previous_effective
+        else:
+            self._full_suite_story_side = None
+            self._full_suite_story_count = 0
+            effective_side = previous_effective
+        if confirmed and previous_effective in {"BUY", "SELL"}:
+            side_flip_pending = bool(active_side != previous_effective and self._full_suite_story_count < 2)
+        else:
+            side_flip_pending = False
+        if effective_side in {"BUY", "SELL"}:
+            self._full_suite_effective_side = effective_side
+        elif not confirmed:
+            self._full_suite_effective_side = None
+        stability_state = (
+            "SIDE_FLIP_PENDING_SECOND_FRESH_READ"
+            if side_flip_pending
+            else "STORY_LOCK_STABLE"
+            if confirmed and effective_side == active_side
+            else "STORY_LOCK_WATCHING"
+        )
+        patch = {
+            "raw_active_side": active_side if active_side in {"BUY", "SELL"} else "HOLD",
+            "effective_side": effective_side if effective_side in {"BUY", "SELL"} else "HOLD",
+            "display_side": effective_side if effective_side in {"BUY", "SELL"} else active_side if active_side in {"BUY", "SELL"} else "HOLD",
+            "previous_effective_side": previous_effective,
+            "stability_reads": self._full_suite_story_count,
+            "required_stability_reads": 2,
+            "side_flip_pending": side_flip_pending,
+            "stability_state": stability_state,
+            "stability_policy": "opposite full-suite authority requires two fresh same-side reads on the same symbol/timeframe",
+        }
+        for ref in refs:
+            ref.update(patch)
+
+    def _contain_single_read_candidate_flip(self, result: dict[str, Any], *, candidate: str, stable_reads: int) -> None:
+        suppressed_packet = result.pop("execution_packet", None)
+        execution = _mapping(result.get("execution"))
+        execution["enabled"] = False
+        execution["state"] = "WATCHING"
+        result["execution"] = execution
+        model_council = _mapping(result.get("model_council"))
+        model_council["final_state"] = "WATCHING"
+        model_council["block_reason"] = "FLIP_FLOP_CONTAINED"
+        result["model_council"] = model_council
+        queue = _mapping(result.get("trade_candidate_queue"))
+        queue.update(
+            {
+                "active_side": candidate if candidate in {"BUY", "SELL"} else "HOLD",
+                "stable_reads": stable_reads,
+                "flip_flop_risk": True,
+                "executable_allowed": False,
+                "deny_reason": "FLIP_FLOP_CONTAINED",
+                "reason": "Single-read opposite candidate contained until a second fresh same-side read confirms it.",
+            }
+        )
+        result["trade_candidate_queue"] = queue
+        result["block_reason"] = "FLIP_FLOP_CONTAINED"
+        result["execution_suppressed_by_facade"] = {
+            "reason": "FLIP_FLOP_CONTAINED",
+            "candidate_side": candidate if candidate in {"BUY", "SELL"} else "HOLD",
+            "stable_reads": stable_reads,
+            "required_stable_reads": 2,
+            "suppressed_packet_id": str(_mapping(suppressed_packet).get("packet_id") or ""),
+        }
 
     def evaluate(self, snapshot: Mapping[str, Any], *, now_epoch: float | None = None) -> dict[str, Any]:
         working = dict(snapshot)
@@ -7023,6 +7141,9 @@ class ModelCouncilV3:
             self._stable_candidate_count = 0
             self._recent_candidate_sides = []
             self._recent_raw_sides = []
+            self._full_suite_story_side = None
+            self._full_suite_story_count = 0
+            self._full_suite_effective_side = None
             working["source_identity_just_switched"] = True
             working["execution_mature"] = False
             working["candidate_stable_reads"] = 0
@@ -7035,6 +7156,9 @@ class ModelCouncilV3:
                 stored_symbol = previous_symbol
             stored_timeframe = context_timeframe or previous_timeframe
             self._stable_context_key = f"{stored_symbol}|{stored_timeframe}"
+        working["full_suite_story_stable_side"] = self._full_suite_story_side or "HOLD"
+        working["full_suite_story_stable_reads"] = self._full_suite_story_count
+        working["full_suite_story_effective_side"] = self._full_suite_effective_side or "HOLD"
         locked_surface_maturity = bool(_bool(working.get("locked_surface_identity_fallback_active")) and not context_switched)
         raw_side = _raw_observed_side_from_snapshot(working)
         buy_score = _score_from_snapshot(working, "BUY")
@@ -7083,11 +7207,21 @@ class ModelCouncilV3:
             }
             if effective_stable_count >= 2:
                 working["execution_mature"] = True
+        else:
+            candidate_changed = False
+            effective_stable_count = 0
         result = evaluate_model_council_v3(
             working,
             previous_state=self._previous_result,
             now=now_epoch,
         )
+        self._annotate_full_suite_story_stability(result, context_switched=context_switched)
+        if candidate_changed and effective_stable_count < 2:
+            self._contain_single_read_candidate_flip(
+                result,
+                candidate=candidate,
+                stable_reads=effective_stable_count,
+            )
         self._previous_result = result
         packet = result.get("execution_packet")
         if isinstance(packet, Mapping):

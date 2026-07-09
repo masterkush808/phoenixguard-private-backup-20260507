@@ -10570,7 +10570,9 @@
       const plan = objectOrEmpty(packet.professional_trade_plan);
       const story = objectOrEmpty(ai.full_suite_story_lock_v3 || dual.full_suite_story_lock_v3);
       const execution = objectOrEmpty(packet.execution);
-      const selectedSide = clean(story.active_side || dual.selected_authority_side || execution.side, "HOLD").toUpperCase();
+      const rawStorySide = clean(story.raw_active_side || story.active_side, "HOLD").toUpperCase();
+      const effectiveStorySide = clean(story.effective_side || story.display_side || "", "").toUpperCase();
+      const selectedSide = clean(effectiveStorySide || dual.selected_authority_side || execution.side, "HOLD").toUpperCase();
       const bigPicture = objectOrEmpty(objectOrEmpty(objectOrEmpty(plan.trade_hierarchy).big_picture));
       const primaryBias = clean(dual.primary_bias_side || bigPicture.side, "HOLD").toUpperCase();
       const currentPressure = objectOrEmpty(dual.current_pressure);
@@ -10578,26 +10580,36 @@
       const score = sideStudyScore(sideKey, ai, dual);
       const expected = objectOrEmpty(packet.expected_move_time);
       const entryWindow = objectOrEmpty(expected.entry_window);
-      const fullSuiteReady = ai.full_suite_ready === true || story.state === "FULL_SUITE_STORY_CONFIRMED";
+      const sideFlipPending = story.side_flip_pending === true;
+      const pendingSide = sideFlipPending ? rawStorySide : "";
+      const fullSuiteReady = ai.full_suite_ready === true || story.state === "FULL_SUITE_STORY_CONFIRMED" || story.confirmed === true;
       const freshnessPass = clean(packet.freshness_status || packet.freshness || payload.stale_status || "PASS", "PASS").toUpperCase();
       const blocker = clean(plan.blocker || packet.blocker || packet.block_reason || "", "");
       const sideIsAuthority = sideKey === selectedSide;
+      const sideIsPending = sideKey === pendingSide;
       const sideIsPressure = sideKey === currentPressureSide;
       const sideIsPrimary = sideKey === primaryBias;
       const candleSuffix = currentPressure.candle_count ? `${currentPressure.candle_count}c` : "";
+      const lockText = sideIsPending
+        ? clean(story.stability_state, "TRANSITION PENDING")
+        : sideIsAuthority && story.confirmed === true
+          ? "FULL SUITE STORY LOCK"
+          : sideIsAuthority
+            ? clean(story.state, "AUTHORITY")
+            : "STUDYING";
       return {
         side: sideKey,
-        signal: sideIsAuthority ? sideKey : sideIsPressure ? `${sideKey} PRESSURE` : sideIsPrimary ? `${sideKey} BIAS` : "STUDYING",
+        signal: sideIsAuthority ? sideKey : sideIsPending ? `${sideKey} TRANSITION` : sideIsPressure ? `${sideKey} PRESSURE` : sideIsPrimary ? `${sideKey} BIAS` : "STUDYING",
         score,
         pressure: sideIsPressure ? [sideKey, candleSuffix, clean(currentPressure.stage, "")].filter(Boolean).join(" ") : "not dominant",
-        bias: sideIsPrimary ? "PRIMARY" : sideIsAuthority ? "AUTHORITY" : "secondary",
-        lock: sideIsAuthority && story.confirmed === true ? "FULL SUITE STORY LOCK" : sideIsAuthority ? clean(story.state, "AUTHORITY") : "STUDYING",
-        authority: sideIsAuthority ? "PLAYBOOK FINAL DECIDER" : "LIVE STUDY",
+        bias: sideIsPrimary ? "PRIMARY" : sideIsAuthority ? "AUTHORITY" : sideIsPending ? "pending" : "secondary",
+        lock: lockText,
+        authority: sideIsAuthority ? "PLAYBOOK FINAL DECIDER" : sideIsPending ? "PENDING SECOND READ" : "LIVE STUDY",
         horizon: sideStudyHorizon(sideKey, ai, selectedSide),
-        entry: sideIsAuthority ? clean(entryWindow.duration_text || entryWindow.duration_sec, "active") : "watch",
+        entry: sideIsAuthority ? clean(entryWindow.duration_text || entryWindow.duration_sec, "active") : sideIsPending ? "confirming" : "watch",
         overlay: fullSuiteReady ? "TRUE" : "WAIT",
         freshness: freshnessPass,
-        blockers: sideIsAuthority ? (blocker || "NONE") : "not selected",
+        blockers: sideIsAuthority ? (blocker || "NONE") : sideIsPending ? "stability pending" : "not selected",
       };
     }
 
@@ -10627,7 +10639,7 @@
       const ai = fullSuiteAiFromPacket(packet);
       const story = objectOrEmpty(ai.full_suite_story_lock_v3 || dual.full_suite_story_lock_v3);
       const execution = objectOrEmpty(packet.execution);
-      const selectedSide = clean(story.active_side || dual.selected_authority_side || execution.side, "HOLD").toUpperCase();
+      const selectedSide = clean(story.effective_side || story.display_side || dual.selected_authority_side || execution.side, "HOLD").toUpperCase();
       const buyStatus = sideStudyStatus("BUY", payload, packet, ai, dual);
       const sellStatus = sideStudyStatus("SELL", payload, packet, ai, dual);
       renderSideStudy("buy", buyStatus);
@@ -10647,7 +10659,7 @@
       setText(els.packageSummaryMeta, `Frame ${frameId} | Capture ${captureCount} | Entry ${clean(entryWindow.duration_text, "--")}`);
       setText(els.guardStale, clean(packet.freshness_status || "No Stale Data"));
       setText(els.guardBridge, "MT4 Bridge Ready");
-      setText(els.guardSource, story.confirmed === true ? "Source Locked" : "Source Checking");
+      setText(els.guardSource, story.side_flip_pending === true ? "Story Confirming" : story.confirmed === true ? "Source Locked" : "Source Checking");
     }
 
     function renderWorkspacePanels(payload = {}) {
@@ -10782,7 +10794,7 @@
       const expected = objectOrEmpty(packet.expected_move_time);
       const frameId = clean(packet.frame_id || packet.frame || payload.frame_id || payload.capture_count, "--");
       const captureCount = clean(packet.capture_count || payload.capture_count, "--");
-      const side = clean(story.active_side || packet.execution?.side, "HOLD").toUpperCase();
+      const side = clean(story.effective_side || story.display_side || story.active_side || packet.execution?.side, "HOLD").toUpperCase();
       const playbook = clean(packet.book_strategy_playbook || expected.professional_trade_plan?.thesis_class, "Full suite story");
       const overlayCount = clean(ai.coverage?.actionable_count || payload.tracking_summary?.overlay_count || payload.overlay_count, "--");
       const rows = [

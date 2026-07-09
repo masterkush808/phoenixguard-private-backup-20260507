@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from .packages import package_profile_for_plan, payments_are_paused
 from .commands import latest_command_for_context
-from .providers import ProviderConfigurationError, ProviderRequestError, ResendEmailProvider, StripeCheckoutProvider
+from .providers import ProviderConfigurationError, ProviderRequestError, ResendEmailProvider, checkout_provider_from_env
 from .store import (
     EMAIL_VERIFICATION_TTL_SECONDS,
     FREE_PREVIEW_PLAN_CODE,
@@ -186,7 +186,7 @@ def _email_verification_payload(
 
 def register_business_routes(app: FastAPI, store: BusinessStore | None = None) -> None:
     business_store = store or get_business_store()
-    stripe_provider = StripeCheckoutProvider()
+    checkout_provider = checkout_provider_from_env()
     email_provider = ResendEmailProvider()
     register_business_tracker_access_routes(
         app,
@@ -222,14 +222,14 @@ def register_business_routes(app: FastAPI, store: BusinessStore | None = None) -
 
     @app.get("/v1/business/health")
     def business_health() -> dict[str, Any]:
-        stripe_status = stripe_provider.status()
+        billing_status = checkout_provider.status()
         email_status = email_provider.status()
         return {
             "status": "ok",
             "mode": "production-ready",
             "payments_paused": payments_are_paused(),
             "provider_adapters": {
-                "billing": stripe_status.as_dict(),
+                "billing": billing_status.as_dict(),
                 "email": email_status.as_dict(),
                 "storage": {
                     "provider": "in-memory-development",
@@ -289,29 +289,31 @@ def register_business_routes(app: FastAPI, store: BusinessStore | None = None) -
         if payments_are_paused():
             return business_store.stage_paid_package_selection(customer=customer, plan_code=package_profile.code)
         try:
-            checkout = stripe_provider.create_subscription_checkout(
+            checkout = checkout_provider.create_subscription_checkout(
                 customer_id=customer.id,
                 email=customer.email,
                 plan_code=package_profile.code,
             )
             checkout["plan_code"] = package_profile.code
         except ProviderConfigurationError as exc:
+            billing_status = checkout_provider.status()
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={
-                    "code": "stripe_configuration_required",
+                    "code": f"{billing_status.provider}_configuration_required",
                     "message": str(exc),
-                    "status": stripe_provider.status().as_dict(),
+                    "status": billing_status.as_dict(),
                 },
             ) from exc
         except ProviderRequestError as exc:
             raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
         session = business_store.record_checkout_session(customer=customer, provider_payload=checkout)
+        billing_status = checkout_provider.status()
         return {
             "checkout_url": session["url"],
             "checkout_session_id": session["id"],
-            "mode": stripe_provider.status().mode,
-            "provider": "stripe",
+            "mode": billing_status.mode,
+            "provider": billing_status.provider,
             "plan_code": package_profile.code,
             "package_profile": business_store.package_profile_payload(package_profile.code),
             "risk_warning": "Trading carries risk. PhoenixGuard does not guarantee profit and is not financial advice.",
@@ -681,6 +683,20 @@ def register_business_routes(app: FastAPI, store: BusinessStore | None = None) -
         event_payload: Mapping[str, Any] = cast(Mapping[str, Any], event) if isinstance(event, Mapping) else {}
         return business_store.apply_stripe_event(event_payload)
 
+    @app.post("/v1/webhooks/paypal")
+    async def paypal_webhook(request: Request) -> dict[str, Any]:
+        payload = await request.body()
+        headers = {key: value for key, value in request.headers.items()}
+        verifier = getattr(checkout_provider, "verify_webhook_signature", None)
+        if not callable(verifier) or not verifier(payload=payload, headers=headers):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid PayPal signature.")
+        try:
+            event: object = json.loads(payload.decode("utf-8") or "{}")
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid webhook JSON.") from exc
+        event_payload: Mapping[str, Any] = cast(Mapping[str, Any], event) if isinstance(event, Mapping) else {}
+        return business_store.apply_paypal_event(event_payload)
+
     @app.get("/v1/admin/customers")
     def admin_customers(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         _require_admin(business_store, authorization)
@@ -759,6 +775,7 @@ def register_business_routes(app: FastAPI, store: BusinessStore | None = None) -
             latest_command,
             latest_release,
             stripe_webhook,
+            paypal_webhook,
             admin_customers,
             admin_revoke_license,
             admin_grant_family_lifetime_license,

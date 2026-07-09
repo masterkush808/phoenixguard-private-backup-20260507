@@ -1556,10 +1556,17 @@ def compact_playbook_ai_intelligence_v3(value: Mapping[str, Any] | None) -> dict
         },
         "full_suite_story_lock_v3": {
             "active_side": _side(story_lock.get("active_side")),
+            "raw_active_side": _side(story_lock.get("raw_active_side")),
+            "effective_side": _side(story_lock.get("effective_side")),
+            "display_side": _side(story_lock.get("display_side")),
             "candidate_side": _side(story_lock.get("candidate_side")),
             "state": str(story_lock.get("state") or ""),
             "confirmed": _bool(story_lock.get("confirmed")),
             "transition_confirmed": _bool(story_lock.get("transition_confirmed")),
+            "side_flip_pending": _bool(story_lock.get("side_flip_pending")),
+            "stability_state": str(story_lock.get("stability_state") or ""),
+            "stability_reads": _int(story_lock.get("stability_reads"), 0),
+            "required_stability_reads": _int(story_lock.get("required_stability_reads"), 0),
             "story_confidence": _round4(story_lock.get("story_confidence")),
             "story_margin": _round4(story_lock.get("story_margin")),
             "target_before_invalidation_probability": _round4(

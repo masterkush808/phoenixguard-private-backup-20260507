@@ -1073,6 +1073,62 @@ class BusinessStore:
             "valid_until_epoch": now + 8.0,
         }
 
+    def _grant_paid_license_from_provider(
+        self,
+        *,
+        provider: str,
+        event_type: str,
+        customer_id: str,
+        plan_code: str,
+        provider_subscription_id: str,
+    ) -> dict[str, Any]:
+        if customer_id not in self.customers:
+            return {"status": "ignored", "reason": "customer not found"}
+        now = time.time()
+        profile = package_profile_for_plan(plan_code or DEFAULT_PAID_PLAN_CODE)
+        provider_subscription_id = provider_subscription_id or f"{provider}_{customer_id}_{int(now)}"
+        subscription = Subscription(
+            id=_stable_id("sub", provider_subscription_id),
+            customer_id=customer_id,
+            provider_subscription_id=provider_subscription_id,
+            plan_code=profile.code,
+            status=profile.subscription_status,
+            current_period_end_epoch=now + 86400 * profile.license_duration_days,
+        )
+        self.subscriptions[subscription.id] = subscription
+        license_key = f"PG-{secrets.token_hex(8).upper()}"
+        license_record = License(
+            id=_stable_id("lic", f"{customer_id}:{provider_subscription_id}"),
+            customer_id=customer_id,
+            subscription_id=subscription.id,
+            license_key_hash=_hash_secret(license_key),
+            license_key_hint=license_key[-6:],
+            plan_code=subscription.plan_code,
+            status=profile.license_status,
+            expires_at_epoch=subscription.current_period_end_epoch,
+        )
+        self.licenses[license_record.id] = license_record
+        self.license_keys[license_record.id] = license_key
+        self.audit(
+            actor_type="provider",
+            actor_id=provider,
+            action=f"{provider}.{event_type or 'payment_completed'}",
+            target_type="license",
+            target_id=license_record.id,
+            metadata={
+                "provider_subscription_id": provider_subscription_id,
+                "plan_code": profile.code,
+                "runtime_policy": profile.runtime_policy(),
+            },
+        )
+        return {
+            "status": "accepted",
+            "subscription_status": subscription.status,
+            "license_id": license_record.id,
+            "plan_code": profile.code,
+            "runtime_policy": profile.runtime_policy(),
+        }
+
     def apply_stripe_event(self, event: Mapping[str, Any]) -> dict[str, Any]:
         event_id = str(event.get("id") or "").strip()
         if event_id:
@@ -1086,38 +1142,14 @@ class BusinessStore:
         metadata = _mapping(obj.get("metadata"))
         customer_id = str(obj.get("client_reference_id") or metadata.get("customer_id") or "")
         if event_type == "checkout.session.completed" and customer_id and customer_id in self.customers:
-            now = time.time()
             provider_subscription_id = provider_subscription_id or str(obj.get("subscription") or f"sub_stripe_{customer_id}")
-            profile = package_profile_for_plan(str(metadata.get("plan_code") or DEFAULT_PAID_PLAN_CODE))
-            subscription = Subscription(
-                id=_stable_id("sub", provider_subscription_id),
+            return self._grant_paid_license_from_provider(
+                provider="stripe",
+                event_type=event_type,
                 customer_id=customer_id,
+                plan_code=str(metadata.get("plan_code") or DEFAULT_PAID_PLAN_CODE),
                 provider_subscription_id=provider_subscription_id,
-                plan_code=profile.code,
-                status=profile.subscription_status,
-                current_period_end_epoch=now + 86400 * profile.license_duration_days,
             )
-            self.subscriptions[subscription.id] = subscription
-            license_key = f"PG-{secrets.token_hex(8).upper()}"
-            license_record = License(
-                id=_stable_id("lic", f"{customer_id}:{provider_subscription_id}"),
-                customer_id=customer_id,
-                subscription_id=subscription.id,
-                license_key_hash=_hash_secret(license_key),
-                license_key_hint=license_key[-6:],
-                plan_code=subscription.plan_code,
-                status=profile.license_status,
-                expires_at_epoch=subscription.current_period_end_epoch,
-            )
-            self.licenses[license_record.id] = license_record
-            self.license_keys[license_record.id] = license_key
-            return {
-                "status": "accepted",
-                "subscription_status": subscription.status,
-                "license_id": license_record.id,
-                "plan_code": profile.code,
-                "runtime_policy": profile.runtime_policy(),
-            }
         provider_subscription_id = provider_subscription_id or "sub_mock_active"
         matched_subscription = None
         for subscription in self.subscriptions.values():
@@ -1144,6 +1176,37 @@ class BusinessStore:
             metadata={"provider_subscription_id": provider_subscription_id},
         )
         return {"status": "accepted", "subscription_status": matched_subscription.status}
+
+    def apply_paypal_event(self, event: Mapping[str, Any]) -> dict[str, Any]:
+        event_id = str(event.get("id") or "").strip()
+        if event_id:
+            if event_id in self.processed_billing_event_ids:
+                return {"status": "ignored", "reason": "duplicate_billing_event"}
+            self.processed_billing_event_ids.add(event_id)
+        event_type = str(event.get("event_type") or event.get("type") or "").strip()
+        resource = _mapping(event.get("resource") or _mapping(event.get("data")).get("object"))
+        status_text = str(resource.get("status") or "").strip().upper()
+        if event_type != "PAYMENT.CAPTURE.COMPLETED" or status_text not in {"", "COMPLETED"}:
+            return {"status": "ignored", "reason": "unsupported_paypal_event", "event_type": event_type}
+        custom_id = str(resource.get("custom_id") or resource.get("invoice_id") or "").strip()
+        parts = custom_id.split(":")
+        customer_id = ""
+        plan_code = DEFAULT_PAID_PLAN_CODE
+        if len(parts) >= 3 and parts[0] == "pg":
+            customer_id = parts[1]
+            plan_code = parts[2]
+        provider_subscription_id = str(resource.get("id") or "").strip()
+        related_ids = _mapping(_mapping(resource.get("supplementary_data")).get("related_ids"))
+        provider_subscription_id = provider_subscription_id or str(related_ids.get("order_id") or "").strip()
+        if not customer_id:
+            return {"status": "ignored", "reason": "missing_paypal_customer_reference"}
+        return self._grant_paid_license_from_provider(
+            provider="paypal",
+            event_type=event_type,
+            customer_id=customer_id,
+            plan_code=plan_code,
+            provider_subscription_id=provider_subscription_id,
+        )
 
     def snapshot_customer(self, customer: Customer) -> dict[str, Any]:
         licenses = [self.license_payload(item) for item in self.customer_licenses(customer.id)]
