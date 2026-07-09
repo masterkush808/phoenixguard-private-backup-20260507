@@ -2688,7 +2688,8 @@
 
     .status-chip,
     .session-token,
-    .live-token {
+    .live-token,
+    .countdown-token {
       min-height: 20px;
       border-radius: 4px;
       border: 1px solid rgba(242, 200, 102, 0.25);
@@ -2710,6 +2711,27 @@
     .status-chip:nth-child(3),
     .status-chip:nth-child(4) {
       color: var(--ice);
+    }
+
+    .countdown-token {
+      min-width: 74px;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      color: rgba(243, 240, 230, 0.8);
+      font-family: var(--mono);
+      font-size: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .countdown-token strong {
+      color: var(--gold);
+      font-size: 10px;
+      text-align: right;
+      white-space: nowrap;
     }
 
     .session-cluster {
@@ -2749,14 +2771,27 @@
       white-space: nowrap;
     }
 
-    .heartbeat-spark {
+    .heartbeat-bars {
       width: 72px;
       height: 18px;
-      background:
-        linear-gradient(90deg, transparent 0 10%, rgba(99, 224, 154, 0.42) 10% 12%, transparent 12% 22%, rgba(99, 224, 154, 0.72) 22% 24%, transparent 24% 34%, rgba(99, 224, 154, 0.35) 34% 40%, transparent 40% 52%, rgba(99, 224, 154, 0.9) 52% 55%, transparent 55% 70%, rgba(99, 224, 154, 0.5) 70% 74%, transparent 74%),
-        linear-gradient(180deg, transparent 46%, rgba(99, 224, 154, 0.28) 48% 52%, transparent 54%);
-      filter: drop-shadow(0 0 6px rgba(99, 224, 154, 0.28));
-      animation: heartbeatTrace 2.6s linear infinite;
+      display: flex;
+      align-items: end;
+      gap: 4px;
+      border-bottom: 1px solid rgba(99, 224, 154, 0.22);
+      filter: drop-shadow(0 0 6px rgba(99, 224, 154, 0.18));
+    }
+
+    .heartbeat-bars i {
+      width: 2px;
+      min-height: 3px;
+      height: var(--bar-height, 6px);
+      background: rgba(99, 224, 154, 0.66);
+      box-shadow: 0 0 8px rgba(99, 224, 154, 0.24);
+    }
+
+    .heartbeat-bars.is-unknown i {
+      background: rgba(170, 167, 150, 0.42);
+      box-shadow: none;
     }
 
     .workspace-nav {
@@ -3128,7 +3163,7 @@
     .workspace-panel {
       display: none;
       grid-column: 1 / -1;
-      min-height: 420px;
+      min-height: 0;
       border: 1px solid rgba(255, 255, 255, 0.085);
       border-radius: 6px;
       background:
@@ -3143,17 +3178,17 @@
       align-items: flex-start;
       justify-content: space-between;
       gap: 14px;
-      padding: 14px 16px;
+      padding: 9px 12px;
       border-bottom: 1px solid rgba(255, 255, 255, 0.075);
       background: rgba(0, 0, 0, 0.18);
     }
 
     .workspace-panel-head p {
-      margin-top: 5px;
+      margin-top: 3px;
       color: var(--muted);
       font-family: var(--mono);
-      font-size: 11px;
-      line-height: 1.45;
+      font-size: 9px;
+      line-height: 1.35;
     }
 
     .workspace-state {
@@ -3175,17 +3210,19 @@
     .workspace-panel-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 10px;
-      padding: 14px;
+      align-items: start;
+      gap: 8px;
+      padding: 10px;
     }
 
     .ops-card {
       min-width: 0;
-      min-height: 138px;
+      min-height: 78px;
       display: grid;
+      align-self: start;
       align-content: start;
-      gap: 10px;
-      padding: 13px;
+      gap: 5px;
+      padding: 9px 10px;
       border: 1px solid rgba(255, 255, 255, 0.085);
       border-radius: 5px;
       background: rgba(255, 255, 255, 0.032);
@@ -3195,16 +3232,20 @@
 
     .ops-card strong {
       color: var(--gold);
-      font-size: 19px;
-      line-height: 1.1;
+      font-size: 15px;
+      line-height: 1.15;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
       overflow-wrap: anywhere;
     }
 
     .ops-card span:last-child {
       color: var(--muted);
       font-family: var(--mono);
-      font-size: 10px;
-      line-height: 1.45;
+      font-size: 8.8px;
+      line-height: 1.3;
       overflow-wrap: anywhere;
     }
 
@@ -3251,7 +3292,19 @@
     body.route-security .workspace-panel[data-panel-route="security"],
     body.route-settings .workspace-panel[data-panel-route="settings"] {
       display: grid;
-      grid-template-rows: auto minmax(0, 1fr);
+      grid-template-rows: auto auto;
+      align-self: start;
+    }
+
+    body.route-broker .lower-grid,
+    body.route-bridge .lower-grid,
+    body.route-security .lower-grid,
+    body.route-settings .lower-grid {
+      min-height: 0;
+      grid-auto-rows: auto;
+      align-items: start;
+      padding-top: 10px;
+      padding-bottom: 10px;
     }
 
     .inspector-module {
@@ -3459,12 +3512,6 @@
       color: rgba(243, 240, 230, 0.86);
     }
 
-    @keyframes heartbeatTrace {
-      from { opacity: 0.62; transform: translateX(-2px); }
-      50% { opacity: 1; }
-      to { opacity: 0.62; transform: translateX(2px); }
-    }
-
     @media (max-width: 1280px) {
       body {
         overflow: auto;
@@ -3551,12 +3598,15 @@
             </div>
             <div class="system-telemetry-item">
               <span>Heartbeat</span>
-              <strong id="system-heartbeat">-- FPS</strong>
-              <i class="heartbeat-spark" aria-hidden="true"></i>
+              <strong id="system-heartbeat">N/A</strong>
+              <span class="heartbeat-bars is-unknown" id="heartbeat-bars" aria-hidden="true">
+                <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+              </span>
             </div>
           </div>
           <button type="button" class="session-token" id="session-chip">Session __SESSION_LABEL__</button>
           <div class="live-token"><span class="live-dot" id="live-dot"></span><span id="metric-status-mini">Awaiting</span></div>
+          <div class="countdown-token"><span>Next</span><strong id="capture-countdown">N/A</strong></div>
         </div>
       </header>
 
@@ -4318,6 +4368,7 @@
       mode: "overlay",
       refreshTimer: null,
       heartbeatTimer: null,
+      countdownTimer: null,
       heartbeatWorker: null,
       stream: null,
       streamConnected: false,
@@ -4340,6 +4391,8 @@
       pendingMemoryAction: null,
       pendingMemoryLabel: "",
       pendingMemoryStartedAt: 0,
+      captureCountdown: {deadlineMs: 0, intervalSec: 0, active: false},
+      heartbeatSamples: [],
       selected: {type: "signal", key: ""},
       layers: {
         chart_bounds: true,
@@ -4617,6 +4670,8 @@
       systemTime: $("system-time"),
       systemUptime: $("system-uptime"),
       systemHeartbeat: $("system-heartbeat"),
+      heartbeatBars: $("heartbeat-bars"),
+      captureCountdown: $("capture-countdown"),
       eventTimelineCaption: $("event-timeline-caption"),
       eventTimelineList: $("event-timeline-list"),
       evidenceSnapshotImg: $("evidence-snapshot-img"),
@@ -4740,7 +4795,7 @@
       const signal = session.latest_signal || {};
       const projection = currentMemoryProjection(session);
       const market = clean(tracking.detected_market || signal.market || session.market);
-      const timeframe = clean(signal.focus_timeframe || tracking.detected_timeframe);
+      const timeframe = timeframeDisplay(session);
       const overlayCatchingUp = state.mode === "overlay" && state.surface.overlayStale;
       const modeLabel = overlayCatchingUp ? "Overlay catching up" : state.mode === "overlay" ? "Overlay mode" : "Raw surface mode";
       const brokerPlane = session.broker_surface && session.broker_surface.capture_plane;
@@ -4752,7 +4807,7 @@
       const memoryLabel = projection && projection.status === "ready"
         ? `${clean(projection.mode, "predict").toUpperCase()} memory path`
         : "live tracker study";
-      const marketLabel = [market, timeframe].filter(Boolean).join(" ");
+      const marketLabel = [market, timeframe !== "N/A" ? timeframe : ""].filter(Boolean).join(" ");
       els.surfaceCaption.textContent = [modeLabel, planeLabel, marketLabel || "market pending", memoryLabel].join(" | ");
     }
 
@@ -5828,6 +5883,70 @@
     function clean(value, fallback = "--") {
       const text = String(value ?? "").trim();
       return text || fallback;
+    }
+
+    function normalizeTimeframeLabel(value) {
+      const text = String(value ?? "").trim().toUpperCase().replace(/\s+/g, "");
+      const match = text.match(/^(S(?:3|5|10|15|30)|M(?:1|2|3|5|10|15|30)|H(?:1|2|4)|D1|W1)$/);
+      return match ? match[1] : "";
+    }
+
+    function timeframeConfidence(value) {
+      const number = Number(value);
+      return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : 0;
+    }
+
+    function timeframeSourceIsWeak(source) {
+      const text = String(source ?? "").trim().toLowerCase();
+      return !text || text.includes("cached") || text.includes("fallback") || text.includes("default");
+    }
+
+    function trustedTimeframeContext(session = {}) {
+      const signal = objectOrEmpty(session.latest_signal);
+      const tracking = objectOrEmpty(session.tracking_summary);
+      const forecast = objectOrEmpty(signal.high_frequency_forecast);
+      const twoCandle = objectOrEmpty(forecast.two_candle_study);
+      const configured = [
+        signal.configured_high_frequency_timeframe,
+        signal.high_frequency_study_timeframe,
+        tracking.configured_high_frequency_timeframe,
+        forecast.timeframe,
+        twoCandle.timeframe,
+      ].map(normalizeTimeframeLabel).filter(Boolean);
+      const configuredSet = new Set(configured);
+      const candidates = [
+        {
+          value: signal.focus_timeframe,
+          source: signal.focus_timeframe_source || tracking.timeframe_source || "focus_selector",
+          confidence: signal.focus_timeframe_confidence ?? tracking.timeframe_confidence,
+        },
+        {
+          value: tracking.detected_timeframe,
+          source: tracking.timeframe_source || "detected_selector",
+          confidence: tracking.timeframe_confidence,
+        },
+        {value: signal.timeframe, source: signal.timeframe_source || "signal", confidence: signal.timeframe_confidence ?? 1},
+        {value: tracking.timeframe, source: tracking.timeframe_source || "tracking", confidence: tracking.timeframe_confidence ?? 1},
+        {value: session.timeframe, source: session.timeframe_source || "session", confidence: session.timeframe_confidence ?? 1},
+      ];
+      for (const candidate of candidates) {
+        const label = normalizeTimeframeLabel(candidate.value);
+        if (!label) continue;
+        const confidence = timeframeConfidence(candidate.confidence);
+        const source = clean(candidate.source, "unverified");
+        const weakSource = timeframeSourceIsWeak(source);
+        if (confidence >= 0.85 && !weakSource) {
+          return {label, source, confidence, trusted: true};
+        }
+        if (configuredSet.has(label) && confidence >= 0.55) {
+          return {label, source: `${source} + runtime agreement`, confidence, trusted: true};
+        }
+      }
+      return {label: "N/A", source: configured.length ? "selector unverified" : "not detected", confidence: 0, trusted: false};
+    }
+
+    function timeframeDisplay(session = {}) {
+      return trustedTimeframeContext(session).label;
     }
 
     function colorClass(action) {
@@ -7419,7 +7538,7 @@
         ["Sequence", `${clean(sequence.sequence_id, "--")} | ${Number(sequence.confidence || 0).toFixed(2)}`],
         ["Model Council", `${clean(council.state || council.status || result.execution || "--")} | ${clean(council.reason || council.summary || result.reason || "--")}`],
         ["Broker Exec", `${clean(executionState.status, "disabled")} | ${clean(executionState.message, "--")}`],
-        ["Timeframe", clean(signal.focus_timeframe || tracking.detected_timeframe)],
+        ["Timeframe", timeframeDisplay(session)],
         ["Selector", clean(focus.status, "idle")],
         ["Surface", clean(tracking.surface_kind || tracking.overlay_kind)],
         ["Session", clean(session.session_id || SESSION_ID)],
@@ -7674,7 +7793,7 @@
       const executionControls = session.execution_controls || {};
       const values = {
         window: clean(session.locked_title || session.window_query, "Unmatched"),
-        timeframe: clean([signal.focus_timeframe || tracking.detected_timeframe, tracking.detected_market || signal.market].filter(Boolean).join(" | "), signal.focus_timeframe || tracking.detected_timeframe || tracking.detected_market || signal.market),
+        timeframe: clean([timeframeDisplay(session) !== "N/A" ? timeframeDisplay(session) : "", tracking.detected_market || signal.market].filter(Boolean).join(" | "), "N/A"),
         selector: clean(focus.status, "idle"),
         execution: `${clean(executionState.status, "disabled")} | ${clean(executionControls.execution_mode, "shadow")}`,
         error: clean(session.last_error || focus.last_error, "None"),
@@ -10010,7 +10129,7 @@
         ["Next", kernel.next_most_likely_event || "--"],
         ["CandleExec", kernel.candle_execution_side || "--"],
         ["Mode", kernel.trade_mode || "--"],
-        ["Timeframe", signal.focus_timeframe || tracking.detected_timeframe || "--"],
+        ["Timeframe", timeframeDisplay(state.session || {})],
         ["Selector", focus.status || "idle"],
         ["Candles", tracking.visible_candle_count || 0],
       ];
@@ -10266,6 +10385,130 @@
       return scoreNumber(value).toFixed(2);
     }
 
+    function pipelineTiming(session = {}) {
+      const signal = objectOrEmpty(session.latest_signal);
+      const tracking = objectOrEmpty(session.tracking_summary);
+      return objectOrEmpty(session.pipeline_timing || signal.pipeline_timing || tracking.pipeline_timing);
+    }
+
+    function captureIntervalSeconds(session = {}) {
+      const timing = pipelineTiming(session);
+      return scoreNumber(
+        session.effective_capture_interval_sec
+        || session.capture_interval_sec
+        || timing.capture_interval_sec
+        || timing.interval_sec,
+        0,
+      );
+    }
+
+    function publishedEpochSeconds(session = {}) {
+      const timing = pipelineTiming(session);
+      return scoreNumber(
+        timing.published_epoch
+        || timing.capture_started_epoch
+        || session.updated_epoch
+        || session.last_capture_epoch,
+        0,
+      );
+    }
+
+    function updateCaptureCountdown(session = {}) {
+      const intervalSec = captureIntervalSeconds(session);
+      const directNext = Number(session.next_capture_in_sec);
+      const publishedEpoch = publishedEpochSeconds(session);
+      let deadlineMs = 0;
+      if (Number.isFinite(directNext) && directNext > 0) {
+        deadlineMs = Date.now() + directNext * 1000;
+      } else if (publishedEpoch > 0 && intervalSec > 0) {
+        deadlineMs = publishedEpoch * 1000 + intervalSec * 1000;
+        const maxTrustedAgeMs = Math.max(180000, intervalSec * 6000);
+        if (Date.now() - publishedEpoch * 1000 <= maxTrustedAgeMs) {
+          while (deadlineMs <= Date.now()) {
+            deadlineMs += intervalSec * 1000;
+          }
+        } else {
+          deadlineMs = 0;
+        }
+      }
+      state.captureCountdown = {
+        deadlineMs,
+        intervalSec,
+        active: Boolean(session.tracking_enabled) && deadlineMs > 0,
+      };
+      renderCaptureCountdown();
+    }
+
+    function renderCaptureCountdown() {
+      if (!els.captureCountdown) return;
+      const countdown = state.captureCountdown || {};
+      if (!countdown.active || !countdown.deadlineMs) {
+        els.captureCountdown.textContent = "N/A";
+        return;
+      }
+      const remaining = Math.max(0, (countdown.deadlineMs - Date.now()) / 1000);
+      els.captureCountdown.textContent = remaining <= 0.25 ? "due" : formatSeconds(remaining);
+    }
+
+    function captureCountFrom(session = {}, telemetry = {}) {
+      const frames = objectOrEmpty(telemetry.frames);
+      return scoreNumber(session.capture_count || session.frame_id || frames.capture_count || frames.frame_id, 0);
+    }
+
+    function heartbeatMetric(session = {}, telemetry = {}) {
+      const explicitFps = scoreNumber(
+        telemetry.heartbeat_fps
+        || telemetry.fps
+        || session.heartbeat_fps
+        || session.frame_rate
+        || session.capture_fps,
+        0,
+      );
+      const count = captureCountFrom(session, telemetry);
+      const nowMs = Date.now();
+      if (count > 0) {
+        const samples = state.heartbeatSamples || [];
+        const last = samples[samples.length - 1];
+        if (!last || last.count !== count) {
+          samples.push({count, ms: nowMs});
+          state.heartbeatSamples = samples.slice(-8);
+        }
+      }
+      if (explicitFps > 0) {
+        return {known: true, fps: explicitFps, label: `${explicitFps.toFixed(2)} FPS`};
+      }
+      const samples = state.heartbeatSamples || [];
+      if (samples.length >= 2) {
+        const first = samples[0];
+        const last = samples[samples.length - 1];
+        const elapsedSec = (last.ms - first.ms) / 1000;
+        const delta = last.count - first.count;
+        if (elapsedSec > 0 && delta > 0) {
+          const framesPerMinute = (delta / elapsedSec) * 60;
+          return {known: true, fps: delta / elapsedSec, label: `${framesPerMinute.toFixed(1)} f/m`};
+        }
+      }
+      const intervalSec = captureIntervalSeconds(session);
+      if (intervalSec > 0 && count > 0) {
+        return {known: true, fps: 1 / intervalSec, label: `${formatSeconds(intervalSec)} beat`};
+      }
+      return {known: false, fps: 0, label: "N/A"};
+    }
+
+    function renderHeartbeatBars(metric = {known: false, fps: 0}) {
+      if (!els.heartbeatBars) return;
+      const known = Boolean(metric.known);
+      els.heartbeatBars.classList.toggle("is-unknown", !known);
+      const intervalSec = metric.fps > 0 ? 1 / metric.fps : 0;
+      const freshness = intervalSec > 0 ? Math.max(0.18, Math.min(1, 15 / Math.max(1, intervalSec))) : 0.24;
+      Array.from(els.heartbeatBars.querySelectorAll("i")).forEach((bar, index) => {
+        const sample = (state.heartbeatSamples || [])[index - Math.max(0, 8 - (state.heartbeatSamples || []).length)];
+        const previous = (state.heartbeatSamples || [])[index - Math.max(0, 8 - (state.heartbeatSamples || []).length) - 1];
+        const intervalWeight = sample && previous ? Math.max(0.2, Math.min(1, 15 / Math.max(1, (sample.ms - previous.ms) / 1000))) : freshness;
+        bar.style.setProperty("--bar-height", `${Math.round(4 + intervalWeight * 14)}px`);
+      });
+    }
+
     function confidenceBars(value) {
       const active = Math.max(0, Math.min(8, Math.round(scoreNumber(value) * 8)));
       return Array.from({length: 8}, (_item, index) => `<i${index < active ? " class=\"active\"" : ""}></i>`).join("");
@@ -10423,12 +10666,13 @@
       const aligned = overlayMode.artifact_frame_aligned === true;
       const frameId = clean(payload.frame_id || packet.frame_id || packet.frame, "--");
       const captureCount = clean(payload.capture_count || packet.capture_count, "--");
-      const nextCapture = Number(payload.next_capture_in_sec || 0);
-      const interval = Number(payload.effective_capture_interval_sec || payload.capture_interval_sec || 15);
+      const nextCapture = Math.max(0, (state.captureCountdown.deadlineMs || 0) ? (state.captureCountdown.deadlineMs - Date.now()) / 1000 : 0);
+      const interval = captureIntervalSeconds(payload);
       const fullAuto = Boolean(payload.tracking_enabled);
       const focusLocked = Boolean(manualFocus.enabled);
       const sourceTitle = clean(payload.locked_title || payload.window_query, "Unmatched");
-      const detected = [clean(signal.focus_timeframe || tracking.detected_timeframe, ""), clean(tracking.detected_market || signal.market || payload.market, "")]
+      const timeframe = trustedTimeframeContext(payload);
+      const detected = [timeframe.label !== "N/A" ? timeframe.label : "", clean(tracking.detected_market || signal.market || payload.market, "")]
         .filter(Boolean)
         .join(" | ");
       const executionMode = clean(executionControls.execution_mode, "shadow").toUpperCase();
@@ -10442,11 +10686,11 @@
 
       setText(els.brokerFeedState, fullAuto ? "live" : "paused");
       setText(els.brokerFeedWindow, sourceTitle);
-      setText(els.brokerFeedWindowNote, detected || clean(focus.status, "focus pending"));
+      setText(els.brokerFeedWindowNote, detected || `timeframe N/A | ${timeframe.source}`);
       setText(els.brokerFeedFrame, `frame ${frameId} | capture ${captureCount}`);
       setText(els.brokerFeedFrameNote, aligned ? "overlay frame aligned" : "overlay alignment checking");
-      setText(els.brokerFeedCadence, `${formatSeconds(interval)} loop`);
-      setText(els.brokerFeedCadenceNote, fullAuto ? `next capture ${formatSeconds(nextCapture || interval)}` : "manual capture mode");
+      setText(els.brokerFeedCadence, interval > 0 ? `${formatSeconds(interval)} loop` : "N/A");
+      setText(els.brokerFeedCadenceNote, fullAuto ? `next capture ${nextCapture <= 0 ? "due" : formatSeconds(nextCapture)}` : "manual capture mode");
       setText(els.brokerFeedOverlay, `${activeMode} | ${Number(payload.overlay_count || 0)} overlays`);
       setText(els.brokerFeedOverlayNote, aligned ? "same frame authority" : "waiting for current artifact");
 
@@ -10520,15 +10764,9 @@
         0,
       );
       setText(els.systemUptime, formatLongDuration(uptimeSeconds));
-      const fps = scoreNumber(
-        telemetry.heartbeat_fps
-        || telemetry.fps
-        || payload.heartbeat_fps
-        || payload.frame_rate
-        || payload.capture_fps,
-        0,
-      );
-      setText(els.systemHeartbeat, fps > 0 ? `${fps.toFixed(1)} FPS` : "LIVE");
+      const heartbeat = heartbeatMetric(payload, telemetry);
+      setText(els.systemHeartbeat, heartbeat.label, "N/A");
+      renderHeartbeatBars(heartbeat);
     }
 
     function eventTimeText() {
@@ -10605,15 +10843,17 @@
       const confidence = Number(signal.effective_confidence || 0);
       const fullAuto = Boolean(payload.tracking_enabled);
       const detectedMarket = clean(tracking.detected_market || signal.market || payload.market);
-      const detectedTimeframe = clean(signal.focus_timeframe || tracking.detected_timeframe);
-      const baseInterval = Number(payload.capture_interval_sec || 3);
-      const effectiveInterval = Number(payload.effective_capture_interval_sec || baseInterval);
+      const timeframeContext = trustedTimeframeContext(payload);
+      const detectedTimeframe = timeframeContext.label;
+      const baseInterval = captureIntervalSeconds(payload);
+      const effectiveInterval = baseInterval;
       const adaptiveTimer = executionControls.adaptive_timer_enabled !== false;
+      updateCaptureCountdown(payload);
 
       setText(els.metricStatus, trackerStatus);
       setText(els.metricStatusMini, fullAuto ? `Auto ${formatSeconds(effectiveInterval)}` : "Semi Auto");
       setText(els.metricStatusNote, fullAuto ? `${adaptiveTimer ? "Adaptive" : "Fixed"} capture cycle` : "Semi auto manual capture");
-      setText(els.metricNext, `${nextSec.toFixed(1)}s`);
+      setText(els.metricNext, Number.isFinite(nextSec) && nextSec > 0 ? `${nextSec.toFixed(1)}s` : clean(els.captureCountdown && els.captureCountdown.textContent, "N/A"));
       setText(els.metricFocus, focusLocked ? "Locked" : "Not locked");
       setText(els.metricFocusNote, focusLocked ? "Manual region active" : "Region pending");
       setText(els.metricCaptures, String(payload.capture_count || 0));
@@ -10655,8 +10895,8 @@
 
       els.focusWindow.textContent = clean(payload.locked_title || payload.window_query, "Unmatched");
       els.focusTimeframe.textContent = clean(
-        [detectedTimeframe, detectedMarket].filter(Boolean).join(" | "),
-        detectedTimeframe || detectedMarket || "--",
+        [detectedTimeframe !== "N/A" ? detectedTimeframe : "", detectedMarket].filter(Boolean).join(" | "),
+        detectedMarket || detectedTimeframe || "N/A",
       );
       els.focusSelector.textContent = clean(focus.status, "idle");
       els.focusExecution.textContent = `${clean(executionState.status, "disabled")} | ${clean(executionControls.execution_mode, "shadow")} | ${clean(executionControls.trade_profile || executionControls.execution_profile, "HIGH_FREQUENCY")}`;
@@ -10664,7 +10904,7 @@
 
       els.sessionChip.textContent = `Session ${clean(payload.session_id || SESSION_ID)}`;
       els.heroCopy.textContent = focusLocked
-        ? `Powered by the Phoenix Guard V3 engine | ${[detectedMarket, detectedTimeframe].filter(Boolean).join(" ") || "market pending"} | locked broker surface`
+        ? `Powered by the Phoenix Guard V3 engine | ${[detectedMarket, detectedTimeframe !== "N/A" ? detectedTimeframe : ""].filter(Boolean).join(" ") || "market pending"} | locked broker surface`
         : "Powered by the Phoenix Guard V3 engine | live focus pending";
 
       els.trackerToggle.textContent = fullAuto ? `Auto ${formatSeconds(effectiveInterval)} Off` : `Auto ${formatSeconds(effectiveInterval)} On`;
@@ -11297,6 +11537,9 @@
     connectSessionStream();
     scheduleDashboardRefresh(DASHBOARD_REFRESH_FAST_INTERVAL_MS);
     startDashboardBackgroundPulse();
+    state.countdownTimer = window.setInterval(() => {
+      renderCaptureCountdown();
+    }, 1000);
     state.heartbeatTimer = window.setInterval(() => {
       pulseFrontendHeartbeat();
     }, DASHBOARD_HEARTBEAT_INTERVAL_MS);
