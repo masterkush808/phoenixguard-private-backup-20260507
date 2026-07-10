@@ -714,12 +714,13 @@ def _compute_authorization(snapshot: Mapping[str, object]) -> _AuthorizationDeci
     side = _normalize_side(_get_value(snapshot, "candidate_side", "side", "action", "execution_action"))
 
     if _bool(mid_range.get("blocked")):
-        soft_warnings.append(
-            _virtual_warning(
-                "MID_RANGE_NEEDS_STRONG_CONFIRMATION",
-                "MARKET_LOCATION",
-                _text(mid_range.get("reason")),
-                BlockerTaxonomyV3.STRATEGY_CAUTION,
+        hard_blockers.append(
+            ClassifiedBlockerV3(
+                code="MID_RANGE_NEEDS_STRONG_CONFIRMATION",
+                field="MARKET_LOCATION",
+                reason=_text(mid_range.get("reason")),
+                taxonomy=BlockerTaxonomyV3.HARD_CONFIRMATION_FAILURE,
+                hard=True,
             )
         )
     if phase == PullbackPhaseV3.PULLBACK_FAILED:

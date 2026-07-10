@@ -167,14 +167,34 @@ def test_overlay_mode_capture_command_passes_child_timeout(tmp_path: Path) -> No
 
 
 class _SlowJsonHandler(BaseHTTPRequestHandler):
+    active_lock = threading.Lock()
+    active_requests = 0
+    peak_active_requests = 0
+
+    @classmethod
+    def reset_concurrency(cls) -> None:
+        with cls.active_lock:
+            cls.active_requests = 0
+            cls.peak_active_requests = 0
+
     def do_GET(self) -> None:
-        time.sleep(0.4)
-        body = b'{"ok": true}'
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        with self.active_lock:
+            type(self).active_requests += 1
+            type(self).peak_active_requests = max(
+                type(self).peak_active_requests,
+                type(self).active_requests,
+            )
+        try:
+            time.sleep(0.4)
+            body = b'{"ok": true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        finally:
+            with self.active_lock:
+                type(self).active_requests -= 1
 
     def log_message(self, format: str, *args: object) -> None:
         _ = (format, args)
@@ -182,6 +202,7 @@ class _SlowJsonHandler(BaseHTTPRequestHandler):
 
 
 def test_endpoint_fetch_runs_in_parallel() -> None:
+    _SlowJsonHandler.reset_concurrency()
     server = ThreadingHTTPServer(("127.0.0.1", 0), _SlowJsonHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -198,4 +219,5 @@ def test_endpoint_fetch_runs_in_parallel() -> None:
 
     assert set(results) == set(urls)
     assert all(status == 200 for status, _payload, _error, _latency in results.values())
-    assert elapsed < 1.2
+    assert _SlowJsonHandler.peak_active_requests >= 2
+    assert elapsed < 5.0

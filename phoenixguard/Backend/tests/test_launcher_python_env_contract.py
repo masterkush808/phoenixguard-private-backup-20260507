@@ -78,8 +78,8 @@ def test_runtime_environment_rejects_wrong_repo_python(monkeypatch: pytest.Monke
     wrong_python = tmp_path / "Python311" / "python.exe"
     wrong_python.parent.mkdir(parents=True)
     wrong_python.write_text("", encoding="utf-8")
-    monkeypatch.setenv("PHOENIXGUARD_PYTHON_ENV_NAME", ".venv")
-    monkeypatch.setenv("VIRTUAL_ENV", str(ROOT / ".venv"))
+    monkeypatch.setenv("PHOENIXGUARD_PYTHON_ENV_NAME", ".venv-dev")
+    monkeypatch.setenv("VIRTUAL_ENV", str(ROOT / ".venv-dev"))
     monkeypatch.setenv("PHOENIXGUARD_PYTHON_EXE", str(wrong_python))
 
     status = build_python_environment_status(ROOT)
@@ -145,6 +145,13 @@ def test_canonical_dashboard_launchers_use_v3_window_tracker_dashboard_route() -
         text = _read(relative_path)
         assert "/v3/mobile/window-tracker/dashboard/$SessionId" in text
         assert "/v1/mobile/window-tracker/dashboard/$SessionId" not in text
+
+
+def test_canonical_live_launcher_enables_validated_native_display_capture_fallback() -> None:
+    text = _read("Backend/launch/launch_phoenixguard_live_ready.ps1")
+
+    assert "$env:PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK = '1'" in text
+    assert "display_native_capture_fallback_enabled = $env:PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK" in text
 
 
 def test_dashboard_browser_launcher_quotes_chrome_profile_paths_with_spaces() -> None:

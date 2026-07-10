@@ -35,6 +35,47 @@ def _allowance_package(side: str = "BUY") -> dict[str, object]:
     }
 
 
+def _overlay_truth_audit(
+    *,
+    frame_id: int | None = None,
+    capture_count: int | None = None,
+    input_frame_hash: str = "",
+) -> dict[str, object]:
+    audit: dict[str, object] = {
+        "valid_for_execution": True,
+        "execution_safe": True,
+        "objects": [],
+    }
+    if frame_id is not None:
+        audit["frame_id"] = frame_id
+    if capture_count is not None:
+        audit["capture_count"] = capture_count
+    if input_frame_hash:
+        audit["input_frame_hash"] = input_frame_hash
+    return audit
+
+
+def _live_decision_truth(side: str = "BUY") -> dict[str, object]:
+    return {
+        "trade_permission": {
+            "permission_state": "GRANTED",
+            "side": side,
+            "executable_allowed": True,
+            "failed_reasons": [],
+            "blocking_reasons": [],
+        },
+        "entry_quality": {
+            "state": "ACCEPTABLE_ENTRY",
+            "passes_executable_threshold": True,
+        },
+        "market_trap": {
+            "detected": False,
+            "executable_allowed": True,
+            "active_traps": [],
+        },
+    }
+
+
 def _publish_model_council_v3_state(
     service: ContinuousWindowTrackerService,
     *,
@@ -117,6 +158,38 @@ def _build_model_council_v3_snapshot(
         input_frame_hash=input_frame_hash,
         capture_started_epoch=capture_started_epoch,
     )
+
+
+def test_live_overlay_binding_overwrites_stale_identity() -> None:
+    payload: dict[str, Any] = {
+        "execution_packet": {
+            "schema_version": "PG_EXECUTION_PACKET_V3",
+            "overlay_truth_audit": {
+                "valid_for_execution": True,
+                "execution_safe": True,
+                "frame_id": 1,
+                "capture_count": 2,
+                "input_frame_hash": "stale",
+            },
+        }
+    }
+    binder = cast(
+        Callable[..., None],
+        getattr(window_tracker_module, "_bind_live_overlay_truth_to_execution_packets"),
+    )
+
+    binder(
+        payload,
+        payload["execution_packet"]["overlay_truth_audit"],
+        frame_id=20,
+        capture_count=21,
+        input_frame_hash="current-frame",
+    )
+
+    audit = payload["execution_packet"]["overlay_truth_audit"]
+    assert audit["frame_id"] == 20
+    assert audit["capture_count"] == 21
+    assert audit["input_frame_hash"] == "current-frame"
 
 
 class _FakeCaptureBackend:
@@ -236,6 +309,7 @@ def test_signal_thesis_countertrend_block_downgrades_public_council_state(
         sequence_context=_complete_sequence_context(sequence_id="seq_countertrend_blocked"),
         allowance_package=_allowance_package("SELL"),
     )
+    packet["overlay_truth_audit"] = _overlay_truth_audit()
     study_packet: dict[str, Any] = {
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "pgpkt-countertrend-blocked",
@@ -259,6 +333,7 @@ def test_signal_thesis_countertrend_block_downgrades_public_council_state(
         },
     }
     result: dict[str, Any] = {
+        **_live_decision_truth("SELL"),
         "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
         "packet_id": "pgpkt-countertrend-blocked",
         "packet_type": "STUDY_PACKET",
@@ -301,7 +376,7 @@ def test_signal_thesis_countertrend_block_downgrades_public_council_state(
     published = _publish_model_council_v3_state(
         service,
         payload={"session_id": "pocket-live-8788"},
-        tracking_summary={},
+        tracking_summary={"overlay_truth_audit": _overlay_truth_audit()},
         latest_signal={},
         frame_index=20,
         capture_count=21,
@@ -399,6 +474,7 @@ def test_model_council_packet_uses_publication_epoch_not_capture_start(
                 },
             }
             return {
+                **_live_decision_truth("BUY"),
                 "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
                 "packet_id": packet["packet_id"],
                 "packet_type": "STUDY_PACKET",
@@ -433,7 +509,11 @@ def test_model_council_packet_uses_publication_epoch_not_capture_start(
     published = _publish_model_council_v3_state(
         service,
         payload={"session_id": "pocket-live-8788"},
-        tracking_summary={"detected_market": "EUR/GBP OTC", "detected_timeframe": "M5"},
+        tracking_summary={
+            "detected_market": "EUR/GBP OTC",
+            "detected_timeframe": "M5",
+            "overlay_truth_audit": _overlay_truth_audit(),
+        },
         latest_signal={},
         frame_index=20,
         capture_count=21,
@@ -446,6 +526,12 @@ def test_model_council_packet_uses_publication_epoch_not_capture_start(
     assert packet["created_epoch"] == publication_epoch
     assert packet["valid_until_epoch"] == publication_epoch + 8.0
     assert packet["packet_validation"]["ok"] is True
+    assert packet["trade_permission"]["executable_allowed"] is True
+    assert packet["entry_quality"]["passes_executable_threshold"] is True
+    assert packet["market_trap"]["detected"] is False
+    assert packet["overlay_truth_audit"]["frame_id"] == 20
+    assert packet["overlay_truth_audit"]["capture_count"] == 21
+    assert packet["overlay_truth_audit"]["input_frame_hash"] == "frame-publication-epoch"
 
 
 def test_study_packet_resolver_demotes_executable_claim_without_execution_packet() -> None:
@@ -722,6 +808,12 @@ def test_tracker_live_backend_defers_valid_packet_to_standalone_shooter(tmp_path
         runtime_model_health={"all_required_models_awake": True, "council_status": "AWAKE"},
         sequence_context=sequence_context,
         allowance_package=_allowance_package("BUY"),
+    )
+    packet.update(_live_decision_truth("BUY"))
+    packet["overlay_truth_audit"] = _overlay_truth_audit(
+        frame_id=20,
+        capture_count=21,
+        input_frame_hash="frame-tracker",
     )
 
     resolved_sequence_context = resolve_sequence_context(packet)

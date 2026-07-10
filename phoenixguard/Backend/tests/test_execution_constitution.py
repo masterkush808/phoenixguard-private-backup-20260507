@@ -33,7 +33,10 @@ def _packet() -> dict[str, Any]:
         },
         "model_council": {"final_state": "EXECUTABLE", "final_side": "BUY"},
         "runtime_model_health": {"all_required_models_awake": True},
-        "overlay_truth_audit": {"valid_for_execution": True},
+        "trade_permission": {"permission_state": "GRANTED", "executable_allowed": True},
+        "entry_quality": {"state": "ACCEPTABLE_ENTRY", "passes_executable_threshold": True},
+        "market_trap": {"detected": False, "executable_allowed": True},
+        "overlay_truth_audit": {"valid_for_execution": True, "execution_safe": True},
     }
 
 
@@ -43,6 +46,9 @@ def test_execution_constitution_lists_hard_rules() -> None:
     assert "NO_UNVERIFIED_OVERLAY_GEOMETRY_CAN_EXECUTE" in CONSTITUTION_RULES
     assert "NO_PERMISSION_DENIED_PACKET_CAN_EXECUTE" in CONSTITUTION_RULES
     assert "NO_BAD_ENTRY_QUALITY_CAN_EXECUTE" in CONSTITUTION_RULES
+    assert "NO_MISSING_TRADE_PERMISSION_CAN_EXECUTE" in CONSTITUTION_RULES
+    assert "NO_MISSING_ENTRY_QUALITY_CAN_EXECUTE" in CONSTITUTION_RULES
+    assert "NO_MISSING_MARKET_TRAP_TRUTH_CAN_EXECUTE" in CONSTITUTION_RULES
 
 
 def test_execution_constitution_accepts_clean_packet() -> None:
@@ -92,6 +98,39 @@ def test_execution_constitution_blocks_permission_denial_and_bad_entry_quality()
     packet = _packet()
     packet["trade_permission"] = {"executable_allowed": False, "deny_reason": "LATE_CHASE_TRAP"}
     packet["entry_quality"] = {"state": "BAD_NOW", "passes_executable_threshold": False}
+
+    result = evaluate_execution_constitution(packet, {"gate_1_second_read": "PASS"}, now_epoch=NOW)
+
+    assert "NO_PERMISSION_DENIED_PACKET_CAN_EXECUTE" in result.violations
+    assert "NO_BAD_ENTRY_QUALITY_CAN_EXECUTE" in result.violations
+
+
+def test_execution_constitution_fails_closed_when_execution_truth_is_missing() -> None:
+    packet = _packet()
+    packet.pop("trade_permission")
+    packet.pop("entry_quality")
+    packet.pop("market_trap")
+    packet.pop("overlay_truth_audit")
+
+    result = evaluate_execution_constitution(packet, {"gate_1_second_read": "PASS"}, now_epoch=NOW)
+
+    assert "NO_MISSING_TRADE_PERMISSION_CAN_EXECUTE" in result.violations
+    assert "NO_MISSING_ENTRY_QUALITY_CAN_EXECUTE" in result.violations
+    assert "NO_MISSING_MARKET_TRAP_TRUTH_CAN_EXECUTE" in result.violations
+    assert "NO_UNVERIFIED_OVERLAY_GEOMETRY_CAN_EXECUTE" in result.violations
+
+
+def test_execution_constitution_rejects_denied_council_copy() -> None:
+    packet = _packet()
+    packet["model_council"]["trade_permission"] = {
+        "permission_state": "DENIED",
+        "executable_allowed": False,
+        "deny_reason": "COUNCIL_VETO",
+    }
+    packet["model_council"]["entry_quality"] = {
+        "state": "BAD_NOW",
+        "passes_executable_threshold": False,
+    }
 
     result = evaluate_execution_constitution(packet, {"gate_1_second_read": "PASS"}, now_epoch=NOW)
 

@@ -3071,31 +3071,7 @@ def evaluate_book_strategy_master_v3(
     )
     blockers: list[dict[str, Any]] = []
     soft_warnings: list[dict[str, Any]] = []
-    non_negotiable_blocker_fields = {
-        "api_health",
-        "cache_state",
-        "candidate_invalidated",
-        "candidate_side",
-        "live_integrity",
-        "runtime",
-        "runtime_model_health",
-        "wrong_side_location",
-    }
-
     def add_blocker(field: str, received: Any, required: Any, reason: str, *, hard: bool = False) -> None:
-        field_key = str(field or "").strip().lower()
-        if field_key not in non_negotiable_blocker_fields:
-            soft_warnings.append(
-                {
-                    "field": field,
-                    "received": received,
-                    "required": required,
-                    "effect": "overlay_truth_authority_kept; strategy caution downgraded from blocker",
-                    "reason": reason,
-                    "former_hard": bool(hard),
-                }
-            )
-            return
         blockers.append(_build_blocker(field, received, required, reason, hard=hard))
 
     def add_warning(field: str, received: Any, effect: str) -> None:
@@ -3531,8 +3507,12 @@ def evaluate_book_strategy_master_v3(
         state: BookMaturityState = "NO_OPPORTUNITY"
     elif candidate_invalidated:
         state = "INVALIDATED"
+    elif late_chase or history_exit_here or (
+        replay_template_late_chase_risk and not replay_template_late_chase_softened_by_current_transition
+    ):
+        state = "LATE_CHASE"
     elif conflict_market and not (current_pressure_is_current_truth or professional_reaction_is_current_truth or live_overlay_reclaim_is_current_truth):
-        state = "VALID_WATCH"
+        state = "NO_OPPORTUNITY"
     elif hard_blockers:
         state = "PREPARE"
     elif not has_context:
@@ -3541,7 +3521,7 @@ def evaluate_book_strategy_master_v3(
         state = "VALID_WATCH"
     elif blockers:
         state = "PREPARE"
-    elif bool(reaction_ready and not hard_blockers):
+    elif bool(reaction_ready and timing_supportive and not hard_blockers):
         state = "ENTER_NOW"
     else:
         state = "PREPARE"

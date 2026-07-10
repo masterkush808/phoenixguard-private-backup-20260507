@@ -35,6 +35,7 @@ from phoenixguard.decision.model_council_v3 import (
     DEFAULT_AI_CONTRIBUTION_STRENGTHS,
     DEFAULT_EXECUTION_LANE_THRESHOLDS,
     ModelCouncilV3,
+    build_entry_permission_v3,
     build_promotion_failure_audit_v3,
 )
 from phoenixguard.decision.playbook_ai_intelligence_v3 import compact_playbook_ai_intelligence_v3
@@ -483,14 +484,14 @@ _SESSION_NESTED_DUPLICATE_KEYS = frozenset(
         "study_packet",
     }
 )
-_PACKET_SELF_REFERENCE_KEYS = frozenset(
-    {
-        "model_council_packet",
-        "execution_packet",
-        "latest_model_council_packet",
-        "latest_execution_packet",
-    }
+_EXECUTION_PACKET_ALIAS_KEYS = (
+    "model_council_packet",
+    "execution_packet",
+    "latest_model_council_packet",
+    "latest_execution_packet",
 )
+_PACKET_SELF_REFERENCE_KEYS = frozenset(_EXECUTION_PACKET_ALIAS_KEYS)
+_EXECUTION_PACKET_REVOCATION_KEY = "execution_packet_revocation_v3"
 
 _DISPLAY_STATE_KEYS = frozenset(
     {
@@ -605,8 +606,11 @@ def _compact_persisted_execution_packet(value: Mapping[str, Any]) -> dict[str, A
         "created_epoch_sec",
         "denied_at",
         "dual_thesis_report_v3",
+        "entry_permission_v3",
+        "entry_quality",
         "entry_window",
         "execution",
+        "execution_opportunity_window_v3",
         "execution_authority",
         "execution_authorized",
         "execution_ready",
@@ -627,6 +631,7 @@ def _compact_persisted_execution_packet(value: Mapping[str, Any]) -> dict[str, A
         "next_required",
         "opportunity_maturity",
         "opportunity_maturity_state",
+        "overlay_truth_audit",
         "packet_id",
         "packet_result",
         "packet_type",
@@ -656,6 +661,9 @@ def _compact_persisted_execution_packet(value: Mapping[str, Any]) -> dict[str, A
         "threshold",
         "timeframe",
         "trade_permission",
+        "market_trap",
+        "trap_assessment",
+        "market_reality",
         "valid_until_epoch",
         "valid_until_epoch_ms",
         "valid_until_epoch_sec",
@@ -894,6 +902,7 @@ _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS: frozenset[str] = frozenset(
         "detected_timeframe",
         "effective_confidence",
         "execution_action",
+        "execution_opportunity_window_v3",
         "focus_timeframe",
         "market",
         "market_selector_rebind_required",
@@ -966,8 +975,10 @@ def _compact_persisted_council_payload(value: Mapping[str, Any]) -> dict[str, An
         "candidate_stage",
         "denied_at",
         "dual_thesis_report_v3",
+        "entry_permission_v3",
         "entry_quality",
         "execution",
+        "execution_opportunity_window_v3",
         "execution_lane",
         "execution_threshold",
         "final_execution_score",
@@ -1021,11 +1032,13 @@ def _compact_persisted_study_packet(value: Mapping[str, Any]) -> dict[str, Any]:
         "created_epoch_sec",
         "denied_at",
         "dual_thesis_report_v3",
+        "entry_permission_v3",
         "entry_quality",
         "book_strategy",
         "book_strategy_state",
         "book_strategy_playbook",
         "execution",
+        "execution_opportunity_window_v3",
         "execution_lane",
         "execution_state",
         "execution_threshold",
@@ -1092,9 +1105,12 @@ def _compact_persisted_model_council_result(value: Mapping[str, Any]) -> dict[st
         "confidence",
         "denied_at",
         "dual_thesis_report_v3",
+        "entry_permission_v3",
         "entry_quality",
         "execution",
+        "execution_opportunity_window_v3",
         "execution_authorized",
+        "execution_packet_revocation_v3",
         "execution_lane",
         "execution_threshold",
         "expected_move_time",
@@ -1195,6 +1211,9 @@ _COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
         "full_overlay_frame_id",
         "model_vote_frame_id",
         "state_version",
+        "execution_packet_present",
+        "execution_packet_revocation_v3",
+        "execution_opportunity_window_v3",
         "display_frame_id",
         "display_capture_epoch",
         "display_published_epoch",
@@ -1330,6 +1349,9 @@ _COMPACT_LIVE_STATE_COUNCIL_KEYS: frozenset[str] = frozenset(
         "confidence",
         "denied_at",
         "dual_thesis_report_v3",
+        "entry_permission_v3",
+        "execution_packet_revocation_v3",
+        "execution_opportunity_window_v3",
         "execution_lane",
         "final_side",
         "final_state",
@@ -1409,13 +1431,41 @@ def _compact_live_state_allowance_package(value: Any) -> dict[str, Any]:
         "allowance_family",
         "execution_authority",
         "packet_authority",
+        "packet_id",
+        "model_council_role",
+        "playbook_authorized",
         "accepted",
         "execution_ready",
+        "entry_permission_v3",
+        "executable",
         "decision_accepted",
         "side",
+        "opportunity_maturity",
+        "opportunity_maturity_confidence",
+        "visual_integrity",
+        "tracking_active",
+        "intraday_capture_active",
+        "entry_now_allowed",
+        "timing_mode",
+        "path_class",
         "selected_lane",
+        "lane_accepted",
+        "lane_is_contributor",
+        "accepted_lanes",
         "score",
         "threshold",
+        "score_passed",
+        "preferred_expiry_sec",
+        "final_state",
+        "promotion_result",
+        "release_state",
+        "true_blocker",
+        "next_required",
+        "reasoning_override_allowed",
+        "intraday_reasoning_override_allowed",
+        "wave_reasoning_override_allowed",
+        "professional_reaction_reasoning_override_allowed",
+        "safety",
         "book_strategy_maturity",
         "professional_grade",
         "playbook_ai_summary_v3",
@@ -1425,6 +1475,15 @@ def _compact_live_state_allowance_package(value: Any) -> dict[str, Any]:
         "thesis_horizon",
     }
     compact = _compact_selected_mapping(mapping, selected)
+    for key, item in mapping.items():
+        if key in _PACKET_SELF_REFERENCE_KEYS or item in (None, "", [], {}):
+            continue
+        if isinstance(item, Mapping):
+            continue
+        if isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+            if any(isinstance(child, Mapping) for child in cast(Sequence[Any], item)):
+                continue
+        compact.setdefault(str(key), _strip_packet_self_references(item))
     playbook_ai_summary = _compact_live_state_playbook_ai_summary(mapping)
     if playbook_ai_summary:
         compact["playbook_ai_summary_v3"] = playbook_ai_summary
@@ -1596,6 +1655,7 @@ def _compact_live_state_model_council_for_packet(value: Any) -> dict[str, Any]:
         "candidate_stage",
         "denied_at",
         "dual_thesis_report_v3",
+        "entry_permission_v3",
         "entry_quality",
         "execution",
         "execution_threshold",
@@ -1615,6 +1675,9 @@ def _compact_live_state_model_council_for_packet(value: Any) -> dict[str, Any]:
         "playbook_ai_summary_v3",
         "timing_decision",
         "trade_permission",
+        "market_trap",
+        "trap_assessment",
+        "market_reality",
         "true_blocker",
     }
     compact = _compact_selected_mapping(mapping, selected)
@@ -1654,7 +1717,9 @@ def _compact_live_state_execution_packet(value: Any) -> dict[str, Any]:
         "ttl_sec",
         "valid_for_seconds",
         "provenance",
+        "entry_permission_v3",
         "execution",
+        "execution_opportunity_window_v3",
         "market_context",
         "instrument_context",
         "symbol_context",
@@ -1665,6 +1730,12 @@ def _compact_live_state_execution_packet(value: Any) -> dict[str, Any]:
         "sequence_status",
         "live_integrity",
         "runtime_model_health",
+        "trade_permission",
+        "entry_quality",
+        "market_trap",
+        "trap_assessment",
+        "market_reality",
+        "overlay_truth_audit",
         "visual_integrity",
         "selected_execution_lane",
         "execution_lane",
@@ -4628,7 +4699,205 @@ def _harden_published_signal_contract(
         _published_signal_block(latest_signal, reason="Expiry is fallback-derived; no trade is published.")
 
 
-def _model_council_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _bind_live_decision_truth_to_execution_packets(payload: dict[str, Any]) -> None:
+    council = _mapping_to_dict(payload.get("model_council"))
+    market_reality = _mapping_to_dict(
+        payload.get("market_reality") or council.get("market_reality")
+    )
+    trade_permission = _mapping_to_dict(
+        payload.get("trade_permission")
+        or market_reality.get("trade_permission")
+        or market_reality.get("permission")
+        or council.get("trade_permission")
+    )
+    entry_quality = _mapping_to_dict(
+        payload.get("entry_quality")
+        or market_reality.get("entry_quality")
+        or council.get("entry_quality")
+    )
+    market_trap = _mapping_to_dict(
+        payload.get("market_trap")
+        or payload.get("trap_assessment")
+        or market_reality.get("market_trap")
+        or council.get("market_trap")
+        or council.get("trap_assessment")
+    )
+
+    def bind(container: dict[str, Any], depth: int = 0) -> None:
+        if depth > 3:
+            return
+        if container.get("schema_version") == PG_EXECUTION_PACKET_SCHEMA_VERSION:
+            if trade_permission:
+                container["trade_permission"] = dict(trade_permission)
+            if entry_quality:
+                container["entry_quality"] = dict(entry_quality)
+            if market_trap:
+                container["market_trap"] = dict(market_trap)
+        for packet_key in (
+            "model_council_packet",
+            "execution_packet",
+            "latest_model_council_packet",
+            "latest_execution_packet",
+        ):
+            raw_packet = container.get(packet_key)
+            if not isinstance(raw_packet, Mapping):
+                continue
+            packet = _mapping_to_dict(raw_packet)
+            if trade_permission:
+                packet["trade_permission"] = dict(trade_permission)
+            if entry_quality:
+                packet["entry_quality"] = dict(entry_quality)
+            if market_trap:
+                packet["market_trap"] = dict(market_trap)
+            container[packet_key] = packet
+        for nested_key in ("model_council_result", "model_council_state"):
+            raw_nested = container.get(nested_key)
+            if not isinstance(raw_nested, Mapping):
+                continue
+            nested = _mapping_to_dict(raw_nested)
+            bind(nested, depth + 1)
+            container[nested_key] = nested
+
+    bind(payload)
+
+
+def _execution_packet_alias_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the most direct previously published packet, without re-authorizing it."""
+
+    pending: list[Mapping[str, Any]] = [payload]
+    seen: set[int] = set()
+    while pending:
+        container = pending.pop(0)
+        identity = id(container)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        for packet_key in _EXECUTION_PACKET_ALIAS_KEYS:
+            packet = container.get(packet_key)
+            if isinstance(packet, Mapping) and str(packet.get("packet_id", "") or "").strip():
+                return _mapping_to_dict(packet)
+        for nested_key in ("model_council_result", "latest_signal", "tracking_summary"):
+            nested = container.get(nested_key)
+            if isinstance(nested, Mapping):
+                pending.append(cast(Mapping[str, Any], nested))
+    return {}
+
+
+def _execution_packet_lineage(packet: Mapping[str, Any]) -> tuple[int, int]:
+    provenance = _mapping_to_dict(packet.get("provenance"))
+    frame_id = int(_float_or(packet.get("frame_id") or provenance.get("frame_id"), 0.0) or 0)
+    capture_count = int(
+        _float_or(packet.get("capture_count") or provenance.get("capture_count"), float(frame_id))
+        or frame_id
+    )
+    return frame_id, capture_count
+
+
+def _council_frame_is_newer_than_packet(
+    packet: Mapping[str, Any],
+    *,
+    frame_id: int,
+    capture_count: int,
+) -> bool:
+    packet_frame_id, packet_capture_count = _execution_packet_lineage(packet)
+    if packet_frame_id <= 0 and packet_capture_count <= 0:
+        return bool(frame_id > 0 or capture_count > 0)
+    return bool(
+        (capture_count > 0 and capture_count > packet_capture_count)
+        or (frame_id > 0 and frame_id > packet_frame_id)
+    )
+
+
+def _execution_packet_revocation_reason(
+    result_payload: Mapping[str, Any],
+    previous_packet: Mapping[str, Any],
+) -> str:
+    execution = _mapping_to_dict(result_payload.get("execution"))
+    council = _mapping_to_dict(result_payload.get("model_council"))
+    current_side = _upper_action(
+        execution.get("side")
+        or council.get("final_side")
+        or result_payload.get("final_side")
+        or result_payload.get("side"),
+        fallback="HOLD",
+    )
+    previous_side = _upper_action(resolve_v3_packet_side(previous_packet), fallback="HOLD")
+    if current_side in {"BUY", "SELL"} and previous_side in {"BUY", "SELL"} and current_side != previous_side:
+        return "NEWER_COUNCIL_OPPOSITE_SIDE"
+    state = _upper_action(
+        execution.get("state")
+        or council.get("final_state")
+        or result_payload.get("final_state")
+        or result_payload.get("state"),
+        fallback="HOLD",
+    )
+    if state in {"PREPARING", "WATCHING", "HOLD"}:
+        return f"NEWER_COUNCIL_{state}"
+    return "NEWER_COUNCIL_NO_EXECUTABLE_PACKET"
+
+
+def _clear_execution_packet_aliases(
+    container: dict[str, Any],
+    *,
+    tombstone: Mapping[str, Any] | None = None,
+) -> None:
+    for packet_key in _EXECUTION_PACKET_ALIAS_KEYS:
+        container.pop(packet_key, None)
+    container["execution_packet_present"] = False
+    container.pop("execution_packet_retained_v3", None)
+    if tombstone:
+        container[_EXECUTION_PACKET_REVOCATION_KEY] = dict(tombstone)
+
+
+def _bind_live_overlay_truth_to_execution_packets(
+    payload: dict[str, Any],
+    overlay_truth_audit: Mapping[str, Any] | None,
+    *,
+    frame_id: int,
+    capture_count: int,
+    input_frame_hash: str,
+) -> None:
+    if not isinstance(overlay_truth_audit, Mapping) or not overlay_truth_audit:
+        return
+    normalized = _mapping_to_dict(overlay_truth_audit)
+    normalized["frame_id"] = int(frame_id)
+    normalized["capture_count"] = int(capture_count)
+    normalized["input_frame_hash"] = str(input_frame_hash or "")
+    normalized = cast(dict[str, Any], _strip_packet_self_references(normalized))
+
+    def bind(container: dict[str, Any], depth: int = 0) -> None:
+        if depth > 3:
+            return
+        if container.get("schema_version") == PG_EXECUTION_PACKET_SCHEMA_VERSION:
+            container["overlay_truth_audit"] = dict(normalized)
+        for packet_key in (
+            "model_council_packet",
+            "execution_packet",
+            "latest_model_council_packet",
+            "latest_execution_packet",
+        ):
+            raw_packet = container.get(packet_key)
+            if not isinstance(raw_packet, Mapping):
+                continue
+            packet = _mapping_to_dict(raw_packet)
+            packet["overlay_truth_audit"] = dict(normalized)
+            container[packet_key] = packet
+        for nested_key in ("model_council_result", "model_council_state"):
+            raw_nested = container.get(nested_key)
+            if not isinstance(raw_nested, Mapping):
+                continue
+            nested = _mapping_to_dict(raw_nested)
+            bind(nested, depth + 1)
+            container[nested_key] = nested
+
+    bind(payload)
+
+
+def _model_council_packet_from_payload(
+    payload: Mapping[str, Any],
+    *,
+    require_live_overlay_truth: bool = False,
+) -> dict[str, Any]:
     """Find a V3 executable packet without accepting legacy raw signals."""
 
     now_epoch = _now_epoch()
@@ -4673,6 +4942,8 @@ def _model_council_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, 
                 packet,
                 now_epoch=now_epoch,
                 require_executable=True,
+                require_overlay_truth=require_live_overlay_truth,
+                require_live_handoff_truth=require_live_overlay_truth,
             )
         except Exception:
             LOGGER.debug("Rejected malformed Model Council execution packet.", exc_info=True)
@@ -4701,7 +4972,7 @@ def _model_council_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, 
 
 
 def model_council_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    return _model_council_packet_from_payload(payload)
+    return _model_council_packet_from_payload(payload, require_live_overlay_truth=True)
 
 
 def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -4710,16 +4981,21 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
     now_epoch = time.time()
     latest_signal = _mapping_to_dict(payload.get("latest_signal", {}))
     tracking_summary = _mapping_to_dict(payload.get("tracking_summary", {}))
+    execution_controls = _mapping_to_dict(payload.get("execution_controls", {}))
     pipeline_timing = _mapping_to_dict(latest_signal.get("pipeline_timing") or tracking_summary.get("pipeline_timing"))
     study_ttl_sec = max(
-        8.0,
+        _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC,
+        _float_or(execution_controls.get("study_packet_valid_for_seconds"), 0.0),
         _float_or(payload.get("freshness_window_sec"), 0.0),
         _float_or(latest_signal.get("freshness_window_sec"), 0.0),
         _float_or(pipeline_timing.get("freshness_window_sec"), 0.0),
         _float_or(latest_signal.get("pipeline_latency_sec"), 0.0) * 3.0,
         _float_or(pipeline_timing.get("pipeline_latency_sec"), 0.0) * 3.0,
     )
-    current_execution_packet = _model_council_packet_from_payload(payload)
+    current_execution_packet = _model_council_packet_from_payload(
+        payload,
+        require_live_overlay_truth=True,
+    )
 
     def packet_valid_until(packet: Mapping[str, Any]) -> float:
         direct = _float_or(packet.get("valid_until_epoch") or packet.get("valid_until_epoch_sec"), 0.0)
@@ -5078,6 +5354,13 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
                 row["model_council"] = council_for_dual
         row.setdefault("packet_type", "STUDY_PACKET")
         row.setdefault("schema_version", str(row.get("schema_version") or "PG_MODEL_COUNCIL_STUDY_V3"))
+        study_execution = _mapping_to_dict(row.get("execution"))
+        source_execution_state = _upper_text(study_execution.get("state") or "WATCHING")
+        study_execution["enabled"] = False
+        study_execution["state"] = "WATCHING" if source_execution_state == "EXECUTABLE" else source_execution_state
+        study_execution["source_state"] = source_execution_state
+        study_execution["study_only"] = True
+        row["execution"] = study_execution
         created = _float_or(row.get("created_epoch") or row.get("created_epoch_sec"), 0.0)
         if created <= 0.0:
             created = now_epoch
@@ -5151,6 +5434,24 @@ def _model_council_study_packet_from_payload(payload: Mapping[str, Any]) -> dict
                 row["valid_until_epoch"] = now_epoch + study_ttl_sec
                 row["valid_until_epoch_sec"] = now_epoch + study_ttl_sec
                 row["ttl_sec"] = study_ttl_sec
+        council_for_permission = _mapping_to_dict(row.get("model_council"))
+        dual_for_permission = _mapping_to_dict(
+            row.get("dual_thesis_report_v3")
+            or council_for_permission.get("dual_thesis_report_v3")
+        )
+        entry_permission_v3 = build_entry_permission_v3(
+            dual_for_permission,
+            execution_packet=current_execution_packet,
+            allowance_package=_mapping_to_dict(row.get("allowance_package")),
+        )
+        row["entry_permission_v3"] = entry_permission_v3
+        if dual_for_permission:
+            dual_for_permission["entry_permission_v3"] = entry_permission_v3
+            row["dual_thesis_report_v3"] = dual_for_permission
+            if council_for_permission:
+                council_for_permission["dual_thesis_report_v3"] = dual_for_permission
+                council_for_permission["entry_permission_v3"] = entry_permission_v3
+                row["model_council"] = council_for_permission
         return row
 
     def walk(candidate: Any, depth: int = 0) -> dict[str, Any]:
@@ -16175,13 +16476,13 @@ class PhoenixGuardWindowTrackingAdapter:
         def _read_ohlc(candle: Mapping[str, Any], key_o: str, key_h: str, key_l: str, key_c: str, fallback: float) -> tuple[float, float, float, float]:
             o = _float_or(candle.get(key_o, candle.get("open", fallback)), fallback)
             h = _float_or(candle.get(key_h, candle.get("high", fallback)), fallback)
-            l = _float_or(candle.get(key_l, candle.get("low", fallback)), fallback)
+            low_price = _float_or(candle.get(key_l, candle.get("low", fallback)), fallback)
             c = _float_or(candle.get(key_c, candle.get("close", fallback)), fallback)
-            return o, h, l, c
+            return o, h, low_price, c
 
         entry = tracked_candles[-1]
         fallback = _float_or(tracking_summary.get("latest_price_proxy", 1.0), 1.0)
-        o, h, l, c = _read_ohlc(entry, "o", "h", "l", "c", fallback)
+        o, h, low_price, c = _read_ohlc(entry, "o", "h", "l", "c", fallback)
 
         recent_candles: list[dict[str, Any]] = []
         for row in tracked_candles[-20:]:
@@ -16202,7 +16503,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "entry_candle": {
                 "o": o,
                 "h": max(o, h, c),
-                "l": min(o, l, c),
+                "l": min(o, low_price, c),
                 "c": c,
                 "v": 1.0,
             },
@@ -20219,6 +20520,14 @@ class ContinuousWindowTrackerService:
         )
         if active_signal_thesis:
             snapshot["active_signal_thesis"] = _mapping_to_dict(active_signal_thesis)
+        execution_opportunity_window = _mapping_to_dict(
+            payload.get("execution_opportunity_window_v3")
+            or latest_signal.get("execution_opportunity_window_v3")
+            or tracking_summary.get("execution_opportunity_window_v3")
+            or _execution_packet_alias_from_payload(payload).get("execution_opportunity_window_v3")
+        )
+        if execution_opportunity_window:
+            snapshot["execution_opportunity_window_v3"] = execution_opportunity_window
         return snapshot
 
     def _publish_model_council_v3_state(
@@ -20246,10 +20555,36 @@ class ContinuousWindowTrackerService:
         council = self._model_council_for_session(session_id)
         result = council.evaluate(snapshot, now_epoch=publication_epoch)
         result_payload = _mapping_to_dict(result)
-        previous_execution_packet = _model_council_packet_from_payload(payload)
-        packet = _model_council_packet_from_payload(result_payload)
+        _bind_live_decision_truth_to_execution_packets(result_payload)
+        overlay_truth_audit = _mapping_to_dict(
+            tracking_summary.get("overlay_truth_audit")
+            or latest_signal.get("overlay_truth_audit")
+            or _mapping_to_dict(tracking_summary.get("overlay_geometry")).get("truth_audit")
+            or _mapping_to_dict(latest_signal.get("overlay_geometry")).get("truth_audit")
+        )
+        _bind_live_overlay_truth_to_execution_packets(
+            result_payload,
+            overlay_truth_audit,
+            frame_id=frame_index,
+            capture_count=capture_count,
+            input_frame_hash=input_frame_hash,
+        )
+        previous_execution_packet = _execution_packet_alias_from_payload(payload)
+        previous_opportunity_window = _mapping_to_dict(
+            payload.get("execution_opportunity_window_v3")
+            or previous_execution_packet.get("execution_opportunity_window_v3")
+        )
+        packet = _model_council_packet_from_payload(
+            result_payload,
+            require_live_overlay_truth=True,
+        )
         study_packet = _mapping_to_dict(
             result_payload.get("model_council_study_packet") or result_payload.get("study_packet")
+        )
+        execution_opportunity_window = _mapping_to_dict(
+            result_payload.get("execution_opportunity_window_v3")
+            or packet.get("execution_opportunity_window_v3")
+            or study_packet.get("execution_opportunity_window_v3")
         )
         if packet:
             packet["packet_validation"] = validate_execution_packet_v3(
@@ -20257,6 +20592,8 @@ class ContinuousWindowTrackerService:
                 expected_session_id=session_id,
                 now_epoch=publication_epoch,
                 require_executable=True,
+                require_overlay_truth=True,
+                require_live_handoff_truth=True,
             ).as_dict()
         session_key = _slugify(session_id, "tracker-session")
         previous_signal_thesis = (
@@ -20472,6 +20809,44 @@ class ContinuousWindowTrackerService:
             result_payload["promotion_trace"] = promotion_trace
             result_payload["packet_result"] = "STUDY_PACKET_PUBLISHED"
             result_payload["execution_packet_present"] = False
+        execution_opportunity_window = _mapping_to_dict(
+            result_payload.get("execution_opportunity_window_v3")
+            or packet.get("execution_opportunity_window_v3")
+            or study_packet.get("execution_opportunity_window_v3")
+        )
+        if (
+            not packet
+            and str(execution_opportunity_window.get("state") or "").strip().upper()
+            in {"OPEN", "PENDING_OPEN"}
+            and execution_opportunity_window.get("anchor_reused") is False
+        ):
+            execution_opportunity_window = previous_opportunity_window
+        for container in (result_payload, study_packet, packet):
+            if not container:
+                continue
+            if execution_opportunity_window:
+                container["execution_opportunity_window_v3"] = execution_opportunity_window
+            else:
+                container.pop("execution_opportunity_window_v3", None)
+        for key in ("model_council", "promotion_trace", "allowance_package"):
+            container = _mapping_to_dict(result_payload.get(key))
+            if not container:
+                continue
+            if execution_opportunity_window:
+                container["execution_opportunity_window_v3"] = execution_opportunity_window
+            else:
+                container.pop("execution_opportunity_window_v3", None)
+            result_payload[key] = container
+        for container in (result_payload, latest_signal, tracking_summary):
+            if execution_opportunity_window:
+                container["execution_opportunity_window_v3"] = execution_opportunity_window
+            else:
+                container.pop("execution_opportunity_window_v3", None)
+        if isinstance(payload, dict):
+            if execution_opportunity_window:
+                payload["execution_opportunity_window_v3"] = execution_opportunity_window
+            else:
+                payload.pop("execution_opportunity_window_v3", None)
         latest_signal["model_council_result"] = result_payload
         latest_signal["model_council"] = _mapping_to_dict(result_payload.get("model_council"))
         latest_signal["signal_thesis_v3"] = _mapping_to_dict(signal_thesis)
@@ -20508,37 +20883,46 @@ class ContinuousWindowTrackerService:
             tracking_summary["execution_packet"] = packet
             tracking_summary["latest_model_council_packet"] = packet
             tracking_summary["latest_execution_packet"] = packet
+            latest_signal["execution_packet_present"] = True
+            latest_signal.pop(_EXECUTION_PACKET_REVOCATION_KEY, None)
+            tracking_summary["execution_packet_present"] = True
+            tracking_summary.pop(_EXECUTION_PACKET_REVOCATION_KEY, None)
+            result_payload.pop(_EXECUTION_PACKET_REVOCATION_KEY, None)
             if isinstance(payload, dict):
                 payload["model_council_packet"] = packet
                 payload["execution_packet"] = packet
                 payload["latest_model_council_packet"] = packet
                 payload["latest_execution_packet"] = packet
-        elif previous_execution_packet:
-            result_payload["latest_model_council_packet"] = previous_execution_packet
-            result_payload["latest_execution_packet"] = previous_execution_packet
-            result_payload["execution_packet_present"] = True
-            result_payload["execution_packet_retained_v3"] = True
-            latest_signal["latest_model_council_packet"] = previous_execution_packet
-            latest_signal["latest_execution_packet"] = previous_execution_packet
-            tracking_summary["latest_model_council_packet"] = previous_execution_packet
-            tracking_summary["latest_execution_packet"] = previous_execution_packet
-            if isinstance(payload, dict):
-                payload["latest_model_council_packet"] = previous_execution_packet
-                payload["latest_execution_packet"] = previous_execution_packet
+                payload["execution_packet_present"] = True
+                payload.pop(_EXECUTION_PACKET_REVOCATION_KEY, None)
         else:
-            latest_signal.pop("model_council_packet", None)
-            latest_signal.pop("execution_packet", None)
-            latest_signal.pop("latest_model_council_packet", None)
-            latest_signal.pop("latest_execution_packet", None)
-            tracking_summary.pop("model_council_packet", None)
-            tracking_summary.pop("execution_packet", None)
-            tracking_summary.pop("latest_model_council_packet", None)
-            tracking_summary.pop("latest_execution_packet", None)
-            if isinstance(payload, dict):
-                payload.pop("model_council_packet", None)
-                payload.pop("execution_packet", None)
-                payload.pop("latest_model_council_packet", None)
-                payload.pop("latest_execution_packet", None)
+            current_frame_is_newer = bool(
+                previous_execution_packet
+                and _council_frame_is_newer_than_packet(
+                    previous_execution_packet,
+                    frame_id=frame_index,
+                    capture_count=capture_count,
+                )
+            )
+            tombstone: dict[str, Any] = {}
+            if previous_execution_packet and current_frame_is_newer:
+                tombstone = {
+                    "schema_version": "PG_EXECUTION_PACKET_REVOCATION_V3",
+                    "revoked_packet_id": str(previous_execution_packet.get("packet_id", "") or ""),
+                    "frame_id": int(frame_index),
+                    "capture_count": int(capture_count),
+                    "reason": _execution_packet_revocation_reason(result_payload, previous_execution_packet),
+                }
+            if not previous_execution_packet or current_frame_is_newer:
+                _clear_execution_packet_aliases(result_payload, tombstone=tombstone)
+                _clear_execution_packet_aliases(latest_signal, tombstone=tombstone)
+                _clear_execution_packet_aliases(tracking_summary, tombstone=tombstone)
+                if isinstance(payload, dict):
+                    _clear_execution_packet_aliases(payload, tombstone=tombstone)
+            else:
+                # An out-of-order council completion must never be allowed to
+                # re-publish the previous packet through the new result.
+                _clear_execution_packet_aliases(result_payload)
         return result_payload
 
     def _append_trade_outcome_memory(self, session_id: str, outcome: Mapping[str, Any]) -> None:
@@ -21442,6 +21826,21 @@ class ContinuousWindowTrackerService:
             "model_council_study_packet": _mapping_to_dict(raw.get("model_council_study_packet", {})),
             "model_council_packet": _mapping_to_dict(raw.get("model_council_packet", {})),
             "execution_packet": _mapping_to_dict(raw.get("execution_packet", {})),
+            "execution_packet_present": bool(
+                raw.get(
+                    "execution_packet_present",
+                    raw.get("model_council_packet")
+                    or raw.get("execution_packet")
+                    or raw.get("latest_model_council_packet")
+                    or raw.get("latest_execution_packet"),
+                )
+            ),
+            "execution_packet_revocation_v3": _mapping_to_dict(
+                raw.get("execution_packet_revocation_v3", {})
+            ),
+            "execution_opportunity_window_v3": _mapping_to_dict(
+                raw.get("execution_opportunity_window_v3", {})
+            ),
             "tracking_summary": tracking_summary,
             "latest_signal": latest_signal,
             "recent_studies": recent_studies,
@@ -21797,14 +22196,20 @@ class ContinuousWindowTrackerService:
     def latest_model_council_packet(self, session_id: str) -> dict[str, Any]:
         compact_payload = _mapping_to_dict(_read_json(self._compact_live_state_path(session_id), {}))
         if compact_payload and str(compact_payload.get("session_id", session_id) or session_id) == str(session_id):
-            packet = _model_council_packet_from_payload(compact_payload)
+            packet = _model_council_packet_from_payload(
+                compact_payload,
+                require_live_overlay_truth=True,
+            )
             if packet:
                 return packet
             compact_result = _mapping_to_dict(compact_payload.get("model_council_result"))
             if compact_payload.get("execution_packet_present") is False or compact_result.get("execution_packet_present") is False:
                 raise KeyError(session_id)
         payload = self._require_session(session_id)
-        packet = _model_council_packet_from_payload(payload)
+        packet = _model_council_packet_from_payload(
+            payload,
+            require_live_overlay_truth=True,
+        )
         if not packet:
             raise KeyError(session_id)
         return packet
@@ -21825,7 +22230,10 @@ class ContinuousWindowTrackerService:
         study_packet = _model_council_study_packet_from_payload(payload)
         if not result and not study_packet:
             raise KeyError(session_id)
-        packet = _model_council_packet_from_payload(payload)
+        packet = _model_council_packet_from_payload(
+            payload,
+            require_live_overlay_truth=True,
+        )
         return {
             "session_id": str(payload.get("session_id", session_id) or session_id),
             "model_council_result": _compact_persisted_model_council_result(result),
@@ -22268,6 +22676,7 @@ class ContinuousWindowTrackerService:
             os.getenv("PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK", "0") or "0"
         ).strip().lower() not in {"0", "false", "off", "no"}
         fast_capture = getattr(self.capture_backend, "_capture_window_imagegrab", None)
+        validate_native_fallback = False
         if fast_visible_enabled and callable(fast_capture):
             try:
                 image = cast(Image.Image, fast_capture(descriptor)).convert("RGB")
@@ -22284,8 +22693,27 @@ class ContinuousWindowTrackerService:
             except Exception:
                 if not native_fallback_enabled:
                     raise
+                validate_native_fallback = True
                 LOGGER.debug("Display fast visible capture failed; using native capture.", exc_info=True)
-        return self.capture_backend.capture_window(descriptor).convert("RGB")
+        image = self.capture_backend.capture_window(descriptor).convert("RGB")
+        if validate_native_fallback:
+            looks_blank = getattr(self.capture_backend, "_looks_blank", None)
+            if callable(looks_blank) and bool(looks_blank(image)):
+                raise CaptureSurfaceUnavailableError("Display native fallback capture was blank.")
+            looks_content_blank = getattr(self.capture_backend, "_looks_browser_content_blank", None)
+            if callable(looks_content_blank) and bool(looks_content_blank(image)):
+                raise CaptureSurfaceUnavailableError(
+                    "Display native fallback capture did not include browser content."
+                )
+            title = str(descriptor.get("title", "") or "")
+            if _is_pocket_option_query(title) and not _capture_looks_like_pocket_option_visible_surface(
+                image,
+                descriptor,
+            ):
+                raise CaptureSurfaceUnavailableError(
+                    "Display native fallback capture did not include Pocket Option pixels."
+                )
+        return image
 
     def _publish_display_snapshot_only(
         self,
@@ -23408,8 +23836,30 @@ class ContinuousWindowTrackerService:
 
     def shutdown(self) -> None:
         self._emergency_hotkey_stop_evt.set()
-        for session_id in list(self._workers):
-            self._stop_worker(session_id)
+        hotkey_thread = self._emergency_hotkey_thread
+        if hotkey_thread is not None and hotkey_thread.is_alive():
+            hotkey_thread.join(timeout=2.0)
+
+        with self._lock:
+            workers = list(self._workers.items())
+            for _session_id, worker in workers:
+                worker.stop_evt.set()
+                worker.capture_now_evt.set()
+        deadline = time.monotonic() + 30.0
+        for _session_id, worker in workers:
+            remaining = max(0.0, deadline - time.monotonic())
+            worker.thread.join(timeout=remaining)
+        with self._lock:
+            for session_id, worker in workers:
+                if not worker.thread.is_alive():
+                    self._workers.pop(session_id, None)
+                    self._next_capture_epoch.pop(session_id, None)
+        alive = [session_id for session_id, worker in workers if worker.thread.is_alive()]
+        if alive:
+            LOGGER.warning(
+                "Tracker shutdown timed out with active workers: %s",
+                ",".join(sorted(alive)),
+            )
 
     def _on_focus_selected(self, session_id: str, normalized_bbox: list[float], source: str) -> None:
         try:
@@ -23486,8 +23936,9 @@ class ContinuousWindowTrackerService:
             worker.capture_now_evt.set()
         worker.thread.join(timeout=10.0)
         with self._lock:
-            self._workers.pop(session_id, None)
-            self._next_capture_epoch.pop(session_id, None)
+            if not worker.thread.is_alive():
+                self._workers.pop(session_id, None)
+                self._next_capture_epoch.pop(session_id, None)
 
     def _worker_loop(self, session_id: str, stop_evt: threading.Event, capture_now_evt: threading.Event) -> None:
         next_run = time.monotonic()
@@ -25023,13 +25474,16 @@ class ContinuousWindowTrackerService:
                     "model_council_result": payload.get("model_council_result"),
                     "latest_signal": latest_signal,
                     "tracking_summary": tracking_summary,
-                }
+                },
+                require_live_overlay_truth=True,
             )
             validation = validate_execution_packet_v3(
                 packet or None,
                 expected_session_id=str(payload.get("session_id", "")),
                 now_epoch=_now_epoch(),
                 require_executable=True,
+                require_overlay_truth=True,
+                require_live_handoff_truth=True,
             )
             state["model_council_packet_validation"] = validation.as_dict()
             state["model_council_packet_id"] = str(packet.get("packet_id", "") or "") if packet else ""
@@ -25265,13 +25719,16 @@ class ContinuousWindowTrackerService:
                     "model_council_result": payload.get("model_council_result"),
                     "latest_signal": latest_signal,
                     "tracking_summary": tracking_summary,
-                }
+                },
+                require_live_overlay_truth=True,
             )
             validation = validate_execution_packet_v3(
                 packet or None,
                 expected_session_id=str(payload.get("session_id", "")),
                 now_epoch=_now_epoch(),
                 require_executable=True,
+                require_overlay_truth=True,
+                require_live_handoff_truth=True,
             )
             state["model_council_packet_validation"] = validation.as_dict()
             state["model_council_packet_id"] = str(packet.get("packet_id", "") or "") if packet else ""
@@ -25592,13 +26049,13 @@ class ContinuousWindowTrackerService:
         def _read_ohlc(candle: Mapping[str, Any], key_o: str, key_h: str, key_l: str, key_c: str, fallback: float) -> tuple[float, float, float, float]:
             o = _float_or(candle.get(key_o, candle.get("open", fallback)), fallback)
             h = _float_or(candle.get(key_h, candle.get("high", fallback)), fallback)
-            l = _float_or(candle.get(key_l, candle.get("low", fallback)), fallback)
+            low_price = _float_or(candle.get(key_l, candle.get("low", fallback)), fallback)
             c = _float_or(candle.get(key_c, candle.get("close", fallback)), fallback)
-            return o, h, l, c
+            return o, h, low_price, c
 
         entry = tracked_candles[-1]
         fallback = _float_or(tracking_summary.get("latest_price_proxy", 1.0), 1.0)
-        o, h, l, c = _read_ohlc(entry, "o", "h", "l", "c", fallback)
+        o, h, low_price, c = _read_ohlc(entry, "o", "h", "l", "c", fallback)
 
         recent_candles: list[dict[str, Any]] = []
         for row in tracked_candles[-20:]:
@@ -25619,7 +26076,7 @@ class ContinuousWindowTrackerService:
             "entry_candle": {
                 "o": o,
                 "h": max(o, h, c),
-                "l": min(o, l, c),
+                "l": min(o, low_price, c),
                 "c": c,
                 "v": 1.0,
             },
@@ -26700,6 +27157,16 @@ class ContinuousWindowTrackerService:
         mark_stage("model_council")
         payload["model_council_result"] = model_council_result
         payload["model_council"] = _mapping_to_dict(model_council_result.get("model_council"))
+        execution_opportunity_window = _mapping_to_dict(
+            model_council_result.get("execution_opportunity_window_v3")
+            or _mapping_to_dict(model_council_result.get("model_council")).get(
+                "execution_opportunity_window_v3"
+            )
+        )
+        if execution_opportunity_window:
+            payload["execution_opportunity_window_v3"] = execution_opportunity_window
+            latest_signal["execution_opportunity_window_v3"] = execution_opportunity_window
+            tracking_summary["execution_opportunity_window_v3"] = execution_opportunity_window
         model_council_study_packet = _mapping_to_dict(
             model_council_result.get("model_council_study_packet") or model_council_result.get("study_packet")
         )
@@ -26707,7 +27174,10 @@ class ContinuousWindowTrackerService:
             payload["model_council_study_packet"] = model_council_study_packet
         else:
             payload.pop("model_council_study_packet", None)
-        model_council_packet = _model_council_packet_from_payload(model_council_result)
+        model_council_packet = _model_council_packet_from_payload(
+            model_council_result,
+            require_live_overlay_truth=True,
+        )
         if model_council_packet:
             payload["model_council_packet"] = model_council_packet
             payload["execution_packet"] = model_council_packet
@@ -26732,8 +27202,10 @@ class ContinuousWindowTrackerService:
             except Exception:
                 LOGGER.debug("Entry allowance evidence capture failed for session %s.", session_id, exc_info=True)
         else:
-            payload.pop("model_council_packet", None)
-            payload.pop("execution_packet", None)
+            _clear_execution_packet_aliases(
+                payload,
+                tombstone=_mapping_to_dict(model_council_result.get(_EXECUTION_PACKET_REVOCATION_KEY)),
+            )
 
         fast_visual_controls = _normalize_execution_controls(payload.get("execution_controls", {}))
         fast_visual_only_when_blocked = (
@@ -27041,8 +27513,10 @@ class ContinuousWindowTrackerService:
                 visual_payload["model_council_packet"] = model_council_packet
                 visual_payload["execution_packet"] = model_council_packet
             else:
-                visual_payload.pop("model_council_packet", None)
-                visual_payload.pop("execution_packet", None)
+                _clear_execution_packet_aliases(
+                    visual_payload,
+                    tombstone=_mapping_to_dict(model_council_result.get(_EXECUTION_PACKET_REVOCATION_KEY)),
+                )
             self._save_session(visual_payload)
         if fast_visual_only_when_blocked:
             blocked_decision_model_council_result = (
@@ -27436,8 +27910,10 @@ class ContinuousWindowTrackerService:
                 payload["model_council_packet"] = model_council_packet
                 payload["execution_packet"] = model_council_packet
             else:
-                payload.pop("model_council_packet", None)
-                payload.pop("execution_packet", None)
+                _clear_execution_packet_aliases(
+                    payload,
+                    tombstone=_mapping_to_dict(model_council_result.get(_EXECUTION_PACKET_REVOCATION_KEY)),
+                )
             if execution_memory_projection is not None:
                 payload["execution_memory_projection"] = execution_memory_projection
             payload["memory_projection_predict"] = _mark_memory_projection_payload_stale(
@@ -28172,7 +28648,6 @@ class ContinuousWindowTrackerService:
 
 
 build_high_frequency_candle_cycle_context = _build_high_frequency_candle_cycle_context
-model_council_study_packet_from_payload = _model_council_study_packet_from_payload
 normalize_execution_controls = _normalize_execution_controls
 overlay_font = _overlay_font
 read_json = _read_json

@@ -506,6 +506,36 @@ class TestSecurity(unittest.TestCase):
         cipher_tmp_path = db_path.with_name(db_path.name + ".tmp")
         self.assertFalse(cipher_tmp_path.exists())
 
+    def test_pref_store_atomic_sync_retries_transient_replace_lock(self):
+        import phoenixguard.runtime.security as security_module
+        from unittest.mock import patch
+
+        db_path = self.td / "prefs_atomic_retry.enc.sqlite"
+        store = self.EncryptedPreferenceStore(db_path, self.fernet)
+        real_replace = security_module.os.replace
+        attempts = 0
+
+        def flaky_replace(src: object, dst: object) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 2:
+                raise PermissionError(5, "simulated transient scanner lock")
+            real_replace(src, dst)
+
+        with patch.object(security_module.os, "replace", side_effect=flaky_replace):
+            store.insert_preference({
+                "ts": "2026-01-01T00:00:00+00:00",
+                "image_hash": "atomic-retry",
+                "chosen": "BUY",
+                "rejected": "SELL",
+                "reason": "retry atomic write",
+                "annotation_text": "",
+            })
+
+        self.assertEqual(attempts, 3)
+        self.assertEqual(store.fetch_recent(1)[0]["image_hash"], "atomic-retry")
+        self.assertEqual(list(db_path.parent.glob(db_path.name + ".*.tmp")), [])
+
 
 # ===========================================================================
 # 5. rl_module.py
@@ -1221,9 +1251,9 @@ class TestRegressionModule(unittest.TestCase):
         for _ in range(n):
             o = price
             h = price + 0.0020
-            l = price - 0.0010
+            low = price - 0.0010
             c = price + 0.0015
-            ohlc.append([o, h, l, c])
+            ohlc.append([o, h, low, c])
             price += step
         return ohlc
 

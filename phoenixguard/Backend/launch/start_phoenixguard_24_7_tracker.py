@@ -344,10 +344,17 @@ def _quarantine_stale_session_on_boot(script_dir: Path, session_id: str) -> bool
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.monotonic_ns()}.tmp")
+    tmp_path = path.with_name(f".pg-{os.getpid():x}-{time.monotonic_ns():x}.tmp")
     try:
         tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True), encoding="utf-8")
-        tmp_path.replace(path)
+        for attempt in range(3):
+            try:
+                tmp_path.replace(path)
+                return
+            except OSError:
+                if attempt >= 2:
+                    raise
+                time.sleep(0.02 * float(attempt + 1))
     except Exception:
         try:
             tmp_path.unlink(missing_ok=True)
@@ -361,9 +368,16 @@ def _live_fast_display_file_heartbeat(script_dir: Path, session_id: str, *, now_
     if enabled in {"0", "false", "off", "no"}:
         return False
     path = _display_state_path(script_dir, session_id)
-    try:
-        raw: Any = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    raw: Any = None
+    for attempt in range(3):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            break
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            if attempt >= 2:
+                return False
+            time.sleep(0.02 * float(attempt + 1))
+    if raw is None:
         return False
     if not isinstance(raw, dict):
         return False

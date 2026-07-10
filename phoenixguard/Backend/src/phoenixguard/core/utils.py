@@ -167,7 +167,15 @@ def can_import_module_safely(import_stmt: str, timeout_sec: int = 20) -> bool:
         return False
 
 
-def can_import_sentence_transformers_safely(timeout_sec: int = 20) -> bool:
+def can_import_sentence_transformers_safely(timeout_sec: int | None = None) -> bool:
+    if timeout_sec is None:
+        raw_timeout = str(
+            os.getenv("PHOENIXGUARD_SENTENCE_TRANSFORMERS_IMPORT_TIMEOUT_SEC", "120") or "120"
+        ).strip()
+        try:
+            timeout_sec = max(1, int(float(raw_timeout)))
+        except (TypeError, ValueError):
+            timeout_sec = 120
     return can_import_module_safely(
         "from sentence_transformers import SentenceTransformer",
         timeout_sec=timeout_sec,
@@ -181,7 +189,15 @@ def can_import_chronos_safely(timeout_sec: int = 20) -> bool:
     )
 
 
-def can_import_torchvision_safely(timeout_sec: int = 20) -> bool:
+def can_import_torchvision_safely(timeout_sec: int | None = None) -> bool:
+    if timeout_sec is None:
+        raw_timeout = str(
+            os.getenv("PHOENIXGUARD_TORCHVISION_IMPORT_TIMEOUT_SEC", "60") or "60"
+        ).strip()
+        try:
+            timeout_sec = max(1, int(float(raw_timeout)))
+        except (TypeError, ValueError):
+            timeout_sec = 60
     return can_import_module_safely(
         "import torchvision",
         timeout_sec=timeout_sec,

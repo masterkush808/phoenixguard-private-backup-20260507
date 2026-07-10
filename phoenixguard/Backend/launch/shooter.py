@@ -132,7 +132,12 @@ def _allowance_package_from_packet(packet: Mapping[str, object]) -> JsonDict:
 
 
 def review_allowed_package(packet: Mapping[str, object], *, now_epoch: float | None = None) -> AllowanceReview:
-    validation = validate_execution_packet_v3(packet, now_epoch=now_epoch)
+    validation = validate_execution_packet_v3(
+        packet,
+        now_epoch=now_epoch,
+        require_overlay_truth=True,
+        require_live_handoff_truth=True,
+    )
     if validation.rejected:
         return {
             "allowed": False,

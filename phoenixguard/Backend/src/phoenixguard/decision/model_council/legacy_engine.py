@@ -184,6 +184,9 @@ PROFESSIONAL_MAX_REACTION_ROOM_CANDLES = 18
 PROFESSIONAL_TREND_THESIS_CANDLES = 18
 PROFESSIONAL_REVERSAL_THESIS_CANDLES = 12
 PROFESSIONAL_MAX_THESIS_CANDLES = 48
+DEFAULT_EXECUTION_HANDOFF_TTL_SECONDS = 60.0
+MIN_EXECUTION_HANDOFF_TTL_SECONDS = 0.1
+EXECUTION_OPPORTUNITY_WINDOW_SCHEMA_VERSION = "PG_EXECUTION_OPPORTUNITY_WINDOW_V3"
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -224,6 +227,320 @@ def _int(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return int(default)
+
+
+def _entry_window_remaining_seconds(
+    entry_window: Mapping[str, Any],
+    *,
+    now_epoch: float,
+) -> float:
+    """Return entry authorization time left, independently of trade duration."""
+    window = _mapping(entry_window)
+    duration = max(
+        0.0,
+        _float(
+            _first_visible_value(
+                window.get("duration_sec"),
+                window.get("duration_seconds"),
+                window.get("window_seconds"),
+            ),
+            0.0,
+        ),
+    )
+    for key in ("remaining_sec", "remaining_seconds", "seconds_remaining"):
+        if key in window and window.get(key) not in (None, ""):
+            remaining = max(0.0, _float(window.get(key), 0.0))
+            return min(duration, remaining) if duration > 0.0 else remaining
+    valid_until = _float(
+        _first_visible_value(
+            window.get("valid_until_epoch_sec"),
+            window.get("valid_until_epoch"),
+        ),
+        0.0,
+    )
+    if valid_until > 0.0:
+        remaining = max(0.0, valid_until - float(now_epoch))
+        return min(duration, remaining) if duration > 0.0 else remaining
+    for key in ("elapsed_sec", "elapsed_seconds", "seconds_elapsed"):
+        if duration > 0.0 and key in window and window.get(key) not in (None, ""):
+            return max(0.0, duration - max(0.0, _float(window.get(key), 0.0)))
+    return duration
+
+
+def _execution_opportunity_window_from_state(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    root = _mapping(value)
+    if not root:
+        return {}
+    containers = [root]
+    for key in (
+        "model_council_result",
+        "model_council_packet",
+        "execution_packet",
+        "latest_model_council_packet",
+        "latest_execution_packet",
+        "model_council_study_packet",
+        "study_packet",
+    ):
+        nested = _mapping(root.get(key))
+        if nested:
+            containers.append(nested)
+    for container in containers:
+        candidate = _mapping(container.get("execution_opportunity_window_v3"))
+        if candidate:
+            return candidate
+    return {}
+
+
+def _execution_opportunity_key(
+    *,
+    session_id: str,
+    symbol: str,
+    timeframe: str,
+    side: str,
+    candidate_id: str,
+) -> str:
+    seed = "|".join(
+        (
+            str(session_id or "").strip().upper(),
+            str(symbol or "").strip().upper(),
+            str(timeframe or "").strip().upper(),
+            str(side or "").strip().upper(),
+            str(candidate_id or "").strip(),
+        )
+    )
+    return "pgopp_" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:20]
+
+
+def _resolve_execution_opportunity_window_v3(
+    snapshot: Mapping[str, Any],
+    previous_state: Mapping[str, Any] | None,
+    *,
+    candidate_id: str,
+    candidate_side: str,
+    entry_window: Mapping[str, Any],
+    executable: bool,
+    naturally_disarmed: bool,
+    now_epoch: float,
+    frame_id: int,
+    capture_count: int,
+    session_id: str,
+    symbol: str,
+    timeframe: str,
+) -> dict[str, Any]:
+    """Keep one absolute entry deadline for a stable market opportunity.
+
+    Current-frame packets may be refreshed for transport, but a new frame must
+    never create a new entry opportunity.  The same opportunity can re-arm only
+    after a naturally non-enter-now read, not after this deadline guard blocks it.
+    """
+
+    duration_sec = max(0.0, _entry_window_remaining_seconds(entry_window, now_epoch=0.0))
+    if duration_sec <= 0.0:
+        return {}
+    opportunity_key = _execution_opportunity_key(
+        session_id=session_id,
+        symbol=symbol,
+        timeframe=timeframe,
+        side=candidate_side,
+        candidate_id=candidate_id,
+    )
+    previous = _execution_opportunity_window_from_state(snapshot) or _execution_opportunity_window_from_state(
+        previous_state
+    )
+    previous_key = str(previous.get("opportunity_key") or "").strip()
+    previous_frame_id = _int(previous.get("last_seen_frame_id"), 0)
+    previous_capture_count = _int(previous.get("last_seen_capture_count"), 0)
+    lineage_not_advanced = bool(
+        previous
+        and (
+            (frame_id > 0 and previous_frame_id > 0 and frame_id <= previous_frame_id)
+            or (capture_count > 0 and previous_capture_count > 0 and capture_count <= previous_capture_count)
+        )
+    )
+    identity_matches = bool(
+        previous_key == opportunity_key
+        and str(previous.get("schema_version") or "") == EXECUTION_OPPORTUNITY_WINDOW_SCHEMA_VERSION
+        and str(previous.get("session_id") or "").strip().upper() == str(session_id).strip().upper()
+        and str(previous.get("symbol") or "").strip().upper() == str(symbol).strip().upper()
+        and str(previous.get("timeframe") or "").strip().upper() == str(timeframe).strip().upper()
+        and _side(previous.get("side")) == _side(candidate_side)
+        and str(previous.get("candidate_id") or "").strip() == str(candidate_id).strip()
+    )
+    same_opportunity = bool(previous_key and previous_key == opportunity_key and identity_matches)
+
+    def open_window(
+        *,
+        reset_reason: str,
+        opened_epoch_override: float | None = None,
+        opened_frame_override: int = 0,
+        opened_capture_override: int = 0,
+    ) -> dict[str, Any]:
+        opened_epoch_value = (
+            float(opened_epoch_override)
+            if opened_epoch_override is not None and float(opened_epoch_override) > 0.0
+            else float(now_epoch)
+        )
+        opened_frame_value = int(opened_frame_override or frame_id)
+        opened_capture_value = int(opened_capture_override or capture_count)
+        valid_until_epoch = opened_epoch_value + duration_sec
+        remaining_sec = max(0.0, valid_until_epoch - float(now_epoch))
+        window_state = "PENDING_OPEN" if remaining_sec >= MIN_EXECUTION_HANDOFF_TTL_SECONDS else "EXPIRED"
+        episode_seed = (
+            f"{opportunity_key}|{opened_frame_value}|{opened_capture_value}|{opened_epoch_value:.6f}"
+        )
+        return {
+            "schema_version": EXECUTION_OPPORTUNITY_WINDOW_SCHEMA_VERSION,
+            "opportunity_key": opportunity_key,
+            "opportunity_id": "pgepisode_" + hashlib.sha1(episode_seed.encode("utf-8")).hexdigest()[:20],
+            "session_id": str(session_id),
+            "symbol": str(symbol),
+            "timeframe": str(timeframe).upper(),
+            "side": str(candidate_side).upper(),
+            "candidate_id": str(candidate_id),
+            "opened_epoch": opened_epoch_value,
+            "opened_epoch_sec": opened_epoch_value,
+            "opened_frame_id": opened_frame_value,
+            "opened_capture_count": opened_capture_value,
+            "duration_sec": duration_sec,
+            "valid_until_epoch": valid_until_epoch,
+            "valid_until_epoch_sec": valid_until_epoch,
+            "remaining_sec": remaining_sec,
+            "state": window_state,
+            "anchor_reused": False,
+            "integrity_valid": True,
+            "lineage_rejected": False,
+            "last_seen_epoch": float(now_epoch),
+            "last_seen_frame_id": int(frame_id),
+            "last_seen_capture_count": int(capture_count),
+            "reset_reason": reset_reason,
+            "rearm_policy": "new candidate identity or natural non-enter-now read; a new frame never rearms",
+        }
+
+    if previous_key == opportunity_key and not identity_matches:
+        invalid = dict(previous)
+        invalid.update(
+            {
+                "state": "INVALID",
+                "remaining_sec": 0.0,
+                "integrity_valid": False,
+                "integrity_reason": "persisted opportunity schema or identity does not match current context",
+                "out_of_order_ignored": lineage_not_advanced,
+            }
+        )
+        return invalid
+
+    if previous and lineage_not_advanced:
+        stale = dict(previous)
+        stale.update(
+            {
+                "integrity_valid": True,
+                "out_of_order_ignored": True,
+                "lineage_rejected": True,
+                "integrity_reason": "frame and capture lineage must strictly advance before open or rearm",
+            }
+        )
+        return stale
+
+    if not same_opportunity:
+        if not executable:
+            if not previous:
+                return {}
+            retained = dict(previous)
+            retained.update(
+                {
+                    "anchor_reused": True,
+                    "lineage_rejected": False,
+                    "out_of_order_ignored": False,
+                    "pending_candidate_key": opportunity_key,
+                    "pending_candidate_side": _side(candidate_side),
+                    "last_seen_epoch": max(_float(previous.get("last_seen_epoch"), 0.0), float(now_epoch)),
+                    "last_seen_frame_id": max(previous_frame_id, int(frame_id)),
+                    "last_seen_capture_count": max(previous_capture_count, int(capture_count)),
+                }
+            )
+            return retained
+        active_thesis = _mapping(snapshot.get("active_signal_thesis"))
+        thesis_side = _side(
+            active_thesis.get("side")
+            or active_thesis.get("active_side")
+            or active_thesis.get("entry_side")
+        )
+        thesis_opened_epoch = _float(
+            active_thesis.get("created_epoch_sec")
+            or active_thesis.get("created_epoch")
+            or active_thesis.get("opened_epoch_sec")
+            or active_thesis.get("opened_epoch"),
+            0.0,
+        )
+        if not previous and thesis_side == _side(candidate_side) and 0.0 < thesis_opened_epoch <= float(now_epoch):
+            return open_window(
+                reset_reason="MIGRATED_FROM_ACTIVE_SIGNAL_THESIS",
+                opened_epoch_override=thesis_opened_epoch,
+                opened_frame_override=_int(
+                    active_thesis.get("entry_frame_id") or active_thesis.get("opened_frame_id"),
+                    0,
+                ),
+                opened_capture_override=_int(
+                    active_thesis.get("entry_capture_count") or active_thesis.get("opened_capture_count"),
+                    0,
+                ),
+            )
+        return open_window(reset_reason="NEW_OPPORTUNITY_IDENTITY")
+
+    state = str(previous.get("state") or "OPEN").strip().upper()
+    if state == "REARM_READY" and executable:
+        return open_window(reset_reason="NATURAL_DISARM_THEN_FRESH_ENTER_NOW")
+
+    opened_epoch = _float(previous.get("opened_epoch_sec") or previous.get("opened_epoch"), float(now_epoch))
+    previous_duration_sec = max(0.0, _float(previous.get("duration_sec"), duration_sec))
+    anchored_duration_sec = min(duration_sec, previous_duration_sec) if previous_duration_sec > 0.0 else duration_sec
+    maximum_valid_until_epoch = opened_epoch + anchored_duration_sec
+    supplied_valid_until_epoch = _float(
+        previous.get("valid_until_epoch_sec") or previous.get("valid_until_epoch"),
+        maximum_valid_until_epoch,
+    )
+    valid_until_epoch = min(
+        maximum_valid_until_epoch,
+        supplied_valid_until_epoch if supplied_valid_until_epoch > 0.0 else maximum_valid_until_epoch,
+    )
+    remaining_sec = max(0.0, valid_until_epoch - float(now_epoch))
+    if opened_epoch <= 0.0 or opened_epoch > float(now_epoch):
+        state = "INVALID"
+        remaining_sec = 0.0
+    elif remaining_sec < MIN_EXECUTION_HANDOFF_TTL_SECONDS and state == "OPEN":
+        state = "EXPIRED"
+    if naturally_disarmed and state in {"OPEN", "EXPIRED"}:
+        state = "REARM_READY"
+
+    resolved = dict(previous)
+    resolved.update(
+        {
+            "schema_version": EXECUTION_OPPORTUNITY_WINDOW_SCHEMA_VERSION,
+            "opportunity_key": opportunity_key,
+            "session_id": str(session_id),
+            "symbol": str(symbol),
+            "timeframe": str(timeframe).upper(),
+            "side": str(candidate_side).upper(),
+            "candidate_id": str(candidate_id),
+            "opened_epoch": opened_epoch,
+            "opened_epoch_sec": opened_epoch,
+            "duration_sec": anchored_duration_sec,
+            "valid_until_epoch": valid_until_epoch,
+            "valid_until_epoch_sec": valid_until_epoch,
+            "remaining_sec": remaining_sec if state == "OPEN" else 0.0,
+            "state": state,
+            "anchor_reused": True,
+            "integrity_valid": state != "INVALID",
+            "lineage_rejected": False,
+            "last_seen_epoch": max(_float(previous.get("last_seen_epoch"), 0.0), float(now_epoch)),
+            "last_seen_frame_id": max(previous_frame_id, int(frame_id)),
+            "last_seen_capture_count": max(previous_capture_count, int(capture_count)),
+            "reset_reason": "NATURAL_DISARM_OBSERVED" if state == "REARM_READY" else str(previous.get("reset_reason") or ""),
+            "out_of_order_ignored": False,
+            "rearm_policy": "new candidate identity or natural non-enter-now read; a new frame never rearms",
+        }
+    )
+    return resolved
 
 
 def _estimated_force_room_candles(room_context: Mapping[str, Any], *, default: int = 0) -> int:
@@ -2075,6 +2392,99 @@ def _dual_thesis_report_v3(
         "sides": {"BUY": buy_row, "SELL": sell_row},
         "buy": buy_row,
         "sell": sell_row,
+    }
+
+
+def build_entry_permission_v3(
+    dual_thesis_report: Mapping[str, Any] | None,
+    *,
+    execution_packet: Mapping[str, Any] | None = None,
+    allowance_package: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Separate raw BUY/SELL evidence from effective entry authorization."""
+
+    dual = _mapping(dual_thesis_report)
+    packet = _mapping(execution_packet)
+    execution = _mapping(packet.get("execution"))
+    allowance = _mapping(packet.get("allowance_package")) or _mapping(allowance_package)
+    packet_schema = _upper(packet.get("schema_version") or packet.get("packet_type"))
+    packet_authorized = bool(
+        packet
+        and packet_schema == PG_EXECUTION_PACKET_SCHEMA_VERSION
+        and _bool(execution.get("enabled"))
+    )
+    packet_side = _side(execution.get("side") or packet.get("side")) if packet_authorized else "HOLD"
+    current_pressure_side = _side(dual.get("current_pressure_side")) or "HOLD"
+    selected_authority_side = _side(dual.get("selected_authority_side")) or "HOLD"
+    raw_selected_side = packet_side if packet_side in {"BUY", "SELL"} else selected_authority_side
+    raw_selected_row = _mapping(dual.get(raw_selected_side.lower())) if raw_selected_side in {"BUY", "SELL"} else {}
+    raw_selected_status = _upper(raw_selected_row.get("status"), "STUDYING")
+    opposing_force = _mapping(dual.get("opposing_force"))
+    raw_rejection_pending = bool(
+        raw_selected_status == "WAITING_FOR_REJECTION_PROOF"
+        or _bool(opposing_force.get("watch_only_until_rejection"))
+    )
+    full_suite_story = _mapping(dual.get("full_suite_story_lock_v3"))
+    if not full_suite_story:
+        full_suite_story = _mapping(_mapping(allowance.get("playbook_ai_summary_v3")).get("full_suite_story_lock_v3"))
+    story_confirmed = bool(
+        _bool(full_suite_story.get("confirmed"))
+        and _side(full_suite_story.get("active_side") or full_suite_story.get("effective_side")) in {"BUY", "SELL"}
+    )
+    professional_trade_plan = _mapping(allowance.get("professional_trade_plan"))
+    trend_alignment = _mapping(professional_trade_plan.get("trend_alignment"))
+    professional_override_declared = bool(
+        _bool(allowance.get("professional_reaction_reasoning_override_allowed"))
+        or _bool(trend_alignment.get("professional_opposing_force_reaction"))
+    )
+    counter_pressure_entry = bool(
+        packet_authorized
+        and current_pressure_side in {"BUY", "SELL"}
+        and packet_side != current_pressure_side
+    )
+    override_applied = bool(
+        counter_pressure_entry
+        and (story_confirmed or professional_override_declared)
+    )
+    if override_applied and story_confirmed:
+        override_basis = "FULL_SUITE_PROFESSIONAL_STORY"
+    elif packet_authorized:
+        override_basis = "VALIDATED_EXECUTION_PACKET"
+    else:
+        override_basis = "NO_CURRENT_EXECUTION_PACKET"
+    if packet_authorized:
+        if counter_pressure_entry:
+            operator_read = (
+                f"Pressure: {current_pressure_side}. Full-suite selection: {selected_authority_side}. "
+                f"Entry permission: {packet_side} NOW via {override_basis}."
+            )
+        else:
+            operator_read = (
+                f"Pressure: {current_pressure_side}. Full-suite selection: {selected_authority_side}. "
+                f"Entry permission: {packet_side} NOW via a current validated execution packet."
+            )
+    else:
+        operator_read = (
+            f"Pressure: {current_pressure_side}. Full-suite selection: {selected_authority_side}. "
+            "Entry permission: NONE; BUY and SELL remain study-only until a current validated execution packet exists."
+        )
+    return {
+        "schema_version": "PG_ENTRY_PERMISSION_V3",
+        "state": "AUTHORIZED_NOW" if packet_authorized else "NOT_AUTHORIZED",
+        "side": packet_side if packet_authorized else "HOLD",
+        "execution_packet_required": True,
+        "execution_packet_present": packet_authorized,
+        "execution_packet_id": str(packet.get("packet_id") or "") if packet_authorized else "",
+        "current_pressure_side": current_pressure_side,
+        "selected_authority_side": selected_authority_side,
+        "counter_pressure_entry": counter_pressure_entry,
+        "override_applied": override_applied,
+        "override_basis": override_basis,
+        "raw_selected_status": raw_selected_status,
+        "raw_rejection_pending": raw_rejection_pending,
+        "raw_evidence_status_preserved": True,
+        "study_packet_executable": False,
+        "operator_read": operator_read,
     }
 
 
@@ -4386,11 +4796,7 @@ def evaluate_model_council_v3(
         if "prepare_allowed" in trade_permission
         else True
     )
-    permission_denied = bool(
-        trade_permission
-        and not permission_executable_allowed
-        and str(trade_permission.get("deny_reason") or "").upper() == "NO_DIRECTION_CANDIDATE"
-    )
+    permission_denied = bool(trade_permission and not permission_executable_allowed)
     permission_block_reason = str(trade_permission.get("deny_reason") or "TRADE_PERMISSION_DENIED")
     dominance_margin = abs(buy_score - sell_score)
     disagreement_score = min(1.0, 1.0 - dominance_margin)
@@ -4702,11 +5108,6 @@ def evaluate_model_council_v3(
         "timing_mode": timing_mode,
         "path_class": path_class,
         "preferred_expiry_sec": preferred_expiry_seconds,
-        "expiry_band": {
-            "min": expiry_band["minimum_safe_expiry_sec"],
-            "preferred": expiry_band["preferred_expiry_sec"],
-            "max": expiry_band["maximum_useful_expiry_sec"],
-        },
         "time_to_reward_sec": reward_seconds,
         "time_to_invalidation_sec": invalidation_seconds,
         "mfe_mae_expected_ratio": round(float(1.35 if path_class in {"DIRECT_CONTINUATION", "PULLBACK_THEN_CONTINUATION"} else 0.82 if drawdown_first_warning_active else 1.0), 4),
@@ -5030,13 +5431,26 @@ def evaluate_model_council_v3(
         entry_quality_surface = effective_entry_quality
         entry_quality_label = _entry_quality_label(entry_quality_surface) or entry_quality_label
         effective_trade_permission = _mapping(trade_permission)
+        permission_override_reasons = (
+            PROFESSIONAL_REACTION_SOFT_PERMISSION_REASONS
+            if professional_reaction_permission_override
+            else LANE_SOFT_PERMISSION_REASONS
+        )
         failed_reasons: list[str] = []
         raw_failed = trade_permission.get("failed_reasons")
         if isinstance(raw_failed, Sequence) and not isinstance(raw_failed, (str, bytes, bytearray)):
             failed_reasons = [
                 str(reason)
                 for reason in cast(Sequence[Any], raw_failed)
-                if _upper(reason) not in LANE_SOFT_PERMISSION_REASONS
+                if _upper(reason) not in permission_override_reasons
+            ]
+        blocking_reasons: list[str] = []
+        raw_blocking = trade_permission.get("blocking_reasons")
+        if isinstance(raw_blocking, Sequence) and not isinstance(raw_blocking, (str, bytes, bytearray)):
+            blocking_reasons = [
+                str(reason)
+                for reason in cast(Sequence[Any], raw_blocking)
+                if _upper(reason) not in permission_override_reasons
             ]
         effective_trade_permission.update(
             {
@@ -5045,7 +5459,11 @@ def evaluate_model_council_v3(
                 "executable_allowed": True,
                 "prepare_allowed": True,
                 "deny_reason": None,
+                "denied_at": None,
                 "failed_reasons": failed_reasons,
+                "blocking_reasons": blocking_reasons,
+                "advisory_failed_reasons": sorted(permission_failed_reasons),
+                "next_required_condition": "All final lane authority checks passed.",
                 "lane_override": True,
                 "lane": execution_lane.get("name"),
                 "reason": f"Execution permission granted by accepted {execution_lane.get('name')} lane.",
@@ -5378,7 +5796,7 @@ def evaluate_model_council_v3(
     professional_thesis_seconds = _int(thesis_horizon.get("expected_duration_sec"), preferred_expiry_seconds)
     professional_thesis_candles = _int(thesis_horizon.get("expected_candle_count"), 0)
     professional_plan_block_reason = str(professional_trade_plan.get("blocker") or "").strip().upper()
-    professional_plan_ok = bool(professional_trade_plan.get("professional_grade")) or bool(playbook_enter_now)
+    professional_plan_ok = bool(professional_trade_plan.get("professional_grade"))
     if professional_thesis_seconds > preferred_expiry_seconds:
         preferred_expiry_seconds = professional_thesis_seconds
         reward_seconds = max(reward_seconds, professional_thesis_seconds)
@@ -5396,7 +5814,7 @@ def evaluate_model_council_v3(
         timing_risk["expiry_sec"] = preferred_expiry_seconds
         timing_decision["timing_risk"] = timing_risk
     professional_trade_plan["applied_to_package"] = bool(professional_thesis_seconds >= preferred_expiry_seconds)
-    professional_enter_now_block = False
+    professional_enter_now_block = bool(playbook_enter_now and not professional_plan_ok)
     if professional_enter_now_block:
         playbook_enter_now = False
         playbook_wait_state = "PREPARE"
@@ -5494,12 +5912,22 @@ def evaluate_model_council_v3(
     opportunity_maturity["side_conflict_resolved_by_professional_thesis"] = professional_conflict_resolution
     opportunity_maturity["side_conflict_resolved_by_current_pressure"] = current_pressure_conflict_resolution
     playbook_hard_gate_reason = ""
-    if runtime_blocked:
+    if book_strategy_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
+        playbook_hard_gate_reason = f"PLAYBOOK_{book_strategy_state}"
+    elif side_conflict_unresolved:
+        playbook_hard_gate_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
+    elif runtime_blocked:
         playbook_hard_gate_reason = runtime_block_reason
     elif _bool(snapshot.get("source_identity_just_switched")):
         playbook_hard_gate_reason = "SOURCE_IDENTITY_JUST_SWITCHED"
     elif candidate_invalidated:
         playbook_hard_gate_reason = "CANDIDATE_INVALIDATED"
+    elif permission_hard_block:
+        playbook_hard_gate_reason = str(permission_block_reason or "TRADE_PERMISSION_DENIED")
+    elif trap_active:
+        playbook_hard_gate_reason = "MARKET_TRAP"
+    elif professional_enter_now_block:
+        playbook_hard_gate_reason = professional_plan_block_reason
 
     if playbook_enter_now and not playbook_hard_gate_reason:
         entry_now_allowed = True
@@ -5549,14 +5977,14 @@ def evaluate_model_council_v3(
     final_state = "WATCHING"
     block_reason: str | None = None
     executable = False
-    if side_conflict_unresolved and not playbook_enter_now:
+    if side_conflict_unresolved:
         final_state = "CONFLICT"
         candidate_side = "HOLD"
         block_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
     elif runtime_blocked:
         final_state = "BLOCKED_BY_RUNTIME"
         block_reason = runtime_block_reason
-    elif flip_flop_contained and not professional_flip_flop_override and not playbook_enter_now:
+    elif flip_flop_contained and not professional_flip_flop_override:
         final_state = "WATCHING"
         block_reason = "FLIP_FLOP_CONTAINED"
     elif professional_enter_now_block:
@@ -5575,6 +6003,9 @@ def evaluate_model_council_v3(
             else:
                 final_state = "WATCHING"
             block_reason = playbook_hard_gate_reason
+        elif permission_denied_effective and permission_prepare_allowed:
+            final_state = "PREPARING"
+            block_reason = permission_block_reason
         elif packet_identity_validation.ok:
             final_state = "EXECUTABLE"
             executable = True
@@ -5877,6 +6308,45 @@ def evaluate_model_council_v3(
     )
     timeframe_seconds = max(0, _int(candle_movement_context.get("timeframe_seconds"), 0))
     professional_entry_window = _mapping(professional_trade_plan.get("entry_window"))
+    naturally_disarmed = bool(
+        not executable
+        and (
+            book_strategy_state != "ENTER_NOW"
+            or opportunity_maturity_state in {"INVALIDATED", "MISSED", "LATE_CHASE"}
+        )
+    )
+    execution_opportunity_window = _resolve_execution_opportunity_window_v3(
+        snapshot,
+        previous_state,
+        candidate_id=active_candidate_id,
+        candidate_side=candidate_side,
+        entry_window=professional_entry_window,
+        executable=executable,
+        naturally_disarmed=naturally_disarmed,
+        now_epoch=current_now,
+        frame_id=_int(base.get("frame_id"), 0),
+        capture_count=_int(base.get("capture_count"), 0),
+        session_id=str(base.get("session_id") or ""),
+        symbol=str(base.get("symbol") or ""),
+        timeframe=str(base.get("timeframe") or ""),
+    )
+    if execution_opportunity_window:
+        professional_entry_window.update(
+            {
+                "opportunity_id": execution_opportunity_window.get("opportunity_id"),
+                "opportunity_key": execution_opportunity_window.get("opportunity_key"),
+                "duration_sec": execution_opportunity_window.get("duration_sec"),
+                "opened_epoch": execution_opportunity_window.get("opened_epoch"),
+                "opened_epoch_sec": execution_opportunity_window.get("opened_epoch_sec"),
+                "valid_until_epoch": execution_opportunity_window.get("valid_until_epoch"),
+                "valid_until_epoch_sec": execution_opportunity_window.get("valid_until_epoch_sec"),
+                "remaining_sec": execution_opportunity_window.get("remaining_sec"),
+                "state": execution_opportunity_window.get("state"),
+                "purpose": "absolute immediate entry authorization window; later frames do not renew it",
+            }
+        )
+        professional_trade_plan["entry_window"] = professional_entry_window
+        professional_trade_plan["execution_opportunity_window_v3"] = execution_opportunity_window
     professional_thesis_horizon = _mapping(professional_trade_plan.get("thesis_horizon"))
     expected_move_candles = (
         _int(professional_thesis_horizon.get("expected_candle_count"), 0)
@@ -5921,6 +6391,8 @@ def evaluate_model_council_v3(
     allowance_package["candle_movement"] = candle_movement_brief
     allowance_package["expected_move_time"] = expected_move_time
     allowance_package["entry_window"] = professional_entry_window
+    if execution_opportunity_window:
+        allowance_package["execution_opportunity_window_v3"] = execution_opportunity_window
     allowance_package["thesis_horizon"] = professional_thesis_horizon
     allowance_package["professional_trade_plan"] = professional_trade_plan
     allowance_package["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
@@ -5943,6 +6415,7 @@ def evaluate_model_council_v3(
         "previous_candidate_side": candidate_recent_sides[-2] if len(candidate_recent_sides) >= 2 else None,
         "candidate_id": active_candidate_id,
         "candidate_stage": candidate_stage,
+        "execution_opportunity_window_v3": execution_opportunity_window,
         "opportunity_maturity": opportunity_maturity,
         "opportunity_maturity_state": opportunity_maturity_state,
         "book_strategy": book_strategy,
@@ -6143,6 +6616,7 @@ def evaluate_model_council_v3(
     council: dict[str, Any] = {
         "final_state": final_state,
         "final_side": candidate_side if side_ok and final_state != "CONFLICT" else None,
+        "execution_opportunity_window_v3": execution_opportunity_window,
         "decision_id": "mc_" + hashlib.sha1(f"{current_now}|{candidate_side}|{buy_score}|{sell_score}".encode("utf-8")).hexdigest()[:18],
         "maturity_stage": "EXECUTABLE_PACKET" if executable else maturity_stage,
         "opportunity_maturity": opportunity_maturity,
@@ -6275,6 +6749,7 @@ def evaluate_model_council_v3(
         "schema_version": MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
         "packet_id": base["packet_id"],
         "packet_type": "STUDY_PACKET",
+        "execution_opportunity_window_v3": execution_opportunity_window,
         "execution": execution,
         "allowance_package": allowance_package,
         "model_council": council,
@@ -6374,6 +6849,13 @@ def evaluate_model_council_v3(
         },
     }
     study_packet_valid_for_seconds = _float(snapshot.get("study_packet_valid_for_seconds"), 20.0)
+    study_execution = {
+        **execution,
+        "enabled": False,
+        "state": "WATCHING" if _upper(execution.get("state")) == "EXECUTABLE" else execution.get("state", "WATCHING"),
+        "source_state": _upper(execution.get("state"), "WATCHING"),
+        "study_only": True,
+    }
     study_packet: dict[str, Any] = {
         "schema_version": MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
         "packet_id": base["packet_id"],
@@ -6388,7 +6870,7 @@ def evaluate_model_council_v3(
         "created_epoch_sec": current_now,
         "valid_until_epoch": current_now + study_packet_valid_for_seconds,
         "valid_until_epoch_sec": current_now + study_packet_valid_for_seconds,
-        "execution": execution,
+        "execution": study_execution,
         "model_council": council,
         "allowance_package": allowance_package,
         "block_reason": block_reason,
@@ -6402,6 +6884,7 @@ def evaluate_model_council_v3(
         "release_condition": release_condition,
         "candidate_id": active_candidate_id,
         "candidate_stage": candidate_stage,
+        "execution_opportunity_window_v3": execution_opportunity_window,
         "final_score": round(float(final_execution_score), 4),
         "threshold": round(float(lane_required_score), 4),
         "selected_lane": execution_lane.get("name"),
@@ -6593,18 +7076,65 @@ def evaluate_model_council_v3(
         allowance_package["sequence_context_role"] = "TRACE_ADVISORY_FOR_PLAYBOOK_AUTHORITY"
         council["sequence_context_readiness"] = sequence_readiness
         council["sequence_context_ready"] = False
+    execution_window_state = str(execution_opportunity_window.get("state") or "").strip().upper()
+    execution_window_block_reason = (
+        "EXECUTION_OPPORTUNITY_OUT_OF_ORDER_FRAME"
+        if execution_opportunity_window.get("lineage_rejected") is True
+        else {
+            "EXPIRED": "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED",
+            "INVALID": "EXECUTION_OPPORTUNITY_WINDOW_INVALID",
+        }.get(execution_window_state, "")
+    )
+    if executable and execution_window_block_reason:
+        executable = False
+        block_reason = execution_window_block_reason
+        blocked_by = block_reason
+        true_blocker = block_reason
+        final_state = "WATCHING"
+        release_state = "WATCHING"
+        next_required = "wait for a distinct candidate identity or a natural non-enter-now read before re-arming"
+        release_condition = next_required
+        promotion_trace.update(
+            {
+                "denied_at": block_reason,
+                "blocked_by": block_reason,
+                "true_blocker": block_reason,
+                "next_required": next_required,
+                "release_condition": release_condition,
+                "non_executable_state": release_state,
+                "execution_opportunity_window_v3": execution_opportunity_window,
+            }
+        )
     if not executable:
         _refresh_promotion_failure_audit()
-    packet_valid_for_seconds = max(
-        8.0,
-        _float(snapshot.get("packet_valid_for_seconds"), 0.0),
-        float(max(0, int(timing_expiry or 0))),
-        _float(professional_entry_window.get("duration_sec"), 0.0),
-        _float(_mapping(allowance_package.get("entry_window")).get("duration_sec"), 0.0),
+    configured_handoff_ttl_seconds = _float(
+        _first_visible_value(
+            snapshot.get("packet_handoff_ttl_seconds"),
+            snapshot.get("packet_valid_for_seconds"),
+            DEFAULT_EXECUTION_HANDOFF_TTL_SECONDS,
+        ),
+        DEFAULT_EXECUTION_HANDOFF_TTL_SECONDS,
     )
+    if configured_handoff_ttl_seconds <= 0.0:
+        configured_handoff_ttl_seconds = DEFAULT_EXECUTION_HANDOFF_TTL_SECONDS
+    entry_window_remaining_candidates = [
+        _entry_window_remaining_seconds(professional_entry_window, now_epoch=current_now),
+        _entry_window_remaining_seconds(
+            _mapping(allowance_package.get("entry_window")),
+            now_epoch=current_now,
+        ),
+    ]
+    entry_window_remaining_seconds = (
+        min(entry_window_remaining_candidates)
+        if entry_window_remaining_candidates
+        else configured_handoff_ttl_seconds
+    )
+    packet_valid_for_seconds = max(0.0, min(configured_handoff_ttl_seconds, entry_window_remaining_seconds))
     if executable:
         promotion_trace["packet_valid_for_seconds"] = packet_valid_for_seconds
-        promotion_trace["packet_validity_source"] = "playbook_entry_window"
+        promotion_trace["configured_handoff_ttl_seconds"] = configured_handoff_ttl_seconds
+        promotion_trace["entry_window_remaining_seconds"] = entry_window_remaining_seconds
+        promotion_trace["packet_validity_source"] = "configured_handoff_ttl_capped_by_entry_window"
     if executable:
         packet = build_execution_packet_v3(
             packet_id=base["packet_id"],
@@ -6632,6 +7162,8 @@ def evaluate_model_council_v3(
             allowance_package=allowance_package,
         )
         packet["allowance_package"] = allowance_package
+        packet["execution_opportunity_window_v3"] = execution_opportunity_window
+        packet["entry_window"] = professional_entry_window
         packet["execution"]["allowance_package_type"] = allowance_package["package_type"]
         packet["market_reality"] = market_reality
         packet["packet_type"] = "PG_EXECUTION_PACKET_V3"
@@ -6687,6 +7219,12 @@ def evaluate_model_council_v3(
             require_broker_click_safe_identity=False,
         )
         if not validation.ok:
+            if str(execution_opportunity_window.get("state") or "").upper() == "PENDING_OPEN":
+                previous_window = _execution_opportunity_window_from_state(snapshot) or _execution_opportunity_window_from_state(
+                    previous_state
+                )
+                execution_opportunity_window.clear()
+                execution_opportunity_window.update(previous_window)
             runtime_release_condition = (
                 _instrument_release_requirement(instrument_context, instrument_release_condition)
                 if validation.first_reason.startswith("INSTRUMENT_CONTEXT")
@@ -6768,6 +7306,8 @@ def evaluate_model_council_v3(
             result["packet_validation"] = validation.as_dict()
             _refresh_promotion_failure_audit()
         else:
+            if str(execution_opportunity_window.get("state") or "").upper() == "PENDING_OPEN":
+                execution_opportunity_window["state"] = "OPEN"
             packet["contributors"] = result["contributors"]
             result["execution_packet"] = packet
             result["model_council_packet"] = packet
@@ -6843,7 +7383,14 @@ def evaluate_model_council_v3(
         if not no_packet_next_required or no_packet_next_required.lower() == "none":
             no_packet_next_required = "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
         no_packet_reason_upper = _upper(no_packet_reason, "EXECUTION_PACKET_NOT_PUBLISHED")
-        if opportunity_maturity_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
+        if no_packet_reason_upper == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED":
+            no_packet_maturity_state = "MISSED"
+        elif no_packet_reason_upper in {
+            "EXECUTION_OPPORTUNITY_WINDOW_INVALID",
+            "EXECUTION_OPPORTUNITY_OUT_OF_ORDER_FRAME",
+        }:
+            no_packet_maturity_state = "INVALIDATED"
+        elif opportunity_maturity_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
             no_packet_maturity_state = opportunity_maturity_state
         elif no_packet_reason_upper.startswith("PLAYBOOK_MATURITY_"):
             candidate_state = no_packet_reason_upper.removeprefix("PLAYBOOK_MATURITY_")
@@ -6878,6 +7425,7 @@ def evaluate_model_council_v3(
                 "MISSING",
                 "MODEL_COUNCIL_EXPLICIT_EXPIRY",
                 "EXECUTION_PACKET_NOT_CURRENT",
+                "EXECUTION_OPPORTUNITY_",
             )
         )
         _mark_opportunity_maturity_blocked(
@@ -6962,6 +7510,37 @@ def evaluate_model_council_v3(
         result["model_council_study_packet"] = study_packet
         result["packet_result"] = "STUDY_PACKET_PUBLISHED"
         result["execution_packet_present"] = False
+    current_execution_packet = _mapping(result.get("execution_packet") or result.get("model_council_packet"))
+    entry_permission_v3 = build_entry_permission_v3(
+        dual_thesis_report,
+        execution_packet=current_execution_packet,
+        allowance_package=allowance_package,
+    )
+    dual_thesis_report["entry_permission_v3"] = entry_permission_v3
+    for payload in (result, council, promotion_trace, allowance_package, study_packet):
+        payload["entry_permission_v3"] = entry_permission_v3
+        payload["dual_thesis_report_v3"] = dual_thesis_report
+    study_packet["execution"] = {
+        **_mapping(study_packet.get("execution")),
+        "enabled": False,
+        "state": "WATCHING"
+        if _upper(_mapping(study_packet.get("execution")).get("state")) == "EXECUTABLE"
+        else _upper(_mapping(study_packet.get("execution")).get("state"), "WATCHING"),
+        "study_only": True,
+    }
+    if current_execution_packet:
+        current_execution_packet["entry_permission_v3"] = entry_permission_v3
+        current_execution_packet["dual_thesis_report_v3"] = dual_thesis_report
+        packet_allowance = _mapping(current_execution_packet.get("allowance_package"))
+        packet_allowance["entry_permission_v3"] = entry_permission_v3
+        packet_allowance["dual_thesis_report_v3"] = dual_thesis_report
+        current_execution_packet["allowance_package"] = packet_allowance
+        if isinstance(result.get("execution_packet"), Mapping):
+            result["execution_packet"] = current_execution_packet
+        if isinstance(result.get("model_council_packet"), Mapping):
+            result["model_council_packet"] = current_execution_packet
+    result["study_packet"] = study_packet
+    result["model_council_study_packet"] = study_packet
     return result
 
 
@@ -7222,6 +7801,34 @@ class ModelCouncilV3:
                 candidate=candidate,
                 stable_reads=effective_stable_count,
             )
+        if not _mapping(result.get("execution_packet") or result.get("model_council_packet")):
+            current_window = _execution_opportunity_window_from_state(result)
+            if (
+                str(current_window.get("state") or "").upper() == "OPEN"
+                and current_window.get("anchor_reused") is False
+            ):
+                previous_window = _execution_opportunity_window_from_state(self._previous_result) or _execution_opportunity_window_from_state(
+                    working
+                )
+                if previous_window:
+                    result["execution_opportunity_window_v3"] = previous_window
+                else:
+                    result.pop("execution_opportunity_window_v3", None)
+                for key in (
+                    "model_council",
+                    "promotion_trace",
+                    "allowance_package",
+                    "study_packet",
+                    "model_council_study_packet",
+                ):
+                    container = _mapping(result.get(key))
+                    if not container:
+                        continue
+                    if previous_window:
+                        container["execution_opportunity_window_v3"] = previous_window
+                    else:
+                        container.pop("execution_opportunity_window_v3", None)
+                    result[key] = container
         self._previous_result = result
         packet = result.get("execution_packet")
         if isinstance(packet, Mapping):

@@ -1365,6 +1365,42 @@ def test_execution_packet_publishes_after_all_release_conditions_pass() -> None:
     assert allowance["visual_integrity"] == "PASS"
     assert packet["model_council"]["allowance_package"]["package_type"] == "INTRADAY_ENTER_NOW"
     assert packet["promotion_trace"]["allowance_package"]["package_type"] == "INTRADAY_ENTER_NOW"
+    assert packet["entry_permission_v3"]["state"] == "AUTHORIZED_NOW"
+    assert packet["entry_permission_v3"]["side"] == "BUY"
+    assert packet["entry_permission_v3"]["execution_packet_id"] == packet["packet_id"]
+
+
+def test_entry_permission_preserves_raw_counter_pressure_evidence_and_explains_override() -> None:
+    dual = {
+        "current_pressure_side": "BUY",
+        "selected_authority_side": "SELL",
+        "opposing_force": {
+            "side": "SELL",
+            "watch_only_until_rejection": True,
+            "rejection_confirmed": False,
+        },
+        "buy": {"side": "BUY", "status": "CURRENT_PRESSURE_ACTIVE"},
+        "sell": {"side": "SELL", "status": "WAITING_FOR_REJECTION_PROOF"},
+        "full_suite_story_lock_v3": {"active_side": "SELL", "confirmed": True},
+    }
+    packet = {
+        "schema_version": "PG_EXECUTION_PACKET_V3",
+        "packet_id": "pgpkt-counter-pressure",
+        "execution": {"enabled": True, "state": "EXECUTABLE", "side": "SELL"},
+        "allowance_package": {"professional_reaction_reasoning_override_allowed": True},
+    }
+
+    permission = model_council_module.build_entry_permission_v3(dual, execution_packet=packet)
+
+    assert dual["sell"]["status"] == "WAITING_FOR_REJECTION_PROOF"
+    assert permission["state"] == "AUTHORIZED_NOW"
+    assert permission["side"] == "SELL"
+    assert permission["current_pressure_side"] == "BUY"
+    assert permission["counter_pressure_entry"] is True
+    assert permission["override_applied"] is True
+    assert permission["override_basis"] == "FULL_SUITE_PROFESSIONAL_STORY"
+    assert permission["raw_selected_status"] == "WAITING_FOR_REJECTION_PROOF"
+    assert permission["raw_rejection_pending"] is True
 
 
 def test_strategy_package_uses_visible_swing_horizon_not_one_candle_scalp() -> None:
@@ -1404,6 +1440,323 @@ def test_strategy_package_uses_visible_swing_horizon_not_one_candle_scalp() -> N
     assert expected["basis"] == "professional_visible_history_memory_trend_plan"
     assert expected["projection_horizon"]["basis"] == "visible_swing_leg_room_projection"
     assert expected["projection_horizon"]["applied"] is True
+
+
+@pytest.mark.parametrize(
+    ("entry_window_seconds", "expected_handoff_ttl_seconds"),
+    ((900, 60.0), (30, 30.0)),
+)
+def test_execution_handoff_ttl_is_separate_from_trade_expiry_and_capped_by_entry_window(
+    monkeypatch: pytest.MonkeyPatch,
+    entry_window_seconds: int,
+    expected_handoff_ttl_seconds: float,
+) -> None:
+    # Bound this fixture's professional thesis to twelve M5 candles so the
+    # trade clock is exactly one hour and can be compared with the handoff TTL.
+    monkeypatch.setattr(model_council_module, "PROFESSIONAL_TREND_THESIS_CANDLES", 12)
+    monkeypatch.setattr(model_council_module, "PROFESSIONAL_MAX_THESIS_CANDLES", 12)
+    monkeypatch.setattr(model_council_module, "PROFESSIONAL_MEMORY_MEDIAN_LEG_CANDLES", 12)
+
+    def snapshot(frame_id: int) -> dict[str, Any]:
+        payload = _strong_snapshot("BUY", frame_id=frame_id)
+        payload["timing"]["expiry_seconds"] = entry_window_seconds
+        payload["packet_valid_for_seconds"] = 60.0
+        return payload
+
+    council = ModelCouncilV3()
+    first = council.evaluate(snapshot(100), now_epoch=NOW)
+    packet = first if first.get("packet_type") == "PG_EXECUTION_PACKET_V3" else council.evaluate(
+        snapshot(101),
+        now_epoch=NOW + 0.5,
+    )
+
+    assert packet["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert packet["execution"]["expiry_seconds"] == 3600
+    assert packet["allowance_package"]["thesis_horizon"]["expected_duration_sec"] == 3600
+    assert packet["allowance_package"]["entry_window"]["duration_sec"] == entry_window_seconds
+    assert packet["valid_for_seconds"] == expected_handoff_ttl_seconds
+    assert packet["valid_until_epoch"] - packet["created_epoch"] == expected_handoff_ttl_seconds
+    assert packet["promotion_trace"]["packet_validity_source"] == (
+        "configured_handoff_ttl_capped_by_entry_window"
+    )
+
+
+def test_execution_opportunity_window_does_not_renew_on_each_fresh_frame() -> None:
+    def snapshot(frame_id: int, *, zone_id: str = "stable-entry-zone") -> dict[str, Any]:
+        payload = _strong_snapshot("BUY", frame_id=frame_id)
+        payload["timing"]["expiry_seconds"] = 30
+        payload["packet_valid_for_seconds"] = 60.0
+        payload["sniper_zone_id"] = zone_id
+        payload["market_context"]["sniper_zone_id"] = zone_id
+        return payload
+
+    council = ModelCouncilV3()
+    first = council.evaluate(snapshot(200), now_epoch=NOW)
+    packet = first if first.get("packet_type") == "PG_EXECUTION_PACKET_V3" else council.evaluate(
+        snapshot(201),
+        now_epoch=NOW + 0.5,
+    )
+    authority = cast(Mapping[str, Any], packet["execution_opportunity_window_v3"])
+    valid_until = float(authority["valid_until_epoch_sec"])
+    opened_epoch = float(authority["opened_epoch_sec"])
+    opportunity_id = str(authority["opportunity_id"])
+
+    near_expiry = council.evaluate(snapshot(202), now_epoch=valid_until - 5.0)
+    assert near_expiry["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert near_expiry["valid_for_seconds"] == pytest.approx(5.0)
+    assert near_expiry["execution_opportunity_window_v3"]["opened_epoch_sec"] == opened_epoch
+    assert near_expiry["execution_opportunity_window_v3"]["opportunity_id"] == opportunity_id
+
+    expired = council.evaluate(snapshot(203), now_epoch=valid_until + 0.1)
+    assert expired["packet_type"] == "STUDY_PACKET"
+    assert expired["execution"]["enabled"] is False
+    assert expired["execution_packet_present"] is False
+    assert "execution_packet" not in expired
+    assert expired["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED"
+    assert expired["execution_opportunity_window_v3"]["state"] == "EXPIRED"
+    assert expired["execution_opportunity_window_v3"]["opportunity_id"] == opportunity_id
+    assert expired["dual_thesis_report_v3"]["buy"]["side"] == "BUY"
+    assert expired["dual_thesis_report_v3"]["sell"]["side"] == "SELL"
+
+    still_expired = council.evaluate(snapshot(204), now_epoch=valid_until + 15.0)
+    assert still_expired["packet_type"] == "STUDY_PACKET"
+    assert still_expired["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED"
+    assert still_expired["execution_opportunity_window_v3"]["opportunity_id"] == opportunity_id
+
+    distinct_opportunity = council.evaluate(
+        snapshot(205, zone_id="fresh-entry-zone"),
+        now_epoch=valid_until + 16.0,
+    )
+    assert distinct_opportunity["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert distinct_opportunity["execution_opportunity_window_v3"]["state"] == "OPEN"
+    assert distinct_opportunity["execution_opportunity_window_v3"]["opportunity_id"] != opportunity_id
+
+
+def test_execution_opportunity_window_fails_closed_inside_builder_minimum_ttl() -> None:
+    def snapshot(frame_id: int) -> dict[str, Any]:
+        payload = _strong_snapshot("BUY", frame_id=frame_id)
+        payload["timing"]["expiry_seconds"] = 30
+        return payload
+
+    council = ModelCouncilV3()
+    first = council.evaluate(snapshot(220), now_epoch=NOW)
+    packet = first if first.get("packet_type") == "PG_EXECUTION_PACKET_V3" else council.evaluate(
+        snapshot(221),
+        now_epoch=NOW + 0.5,
+    )
+    valid_until = float(packet["execution_opportunity_window_v3"]["valid_until_epoch_sec"])
+
+    result = council.evaluate(snapshot(222), now_epoch=valid_until - 0.05)
+
+    assert result["packet_type"] == "STUDY_PACKET"
+    assert result["execution"]["enabled"] is False
+    assert result["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED"
+    assert result["execution_opportunity_window_v3"]["state"] == "EXPIRED"
+
+
+def test_out_of_order_or_equal_lineage_cannot_open_or_rearm_opportunity_window() -> None:
+    def snapshot(frame_id: int, *, zone_id: str) -> dict[str, Any]:
+        payload = _strong_snapshot("BUY", frame_id=frame_id)
+        payload["timing"]["expiry_seconds"] = 30
+        payload["sniper_zone_id"] = zone_id
+        payload["market_context"]["sniper_zone_id"] = zone_id
+        return payload
+
+    council = ModelCouncilV3()
+    first = council.evaluate(snapshot(240, zone_id="original-zone"), now_epoch=NOW)
+    packet = first if first.get("packet_type") == "PG_EXECUTION_PACKET_V3" else council.evaluate(
+        snapshot(241, zone_id="original-zone"),
+        now_epoch=NOW + 0.5,
+    )
+    authority = deepcopy(packet["execution_opportunity_window_v3"])
+    original_id = str(authority["opportunity_id"])
+    last_frame = int(authority["last_seen_frame_id"])
+
+    older_different_identity = council.evaluate(
+        snapshot(last_frame - 1, zone_id="different-zone"),
+        now_epoch=NOW + 1.0,
+    )
+    assert older_different_identity["packet_type"] == "STUDY_PACKET"
+    assert older_different_identity["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_OUT_OF_ORDER_FRAME"
+    assert older_different_identity["execution_opportunity_window_v3"]["opportunity_id"] == original_id
+
+    rearm_ready = deepcopy(authority)
+    rearm_ready["state"] = "REARM_READY"
+    equal_snapshot = snapshot(last_frame, zone_id="original-zone")
+    equal_snapshot["capture_count"] = int(rearm_ready["last_seen_capture_count"])
+    equal_snapshot["execution_opportunity_window_v3"] = rearm_ready
+    restarted = ModelCouncilV3()
+    equal_result = restarted.evaluate(equal_snapshot, now_epoch=NOW + 2.0)
+    assert equal_result["packet_type"] == "STUDY_PACKET"
+    assert equal_result["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_OUT_OF_ORDER_FRAME"
+    assert equal_result["execution_opportunity_window_v3"]["opportunity_id"] == original_id
+
+
+def test_same_identity_rearms_only_after_natural_non_enter_now_read() -> None:
+    def snapshot(frame_id: int) -> dict[str, Any]:
+        payload = _strong_snapshot("BUY", frame_id=frame_id)
+        payload["timing"]["expiry_seconds"] = 30
+        return payload
+
+    council = ModelCouncilV3()
+    first = council.evaluate(snapshot(250), now_epoch=NOW)
+    packet = first if first.get("packet_type") == "PG_EXECUTION_PACKET_V3" else council.evaluate(
+        snapshot(251),
+        now_epoch=NOW + 0.5,
+    )
+    original_id = str(packet["execution_opportunity_window_v3"]["opportunity_id"])
+
+    disarmed_snapshot = snapshot(252)
+    disarmed_snapshot["timing"]["state"] = "WAIT"
+    disarmed_snapshot["timing"]["reason"] = "Price left the valid trigger and became a late chase."
+    disarmed_snapshot["angle_dynamics"]["late_chase_risk"] = True
+    disarmed_snapshot["market_context"]["is_late_chase"] = True
+    disarmed_snapshot["historical_pattern"]["historical_late_entry_risk"] = "HIGH"
+    disarmed = council.evaluate(disarmed_snapshot, now_epoch=NOW + 1.0)
+
+    assert disarmed["packet_type"] == "STUDY_PACKET"
+    assert disarmed["execution"]["enabled"] is False
+    assert disarmed["execution_opportunity_window_v3"]["state"] == "REARM_READY"
+    assert disarmed["execution_opportunity_window_v3"]["opportunity_id"] == original_id
+
+    rearmed = council.evaluate(snapshot(253), now_epoch=NOW + 1.5)
+    assert rearmed["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert rearmed["execution_opportunity_window_v3"]["state"] == "OPEN"
+    assert rearmed["execution_opportunity_window_v3"]["opportunity_id"] != original_id
+    assert rearmed["execution_opportunity_window_v3"]["reset_reason"] == (
+        "NATURAL_DISARM_THEN_FRESH_ENTER_NOW"
+    )
+
+
+def test_contained_candidate_flip_cannot_replace_persisted_opportunity_window() -> None:
+    council = ModelCouncilV3()
+    first = council.evaluate(_strong_snapshot("BUY", frame_id=270), now_epoch=NOW)
+    buy_packet = first if first.get("packet_type") == "PG_EXECUTION_PACKET_V3" else council.evaluate(
+        _strong_snapshot("BUY", frame_id=271),
+        now_epoch=NOW + 0.5,
+    )
+    buy_opportunity_id = str(buy_packet["execution_opportunity_window_v3"]["opportunity_id"])
+
+    contained = council.evaluate(_strong_snapshot("SELL", frame_id=272), now_epoch=NOW + 1.0)
+
+    assert contained["packet_type"] == "STUDY_PACKET"
+    assert contained["execution"]["enabled"] is False
+    assert contained["block_reason"] == "FLIP_FLOP_CONTAINED"
+    assert contained["execution_opportunity_window_v3"]["opportunity_id"] == buy_opportunity_id
+    assert contained["execution_opportunity_window_v3"]["side"] == "BUY"
+
+    sell_packet = council.evaluate(_strong_snapshot("SELL", frame_id=273), now_epoch=NOW + 1.5)
+    assert sell_packet["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert sell_packet["execution_opportunity_window_v3"]["side"] == "SELL"
+    assert sell_packet["execution_opportunity_window_v3"]["opportunity_id"] != buy_opportunity_id
+
+
+def test_persisted_opportunity_deadline_is_schema_checked_and_never_extended() -> None:
+    def snapshot(frame_id: int) -> dict[str, Any]:
+        payload = _strong_snapshot("BUY", frame_id=frame_id)
+        payload["timing"]["expiry_seconds"] = 30
+        return payload
+
+    original = ModelCouncilV3()
+    first = original.evaluate(snapshot(260), now_epoch=NOW)
+    packet = first if first.get("packet_type") == "PG_EXECUTION_PACKET_V3" else original.evaluate(
+        snapshot(261),
+        now_epoch=NOW + 0.5,
+    )
+    authority = deepcopy(packet["execution_opportunity_window_v3"])
+    opened_epoch = float(authority["opened_epoch_sec"])
+    authority["valid_until_epoch"] = opened_epoch + 10_000.0
+    authority["valid_until_epoch_sec"] = opened_epoch + 10_000.0
+
+    restarted = ModelCouncilV3()
+    later_snapshot = snapshot(262)
+    later_snapshot["execution_opportunity_window_v3"] = authority
+    result = restarted.evaluate(later_snapshot, now_epoch=opened_epoch + 31.0)
+    if not result.get("execution_opportunity_window_v3"):
+        next_snapshot = snapshot(263)
+        next_snapshot["execution_opportunity_window_v3"] = authority
+        result = restarted.evaluate(next_snapshot, now_epoch=opened_epoch + 31.5)
+    assert result["packet_type"] == "STUDY_PACKET"
+    assert result["execution_opportunity_window_v3"]["valid_until_epoch_sec"] == opened_epoch + 30.0
+    assert result["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED"
+
+    invalid = deepcopy(authority)
+    invalid["schema_version"] = "PG_EXECUTION_OPPORTUNITY_WINDOW_V2"
+    invalid_snapshot = snapshot(264)
+    invalid_snapshot["execution_opportunity_window_v3"] = invalid
+    invalid_council = ModelCouncilV3()
+    invalid_result = invalid_council.evaluate(invalid_snapshot, now_epoch=opened_epoch + 5.0)
+    if not invalid_result.get("execution_opportunity_window_v3"):
+        invalid_snapshot = snapshot(265)
+        invalid_snapshot["execution_opportunity_window_v3"] = invalid
+        invalid_result = invalid_council.evaluate(invalid_snapshot, now_epoch=opened_epoch + 5.5)
+    assert invalid_result["packet_type"] == "STUDY_PACKET"
+    assert invalid_result["execution_opportunity_window_v3"]["state"] == "INVALID"
+    assert invalid_result["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_WINDOW_INVALID"
+
+
+def test_persisted_expired_opportunity_window_survives_council_restart() -> None:
+    def snapshot(frame_id: int) -> dict[str, Any]:
+        payload = _strong_snapshot("BUY", frame_id=frame_id)
+        payload["timing"]["expiry_seconds"] = 30
+        payload["sniper_zone_id"] = "restart-stable-zone"
+        payload["market_context"]["sniper_zone_id"] = "restart-stable-zone"
+        return payload
+
+    original = ModelCouncilV3()
+    first = original.evaluate(snapshot(300), now_epoch=NOW)
+    packet = first if first.get("packet_type") == "PG_EXECUTION_PACKET_V3" else original.evaluate(
+        snapshot(301),
+        now_epoch=NOW + 0.5,
+    )
+    authority = cast(dict[str, Any], packet["execution_opportunity_window_v3"])
+    valid_until = float(authority["valid_until_epoch_sec"])
+
+    restarted = ModelCouncilV3()
+    after_restart_first = snapshot(302)
+    after_restart_first["execution_opportunity_window_v3"] = deepcopy(authority)
+    first_result = restarted.evaluate(after_restart_first, now_epoch=valid_until + 1.0)
+    after_restart_second = snapshot(303)
+    after_restart_second["execution_opportunity_window_v3"] = deepcopy(authority)
+    second_result = restarted.evaluate(after_restart_second, now_epoch=valid_until + 1.5)
+
+    for result in (first_result, second_result):
+        assert result["packet_type"] == "STUDY_PACKET"
+        assert result["execution"]["enabled"] is False
+        assert result["execution_opportunity_window_v3"]["state"] == "EXPIRED"
+        assert result["execution_opportunity_window_v3"]["opportunity_id"] == authority["opportunity_id"]
+    assert second_result["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED"
+
+
+def test_existing_signal_thesis_bootstraps_absolute_entry_deadline_without_restart_renewal() -> None:
+    def snapshot(frame_id: int) -> dict[str, Any]:
+        payload = _strong_snapshot("BUY", frame_id=frame_id)
+        payload["timing"]["expiry_seconds"] = 30
+        payload["active_signal_thesis"] = {
+            "schema_version": "PG_SIGNAL_THESIS_V3",
+            "side": "BUY",
+            "created_epoch": NOW - 40.0,
+            "entry_frame_id": 80,
+            "entry_capture_count": 82,
+            "state": "ACTIVE",
+        }
+        return payload
+
+    restarted = ModelCouncilV3()
+    first = restarted.evaluate(snapshot(400), now_epoch=NOW)
+    result = first if first.get("execution_opportunity_window_v3") else restarted.evaluate(
+        snapshot(401),
+        now_epoch=NOW + 0.5,
+    )
+
+    assert result["packet_type"] == "STUDY_PACKET"
+    assert result["execution"]["enabled"] is False
+    assert result["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED"
+    authority = result["execution_opportunity_window_v3"]
+    assert authority["reset_reason"] == "MIGRATED_FROM_ACTIVE_SIGNAL_THESIS"
+    assert authority["opened_epoch_sec"] == NOW - 40.0
+    assert authority["opened_frame_id"] == 80
+    assert authority["state"] == "EXPIRED"
 
 
 def test_strategy_package_uses_full_overlay_suite_projection_horizon() -> None:

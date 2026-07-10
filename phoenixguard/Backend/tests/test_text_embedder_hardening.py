@@ -11,8 +11,9 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from phoenixguard.decision.personalization import PersonalizationEngine
-from phoenixguard.memory import memory_ingest
+from phoenixguard.decision.personalization import PersonalizationEngine  # noqa: E402
+from phoenixguard.core import utils as core_utils  # noqa: E402
+from phoenixguard.memory import memory_ingest  # noqa: E402
 
 
 class _PrefStore:
@@ -29,6 +30,42 @@ class _Logger:
 
     def warning(self, *args: object, **kwargs: object) -> None:
         return None
+
+
+def test_sentence_transformer_probe_uses_configurable_cold_start_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _probe(import_stmt: str, timeout_sec: int = 20) -> bool:
+        captured["import_stmt"] = import_stmt
+        captured["timeout_sec"] = timeout_sec
+        return True
+
+    monkeypatch.setenv("PHOENIXGUARD_SENTENCE_TRANSFORMERS_IMPORT_TIMEOUT_SEC", "75")
+    monkeypatch.setattr(core_utils, "can_import_module_safely", _probe)
+
+    assert core_utils.can_import_sentence_transformers_safely() is True
+    assert captured["import_stmt"] == "from sentence_transformers import SentenceTransformer"
+    assert captured["timeout_sec"] == 75
+
+
+def test_torchvision_probe_uses_configurable_cold_start_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _probe(import_stmt: str, timeout_sec: int = 20) -> bool:
+        captured["import_stmt"] = import_stmt
+        captured["timeout_sec"] = timeout_sec
+        return True
+
+    monkeypatch.setenv("PHOENIXGUARD_TORCHVISION_IMPORT_TIMEOUT_SEC", "70")
+    monkeypatch.setattr(core_utils, "can_import_module_safely", _probe)
+
+    assert core_utils.can_import_torchvision_safely() is True
+    assert captured["import_stmt"] == "import torchvision"
+    assert captured["timeout_sec"] == 70
 
 
 def _captured_kwargs(captured: Mapping[str, object]) -> Mapping[str, object]:

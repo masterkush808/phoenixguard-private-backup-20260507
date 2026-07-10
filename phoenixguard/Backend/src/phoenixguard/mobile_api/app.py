@@ -1353,6 +1353,116 @@ def _raise_if_stale_payload(payload: Mapping[str, object], *, detail: str) -> No
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
 
 
+def _explicit_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value or "").strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _payload_declares_no_current_execution_packet(payload: Mapping[str, object]) -> bool:
+    result = _mapping_to_plain_dict(payload.get("model_council_result"))
+    trace = _mapping_to_plain_dict(result.get("promotion_trace") or payload.get("promotion_trace"))
+    for container in (payload, result, trace):
+        for key in (
+            "execution_packet_revoked",
+            "model_council_packet_revoked",
+            "current_execution_packet_revoked",
+            "execution_revoked",
+            "packet_revoked",
+            "execution_packet_invalidated",
+        ):
+            if _explicit_bool(container.get(key)) is True:
+                return True
+    if _explicit_bool(payload.get("model_council_update_pending")) is True:
+        return True
+    root_presence = _explicit_bool(payload.get("execution_packet_present"))
+    if root_presence is not None:
+        return not root_presence
+    result_presence = _explicit_bool(result.get("execution_packet_present"))
+    if result_presence is not None:
+        return not result_presence
+    packet_result = str(
+        trace.get("packet_result")
+        or result.get("packet_result")
+        or payload.get("packet_result")
+        or ""
+    ).strip().upper()
+    return packet_result in {
+        "NO_EXECUTION_PACKET",
+        "EXECUTION_PACKET_REVOKED",
+        "STUDY_PACKET_PUBLISHED",
+    }
+
+
+def _first_positive_int(*values: object) -> int:
+    for value in values:
+        resolved = int(_epoch_float(value, 0.0))
+        if resolved > 0:
+            return resolved
+    return 0
+
+
+def _execution_packet_matches_current_payload(
+    packet: Mapping[str, object],
+    payload: Mapping[str, object],
+) -> bool:
+    result = _mapping_to_plain_dict(payload.get("model_council_result"))
+    tracking = _mapping_to_plain_dict(payload.get("tracking_summary"))
+    current_frame = _first_positive_int(
+        payload.get("model_vote_frame_id"),
+        payload.get("frame_index"),
+        tracking.get("model_vote_frame_id"),
+        tracking.get("frame_index"),
+        result.get("frame_id"),
+        result.get("frame_index"),
+    )
+    current_capture = _first_positive_int(
+        payload.get("capture_count"),
+        tracking.get("capture_count"),
+        result.get("capture_count"),
+    )
+    packet_frame = _first_positive_int(
+        packet.get("frame_id"),
+        packet.get("frame_index"),
+        packet.get("model_vote_frame_id"),
+    )
+    packet_capture = _first_positive_int(packet.get("capture_count"))
+    if current_frame > 0 and packet_frame != current_frame:
+        return False
+    if current_capture > 0 and packet_capture != current_capture:
+        return False
+    current_session_id = str(payload.get("session_id") or "").strip()
+    packet_session_id = str(packet.get("session_id") or "").strip()
+    if current_session_id and packet_session_id and current_session_id != packet_session_id:
+        return False
+    return True
+
+
+def _current_execution_packet_from_payload(
+    payload: Mapping[str, object],
+    *,
+    candidate: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    if _payload_declares_no_current_execution_packet(payload):
+        return {}
+    source: Mapping[str, Any]
+    if candidate is None:
+        source = cast(Mapping[str, Any], payload)
+    else:
+        source = {"model_council_packet": dict(candidate)}
+    packet = model_council_packet_from_payload(source)
+    if not packet or not _execution_packet_matches_current_payload(packet, payload):
+        return {}
+    return cast(dict[str, object], packet)
+
+
 def _live_model_health_summary(payload: Mapping[str, object]) -> dict[str, object]:
     latest_signal = _mapping_to_plain_dict(payload.get("latest_signal"))
     result = _mapping_to_plain_dict(payload.get("model_council_result"))
@@ -2201,9 +2311,16 @@ def create_app(
             direct_payload = _direct_model_council_fast_payload(session_id)
             if direct_payload is not None:
                 direct_packet = model_council_study_packet_from_payload(cast(Mapping[str, Any], direct_payload))
-                if direct_packet:
+                if direct_packet and not _payload_is_stale(cast(Mapping[str, object], direct_packet)):
                     return cast(dict[str, object], direct_packet)
-                raise KeyError(session_id)
+                full_payload = _direct_window_tracker_session_snapshot(
+                    session_id,
+                    require_complete_display_bundle=False,
+                )
+                if full_payload is not None:
+                    full_packet = model_council_study_packet_from_payload(cast(Mapping[str, Any], full_payload))
+                    if full_packet:
+                        return cast(dict[str, object], full_packet)
         payload = resolve_model_council_session_payload(session_id)
         packet = model_council_study_packet_from_payload(cast(Mapping[str, Any], payload))
         if not packet:
@@ -2214,15 +2331,36 @@ def create_app(
         if not explicit_window_tracker_service:
             direct_payload = _direct_model_council_fast_payload(session_id)
             if direct_payload is not None:
-                direct_packet = model_council_packet_from_payload(cast(Mapping[str, Any], direct_payload))
+                direct_packet = _current_execution_packet_from_payload(direct_payload)
                 if direct_packet:
-                    return cast(dict[str, object], direct_packet)
+                    return direct_packet
+                if _payload_declares_no_current_execution_packet(direct_payload):
+                    raise KeyError(session_id)
+                full_payload = _direct_window_tracker_session_snapshot(
+                    session_id,
+                    require_complete_display_bundle=False,
+                )
+                if full_payload is not None:
+                    full_packet = _current_execution_packet_from_payload(full_payload)
+                    if (
+                        full_packet
+                        and _execution_packet_matches_current_payload(full_packet, direct_payload)
+                    ):
+                        return full_packet
                 raise KeyError(session_id)
         payload = resolve_model_council_session_payload(session_id)
-        packet = model_council_packet_from_payload(cast(Mapping[str, Any], payload))
+        packet = _current_execution_packet_from_payload(payload)
+        if _payload_declares_no_current_execution_packet(payload):
+            raise KeyError(session_id)
         if not packet:
-            packet = get_window_tracker_service().latest_model_council_packet(session_id)
-        return cast(dict[str, object], packet)
+            fallback = get_window_tracker_service().latest_model_council_packet(session_id)
+            packet = _current_execution_packet_from_payload(
+                payload,
+                candidate=cast(Mapping[str, object], fallback),
+            )
+        if not packet:
+            raise KeyError(session_id)
+        return packet
 
     @app.get("/v1/mobile/model-council/health")
     def model_council_health(session_id: str | None = None) -> dict[str, object]:
@@ -4189,7 +4327,7 @@ def create_app(
                 return canonical_trace
             return direct_trace
         cached_trace = _cached_direct_performance_trace(session_id)
-        if cached_trace is not None and _performance_trace_overlay_count(cached_trace) > 0:
+        if cached_trace is not None:
             return cached_trace
         if _direct_performance_trace_direct_only():
             raise HTTPException(

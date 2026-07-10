@@ -5,6 +5,13 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, cast
 
+import pytest
+from phoenixguard.execution.packet_v3 import build_execution_packet_v3
+from tests.support.v3_packet_samples import complete_sequence_context_v3
+
+
+NOW = 1782000001.0
+
 
 def _load_bridge_module():
     module_path = Path(__file__).resolve().parents[2] / "Backend" / "tools" / "phoenixguard_mt4_file_bridge.py"
@@ -36,48 +43,22 @@ def _sample_execution_packet() -> dict[str, object]:
             "estimated_candles_to_force": 18,
         },
     }
-    return {
-        "schema_version": "PG_EXECUTION_PACKET_V3",
-        "packet_id": "pgpkt_test_001",
-        "session_id": "pocket-live-8788",
-        "symbol": "EURJPY-OTC",
-        "timeframe": "M5",
-        "frame_id": 12,
-        "capture_count": 34,
-        "state_version": 56,
-        "created_epoch_sec": 1782000000.0,
-        "valid_until_epoch_sec": 1782000002.5,
-        "execution": {
-            "enabled": True,
-            "state": "EXECUTABLE",
-            "side": "BUY",
-            "expiry_seconds": 600,
-            "amount_action": "DO_NOT_CHANGE_AMOUNT",
-            "time_sequence": {"target_seconds": 600, "target_text": "00:10:00"},
-            "reason_codes": ["CLEAN_WAVE"],
-        },
-        "model_council": {
-            "final_state": "EXECUTABLE",
-            "final_side": "BUY",
-            "dominance_margin": 0.73,
-            "sequence_context": {
-                "sequence_status": "COMPLETE",
-                "sequence_length": 3,
-                "sequence_confidence": 0.81,
-            },
-        },
-        "live_integrity": {
-            "is_live": True,
-            "frame_advancing": True,
-            "capture_advancing": True,
-            "state_advancing": True,
-            "source": "model_council",
-            "cache_status": "fresh",
-            "input_frame_hash": "frame_hash_test",
-        },
-        "runtime_model_health": {"all_required_models_awake": True},
-        "trade_permission": {"executable_allowed": True},
-        "allowance_package": {
+    trade_permission: dict[str, object] = {
+        "permission_state": "GRANTED",
+        "executable_allowed": True,
+        "failed_reasons": [],
+        "blocking_reasons": [],
+    }
+    entry_quality: dict[str, object] = {
+        "state": "ACCEPTABLE_ENTRY",
+        "passes_executable_threshold": True,
+    }
+    market_trap: dict[str, object] = {
+        "detected": False,
+        "executable_allowed": True,
+        "active_traps": [],
+    }
+    allowance_package: dict[str, object] = {
             "schema_version": "PG_ALLOWANCE_PACKAGE_V1",
             "package_type": "INTRADAY_ENTER_NOW",
             "allowance_family": "INTRADAY",
@@ -87,6 +68,7 @@ def _sample_execution_packet() -> dict[str, object]:
             "accepted": True,
             "decision_accepted": True,
             "execution_ready": True,
+            "executable": True,
             "entry_now_allowed": True,
             "timing_mode": "ENTER_NOW",
             "selected_lane": "SNIPER_ZONE_ENTRY",
@@ -101,8 +83,58 @@ def _sample_execution_packet() -> dict[str, object]:
             "professional_trade_plan": professional_plan,
             "professional_thesis_state": "PRIMARY_BIAS_ALIGNED",
             "professional_authority_side": "BUY",
-        },
     }
+    packet = build_execution_packet_v3(
+        packet_id="pgpkt_test_001",
+        session_id="pocket-live-8788",
+        symbol="EURJPY-OTC",
+        timeframe="M5",
+        frame_id=12,
+        capture_count=34,
+        state_version=56,
+        created_epoch=1782000000.0,
+        valid_until_epoch=1782000002.5,
+        side="BUY",
+        expiry_seconds=600,
+        live_integrity={
+            "is_live": True,
+            "frame_advancing": True,
+            "capture_advancing": True,
+            "state_advancing": True,
+            "source": "model_council",
+            "cache_status": "fresh",
+            "input_frame_hash": "frame_hash_test",
+            "previous_frame_hash": "frame_hash_previous",
+        },
+        model_council={
+            "final_state": "EXECUTABLE",
+            "final_side": "BUY",
+            "dominance_margin": 0.73,
+            "trade_permission": dict(trade_permission),
+            "entry_quality": dict(entry_quality),
+            "market_trap": dict(market_trap),
+        },
+        runtime_model_health={"all_required_models_awake": True},
+        sequence_context=complete_sequence_context_v3(
+            sequence_id="seq-mt4-test-001",
+            session_id="pocket-live-8788",
+            side="BUY",
+        ),
+        allowance_package=allowance_package,
+    )
+    packet["execution"]["reason_codes"] = ["CLEAN_WAVE"]
+    packet["trade_permission"] = trade_permission
+    packet["entry_quality"] = entry_quality
+    packet["market_trap"] = market_trap
+    packet["overlay_truth_audit"] = {
+        "valid_for_execution": True,
+        "execution_safe": True,
+        "frame_id": 12,
+        "capture_count": 34,
+        "input_frame_hash": "frame_hash_test",
+        "objects": [],
+    }
+    return packet
 
 
 def _sample_playbook_ai_intelligence() -> dict[str, object]:
@@ -175,7 +207,11 @@ def _sample_playbook_ai_intelligence() -> dict[str, object]:
 
 def test_mt4_bridge_compact_command_preserves_ea_contract() -> None:
     bridge = _load_bridge_module()
-    command = bridge._compact_command(_sample_execution_packet(), bridge_sequence=7)
+    command = bridge._compact_command(
+        _sample_execution_packet(),
+        bridge_sequence=7,
+        validation_now_epoch=NOW,
+    )
 
     bridge._validate_command(command)
     encoded = bridge._json_dumps(command)
@@ -219,7 +255,7 @@ def test_mt4_bridge_compacts_playbook_ai_summary_without_full_nested_payload() -
     allowance = cast(dict[str, object], packet["allowance_package"])
     allowance["playbook_ai_intelligence_v3"] = ai_intelligence
 
-    command = bridge._compact_command(packet, bridge_sequence=9)
+    command = bridge._compact_command(packet, bridge_sequence=9, validation_now_epoch=NOW)
 
     bridge._validate_command(command)
     summary = cast(dict[str, object], command["playbook_ai_summary_v3"])
@@ -244,6 +280,7 @@ def test_mt4_bridge_compact_command_accepts_mt4_symbol_and_timeframe_override() 
         bridge_sequence=8,
         symbol_override="EURCADm",
         timeframe_override="M5",
+        validation_now_epoch=NOW,
     )
 
     bridge._validate_command(command)
@@ -265,7 +302,7 @@ def test_mt4_bridge_compact_command_preserves_expected_move_time_from_profession
         "expected_candle_count": 8,
     }
 
-    command = bridge._compact_command(packet, bridge_sequence=12)
+    command = bridge._compact_command(packet, bridge_sequence=12, validation_now_epoch=NOW)
 
     bridge._validate_command(command)
     assert command["allowance_package"]["expected_move_time"]["expected_duration_text"] == "40m"
@@ -323,7 +360,7 @@ def test_mt4_bridge_compact_command_preserves_swing_allowance_package() -> None:
         },
     }
 
-    command = bridge._compact_command(packet, bridge_sequence=9)
+    command = bridge._compact_command(packet, bridge_sequence=9, validation_now_epoch=NOW)
 
     bridge._validate_command(command)
     assert command["allowance_package"]["package_type"] == "SWING"
@@ -336,15 +373,12 @@ def test_mt4_bridge_rejects_inferred_allowance_package() -> None:
     bridge = _load_bridge_module()
     packet = _sample_execution_packet()
     packet.pop("allowance_package")
+    cast(dict[str, object], packet["model_council"]).pop("allowance_package", None)
 
-    command = bridge._compact_command(packet, bridge_sequence=10)
-
-    assert command["allowance_package"]["source_present"] is False
-    assert command["allowance_package"]["inferred"] is True
     try:
-        bridge._validate_command(command)
+        bridge._compact_command(packet, bridge_sequence=10, validation_now_epoch=NOW)
     except ValueError as exc:
-        assert "explicit from Playbook final decider" in str(exc)
+        assert "MISSING_ALLOWANCE_PACKAGE" in str(exc)
     else:
         raise AssertionError("bridge accepted an inferred allowance package")
 
@@ -356,14 +390,76 @@ def test_mt4_bridge_rejects_non_ready_allowance_package() -> None:
     allowance["execution_ready"] = False
     packet["allowance_package"] = allowance
 
-    command = bridge._compact_command(packet, bridge_sequence=11)
-
     try:
-        bridge._validate_command(command)
+        bridge._compact_command(packet, bridge_sequence=11, validation_now_epoch=NOW)
     except ValueError as exc:
-        assert "execution_ready" in str(exc)
+        assert "ALLOWANCE_PACKAGE_NOT_EXECUTION_READY" in str(exc)
     else:
         raise AssertionError("bridge accepted a non-ready allowance package")
+
+
+def test_mt4_bridge_does_not_reconstruct_missing_intraday_allowance_truth() -> None:
+    bridge = _load_bridge_module()
+    for field, expected_message in (
+        ("entry_now_allowed", "INTRADAY_ALLOWANCE_ENTRY_NOW_NOT_ALLOWED"),
+        ("timing_mode", "INTRADAY_ALLOWANCE_TIMING_MODE_INVALID"),
+        ("execution_authority", "MISSING_ALLOWANCE_EXECUTION_AUTHORITY"),
+        ("packet_authority", "MISSING_ALLOWANCE_PACKET_AUTHORITY"),
+        ("side", "MISSING_ALLOWANCE_SIDE"),
+        ("package_type", "INVALID_ALLOWANCE_PACKAGE_TYPE"),
+    ):
+        packet = _sample_execution_packet()
+        allowance = dict(cast(Mapping[str, object], packet["allowance_package"]))
+        allowance.pop(field)
+        packet["allowance_package"] = allowance
+
+        try:
+            bridge._compact_command(packet, bridge_sequence=12, validation_now_epoch=NOW)
+        except ValueError as exc:
+            assert expected_message in str(exc)
+        else:
+            raise AssertionError(f"bridge reconstructed missing {field} from a secondary source")
+
+
+@pytest.mark.parametrize(
+    ("case", "reason_code"),
+    (
+        ("denied_trap", "MARKET_TRAP_EXECUTION_DENIED"),
+        ("bad_entry", "ENTRY_QUALITY_BELOW_ACCEPTABLE"),
+        ("missing_overlay", "MISSING_OVERLAY_TRUTH_AUDIT"),
+        ("overlay_frame_mismatch", "OVERLAY_TRUTH_FRAME_ID_MISMATCH"),
+        ("overlay_capture_mismatch", "OVERLAY_TRUTH_CAPTURE_COUNT_MISMATCH"),
+        ("overlay_hash_mismatch", "OVERLAY_TRUTH_INPUT_FRAME_HASH_MISMATCH"),
+    ),
+)
+def test_mt4_bridge_rejects_unsafe_source_packet_before_compaction(
+    case: str,
+    reason_code: str,
+) -> None:
+    bridge = _load_bridge_module()
+    packet = _sample_execution_packet()
+    if case == "denied_trap":
+        packet["market_trap"] = {
+            "detected": True,
+            "executable_allowed": False,
+            "trap_type": "LATE_CHASE_TRAP",
+        }
+    elif case == "bad_entry":
+        packet["entry_quality"] = {
+            "state": "BAD_NOW",
+            "passes_executable_threshold": False,
+        }
+    elif case == "missing_overlay":
+        packet.pop("overlay_truth_audit")
+    elif case == "overlay_frame_mismatch":
+        packet["overlay_truth_audit"]["frame_id"] = 999
+    elif case == "overlay_capture_mismatch":
+        packet["overlay_truth_audit"]["capture_count"] = 999
+    else:
+        packet["overlay_truth_audit"]["input_frame_hash"] = "wrong-frame"
+
+    with pytest.raises(ValueError, match=reason_code):
+        bridge._compact_command(packet, bridge_sequence=13, validation_now_epoch=NOW)
 
 
 def test_mt4_bridge_live_monitor_rejects_stale_packet_frame() -> None:
@@ -560,12 +656,10 @@ def test_mt4_bridge_rejects_compacted_command_that_would_fail_ea_contract() -> N
     execution["amount_action"] = "LOCKED"
     packet["execution"] = execution
 
-    command = bridge._compact_command(packet, bridge_sequence=8)
-
     try:
-        bridge._validate_command(command)
+        bridge._compact_command(packet, bridge_sequence=8, validation_now_epoch=NOW)
     except ValueError as exc:
-        assert "amount_action" in str(exc)
+        assert "AMOUNT_ACTION_NOT_LOCKED" in str(exc)
     else:
         raise AssertionError("bridge accepted an EA-incompatible amount_action")
 

@@ -13,6 +13,7 @@ import base64
 import json
 import sqlite3
 import tempfile
+import time
 from contextlib import closing
 from threading import RLock
 
@@ -178,10 +179,27 @@ class EncryptedPreferenceStore:
 
     def _sync_encrypted_from_plaintext(self, plain_path: Path) -> None:
         cipher = self.fernet.encrypt(plain_path.read_bytes())
-        cipher_tmp_path = self.db_path.with_name(self.db_path.name + ".tmp")
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, cipher_tmp_raw = tempfile.mkstemp(
+            prefix=f"{self.db_path.name}.",
+            suffix=".tmp",
+            dir=str(self.db_path.parent),
+        )
+        os.close(fd)
+        cipher_tmp_path = Path(cipher_tmp_raw)
         try:
-            cipher_tmp_path.write_bytes(cipher)
-            os.replace(cipher_tmp_path, self.db_path)
+            with cipher_tmp_path.open("wb") as handle:
+                handle.write(cipher)
+                handle.flush()
+                os.fsync(handle.fileno())
+            for attempt in range(10):
+                try:
+                    os.replace(cipher_tmp_path, self.db_path)
+                    break
+                except PermissionError:
+                    if attempt >= 9:
+                        raise
+                    time.sleep(min(0.5, 0.05 * float(attempt + 1)))
         finally:
             try:
                 cipher_tmp_path.unlink(missing_ok=True)

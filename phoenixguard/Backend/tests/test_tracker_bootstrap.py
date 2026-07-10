@@ -308,7 +308,9 @@ def test_live_fast_display_heartbeat_prefers_display_state_file(monkeypatch: pyt
         encoding="utf-8",
     )
     monkeypatch.setenv("PHOENIXGUARD_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "1")
     monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "0")
+
     def _unexpected_request_json(*args: Any, **kwargs: Any) -> dict[str, Any]:
         del args, kwargs
         calls.append("called")
@@ -334,6 +336,79 @@ def test_live_fast_display_heartbeat_prefers_display_state_file(monkeypatch: pyt
     assert payload["frame_bundle_complete_v3"] is False
     assert payload["display_fast_path_v3"]["reason"] == "supervisor_file_reuse_heartbeat"
     assert payload["display_fast_path_v3"]["heartbeat_published_epoch"] == 100.0
+
+
+def test_live_fast_display_heartbeat_retries_transient_file_locks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    state_path = (
+        data_dir
+        / "mobile_api"
+        / "window_tracker"
+        / "sessions"
+        / "pocket-live-8788"
+        / "display_state.json"
+    )
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "display_frame_id": 4,
+                "display_capture_epoch": 99.0,
+                "display_published_epoch": 99.0,
+                "last_display_window_path": "window.jpg",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PHOENIXGUARD_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "1")
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "0")
+    monkeypatch.setattr(tracker_launcher.time, "time", lambda: 100.0)
+
+    original_read_text = Path.read_text
+    original_replace = Path.replace
+    read_attempts = 0
+    replace_attempts = 0
+    temp_names: list[str] = []
+
+    def transient_read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+        nonlocal read_attempts
+        if path == state_path:
+            read_attempts += 1
+            if read_attempts == 1:
+                raise PermissionError("transient OneDrive read lock")
+        return original_read_text(path, *args, **kwargs)
+
+    def transient_replace(path: Path, target: str | Path) -> Path:
+        nonlocal replace_attempts
+        if Path(target) == state_path:
+            temp_names.append(path.name)
+            replace_attempts += 1
+            if replace_attempts == 1:
+                raise PermissionError("transient OneDrive replace lock")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "read_text", transient_read_text)
+    monkeypatch.setattr(Path, "replace", transient_replace)
+
+    next_epoch = tracker_launcher.live_fast_display_heartbeat(
+        "http://127.0.0.1:8793",
+        "pocket-live-8788",
+        {"tracking_enabled": True},
+        last_heartbeat_epoch=0.0,
+        script_dir=tmp_path,
+    )
+
+    payload = json.loads(original_read_text(state_path, encoding="utf-8"))
+    assert next_epoch == 100.0
+    assert read_attempts == 2
+    assert replace_attempts == 2
+    assert temp_names and all(name.startswith(".pg-") and len(name) < 40 for name in temp_names)
+    assert payload["display_heartbeat_epoch"] == 100.0
 
 
 def test_live_fast_display_heartbeat_respects_disable_env(monkeypatch: pytest.MonkeyPatch) -> None:

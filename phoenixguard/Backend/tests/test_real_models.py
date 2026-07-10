@@ -49,6 +49,9 @@ class _YOLOLike(Protocol):
 class _DetectorLike(Protocol):
     model: _YOLOLike | None
     model_name: str
+    use_hf_endpoint: bool
+    hf_last_inference_ok: bool | None
+    hf_last_inference_error: str
 
     def detect(self, image_rgb: Image.Image) -> list[dict[str, Any]]: ...
 
@@ -138,21 +141,32 @@ class TestCVRealYOLO(unittest.TestCase):
         if not bool(_HF_TOKEN):
             self.skipTest("HF_TOKEN is required for HF-backed CV integration tests.")
 
-        det = cast(_DetectorLike, CVPatternDetector(
-            primary_model=MODELS.cv_primary,
-            fallback_model=MODELS.cv_primary,
-            logger=_NullLogger(),
-        ))
-        if det.model is None and not bool(getattr(det, "use_hf_endpoint", False)):
+        previous_bootstrap_setting = os.environ.get("PHOENIXGUARD_CV_ALLOW_REMOTE_BOOTSTRAP")
+        previous_endpoint_setting = os.environ.get("PHOENIXGUARD_CV_ALLOW_REMOTE_ENDPOINT")
+        os.environ["PHOENIXGUARD_CV_ALLOW_REMOTE_BOOTSTRAP"] = "1"
+        os.environ["PHOENIXGUARD_CV_ALLOW_REMOTE_ENDPOINT"] = "0"
+        try:
+            det = cast(_DetectorLike, CVPatternDetector(
+                primary_model=MODELS.cv_primary,
+                fallback_model=MODELS.cv_primary,
+                logger=_NullLogger(),
+            ))
+        finally:
+            if previous_bootstrap_setting is None:
+                os.environ.pop("PHOENIXGUARD_CV_ALLOW_REMOTE_BOOTSTRAP", None)
+            else:
+                os.environ["PHOENIXGUARD_CV_ALLOW_REMOTE_BOOTSTRAP"] = previous_bootstrap_setting
+            if previous_endpoint_setting is None:
+                os.environ.pop("PHOENIXGUARD_CV_ALLOW_REMOTE_ENDPOINT", None)
+            else:
+                os.environ["PHOENIXGUARD_CV_ALLOW_REMOTE_ENDPOINT"] = previous_endpoint_setting
+        if det.model is None:
             self.skipTest("HF CV model could not be loaded (network/token/ultralytics issue)")
         return det
 
     def test_yolo_model_loads_from_hf(self):
         det = self._load_hf_detector()
-        self.assertTrue(
-            bool(getattr(det, "use_hf_endpoint", False)) or det.model is not None,
-            "CV detector should be active via HF endpoint or YOLO model",
-        )
+        self.assertIsNotNone(det.model, "CV detector should load the real HF-hosted YOLO weights")
         print(f"  ✓  YOLO model loaded: {det.model_name}")
 
     def test_yolo_detect_returns_list_on_real_image(self):
@@ -168,7 +182,15 @@ class TestCVRealYOLO(unittest.TestCase):
                 if pixels is not None:
                     pixels[x, y] = (220, 220, 220)
 
-        result = det.detect(img)
+        previous_local_setting = os.environ.get("PHOENIXGUARD_ENABLE_LOCAL_YOLO_IN_TESTS")
+        os.environ["PHOENIXGUARD_ENABLE_LOCAL_YOLO_IN_TESTS"] = "1"
+        try:
+            result = det.detect(img)
+        finally:
+            if previous_local_setting is None:
+                os.environ.pop("PHOENIXGUARD_ENABLE_LOCAL_YOLO_IN_TESTS", None)
+            else:
+                os.environ["PHOENIXGUARD_ENABLE_LOCAL_YOLO_IN_TESTS"] = previous_local_setting
         # Returns a list (may be empty — yolov8n wasn't trained on forex patterns,
         # but the inference must complete without error)
         self.assertIsInstance(result, list)
@@ -178,38 +200,20 @@ class TestCVRealYOLO(unittest.TestCase):
         """Confirm detector backend is active (YOLO object or HF endpoint mode)."""
         from ultralytics import YOLO
         det = self._load_hf_detector()
-        if bool(getattr(det, "use_hf_endpoint", False)):
-            self.assertTrue(True)
-            print("  ✓  CV detector is using HF endpoint mode")
-        else:
-            self.assertIsInstance(det.model, YOLO)
-            print("  ✓  Model is ultralytics.YOLO instance")
+        self.assertIsInstance(det.model, YOLO)
+        print("  ✓  Model is ultralytics.YOLO instance")
 
     def test_yolo_predict_raw_directly(self):
         """Validate the backend path without forcing unstable native local inference."""
         det = self._load_hf_detector()
         img_array = np.zeros((256, 256, 3), dtype=np.uint8)
-        if bool(getattr(det, "use_hf_endpoint", False)):
-            img = Image.fromarray(img_array)
-            results = det.detect(img)
-            self.assertIsInstance(results, list)
-            print(f"  ✓  HF endpoint detect() returned {len(results)} objects")
-        elif os.getenv("PHOENIXGUARD_ENABLE_LOCAL_YOLO_IN_TESTS", "").strip().lower() not in {"1", "true", "yes", "on"}:
-            img = Image.fromarray(img_array)
-            results = det.detect(img)
-            self.assertIsInstance(results, list)
-            print(f"  ✓  Local YOLO wrapper contract returned {len(results)} objects")
-        else:
-            self.assertIsNotNone(det.model)
-            model = det.model
-            assert model is not None
-            try:
-                results = model.predict(source=img_array, verbose=False, conf=0.3)
-            except Exception as exc:
-                self.skipTest(f"Local YOLO runtime unavailable in this environment: {exc}")
-            self.assertIsNotNone(results)
-            self.assertIsInstance(results, list)
-            print(f"  ✓  YOLO.predict() returned {len(results)} result objects")
+        self.assertIsNotNone(det.model)
+        model = det.model
+        assert model is not None
+        results = model.predict(source=img_array, verbose=False, conf=0.3)
+        self.assertIsNotNone(results)
+        self.assertIsInstance(results, list)
+        print(f"  ✓  YOLO.predict() returned {len(results)} result objects")
 
 
 # ===========================================================================
@@ -255,7 +259,7 @@ class TestSentenceTransformerEmbedder(unittest.TestCase):
         v1 = np.asarray(model.encode(text, convert_to_numpy=True))
         v2 = np.asarray(model.encode(text, convert_to_numpy=True))
         np.testing.assert_allclose(v1, v2, atol=1e-5)
-        print(f"  ✓  Same text → identical embedding (deterministic)")
+        print("  ✓  Same text → identical embedding (deterministic)")
 
     def test_personalization_engine_uses_real_embedder(self):
         """PersonalizationEngine.update_style_from_memory_bank uses real ST model."""
@@ -317,8 +321,8 @@ class TestChronosModel(unittest.TestCase):
         ohlc: list[list[float]] = []
         price = 1.2300
         for _ in range(20):
-            o, h, l, c = price, price + 0.0020, price - 0.0010, price + 0.0015
-            row: list[float] = [o, h, l, c]
+            open_price, high, low, close = price, price + 0.0020, price - 0.0010, price + 0.0015
+            row: list[float] = [open_price, high, low, close]
             ohlc.append(row)
             price += 0.0008
 

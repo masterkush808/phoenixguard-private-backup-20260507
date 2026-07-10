@@ -314,6 +314,81 @@ def _playbook_exports_from_allowance(
     return exports
 
 
+def _entry_quality_allows_execution(entry_quality: Mapping[str, Any]) -> bool:
+    if entry_quality.get("passes_executable_threshold") is False:
+        return False
+    state = _clean_str(
+        entry_quality.get("state")
+        or entry_quality.get("entry_grade")
+        or entry_quality.get("grade")
+        or entry_quality.get("quality")
+    ).upper()
+    if not state:
+        return True
+    if state in {
+        "PERFECT_ENTRY",
+        "IDEAL_ENTRY",
+        "A_PLUS_ENTRY",
+        "GOOD_ENTRY",
+        "VALID_ENTRY",
+        "AGGRESSIVE_VALID_ENTRY",
+        "ACCEPTABLE_ENTRY",
+    }:
+        return True
+    return entry_quality.get("passes_executable_threshold") is True
+
+
+def _market_trap_blocks_execution(trap: Mapping[str, Any]) -> bool:
+    if not trap:
+        return False
+    active_traps = _sequence(trap.get("active_traps") or trap.get("traps"))
+    professional_override = bool(
+        trap.get("professional_reaction_override") is True
+        and trap.get("trap_active") is False
+        and trap.get("trap_free") is True
+        and (
+            trap.get("execution_allowed") is True
+            or trap.get("executable_allowed") is True
+        )
+        and not active_traps
+        and _clean_str(trap.get("professional_thesis_state"))
+    )
+    if professional_override:
+        return False
+    if trap.get("execution_allowed") is False or trap.get("executable_allowed") is False:
+        return True
+    if (
+        trap.get("trap_free") is False
+        or trap.get("detected") is True
+        or trap.get("is_late_chase") is True
+        or trap.get("late_chase_risk") is True
+    ):
+        return True
+    for raw in active_traps:
+        item = _mapping(raw)
+        severity = _float(item.get("severity"), 1.0)
+        if severity >= 0.5:
+            return True
+    return False
+
+
+def _trade_permission_allows_execution(permission: Mapping[str, Any]) -> bool:
+    if not permission:
+        return True
+    permission_state = _enum_text(permission.get("permission_state") or permission.get("state"))
+    if permission_state in {"DENIED", "BLOCKED", "REJECTED", "WAIT"}:
+        return False
+    deny_reason = _enum_text(permission.get("deny_reason") or permission.get("block_reason"))
+    if deny_reason not in {"", "NONE", "NULL"}:
+        return False
+    denied_at = _enum_text(permission.get("denied_at"))
+    if denied_at not in {"", "NONE", "NULL"}:
+        return False
+    if _sequence(permission.get("blocking_reasons")):
+        return False
+    return permission.get("executable_allowed") is True
+
+
 def _overlay_truth_blocks_execution(overlay: Mapping[str, Any]) -> bool:
     if not overlay:
         return False
@@ -678,6 +753,8 @@ def validate_execution_packet_v3(
     previous_identity: Mapping[str, Any] | None = None,
     require_executable: bool = True,
     require_broker_click_safe_identity: bool = False,
+    require_overlay_truth: bool = False,
+    require_live_handoff_truth: bool = False,
 ) -> PacketValidationResult:
     issues: list[PacketValidationIssue] = []
     if now is not None:
@@ -875,10 +952,52 @@ def validate_execution_packet_v3(
 
     execution = _mapping(packet.get("execution"))
     council = _mapping(packet.get("model_council"))
-    allowance_package = _mapping(packet.get("allowance_package") or council.get("allowance_package"))
+    top_level_allowance_package = _mapping(packet.get("allowance_package"))
+    council_allowance_package = _mapping(council.get("allowance_package"))
+    allowance_package_sources = tuple(
+        source
+        for source in (top_level_allowance_package, council_allowance_package)
+        if source
+    )
+    allowance_package = allowance_package_sources[0] if allowance_package_sources else {}
     health = _mapping(packet.get("runtime_model_health"))
     sequence_context = _mapping(council.get("sequence_context"))
-    overlay_truth = _mapping(packet.get("overlay_truth_audit") or packet.get("overlay_geometry") or packet.get("overlay_context"))
+    trade_permission_sources = tuple(
+        source
+        for source in (
+            _mapping(packet.get("trade_permission")),
+            _mapping(council.get("trade_permission")),
+        )
+        if source
+    )
+    entry_quality_sources = tuple(
+        source
+        for source in (
+            _mapping(packet.get("entry_quality")),
+            _mapping(council.get("entry_quality")),
+        )
+        if source
+    )
+    market_trap_sources = tuple(
+        source
+        for source in (
+            _mapping(packet.get("market_trap")),
+            _mapping(packet.get("trap_assessment")),
+            _mapping(council.get("market_trap")),
+            _mapping(council.get("trap_assessment")),
+        )
+        if source
+    )
+    overlay_truth_audit = _mapping(packet.get("overlay_truth_audit"))
+    overlay_truth = (
+        overlay_truth_audit
+        if require_overlay_truth or require_live_handoff_truth
+        else _mapping(
+            packet.get("overlay_truth_audit")
+            or packet.get("overlay_geometry")
+            or packet.get("overlay_context")
+        )
+    )
     execution_side = normalize_side(execution.get("side"))
     final_side = normalize_side(council.get("final_side"))
     expiry = resolve_expiry_seconds(packet)
@@ -932,6 +1051,59 @@ def validate_execution_packet_v3(
             add("ALLOWANCE_PACKAGE_NOT_ACCEPTED", MODEL_COUNCIL, "allowance_package.accepted must be true for executable packets.")
         if require_executable and allowance_package.get("execution_ready") is not True:
             add("ALLOWANCE_PACKAGE_NOT_EXECUTION_READY", MODEL_COUNCIL, "allowance_package.execution_ready must be true for executable packets.")
+        if require_executable and allowance_type == "INTRADAY_ENTER_NOW":
+            if allowance_package.get("entry_now_allowed") is not True:
+                add(
+                    "INTRADAY_ALLOWANCE_ENTRY_NOW_NOT_ALLOWED",
+                    MODEL_COUNCIL,
+                    "INTRADAY_ENTER_NOW allowance packages must keep entry_now_allowed=true.",
+                )
+            if _enum_text(allowance_package.get("timing_mode")) != "ENTER_NOW":
+                add(
+                    "INTRADAY_ALLOWANCE_TIMING_MODE_INVALID",
+                    MODEL_COUNCIL,
+                    "INTRADAY_ENTER_NOW allowance packages must keep timing_mode=ENTER_NOW.",
+                )
+        allowance_side = normalize_side(allowance_package.get("side"))
+        if require_executable and require_live_handoff_truth and not allowance_side:
+            add(
+                "MISSING_ALLOWANCE_SIDE",
+                MODEL_COUNCIL,
+                "Live execution handoff requires an explicit allowance_package.side.",
+            )
+        if require_executable and allowance_side and execution_side and allowance_side != execution_side:
+            add(
+                "ALLOWANCE_SIDE_EXECUTION_SIDE_MISMATCH",
+                MODEL_COUNCIL,
+                "allowance_package.side must match execution.side.",
+            )
+        if require_executable and require_live_handoff_truth:
+            for secondary_allowance in allowance_package_sources[1:]:
+                if secondary_allowance.get("accepted") is not True:
+                    add(
+                        "ALLOWANCE_PACKAGE_NOT_ACCEPTED",
+                        MODEL_COUNCIL,
+                        "Every allowance_package copy must keep accepted=true.",
+                    )
+                if secondary_allowance.get("execution_ready") is not True:
+                    add(
+                        "ALLOWANCE_PACKAGE_NOT_EXECUTION_READY",
+                        MODEL_COUNCIL,
+                        "Every allowance_package copy must keep execution_ready=true.",
+                    )
+                secondary_side = normalize_side(secondary_allowance.get("side"))
+                if not secondary_side:
+                    add(
+                        "MISSING_ALLOWANCE_SIDE",
+                        MODEL_COUNCIL,
+                        "Every live allowance_package copy must include side.",
+                    )
+                elif execution_side and secondary_side != execution_side:
+                    add(
+                        "ALLOWANCE_SIDE_EXECUTION_SIDE_MISMATCH",
+                        MODEL_COUNCIL,
+                        "Every allowance_package.side must match execution.side.",
+                    )
     if not sequence_context:
         add("MISSING_SEQUENCE_CONTEXT", MODEL_COUNCIL, "model_council.sequence_context is required.")
     else:
@@ -1060,15 +1232,96 @@ def validate_execution_packet_v3(
             add("COUNCIL_STATE_NOT_EXECUTABLE", "MODEL_COUNCIL", "model_council.final_state must be EXECUTABLE.")
     if health.get("all_required_models_awake") is not True:
         add("REQUIRED_MODELS_NOT_AWAKE", RUNTIME_INTEGRITY_CATEGORY, "All required runtime models must be awake.")
-    # Trade permission, entry-quality, and trap reads are strategy diagnostics under
-    # overlay-truth authority. Runtime identity, model health, packet state, and
-    # overlay-truth safety remain the hard execution contract below.
-    if require_executable and _overlay_truth_blocks_execution(overlay_truth):
+    if require_executable and require_live_handoff_truth and not trade_permission_sources:
+        add(
+            "MISSING_TRADE_PERMISSION",
+            MODEL_COUNCIL,
+            "Live execution handoff requires explicit trade_permission truth.",
+        )
+    if require_executable and any(
+        not _trade_permission_allows_execution(source)
+        for source in trade_permission_sources
+    ):
+        add(
+            "TRADE_PERMISSION_DENIED",
+            MODEL_COUNCIL,
+            "Every final trade_permission copy must explicitly allow execution without blocking reasons.",
+        )
+    if require_executable and require_live_handoff_truth and not entry_quality_sources:
+        add(
+            "MISSING_ENTRY_QUALITY",
+            MODEL_COUNCIL,
+            "Live execution handoff requires explicit entry_quality truth.",
+        )
+    if require_executable and any(
+        not _entry_quality_allows_execution(source)
+        for source in entry_quality_sources
+    ):
+        add(
+            "ENTRY_QUALITY_BELOW_ACCEPTABLE",
+            MODEL_COUNCIL,
+            "Every entry_quality copy must be ACCEPTABLE_ENTRY or better for executable packets.",
+        )
+    if require_executable and require_live_handoff_truth and not market_trap_sources:
+        add(
+            "MISSING_MARKET_TRAP_ASSESSMENT",
+            MODEL_COUNCIL,
+            "Live execution handoff requires explicit market_trap or trap_assessment truth.",
+        )
+    if require_executable and (
+        any(_market_trap_blocks_execution(source) for source in market_trap_sources)
+    ):
+        add(
+            "MARKET_TRAP_EXECUTION_DENIED",
+            MODEL_COUNCIL,
+            "Active market trap assessment prevents executable packets.",
+        )
+    strict_overlay_truth = bool(require_overlay_truth or require_live_handoff_truth)
+    if require_executable and strict_overlay_truth and not overlay_truth:
+        add(
+            "MISSING_OVERLAY_TRUTH_AUDIT",
+            RUNTIME_INTEGRITY_CATEGORY,
+            "Live execution handoff requires an explicit overlay truth audit.",
+        )
+    elif require_executable and strict_overlay_truth and (
+        overlay_truth.get("valid_for_execution") is not True
+        or overlay_truth.get("execution_safe") is not True
+    ):
         add(
             "OVERLAY_TRUTH_NOT_EXECUTION_SAFE",
             MODEL_COUNCIL,
-            "Overlay truth audit is not execution safe.",
+            "Live execution handoff requires explicit valid_for_execution and execution_safe truth.",
         )
+    if require_executable and strict_overlay_truth and overlay_truth:
+        overlay_frame_id = _int(overlay_truth.get("frame_id"), -1)
+        overlay_capture_count = _int(overlay_truth.get("capture_count"), -1)
+        overlay_input_frame_hash = _clean_str(overlay_truth.get("input_frame_hash"))
+        live_input_frame_hash = _clean_str(live_integrity.get("input_frame_hash"))
+        if overlay_frame_id != frame_id:
+            add(
+                "OVERLAY_TRUTH_FRAME_ID_MISMATCH",
+                RUNTIME_INTEGRITY_CATEGORY,
+                "overlay_truth_audit.frame_id must exactly match packet.frame_id.",
+            )
+        if overlay_capture_count != capture_count:
+            add(
+                "OVERLAY_TRUTH_CAPTURE_COUNT_MISMATCH",
+                RUNTIME_INTEGRITY_CATEGORY,
+                "overlay_truth_audit.capture_count must exactly match packet.capture_count.",
+            )
+        if not overlay_input_frame_hash or overlay_input_frame_hash != live_input_frame_hash:
+            add(
+                "OVERLAY_TRUTH_INPUT_FRAME_HASH_MISMATCH",
+                RUNTIME_INTEGRITY_CATEGORY,
+                "overlay_truth_audit.input_frame_hash must exactly match live_integrity.input_frame_hash.",
+            )
+    if require_executable and _overlay_truth_blocks_execution(overlay_truth):
+        if not any(issue.code == "OVERLAY_TRUTH_NOT_EXECUTION_SAFE" for issue in issues):
+            add(
+                "OVERLAY_TRUTH_NOT_EXECUTION_SAFE",
+                MODEL_COUNCIL,
+                "Overlay truth audit is not execution safe.",
+            )
 
     executable = not issues and execution_enabled and execution_state == EXECUTABLE_STATE and council_state == EXECUTABLE_STATE
     return PacketValidationResult(

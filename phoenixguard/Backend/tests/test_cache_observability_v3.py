@@ -138,6 +138,84 @@ def _execution_packet(**updates: Any) -> dict[str, Any]:
     return packet
 
 
+def _fresh_endpoint_execution_packet(*, packet_id: str, frame_id: int, capture_count: int, side: str = "BUY") -> dict[str, Any]:
+    now = time.time()
+    input_frame_hash = f"frame-{frame_id}"
+    packet = build_execution_packet_v3(
+        packet_id=packet_id,
+        session_id="pocket-live-8788",
+        symbol="EUR/GBP OTC",
+        timeframe="M5",
+        frame_id=frame_id,
+        capture_count=capture_count,
+        state_version=100 + frame_id,
+        side=side,
+        expiry_seconds=300,
+        input_frame_hash=input_frame_hash,
+        created_epoch=now,
+        valid_until_epoch=now + 120.0,
+        live_integrity={
+            "is_live": True,
+            "frame_advancing": True,
+            "capture_advancing": True,
+            "state_advancing": True,
+            "source": "model_council",
+            "cache_status": "fresh",
+            "input_frame_hash": input_frame_hash,
+            "previous_frame_hash": f"frame-{max(0, frame_id - 1)}",
+            "packet_age_ms": 10,
+        },
+        model_council={"final_state": "EXECUTABLE", "final_side": side},
+        runtime_model_health={"all_required_models_awake": True, "council_status": "AWAKE"},
+        sequence_context={
+            "sequence_id": f"seq-{frame_id}",
+            "session_id": "pocket-live-8788",
+            "timeframe": "M5",
+            "sequence_signature": f"seqsig-{frame_id}",
+            "sequence_status": "COMPLETE",
+            "sequence_length": 50,
+            "frames_used": 50,
+            "sequence_confidence": 0.95,
+            "box_history": [{"type": "IMPULSE_BOX", "bounds": [0.1, 0.2, 0.3, 0.4]}],
+            "progression": [{"type": "IMPULSE_BOX", "index": 1}],
+            "entry_progression": {"steps": [{"type": "TRIGGER", "index": 1}]},
+        },
+        allowance_package={
+            "schema_version": "PG_ALLOWANCE_PACKAGE_V1",
+            "package_type": "INTRADAY_ENTER_NOW",
+            "allowance_family": "INTRADAY",
+            "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3",
+            "packet_authority": "PG_EXECUTION_PACKET_V3",
+            "side": side,
+            "accepted": True,
+            "decision_accepted": True,
+            "execution_ready": True,
+            "entry_now_allowed": True,
+            "timing_mode": "ENTER_NOW",
+            "selected_lane": "SNIPER_ZONE_ENTRY",
+            "score": 0.84,
+            "threshold": 0.70,
+        },
+    )
+    packet["trade_permission"] = {
+        "permission_state": "GRANTED",
+        "executable_allowed": True,
+        "failed_reasons": [],
+        "blocking_reasons": [],
+    }
+    packet["entry_quality"] = {"state": "ACCEPTABLE_ENTRY", "passes_executable_threshold": True}
+    packet["market_trap"] = {"detected": False, "executable_allowed": True, "active_traps": []}
+    packet["overlay_truth_audit"] = {
+        "valid_for_execution": True,
+        "execution_safe": True,
+        "frame_id": frame_id,
+        "capture_count": capture_count,
+        "input_frame_hash": input_frame_hash,
+        "objects": [],
+    }
+    return packet
+
+
 def test_old_cache_schema_rejected() -> None:
     result = validate_cache_record(
         _cache_record(cache_schema_version="PG_CACHE_V2"),
@@ -442,22 +520,11 @@ def test_model_council_health_endpoint_reads_tracker_session() -> None:
 
 
 def test_model_council_latest_execution_packet_endpoints_return_v3_packet() -> None:
-    now = time.time()
-    packet = build_execution_packet_v3(
+    packet = _fresh_endpoint_execution_packet(
         packet_id="pgpkt-endpoint",
-        session_id="pocket-live-8788",
-        symbol="EUR/GBP OTC",
-        timeframe="M5",
         frame_id=20,
         capture_count=21,
-        state_version=120,
         side="BUY",
-        expiry_seconds=300,
-        input_frame_hash="frame-endpoint",
-        created_epoch=now,
-        valid_until_epoch=now + 120.0,
-        model_council={"final_state": "EXECUTABLE", "final_side": "BUY"},
-        runtime_model_health={"all_required_models_awake": True, "council_status": "AWAKE"},
     )
 
     class _FakeTracker:
@@ -481,6 +548,240 @@ def test_model_council_latest_execution_packet_endpoints_return_v3_packet() -> N
     assert alias.status_code == 200
     assert direct.json()["schema_version"] == "PG_EXECUTION_PACKET_V3"
     assert alias.json()["packet_id"] == "pgpkt-endpoint"
+
+
+def test_study_latest_falls_back_to_full_session_when_compact_study_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = time.time()
+    execution_packet = _fresh_endpoint_execution_packet(
+        packet_id="pgpkt-current-execution",
+        frame_id=90,
+        capture_count=91,
+        side="SELL",
+    )
+    dual_thesis_report = {
+        "buy": {"status": "CURRENT_PRESSURE_DEFENDED"},
+        "sell": {"status": "CURRENT_PRESSURE_ACTIVE"},
+    }
+    compact_payload: dict[str, Any] = {
+        "session_id": "pocket-live-8788",
+        "tracking_enabled": True,
+        "frame_index": 90,
+        "model_vote_frame_id": 90,
+        "capture_count": 91,
+        "last_capture_epoch": now_epoch - 400.0,
+        "execution_packet_present": True,
+        "model_council_packet": execution_packet,
+        "model_council_result": {
+            "execution": {"state": "EXECUTABLE", "side": "SELL"},
+            "model_council": {
+                "final_state": "EXECUTABLE",
+                "final_side": "SELL",
+                "dual_thesis_report_v3": dual_thesis_report,
+            },
+            "dual_thesis_report_v3": dual_thesis_report,
+        },
+    }
+    full_payload: dict[str, Any] = {
+        **compact_payload,
+        "model_council_result": {
+            "packet_id": "pgpkt-current-study-source",
+            "session_id": "pocket-live-8788",
+            "created_epoch": now_epoch,
+            "valid_until_epoch": now_epoch + 120.0,
+            "execution": {"state": "PREPARING", "side": "SELL"},
+            "model_council": {
+                "final_state": "PREPARING",
+                "final_side": "SELL",
+                "dual_thesis_report_v3": dual_thesis_report,
+            },
+            "dual_thesis_report_v3": dual_thesis_report,
+        },
+    }
+    full_snapshot_calls: list[bool] = []
+
+    def full_snapshot(
+        session_id: str,
+        *,
+        require_complete_display_bundle: bool = True,
+    ) -> dict[str, Any]:
+        assert session_id == "pocket-live-8788"
+        full_snapshot_calls.append(require_complete_display_bundle)
+        return dict(full_payload)
+
+    monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", lambda _session_id: dict(compact_payload))
+    monkeypatch.setattr(mobile_app, "_direct_window_tracker_session_snapshot", full_snapshot)
+    client = TestClient(create_app())
+
+    study_response = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/study/latest")
+    execution_response = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/execution/latest")
+
+    assert study_response.status_code == 200
+    assert execution_response.status_code == 200
+    study = study_response.json()
+    assert study["packet_id"] == "pgpkt-current-study-source"
+    assert study["packet_type"] == "STUDY_PACKET"
+    assert study["execution"]["enabled"] is False
+    assert study["execution"]["state"] == "PREPARING"
+    assert study["entry_permission_v3"]["state"] == "AUTHORIZED_NOW"
+    assert study["entry_permission_v3"]["side"] == "SELL"
+    assert study["entry_permission_v3"]["execution_packet_id"] == "pgpkt-current-execution"
+    assert study["dual_thesis_report_v3"]["buy"] == dual_thesis_report["buy"]
+    assert study["dual_thesis_report_v3"]["sell"] == dual_thesis_report["sell"]
+    assert execution_response.json()["packet_id"] == "pgpkt-current-execution"
+    assert full_snapshot_calls == [False]
+
+
+def test_study_latest_compact_synthesis_uses_canonical_visibility_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = time.time()
+    execution_packet = _fresh_endpoint_execution_packet(
+        packet_id="pgpkt-current-execution-compact-study",
+        frame_id=92,
+        capture_count=93,
+        side="BUY",
+    )
+    dual_thesis_report = {
+        "buy": {"side": "BUY", "status": "AUTHORITY_ACTIVE"},
+        "sell": {"side": "SELL", "status": "STUDYING"},
+    }
+    compact_payload: dict[str, Any] = {
+        "session_id": "pocket-live-8788",
+        "tracking_enabled": True,
+        "frame_index": 92,
+        "model_vote_frame_id": 92,
+        "capture_count": 93,
+        "last_capture_epoch": now_epoch - 30.0,
+        "execution_packet_present": True,
+        "model_council_packet": execution_packet,
+        "model_council_result": {
+            "execution": {"state": "EXECUTABLE", "side": "BUY"},
+            "model_council": {
+                "final_state": "EXECUTABLE",
+                "final_side": "BUY",
+                "dual_thesis_report_v3": dual_thesis_report,
+            },
+            "dual_thesis_report_v3": dual_thesis_report,
+        },
+    }
+
+    def unexpected_full_snapshot(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("current compact study synthesis must not require the full-session fallback")
+
+    monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", lambda _session_id: dict(compact_payload))
+    monkeypatch.setattr(mobile_app, "_direct_window_tracker_session_snapshot", unexpected_full_snapshot)
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/study/latest")
+
+    assert response.status_code == 200
+    study = response.json()
+    assert study["packet_type"] == "STUDY_PACKET"
+    assert study["execution"]["enabled"] is False
+    assert study["execution"]["state"] == "WATCHING"
+    assert study["entry_permission_v3"]["state"] == "AUTHORIZED_NOW"
+    assert study["entry_permission_v3"]["side"] == "BUY"
+    assert study["entry_permission_v3"]["execution_packet_id"] == "pgpkt-current-execution-compact-study"
+    assert study["dual_thesis_report_v3"]["buy"] == dual_thesis_report["buy"]
+    assert study["dual_thesis_report_v3"]["sell"] == dual_thesis_report["sell"]
+    assert study["created_epoch"] == pytest.approx(now_epoch - 30.0)
+    assert study["valid_until_epoch"] - study["created_epoch"] == pytest.approx(300.0)
+
+
+def test_execution_latest_rejects_packet_from_previous_completed_frame(monkeypatch: Any) -> None:
+    old_packet = _fresh_endpoint_execution_packet(
+        packet_id="pgpkt-frame-31",
+        frame_id=31,
+        capture_count=31,
+        side="BUY",
+    )
+    current_payload: dict[str, Any] = {
+        "session_id": "pocket-live-8788",
+        "tracking_enabled": True,
+        "frame_index": 90,
+        "model_vote_frame_id": 90,
+        "capture_count": 90,
+        "execution_packet_present": True,
+        "model_council_packet": old_packet,
+    }
+    monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", lambda _session_id: dict(current_payload))
+    monkeypatch.setattr(
+        mobile_app,
+        "_direct_window_tracker_session_snapshot",
+        lambda _session_id, **_kwargs: dict(current_payload),
+    )
+    client = TestClient(create_app())
+
+    direct = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/execution/latest")
+    alias = client.get("/v1/mobile/model-council/execution/latest?session_id=pocket-live-8788")
+
+    assert direct.status_code == 404
+    assert alias.status_code == 404
+
+
+def test_execution_latest_honors_current_packet_revocation(monkeypatch: Any) -> None:
+    revoked_packet = _fresh_endpoint_execution_packet(
+        packet_id="pgpkt-revoked-frame-90",
+        frame_id=90,
+        capture_count=90,
+        side="SELL",
+    )
+    revoked_payload: dict[str, Any] = {
+        "session_id": "pocket-live-8788",
+        "tracking_enabled": True,
+        "frame_index": 90,
+        "model_vote_frame_id": 90,
+        "capture_count": 90,
+        "execution_packet_present": False,
+        "model_council_packet": revoked_packet,
+    }
+    monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", lambda _session_id: dict(revoked_payload))
+    monkeypatch.setattr(
+        mobile_app,
+        "_direct_window_tracker_session_snapshot",
+        lambda _session_id, **_kwargs: dict(revoked_payload),
+    )
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/execution/latest")
+
+    assert response.status_code == 404
+
+
+def test_execution_latest_service_fallback_cannot_resurrect_previous_frame() -> None:
+    old_packet = _fresh_endpoint_execution_packet(
+        packet_id="pgpkt-service-frame-31",
+        frame_id=31,
+        capture_count=31,
+    )
+    current_payload: dict[str, Any] = {
+        "session_id": "pocket-live-8788",
+        "frame_index": 90,
+        "model_vote_frame_id": 90,
+        "capture_count": 90,
+    }
+
+    class _FakeTracker:
+        def list_sessions(self, limit: int = 1) -> list[dict[str, Any]]:
+            return [dict(current_payload)]
+
+        def get_session(self, session_id: str) -> dict[str, Any]:
+            assert session_id == "pocket-live-8788"
+            return dict(current_payload)
+
+        def latest_model_council_packet(self, session_id: str) -> dict[str, Any]:
+            assert session_id == "pocket-live-8788"
+            return old_packet
+
+    client = TestClient(create_app(window_tracker_service=_FakeTracker()))
+
+    direct = client.get("/v1/mobile/model-council/sessions/pocket-live-8788/execution/latest")
+    alias = client.get("/v1/mobile/model-council/execution/latest?session_id=pocket-live-8788")
+
+    assert direct.status_code == 404
+    assert alias.status_code == 404
 
 
 def test_dashboard_asset_route_rejects_encoded_path_traversal() -> None:

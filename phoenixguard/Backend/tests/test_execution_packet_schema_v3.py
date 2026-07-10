@@ -128,6 +128,34 @@ def _packet(**overrides: Any) -> Payload:
     return payload
 
 
+def _live_handoff_packet() -> Payload:
+    payload = _packet()
+    payload["trade_permission"] = {
+        "permission_state": "GRANTED",
+        "executable_allowed": True,
+        "failed_reasons": [],
+        "blocking_reasons": [],
+    }
+    payload["entry_quality"] = {
+        "state": "ACCEPTABLE_ENTRY",
+        "passes_executable_threshold": True,
+    }
+    payload["market_trap"] = {
+        "detected": False,
+        "executable_allowed": True,
+        "active_traps": [],
+    }
+    payload["overlay_truth_audit"] = {
+        "valid_for_execution": True,
+        "execution_safe": True,
+        "frame_id": payload["frame_id"],
+        "capture_count": payload["capture_count"],
+        "input_frame_hash": payload["live_integrity"]["input_frame_hash"],
+        "objects": [],
+    }
+    return payload
+
+
 def _deep_update(target: Payload, updates: Payload) -> None:
     for key, value in updates.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):
@@ -367,6 +395,158 @@ def test_market_trap_rejects_executable_packet() -> None:
     assert result.rejected is True
     assert "MARKET_TRAP_EXECUTION_DENIED" in result.reason_codes
     assert MODEL_COUNCIL in result.categories
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason_code"),
+    (
+        ("entry_now_allowed", False, "INTRADAY_ALLOWANCE_ENTRY_NOW_NOT_ALLOWED"),
+        ("timing_mode", "WAIT_FOR_PULLBACK", "INTRADAY_ALLOWANCE_TIMING_MODE_INVALID"),
+    ),
+)
+def test_intraday_allowance_requires_explicit_enter_now_contract(
+    field: str,
+    value: object,
+    reason_code: str,
+) -> None:
+    payload = _packet()
+    payload["allowance_package"][field] = value
+
+    result = validate_execution_packet_v3(payload, now_epoch=NOW)
+
+    assert result.rejected is True
+    assert reason_code in result.reason_codes
+    assert MODEL_COUNCIL in result.categories
+
+
+def test_live_handoff_requires_explicit_safe_overlay_truth() -> None:
+    payload = _packet()
+
+    missing = validate_execution_packet_v3(
+        payload,
+        now_epoch=NOW,
+        require_overlay_truth=True,
+    )
+    payload["overlay_truth_audit"] = {
+        "valid_for_execution": True,
+        "execution_safe": True,
+        "frame_id": payload["frame_id"],
+        "capture_count": payload["capture_count"],
+        "input_frame_hash": payload["live_integrity"]["input_frame_hash"],
+        "objects": [],
+    }
+    safe = validate_execution_packet_v3(
+        payload,
+        now_epoch=NOW,
+        require_overlay_truth=True,
+    )
+
+    assert missing.rejected is True
+    assert "MISSING_OVERLAY_TRUTH_AUDIT" in missing.reason_codes
+    assert RUNTIME_INTEGRITY in missing.categories
+    assert safe.accepted is True
+
+
+@pytest.mark.parametrize(
+    ("field", "reason_code"),
+    (
+        ("trade_permission", "MISSING_TRADE_PERMISSION"),
+        ("entry_quality", "MISSING_ENTRY_QUALITY"),
+        ("market_trap", "MISSING_MARKET_TRAP_ASSESSMENT"),
+    ),
+)
+def test_live_handoff_rejects_missing_decision_truth(field: str, reason_code: str) -> None:
+    payload = _live_handoff_packet()
+    payload.pop(field)
+
+    result = validate_execution_packet_v3(
+        payload,
+        now_epoch=NOW,
+        require_live_handoff_truth=True,
+    )
+
+    assert result.rejected is True
+    assert reason_code in result.reason_codes
+
+
+def test_live_handoff_rejects_missing_allowance_side() -> None:
+    payload = _live_handoff_packet()
+    payload["allowance_package"].pop("side")
+    payload["model_council"]["allowance_package"].pop("side", None)
+
+    result = validate_execution_packet_v3(
+        payload,
+        now_epoch=NOW,
+        require_live_handoff_truth=True,
+    )
+
+    assert result.rejected is True
+    assert "MISSING_ALLOWANCE_SIDE" in result.reason_codes
+
+
+@pytest.mark.parametrize(
+    ("field", "council_value", "reason_code"),
+    (
+        (
+            "trade_permission",
+            {"permission_state": "DENIED", "executable_allowed": False, "deny_reason": "COUNCIL_VETO"},
+            "TRADE_PERMISSION_DENIED",
+        ),
+        (
+            "entry_quality",
+            {"state": "BAD_NOW", "passes_executable_threshold": False},
+            "ENTRY_QUALITY_BELOW_ACCEPTABLE",
+        ),
+        (
+            "market_trap",
+            {"detected": True, "executable_allowed": False, "trap_type": "LATE_CHASE_TRAP"},
+            "MARKET_TRAP_EXECUTION_DENIED",
+        ),
+    ),
+)
+def test_live_handoff_rejects_contradictory_council_truth(
+    field: str,
+    council_value: Payload,
+    reason_code: str,
+) -> None:
+    payload = _live_handoff_packet()
+    payload["model_council"][field] = council_value
+
+    result = validate_execution_packet_v3(
+        payload,
+        now_epoch=NOW,
+        require_live_handoff_truth=True,
+    )
+
+    assert result.rejected is True
+    assert reason_code in result.reason_codes
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason_code"),
+    (
+        ("frame_id", 999, "OVERLAY_TRUTH_FRAME_ID_MISMATCH"),
+        ("capture_count", 999, "OVERLAY_TRUTH_CAPTURE_COUNT_MISMATCH"),
+        ("input_frame_hash", "wrong-frame", "OVERLAY_TRUTH_INPUT_FRAME_HASH_MISMATCH"),
+    ),
+)
+def test_live_handoff_rejects_overlay_identity_mismatch(
+    field: str,
+    value: object,
+    reason_code: str,
+) -> None:
+    payload = _live_handoff_packet()
+    payload["overlay_truth_audit"][field] = value
+
+    result = validate_execution_packet_v3(
+        payload,
+        now_epoch=NOW,
+        require_live_handoff_truth=True,
+    )
+
+    assert result.rejected is True
+    assert reason_code in result.reason_codes
+    assert RUNTIME_INTEGRITY in result.categories
 
 
 def test_overlay_truth_rejects_executable_packet() -> None:

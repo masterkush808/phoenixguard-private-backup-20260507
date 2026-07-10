@@ -663,10 +663,49 @@ def _permission_stack(
     if first_reason is None and failed_reasons:
         first_reason = failed_reasons[0]
 
-    blocking_reasons = [reason for reason in failed_reasons if reason == "NO_DIRECTION_CANDIDATE"]
-    prepare_allowed = not blocking_reasons
+    hard_execution_reasons = {
+        "NO_DIRECTION_CANDIDATE",
+        "LATE_CHASE_TRAP",
+        "MARKET_TRAP_DETECTED",
+        "IDEAL_PATH_PROTECT",
+        "IDEAL_PATH_HOLD",
+        "IDEAL_PATH_WAIT",
+        "PATH_RISK_WEAK",
+        "CANDIDATE_QUEUE_UNSTABLE",
+        "REGIME_PLAYBOOK_DENIES_ENTRY",
+        "TIMING_PATH_BAD",
+        "CURRENT_CANDLE_CONTRACT_UNSAFE",
+    }
+    hard_prepare_reasons = hard_execution_reasons - {
+        "TIMING_PATH_BAD",
+        "CURRENT_CANDLE_CONTRACT_UNSAFE",
+    }
+    hard_entry_quality = (
+        "ENTRY_QUALITY_BELOW_ACCEPTABLE" in failed_reasons
+        and str(entry_quality.get("state") or "").upper() in {"BAD_NOW", "UNACCEPTABLE_ENTRY"}
+    )
+    if hard_entry_quality:
+        hard_execution_reasons = {*hard_execution_reasons, "ENTRY_QUALITY_BELOW_ACCEPTABLE"}
+        hard_prepare_reasons = {*hard_prepare_reasons, "ENTRY_QUALITY_BELOW_ACCEPTABLE"}
+    blocking_reasons = [reason for reason in failed_reasons if reason in hard_execution_reasons]
+    advisory_failed_reasons = [reason for reason in failed_reasons if reason not in hard_execution_reasons]
+    prepare_allowed = bool(
+        not hard_entry_quality
+        and not any(reason in hard_prepare_reasons for reason in failed_reasons)
+    )
     executable_allowed = not blocking_reasons
-    denied_layer = next((layer for layer in layers if not layer["passed"] and layer.get("deny_reason") in blocking_reasons), None)
+    first_reason = next(
+        (reason for reason in PERMISSION_DENY_PRIORITY if reason in blocking_reasons),
+        blocking_reasons[0] if blocking_reasons else None,
+    )
+    denied_layer = next(
+        (
+            layer
+            for layer in layers
+            if not layer["passed"] and layer.get("deny_reason") in blocking_reasons
+        ),
+        None,
+    )
     next_condition_by_reason = {
         "NO_DIRECTION_CANDIDATE": "Wait for BUY or SELL dominance to become measurable.",
         "ENTRY_QUALITY_BELOW_ACCEPTABLE": str(entry_quality.get("recommended_wait_condition") or "Wait for entry quality to reach ACCEPTABLE_ENTRY."),
@@ -689,11 +728,13 @@ def _permission_stack(
         "deny_reason": first_reason if not executable_allowed else None,
         "next_required_condition": next_condition_by_reason.get(str(first_reason), "Wait for all permission layers to pass.") if not executable_allowed else "All permission layers passed.",
         "failed_reasons": failed_reasons,
-        "advisory_failed_reasons": failed_reasons,
+        "advisory_failed_reasons": advisory_failed_reasons,
         "blocking_reasons": blocking_reasons,
         "layers": layers,
         "reason": (
-            "Execution permission granted; strategy caution remains advisory under overlay-truth authority."
+            "Execution permission granted; strategy caution remains advisory under Model Council lane authority."
+            if executable_allowed and advisory_failed_reasons
+            else "Execution permission granted; all hard permission layers passed."
             if executable_allowed
             else f"Execution permission denied: {first_reason}."
         ),

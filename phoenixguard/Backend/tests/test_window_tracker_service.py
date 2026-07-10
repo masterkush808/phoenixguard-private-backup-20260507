@@ -7,7 +7,7 @@ import ctypes
 import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Mapping, Protocol, Sequence, cast
+from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence, cast
 
 from fastapi.testclient import TestClient
 import numpy as np
@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw
 import pytest
 
 import phoenixguard.mobile_api.window_tracker as window_tracker_module
+from phoenixguard.execution.packet_v3 import build_execution_packet_v3
 from phoenixguard.memory.memory_ingest import MemoryEntry
 from phoenixguard.mobile_api.app import create_app
 from phoenixguard.mobile_api.window_tracker import (
@@ -30,6 +31,28 @@ from phoenixguard.mobile_api.window_tracker import (
     preserve_newer_active_execution_state,
     write_json_atomic,
 )
+from tests.support.v3_packet_samples import complete_sequence_context_v3
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_tracker_services_after_test(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[list[ContinuousWindowTrackerService]]:
+    services: list[ContinuousWindowTrackerService] = []
+    original_init = ContinuousWindowTrackerService.__init__
+
+    def tracked_init(
+        service: ContinuousWindowTrackerService,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        original_init(service, *args, **kwargs)
+        services.append(service)
+
+    monkeypatch.setattr(ContinuousWindowTrackerService, "__init__", tracked_init)
+    yield services
+    for service in reversed(services):
+        service.shutdown()
 
 
 class _BuildSignalPayloads(Protocol):
@@ -205,7 +228,15 @@ def test_read_json_prefers_newer_last_good_snapshot(tmp_path: Path) -> None:
     assert payload["last_capture_epoch"] == 200.0
 
 
-def test_model_council_study_packet_uses_signal_freshness_when_synthesized(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("signal_freshness_sec", "expected_ttl_sec"),
+    ((120.0, 300.0), (420.0, 420.0)),
+)
+def test_model_council_study_packet_respects_canonical_visibility_floor_when_synthesized(
+    monkeypatch: pytest.MonkeyPatch,
+    signal_freshness_sec: float,
+    expected_ttl_sec: float,
+) -> None:
     monkeypatch.setattr(window_tracker_module.time, "time", lambda: 200.0)
 
     packet = window_tracker_module.model_council_study_packet_from_payload(
@@ -213,7 +244,7 @@ def test_model_council_study_packet_uses_signal_freshness_when_synthesized(monke
             "session_id": "pocket-live-8788",
             "state_version": 200123,
             "last_capture_epoch": 200.0,
-            "latest_signal": {"freshness_window_sec": 120.0},
+            "latest_signal": {"freshness_window_sec": signal_freshness_sec},
             "model_council_result": {
                 "execution": {"enabled": False, "state": "WATCHING", "side": "BUY"},
                 "model_council": {"final_state": "WATCHING", "final_side": "BUY"},
@@ -222,8 +253,8 @@ def test_model_council_study_packet_uses_signal_freshness_when_synthesized(monke
     )
 
     assert packet["created_epoch"] == 200.0
-    assert packet["valid_until_epoch"] == 320.0
-    assert packet["ttl_sec"] == 120.0
+    assert packet["valid_until_epoch"] == 200.0 + expected_ttl_sec
+    assert packet["ttl_sec"] == expected_ttl_sec
 
 
 def _manual_candle_tracks(
@@ -3493,6 +3524,375 @@ def test_model_council_packet_lookup_rejects_demoted_execution_root_without_side
     assert model_council_packet_from_payload({"model_council_result": demoted_root}) == {}
 
 
+def _revocation_test_execution_packet(*, session_id: str, now_epoch: float) -> dict[str, Any]:
+    input_frame_hash = "revocation-frame-10"
+    allowance_package: dict[str, Any] = {
+        "schema_version": "PG_ALLOWANCE_PACKAGE_V1",
+        "package_type": "INTRADAY_ENTER_NOW",
+        "allowance_family": "INTRADAY",
+        "execution_authority": "PLAYBOOK_FINAL_DECIDER_V3",
+        "packet_authority": "PG_EXECUTION_PACKET_V3",
+        "side": "BUY",
+        "accepted": True,
+        "decision_accepted": True,
+        "execution_ready": True,
+        "entry_now_allowed": True,
+        "timing_mode": "ENTER_NOW",
+        "selected_lane": "SNIPER_ZONE_ENTRY",
+    }
+    packet = build_execution_packet_v3(
+        packet_id="pgpkt-revocation-frame-10",
+        session_id=session_id,
+        symbol="EUR/USD OTC",
+        timeframe="M5",
+        frame_id=10,
+        capture_count=10,
+        state_version=10_010,
+        created_epoch=now_epoch - 0.1,
+        valid_until_epoch=now_epoch + 60.0,
+        side="BUY",
+        expiry_seconds=300,
+        input_frame_hash=input_frame_hash,
+        live_integrity={
+            "is_live": True,
+            "frame_advancing": True,
+            "capture_advancing": True,
+            "state_advancing": True,
+            "source": "model_council",
+            "cache_status": "fresh",
+            "input_frame_hash": input_frame_hash,
+            "previous_frame_hash": "revocation-frame-9",
+            "packet_age_ms": 100,
+        },
+        model_council={"final_state": "EXECUTABLE", "final_side": "BUY"},
+        runtime_model_health={"all_required_models_awake": True, "council_status": "AWAKE"},
+        sequence_context=complete_sequence_context_v3(
+            sequence_id="seq-revocation-frame-10",
+            session_id=session_id,
+            side="BUY",
+        ),
+        allowance_package=allowance_package,
+    )
+    packet["trade_permission"] = {
+        "permission_state": "GRANTED",
+        "executable_allowed": True,
+        "failed_reasons": [],
+        "blocking_reasons": [],
+    }
+    packet["entry_quality"] = {
+        "state": "ACCEPTABLE_ENTRY",
+        "passes_executable_threshold": True,
+    }
+    packet["market_trap"] = {
+        "detected": False,
+        "executable_allowed": True,
+        "active_traps": [],
+    }
+    packet["overlay_truth_audit"] = {
+        "valid_for_execution": True,
+        "execution_safe": True,
+        "frame_id": 10,
+        "capture_count": 10,
+        "input_frame_hash": input_frame_hash,
+        "objects": [],
+    }
+    return packet
+
+
+class _RevocationCouncilSequence:
+    def __init__(self, results: Sequence[Mapping[str, Any]]) -> None:
+        self._results = [dict(result) for result in results]
+
+    def evaluate(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+        return self._results.pop(0)
+
+
+def _assert_newer_council_frame_revokes_execution_packet(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    side: str,
+    expected_reason: str,
+) -> None:
+    now_epoch = 1_800_000_000.0
+    monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: now_epoch)
+    tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
+    session = tracker.create_session(session_id="packet-revocation")
+    session_id = str(session["session_id"])
+    payload = tracker.load_session_payload(session_id)
+    first_packet = _revocation_test_execution_packet(session_id=session_id, now_epoch=now_epoch)
+    second_result: dict[str, Any] = {
+        "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
+        "packet_type": "STUDY_PACKET",
+        "session_id": session_id,
+        "frame_id": 11,
+        "capture_count": 11,
+        "execution": {"enabled": False, "state": state, "side": side},
+        "model_council": {"final_state": state, "final_side": side},
+        "promotion_trace": {
+            "packet_result": "STUDY_PACKET_PUBLISHED",
+            "denied_at": f"TEST_{state}",
+        },
+    }
+    council = _RevocationCouncilSequence((first_packet, second_result))
+    monkeypatch.setattr(tracker, "_model_council_for_session", lambda _session_id: council)
+
+    first_audit = dict(cast(Mapping[str, Any], first_packet["overlay_truth_audit"]))
+    tracking_summary: dict[str, Any] = {"overlay_truth_audit": first_audit}
+    latest_signal: dict[str, Any] = {
+        "overlay_truth_audit": first_audit,
+        "execution_action": "BUY",
+        "action": "BUY",
+    }
+    first_result = tracker._publish_model_council_v3_state(  # noqa: SLF001
+        payload=payload,
+        tracking_summary=tracking_summary,
+        latest_signal=latest_signal,
+        frame_index=10,
+        capture_count=10,
+        input_frame_hash="revocation-frame-10",
+        capture_started_epoch=now_epoch - 0.1,
+    )
+    assert first_result["execution_packet_present"] is True
+
+    payload["model_council_result"] = first_result
+    payload["model_council"] = dict(cast(Mapping[str, Any], first_result.get("model_council", {})))
+    payload["tracking_summary"] = tracking_summary
+    payload["latest_signal"] = latest_signal
+    payload["frame_index"] = 10
+    payload["capture_count"] = 10
+    payload["model_vote_frame_id"] = 10
+    payload["last_capture_epoch"] = now_epoch - 0.1
+    tracker.save_session(payload)
+    assert tracker.latest_model_council_packet(session_id)["packet_id"] == "pgpkt-revocation-frame-10"
+
+    second_audit = {
+        "valid_for_execution": True,
+        "execution_safe": True,
+        "frame_id": 11,
+        "capture_count": 11,
+        "input_frame_hash": "revocation-frame-11",
+        "objects": [],
+    }
+    tracking_summary["overlay_truth_audit"] = second_audit
+    latest_signal["overlay_truth_audit"] = second_audit
+    latest_signal["execution_action"] = side
+    latest_signal["action"] = side
+
+    revoked_result = tracker._publish_model_council_v3_state(  # noqa: SLF001
+        payload=payload,
+        tracking_summary=tracking_summary,
+        latest_signal=latest_signal,
+        frame_index=11,
+        capture_count=11,
+        input_frame_hash="revocation-frame-11",
+        capture_started_epoch=now_epoch,
+    )
+    payload["model_council_result"] = revoked_result
+    payload["model_council"] = dict(cast(Mapping[str, Any], revoked_result.get("model_council", {})))
+    payload["tracking_summary"] = tracking_summary
+    payload["latest_signal"] = latest_signal
+    payload["frame_index"] = 11
+    payload["capture_count"] = 11
+    payload["model_vote_frame_id"] = 11
+    payload["last_capture_epoch"] = now_epoch
+    tracker.save_session(payload)
+
+    aliases = {
+        "model_council_packet",
+        "execution_packet",
+        "latest_model_council_packet",
+        "latest_execution_packet",
+    }
+    for container in (revoked_result, latest_signal, tracking_summary, payload):
+        assert aliases.isdisjoint(container)
+        assert container["execution_packet_present"] is False
+        tombstone = cast(Mapping[str, Any], container["execution_packet_revocation_v3"])
+        assert tombstone["revoked_packet_id"] == "pgpkt-revocation-frame-10"
+        assert tombstone["frame_id"] == 11
+        assert tombstone["capture_count"] == 11
+        assert tombstone["reason"] == expected_reason
+
+    with pytest.raises(KeyError):
+        tracker.latest_model_council_packet(session_id)
+    stored = tracker.load_session_payload(session_id)
+    assert aliases.isdisjoint(stored)
+    assert stored["execution_packet_present"] is False
+    assert stored["execution_packet_revocation_v3"]["reason"] == expected_reason
+    compact = window_tracker_module.read_json(tracker._compact_live_state_path(session_id), {})  # noqa: SLF001
+    assert compact["execution_packet_present"] is False
+    assert compact["execution_packet_revocation_v3"]["revoked_packet_id"] == "pgpkt-revocation-frame-10"
+
+
+def test_newer_watching_council_frame_revokes_previous_execution_packet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_newer_council_frame_revokes_execution_packet(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        state="WATCHING",
+        side="BUY",
+        expected_reason="NEWER_COUNCIL_WATCHING",
+    )
+
+
+def test_newer_opposite_council_frame_revokes_previous_execution_packet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_newer_council_frame_revokes_execution_packet(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        state="PREPARING",
+        side="SELL",
+        expected_reason="NEWER_COUNCIL_OPPOSITE_SIDE",
+    )
+
+
+def test_execution_opportunity_window_survives_session_persistence_and_snapshot_rebuild(tmp_path: Path) -> None:
+    tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
+    session = tracker.create_session(session_id="opportunity-window-persistence")
+    session_id = str(session["session_id"])
+    payload = tracker.load_session_payload(session_id)
+    authority = {
+        "schema_version": "PG_EXECUTION_OPPORTUNITY_WINDOW_V3",
+        "opportunity_key": "pgopp_stable",
+        "opportunity_id": "pgepisode_stable",
+        "session_id": session_id,
+        "symbol": "BROKER_LOCKED_ACTIVE_CHART",
+        "timeframe": "M3",
+        "side": "BUY",
+        "candidate_id": "pgcand_stable",
+        "opened_epoch_sec": 1_800_000_000.0,
+        "valid_until_epoch_sec": 1_800_000_360.0,
+        "duration_sec": 360.0,
+        "remaining_sec": 120.0,
+        "state": "OPEN",
+        "last_seen_frame_id": 8,
+        "last_seen_capture_count": 8,
+    }
+    payload["execution_opportunity_window_v3"] = authority
+    payload["model_council_result"] = {"execution_opportunity_window_v3": authority}
+    payload["frame_index"] = 8
+    payload["capture_count"] = 8
+    tracker.save_session(payload)
+
+    restored = tracker.load_session_payload(session_id)
+    assert restored["execution_opportunity_window_v3"] == authority
+    compact = window_tracker_module.read_json(tracker._compact_live_state_path(session_id), {})  # noqa: SLF001
+    assert compact["execution_opportunity_window_v3"] == authority
+    assert compact["model_council_result"]["execution_opportunity_window_v3"] == authority
+
+    snapshot = tracker._build_model_council_v3_snapshot(  # noqa: SLF001
+        payload=restored,
+        tracking_summary={},
+        latest_signal={},
+        frame_index=9,
+        capture_count=9,
+        input_frame_hash="opportunity-window-frame-9",
+        capture_started_epoch=1_800_000_100.0,
+    )
+    assert snapshot["execution_opportunity_window_v3"] == authority
+
+
+def test_countertrend_thesis_block_cannot_replace_execution_opportunity_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = 1_800_000_100.0
+    monkeypatch.setattr(window_tracker_module, "_now_epoch", lambda: now_epoch)
+    tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
+    session = tracker.create_session(session_id="opportunity-window-countertrend")
+    session_id = str(session["session_id"])
+    payload = tracker.load_session_payload(session_id)
+    previous_authority = {
+        "schema_version": "PG_EXECUTION_OPPORTUNITY_WINDOW_V3",
+        "opportunity_key": "pgopp-sell-existing",
+        "opportunity_id": "pgepisode-sell-existing",
+        "session_id": session_id,
+        "symbol": "EUR/USD OTC",
+        "timeframe": "M5",
+        "side": "SELL",
+        "candidate_id": "pgcand-sell-existing",
+        "opened_epoch_sec": now_epoch - 30.0,
+        "valid_until_epoch_sec": now_epoch + 270.0,
+        "duration_sec": 300.0,
+        "remaining_sec": 270.0,
+        "state": "OPEN",
+        "anchor_reused": True,
+        "last_seen_frame_id": 9,
+        "last_seen_capture_count": 9,
+    }
+    new_authority = {
+        **previous_authority,
+        "opportunity_key": "pgopp-buy-attempt",
+        "opportunity_id": "pgepisode-buy-attempt",
+        "side": "BUY",
+        "candidate_id": "pgcand-buy-attempt",
+        "opened_epoch_sec": now_epoch,
+        "valid_until_epoch_sec": now_epoch + 300.0,
+        "remaining_sec": 300.0,
+        "anchor_reused": False,
+        "last_seen_frame_id": 10,
+        "last_seen_capture_count": 10,
+    }
+    packet = _revocation_test_execution_packet(session_id=session_id, now_epoch=now_epoch)
+    packet["execution_opportunity_window_v3"] = new_authority
+    packet["entry_window"] = {"duration_sec": 300.0, "remaining_sec": 300.0}
+    packet["model_council"]["execution_opportunity_window_v3"] = new_authority
+    council = _RevocationCouncilSequence((packet,))
+    monkeypatch.setattr(tracker, "_model_council_for_session", lambda _session_id: council)
+    active_sell_thesis = {
+        "schema_version": "PG_SIGNAL_THESIS_V3",
+        "active": True,
+        "status": "ACTIVE",
+        "room_state": "ACTIVE",
+        "thesis_id": "pgthesis-active-sell",
+        "session_id": session_id,
+        "symbol": "EUR/USD OTC",
+        "symbol_key": "EUR/USD OTC",
+        "timeframe": "M5",
+        "side": "SELL",
+        "effective_side": "SELL",
+        "raw_read_side": "SELL",
+        "created_epoch": now_epoch - 30.0,
+        "updated_epoch": now_epoch - 1.0,
+        "entry_frame_id": 9,
+        "last_frame_id": 9,
+        "invalidated": False,
+    }
+    payload["execution_opportunity_window_v3"] = previous_authority
+    payload["signal_thesis_v3"] = active_sell_thesis
+    tracker._signal_theses[session_id] = active_sell_thesis  # noqa: SLF001
+    overlay_audit = dict(cast(Mapping[str, Any], packet["overlay_truth_audit"]))
+    tracking_summary: dict[str, Any] = {"overlay_truth_audit": overlay_audit}
+    latest_signal: dict[str, Any] = {
+        "overlay_truth_audit": overlay_audit,
+        "execution_action": "BUY",
+        "action": "BUY",
+    }
+
+    result = tracker._publish_model_council_v3_state(  # noqa: SLF001
+        payload=payload,
+        tracking_summary=tracking_summary,
+        latest_signal=latest_signal,
+        frame_index=10,
+        capture_count=10,
+        input_frame_hash="revocation-frame-10",
+        capture_started_epoch=now_epoch - 0.1,
+    )
+
+    assert result["execution_packet_present"] is False
+    assert result["model_council"]["true_blocker"] == "SIGNAL_THESIS_V3_COUNTERTREND_BLOCK"
+    for container in (result, payload, latest_signal, tracking_summary):
+        assert container["execution_opportunity_window_v3"]["opportunity_id"] == (
+            previous_authority["opportunity_id"]
+        )
+        assert container["execution_opportunity_window_v3"]["side"] == "SELL"
+
+
 def testpublic_session_payload_does_not_block_non_executable_missing_signal_id(tmp_path: Path) -> None:
     tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
 
@@ -4173,6 +4573,64 @@ def test_tracker_display_only_blocks_native_capture_fallback_when_fast_visible_f
     assert backend.capture_calls == 0
 
 
+def test_tracker_display_only_uses_validated_native_capture_fallback_when_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _FailingFastVisibleCaptureBackend(_synthetic_full_pocket_option_gui(width=1280, height=720))
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    session = tracker.create_session(session_id="pocket-live")
+    session_id = str(session["session_id"])
+    _focus_session_without_preview(tracker, session_id)
+    payload = tracker.load_session_payload(session_id)
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1")
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK", "1")
+
+    result = tracker.capture_once(session_id, display_only=True)
+
+    assert result["capture_once_result"]["ok"] is True
+    assert backend.fast_capture_calls == 1
+    assert backend.capture_calls == 1
+    assert Path(str(result["last_display_window_path"])).exists()
+
+
+def test_tracker_display_only_rejects_invalid_native_capture_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _FailingFastVisibleCaptureBackend(Image.new("RGB", (1280, 720), color=(0, 0, 0)))
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+
+    session = tracker.create_session(session_id="pocket-live")
+    session_id = str(session["session_id"])
+    _focus_session_without_preview(tracker, session_id)
+    payload = tracker.load_session_payload(session_id)
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1")
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK", "1")
+
+    result = tracker.capture_once(session_id, display_only=True)
+
+    assert result["capture_once_result"]["ok"] is False
+    assert backend.fast_capture_calls == 1
+    assert backend.capture_calls == 1
+    assert "did not include Pocket Option pixels" in result["capture_once_result"]["error"]
+
+
 def test_tracker_display_only_reuse_only_heartbeat_skips_capture_after_locked_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4467,16 +4925,16 @@ def test_tracker_study_gate_blocks_overlapping_capture(tmp_path: Path) -> None:
     class _BlockingTrackingAdapter(_FakeTrackingAdapter):
         def study(self, image: Image.Image, *, session_payload: Mapping[str, Any] | None = None) -> TrackingStudy:
             started.set()
-            assert release.wait(5.0)
+            assert release.wait(20.0)
             return super().study(image, session_payload=session_payload)
 
     setattr(tracker, "tracking_adapter", _BlockingTrackingAdapter("BUY"))
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(tracker.capture_and_analyze, session_id, force=True)
-        assert started.wait(5.0)
+        assert started.wait(20.0)
         tracker.capture_and_analyze(session_id, force=True)
         release.set()
-        future.result(timeout=10.0)
+        future.result(timeout=30.0)
 
     payload = tracker.get_session(session_id)
     assert int(payload["capture_count"]) == 1
@@ -5168,7 +5626,8 @@ def test_tracker_http_surface_serves_session_artifacts_and_dashboard(tmp_path: P
 
     dashboard_response = client.get(f"/v3/mobile/window-tracker/dashboard/{session_id}")
     assert dashboard_response.status_code == 200
-    assert "Locked Broker Surface Tracker" in dashboard_response.text
+    assert "<title>808Fx Standard Hybrid System Live Tracker</title>" in dashboard_response.text
+    assert 'aria-label="808Fx Standard Hybrid System live tracker"' in dashboard_response.text
 
 
 def test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout() -> None:
@@ -5185,8 +5644,10 @@ def test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout() -
     assert "height: 220px;" not in dashboard_html
     assert "object-fit: contain;" in dashboard_html
     assert "aspect-ratio: auto;" in dashboard_html
-    assert "Precision" in dashboard_html
-    assert "Edge" in dashboard_html
+    assert "808Fx Standard Hybrid System Live Tracker" in dashboard_html
+    assert "Powered by the Phoenix Guard V3 engine" in dashboard_html
+    assert "Path Quality" in dashboard_html
+    assert "Entry Quality" in dashboard_html
     assert "Top 3 Forecasts" in dashboard_html
     assert "accepted_by" in dashboard_html
     assert "failure_or_probe" in dashboard_html

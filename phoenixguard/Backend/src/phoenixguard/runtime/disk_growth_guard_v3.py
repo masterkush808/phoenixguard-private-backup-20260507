@@ -196,17 +196,25 @@ def assert_safe_target(path: Path, *, allowed_roots: Sequence[Path], protected: 
 
 
 def directory_size(path: Path) -> int:
-    if not path.exists():
+    try:
+        if not path.exists():
+            return 0
+        if path.is_file():
+            return path.stat().st_size
+    except OSError:
         return 0
-    if path.is_file():
-        return path.stat().st_size
     total = 0
-    for file_path in path.rglob("*"):
-        try:
-            if file_path.is_file():
-                total += file_path.stat().st_size
-        except OSError:
-            continue
+    try:
+        for file_path in path.rglob("*"):
+            try:
+                if file_path.is_file():
+                    total += file_path.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        # Concurrent cleanup may remove a directory while rglob is traversing it.
+        # Keep the bytes already observed and retry from fresh state next cycle.
+        pass
     return total
 
 

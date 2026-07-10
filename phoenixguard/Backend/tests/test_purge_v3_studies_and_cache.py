@@ -4,6 +4,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from tools.purge_v3_studies_and_cache import run_purge
 
 
@@ -101,6 +103,28 @@ def test_unapproved_and_non_runtime_paths_are_retained(tmp_path: Path) -> None:
 
     assert not deleted_path.exists()
     assert all(path.exists() for path in retained_paths)
+
+
+@pytest.mark.parametrize("runtime_env_configured", [False, True])
+def test_explicit_root_is_authoritative_over_process_runtime_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runtime_env_configured: bool,
+) -> None:
+    explicit_root = tmp_path / "explicit-root"
+    explicit_study = _write(explicit_root / ".codex_runtime" / "studies" / "study.json")
+    process_runtime = tmp_path / "process-runtime"
+    process_study = _write(process_runtime / "studies" / "process-study.json")
+    if runtime_env_configured:
+        monkeypatch.setenv("PHOENIXGUARD_RUNTIME_DIR", str(process_runtime))
+    else:
+        monkeypatch.delenv("PHOENIXGUARD_RUNTIME_DIR", raising=False)
+
+    result = run_purge(explicit_root, confirm_delete=True)
+
+    assert result.root == explicit_root.resolve()
+    assert not explicit_study.exists()
+    assert process_study.exists()
 
 
 def test_certification_burn_purge_requires_explicit_include_and_age_gate(tmp_path: Path) -> None:

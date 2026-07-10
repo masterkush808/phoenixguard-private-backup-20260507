@@ -18,8 +18,11 @@ ROOT = PROJECT_ROOT
 
 
 def runtime_root(root: Path) -> Path:
+    root = root.resolve()
     configured = os.getenv("PHOENIXGUARD_RUNTIME_DIR")
-    if configured:
+    # A process-wide live runtime must not redirect a purge that explicitly
+    # targets a separate repository/workspace root.
+    if configured and root == ROOT.resolve():
         return Path(configured).resolve()
     codex_runtime = root / ".codex_runtime"
     if codex_runtime.exists():

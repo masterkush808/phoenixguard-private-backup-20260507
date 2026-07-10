@@ -30,6 +30,44 @@ def test_parse_size_bytes_accepts_server_friendly_units() -> None:
     assert parse_size_bytes("", default=123) == 123
 
 
+def test_directory_size_tolerates_directory_disappearing_during_walk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "reports"
+    observed = target / "observed.bin"
+    _write(observed, 8)
+    original_rglob = Path.rglob
+
+    def disappearing_rglob(path: Path, pattern: str):
+        if path != target:
+            yield from original_rglob(path, pattern)
+            return
+        yield observed
+        raise FileNotFoundError(target / "removed-during-scan")
+
+    monkeypatch.setattr(Path, "rglob", disappearing_rglob)
+
+    assert directory_size(target) == 8
+
+
+def test_directory_size_tolerates_file_disappearing_before_stat() -> None:
+    class DisappearingFile:
+        @staticmethod
+        def exists() -> bool:
+            return True
+
+        @staticmethod
+        def is_file() -> bool:
+            return True
+
+        @staticmethod
+        def stat() -> object:
+            raise FileNotFoundError("removed-before-stat")
+
+    assert directory_size(DisappearingFile()) == 0  # type: ignore[arg-type]
+
+
 def test_disk_growth_guard_prunes_generated_files_to_low_water(tmp_path: Path) -> None:
     reports = tmp_path / "reports"
     _write(reports / "old-a.png", 8)

@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import math
+import os
 import re
 import threading
 import time
@@ -90,16 +91,30 @@ def _slugify(value: str, fallback: str) -> str:
     return slug or fallback
 
 
+def _filesystem_path(path: Path) -> Path:
+    """Return a Windows extended-length path for deep observer artifacts."""
+
+    if os.name != "nt":
+        return path
+    raw = str(path.absolute())
+    if raw.startswith("\\\\?\\"):
+        return Path(raw)
+    if raw.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + raw[2:])
+    return Path("\\\\?\\" + raw)
+
+
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    io_path = _filesystem_path(path)
+    io_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = io_path.with_suffix(io_path.suffix + ".tmp")
     tmp_path.write_text(
         json.dumps(dict(payload), ensure_ascii=True, indent=2, default=str),
         encoding="utf-8",
     )
     for attempt in range(6):
         try:
-            tmp_path.replace(path)
+            tmp_path.replace(io_path)
             return
         except PermissionError:
             if attempt >= 5:
@@ -108,10 +123,11 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def _read_json(path: Path, default: Any) -> Any:
-    if not path.exists():
+    io_path = _filesystem_path(path)
+    if not io_path.exists():
         return default
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(io_path.read_text(encoding="utf-8"))
     except Exception:
         return default
 
@@ -758,7 +774,7 @@ class SignalObserverService:
             raise KeyError(bundle_id)
         public_payload = self._public_bundle_payload(payload)
         result_path = str(payload.get("result_path", "")).strip()
-        if result_path and Path(result_path).exists():
+        if result_path and _filesystem_path(Path(result_path)).exists():
             public_payload["result"] = _read_json(Path(result_path), {})
         return public_payload
 
@@ -823,8 +839,9 @@ class SignalObserverService:
             if str(artifact.get("name", "")) != safe_name:
                 continue
             path = Path(str(artifact.get("path", "")))
-            if path.exists() and path.is_file():
-                return path
+            io_path = _filesystem_path(path)
+            if io_path.exists() and io_path.is_file():
+                return io_path
             break
         raise FileNotFoundError(safe_name)
 
@@ -844,7 +861,7 @@ class SignalObserverService:
             last_error="",
         )
         upload_paths = [
-            str(item.get("path", ""))
+            str(_filesystem_path(Path(str(item.get("path", "")))))
             for item in payload.get("uploads", [])
             if str(item.get("path", "")).strip()
         ]
@@ -1535,7 +1552,7 @@ class SignalObserverService:
         upload_dir: Path,
         uploads: Sequence[tuple[str, bytes]],
     ) -> list[dict[str, Any]]:
-        upload_dir.mkdir(parents=True, exist_ok=True)
+        _filesystem_path(upload_dir).mkdir(parents=True, exist_ok=True)
         records: list[dict[str, Any]] = []
         for index, (filename, payload) in enumerate(uploads, start=1):
             slot = DEFAULT_UPLOAD_ORDER[index - 1]
@@ -1552,7 +1569,7 @@ class SignalObserverService:
                 )
             width, height = self._validate_image_bytes(payload)
             target_path = upload_dir / f"{index:02d}_{slot['key']}{suffix}"
-            target_path.write_bytes(payload)
+            _filesystem_path(target_path).write_bytes(payload)
             records.append(
                 {
                     "slot_index": index,
@@ -1594,7 +1611,7 @@ class SignalObserverService:
             return self.pipeline_adapter.export_artifacts(
                 result,
                 source_image_state,
-                artifact_dir,
+                _filesystem_path(artifact_dir),
                 bundle_id,
             )
         except Exception:

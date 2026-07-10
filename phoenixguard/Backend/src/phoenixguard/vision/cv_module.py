@@ -332,6 +332,8 @@ class CVPatternDetector:
         self.hf_model_id = None
         self.hf_client = None
         self.hf_remote_url = ""
+        self.hf_last_inference_ok: bool | None = None
+        self.hf_last_inference_error = ""
         self.memory_clf = None
         self.latest_dir_clf = None
         self.next_dir_clf = None
@@ -362,6 +364,16 @@ class CVPatternDetector:
             self.logger.info("CV local YOLO backend ready (%s)", self.model_name)
             self._load_or_train_memory_classifier()
             return
+
+        allow_remote_endpoint = (
+            str(os.getenv("PHOENIXGUARD_CV_ALLOW_REMOTE_ENDPOINT", "") or "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        if allow_remote_endpoint:
+            remote_ref = str(primary_model or fallback_model or "").strip()
+            if self._try_enable_hf_endpoint(remote_ref):
+                self.logger.info("CV remote inference backend ready (%s)", self.model_name)
+                return
 
         self.strict_model_only = False
         self.logger.warning(
@@ -1508,14 +1520,22 @@ class CVPatternDetector:
         model_id = model_ref.replace("hf://", "", 1)
         token = os.getenv("HF_TOKEN", "").strip() or None
         custom_url = os.getenv("PHOENIXGUARD_CV_REMOTE_URL", "").strip()
+        if not custom_url:
+            self.logger.warning(
+                "Remote CV endpoint requested for %s but PHOENIXGUARD_CV_REMOTE_URL is not configured.",
+                model_id,
+            )
+            return False
         try:
             if HfApi is not None:
                 HfApi(token=token).model_info(model_id)
-            self.hf_remote_url = custom_url or f"https://api-inference.huggingface.co/models/{model_id}"
+            self.hf_remote_url = custom_url
             self.use_hf_endpoint = True
             self.hf_model_id = model_id
             self.model_name = model_ref
-            self.logger.info("Using remote CV inference API: model=%s url=%s", model_id, self.hf_remote_url)
+            self.hf_last_inference_ok = None
+            self.hf_last_inference_error = ""
+            self.logger.info("Configured remote CV inference API: model=%s url=%s", model_id, self.hf_remote_url)
             return True
         except Exception as e:
             self.logger.warning("Remote CV init failed (%s)", e)
@@ -1523,6 +1543,8 @@ class CVPatternDetector:
 
     def _raw_detect_hf(self, image_rgb: Image.Image | NDArray[np.uint8]) -> list[dict[str, Any]]:
         if not self.use_hf_endpoint or not self.hf_model_id or not self.hf_remote_url:
+            self.hf_last_inference_ok = False
+            self.hf_last_inference_error = "remote endpoint is not fully configured"
             return []
         try:
             if isinstance(image_rgb, Image.Image):
@@ -1545,6 +1567,8 @@ class CVPatternDetector:
                 raw = resp.read().decode("utf-8", errors="replace")
 
             parsed_obj: object = json.loads(raw)
+            if isinstance(parsed_obj, Mapping) and parsed_obj.get("error"):
+                raise RuntimeError(str(parsed_obj.get("error")))
             preds_obj: list[Any] = parsed_obj if isinstance(parsed_obj, list) else []  # type: ignore
             preds: list[Mapping[str, object]] = [
                 cast(Mapping[str, object], item) for item in preds_obj if isinstance(item, dict)
@@ -1562,6 +1586,8 @@ class CVPatternDetector:
                     "confidence": score,
                     "bbox": [xmin, ymin, xmax, ymax],
                 })
+            self.hf_last_inference_ok = True
+            self.hf_last_inference_error = ""
             return out
         except error.HTTPError as e:
             body = ""
@@ -1574,13 +1600,19 @@ class CVPatternDetector:
                 self.logger.warning(
                     "Remote endpoint unavailable. Set PHOENIXGUARD_CV_REMOTE_URL to your hosted inference endpoint."
                 )
+            self.hf_last_inference_ok = False
+            self.hf_last_inference_error = f"HTTP {int(getattr(e, 'code', 0))}: {body or e}"
             return []
         except Exception as e:
             self.logger.warning("Remote CV detection failed for model=%s: %s", self.hf_model_id, e)
+            self.hf_last_inference_ok = False
+            self.hf_last_inference_error = str(e)
             return []
 
     # ── raw YOLO detection ────────────────────────────────────────────────────
     def _raw_detect(self, image_rgb: Image.Image | NDArray[np.uint8]) -> list[dict[str, Any]]:
+        if self.use_hf_endpoint:
+            return self._raw_detect_hf(image_rgb)
         if self.model is None:
             return []
         if not _local_yolo_inference_enabled():

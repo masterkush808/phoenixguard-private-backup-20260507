@@ -23,6 +23,7 @@ PROJECT_ROOT = ensure_project_paths()
 
 from phoenixguard.runtime.python_environment_v3 import assert_repo_venv_runtime
 from phoenixguard.decision.playbook_ai_intelligence_v3 import compact_playbook_ai_intelligence_v3
+from phoenixguard.execution.packet_v3 import validate_execution_packet_v3
 
 _PYTHON_ENVIRONMENT_STATUS = assert_repo_venv_runtime("mt4_bridge", PROJECT_ROOT)
 
@@ -379,12 +380,9 @@ def _packet_current_in_live_monitor(
 
 
 def _allowance_source(payload: dict[str, object], execution: dict[str, object], council: dict[str, object]) -> dict[str, object]:
-    promotion_trace = _nested(council, "promotion_trace") or _nested(payload, "promotion_trace")
     for source in (
         _nested(payload, "allowance_package"),
-        _nested(execution, "allowance_package"),
         _nested(council, "allowance_package"),
-        _nested(promotion_trace, "allowance_package"),
     ):
         if source:
             return source
@@ -663,38 +661,47 @@ def _compact_allowance_package(
     source = _allowance_source(payload, execution, council)
     source_present = bool(source)
     timing_decision = _nested(payload, "timing_decision") or _nested(council, "timing_decision")
-    timing_mode = str(
-        source.get("timing_mode")
-        or timing_decision.get("timing_mode")
-        or execution.get("timing_mode")
-        or ""
-    ).upper()
-    entry_now_allowed = (
-        source.get("entry_now_allowed") is True
-        or timing_decision.get("entry_now_allowed") is True
-    )
+    if source_present:
+        timing_mode = str(source.get("timing_mode") or "").upper()
+        entry_now_allowed = source.get("entry_now_allowed") is True
+    else:
+        timing_mode = str(
+            timing_decision.get("timing_mode")
+            or execution.get("timing_mode")
+            or ""
+        ).upper()
+        entry_now_allowed = timing_decision.get("entry_now_allowed") is True
     package_type = str(source.get("package_type") or "").upper()
-    if not package_type:
+    if not package_type and not source_present:
         package_type = "INTRADAY_ENTER_NOW" if entry_now_allowed and timing_mode == "ENTER_NOW" else "SWING"
     allowance_family = str(source.get("allowance_family") or "").upper()
-    if not allowance_family:
+    if not allowance_family and not source_present:
         allowance_family = "INTRADAY" if package_type == "INTRADAY_ENTER_NOW" else "SWING"
     professional_plan = _compact_professional_trade_plan(source, payload, execution, council, timing_decision)
     expected_move_time = _compact_expected_move_time(source, professional_plan, payload, execution, council, timing_decision)
     playbook_ai_summary = _compact_playbook_ai_summary(source, professional_plan, payload, execution, council, timing_decision)
     return {
-        "schema_version": str(source.get("schema_version") or "PG_ALLOWANCE_PACKAGE_V1"),
+        "schema_version": str(
+            source.get("schema_version")
+            or ("" if source_present else "PG_ALLOWANCE_PACKAGE_V1")
+        ),
         "package_type": package_type,
         "allowance_family": allowance_family,
-        "execution_authority": str(source.get("execution_authority") or "PLAYBOOK_FINAL_DECIDER_V3"),
-        "packet_authority": str(source.get("packet_authority") or "PG_EXECUTION_PACKET_V3"),
+        "execution_authority": str(
+            source.get("execution_authority")
+            or ("" if source_present else "PLAYBOOK_FINAL_DECIDER_V3")
+        ),
+        "packet_authority": str(
+            source.get("packet_authority")
+            or ("" if source_present else "PG_EXECUTION_PACKET_V3")
+        ),
         "source_present": source_present,
         "inferred": not source_present,
-        "side": str(source.get("side") or side),
-        "accepted": bool(source.get("accepted", eligible)),
-        "decision_accepted": bool(source.get("decision_accepted", source.get("accepted", eligible))),
-        "execution_ready": bool(source.get("execution_ready", eligible)),
-        "executable": bool(source.get("executable", eligible)),
+        "side": str(source.get("side") or ("" if source_present else side)),
+        "accepted": source.get("accepted") is True if source_present else bool(eligible),
+        "decision_accepted": source.get("decision_accepted") is True if source_present else bool(eligible),
+        "execution_ready": source.get("execution_ready") is True if source_present else bool(eligible),
+        "executable": source.get("executable") is True if source_present else bool(eligible),
         "tracking_active": bool(source.get("tracking_active", False)) and not eligible,
         "intraday_capture_active": bool(source.get("intraday_capture_active", package_type == "INTRADAY_ENTER_NOW" and eligible)),
         "entry_now_allowed": bool(entry_now_allowed),
@@ -738,7 +745,20 @@ def _compact_command(
     bridge_sequence: int = 0,
     symbol_override: object = "",
     timeframe_override: object = "",
+    validation_now_epoch: float | None = None,
 ) -> dict[str, object]:
+    validation = validate_execution_packet_v3(
+        payload,
+        now_epoch=validation_now_epoch,
+        require_executable=True,
+        require_overlay_truth=True,
+        require_live_handoff_truth=True,
+    )
+    if validation.rejected:
+        raise ValueError(
+            "MT4 source packet failed shared live validation: "
+            + ",".join(validation.reason_codes)
+        )
     execution = _nested(payload, "execution")
     council = _nested(payload, "model_council")
     live = _nested(payload, "live_integrity")
@@ -905,6 +925,11 @@ def _validate_command(command: dict[str, object]) -> None:
         raise ValueError("MT4 command allowance_package.accepted must be true")
     if allowance.get("execution_ready") is not True:
         raise ValueError("MT4 command allowance_package.execution_ready must be true")
+    if allowance.get("package_type") == "INTRADAY_ENTER_NOW":
+        if allowance.get("entry_now_allowed") is not True:
+            raise ValueError("MT4 command INTRADAY_ENTER_NOW allowance must keep entry_now_allowed=true")
+        if str(allowance.get("timing_mode") or "").strip().upper() != "ENTER_NOW":
+            raise ValueError("MT4 command INTRADAY_ENTER_NOW allowance must keep timing_mode=ENTER_NOW")
     professional_plan = _nested(allowance, "professional_trade_plan")
     if not professional_plan:
         raise ValueError("MT4 command allowance_package.professional_trade_plan is required")
@@ -1049,6 +1074,7 @@ def main() -> int:
                         bridge_sequence=bridge_sequence,
                         symbol_override=args.symbol_override,
                         timeframe_override=args.timeframe_override,
+                        validation_now_epoch=time.time(),
                     )
                     command["bridge_live_freshness"] = {
                         "status": "PASS",

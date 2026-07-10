@@ -11,9 +11,9 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from phoenixguard.vision import cv_module
-from phoenixguard.vision import grounded_backends
-from phoenixguard.vision.cv_module import CVPatternDetector
+from phoenixguard.vision import cv_module  # noqa: E402
+from phoenixguard.vision import grounded_backends  # noqa: E402
+from phoenixguard.vision.cv_module import CVPatternDetector  # noqa: E402
 
 
 class _Logger:
@@ -48,6 +48,7 @@ def test_hf_bootstrap_stays_cache_only_until_explicitly_enabled(monkeypatch: pyt
 
     monkeypatch.delenv("PHOENIXGUARD_CV_ALLOW_REMOTE_BOOTSTRAP", raising=False)
     monkeypatch.delenv("PHOENIXGUARD_CV_FORCE_DOWNLOAD", raising=False)
+    monkeypatch.delenv("PHOENIXGUARD_CV_ALLOW_REMOTE_ENDPOINT", raising=False)
     monkeypatch.setattr(cv_module, "YOLOModel", _load_yolo_model)
     monkeypatch.setattr(cv_module, "hf_hub_download", _fake_download)
     monkeypatch.setattr(cv_module, "can_import_torchvision_safely", _can_import_torchvision_safely)
@@ -63,6 +64,63 @@ def test_hf_bootstrap_stays_cache_only_until_explicitly_enabled(monkeypatch: pyt
     assert detector.strict_model_only is False
     assert len(calls) == 1
     assert calls[0]["local_files_only"] is True
+
+
+def test_hf_remote_endpoint_requires_explicit_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    endpoint_calls: list[str] = []
+
+    monkeypatch.setenv("PHOENIXGUARD_CV_ALLOW_REMOTE_ENDPOINT", "1")
+    monkeypatch.setattr(CVPatternDetector, "_try_load_hf_yolo_weights", lambda *_args: False)
+
+    def _enable_endpoint(self: CVPatternDetector, model_ref: str) -> bool:
+        endpoint_calls.append(model_ref)
+        self.use_hf_endpoint = True
+        self.hf_model_id = model_ref.replace("hf://", "", 1)
+        self.hf_remote_url = "https://example.invalid/inference"
+        return True
+
+    monkeypatch.setattr(CVPatternDetector, "_try_enable_hf_endpoint", _enable_endpoint)
+
+    detector = CVPatternDetector(
+        primary_model="hf://demo/cv-model",
+        fallback_model="hf://demo/cv-model",
+        logger=_Logger(),
+    )
+
+    assert endpoint_calls == ["hf://demo/cv-model"]
+    assert detector.use_hf_endpoint is True
+    assert detector.strict_model_only is True
+
+
+def test_hf_remote_endpoint_requires_explicit_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_CV_ALLOW_REMOTE_ENDPOINT", "1")
+    monkeypatch.delenv("PHOENIXGUARD_CV_REMOTE_URL", raising=False)
+    monkeypatch.setattr(CVPatternDetector, "_try_load_hf_yolo_weights", lambda *_args: False)
+
+    detector = CVPatternDetector(
+        primary_model="hf://demo/cv-model",
+        fallback_model="hf://demo/cv-model",
+        logger=_Logger(),
+    )
+
+    assert detector.use_hf_endpoint is False
+    assert detector.strict_model_only is False
+
+
+def test_raw_detect_routes_to_enabled_hf_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(CVPatternDetector, "_try_load_hf_yolo_weights", lambda *_args: False)
+    detector = CVPatternDetector(
+        primary_model="hf://demo/cv-model",
+        fallback_model="hf://demo/cv-model",
+        logger=_Logger(),
+    )
+    detector.use_hf_endpoint = True
+    detector.hf_model_id = "demo/cv-model"
+    detector.hf_remote_url = "https://example.invalid/inference"
+    expected = [{"pattern": "breakout", "confidence": 0.8, "bbox": [1.0, 2.0, 3.0, 4.0]}]
+    monkeypatch.setattr(detector, "_raw_detect_hf", lambda _image: list(expected))
+
+    assert detector._raw_detect(Image.new("RGB", (32, 32))) == expected
 
 
 def test_detect_uses_heuristic_fallback_when_raw_backend_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
