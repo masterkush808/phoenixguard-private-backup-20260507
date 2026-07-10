@@ -3236,6 +3236,7 @@
       line-height: 1.15;
       display: -webkit-box;
       -webkit-line-clamp: 2;
+      line-clamp: 2;
       -webkit-box-orient: vertical;
       overflow: hidden;
       overflow-wrap: anywhere;
@@ -3512,6 +3513,363 @@
       color: rgba(243, 240, 230, 0.86);
     }
 
+    .guide-button {
+      min-height: 38px;
+      padding: 0 14px;
+      border: 1px solid rgba(242, 200, 102, 0.32);
+      background: rgba(242, 200, 102, 0.10);
+      color: var(--gold);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      box-shadow: inset 0 0 18px rgba(242, 200, 102, 0.08);
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+    }
+
+    .guide-button:hover {
+      transform: translateY(-1px);
+      border-color: rgba(242, 200, 102, 0.62);
+      background: rgba(242, 200, 102, 0.16);
+    }
+
+    .operator-guide-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 110;
+      pointer-events: auto;
+      background: transparent;
+      animation: guideFadeIn 220ms ease-out both;
+    }
+
+    .operator-guide-overlay[hidden],
+    .guide-spotlight[hidden] {
+      display: none;
+    }
+
+    .operator-guide-shell {
+      position: fixed;
+      z-index: 111;
+      left: var(--guide-card-left, 24px);
+      top: var(--guide-card-top, 24px);
+      width: min(470px, calc(100vw - 28px));
+      max-height: calc(100svh - 28px);
+      display: grid;
+      grid-template-columns: 1fr;
+      overflow: auto;
+      border: 1px solid rgba(242, 200, 102, 0.24);
+      border-radius: 12px;
+      background:
+        linear-gradient(135deg, rgba(20, 18, 13, 0.96), rgba(9, 9, 7, 0.94)),
+        rgba(8, 8, 6, 0.96);
+      box-shadow: 0 35px 120px rgba(0, 0, 0, 0.66);
+      pointer-events: auto;
+      transition: left 220ms ease, top 220ms ease;
+    }
+
+    .operator-guide-visual {
+      position: relative;
+      min-height: 126px;
+      padding: 18px 20px;
+      overflow: hidden;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      background:
+        linear-gradient(180deg, rgba(242, 200, 102, 0.08), rgba(32, 212, 155, 0.03)),
+        rgba(255, 255, 255, 0.025);
+    }
+
+    .operator-guide-visual::before {
+      content: "";
+      position: absolute;
+      inset: 20px;
+      border: 1px solid rgba(242, 200, 102, 0.16);
+      border-radius: 10px;
+      background:
+        linear-gradient(90deg, rgba(255, 255, 255, 0.07) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+      background-size: 42px 42px;
+      opacity: 0.34;
+    }
+
+    .operator-guide-orbit {
+      position: absolute;
+      width: 180px;
+      height: 180px;
+      right: -42px;
+      top: -48px;
+      transform: translate(-50%, -50%);
+      border: 1px solid rgba(242, 200, 102, 0.14);
+      border-radius: 50%;
+      animation: guideOrbit 18s linear infinite;
+    }
+
+    .operator-guide-orbit::before,
+    .operator-guide-orbit::after {
+      content: "";
+      position: absolute;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--gold);
+      box-shadow: 0 0 20px rgba(242, 200, 102, 0.76);
+    }
+
+    .operator-guide-orbit::before {
+      left: 42px;
+      top: 40px;
+    }
+
+    .operator-guide-orbit::after {
+      right: 30px;
+      bottom: 88px;
+      background: var(--jade);
+      box-shadow: 0 0 20px rgba(99, 224, 154, 0.7);
+    }
+
+    .operator-guide-map {
+      position: relative;
+      z-index: 1;
+      height: 100%;
+      display: grid;
+      align-content: center;
+      grid-template-columns: auto 1fr;
+      column-gap: 14px;
+      row-gap: 6px;
+    }
+
+    .operator-guide-mark {
+      grid-row: 1 / span 2;
+      width: 50px;
+      height: 50px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(242, 200, 102, 0.42);
+      border-radius: 10px;
+      color: var(--gold);
+      font-family: var(--mono);
+      font-size: 20px;
+      font-weight: 900;
+      background: rgba(242, 200, 102, 0.12);
+    }
+
+    .operator-guide-map h2 {
+      margin: 0;
+      max-width: 320px;
+      color: var(--text);
+      font-size: clamp(22px, 3vw, 30px);
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .operator-guide-map p {
+      max-width: 330px;
+      margin: 0;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .operator-guide-card {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      min-height: 0;
+      padding: 20px;
+      gap: 16px;
+    }
+
+    .operator-guide-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .operator-guide-kicker,
+    .operator-guide-progress,
+    .operator-guide-step-label {
+      font-family: var(--mono);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 11px;
+    }
+
+    .operator-guide-kicker {
+      color: var(--gold);
+      font-weight: 900;
+    }
+
+    .operator-guide-progress {
+      color: var(--dim);
+    }
+
+    .operator-guide-close {
+      width: 36px;
+      height: 36px;
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      background: rgba(255, 255, 255, 0.045);
+      color: var(--muted);
+    }
+
+    .operator-guide-content {
+      display: grid;
+      align-content: center;
+      gap: 18px;
+      animation: guideSlideIn 240ms ease-out both;
+    }
+
+    .operator-guide-step-label {
+      color: var(--jade);
+      font-weight: 900;
+    }
+
+    .operator-guide-title {
+      margin: 0;
+      font-size: clamp(26px, 3vw, 34px);
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+
+    .operator-guide-copy {
+      margin: 0;
+      max-width: 620px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .operator-guide-points {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+      padding: 0;
+      margin: 4px 0 0;
+      list-style: none;
+    }
+
+    .operator-guide-points li {
+      min-height: 0;
+      padding: 13px;
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.035);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .operator-guide-target {
+      min-height: 46px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      border: 1px solid rgba(242, 200, 102, 0.22);
+      border-radius: 8px;
+      background: rgba(242, 200, 102, 0.08);
+      color: var(--gold);
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .operator-guide-target::before {
+      content: "";
+      width: 9px;
+      height: 9px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--gold);
+      box-shadow: 0 0 18px rgba(242, 200, 102, 0.72);
+    }
+
+    .operator-guide-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+    }
+
+    .operator-guide-dots {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .operator-guide-dot {
+      width: 24px;
+      height: 4px;
+      border-radius: 99px;
+      background: rgba(255, 255, 255, 0.16);
+      transition: width 180ms ease, background 180ms ease;
+    }
+
+    .operator-guide-dot.active {
+      width: 42px;
+      background: var(--gold);
+    }
+
+    .operator-guide-action-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .operator-guide-action-group button {
+      min-height: 40px;
+      padding: 0 15px;
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      background: rgba(255, 255, 255, 0.045);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .operator-guide-action-group .primary {
+      border-color: rgba(242, 200, 102, 0.50);
+      background: linear-gradient(135deg, rgba(242, 200, 102, 0.26), rgba(184, 121, 40, 0.18));
+      color: var(--gold);
+    }
+
+    .guide-spotlight {
+      position: fixed;
+      z-index: 109;
+      border: 2px solid rgba(242, 200, 102, 0.86);
+      border-radius: 12px;
+      box-shadow:
+        0 0 0 9999px rgba(0, 0, 0, 0.68),
+        0 0 32px rgba(242, 200, 102, 0.40);
+      pointer-events: none;
+      transition: transform 220ms ease, width 220ms ease, height 220ms ease, opacity 180ms ease;
+    }
+
+    @keyframes guideFadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+
+    @keyframes guideSlideIn {
+      from {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes guideOrbit {
+      to { transform: rotate(360deg); }
+    }
+
     @media (max-width: 1280px) {
       body {
         overflow: auto;
@@ -3550,6 +3908,29 @@
       .focus-module,
       .telemetry-module {
         grid-column: auto;
+      }
+
+      .operator-guide-shell {
+        grid-template-columns: 1fr;
+        max-height: calc(100svh - 24px);
+        left: 12px !important;
+        right: 12px;
+        bottom: 12px;
+        top: auto !important;
+        overflow-y: auto;
+      }
+
+      .operator-guide-visual {
+        min-height: 112px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      }
+
+      .operator-guide-card {
+        min-height: 0;
+      }
+
+      .operator-guide-points {
+        grid-template-columns: 1fr;
       }
     }
 
@@ -3604,6 +3985,7 @@
               </span>
             </div>
           </div>
+          <button type="button" class="guide-button" id="operator-guide-open">Guide</button>
           <button type="button" class="session-token" id="session-chip">Session __SESSION_LABEL__</button>
           <div class="live-token"><span class="live-dot" id="live-dot"></span><span id="metric-status-mini">Awaiting</span></div>
           <div class="countdown-token"><span>Next</span><strong id="capture-countdown">N/A</strong></div>
@@ -4130,6 +4512,44 @@
     </div>
   </div>
 
+  <div class="guide-spotlight" id="operator-guide-spotlight" hidden></div>
+  <section class="operator-guide-overlay" id="operator-guide-overlay" role="dialog" aria-modal="true" aria-labelledby="operator-guide-title" hidden>
+    <div class="operator-guide-shell" id="operator-guide-shell">
+      <div class="operator-guide-visual" aria-hidden="true">
+        <div class="operator-guide-orbit"></div>
+        <div class="operator-guide-map">
+          <div class="operator-guide-mark">808</div>
+          <h2>Learn the desk in minutes.</h2>
+          <p>Connect a chart, read the full-suite story, wait for fresh authority, and act only when the package is current.</p>
+        </div>
+      </div>
+      <div class="operator-guide-card">
+        <div class="operator-guide-top">
+          <div>
+            <span class="operator-guide-kicker">808Fx Operator Guide</span>
+            <span class="operator-guide-progress" id="operator-guide-progress">Step 1 / 7</span>
+          </div>
+          <button type="button" class="operator-guide-close" id="operator-guide-close" aria-label="Close guide">x</button>
+        </div>
+        <div class="operator-guide-content" id="operator-guide-content">
+          <span class="operator-guide-step-label" id="operator-guide-step-label">Start</span>
+          <h2 class="operator-guide-title" id="operator-guide-title">Welcome to the live command surface.</h2>
+          <p class="operator-guide-copy" id="operator-guide-copy">This guide walks through the tracker without burying you in docs.</p>
+          <ul class="operator-guide-points" id="operator-guide-points"></ul>
+          <div class="operator-guide-target" id="operator-guide-target">The highlighted area shows where to look.</div>
+        </div>
+        <div class="operator-guide-actions">
+          <div class="operator-guide-dots" id="operator-guide-dots" aria-label="Guide progress"></div>
+          <div class="operator-guide-action-group">
+            <button type="button" id="operator-guide-skip">Skip</button>
+            <button type="button" id="operator-guide-prev">Back</button>
+            <button type="button" class="primary" id="operator-guide-next">Next</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <button class="overlay-editor-fab" id="overlay-editor-fab" type="button" hidden>Overlay Editor</button>
   <section class="overlay-editor open" id="overlay-editor" role="dialog" aria-label="Overlay editor" hidden>
     <div class="overlay-editor-head">
@@ -4378,6 +4798,11 @@
       streamHydrationRequestId: 0,
       commandPaletteOpen: false,
       commandPaletteIndex: 0,
+      operatorGuide: {
+        open: false,
+        index: 0,
+        autoShown: localStorage.getItem("phoenixguard.operatorGuide.seen") === "1",
+      },
       overlayEditor: loadOverlayEditorSettings(),
       overlayEditorDrag: {active: false},
       overlayEditorSaved: true,
@@ -4475,6 +4900,22 @@
       commandPaletteOverlay: $("command-palette-overlay"),
       commandPaletteInput: $("command-palette-input"),
       commandPaletteList: $("command-palette-list"),
+      operatorGuideOpen: $("operator-guide-open"),
+      operatorGuideOverlay: $("operator-guide-overlay"),
+      operatorGuideShell: $("operator-guide-shell"),
+      operatorGuideSpotlight: $("operator-guide-spotlight"),
+      operatorGuideClose: $("operator-guide-close"),
+      operatorGuideSkip: $("operator-guide-skip"),
+      operatorGuidePrev: $("operator-guide-prev"),
+      operatorGuideNext: $("operator-guide-next"),
+      operatorGuideProgress: $("operator-guide-progress"),
+      operatorGuideContent: $("operator-guide-content"),
+      operatorGuideStepLabel: $("operator-guide-step-label"),
+      operatorGuideTitle: $("operator-guide-title"),
+      operatorGuideCopy: $("operator-guide-copy"),
+      operatorGuidePoints: $("operator-guide-points"),
+      operatorGuideTarget: $("operator-guide-target"),
+      operatorGuideDots: $("operator-guide-dots"),
       runtimeStrip: $("runtime-strip"),
       bottomDrawer: $("bottom-drawer"),
       chipMode: $("chip-mode"),
@@ -4714,6 +5155,107 @@
       settingsExecution: $("settings-execution"),
       settingsStop: $("settings-stop"),
     };
+
+    const OPERATOR_GUIDE_STEPS = Object.freeze([
+      {
+        label: "01 / Welcome",
+        title: "This is the live command surface.",
+        route: "live",
+        target: ".topbar",
+        targetCopy: "Start here: status chips, system time, heartbeat, session, and the next capture countdown.",
+        copy: "808Fx Standard Hybrid System is the operator layer. Phoenix Guard V3 powers the capture, computer-vision read, full-suite overlays, playbook, package reporter, and safety checks underneath.",
+        points: [
+          "The top bar confirms whether the tracker is live, models are awake, cache is clean, and the broker is locked.",
+          "The countdown shows the next capture cadence so you know when fresh data should arrive.",
+          "Use Guide any time; the walkthrough never changes trading state.",
+          "The dashboard is advisory by default unless you explicitly enable bridge/live execution.",
+        ],
+      },
+      {
+        label: "02 / Connect",
+        title: "Lock the chart before trusting the read.",
+        route: "broker",
+        target: "[data-panel-route='broker']",
+        targetCopy: "Broker Feed shows the source window, frame count, cadence, and overlay feed alignment.",
+        copy: "A user connects by opening a chart feed, locking the browser or uploaded frame source, then waiting for source lock, frame/capture advancement, and overlay alignment.",
+        points: [
+          "Source Window identifies the captured chart surface.",
+          "Frame / Capture must keep advancing; stale frames cannot become live truth.",
+          "Cadence tells the user how often the tracker expects a fresh image.",
+          "Overlay Feed confirms that the full-suite overlay belongs to the same frame authority.",
+        ],
+      },
+      {
+        label: "03 / Surface",
+        title: "The chart is the workspace, not decoration.",
+        route: "live",
+        target: ".surface-module",
+        targetCopy: "The central plane is the live broker surface with overlays drawn over the current locked frame.",
+        copy: "Use the surface controls to inspect the chart without breaking the feed. The image, overlay, and full-suite frame IDs must stay aligned.",
+        points: [
+          "Signal Overlay shows the interpreted tracker output.",
+          "Locked Surface shows the raw broker capture.",
+          "Zoom and Center are inspection tools; they do not change the backend source truth.",
+          "Layer buttons expose chart bounds, candles, supply/demand, trendlines, triggers, replay, and strength.",
+        ],
+      },
+      {
+        label: "04 / Full Suite",
+        title: "Read buy and sell at the same time.",
+        route: "live",
+        target: "#full-suite-command-center",
+        targetCopy: "Decision Command Center compares the simultaneous BUY and SELL studies before one side earns authority.",
+        copy: "The full-suite story is the important read. It should explain current pressure, primary bias, story lock, expected move, freshness, blockers, and confidence for both sides.",
+        points: [
+          "BUY Study and SELL Study are scored side by side.",
+          "Story Lock means the full overlay suite has enough evidence to control the package side.",
+          "A transition should confirm across fresh reads before replacing the prior authority.",
+          "If freshness fails, the side may be interesting but it is not live truth.",
+        ],
+      },
+      {
+        label: "05 / Packages",
+        title: "A package is the moment the system is allowed to speak clearly.",
+        route: "live",
+        target: ".full-suite-foot",
+        targetCopy: "Package Summary and guard pills show what is allowed, why, and whether it is fresh enough to trust.",
+        copy: "The package area translates the full-suite read into practical operator language: active side, play type, score, frame, capture, entry window, bridge state, and stale-data status.",
+        points: [
+          "No Stale Data must stay green before any package matters.",
+          "Source Locked means the system is still reading the intended chart.",
+          "MT4 Bridge Ready only means the adapter path is available; the playbook still decides.",
+          "If no package is present, the system is studying rather than authorizing.",
+        ],
+      },
+      {
+        label: "06 / Evidence",
+        title: "Replay and evidence are how you audit the machine.",
+        route: "replay",
+        target: ".lower-grid",
+        targetCopy: "The lower workspace holds event timeline, evidence snapshots, study map, focus state, and telemetry.",
+        copy: "Use the lower panels after a package, missed move, or broker issue. They show whether the system saw the move, which frame it used, and which guard or playbook stage held it back.",
+        points: [
+          "Event Timeline shows heartbeats, overlay updates, package events, and bridge status.",
+          "Evidence Snapshot keeps the visual proof tied to the read.",
+          "Study Map summarizes global/local/impulse/SMC/SR/candle truth.",
+          "Telemetry shows latency, cache, permission, and path quality.",
+        ],
+      },
+      {
+        label: "07 / Safety",
+        title: "Security gates protect the product and the trader.",
+        route: "security",
+        target: "[data-panel-route='security']",
+        targetCopy: "Security keeps freshness, source lock, models, and packet contract visible.",
+        copy: "These checks are not optional noise. They stop stale frames, wrong windows, sleeping models, and invalid packet contracts from being treated as current authority.",
+        points: [
+          "Freshness Contract confirms the current read is not expired.",
+          "Source Lock prevents wrong-browser or wrong-surface trades.",
+          "Models confirms the engine is awake.",
+          "Packet Contract confirms V3 authority before bridge or notification handling.",
+        ],
+      },
+    ]);
 
     function sessionUrl() {
       return `/v1/mobile/window-tracker/sessions/${encodeURIComponent(SESSION_ID)}`;
@@ -11157,6 +11699,7 @@
 
     function commandPaletteCommands() {
       return [
+        {id: "operator-guide", title: "Open Guide", hint: "Product walkthrough", run: () => openOperatorGuide(0)},
         {id: "open-live", title: "Open Live", hint: "Command centre", run: () => applyRoute("live")},
         {id: "open-chart", title: "Open Chart", hint: "Full surface intelligence", run: () => applyRoute("chart")},
         {id: "open-council", title: "Open Council", hint: "Model Council summary", run: () => applyRoute("council")},
@@ -11204,6 +11747,160 @@
       }
       closeCommandPalette();
       command.run();
+    }
+
+    function currentGuideStep() {
+      const index = Math.max(0, Math.min(Number(state.operatorGuide.index || 0), OPERATOR_GUIDE_STEPS.length - 1));
+      return OPERATOR_GUIDE_STEPS[index] || OPERATOR_GUIDE_STEPS[0];
+    }
+
+    function guideTargetElement(step) {
+      if (!step || !step.target) {
+        return document.body;
+      }
+      return document.querySelector(step.target) || document.body;
+    }
+
+    function positionGuideShell(bounds) {
+      if (!els.operatorGuideShell || !bounds) {
+        return;
+      }
+      const gap = 16;
+      const padding = 14;
+      const cardWidth = Math.min(470, Math.max(320, window.innerWidth - padding * 2));
+      const cardHeight = Math.min(els.operatorGuideShell.offsetHeight || 560, window.innerHeight - padding * 2);
+      let left;
+      let top;
+
+      if (bounds.right + gap + cardWidth <= window.innerWidth - padding) {
+        left = bounds.right + gap;
+        top = Math.max(padding, Math.min(bounds.top, window.innerHeight - cardHeight - padding));
+      } else if (bounds.left - gap - cardWidth >= padding) {
+        left = bounds.left - gap - cardWidth;
+        top = Math.max(padding, Math.min(bounds.top, window.innerHeight - cardHeight - padding));
+      } else if (bounds.bottom + gap + cardHeight <= window.innerHeight - padding) {
+        left = Math.max(padding, Math.min(bounds.left, window.innerWidth - cardWidth - padding));
+        top = bounds.bottom + gap;
+      } else if (bounds.top - gap - cardHeight >= padding) {
+        left = Math.max(padding, Math.min(bounds.left, window.innerWidth - cardWidth - padding));
+        top = bounds.top - gap - cardHeight;
+      } else {
+        left = Math.max(padding, window.innerWidth - cardWidth - padding);
+        top = padding;
+      }
+
+      els.operatorGuideShell.style.setProperty("--guide-card-left", `${Math.round(left)}px`);
+      els.operatorGuideShell.style.setProperty("--guide-card-top", `${Math.round(top)}px`);
+    }
+
+    function updateGuideSpotlight(step) {
+      if (!els.operatorGuideSpotlight || els.operatorGuideSpotlight.hidden || !step) {
+        return;
+      }
+      const target = guideTargetElement(step);
+      const rect = target.getBoundingClientRect();
+      const margin = Math.max(10, Math.min(22, window.innerWidth * 0.012));
+      const left = Math.max(8, rect.left - margin);
+      const top = Math.max(8, rect.top - margin);
+      const right = Math.min(window.innerWidth - 8, rect.right + margin);
+      const bottom = Math.min(window.innerHeight - 8, rect.bottom + margin);
+      if (els.operatorGuideOverlay) {
+        els.operatorGuideOverlay.style.setProperty("--guide-x", `${left + Math.max(80, right - left) / 2}px`);
+        els.operatorGuideOverlay.style.setProperty("--guide-y", `${top + Math.max(56, bottom - top) / 2}px`);
+      }
+      positionGuideShell({left, top, right, bottom});
+      els.operatorGuideSpotlight.style.left = `${left}px`;
+      els.operatorGuideSpotlight.style.top = `${top}px`;
+      els.operatorGuideSpotlight.style.width = `${Math.max(80, right - left)}px`;
+      els.operatorGuideSpotlight.style.height = `${Math.max(56, bottom - top)}px`;
+    }
+
+    function renderOperatorGuide() {
+      if (!state.operatorGuide.open || !els.operatorGuideOverlay) {
+        return;
+      }
+      const step = currentGuideStep();
+      if (step.route && normalizeRoute(step.route) !== state.route) {
+        applyRoute(step.route, false);
+      }
+      const index = Number(state.operatorGuide.index || 0);
+      const total = OPERATOR_GUIDE_STEPS.length;
+      if (els.operatorGuideProgress) {
+        els.operatorGuideProgress.textContent = `${index + 1} of ${total}`;
+      }
+      if (els.operatorGuideStepLabel) {
+        els.operatorGuideStepLabel.textContent = step.label || "";
+      }
+      if (els.operatorGuideTitle) {
+        els.operatorGuideTitle.textContent = step.title || "";
+      }
+      if (els.operatorGuideCopy) {
+        els.operatorGuideCopy.textContent = step.copy || "";
+      }
+      if (els.operatorGuideTarget) {
+        els.operatorGuideTarget.textContent = step.targetCopy || "";
+      }
+      if (els.operatorGuidePoints) {
+        const points = Array.isArray(step.points) ? step.points : [];
+        els.operatorGuidePoints.innerHTML = points.map((point) => `<li>${escapeHtml(point)}</li>`).join("");
+      }
+      if (els.operatorGuideDots) {
+        els.operatorGuideDots.innerHTML = OPERATOR_GUIDE_STEPS.map((_, dotIndex) => `
+          <button type="button" class="operator-guide-dot ${dotIndex === index ? "active" : ""}" data-guide-step="${dotIndex}" aria-label="Open guide step ${dotIndex + 1}"></button>
+        `).join("");
+      }
+      if (els.operatorGuidePrev) {
+        els.operatorGuidePrev.disabled = index <= 0;
+      }
+      if (els.operatorGuideNext) {
+        els.operatorGuideNext.textContent = index >= total - 1 ? "Finish" : "Next";
+      }
+      const target = guideTargetElement(step);
+      if (target && target !== document.body) {
+        target.scrollIntoView({behavior: "smooth", block: "center", inline: "nearest"});
+      }
+      window.setTimeout(() => updateGuideSpotlight(step), 180);
+    }
+
+    function openOperatorGuide(index = 0) {
+      if (!els.operatorGuideOverlay || !els.operatorGuideSpotlight) {
+        return;
+      }
+      state.operatorGuide.open = true;
+      state.operatorGuide.index = Math.max(0, Math.min(Number(index || 0), OPERATOR_GUIDE_STEPS.length - 1));
+      state.operatorGuide.autoShown = true;
+      try {
+        localStorage.setItem("phoenixguard.operatorGuide.seen", "1");
+      } catch (_err) {
+      }
+      els.operatorGuideOverlay.hidden = false;
+      els.operatorGuideSpotlight.hidden = false;
+      renderOperatorGuide();
+    }
+
+    function closeOperatorGuide() {
+      state.operatorGuide.open = false;
+      if (els.operatorGuideOverlay) {
+        els.operatorGuideOverlay.hidden = true;
+      }
+      if (els.operatorGuideSpotlight) {
+        els.operatorGuideSpotlight.hidden = true;
+      }
+    }
+
+    function nextOperatorGuideStep() {
+      const nextIndex = Number(state.operatorGuide.index || 0) + 1;
+      if (nextIndex >= OPERATOR_GUIDE_STEPS.length) {
+        closeOperatorGuide();
+        return;
+      }
+      state.operatorGuide.index = nextIndex;
+      renderOperatorGuide();
+    }
+
+    function previousOperatorGuideStep() {
+      state.operatorGuide.index = Math.max(0, Number(state.operatorGuide.index || 0) - 1);
+      renderOperatorGuide();
     }
 
     function connectSessionStream() {
@@ -11307,6 +12004,36 @@
     on(els.commandPaletteOverlay, "click", (event) => {
       if (event.target === els.commandPaletteOverlay) {
         closeCommandPalette();
+      }
+    });
+    on(els.operatorGuideOpen, "click", () => openOperatorGuide(0));
+    on(els.operatorGuideClose, "click", closeOperatorGuide);
+    on(els.operatorGuideSkip, "click", closeOperatorGuide);
+    on(els.operatorGuidePrev, "click", previousOperatorGuideStep);
+    on(els.operatorGuideNext, "click", nextOperatorGuideStep);
+    on(els.operatorGuideOverlay, "click", (event) => {
+      if (event.target === els.operatorGuideOverlay) {
+        closeOperatorGuide();
+      }
+    });
+    on(els.operatorGuideDots, "click", (event) => {
+      const target = event.target instanceof Element ? event.target.closest("[data-guide-step]") : null;
+      if (!target) {
+        return;
+      }
+      state.operatorGuide.index = Number(target.getAttribute("data-guide-step") || 0);
+      renderOperatorGuide();
+    });
+    on(document, "keydown", (event) => {
+      if (!state.operatorGuide.open) {
+        return;
+      }
+      if (event.key === "Escape") {
+        closeOperatorGuide();
+      } else if (event.key === "ArrowRight") {
+        nextOperatorGuideStep();
+      } else if (event.key === "ArrowLeft") {
+        previousOperatorGuideStep();
       }
     });
     on(window, "popstate", () => applyRoute(routeFromLocation(), false));
@@ -11531,6 +12258,9 @@
         refreshSurfaceViewportIfNeeded(true, true);
         applyOverlayEditorPosition();
         renderHotspots();
+        if (state.operatorGuide.open) {
+          updateGuideSpotlight(currentGuideStep());
+        }
       });
     });
     on(document, "visibilitychange", () => {
@@ -11546,6 +12276,9 @@
     applyRoute(routeFromLocation(), false);
     updateLayerControls();
     refreshSession();
+    if (!state.operatorGuide.autoShown) {
+      window.setTimeout(() => openOperatorGuide(0), 900);
+    }
     connectSessionStream();
     scheduleDashboardRefresh(DASHBOARD_REFRESH_FAST_INTERVAL_MS);
     startDashboardBackgroundPulse();
