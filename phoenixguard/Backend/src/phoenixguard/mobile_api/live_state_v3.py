@@ -2010,10 +2010,6 @@ def _compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
-    return _compact_session_payload(session)
-
-
 def _compact_live_poll_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
     selected = {
         "session_id",

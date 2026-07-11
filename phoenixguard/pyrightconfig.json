@@ -1,23 +1,7 @@
 {
   "typeCheckingMode": "strict",
   "include": [
-    "Backend/_bootstrap.py",
-    "Backend/compat",
-    "Backend/launch/shooter.py",
-    "Backend/launch/start_phoenixguard_24_7_tracker.py",
-    "Backend/launch/start_phoenixguard_mobile_api.py",
-    "Backend/src/phoenixguard",
-    "Backend/scripts_runtime",
-    "Backend/scripts_data",
-    "Backend/tools",
-    "Backend/tests",
-    "Business/api",
-    "Developer/datasets",
-    "Developer/developer_tools",
-    "Developer/model_exports",
-    "Developer/model_training",
-    "Developer/sequence_teacher",
-    "Frontend/dashboard/main.py"
+    "."
   ],
   "extraPaths": [
     "Backend/src",
@@ -31,6 +15,8 @@
   "exclude": [
     "**/__pycache__",
     ".venv",
+    ".venv-dev",
+    ".venv-live",
     ".pytest_cache",
     ".codex_runtime",
     ".hf_cache",
@@ -39,8 +25,6 @@
     "cleanup_reports",
     "_archive",
     "_backups",
-    "Backend/src/phoenixguard/decision/book_strategy/legacy_engine.py",
-    "Backend/src/phoenixguard/decision/model_council/legacy_engine.py",
     "DataAnalysisExpert",
     "node_modules",
     "Business/web"
@@ -48,7 +32,7 @@
   "pythonVersion": "3.11",
   "stubPath": "Backend/typings",
   "venvPath": ".",
-  "venv": ".venv",
+  "venv": ".venv-dev",
   "reportUnknownVariableType": "error",
   "reportUnknownMemberType": "error",
   "reportUnknownArgumentType": "error",

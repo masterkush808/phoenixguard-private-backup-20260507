@@ -399,9 +399,7 @@ def build_two_candle_study_v3(
     )
     second_confidence = _clip01(confidence - 0.08 - 0.10 * pullback_first_probability)
     second_play = _expected_play(second_direction, pullback_first_probability * 0.75, reversal_probability * 0.85, continuation_probability)
-    second_reason = (
-        f"NEXT 2 remains a study only; confidence drops because the first candle must confirm or reject first."
-    )
+    second_reason = "NEXT 2 remains a study only; confidence drops because the first candle must confirm or reject first."
     next_step = _study_step(
         label="NEXT 1",
         side=next_direction,

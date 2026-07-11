@@ -276,8 +276,42 @@ def test_performance_trace_contains_model_warm_state_and_budgets() -> None:
 
     assert trace["schema_version"] == "PG_PERFORMANCE_TRACE_V3"
     assert trace["visual_health"]["status"] == "ALIVE"
-    assert trace["model_health_summary"]["label"] == "2/2 awake"
+    assert trace["model_health_summary"]["label"] == "2/2 roles ready"
+    assert all(row["synthetic"] is True for row in trace["model_warm_state_v3"])
+    assert {row["unit_kind"] for row in trace["model_warm_state_v3"]} == {"logical_role"}
     assert trace["overlay_render_budget"]["CLEAN_LIVE"] == 48
+
+
+def test_performance_trace_keeps_awake_label_for_measured_model_rows() -> None:
+    live_state: dict[str, Any] = {
+        "session_id": "speed",
+        "frame_id": 7,
+        "frame_timing_trace_v3": {
+            "frame_id": 7,
+            "frame_age_ms": 500,
+            "overlay_age_ms": 400,
+            "model_vote_age_ms": 300,
+            "frontend_render_age_ms": 200,
+            "stale_status": "PASS",
+        },
+        "model_health": {
+            "models": [
+                {
+                    "name": "global_structure_worker",
+                    "status": "AWAKE",
+                    "last_heartbeat_epoch": 100.5,
+                    "latency_ms": 12,
+                    "device": "cpu",
+                }
+            ]
+        },
+    }
+
+    trace = build_performance_trace_v3(live_state, now_epoch=101.0)
+
+    assert trace["model_health_summary"]["label"] == "1/1 awake"
+    assert trace["model_warm_state_v3"][0]["synthetic"] is False
+    assert trace["model_warm_state_v3"][0]["unit_kind"] == "model"
 
 
 def test_all_selectable_overlay_modes_have_positive_render_budget() -> None:

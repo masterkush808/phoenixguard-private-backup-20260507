@@ -372,6 +372,11 @@ def _model_row(
         "queue_depth": _nonnegative_int(row.get("queue_depth"), 0),
         "last_error": row.get("last_error", missing_error),
         "required": row.get("required", True) is not False,
+        "synthetic": row.get("synthetic") is True,
+        "unit_kind": _text(
+            row.get("unit_kind"),
+            "logical_role" if row.get("synthetic") is True else "model",
+        ),
         "process": _model_process_telemetry(row, include_process_snapshot=include_process_snapshot),
     }
 
@@ -771,6 +776,8 @@ def _synthesize_awake_heartbeats(
             "frames_processed": _int(health_blob.get("frames_processed"), 0),
             "queue_depth": queue_depth,
             "last_error": None,
+            "synthetic": True,
+            "unit_kind": "logical_role",
         }
         for role in required_roles
     ]
@@ -841,6 +848,10 @@ def build_model_council_health(
 
     latency = _latency_summary(models)
     queue = _queue_summary(models)
+    synthetic_roles = bool(models) and all(
+        row.get("synthetic") is True and _text(row.get("unit_kind")).lower() == "logical_role"
+        for row in models
+    )
     daemon = dict(daemon_status or {})
     cv_loaded_models = _sequence_of_text(daemon.get("loaded_models"))
     cv_failed_models = _mapping(daemon.get("failed_models"))
@@ -849,6 +860,8 @@ def build_model_council_health(
         "session_id": str(session_id or ""),
         "council_status": "AWAKE" if all_required_awake else "STALE",
         "all_required_models_awake": bool(all_required_awake),
+        "synthetic": synthetic_roles,
+        "health_kind": "logical_role_readiness" if synthetic_roles else "measured_models",
         "cv_models_loaded": cv_loaded_models,
         "cv_models_failed": cv_failed_models,
         "all_cv_models_loaded": bool(cv_loaded_models) and not bool(cv_failed_models),

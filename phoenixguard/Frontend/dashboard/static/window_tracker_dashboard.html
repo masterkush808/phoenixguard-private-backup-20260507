@@ -7331,7 +7331,18 @@
         ? clean(executionControls.execution_mode, "shadow").toUpperCase()
         : "STUDY";
       const packetAge = Number(telemetryPacket.age_sec || ((packet.live_integrity || {}).packet_age_ms ? Number((packet.live_integrity || {}).packet_age_ms) / 1000 : 0));
-      const modelsAwake = health.all_required_models_awake === false ? "STALE" : clean(health.council_status, "AWAKE");
+      const hasHealth = Object.keys(objectOrEmpty(health)).length > 0;
+      const models = Array.isArray(health.models) ? health.models : [];
+      const logicalRoles = health.synthetic === true
+        || health.health_kind === "logical_role_readiness"
+        || (models.length > 0 && models.every((row) => row?.synthetic === true || row?.unit_kind === "logical_role"));
+      const modelsAwake = health.all_required_models_awake === false
+        ? "STALE"
+        : logicalRoles
+          ? "ROLES READY"
+          : hasHealth
+            ? clean(health.council_status, "UNKNOWN")
+            : "UNKNOWN";
       const cacheLabel = cache.entries != null
         ? `${Number(cache.hits || 0)}/${Number(cache.misses || 0)}`
         : clean((packet.live_integrity || {}).cache_status, "--");
@@ -7341,7 +7352,7 @@
         : "SHOOTER DRY";
       setChip(els.chipMode, modeText, modeText === "LIVE" ? "bad" : modeText === "SHADOW" ? "warn" : "good");
       setChip(els.chipPacketAge, packetAge > 0 ? `PKT ${formatSeconds(packetAge)}` : "PKT --", packetAge > 2 ? "bad" : packetAge > 0.75 ? "warn" : "good");
-      setChip(els.chipModels, `MODELS ${modelsAwake}`, modelsAwake === "STALE" ? "bad" : "good");
+      setChip(els.chipModels, `MODELS ${modelsAwake}`, modelsAwake === "STALE" ? "bad" : modelsAwake === "UNKNOWN" ? "warn" : "good");
       setChip(els.chipCache, `CACHE ${cacheLabel}`, cacheLabel === "--" ? "warn" : "good");
       setChip(els.chipBroker, brokerLocked ? "LOCKED" : "PENDING", brokerLocked ? "good" : "warn");
       setChip(els.chipShooter, shooterMode, executionControls.execution_mode === "live" ? "bad" : "good");
@@ -7354,7 +7365,8 @@
     }
 
     function modelHealthPayload(payload = {}, signal = {}, tracking = {}) {
-      return signal.runtime_model_health
+      return payload.model_council_health
+        || signal.runtime_model_health
         || tracking.runtime_model_health
         || ((payload.model_council_result || {}).runtime_model_health)
         || ((payload.model_council || {}).runtime_model_health)
@@ -7372,7 +7384,17 @@
         || Number(state.surface.lastOverlayRenderMs || 0);
       const budgetMs = Number(overlayGeometry.render_budget_ms || 0);
       const health = modelHealthPayload(payload, signal, tracking);
-      const healthStatus = clean(health.council_status, health.all_required_models_awake === false ? "STALE" : "AWAKE");
+      const healthModels = Array.isArray(health.models) ? health.models : [];
+      const logicalRoles = health.synthetic === true
+        || health.health_kind === "logical_role_readiness"
+        || (healthModels.length > 0 && healthModels.every((row) => row?.synthetic === true || row?.unit_kind === "logical_role"));
+      const healthStatus = health.all_required_models_awake === false
+        ? "STALE"
+        : logicalRoles
+          ? "ROLES READY"
+          : Object.keys(objectOrEmpty(health)).length
+            ? clean(health.council_status, "UNKNOWN")
+            : "UNKNOWN";
       const healthLatency = Number(health.max_model_latency_ms || 0);
       els.latencyPipeline.textContent = `pipe ${pipelineMs > 0 ? pipelineMs.toFixed(0) + "ms" : "--"}`;
       els.latencyOverlay.textContent = `overlay ${renderMs > 0 ? renderMs.toFixed(1) + "ms" : "--"}`;
@@ -11068,6 +11090,19 @@
       );
     }
 
+    function studyPacketFromSession(payload = {}) {
+      const signal = objectOrEmpty(payload.latest_signal);
+      const tracking = objectOrEmpty(payload.tracking_summary);
+      const result = objectOrEmpty(payload.model_council_result || signal.model_council_result || tracking.model_council_result);
+      return objectOrEmpty(
+        payload.model_council_study_packet
+        || signal.model_council_study_packet
+        || tracking.model_council_study_packet
+        || result.model_council_study_packet
+        || result.study_packet
+      );
+    }
+
     function fullSuiteAiFromPacket(packet = {}) {
       const plan = objectOrEmpty(packet.professional_trade_plan);
       return objectOrEmpty(
@@ -11076,6 +11111,113 @@
         || plan.playbook_ai_intelligence_v3
         || packet.playbook_ai_intelligence_v3
       );
+    }
+
+    function firstNonEmptyObject(...values) {
+      for (const value of values) {
+        const candidate = objectOrEmpty(value);
+        if (Object.keys(candidate).length) return candidate;
+      }
+      return {};
+    }
+
+    function compactDecisionStudyContext(payload = {}) {
+      const compact = objectOrEmpty(payload.decision_command_center);
+      const compactScores = objectOrEmpty(compact.scores);
+      const compactSides = objectOrEmpty(compact.sides);
+      const story = objectOrEmpty(compact.story);
+      const rawBuyScore = compactScores.BUY ?? compactScores.buy ?? compactSides.BUY ?? compactSides.buy ?? compact.buy_score;
+      const rawSellScore = compactScores.SELL ?? compactScores.sell ?? compactSides.SELL ?? compactSides.sell ?? compact.sell_score;
+      const buyScore = objectOrEmpty(rawBuyScore);
+      const sellScore = objectOrEmpty(rawSellScore);
+      return {
+        packet: Object.keys(compact).length ? {
+          packet_id: compact.study_packet_id || compact.packet_id,
+          packet_type: "STUDY_PACKET",
+          created_epoch: compact.created_epoch,
+          valid_until_epoch: compact.valid_until_epoch,
+          freshness_status: compact.freshness_status,
+          true_blocker: compact.true_blocker || compact.blocker,
+          next_required: compact.next_required,
+          book_strategy_playbook: compact.book_strategy_playbook,
+          expected_move_time: compact.expected_move_time,
+          execution_opportunity_window_v3: compact.execution_opportunity_window_v3,
+        } : {},
+        ai: Object.keys(compact).length ? {
+          thesis_arbitration: {
+            candidate_side: compact.selected_side,
+            scores: {
+              BUY: {side: "BUY", score: scoreNumber(buyScore.score ?? rawBuyScore, 0)},
+              SELL: {side: "SELL", score: scoreNumber(sellScore.score ?? rawSellScore, 0)},
+            },
+          },
+          full_suite_story_lock_v3: story,
+          horizon: objectOrEmpty(compact.horizon),
+          full_suite_ready: compact.full_suite_ready === true || story.confirmed === true,
+        } : {},
+        dual: Object.keys(compact).length ? {
+          selected_authority_side: compact.selected_side,
+          primary_bias_side: compact.primary_bias_side,
+          current_pressure_side: compact.current_pressure_side,
+          current_pressure: objectOrEmpty(compact.current_pressure),
+          full_suite_story_lock_v3: story,
+          buy: {...buyScore, side: "BUY", score: scoreNumber(buyScore.score ?? rawBuyScore, 0)},
+          sell: {...sellScore, side: "SELL", score: scoreNumber(sellScore.score ?? rawSellScore, 0)},
+        } : {},
+      };
+    }
+
+    function fullSuiteStudyContext(payload = {}) {
+      const signal = objectOrEmpty(payload.latest_signal);
+      const tracking = objectOrEmpty(payload.tracking_summary);
+      const result = objectOrEmpty(payload.model_council_result || signal.model_council_result || tracking.model_council_result);
+      const resultCouncil = objectOrEmpty(result.model_council);
+      const executionPacket = packetFromSession(payload);
+      const persistedStudyPacket = studyPacketFromSession(payload);
+      const compactStudy = compactDecisionStudyContext(payload);
+      const studyPacket = Object.keys(persistedStudyPacket).length ? persistedStudyPacket : compactStudy.packet;
+      const displayPacket = Object.keys(executionPacket).length ? executionPacket : studyPacket;
+      const packetCouncil = objectOrEmpty(displayPacket.model_council);
+      const council = firstNonEmptyObject(packetCouncil, resultCouncil, payload.model_council);
+      const dual = firstNonEmptyObject(
+        displayPacket.dual_thesis_report_v3,
+        packetCouncil.dual_thesis_report_v3,
+        council.dual_thesis_report_v3,
+        result.dual_thesis_report_v3,
+        compactStudy.dual,
+      );
+      const ai = firstNonEmptyObject(
+        fullSuiteAiFromPacket(displayPacket),
+        council.playbook_ai_summary_v3,
+        result.playbook_ai_summary_v3,
+        compactStudy.ai,
+      );
+      const execution = objectOrEmpty(executionPacket.execution);
+      const executionSide = clean(
+        execution.side
+        || executionPacket.side
+        || objectOrEmpty(executionPacket.model_council).final_side,
+        "HOLD",
+      ).toUpperCase();
+      const executionPresent = Boolean(
+        executionPacket.packet_id
+        && String(executionPacket.packet_type || executionPacket.schema_version || "").toUpperCase().includes("EXECUTION_PACKET")
+      );
+      return {studyPacket, executionPacket, displayPacket, result, council, dual, ai, executionSide, executionPresent};
+    }
+
+    function packetFreshnessLabel(packet = {}, payload = {}) {
+      const explicit = clean(packet.freshness_status || packet.freshness || payload.stale_status, "").toUpperCase();
+      if (explicit) return explicit;
+      const nowSec = Date.now() / 1000;
+      const validUntil = scoreNumber(packet.valid_until_epoch_sec || packet.valid_until_epoch, 0);
+      if (validUntil > 0) return validUntil >= nowSec ? "PASS" : "STALE";
+      const created = scoreNumber(packet.created_epoch_sec || packet.created_epoch, 0);
+      const interval = captureIntervalSeconds(payload);
+      if (created > 0 && interval > 0) {
+        return nowSec - created <= Math.max(60, interval * 4) ? "PASS" : "STALE";
+      }
+      return Object.keys(objectOrEmpty(packet)).length ? "STUDY" : "UNKNOWN";
     }
 
     function sideStudyScore(side, ai = {}, dual = {}) {
@@ -11107,51 +11249,83 @@
       return selectedText || "--";
     }
 
-    function sideStudyStatus(side, payload = {}, packet = {}, ai = {}, dual = {}) {
+    function sideStudyStatus(side, payload = {}, context = {}) {
       const sideKey = String(side || "").toUpperCase();
+      const packet = objectOrEmpty(context.displayPacket || context.studyPacket);
+      const executionPacket = objectOrEmpty(context.executionPacket);
+      const result = objectOrEmpty(context.result);
+      const council = objectOrEmpty(context.council);
+      const ai = objectOrEmpty(context.ai);
+      const dual = objectOrEmpty(context.dual);
       const plan = objectOrEmpty(packet.professional_trade_plan);
       const story = objectOrEmpty(ai.full_suite_story_lock_v3 || dual.full_suite_story_lock_v3);
-      const execution = objectOrEmpty(packet.execution);
+      const execution = objectOrEmpty(executionPacket.execution);
       const rawStorySide = clean(story.raw_active_side || story.active_side, "HOLD").toUpperCase();
       const effectiveStorySide = clean(story.effective_side || story.display_side || "", "").toUpperCase();
-      const selectedSide = clean(effectiveStorySide || dual.selected_authority_side || execution.side, "HOLD").toUpperCase();
+      const selectedSide = clean(
+        effectiveStorySide
+        || dual.selected_authority_side
+        || objectOrEmpty(ai.thesis_arbitration).candidate_side
+        || council.final_side
+        || result.final_side,
+        "HOLD",
+      ).toUpperCase();
       const bigPicture = objectOrEmpty(objectOrEmpty(objectOrEmpty(plan.trade_hierarchy).big_picture));
       const primaryBias = clean(dual.primary_bias_side || bigPicture.side, "HOLD").toUpperCase();
       const currentPressure = objectOrEmpty(dual.current_pressure);
       const currentPressureSide = clean(currentPressure.side || dual.current_pressure_side, "HOLD").toUpperCase();
       const score = sideStudyScore(sideKey, ai, dual);
       const expected = objectOrEmpty(packet.expected_move_time);
-      const entryWindow = objectOrEmpty(expected.entry_window);
+      const entryWindow = objectOrEmpty(objectOrEmpty(executionPacket.expected_move_time).entry_window);
+      const studyWindow = objectOrEmpty(packet.execution_opportunity_window_v3 || packet.entry_window || expected.entry_window);
       const sideFlipPending = story.side_flip_pending === true;
       const pendingSide = sideFlipPending ? rawStorySide : "";
       const fullSuiteReady = ai.full_suite_ready === true || story.state === "FULL_SUITE_STORY_CONFIRMED" || story.confirmed === true;
-      const freshnessPass = clean(packet.freshness_status || packet.freshness || payload.stale_status || "PASS", "PASS").toUpperCase();
-      const blocker = clean(plan.blocker || packet.blocker || packet.block_reason || "", "");
-      const sideIsAuthority = sideKey === selectedSide;
+      const freshnessPass = packetFreshnessLabel(packet, payload);
+      const blocker = clean(
+        plan.blocker
+        || packet.true_blocker
+        || packet.blocker
+        || packet.block_reason
+        || council.true_blocker
+        || result.true_blocker
+        || packet.next_required
+        || council.next_required
+        || result.next_required,
+        "",
+      );
+      const sideIsStudyLeader = sideKey === selectedSide;
+      const sideIsAuthority = context.executionPresent === true && sideKey === clean(context.executionSide || execution.side, "HOLD").toUpperCase();
       const sideIsPending = sideKey === pendingSide;
       const sideIsPressure = sideKey === currentPressureSide;
       const sideIsPrimary = sideKey === primaryBias;
       const candleSuffix = currentPressure.candle_count ? `${currentPressure.candle_count}c` : "";
       const lockText = sideIsPending
         ? clean(story.stability_state, "TRANSITION PENDING")
-        : sideIsAuthority && story.confirmed === true
+        : sideIsStudyLeader && story.confirmed === true
           ? "FULL SUITE STORY LOCK"
-          : sideIsAuthority
+          : sideIsStudyLeader
             ? clean(story.state, "AUTHORITY")
             : "STUDYING";
       return {
         side: sideKey,
-        signal: sideIsAuthority ? sideKey : sideIsPending ? `${sideKey} TRANSITION` : sideIsPressure ? `${sideKey} PRESSURE` : sideIsPrimary ? `${sideKey} BIAS` : "STUDYING",
+        signal: sideIsAuthority ? sideKey : sideIsPending ? `${sideKey} TRANSITION` : sideIsStudyLeader ? `${sideKey} STUDY` : sideIsPressure ? `${sideKey} PRESSURE` : sideIsPrimary ? `${sideKey} BIAS` : "STUDYING",
         score,
         pressure: sideIsPressure ? [sideKey, candleSuffix, clean(currentPressure.stage, "")].filter(Boolean).join(" ") : "not dominant",
-        bias: sideIsPrimary ? "PRIMARY" : sideIsAuthority ? "AUTHORITY" : sideIsPending ? "pending" : "secondary",
+        bias: sideIsPrimary ? "PRIMARY" : sideIsAuthority ? "AUTHORITY" : sideIsStudyLeader ? "LEADING" : sideIsPending ? "pending" : "secondary",
         lock: lockText,
-        authority: sideIsAuthority ? "PLAYBOOK FINAL DECIDER" : sideIsPending ? "PENDING SECOND READ" : "LIVE STUDY",
+        authority: sideIsAuthority ? "PLAYBOOK FINAL DECIDER" : sideIsStudyLeader ? "STUDY LEADER" : sideIsPending ? "PENDING SECOND READ" : "LIVE STUDY",
         horizon: sideStudyHorizon(sideKey, ai, selectedSide),
-        entry: sideIsAuthority ? clean(entryWindow.duration_text || entryWindow.duration_sec, "active") : sideIsPending ? "confirming" : "watch",
+        entry: sideIsAuthority
+          ? clean(entryWindow.duration_text || entryWindow.duration_sec, "active")
+          : sideIsStudyLeader
+            ? clean(studyWindow.state || studyWindow.status, "watch")
+            : sideIsPending
+              ? "confirming"
+              : "watch",
         overlay: fullSuiteReady ? "TRUE" : "WAIT",
         freshness: freshnessPass,
-        blockers: sideIsAuthority ? (blocker || "NONE") : sideIsPending ? "stability pending" : "not selected",
+        blockers: sideIsAuthority || sideIsStudyLeader ? (blocker || "NONE") : sideIsPending ? "stability pending" : "not selected",
       };
     }
 
@@ -11175,20 +11349,20 @@
     }
 
     function renderFullSuiteCommandCenter(payload = {}) {
-      const packet = packetFromSession(payload);
-      const council = objectOrEmpty(packet.model_council || payload.model_council_result || payload.model_council);
-      const dual = objectOrEmpty(council.dual_thesis_report_v3 || packet.dual_thesis_report_v3);
-      const ai = fullSuiteAiFromPacket(packet);
+      const context = fullSuiteStudyContext(payload);
+      const packet = objectOrEmpty(context.displayPacket || context.studyPacket);
+      const dual = objectOrEmpty(context.dual);
+      const ai = objectOrEmpty(context.ai);
       const story = objectOrEmpty(ai.full_suite_story_lock_v3 || dual.full_suite_story_lock_v3);
-      const execution = objectOrEmpty(packet.execution);
-      const selectedSide = clean(story.effective_side || story.display_side || dual.selected_authority_side || execution.side, "HOLD").toUpperCase();
-      const buyStatus = sideStudyStatus("BUY", payload, packet, ai, dual);
-      const sellStatus = sideStudyStatus("SELL", payload, packet, ai, dual);
+      const selectedSide = clean(story.effective_side || story.display_side || dual.selected_authority_side || objectOrEmpty(ai.thesis_arbitration).candidate_side, "HOLD").toUpperCase();
+      const buyStatus = sideStudyStatus("BUY", payload, context);
+      const sellStatus = sideStudyStatus("SELL", payload, context);
       renderSideStudy("buy", buyStatus);
       renderSideStudy("sell", sellStatus);
 
       const expected = objectOrEmpty(packet.expected_move_time);
       const entryWindow = objectOrEmpty(expected.entry_window);
+      const studyWindow = objectOrEmpty(packet.execution_opportunity_window_v3);
       const frameId = clean(packet.frame_id || packet.frame || payload.frame_id || payload.capture_count, "--");
       const captureCount = clean(packet.capture_count || payload.capture_count, "--");
       const duration = clean(expected.expected_duration_text || ai.horizon?.optimized_duration_text || ai.horizon?.selected?.optimized_duration_text, "--");
@@ -11196,11 +11370,11 @@
       const score = selectedSide === "BUY" ? buyStatus.score : selectedSide === "SELL" ? sellStatus.score : 0;
 
       setText(els.fullSuiteAuto, payload.tracking_enabled ? "Auto" : "Manual");
-      setText(els.packageSummaryTitle, selectedSide === "BUY" || selectedSide === "SELL" ? `${selectedSide} Package Summary` : "Package Summary");
+      setText(els.packageSummaryTitle, selectedSide === "BUY" || selectedSide === "SELL" ? `${selectedSide} ${context.executionPresent ? "Package" : "Study"} Summary` : "Study Summary");
       setText(els.packageSummaryBody, `${playbook} | score ${scoreText(score)} | horizon ${duration}`);
-      setText(els.packageSummaryMeta, `Frame ${frameId} | Capture ${captureCount} | Entry ${clean(entryWindow.duration_text, "--")}`);
-      setText(els.guardStale, clean(packet.freshness_status || "No Stale Data"));
-      setText(els.guardBridge, "MT4 Bridge Ready");
+      setText(els.packageSummaryMeta, `Frame ${frameId} | Capture ${captureCount} | Entry ${clean(entryWindow.duration_text || studyWindow.state, "--")}`);
+      setText(els.guardStale, packetFreshnessLabel(packet, payload));
+      setText(els.guardBridge, context.executionPresent ? "MT4 Bridge Ready" : "Study Only");
       setText(els.guardSource, story.side_flip_pending === true ? "Story Confirming" : story.confirmed === true ? "Source Locked" : "Source Checking");
     }
 
@@ -11330,22 +11504,26 @@
 
     function renderOperationalTimeline(payload = {}) {
       if (!els.eventTimelineList) return;
-      const packet = packetFromSession(payload);
-      const ai = fullSuiteAiFromPacket(packet);
-      const story = objectOrEmpty(ai.full_suite_story_lock_v3);
+      const context = fullSuiteStudyContext(payload);
+      const packet = objectOrEmpty(context.displayPacket || context.studyPacket);
+      const ai = objectOrEmpty(context.ai);
+      const dual = objectOrEmpty(context.dual);
+      const story = objectOrEmpty(ai.full_suite_story_lock_v3 || dual.full_suite_story_lock_v3);
       const expected = objectOrEmpty(packet.expected_move_time);
       const frameId = clean(packet.frame_id || packet.frame || payload.frame_id || payload.capture_count, "--");
       const captureCount = clean(packet.capture_count || payload.capture_count, "--");
-      const side = clean(story.effective_side || story.display_side || story.active_side || packet.execution?.side, "HOLD").toUpperCase();
+      const side = clean(story.effective_side || story.display_side || story.active_side || dual.selected_authority_side || packet.execution?.side, "HOLD").toUpperCase();
       const playbook = clean(packet.book_strategy_playbook || expected.professional_trade_plan?.thesis_class, "Full suite story");
       const overlayCount = clean(ai.coverage?.actionable_count || payload.tracking_summary?.overlay_count || payload.overlay_count, "--");
+      const packageEvent = context.executionPresent ? `Package grant: ${side}` : `Study leader: ${side}`;
+      const packetStatus = context.executionPresent ? "OK" : "Study";
       const rows = [
         ["Time", "Event", "Details", "Type", "Status"],
         [eventTimeText(), "Frame heartbeat", `Frame ${frameId} | Capture ${captureCount} | Source live`, "System", "OK"],
-        [eventTimeText(), `Package grant: ${side}`, `${playbook} | horizon ${clean(expected.expected_duration_text || ai.horizon?.optimized_duration_text, "--")}`, "Playbook", packet.packet_type ? "OK" : "Watch"],
+        [eventTimeText(), packageEvent, `${playbook} | horizon ${clean(expected.expected_duration_text || ai.horizon?.optimized_duration_text, "--")}`, "Playbook", packetStatus],
         [eventTimeText(), "Full-suite story", `${clean(story.state, "STUDYING")} | side ${side} | confidence ${scoreText(story.story_confidence)}`, "Suite", story.confirmed ? "OK" : "Watch"],
         [eventTimeText(), "Overlay update", `Overlays ${overlayCount} | entry ${clean(ai.coverage?.entry_window_count, "--")} | targets ${clean(ai.coverage?.target_window_count, "--")}`, "Overlay", "OK"],
-        [eventTimeText(), "MT4 bridge status", `Packet side ${side} | freshness ${clean(packet.freshness_status || "PASS")}`, "Bridge", "OK"],
+        [eventTimeText(), "MT4 bridge status", context.executionPresent ? `Packet side ${side} | freshness ${packetFreshnessLabel(packet, payload)}` : `Study only | freshness ${packetFreshnessLabel(packet, payload)}`, "Bridge", context.executionPresent ? "OK" : "Guarded"],
       ];
       els.eventTimelineCaption.textContent = `Frame ${frameId} | capture ${captureCount}`;
       els.eventTimelineList.innerHTML = rows.map((row, index) => {

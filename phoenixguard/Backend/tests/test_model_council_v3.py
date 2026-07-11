@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import math
 import pytest
 
 from copy import deepcopy
@@ -1371,7 +1373,7 @@ def test_execution_packet_publishes_after_all_release_conditions_pass() -> None:
 
 
 def test_entry_permission_preserves_raw_counter_pressure_evidence_and_explains_override() -> None:
-    dual = {
+    dual: dict[str, Any] = {
         "current_pressure_side": "BUY",
         "selected_authority_side": "SELL",
         "opposing_force": {
@@ -1503,7 +1505,7 @@ def test_execution_opportunity_window_does_not_renew_on_each_fresh_frame() -> No
 
     near_expiry = council.evaluate(snapshot(202), now_epoch=valid_until - 5.0)
     assert near_expiry["packet_type"] == "PG_EXECUTION_PACKET_V3"
-    assert near_expiry["valid_for_seconds"] == pytest.approx(5.0)
+    assert math.isclose(float(near_expiry["valid_for_seconds"]), 5.0, rel_tol=1e-9, abs_tol=1e-9)
     assert near_expiry["execution_opportunity_window_v3"]["opened_epoch_sec"] == opened_epoch
     assert near_expiry["execution_opportunity_window_v3"]["opportunity_id"] == opportunity_id
 

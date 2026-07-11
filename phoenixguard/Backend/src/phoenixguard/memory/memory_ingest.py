@@ -41,6 +41,19 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
+from phoenixguard.core.utils import append_hash_chain, can_import_sentence_transformers_safely, setup_logger, utc_now_iso
+from phoenixguard.memory.memory_features import (
+    build_late_interaction_tokens,
+    build_metric_profile,
+    build_trajectory_signature,
+    infer_style_signature_from_chart_state,
+    late_interaction_score,
+    metric_profile_alignment,
+    style_alignment_score,
+    trajectory_alignment,
+)
+from phoenixguard.paths import PROJECT_ROOT
+
 # ── optional heavy deps (graceful degradation) ───────────────────────────────
 _HNSW_OK: bool = False
 try:
@@ -73,20 +86,6 @@ try:
     del _torch_probe
 except Exception:
     pass
-
-# ── repo-local imports ────────────────────────────────────────────────────────
-from phoenixguard.core.utils import append_hash_chain, can_import_sentence_transformers_safely, setup_logger, utc_now_iso  # noqa: E402
-from phoenixguard.memory.memory_features import (  # noqa: E402
-    build_late_interaction_tokens,
-    build_metric_profile,
-    build_trajectory_signature,
-    infer_style_signature_from_chart_state,
-    late_interaction_score,
-    metric_profile_alignment,
-    style_alignment_score,
-    trajectory_alignment,
-)
-from phoenixguard.paths import PROJECT_ROOT
 
 # ── constants ─────────────────────────────────────────────────────────────────
 EMBED_DIM = 384          # sentence-transformer all-MiniLM-L6-v2 output dim

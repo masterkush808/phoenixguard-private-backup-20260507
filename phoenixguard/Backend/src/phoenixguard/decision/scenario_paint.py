@@ -106,9 +106,9 @@ class ScenarioPainter:
                 "hovertext": [
                     f"<b>{name}</b><br>"
                     f"Time: {t}<br>"
-                    f"O: {o:.4f} | H: {h:.4f} | L: {l:.4f} | C: {c:.4f}<br>"
+                    f"O: {open_price:.4f} | H: {high:.4f} | L: {low:.4f} | C: {close:.4f}<br>"
                     f"Confidence: {conf:.1%}"
-                    for t, o, h, l, c, conf in zip(times, opens, highs, lows, closes, confidences)
+                    for t, open_price, high, low, close, conf in zip(times, opens, highs, lows, closes, confidences)
                 ],
                 "hoverinfo": "text",
                 "visible": (rank <= 3),  # Show top 3 by default

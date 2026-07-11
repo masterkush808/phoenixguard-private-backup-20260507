@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import time
 from typing import Any, Callable, Mapping, MutableMapping, cast
@@ -415,6 +416,8 @@ def test_all_required_models_awake_permits_packet_publication() -> None:
 
     assert health["all_required_models_awake"] is True
     assert health["council_status"] == "AWAKE"
+    assert health["synthetic"] is False
+    assert health["health_kind"] == "measured_models"
     assert model_health_allows_executable(health) is True
 
 
@@ -512,11 +515,151 @@ def test_model_council_health_endpoint_reads_tracker_session() -> None:
     payload = response.json()
     assert payload["session_id"] == "pocket-live-8788"
     assert payload["all_required_models_awake"] is True
+    assert payload["synthetic"] is True
+    assert payload["health_kind"] == "logical_role_readiness"
+    assert {row["unit_kind"] for row in payload["models"]} == {"logical_role"}
     assert payload["queue_depth"] == 2
     assert payload["runtime_telemetry"]["packet"]["age_sec"] == 0.5
     assert payload["runtime_telemetry"]["cache"]["rejects"] == 1
     assert payload["runtime_telemetry"]["paper"]["wins"] == 1
     assert payload["runtime_telemetry"]["path_quality"]["label"] == "MEDIUM"
+
+
+def test_model_council_health_prefers_compact_sidecar_and_caches_bounded_daemon_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    session_dir.mkdir(parents=True)
+    common = {
+        "session_id": "pocket-live-8788",
+        "status": "running",
+        "tracking_enabled": True,
+        "last_capture_epoch": time.time(),
+    }
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                **common,
+                "latest_signal": {"runtime_model_health": {"queue_depth": 99}},
+                "unrelated_large_blob": "x" * 1_000_000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "compact_live_state.json").write_text(
+        json.dumps(
+            {
+                **common,
+                "latest_signal": {
+                    "runtime_model_health": {
+                        "all_required_models_awake": True,
+                        "max_model_latency_ms": 12.0,
+                        "queue_depth": 3,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    probe_timeouts: list[float] = []
+
+    def missing_daemon(_request: object, *, timeout: float) -> object:
+        probe_timeouts.append(timeout)
+        raise mobile_app.urllib.error.URLError("daemon unavailable")
+
+    monkeypatch.setattr(mobile_app.urllib.request, "urlopen", missing_daemon)
+    client = TestClient(create_app())
+
+    first = client.get("/v1/mobile/model-council/health?session_id=pocket-live-8788")
+    second = client.get("/v1/mobile/model-council/health?session_id=pocket-live-8788")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["queue_depth"] == 3
+    assert second.json()["queue_depth"] == 3
+    assert len(probe_timeouts) == 1
+    assert math.isclose(probe_timeouts[0], 0.1, rel_tol=1e-9, abs_tol=1e-9)
+
+
+def test_direct_window_tracker_stream_uses_compact_signature_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    session_dir.mkdir(parents=True)
+    session_path = session_dir / "session.json"
+    compact_path = session_dir / "compact_live_state.json"
+    session_path.write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "tracking_enabled": True,
+                "capture_count": 1,
+                "unrelated_large_blob": "x" * 1_000_000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    compact_path.write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "tracking_enabled": True,
+                "capture_count": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    probe = cast(
+        Callable[..., tuple[str, tuple[str, int, int] | None, dict[str, object] | None]],
+        getattr(mobile_app, "_direct_window_tracker_stream_snapshot"),
+    )
+
+    state, signature, payload = probe("pocket-live-8788", None)
+
+    assert state == "updated"
+    assert signature is not None
+    assert payload is not None
+    assert payload["capture_count"] == 1
+    assert "unrelated_large_blob" not in payload
+
+    session_path.write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "tracking_enabled": True,
+                "capture_count": 2,
+                "unrelated_large_blob": "y" * 1_100_000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    state, unchanged_signature, unchanged_payload = probe("pocket-live-8788", signature)
+    assert state == "unchanged"
+    assert unchanged_signature == signature
+    assert unchanged_payload is None
+
+    compact_path.write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "tracking_enabled": True,
+                "capture_count": 2,
+                "signature_change_marker": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    state, changed_signature, changed_payload = probe("pocket-live-8788", signature)
+    assert state == "updated"
+    assert changed_signature != signature
+    assert changed_payload is not None
+    assert changed_payload["capture_count"] == 2
 
 
 def test_model_council_latest_execution_packet_endpoints_return_v3_packet() -> None:
@@ -610,7 +753,10 @@ def test_study_latest_falls_back_to_full_session_when_compact_study_is_stale(
         full_snapshot_calls.append(require_complete_display_bundle)
         return dict(full_payload)
 
-    monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", lambda _session_id: dict(compact_payload))
+    def compact_snapshot(_session_id: str) -> dict[str, Any]:
+        return dict(compact_payload)
+
+    monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", compact_snapshot)
     monkeypatch.setattr(mobile_app, "_direct_window_tracker_session_snapshot", full_snapshot)
     client = TestClient(create_app())
 
@@ -670,7 +816,10 @@ def test_study_latest_compact_synthesis_uses_canonical_visibility_window(
     def unexpected_full_snapshot(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         raise AssertionError("current compact study synthesis must not require the full-session fallback")
 
-    monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", lambda _session_id: dict(compact_payload))
+    def compact_snapshot(_session_id: str) -> dict[str, Any]:
+        return dict(compact_payload)
+
+    monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", compact_snapshot)
     monkeypatch.setattr(mobile_app, "_direct_window_tracker_session_snapshot", unexpected_full_snapshot)
     client = TestClient(create_app())
 
@@ -686,8 +835,13 @@ def test_study_latest_compact_synthesis_uses_canonical_visibility_window(
     assert study["entry_permission_v3"]["execution_packet_id"] == "pgpkt-current-execution-compact-study"
     assert study["dual_thesis_report_v3"]["buy"] == dual_thesis_report["buy"]
     assert study["dual_thesis_report_v3"]["sell"] == dual_thesis_report["sell"]
-    assert study["created_epoch"] == pytest.approx(now_epoch - 30.0)
-    assert study["valid_until_epoch"] - study["created_epoch"] == pytest.approx(300.0)
+    assert math.isclose(float(study["created_epoch"]), now_epoch - 30.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(
+        float(study["valid_until_epoch"]) - float(study["created_epoch"]),
+        300.0,
+        rel_tol=1e-9,
+        abs_tol=1e-9,
+    )
 
 
 def test_execution_latest_rejects_packet_from_previous_completed_frame(monkeypatch: Any) -> None:
@@ -706,11 +860,18 @@ def test_execution_latest_rejects_packet_from_previous_completed_frame(monkeypat
         "execution_packet_present": True,
         "model_council_packet": old_packet,
     }
-    monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", lambda _session_id: dict(current_payload))
+
+    def current_fast_payload(_session_id: str) -> dict[str, Any]:
+        return dict(current_payload)
+
+    def current_full_payload(_session_id: str, **_kwargs: Any) -> dict[str, Any]:
+        return dict(current_payload)
+
+    monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", current_fast_payload)
     monkeypatch.setattr(
         mobile_app,
         "_direct_window_tracker_session_snapshot",
-        lambda _session_id, **_kwargs: dict(current_payload),
+        current_full_payload,
     )
     client = TestClient(create_app())
 
@@ -737,11 +898,18 @@ def test_execution_latest_honors_current_packet_revocation(monkeypatch: Any) -> 
         "execution_packet_present": False,
         "model_council_packet": revoked_packet,
     }
-    monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", lambda _session_id: dict(revoked_payload))
+
+    def revoked_fast_payload(_session_id: str) -> dict[str, Any]:
+        return dict(revoked_payload)
+
+    def revoked_full_payload(_session_id: str, **_kwargs: Any) -> dict[str, Any]:
+        return dict(revoked_payload)
+
+    monkeypatch.setattr(mobile_app, "_direct_model_council_fast_payload", revoked_fast_payload)
     monkeypatch.setattr(
         mobile_app,
         "_direct_window_tracker_session_snapshot",
-        lambda _session_id, **_kwargs: dict(revoked_payload),
+        revoked_full_payload,
     )
     client = TestClient(create_app())
 
@@ -882,6 +1050,204 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
     assert "live_visual_state" not in compact
     assert "overlay_objects" not in compact
     assert "market_object_registry" not in compact
+
+
+def test_compact_live_state_projects_study_only_decision_command_center(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(mobile_app.RUNTIME, "data_dir", data_dir)
+    monkeypatch.setattr(mobile_app, "_SHOOTER_HANDSHAKE_PATH", tmp_path / "missing_shooter_handshake.json")
+    _clear_mobile_live_state_caches()
+    session_dir = data_dir / "mobile_api" / "window_tracker" / "sessions" / "pocket-live-8788"
+    session_dir.mkdir(parents=True)
+    now_epoch = time.time()
+    study_packet: dict[str, Any] = {
+        "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
+        "packet_type": "STUDY_PACKET",
+        "packet_id": "pgpkt-study-command-center",
+        "session_id": "pocket-live-8788",
+        "created_epoch": now_epoch - 2.0,
+        "valid_until_epoch": now_epoch + 60.0,
+        "execution": {"enabled": False, "state": "WATCHING", "side": "SELL"},
+        "dual_thesis_report_v3": {
+            "selected_authority_side": "SELL",
+            "primary_bias_side": "BUY",
+            "current_pressure_side": "SELL",
+            "current_pressure": {"side": "SELL", "candle_count": 4, "stage": "CONTINUATION"},
+            "buy": {"score": 0.6036, "status": "STUDYING", "role": "PRIMARY_BIAS_WAITING"},
+            "sell": {"score": 0.8183, "status": "AUTHORITY_ACTIVE", "role": "SELECTED_AUTHORITY"},
+            "full_suite_story_lock_v3": {
+                "state": "FULL_SUITE_STORY_CONFIRMED",
+                "confirmed": True,
+                "effective_side": "SELL",
+            },
+        },
+        "playbook_ai_summary_v3": {
+            "full_suite_ready": True,
+            "thesis_arbitration": {
+                "scores": {"BUY": {"score": 0.6036}, "SELL": {"score": 0.8183}},
+            },
+            "full_suite_story_lock_v3": {
+                "state": "FULL_SUITE_STORY_CONFIRMED",
+                "confirmed": True,
+                "effective_side": "SELL",
+            },
+            "horizon": {
+                "selected_side": "SELL",
+                "optimized_candle_count": 18,
+                "optimized_duration_sec": 5400,
+                "optimized_duration_text": "1h 30m",
+                "horizon_class": "EXTENDED_THESIS_13_PLUS_CANDLES",
+                "basis": "professional_trade_plan_thesis_horizon",
+                "target_before_invalidation_probability": 0.84,
+                "by_side": {"SELL": {"execution_authorized": True}},
+            },
+        },
+        "book_strategy_playbook": "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+        "execution_opportunity_window_v3": {
+            "state": "OPEN",
+            "side": "SELL",
+            "duration_sec": 90.0,
+            "remaining_sec": 90.0,
+            "opened_epoch": now_epoch - 10.0,
+            "opened_epoch_sec": now_epoch - 10.0,
+            "valid_until_epoch": now_epoch + 80.0,
+            "valid_until_epoch_sec": now_epoch + 80.0,
+            "integrity_valid": True,
+            "lineage_rejected": False,
+            "anchor_reused": True,
+            "out_of_order_ignored": False,
+            "opportunity_id": "must-not-leak",
+            "execution_authorized": True,
+            "entry_permission_v3": {"allowed": True},
+        },
+        "promotion_trace": {
+            "denied_at": "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED",
+            "next_required": "wait for a fresh entry window",
+        },
+        "model_council": {"final_state": "WATCHING", "final_side": "SELL"},
+    }
+    expired_execution_packet = {
+        "schema_version": "PG_EXECUTION_PACKET_V3",
+        "packet_type": "PG_EXECUTION_PACKET_V3",
+        "packet_id": "pgpkt-expired-command-center",
+        "session_id": "pocket-live-8788",
+        "created_epoch": now_epoch - 120.0,
+        "valid_until_epoch": now_epoch - 60.0,
+        "execution": {"enabled": True, "state": "EXECUTABLE", "side": "SELL", "expiry_seconds": 60},
+        "model_council": {"final_state": "EXECUTABLE", "final_side": "SELL"},
+    }
+    (session_dir / "session.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "status": "running",
+                "tracking_enabled": True,
+                "capture_count": 21,
+                "frame_index": 21,
+                "last_capture_epoch": now_epoch,
+                "tracking_summary": {},
+                "latest_signal": {},
+                "model_council_study_packet": study_packet,
+                "model_council_result": {"study_packet": study_packet, "promotion_trace": study_packet["promotion_trace"]},
+                "model_council_packet": expired_execution_packet,
+                "execution_packet": expired_execution_packet,
+                "execution_packet_present": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app())
+
+    response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?compact=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    command = payload["decision_command_center"]
+    assert command["schema_version"] == "PG_DECISION_COMMAND_CENTER_V3"
+    assert command["study_packet_id"] == "pgpkt-study-command-center"
+    assert command["selected_side"] == "SELL"
+    assert command["current_pressure_side"] == "SELL"
+    assert command["primary_bias_side"] == "BUY"
+    assert math.isclose(float(command["sides"]["BUY"]["score"]), 0.6036, rel_tol=1e-6, abs_tol=1e-12)
+    assert math.isclose(float(command["sides"]["SELL"]["score"]), 0.8183, rel_tol=1e-6, abs_tol=1e-12)
+    assert command["story"]["state"] == "FULL_SUITE_STORY_CONFIRMED"
+    assert command["blocker"] == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED"
+    assert command["next_required"] == "wait for a fresh entry window"
+    assert command["book_strategy_playbook"] == "SELL_IN_BUY_OPPOSING_FORCE_REACTION"
+    assert command["horizon"] == {
+        "selected_side": "SELL",
+        "optimized_candle_count": 18,
+        "optimized_duration_sec": 5400,
+        "optimized_duration_text": "1h 30m",
+        "horizon_class": "EXTENDED_THESIS_13_PLUS_CANDLES",
+        "basis": "professional_trade_plan_thesis_horizon",
+        "target_before_invalidation_probability": 0.84,
+    }
+    assert set(command["execution_opportunity_window_v3"]) == {
+        "state",
+        "side",
+        "duration_sec",
+        "remaining_sec",
+        "opened_epoch",
+        "opened_epoch_sec",
+        "valid_until_epoch",
+        "valid_until_epoch_sec",
+        "integrity_valid",
+        "lineage_rejected",
+        "anchor_reused",
+        "out_of_order_ignored",
+    }
+    assert command["execution_opportunity_window_v3"]["state"] == "OPEN"
+    assert command["execution_opportunity_window_v3"]["side"] == "SELL"
+    assert command["execution_opportunity_window_v3"]["integrity_valid"] is True
+    assert "execution_authorized" not in command["execution_opportunity_window_v3"]
+    assert "entry_permission_v3" not in command["execution_opportunity_window_v3"]
+    assert "by_side" not in command["horizon"]
+    assert command["fresh"] is True
+    assert command["execution_packet_present"] is False
+    assert command["contains_execution_authority"] is False
+    assert "execution" not in command
+    assert "model_council_packet" not in payload
+    assert "execution_packet" not in payload
+    assert "model_council_study_packet" not in payload
+
+    refresh_freshness = cast(
+        Callable[..., dict[str, object]],
+        getattr(mobile_app, "_refresh_decision_command_center_freshness_v3"),
+    )
+    cached_command = refresh_freshness(command, now_epoch=now_epoch + 61.0)
+    assert cached_command["study_packet_id"] == "pgpkt-study-command-center"
+    assert cached_command["age_ms"] > command["age_ms"]
+    assert cached_command["fresh"] is False
+    assert cached_command["freshness_status"] == "STALE"
+
+    build_summary = cast(
+        Callable[..., dict[str, object]],
+        getattr(mobile_app, "_decision_command_center_summary_v3"),
+    )
+    arbitration_fallback = build_summary(
+        {
+            "model_council_result": {
+                "final_side": "BUY",
+                "playbook_ai_summary_v3": {
+                    "thesis_arbitration": {
+                        "winner": "SELL",
+                        "candidate_side": "SELL",
+                    }
+                },
+            }
+        },
+        now_epoch=now_epoch,
+    )
+    result_fallback = build_summary(
+        {"model_council_result": {"final_side": "BUY"}},
+        now_epoch=now_epoch,
+    )
+    assert arbitration_fallback["selected_side"] == "SELL"
+    assert result_fallback["selected_side"] == "BUY"
 
 
 def test_live_state_v3_direct_read_skips_legacy_registry_when_v3_sources_exist(

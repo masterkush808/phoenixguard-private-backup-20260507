@@ -3,7 +3,7 @@ import pytest
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, cast
 
 from PIL import Image
 
@@ -28,6 +28,10 @@ class _Logger:
 
     def error(self, msg: str, *args: object, **kwargs: object) -> None:
         return None
+
+
+def _reject_hf_weights(_self: CVPatternDetector, _model_ref: str) -> bool:
+    return False
 
 
 def test_hf_bootstrap_stays_cache_only_until_explicitly_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -70,7 +74,7 @@ def test_hf_remote_endpoint_requires_explicit_opt_in(monkeypatch: pytest.MonkeyP
     endpoint_calls: list[str] = []
 
     monkeypatch.setenv("PHOENIXGUARD_CV_ALLOW_REMOTE_ENDPOINT", "1")
-    monkeypatch.setattr(CVPatternDetector, "_try_load_hf_yolo_weights", lambda *_args: False)
+    monkeypatch.setattr(CVPatternDetector, "_try_load_hf_yolo_weights", _reject_hf_weights)
 
     def _enable_endpoint(self: CVPatternDetector, model_ref: str) -> bool:
         endpoint_calls.append(model_ref)
@@ -95,7 +99,7 @@ def test_hf_remote_endpoint_requires_explicit_opt_in(monkeypatch: pytest.MonkeyP
 def test_hf_remote_endpoint_requires_explicit_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PHOENIXGUARD_CV_ALLOW_REMOTE_ENDPOINT", "1")
     monkeypatch.delenv("PHOENIXGUARD_CV_REMOTE_URL", raising=False)
-    monkeypatch.setattr(CVPatternDetector, "_try_load_hf_yolo_weights", lambda *_args: False)
+    monkeypatch.setattr(CVPatternDetector, "_try_load_hf_yolo_weights", _reject_hf_weights)
 
     detector = CVPatternDetector(
         primary_model="hf://demo/cv-model",
@@ -108,7 +112,7 @@ def test_hf_remote_endpoint_requires_explicit_url(monkeypatch: pytest.MonkeyPatc
 
 
 def test_raw_detect_routes_to_enabled_hf_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(CVPatternDetector, "_try_load_hf_yolo_weights", lambda *_args: False)
+    monkeypatch.setattr(CVPatternDetector, "_try_load_hf_yolo_weights", _reject_hf_weights)
     detector = CVPatternDetector(
         primary_model="hf://demo/cv-model",
         fallback_model="hf://demo/cv-model",
@@ -118,9 +122,17 @@ def test_raw_detect_routes_to_enabled_hf_endpoint(monkeypatch: pytest.MonkeyPatc
     detector.hf_model_id = "demo/cv-model"
     detector.hf_remote_url = "https://example.invalid/inference"
     expected = [{"pattern": "breakout", "confidence": 0.8, "bbox": [1.0, 2.0, 3.0, 4.0]}]
-    monkeypatch.setattr(detector, "_raw_detect_hf", lambda _image: list(expected))
 
-    assert detector._raw_detect(Image.new("RGB", (32, 32))) == expected
+    def raw_hf_result(_image: object) -> list[dict[str, Any]]:
+        return list(expected)
+
+    monkeypatch.setattr(detector, "_raw_detect_hf", raw_hf_result)
+
+    raw_detect = cast(
+        Callable[[Image.Image], list[dict[str, Any]]],
+        getattr(detector, "_raw_detect"),
+    )
+    assert raw_detect(Image.new("RGB", (32, 32))) == expected
 
 
 def test_detect_uses_heuristic_fallback_when_raw_backend_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:

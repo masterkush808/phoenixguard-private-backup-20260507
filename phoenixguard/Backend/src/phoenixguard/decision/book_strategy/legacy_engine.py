@@ -2060,6 +2060,173 @@ def _next_required_for_state(state: BookMaturityState, blockers: Sequence[Mappin
     return "continue study"
 
 
+def _bias_alignment_v3(
+    *,
+    side: str,
+    countertrend_scalp_only: bool,
+    live_overlay_reclaim_is_current_truth: bool,
+    current_pressure_is_current_truth: bool,
+    professional_thesis_state: str,
+    professional_reaction_is_current_truth: bool,
+    counter_leg_is_current_truth: bool,
+    countertrend_reversal_override: bool,
+    countertrend_against_global: bool,
+    countertrend_against_local: bool,
+    countertrend_against_primary: bool,
+    aligned_with_primary_bias: bool,
+) -> str:
+    if side not in {"BUY", "SELL"}:
+        return "NO_DIRECTION"
+    if countertrend_scalp_only:
+        return "COUNTERTREND_SCALP_ONLY"
+    if live_overlay_reclaim_is_current_truth:
+        return "LIVE_OVERLAY_RECLAIM_CURRENT_TRUTH"
+    if current_pressure_is_current_truth:
+        return professional_thesis_state or "CURRENT_PRESSURE_CONTINUATION"
+    if professional_reaction_is_current_truth or counter_leg_is_current_truth:
+        return professional_thesis_state
+    if countertrend_reversal_override and (
+        countertrend_against_global or countertrend_against_local or countertrend_against_primary
+    ):
+        return "REVERSAL_OVERRIDE"
+    if aligned_with_primary_bias:
+        return "PRIMARY_BIAS_ALIGNED"
+    if countertrend_against_global or countertrend_against_local or countertrend_against_primary:
+        return "COUNTERTREND_WATCH"
+    return "BIAS_UNRESOLVED"
+
+
+def _momentum_interpretation_v3(
+    *,
+    momentum_request_present: bool,
+    current_leg_exhausted: bool,
+    same_side_current_leg: bool,
+    current_leg_candle_count: int,
+    momentum_structure_context_ready: bool,
+    countertrend_against_primary: bool,
+    countertrend_against_local: bool,
+    countertrend_against_global: bool,
+    countertrend_reversal_override: bool,
+    professional_reaction_is_current_truth: bool,
+    counter_leg_is_current_truth: bool,
+    live_overlay_reclaim_is_current_truth: bool,
+    current_pressure_is_current_truth: bool,
+    role_flip_confirmed: bool,
+    break_of_structure_confirmed: bool,
+    structure_shift_confirmed: bool,
+    aligned_with_primary_bias: bool,
+    professional_profit_room_ok: bool,
+) -> MomentumInterpretationV3:
+    if not momentum_request_present:
+        return "NO_MOMENTUM_DRIVER"
+    if current_leg_exhausted or (
+        same_side_current_leg and current_leg_candle_count >= 14 and not momentum_structure_context_ready
+    ):
+        return "LATE_IMPULSE_RISK"
+    if (countertrend_against_primary or countertrend_against_local or countertrend_against_global) and not (
+        countertrend_reversal_override
+        or professional_reaction_is_current_truth
+        or counter_leg_is_current_truth
+        or live_overlay_reclaim_is_current_truth
+        or current_pressure_is_current_truth
+    ):
+        return "COUNTERTREND_TRAP_RISK"
+    if (
+        professional_reaction_is_current_truth
+        or counter_leg_is_current_truth
+        or live_overlay_reclaim_is_current_truth
+        or current_pressure_is_current_truth
+    ):
+        return "COUNTER_LEG_REACTION_SUPPORT"
+    if role_flip_confirmed or break_of_structure_confirmed or structure_shift_confirmed:
+        return "STRUCTURE_BREAK_ACCEPTANCE_SUPPORT"
+    if aligned_with_primary_bias and momentum_structure_context_ready and professional_profit_room_ok:
+        return "TREND_REENTRY_SUPPORT"
+    return "RAW_MOMENTUM_DIAGNOSTIC_ONLY"
+
+
+def _resolve_book_maturity_state_v3(
+    *,
+    side: str,
+    candidate_invalidated: bool,
+    late_chase: bool,
+    history_exit_here: bool,
+    replay_template_late_chase_risk: bool,
+    replay_template_late_chase_softened_by_current_transition: bool,
+    conflict_market: bool,
+    current_pressure_is_current_truth: bool,
+    professional_reaction_is_current_truth: bool,
+    live_overlay_reclaim_is_current_truth: bool,
+    hard_blockers: Sequence[Mapping[str, Any]],
+    has_context: bool,
+    entry_profile: BookEntryProfile,
+    reaction_ready: bool,
+    blockers: Sequence[Mapping[str, Any]],
+    timing_supportive: bool,
+) -> BookMaturityState:
+    if side not in {"BUY", "SELL"}:
+        return "NO_OPPORTUNITY"
+    if candidate_invalidated:
+        return "INVALIDATED"
+    if late_chase or history_exit_here or (
+        replay_template_late_chase_risk and not replay_template_late_chase_softened_by_current_transition
+    ):
+        return "LATE_CHASE"
+    if conflict_market and not (
+        current_pressure_is_current_truth
+        or professional_reaction_is_current_truth
+        or live_overlay_reclaim_is_current_truth
+    ):
+        return "NO_OPPORTUNITY"
+    if hard_blockers:
+        return "PREPARE"
+    if not has_context:
+        return "EARLY_FORMING"
+    if entry_profile == "WATCH_ONLY" or not reaction_ready:
+        return "VALID_WATCH"
+    if blockers:
+        return "PREPARE"
+    if reaction_ready and timing_supportive:
+        return "ENTER_NOW"
+    return "PREPARE"
+
+
+def _astar_zone_role_v3(
+    *,
+    side: str,
+    price_location_label: str,
+    active_zone: Mapping[str, Any],
+    opposing_zone: Mapping[str, Any],
+    role_flip_confirmed: bool,
+    break_of_structure_confirmed: bool,
+) -> str:
+    active_zone_type = _zone_type(active_zone).upper() if active_zone else ""
+    opposing_zone_type = _zone_type(opposing_zone).upper() if opposing_zone else ""
+    if side == "BUY" and (
+        "RESISTANCE" in price_location_label
+        or "SUPPLY" in price_location_label
+        or (
+            opposing_zone_type in {"SUPPLY", "RESISTANCE"}
+            and (role_flip_confirmed or break_of_structure_confirmed)
+        )
+    ):
+        return "resistance"
+    if side == "SELL" and (
+        "SUPPORT" in price_location_label
+        or "DEMAND" in price_location_label
+        or (
+            opposing_zone_type in {"DEMAND", "SUPPORT"}
+            and (role_flip_confirmed or break_of_structure_confirmed)
+        )
+    ):
+        return "support"
+    if active_zone_type in {"DEMAND", "SUPPORT"}:
+        return "support"
+    if active_zone_type in {"SUPPLY", "RESISTANCE"}:
+        return "resistance"
+    return ""
+
+
 def evaluate_book_strategy_master_v3(
     snapshot: Mapping[str, Any],
     *,
@@ -2566,26 +2733,20 @@ def evaluate_book_strategy_master_v3(
             or current_pressure_is_current_truth
         )
     )
-    if side not in {"BUY", "SELL"}:
-        bias_alignment = "NO_DIRECTION"
-    elif countertrend_scalp_only:
-        bias_alignment = "COUNTERTREND_SCALP_ONLY"
-    elif live_overlay_reclaim_is_current_truth:
-        bias_alignment = "LIVE_OVERLAY_RECLAIM_CURRENT_TRUTH"
-    elif current_pressure_is_current_truth:
-        bias_alignment = professional_thesis_state or "CURRENT_PRESSURE_CONTINUATION"
-    elif professional_reaction_is_current_truth:
-        bias_alignment = professional_thesis_state
-    elif counter_leg_is_current_truth:
-        bias_alignment = professional_thesis_state
-    elif countertrend_reversal_override and (countertrend_against_global or countertrend_against_local or countertrend_against_primary):
-        bias_alignment = "REVERSAL_OVERRIDE"
-    elif aligned_with_primary_bias:
-        bias_alignment = "PRIMARY_BIAS_ALIGNED"
-    elif countertrend_against_global or countertrend_against_local or countertrend_against_primary:
-        bias_alignment = "COUNTERTREND_WATCH"
-    else:
-        bias_alignment = "BIAS_UNRESOLVED"
+    bias_alignment = _bias_alignment_v3(
+        side=side,
+        countertrend_scalp_only=countertrend_scalp_only,
+        live_overlay_reclaim_is_current_truth=live_overlay_reclaim_is_current_truth,
+        current_pressure_is_current_truth=current_pressure_is_current_truth,
+        professional_thesis_state=professional_thesis_state,
+        professional_reaction_is_current_truth=professional_reaction_is_current_truth,
+        counter_leg_is_current_truth=counter_leg_is_current_truth,
+        countertrend_reversal_override=countertrend_reversal_override,
+        countertrend_against_global=countertrend_against_global,
+        countertrend_against_local=countertrend_against_local,
+        countertrend_against_primary=countertrend_against_primary,
+        aligned_with_primary_bias=aligned_with_primary_bias,
+    )
     live_integrity = _mapping(snapshot.get("live_integrity") or market.get("live_integrity"))
     runtime_model_health = _mapping(snapshot.get("runtime_model_health") or market.get("runtime_model_health") or snapshot.get("model_health"))
     api_health = _mapping(snapshot.get("api_health") or market.get("api_health"))
@@ -2847,31 +3008,26 @@ def evaluate_book_strategy_master_v3(
         or overlay_suite_full_ready
         or overlay_suite_projection_ready
     )
-    if not momentum_request_present:
-        momentum_interpretation: MomentumInterpretationV3 = "NO_MOMENTUM_DRIVER"
-    elif current_leg_exhausted or (same_side_current_leg and current_leg_candle_count >= 14 and not momentum_structure_context_ready):
-        momentum_interpretation = "LATE_IMPULSE_RISK"
-    elif (countertrend_against_primary or countertrend_against_local or countertrend_against_global) and not (
-        countertrend_reversal_override
-        or professional_reaction_is_current_truth
-        or counter_leg_is_current_truth
-        or live_overlay_reclaim_is_current_truth
-        or current_pressure_is_current_truth
-    ):
-        momentum_interpretation = "COUNTERTREND_TRAP_RISK"
-    elif (
-        professional_reaction_is_current_truth
-        or counter_leg_is_current_truth
-        or live_overlay_reclaim_is_current_truth
-        or current_pressure_is_current_truth
-    ):
-        momentum_interpretation = "COUNTER_LEG_REACTION_SUPPORT"
-    elif role_flip_confirmed or break_of_structure_confirmed or structure_shift_confirmed:
-        momentum_interpretation = "STRUCTURE_BREAK_ACCEPTANCE_SUPPORT"
-    elif aligned_with_primary_bias and momentum_structure_context_ready and professional_profit_room_ok:
-        momentum_interpretation = "TREND_REENTRY_SUPPORT"
-    else:
-        momentum_interpretation = "RAW_MOMENTUM_DIAGNOSTIC_ONLY"
+    momentum_interpretation = _momentum_interpretation_v3(
+        momentum_request_present=momentum_request_present,
+        current_leg_exhausted=current_leg_exhausted,
+        same_side_current_leg=same_side_current_leg,
+        current_leg_candle_count=current_leg_candle_count,
+        momentum_structure_context_ready=momentum_structure_context_ready,
+        countertrend_against_primary=countertrend_against_primary,
+        countertrend_against_local=countertrend_against_local,
+        countertrend_against_global=countertrend_against_global,
+        countertrend_reversal_override=countertrend_reversal_override,
+        professional_reaction_is_current_truth=professional_reaction_is_current_truth,
+        counter_leg_is_current_truth=counter_leg_is_current_truth,
+        live_overlay_reclaim_is_current_truth=live_overlay_reclaim_is_current_truth,
+        current_pressure_is_current_truth=current_pressure_is_current_truth,
+        role_flip_confirmed=role_flip_confirmed,
+        break_of_structure_confirmed=break_of_structure_confirmed,
+        structure_shift_confirmed=structure_shift_confirmed,
+        aligned_with_primary_bias=aligned_with_primary_bias,
+        professional_profit_room_ok=professional_profit_room_ok,
+    )
     momentum_context_ready = bool(
         momentum_request_present
         and professional_profit_room_ok
@@ -3503,28 +3659,26 @@ def evaluate_book_strategy_master_v3(
         )
     )
     hard_blockers = [row for row in blockers if _bool(row.get("hard"))]
-    if side not in {"BUY", "SELL"}:
-        state: BookMaturityState = "NO_OPPORTUNITY"
-    elif candidate_invalidated:
-        state = "INVALIDATED"
-    elif late_chase or history_exit_here or (
-        replay_template_late_chase_risk and not replay_template_late_chase_softened_by_current_transition
-    ):
-        state = "LATE_CHASE"
-    elif conflict_market and not (current_pressure_is_current_truth or professional_reaction_is_current_truth or live_overlay_reclaim_is_current_truth):
-        state = "NO_OPPORTUNITY"
-    elif hard_blockers:
-        state = "PREPARE"
-    elif not has_context:
-        state = "EARLY_FORMING"
-    elif entry_profile == "WATCH_ONLY" or not reaction_ready:
-        state = "VALID_WATCH"
-    elif blockers:
-        state = "PREPARE"
-    elif bool(reaction_ready and timing_supportive and not hard_blockers):
-        state = "ENTER_NOW"
-    else:
-        state = "PREPARE"
+    state = _resolve_book_maturity_state_v3(
+        side=side,
+        candidate_invalidated=candidate_invalidated,
+        late_chase=late_chase,
+        history_exit_here=history_exit_here,
+        replay_template_late_chase_risk=replay_template_late_chase_risk,
+        replay_template_late_chase_softened_by_current_transition=(
+            replay_template_late_chase_softened_by_current_transition
+        ),
+        conflict_market=conflict_market,
+        current_pressure_is_current_truth=current_pressure_is_current_truth,
+        professional_reaction_is_current_truth=professional_reaction_is_current_truth,
+        live_overlay_reclaim_is_current_truth=live_overlay_reclaim_is_current_truth,
+        hard_blockers=hard_blockers,
+        has_context=has_context,
+        entry_profile=entry_profile,
+        reaction_ready=reaction_ready,
+        blockers=blockers,
+        timing_supportive=timing_supportive,
+    )
 
     astar_confirmation_score = max(
         _clip01(lane_score, 0.0),
@@ -3537,25 +3691,14 @@ def evaluate_book_strategy_master_v3(
         )
         else 0.0,
     )
-    active_zone_type = _zone_type(active_zone).upper() if active_zone else ""
-    opposing_zone_type = _zone_type(opposing_zone).upper() if opposing_zone else ""
-    astar_zone_role = ""
-    if side == "BUY" and (
-        "RESISTANCE" in price_location_label
-        or "SUPPLY" in price_location_label
-        or (opposing_zone_type in {"SUPPLY", "RESISTANCE"} and (role_flip_confirmed or break_of_structure_confirmed))
-    ):
-        astar_zone_role = "resistance"
-    elif side == "SELL" and (
-        "SUPPORT" in price_location_label
-        or "DEMAND" in price_location_label
-        or (opposing_zone_type in {"DEMAND", "SUPPORT"} and (role_flip_confirmed or break_of_structure_confirmed))
-    ):
-        astar_zone_role = "support"
-    elif active_zone_type in {"DEMAND", "SUPPORT"}:
-        astar_zone_role = "support"
-    elif active_zone_type in {"SUPPLY", "RESISTANCE"}:
-        astar_zone_role = "resistance"
+    astar_zone_role = _astar_zone_role_v3(
+        side=side,
+        price_location_label=price_location_label,
+        active_zone=active_zone,
+        opposing_zone=opposing_zone,
+        role_flip_confirmed=role_flip_confirmed,
+        break_of_structure_confirmed=break_of_structure_confirmed,
+    )
     astar_decision_input: dict[str, Any] = {
         "candidate_side": side,
         "requested_state": "ENTER_NOW" if reaction_ready else state,

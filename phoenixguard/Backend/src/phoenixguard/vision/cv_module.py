@@ -1567,9 +1567,12 @@ class CVPatternDetector:
                 raw = resp.read().decode("utf-8", errors="replace")
 
             parsed_obj: object = json.loads(raw)
-            if isinstance(parsed_obj, Mapping) and parsed_obj.get("error"):
-                raise RuntimeError(str(parsed_obj.get("error")))
-            preds_obj: list[Any] = parsed_obj if isinstance(parsed_obj, list) else []  # type: ignore
+            if isinstance(parsed_obj, Mapping):
+                parsed_mapping = cast(Mapping[str, object], parsed_obj)
+                remote_error = parsed_mapping.get("error")
+                if remote_error:
+                    raise RuntimeError(str(remote_error))
+            preds_obj = cast(list[object], parsed_obj) if isinstance(parsed_obj, list) else []
             preds: list[Mapping[str, object]] = [
                 cast(Mapping[str, object], item) for item in preds_obj if isinstance(item, dict)
             ]

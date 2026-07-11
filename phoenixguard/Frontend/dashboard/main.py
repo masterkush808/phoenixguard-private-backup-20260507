@@ -1193,7 +1193,7 @@ def _get_memory_bank():
                     str(
                         max(
                             set(e.label for e in loaded_bank.entries),
-                            key=lambda l: sum(1 for e in loaded_bank.entries if e.label == l),
+                            key=lambda label: sum(1 for e in loaded_bank.entries if e.label == label),
                         )
                     )
                     if loaded_bank.entries
@@ -7808,8 +7808,8 @@ def explain_cv_debug_payload(cv_debug: dict[str, Any], result: dict[str, Any] | 
             g = global_top[0]
             g_txt = f"{g.get('pattern', 'unknown')} ({float(g.get('confidence', 0.0) or 0.0):.2f})"
         if latest_top:
-            l = latest_top[0]
-            l_txt = f"{l.get('pattern', 'unknown')} ({float(l.get('confidence', 0.0) or 0.0):.2f})"
+            local_detection = latest_top[0]
+            l_txt = f"{local_detection.get('pattern', 'unknown')} ({float(local_detection.get('confidence', 0.0) or 0.0):.2f})"
         best_action = str((result or {}).get("action", "HOLD"))
         best_conf = float((result or {}).get("confidence", 0.0) or 0.0)
         return (
@@ -16188,13 +16188,6 @@ def _sample_overlay_candle_palette_impl(
     }
 
 
-def sample_overlay_candle_palette(
-    image: Any,
-    sequence_state: Mapping[str, Any],
-) -> dict[str, tuple[int, int, int]]:
-    return _sample_overlay_candle_palette_impl(image, sequence_state)
-
-
 def _sample_overlay_candle_palette(  # pyright: ignore[reportUnusedFunction]
     image: Any,
     sequence_state: Mapping[str, Any],
@@ -16807,7 +16800,7 @@ def _build_confidence_heatmap_payload(
         0.0,
         1.0,
     ).astype(np.float32, copy=False)
-    del context_heat, precision_heat, path_heat, detection_heat, zone_heat, segmentation_heat, opportunity_heat
+    del detection_heat, zone_heat, segmentation_heat
     del entry_heat, continuation_heat, reversal_heat
     del context_norm, precision_norm, path_norm, detection_norm, zone_norm, segmentation_norm, opportunity_norm
     del entry_norm, continuation_norm, reversal_norm

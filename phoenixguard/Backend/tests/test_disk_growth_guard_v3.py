@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import time
+from typing import Iterator
 
 import pytest
 
@@ -39,7 +40,7 @@ def test_directory_size_tolerates_directory_disappearing_during_walk(
     _write(observed, 8)
     original_rglob = Path.rglob
 
-    def disappearing_rglob(path: Path, pattern: str):
+    def disappearing_rglob(path: Path, pattern: str) -> Iterator[Path]:
         if path != target:
             yield from original_rglob(path, pattern)
             return

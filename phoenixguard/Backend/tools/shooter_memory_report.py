@@ -132,7 +132,7 @@ def summarize(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 def render_markdown(report: Mapping[str, Any]) -> str:
     lines: list[str] = []
     ms = report["memory_similarity"]
-    lines.append(f"# Shooter Memory Report\n")
+    lines.append("# Shooter Memory Report\n")
     lines.append(f"Rows analyzed: {report['rows']}\n")
     lines.append("## Memory similarity\n")
     lines.append(f"- Count: {ms['count']}\n")

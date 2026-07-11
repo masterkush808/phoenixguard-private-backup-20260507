@@ -466,6 +466,48 @@ def _direct_live_state_compact_session_path(session_id: str) -> Path:
     return session_path
 
 
+def _direct_window_tracker_stream_snapshot(
+    session_id: str,
+    previous_signature: tuple[str, int, int] | None,
+) -> tuple[str, tuple[str, int, int] | None, dict[str, object] | None]:
+    """Read the compact stream sidecar only when its atomic-file signature changes."""
+
+    if str(os.getenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "1") or "1").strip().lower() in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }:
+        return "unavailable", previous_signature, None
+    requested_session_id = str(session_id or "").strip()
+    if not requested_session_id:
+        return "unavailable", previous_signature, None
+    session_path = _direct_live_state_session_path(requested_session_id)
+    compact_path = session_path.with_name("compact_live_state.json")
+    source_path = compact_path if compact_path.is_file() else session_path
+    try:
+        stat = source_path.stat()
+    except OSError:
+        return "unavailable", previous_signature, None
+    signature = (str(source_path), int(stat.st_mtime_ns), int(stat.st_size))
+    if signature == previous_signature:
+        return "unchanged", signature, None
+    try:
+        raw = json.loads(source_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        # Atomic replacement can briefly race the stat/read pair. Preserve the
+        # old signature so the next 200 ms pass retries instead of suppressing it.
+        return "retry", previous_signature, None
+    if not isinstance(raw, Mapping):
+        return "retry", previous_signature, None
+    payload = dict(cast(Mapping[str, object], raw))
+    if str(payload.get("session_id", requested_session_id) or requested_session_id) != requested_session_id:
+        return "retry", previous_signature, None
+    if source_path == session_path:
+        payload = cast(dict[str, object], compact_session_payload(cast(Mapping[str, Any], payload)))
+    return "updated", signature, payload
+
+
 def _direct_window_tracker_display_state_path(session_id: str) -> Path:
     relative_path = _direct_session_relative_path(session_id).with_name("display_state.json")
     candidates = _runtime_data_dir_candidates()
@@ -1463,6 +1505,320 @@ def _current_execution_packet_from_payload(
     return cast(dict[str, object], packet)
 
 
+def _decision_command_center_summary_v3(
+    payload: Mapping[str, object],
+    *,
+    supplemental: Mapping[str, object] | None = None,
+    now_epoch: float | None = None,
+) -> dict[str, object]:
+    """Project study evidence without copying an executable packet or authority."""
+
+    sources = [payload]
+    if supplemental:
+        sources.append(supplemental)
+
+    def first_mapping(*paths: tuple[str, ...]) -> dict[str, object]:
+        for source in sources:
+            for path in paths:
+                current: object = source
+                for key in path:
+                    current_mapping = _as_object_mapping(current)
+                    if not current_mapping:
+                        current = None
+                        break
+                    current = current_mapping.get(key)
+                if isinstance(current, Mapping) and current:
+                    return dict(cast(Mapping[str, object], current))
+        return {}
+
+    study_packet = first_mapping(
+        ("model_council_study_packet",),
+        ("study_packet",),
+        ("model_council_result", "model_council_study_packet"),
+        ("model_council_result", "study_packet"),
+    )
+    model_result = first_mapping(("model_council_result",))
+    if not study_packet and not model_result:
+        return {}
+
+    council = first_mapping(
+        ("model_council_study_packet", "model_council"),
+        ("study_packet", "model_council"),
+        ("model_council_result", "model_council"),
+    )
+    dual = first_mapping(
+        ("model_council_study_packet", "dual_thesis_report_v3"),
+        ("model_council_study_packet", "model_council", "dual_thesis_report_v3"),
+        ("study_packet", "dual_thesis_report_v3"),
+        ("model_council_result", "dual_thesis_report_v3"),
+        ("model_council_result", "model_council", "dual_thesis_report_v3"),
+    )
+    ai_summary = first_mapping(
+        ("model_council_study_packet", "playbook_ai_summary_v3"),
+        ("model_council_study_packet", "model_council", "playbook_ai_summary_v3"),
+        ("study_packet", "playbook_ai_summary_v3"),
+        ("model_council_result", "playbook_ai_summary_v3"),
+        ("model_council_result", "model_council", "playbook_ai_summary_v3"),
+    )
+    story = _mapping_to_plain_dict(
+        ai_summary.get("full_suite_story_lock_v3") or dual.get("full_suite_story_lock_v3")
+    )
+    current_pressure = _mapping_to_plain_dict(dual.get("current_pressure"))
+    promotion = first_mapping(
+        ("model_council_study_packet", "promotion_trace"),
+        ("study_packet", "promotion_trace"),
+        ("model_council_result", "promotion_trace"),
+        ("model_council_result", "model_council", "promotion_trace"),
+    )
+    professional_plan = first_mapping(
+        ("model_council_study_packet", "professional_trade_plan"),
+        ("study_packet", "professional_trade_plan"),
+        ("model_council_result", "professional_trade_plan"),
+        ("model_council_result", "model_council", "professional_trade_plan"),
+    )
+    horizon = _mapping_to_plain_dict(ai_summary.get("horizon"))
+    opportunity_window = first_mapping(
+        ("model_council_study_packet", "execution_opportunity_window_v3"),
+        ("study_packet", "execution_opportunity_window_v3"),
+        ("model_council_result", "execution_opportunity_window_v3"),
+        ("model_council_result", "model_council", "execution_opportunity_window_v3"),
+    )
+
+    def upper_side(*values: object) -> str:
+        for value in values:
+            side = str(value or "").strip().upper()
+            if side in {"BUY", "SELL"}:
+                return side
+        return "HOLD"
+
+    arbitration = _mapping_to_plain_dict(ai_summary.get("thesis_arbitration"))
+    arbitration_scores = _mapping_to_plain_dict(arbitration.get("scores"))
+    selected_side = upper_side(
+        story.get("effective_side"),
+        story.get("display_side"),
+        story.get("active_side"),
+        dual.get("selected_authority_side"),
+        dual.get("playbook_ai_selected_side"),
+        arbitration.get("winner"),
+        arbitration.get("candidate_side"),
+        council.get("final_side"),
+        council.get("side"),
+        model_result.get("final_side"),
+        model_result.get("side"),
+    )
+    pressure_side = upper_side(current_pressure.get("side"), dual.get("current_pressure_side"))
+    primary_bias_side = upper_side(dual.get("primary_bias_side"))
+    council_scores = first_mapping(
+        ("model_council_study_packet", "council_scores"),
+        ("study_packet", "council_scores"),
+        ("model_council_result", "council_scores"),
+    )
+
+    def finite_score(value: object) -> float | None:
+        score = _epoch_float(value, float("nan"))
+        if score != score or score in {float("inf"), float("-inf")}:
+            return None
+        return score
+
+    def side_summary(side: str) -> dict[str, object]:
+        score_row = _mapping_to_plain_dict(arbitration_scores.get(side))
+        dual_row = _mapping_to_plain_dict(
+            dual.get(side.lower()) or _mapping_to_plain_dict(dual.get("sides")).get(side)
+        )
+        score: float | None = None
+        for candidate in (
+            score_row.get("score"),
+            dual_row.get("score"),
+            council_scores.get(f"{side.lower()}_score"),
+            council_scores.get(side),
+        ):
+            score = finite_score(candidate)
+            if score is not None:
+                break
+        return {
+            "score": round(float(score or 0.0), 4),
+            "status": str(dual_row.get("status") or "STUDYING"),
+            "role": str(dual_row.get("role") or "SECONDARY_STUDY"),
+            "selected": side == selected_side,
+            "current_pressure": side == pressure_side,
+            "primary_bias": side == primary_bias_side,
+        }
+
+    packet_source: Mapping[str, object] = study_packet or model_result
+    packet_status = first_mapping(("study_packet_status",), ("packets", "study"))
+    created_epoch = _epoch_float(
+        packet_source.get("created_epoch_sec")
+        or packet_source.get("created_epoch")
+        or packet_source.get("published_epoch")
+        or packet_status.get("created_epoch"),
+        0.0,
+    )
+    valid_until_epoch = _epoch_float(
+        packet_source.get("valid_until_epoch_sec")
+        or packet_source.get("valid_until_epoch")
+        or packet_status.get("valid_until_epoch")
+        or _payload_valid_until_epoch(packet_source),
+        0.0,
+    )
+    current_epoch = float(now_epoch if now_epoch is not None else time.time())
+    explicit_fresh = _explicit_bool(packet_status.get("fresh"))
+    fresh: bool | None
+    if explicit_fresh is not None:
+        fresh = explicit_fresh
+    elif valid_until_epoch > 0.0:
+        fresh = valid_until_epoch >= current_epoch
+    elif created_epoch > 0.0:
+        fresh = not _payload_is_stale(packet_source, now_epoch=current_epoch)
+    else:
+        fresh = None
+    age_ms = max(0.0, (current_epoch - created_epoch) * 1000.0) if created_epoch > 0.0 else 0.0
+
+    execution_packet_present = any(
+        bool(_current_execution_packet_from_payload(source))
+        for source in sources
+    )
+    blocker = str(
+        promotion.get("denied_at")
+        or promotion.get("true_blocker")
+        or study_packet.get("true_blocker")
+        or study_packet.get("block_reason")
+        or model_result.get("denied_at")
+        or professional_plan.get("blocker")
+        or ""
+    ).strip()
+    next_required = str(
+        promotion.get("next_required")
+        or promotion.get("runtime_release_condition")
+        or study_packet.get("next_required")
+        or model_result.get("next_required")
+        or professional_plan.get("next_required")
+        or ""
+    ).strip()
+    story_summary = {
+        key: story.get(key)
+        for key in (
+            "state",
+            "confirmed",
+            "active_side",
+            "effective_side",
+            "display_side",
+            "side_flip_pending",
+            "stability_state",
+            "horizon_candles",
+        )
+        if story.get(key) not in (None, "", [], {})
+    }
+    side_summaries = {"BUY": side_summary("BUY"), "SELL": side_summary("SELL")}
+    pressure_summary = {
+        key: current_pressure.get(key)
+        for key in (
+            "side",
+            "candle_count",
+            "stage",
+            "continuation_ready",
+            "defended_against_opposing_force",
+        )
+        if current_pressure.get(key) not in (None, "", [], {})
+    }
+    horizon_summary = {
+        key: horizon.get(key)
+        for key in (
+            "selected_side",
+            "optimized_candle_count",
+            "optimized_duration_sec",
+            "optimized_duration_text",
+            "horizon_class",
+            "basis",
+            "target_before_invalidation_probability",
+        )
+        if horizon.get(key) not in (None, "", [], {})
+    }
+    opportunity_window_summary = {
+        key: opportunity_window.get(key)
+        for key in (
+            "state",
+            "side",
+            "duration_sec",
+            "remaining_sec",
+            "opened_epoch",
+            "opened_epoch_sec",
+            "valid_until_epoch",
+            "valid_until_epoch_sec",
+            "integrity_valid",
+            "lineage_rejected",
+            "anchor_reused",
+            "out_of_order_ignored",
+        )
+        if opportunity_window.get(key) not in (None, "", [], {})
+    }
+    playbook = str(
+        study_packet.get("book_strategy_playbook")
+        or council.get("book_strategy_playbook")
+        or model_result.get("book_strategy_playbook")
+        or dual.get("selected_book_strategy_playbook")
+        or ""
+    ).strip()
+    return {
+        "schema_version": "PG_DECISION_COMMAND_CENTER_V3",
+        "source": "model_council_study_packet" if study_packet else "model_council_result",
+        "study_details_present": bool(dual or ai_summary),
+        "study_packet_id": str(study_packet.get("packet_id") or model_result.get("packet_id") or ""),
+        "selected_side": selected_side,
+        "current_pressure_side": pressure_side,
+        "current_pressure": pressure_summary,
+        "primary_bias_side": primary_bias_side,
+        "story": story_summary,
+        "book_strategy_playbook": playbook,
+        "horizon": horizon_summary,
+        "execution_opportunity_window_v3": opportunity_window_summary,
+        "sides": side_summaries,
+        "buy_score": cast(Mapping[str, object], side_summaries["BUY"])["score"],
+        "sell_score": cast(Mapping[str, object], side_summaries["SELL"])["score"],
+        "blocker": blocker,
+        "next_required": next_required,
+        "created_epoch": created_epoch,
+        "valid_until_epoch": valid_until_epoch,
+        "age_ms": round(age_ms, 3),
+        "fresh": fresh,
+        "freshness_status": "PASS" if fresh is True else "STALE" if fresh is False else "UNKNOWN",
+        "execution_packet_present": execution_packet_present,
+        "contains_execution_authority": False,
+    }
+
+
+def _refresh_decision_command_center_freshness_v3(
+    summary: Mapping[str, object],
+    *,
+    now_epoch: float | None = None,
+) -> dict[str, object]:
+    refreshed = dict(summary)
+    current_epoch = float(now_epoch if now_epoch is not None else time.time())
+    created_epoch = _epoch_float(refreshed.get("created_epoch"), 0.0)
+    valid_until_epoch = _epoch_float(refreshed.get("valid_until_epoch"), 0.0)
+    refreshed["age_ms"] = round(
+        max(0.0, (current_epoch - created_epoch) * 1000.0) if created_epoch > 0.0 else 0.0,
+        3,
+    )
+    fresh: bool | None = valid_until_epoch >= current_epoch if valid_until_epoch > 0.0 else None
+    refreshed["fresh"] = fresh
+    refreshed["freshness_status"] = "PASS" if fresh is True else "STALE" if fresh is False else "UNKNOWN"
+    opportunity_window = _mapping_to_plain_dict(refreshed.get("execution_opportunity_window_v3"))
+    opportunity_valid_until = _epoch_float(
+        opportunity_window.get("valid_until_epoch_sec") or opportunity_window.get("valid_until_epoch"),
+        0.0,
+    )
+    if opportunity_valid_until > 0.0:
+        opportunity_window["remaining_sec"] = round(max(0.0, opportunity_valid_until - current_epoch), 3)
+        if opportunity_window["remaining_sec"] == 0.0 and str(opportunity_window.get("state") or "").upper() in {
+            "ACTIVE",
+            "OPEN",
+            "READY",
+        }:
+            opportunity_window["state"] = "EXPIRED"
+        refreshed["execution_opportunity_window_v3"] = opportunity_window
+    return refreshed
+
+
 def _live_model_health_summary(payload: Mapping[str, object]) -> dict[str, object]:
     latest_signal = _mapping_to_plain_dict(payload.get("latest_signal"))
     result = _mapping_to_plain_dict(payload.get("model_council_result"))
@@ -1510,6 +1866,8 @@ def _live_model_health_summary(payload: Mapping[str, object]) -> dict[str, objec
         "session_id": str(payload.get("session_id", "") or ""),
         "all_required_models_awake": has_model_state,
         "council_status": "AWAKE" if has_model_state else "WARMING",
+        "synthetic": True,
+        "health_kind": "logical_role_readiness",
         "required_roles": roles,
         "queue_depth": int(_epoch_float(payload.get("queue_depth"), 0.0)),
         "max_model_latency_ms": round(float(max_latency), 3),
@@ -1522,6 +1880,8 @@ def _live_model_health_summary(payload: Mapping[str, object]) -> dict[str, objec
                 "queue_depth": int(_epoch_float(payload.get("queue_depth"), 0.0)),
                 "last_inference_epoch": published_epoch,
                 "device": "local",
+                "synthetic": True,
+                "unit_kind": "logical_role",
             }
             for role in roles
         ],
@@ -2237,7 +2597,11 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    def fetch_model_council_daemon_status(timeout_sec: float = 1.5) -> dict[str, object]:
+    daemon_status_cache: dict[str, object] = {}
+    daemon_status_cache_epoch = 0.0
+    daemon_status_cache_lock = threading.Lock()
+
+    def fetch_model_council_daemon_status(timeout_sec: float = 0.1) -> dict[str, object]:
         url = str(
             os.getenv("PHOENIXGUARD_MODEL_COUNCIL_DAEMON_STATUS_URL")
             or os.getenv("PHOENIXGUARD_MODEL_COUNCIL_DAEMON_URL")
@@ -2247,13 +2611,26 @@ def create_app(
             return {}
         if not url.endswith("/status"):
             url = url.rstrip("/") + "/status"
+        bounded_timeout_sec = min(0.1, max(0.01, float(timeout_sec)))
         try:
             req = urllib.request.Request(url=url, method="GET")
-            with urllib.request.urlopen(req, timeout=float(timeout_sec)) as resp:
+            with urllib.request.urlopen(req, timeout=bounded_timeout_sec) as resp:
                 payload: object = json.loads(resp.read().decode("utf-8"))
             return dict(_as_object_mapping(payload))
         except (urllib.error.URLError, TimeoutError, ValueError, OSError):
             return {}
+
+    def cached_model_council_daemon_status(*, cache_ttl_sec: float = 2.0) -> dict[str, object]:
+        nonlocal daemon_status_cache_epoch
+        now_monotonic = time.monotonic()
+        with daemon_status_cache_lock:
+            if daemon_status_cache_epoch > 0.0 and now_monotonic - daemon_status_cache_epoch < cache_ttl_sec:
+                return dict(daemon_status_cache)
+            status_payload = fetch_model_council_daemon_status(timeout_sec=0.1)
+            daemon_status_cache.clear()
+            daemon_status_cache.update(status_payload)
+            daemon_status_cache_epoch = time.monotonic()
+            return dict(daemon_status_cache)
 
     def resolve_model_council_session_payload(session_id: str | None = None) -> dict[str, object]:
         tracker_service = get_window_tracker_service()
@@ -2364,13 +2741,18 @@ def create_app(
 
     @app.get("/v1/mobile/model-council/health")
     def model_council_health(session_id: str | None = None) -> dict[str, object]:
+        requested_session_id = str(session_id or "").strip()
+        payload: dict[str, object] | None = None
+        if not explicit_window_tracker_service and requested_session_id:
+            payload = _direct_model_council_fast_payload(requested_session_id)
         try:
-            payload = resolve_model_council_session_payload(session_id)
+            if payload is None:
+                payload = resolve_model_council_session_payload(requested_session_id or None)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         return build_model_council_health_from_session(
             cast(Mapping[str, Any], payload),
-            daemon_status=fetch_model_council_daemon_status(),
+            daemon_status=cached_model_council_daemon_status(),
         )
 
     @app.get("/v1/mobile/model-council/intelligence")
@@ -2549,6 +2931,19 @@ def create_app(
         return live_state
 
     def compact_live_state_response(live_state: Mapping[str, object]) -> dict[str, object]:
+        def decision_command_center(value: Mapping[str, object]) -> dict[str, object]:
+            local_summary = _decision_command_center_summary_v3(value)
+            if local_summary.get("study_details_present") is True:
+                return local_summary
+            session_id = str(value.get("session_id") or "").strip()
+            if not session_id:
+                return local_summary
+            try:
+                supplemental = latest_model_council_state_from_live_session(session_id)
+            except (KeyError, OSError, ValueError):
+                supplemental = {}
+            return _decision_command_center_summary_v3(value, supplemental=supplemental) or local_summary
+
         def compact_mapping(value: object, fields: set[str]) -> dict[str, object]:
             row = _mapping_to_plain_dict(value)
             return {
@@ -2826,6 +3221,7 @@ def create_app(
                 if chart_output:
                     target["chart"] = chart_output
 
+        command_center = decision_command_center(live_state)
         compact: dict[str, object] = dict(compact_session_payload(cast(Mapping[str, Any], live_state)))
         for scalar_key in (
             "schema_version",
@@ -3022,6 +3418,8 @@ def create_app(
         )
         if broker_execution_state:
             compact["broker_execution_state"] = broker_execution_state
+        if command_center:
+            compact["decision_command_center"] = command_center
         for heavy_key in (
             "model_council_study_packet",
             "model_council_packet",
@@ -3208,7 +3606,7 @@ def create_app(
         projected["hidden_count"] = hidden_count
         projected["rejected_count"] = rejected_count
         projected["reason_if_empty"] = reason_if_empty
-        overlay_mode_payload = {
+        overlay_mode_payload: dict[str, object] = {
             **_mapping_to_plain_dict(projected.get("overlay_mode")),
             "requested": requested_mode,
             "active": active_mode,
@@ -3216,7 +3614,7 @@ def create_app(
             "reason_if_empty": reason_if_empty,
         }
         projected["overlay_mode"] = overlay_mode_payload
-        projected_overlays = {
+        projected_overlays: dict[str, object] = {
             **_mapping_to_plain_dict(projected.get("overlays")),
             "requested_mode": requested_mode,
             "active_mode": active_mode,
@@ -3232,7 +3630,7 @@ def create_app(
             "source": "projected_compact_overlay_pool_v3",
         }
         projected["overlays"] = projected_overlays
-        provider = {
+        provider: dict[str, object] = {
             **_mapping_to_plain_dict(projected.get("provider_status")),
             "compact_overlay_mode_projection_v3": True,
             "compact_overlay_projection_epoch": now_epoch,
@@ -3259,6 +3657,28 @@ def create_app(
     def _public_compact_live_state_response(payload: Mapping[str, object]) -> dict[str, object]:
         public_payload: dict[str, object] = dict(payload)
         public_payload.pop("live_visual_state", None)
+        existing_command_center = public_payload.get("decision_command_center")
+        if isinstance(existing_command_center, Mapping):
+            public_payload["decision_command_center"] = _refresh_decision_command_center_freshness_v3(
+                cast(Mapping[str, object], existing_command_center)
+            )
+        else:
+            command_center = _decision_command_center_summary_v3(public_payload)
+            if not command_center.get("study_details_present"):
+                session_id = str(public_payload.get("session_id") or "").strip()
+                if session_id:
+                    try:
+                        supplemental = latest_model_council_state_from_live_session(session_id)
+                    except (KeyError, OSError, ValueError):
+                        supplemental = {}
+                    command_center = _decision_command_center_summary_v3(
+                        public_payload,
+                        supplemental=supplemental,
+                    ) or command_center
+            if command_center:
+                public_payload["decision_command_center"] = _refresh_decision_command_center_freshness_v3(
+                    command_center
+                )
         omitted_all_objects = 0
         overlays = _mapping_to_plain_dict(public_payload.get("overlays"))
         if overlays:
@@ -3267,7 +3687,7 @@ def create_app(
                 omitted_all_objects = len(cast(Sequence[object], all_objects))
             overlays.pop("all_objects", None)
             public_payload["overlays"] = overlays
-        provider = {
+        provider: dict[str, object] = {
             **_mapping_to_plain_dict(public_payload.get("provider_status")),
             "compact_public_payload_v3": True,
             "compact_public_all_objects_omitted_v3": omitted_all_objects,
@@ -3346,7 +3766,7 @@ def create_app(
         if display_snapshot is None:
             return projected
         if not _display_state_frame_bundle_complete_v3(display_snapshot):
-            provider = {
+            pending_provider: dict[str, object] = {
                 **_mapping_to_plain_dict(projected.get("provider_status")),
                 "compact_display_snapshot_pending_v3": True,
                 "compact_display_pending_frame_id_v3": int(
@@ -3357,7 +3777,7 @@ def create_app(
                     or "display/chart/overlay/model frame bundle incomplete"
                 ),
             }
-            projected["provider_status"] = provider
+            projected["provider_status"] = pending_provider
             return projected
         display_frame_id = int(
             _epoch_float(
@@ -3460,11 +3880,11 @@ def create_app(
         projected["performance_trace_v3"] = performance_trace
         projected["visual_health_v3"] = performance_trace.get("visual_health", projected.get("visual_health_v3"))
         projected["frontend_heartbeat"] = dict(frontend_heartbeat or {})
-        provider = {
+        refresh_provider: dict[str, object] = {
             **_mapping_to_plain_dict(projected.get("provider_status")),
             "compact_overlay_projection_light_refresh_v3": True,
         }
-        projected["provider_status"] = provider
+        projected["provider_status"] = refresh_provider
         live_visual_state = projected.get("live_visual_state")
         if isinstance(live_visual_state, Mapping):
             live_visual = dict(cast(Mapping[str, object], live_visual_state))
@@ -3926,7 +4346,7 @@ def create_app(
             payload["frame_id"] = frame_id
         payload["active_mode"] = active_mode
         payload["requested_mode"] = active_mode
-        provider = {
+        provider: dict[str, object] = {
             **_mapping_to_plain_dict(payload.get("provider_status")),
             "monitor_compact_sidecar_v3": True,
             "monitor_compact_sidecar_path": str(compact_path),
@@ -6091,17 +6511,34 @@ def create_app(
         def _events() -> Iterator[str]:
             last_fingerprint = ""
             last_keepalive = 0.0
+            last_direct_signature: tuple[str, int, int] | None = None
             while True:
                 now = time.time()
-                try:
-                    payload = read_window_tracker_session(session_id)
-                except KeyError:
-                    error_payload = json.dumps(
-                        {"session_id": session_id, "status": "error", "detail": "Window tracker session not found."},
-                        default=str,
+                payload: dict[str, object] | None = None
+                direct_state = "unavailable"
+                if not explicit_window_tracker_service:
+                    direct_state, signature, payload = _direct_window_tracker_stream_snapshot(
+                        session_id,
+                        last_direct_signature,
                     )
-                    yield f"event: SESSION_ERROR\ndata: {error_payload}\n\n"
-                    return
+                    if direct_state == "updated":
+                        last_direct_signature = signature
+                if explicit_window_tracker_service or direct_state == "unavailable":
+                    try:
+                        payload = read_window_tracker_session(session_id)
+                    except KeyError:
+                        error_payload = json.dumps(
+                            {"session_id": session_id, "status": "error", "detail": "Window tracker session not found."},
+                            default=str,
+                        )
+                        yield f"event: SESSION_ERROR\ndata: {error_payload}\n\n"
+                        return
+                if payload is None:
+                    if now - last_keepalive >= 2.0:
+                        yield ": heartbeat\n\n"
+                        last_keepalive = now
+                    time.sleep(0.2)
+                    continue
                 fingerprint = _fingerprint(cast(Mapping[str, Any], payload))
                 if fingerprint != last_fingerprint:
                     last_fingerprint = fingerprint

@@ -460,6 +460,71 @@ def _mapping_to_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _synchronize_session_versions(
+    payload: Mapping[str, Any],
+    *,
+    previous: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Keep persisted and public state/decision versions current and monotonic."""
+
+    synchronized = dict(payload)
+    latest_signal = _mapping_to_dict(synchronized.get("latest_signal"))
+    tracking_summary = _mapping_to_dict(synchronized.get("tracking_summary"))
+    pipeline_timing = _mapping_to_dict(tracking_summary.get("pipeline_timing"))
+    published_epoch = max(
+        _float_or(latest_signal.get("published_epoch"), 0.0),
+        _float_or(pipeline_timing.get("published_epoch"), 0.0),
+        _float_or(synchronized.get("last_capture_epoch"), 0.0),
+        _float_or(synchronized.get("display_published_epoch"), 0.0),
+        _float_or(synchronized.get("last_display_published_epoch"), 0.0),
+    )
+    capture_count = max(
+        int(_float_or(synchronized.get("capture_count"), 0.0)),
+        int(_float_or(synchronized.get("display_frame_id"), 0.0)),
+    )
+    frame_index = max(
+        int(_float_or(synchronized.get("frame_index"), 0.0)),
+        int(_float_or(synchronized.get("chart_frame_id"), 0.0)),
+        int(_float_or(synchronized.get("overlay_frame_id"), 0.0)),
+        int(_float_or(synchronized.get("full_overlay_frame_id"), 0.0)),
+        int(_float_or(synchronized.get("model_vote_frame_id"), 0.0)),
+    )
+    state_version = max(
+        int(_float_or(synchronized.get("state_version"), 0.0)),
+        int(_float_or((previous or {}).get("state_version"), 0.0)),
+        derive_state_version(
+            capture_count=capture_count,
+            frame_index=frame_index,
+            published_epoch=published_epoch,
+        ),
+    )
+    synchronized["state_version"] = state_version
+    if latest_signal:
+        latest_signal["state_version"] = state_version
+        synchronized["latest_signal"] = latest_signal
+
+    intent_version = 0
+    if bool(latest_signal.get("actionable", False)):
+        explicit_intent = _mapping_to_dict(
+            synchronized.get("trade_intent") or latest_signal.get("trade_intent")
+        )
+        latest_signal_id = str(latest_signal.get("signal_id", "") or "").strip()
+        explicit_signal_id = str(explicit_intent.get("signal_id", "") or "").strip()
+        explicit_side = str(explicit_intent.get("side", "") or "").strip().upper()
+        if (
+            explicit_side in {"BUY", "SELL"}
+            and int(_float_or(explicit_intent.get("state_version"), 0.0)) > 0
+            and (not latest_signal_id or not explicit_signal_id or explicit_signal_id == latest_signal_id)
+        ):
+            intent_version = int(_float_or(explicit_intent.get("state_version"), 0.0))
+        else:
+            trade_intent = build_trade_intent(latest_signal, session_payload=synchronized)
+            if trade_intent is not None:
+                intent_version = int(trade_intent.state_version)
+    synchronized["decision_version"] = intent_version or state_version
+    return synchronized
+
+
 def _sequence_of_mappings(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
@@ -503,6 +568,8 @@ _DISPLAY_STATE_KEYS = frozenset(
         "full_overlay_frame_id",
         "model_vote_frame_id",
         "state_version",
+        "decision_version",
+        "decision_valid_until_epoch",
         "display_frame_id",
         "display_capture_epoch",
         "display_published_epoch",
@@ -1211,6 +1278,8 @@ _COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
         "full_overlay_frame_id",
         "model_vote_frame_id",
         "state_version",
+        "decision_version",
+        "decision_valid_until_epoch",
         "execution_packet_present",
         "execution_packet_revocation_v3",
         "execution_opportunity_window_v3",
@@ -4774,8 +4843,10 @@ def _execution_packet_alias_from_payload(payload: Mapping[str, Any]) -> dict[str
         seen.add(identity)
         for packet_key in _EXECUTION_PACKET_ALIAS_KEYS:
             packet = container.get(packet_key)
-            if isinstance(packet, Mapping) and str(packet.get("packet_id", "") or "").strip():
-                return _mapping_to_dict(packet)
+            if isinstance(packet, Mapping):
+                packet_mapping = cast(Mapping[str, Any], packet)
+                if str(packet_mapping.get("packet_id", "") or "").strip():
+                    return _mapping_to_dict(packet_mapping)
         for nested_key in ("model_council_result", "latest_signal", "tracking_summary"):
             nested = container.get(nested_key)
             if isinstance(nested, Mapping):
@@ -28297,7 +28368,10 @@ class ContinuousWindowTrackerService:
         return self._merge_display_state(_mapping_to_dict(_read_json(self._session_path(session_id), {})), session_id)
 
     def _write_display_state(self, session_id: str, payload: Mapping[str, Any]) -> None:
-        display_state = _display_state_from_payload(payload)
+        previous = _mapping_to_dict(_read_json(self._display_state_path(session_id), {}))
+        display_state = _display_state_from_payload(
+            _synchronize_session_versions(payload, previous=previous)
+        )
         if not display_state:
             return
         display_state["session_id"] = str(session_id)
@@ -28444,6 +28518,7 @@ class ContinuousWindowTrackerService:
                     previous_epoch,
                 )
                 return
+        payload = _synchronize_session_versions(payload, previous=previous)
         try:
             prepared_payload = SessionAtomicWriterV3.prepare_payload(payload, previous=previous)
         except Exception:
@@ -28459,7 +28534,7 @@ class ContinuousWindowTrackerService:
             self._write_display_state(session_id, prepared_payload)
 
     def _public_session_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        public = dict(payload)
+        public = _synchronize_session_versions(payload)
         session_id = str(public.get("session_id", "") or "")
         public["manual_focus_region"] = _public_manual_focus_region(public.get("manual_focus_region", {}))
         public["event_log_path"] = str(self._event_log_path(session_id)) if session_id else ""
@@ -28508,11 +28583,7 @@ class ContinuousWindowTrackerService:
             latest_signal["signal_age_sec"] = signal_age_sec
             latest_signal.setdefault("published_epoch", published_epoch)
             latest_signal.setdefault("published_at", _epoch_to_utc_iso(published_epoch))
-            state_version = derive_state_version(
-                capture_count=int(public.get("capture_count", 0) or 0),
-                frame_index=int(public.get("frame_index", 0) or 0),
-                published_epoch=published_epoch,
-            )
+            state_version = int(public.get("state_version", 0) or 0)
             public["state_version"] = state_version
             latest_signal["state_version"] = state_version
             public["signal_age_sec"] = signal_age_sec
@@ -28541,7 +28612,11 @@ class ContinuousWindowTrackerService:
             )
             latest_signal["valid_until_epoch"] = valid_until_epoch
             public["decision_valid_until_epoch"] = valid_until_epoch
-            trade_intent = build_trade_intent(latest_signal, session_payload=public)
+            trade_intent = (
+                build_trade_intent(latest_signal, session_payload=public)
+                if bool(latest_signal.get("actionable", False))
+                else None
+            )
             if trade_intent is not None:
                 intent_payload = trade_intent.to_dict()
                 latest_signal["trade_intent"] = intent_payload
@@ -28549,8 +28624,8 @@ class ContinuousWindowTrackerService:
                 public["decision_version"] = int(trade_intent.state_version)
                 public["decision_valid_until_epoch"] = float(trade_intent.valid_until_epoch)
             else:
-                public.setdefault("trade_intent", {})
-                public.setdefault("decision_version", int(public.get("state_version", 0) or 0))
+                public["trade_intent"] = {}
+                public["decision_version"] = int(public.get("state_version", 0) or 0)
         else:
             public["signal_age_sec"] = _float_or(latest_signal.get("signal_age_sec", 0.0), 0.0)
             if "freshness_score" in latest_signal:

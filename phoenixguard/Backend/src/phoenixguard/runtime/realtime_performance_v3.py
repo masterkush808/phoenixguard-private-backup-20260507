@@ -814,6 +814,8 @@ class ModelWarmStateV3:
     queue_depth: int = 0
     device: str = "unknown"
     warm: bool = True
+    synthetic: bool = False
+    unit_kind: str = "model"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -828,6 +830,8 @@ class ModelWarmStateV3:
             "queue_depth": int(self.queue_depth),
             "device": self.device,
             "warm": bool(self.warm),
+            "synthetic": bool(self.synthetic),
+            "unit_kind": self.unit_kind,
         }
 
 
@@ -857,6 +861,8 @@ def model_warm_states_from_health(model_health: Mapping[str, Any], *, frame_id: 
                 "queue_depth": _int(model_health.get("queue_depth"), 0),
                 "last_inference_epoch": now,
                 "device": _text(model_health.get("device"), "unknown"),
+                "synthetic": True,
+                "unit_kind": "logical_role",
             }
             for role in roles
         ]
@@ -879,6 +885,11 @@ def model_warm_states_from_health(model_health: Mapping[str, Any], *, frame_id: 
                 queue_depth=_int(row.get("queue_depth"), 0),
                 device=_text(row.get("device"), "unknown"),
                 warm=status in {"AWAKE", "BUSY", "IDLE_BUT_LOADED", "STAGGERED_FRESH"},
+                synthetic=row.get("synthetic") is True,
+                unit_kind=_text(
+                    row.get("unit_kind"),
+                    "logical_role" if row.get("synthetic") is True else "model",
+                ),
             ).as_dict()
         )
     return rows
@@ -1036,6 +1047,15 @@ def build_performance_trace_v3(
         "last_5m": {key: summarize_window([value]) for key, value in metrics.items()},
     }
     awake_count = sum(1 for row in model_warm_states if row.get("warm"))
+    logical_role_summary = bool(model_warm_states) and all(
+        row.get("synthetic") is True and _text(row.get("unit_kind")).lower() == "logical_role"
+        for row in model_warm_states
+    )
+    model_health_label = (
+        f"{awake_count}/{len(model_warm_states)} roles ready"
+        if logical_role_summary
+        else f"{awake_count}/{len(model_warm_states)} awake"
+    )
     return {
         "schema_version": PERFORMANCE_TRACE_SCHEMA_VERSION,
         "session_id": _text(live_state.get("session_id")),
@@ -1074,7 +1094,7 @@ def build_performance_trace_v3(
         "timing_trace": timing,
         "model_warm_state_v3": model_warm_states,
         "model_health_summary": {
-            "label": f"{awake_count}/{len(model_warm_states)} awake",
+            "label": model_health_label,
             "slowest_model_ms": max((_float(row.get("p95_inference_ms"), 0.0) for row in model_warm_states), default=0.0),
             "queue_depth": _int(model_health.get("queue_depth") or queue.get("depth")),
         },

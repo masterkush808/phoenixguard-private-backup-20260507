@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, cast
 
 from fastapi.testclient import TestClient
 import pytest
@@ -16,6 +16,22 @@ import shooter
 
 
 NOW = 1_800_000_000.0
+
+
+def compact_live_state_execution_packet(value: Mapping[str, Any]) -> dict[str, Any]:
+    compactor = cast(
+        Callable[[Any], dict[str, Any]],
+        getattr(window_tracker_module, "_compact_live_state_execution_packet"),
+    )
+    return compactor(value)
+
+
+def compact_persisted_execution_packet(value: Mapping[str, Any]) -> dict[str, Any]:
+    compactor = cast(
+        Callable[[Mapping[str, Any]], dict[str, Any]],
+        getattr(window_tracker_module, "_compact_persisted_execution_packet"),
+    )
+    return compactor(value)
 
 
 def _allowance_package(*, execution_ready: bool = True, package_type: str = "INTRADAY_ENTER_NOW") -> dict[str, object]:
@@ -176,19 +192,21 @@ def test_compactor_execution_endpoint_and_shooter_keep_allowance_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     packet = _packet()
-    compacted = window_tracker_module._compact_live_state_execution_packet(packet)
-    persisted = window_tracker_module._compact_persisted_execution_packet(packet)
+    compacted = compact_live_state_execution_packet(packet)
+    persisted = compact_persisted_execution_packet(packet)
     source_allowance = packet["allowance_package"]
     compact_allowance = compacted["allowance_package"]
     assert isinstance(source_allowance, Mapping)
     assert isinstance(compact_allowance, Mapping)
-    for key, value in source_allowance.items():
+    source_allowance_mapping = cast(Mapping[str, Any], source_allowance)
+    compact_allowance_mapping = cast(Mapping[str, Any], compact_allowance)
+    for key, value in source_allowance_mapping.items():
         if not isinstance(value, Mapping):
-            assert compact_allowance[key] == value
-    assert compact_allowance["entry_now_allowed"] is True
-    assert compact_allowance["timing_mode"] == "ENTER_NOW"
+            assert compact_allowance_mapping[key] == value
+    assert compact_allowance_mapping["entry_now_allowed"] is True
+    assert compact_allowance_mapping["timing_mode"] == "ENTER_NOW"
     assert compacted["entry_permission_v3"] == packet["entry_permission_v3"]
-    assert compact_allowance["entry_permission_v3"] == packet["entry_permission_v3"]
+    assert compact_allowance_mapping["entry_permission_v3"] == packet["entry_permission_v3"]
     assert persisted["entry_permission_v3"] == packet["entry_permission_v3"]
     assert persisted["allowance_package"]["entry_permission_v3"] == packet["entry_permission_v3"]
     assert compacted["overlay_truth_audit"]["execution_safe"] is True
@@ -338,7 +356,7 @@ def test_execution_latest_endpoint_rejects_unsafe_live_packet(
     monkeypatch: pytest.MonkeyPatch,
     case: str,
 ) -> None:
-    compacted = window_tracker_module._compact_live_state_execution_packet(_packet())
+    compacted = compact_live_state_execution_packet(_packet())
     unsafe = deepcopy(compacted)
     if case == "denied_trap":
         unsafe["market_trap"] = {

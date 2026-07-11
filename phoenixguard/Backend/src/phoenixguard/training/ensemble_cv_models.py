@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 PhoenixGuard Ensemble CV Models
 ==============================
@@ -26,6 +24,8 @@ Upgrades wired in without changing the outer training flow:
 - safe embedding export using backbone features only
 """
 
+from __future__ import annotations
+
 import copy
 import gc
 import importlib
@@ -43,6 +43,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+
+from phoenixguard.core.config import RUNTIME, TRAIN
+from phoenixguard.runtime.continual_adapters import (
+    AdapterConfig,
+    apply_lora_adapters,
+    collect_adaptable_module_paths,
+    collect_lora_summary,
+    sanitize_adapter_name,
+    set_active_adapter,
+    set_adapter_trainable,
+)
+from Developer.sequence_teacher.build_sequence_teacher_manifest import validate_directional_teacher_consistency
 
 
 def _patch_torchvision_register_fake() -> None:
@@ -74,7 +87,7 @@ try:
     clip = importlib.import_module("clip")
 except Exception:  # pragma: no cover - optional dependency
     clip = None
-import timm
+timm: Any = importlib.import_module("timm")
 T: Any = importlib.import_module("torchvision.transforms")
 try:
     _lightly_modules: Any = importlib.import_module("lightly.models.modules")
@@ -133,21 +146,6 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             return self.heads[0](x)
-
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
-
-from phoenixguard.core.config import RUNTIME, TRAIN
-from phoenixguard.runtime.continual_adapters import (
-    AdapterConfig,
-    apply_lora_adapters,
-    collect_adaptable_module_paths,
-    collect_lora_summary,
-    sanitize_adapter_name,
-    set_active_adapter,
-    set_adapter_trainable,
-)
-from Developer.sequence_teacher.build_sequence_teacher_manifest import validate_directional_teacher_consistency
-
 
 IMAGENET_MEAN: Final[tuple[float, float, float]] = (0.485, 0.456, 0.406)
 IMAGENET_STD: Final[tuple[float, float, float]] = (0.229, 0.224, 0.225)

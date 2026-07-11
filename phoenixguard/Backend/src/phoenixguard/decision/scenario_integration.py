@@ -356,7 +356,7 @@ def scenario_explanation_for_ui(scenario: ScenarioPrediction) -> str:
         f"**Memory Alignment:** {scenario.scenario.memory_alignment:.1%}",
         f"**Path Cost:** {scenario.scenario.cost:.3f}",
         "",
-        f"**Price Range:**",
+        "**Price Range:**",
         f"- Open: {first.open:.4f}",
         f"- Latest Close: {last.close:.4f}",
         f"- High: {last.high:.4f}",

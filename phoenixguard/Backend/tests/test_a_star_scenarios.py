@@ -275,7 +275,7 @@ def demo_integration_with_forecast():
 
     # Convert to paint layer
     paint_layer = scenarios_to_paint_layer(scenarios, chart_state)
-    print(f"\nPaint layer structure:")
+    print("\nPaint layer structure:")
     print(f"  - Scenarios: {len(paint_layer['scenarios'])}")
     print(f"  - Confidence heatmap: {len(paint_layer['confidence_heatmap'])}x{len(paint_layer['confidence_heatmap'][0]) if paint_layer['confidence_heatmap'] else 0}")
     print(f"  - Tree branches: {paint_layer['tree_structure'].get('branches', 0)}")
@@ -334,17 +334,17 @@ def demo_decision_kernel():
         skill_gates=skill_gates,
     )
 
-    print(f"\nDecision Kernel Output:")
+    print("\nDecision Kernel Output:")
     print(f"  Action: {result['action']}")
     print(f"  Confidence: {result['confidence']:.1%}")
     print(f"  Reason: {result['reason']}")
-    print(f"\nScenario Summary:")
+    print("\nScenario Summary:")
     for key, val in result['scenario_summary'].items():
         if isinstance(val, float):
             print(f"  {key}: {val:.1%}" if val <= 1 else f"  {key}: {val}")
         else:
             print(f"  {key}: {val}")
-    print(f"\nSkill Gates Updated:")
+    print("\nSkill Gates Updated:")
     for gate, status in result['skill_gates'].items():
         symbol = "✓" if status else "✗"
         print(f"  {symbol} {gate}")

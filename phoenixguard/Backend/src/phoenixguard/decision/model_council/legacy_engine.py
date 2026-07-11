@@ -4708,6 +4708,7 @@ def evaluate_model_council_v3(
             "professional_thesis_resolution_v3": professional_thesis_resolution,
             "dual_thesis_report_v3": dual_thesis_report,
         }
+    snapshot = _mapping(snapshot)
     timing = _timing_context(snapshot, candidate_side)
     health = _runtime_health(snapshot)
     previous_instrument_context = _previous_instrument_context(previous_state)
@@ -5186,2362 +5187,2403 @@ def evaluate_model_council_v3(
             or market_reality.get("timing_memory")
         ),
     }
-    timed_reasoning = analyze_reasoning_arbitration_v3(
-        snapshot,
-        side=candidate_side,
-        market_play=_mapping(market.get("market_play")),
-        regime=_mapping(market.get("regime")),
-        price_location=_mapping(market.get("price_location")),
-        memory_confirmation=_mapping(market.get("memory_confirmation")),
-        pair_profile=_mapping(market.get("pair_profile")),
-        model_role_votes=_rows(market.get("model_role_outputs")),
-        timing_decision=timing_decision,
-        market_context=market_context,
-        existing_block_reason=_upper(market.get("block_reason")),
-    )
-    reasoning_arbitration = _mapping(timed_reasoning.get("arbitration"))
-    final_reasoning_decision = _mapping(timed_reasoning.get("final_reasoning_decision"))
-    bad_entry_filter = _mapping(timed_reasoning.get("bad_entry_filter"))
-    model_role_outputs = _rows(timed_reasoning.get("model_role_outputs"))
-    reasoning_decision_state = _upper(final_reasoning_decision.get("decision"))
-    reasoning_side = _side(final_reasoning_decision.get("side"))
-    reasoning_side_mismatch = bool(
-        candidate_side in {"BUY", "SELL"}
-        and reasoning_side in {"BUY", "SELL"}
-        and reasoning_side != candidate_side
-    )
-    reasoning_execution_blocked = bool(
-        reasoning_decision_state in {
-            "WATCH",
-            "WAIT_FOR_PULLBACK",
-            "WAIT_FOR_RETEST",
-            "WAIT_FOR_REJECTION",
-            "WAIT_FOR_BREAK_CONFIRMATION",
-            "ABORT",
+
+    def _evaluate_reasoning_and_playbook(
+        snapshot: Mapping[str, Any],
+        current_candle: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        nonlocal dual_thesis_report
+        nonlocal entry_now_allowed
+        nonlocal entry_quality_label
+        nonlocal entry_quality_surface
+        nonlocal final_score_passed
+        nonlocal preferred_expiry_seconds
+        nonlocal reward_seconds
+        nonlocal stable
+        nonlocal timing_expiry
+        nonlocal timing_has_explicit_expiry
+        nonlocal timing_mode
+        nonlocal trade_permission
+        timed_reasoning = analyze_reasoning_arbitration_v3(
+            snapshot,
+            side=candidate_side,
+            market_play=_mapping(market.get("market_play")),
+            regime=_mapping(market.get("regime")),
+            price_location=_mapping(market.get("price_location")),
+            memory_confirmation=_mapping(market.get("memory_confirmation")),
+            pair_profile=_mapping(market.get("pair_profile")),
+            model_role_votes=_rows(market.get("model_role_outputs")),
+            timing_decision=timing_decision,
+            market_context=market_context,
+            existing_block_reason=_upper(market.get("block_reason")),
+        )
+        reasoning_arbitration = _mapping(timed_reasoning.get("arbitration"))
+        final_reasoning_decision = _mapping(timed_reasoning.get("final_reasoning_decision"))
+        bad_entry_filter = _mapping(timed_reasoning.get("bad_entry_filter"))
+        model_role_outputs = _rows(timed_reasoning.get("model_role_outputs"))
+        reasoning_decision_state = _upper(final_reasoning_decision.get("decision"))
+        reasoning_side = _side(final_reasoning_decision.get("side"))
+        reasoning_side_mismatch = bool(
+            candidate_side in {"BUY", "SELL"}
+            and reasoning_side in {"BUY", "SELL"}
+            and reasoning_side != candidate_side
+        )
+        reasoning_execution_blocked = bool(
+            reasoning_decision_state in {
+                "WATCH",
+                "WAIT_FOR_PULLBACK",
+                "WAIT_FOR_RETEST",
+                "WAIT_FOR_REJECTION",
+                "WAIT_FOR_BREAK_CONFIRMATION",
+                "ABORT",
+            }
+            or reasoning_side_mismatch
+        )
+        reasoning_block_reason = (
+            "REASONING_SIDE_MISMATCH"
+            if reasoning_side_mismatch
+            else f"REASONING_{reasoning_decision_state}"
+            if reasoning_execution_blocked
+            else ""
+        )
+        selected_wave_context = _mapping(execution_lane.get("wave_context"))
+        reasoning_bad_entry_class = _upper(bad_entry_filter.get("class"))
+        market_bad_entry_class = _upper(
+            bad_entry.get("class")
+            or bad_entry.get("class_id")
+            or bad_entry.get("bad_entry_class")
+            or bad_entry.get("reason")
+        )
+        hard_bad_entry_classes = {
+            item
+            for item in (reasoning_bad_entry_class, market_bad_entry_class)
+            if item in WAVE_REASONING_HARD_BAD_CLASSES
         }
-        or reasoning_side_mismatch
-    )
-    reasoning_block_reason = (
-        "REASONING_SIDE_MISMATCH"
-        if reasoning_side_mismatch
-        else f"REASONING_{reasoning_decision_state}"
-        if reasoning_execution_blocked
-        else ""
-    )
-    selected_wave_context = _mapping(execution_lane.get("wave_context"))
-    reasoning_bad_entry_class = _upper(bad_entry_filter.get("class"))
-    market_bad_entry_class = _upper(
-        bad_entry.get("class")
-        or bad_entry.get("class_id")
-        or bad_entry.get("bad_entry_class")
-        or bad_entry.get("reason")
-    )
-    hard_bad_entry_classes = {
-        item
-        for item in (reasoning_bad_entry_class, market_bad_entry_class)
-        if item in WAVE_REASONING_HARD_BAD_CLASSES
-    }
-    late_chase_block_overridden = bool(
-        stale_late_chase_overridden
-        and live_trigger_reaction.get("accepted")
-        and market_block_reason in LATE_CHASE_BLOCK_REASONS
-        and current_candle_ok
-        and not trap_active
-        and opposing_force_ok
-    )
-    late_chase_bad_entry_override_allowed = bool(
-        stale_late_chase_overridden
-        and live_trigger_reaction.get("accepted")
-        and hard_bad_entry_classes
-        and hard_bad_entry_classes.issubset(LATE_CHASE_BLOCK_REASONS)
-        and current_candle_ok
-        and not trap_active
-        and opposing_force_ok
-    )
-    hard_bad_entry_class_active = bool(
-        hard_bad_entry_classes
-        and not late_chase_bad_entry_override_allowed
-    )
-    bad_entry_filter_hard_active = bool(
-        bad_entry_filter.get("active")
-        and _clip01(bad_entry_filter.get("severity"), 0.0) >= 0.72
-        and not late_chase_bad_entry_override_allowed
-    )
-    bad_entry_detected_effective = bool(
-        bad_entry.get("detected")
-        and not (
+        late_chase_block_overridden = bool(
             stale_late_chase_overridden
             and live_trigger_reaction.get("accepted")
-            and market_bad_entry_class in LATE_CHASE_BLOCK_REASONS
+            and market_block_reason in LATE_CHASE_BLOCK_REASONS
             and current_candle_ok
             and not trap_active
             and opposing_force_ok
         )
-    )
-    history_exit_active = _bool(
-        _mapping(snapshot.get("historical_pattern")).get("would_have_exited_here")
-        or market_context.get("history_would_exit_here")
-    )
-    wave_reasoning_override_allowed = bool(
-        lane_name == "WAVE_RIDING_CONTINUATION"
-        and bool(execution_lane.get("accepted"))
-        and reasoning_decision_state in WAVE_REASONING_SOFT_WAIT_STATES
-        and not reasoning_side_mismatch
-        and not hard_bad_entry_class_active
-        and not bad_entry_filter_hard_active
-        and not bad_entry_detected_effective
-        and not trap_active
-        and not late_chase
-        and not history_exit_active
-        and current_candle_ok
-        and opposing_force_ok
-        and path_class == "DIRECT_CONTINUATION"
-        and timing_mode == "ENTER_NOW"
-        and bool(selected_wave_context.get("wave_entry_ok"))
-        and bool(selected_wave_context.get("buy_low_sell_high_ok"))
-        and bool(selected_wave_context.get("opposing_force_ok"))
-        and (
-            bool(selected_wave_context.get("pullback_reclaim_ready"))
-            or bool(selected_wave_context.get("breakout_role_flip_ready"))
-            or bool(selected_wave_context.get("strong_confluence_override"))
-            or bool(
-                selected_wave_context.get("continuation_ready")
-                and selected_wave_context.get("clear_path_ready")
+        late_chase_bad_entry_override_allowed = bool(
+            stale_late_chase_overridden
+            and live_trigger_reaction.get("accepted")
+            and hard_bad_entry_classes
+            and hard_bad_entry_classes.issubset(LATE_CHASE_BLOCK_REASONS)
+            and current_candle_ok
+            and not trap_active
+            and opposing_force_ok
+        )
+        hard_bad_entry_class_active = bool(
+            hard_bad_entry_classes
+            and not late_chase_bad_entry_override_allowed
+        )
+        bad_entry_filter_hard_active = bool(
+            bad_entry_filter.get("active")
+            and _clip01(bad_entry_filter.get("severity"), 0.0) >= 0.72
+            and not late_chase_bad_entry_override_allowed
+        )
+        bad_entry_detected_effective = bool(
+            bad_entry.get("detected")
+            and not (
+                stale_late_chase_overridden
+                and live_trigger_reaction.get("accepted")
+                and market_bad_entry_class in LATE_CHASE_BLOCK_REASONS
+                and current_candle_ok
+                and not trap_active
+                and opposing_force_ok
             )
         )
-        and (
-            bool(selected_wave_context.get("clear_path_ready"))
-            or _clip01(selected_wave_context.get("clear_path_score"), 0.0) >= 0.70
+        history_exit_active = _bool(
+            _mapping(snapshot.get("historical_pattern")).get("would_have_exited_here")
+            or market_context.get("history_would_exit_here")
         )
-    )
-    high_frequency_contribution_for_override = _mapping(execution_lane.get("high_frequency_contribution"))
-    high_frequency_cycle_for_override = _mapping(high_frequency_contribution_for_override.get("high_frequency_candle_cycle"))
-    high_frequency_soft_wait_only = bool(
-        high_frequency_contribution_for_override.get("active")
-        and not bool(high_frequency_contribution_for_override.get("lane_authority"))
-        and _upper(high_frequency_cycle_for_override.get("lane")) == "HIGH_FREQUENCY_TWO_CANDLE"
-    )
-    high_frequency_wait_blocks_intraday = bool(
-        high_frequency_soft_wait_only
-        and not (
-            bool(live_trigger_reaction.get("accepted"))
-            and lane_name in INTRADAY_ENTER_NOW_LANES
+        wave_reasoning_override_allowed = bool(
+            lane_name == "WAVE_RIDING_CONTINUATION"
+            and bool(execution_lane.get("accepted"))
+            and reasoning_decision_state in WAVE_REASONING_SOFT_WAIT_STATES
+            and not reasoning_side_mismatch
+            and not hard_bad_entry_class_active
+            and not bad_entry_filter_hard_active
+            and not bad_entry_detected_effective
+            and not trap_active
+            and not late_chase
+            and not history_exit_active
+            and current_candle_ok
+            and opposing_force_ok
+            and path_class == "DIRECT_CONTINUATION"
             and timing_mode == "ENTER_NOW"
+            and bool(selected_wave_context.get("wave_entry_ok"))
+            and bool(selected_wave_context.get("buy_low_sell_high_ok"))
+            and bool(selected_wave_context.get("opposing_force_ok"))
+            and (
+                bool(selected_wave_context.get("pullback_reclaim_ready"))
+                or bool(selected_wave_context.get("breakout_role_flip_ready"))
+                or bool(selected_wave_context.get("strong_confluence_override"))
+                or bool(
+                    selected_wave_context.get("continuation_ready")
+                    and selected_wave_context.get("clear_path_ready")
+                )
+            )
+            and (
+                bool(selected_wave_context.get("clear_path_ready"))
+                or _clip01(selected_wave_context.get("clear_path_score"), 0.0) >= 0.70
+            )
         )
-    )
-    intraday_enter_now_reasoning_override_allowed = bool(
-        entry_now_allowed
-        and timing_mode == "ENTER_NOW"
-        and lane_name in INTRADAY_ENTER_NOW_LANES
-        and bool(execution_lane.get("accepted"))
-        and reasoning_decision_state in INTRADAY_ENTER_NOW_REASONING_SOFT_WAIT_STATES
-        and not high_frequency_wait_blocks_intraday
-        and not reasoning_side_mismatch
-        and not hard_bad_entry_class_active
-        and not bad_entry_filter_hard_active
-        and not bad_entry_detected_effective
-        and not trap_active
-        and not late_chase
-        and not history_exit_active
-        and current_candle_ok
-        and opposing_force_ok
-        and path_class in {"DIRECT_CONTINUATION", "PULLBACK_THEN_CONTINUATION"}
-    )
-    professional_reaction_reasoning_override_allowed = bool(
-        entry_now_allowed
-        and timing_mode == "ENTER_NOW"
-        and lane_name in INTRADAY_ENTER_NOW_LANES
-        and bool(execution_lane.get("accepted"))
-        and bool(execution_lane.get("professional_reaction_lane_authority"))
-        and bool(selected_wave_context.get("professional_reaction_ready"))
-        and reasoning_decision_state in {
-            "WATCH",
-            "WAIT_FOR_PULLBACK",
-            "WAIT_FOR_RETEST",
-            "WAIT_FOR_REJECTION",
-            "WAIT_FOR_BREAK_CONFIRMATION",
-            "PREPARE",
-            "TRACK_CANDIDATE",
-        }
-        and not reasoning_side_mismatch
-        and not high_frequency_wait_blocks_intraday
-        and not trap_active
-        and not history_exit_active
-        and current_candle_ok
-        and opposing_force_ok
-        and path_class in {"DIRECT_CONTINUATION", "PULLBACK_THEN_CONTINUATION"}
-        and hard_bad_entry_classes.issubset(PROFESSIONAL_REACTION_SOFT_BAD_CLASSES)
-        and (
-            not bad_entry_filter_hard_active
-            or reasoning_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES
+        high_frequency_contribution_for_override = _mapping(execution_lane.get("high_frequency_contribution"))
+        high_frequency_cycle_for_override = _mapping(high_frequency_contribution_for_override.get("high_frequency_candle_cycle"))
+        high_frequency_soft_wait_only = bool(
+            high_frequency_contribution_for_override.get("active")
+            and not bool(high_frequency_contribution_for_override.get("lane_authority"))
+            and _upper(high_frequency_cycle_for_override.get("lane")) == "HIGH_FREQUENCY_TWO_CANDLE"
         )
-        and (
-            not bad_entry_detected_effective
-            or market_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES
+        high_frequency_wait_blocks_intraday = bool(
+            high_frequency_soft_wait_only
+            and not (
+                bool(live_trigger_reaction.get("accepted"))
+                and lane_name in INTRADAY_ENTER_NOW_LANES
+                and timing_mode == "ENTER_NOW"
+            )
         )
-    )
-    if wave_reasoning_override_allowed or intraday_enter_now_reasoning_override_allowed or professional_reaction_reasoning_override_allowed:
-        reasoning_execution_blocked = False
-        reasoning_block_reason = ""
-    if professional_reaction_reasoning_override_allowed:
-        if hard_bad_entry_classes.issubset(PROFESSIONAL_REACTION_SOFT_BAD_CLASSES):
-            hard_bad_entry_class_active = False
-        if reasoning_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES:
-            bad_entry_filter_hard_active = False
-        if market_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES:
-            bad_entry_detected_effective = False
-    permission_failed_reasons = _permission_failed_reasons(trade_permission)
-    professional_reaction_permission_override = bool(
-        execution_lane.get("professional_reaction_lane_authority")
-        and permission_failed_reasons
-        and permission_failed_reasons.issubset(PROFESSIONAL_REACTION_SOFT_PERMISSION_REASONS)
-    )
-    lane_permission_override = bool(
-        execution_lane.get("permission_override_allowed")
-        and permission_failed_reasons
-        and permission_failed_reasons.issubset(LANE_SOFT_PERMISSION_REASONS)
-        or professional_reaction_permission_override
-    )
-    lane_market_override = bool(
-        execution_lane.get("accepted")
-        and market_block_reason
-        and (market_block_reason in LANE_SOFT_MARKET_BLOCK_REASONS or late_chase_block_overridden)
-        and not bad_entry_detected_effective
-        and not trap_active
-    )
-    market_blocked_effective = bool(market_blocked and not lane_market_override)
-    permission_denied_effective = bool(permission_denied and not lane_permission_override)
-    if lane_permission_override:
-        effective_entry_quality = _mapping(entry_quality_surface)
-        effective_entry_quality.setdefault("raw_state", entry_quality_label)
-        effective_entry_quality.update(
-            {
-                "state": "AGGRESSIVE_VALID_ENTRY",
-                "entry_grade": "AGGRESSIVE_VALID_ENTRY",
-                "quality": "AGGRESSIVE_VALID_ENTRY",
-                "score": max(_clip01(effective_entry_quality.get("score"), 0.0), _clip01(execution_lane.get("actual_score"), 0.0)),
-                "entry_score": max(_clip01(effective_entry_quality.get("entry_score"), 0.0), _clip01(execution_lane.get("actual_score"), 0.0)),
-                "rank": max(_int(effective_entry_quality.get("rank"), 0), 2),
-                "passes_executable_threshold": True,
-                "lane_override": True,
-                "lane": execution_lane.get("name"),
-                "reason": f"{execution_lane.get('name')} accepted a valid lane entry; raw entry quality was {entry_quality_label}.",
+        intraday_enter_now_reasoning_override_allowed = bool(
+            entry_now_allowed
+            and timing_mode == "ENTER_NOW"
+            and lane_name in INTRADAY_ENTER_NOW_LANES
+            and bool(execution_lane.get("accepted"))
+            and reasoning_decision_state in INTRADAY_ENTER_NOW_REASONING_SOFT_WAIT_STATES
+            and not high_frequency_wait_blocks_intraday
+            and not reasoning_side_mismatch
+            and not hard_bad_entry_class_active
+            and not bad_entry_filter_hard_active
+            and not bad_entry_detected_effective
+            and not trap_active
+            and not late_chase
+            and not history_exit_active
+            and current_candle_ok
+            and opposing_force_ok
+            and path_class in {"DIRECT_CONTINUATION", "PULLBACK_THEN_CONTINUATION"}
+        )
+        professional_reaction_reasoning_override_allowed = bool(
+            entry_now_allowed
+            and timing_mode == "ENTER_NOW"
+            and lane_name in INTRADAY_ENTER_NOW_LANES
+            and bool(execution_lane.get("accepted"))
+            and bool(execution_lane.get("professional_reaction_lane_authority"))
+            and bool(selected_wave_context.get("professional_reaction_ready"))
+            and reasoning_decision_state in {
+                "WATCH",
+                "WAIT_FOR_PULLBACK",
+                "WAIT_FOR_RETEST",
+                "WAIT_FOR_REJECTION",
+                "WAIT_FOR_BREAK_CONFIRMATION",
+                "PREPARE",
+                "TRACK_CANDIDATE",
             }
+            and not reasoning_side_mismatch
+            and not high_frequency_wait_blocks_intraday
+            and not trap_active
+            and not history_exit_active
+            and current_candle_ok
+            and opposing_force_ok
+            and path_class in {"DIRECT_CONTINUATION", "PULLBACK_THEN_CONTINUATION"}
+            and hard_bad_entry_classes.issubset(PROFESSIONAL_REACTION_SOFT_BAD_CLASSES)
+            and (
+                not bad_entry_filter_hard_active
+                or reasoning_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES
+            )
+            and (
+                not bad_entry_detected_effective
+                or market_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES
+            )
         )
-        entry_quality_surface = effective_entry_quality
-        entry_quality_label = _entry_quality_label(entry_quality_surface) or entry_quality_label
-        effective_trade_permission = _mapping(trade_permission)
-        permission_override_reasons = (
-            PROFESSIONAL_REACTION_SOFT_PERMISSION_REASONS
-            if professional_reaction_permission_override
-            else LANE_SOFT_PERMISSION_REASONS
+        if wave_reasoning_override_allowed or intraday_enter_now_reasoning_override_allowed or professional_reaction_reasoning_override_allowed:
+            reasoning_execution_blocked = False
+            reasoning_block_reason = ""
+        if professional_reaction_reasoning_override_allowed:
+            if hard_bad_entry_classes.issubset(PROFESSIONAL_REACTION_SOFT_BAD_CLASSES):
+                hard_bad_entry_class_active = False
+            if reasoning_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES:
+                bad_entry_filter_hard_active = False
+            if market_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES:
+                bad_entry_detected_effective = False
+        permission_failed_reasons = _permission_failed_reasons(trade_permission)
+        professional_reaction_permission_override = bool(
+            execution_lane.get("professional_reaction_lane_authority")
+            and permission_failed_reasons
+            and permission_failed_reasons.issubset(PROFESSIONAL_REACTION_SOFT_PERMISSION_REASONS)
         )
-        failed_reasons: list[str] = []
-        raw_failed = trade_permission.get("failed_reasons")
-        if isinstance(raw_failed, Sequence) and not isinstance(raw_failed, (str, bytes, bytearray)):
-            failed_reasons = [
-                str(reason)
-                for reason in cast(Sequence[Any], raw_failed)
-                if _upper(reason) not in permission_override_reasons
-            ]
-        blocking_reasons: list[str] = []
-        raw_blocking = trade_permission.get("blocking_reasons")
-        if isinstance(raw_blocking, Sequence) and not isinstance(raw_blocking, (str, bytes, bytearray)):
-            blocking_reasons = [
-                str(reason)
-                for reason in cast(Sequence[Any], raw_blocking)
-                if _upper(reason) not in permission_override_reasons
-            ]
-        effective_trade_permission.update(
-            {
-                "permission_state": "GRANTED",
-                "side": candidate_side if candidate_side in {"BUY", "SELL"} else None,
-                "executable_allowed": True,
-                "prepare_allowed": True,
-                "deny_reason": None,
-                "denied_at": None,
-                "failed_reasons": failed_reasons,
-                "blocking_reasons": blocking_reasons,
-                "advisory_failed_reasons": sorted(permission_failed_reasons),
-                "next_required_condition": "All final lane authority checks passed.",
-                "lane_override": True,
-                "lane": execution_lane.get("name"),
-                "reason": f"Execution permission granted by accepted {execution_lane.get('name')} lane.",
-            }
+        lane_permission_override = bool(
+            execution_lane.get("permission_override_allowed")
+            and permission_failed_reasons
+            and permission_failed_reasons.issubset(LANE_SOFT_PERMISSION_REASONS)
+            or professional_reaction_permission_override
         )
-        trade_permission = effective_trade_permission
-    entry_quality_adjustment = 0.05 if lane_effective_entry_quality_ok else -0.08
-    context_adjustment = 0.0 if context_ok else -0.30
-    timing_adjustment = 0.0 if lane_effective_timing_ready else -0.08
-    maturity_adjustment = 0.0 if lane_effective_mature else -0.04
-    permission_adjustment = -0.18 if permission_denied_effective else 0.0
-    market_reality_adjustment = (
-        entry_quality_adjustment
-        + trap_penalty
-        + path_risk_adjustment
-        + flip_flop_penalty
-        + context_adjustment
-        + timing_adjustment
-        + maturity_adjustment
-        + permission_adjustment
-    )
-    final_execution_score = _clip01(raw_council_score + market_reality_adjustment)
-    final_score_passed = final_execution_score >= lane_required_score
-    stable = preliminary_stable
-    permission_hard_block = bool(permission_denied_effective and not permission_prepare_allowed)
-    candidate_invalidated = _bool(
-        snapshot.get("candidate_invalidated")
-        or snapshot.get("previous_side_invalidated")
-        or snapshot.get("confirmed_reversal")
-    )
-    opportunity_maturity = _opportunity_maturity_v3(
-        candidate_side=candidate_side,
-        runtime_blocked=runtime_blocked,
-        candidate_invalidated=candidate_invalidated,
-        side_ok=side_ok,
-        context_ok=context_ok,
-        lane_effective_timing_ready=lane_effective_timing_ready,
-        lane_effective_mature=lane_effective_mature,
-        stable=stable_for_authority,
-        final_score_passed=final_score_passed,
-        timing_has_explicit_expiry=timing_has_explicit_expiry,
-        timing_mode=timing_mode,
-        entry_now_allowed=entry_now_allowed,
-        current_candle_ok=current_candle_ok,
-        trap_active=trap_active,
-        late_chase=late_chase,
-        opposing_force_ok=opposing_force_ok,
-        path_class=path_class,
-        reasoning_execution_blocked=reasoning_execution_blocked,
-        reasoning_block_reason=reasoning_block_reason,
-        hard_bad_entry_class_active=hard_bad_entry_class_active,
-        bad_entry_filter_hard_active=bad_entry_filter_hard_active,
-        bad_entry_detected_effective=bad_entry_detected_effective,
-        history_exit_active=history_exit_active,
-        permission_denied_effective=permission_denied_effective,
-        permission_prepare_allowed=permission_prepare_allowed,
-        final_execution_score=final_execution_score,
-        lane_required_score=lane_required_score,
-        execution_lane=execution_lane,
-    )
-    opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "NO_OPPORTUNITY")
-    book_strategy_snapshot: dict[str, Any] = {**snapshot, "candle_movement_context_v3": candle_movement_context}
-    book_strategy_market: dict[str, Any] = {**market, "candle_movement_context_v3": candle_movement_context}
-    book_strategy = evaluate_book_strategy_master_v3(
-        book_strategy_snapshot,
-        market=book_strategy_market,
-        candidate_side=candidate_side,
-        execution_lane=execution_lane,
-        timing_decision=timing_decision,
-        current_candle=current_candle,
-        timing_mode=timing_mode,
-        final_score_passed=final_score_passed,
-        timing_enter_now=bool(timing_decision.get("entry_now_allowed") and timing_mode == "ENTER_NOW"),
-        lane_score=final_execution_score,
-        lane_required_score=lane_required_score,
-        bad_entry_filter=bad_entry_filter,
-        bad_entry=bad_entry,
-    )
-    book_strategy_state = _upper(book_strategy.get("maturity_state"), "VALID_WATCH")
-    if book_strategy_state in OPPORTUNITY_MATURITY_STATES:
-        opportunity_maturity["state"] = book_strategy_state
-        opportunity_maturity_state = book_strategy_state
-    opportunity_maturity["book_strategy"] = book_strategy
-    opportunity_maturity["execution_authority"] = PLAYBOOK_FINAL_DECIDER
-    opportunity_maturity["final_decider"] = "book_strategy_master_v3"
-    opportunity_maturity["model_council_role"] = MODEL_COUNCIL_CONTRIBUTOR_ROLE
-    opportunity_maturity["confidence"] = round(
-        max(_clip01(opportunity_maturity.get("confidence"), 0.0), _clip01(book_strategy.get("confidence"), 0.0)),
-        4,
-    )
-    if book_strategy_state == "ENTER_NOW":
-        opportunity_maturity["denied_at"] = "NONE"
-        opportunity_maturity["next_required"] = "publish validated PG_EXECUTION_PACKET_V3"
-    else:
-        opportunity_maturity["denied_at"] = "BOOK_STRATEGY_MASTER"
-        opportunity_maturity["next_required"] = str(book_strategy.get("next_required") or "book strategy reaction proof required")
+        lane_market_override = bool(
+            execution_lane.get("accepted")
+            and market_block_reason
+            and (market_block_reason in LANE_SOFT_MARKET_BLOCK_REASONS or late_chase_block_overridden)
+            and not bad_entry_detected_effective
+            and not trap_active
+        )
+        market_blocked_effective = bool(market_blocked and not lane_market_override)
+        permission_denied_effective = bool(permission_denied and not lane_permission_override)
+        if lane_permission_override:
+            effective_entry_quality = _mapping(entry_quality_surface)
+            effective_entry_quality.setdefault("raw_state", entry_quality_label)
+            effective_entry_quality.update(
+                {
+                    "state": "AGGRESSIVE_VALID_ENTRY",
+                    "entry_grade": "AGGRESSIVE_VALID_ENTRY",
+                    "quality": "AGGRESSIVE_VALID_ENTRY",
+                    "score": max(_clip01(effective_entry_quality.get("score"), 0.0), _clip01(execution_lane.get("actual_score"), 0.0)),
+                    "entry_score": max(_clip01(effective_entry_quality.get("entry_score"), 0.0), _clip01(execution_lane.get("actual_score"), 0.0)),
+                    "rank": max(_int(effective_entry_quality.get("rank"), 0), 2),
+                    "passes_executable_threshold": True,
+                    "lane_override": True,
+                    "lane": execution_lane.get("name"),
+                    "reason": f"{execution_lane.get('name')} accepted a valid lane entry; raw entry quality was {entry_quality_label}.",
+                }
+            )
+            entry_quality_surface = effective_entry_quality
+            entry_quality_label = _entry_quality_label(entry_quality_surface) or entry_quality_label
+            effective_trade_permission = _mapping(trade_permission)
+            permission_override_reasons = (
+                PROFESSIONAL_REACTION_SOFT_PERMISSION_REASONS
+                if professional_reaction_permission_override
+                else LANE_SOFT_PERMISSION_REASONS
+            )
+            failed_reasons: list[str] = []
+            raw_failed = trade_permission.get("failed_reasons")
+            if isinstance(raw_failed, Sequence) and not isinstance(raw_failed, (str, bytes, bytearray)):
+                failed_reasons = [
+                    str(reason)
+                    for reason in cast(Sequence[Any], raw_failed)
+                    if _upper(reason) not in permission_override_reasons
+                ]
+            blocking_reasons: list[str] = []
+            raw_blocking = trade_permission.get("blocking_reasons")
+            if isinstance(raw_blocking, Sequence) and not isinstance(raw_blocking, (str, bytes, bytearray)):
+                blocking_reasons = [
+                    str(reason)
+                    for reason in cast(Sequence[Any], raw_blocking)
+                    if _upper(reason) not in permission_override_reasons
+                ]
+            effective_trade_permission.update(
+                {
+                    "permission_state": "GRANTED",
+                    "side": candidate_side if candidate_side in {"BUY", "SELL"} else None,
+                    "executable_allowed": True,
+                    "prepare_allowed": True,
+                    "deny_reason": None,
+                    "denied_at": None,
+                    "failed_reasons": failed_reasons,
+                    "blocking_reasons": blocking_reasons,
+                    "advisory_failed_reasons": sorted(permission_failed_reasons),
+                    "next_required_condition": "All final lane authority checks passed.",
+                    "lane_override": True,
+                    "lane": execution_lane.get("name"),
+                    "reason": f"Execution permission granted by accepted {execution_lane.get('name')} lane.",
+                }
+            )
+            trade_permission = effective_trade_permission
+        entry_quality_adjustment = 0.05 if lane_effective_entry_quality_ok else -0.08
+        context_adjustment = 0.0 if context_ok else -0.30
+        timing_adjustment = 0.0 if lane_effective_timing_ready else -0.08
+        maturity_adjustment = 0.0 if lane_effective_mature else -0.04
+        permission_adjustment = -0.18 if permission_denied_effective else 0.0
+        market_reality_adjustment = (
+            entry_quality_adjustment
+            + trap_penalty
+            + path_risk_adjustment
+            + flip_flop_penalty
+            + context_adjustment
+            + timing_adjustment
+            + maturity_adjustment
+            + permission_adjustment
+        )
+        final_execution_score = _clip01(raw_council_score + market_reality_adjustment)
+        final_score_passed = final_execution_score >= lane_required_score
+        stable = preliminary_stable
+        permission_hard_block = bool(permission_denied_effective and not permission_prepare_allowed)
+        candidate_invalidated = _bool(
+            snapshot.get("candidate_invalidated")
+            or snapshot.get("previous_side_invalidated")
+            or snapshot.get("confirmed_reversal")
+        )
+        opportunity_maturity = _opportunity_maturity_v3(
+            candidate_side=candidate_side,
+            runtime_blocked=runtime_blocked,
+            candidate_invalidated=candidate_invalidated,
+            side_ok=side_ok,
+            context_ok=context_ok,
+            lane_effective_timing_ready=lane_effective_timing_ready,
+            lane_effective_mature=lane_effective_mature,
+            stable=stable_for_authority,
+            final_score_passed=final_score_passed,
+            timing_has_explicit_expiry=timing_has_explicit_expiry,
+            timing_mode=timing_mode,
+            entry_now_allowed=entry_now_allowed,
+            current_candle_ok=current_candle_ok,
+            trap_active=trap_active,
+            late_chase=late_chase,
+            opposing_force_ok=opposing_force_ok,
+            path_class=path_class,
+            reasoning_execution_blocked=reasoning_execution_blocked,
+            reasoning_block_reason=reasoning_block_reason,
+            hard_bad_entry_class_active=hard_bad_entry_class_active,
+            bad_entry_filter_hard_active=bad_entry_filter_hard_active,
+            bad_entry_detected_effective=bad_entry_detected_effective,
+            history_exit_active=history_exit_active,
+            permission_denied_effective=permission_denied_effective,
+            permission_prepare_allowed=permission_prepare_allowed,
+            final_execution_score=final_execution_score,
+            lane_required_score=lane_required_score,
+            execution_lane=execution_lane,
+        )
+        opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "NO_OPPORTUNITY")
+        book_strategy_snapshot: dict[str, Any] = {**snapshot, "candle_movement_context_v3": candle_movement_context}
+        book_strategy_market: dict[str, Any] = {**market, "candle_movement_context_v3": candle_movement_context}
+        book_strategy = evaluate_book_strategy_master_v3(
+            book_strategy_snapshot,
+            market=book_strategy_market,
+            candidate_side=candidate_side,
+            execution_lane=execution_lane,
+            timing_decision=timing_decision,
+            current_candle=current_candle,
+            timing_mode=timing_mode,
+            final_score_passed=final_score_passed,
+            timing_enter_now=bool(timing_decision.get("entry_now_allowed") and timing_mode == "ENTER_NOW"),
+            lane_score=final_execution_score,
+            lane_required_score=lane_required_score,
+            bad_entry_filter=bad_entry_filter,
+            bad_entry=bad_entry,
+        )
+        book_strategy_state = _upper(book_strategy.get("maturity_state"), "VALID_WATCH")
+        if book_strategy_state in OPPORTUNITY_MATURITY_STATES:
+            opportunity_maturity["state"] = book_strategy_state
+            opportunity_maturity_state = book_strategy_state
+        opportunity_maturity["book_strategy"] = book_strategy
+        opportunity_maturity["execution_authority"] = PLAYBOOK_FINAL_DECIDER
+        opportunity_maturity["final_decider"] = "book_strategy_master_v3"
+        opportunity_maturity["model_council_role"] = MODEL_COUNCIL_CONTRIBUTOR_ROLE
+        opportunity_maturity["confidence"] = round(
+            max(_clip01(opportunity_maturity.get("confidence"), 0.0), _clip01(book_strategy.get("confidence"), 0.0)),
+            4,
+        )
+        if book_strategy_state == "ENTER_NOW":
+            opportunity_maturity["denied_at"] = "NONE"
+            opportunity_maturity["next_required"] = "publish validated PG_EXECUTION_PACKET_V3"
+        else:
+            opportunity_maturity["denied_at"] = "BOOK_STRATEGY_MASTER"
+            opportunity_maturity["next_required"] = str(book_strategy.get("next_required") or "book strategy reaction proof required")
 
-    playbook_enter_now = bool(book_strategy_state == "ENTER_NOW" and candidate_side in {"BUY", "SELL"})
-    playbook_wait_state = book_strategy_state if book_strategy_state in OPPORTUNITY_MATURITY_STATES else "VALID_WATCH"
-    professional_trade_plan = _professional_trade_plan_v3(
-        candle_movement_context,
-        book_strategy,
-        candidate_side=candidate_side,
-        entry_window_seconds=entry_window_seconds,
-        path_class=path_class,
-        professional_thesis_resolution=professional_thesis_resolution,
-    )
-    playbook_ai_intelligence = build_playbook_ai_intelligence_v3(
-        book_strategy_snapshot,
-        {**book_strategy_market, "professional_trade_plan": professional_trade_plan},
-        {**book_strategy, "professional_trade_plan": professional_trade_plan},
-        candidate_side,
-    )
-    playbook_ai_summary = compact_playbook_ai_intelligence_v3(playbook_ai_intelligence)
-    book_strategy["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
-    book_strategy["playbook_ai_summary_v3"] = playbook_ai_summary
-    strategy_read_payload = _mapping(book_strategy.get("strategy_read"))
-    if strategy_read_payload:
-        strategy_read_payload["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
-        strategy_read_payload["playbook_ai_summary_v3"] = playbook_ai_summary
-        book_strategy["strategy_read"] = strategy_read_payload
-    professional_trade_plan["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
-    professional_trade_plan["playbook_ai_summary_v3"] = playbook_ai_summary
-    ai_semantic_graph = _mapping(playbook_ai_intelligence.get("semantic_graph"))
-    ai_semantic_coverage = _mapping(ai_semantic_graph.get("coverage"))
-    ai_thesis_arbitration = _mapping(playbook_ai_intelligence.get("thesis_arbitration"))
-    ai_meta_label = _mapping(playbook_ai_intelligence.get("meta_label"))
-    ai_horizon = _mapping(playbook_ai_intelligence.get("horizon"))
-    ai_regime_router = _mapping(playbook_ai_intelligence.get("regime_router"))
-    ai_story_lock = _mapping(playbook_ai_intelligence.get("full_suite_story_lock_v3"))
-    ai_selected_meta = _mapping(ai_meta_label.get("selected"))
-    ai_selected_horizon = _mapping(ai_horizon.get("selected"))
-    ai_selected_side = _side(
-        ai_story_lock.get("active_side")
-        or ai_meta_label.get("selected_side")
-        or ai_horizon.get("selected_side")
-    )
-    ai_route = _upper(ai_regime_router.get("route"))
-    ai_full_suite_ready = _bool(ai_semantic_coverage.get("full_suite_ready"))
-    ai_candidate_tradeable = (
-        True
-        if ai_meta_label.get("candidate_tradeable") is None
-        else _bool(ai_meta_label.get("candidate_tradeable"))
-    )
-    ai_target_before_invalidation_probability = _clip01(
-        ai_selected_meta.get("target_before_invalidation_probability"),
-        0.0,
-    )
-    ai_thesis_margin = _clip01(ai_thesis_arbitration.get("margin"), 0.0)
-    ai_winning_score = _clip01(ai_thesis_arbitration.get("winning_score"), 0.0)
-    ai_selected_horizon_candles = _int(ai_selected_horizon.get("optimized_candle_count"), 0)
-    ai_selected_horizon_seconds = _int(ai_selected_horizon.get("optimized_duration_sec"), 0)
-    ai_story_lock_confirmed = bool(
-        _bool(ai_story_lock.get("confirmed"))
-        and ai_selected_side in {"BUY", "SELL"}
-        and ai_winning_score >= 0.60
-        and ai_thesis_margin >= 0.06
-        and _int(ai_story_lock.get("horizon_candles"), ai_selected_horizon_candles) > 0
-    )
-    ai_story_lock_reframes_candidate = bool(
-        ai_story_lock_confirmed
-        and ai_selected_side in {"BUY", "SELL"}
-        and candidate_side in {"BUY", "SELL"}
-        and ai_selected_side != candidate_side
-        and _side(snapshot.get("full_suite_story_stable_side")) == ai_selected_side
-        and _int(snapshot.get("full_suite_story_stable_reads"), 0) >= 1
-    )
-    if ai_story_lock_reframes_candidate and not _bool(snapshot.get("full_suite_story_reframe_attempted")):
-        story_reframe_snapshot = {
-            **snapshot,
-            "candidate_side": ai_selected_side,
-            "full_suite_story_side": ai_selected_side,
-            "full_suite_story_confirmed": True,
-            "full_suite_story_confidence": ai_winning_score,
-            "full_suite_story_margin": ai_thesis_margin,
-            "full_suite_story_horizon_candles": max(
-                _int(ai_story_lock.get("horizon_candles"), 0),
-                ai_selected_horizon_candles,
-            ),
-            "full_suite_story_reframed_from": candidate_side,
-            "full_suite_story_reframe_attempted": True,
-            "execution_mature": True,
-            "candidate_stable_reads": max(candidate_stable_reads, 2),
-            "stability_frames": max(_int(snapshot.get("stability_frames"), 0), 2),
-            "recent_candidate_sides": [ai_selected_side, ai_selected_side],
-            "full_suite_story_lock_v3": ai_story_lock,
-        }
-        return evaluate_model_council_v3(
-            story_reframe_snapshot,
-            previous_state=previous_state,
-            now=current_now,
+        playbook_enter_now = bool(book_strategy_state == "ENTER_NOW" and candidate_side in {"BUY", "SELL"})
+        playbook_wait_state = book_strategy_state if book_strategy_state in OPPORTUNITY_MATURITY_STATES else "VALID_WATCH"
+        professional_trade_plan = _professional_trade_plan_v3(
+            candle_movement_context,
+            book_strategy,
+            candidate_side=candidate_side,
+            entry_window_seconds=entry_window_seconds,
+            path_class=path_class,
+            professional_thesis_resolution=professional_thesis_resolution,
         )
-    ai_opposite_thesis_leads = bool(
-        ai_full_suite_ready
-        and candidate_side in {"BUY", "SELL"}
-        and ai_selected_side in {"BUY", "SELL"}
-        and ai_selected_side != candidate_side
-        and ai_thesis_margin >= 0.10
-        and ai_winning_score >= 0.58
-        and not ai_story_lock_reframes_candidate
-    )
-    ai_wait_route_active = bool(
-        ai_full_suite_ready
-        and ai_route
-        in {
-            "WAIT_FOR_CLEARER_THESIS",
-            "WAIT_FOR_PULLBACK_OR_NEW_STRUCTURE",
-            "WAIT_FOR_CONTEXT",
-        }
-    )
-    thesis_horizon = _mapping(professional_trade_plan.get("thesis_horizon"))
-    thesis_horizon_candles = _int(thesis_horizon.get("expected_candle_count"), 0)
-    thesis_horizon_seconds = _int(thesis_horizon.get("expected_duration_sec"), 0)
-    ai_effective_horizon_candles = max(ai_selected_horizon_candles, thesis_horizon_candles)
-    ai_effective_horizon_seconds = max(ai_selected_horizon_seconds, thesis_horizon_seconds)
-    playbook_ai_strike_override_ready = bool(
-        playbook_enter_now
-        and ai_full_suite_ready
-        and candidate_side in {"BUY", "SELL"}
-        and ai_selected_side == candidate_side
-        and ai_candidate_tradeable
-        and ai_target_before_invalidation_probability >= 0.70
-        and ai_winning_score >= 0.58
-        and not ai_opposite_thesis_leads
-    )
-    if (
-        candidate_side in {"BUY", "SELL"}
-        and ai_selected_side == candidate_side
-        and ai_candidate_tradeable
-        and ai_selected_horizon_candles > _int(thesis_horizon.get("expected_candle_count"), 0)
-        and ai_selected_horizon_seconds > _int(thesis_horizon.get("expected_duration_sec"), 0)
-    ):
-        thesis_horizon = {
-            **thesis_horizon,
-            "expected_candle_count": ai_selected_horizon_candles,
-            "expected_duration_sec": ai_selected_horizon_seconds,
-            "expected_duration_text": _duration_text(ai_selected_horizon_seconds),
-            "basis": "playbook_ai_horizon_optimizer_v3",
-            "playbook_ai_basis": ai_selected_horizon.get("basis"),
-            "playbook_ai_target_before_invalidation_probability": round(
-                float(ai_target_before_invalidation_probability),
-                4,
-            ),
-        }
-        professional_trade_plan["thesis_horizon"] = thesis_horizon
-        profit_discipline = _mapping(professional_trade_plan.get("profit_discipline"))
-        profit_discipline.update(
-            {
-                "playbook_ai_horizon_applied": True,
-                "playbook_ai_expected_candles": ai_selected_horizon_candles,
-                "playbook_ai_expected_duration_sec": ai_selected_horizon_seconds,
+        playbook_ai_intelligence = build_playbook_ai_intelligence_v3(
+            book_strategy_snapshot,
+            {**book_strategy_market, "professional_trade_plan": professional_trade_plan},
+            {**book_strategy, "professional_trade_plan": professional_trade_plan},
+            candidate_side,
+        )
+        playbook_ai_summary = compact_playbook_ai_intelligence_v3(playbook_ai_intelligence)
+        book_strategy["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
+        book_strategy["playbook_ai_summary_v3"] = playbook_ai_summary
+        strategy_read_payload = _mapping(book_strategy.get("strategy_read"))
+        if strategy_read_payload:
+            strategy_read_payload["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
+            strategy_read_payload["playbook_ai_summary_v3"] = playbook_ai_summary
+            book_strategy["strategy_read"] = strategy_read_payload
+        professional_trade_plan["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
+        professional_trade_plan["playbook_ai_summary_v3"] = playbook_ai_summary
+        ai_semantic_graph = _mapping(playbook_ai_intelligence.get("semantic_graph"))
+        ai_semantic_coverage = _mapping(ai_semantic_graph.get("coverage"))
+        ai_thesis_arbitration = _mapping(playbook_ai_intelligence.get("thesis_arbitration"))
+        ai_meta_label = _mapping(playbook_ai_intelligence.get("meta_label"))
+        ai_horizon = _mapping(playbook_ai_intelligence.get("horizon"))
+        ai_regime_router = _mapping(playbook_ai_intelligence.get("regime_router"))
+        ai_story_lock = _mapping(playbook_ai_intelligence.get("full_suite_story_lock_v3"))
+        ai_selected_meta = _mapping(ai_meta_label.get("selected"))
+        ai_selected_horizon = _mapping(ai_horizon.get("selected"))
+        ai_selected_side = _side(
+            ai_story_lock.get("active_side")
+            or ai_meta_label.get("selected_side")
+            or ai_horizon.get("selected_side")
+        )
+        ai_route = _upper(ai_regime_router.get("route"))
+        ai_full_suite_ready = _bool(ai_semantic_coverage.get("full_suite_ready"))
+        ai_candidate_tradeable = (
+            True
+            if ai_meta_label.get("candidate_tradeable") is None
+            else _bool(ai_meta_label.get("candidate_tradeable"))
+        )
+        ai_target_before_invalidation_probability = _clip01(
+            ai_selected_meta.get("target_before_invalidation_probability"),
+            0.0,
+        )
+        ai_thesis_margin = _clip01(ai_thesis_arbitration.get("margin"), 0.0)
+        ai_winning_score = _clip01(ai_thesis_arbitration.get("winning_score"), 0.0)
+        ai_selected_horizon_candles = _int(ai_selected_horizon.get("optimized_candle_count"), 0)
+        ai_selected_horizon_seconds = _int(ai_selected_horizon.get("optimized_duration_sec"), 0)
+        ai_story_lock_confirmed = bool(
+            _bool(ai_story_lock.get("confirmed"))
+            and ai_selected_side in {"BUY", "SELL"}
+            and ai_winning_score >= 0.60
+            and ai_thesis_margin >= 0.06
+            and _int(ai_story_lock.get("horizon_candles"), ai_selected_horizon_candles) > 0
+        )
+        ai_story_lock_reframes_candidate = bool(
+            ai_story_lock_confirmed
+            and ai_selected_side in {"BUY", "SELL"}
+            and candidate_side in {"BUY", "SELL"}
+            and ai_selected_side != candidate_side
+            and _side(snapshot.get("full_suite_story_stable_side")) == ai_selected_side
+            and _int(snapshot.get("full_suite_story_stable_reads"), 0) >= 1
+        )
+        if ai_story_lock_reframes_candidate and not _bool(snapshot.get("full_suite_story_reframe_attempted")):
+            story_reframe_snapshot = {
+                **snapshot,
+                "candidate_side": ai_selected_side,
+                "full_suite_story_side": ai_selected_side,
+                "full_suite_story_confirmed": True,
+                "full_suite_story_confidence": ai_winning_score,
+                "full_suite_story_margin": ai_thesis_margin,
+                "full_suite_story_horizon_candles": max(
+                    _int(ai_story_lock.get("horizon_candles"), 0),
+                    ai_selected_horizon_candles,
+                ),
+                "full_suite_story_reframed_from": candidate_side,
+                "full_suite_story_reframe_attempted": True,
+                "execution_mature": True,
+                "candidate_stable_reads": max(candidate_stable_reads, 2),
+                "stability_frames": max(_int(snapshot.get("stability_frames"), 0), 2),
+                "recent_candidate_sides": [ai_selected_side, ai_selected_side],
+                "full_suite_story_lock_v3": ai_story_lock,
+            }
+            return evaluate_model_council_v3(
+                story_reframe_snapshot,
+                previous_state=previous_state,
+                now=current_now,
+            )
+        ai_opposite_thesis_leads = bool(
+            ai_full_suite_ready
+            and candidate_side in {"BUY", "SELL"}
+            and ai_selected_side in {"BUY", "SELL"}
+            and ai_selected_side != candidate_side
+            and ai_thesis_margin >= 0.10
+            and ai_winning_score >= 0.58
+            and not ai_story_lock_reframes_candidate
+        )
+        ai_wait_route_active = bool(
+            ai_full_suite_ready
+            and ai_route
+            in {
+                "WAIT_FOR_CLEARER_THESIS",
+                "WAIT_FOR_PULLBACK_OR_NEW_STRUCTURE",
+                "WAIT_FOR_CONTEXT",
+            }
+        )
+        thesis_horizon = _mapping(professional_trade_plan.get("thesis_horizon"))
+        thesis_horizon_candles = _int(thesis_horizon.get("expected_candle_count"), 0)
+        thesis_horizon_seconds = _int(thesis_horizon.get("expected_duration_sec"), 0)
+        ai_effective_horizon_candles = max(ai_selected_horizon_candles, thesis_horizon_candles)
+        ai_effective_horizon_seconds = max(ai_selected_horizon_seconds, thesis_horizon_seconds)
+        playbook_ai_strike_override_ready = bool(
+            playbook_enter_now
+            and ai_full_suite_ready
+            and candidate_side in {"BUY", "SELL"}
+            and ai_selected_side == candidate_side
+            and ai_candidate_tradeable
+            and ai_target_before_invalidation_probability >= 0.70
+            and ai_winning_score >= 0.58
+            and not ai_opposite_thesis_leads
+        )
+        if (
+            candidate_side in {"BUY", "SELL"}
+            and ai_selected_side == candidate_side
+            and ai_candidate_tradeable
+            and ai_selected_horizon_candles > _int(thesis_horizon.get("expected_candle_count"), 0)
+            and ai_selected_horizon_seconds > _int(thesis_horizon.get("expected_duration_sec"), 0)
+        ):
+            thesis_horizon = {
+                **thesis_horizon,
+                "expected_candle_count": ai_selected_horizon_candles,
+                "expected_duration_sec": ai_selected_horizon_seconds,
+                "expected_duration_text": _duration_text(ai_selected_horizon_seconds),
+                "basis": "playbook_ai_horizon_optimizer_v3",
+                "playbook_ai_basis": ai_selected_horizon.get("basis"),
                 "playbook_ai_target_before_invalidation_probability": round(
                     float(ai_target_before_invalidation_probability),
                     4,
                 ),
             }
-        )
-        professional_trade_plan["profit_discipline"] = profit_discipline
-    playbook_ai_block_reason = ""
-    playbook_ai_next_required = ""
-    playbook_ai_warning_reason = ""
-    if playbook_enter_now and ai_full_suite_ready:
-        if ai_opposite_thesis_leads:
-            playbook_ai_block_reason = "PLAYBOOK_AI_OPPOSITE_THESIS_LEADS"
-            playbook_ai_next_required = (
-                f"AI thesis arbitration favors {ai_selected_side}; wait for {candidate_side} reclaim "
-                "or let the next fresh cycle reframe the package."
+            professional_trade_plan["thesis_horizon"] = thesis_horizon
+            profit_discipline = _mapping(professional_trade_plan.get("profit_discipline"))
+            profit_discipline.update(
+                {
+                    "playbook_ai_horizon_applied": True,
+                    "playbook_ai_expected_candles": ai_selected_horizon_candles,
+                    "playbook_ai_expected_duration_sec": ai_selected_horizon_seconds,
+                    "playbook_ai_target_before_invalidation_probability": round(
+                        float(ai_target_before_invalidation_probability),
+                        4,
+                    ),
+                }
             )
-        elif ai_wait_route_active:
-            if playbook_ai_strike_override_ready:
-                playbook_ai_warning_reason = f"SOFT_{ai_route}"
-                playbook_ai_next_required = "none"
-            else:
-                playbook_ai_warning_reason = f"SOFT_PLAYBOOK_AI_{ai_route}"
-                playbook_ai_next_required = str(
-                    ai_regime_router.get("regime")
-                    or "wait for clearer full-suite thesis, pullback, or new structure"
+            professional_trade_plan["profit_discipline"] = profit_discipline
+        playbook_ai_block_reason = ""
+        playbook_ai_next_required = ""
+        playbook_ai_warning_reason = ""
+        if playbook_enter_now and ai_full_suite_ready:
+            if ai_opposite_thesis_leads:
+                playbook_ai_block_reason = "PLAYBOOK_AI_OPPOSITE_THESIS_LEADS"
+                playbook_ai_next_required = (
+                    f"AI thesis arbitration favors {ai_selected_side}; wait for {candidate_side} reclaim "
+                    "or let the next fresh cycle reframe the package."
                 )
-        elif not ai_candidate_tradeable or ai_target_before_invalidation_probability < 0.54:
-            playbook_ai_block_reason = "PLAYBOOK_AI_TARGET_BEFORE_INVALIDATION_WEAK"
-            playbook_ai_next_required = (
-                "wait until target-before-invalidation probability is at least 0.54 "
-                f"(current={ai_target_before_invalidation_probability:.4f})"
-            )
-        elif ai_effective_horizon_candles <= 0 and ai_effective_horizon_seconds <= 0:
-            playbook_ai_block_reason = "PLAYBOOK_AI_NO_PROFESSIONAL_HORIZON"
-            playbook_ai_next_required = "wait for a non-zero professional horizon from overlay targets or room-to-force"
-    if playbook_ai_block_reason:
-        professional_trade_plan["professional_grade"] = False
-        professional_trade_plan["blocker"] = playbook_ai_block_reason
-        professional_trade_plan["next_required"] = playbook_ai_next_required
-    professional_trade_plan["playbook_ai_decision"] = {
-        "block_reason": playbook_ai_block_reason,
-        "warning_reason": playbook_ai_warning_reason,
-        "next_required": playbook_ai_next_required or "none",
-        "selected_side": ai_selected_side,
-        "candidate_side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
-        "target_before_invalidation_probability": round(float(ai_target_before_invalidation_probability), 4),
-        "opposite_thesis_leads": ai_opposite_thesis_leads,
-        "wait_route_active": ai_wait_route_active,
-        "strike_override_ready": playbook_ai_strike_override_ready,
-        "full_suite_ready": ai_full_suite_ready,
-        "full_suite_story_lock_confirmed": ai_story_lock_confirmed,
-        "full_suite_story_lock_state": str(ai_story_lock.get("state") or ""),
-        "full_suite_story_side": ai_selected_side if ai_story_lock_confirmed else "HOLD",
-        "full_suite_story_stable_side": _side(snapshot.get("full_suite_story_stable_side")),
-        "full_suite_story_stable_reads": _int(snapshot.get("full_suite_story_stable_reads"), 0),
-        "horizon_candles": ai_selected_horizon_candles,
-        "horizon_seconds": ai_selected_horizon_seconds,
-        "effective_horizon_candles": ai_effective_horizon_candles,
-        "effective_horizon_seconds": ai_effective_horizon_seconds,
-    }
-    dual_thesis_report = {
-        **dual_thesis_report,
-        "selected_candidate_side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
-        "selected_book_strategy_state": book_strategy_state,
-        "selected_book_strategy_playbook": str(book_strategy.get("playbook") or ""),
-        "selected_professional_grade": bool(professional_trade_plan.get("professional_grade")),
-        "selected_professional_blocker": str(professional_trade_plan.get("blocker") or ""),
-        "playbook_ai_selected_side": ai_selected_side if ai_selected_side in {"BUY", "SELL"} else "HOLD",
-        "playbook_ai_route": ai_route,
-        "playbook_ai_opposite_thesis_leads": ai_opposite_thesis_leads,
-        "playbook_ai_candidate_tradeable": ai_candidate_tradeable,
-        "full_suite_story_lock_v3": ai_story_lock,
-        "full_suite_story_controls_package_side": ai_story_lock_confirmed,
-    }
-    opportunity_maturity["dual_thesis_report_v3"] = dual_thesis_report
-    book_strategy["dual_thesis_report_v3"] = dual_thesis_report
-    professional_trade_plan["dual_thesis_report_v3"] = dual_thesis_report
-    professional_thesis_seconds = _int(thesis_horizon.get("expected_duration_sec"), preferred_expiry_seconds)
-    professional_thesis_candles = _int(thesis_horizon.get("expected_candle_count"), 0)
-    professional_plan_block_reason = str(professional_trade_plan.get("blocker") or "").strip().upper()
-    professional_plan_ok = bool(professional_trade_plan.get("professional_grade"))
-    if professional_thesis_seconds > preferred_expiry_seconds:
-        preferred_expiry_seconds = professional_thesis_seconds
-        reward_seconds = max(reward_seconds, professional_thesis_seconds)
-        if timing_expiry > 0:
-            timing_expiry = max(timing_expiry, professional_thesis_seconds)
-        timing_forecast["expected_time_to_favourable_move_sec"] = reward_seconds
-        timing_forecast["expected_time_to_target_sec"] = reward_seconds
-        timing_forecast["recommended_expiry_sec"] = preferred_expiry_seconds
-        timing_decision["preferred_expiry_sec"] = preferred_expiry_seconds
-        timing_decision["time_to_reward_sec"] = reward_seconds
-        timing_decision["expiry_band"] = _timing_expiry_band(preferred_expiry_seconds)
-        timing_decision["timing_forecast"] = timing_forecast
-        timing_risk = _mapping(timing_decision.get("timing_risk"))
-        timing_risk["expected_time_to_reward_sec"] = reward_seconds
-        timing_risk["expiry_sec"] = preferred_expiry_seconds
-        timing_decision["timing_risk"] = timing_risk
-    professional_trade_plan["applied_to_package"] = bool(professional_thesis_seconds >= preferred_expiry_seconds)
-    professional_enter_now_block = bool(playbook_enter_now and not professional_plan_ok)
-    if professional_enter_now_block:
-        playbook_enter_now = False
-        playbook_wait_state = "PREPARE"
-        opportunity_maturity["state"] = "PREPARE"
-        opportunity_maturity_state = "PREPARE"
-        opportunity_maturity["denied_at"] = professional_plan_block_reason or "PROFESSIONAL_TRADE_PLAN"
-        opportunity_maturity["next_required"] = str(
-            professional_trade_plan.get("next_required")
-            or "professional trend/reversal thesis required"
-        )
-    opportunity_maturity["professional_trade_plan"] = professional_trade_plan
-    opportunity_maturity["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
-    opportunity_maturity["playbook_ai_summary_v3"] = playbook_ai_summary
-    opportunity_maturity["professional_thesis_resolution"] = professional_thesis_resolution
-    opportunity_maturity["professional_thesis_candles"] = professional_thesis_candles
-    professional_thesis_state = _upper(professional_trade_plan.get("professional_thesis_state"))
-    professional_playbook_reasoning_override_allowed = bool(
-        playbook_enter_now
-        and professional_plan_ok
-        and candidate_side in {"BUY", "SELL"}
-        and professional_thesis_state in PROFESSIONAL_PLAYBOOK_AUTHORITY_STATES
-        and bool(execution_lane.get("accepted"))
-        and not runtime_blocked
-        and not candidate_invalidated
-        and not trap_active
-        and not history_exit_active
-        and current_candle_ok
-        and opposing_force_ok
-        and timing_has_explicit_expiry
-        and timing_mode == "ENTER_NOW"
-        and (
-            not permission_denied_effective
-            or permission_prepare_allowed
-            or lane_permission_override
-            or bool(professional_trade_plan.get("professional_grade"))
-        )
-        and hard_bad_entry_classes.issubset(PROFESSIONAL_REACTION_SOFT_BAD_CLASSES)
-        and (
-            not bad_entry_filter_hard_active
-            or reasoning_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES
-        )
-        and (
-            not bad_entry_detected_effective
-            or market_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES
-        )
-    )
-    if professional_playbook_reasoning_override_allowed:
-        reasoning_execution_blocked = False
-        reasoning_block_reason = ""
-        professional_reaction_reasoning_override_allowed = True
-        if hard_bad_entry_classes.issubset(PROFESSIONAL_REACTION_SOFT_BAD_CLASSES):
-            hard_bad_entry_class_active = False
-        if reasoning_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES:
-            bad_entry_filter_hard_active = False
-        if market_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES:
-            bad_entry_detected_effective = False
-        opportunity_maturity["professional_playbook_reasoning_override_allowed"] = True
-        opportunity_maturity["reasoning_override_reason"] = (
-            "Professional playbook accepted a current source-truth trade plan; "
-            "legacy reasoning warnings are diagnostic only for this package."
-        )
-    playbook_required_stable_reads = max(1, _int(snapshot.get("playbook_required_stable_reads"), 2))
-    playbook_candidate_stable = bool(_bool(snapshot.get("execution_mature")) or candidate_stable_reads >= playbook_required_stable_reads)
-    professional_thesis_state = _upper(professional_thesis_resolution.get("thesis_state"))
-    side_conflict_requested = bool(both_executable_requested or (buy_score >= 0.62 and sell_score >= 0.62))
-    current_pressure_conflict_resolution = bool(
-        _bool(professional_thesis_resolution.get("current_pressure_defends_against_opposing_force"))
-        and _side(professional_thesis_resolution.get("authority_side")) == candidate_side
-        and candidate_side in {"BUY", "SELL"}
-    )
-    professional_conflict_resolution = bool(
-        side_conflict_requested
-        and (
-            _bool(professional_thesis_resolution.get("side_reframed"))
-            or _bool(professional_thesis_resolution.get("opposing_force_reaction_ready"))
-            or _bool(professional_thesis_resolution.get("primary_bias_zone_rejection_ready"))
-            or current_pressure_conflict_resolution
-        )
-        and professional_thesis_state
-        in {
-            "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
-            "BUY_IN_SELL_OPPOSING_FORCE_REACTION",
-            "SELL_IN_BUY_TRADEABLE_COUNTER_LEG",
-            "BUY_IN_SELL_TRADEABLE_COUNTER_LEG",
-            "SELL_TREND_RESUMPTION_FROM_SUPPLY",
-            "BUY_TREND_RESUMPTION_FROM_DEMAND",
-            "PROVEN_REVERSAL_RECLAIM",
-            "BUY_CURRENT_PRESSURE_CONTINUATION",
-            "SELL_CURRENT_PRESSURE_CONTINUATION",
+            elif ai_wait_route_active:
+                if playbook_ai_strike_override_ready:
+                    playbook_ai_warning_reason = f"SOFT_{ai_route}"
+                    playbook_ai_next_required = "none"
+                else:
+                    playbook_ai_warning_reason = f"SOFT_PLAYBOOK_AI_{ai_route}"
+                    playbook_ai_next_required = str(
+                        ai_regime_router.get("regime")
+                        or "wait for clearer full-suite thesis, pullback, or new structure"
+                    )
+            elif not ai_candidate_tradeable or ai_target_before_invalidation_probability < 0.54:
+                playbook_ai_block_reason = "PLAYBOOK_AI_TARGET_BEFORE_INVALIDATION_WEAK"
+                playbook_ai_next_required = (
+                    "wait until target-before-invalidation probability is at least 0.54 "
+                    f"(current={ai_target_before_invalidation_probability:.4f})"
+                )
+            elif ai_effective_horizon_candles <= 0 and ai_effective_horizon_seconds <= 0:
+                playbook_ai_block_reason = "PLAYBOOK_AI_NO_PROFESSIONAL_HORIZON"
+                playbook_ai_next_required = "wait for a non-zero professional horizon from overlay targets or room-to-force"
+        if playbook_ai_block_reason:
+            professional_trade_plan["professional_grade"] = False
+            professional_trade_plan["blocker"] = playbook_ai_block_reason
+            professional_trade_plan["next_required"] = playbook_ai_next_required
+        professional_trade_plan["playbook_ai_decision"] = {
+            "block_reason": playbook_ai_block_reason,
+            "warning_reason": playbook_ai_warning_reason,
+            "next_required": playbook_ai_next_required or "none",
+            "selected_side": ai_selected_side,
+            "candidate_side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
+            "target_before_invalidation_probability": round(float(ai_target_before_invalidation_probability), 4),
+            "opposite_thesis_leads": ai_opposite_thesis_leads,
+            "wait_route_active": ai_wait_route_active,
+            "strike_override_ready": playbook_ai_strike_override_ready,
+            "full_suite_ready": ai_full_suite_ready,
+            "full_suite_story_lock_confirmed": ai_story_lock_confirmed,
+            "full_suite_story_lock_state": str(ai_story_lock.get("state") or ""),
+            "full_suite_story_side": ai_selected_side if ai_story_lock_confirmed else "HOLD",
+            "full_suite_story_stable_side": _side(snapshot.get("full_suite_story_stable_side")),
+            "full_suite_story_stable_reads": _int(snapshot.get("full_suite_story_stable_reads"), 0),
+            "horizon_candles": ai_selected_horizon_candles,
+            "horizon_seconds": ai_selected_horizon_seconds,
+            "effective_horizon_candles": ai_effective_horizon_candles,
+            "effective_horizon_seconds": ai_effective_horizon_seconds,
         }
-        and candidate_side in {"BUY", "SELL"}
-    )
-    side_conflict_unresolved = bool(side_conflict_requested and not professional_conflict_resolution)
-    opportunity_maturity["side_conflict_requested"] = side_conflict_requested
-    opportunity_maturity["side_conflict_resolved_by_professional_thesis"] = professional_conflict_resolution
-    opportunity_maturity["side_conflict_resolved_by_current_pressure"] = current_pressure_conflict_resolution
-    playbook_hard_gate_reason = ""
-    if book_strategy_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
-        playbook_hard_gate_reason = f"PLAYBOOK_{book_strategy_state}"
-    elif side_conflict_unresolved:
-        playbook_hard_gate_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
-    elif runtime_blocked:
-        playbook_hard_gate_reason = runtime_block_reason
-    elif _bool(snapshot.get("source_identity_just_switched")):
-        playbook_hard_gate_reason = "SOURCE_IDENTITY_JUST_SWITCHED"
-    elif candidate_invalidated:
-        playbook_hard_gate_reason = "CANDIDATE_INVALIDATED"
-    elif permission_hard_block:
-        playbook_hard_gate_reason = str(permission_block_reason or "TRADE_PERMISSION_DENIED")
-    elif trap_active:
-        playbook_hard_gate_reason = "MARKET_TRAP"
-    elif professional_enter_now_block:
-        playbook_hard_gate_reason = professional_plan_block_reason
+        dual_thesis_report = {
+            **dual_thesis_report,
+            "selected_candidate_side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
+            "selected_book_strategy_state": book_strategy_state,
+            "selected_book_strategy_playbook": str(book_strategy.get("playbook") or ""),
+            "selected_professional_grade": bool(professional_trade_plan.get("professional_grade")),
+            "selected_professional_blocker": str(professional_trade_plan.get("blocker") or ""),
+            "playbook_ai_selected_side": ai_selected_side if ai_selected_side in {"BUY", "SELL"} else "HOLD",
+            "playbook_ai_route": ai_route,
+            "playbook_ai_opposite_thesis_leads": ai_opposite_thesis_leads,
+            "playbook_ai_candidate_tradeable": ai_candidate_tradeable,
+            "full_suite_story_lock_v3": ai_story_lock,
+            "full_suite_story_controls_package_side": ai_story_lock_confirmed,
+        }
+        opportunity_maturity["dual_thesis_report_v3"] = dual_thesis_report
+        book_strategy["dual_thesis_report_v3"] = dual_thesis_report
+        professional_trade_plan["dual_thesis_report_v3"] = dual_thesis_report
+        professional_thesis_seconds = _int(thesis_horizon.get("expected_duration_sec"), preferred_expiry_seconds)
+        professional_thesis_candles = _int(thesis_horizon.get("expected_candle_count"), 0)
+        professional_plan_block_reason = str(professional_trade_plan.get("blocker") or "").strip().upper()
+        professional_plan_ok = bool(professional_trade_plan.get("professional_grade"))
+        if professional_thesis_seconds > preferred_expiry_seconds:
+            preferred_expiry_seconds = professional_thesis_seconds
+            reward_seconds = max(reward_seconds, professional_thesis_seconds)
+            if timing_expiry > 0:
+                timing_expiry = max(timing_expiry, professional_thesis_seconds)
+            timing_forecast["expected_time_to_favourable_move_sec"] = reward_seconds
+            timing_forecast["expected_time_to_target_sec"] = reward_seconds
+            timing_forecast["recommended_expiry_sec"] = preferred_expiry_seconds
+            timing_decision["preferred_expiry_sec"] = preferred_expiry_seconds
+            timing_decision["time_to_reward_sec"] = reward_seconds
+            timing_decision["expiry_band"] = _timing_expiry_band(preferred_expiry_seconds)
+            timing_decision["timing_forecast"] = timing_forecast
+            timing_risk = _mapping(timing_decision.get("timing_risk"))
+            timing_risk["expected_time_to_reward_sec"] = reward_seconds
+            timing_risk["expiry_sec"] = preferred_expiry_seconds
+            timing_decision["timing_risk"] = timing_risk
+        professional_trade_plan["applied_to_package"] = bool(professional_thesis_seconds >= preferred_expiry_seconds)
+        professional_enter_now_block = bool(playbook_enter_now and not professional_plan_ok)
+        if professional_enter_now_block:
+            playbook_enter_now = False
+            playbook_wait_state = "PREPARE"
+            opportunity_maturity["state"] = "PREPARE"
+            opportunity_maturity_state = "PREPARE"
+            opportunity_maturity["denied_at"] = professional_plan_block_reason or "PROFESSIONAL_TRADE_PLAN"
+            opportunity_maturity["next_required"] = str(
+                professional_trade_plan.get("next_required")
+                or "professional trend/reversal thesis required"
+            )
+        opportunity_maturity["professional_trade_plan"] = professional_trade_plan
+        opportunity_maturity["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
+        opportunity_maturity["playbook_ai_summary_v3"] = playbook_ai_summary
+        opportunity_maturity["professional_thesis_resolution"] = professional_thesis_resolution
+        opportunity_maturity["professional_thesis_candles"] = professional_thesis_candles
+        professional_thesis_state = _upper(professional_trade_plan.get("professional_thesis_state"))
+        professional_playbook_reasoning_override_allowed = bool(
+            playbook_enter_now
+            and professional_plan_ok
+            and candidate_side in {"BUY", "SELL"}
+            and professional_thesis_state in PROFESSIONAL_PLAYBOOK_AUTHORITY_STATES
+            and bool(execution_lane.get("accepted"))
+            and not runtime_blocked
+            and not candidate_invalidated
+            and not trap_active
+            and not history_exit_active
+            and current_candle_ok
+            and opposing_force_ok
+            and timing_has_explicit_expiry
+            and timing_mode == "ENTER_NOW"
+            and (
+                not permission_denied_effective
+                or permission_prepare_allowed
+                or lane_permission_override
+                or bool(professional_trade_plan.get("professional_grade"))
+            )
+            and hard_bad_entry_classes.issubset(PROFESSIONAL_REACTION_SOFT_BAD_CLASSES)
+            and (
+                not bad_entry_filter_hard_active
+                or reasoning_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES
+            )
+            and (
+                not bad_entry_detected_effective
+                or market_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES
+            )
+        )
+        if professional_playbook_reasoning_override_allowed:
+            reasoning_execution_blocked = False
+            reasoning_block_reason = ""
+            professional_reaction_reasoning_override_allowed = True
+            if hard_bad_entry_classes.issubset(PROFESSIONAL_REACTION_SOFT_BAD_CLASSES):
+                hard_bad_entry_class_active = False
+            if reasoning_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES:
+                bad_entry_filter_hard_active = False
+            if market_bad_entry_class in PROFESSIONAL_REACTION_SOFT_BAD_CLASSES:
+                bad_entry_detected_effective = False
+            opportunity_maturity["professional_playbook_reasoning_override_allowed"] = True
+            opportunity_maturity["reasoning_override_reason"] = (
+                "Professional playbook accepted a current source-truth trade plan; "
+                "legacy reasoning warnings are diagnostic only for this package."
+            )
+        playbook_required_stable_reads = max(1, _int(snapshot.get("playbook_required_stable_reads"), 2))
+        playbook_candidate_stable = bool(_bool(snapshot.get("execution_mature")) or candidate_stable_reads >= playbook_required_stable_reads)
+        professional_thesis_state = _upper(professional_thesis_resolution.get("thesis_state"))
+        side_conflict_requested = bool(both_executable_requested or (buy_score >= 0.62 and sell_score >= 0.62))
+        current_pressure_conflict_resolution = bool(
+            _bool(professional_thesis_resolution.get("current_pressure_defends_against_opposing_force"))
+            and _side(professional_thesis_resolution.get("authority_side")) == candidate_side
+            and candidate_side in {"BUY", "SELL"}
+        )
+        professional_conflict_resolution = bool(
+            side_conflict_requested
+            and (
+                _bool(professional_thesis_resolution.get("side_reframed"))
+                or _bool(professional_thesis_resolution.get("opposing_force_reaction_ready"))
+                or _bool(professional_thesis_resolution.get("primary_bias_zone_rejection_ready"))
+                or current_pressure_conflict_resolution
+            )
+            and professional_thesis_state
+            in {
+                "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+                "BUY_IN_SELL_OPPOSING_FORCE_REACTION",
+                "SELL_IN_BUY_TRADEABLE_COUNTER_LEG",
+                "BUY_IN_SELL_TRADEABLE_COUNTER_LEG",
+                "SELL_TREND_RESUMPTION_FROM_SUPPLY",
+                "BUY_TREND_RESUMPTION_FROM_DEMAND",
+                "PROVEN_REVERSAL_RECLAIM",
+                "BUY_CURRENT_PRESSURE_CONTINUATION",
+                "SELL_CURRENT_PRESSURE_CONTINUATION",
+            }
+            and candidate_side in {"BUY", "SELL"}
+        )
+        side_conflict_unresolved = bool(side_conflict_requested and not professional_conflict_resolution)
+        opportunity_maturity["side_conflict_requested"] = side_conflict_requested
+        opportunity_maturity["side_conflict_resolved_by_professional_thesis"] = professional_conflict_resolution
+        opportunity_maturity["side_conflict_resolved_by_current_pressure"] = current_pressure_conflict_resolution
+        playbook_hard_gate_reason = ""
+        if book_strategy_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
+            playbook_hard_gate_reason = f"PLAYBOOK_{book_strategy_state}"
+        elif side_conflict_unresolved:
+            playbook_hard_gate_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
+        elif runtime_blocked:
+            playbook_hard_gate_reason = runtime_block_reason
+        elif _bool(snapshot.get("source_identity_just_switched")):
+            playbook_hard_gate_reason = "SOURCE_IDENTITY_JUST_SWITCHED"
+        elif candidate_invalidated:
+            playbook_hard_gate_reason = "CANDIDATE_INVALIDATED"
+        elif permission_hard_block:
+            playbook_hard_gate_reason = str(permission_block_reason or "TRADE_PERMISSION_DENIED")
+        elif trap_active:
+            playbook_hard_gate_reason = "MARKET_TRAP"
+        elif professional_enter_now_block:
+            playbook_hard_gate_reason = professional_plan_block_reason
 
-    if playbook_enter_now and not playbook_hard_gate_reason:
-        entry_now_allowed = True
-        timing_mode = "ENTER_NOW"
-        timing_forecast["entry_now_quality"] = "GOOD"
-        timing_forecast["reason"] = "Playbook final decider accepted immediate execution after current source-truth gates."
-        timing_decision["entry_now_allowed"] = True
-        timing_decision["timing_mode"] = "ENTER_NOW"
-        timing_decision["timing_forecast"] = timing_forecast
-        timing_entry = _mapping(timing_decision.get("entry_timing"))
-        timing_entry.update(
-            {
-                "mode": "ENTER_NOW",
-                "side": candidate_side if candidate_side in {"BUY", "SELL"} else None,
-                "reason": "Playbook final decider accepted immediate execution.",
-                "next_condition": "none",
+        if playbook_enter_now and not playbook_hard_gate_reason:
+            entry_now_allowed = True
+            timing_mode = "ENTER_NOW"
+            timing_forecast["entry_now_quality"] = "GOOD"
+            timing_forecast["reason"] = "Playbook final decider accepted immediate execution after current source-truth gates."
+            timing_decision["entry_now_allowed"] = True
+            timing_decision["timing_mode"] = "ENTER_NOW"
+            timing_decision["timing_forecast"] = timing_forecast
+            timing_entry = _mapping(timing_decision.get("entry_timing"))
+            timing_entry.update(
+                {
+                    "mode": "ENTER_NOW",
+                    "side": candidate_side if candidate_side in {"BUY", "SELL"} else None,
+                    "reason": "Playbook final decider accepted immediate execution.",
+                    "next_condition": "none",
+                }
+            )
+            timing_decision["entry_timing"] = timing_entry
+            timing_decision["playbook_strategy_authorized"] = True
+            timing_decision["lane_is_contributor"] = True
+            timing_decision["packet_requires_current_source_truth"] = True
+            if timing_expiry <= 0:
+                timing_expiry = max(1, preferred_expiry_seconds)
+                timing_decision["preferred_expiry_sec"] = timing_expiry
+            timing_has_explicit_expiry = True
+
+        professional_thesis_state = _upper(professional_trade_plan.get("professional_thesis_state"))
+        professional_flip_flop_override = bool(
+            flip_flop_contained
+            and playbook_enter_now
+            and professional_plan_ok
+            and not playbook_hard_gate_reason
+            and _bool(professional_thesis_resolution.get("side_reframed"))
+            and professional_thesis_state
+            in {
+                "PRIMARY_BIAS_ALIGNED",
+                "PULLBACK_IN_PRIMARY_TREND",
+                "TREND_ALIGNED_CONTINUATION",
+                "PROVEN_REVERSAL_RECLAIM",
+                "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
+                "BUY_IN_SELL_OPPOSING_FORCE_REACTION",
+                "SELL_TREND_RESUMPTION_FROM_SUPPLY",
+                "BUY_TREND_RESUMPTION_FROM_DEMAND",
             }
         )
-        timing_decision["entry_timing"] = timing_entry
-        timing_decision["playbook_strategy_authorized"] = True
-        timing_decision["lane_is_contributor"] = True
-        timing_decision["packet_requires_current_source_truth"] = True
-        if timing_expiry <= 0:
-            timing_expiry = max(1, preferred_expiry_seconds)
-            timing_decision["preferred_expiry_sec"] = timing_expiry
-        timing_has_explicit_expiry = True
 
-    professional_thesis_state = _upper(professional_trade_plan.get("professional_thesis_state"))
-    professional_flip_flop_override = bool(
-        flip_flop_contained
-        and playbook_enter_now
-        and professional_plan_ok
-        and not playbook_hard_gate_reason
-        and _bool(professional_thesis_resolution.get("side_reframed"))
-        and professional_thesis_state
-        in {
-            "PRIMARY_BIAS_ALIGNED",
-            "PULLBACK_IN_PRIMARY_TREND",
-            "TREND_ALIGNED_CONTINUATION",
-            "PROVEN_REVERSAL_RECLAIM",
-            "SELL_IN_BUY_OPPOSING_FORCE_REACTION",
-            "BUY_IN_SELL_OPPOSING_FORCE_REACTION",
-            "SELL_TREND_RESUMPTION_FROM_SUPPLY",
-            "BUY_TREND_RESUMPTION_FROM_DEMAND",
-        }
-    )
-    final_state = "WATCHING"
-    block_reason: str | None = None
-    executable = False
-    if side_conflict_unresolved:
-        final_state = "CONFLICT"
-        candidate_side = "HOLD"
-        block_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
-    elif runtime_blocked:
-        final_state = "BLOCKED_BY_RUNTIME"
-        block_reason = runtime_block_reason
-    elif flip_flop_contained and not professional_flip_flop_override:
-        final_state = "WATCHING"
-        block_reason = "FLIP_FLOP_CONTAINED"
-    elif professional_enter_now_block:
-        final_state = "PREPARING"
-        block_reason = professional_plan_block_reason
-    elif playbook_enter_now:
-        if playbook_hard_gate_reason:
-            if playbook_hard_gate_reason in {
-                "REQUIRED_MODELS_NOT_AWAKE",
-                "SOURCE_IDENTITY_JUST_SWITCHED",
-                "LIVE_INTEGRITY_HASH_MISMATCH",
-            } or playbook_hard_gate_reason.startswith("INSTRUMENT_CONTEXT"):
+        def _resolve_execution_state_and_packages() -> dict[str, Any]:
+            nonlocal candidate_side
+            nonlocal entry_quality_label
+            nonlocal opportunity_maturity_state
+            nonlocal timeframe_seconds
+            final_state = "WATCHING"
+            block_reason: str | None = None
+            executable = False
+            if side_conflict_unresolved:
+                final_state = "CONFLICT"
+                candidate_side = "HOLD"
+                block_reason = "BUY_AND_SELL_EXECUTABLE_CONFLICT"
+            elif runtime_blocked:
                 final_state = "BLOCKED_BY_RUNTIME"
-            elif permission_denied_effective and permission_prepare_allowed:
-                final_state = "PREPARING"
-            else:
+                block_reason = runtime_block_reason
+            elif flip_flop_contained and not professional_flip_flop_override:
                 final_state = "WATCHING"
-            block_reason = playbook_hard_gate_reason
-        elif permission_denied_effective and permission_prepare_allowed:
-            final_state = "PREPARING"
-            block_reason = permission_block_reason
-        elif packet_identity_validation.ok:
-            final_state = "EXECUTABLE"
-            executable = True
-        else:
-            final_state = "BLOCKED_BY_RUNTIME"
-            block_reason = packet_identity_validation.first_reason
-    elif side_ok and playbook_wait_state in {"EARLY_FORMING", "VALID_WATCH", "PREPARE", "NO_OPPORTUNITY", "LATE_CHASE", "INVALIDATED", "MISSED"}:
-        final_state = "PREPARING" if playbook_wait_state in {"VALID_WATCH", "PREPARE"} else "WATCHING"
-        block_reason = reasoning_block_reason if reasoning_execution_blocked and context_ok else f"PLAYBOOK_MATURITY_{playbook_wait_state}"
-    elif market_blocked_effective or permission_hard_block:
-        final_state = "WATCHING"
-        block_reason = str(market_block_reason or permission_block_reason or "BLOCKED_BY_MARKET")
-    elif permission_denied_effective and context_ok:
-        final_state = "PREPARING" if side_ok and context_ok and permission_prepare_allowed else "WATCHING"
-        block_reason = permission_block_reason
-    elif side_ok and context_ok and lane_effective_timing_ready and lane_effective_mature and stable and final_score_passed:
-        if not timing_has_explicit_expiry:
-            final_state = "BLOCKED_BY_RUNTIME"
-            block_reason = "MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING"
-        elif reasoning_execution_blocked:
-            final_state = "PREPARING"
-            block_reason = reasoning_block_reason
-        elif opportunity_maturity_state != "ENTER_NOW":
-            final_state = "PREPARING" if opportunity_maturity_state in {"PREPARE", "VALID_WATCH", "EARLY_FORMING"} else "WATCHING"
-            block_reason = f"OPPORTUNITY_MATURITY_{opportunity_maturity_state}"
-        elif not timing_decision["entry_now_allowed"] or timing_mode != "ENTER_NOW":
-            final_state = "PREPARING"
-            block_reason = f"TIMING_MODE_{timing_mode}"
-        elif packet_identity_validation.ok:
-            final_state = "EXECUTABLE"
-            executable = True
-        else:
-            final_state = "BLOCKED_BY_RUNTIME"
-            block_reason = packet_identity_validation.first_reason
-    elif side_ok and context_ok and lane_effective_timing_ready and lane_effective_mature and stable:
-        final_state = "PREPARING"
-        block_reason = "LANE_SCORE_BELOW_THRESHOLD"
-    elif side_ok and context_ok:
-        final_state = "PREPARING"
-    elif side_ok:
-        final_state = "WATCHING"
+                block_reason = "FLIP_FLOP_CONTAINED"
+            elif professional_enter_now_block:
+                final_state = "PREPARING"
+                block_reason = professional_plan_block_reason
+            elif playbook_enter_now:
+                if playbook_hard_gate_reason:
+                    if playbook_hard_gate_reason in {
+                        "REQUIRED_MODELS_NOT_AWAKE",
+                        "SOURCE_IDENTITY_JUST_SWITCHED",
+                        "LIVE_INTEGRITY_HASH_MISMATCH",
+                    } or playbook_hard_gate_reason.startswith("INSTRUMENT_CONTEXT"):
+                        final_state = "BLOCKED_BY_RUNTIME"
+                    elif permission_denied_effective and permission_prepare_allowed:
+                        final_state = "PREPARING"
+                    else:
+                        final_state = "WATCHING"
+                    block_reason = playbook_hard_gate_reason
+                elif permission_denied_effective and permission_prepare_allowed:
+                    final_state = "PREPARING"
+                    block_reason = permission_block_reason
+                elif packet_identity_validation.ok:
+                    final_state = "EXECUTABLE"
+                    executable = True
+                else:
+                    final_state = "BLOCKED_BY_RUNTIME"
+                    block_reason = packet_identity_validation.first_reason
+            elif side_ok and playbook_wait_state in {"EARLY_FORMING", "VALID_WATCH", "PREPARE", "NO_OPPORTUNITY", "LATE_CHASE", "INVALIDATED", "MISSED"}:
+                final_state = "PREPARING" if playbook_wait_state in {"VALID_WATCH", "PREPARE"} else "WATCHING"
+                block_reason = reasoning_block_reason if reasoning_execution_blocked and context_ok else f"PLAYBOOK_MATURITY_{playbook_wait_state}"
+            elif market_blocked_effective or permission_hard_block:
+                final_state = "WATCHING"
+                block_reason = str(market_block_reason or permission_block_reason or "BLOCKED_BY_MARKET")
+            elif permission_denied_effective and context_ok:
+                final_state = "PREPARING" if side_ok and context_ok and permission_prepare_allowed else "WATCHING"
+                block_reason = permission_block_reason
+            elif side_ok and context_ok and lane_effective_timing_ready and lane_effective_mature and stable and final_score_passed:
+                if not timing_has_explicit_expiry:
+                    final_state = "BLOCKED_BY_RUNTIME"
+                    block_reason = "MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING"
+                elif reasoning_execution_blocked:
+                    final_state = "PREPARING"
+                    block_reason = reasoning_block_reason
+                elif opportunity_maturity_state != "ENTER_NOW":
+                    final_state = "PREPARING" if opportunity_maturity_state in {"PREPARE", "VALID_WATCH", "EARLY_FORMING"} else "WATCHING"
+                    block_reason = f"OPPORTUNITY_MATURITY_{opportunity_maturity_state}"
+                elif not timing_decision["entry_now_allowed"] or timing_mode != "ENTER_NOW":
+                    final_state = "PREPARING"
+                    block_reason = f"TIMING_MODE_{timing_mode}"
+                elif packet_identity_validation.ok:
+                    final_state = "EXECUTABLE"
+                    executable = True
+                else:
+                    final_state = "BLOCKED_BY_RUNTIME"
+                    block_reason = packet_identity_validation.first_reason
+            elif side_ok and context_ok and lane_effective_timing_ready and lane_effective_mature and stable:
+                final_state = "PREPARING"
+                block_reason = "LANE_SCORE_BELOW_THRESHOLD"
+            elif side_ok and context_ok:
+                final_state = "PREPARING"
+            elif side_ok:
+                final_state = "WATCHING"
 
-    base_snapshot = dict(snapshot)
-    base_snapshot["instrument_context"] = instrument_context
-    base = _packet_base(
-        base_snapshot,
-        current_now,
-        packet_side=candidate_side,
-        packet_playbook=str(book_strategy.get("playbook") or ""),
-        packet_state=book_strategy_state,
-    )
-    active_candidate_id = _candidate_id(
-        snapshot,
-        side=candidate_side,
-        market_context=market_context,
-        entry_quality=entry_quality_surface,
-    )
-    entry_quality_label = _entry_quality_label(entry_quality_surface) or "UNKNOWN"
-    effective_permission_state = "GRANTED" if executable or lane_permission_override else "DENIED" if permission_denied_effective else "PENDING"
-    permission_state = str(
-        effective_permission_state
-        if lane_permission_override or executable or permission_denied_effective
-        else trade_permission.get("permission_state")
-        or effective_permission_state
-    ).strip().upper()
-    if executable:
-        promotion_result = "EXECUTABLE_PACKET_CREATED"
-    elif final_state == "PREPARING":
-        promotion_result = "PREPARING"
-    elif flip_flop_contained and not professional_flip_flop_override:
-        promotion_result = "WAITING"
-    else:
-        promotion_result = final_state
-    if executable:
-        blocked_by = None
-    elif block_reason:
-        blocked_by = block_reason
-    elif flip_flop_contained and not professional_flip_flop_override:
-        blocked_by = "candidate_flip_count"
-    elif not side_ok:
-        blocked_by = "candidate_side"
-    elif not context_ok:
-        blocked_by = "NO_EXECUTION_LANE_ACCEPTED"
-    elif not lane_effective_timing_ready:
-        blocked_by = "timing"
-    elif not lane_effective_mature:
-        blocked_by = "candidate_maturity"
-    elif not stable:
-        blocked_by = "dominance_margin"
-    elif not final_score_passed:
-        blocked_by = "LANE_SCORE_BELOW_THRESHOLD"
-    else:
-        blocked_by = None
-    true_blocker = str(block_reason or blocked_by or "NONE").strip().upper()
-    candidate_stage = (
-        "EXECUTION_PACKET_PUBLISHED"
-        if executable
-        else "PREPARING"
-        if final_state == "PREPARING"
-        else "CANDIDATE_STABLE"
-        if side_ok and stable
-        else "CANDIDATE_CREATED"
-        if side_ok
-        else "OBSERVATION"
-    )
-    lane_release_requirements = _lane_release_requirements(
-        execution_lane,
-        final_score=final_execution_score,
-        lane_required_score=lane_required_score,
-    )
-    if executable:
-        next_required = "none"
-    elif flip_flop_contained and not professional_flip_flop_override:
-        next_required = (
-            f"candidate_stage=CANDIDATE_STABLE; same candidate side for {max(0, _int(snapshot.get('flip_flop_release_stable_reads'), 2) - candidate_stable_reads)} more read(s); dominance_margin >= {min_dominance_margin:.2f}; entry_quality_ok=true; timing_mode=ENTER_NOW"
-        )
-    elif true_blocker.startswith("PROFESSIONAL_"):
-        next_required = str(
-            professional_trade_plan.get("next_required")
-            or "professional trend/reversal thesis required"
-        )
-    elif true_blocker.startswith("PLAYBOOK_"):
-        next_required = str(book_strategy.get("next_required") or "playbook reaction proof required")
-    elif not context_ok:
-        next_required = lane_release_requirements
-    elif not lane_effective_mature:
-        next_required = f"candidate_stage={candidate_stage}; next_required one more stable candidate read"
-    elif not lane_effective_timing_ready or timing_mode != "ENTER_NOW":
-        next_required = f"timing_mode={timing_mode}; next_required {timing_decision['entry_timing']['next_condition']}"
-    elif not timing_has_explicit_expiry:
-        next_required = "timing.expiry_seconds explicit and execution.time_sequence target exists"
-    elif not final_score_passed:
-        next_required = f"final_score={final_execution_score:.4f} >= threshold={lane_required_score:.4f} for selected_lane={execution_lane.get('name', 'execution lane')}"
-    else:
-        next_required = str(block_reason or "continue study")
-    instrument_context_state = str(
-        instrument_context.get("instrument_context_state")
-        or instrument_context.get("identity_state_v2")
-        or instrument_context.get("identity_state")
-        or "UNKNOWN"
-    ).strip().upper()
-    instrument_release_condition = str(
-        instrument_context.get("release_condition")
-        or "stable locked broker surface evidence"
-    ).strip()
-    if true_blocker.startswith("INSTRUMENT_CONTEXT") or true_blocker in {
-        "MISSING_TIMEFRAME",
-        "INSTRUMENT_CONTEXT_INVALIDATED",
-        "INSTRUMENT_CONTEXT_NOT_PAPER_SAFE",
-        "INSTRUMENT_CONTEXT_NOT_BROKER_CLICK_SAFE",
-    }:
-        next_required = _instrument_release_requirement(instrument_context, instrument_release_condition)
-    if final_state == "BLOCKED_BY_RUNTIME" or true_blocker.startswith("INSTRUMENT_CONTEXT"):
-        runtime_field = "instrument_context" if true_blocker.startswith("INSTRUMENT_CONTEXT") else "runtime"
-        _mark_opportunity_maturity_blocked(
-            opportunity_maturity,
-            state="VALID_WATCH",
-            denied_at=true_blocker,
-            next_required=next_required,
-            field=runtime_field,
-            received=true_blocker,
-            required="hard runtime gates pass",
-            reason=next_required,
-            hard=True,
-        )
-        opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "VALID_WATCH")
-    opportunity_maturity["next_required"] = "publish validated PG_EXECUTION_PACKET_V3" if executable else next_required
-    raw_lane_blockers = execution_lane.get("blockers")
-    lane_blockers = (
-        [
-            _upper(blocker)
-            for blocker in cast(Sequence[Any], raw_lane_blockers)
-            if str(blocker or "").strip()
-        ]
-        if isinstance(raw_lane_blockers, Sequence) and not isinstance(raw_lane_blockers, (str, bytes, bytearray))
-        else []
-    )
-    release_state = _non_executable_release_state(
-        executable=executable,
-        true_blocker=true_blocker,
-        final_state=final_state,
-        flip_flop_contained=flip_flop_contained,
-        permission_denied_effective=permission_denied_effective,
-        context_ok=context_ok,
-        lane_effective_timing_ready=lane_effective_timing_ready,
-        timing_mode=timing_mode,
-        final_score_passed=final_score_passed,
-        lane_score_blocked="LANE_SCORE_BELOW_THRESHOLD" in lane_blockers,
-        lane_timing_blocked="CURRENT_CANDLE_NOT_ACCEPTED" in lane_blockers,
-        packet_identity_mode=packet_identity_mode,
-        instrument_context=instrument_context,
-    )
-    if executable:
-        release_condition = "none"
-    elif true_blocker.startswith("INSTRUMENT_CONTEXT") or final_state == "BLOCKED_BY_RUNTIME":
-        release_condition = next_required
-    elif true_blocker.startswith("PROFESSIONAL_"):
-        release_condition = str(
-            professional_trade_plan.get("next_required")
-            or next_required
-            or "professional trend/reversal thesis required"
-        )
-    elif true_blocker.startswith("PLAYBOOK_"):
-        release_condition = str(book_strategy.get("next_required") or next_required or "playbook reaction proof required")
-    elif flip_flop_contained and not professional_flip_flop_override:
-        release_condition = "candidate_stage=CANDIDATE_STABLE + same candidate side + stable dominance + acceptable entry + timing_mode=ENTER_NOW"
-    elif not context_ok:
-        release_condition = lane_release_requirements
-    elif not lane_effective_mature:
-        release_condition = "candidate_stage=CANDIDATE_STABLE/PREPARING"
-    elif not lane_effective_timing_ready or timing_mode != "ENTER_NOW":
-        release_condition = f"timing_mode=ENTER_NOW; {timing_decision['entry_timing']['next_condition']}"
-    elif not stable:
-        release_condition = f"dominance_margin >= {min_dominance_margin:.2f}"
-    elif not final_score_passed:
-        release_condition = f"final_score >= threshold ({final_execution_score:.4f}/{lane_required_score:.4f})"
-    else:
-        release_condition = next_required
-    missed_opportunity = _missed_opportunity_probe(
-        candidate_side=candidate_side,
-        execution_lane=execution_lane,
-        raw_council_score=raw_council_score,
-        final_execution_score=final_execution_score,
-        true_blocker=true_blocker,
-    )
-    trade_candidate_queue_raw = market.get("trade_candidate_queue", _mapping(market_reality.get("trade_candidate_queue")))
-    trade_candidate_queue: dict[str, Any]
-    if isinstance(trade_candidate_queue_raw, Mapping):
-        trade_candidate_queue = _mapping(trade_candidate_queue_raw)
-    elif isinstance(trade_candidate_queue_raw, Sequence) and not isinstance(trade_candidate_queue_raw, (str, bytes, bytearray)):
-        trade_candidate_queue = {"candidates": _rows(trade_candidate_queue_raw)}
-    else:
-        trade_candidate_queue = {}
-    active_candidate: dict[str, Any] = {
-        "candidate_id": active_candidate_id,
-        "side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
-        "stage": candidate_stage,
-        "maturity_stage": "EXECUTABLE_PACKET" if executable else maturity_stage,
-        "stable_reads": candidate_stable_reads,
-        "raw_side_flips": raw_flip_count,
-        "candidate_flip_count_10s": candidate_flip_count,
-        "candidate_invalidated": candidate_invalidated,
-        "entry_quality": entry_quality_label,
-        "permission": permission_state,
-        "opportunity_maturity": opportunity_maturity_state,
-        "opportunity_maturity_confidence": opportunity_maturity["confidence"],
-        "book_strategy_playbook": book_strategy.get("playbook"),
-        "book_strategy_maturity": book_strategy_state,
-        "flip_flop_risk": bool(flip_flop_contained and not professional_flip_flop_override),
-        "professional_flip_flop_override": professional_flip_flop_override,
-        "professional_thesis_state": professional_trade_plan.get("professional_thesis_state"),
-        "release_allowed": flip_flop_release_allowed,
-        "raw_recent_sides": raw_recent_sides,
-        "candidate_recent_sides": candidate_recent_sides,
-    }
-    trade_candidate_queue.update(
-        {
-            "active_candidate": active_candidate,
-            "candidate_id": active_candidate_id,
-            "candidate_side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
-            "candidate_stage": active_candidate["stage"],
-            "candidate_stable_reads": candidate_stable_reads,
-            "raw_side_flips": raw_flip_count,
-            "candidate_flip_count_10s": candidate_flip_count,
-            "candidate_invalidated": candidate_invalidated,
-            "opportunity_maturity": opportunity_maturity,
-            "opportunity_maturity_state": opportunity_maturity_state,
-            "book_strategy": book_strategy,
-            "book_strategy_state": book_strategy_state,
-            "flip_flop_risk": bool(flip_flop_contained and not professional_flip_flop_override),
-            "flip_flop_release_allowed": flip_flop_release_allowed,
-            "professional_flip_flop_override": professional_flip_flop_override,
-            "professional_thesis_resolution": professional_thesis_resolution,
-        }
-    )
-    allowance_package = _build_allowance_package_v1(
-        candidate_side=candidate_side,
-        timing_mode=timing_mode,
-        timing_decision=timing_decision,
-        execution_lane=execution_lane,
-        final_execution_score=final_execution_score,
-        lane_required_score=lane_required_score,
-        executable=executable,
-        final_state=final_state,
-        true_blocker=true_blocker,
-        next_required=next_required,
-        release_state=release_state,
-        promotion_result=promotion_result,
-        path_class=path_class,
-        preferred_expiry_seconds=preferred_expiry_seconds,
-        final_score_passed=final_score_passed,
-        intraday_reasoning_override_allowed=intraday_enter_now_reasoning_override_allowed,
-        wave_reasoning_override_allowed=wave_reasoning_override_allowed,
-        professional_reaction_reasoning_override_allowed=professional_reaction_reasoning_override_allowed,
-        trap_active=trap_active,
-        late_chase=late_chase,
-        opposing_force_ok=opposing_force_ok,
-        hard_bad_entry_class_active=hard_bad_entry_class_active,
-        opportunity_maturity=opportunity_maturity,
-    )
-    timeframe_seconds = max(0, _int(candle_movement_context.get("timeframe_seconds"), 0))
-    professional_entry_window = _mapping(professional_trade_plan.get("entry_window"))
-    naturally_disarmed = bool(
-        not executable
-        and (
-            book_strategy_state != "ENTER_NOW"
-            or opportunity_maturity_state in {"INVALIDATED", "MISSED", "LATE_CHASE"}
-        )
-    )
-    execution_opportunity_window = _resolve_execution_opportunity_window_v3(
-        snapshot,
-        previous_state,
-        candidate_id=active_candidate_id,
-        candidate_side=candidate_side,
-        entry_window=professional_entry_window,
-        executable=executable,
-        naturally_disarmed=naturally_disarmed,
-        now_epoch=current_now,
-        frame_id=_int(base.get("frame_id"), 0),
-        capture_count=_int(base.get("capture_count"), 0),
-        session_id=str(base.get("session_id") or ""),
-        symbol=str(base.get("symbol") or ""),
-        timeframe=str(base.get("timeframe") or ""),
-    )
-    if execution_opportunity_window:
-        professional_entry_window.update(
-            {
-                "opportunity_id": execution_opportunity_window.get("opportunity_id"),
-                "opportunity_key": execution_opportunity_window.get("opportunity_key"),
-                "duration_sec": execution_opportunity_window.get("duration_sec"),
-                "opened_epoch": execution_opportunity_window.get("opened_epoch"),
-                "opened_epoch_sec": execution_opportunity_window.get("opened_epoch_sec"),
-                "valid_until_epoch": execution_opportunity_window.get("valid_until_epoch"),
-                "valid_until_epoch_sec": execution_opportunity_window.get("valid_until_epoch_sec"),
-                "remaining_sec": execution_opportunity_window.get("remaining_sec"),
-                "state": execution_opportunity_window.get("state"),
-                "purpose": "absolute immediate entry authorization window; later frames do not renew it",
-            }
-        )
-        professional_trade_plan["entry_window"] = professional_entry_window
-        professional_trade_plan["execution_opportunity_window_v3"] = execution_opportunity_window
-    professional_thesis_horizon = _mapping(professional_trade_plan.get("thesis_horizon"))
-    expected_move_candles = (
-        _int(professional_thesis_horizon.get("expected_candle_count"), 0)
-        or max(1, (int(max(0, preferred_expiry_seconds)) + timeframe_seconds - 1) // timeframe_seconds)
-        if timeframe_seconds > 0 and preferred_expiry_seconds > 0
-        else 0
-    )
-    current_leg_payload = _mapping(candle_movement_context.get("current_leg"))
-    current_leg_candle_count = _int(current_leg_payload.get("candle_count"), 0)
-    expected_duration_sec = _int(professional_thesis_horizon.get("expected_duration_sec"), int(max(0, preferred_expiry_seconds)))
-    expected_move_time = {
-        "expected_duration_sec": expected_duration_sec,
-        "expected_duration_text": _duration_text(expected_duration_sec),
-        "timeframe": str(candle_movement_context.get("timeframe") or "").upper(),
-        "timeframe_seconds": timeframe_seconds,
-        "expected_candle_count": expected_move_candles,
-        "current_leg_candle_count": current_leg_candle_count,
-        "projected_total_current_leg_candles": current_leg_candle_count + expected_move_candles,
-        "current_leg_side": current_leg_payload.get("side"),
-        "current_leg_stage": candle_movement_context.get("move_stage"),
-        "basis": str(professional_thesis_horizon.get("basis") or movement_projection_horizon.get("basis") or "preferred_expiry_seconds_to_timeframe_candles"),
-        "entry_window": professional_entry_window,
-        "thesis_horizon": professional_thesis_horizon,
-        "professional_trade_plan": professional_trade_plan,
-        "projection_horizon": movement_projection_horizon,
-    }
-    allowance_package["packet_id"] = base["packet_id"]
-    allowance_package["expected_duration_sec"] = expected_duration_sec
-    allowance_package["expected_duration_text"] = expected_move_time["expected_duration_text"]
-    allowance_package["expected_candle_count"] = expected_move_candles
-    candle_movement_brief = {
-        "visible_candle_count": candle_movement_context.get("visible_candle_count"),
-        "tracked_candle_count": candle_movement_context.get("tracked_candle_count"),
-        "current_leg_candle_count": current_leg_candle_count,
-        "current_leg_side": current_leg_payload.get("side"),
-        "current_leg_stage": candle_movement_context.get("move_stage"),
-        "move_duration": candle_movement_context.get("move_duration"),
-        "opposing_force_room": candle_movement_context.get("opposing_force_room"),
-        "expected_move_time": expected_move_time,
-    }
-    allowance_package["candle_movement_context_v3"] = candle_movement_context
-    allowance_package["candle_movement"] = candle_movement_brief
-    allowance_package["expected_move_time"] = expected_move_time
-    allowance_package["entry_window"] = professional_entry_window
-    if execution_opportunity_window:
-        allowance_package["execution_opportunity_window_v3"] = execution_opportunity_window
-    allowance_package["thesis_horizon"] = professional_thesis_horizon
-    allowance_package["professional_trade_plan"] = professional_trade_plan
-    allowance_package["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
-    allowance_package["playbook_ai_summary_v3"] = playbook_ai_summary
-    allowance_package["professional_thesis_resolution"] = professional_thesis_resolution
-    allowance_package["dual_thesis_report_v3"] = dual_thesis_report
-    allowance_package["professional_thesis_state"] = professional_trade_plan.get("professional_thesis_state")
-    allowance_package["professional_authority_side"] = professional_trade_plan.get("authority_side")
-    allowance_package["professional_flip_flop_override"] = professional_flip_flop_override
-    allowance_package["book_strategy"] = book_strategy.get("strategy_read")
-    allowance_package["book_strategy_playbook"] = book_strategy.get("playbook")
-    allowance_package["book_strategy_maturity"] = book_strategy_state
-    promotion_trace: dict[str, Any] = {
-        "packet_id": base["packet_id"],
-        "release_state": release_state,
-        "non_executable_state": None if executable else release_state,
-        "raw_side": raw_side,
-        "previous_raw_side": raw_recent_sides[-2] if len(raw_recent_sides) >= 2 else None,
-        "candidate_side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
-        "previous_candidate_side": candidate_recent_sides[-2] if len(candidate_recent_sides) >= 2 else None,
-        "candidate_id": active_candidate_id,
-        "candidate_stage": candidate_stage,
-        "execution_opportunity_window_v3": execution_opportunity_window,
-        "opportunity_maturity": opportunity_maturity,
-        "opportunity_maturity_state": opportunity_maturity_state,
-        "book_strategy": book_strategy,
-        "book_strategy_state": book_strategy_state,
-        "book_strategy_playbook": book_strategy.get("playbook"),
-        "playbook_ai_intelligence_v3": playbook_ai_intelligence,
-        "playbook_ai_summary_v3": playbook_ai_summary,
-        "professional_trade_plan": professional_trade_plan,
-        "professional_thesis_resolution": professional_thesis_resolution,
-        "dual_thesis_report_v3": dual_thesis_report,
-        "professional_flip_flop_override": professional_flip_flop_override,
-        "professional_thesis_horizon": professional_thesis_horizon,
-        "thesis_horizon": professional_thesis_horizon,
-        "expected_move_time": expected_move_time,
-        "expected_duration_sec": expected_duration_sec,
-        "expected_candle_count": expected_move_candles,
-        "candle_movement_context_v3": candle_movement_context,
-        "candle_movement": candle_movement_brief,
-        "visual_integrity": opportunity_maturity.get("visual_integrity"),
-        "candidate_stable_reads": candidate_stable_reads,
-        "playbook_required_stable_reads": playbook_required_stable_reads,
-        "playbook_candidate_stable": playbook_candidate_stable,
-        "candidate_stability_policy_v3": _mapping(snapshot.get("candidate_stability_policy_v3")),
-        "runtime_block_reason": runtime_block_reason,
-        "live_integrity_hash_mismatch": live_integrity_hash_mismatch,
-        "top_input_frame_hash": top_input_frame_hash,
-        "live_integrity_frame_hash": live_integrity_frame_hash,
-        "raw_flip_count_10s": raw_flip_count,
-        "candidate_flip_count_10s": candidate_flip_count,
-        "dominance_margin": round(float(dominance_margin), 4),
-        "entry_quality": entry_quality_label,
-        "entry_quality_ok": lane_effective_entry_quality_ok,
-        "raw_entry_quality_ok": entry_quality_ok,
-        "timing_ready": lane_effective_timing_ready,
-        "raw_timing_ready": timing_ready,
-        "timing_mode": timing_mode,
-        "timing_has_explicit_expiry": timing_has_explicit_expiry,
-        "timing_decision": timing_decision,
-        "late_chase_detected": bool(
-            bad_entry.get("detected")
-            or market_trap.get("late_chase_detected")
-            or str(market_trap.get("trap_type") or market_trap.get("primary_trap") or "").upper().startswith("LATE_CHASE")
-        ),
-        "trap_active": trap_active,
-        "path_quality": "ACCEPTABLE" if opposing_force_ok else "OPPOSING_FORCE_TOO_CLOSE",
-        "opposing_force_ok": opposing_force_ok,
-        "instrument_context_state": instrument_context_state,
-        "instrument_context_broker_click_safe": bool(instrument_context.get("broker_click_safe")),
-        "instrument_context_release_condition": instrument_release_condition,
-        "instrument_context_evidence": _mapping(instrument_context.get("evidence")),
-        "permission": permission_state,
-        "permission_override_allowed": lane_permission_override,
-        "market_block_override_allowed": lane_market_override,
-        "reasoning_decision_state": reasoning_decision_state,
-        "reasoning_execution_blocked": reasoning_execution_blocked,
-        "reasoning_block_reason": reasoning_block_reason,
-        "intraday_enter_now_reasoning_override_allowed": intraday_enter_now_reasoning_override_allowed,
-        "high_frequency_soft_wait_only": high_frequency_soft_wait_only,
-        "high_frequency_wait_blocks_intraday": high_frequency_wait_blocks_intraday,
-        "wave_reasoning_override_allowed": wave_reasoning_override_allowed,
-        "professional_reaction_reasoning_override_allowed": professional_reaction_reasoning_override_allowed,
-        "professional_playbook_reasoning_override_allowed": professional_playbook_reasoning_override_allowed,
-        "reasoning_bad_entry_class": reasoning_bad_entry_class,
-        "market_bad_entry_class": market_bad_entry_class,
-        "bad_entry_detected_effective": bad_entry_detected_effective,
-        "bad_entry_filter_hard_active": bad_entry_filter_hard_active,
-        "hard_bad_entry_class_active": hard_bad_entry_class_active,
-        "late_chase_block_overridden": late_chase_block_overridden,
-        "late_chase_bad_entry_override_allowed": late_chase_bad_entry_override_allowed,
-        "denied_at": (
-            "NONE"
-            if executable
-            else true_blocker
-            if true_blocker != "NONE"
-            else blocked_by
-            if blocked_by != "NONE"
-            else promotion_result
-        ),
-        "base_council_score": round(float(base_council_score), 4),
-        "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
-        "raw_council_score": round(float(raw_council_score), 4),
-        "market_reality_adjustment": round(float(market_reality_adjustment), 4),
-        "final_execution_score": round(float(final_execution_score), 4),
-        "final_score": round(float(final_execution_score), 4),
-        "execution_threshold": round(float(execution_threshold), 4),
-        "lane_threshold": round(float(lane_required_score), 4),
-        "threshold": round(float(lane_required_score), 4),
-        "execution_lane": execution_lane,
-        "selected_lane": execution_lane.get("name"),
-        "lane_accepted": bool(execution_lane.get("accepted")),
-        "accepted_lanes": execution_lane.get("accepted_lanes", []),
-        "stale_dominant_overridden": bool(execution_lane.get("stale_dominant_overridden")),
-        "raw_late_chase": bool(execution_lane.get("raw_late_chase", late_chase_raw)),
-        "effective_late_chase": bool(execution_lane.get("effective_late_chase", late_chase)),
-        "stale_late_chase_overridden": stale_late_chase_overridden,
-        "live_trigger_reaction": live_trigger_reaction,
-        "structural_flow_ready": bool(execution_lane.get("structural_flow_ready")),
-        "reversal_capture_mature": bool(execution_lane.get("reversal_capture_mature")),
-        "mature_directional_flow_ready": bool(execution_lane.get("mature_directional_flow_ready")),
-        "opportunity_capture_mode": bool(execution_lane.get("opportunity_capture_mode")),
-        "current_candle_acceptance": execution_lane.get("current_candle_acceptance", {}),
-        "wave_context": execution_lane.get("wave_context", {}),
-        "release_allowed": flip_flop_release_allowed,
-        "blocked_by": "NONE" if executable else blocked_by,
-        "true_blocker": "NONE" if executable else true_blocker,
-        "next_required": "none" if executable else next_required,
-        "release_condition": release_condition,
-        "promotion_result": promotion_result,
-        "packet_result": "PG_EXECUTION_PACKET_V3_PUBLISHED" if executable else "STUDY_PACKET_PUBLISHED",
-        "missed_opportunity": missed_opportunity,
-        "reasoning_state": final_reasoning_decision.get("decision"),
-        "reasoning_play": final_reasoning_decision.get("play"),
-        "reasoning_regime": final_reasoning_decision.get("regime"),
-        "reasoning_price_location": final_reasoning_decision.get("price_location"),
-        "reasoning_coherence_score": reasoning_arbitration.get("coherence_score"),
-        "bad_entry_filter": bad_entry_filter,
-        "ai_contribution_strengths": ai_contribution_strengths,
-        "model_strength_profile": model_strength_profile,
-        "lane_thresholds": _lane_thresholds(snapshot),
-        "allowance_package": allowance_package,
-    }
-    sequence_readiness: dict[str, Any] = {}
-    survival_blockers: list[dict[str, Any]] = []
-    survival_blockers.extend(_rows(opportunity_maturity.get("blockers")))
-    survival_blockers.extend(_rows(book_strategy.get("blockers")))
-    survival_soft_warnings: list[dict[str, Any]] = []
-    survival_soft_warnings.extend(_rows(opportunity_maturity.get("soft_contributors")))
-    survival_soft_warnings.extend(_rows(book_strategy.get("soft_warnings")))
-    if true_blocker != "NONE":
-        survival_blockers.append(
-            {
-                "field": _promotion_exact_field(true_blocker, sequence_readiness, instrument_context),
-                "code": true_blocker,
-                "reason": next_required,
-                "hard": bool(final_state == "BLOCKED_BY_RUNTIME" or true_blocker.startswith("INSTRUMENT_CONTEXT")),
-            }
-        )
-    price_location_payload = _mapping(market.get("price_location"))
-    astar_authorization_ledger = build_candidate_decision_ledger_v3(
-        {
-            "candidate_side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
-            "requested_state": "ENTER_NOW" if book_strategy_state == "ENTER_NOW" else opportunity_maturity_state,
-            "book_strategy_state": book_strategy_state,
-            "state": final_state,
-            "timing_mode": timing_mode,
-            "entry_now_allowed": bool(timing_decision.get("entry_now_allowed")),
-            "current_candle_accepted": current_candle_ok,
-            "current_candle_entry_allowed": current_candle_ok,
-            "runtime_pass": not bool(runtime_blocked or final_state == "BLOCKED_BY_RUNTIME"),
-            "runtime_status": final_state,
-            "market_location": (
-                price_location_payload.get("relative_location")
-                or price_location_payload.get("location")
-                or _mapping(book_strategy.get("evidence")).get("bias_alignment")
-                or ""
-            ),
-            "confirmation_score": max(
-                _clip01(final_execution_score, 0.0),
-                _clip01(_mapping(book_strategy.get("evidence")).get("overlay_suite_score"), 0.0),
-            ),
-            "pullback_held": bool(_bool(snapshot.get("pullback_confirmed")) or _bool(snapshot.get("retest_confirmed"))),
-            "pullback_reclaimed": bool(_bool(snapshot.get("role_flip_confirmed")) or _bool(snapshot.get("pullback_reclaim_ready"))),
-            "pullback_failed": bool(candidate_invalidated),
-            "zone_role": price_location_payload.get("zone_role") or price_location_payload.get("role") or "",
-            "hard_blockers": survival_blockers,
-            "blockers": survival_blockers,
-            "soft_warnings": survival_soft_warnings,
-        }
-    )
-    astar_authorization_trace = _mapping(astar_authorization_ledger.get("authorization_trace"))
-    opportunity_maturity["astar_decision_state_v3"] = astar_authorization_ledger
-    opportunity_maturity["authorization_survival_trace_v3"] = astar_authorization_trace
-    allowance_package["astar_decision_state_v3"] = astar_authorization_ledger
-    allowance_package["authorization_survival_trace_v3"] = astar_authorization_trace
-    promotion_trace["astar_decision_state_v3"] = astar_authorization_ledger
-    promotion_trace["authorization_survival_trace_v3"] = astar_authorization_trace
-    council_scores = {
-        "global": round(float(_clip01(market.get("global_score"), raw_council_score)), 4),
-        "local": round(float(_clip01(market.get("local_score"), raw_council_score)), 4),
-        "zone": round(float(_clip01(market.get("zone_score"), raw_council_score)), 4),
-        "angle": round(float(_clip01(market.get("angle_score"), raw_council_score)), 4),
-        "history": round(float(_clip01(market.get("history_score"), raw_council_score)), 4),
-        "risk": round(float(_clip01(market.get("risk_score"), raw_council_score)), 4),
-        "arbitration": round(float(_clip01(market.get("arbitration_score"), raw_council_score)), 4),
-        "raw_council_score": round(float(raw_council_score), 4),
-    }
-    reality_adjustments = {
-        "entry_quality": round(float(entry_quality_adjustment), 4),
-        "trap_penalty": round(float(trap_penalty), 4),
-        "path_risk": round(float(path_risk_adjustment), 4),
-        "flip_flop_penalty": round(float(flip_flop_penalty), 4),
-        "context": round(float(context_adjustment), 4),
-        "timing": round(float(timing_adjustment), 4),
-        "maturity": round(float(maturity_adjustment), 4),
-        "permission": round(float(permission_adjustment), 4),
-        "market_reality_adjustment": round(float(market_reality_adjustment), 4),
-    }
-    council: dict[str, Any] = {
-        "final_state": final_state,
-        "final_side": candidate_side if side_ok and final_state != "CONFLICT" else None,
-        "execution_opportunity_window_v3": execution_opportunity_window,
-        "decision_id": "mc_" + hashlib.sha1(f"{current_now}|{candidate_side}|{buy_score}|{sell_score}".encode("utf-8")).hexdigest()[:18],
-        "maturity_stage": "EXECUTABLE_PACKET" if executable else maturity_stage,
-        "opportunity_maturity": opportunity_maturity,
-        "opportunity_maturity_state": opportunity_maturity_state,
-        "book_strategy": book_strategy,
-        "book_strategy_state": book_strategy_state,
-        "book_strategy_playbook": book_strategy.get("playbook"),
-        "playbook_ai_intelligence_v3": playbook_ai_intelligence,
-        "playbook_ai_summary_v3": playbook_ai_summary,
-        "professional_trade_plan": professional_trade_plan,
-        "thesis_horizon": professional_thesis_horizon,
-        "expected_move_time": expected_move_time,
-        "expected_duration_sec": expected_duration_sec,
-        "expected_candle_count": expected_move_candles,
-        "professional_thesis_resolution": professional_thesis_resolution,
-        "dual_thesis_report_v3": dual_thesis_report,
-        "candidate_stability_policy_v3": _mapping(snapshot.get("candidate_stability_policy_v3")),
-        "professional_flip_flop_override": professional_flip_flop_override,
-        "candle_movement_context_v3": candle_movement_context,
-        "candle_movement": candle_movement_brief,
-        "strategy_read": book_strategy.get("strategy_read"),
-        "arbitration_reason": (
-            f"{candidate_side} executable via {execution_lane.get('name')}: {execution_lane.get('reason')}"
-            if executable
-            else str(
-                block_reason
-                or (
-                    f"{promotion_result}: blocked_by={true_blocker}; next_required={next_required}"
-                    if true_blocker != "NONE"
-                    else f"{promotion_result}: {next_required}"
-                )
+            base_snapshot = dict(snapshot)
+            base_snapshot["instrument_context"] = instrument_context
+            base = _packet_base(
+                base_snapshot,
+                current_now,
+                packet_side=candidate_side,
+                packet_playbook=str(book_strategy.get("playbook") or ""),
+                packet_state=book_strategy_state,
             )
-        ),
-        "buy_score": round(float(buy_score), 4),
-        "sell_score": round(float(sell_score), 4),
-        "hold_score": round(float(hold_score), 4),
-        "dominance_margin": round(float(dominance_margin), 4),
-        "disagreement_score": round(float(disagreement_score), 4),
-        "council_scores": council_scores,
-        "reality_adjustments": reality_adjustments,
-        "base_council_score": round(float(base_council_score), 4),
-        "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
-        "raw_council_score": round(float(raw_council_score), 4),
-        "final_execution_score": round(float(final_execution_score), 4),
-        "execution_threshold": round(float(execution_threshold), 4),
-        "lane_threshold": round(float(lane_required_score), 4),
-        "execution_lane": execution_lane,
-        "selected_execution_lane": execution_lane.get("name"),
-        "true_blocker": true_blocker,
-        "release_state": release_state,
-        "non_executable_state": None if executable else release_state,
-        "denied_at": promotion_trace["denied_at"],
-        "next_required": next_required,
-        "release_condition": release_condition,
-        "candidate_id": active_candidate_id,
-        "candidate_stage": candidate_stage,
-        "candidate_stable_reads": candidate_stable_reads,
-        "stability_frames": _int(snapshot.get("stability_frames"), candidate_stable_reads),
-        "final_score": round(float(final_execution_score), 4),
-        "threshold": round(float(lane_required_score), 4),
-        "selected_lane": execution_lane.get("name"),
-        "timing_mode": timing_mode,
-        "instrument_context_state": instrument_context_state,
-        "instrument_context_broker_click_safe": bool(instrument_context.get("broker_click_safe")),
-        "flip_flop_state": (
-            "PROFESSIONAL_THESIS_OVERRIDE_RELEASED"
-            if professional_flip_flop_override
-            else "FLIP_FLOP_RELEASED"
-            if flip_flop_release_allowed
-            else "FLIP_FLOP_CONTAINED"
-            if flip_flop_contained
-            else ("STABLE_EXECUTABLE" if executable else "STUDYING")
-        ),
-        "contributors_are_diagnostic": True,
-        "ai_contribution_strengths": ai_contribution_strengths,
-        "model_strength_profile": model_strength_profile,
-        "lane_thresholds": _lane_thresholds(snapshot),
-        "skill_contributions": skill_contributions,
-        "two_candle_study": two_candle_study,
-        "lstm_contribution": lstm_contribution,
-        "entry_quality": entry_quality_surface,
-        "trade_permission": trade_permission,
-        "promotion_trace": promotion_trace,
-        "astar_decision_state_v3": astar_authorization_ledger,
-        "authorization_survival_trace_v3": astar_authorization_trace,
-        "trade_candidate_queue": trade_candidate_queue,
-        "timing_decision": timing_decision,
-        "timing_forecast": timing_forecast,
-        "regime": market.get("regime", {}),
-        "market_play": market.get("market_play", {}),
-        "price_location": market.get("price_location", {}),
-        "memory_confirmation": market.get("memory_confirmation", {}),
-        "pair_profile": market.get("pair_profile", {}),
-        "model_role_outputs": model_role_outputs,
-        "reasoning_arbitration": reasoning_arbitration,
-        "bad_entry_filter": bad_entry_filter,
-        "final_reasoning_decision": final_reasoning_decision,
-        "primary_play": final_reasoning_decision.get("play"),
-        "regime_primary": _mapping(market.get("regime")).get("primary"),
-        "reasoning_decision": final_reasoning_decision.get("decision"),
-        "reasoning_coherence_score": reasoning_arbitration.get("coherence_score"),
-        "reasoning_execution_blocked": reasoning_execution_blocked,
-        "reasoning_block_reason": reasoning_block_reason,
-        "intraday_enter_now_reasoning_override_allowed": intraday_enter_now_reasoning_override_allowed,
-        "wave_reasoning_override_allowed": wave_reasoning_override_allowed,
-        "professional_reaction_reasoning_override_allowed": professional_reaction_reasoning_override_allowed,
-        "allowance_package": allowance_package,
-    }
-    council_debate = _council_debate(
-        candidate_side=candidate_side,
-        buy_score=buy_score,
-        sell_score=sell_score,
-        final_state=final_state,
-        market=market,
-        market_context=market_context,
-        entry_quality=_mapping(entry_quality_surface),
-        trade_permission=_mapping(trade_permission),
-        block_reason=block_reason,
-    )
-    study_side = candidate_side if side_ok and (executable or context_ok or final_state == "PREPARING") else None
-    execution: dict[str, Any] = {
-        "enabled": executable,
-        "state": "EXECUTABLE" if executable else final_state,
-        "side": study_side,
-        "expiry_seconds": timing_expiry if executable else 0,
-        "amount_action": "DO_NOT_CHANGE_AMOUNT",
-        "allowance_package_type": allowance_package["package_type"],
-    }
-    result: dict[str, Any] = {
-        "schema_version": MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
-        "packet_id": base["packet_id"],
-        "packet_type": "STUDY_PACKET",
-        "execution_opportunity_window_v3": execution_opportunity_window,
-        "execution": execution,
-        "allowance_package": allowance_package,
-        "model_council": council,
-        "promotion_trace": promotion_trace,
-        "council_scores": council_scores,
-        "reality_adjustments": reality_adjustments,
-        "execution_lane": execution_lane,
-        "selected_execution_lane": execution_lane.get("name"),
-        "release_state": release_state,
-        "non_executable_state": None if executable else release_state,
-        "missed_opportunity": missed_opportunity,
-        "opportunity_maturity": opportunity_maturity,
-        "opportunity_maturity_state": opportunity_maturity_state,
-        "book_strategy": book_strategy,
-        "book_strategy_state": book_strategy_state,
-        "book_strategy_playbook": book_strategy.get("playbook"),
-        "playbook_ai_intelligence_v3": playbook_ai_intelligence,
-        "playbook_ai_summary_v3": playbook_ai_summary,
-        "professional_trade_plan": professional_trade_plan,
-        "thesis_horizon": professional_thesis_horizon,
-        "expected_move_time": expected_move_time,
-        "expected_duration_sec": expected_duration_sec,
-        "expected_candle_count": expected_move_candles,
-        "professional_thesis_resolution": professional_thesis_resolution,
-        "dual_thesis_report_v3": dual_thesis_report,
-        "professional_flip_flop_override": professional_flip_flop_override,
-        "candle_movement_context_v3": candle_movement_context,
-        "candle_movement": candle_movement_brief,
-        "strategy_read": book_strategy.get("strategy_read"),
-        "final_execution_score": round(float(final_execution_score), 4),
-        "final_score": round(float(final_execution_score), 4),
-        "execution_threshold": round(float(execution_threshold), 4),
-        "threshold": round(float(lane_required_score), 4),
-        "base_council_score": round(float(base_council_score), 4),
-        "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
-        "lane_thresholds": _lane_thresholds(snapshot),
-        "ai_contribution_strengths": ai_contribution_strengths,
-        "model_strength_profile": model_strength_profile,
-        "market_context": market_context,
-        "two_candle_study": two_candle_study,
-        "lstm_contribution": lstm_contribution,
-        "skill_contributions": skill_contributions,
-        "angle_context": market.get("angle_context", {}),
-        "history_context": market.get("history_context", {}),
-        "market_reality": market_reality,
-        "entry_quality": entry_quality_surface,
-        "trade_permission": trade_permission,
-        "market_trap": execution_market_trap,
-        "raw_market_trap": market_trap,
-        "ideal_trade_path": market.get("ideal_trade_path", _mapping(market_reality.get("ideal_trade_path"))),
-        "path_risk": market.get("path_risk", _mapping(market_reality.get("path_risk"))),
-        "regime_playbook": market.get("regime_playbook", _mapping(market_reality.get("regime_playbook"))),
-        "time_to_reward_invalidation": market.get(
-            "time_to_reward_invalidation",
-            _mapping(market_reality.get("time_to_reward_invalidation")),
-        ),
-        "current_candle_contract": market.get(
-            "current_candle_contract",
-            _mapping(market_reality.get("current_candle_contract")),
-        ),
-        "market_listening_stream": market.get(
-            "market_listening_stream",
-            _mapping(market_reality.get("market_listening_stream")),
-        ),
-        "trade_candidate_queue": trade_candidate_queue,
-        "council_debate": council_debate,
-        "timing_decision": timing_decision,
-        "timing_forecast": timing_forecast,
-        "regime": market.get("regime", {}),
-        "market_play": market.get("market_play", {}),
-        "price_location": market.get("price_location", {}),
-        "memory_confirmation": market.get("memory_confirmation", {}),
-        "pair_profile": market.get("pair_profile", {}),
-        "model_role_outputs": model_role_outputs,
-        "reasoning_arbitration": reasoning_arbitration,
-        "bad_entry_filter": bad_entry_filter,
-        "final_reasoning_decision": final_reasoning_decision,
-        "runtime_model_health": health,
-        "instrument_context": instrument_context,
-        "symbol_context": symbol_context,
-        "instrument_context_validation": packet_identity_validation.as_dict(),
-        "block_reason": block_reason,
-        "contributors": {
-            "contributors_are_diagnostic": True,
-            "ai_contribution_strengths": ai_contribution_strengths,
-            "model_strength_profile": model_strength_profile,
-            "skill_gates": _diagnostic_skill_gates(snapshot),
-            "skill_contributions": skill_contributions,
-            "lstm_candle_sequence": lstm_contribution,
-            "two_candle_study": two_candle_study,
-            "memory": snapshot.get("memory", snapshot.get("memory_similarity", {})),
-            "decision_kernel": snapshot.get("decision_kernel", {}),
-            "market_agents": market.get("agents", []),
-            "market_reality": market_reality,
-            "model_role_outputs": model_role_outputs,
-            "play_reasoning": final_reasoning_decision,
-        },
-    }
-    study_packet_valid_for_seconds = _float(snapshot.get("study_packet_valid_for_seconds"), 20.0)
-    study_execution = {
-        **execution,
-        "enabled": False,
-        "state": "WATCHING" if _upper(execution.get("state")) == "EXECUTABLE" else execution.get("state", "WATCHING"),
-        "source_state": _upper(execution.get("state"), "WATCHING"),
-        "study_only": True,
-    }
-    study_packet: dict[str, Any] = {
-        "schema_version": MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
-        "packet_id": base["packet_id"],
-        "packet_type": "STUDY_PACKET",
-        "session_id": base["session_id"],
-        "symbol": base["symbol"],
-        "timeframe": base["timeframe"],
-        "frame_id": base["frame_id"],
-        "capture_count": base["capture_count"],
-        "state_version": base["state_version"],
-        "created_epoch": current_now,
-        "created_epoch_sec": current_now,
-        "valid_until_epoch": current_now + study_packet_valid_for_seconds,
-        "valid_until_epoch_sec": current_now + study_packet_valid_for_seconds,
-        "execution": study_execution,
-        "model_council": council,
-        "allowance_package": allowance_package,
-        "block_reason": block_reason,
-        "promotion_trace": promotion_trace,
-        "reason": council["arbitration_reason"],
-        "true_blocker": true_blocker,
-        "release_state": release_state,
-        "non_executable_state": None if executable else release_state,
-        "denied_at": promotion_trace["denied_at"],
-        "next_required": next_required,
-        "release_condition": release_condition,
-        "candidate_id": active_candidate_id,
-        "candidate_stage": candidate_stage,
-        "execution_opportunity_window_v3": execution_opportunity_window,
-        "final_score": round(float(final_execution_score), 4),
-        "threshold": round(float(lane_required_score), 4),
-        "selected_lane": execution_lane.get("name"),
-        "timing_mode": timing_mode,
-        "instrument_context_state": instrument_context_state,
-        "execution_lane": execution_lane,
-        "selected_execution_lane": execution_lane.get("name"),
-        "lane_thresholds": _lane_thresholds(snapshot),
-        "ai_contribution_strengths": ai_contribution_strengths,
-        "model_strength_profile": model_strength_profile,
-        "missed_opportunity": missed_opportunity,
-        "opportunity_maturity": opportunity_maturity,
-        "opportunity_maturity_state": opportunity_maturity_state,
-        "book_strategy": book_strategy,
-        "book_strategy_state": book_strategy_state,
-        "book_strategy_playbook": book_strategy.get("playbook"),
-        "playbook_ai_intelligence_v3": playbook_ai_intelligence,
-        "playbook_ai_summary_v3": playbook_ai_summary,
-        "professional_trade_plan": professional_trade_plan,
-        "thesis_horizon": professional_thesis_horizon,
-        "expected_move_time": expected_move_time,
-        "expected_duration_sec": expected_duration_sec,
-        "expected_candle_count": expected_move_candles,
-        "professional_thesis_resolution": professional_thesis_resolution,
-        "dual_thesis_report_v3": dual_thesis_report,
-        "candle_movement_context_v3": candle_movement_context,
-        "candle_movement": candle_movement_brief,
-        "strategy_read": book_strategy.get("strategy_read"),
-        "trade_candidate_queue": trade_candidate_queue,
-        "council_scores": council_scores,
-        "reality_adjustments": reality_adjustments,
-        "base_council_score": round(float(base_council_score), 4),
-        "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
-        "two_candle_study": two_candle_study,
-        "lstm_contribution": lstm_contribution,
-        "skill_contributions": skill_contributions,
-        "final_execution_score": round(float(final_execution_score), 4),
-        "execution_threshold": round(float(execution_threshold), 4),
-        "timing_decision": timing_decision,
-        "timing_forecast": timing_forecast,
-        "regime": market.get("regime", {}),
-        "market_play": market.get("market_play", {}),
-        "price_location": market.get("price_location", {}),
-        "memory_confirmation": market.get("memory_confirmation", {}),
-        "pair_profile": market.get("pair_profile", {}),
-        "model_role_outputs": model_role_outputs,
-        "reasoning_arbitration": reasoning_arbitration,
-        "bad_entry_filter": bad_entry_filter,
-        "final_reasoning_decision": final_reasoning_decision,
-    }
-    result["study_packet"] = study_packet
-    result["model_council_study_packet"] = study_packet
-    sequence_context = build_sequence_context_v3(
-        snapshot,
-        packet=base_snapshot,
-    )
-    sequence_context_payload = sequence_context.as_dict()
-    sequence_readiness = sequence_context_readiness_report(
-        sequence_context,
-        source_module="model_council_resolver",
-    )
-    council["sequence_context"] = sequence_context_payload
-    council["sequence_context_readiness"] = sequence_readiness
-    council["sequence_id"] = sequence_context_payload["sequence_id"]
-    council["sequence_signature"] = sequence_context_payload["sequence_signature"]
-    council["sequence_length"] = sequence_context_payload["sequence_length"]
-    council["frames_used"] = sequence_context_payload["frames_used"]
-    council["sequence_status"] = sequence_context_payload["sequence_status"]
-    council["sequence_confidence"] = sequence_context_payload["sequence_confidence"]
-
-    def _refresh_promotion_failure_audit() -> dict[str, Any]:
-        audit = build_promotion_failure_audit_v3(
-            packet_id=base["packet_id"],
-            candidate_id=active_candidate_id,
-            promotion_trace=promotion_trace,
-            sequence_context_readiness=sequence_readiness,
-            execution_lane=execution_lane,
-            final_score=final_execution_score,
-            threshold=lane_required_score,
-            timing_mode=timing_mode,
-            instrument_context=instrument_context,
-            packet_result=str(promotion_trace.get("packet_result") or study_packet.get("packet_result") or "STUDY_PACKET_PUBLISHED"),
-            extra_source_fields={
-                "release_state": promotion_trace.get("release_state"),
-                "non_executable_state": promotion_trace.get("non_executable_state"),
-                "blocked_by": promotion_trace.get("blocked_by"),
-                "true_blocker": promotion_trace.get("true_blocker"),
-                "opportunity_maturity_state": opportunity_maturity_state,
-                "visual_integrity": opportunity_maturity.get("visual_integrity"),
-                "opportunity_maturity_denied_at": opportunity_maturity.get("denied_at"),
-                "book_strategy_state": book_strategy_state,
-                "book_strategy_playbook": book_strategy.get("playbook"),
-            },
-        )
-        promotion_trace["promotion_failure_audit_v3"] = audit
-        promotion_trace["allowance_package"] = allowance_package
-        council["promotion_failure_audit_v3"] = audit
-        council["promotion_trace"] = promotion_trace
-        council["allowance_package"] = allowance_package
-        study_packet["promotion_failure_audit_v3"] = audit
-        study_packet["promotion_trace"] = promotion_trace
-        study_packet["allowance_package"] = allowance_package
-        result["promotion_failure_audit_v3"] = audit
-        result["promotion_trace"] = promotion_trace
-        result["model_council"] = council
-        result["allowance_package"] = allowance_package
-        result["study_packet"] = study_packet
-        result["model_council_study_packet"] = study_packet
-        return audit
-
-    if not bool(sequence_readiness.get("ready")) and not (executable and playbook_enter_now):
-        executable = False
-        block_reason = "SEQUENCE_CONTEXT"
-        blocked_by = block_reason
-        true_blocker = block_reason
-        next_required = str(sequence_readiness.get("next_required") or "sequence context incomplete")
-        release_condition = next_required
-        _mark_opportunity_maturity_blocked(
-            opportunity_maturity,
-            state="VALID_WATCH",
-            denied_at=block_reason,
-            next_required=next_required,
-            field=str(sequence_readiness.get("failed_module") or "sequence_context"),
-            received=sequence_readiness.get("status") or "not_ready",
-            required="COMPLETE sequence context",
-            reason=next_required,
-            hard=True,
-        )
-        opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "VALID_WATCH")
-        allowance_package["opportunity_maturity"] = opportunity_maturity_state
-        allowance_package["opportunity_maturity_confidence"] = opportunity_maturity["confidence"]
-        allowance_package["visual_integrity"] = opportunity_maturity.get("visual_integrity")
-        promotion_trace["denied_at"] = block_reason
-        promotion_trace["blocked_by"] = block_reason
-        promotion_trace["true_blocker"] = block_reason
-        promotion_trace["next_required"] = next_required
-        promotion_trace["release_condition"] = next_required
-        promotion_trace["sequence_context_readiness"] = sequence_readiness
-        promotion_trace["opportunity_maturity"] = opportunity_maturity
-        promotion_trace["opportunity_maturity_state"] = opportunity_maturity_state
-        promotion_trace["visual_integrity"] = opportunity_maturity.get("visual_integrity")
-        promotion_trace["promotion_result"] = "STUDY_PACKET_PUBLISHED"
-        promotion_trace["packet_result"] = "STUDY_PACKET_PUBLISHED"
-        _mark_allowance_package_blocked(
-            allowance_package,
-            block_reason=block_reason,
-            next_required=next_required,
-            release_state=release_state,
-            final_state="WATCHING",
-            promotion_result="STUDY_PACKET_PUBLISHED",
-        )
-        promotion_trace["allowance_package"] = allowance_package
-        study_packet["denied_at"] = block_reason
-        study_packet["next_required"] = next_required
-        study_packet["release_condition"] = next_required
-        study_packet["sequence_context_readiness"] = sequence_readiness
-        study_packet["non_executable_state"] = release_state
-        study_packet["block_reason"] = block_reason
-        study_packet["allowance_package"] = allowance_package
-        study_packet["opportunity_maturity"] = opportunity_maturity
-        study_packet["opportunity_maturity_state"] = opportunity_maturity_state
-        council["final_state"] = "WATCHING"
-        council["allowance_package"] = allowance_package
-        council["opportunity_maturity"] = opportunity_maturity
-        council["opportunity_maturity_state"] = opportunity_maturity_state
-        council["arbitration_reason"] = (
-            f"BLOCKED_BY_SEQUENCE_CONTEXT: blocked_by={block_reason}; "
-            f"failed_module={sequence_readiness.get('failed_module')}; next_required={next_required}"
-        )
-        if executable:
-            result["block_reason"] = block_reason
-        result["packet_result"] = "STUDY_PACKET_PUBLISHED"
-        result["execution"] = {**execution, "enabled": False, "state": "WATCHING"}
-        result["allowance_package"] = allowance_package
-        result["model_council"] = council
-        result["promotion_trace"] = promotion_trace
-        result["opportunity_maturity"] = opportunity_maturity
-        result["opportunity_maturity_state"] = opportunity_maturity_state
-        result["study_packet"] = study_packet
-        result["model_council_study_packet"] = study_packet
-    elif not bool(sequence_readiness.get("ready")):
-        promotion_trace["sequence_context_readiness"] = sequence_readiness
-        promotion_trace["sequence_context_ready"] = False
-        promotion_trace["sequence_context_advisory"] = True
-        opportunity_maturity["sequence_context_readiness"] = sequence_readiness
-        opportunity_maturity["sequence_context_ready"] = False
-        opportunity_maturity["sequence_context_role"] = "TRACE_ADVISORY_FOR_PLAYBOOK_AUTHORITY"
-        allowance_package["sequence_context_ready"] = False
-        allowance_package["sequence_context_role"] = "TRACE_ADVISORY_FOR_PLAYBOOK_AUTHORITY"
-        council["sequence_context_readiness"] = sequence_readiness
-        council["sequence_context_ready"] = False
-    execution_window_state = str(execution_opportunity_window.get("state") or "").strip().upper()
-    execution_window_block_reason = (
-        "EXECUTION_OPPORTUNITY_OUT_OF_ORDER_FRAME"
-        if execution_opportunity_window.get("lineage_rejected") is True
-        else {
-            "EXPIRED": "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED",
-            "INVALID": "EXECUTION_OPPORTUNITY_WINDOW_INVALID",
-        }.get(execution_window_state, "")
-    )
-    if executable and execution_window_block_reason:
-        executable = False
-        block_reason = execution_window_block_reason
-        blocked_by = block_reason
-        true_blocker = block_reason
-        final_state = "WATCHING"
-        release_state = "WATCHING"
-        next_required = "wait for a distinct candidate identity or a natural non-enter-now read before re-arming"
-        release_condition = next_required
-        promotion_trace.update(
-            {
-                "denied_at": block_reason,
-                "blocked_by": block_reason,
-                "true_blocker": block_reason,
-                "next_required": next_required,
-                "release_condition": release_condition,
-                "non_executable_state": release_state,
-                "execution_opportunity_window_v3": execution_opportunity_window,
-            }
-        )
-    if not executable:
-        _refresh_promotion_failure_audit()
-    configured_handoff_ttl_seconds = _float(
-        _first_visible_value(
-            snapshot.get("packet_handoff_ttl_seconds"),
-            snapshot.get("packet_valid_for_seconds"),
-            DEFAULT_EXECUTION_HANDOFF_TTL_SECONDS,
-        ),
-        DEFAULT_EXECUTION_HANDOFF_TTL_SECONDS,
-    )
-    if configured_handoff_ttl_seconds <= 0.0:
-        configured_handoff_ttl_seconds = DEFAULT_EXECUTION_HANDOFF_TTL_SECONDS
-    entry_window_remaining_candidates = [
-        _entry_window_remaining_seconds(professional_entry_window, now_epoch=current_now),
-        _entry_window_remaining_seconds(
-            _mapping(allowance_package.get("entry_window")),
-            now_epoch=current_now,
-        ),
-    ]
-    entry_window_remaining_seconds = (
-        min(entry_window_remaining_candidates)
-        if entry_window_remaining_candidates
-        else configured_handoff_ttl_seconds
-    )
-    packet_valid_for_seconds = max(0.0, min(configured_handoff_ttl_seconds, entry_window_remaining_seconds))
-    if executable:
-        promotion_trace["packet_valid_for_seconds"] = packet_valid_for_seconds
-        promotion_trace["configured_handoff_ttl_seconds"] = configured_handoff_ttl_seconds
-        promotion_trace["entry_window_remaining_seconds"] = entry_window_remaining_seconds
-        promotion_trace["packet_validity_source"] = "configured_handoff_ttl_capped_by_entry_window"
-    if executable:
-        packet = build_execution_packet_v3(
-            packet_id=base["packet_id"],
-            session_id=base["session_id"],
-            symbol=base["symbol"],
-            timeframe=base["timeframe"],
-            frame_id=base["frame_id"],
-            capture_count=base["capture_count"],
-            state_version=base["state_version"],
-            side=candidate_side,
-            expiry_seconds=timing_expiry,
-            input_frame_hash=base["input_frame_hash"],
-            previous_frame_hash=base["previous_frame_hash"],
-            created_epoch=current_now,
-            valid_for_seconds=packet_valid_for_seconds,
-            live_integrity=_mapping(snapshot.get("live_integrity")),
-            model_council=council,
-            market_context=market_context,
-            angle_context=_mapping(market.get("angle_context")),
-            history_context=_mapping(market.get("history_context")),
-            runtime_model_health=health,
-            instrument_context=instrument_context,
-            symbol_context=symbol_context,
-            sequence_context=sequence_context_payload,
-            allowance_package=allowance_package,
-        )
-        packet["allowance_package"] = allowance_package
-        packet["execution_opportunity_window_v3"] = execution_opportunity_window
-        packet["entry_window"] = professional_entry_window
-        packet["execution"]["allowance_package_type"] = allowance_package["package_type"]
-        packet["market_reality"] = market_reality
-        packet["packet_type"] = "PG_EXECUTION_PACKET_V3"
-        packet["entry_quality"] = result["entry_quality"]
-        packet["trade_permission"] = trade_permission
-        packet["market_trap"] = result["market_trap"]
-        packet["ideal_trade_path"] = result["ideal_trade_path"]
-        packet["path_risk"] = result["path_risk"]
-        packet["regime_playbook"] = result["regime_playbook"]
-        packet["time_to_reward_invalidation"] = result["time_to_reward_invalidation"]
-        packet["timing_decision"] = timing_decision
-        packet["timing_forecast"] = timing_forecast
-        packet["regime"] = result["regime"]
-        packet["market_play"] = result["market_play"]
-        packet["price_location"] = result["price_location"]
-        packet["memory_confirmation"] = result["memory_confirmation"]
-        packet["pair_profile"] = result["pair_profile"]
-        packet["two_candle_study"] = two_candle_study
-        packet["lstm_contribution"] = lstm_contribution
-        packet["skill_contributions"] = skill_contributions
-        packet["ai_contribution_strengths"] = ai_contribution_strengths
-        packet["model_strength_profile"] = model_strength_profile
-        packet["lane_thresholds"] = _lane_thresholds(snapshot)
-        packet["model_role_outputs"] = model_role_outputs
-        packet["reasoning_arbitration"] = reasoning_arbitration
-        packet["bad_entry_filter"] = bad_entry_filter
-        packet["final_reasoning_decision"] = final_reasoning_decision
-        packet["current_candle_contract"] = result["current_candle_contract"]
-        packet["execution_lane"] = execution_lane
-        packet["selected_execution_lane"] = execution_lane.get("name")
-        packet["trade_candidate_queue"] = result["trade_candidate_queue"]
-        packet["market_listening_stream"] = result["market_listening_stream"]
-        packet["council_debate"] = council_debate
-        packet["promotion_trace"] = promotion_trace
-        packet["opportunity_maturity"] = opportunity_maturity
-        packet["opportunity_maturity_state"] = opportunity_maturity_state
-        packet["candle_movement_context_v3"] = candle_movement_context
-        packet["candle_movement"] = candle_movement_brief
-        packet["book_strategy"] = book_strategy
-        packet["book_strategy_state"] = book_strategy_state
-        packet["book_strategy_playbook"] = book_strategy.get("playbook")
-        packet["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
-        packet["playbook_ai_summary_v3"] = playbook_ai_summary
-        packet["professional_trade_plan"] = professional_trade_plan
-        packet["professional_thesis_resolution"] = professional_thesis_resolution
-        packet["professional_flip_flop_override"] = professional_flip_flop_override
-        packet["strategy_read"] = book_strategy.get("strategy_read")
-        packet["visual_integrity"] = opportunity_maturity.get("visual_integrity")
-        validation = validate_execution_packet_v3(
-            packet,
-            now=current_now,
-            require_executable=True,
-            require_broker_click_safe_identity=False,
-        )
-        if not validation.ok:
-            if str(execution_opportunity_window.get("state") or "").upper() == "PENDING_OPEN":
-                previous_window = _execution_opportunity_window_from_state(snapshot) or _execution_opportunity_window_from_state(
-                    previous_state
-                )
-                execution_opportunity_window.clear()
-                execution_opportunity_window.update(previous_window)
-            runtime_release_condition = (
-                _instrument_release_requirement(instrument_context, instrument_release_condition)
-                if validation.first_reason.startswith("INSTRUMENT_CONTEXT")
-                else f"runtime validation clears: {validation.first_reason}"
+            active_candidate_id = _candidate_id(
+                snapshot,
+                side=candidate_side,
+                market_context=market_context,
+                entry_quality=entry_quality_surface,
             )
-            runtime_release_state = "INSTRUMENT_CONTEXT_WAIT" if validation.first_reason.startswith("INSTRUMENT_CONTEXT") else "WATCHING"
-            _mark_opportunity_maturity_blocked(
-                opportunity_maturity,
-                state="VALID_WATCH",
-                denied_at=validation.first_reason,
-                next_required=runtime_release_condition,
-                field="current_execution_packet",
-                received=validation.first_reason,
-                required="validate_execution_packet_v3 pass",
-                reason=runtime_release_condition,
-                hard=True,
-            )
-            opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "VALID_WATCH")
-            allowance_package["opportunity_maturity"] = opportunity_maturity_state
-            allowance_package["opportunity_maturity_confidence"] = opportunity_maturity["confidence"]
-            allowance_package["visual_integrity"] = opportunity_maturity.get("visual_integrity")
-            _mark_allowance_package_blocked(
-                allowance_package,
-                block_reason=validation.first_reason,
-                next_required=runtime_release_condition,
-                release_state=runtime_release_state,
-                final_state="BLOCKED_BY_RUNTIME",
-                promotion_result="BLOCKED_BY_RUNTIME",
-            )
-            promotion_trace.update(
-                {
-                    "release_state": runtime_release_state,
-                    "non_executable_state": runtime_release_state,
-                    "denied_at": validation.first_reason,
-                    "blocked_by": validation.first_reason,
-                    "true_blocker": validation.first_reason,
-                    "next_required": runtime_release_condition,
-                    "release_condition": runtime_release_condition,
-                    "promotion_result": "BLOCKED_BY_RUNTIME",
-                    "packet_result": "STUDY_PACKET_PUBLISHED",
-                    "allowance_package": allowance_package,
-                    "opportunity_maturity": opportunity_maturity,
-                    "opportunity_maturity_state": opportunity_maturity_state,
-                    "visual_integrity": opportunity_maturity.get("visual_integrity"),
-                }
-            )
-            council.update(
-                {
-                    "final_state": "BLOCKED_BY_RUNTIME",
-                    "release_state": runtime_release_state,
-                    "non_executable_state": runtime_release_state,
-                    "true_blocker": validation.first_reason,
-                    "denied_at": validation.first_reason,
-                    "next_required": runtime_release_condition,
-                    "release_condition": runtime_release_condition,
-                    "arbitration_reason": f"BLOCKED_BY_RUNTIME: blocked_by={validation.first_reason}; next_required={runtime_release_condition}",
-                    "promotion_trace": promotion_trace,
-                    "allowance_package": allowance_package,
-                    "opportunity_maturity": opportunity_maturity,
-                    "opportunity_maturity_state": opportunity_maturity_state,
-                }
-            )
-            study_packet["promotion_trace"] = promotion_trace
-            study_packet["model_council"] = council
-            study_packet["allowance_package"] = allowance_package
-            study_packet["opportunity_maturity"] = opportunity_maturity
-            study_packet["opportunity_maturity_state"] = opportunity_maturity_state
-            study_packet["true_blocker"] = validation.first_reason
-            study_packet["reason"] = council["arbitration_reason"]
-            result["execution"] = {**execution, "enabled": False, "state": "BLOCKED_BY_RUNTIME"}
-            result["allowance_package"] = allowance_package
-            result["model_council"] = council
-            result["promotion_trace"] = promotion_trace
-            result["opportunity_maturity"] = opportunity_maturity
-            result["opportunity_maturity_state"] = opportunity_maturity_state
-            result["study_packet"] = study_packet
-            result["model_council_study_packet"] = study_packet
-            result["block_reason"] = validation.first_reason
-            result["packet_validation"] = validation.as_dict()
-            _refresh_promotion_failure_audit()
-        else:
-            if str(execution_opportunity_window.get("state") or "").upper() == "PENDING_OPEN":
-                execution_opportunity_window["state"] = "OPEN"
-            packet["contributors"] = result["contributors"]
-            result["execution_packet"] = packet
-            result["model_council_packet"] = packet
-            result["packet_validation"] = validation.as_dict()
-    if not _mapping(result.get("execution_packet") or result.get("model_council_packet")):
-        no_packet_reason = str(
-            promotion_trace.get("true_blocker")
-            or promotion_trace.get("denied_at")
-            or block_reason
-            or "EXECUTION_PACKET_NOT_PUBLISHED"
-        ).strip().upper()
-        if not no_packet_reason or no_packet_reason == "NONE":
-            no_packet_reason = "EXECUTION_PACKET_NOT_PUBLISHED"
-        derived_no_packet_next_required = ""
-        late_chase_packet_block = bool(
-            opportunity_maturity_state == "LATE_CHASE"
-            or late_chase
-            or path_class == "LATE_CHASE_REVERSAL_RISK"
-        )
-        if late_chase_packet_block:
-            if opportunity_maturity_state == "LATE_CHASE":
-                no_packet_reason = "PLAYBOOK_MATURITY_LATE_CHASE"
-                derived_no_packet_next_required = str(
-                    opportunity_maturity.get("next_required")
-                    or _mapping(opportunity_maturity.get("book_strategy")).get("next_required")
-                    or "skip late chase; wait for pullback/retest or a new structure sequence"
-                )
+            entry_quality_label = _entry_quality_label(entry_quality_surface) or "UNKNOWN"
+            effective_permission_state = "GRANTED" if executable or lane_permission_override else "DENIED" if permission_denied_effective else "PENDING"
+            permission_state = str(
+                effective_permission_state
+                if lane_permission_override or executable or permission_denied_effective
+                else trade_permission.get("permission_state")
+                or effective_permission_state
+            ).strip().upper()
+            if executable:
+                promotion_result = "EXECUTABLE_PACKET_CREATED"
+            elif final_state == "PREPARING":
+                promotion_result = "PREPARING"
+            elif flip_flop_contained and not professional_flip_flop_override:
+                promotion_result = "WAITING"
             else:
-                no_packet_reason = f"TIMING_MODE_{timing_mode or 'LATE_CHASE'}"
-                derived_no_packet_next_required = f"skip late chase; {timing_decision['entry_timing']['next_condition']}"
-        elif no_packet_reason in {"EXECUTION_PACKET_NOT_PUBLISHED", "WATCHING", "STUDY_PACKET_PUBLISHED"}:
-            if not context_ok or not bool(execution_lane.get("accepted")):
-                no_packet_reason = "NO_EXECUTION_LANE_ACCEPTED"
-                derived_no_packet_next_required = lane_release_requirements
+                promotion_result = final_state
+            if executable:
+                blocked_by = None
+            elif block_reason:
+                blocked_by = block_reason
+            elif flip_flop_contained and not professional_flip_flop_override:
+                blocked_by = "candidate_flip_count"
+            elif not side_ok:
+                blocked_by = "candidate_side"
+            elif not context_ok:
+                blocked_by = "NO_EXECUTION_LANE_ACCEPTED"
+            elif not lane_effective_timing_ready:
+                blocked_by = "timing"
             elif not lane_effective_mature:
-                no_packet_reason = "CANDIDATE_MATURITY"
-                derived_no_packet_next_required = "candidate_stage=CANDIDATE_STABLE/PREPARING"
+                blocked_by = "candidate_maturity"
             elif not stable:
-                no_packet_reason = "CANDIDATE_STABILITY"
-                derived_no_packet_next_required = f"dominance_margin >= {min_dominance_margin:.2f}"
-            elif not lane_effective_timing_ready or timing_mode != "ENTER_NOW":
-                no_packet_reason = f"TIMING_MODE_{timing_mode or 'NOT_READY'}"
-                derived_no_packet_next_required = f"timing_mode=ENTER_NOW; {timing_decision['entry_timing']['next_condition']}"
-            elif not timing_has_explicit_expiry:
-                no_packet_reason = "MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING"
-                derived_no_packet_next_required = "timing.expiry_seconds explicit and execution.time_sequence target exists"
+                blocked_by = "dominance_margin"
             elif not final_score_passed:
-                no_packet_reason = "LANE_SCORE_BELOW_THRESHOLD"
-                derived_no_packet_next_required = (
-                    f"final_score={final_execution_score:.4f} >= threshold={lane_required_score:.4f} "
-                    f"for selected_lane={execution_lane.get('name', 'execution lane')}"
-                )
-            elif final_state and final_state != "EXECUTABLE":
-                no_packet_reason = str(final_state).strip().upper()
-                derived_no_packet_next_required = str(next_required or release_condition or "continue study")
-        raw_no_packet_next_required = str(promotion_trace.get("next_required") or next_required or "").strip()
-        if late_chase_packet_block:
-            no_packet_next_required = str(
-                derived_no_packet_next_required
-                or "skip late chase; wait for a fresh trigger/retest"
-            ).strip()
-        elif (
-            not raw_no_packet_next_required
-            or raw_no_packet_next_required.lower() == "none"
-            or raw_no_packet_next_required == "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
-        ):
-            no_packet_next_required = str(
-                derived_no_packet_next_required
-                or "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
-            ).strip()
-        else:
-            no_packet_next_required = raw_no_packet_next_required
-        if not no_packet_next_required or no_packet_next_required.lower() == "none":
-            no_packet_next_required = "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
-        no_packet_reason_upper = _upper(no_packet_reason, "EXECUTION_PACKET_NOT_PUBLISHED")
-        if no_packet_reason_upper == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED":
-            no_packet_maturity_state = "MISSED"
-        elif no_packet_reason_upper in {
-            "EXECUTION_OPPORTUNITY_WINDOW_INVALID",
-            "EXECUTION_OPPORTUNITY_OUT_OF_ORDER_FRAME",
-        }:
-            no_packet_maturity_state = "INVALIDATED"
-        elif opportunity_maturity_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
-            no_packet_maturity_state = opportunity_maturity_state
-        elif no_packet_reason_upper.startswith("PLAYBOOK_MATURITY_"):
-            candidate_state = no_packet_reason_upper.removeprefix("PLAYBOOK_MATURITY_")
-            no_packet_maturity_state = candidate_state if candidate_state in OPPORTUNITY_MATURITY_STATES else "VALID_WATCH"
-        elif no_packet_reason_upper.startswith("PLAYBOOK_"):
-            candidate_state = no_packet_reason_upper.removeprefix("PLAYBOOK_")
-            no_packet_maturity_state = candidate_state if candidate_state in OPPORTUNITY_MATURITY_STATES else opportunity_maturity_state
-        elif no_packet_reason_upper == "NO_EXECUTION_LANE_ACCEPTED":
-            no_packet_maturity_state = "EARLY_FORMING"
-        elif no_packet_reason_upper in {"CANDIDATE_MATURITY", "CANDIDATE_STABILITY"}:
-            no_packet_maturity_state = "VALID_WATCH"
-        elif "LATE_CHASE" in no_packet_reason_upper or no_packet_reason_upper.startswith("TIMING_MODE_SKIP_LATE"):
-            no_packet_maturity_state = "LATE_CHASE"
-        elif "INVALID" in no_packet_reason_upper or "TRAP" in no_packet_reason_upper or "BAD_ENTRY" in no_packet_reason_upper:
-            no_packet_maturity_state = "INVALIDATED"
-        elif no_packet_reason_upper == "LANE_SCORE_BELOW_THRESHOLD" or no_packet_reason_upper.startswith("TIMING_MODE_"):
-            no_packet_maturity_state = "PREPARE"
-        elif no_packet_reason_upper in OPPORTUNITY_MATURITY_STATES:
-            no_packet_maturity_state = no_packet_reason_upper
-        else:
-            no_packet_maturity_state = opportunity_maturity_state if opportunity_maturity_state in OPPORTUNITY_MATURITY_STATES else "VALID_WATCH"
-        no_packet_hard_block = no_packet_reason_upper.startswith(
-            (
-                "INSTRUMENT_CONTEXT",
-                "SEQUENCE_CONTEXT",
-                "REQUIRED_MODELS",
-                "NOT_LIVE",
-                "CACHE",
-                "FRAME",
-                "CAPTURE",
-                "STATE",
-                "MISSING",
-                "MODEL_COUNCIL_EXPLICIT_EXPIRY",
-                "EXECUTION_PACKET_NOT_CURRENT",
-                "EXECUTION_OPPORTUNITY_",
+                blocked_by = "LANE_SCORE_BELOW_THRESHOLD"
+            else:
+                blocked_by = None
+            true_blocker = str(block_reason or blocked_by or "NONE").strip().upper()
+            candidate_stage = (
+                "EXECUTION_PACKET_PUBLISHED"
+                if executable
+                else "PREPARING"
+                if final_state == "PREPARING"
+                else "CANDIDATE_STABLE"
+                if side_ok and stable
+                else "CANDIDATE_CREATED"
+                if side_ok
+                else "OBSERVATION"
             )
-        )
-        _mark_opportunity_maturity_blocked(
-            opportunity_maturity,
-            state=no_packet_maturity_state,
-            denied_at=no_packet_reason_upper,
-            next_required=no_packet_next_required,
-            field=_promotion_exact_field(no_packet_reason_upper, sequence_readiness, instrument_context),
-            received=no_packet_reason_upper,
-            required=no_packet_next_required,
-            reason=no_packet_next_required,
-            hard=no_packet_hard_block,
-        )
-        opportunity_maturity_state = _upper(opportunity_maturity.get("state"), no_packet_maturity_state)
-        allowance_package["opportunity_maturity"] = opportunity_maturity_state
-        allowance_package["opportunity_maturity_confidence"] = opportunity_maturity["confidence"]
-        allowance_package["visual_integrity"] = opportunity_maturity.get("visual_integrity")
-        _mark_allowance_package_blocked(
-            allowance_package,
-            block_reason=no_packet_reason,
-            next_required=no_packet_next_required,
-            release_state=str(council.get("release_state") or release_state or "WATCHING"),
-            final_state=str(council.get("final_state") or final_state or "WATCHING"),
-            promotion_result="STUDY_PACKET_PUBLISHED",
-        )
-        result_execution = _mapping(result.get("execution") or execution)
-        result_execution.update(
-            {
-                "enabled": False,
-                "state": "WATCHING"
-                if str(result_execution.get("state") or "").strip().upper() == "EXECUTABLE"
-                else str(result_execution.get("state") or final_state or "WATCHING").strip().upper(),
+            lane_release_requirements = _lane_release_requirements(
+                execution_lane,
+                final_score=final_execution_score,
+                lane_required_score=lane_required_score,
+            )
+            if executable:
+                next_required = "none"
+            elif flip_flop_contained and not professional_flip_flop_override:
+                next_required = (
+                    f"candidate_stage=CANDIDATE_STABLE; same candidate side for {max(0, _int(snapshot.get('flip_flop_release_stable_reads'), 2) - candidate_stable_reads)} more read(s); dominance_margin >= {min_dominance_margin:.2f}; entry_quality_ok=true; timing_mode=ENTER_NOW"
+                )
+            elif true_blocker.startswith("PROFESSIONAL_"):
+                next_required = str(
+                    professional_trade_plan.get("next_required")
+                    or "professional trend/reversal thesis required"
+                )
+            elif true_blocker.startswith("PLAYBOOK_"):
+                next_required = str(book_strategy.get("next_required") or "playbook reaction proof required")
+            elif not context_ok:
+                next_required = lane_release_requirements
+            elif not lane_effective_mature:
+                next_required = f"candidate_stage={candidate_stage}; next_required one more stable candidate read"
+            elif not lane_effective_timing_ready or timing_mode != "ENTER_NOW":
+                next_required = f"timing_mode={timing_mode}; next_required {timing_decision['entry_timing']['next_condition']}"
+            elif not timing_has_explicit_expiry:
+                next_required = "timing.expiry_seconds explicit and execution.time_sequence target exists"
+            elif not final_score_passed:
+                next_required = f"final_score={final_execution_score:.4f} >= threshold={lane_required_score:.4f} for selected_lane={execution_lane.get('name', 'execution lane')}"
+            else:
+                next_required = str(block_reason or "continue study")
+            instrument_context_state = str(
+                instrument_context.get("instrument_context_state")
+                or instrument_context.get("identity_state_v2")
+                or instrument_context.get("identity_state")
+                or "UNKNOWN"
+            ).strip().upper()
+            instrument_release_condition = str(
+                instrument_context.get("release_condition")
+                or "stable locked broker surface evidence"
+            ).strip()
+            if true_blocker.startswith("INSTRUMENT_CONTEXT") or true_blocker in {
+                "MISSING_TIMEFRAME",
+                "INSTRUMENT_CONTEXT_INVALIDATED",
+                "INSTRUMENT_CONTEXT_NOT_PAPER_SAFE",
+                "INSTRUMENT_CONTEXT_NOT_BROKER_CLICK_SAFE",
+            }:
+                next_required = _instrument_release_requirement(instrument_context, instrument_release_condition)
+            if final_state == "BLOCKED_BY_RUNTIME" or true_blocker.startswith("INSTRUMENT_CONTEXT"):
+                runtime_field = "instrument_context" if true_blocker.startswith("INSTRUMENT_CONTEXT") else "runtime"
+                _mark_opportunity_maturity_blocked(
+                    opportunity_maturity,
+                    state="VALID_WATCH",
+                    denied_at=true_blocker,
+                    next_required=next_required,
+                    field=runtime_field,
+                    received=true_blocker,
+                    required="hard runtime gates pass",
+                    reason=next_required,
+                    hard=True,
+                )
+                opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "VALID_WATCH")
+            opportunity_maturity["next_required"] = "publish validated PG_EXECUTION_PACKET_V3" if executable else next_required
+            raw_lane_blockers = execution_lane.get("blockers")
+            lane_blockers = (
+                [
+                    _upper(blocker)
+                    for blocker in cast(Sequence[Any], raw_lane_blockers)
+                    if str(blocker or "").strip()
+                ]
+                if isinstance(raw_lane_blockers, Sequence) and not isinstance(raw_lane_blockers, (str, bytes, bytearray))
+                else []
+            )
+            release_state = _non_executable_release_state(
+                executable=executable,
+                true_blocker=true_blocker,
+                final_state=final_state,
+                flip_flop_contained=flip_flop_contained,
+                permission_denied_effective=permission_denied_effective,
+                context_ok=context_ok,
+                lane_effective_timing_ready=lane_effective_timing_ready,
+                timing_mode=timing_mode,
+                final_score_passed=final_score_passed,
+                lane_score_blocked="LANE_SCORE_BELOW_THRESHOLD" in lane_blockers,
+                lane_timing_blocked="CURRENT_CANDLE_NOT_ACCEPTED" in lane_blockers,
+                packet_identity_mode=packet_identity_mode,
+                instrument_context=instrument_context,
+            )
+            if executable:
+                release_condition = "none"
+            elif true_blocker.startswith("INSTRUMENT_CONTEXT") or final_state == "BLOCKED_BY_RUNTIME":
+                release_condition = next_required
+            elif true_blocker.startswith("PROFESSIONAL_"):
+                release_condition = str(
+                    professional_trade_plan.get("next_required")
+                    or next_required
+                    or "professional trend/reversal thesis required"
+                )
+            elif true_blocker.startswith("PLAYBOOK_"):
+                release_condition = str(book_strategy.get("next_required") or next_required or "playbook reaction proof required")
+            elif flip_flop_contained and not professional_flip_flop_override:
+                release_condition = "candidate_stage=CANDIDATE_STABLE + same candidate side + stable dominance + acceptable entry + timing_mode=ENTER_NOW"
+            elif not context_ok:
+                release_condition = lane_release_requirements
+            elif not lane_effective_mature:
+                release_condition = "candidate_stage=CANDIDATE_STABLE/PREPARING"
+            elif not lane_effective_timing_ready or timing_mode != "ENTER_NOW":
+                release_condition = f"timing_mode=ENTER_NOW; {timing_decision['entry_timing']['next_condition']}"
+            elif not stable:
+                release_condition = f"dominance_margin >= {min_dominance_margin:.2f}"
+            elif not final_score_passed:
+                release_condition = f"final_score >= threshold ({final_execution_score:.4f}/{lane_required_score:.4f})"
+            else:
+                release_condition = next_required
+            missed_opportunity = _missed_opportunity_probe(
+                candidate_side=candidate_side,
+                execution_lane=execution_lane,
+                raw_council_score=raw_council_score,
+                final_execution_score=final_execution_score,
+                true_blocker=true_blocker,
+            )
+            trade_candidate_queue_raw = market.get("trade_candidate_queue", _mapping(market_reality.get("trade_candidate_queue")))
+            trade_candidate_queue: dict[str, Any]
+            if isinstance(trade_candidate_queue_raw, Mapping):
+                trade_candidate_queue = _mapping(trade_candidate_queue_raw)
+            elif isinstance(trade_candidate_queue_raw, Sequence) and not isinstance(trade_candidate_queue_raw, (str, bytes, bytearray)):
+                trade_candidate_queue = {"candidates": _rows(trade_candidate_queue_raw)}
+            else:
+                trade_candidate_queue = {}
+            active_candidate: dict[str, Any] = {
+                "candidate_id": active_candidate_id,
+                "side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
+                "stage": candidate_stage,
+                "maturity_stage": "EXECUTABLE_PACKET" if executable else maturity_stage,
+                "stable_reads": candidate_stable_reads,
+                "raw_side_flips": raw_flip_count,
+                "candidate_flip_count_10s": candidate_flip_count,
+                "candidate_invalidated": candidate_invalidated,
+                "entry_quality": entry_quality_label,
+                "permission": permission_state,
+                "opportunity_maturity": opportunity_maturity_state,
+                "opportunity_maturity_confidence": opportunity_maturity["confidence"],
+                "book_strategy_playbook": book_strategy.get("playbook"),
+                "book_strategy_maturity": book_strategy_state,
+                "flip_flop_risk": bool(flip_flop_contained and not professional_flip_flop_override),
+                "professional_flip_flop_override": professional_flip_flop_override,
+                "professional_thesis_state": professional_trade_plan.get("professional_thesis_state"),
+                "release_allowed": flip_flop_release_allowed,
+                "raw_recent_sides": raw_recent_sides,
+                "candidate_recent_sides": candidate_recent_sides,
             }
-        )
-        if result_execution["state"] == "EXECUTABLE":
-            result_execution["state"] = "WATCHING"
-        result["execution"] = result_execution
-        council["final_state"] = (
-            "WATCHING" if str(council.get("final_state") or "").strip().upper() == "EXECUTABLE" else council.get("final_state", "WATCHING")
-        )
-        council["true_blocker"] = no_packet_reason
-        council["denied_at"] = no_packet_reason
-        council["next_required"] = no_packet_next_required
-        council["release_condition"] = str(promotion_trace.get("release_condition") or release_condition or no_packet_next_required)
-        council["allowance_package"] = allowance_package
-        council["opportunity_maturity"] = opportunity_maturity
-        council["opportunity_maturity_state"] = opportunity_maturity_state
-        promotion_trace.update(
-            {
-                "denied_at": no_packet_reason,
-                "blocked_by": no_packet_reason,
-                "true_blocker": no_packet_reason,
-                "next_required": no_packet_next_required,
-                "release_condition": council["release_condition"],
-                "packet_result": "STUDY_PACKET_PUBLISHED",
-                "allowance_package": allowance_package,
+            trade_candidate_queue.update(
+                {
+                    "active_candidate": active_candidate,
+                    "candidate_id": active_candidate_id,
+                    "candidate_side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
+                    "candidate_stage": active_candidate["stage"],
+                    "candidate_stable_reads": candidate_stable_reads,
+                    "raw_side_flips": raw_flip_count,
+                    "candidate_flip_count_10s": candidate_flip_count,
+                    "candidate_invalidated": candidate_invalidated,
+                    "opportunity_maturity": opportunity_maturity,
+                    "opportunity_maturity_state": opportunity_maturity_state,
+                    "book_strategy": book_strategy,
+                    "book_strategy_state": book_strategy_state,
+                    "flip_flop_risk": bool(flip_flop_contained and not professional_flip_flop_override),
+                    "flip_flop_release_allowed": flip_flop_release_allowed,
+                    "professional_flip_flop_override": professional_flip_flop_override,
+                    "professional_thesis_resolution": professional_thesis_resolution,
+                }
+            )
+            allowance_package = _build_allowance_package_v1(
+                candidate_side=candidate_side,
+                timing_mode=timing_mode,
+                timing_decision=timing_decision,
+                execution_lane=execution_lane,
+                final_execution_score=final_execution_score,
+                lane_required_score=lane_required_score,
+                executable=executable,
+                final_state=final_state,
+                true_blocker=true_blocker,
+                next_required=next_required,
+                release_state=release_state,
+                promotion_result=promotion_result,
+                path_class=path_class,
+                preferred_expiry_seconds=preferred_expiry_seconds,
+                final_score_passed=final_score_passed,
+                intraday_reasoning_override_allowed=intraday_enter_now_reasoning_override_allowed,
+                wave_reasoning_override_allowed=wave_reasoning_override_allowed,
+                professional_reaction_reasoning_override_allowed=professional_reaction_reasoning_override_allowed,
+                trap_active=trap_active,
+                late_chase=late_chase,
+                opposing_force_ok=opposing_force_ok,
+                hard_bad_entry_class_active=hard_bad_entry_class_active,
+                opportunity_maturity=opportunity_maturity,
+            )
+            timeframe_seconds = max(0, _int(candle_movement_context.get("timeframe_seconds"), 0))
+            professional_entry_window = _mapping(professional_trade_plan.get("entry_window"))
+            naturally_disarmed = bool(
+                not executable
+                and (
+                    book_strategy_state != "ENTER_NOW"
+                    or opportunity_maturity_state in {"INVALIDATED", "MISSED", "LATE_CHASE"}
+                )
+            )
+            execution_opportunity_window = _resolve_execution_opportunity_window_v3(
+                snapshot,
+                previous_state,
+                candidate_id=active_candidate_id,
+                candidate_side=candidate_side,
+                entry_window=professional_entry_window,
+                executable=executable,
+                naturally_disarmed=naturally_disarmed,
+                now_epoch=current_now,
+                frame_id=_int(base.get("frame_id"), 0),
+                capture_count=_int(base.get("capture_count"), 0),
+                session_id=str(base.get("session_id") or ""),
+                symbol=str(base.get("symbol") or ""),
+                timeframe=str(base.get("timeframe") or ""),
+            )
+            if execution_opportunity_window:
+                professional_entry_window.update(
+                    {
+                        "opportunity_id": execution_opportunity_window.get("opportunity_id"),
+                        "opportunity_key": execution_opportunity_window.get("opportunity_key"),
+                        "duration_sec": execution_opportunity_window.get("duration_sec"),
+                        "opened_epoch": execution_opportunity_window.get("opened_epoch"),
+                        "opened_epoch_sec": execution_opportunity_window.get("opened_epoch_sec"),
+                        "valid_until_epoch": execution_opportunity_window.get("valid_until_epoch"),
+                        "valid_until_epoch_sec": execution_opportunity_window.get("valid_until_epoch_sec"),
+                        "remaining_sec": execution_opportunity_window.get("remaining_sec"),
+                        "state": execution_opportunity_window.get("state"),
+                        "purpose": "absolute immediate entry authorization window; later frames do not renew it",
+                    }
+                )
+                professional_trade_plan["entry_window"] = professional_entry_window
+                professional_trade_plan["execution_opportunity_window_v3"] = execution_opportunity_window
+            professional_thesis_horizon = _mapping(professional_trade_plan.get("thesis_horizon"))
+            expected_move_candles = (
+                _int(professional_thesis_horizon.get("expected_candle_count"), 0)
+                or max(1, (int(max(0, preferred_expiry_seconds)) + timeframe_seconds - 1) // timeframe_seconds)
+                if timeframe_seconds > 0 and preferred_expiry_seconds > 0
+                else 0
+            )
+            current_leg_payload = _mapping(candle_movement_context.get("current_leg"))
+            current_leg_candle_count = _int(current_leg_payload.get("candle_count"), 0)
+            expected_duration_sec = _int(professional_thesis_horizon.get("expected_duration_sec"), int(max(0, preferred_expiry_seconds)))
+            expected_move_time = {
+                "expected_duration_sec": expected_duration_sec,
+                "expected_duration_text": _duration_text(expected_duration_sec),
+                "timeframe": str(candle_movement_context.get("timeframe") or "").upper(),
+                "timeframe_seconds": timeframe_seconds,
+                "expected_candle_count": expected_move_candles,
+                "current_leg_candle_count": current_leg_candle_count,
+                "projected_total_current_leg_candles": current_leg_candle_count + expected_move_candles,
+                "current_leg_side": current_leg_payload.get("side"),
+                "current_leg_stage": candle_movement_context.get("move_stage"),
+                "basis": str(professional_thesis_horizon.get("basis") or movement_projection_horizon.get("basis") or "preferred_expiry_seconds_to_timeframe_candles"),
+                "entry_window": professional_entry_window,
+                "thesis_horizon": professional_thesis_horizon,
+                "professional_trade_plan": professional_trade_plan,
+                "projection_horizon": movement_projection_horizon,
+            }
+            allowance_package["packet_id"] = base["packet_id"]
+            allowance_package["expected_duration_sec"] = expected_duration_sec
+            allowance_package["expected_duration_text"] = expected_move_time["expected_duration_text"]
+            allowance_package["expected_candle_count"] = expected_move_candles
+            candle_movement_brief = {
+                "visible_candle_count": candle_movement_context.get("visible_candle_count"),
+                "tracked_candle_count": candle_movement_context.get("tracked_candle_count"),
+                "current_leg_candle_count": current_leg_candle_count,
+                "current_leg_side": current_leg_payload.get("side"),
+                "current_leg_stage": candle_movement_context.get("move_stage"),
+                "move_duration": candle_movement_context.get("move_duration"),
+                "opposing_force_room": candle_movement_context.get("opposing_force_room"),
+                "expected_move_time": expected_move_time,
+            }
+            allowance_package["candle_movement_context_v3"] = candle_movement_context
+            allowance_package["candle_movement"] = candle_movement_brief
+            allowance_package["expected_move_time"] = expected_move_time
+            allowance_package["entry_window"] = professional_entry_window
+            if execution_opportunity_window:
+                allowance_package["execution_opportunity_window_v3"] = execution_opportunity_window
+            allowance_package["thesis_horizon"] = professional_thesis_horizon
+            allowance_package["professional_trade_plan"] = professional_trade_plan
+            allowance_package["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
+            allowance_package["playbook_ai_summary_v3"] = playbook_ai_summary
+            allowance_package["professional_thesis_resolution"] = professional_thesis_resolution
+            allowance_package["dual_thesis_report_v3"] = dual_thesis_report
+            allowance_package["professional_thesis_state"] = professional_trade_plan.get("professional_thesis_state")
+            allowance_package["professional_authority_side"] = professional_trade_plan.get("authority_side")
+            allowance_package["professional_flip_flop_override"] = professional_flip_flop_override
+            allowance_package["book_strategy"] = book_strategy.get("strategy_read")
+            allowance_package["book_strategy_playbook"] = book_strategy.get("playbook")
+            allowance_package["book_strategy_maturity"] = book_strategy_state
+            promotion_trace: dict[str, Any] = {
+                "packet_id": base["packet_id"],
+                "release_state": release_state,
+                "non_executable_state": None if executable else release_state,
+                "raw_side": raw_side,
+                "previous_raw_side": raw_recent_sides[-2] if len(raw_recent_sides) >= 2 else None,
+                "candidate_side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
+                "previous_candidate_side": candidate_recent_sides[-2] if len(candidate_recent_sides) >= 2 else None,
+                "candidate_id": active_candidate_id,
+                "candidate_stage": candidate_stage,
+                "execution_opportunity_window_v3": execution_opportunity_window,
                 "opportunity_maturity": opportunity_maturity,
                 "opportunity_maturity_state": opportunity_maturity_state,
+                "book_strategy": book_strategy,
+                "book_strategy_state": book_strategy_state,
+                "book_strategy_playbook": book_strategy.get("playbook"),
+                "playbook_ai_intelligence_v3": playbook_ai_intelligence,
+                "playbook_ai_summary_v3": playbook_ai_summary,
+                "professional_trade_plan": professional_trade_plan,
+                "professional_thesis_resolution": professional_thesis_resolution,
+                "dual_thesis_report_v3": dual_thesis_report,
+                "professional_flip_flop_override": professional_flip_flop_override,
+                "professional_thesis_horizon": professional_thesis_horizon,
+                "thesis_horizon": professional_thesis_horizon,
+                "expected_move_time": expected_move_time,
+                "expected_duration_sec": expected_duration_sec,
+                "expected_candle_count": expected_move_candles,
+                "candle_movement_context_v3": candle_movement_context,
+                "candle_movement": candle_movement_brief,
                 "visual_integrity": opportunity_maturity.get("visual_integrity"),
+                "candidate_stable_reads": candidate_stable_reads,
+                "playbook_required_stable_reads": playbook_required_stable_reads,
+                "playbook_candidate_stable": playbook_candidate_stable,
+                "candidate_stability_policy_v3": _mapping(snapshot.get("candidate_stability_policy_v3")),
+                "runtime_block_reason": runtime_block_reason,
+                "live_integrity_hash_mismatch": live_integrity_hash_mismatch,
+                "top_input_frame_hash": top_input_frame_hash,
+                "live_integrity_frame_hash": live_integrity_frame_hash,
+                "raw_flip_count_10s": raw_flip_count,
+                "candidate_flip_count_10s": candidate_flip_count,
+                "dominance_margin": round(float(dominance_margin), 4),
+                "entry_quality": entry_quality_label,
+                "entry_quality_ok": lane_effective_entry_quality_ok,
+                "raw_entry_quality_ok": entry_quality_ok,
+                "timing_ready": lane_effective_timing_ready,
+                "raw_timing_ready": timing_ready,
+                "timing_mode": timing_mode,
+                "timing_has_explicit_expiry": timing_has_explicit_expiry,
+                "timing_decision": timing_decision,
+                "late_chase_detected": bool(
+                    bad_entry.get("detected")
+                    or market_trap.get("late_chase_detected")
+                    or str(market_trap.get("trap_type") or market_trap.get("primary_trap") or "").upper().startswith("LATE_CHASE")
+                ),
+                "trap_active": trap_active,
+                "path_quality": "ACCEPTABLE" if opposing_force_ok else "OPPOSING_FORCE_TOO_CLOSE",
+                "opposing_force_ok": opposing_force_ok,
+                "instrument_context_state": instrument_context_state,
+                "instrument_context_broker_click_safe": bool(instrument_context.get("broker_click_safe")),
+                "instrument_context_release_condition": instrument_release_condition,
+                "instrument_context_evidence": _mapping(instrument_context.get("evidence")),
+                "permission": permission_state,
+                "permission_override_allowed": lane_permission_override,
+                "market_block_override_allowed": lane_market_override,
+                "reasoning_decision_state": reasoning_decision_state,
+                "reasoning_execution_blocked": reasoning_execution_blocked,
+                "reasoning_block_reason": reasoning_block_reason,
+                "intraday_enter_now_reasoning_override_allowed": intraday_enter_now_reasoning_override_allowed,
+                "high_frequency_soft_wait_only": high_frequency_soft_wait_only,
+                "high_frequency_wait_blocks_intraday": high_frequency_wait_blocks_intraday,
+                "wave_reasoning_override_allowed": wave_reasoning_override_allowed,
+                "professional_reaction_reasoning_override_allowed": professional_reaction_reasoning_override_allowed,
+                "professional_playbook_reasoning_override_allowed": professional_playbook_reasoning_override_allowed,
+                "reasoning_bad_entry_class": reasoning_bad_entry_class,
+                "market_bad_entry_class": market_bad_entry_class,
+                "bad_entry_detected_effective": bad_entry_detected_effective,
+                "bad_entry_filter_hard_active": bad_entry_filter_hard_active,
+                "hard_bad_entry_class_active": hard_bad_entry_class_active,
+                "late_chase_block_overridden": late_chase_block_overridden,
+                "late_chase_bad_entry_override_allowed": late_chase_bad_entry_override_allowed,
+                "denied_at": (
+                    "NONE"
+                    if executable
+                    else true_blocker
+                    if true_blocker != "NONE"
+                    else blocked_by
+                    if blocked_by != "NONE"
+                    else promotion_result
+                ),
+                "base_council_score": round(float(base_council_score), 4),
+                "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
+                "raw_council_score": round(float(raw_council_score), 4),
+                "market_reality_adjustment": round(float(market_reality_adjustment), 4),
+                "final_execution_score": round(float(final_execution_score), 4),
+                "final_score": round(float(final_execution_score), 4),
+                "execution_threshold": round(float(execution_threshold), 4),
+                "lane_threshold": round(float(lane_required_score), 4),
+                "threshold": round(float(lane_required_score), 4),
+                "execution_lane": execution_lane,
+                "selected_lane": execution_lane.get("name"),
+                "lane_accepted": bool(execution_lane.get("accepted")),
+                "accepted_lanes": execution_lane.get("accepted_lanes", []),
+                "stale_dominant_overridden": bool(execution_lane.get("stale_dominant_overridden")),
+                "raw_late_chase": bool(execution_lane.get("raw_late_chase", late_chase_raw)),
+                "effective_late_chase": bool(execution_lane.get("effective_late_chase", late_chase)),
+                "stale_late_chase_overridden": stale_late_chase_overridden,
+                "live_trigger_reaction": live_trigger_reaction,
+                "structural_flow_ready": bool(execution_lane.get("structural_flow_ready")),
+                "reversal_capture_mature": bool(execution_lane.get("reversal_capture_mature")),
+                "mature_directional_flow_ready": bool(execution_lane.get("mature_directional_flow_ready")),
+                "opportunity_capture_mode": bool(execution_lane.get("opportunity_capture_mode")),
+                "current_candle_acceptance": execution_lane.get("current_candle_acceptance", {}),
+                "wave_context": execution_lane.get("wave_context", {}),
+                "release_allowed": flip_flop_release_allowed,
+                "blocked_by": "NONE" if executable else blocked_by,
+                "true_blocker": "NONE" if executable else true_blocker,
+                "next_required": "none" if executable else next_required,
+                "release_condition": release_condition,
+                "promotion_result": promotion_result,
+                "packet_result": "PG_EXECUTION_PACKET_V3_PUBLISHED" if executable else "STUDY_PACKET_PUBLISHED",
+                "missed_opportunity": missed_opportunity,
+                "reasoning_state": final_reasoning_decision.get("decision"),
+                "reasoning_play": final_reasoning_decision.get("play"),
+                "reasoning_regime": final_reasoning_decision.get("regime"),
+                "reasoning_price_location": final_reasoning_decision.get("price_location"),
+                "reasoning_coherence_score": reasoning_arbitration.get("coherence_score"),
+                "bad_entry_filter": bad_entry_filter,
+                "ai_contribution_strengths": ai_contribution_strengths,
+                "model_strength_profile": model_strength_profile,
+                "lane_thresholds": _lane_thresholds(snapshot),
+                "allowance_package": allowance_package,
             }
-        )
-        if str(promotion_trace.get("promotion_result") or "").strip().upper() == "EXECUTABLE_PACKET_CREATED":
-            promotion_trace["promotion_result"] = str(council.get("final_state") or "WATCHING").strip().upper()
-        council["promotion_trace"] = promotion_trace
-        study_packet["execution"] = dict(result_execution)
-        study_packet["model_council"] = council
-        study_packet["promotion_trace"] = promotion_trace
-        study_packet["allowance_package"] = allowance_package
-        study_packet["opportunity_maturity"] = opportunity_maturity
-        study_packet["opportunity_maturity_state"] = opportunity_maturity_state
-        study_packet["true_blocker"] = no_packet_reason
-        study_packet["denied_at"] = no_packet_reason
-        study_packet["next_required"] = no_packet_next_required
-        study_packet["release_condition"] = council["release_condition"]
-        study_packet["packet_result"] = "STUDY_PACKET_PUBLISHED"
-        result["model_council"] = council
-        result["promotion_trace"] = promotion_trace
-        result["allowance_package"] = allowance_package
-        result["opportunity_maturity"] = opportunity_maturity
-        result["opportunity_maturity_state"] = opportunity_maturity_state
-        result["study_packet"] = study_packet
-        result["model_council_study_packet"] = study_packet
-        result["packet_result"] = "STUDY_PACKET_PUBLISHED"
-        result["execution_packet_present"] = False
-    current_execution_packet = _mapping(result.get("execution_packet") or result.get("model_council_packet"))
-    entry_permission_v3 = build_entry_permission_v3(
-        dual_thesis_report,
-        execution_packet=current_execution_packet,
-        allowance_package=allowance_package,
-    )
-    dual_thesis_report["entry_permission_v3"] = entry_permission_v3
-    for payload in (result, council, promotion_trace, allowance_package, study_packet):
-        payload["entry_permission_v3"] = entry_permission_v3
-        payload["dual_thesis_report_v3"] = dual_thesis_report
-    study_packet["execution"] = {
-        **_mapping(study_packet.get("execution")),
-        "enabled": False,
-        "state": "WATCHING"
-        if _upper(_mapping(study_packet.get("execution")).get("state")) == "EXECUTABLE"
-        else _upper(_mapping(study_packet.get("execution")).get("state"), "WATCHING"),
-        "study_only": True,
-    }
-    if current_execution_packet:
-        current_execution_packet["entry_permission_v3"] = entry_permission_v3
-        current_execution_packet["dual_thesis_report_v3"] = dual_thesis_report
-        packet_allowance = _mapping(current_execution_packet.get("allowance_package"))
-        packet_allowance["entry_permission_v3"] = entry_permission_v3
-        packet_allowance["dual_thesis_report_v3"] = dual_thesis_report
-        current_execution_packet["allowance_package"] = packet_allowance
-        if isinstance(result.get("execution_packet"), Mapping):
-            result["execution_packet"] = current_execution_packet
-        if isinstance(result.get("model_council_packet"), Mapping):
-            result["model_council_packet"] = current_execution_packet
-    result["study_packet"] = study_packet
-    result["model_council_study_packet"] = study_packet
-    return result
+            sequence_readiness: dict[str, Any] = {}
+            survival_blockers: list[dict[str, Any]] = []
+            survival_blockers.extend(_rows(opportunity_maturity.get("blockers")))
+            survival_blockers.extend(_rows(book_strategy.get("blockers")))
+            survival_soft_warnings: list[dict[str, Any]] = []
+            survival_soft_warnings.extend(_rows(opportunity_maturity.get("soft_contributors")))
+            survival_soft_warnings.extend(_rows(book_strategy.get("soft_warnings")))
+            if true_blocker != "NONE":
+                survival_blockers.append(
+                    {
+                        "field": _promotion_exact_field(true_blocker, sequence_readiness, instrument_context),
+                        "code": true_blocker,
+                        "reason": next_required,
+                        "hard": bool(final_state == "BLOCKED_BY_RUNTIME" or true_blocker.startswith("INSTRUMENT_CONTEXT")),
+                    }
+                )
+            price_location_payload = _mapping(market.get("price_location"))
+            astar_authorization_ledger = build_candidate_decision_ledger_v3(
+                {
+                    "candidate_side": candidate_side if candidate_side in {"BUY", "SELL"} else "HOLD",
+                    "requested_state": "ENTER_NOW" if book_strategy_state == "ENTER_NOW" else opportunity_maturity_state,
+                    "book_strategy_state": book_strategy_state,
+                    "state": final_state,
+                    "timing_mode": timing_mode,
+                    "entry_now_allowed": bool(timing_decision.get("entry_now_allowed")),
+                    "current_candle_accepted": current_candle_ok,
+                    "current_candle_entry_allowed": current_candle_ok,
+                    "runtime_pass": not bool(runtime_blocked or final_state == "BLOCKED_BY_RUNTIME"),
+                    "runtime_status": final_state,
+                    "market_location": (
+                        price_location_payload.get("relative_location")
+                        or price_location_payload.get("location")
+                        or _mapping(book_strategy.get("evidence")).get("bias_alignment")
+                        or ""
+                    ),
+                    "confirmation_score": max(
+                        _clip01(final_execution_score, 0.0),
+                        _clip01(_mapping(book_strategy.get("evidence")).get("overlay_suite_score"), 0.0),
+                    ),
+                    "pullback_held": bool(_bool(snapshot.get("pullback_confirmed")) or _bool(snapshot.get("retest_confirmed"))),
+                    "pullback_reclaimed": bool(_bool(snapshot.get("role_flip_confirmed")) or _bool(snapshot.get("pullback_reclaim_ready"))),
+                    "pullback_failed": bool(candidate_invalidated),
+                    "zone_role": price_location_payload.get("zone_role") or price_location_payload.get("role") or "",
+                    "hard_blockers": survival_blockers,
+                    "blockers": survival_blockers,
+                    "soft_warnings": survival_soft_warnings,
+                }
+            )
+            astar_authorization_trace = _mapping(astar_authorization_ledger.get("authorization_trace"))
+            opportunity_maturity["astar_decision_state_v3"] = astar_authorization_ledger
+            opportunity_maturity["authorization_survival_trace_v3"] = astar_authorization_trace
+            allowance_package["astar_decision_state_v3"] = astar_authorization_ledger
+            allowance_package["authorization_survival_trace_v3"] = astar_authorization_trace
+            promotion_trace["astar_decision_state_v3"] = astar_authorization_ledger
+            promotion_trace["authorization_survival_trace_v3"] = astar_authorization_trace
+            council_scores = {
+                "global": round(float(_clip01(market.get("global_score"), raw_council_score)), 4),
+                "local": round(float(_clip01(market.get("local_score"), raw_council_score)), 4),
+                "zone": round(float(_clip01(market.get("zone_score"), raw_council_score)), 4),
+                "angle": round(float(_clip01(market.get("angle_score"), raw_council_score)), 4),
+                "history": round(float(_clip01(market.get("history_score"), raw_council_score)), 4),
+                "risk": round(float(_clip01(market.get("risk_score"), raw_council_score)), 4),
+                "arbitration": round(float(_clip01(market.get("arbitration_score"), raw_council_score)), 4),
+                "raw_council_score": round(float(raw_council_score), 4),
+            }
+            reality_adjustments = {
+                "entry_quality": round(float(entry_quality_adjustment), 4),
+                "trap_penalty": round(float(trap_penalty), 4),
+                "path_risk": round(float(path_risk_adjustment), 4),
+                "flip_flop_penalty": round(float(flip_flop_penalty), 4),
+                "context": round(float(context_adjustment), 4),
+                "timing": round(float(timing_adjustment), 4),
+                "maturity": round(float(maturity_adjustment), 4),
+                "permission": round(float(permission_adjustment), 4),
+                "market_reality_adjustment": round(float(market_reality_adjustment), 4),
+            }
+            council: dict[str, Any] = {
+                "final_state": final_state,
+                "final_side": candidate_side if side_ok and final_state != "CONFLICT" else None,
+                "execution_opportunity_window_v3": execution_opportunity_window,
+                "decision_id": "mc_" + hashlib.sha1(f"{current_now}|{candidate_side}|{buy_score}|{sell_score}".encode("utf-8")).hexdigest()[:18],
+                "maturity_stage": "EXECUTABLE_PACKET" if executable else maturity_stage,
+                "opportunity_maturity": opportunity_maturity,
+                "opportunity_maturity_state": opportunity_maturity_state,
+                "book_strategy": book_strategy,
+                "book_strategy_state": book_strategy_state,
+                "book_strategy_playbook": book_strategy.get("playbook"),
+                "playbook_ai_intelligence_v3": playbook_ai_intelligence,
+                "playbook_ai_summary_v3": playbook_ai_summary,
+                "professional_trade_plan": professional_trade_plan,
+                "thesis_horizon": professional_thesis_horizon,
+                "expected_move_time": expected_move_time,
+                "expected_duration_sec": expected_duration_sec,
+                "expected_candle_count": expected_move_candles,
+                "professional_thesis_resolution": professional_thesis_resolution,
+                "dual_thesis_report_v3": dual_thesis_report,
+                "candidate_stability_policy_v3": _mapping(snapshot.get("candidate_stability_policy_v3")),
+                "professional_flip_flop_override": professional_flip_flop_override,
+                "candle_movement_context_v3": candle_movement_context,
+                "candle_movement": candle_movement_brief,
+                "strategy_read": book_strategy.get("strategy_read"),
+                "arbitration_reason": (
+                    f"{candidate_side} executable via {execution_lane.get('name')}: {execution_lane.get('reason')}"
+                    if executable
+                    else str(
+                        block_reason
+                        or (
+                            f"{promotion_result}: blocked_by={true_blocker}; next_required={next_required}"
+                            if true_blocker != "NONE"
+                            else f"{promotion_result}: {next_required}"
+                        )
+                    )
+                ),
+                "buy_score": round(float(buy_score), 4),
+                "sell_score": round(float(sell_score), 4),
+                "hold_score": round(float(hold_score), 4),
+                "dominance_margin": round(float(dominance_margin), 4),
+                "disagreement_score": round(float(disagreement_score), 4),
+                "council_scores": council_scores,
+                "reality_adjustments": reality_adjustments,
+                "base_council_score": round(float(base_council_score), 4),
+                "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
+                "raw_council_score": round(float(raw_council_score), 4),
+                "final_execution_score": round(float(final_execution_score), 4),
+                "execution_threshold": round(float(execution_threshold), 4),
+                "lane_threshold": round(float(lane_required_score), 4),
+                "execution_lane": execution_lane,
+                "selected_execution_lane": execution_lane.get("name"),
+                "true_blocker": true_blocker,
+                "release_state": release_state,
+                "non_executable_state": None if executable else release_state,
+                "denied_at": promotion_trace["denied_at"],
+                "next_required": next_required,
+                "release_condition": release_condition,
+                "candidate_id": active_candidate_id,
+                "candidate_stage": candidate_stage,
+                "candidate_stable_reads": candidate_stable_reads,
+                "stability_frames": _int(snapshot.get("stability_frames"), candidate_stable_reads),
+                "final_score": round(float(final_execution_score), 4),
+                "threshold": round(float(lane_required_score), 4),
+                "selected_lane": execution_lane.get("name"),
+                "timing_mode": timing_mode,
+                "instrument_context_state": instrument_context_state,
+                "instrument_context_broker_click_safe": bool(instrument_context.get("broker_click_safe")),
+                "flip_flop_state": (
+                    "PROFESSIONAL_THESIS_OVERRIDE_RELEASED"
+                    if professional_flip_flop_override
+                    else "FLIP_FLOP_RELEASED"
+                    if flip_flop_release_allowed
+                    else "FLIP_FLOP_CONTAINED"
+                    if flip_flop_contained
+                    else ("STABLE_EXECUTABLE" if executable else "STUDYING")
+                ),
+                "contributors_are_diagnostic": True,
+                "ai_contribution_strengths": ai_contribution_strengths,
+                "model_strength_profile": model_strength_profile,
+                "lane_thresholds": _lane_thresholds(snapshot),
+                "skill_contributions": skill_contributions,
+                "two_candle_study": two_candle_study,
+                "lstm_contribution": lstm_contribution,
+                "entry_quality": entry_quality_surface,
+                "trade_permission": trade_permission,
+                "promotion_trace": promotion_trace,
+                "astar_decision_state_v3": astar_authorization_ledger,
+                "authorization_survival_trace_v3": astar_authorization_trace,
+                "trade_candidate_queue": trade_candidate_queue,
+                "timing_decision": timing_decision,
+                "timing_forecast": timing_forecast,
+                "regime": market.get("regime", {}),
+                "market_play": market.get("market_play", {}),
+                "price_location": market.get("price_location", {}),
+                "memory_confirmation": market.get("memory_confirmation", {}),
+                "pair_profile": market.get("pair_profile", {}),
+                "model_role_outputs": model_role_outputs,
+                "reasoning_arbitration": reasoning_arbitration,
+                "bad_entry_filter": bad_entry_filter,
+                "final_reasoning_decision": final_reasoning_decision,
+                "primary_play": final_reasoning_decision.get("play"),
+                "regime_primary": _mapping(market.get("regime")).get("primary"),
+                "reasoning_decision": final_reasoning_decision.get("decision"),
+                "reasoning_coherence_score": reasoning_arbitration.get("coherence_score"),
+                "reasoning_execution_blocked": reasoning_execution_blocked,
+                "reasoning_block_reason": reasoning_block_reason,
+                "intraday_enter_now_reasoning_override_allowed": intraday_enter_now_reasoning_override_allowed,
+                "wave_reasoning_override_allowed": wave_reasoning_override_allowed,
+                "professional_reaction_reasoning_override_allowed": professional_reaction_reasoning_override_allowed,
+                "allowance_package": allowance_package,
+            }
+            council_debate = _council_debate(
+                candidate_side=candidate_side,
+                buy_score=buy_score,
+                sell_score=sell_score,
+                final_state=final_state,
+                market=market,
+                market_context=market_context,
+                entry_quality=_mapping(entry_quality_surface),
+                trade_permission=_mapping(trade_permission),
+                block_reason=block_reason,
+            )
+            study_side = candidate_side if side_ok and (executable or context_ok or final_state == "PREPARING") else None
+            execution: dict[str, Any] = {
+                "enabled": executable,
+                "state": "EXECUTABLE" if executable else final_state,
+                "side": study_side,
+                "expiry_seconds": timing_expiry if executable else 0,
+                "amount_action": "DO_NOT_CHANGE_AMOUNT",
+                "allowance_package_type": allowance_package["package_type"],
+            }
+            result: dict[str, Any] = {
+                "schema_version": MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
+                "packet_id": base["packet_id"],
+                "packet_type": "STUDY_PACKET",
+                "execution_opportunity_window_v3": execution_opportunity_window,
+                "execution": execution,
+                "allowance_package": allowance_package,
+                "model_council": council,
+                "promotion_trace": promotion_trace,
+                "council_scores": council_scores,
+                "reality_adjustments": reality_adjustments,
+                "execution_lane": execution_lane,
+                "selected_execution_lane": execution_lane.get("name"),
+                "release_state": release_state,
+                "non_executable_state": None if executable else release_state,
+                "missed_opportunity": missed_opportunity,
+                "opportunity_maturity": opportunity_maturity,
+                "opportunity_maturity_state": opportunity_maturity_state,
+                "book_strategy": book_strategy,
+                "book_strategy_state": book_strategy_state,
+                "book_strategy_playbook": book_strategy.get("playbook"),
+                "playbook_ai_intelligence_v3": playbook_ai_intelligence,
+                "playbook_ai_summary_v3": playbook_ai_summary,
+                "professional_trade_plan": professional_trade_plan,
+                "thesis_horizon": professional_thesis_horizon,
+                "expected_move_time": expected_move_time,
+                "expected_duration_sec": expected_duration_sec,
+                "expected_candle_count": expected_move_candles,
+                "professional_thesis_resolution": professional_thesis_resolution,
+                "dual_thesis_report_v3": dual_thesis_report,
+                "professional_flip_flop_override": professional_flip_flop_override,
+                "candle_movement_context_v3": candle_movement_context,
+                "candle_movement": candle_movement_brief,
+                "strategy_read": book_strategy.get("strategy_read"),
+                "final_execution_score": round(float(final_execution_score), 4),
+                "final_score": round(float(final_execution_score), 4),
+                "execution_threshold": round(float(execution_threshold), 4),
+                "threshold": round(float(lane_required_score), 4),
+                "base_council_score": round(float(base_council_score), 4),
+                "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
+                "lane_thresholds": _lane_thresholds(snapshot),
+                "ai_contribution_strengths": ai_contribution_strengths,
+                "model_strength_profile": model_strength_profile,
+                "market_context": market_context,
+                "two_candle_study": two_candle_study,
+                "lstm_contribution": lstm_contribution,
+                "skill_contributions": skill_contributions,
+                "angle_context": market.get("angle_context", {}),
+                "history_context": market.get("history_context", {}),
+                "market_reality": market_reality,
+                "entry_quality": entry_quality_surface,
+                "trade_permission": trade_permission,
+                "market_trap": execution_market_trap,
+                "raw_market_trap": market_trap,
+                "ideal_trade_path": market.get("ideal_trade_path", _mapping(market_reality.get("ideal_trade_path"))),
+                "path_risk": market.get("path_risk", _mapping(market_reality.get("path_risk"))),
+                "regime_playbook": market.get("regime_playbook", _mapping(market_reality.get("regime_playbook"))),
+                "time_to_reward_invalidation": market.get(
+                    "time_to_reward_invalidation",
+                    _mapping(market_reality.get("time_to_reward_invalidation")),
+                ),
+                "current_candle_contract": market.get(
+                    "current_candle_contract",
+                    _mapping(market_reality.get("current_candle_contract")),
+                ),
+                "market_listening_stream": market.get(
+                    "market_listening_stream",
+                    _mapping(market_reality.get("market_listening_stream")),
+                ),
+                "trade_candidate_queue": trade_candidate_queue,
+                "council_debate": council_debate,
+                "timing_decision": timing_decision,
+                "timing_forecast": timing_forecast,
+                "regime": market.get("regime", {}),
+                "market_play": market.get("market_play", {}),
+                "price_location": market.get("price_location", {}),
+                "memory_confirmation": market.get("memory_confirmation", {}),
+                "pair_profile": market.get("pair_profile", {}),
+                "model_role_outputs": model_role_outputs,
+                "reasoning_arbitration": reasoning_arbitration,
+                "bad_entry_filter": bad_entry_filter,
+                "final_reasoning_decision": final_reasoning_decision,
+                "runtime_model_health": health,
+                "instrument_context": instrument_context,
+                "symbol_context": symbol_context,
+                "instrument_context_validation": packet_identity_validation.as_dict(),
+                "block_reason": block_reason,
+                "contributors": {
+                    "contributors_are_diagnostic": True,
+                    "ai_contribution_strengths": ai_contribution_strengths,
+                    "model_strength_profile": model_strength_profile,
+                    "skill_gates": _diagnostic_skill_gates(snapshot),
+                    "skill_contributions": skill_contributions,
+                    "lstm_candle_sequence": lstm_contribution,
+                    "two_candle_study": two_candle_study,
+                    "memory": snapshot.get("memory", snapshot.get("memory_similarity", {})),
+                    "decision_kernel": snapshot.get("decision_kernel", {}),
+                    "market_agents": market.get("agents", []),
+                    "market_reality": market_reality,
+                    "model_role_outputs": model_role_outputs,
+                    "play_reasoning": final_reasoning_decision,
+                },
+            }
+            study_packet_valid_for_seconds = _float(snapshot.get("study_packet_valid_for_seconds"), 20.0)
+            study_execution = {
+                **execution,
+                "enabled": False,
+                "state": "WATCHING" if _upper(execution.get("state")) == "EXECUTABLE" else execution.get("state", "WATCHING"),
+                "source_state": _upper(execution.get("state"), "WATCHING"),
+                "study_only": True,
+            }
+            study_packet: dict[str, Any] = {
+                "schema_version": MODEL_COUNCIL_STUDY_SCHEMA_VERSION,
+                "packet_id": base["packet_id"],
+                "packet_type": "STUDY_PACKET",
+                "session_id": base["session_id"],
+                "symbol": base["symbol"],
+                "timeframe": base["timeframe"],
+                "frame_id": base["frame_id"],
+                "capture_count": base["capture_count"],
+                "state_version": base["state_version"],
+                "created_epoch": current_now,
+                "created_epoch_sec": current_now,
+                "valid_until_epoch": current_now + study_packet_valid_for_seconds,
+                "valid_until_epoch_sec": current_now + study_packet_valid_for_seconds,
+                "execution": study_execution,
+                "model_council": council,
+                "allowance_package": allowance_package,
+                "block_reason": block_reason,
+                "promotion_trace": promotion_trace,
+                "reason": council["arbitration_reason"],
+                "true_blocker": true_blocker,
+                "release_state": release_state,
+                "non_executable_state": None if executable else release_state,
+                "denied_at": promotion_trace["denied_at"],
+                "next_required": next_required,
+                "release_condition": release_condition,
+                "candidate_id": active_candidate_id,
+                "candidate_stage": candidate_stage,
+                "execution_opportunity_window_v3": execution_opportunity_window,
+                "final_score": round(float(final_execution_score), 4),
+                "threshold": round(float(lane_required_score), 4),
+                "selected_lane": execution_lane.get("name"),
+                "timing_mode": timing_mode,
+                "instrument_context_state": instrument_context_state,
+                "execution_lane": execution_lane,
+                "selected_execution_lane": execution_lane.get("name"),
+                "lane_thresholds": _lane_thresholds(snapshot),
+                "ai_contribution_strengths": ai_contribution_strengths,
+                "model_strength_profile": model_strength_profile,
+                "missed_opportunity": missed_opportunity,
+                "opportunity_maturity": opportunity_maturity,
+                "opportunity_maturity_state": opportunity_maturity_state,
+                "book_strategy": book_strategy,
+                "book_strategy_state": book_strategy_state,
+                "book_strategy_playbook": book_strategy.get("playbook"),
+                "playbook_ai_intelligence_v3": playbook_ai_intelligence,
+                "playbook_ai_summary_v3": playbook_ai_summary,
+                "professional_trade_plan": professional_trade_plan,
+                "thesis_horizon": professional_thesis_horizon,
+                "expected_move_time": expected_move_time,
+                "expected_duration_sec": expected_duration_sec,
+                "expected_candle_count": expected_move_candles,
+                "professional_thesis_resolution": professional_thesis_resolution,
+                "dual_thesis_report_v3": dual_thesis_report,
+                "candle_movement_context_v3": candle_movement_context,
+                "candle_movement": candle_movement_brief,
+                "strategy_read": book_strategy.get("strategy_read"),
+                "trade_candidate_queue": trade_candidate_queue,
+                "council_scores": council_scores,
+                "reality_adjustments": reality_adjustments,
+                "base_council_score": round(float(base_council_score), 4),
+                "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
+                "two_candle_study": two_candle_study,
+                "lstm_contribution": lstm_contribution,
+                "skill_contributions": skill_contributions,
+                "final_execution_score": round(float(final_execution_score), 4),
+                "execution_threshold": round(float(execution_threshold), 4),
+                "timing_decision": timing_decision,
+                "timing_forecast": timing_forecast,
+                "regime": market.get("regime", {}),
+                "market_play": market.get("market_play", {}),
+                "price_location": market.get("price_location", {}),
+                "memory_confirmation": market.get("memory_confirmation", {}),
+                "pair_profile": market.get("pair_profile", {}),
+                "model_role_outputs": model_role_outputs,
+                "reasoning_arbitration": reasoning_arbitration,
+                "bad_entry_filter": bad_entry_filter,
+                "final_reasoning_decision": final_reasoning_decision,
+            }
+            result["study_packet"] = study_packet
+            result["model_council_study_packet"] = study_packet
+
+            def _finalize_sequence_and_packets() -> dict[str, Any]:
+                nonlocal block_reason
+                nonlocal blocked_by
+                nonlocal executable
+                nonlocal final_state
+                nonlocal next_required
+                nonlocal opportunity_maturity_state
+                nonlocal release_condition
+                nonlocal release_state
+                nonlocal sequence_readiness
+                nonlocal true_blocker
+                sequence_context = build_sequence_context_v3(
+                    snapshot,
+                    packet=base_snapshot,
+                )
+                sequence_context_payload = sequence_context.as_dict()
+                sequence_readiness = sequence_context_readiness_report(
+                    sequence_context,
+                    source_module="model_council_resolver",
+                )
+                council["sequence_context"] = sequence_context_payload
+                council["sequence_context_readiness"] = sequence_readiness
+                council["sequence_id"] = sequence_context_payload["sequence_id"]
+                council["sequence_signature"] = sequence_context_payload["sequence_signature"]
+                council["sequence_length"] = sequence_context_payload["sequence_length"]
+                council["frames_used"] = sequence_context_payload["frames_used"]
+                council["sequence_status"] = sequence_context_payload["sequence_status"]
+                council["sequence_confidence"] = sequence_context_payload["sequence_confidence"]
+
+                def _refresh_promotion_failure_audit() -> dict[str, Any]:
+                    audit = build_promotion_failure_audit_v3(
+                        packet_id=base["packet_id"],
+                        candidate_id=active_candidate_id,
+                        promotion_trace=promotion_trace,
+                        sequence_context_readiness=sequence_readiness,
+                        execution_lane=execution_lane,
+                        final_score=final_execution_score,
+                        threshold=lane_required_score,
+                        timing_mode=timing_mode,
+                        instrument_context=instrument_context,
+                        packet_result=str(promotion_trace.get("packet_result") or study_packet.get("packet_result") or "STUDY_PACKET_PUBLISHED"),
+                        extra_source_fields={
+                            "release_state": promotion_trace.get("release_state"),
+                            "non_executable_state": promotion_trace.get("non_executable_state"),
+                            "blocked_by": promotion_trace.get("blocked_by"),
+                            "true_blocker": promotion_trace.get("true_blocker"),
+                            "opportunity_maturity_state": opportunity_maturity_state,
+                            "visual_integrity": opportunity_maturity.get("visual_integrity"),
+                            "opportunity_maturity_denied_at": opportunity_maturity.get("denied_at"),
+                            "book_strategy_state": book_strategy_state,
+                            "book_strategy_playbook": book_strategy.get("playbook"),
+                        },
+                    )
+                    promotion_trace["promotion_failure_audit_v3"] = audit
+                    promotion_trace["allowance_package"] = allowance_package
+                    council["promotion_failure_audit_v3"] = audit
+                    council["promotion_trace"] = promotion_trace
+                    council["allowance_package"] = allowance_package
+                    study_packet["promotion_failure_audit_v3"] = audit
+                    study_packet["promotion_trace"] = promotion_trace
+                    study_packet["allowance_package"] = allowance_package
+                    result["promotion_failure_audit_v3"] = audit
+                    result["promotion_trace"] = promotion_trace
+                    result["model_council"] = council
+                    result["allowance_package"] = allowance_package
+                    result["study_packet"] = study_packet
+                    result["model_council_study_packet"] = study_packet
+                    return audit
+
+                if not bool(sequence_readiness.get("ready")) and not (executable and playbook_enter_now):
+                    executable = False
+                    block_reason = "SEQUENCE_CONTEXT"
+                    blocked_by = block_reason
+                    true_blocker = block_reason
+                    next_required = str(sequence_readiness.get("next_required") or "sequence context incomplete")
+                    release_condition = next_required
+                    _mark_opportunity_maturity_blocked(
+                        opportunity_maturity,
+                        state="VALID_WATCH",
+                        denied_at=block_reason,
+                        next_required=next_required,
+                        field=str(sequence_readiness.get("failed_module") or "sequence_context"),
+                        received=sequence_readiness.get("status") or "not_ready",
+                        required="COMPLETE sequence context",
+                        reason=next_required,
+                        hard=True,
+                    )
+                    opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "VALID_WATCH")
+                    allowance_package["opportunity_maturity"] = opportunity_maturity_state
+                    allowance_package["opportunity_maturity_confidence"] = opportunity_maturity["confidence"]
+                    allowance_package["visual_integrity"] = opportunity_maturity.get("visual_integrity")
+                    promotion_trace["denied_at"] = block_reason
+                    promotion_trace["blocked_by"] = block_reason
+                    promotion_trace["true_blocker"] = block_reason
+                    promotion_trace["next_required"] = next_required
+                    promotion_trace["release_condition"] = next_required
+                    promotion_trace["sequence_context_readiness"] = sequence_readiness
+                    promotion_trace["opportunity_maturity"] = opportunity_maturity
+                    promotion_trace["opportunity_maturity_state"] = opportunity_maturity_state
+                    promotion_trace["visual_integrity"] = opportunity_maturity.get("visual_integrity")
+                    promotion_trace["promotion_result"] = "STUDY_PACKET_PUBLISHED"
+                    promotion_trace["packet_result"] = "STUDY_PACKET_PUBLISHED"
+                    _mark_allowance_package_blocked(
+                        allowance_package,
+                        block_reason=block_reason,
+                        next_required=next_required,
+                        release_state=release_state,
+                        final_state="WATCHING",
+                        promotion_result="STUDY_PACKET_PUBLISHED",
+                    )
+                    promotion_trace["allowance_package"] = allowance_package
+                    study_packet["denied_at"] = block_reason
+                    study_packet["next_required"] = next_required
+                    study_packet["release_condition"] = next_required
+                    study_packet["sequence_context_readiness"] = sequence_readiness
+                    study_packet["non_executable_state"] = release_state
+                    study_packet["block_reason"] = block_reason
+                    study_packet["allowance_package"] = allowance_package
+                    study_packet["opportunity_maturity"] = opportunity_maturity
+                    study_packet["opportunity_maturity_state"] = opportunity_maturity_state
+                    council["final_state"] = "WATCHING"
+                    council["allowance_package"] = allowance_package
+                    council["opportunity_maturity"] = opportunity_maturity
+                    council["opportunity_maturity_state"] = opportunity_maturity_state
+                    council["arbitration_reason"] = (
+                        f"BLOCKED_BY_SEQUENCE_CONTEXT: blocked_by={block_reason}; "
+                        f"failed_module={sequence_readiness.get('failed_module')}; next_required={next_required}"
+                    )
+                    if executable:
+                        result["block_reason"] = block_reason
+                    result["packet_result"] = "STUDY_PACKET_PUBLISHED"
+                    result["execution"] = {**execution, "enabled": False, "state": "WATCHING"}
+                    result["allowance_package"] = allowance_package
+                    result["model_council"] = council
+                    result["promotion_trace"] = promotion_trace
+                    result["opportunity_maturity"] = opportunity_maturity
+                    result["opportunity_maturity_state"] = opportunity_maturity_state
+                    result["study_packet"] = study_packet
+                    result["model_council_study_packet"] = study_packet
+                elif not bool(sequence_readiness.get("ready")):
+                    promotion_trace["sequence_context_readiness"] = sequence_readiness
+                    promotion_trace["sequence_context_ready"] = False
+                    promotion_trace["sequence_context_advisory"] = True
+                    opportunity_maturity["sequence_context_readiness"] = sequence_readiness
+                    opportunity_maturity["sequence_context_ready"] = False
+                    opportunity_maturity["sequence_context_role"] = "TRACE_ADVISORY_FOR_PLAYBOOK_AUTHORITY"
+                    allowance_package["sequence_context_ready"] = False
+                    allowance_package["sequence_context_role"] = "TRACE_ADVISORY_FOR_PLAYBOOK_AUTHORITY"
+                    council["sequence_context_readiness"] = sequence_readiness
+                    council["sequence_context_ready"] = False
+                execution_window_state = str(execution_opportunity_window.get("state") or "").strip().upper()
+                execution_window_block_reason = (
+                    "EXECUTION_OPPORTUNITY_OUT_OF_ORDER_FRAME"
+                    if execution_opportunity_window.get("lineage_rejected") is True
+                    else {
+                        "EXPIRED": "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED",
+                        "INVALID": "EXECUTION_OPPORTUNITY_WINDOW_INVALID",
+                    }.get(execution_window_state, "")
+                )
+                if executable and execution_window_block_reason:
+                    executable = False
+                    block_reason = execution_window_block_reason
+                    blocked_by = block_reason
+                    true_blocker = block_reason
+                    final_state = "WATCHING"
+                    release_state = "WATCHING"
+                    next_required = "wait for a distinct candidate identity or a natural non-enter-now read before re-arming"
+                    release_condition = next_required
+                    promotion_trace.update(
+                        {
+                            "denied_at": block_reason,
+                            "blocked_by": block_reason,
+                            "true_blocker": block_reason,
+                            "next_required": next_required,
+                            "release_condition": release_condition,
+                            "non_executable_state": release_state,
+                            "execution_opportunity_window_v3": execution_opportunity_window,
+                        }
+                    )
+                if not executable:
+                    _refresh_promotion_failure_audit()
+                configured_handoff_ttl_seconds = _float(
+                    _first_visible_value(
+                        snapshot.get("packet_handoff_ttl_seconds"),
+                        snapshot.get("packet_valid_for_seconds"),
+                        DEFAULT_EXECUTION_HANDOFF_TTL_SECONDS,
+                    ),
+                    DEFAULT_EXECUTION_HANDOFF_TTL_SECONDS,
+                )
+                if configured_handoff_ttl_seconds <= 0.0:
+                    configured_handoff_ttl_seconds = DEFAULT_EXECUTION_HANDOFF_TTL_SECONDS
+                entry_window_remaining_candidates = [
+                    _entry_window_remaining_seconds(professional_entry_window, now_epoch=current_now),
+                    _entry_window_remaining_seconds(
+                        _mapping(allowance_package.get("entry_window")),
+                        now_epoch=current_now,
+                    ),
+                ]
+                entry_window_remaining_seconds = (
+                    min(entry_window_remaining_candidates)
+                    if entry_window_remaining_candidates
+                    else configured_handoff_ttl_seconds
+                )
+                packet_valid_for_seconds = max(0.0, min(configured_handoff_ttl_seconds, entry_window_remaining_seconds))
+                if executable:
+                    promotion_trace["packet_valid_for_seconds"] = packet_valid_for_seconds
+                    promotion_trace["configured_handoff_ttl_seconds"] = configured_handoff_ttl_seconds
+                    promotion_trace["entry_window_remaining_seconds"] = entry_window_remaining_seconds
+                    promotion_trace["packet_validity_source"] = "configured_handoff_ttl_capped_by_entry_window"
+                if executable:
+                    packet = build_execution_packet_v3(
+                        packet_id=base["packet_id"],
+                        session_id=base["session_id"],
+                        symbol=base["symbol"],
+                        timeframe=base["timeframe"],
+                        frame_id=base["frame_id"],
+                        capture_count=base["capture_count"],
+                        state_version=base["state_version"],
+                        side=candidate_side,
+                        expiry_seconds=timing_expiry,
+                        input_frame_hash=base["input_frame_hash"],
+                        previous_frame_hash=base["previous_frame_hash"],
+                        created_epoch=current_now,
+                        valid_for_seconds=packet_valid_for_seconds,
+                        live_integrity=_mapping(snapshot.get("live_integrity")),
+                        model_council=council,
+                        market_context=market_context,
+                        angle_context=_mapping(market.get("angle_context")),
+                        history_context=_mapping(market.get("history_context")),
+                        runtime_model_health=health,
+                        instrument_context=instrument_context,
+                        symbol_context=symbol_context,
+                        sequence_context=sequence_context_payload,
+                        allowance_package=allowance_package,
+                    )
+                    packet["allowance_package"] = allowance_package
+                    packet["execution_opportunity_window_v3"] = execution_opportunity_window
+                    packet["entry_window"] = professional_entry_window
+                    packet["execution"]["allowance_package_type"] = allowance_package["package_type"]
+                    packet["market_reality"] = market_reality
+                    packet["packet_type"] = "PG_EXECUTION_PACKET_V3"
+                    packet["entry_quality"] = result["entry_quality"]
+                    packet["trade_permission"] = trade_permission
+                    packet["market_trap"] = result["market_trap"]
+                    packet["ideal_trade_path"] = result["ideal_trade_path"]
+                    packet["path_risk"] = result["path_risk"]
+                    packet["regime_playbook"] = result["regime_playbook"]
+                    packet["time_to_reward_invalidation"] = result["time_to_reward_invalidation"]
+                    packet["timing_decision"] = timing_decision
+                    packet["timing_forecast"] = timing_forecast
+                    packet["regime"] = result["regime"]
+                    packet["market_play"] = result["market_play"]
+                    packet["price_location"] = result["price_location"]
+                    packet["memory_confirmation"] = result["memory_confirmation"]
+                    packet["pair_profile"] = result["pair_profile"]
+                    packet["two_candle_study"] = two_candle_study
+                    packet["lstm_contribution"] = lstm_contribution
+                    packet["skill_contributions"] = skill_contributions
+                    packet["ai_contribution_strengths"] = ai_contribution_strengths
+                    packet["model_strength_profile"] = model_strength_profile
+                    packet["lane_thresholds"] = _lane_thresholds(snapshot)
+                    packet["model_role_outputs"] = model_role_outputs
+                    packet["reasoning_arbitration"] = reasoning_arbitration
+                    packet["bad_entry_filter"] = bad_entry_filter
+                    packet["final_reasoning_decision"] = final_reasoning_decision
+                    packet["current_candle_contract"] = result["current_candle_contract"]
+                    packet["execution_lane"] = execution_lane
+                    packet["selected_execution_lane"] = execution_lane.get("name")
+                    packet["trade_candidate_queue"] = result["trade_candidate_queue"]
+                    packet["market_listening_stream"] = result["market_listening_stream"]
+                    packet["council_debate"] = council_debate
+                    packet["promotion_trace"] = promotion_trace
+                    packet["opportunity_maturity"] = opportunity_maturity
+                    packet["opportunity_maturity_state"] = opportunity_maturity_state
+                    packet["candle_movement_context_v3"] = candle_movement_context
+                    packet["candle_movement"] = candle_movement_brief
+                    packet["book_strategy"] = book_strategy
+                    packet["book_strategy_state"] = book_strategy_state
+                    packet["book_strategy_playbook"] = book_strategy.get("playbook")
+                    packet["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
+                    packet["playbook_ai_summary_v3"] = playbook_ai_summary
+                    packet["professional_trade_plan"] = professional_trade_plan
+                    packet["professional_thesis_resolution"] = professional_thesis_resolution
+                    packet["professional_flip_flop_override"] = professional_flip_flop_override
+                    packet["strategy_read"] = book_strategy.get("strategy_read")
+                    packet["visual_integrity"] = opportunity_maturity.get("visual_integrity")
+                    validation = validate_execution_packet_v3(
+                        packet,
+                        now=current_now,
+                        require_executable=True,
+                        require_broker_click_safe_identity=False,
+                    )
+                    if not validation.ok:
+                        if str(execution_opportunity_window.get("state") or "").upper() == "PENDING_OPEN":
+                            previous_window = _execution_opportunity_window_from_state(snapshot) or _execution_opportunity_window_from_state(
+                                previous_state
+                            )
+                            execution_opportunity_window.clear()
+                            execution_opportunity_window.update(previous_window)
+                        runtime_release_condition = (
+                            _instrument_release_requirement(instrument_context, instrument_release_condition)
+                            if validation.first_reason.startswith("INSTRUMENT_CONTEXT")
+                            else f"runtime validation clears: {validation.first_reason}"
+                        )
+                        runtime_release_state = "INSTRUMENT_CONTEXT_WAIT" if validation.first_reason.startswith("INSTRUMENT_CONTEXT") else "WATCHING"
+                        _mark_opportunity_maturity_blocked(
+                            opportunity_maturity,
+                            state="VALID_WATCH",
+                            denied_at=validation.first_reason,
+                            next_required=runtime_release_condition,
+                            field="current_execution_packet",
+                            received=validation.first_reason,
+                            required="validate_execution_packet_v3 pass",
+                            reason=runtime_release_condition,
+                            hard=True,
+                        )
+                        opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "VALID_WATCH")
+                        allowance_package["opportunity_maturity"] = opportunity_maturity_state
+                        allowance_package["opportunity_maturity_confidence"] = opportunity_maturity["confidence"]
+                        allowance_package["visual_integrity"] = opportunity_maturity.get("visual_integrity")
+                        _mark_allowance_package_blocked(
+                            allowance_package,
+                            block_reason=validation.first_reason,
+                            next_required=runtime_release_condition,
+                            release_state=runtime_release_state,
+                            final_state="BLOCKED_BY_RUNTIME",
+                            promotion_result="BLOCKED_BY_RUNTIME",
+                        )
+                        promotion_trace.update(
+                            {
+                                "release_state": runtime_release_state,
+                                "non_executable_state": runtime_release_state,
+                                "denied_at": validation.first_reason,
+                                "blocked_by": validation.first_reason,
+                                "true_blocker": validation.first_reason,
+                                "next_required": runtime_release_condition,
+                                "release_condition": runtime_release_condition,
+                                "promotion_result": "BLOCKED_BY_RUNTIME",
+                                "packet_result": "STUDY_PACKET_PUBLISHED",
+                                "allowance_package": allowance_package,
+                                "opportunity_maturity": opportunity_maturity,
+                                "opportunity_maturity_state": opportunity_maturity_state,
+                                "visual_integrity": opportunity_maturity.get("visual_integrity"),
+                            }
+                        )
+                        council.update(
+                            {
+                                "final_state": "BLOCKED_BY_RUNTIME",
+                                "release_state": runtime_release_state,
+                                "non_executable_state": runtime_release_state,
+                                "true_blocker": validation.first_reason,
+                                "denied_at": validation.first_reason,
+                                "next_required": runtime_release_condition,
+                                "release_condition": runtime_release_condition,
+                                "arbitration_reason": f"BLOCKED_BY_RUNTIME: blocked_by={validation.first_reason}; next_required={runtime_release_condition}",
+                                "promotion_trace": promotion_trace,
+                                "allowance_package": allowance_package,
+                                "opportunity_maturity": opportunity_maturity,
+                                "opportunity_maturity_state": opportunity_maturity_state,
+                            }
+                        )
+                        study_packet["promotion_trace"] = promotion_trace
+                        study_packet["model_council"] = council
+                        study_packet["allowance_package"] = allowance_package
+                        study_packet["opportunity_maturity"] = opportunity_maturity
+                        study_packet["opportunity_maturity_state"] = opportunity_maturity_state
+                        study_packet["true_blocker"] = validation.first_reason
+                        study_packet["reason"] = council["arbitration_reason"]
+                        result["execution"] = {**execution, "enabled": False, "state": "BLOCKED_BY_RUNTIME"}
+                        result["allowance_package"] = allowance_package
+                        result["model_council"] = council
+                        result["promotion_trace"] = promotion_trace
+                        result["opportunity_maturity"] = opportunity_maturity
+                        result["opportunity_maturity_state"] = opportunity_maturity_state
+                        result["study_packet"] = study_packet
+                        result["model_council_study_packet"] = study_packet
+                        result["block_reason"] = validation.first_reason
+                        result["packet_validation"] = validation.as_dict()
+                        _refresh_promotion_failure_audit()
+                    else:
+                        if str(execution_opportunity_window.get("state") or "").upper() == "PENDING_OPEN":
+                            execution_opportunity_window["state"] = "OPEN"
+                        packet["contributors"] = result["contributors"]
+                        result["execution_packet"] = packet
+                        result["model_council_packet"] = packet
+                        result["packet_validation"] = validation.as_dict()
+                if not _mapping(result.get("execution_packet") or result.get("model_council_packet")):
+                    no_packet_reason = str(
+                        promotion_trace.get("true_blocker")
+                        or promotion_trace.get("denied_at")
+                        or block_reason
+                        or "EXECUTION_PACKET_NOT_PUBLISHED"
+                    ).strip().upper()
+                    if not no_packet_reason or no_packet_reason == "NONE":
+                        no_packet_reason = "EXECUTION_PACKET_NOT_PUBLISHED"
+                    derived_no_packet_next_required = ""
+                    late_chase_packet_block = bool(
+                        opportunity_maturity_state == "LATE_CHASE"
+                        or late_chase
+                        or path_class == "LATE_CHASE_REVERSAL_RISK"
+                    )
+                    if late_chase_packet_block:
+                        if opportunity_maturity_state == "LATE_CHASE":
+                            no_packet_reason = "PLAYBOOK_MATURITY_LATE_CHASE"
+                            derived_no_packet_next_required = str(
+                                opportunity_maturity.get("next_required")
+                                or _mapping(opportunity_maturity.get("book_strategy")).get("next_required")
+                                or "skip late chase; wait for pullback/retest or a new structure sequence"
+                            )
+                        else:
+                            no_packet_reason = f"TIMING_MODE_{timing_mode or 'LATE_CHASE'}"
+                            derived_no_packet_next_required = f"skip late chase; {timing_decision['entry_timing']['next_condition']}"
+                    elif no_packet_reason in {"EXECUTION_PACKET_NOT_PUBLISHED", "WATCHING", "STUDY_PACKET_PUBLISHED"}:
+                        if not context_ok or not bool(execution_lane.get("accepted")):
+                            no_packet_reason = "NO_EXECUTION_LANE_ACCEPTED"
+                            derived_no_packet_next_required = lane_release_requirements
+                        elif not lane_effective_mature:
+                            no_packet_reason = "CANDIDATE_MATURITY"
+                            derived_no_packet_next_required = "candidate_stage=CANDIDATE_STABLE/PREPARING"
+                        elif not stable:
+                            no_packet_reason = "CANDIDATE_STABILITY"
+                            derived_no_packet_next_required = f"dominance_margin >= {min_dominance_margin:.2f}"
+                        elif not lane_effective_timing_ready or timing_mode != "ENTER_NOW":
+                            no_packet_reason = f"TIMING_MODE_{timing_mode or 'NOT_READY'}"
+                            derived_no_packet_next_required = f"timing_mode=ENTER_NOW; {timing_decision['entry_timing']['next_condition']}"
+                        elif not timing_has_explicit_expiry:
+                            no_packet_reason = "MODEL_COUNCIL_EXPLICIT_EXPIRY_MISSING"
+                            derived_no_packet_next_required = "timing.expiry_seconds explicit and execution.time_sequence target exists"
+                        elif not final_score_passed:
+                            no_packet_reason = "LANE_SCORE_BELOW_THRESHOLD"
+                            derived_no_packet_next_required = (
+                                f"final_score={final_execution_score:.4f} >= threshold={lane_required_score:.4f} "
+                                f"for selected_lane={execution_lane.get('name', 'execution lane')}"
+                            )
+                        elif final_state and final_state != "EXECUTABLE":
+                            no_packet_reason = str(final_state).strip().upper()
+                            derived_no_packet_next_required = str(next_required or release_condition or "continue study")
+                    raw_no_packet_next_required = str(promotion_trace.get("next_required") or next_required or "").strip()
+                    if late_chase_packet_block:
+                        no_packet_next_required = str(
+                            derived_no_packet_next_required
+                            or "skip late chase; wait for a fresh trigger/retest"
+                        ).strip()
+                    elif (
+                        not raw_no_packet_next_required
+                        or raw_no_packet_next_required.lower() == "none"
+                        or raw_no_packet_next_required == "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
+                    ):
+                        no_packet_next_required = str(
+                            derived_no_packet_next_required
+                            or "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
+                        ).strip()
+                    else:
+                        no_packet_next_required = raw_no_packet_next_required
+                    if not no_packet_next_required or no_packet_next_required.lower() == "none":
+                        no_packet_next_required = "publish fresh validated PG_EXECUTION_PACKET_V3 when all gates pass"
+                    no_packet_reason_upper = _upper(no_packet_reason, "EXECUTION_PACKET_NOT_PUBLISHED")
+                    if no_packet_reason_upper == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED":
+                        no_packet_maturity_state = "MISSED"
+                    elif no_packet_reason_upper in {
+                        "EXECUTION_OPPORTUNITY_WINDOW_INVALID",
+                        "EXECUTION_OPPORTUNITY_OUT_OF_ORDER_FRAME",
+                    }:
+                        no_packet_maturity_state = "INVALIDATED"
+                    elif opportunity_maturity_state in {"LATE_CHASE", "INVALIDATED", "MISSED"}:
+                        no_packet_maturity_state = opportunity_maturity_state
+                    elif no_packet_reason_upper.startswith("PLAYBOOK_MATURITY_"):
+                        candidate_state = no_packet_reason_upper.removeprefix("PLAYBOOK_MATURITY_")
+                        no_packet_maturity_state = candidate_state if candidate_state in OPPORTUNITY_MATURITY_STATES else "VALID_WATCH"
+                    elif no_packet_reason_upper.startswith("PLAYBOOK_"):
+                        candidate_state = no_packet_reason_upper.removeprefix("PLAYBOOK_")
+                        no_packet_maturity_state = candidate_state if candidate_state in OPPORTUNITY_MATURITY_STATES else opportunity_maturity_state
+                    elif no_packet_reason_upper == "NO_EXECUTION_LANE_ACCEPTED":
+                        no_packet_maturity_state = "EARLY_FORMING"
+                    elif no_packet_reason_upper in {"CANDIDATE_MATURITY", "CANDIDATE_STABILITY"}:
+                        no_packet_maturity_state = "VALID_WATCH"
+                    elif "LATE_CHASE" in no_packet_reason_upper or no_packet_reason_upper.startswith("TIMING_MODE_SKIP_LATE"):
+                        no_packet_maturity_state = "LATE_CHASE"
+                    elif "INVALID" in no_packet_reason_upper or "TRAP" in no_packet_reason_upper or "BAD_ENTRY" in no_packet_reason_upper:
+                        no_packet_maturity_state = "INVALIDATED"
+                    elif no_packet_reason_upper == "LANE_SCORE_BELOW_THRESHOLD" or no_packet_reason_upper.startswith("TIMING_MODE_"):
+                        no_packet_maturity_state = "PREPARE"
+                    elif no_packet_reason_upper in OPPORTUNITY_MATURITY_STATES:
+                        no_packet_maturity_state = no_packet_reason_upper
+                    else:
+                        no_packet_maturity_state = opportunity_maturity_state if opportunity_maturity_state in OPPORTUNITY_MATURITY_STATES else "VALID_WATCH"
+                    no_packet_hard_block = no_packet_reason_upper.startswith(
+                        (
+                            "INSTRUMENT_CONTEXT",
+                            "SEQUENCE_CONTEXT",
+                            "REQUIRED_MODELS",
+                            "NOT_LIVE",
+                            "CACHE",
+                            "FRAME",
+                            "CAPTURE",
+                            "STATE",
+                            "MISSING",
+                            "MODEL_COUNCIL_EXPLICIT_EXPIRY",
+                            "EXECUTION_PACKET_NOT_CURRENT",
+                            "EXECUTION_OPPORTUNITY_",
+                        )
+                    )
+                    _mark_opportunity_maturity_blocked(
+                        opportunity_maturity,
+                        state=no_packet_maturity_state,
+                        denied_at=no_packet_reason_upper,
+                        next_required=no_packet_next_required,
+                        field=_promotion_exact_field(no_packet_reason_upper, sequence_readiness, instrument_context),
+                        received=no_packet_reason_upper,
+                        required=no_packet_next_required,
+                        reason=no_packet_next_required,
+                        hard=no_packet_hard_block,
+                    )
+                    opportunity_maturity_state = _upper(opportunity_maturity.get("state"), no_packet_maturity_state)
+                    allowance_package["opportunity_maturity"] = opportunity_maturity_state
+                    allowance_package["opportunity_maturity_confidence"] = opportunity_maturity["confidence"]
+                    allowance_package["visual_integrity"] = opportunity_maturity.get("visual_integrity")
+                    _mark_allowance_package_blocked(
+                        allowance_package,
+                        block_reason=no_packet_reason,
+                        next_required=no_packet_next_required,
+                        release_state=str(council.get("release_state") or release_state or "WATCHING"),
+                        final_state=str(council.get("final_state") or final_state or "WATCHING"),
+                        promotion_result="STUDY_PACKET_PUBLISHED",
+                    )
+                    result_execution = _mapping(result.get("execution") or execution)
+                    result_execution.update(
+                        {
+                            "enabled": False,
+                            "state": "WATCHING"
+                            if str(result_execution.get("state") or "").strip().upper() == "EXECUTABLE"
+                            else str(result_execution.get("state") or final_state or "WATCHING").strip().upper(),
+                        }
+                    )
+                    if result_execution["state"] == "EXECUTABLE":
+                        result_execution["state"] = "WATCHING"
+                    result["execution"] = result_execution
+                    council["final_state"] = (
+                        "WATCHING" if str(council.get("final_state") or "").strip().upper() == "EXECUTABLE" else council.get("final_state", "WATCHING")
+                    )
+                    council["true_blocker"] = no_packet_reason
+                    council["denied_at"] = no_packet_reason
+                    council["next_required"] = no_packet_next_required
+                    council["release_condition"] = str(promotion_trace.get("release_condition") or release_condition or no_packet_next_required)
+                    council["allowance_package"] = allowance_package
+                    council["opportunity_maturity"] = opportunity_maturity
+                    council["opportunity_maturity_state"] = opportunity_maturity_state
+                    promotion_trace.update(
+                        {
+                            "denied_at": no_packet_reason,
+                            "blocked_by": no_packet_reason,
+                            "true_blocker": no_packet_reason,
+                            "next_required": no_packet_next_required,
+                            "release_condition": council["release_condition"],
+                            "packet_result": "STUDY_PACKET_PUBLISHED",
+                            "allowance_package": allowance_package,
+                            "opportunity_maturity": opportunity_maturity,
+                            "opportunity_maturity_state": opportunity_maturity_state,
+                            "visual_integrity": opportunity_maturity.get("visual_integrity"),
+                        }
+                    )
+                    if str(promotion_trace.get("promotion_result") or "").strip().upper() == "EXECUTABLE_PACKET_CREATED":
+                        promotion_trace["promotion_result"] = str(council.get("final_state") or "WATCHING").strip().upper()
+                    council["promotion_trace"] = promotion_trace
+                    study_packet["execution"] = dict(result_execution)
+                    study_packet["model_council"] = council
+                    study_packet["promotion_trace"] = promotion_trace
+                    study_packet["allowance_package"] = allowance_package
+                    study_packet["opportunity_maturity"] = opportunity_maturity
+                    study_packet["opportunity_maturity_state"] = opportunity_maturity_state
+                    study_packet["true_blocker"] = no_packet_reason
+                    study_packet["denied_at"] = no_packet_reason
+                    study_packet["next_required"] = no_packet_next_required
+                    study_packet["release_condition"] = council["release_condition"]
+                    study_packet["packet_result"] = "STUDY_PACKET_PUBLISHED"
+                    result["model_council"] = council
+                    result["promotion_trace"] = promotion_trace
+                    result["allowance_package"] = allowance_package
+                    result["opportunity_maturity"] = opportunity_maturity
+                    result["opportunity_maturity_state"] = opportunity_maturity_state
+                    result["study_packet"] = study_packet
+                    result["model_council_study_packet"] = study_packet
+                    result["packet_result"] = "STUDY_PACKET_PUBLISHED"
+                    result["execution_packet_present"] = False
+                current_execution_packet = _mapping(result.get("execution_packet") or result.get("model_council_packet"))
+                entry_permission_v3 = build_entry_permission_v3(
+                    dual_thesis_report,
+                    execution_packet=current_execution_packet,
+                    allowance_package=allowance_package,
+                )
+                dual_thesis_report["entry_permission_v3"] = entry_permission_v3
+                for payload in (result, council, promotion_trace, allowance_package, study_packet):
+                    payload["entry_permission_v3"] = entry_permission_v3
+                    payload["dual_thesis_report_v3"] = dual_thesis_report
+                study_packet["execution"] = {
+                    **_mapping(study_packet.get("execution")),
+                    "enabled": False,
+                    "state": "WATCHING"
+                    if _upper(_mapping(study_packet.get("execution")).get("state")) == "EXECUTABLE"
+                    else _upper(_mapping(study_packet.get("execution")).get("state"), "WATCHING"),
+                    "study_only": True,
+                }
+                if current_execution_packet:
+                    current_execution_packet["entry_permission_v3"] = entry_permission_v3
+                    current_execution_packet["dual_thesis_report_v3"] = dual_thesis_report
+                    packet_allowance = _mapping(current_execution_packet.get("allowance_package"))
+                    packet_allowance["entry_permission_v3"] = entry_permission_v3
+                    packet_allowance["dual_thesis_report_v3"] = dual_thesis_report
+                    current_execution_packet["allowance_package"] = packet_allowance
+                    if isinstance(result.get("execution_packet"), Mapping):
+                        result["execution_packet"] = current_execution_packet
+                    if isinstance(result.get("model_council_packet"), Mapping):
+                        result["model_council_packet"] = current_execution_packet
+                result["study_packet"] = study_packet
+                result["model_council_study_packet"] = study_packet
+                return result
+
+            return _finalize_sequence_and_packets()
+
+        return _resolve_execution_state_and_packages()
+
+    return _evaluate_reasoning_and_playbook(snapshot, current_candle)
 
 
 def publish_model_council_packet_v3(
@@ -7591,14 +7633,16 @@ class ModelCouncilV3:
             ("execution_packet", "dual_thesis_report_v3", "full_suite_story_lock_v3"),
         )
         for path in paths:
-            node: Any = value
+            node: object = value
             for key in path:
                 if not isinstance(node, dict):
                     node = None
                     break
-                node = node.get(key)
-            if isinstance(node, dict) and node not in refs:
-                refs.append(node)
+                node = _mapping(node).get(key)
+            if isinstance(node, dict):
+                typed_ref = cast(dict[str, Any], node)
+                if typed_ref not in refs:
+                    refs.append(typed_ref)
         return refs
 
     def _annotate_full_suite_story_stability(self, result: dict[str, Any], *, context_switched: bool) -> None:

@@ -451,12 +451,14 @@ def test_mt4_bridge_rejects_unsafe_source_packet_before_compaction(
         }
     elif case == "missing_overlay":
         packet.pop("overlay_truth_audit")
-    elif case == "overlay_frame_mismatch":
-        packet["overlay_truth_audit"]["frame_id"] = 999
-    elif case == "overlay_capture_mismatch":
-        packet["overlay_truth_audit"]["capture_count"] = 999
     else:
-        packet["overlay_truth_audit"]["input_frame_hash"] = "wrong-frame"
+        overlay_truth = cast(dict[str, object], packet["overlay_truth_audit"])
+        if case == "overlay_frame_mismatch":
+            overlay_truth["frame_id"] = 999
+        elif case == "overlay_capture_mismatch":
+            overlay_truth["capture_count"] = 999
+        else:
+            overlay_truth["input_frame_hash"] = "wrong-frame"
 
     with pytest.raises(ValueError, match=reason_code):
         bridge._compact_command(packet, bridge_sequence=13, validation_now_epoch=NOW)

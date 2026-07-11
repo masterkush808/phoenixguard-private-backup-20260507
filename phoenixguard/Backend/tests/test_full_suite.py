@@ -515,7 +515,10 @@ class TestSecurity(unittest.TestCase):
         real_replace = security_module.os.replace
         attempts = 0
 
-        def flaky_replace(src: object, dst: object) -> None:
+        def flaky_replace(
+            src: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+            dst: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        ) -> None:
             nonlocal attempts
             attempts += 1
             if attempts <= 2:

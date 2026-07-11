@@ -35,7 +35,7 @@ from tests.support.v3_packet_samples import complete_sequence_context_v3
 
 
 @pytest.fixture(autouse=True)
-def _shutdown_tracker_services_after_test(
+def shutdown_tracker_services_after_test(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[list[ContinuousWindowTrackerService]]:
     services: list[ContinuousWindowTrackerService] = []
@@ -3636,7 +3636,15 @@ def _assert_newer_council_frame_revokes_execution_packet(
         },
     }
     council = _RevocationCouncilSequence((first_packet, second_result))
-    monkeypatch.setattr(tracker, "_model_council_for_session", lambda _session_id: council)
+
+    def council_for_session(_session_id: str) -> _RevocationCouncilSequence:
+        return council
+
+    monkeypatch.setattr(tracker, "_model_council_for_session", council_for_session)
+    publish_council_state = cast(
+        Callable[..., dict[str, Any]],
+        getattr(tracker, "_publish_model_council_v3_state"),
+    )
 
     first_audit = dict(cast(Mapping[str, Any], first_packet["overlay_truth_audit"]))
     tracking_summary: dict[str, Any] = {"overlay_truth_audit": first_audit}
@@ -3645,7 +3653,7 @@ def _assert_newer_council_frame_revokes_execution_packet(
         "execution_action": "BUY",
         "action": "BUY",
     }
-    first_result = tracker._publish_model_council_v3_state(  # noqa: SLF001
+    first_result = publish_council_state(
         payload=payload,
         tracking_summary=tracking_summary,
         latest_signal=latest_signal,
@@ -3667,7 +3675,7 @@ def _assert_newer_council_frame_revokes_execution_packet(
     tracker.save_session(payload)
     assert tracker.latest_model_council_packet(session_id)["packet_id"] == "pgpkt-revocation-frame-10"
 
-    second_audit = {
+    second_audit: dict[str, Any] = {
         "valid_for_execution": True,
         "execution_safe": True,
         "frame_id": 11,
@@ -3680,7 +3688,7 @@ def _assert_newer_council_frame_revokes_execution_packet(
     latest_signal["execution_action"] = side
     latest_signal["action"] = side
 
-    revoked_result = tracker._publish_model_council_v3_state(  # noqa: SLF001
+    revoked_result = publish_council_state(
         payload=payload,
         tracking_summary=tracking_summary,
         latest_signal=latest_signal,
@@ -3720,7 +3728,11 @@ def _assert_newer_council_frame_revokes_execution_packet(
     assert aliases.isdisjoint(stored)
     assert stored["execution_packet_present"] is False
     assert stored["execution_packet_revocation_v3"]["reason"] == expected_reason
-    compact = window_tracker_module.read_json(tracker._compact_live_state_path(session_id), {})  # noqa: SLF001
+    compact_live_state_path = cast(
+        Callable[[str], Path],
+        getattr(tracker, "_compact_live_state_path"),
+    )
+    compact = window_tracker_module.read_json(compact_live_state_path(session_id), {})
     assert compact["execution_packet_present"] is False
     assert compact["execution_packet_revocation_v3"]["revoked_packet_id"] == "pgpkt-revocation-frame-10"
 
@@ -3781,11 +3793,19 @@ def test_execution_opportunity_window_survives_session_persistence_and_snapshot_
 
     restored = tracker.load_session_payload(session_id)
     assert restored["execution_opportunity_window_v3"] == authority
-    compact = window_tracker_module.read_json(tracker._compact_live_state_path(session_id), {})  # noqa: SLF001
+    compact_live_state_path = cast(
+        Callable[[str], Path],
+        getattr(tracker, "_compact_live_state_path"),
+    )
+    compact = window_tracker_module.read_json(compact_live_state_path(session_id), {})
     assert compact["execution_opportunity_window_v3"] == authority
     assert compact["model_council_result"]["execution_opportunity_window_v3"] == authority
 
-    snapshot = tracker._build_model_council_v3_snapshot(  # noqa: SLF001
+    build_council_snapshot = cast(
+        Callable[..., dict[str, Any]],
+        getattr(tracker, "_build_model_council_v3_snapshot"),
+    )
+    snapshot = build_council_snapshot(
         payload=restored,
         tracking_summary={},
         latest_signal={},
@@ -3843,7 +3863,11 @@ def test_countertrend_thesis_block_cannot_replace_execution_opportunity_window(
     packet["entry_window"] = {"duration_sec": 300.0, "remaining_sec": 300.0}
     packet["model_council"]["execution_opportunity_window_v3"] = new_authority
     council = _RevocationCouncilSequence((packet,))
-    monkeypatch.setattr(tracker, "_model_council_for_session", lambda _session_id: council)
+
+    def council_for_session(_session_id: str) -> _RevocationCouncilSequence:
+        return council
+
+    monkeypatch.setattr(tracker, "_model_council_for_session", council_for_session)
     active_sell_thesis = {
         "schema_version": "PG_SIGNAL_THESIS_V3",
         "active": True,
@@ -3865,7 +3889,11 @@ def test_countertrend_thesis_block_cannot_replace_execution_opportunity_window(
     }
     payload["execution_opportunity_window_v3"] = previous_authority
     payload["signal_thesis_v3"] = active_sell_thesis
-    tracker._signal_theses[session_id] = active_sell_thesis  # noqa: SLF001
+    signal_theses = cast(
+        dict[str, dict[str, Any]],
+        getattr(tracker, "_signal_theses"),
+    )
+    signal_theses[session_id] = active_sell_thesis
     overlay_audit = dict(cast(Mapping[str, Any], packet["overlay_truth_audit"]))
     tracking_summary: dict[str, Any] = {"overlay_truth_audit": overlay_audit}
     latest_signal: dict[str, Any] = {
@@ -3874,7 +3902,11 @@ def test_countertrend_thesis_block_cannot_replace_execution_opportunity_window(
         "action": "BUY",
     }
 
-    result = tracker._publish_model_council_v3_state(  # noqa: SLF001
+    publish_council_state = cast(
+        Callable[..., dict[str, Any]],
+        getattr(tracker, "_publish_model_council_v3_state"),
+    )
+    result = publish_council_state(
         payload=payload,
         tracking_summary=tracking_summary,
         latest_signal=latest_signal,
@@ -4013,6 +4045,110 @@ def testpublic_session_payload_publishes_strict_executable_signal_contract(tmp_p
     assert signal["invalidation_condition"] == "Break below trigger low."
     assert signal["entry_reason"] == "Ready"
     assert signal["no_trade_reason"] == ""
+    assert public["decision_version"] == public["trade_intent"]["state_version"]
+
+
+def test_public_session_versions_advance_for_non_actionable_publishes(tmp_path: Path) -> None:
+    tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
+    payload: dict[str, Any] = {
+        "session_id": "pocket-live",
+        "status": "running",
+        "tracking_enabled": True,
+        "capture_count": 4,
+        "frame_index": 4,
+        "state_version": 1,
+        "decision_version": 0,
+        "last_capture_epoch": 1_000.0,
+        "display_published_epoch": 1_001.0,
+        "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
+        "latest_signal": {
+            "signal_id": "study-4",
+            "published_epoch": 1_000.0,
+            "action": "BUY",
+            "execution_action": "BUY",
+            "actionable": False,
+        },
+        "tracking_summary": {},
+    }
+
+    first = tracker.public_session_payload(payload)
+    payload.update(
+        {
+            "capture_count": 5,
+            "frame_index": 5,
+            "display_published_epoch": 1_002.0,
+            "state_version": first["state_version"],
+            "decision_version": 0,
+        }
+    )
+    payload["latest_signal"] = dict(payload["latest_signal"], published_epoch=1_002.0)
+    second = tracker.public_session_payload(payload)
+
+    assert int(first["state_version"]) == 1_001_000
+    assert first["decision_version"] == first["state_version"]
+    assert first["trade_intent"] == {}
+    assert int(second["state_version"]) > int(first["state_version"])
+    assert second["decision_version"] == second["state_version"]
+
+
+def test_save_session_persists_advancing_state_and_non_actionable_decision_versions(tmp_path: Path) -> None:
+    tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
+    session_id = str(tracker.create_session(session_id="pocket-live")["session_id"])
+    payload = tracker.load_session_payload(session_id)
+    payload.update(
+        {
+            "capture_count": 1,
+            "frame_index": 1,
+            "last_capture_epoch": 2_000.0,
+            "display_published_epoch": 2_000.25,
+            "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
+            "latest_signal": {
+                "signal_id": "study-1",
+                "published_epoch": 2_000.0,
+                "execution_action": "HOLD",
+                "actionable": False,
+            },
+        }
+    )
+    tracker.save_session(payload)
+    first_persisted = json.loads(
+        (tracker.session_dir(session_id) / "session.json").read_text(encoding="utf-8")
+    )
+    first = tracker.load_session_payload(session_id)
+
+    payload = dict(first)
+    payload.update(
+        {
+            "capture_count": 2,
+            "frame_index": 2,
+            "last_capture_epoch": 2_001.0,
+            "display_published_epoch": 2_001.25,
+            "decision_version": 0,
+            "latest_signal": {
+                "signal_id": "study-2",
+                "published_epoch": 2_001.0,
+                "execution_action": "HOLD",
+                "actionable": False,
+            },
+        }
+    )
+    tracker.save_session(payload)
+    second_persisted = json.loads(
+        (tracker.session_dir(session_id) / "session.json").read_text(encoding="utf-8")
+    )
+    second = tracker.load_session_payload(session_id)
+    compact = json.loads(
+        (tracker.session_dir(session_id) / "compact_live_state.json").read_text(encoding="utf-8")
+    )
+
+    assert int(first["state_version"]) == 2_000_250
+    assert first_persisted["latest_signal"]["state_version"] == first["state_version"]
+    assert first["decision_version"] == first["state_version"]
+    assert int(second["state_version"]) > int(first["state_version"])
+    assert second_persisted["latest_signal"]["state_version"] == second["state_version"]
+    assert second["decision_version"] == second["state_version"]
+    assert compact["state_version"] == second["state_version"]
+    assert compact["decision_version"] == second["decision_version"]
 
 
 @pytest.mark.parametrize(

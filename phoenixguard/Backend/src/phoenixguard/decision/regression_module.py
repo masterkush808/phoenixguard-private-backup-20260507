@@ -634,11 +634,11 @@ def _accumulation_distribution(ohlc: list[list[float]], body_sizes: NDArray[np.f
     for i, bar in enumerate(ohlc):
         if len(bar) < 4:
             continue
-        _o, h, l, c = float(bar[0]), float(bar[1]), float(bar[2]), float(bar[3])
-        hl_range = h - l
+        _open, high, low, close = float(bar[0]), float(bar[1]), float(bar[2]), float(bar[3])
+        hl_range = high - low
         if hl_range < 1e-9:
             continue
-        clv = ((c - l) - (h - c)) / hl_range
+        clv = ((close - low) - (high - close)) / hl_range
         vol_proxy = float(body_sizes[min(i, len(body_sizes) - 1)]) + 1e-6
         ad += clv * vol_proxy
     # Normalize to [-1, 1]

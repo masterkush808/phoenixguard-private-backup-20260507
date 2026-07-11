@@ -58,7 +58,7 @@ def main():
         # TEST 2: Service Initialization
         print("\n🔧 TEST 2: Initializing tracker service...")
         service = ContinuousWindowTrackerService()
-        print(f"   ✓ Service initialized")
+        print("   ✓ Service initialized")
         
         # TEST 3: Session Creation
         print("\n📝 TEST 3: Creating tracker session...")
@@ -80,7 +80,7 @@ def main():
         )
         
         if result['manual_focus_region']['enabled']:
-            print(f"   ✓ Focus region locked!")
+            print("   ✓ Focus region locked!")
             print(f"     - Bbox: {result['manual_focus_region']['normalized_bbox']}")
             print(f"     - Status: {result['status']}")
         else:
@@ -97,7 +97,7 @@ def main():
         tracking = session.get('tracking_summary', {})
         
         if signal:
-            print(f"   ✓ Analysis completed")
+            print("   ✓ Analysis completed")
             print(f"     - Action: {signal.get('action', 'HOLD')}")
             print(f"     - Confidence: {signal.get('effective_confidence', 0):.2f}")
             print(f"     - Setup: {signal.get('setup', '--')}")
@@ -110,7 +110,7 @@ def main():
         session = service.start_session("quick-test")
         
         if session['tracking_enabled']:
-            print(f"   ✓ Tracker started!")
+            print("   ✓ Tracker started!")
             print(f"     - Status: {session['status']}")
             print(f"     - Next capture in: {session.get('next_capture_in_sec', 0):.1f}s")
         else:
