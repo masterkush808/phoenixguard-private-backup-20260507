@@ -6,6 +6,7 @@ from typing import Any, cast
 
 from phoenixguard.runtime.realtime_performance_v3 import OVERLAY_RENDER_BUDGETS
 from phoenixguard.vision.v3_overlay_contract import (
+    LIVE_VIEW_MODES,
     OVERLAY_TYPE_PRIORITY,
     layout_overlay_labels,
     normalize_bounds,
@@ -33,6 +34,11 @@ MARKET_OVERLAY_TYPES = {
     "SUPPLY_ZONE",
     "DEMAND_ZONE",
     "OPPOSING_FORCE",
+    "ORDER_BLOCK",
+    "FAIR_VALUE_GAP",
+    "LIQUIDITY_POOL",
+    "LIQUIDITY_SWEEP",
+    "MARKET_STRUCTURE_SHIFT",
     "SUPPORT_TRENDLINE",
     "RESISTANCE_TRENDLINE",
     "INNER_TRENDLINE",
@@ -44,6 +50,13 @@ MARKET_OVERLAY_TYPES = {
 }
 
 ZONE_TYPES = {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"}
+SMART_MONEY_TYPES = {
+    "ORDER_BLOCK",
+    "FAIR_VALUE_GAP",
+    "LIQUIDITY_POOL",
+    "LIQUIDITY_SWEEP",
+    "MARKET_STRUCTURE_SHIFT",
+}
 ACTIONABLE_TYPES = {"SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"}
 FLOATING_REJECT_TYPES = ZONE_TYPES | ACTIONABLE_TYPES
 DISPLAY_STATES = {
@@ -493,6 +506,77 @@ def _bounds_for_overlay(row: Mapping[str, Any], scene: Mapping[str, Any]) -> tup
     return raw_bounds, plot_chart, "chart_image_space"
 
 
+def _project_normalized_geometry(
+    row: Mapping[str, Any],
+    scene: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project every public geometry field through the same chart transform."""
+    coordinate_mode = str(row.get("coordinate_mode") or "").upper()
+    if coordinate_mode not in {"CHART_NORMALIZED", "PLOT_AREA_NORMALIZED"}:
+        return dict(row)
+    chart_bounds = normalize_bounds(
+        scene.get("chart_region_chart_bounds") or [0, 0, 1, 1]
+    ) or [0.0, 0.0, 1.0, 1.0]
+    target = chart_bounds
+    if coordinate_mode == "PLOT_AREA_NORMALIZED":
+        target = normalize_bounds(scene.get("plot_area_chart_bounds") or chart_bounds) or chart_bounds
+    width = max(1.0, target[2] - target[0])
+    height = max(1.0, target[3] - target[1])
+
+    def project_point(value: object) -> list[float] | None:
+        point = _point_from_value(value)
+        if point is None:
+            return None
+        if max(abs(point[0]), abs(point[1])) > 1.0001:
+            return point
+        return [target[0] + point[0] * width, target[1] + point[1] * height]
+
+    projected = dict(row)
+    for key in ("bounds", "bbox", "tight_bounds", "expanded_bounds", "raw_bounds"):
+        bounds = normalize_bounds(row.get(key))
+        if bounds is None or max(abs(value) for value in bounds) > 1.0001:
+            continue
+        projected[key] = [
+            target[0] + bounds[0] * width,
+            target[1] + bounds[1] * height,
+            target[0] + bounds[2] * width,
+            target[1] + bounds[3] * height,
+        ]
+    for key in (
+        "line_points",
+        "points",
+        "path",
+        "touch_points",
+        "anchor_wick_points",
+        "trendline_touch_points",
+        "anchors",
+    ):
+        values = _sequence(row.get(key))
+        if not values:
+            continue
+        points = [point for item in values if (point := project_point(item)) is not None]
+        if points:
+            projected[key] = points
+    for key in ("start", "end", "start_point", "end_point", "label_position"):
+        point = project_point(row.get(key))
+        if point is not None:
+            projected[key] = point
+    anchor_evidence = _mapping(row.get("anchor_evidence"))
+    if anchor_evidence:
+        evidence_points = [
+            point
+            for item in _sequence(anchor_evidence.get("touch_points"))
+            if (point := project_point(item)) is not None
+        ]
+        if evidence_points:
+            projected["anchor_evidence"] = {
+                **anchor_evidence,
+                "touch_points": evidence_points,
+            }
+    projected["coordinate_mode"] = "CHART_IMAGE_SPACE"
+    return projected
+
+
 def _tighten_box(row: Mapping[str, Any], bounds: Sequence[Any], plot: Sequence[Any]) -> tuple[list[float] | None, list[str]]:
     box = normalize_bounds(bounds)
     clip = normalize_bounds(plot)
@@ -514,6 +598,11 @@ def _tighten_box(row: Mapping[str, Any], bounds: Sequence[Any], plot: Sequence[A
     if overlay_type in ZONE_TYPES:
         max_width_ratio = 0.42
         max_height_ratio = 0.135
+    elif overlay_type == "LIQUIDITY_POOL":
+        # Liquidity is a price level. A chart-height zone here is a semantic
+        # error, even when an older producer still supplies the parent zone.
+        max_width_ratio = 1.0
+        max_height_ratio = 0.014
     elif overlay_type in {"SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"}:
         max_width_ratio = 0.18
         max_height_ratio = 0.115
@@ -545,6 +634,9 @@ def _tighten_box(row: Mapping[str, Any], bounds: Sequence[Any], plot: Sequence[A
         flags.append("height_refined")
         cap = plot_h * max_height_ratio
         center = (box[1] + box[3]) * 0.5
+        if overlay_type == "LIQUIDITY_POOL":
+            center = _float(row.get("price_level_y", row.get("line_y")), center)
+            cap = max(4.0, min(10.0, cap))
         if overlay_type == "INVALIDATION_BOX":
             cap = max(3.0, min(cap, 6.0))
         box[1] = max(clip[1], center - cap * 0.5)
@@ -597,6 +689,8 @@ def _mode_emphasizes_type(mode: str, overlay_type: str, layer: str) -> bool:
         return overlay_type in ZONE_TYPES
     if normalized_mode == "TRENDLINES":
         return overlay_type in TRENDLINE_TYPES
+    if normalized_mode == "SMART_MONEY":
+        return overlay_type in SMART_MONEY_TYPES
     if normalized_mode == "TRIGGER":
         return overlay_type in {"SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"}
     if normalized_mode == "TARGET":
@@ -649,6 +743,8 @@ def _semantic_style_family(row: Mapping[str, Any]) -> str:
         return "resistance"
     if overlay_type == "INNER_TRENDLINE":
         return "inner"
+    if overlay_type in SMART_MONEY_TYPES:
+        return "smart_money"
     if side == "BUY":
         return "buy"
     if side == "SELL":
@@ -729,6 +825,8 @@ def _display_state_for_row(row: Mapping[str, Any], mode: str, current_side: str)
     emphasized = _mode_emphasizes_type(mode, overlay_type, layer)
     if row.get("precision_rejected") or overlay_type in DIAGNOSTIC_TYPES:
         return "INSPECTOR_LABEL", 0.15, "removed from live truth; retained for diagnostics inspector"
+    if _historical_overlay_context(row):
+        return "GHOSTED", max(0.22, min(0.42, truth * 0.28 + 0.14)), "historical geometry remains available without competing with the current plan"
     if current_side in {"BUY", "SELL"} and side in {"BUY", "SELL"} and side != current_side and overlay_type in ACTIONABLE_TYPES:
         return "GHOSTED", max(0.34, min(0.52, truth * 0.30 + 0.22)), "counter-side execution geometry remains visible but subdued"
     if overlay_type in EXECUTION_FOCUS_TYPES:
@@ -859,8 +957,125 @@ def _apply_adaptive_label_policy(rows: Sequence[Mapping[str, Any]], mode: str) -
     return output
 
 
+PROFESSIONAL_SINGLE_LABEL_TYPES = {
+    "ORDER_BLOCK",
+    "FAIR_VALUE_GAP",
+    "LIQUIDITY_POOL",
+    "SNIPER_ENTRY_BOX",
+    "RETEST_BOX",
+    "TARGET_ZONE_BOX",
+    "INVALIDATION_BOX",
+}
+
+
+def _hide_overlay_label(row: dict[str, Any], reason: str) -> None:
+    row["label_hidden"] = True
+    row["label_visible"] = False
+    row["label_anchor"] = "inspector"
+    row["label_lane"] = "inspector"
+    row.setdefault("precision_flags", []).append(reason)
+
+
+def _label_relevance(row: Mapping[str, Any], current_side: str) -> tuple[int, int, int, int, float, float, int]:
+    source_path = _text(row.get("source_path")).lower()
+    lifecycle = _text(row.get("lifecycle_state")).upper()
+    side = _text(row.get("side")).upper()
+    source_rank = 0
+    if ".projection." in source_path:
+        source_rank = 5
+    elif ".structure_boxes" in source_path and "current" in _text(row.get("source_key")).lower():
+        source_rank = 4
+    elif ".structure_boxes" in source_path and "local" in _text(row.get("source_key")).lower():
+        source_rank = 3
+    elif ".structure_boxes" in source_path:
+        source_rank = 2
+    lifecycle_rank = {
+        "FRESH_ACTIVE": 5,
+        "ACTIVE": 4,
+        "PREDICTED": 3,
+        "MITIGATED_ACTIVE": 2,
+        "HISTORICAL_ACTIVE": 1,
+    }.get(lifecycle, 0)
+    freshness_rank = {
+        "FRESH": 3,
+        "TESTED": 2,
+        "MITIGATED": 1,
+    }.get(_text(row.get("freshness_state")).upper(), 0)
+    distance = _float(row.get("distance_to_latest_norm"), 9.0)
+    anchors = [int(_float(item, -1.0)) for item in _sequence(row.get("anchor_candles"))]
+    return (
+        1 if current_side in {"BUY", "SELL"} and side == current_side else 0,
+        1 if row.get("visible_default") is not False else 0,
+        source_rank,
+        lifecycle_rank + freshness_rank,
+        -distance,
+        _clip01(row.get("truth_score", row.get("confidence", 0.0))),
+        max(anchors, default=-1),
+    )
+
+
+def _apply_professional_label_policy(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    mode: str,
+    current_side: str,
+) -> list[dict[str, Any]]:
+    """Keep labels decision-oriented while preserving every valid geometry.
+
+    The user can still toggle and inspect every overlay. Only repeated inline
+    labels are collapsed; the strongest current representative remains labeled
+    and every other object stays available to hover/inspection.
+    """
+
+    output = [dict(row) for row in rows]
+    normalized_mode = normalize_view_mode(mode)
+    current_rows = sorted(
+        [row for row in output if _text(row.get("type")).upper() == "CURRENT_CANDLE" and not row.get("precision_rejected")],
+        key=_current_candle_recency,
+        reverse=True,
+    )
+    for index, row in enumerate(current_rows):
+        row["is_latest_candle"] = index == 0
+        if index == 0:
+            row["display_label"] = "NOW"
+            row["short_label"] = "NOW"
+        else:
+            row["display_label"] = "CANDLES"
+            row["short_label"] = "CANDLES"
+        if normalized_mode in {"CLEAN_LIVE", "CANDLES"} or index > 0:
+            _hide_overlay_label(row, "historical_candle_label_suppressed")
+
+    for row in output:
+        if _historical_overlay_context(row):
+            _hide_overlay_label(row, "historical_inline_label_suppressed")
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in output:
+        overlay_type = _text(row.get("type")).upper()
+        if (
+            overlay_type not in PROFESSIONAL_SINGLE_LABEL_TYPES
+            or row.get("precision_rejected")
+            or _historical_overlay_context(row)
+            or row.get("label_hidden") is True
+        ):
+            continue
+        side = _text(row.get("side")).upper()
+        grouped.setdefault((overlay_type, side), []).append(row)
+    for siblings in grouped.values():
+        if len(siblings) <= 1:
+            continue
+        ranked = sorted(siblings, key=lambda row: _label_relevance(row, current_side), reverse=True)
+        for row in ranked[1:]:
+            _hide_overlay_label(row, "repeated_family_label_suppressed")
+    return output
+
+
 def _mark_rejected(row: Mapping[str, Any], reason: str) -> dict[str, Any]:
     output = dict(row)
+    precision_flags = _string_list(output.get("precision_flags"))
+    if reason not in precision_flags:
+        precision_flags.append(reason)
+    output["precision_flags"] = precision_flags
     output["visible_default"] = False
     output["visible_modes"] = ["DEBUG", "INSPECTOR"]
     output["precision_rejected"] = True
@@ -898,6 +1113,31 @@ def _historical_current_marker(row: Mapping[str, Any]) -> bool:
     return any(token in haystack for token in ("history", "historical", "replay", "memory"))
 
 
+def _historical_overlay_context(row: Mapping[str, Any]) -> bool:
+    lifecycle = _text(row.get("lifecycle_state")).upper()
+    layer = _text(row.get("layer")).lower()
+    return bool(
+        lifecycle in {"HISTORICAL", "REPLAY", "ARCHIVED", "HISTORICAL_ACTIVE", "BROKEN_REFERENCE", "CONSUMED_REFERENCE"}
+        or layer in {"historical_replay", "replay"}
+        or _text(row.get("role")).lower().startswith("replay_")
+    )
+
+
+def _current_candle_recency(row: Mapping[str, Any]) -> tuple[int, int, float, float]:
+    explicit_latest = row.get("is_latest_candle") is True or _text(row.get("is_latest_candle")).lower() == "true"
+    label = _text(row.get("display_label") or row.get("short_label") or row.get("label")).upper()
+    anchors = [int(_float(item, -1.0)) for item in _sequence(row.get("anchor_candles"))]
+    candle_index = int(_float(row.get("candle_index"), -1.0))
+    bounds = normalize_bounds(row.get("bounds") or row.get("bbox"))
+    right = bounds[2] if bounds is not None else -1.0
+    return (
+        1 if explicit_latest or label == "NOW" or _text(row.get("role")).lower() == "current_candle" else 0,
+        max([candle_index, *anchors], default=-1),
+        float(right),
+        _float(row.get("z_index"), 0.0),
+    )
+
+
 def _map_current_marker_to_history(row: dict[str, Any]) -> None:
     row["type"] = "PROGRESSION_PATH"
     row["layer"] = "historical_replay"
@@ -915,7 +1155,7 @@ def _apply_current_candle_policy(rows: Sequence[Mapping[str, Any]], mode: str = 
     normalized_mode = normalize_view_mode(mode)
     current_rows = [
         row
-        for row in sorted(output, key=_priority, reverse=True)
+        for row in sorted(output, key=_current_candle_recency, reverse=True)
         if str(row.get("type") or "") == "CURRENT_CANDLE" and not row.get("precision_rejected")
     ]
     if normalized_mode == "CANDLES":
@@ -946,6 +1186,10 @@ def _apply_current_candle_policy(rows: Sequence[Mapping[str, Any]], mode: str = 
             )
             row["display_label"] = "NOW"
             row["short_label"] = "NOW"
+            row["is_latest_candle"] = True
+            row["label_hidden"] = False
+            row["label_anchor"] = "top"
+            row["label_visible"] = True
             continue
         duplicates_hidden += 1
         row["visible_default"] = False
@@ -961,6 +1205,7 @@ def _apply_current_candle_policy(rows: Sequence[Mapping[str, Any]], mode: str = 
         row["label_anchor"] = "hidden"
         row["label_visible"] = False
         row["display_state"] = "GHOSTED"
+        row["is_latest_candle"] = False
         row.setdefault("precision_flags", []).append("duplicate_now_hidden_from_live")
     return output, duplicates_hidden
 
@@ -1300,8 +1545,9 @@ def resolve_precision_overlays_v3(
     outside = 0
     anchor_snap_refined = 0
     for index, raw in enumerate(overlays):
+        source_frame = raw.get("frame_id", raw.get("frame_index"))
+        source_frame_missing = source_frame in (None, "")
         try:
-            source_frame = raw.get("frame_id", raw.get("frame_index"))
             row = normalize_v3_overlay_object(
                 raw,
                 strict=False,
@@ -1324,20 +1570,56 @@ def resolve_precision_overlays_v3(
         row["unmapped_display_label"] = unmapped_display_label
         row["z_index"] = int(_float(row.get("z_index"), OVERLAY_TYPE_PRIORITY.get(str(row.get("type") or ""), 0)))
         row.setdefault("precision_flags", [])
+        live_mode = normalized_mode in LIVE_VIEW_MODES
+        transform_id = _text(row.get("chart_transform_id"))
+        transform_token = transform_id.upper()
+        transform_missing = not transform_id or any(
+            token in transform_token for token in ("PENDING", "UNKNOWN", "MISSING")
+        )
+        if transform_missing:
+            missing_transform += 1
+            if live_mode:
+                normalized.append(_mark_rejected(row, "missing_or_pending_chart_transform"))
+                continue
+        row_frame = int(_float(row.get("frame_id"), 0.0))
+        if source_frame_missing or row_frame <= 0:
+            stale_frame += 1
+            if live_mode:
+                normalized.append(_mark_rejected(row, "missing_source_frame_id"))
+                continue
+        if scene_frame and row_frame != scene_frame:
+            stale_frame += 1
+            if live_mode:
+                normalized.append(_mark_rejected(row, "stale_source_frame_id"))
+                continue
+        coordinate_mode = _text(row.get("coordinate_mode")).upper()
+        if live_mode and coordinate_mode == "PLOT_AREA_NORMALIZED" and normalize_bounds(
+            scene.get("plot_area_chart_bounds")
+        ) is None:
+            normalized.append(_mark_rejected(row, "missing_plot_area_transform"))
+            continue
+        if live_mode and coordinate_mode == "CHART_NORMALIZED" and normalize_bounds(
+            scene.get("chart_region_chart_bounds")
+        ) is None:
+            normalized.append(_mark_rejected(row, "missing_chart_region_transform"))
+            continue
         source_agent = str(row.get("source_agent") or "").lower()
-        if normalized_mode == "CLEAN_LIVE" and ("legacy_v2" in source_agent or str(row.get("type") or "") == "DEBUG_RAW_DETECTION"):
+        if normalized_mode == "CLEAN_LIVE" and (
+            "legacy_v2" in source_agent
+            or str(row.get("type") or "") == "DEBUG_RAW_DETECTION"
+        ):
             normalized.append(_mark_rejected(row, "legacy_or_raw_hidden_from_clean_live"))
             continue
-        if not row.get("chart_transform_id"):
-            missing_transform += 1
-        if scene_frame and int(_float(row.get("frame_id"), scene_frame)) != scene_frame:
-            stale_frame += 1
         if not row.get("track_id") or not row.get("object_id") or str(row.get("anchor_type") or "").upper() in {"", "NONE", "UNKNOWN"}:
             unanchored += 1
             row["anchor_type"] = "BOX"
             precision_flags = _string_list(row.get("precision_flags"))
             precision_flags.append("anchor_defaulted")
             row["precision_flags"] = precision_flags
+        # Every normalized overlay field must cross the same transform.  Study
+        # paths are intentionally not box-tightened, but their points still
+        # need to become chart-image pixels alongside their bounds.
+        row = _project_normalized_geometry(row, scene)
         if row.get("type") in MARKET_OVERLAY_TYPES:
             raw_bounds, clip_bounds, _space = _bounds_for_overlay(row, scene)
             if raw_bounds is None or clip_bounds is None:
@@ -1391,6 +1673,11 @@ def resolve_precision_overlays_v3(
             row["label_anchor"] = "hidden"
             row["label_visible"] = False
     laid_out = _apply_adaptive_label_policy(laid_out, normalized_mode)
+    laid_out = _apply_professional_label_policy(
+        laid_out,
+        mode=normalized_mode,
+        current_side=str(current_side or "").upper(),
+    )
     rendered = [row for row in laid_out if not row.get("precision_rejected") and row.get("geometry_visible") is not False]
     label_collisions = _label_collision_count(rendered)
     rendered_outside = 0

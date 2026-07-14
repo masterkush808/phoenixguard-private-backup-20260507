@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 from typing import Any, cast
 
+import pytest
+
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
@@ -325,6 +327,155 @@ def test_memory_bank_load_backfills_sequence_metadata(tmp_path: Path) -> None:
     assert persisted_by_id["buy-a"]["episode_id"] == persisted_by_id["buy-b"]["episode_id"]
     assert persisted_by_id["buy-a"]["sequence_index"] == 0
     assert persisted_by_id["buy-b"]["sequence_index"] == 1
+
+
+def test_memory_bank_load_does_not_rescan_complete_entry_progression(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    bank_dir = tmp_path / "memory_bank"
+    bank_dir.mkdir()
+    image_path = tmp_path / "complete-buy.png"
+    image_path.write_bytes(b"the complete state makes this file intentionally unreadable")
+    regression = {
+        "slope": -0.04,
+        "direction": "BUY",
+        "pressure_direction": "BUY",
+        "confidence": 0.84,
+        "alignment_to_label": 1.0,
+        "recent_activity_columns": 18,
+    }
+    progression = {
+        "progression_stage": "progression",
+        "entry_x_norm": 0.78,
+        "entry_y_norm": 0.52,
+        "sniper_y_norm": 0.55,
+        "trigger_y_norm": 0.49,
+        "target_y_norm": 0.36,
+        "invalidation_y_norm": 0.64,
+        "entry_window_norm": [0.68, 0.48, 0.90, 0.56],
+        "sniper_window_norm": [0.68, 0.52, 0.90, 0.58],
+        "trigger_window_norm": [0.68, 0.46, 0.90, 0.52],
+        "target_window_norm": [0.68, 0.32, 0.90, 0.40],
+        "compression_score": 0.72,
+        "pullback_depth": 0.28,
+        "rejection_score": 0.81,
+        "follow_through_score": 0.77,
+        "aggressive_sniper_score": 0.74,
+        "candle_regression": regression,
+        "candle_regression_slope": -0.04,
+        "candle_regression_direction": "BUY",
+        "regression_confidence": 0.84,
+        "favorable_pressure": 0.76,
+        "opposing_pressure": 0.18,
+        "recent_activity_columns": 18,
+    }
+    complete_chart_state: dict[str, Any] = {
+        "direction": "BUY",
+        "entry_type": "continuation",
+        "continuation_signal": "impulse_pause",
+        "momentum_bias": "bullish",
+        "memory_teaching": {
+            "lesson_role": "progression",
+            "tags": ["progression"],
+            "source_name": image_path.name,
+            "label": "BUY",
+            "sequence_index": 1,
+            "actual_entry_score": 0.0,
+            "win_evidence_score": 0.0,
+            "progression_score": 0.55,
+            "teaching_weight": 0.55,
+        },
+        "entry_progression": progression,
+        "memory_candle_regression": regression,
+        "sniper_profile": {
+            "style": "aggressive_sniper",
+            "lesson_role": "progression",
+            "aggressive_entry_score": 0.74,
+            "watch_window_norm": progression["sniper_window_norm"],
+            "entry_window_norm": progression["entry_window_norm"],
+            "trigger_window_norm": progression["trigger_window_norm"],
+            "target_window_norm": progression["target_window_norm"],
+            "invalidation_y_norm": 0.64,
+            "instruction": "Persisted memory entry instruction.",
+        },
+        "aggressive_entry_score": 0.74,
+    }
+    metadata = [
+        {
+            "entry_id": "complete-buy",
+            "image_path": str(image_path),
+            "label": "BUY",
+            "chart_state": complete_chart_state,
+            "text_embed": _make_embed(35),
+            "visual_fp": [0.0] * 128,
+            "combined_embed": _make_embed(36),
+            "episode_id": "BUY:complete",
+            "sequence_index": 1,
+        }
+    ]
+    (bank_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    def fail_if_opened(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("complete persisted progression must not reopen its source image")
+
+    monkeypatch.setattr(memory_ingest_module.Image, "open", fail_if_opened)
+
+    bank = MemoryBank.load(bank_dir)
+
+    assert bank.is_loaded is True
+    assert len(bank.entries) == 1
+    assert bank.entries[0].chart_state["entry_progression"] == complete_chart_state["entry_progression"]
+
+
+def test_memory_bank_load_rescans_image_for_incomplete_entry_progression(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    bank_dir = tmp_path / "memory_bank"
+    bank_dir.mkdir()
+    image_path = tmp_path / "legacy-sell.png"
+    memory_ingest_module.Image.new("RGB", (32, 20), color=(180, 20, 40)).save(image_path)
+    metadata = [
+        {
+            "entry_id": "legacy-sell",
+            "image_path": str(image_path),
+            "label": "SELL",
+            "chart_state": {
+                "direction": "SELL",
+                "entry_type": "continuation",
+                "continuation_signal": "impulse_pause",
+                "momentum_bias": "bearish",
+                "entry_progression": {"progression_stage": "legacy_partial"},
+            },
+            "text_embed": _make_embed(37),
+            "visual_fp": [0.0] * 128,
+            "combined_embed": _make_embed(38),
+            "episode_id": "SELL:legacy",
+            "sequence_index": 1,
+        }
+    ]
+    (bank_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    original_open = memory_ingest_module.Image.open
+    opened_paths: list[Path] = []
+
+    def track_open(path: str | Path, *args: Any, **kwargs: Any) -> Any:
+        opened_paths.append(Path(path))
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(memory_ingest_module.Image, "open", track_open)
+
+    bank = MemoryBank.load(bank_dir)
+
+    assert bank.is_loaded is True
+    assert opened_paths == [image_path]
+    chart_state = bank.entries[0].chart_state
+    progression = cast(dict[str, Any], chart_state["entry_progression"])
+    assert progression["progression_stage"] == "legacy_partial"
+    assert "entry_x_norm" in progression
+    assert "candle_regression" in progression
+    assert chart_state["memory_teaching"]
+    assert chart_state["sniper_profile"]
 
 
 def test_memory_bank_load_survives_incompatible_hnsw_index(tmp_path: Path) -> None:

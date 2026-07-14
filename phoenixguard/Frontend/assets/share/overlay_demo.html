@@ -54,54 +54,55 @@
     </div>
     <script>
       const frame = document.getElementById('brokerFrame');
+      const header = document.getElementById('overlayHeader');
       const sessionId = 'pocket-live-8788';
       const apiBase = (location.protocol === 'file:') ? 'http://127.0.0.1:8793' : '';
-      const localFrameUrl = 'file:///C:/Users/thaba/AppData/Local/Temp/phoenixguard_latest_frame.png';
 
       function frameValue(value) {
         const number = Number(value);
         return Number.isFinite(number) && number > 0 ? Math.round(number) : 0;
       }
 
-      function sessionArtifactVersion(kind, payload = {}) {
-        const pathKey = kind === 'full-overlay'
-          ? payload.last_full_overlay_path
-          : kind === 'overlay'
-            ? payload.last_overlay_path
-            : kind === 'window'
-              ? (payload.last_window_path || payload.last_frame_path)
-              : payload.last_chart_path;
-        const frameKey = kind === 'window'
-          ? Math.max(frameValue(payload.display_frame_id), frameValue(payload.frame_index), frameValue(payload.capture_count))
-          : Math.max(frameValue(payload.overlay_frame_id), frameValue(payload.model_vote_frame_id), frameValue(payload.chart_frame_id));
-        return [kind, frameKey, payload.source_capture_id || '', pathKey || ''].filter(Boolean).join('|') || String(Date.now());
+      function operatorArtifactVersion(kind, payload = {}) {
+        const surface = payload.surface && typeof payload.surface === 'object' ? payload.surface : {};
+        const freshness = payload.freshness && typeof payload.freshness === 'object' ? payload.freshness : {};
+        const frameKey = Math.max(
+          frameValue(surface.frame_id),
+          frameValue(payload.revision),
+          frameValue(payload.state_version),
+        );
+        return [kind, frameKey, freshness.observed_at || ''].filter(Boolean).join('|') || String(Date.now());
       }
 
-      async function latestSession() {
-        const response = await fetch(`${apiBase}/v1/mobile/window-tracker/sessions/${sessionId}`, {cache: 'no-store'});
+      async function latestOperatorState() {
+        const encodedSessionId = encodeURIComponent(sessionId);
+        const response = await fetch(`${apiBase}/v1/mobile/operator/state/v1/${encodedSessionId}?view=all`, {cache: 'no-store'});
         if (!response.ok) {
-          throw new Error(`Session fetch failed: ${response.status}`);
+          throw new Error(`Operator state fetch failed: ${response.status}`);
         }
         return response.json();
       }
 
       async function refreshFrame(kind = 'full-overlay') {
-        if (location.protocol === 'file:') {
-          frame.src = `${localFrameUrl}?v=${Date.now()}`;
-          return;
-        }
-        const payload = await latestSession();
-        const version = encodeURIComponent(sessionArtifactVersion(kind, payload));
-        frame.src = `${apiBase}/v1/mobile/window-tracker/sessions/${sessionId}/artifacts/latest-${kind}?v=${version}`;
+        const payload = await latestOperatorState();
+        const version = encodeURIComponent(operatorArtifactVersion(kind, payload));
+        const encodedSessionId = encodeURIComponent(sessionId);
+        frame.src = `${apiBase}/v1/mobile/window-tracker/sessions/${encodedSessionId}/artifacts/latest-${kind}?v=${version}`;
+        header.textContent = `Overlay Demo - ${sessionId}`;
       }
       frame.addEventListener('error', () => {
         refreshFrame('window').catch(() => {
-          frame.src = `${localFrameUrl}?v=${Date.now()}`;
+          frame.removeAttribute('src');
+          header.textContent = 'Overlay Demo - waiting for PhoenixGuard';
         });
       });
-      refreshFrame().catch(() => refreshFrame('window'));
+      refreshFrame().catch(() => refreshFrame('window').catch(() => {
+        header.textContent = 'Overlay Demo - waiting for PhoenixGuard';
+      }));
       setInterval(() => {
-        refreshFrame().catch(() => refreshFrame('window'));
+        refreshFrame().catch(() => refreshFrame('window').catch(() => {
+          header.textContent = 'Overlay Demo - waiting for PhoenixGuard';
+        }));
       }, 1000);
     </script>
   </body>

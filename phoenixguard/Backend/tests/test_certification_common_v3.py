@@ -14,6 +14,7 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
 from tools import certify_v3_full_system_burn_in as burn
+from tools import certify_process_topology_v3 as topology
 from tools import capture_dashboard_visual_v3 as dashboard_capture
 from tools.capture_dashboard_visual_v3 import prune_capture_evidence
 
@@ -52,6 +53,23 @@ def test_leaf_processes_returns_deepest_matching_children() -> None:
     leaves = cert.leaf_processes(rows)
 
     assert [row["ProcessId"] for row in leaves] == [300]
+
+
+def test_topology_data_dir_proof_uses_local_slugged_session_state(tmp_path: Path) -> None:
+    session_state = topology.local_session_state_path(tmp_path, "Desk/Alpha Beta")
+
+    session_state.parent.mkdir(parents=True)
+    session_state.write_text('{"session_id":"Desk/Alpha Beta"}', encoding="utf-8")
+
+    assert session_state == (
+        tmp_path.resolve()
+        / "mobile_api"
+        / "window_tracker"
+        / "sessions"
+        / "desk_alpha_beta"
+        / "session.json"
+    )
+    assert session_state.is_file()
 
 
 def test_dashboard_capture_retention_prunes_old_timestamp_bundles(tmp_path: Path) -> None:

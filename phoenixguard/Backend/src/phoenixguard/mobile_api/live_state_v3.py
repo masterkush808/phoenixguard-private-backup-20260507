@@ -370,6 +370,34 @@ def _overlay_from_active_object(
     overlay = _mapping(row.get("overlay"))
     if not overlay:
         overlay = dict(row)
+    source_transform = _mapping(row.get("chart_transform")) or _mapping(overlay.get("chart_transform"))
+    source_frame_id = _int(
+        overlay.get("frame_id")
+        or row.get("frame_id")
+        or source_transform.get("frame_id"),
+        0,
+    )
+    source_sequence_id = _text(overlay.get("sequence_id") or row.get("sequence_id"))
+    source_chart_transform_id = _text(
+        overlay.get("chart_transform_id")
+        or row.get("chart_transform_id")
+        or source_transform.get("chart_transform_id")
+    )
+    # Persisted registry rows are supplemental context, not current-frame
+    # authority. Never relabel old or lineage-free geometry as current merely
+    # because it was still inside the registry TTL.
+    if source_frame_id <= 0 or source_frame_id != frame_id:
+        return None
+    # Older persisted rows may not carry the two secondary lineage tokens.
+    # An exact frame match is the minimum authority; any token that is present
+    # must also agree.  Missing tokens are filled only after that exact match,
+    # so stale geometry can never be rebadged as the current frame.
+    if source_sequence_id and source_sequence_id != sequence_id:
+        return None
+    if source_chart_transform_id and source_chart_transform_id != chart_transform_id:
+        return None
+    source_sequence_id = source_sequence_id or sequence_id
+    source_chart_transform_id = source_chart_transform_id or chart_transform_id
     for source_key, target_key in (("pixel_bbox", "bounds"), ("bbox", "bounds"), ("bounds", "bounds")):
         if source_key in overlay and target_key not in overlay:
             overlay[target_key] = overlay[source_key]
@@ -378,9 +406,9 @@ def _overlay_from_active_object(
     overlay.setdefault("track_id", row.get("track_id") or row.get("object_id") or overlay.get("object_id"))
     overlay.setdefault("truth_score", row.get("truth_score", overlay.get("confidence", 0.0)))
     overlay.setdefault("lifecycle_state", row.get("lifecycle_state", "ACTIVE"))
-    overlay["frame_id"] = frame_id
-    overlay["sequence_id"] = sequence_id
-    overlay["chart_transform_id"] = chart_transform_id
+    overlay["frame_id"] = source_frame_id
+    overlay["sequence_id"] = source_sequence_id
+    overlay["chart_transform_id"] = source_chart_transform_id
     overlay.setdefault("source_agent", row.get("source_agent", "market_registry"))
     overlay.setdefault("reason", row.get("reason", "registry active object"))
     overlay.setdefault("source_rule", row.get("source_rule", "active_object_registry"))
@@ -398,10 +426,14 @@ def _overlay_from_active_object(
     ):
         if key in row and key not in overlay:
             overlay[key] = row[key]
+    _rescale_registry_overlay_to_current_chart(
+        overlay,
+        row,
+        scene_graph=scene_graph,
+    )
     visible_modes = [str(item).upper() for item in _sequence(overlay.get("visible_modes"))]
     if visible_modes and "REPLAY" in visible_modes and "FULL_HISTORY_READ" not in visible_modes:
         overlay["visible_modes"] = [*visible_modes, "FULL_HISTORY_READ"]
-    _rescale_registry_overlay_to_current_chart(overlay, row, scene_graph=scene_graph)
     try:
         return normalize_v3_overlay_object(
             overlay,
@@ -467,20 +499,38 @@ def _rescale_registry_overlay_to_current_chart(
     target_bounds = _bounds_list(scene_graph.get("chart_region_chart_bounds"))
     if not source_bounds or not target_bounds:
         return
-    source_width = max(1.0, source_bounds[2] - source_bounds[0])
-    source_height = max(1.0, source_bounds[3] - source_bounds[1])
-    target_width = max(1.0, target_bounds[2] - target_bounds[0])
-    target_height = max(1.0, target_bounds[3] - target_bounds[1])
-    if abs(source_width - target_width) < 1.0 and abs(source_height - target_height) < 1.0:
+    same_bounds = all(
+        abs(float(source_bounds[index]) - float(target_bounds[index])) < 1.0
+        for index in range(4)
+    )
+    if same_bounds:
         return
     for key in ("bbox", "bounds", "pixel_bbox"):
         raw_bounds = _sequence(overlay.get(key))
         if len(raw_bounds) >= 4:
             overlay[key] = _scale_bounds_between_chart_spaces(raw_bounds[:4], source_bounds, target_bounds)
-    for key in ("points", "line_points", "touch_points", "path"):
+    for key in (
+        "points",
+        "line_points",
+        "touch_points",
+        "anchor_wick_points",
+        "trendline_touch_points",
+        "path",
+    ):
         scaled_points = _scale_points_between_chart_spaces(overlay.get(key), source_bounds, target_bounds)
         if scaled_points:
             overlay[key] = scaled_points
+    anchor_evidence = _mapping(overlay.get("anchor_evidence"))
+    scaled_evidence_points = _scale_points_between_chart_spaces(
+        anchor_evidence.get("touch_points"),
+        source_bounds,
+        target_bounds,
+    )
+    if scaled_evidence_points:
+        overlay["anchor_evidence"] = {
+            **anchor_evidence,
+            "touch_points": scaled_evidence_points,
+        }
     overlay["coordinate_mode"] = "CHART_IMAGE_SPACE"
     overlay["registry_chart_space_scaled_v3"] = True
 
@@ -494,6 +544,7 @@ def _combine_overlays(
 ) -> list[dict[str, Any]]:
     overlays = [dict(overlay) for overlay in registry.overlays]
     seen = {str(overlay.get("overlay_id")) for overlay in overlays}
+    seen_semantic = {_overlay_semantic_geometry_key(overlay) for overlay in overlays}
     registry_has_historical_progression = any(
         _text(overlay.get("type")).upper() == "PROGRESSION_PATH"
         and _text(overlay.get("source_path")).startswith("tracking_summary.historical_structure")
@@ -510,10 +561,38 @@ def _combine_overlays(
             scene_graph=scene_graph,
             index=index,
         )
-        if overlay is not None and str(overlay.get("overlay_id")) not in seen:
+        semantic_key = _overlay_semantic_geometry_key(overlay) if overlay is not None else ()
+        if (
+            overlay is not None
+            and str(overlay.get("overlay_id")) not in seen
+            and semantic_key not in seen_semantic
+        ):
             overlays.append(overlay)
             seen.add(str(overlay.get("overlay_id")))
+            seen_semantic.add(semantic_key)
     return overlays
+
+
+def _overlay_semantic_geometry_key(overlay: Mapping[str, Any]) -> tuple[object, ...]:
+    overlay_type = _text(overlay.get("type") or overlay.get("overlay_type")).upper()
+    if overlay_type not in {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"}:
+        return ("ID", _text(overlay.get("overlay_id") or overlay.get("id")))
+    points = _scale_free_point_key(
+        overlay.get("line_points") or overlay.get("points") or overlay.get("path")
+    )
+    role = _text(overlay.get("trendline_role") or overlay.get("role")).lower()
+    scope = _text(overlay.get("trendline_scope")).upper()
+    return ("TRENDLINE", role, scope, points)
+
+
+def _scale_free_point_key(value: Any) -> tuple[tuple[float, float], ...]:
+    points: list[tuple[float, float]] = []
+    for raw_point in _sequence(value):
+        point = _sequence(raw_point)
+        if len(point) < 2:
+            continue
+        points.append((round(_float(point[0]), 2), round(_float(point[1]), 2)))
+    return tuple(points)
 
 
 def _source_less_progression_rectangle(row: Mapping[str, Any]) -> bool:
@@ -1040,16 +1119,38 @@ def _study_overlay_objects(
     two_candle: Mapping[str, Any],
     lstm: Mapping[str, Any],
     *,
-    active_mode: str,
     frame_id: int,
     sequence_id: str,
     chart_transform_id: str,
     now_ms: int,
 ) -> list[dict[str, Any]]:
-    signal = _mapping(session.get("latest_signal"))
-    tracking = _mapping(session.get("tracking_summary"))
-    fallback_side = _text(signal.get("execution_action") or signal.get("action") or tracking.get("local_direction"), "HOLD").upper()
     overlays: list[dict[str, Any]] = []
+
+    def payload_state(payload: Mapping[str, Any]) -> str:
+        if not payload:
+            return "INVALID"
+        source_frame_id = _int(payload.get("_source_frame_id"))
+        display_frame_id = _int(payload.get("_display_frame_id"))
+        if source_frame_id <= 0 or display_frame_id <= 0:
+            return "INVALID"
+        if source_frame_id != display_frame_id or display_frame_id != frame_id:
+            return "INVALID"
+        if _bool(payload.get("_source_stale_diagnostic"), False):
+            return "STALE_DIAGNOSTIC"
+        if "fresh" in payload and not _bool(payload.get("fresh"), False):
+            return "INVALID"
+        if _bool(payload.get("stale"), False) or _bool(payload.get("expired"), False):
+            return "INVALID"
+        valid_until_epoch = _float(payload.get("_source_valid_until_epoch"), 0.0)
+        return "CURRENT" if valid_until_epoch <= 0.0 or valid_until_epoch >= now_ms / 1000.0 else "INVALID"
+
+    def payload_side(payload: Mapping[str, Any], *keys: str) -> str:
+        side = "HOLD"
+        for key in keys:
+            side = _text(payload.get(key)).upper()
+            if side:
+                break
+        return side if side in {"BUY", "SELL", "HOLD"} else "HOLD"
 
     def add_study(
         *,
@@ -1061,15 +1162,14 @@ def _study_overlay_objects(
         fallback_confidence: float,
         fallback_reason: str,
     ) -> None:
-        if not payload and active_mode != mode:
+        forecast_state = payload_state(payload)
+        if forecast_state == "INVALID":
             return
         bounds, anchor_candles = _study_anchor_box(session, candle_count=candle_count)
         if not bounds:
             return
         confidence = max(0.05, min(1.0, _float(payload.get("confidence") or payload.get("contribution"), fallback_confidence)))
-        side = _text(payload.get("side") or payload.get("direction") or payload.get("direction_bias") or fallback_side, "HOLD").upper()
-        if side not in {"BUY", "SELL", "HOLD"}:
-            side = "HOLD"
+        side = payload_side(payload, "side", "direction", "direction_bias")
         raw: dict[str, Any] = {
             "overlay_id": f"{overlay_type.lower()}_{frame_id}",
             "object_id": f"{overlay_type.lower()}_{frame_id}",
@@ -1087,17 +1187,29 @@ def _study_overlay_objects(
             "bounds": bounds,
             "truth_score": confidence,
             "confidence": confidence,
-            "lifecycle_state": "ACTIVE",
+            # Core visibility treats lifecycle=STALE as hidden. Keep the
+            # geometry predicted/displayable and encode the explicit stale
+            # diagnostic state in its role for the public operator contract.
+            "lifecycle_state": "PREDICTED" if forecast_state == "STALE_DIAGNOSTIC" else "ACTIVE",
             "visible_modes": [mode, "COUNCIL", "INSPECTOR"],
             "visible_default": False,
             "ttl_ms": 12000,
             "created_at_ms": now_ms,
-            "reason": _text(payload.get("summary") or payload.get("reason"), fallback_reason),
-            "label": label,
-            "display_label": label,
-            "short_label": label,
+            "reason": (
+                f"Last valid frame-aligned forecast; diagnostic only. "
+                f"{_text(payload.get('summary') or payload.get('reason'), fallback_reason)}"
+                if forecast_state == "STALE_DIAGNOSTIC"
+                else _text(payload.get("summary") or payload.get("reason"), fallback_reason)
+            ),
+            "label": f"{label} - LAST VALID" if forecast_state == "STALE_DIAGNOSTIC" else label,
+            "display_label": f"{label} - LAST VALID" if forecast_state == "STALE_DIAGNOSTIC" else label,
+            "short_label": f"{label} - LAST VALID" if forecast_state == "STALE_DIAGNOSTIC" else label,
             "layer": "active_council_decision",
-            "role": mode.lower(),
+            "role": (
+                f"{mode.lower()}_stale_diagnostic"
+                if forecast_state == "STALE_DIAGNOSTIC"
+                else mode.lower()
+            ),
             "label_anchor": "top",
             "label_hidden": False,
             "z_index": 74 if overlay_type == "TWO_CANDLE_STUDY" else 72,
@@ -1127,15 +1239,216 @@ def _study_overlay_objects(
         fallback_confidence=0.58,
         fallback_reason="Two-candle study anchored to the latest visible candles.",
     )
-    add_study(
-        overlay_type="LSTM_STUDY",
-        payload=lstm,
-        label="LSTM STUDY",
-        mode="LSTM_STUDY",
-        candle_count=8,
-        fallback_confidence=0.50,
-        fallback_reason="LSTM sequence contribution anchored to the latest visible candle window.",
-    )
+    lstm_state = payload_state(lstm)
+    forecast_path = _sequence_of_mappings(lstm.get("forecast_path")) if lstm_state != "INVALID" else []
+    # A learned future path replaces the old history-window box.  The fallback
+    # study box remains useful for a current LSTM payload that has no forecast
+    # geometry, but it must never masquerade as predicted candles.
+    if not forecast_path:
+        add_study(
+            overlay_type="LSTM_STUDY",
+            payload=lstm,
+            label="LSTM STUDY",
+            mode="LSTM_STUDY",
+            candle_count=8,
+            fallback_confidence=0.50,
+            fallback_reason="LSTM sequence contribution anchored to the latest visible candle window.",
+        )
+    candles = _tracked_candle_rows(session)
+    features = _sequence_of_mappings(lstm.get("features"))
+    source_size = _sequence(lstm.get("source_image_size"))
+    if forecast_path and candles and len(source_size) >= 2:
+        image_width = max(1.0, _float(source_size[0], 1.0))
+        centers: list[float] = []
+        for candle in candles:
+            box = _bounds_list(candle)
+            if not box:
+                continue
+            center = 0.5 * (box[0] + box[2])
+            centers.append(center if max(abs(value) for value in box) <= 1.0001 else center / image_width)
+        if centers:
+            latest_x = max(0.0, min(1.0, centers[-1]))
+            positive_gaps = [right - left for left, right in zip(centers, centers[1:]) if right > left]
+            median_gap = sorted(positive_gaps)[len(positive_gaps) // 2] if positive_gaps else 0.012
+            available_step = max(0.0025, (0.985 - latest_x) / max(1, len(forecast_path)))
+            step_x = max(0.0025, min(max(0.006, median_gap), available_step))
+            start_close = max(
+                0.0,
+                min(
+                    1.0,
+                    _float(features[-1].get("relative_price_location"), 0.5)
+                    if features
+                    else 0.5,
+                ),
+            )
+            start_point = [latest_x, 1.0 - start_close]
+            center_points = [start_point]
+            upper_points = [list(start_point)]
+            lower_points = [list(start_point)]
+            for index, row in enumerate(forecast_path, start=1):
+                close_location = max(0.0, min(1.0, _float(row.get("expected_close_norm"), start_close)))
+                lower_close = max(
+                    0.0,
+                    min(1.0, _float(row.get("close_lower_90_norm"), close_location)),
+                )
+                upper_close = max(
+                    0.0,
+                    min(1.0, _float(row.get("close_upper_90_norm"), close_location)),
+                )
+                lower_close, upper_close = sorted((lower_close, upper_close))
+                future_x = min(0.995, latest_x + step_x * index)
+                center_points.append([future_x, 1.0 - close_location])
+                # A higher normalized close is visually higher (smaller y).
+                upper_points.append([future_x, 1.0 - upper_close])
+                lower_points.append([future_x, 1.0 - lower_close])
+            band_points = [*upper_points, *reversed(lower_points), list(upper_points[0])]
+            x_values = [point[0] for point in band_points]
+            y_values = [point[1] for point in band_points]
+            bounds = [
+                min(x_values),
+                max(0.0, min(y_values) - 0.002),
+                max(x_values),
+                min(1.0, max(y_values) + 0.002),
+            ]
+            first_forecast = forecast_path[0]
+            selective_status = _text(
+                lstm.get("selective_status") or first_forecast.get("selective_status"),
+                "NO_EDGE",
+            ).upper()
+            first_selective_status = _text(
+                first_forecast.get("selective_status"),
+                "NO_EDGE",
+            ).upper()
+            selective_authorized = bool(
+                _bool(
+                    lstm.get("selective_authorized"),
+                    False,
+                )
+                and selective_status == "AUTHORIZED"
+                and _bool(first_forecast.get("selective_authorized"), False)
+                and first_selective_status == "AUTHORIZED"
+                and lstm_state == "CURRENT"
+            )
+            status_token = (
+                "stale_diagnostic"
+                if lstm_state == "STALE_DIAGNOSTIC"
+                else "authorized"
+                if selective_authorized
+                else "no_edge"
+            )
+            # These polylines represent the multi-event price trajectory, not
+            # the candle-body classifier.  Colour and label them from the path
+            # direction so a falling path can never be painted as BUY merely
+            # because a separate body head leaned bullish.  A stale path stays
+            # neutral; a current NO_EDGE path remains directional diagnostic
+            # geometry and does not gain execution authority.
+            overlay_side = (
+                "HOLD"
+                if lstm_state == "STALE_DIAGNOSTIC"
+                else payload_side(lstm, "path_side", "side")
+            )
+            confidence = max(0.0, min(1.0, _float(lstm.get("confidence"), 0.0)))
+            status_label = (
+                "LAST VALID - DIAGNOSTIC"
+                if lstm_state == "STALE_DIAGNOSTIC"
+                else "AUTHORIZED"
+                if selective_authorized
+                else "NO EDGE - DIAGNOSTIC"
+            )
+            interpretation = _text(
+                lstm.get("interpretation"),
+                "Causal V3 LSTM candle-event path with 90% uncertainty.",
+            )
+
+            def add_forecast_geometry(
+                *,
+                suffix: str,
+                role: str,
+                line_points: Sequence[Sequence[float]],
+                z_index: int,
+                label: str,
+            ) -> None:
+                path_raw: dict[str, Any] = {
+                    "overlay_id": f"lstm_forecast_{suffix}_{frame_id}",
+                    "object_id": f"lstm_forecast_{suffix}_{frame_id}",
+                    "track_id": f"lstm_forecast_{suffix}",
+                    "type": "LSTM_STUDY",
+                    "side": overlay_side,
+                    "source_agent": "lstm_candle_sequence_v3",
+                    "source_key": _text(
+                        lstm.get("schema_version"),
+                        "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+                    ),
+                    "frame_id": frame_id,
+                    "sequence_id": sequence_id,
+                    "chart_transform_id": chart_transform_id,
+                    "coordinate_mode": "CHART_NORMALIZED",
+                    "anchor_type": "POLYGON",
+                    "anchor_candles": list(range(max(0, len(candles) - 8), len(candles))),
+                    "bounds": bounds,
+                    "line_points": [list(point) for point in line_points],
+                    "truth_score": confidence,
+                    "confidence": confidence,
+                    "lifecycle_state": "PREDICTED",
+                    "visible_modes": ["LSTM_STUDY", "COUNCIL", "INSPECTOR"],
+                    "visible_default": False,
+                    "ttl_ms": 12000,
+                    "created_at_ms": now_ms,
+                    "reason": f"{status_label}. {interpretation}",
+                    "label": label,
+                    "display_label": label,
+                    "short_label": label,
+                    "layer": "prediction_path",
+                    "role": f"{role}_{status_token}",
+                    "z_index": z_index,
+                    "structural_anchor": True,
+                    "source_rule": (
+                        "causal_multi_horizon_lstm_v3_candle_events_"
+                        f"90pct_interval_{status_token}_no_wall_clock"
+                    ),
+                }
+                try:
+                    overlays.append(
+                        normalize_v3_overlay_object(
+                            path_raw,
+                            strict=False,
+                            frame_id=frame_id,
+                            sequence_id=sequence_id,
+                            chart_transform_id=chart_transform_id,
+                            fallback_index=len(overlays),
+                        )
+                    )
+                except Exception:
+                    overlays.append(path_raw)
+
+            add_forecast_geometry(
+                suffix="band_90",
+                role="lstm_forecast_90_band",
+                line_points=band_points,
+                z_index=70,
+                label=f"LSTM V3 90% BAND - {status_label}",
+            )
+            add_forecast_geometry(
+                suffix="upper_90",
+                role="lstm_forecast_90_upper_boundary",
+                line_points=upper_points,
+                z_index=71,
+                label="LSTM V3 90% UPPER",
+            )
+            add_forecast_geometry(
+                suffix="lower_90",
+                role="lstm_forecast_90_lower_boundary",
+                line_points=lower_points,
+                z_index=71,
+                label="LSTM V3 90% LOWER",
+            )
+            add_forecast_geometry(
+                suffix="path",
+                role="lstm_candle_event_path",
+                line_points=center_points,
+                z_index=73,
+                label=f"LSTM V3 PATH - {status_label}",
+            )
     return overlays
 
 
@@ -1482,6 +1795,16 @@ def _shooter_summary(session_id: str, shooter_state: Mapping[str, Any] | None) -
 def _two_candle_and_lstm_payloads(session: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     tracking = _mapping(session.get("tracking_summary"))
     signal = _mapping(session.get("latest_signal"))
+    result = _mapping(session.get("model_council_result"))
+    forecast_snapshot = _mapping(session.get("forecast_snapshot_v3"))
+    study_packet = _first_mapping(
+        session.get("model_council_study_packet"),
+        session.get("study_packet"),
+        result.get("model_council_study_packet"),
+        result.get("study_packet"),
+        signal.get("model_council_study_packet"),
+        tracking.get("model_council_study_packet"),
+    )
     kernel = _mapping(signal.get("decision_kernel") or tracking.get("decision_kernel"))
     forecast = _mapping(
         signal.get("high_frequency_forecast")
@@ -1489,21 +1812,76 @@ def _two_candle_and_lstm_payloads(session: Mapping[str, Any]) -> tuple[dict[str,
         or signal.get("micro_candle_forecast")
         or tracking.get("micro_candle_forecast")
         or kernel.get("high_frequency_forecast")
+        or forecast_snapshot.get("high_frequency_forecast")
     )
     two_candle = _first_mapping(
+        study_packet.get("two_candle_study"),
+        result.get("two_candle_study"),
         signal.get("two_candle_study"),
         tracking.get("two_candle_study"),
         forecast.get("two_candle_study"),
         kernel.get("two_candle_study"),
+        forecast_snapshot.get("two_candle_study"),
     )
     lstm = _first_mapping(
+        study_packet.get("lstm_contribution"),
+        result.get("lstm_contribution"),
         signal.get("lstm_contribution"),
         tracking.get("lstm_contribution"),
         forecast.get("lstm_contribution"),
         kernel.get("lstm_contribution"),
         two_candle.get("lstm_contribution"),
+        forecast_snapshot.get("lstm_contribution"),
     )
-    return two_candle, lstm
+    display_frame_id = _int(
+        session.get("display_frame_id")
+        or session.get("frame_id")
+        or session.get("frame_index")
+    )
+    model_frame_id = _int(
+        session.get("model_vote_frame_id")
+        or study_packet.get("frame_id")
+        or two_candle.get("frame_id")
+        or lstm.get("frame_id")
+    )
+    packet_valid_until = _float(
+        study_packet.get("valid_until_epoch")
+        or study_packet.get("valid_until_epoch_sec"),
+        0.0,
+    )
+    snapshot_frame_id = _int(forecast_snapshot.get("source_frame_id"))
+    snapshot_observed_epoch = _float(forecast_snapshot.get("observed_epoch"), 0.0)
+    snapshot_stale = _bool(forecast_snapshot.get("stale"), False)
+
+    def with_source_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
+        if not payload:
+            return {}
+        row = dict(payload)
+        row["_source_frame_id"] = _int(
+            payload.get("frame_id")
+            or payload.get("model_vote_frame_id")
+            or snapshot_frame_id
+            or model_frame_id
+        )
+        row["_display_frame_id"] = display_frame_id
+        row["_source_valid_until_epoch"] = _float(
+            payload.get("valid_until_epoch")
+            or payload.get("valid_until_epoch_sec")
+            or packet_valid_until,
+            0.0,
+        )
+        row["_source_observed_epoch"] = _float(
+            payload.get("observed_epoch") or snapshot_observed_epoch,
+            0.0,
+        )
+        row["_source_stale_diagnostic"] = bool(
+            _bool(payload.get("diagnostic_only"), False)
+            or _bool(payload.get("stale"), False)
+            or snapshot_stale
+        )
+        return row
+
+    return with_source_identity(two_candle), with_source_identity(lstm)
 
 
 def _visual_plane_state(frontend_heartbeat: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -1955,6 +2333,8 @@ def _compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
         "state_version",
         "decision_version",
         "decision_valid_until_epoch",
+        "visual_observation_v3",
+        "forecast_snapshot_v3",
         "locked_window",
         "locked_title",
         "manual_focus_region",
@@ -2046,6 +2426,8 @@ def _compact_live_poll_session_payload(session: Mapping[str, Any]) -> dict[str, 
         "state_version",
         "decision_version",
         "decision_valid_until_epoch",
+        "visual_observation_v3",
+        "forecast_snapshot_v3",
         "locked_window",
         "locked_title",
         "manual_focus_region",
@@ -2170,6 +2552,16 @@ def build_live_state_v3(
     }
     session = dict(session_payload)
     session_id = _text(session.get("session_id"), "session")
+    visual_observation = _mapping(session.get("visual_observation_v3"))
+    waiting_for_new_frame = bool(
+        _text(visual_observation.get("status")).upper() == "WAITING_FOR_NEW_FRAME"
+        and not _bool(visual_observation.get("new_visual_evidence"), False)
+    )
+    # Identical pixels do not create new evidence, but they also do not make
+    # geometry tied to the still-displayed frame spatially wrong. Pause the
+    # wall-clock TTL while waiting; the public projection marks these objects
+    # stale/diagnostic and execution remains independently revoked.
+    visibility_now_ms: int | None = None if waiting_for_new_frame else now_ms
     model_health_payload = dict(model_health or {})
     broker_source = _broker_source_summary(session)
     source_block_reason = _broker_source_block_reason(broker_source)
@@ -2220,7 +2612,6 @@ def build_live_state_v3(
         session,
         two_candle_study,
         lstm_contribution,
-        active_mode=active_overlay_mode,
         frame_id=registry.frame_id,
         sequence_id=registry.sequence_context.sequence_id,
         chart_transform_id=str(chart_transform["chart_transform_id"]),
@@ -2276,7 +2667,7 @@ def build_live_state_v3(
             current_side=current_side,
             frame_id=registry.frame_id,
         )
-    layer_manager = OverlayLayerManagerV3(active_overlay_mode, now_ms=now_ms)
+    layer_manager = OverlayLayerManagerV3(active_overlay_mode, now_ms=visibility_now_ms)
     clean_overlays_only = str(os.getenv("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "0") or "0").strip().lower() not in {
         "0",
         "false",
@@ -2288,8 +2679,11 @@ def build_live_state_v3(
         overlay_source = [
             overlay
             for overlay in precision_overlays
-            if (not clean_mode_prefilter or _overlay_visible_for_mode(overlay, "CLEAN_LIVE", now_ms=now_ms))
-            and _overlay_visible_for_mode(overlay, active_overlay_mode, now_ms=now_ms)
+            if (
+                not clean_mode_prefilter
+                or _overlay_visible_for_mode(overlay, "CLEAN_LIVE", now_ms=visibility_now_ms)
+            )
+            and _overlay_visible_for_mode(overlay, active_overlay_mode, now_ms=visibility_now_ms)
             and _overlay_is_frame_aligned(overlay, registry.frame_id)
         ]
     else:

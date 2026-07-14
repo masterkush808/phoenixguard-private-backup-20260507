@@ -12,6 +12,10 @@ from phoenixguard.decision.book_strategy_master_v3 import (
 )
 from phoenixguard.decision.astar_decision_state_v3 import build_candidate_decision_ledger_v3
 from phoenixguard.decision.candle_movement_context_v3 import build_candle_movement_context_v3
+from phoenixguard.decision.entry_window_policy_v3 import (
+    entry_location_guidance_v3,
+    resolve_entry_window_policy_v3,
+)
 from phoenixguard.decision.playbook_ai_intelligence_v3 import (
     build_playbook_ai_intelligence_v3,
     compact_playbook_ai_intelligence_v3,
@@ -337,6 +341,10 @@ def _resolve_execution_opportunity_window_v3(
     duration_sec = max(0.0, _entry_window_remaining_seconds(entry_window, now_epoch=0.0))
     if duration_sec <= 0.0:
         return {}
+    entry_window_policy = _mapping(entry_window.get("entry_window_policy_v3"))
+    entry_location_guidance = _mapping(entry_window.get("entry_location_guidance_v3"))
+    if not entry_location_guidance:
+        entry_location_guidance = dict(entry_location_guidance_v3(candidate_side))
     opportunity_key = _execution_opportunity_key(
         session_id=session_id,
         symbol=symbol,
@@ -402,6 +410,8 @@ def _resolve_execution_opportunity_window_v3(
             "opened_frame_id": opened_frame_value,
             "opened_capture_count": opened_capture_value,
             "duration_sec": duration_sec,
+            "entry_window_policy_v3": entry_window_policy,
+            "entry_location_guidance_v3": entry_location_guidance,
             "valid_until_epoch": valid_until_epoch,
             "valid_until_epoch_sec": valid_until_epoch,
             "remaining_sec": remaining_sec,
@@ -525,6 +535,8 @@ def _resolve_execution_opportunity_window_v3(
             "opened_epoch": opened_epoch,
             "opened_epoch_sec": opened_epoch,
             "duration_sec": anchored_duration_sec,
+            "entry_window_policy_v3": entry_window_policy,
+            "entry_location_guidance_v3": entry_location_guidance,
             "valid_until_epoch": valid_until_epoch,
             "valid_until_epoch_sec": valid_until_epoch,
             "remaining_sec": remaining_sec if state == "OPEN" else 0.0,
@@ -1739,6 +1751,14 @@ def _current_candle_acceptance(snapshot: Mapping[str, Any], market: Mapping[str,
         reason = "Current candle has wick/reversal risk."
     else:
         reason = str(candle.get("reason") or "Current candle has not accepted an entry phase.")
+    seconds_elapsed = max(
+        0,
+        _int(candle.get("seconds_elapsed") or candle.get("elapsed_seconds"), 0),
+    )
+    seconds_remaining = max(
+        0,
+        _int(candle.get("seconds_remaining") or candle.get("remaining_seconds"), 0),
+    )
     return {
         "side": side if side in {"BUY", "SELL"} else "HOLD",
         "candle_phase": phase,
@@ -1747,6 +1767,8 @@ def _current_candle_acceptance(snapshot: Mapping[str, Any], market: Mapping[str,
         "too_early": phase == "FORMING",
         "wick_reversal_risk": wick_risk,
         "close_progress": round(float(close_progress), 4),
+        "seconds_elapsed": seconds_elapsed,
+        "seconds_remaining": seconds_remaining,
         "reason": reason,
     }
 
@@ -5028,7 +5050,12 @@ def evaluate_model_council_v3(
             timeframe_seconds,
         ),
     )
-    entry_window_seconds = preferred_expiry_seconds
+    entry_window_policy = resolve_entry_window_policy_v3(
+        timeframe_seconds=timeframe_seconds,
+        opening_candle_remaining_seconds=seconds_remaining,
+        trade_expiry_reference_seconds=preferred_expiry_seconds,
+    )
+    entry_window_seconds = entry_window_policy["duration_sec"]
     movement_projection_horizon = _movement_projection_horizon(
         candle_movement_context,
         candidate_side=candidate_side,
@@ -5589,6 +5616,21 @@ def evaluate_model_council_v3(
             path_class=path_class,
             professional_thesis_resolution=professional_thesis_resolution,
         )
+        entry_location_guidance = dict(entry_location_guidance_v3(candidate_side))
+        professional_entry_window_payload = _mapping(professional_trade_plan.get("entry_window"))
+        professional_entry_window_payload.update(
+            {
+                "entry_window_policy_v3": dict(entry_window_policy),
+                "entry_location_guidance_v3": entry_location_guidance,
+                "purpose": (
+                    "chart-aware setup window; current-frame permission is revalidated continuously "
+                    "and may close early on invalidation"
+                ),
+            }
+        )
+        professional_trade_plan["entry_window"] = professional_entry_window_payload
+        professional_trade_plan["entry_window_policy_v3"] = dict(entry_window_policy)
+        professional_trade_plan["entry_location_guidance_v3"] = entry_location_guidance
         playbook_ai_intelligence = build_playbook_ai_intelligence_v3(
             book_strategy_snapshot,
             {**book_strategy_market, "professional_trade_plan": professional_trade_plan},
@@ -6366,7 +6408,10 @@ def evaluate_model_council_v3(
                         "valid_until_epoch_sec": execution_opportunity_window.get("valid_until_epoch_sec"),
                         "remaining_sec": execution_opportunity_window.get("remaining_sec"),
                         "state": execution_opportunity_window.get("state"),
-                        "purpose": "absolute immediate entry authorization window; later frames do not renew it",
+                        "purpose": (
+                            "absolute chart-aware setup window; later frames do not renew it and "
+                            "current-frame permission remains fail-closed"
+                        ),
                     }
                 )
                 professional_trade_plan["entry_window"] = professional_entry_window
@@ -6393,6 +6438,8 @@ def evaluate_model_council_v3(
                 "current_leg_stage": candle_movement_context.get("move_stage"),
                 "basis": str(professional_thesis_horizon.get("basis") or movement_projection_horizon.get("basis") or "preferred_expiry_seconds_to_timeframe_candles"),
                 "entry_window": professional_entry_window,
+                "entry_window_policy_v3": dict(entry_window_policy),
+                "entry_location_guidance_v3": entry_location_guidance,
                 "thesis_horizon": professional_thesis_horizon,
                 "professional_trade_plan": professional_trade_plan,
                 "projection_horizon": movement_projection_horizon,
@@ -6415,6 +6462,8 @@ def evaluate_model_council_v3(
             allowance_package["candle_movement"] = candle_movement_brief
             allowance_package["expected_move_time"] = expected_move_time
             allowance_package["entry_window"] = professional_entry_window
+            allowance_package["entry_window_policy_v3"] = dict(entry_window_policy)
+            allowance_package["entry_location_guidance_v3"] = entry_location_guidance
             if execution_opportunity_window:
                 allowance_package["execution_opportunity_window_v3"] = execution_opportunity_window
             allowance_package["thesis_horizon"] = professional_thesis_horizon
@@ -7200,6 +7249,8 @@ def evaluate_model_council_v3(
                     packet["allowance_package"] = allowance_package
                     packet["execution_opportunity_window_v3"] = execution_opportunity_window
                     packet["entry_window"] = professional_entry_window
+                    packet["entry_window_policy_v3"] = dict(entry_window_policy)
+                    packet["entry_location_guidance_v3"] = entry_location_guidance
                     packet["execution"]["allowance_package_type"] = allowance_package["package_type"]
                     packet["market_reality"] = market_reality
                     packet["packet_type"] = "PG_EXECUTION_PACKET_V3"

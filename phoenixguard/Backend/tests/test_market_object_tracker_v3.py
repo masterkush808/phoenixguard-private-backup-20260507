@@ -12,6 +12,59 @@ from phoenixguard.tracking.market_object_tracker_v3 import (
 )
 
 
+def _canonical_candle(
+    index: int,
+    *,
+    wick_top: float,
+    wick_bottom: float,
+    open_y: float | None = None,
+    close_y: float | None = None,
+    closed: bool = True,
+    x_start: float = 10.0,
+    x_step: float = 30.0,
+    candle_width: float = 10.0,
+) -> dict[str, Any]:
+    """Build a detector-shaped candle with authoritative pixel geometry."""
+
+    left = x_start + index * x_step
+    center_x = left + candle_width * 0.5
+    midpoint = (wick_top + wick_bottom) * 0.5
+    resolved_open = midpoint + 4.0 if open_y is None else open_y
+    resolved_close = midpoint - 4.0 if close_y is None else close_y
+    return {
+        "track_id": index + 1,
+        # The bbox deliberately remains a transport envelope. Trendline price
+        # anchors must come from the canonical wick/body fields below.
+        "bbox": [left, wick_top, left + candle_width, wick_bottom],
+        "center_x_px": center_x,
+        "center_y_px": midpoint,
+        "wick_top_px": wick_top,
+        "wick_bottom_px": wick_bottom,
+        "body_top_px": min(resolved_open, resolved_close),
+        "body_bottom_px": max(resolved_open, resolved_close),
+        "open_y_px": resolved_open,
+        "close_y_px": resolved_close,
+        "direction": "BUY" if resolved_close < resolved_open else "SELL",
+        "is_closed": closed,
+        "confidence": 0.82,
+    }
+
+
+def _confirmed_support_candles(*, latest_closed: bool = False) -> list[dict[str, Any]]:
+    # Pivots 0, 3, and 6 sit exactly on y = 240 - 5 * bar. Other
+    # candles remain above the support line in pixel-price space.
+    wick_bottoms = [240.0, 220.0, 210.0, 225.0, 200.0, 190.0, 210.0, 185.0, 180.0, 170.0]
+    return [
+        _canonical_candle(
+            index,
+            wick_top=wick_bottom - 40.0,
+            wick_bottom=wick_bottom,
+            closed=latest_closed or index < len(wick_bottoms) - 1,
+        )
+        for index, wick_bottom in enumerate(wick_bottoms)
+    ]
+
+
 def _sample_payload() -> dict[str, Any]:
     return {
         "session_id": "pocket-live-8788",
@@ -19,7 +72,7 @@ def _sample_payload() -> dict[str, Any]:
         "capture_count": 77,
         "tracking_summary": {
             "chart_valid": True,
-            "visible_candle_count": 8,
+            "visible_candle_count": 10,
             "chart_region": {"pixel_bbox": [0, 0, 960, 540], "width": 960, "height": 540},
             "display_region": {"pixel_bbox": [0, 0, 960, 540], "width": 960, "height": 540},
             "detected_timeframe": "M5",
@@ -29,16 +82,26 @@ def _sample_payload() -> dict[str, Any]:
             "overlay_kind": "CONTINUATION BUY",
             "tracked_candles": [
                 {
-                    "track_id": index + 1,
-                    "bbox": [100 + index * 22, 310 - index * 12, 112 + index * 22, 350 - index * 12],
-                    "center_x": 106 + index * 22,
-                    "center_y": 330 - index * 12,
-                    "direction": "BUY" if index % 3 != 1 else "SELL",
+                    **candle,
                     "color": "green" if index % 3 != 1 else "magenta",
                     "price_proxy": 0.32 + index * 0.035,
-                    "confidence": 0.82,
                 }
-                for index in range(8)
+                for index, candle in enumerate(
+                    [
+                        _canonical_candle(
+                            index,
+                            wick_top=wick_bottom - 40.0,
+                            wick_bottom=wick_bottom,
+                            closed=index < 9,
+                            x_start=100.0,
+                            x_step=22.0,
+                            candle_width=12.0,
+                        )
+                        for index, wick_bottom in enumerate(
+                            [350.0, 326.0, 314.0, 332.0, 296.0, 284.0, 314.0, 278.0, 270.0, 260.0]
+                        )
+                    ]
+                )
             ],
             "structure_boxes": [
                 {
@@ -203,7 +266,7 @@ def test_market_object_registry_v3_extracts_tracked_objects_and_overlays() -> No
         "CONTINUATION_BOX",
         "DEMAND_ZONE",
         "SUPPLY_ZONE",
-        "INNER_TRENDLINE",
+            "SUPPORT_TRENDLINE",
         "SNIPER_ENTRY_BOX",
         "RETEST_BOX",
         "TARGET_ZONE_BOX",
@@ -219,7 +282,7 @@ def test_market_object_registry_v3_extracts_tracked_objects_and_overlays() -> No
     trendline_overlays = [overlay for overlay in payload["overlay_objects"] if str(overlay.get("type", "")).endswith("_TRENDLINE")]
     assert trendline_overlays
     assert all(overlay.get("line_points") for overlay in trendline_overlays)
-    assert {overlay.get("display_label") for overlay in trendline_overlays} == {"INNER TRENDLINE"}
+    assert {overlay.get("display_label") for overlay in trendline_overlays} == {"SUPPORT TRENDLINE"}
     replay_labels = {overlay.get("display_label") for overlay in payload["overlay_objects"] if overlay.get("type") in {"REPLAY_ENTRY", "REPLAY_EXIT"}}
     assert {"WOULD HAVE ENTERED", "WOULD HAVE EXITED"}.issubset(replay_labels)
     source_paths = {obj["source_path"] for obj in payload["object_registry"]}
@@ -306,6 +369,120 @@ def test_market_object_registry_maps_supply_demand_lifecycle_to_reference_state(
     assert not any(overlay.get("source_path") == "tracking_summary.execution_timing.opposing_force_zone" for overlay in overlays)
 
 
+def test_market_object_registry_emits_only_hard_anchored_smart_money_geometry() -> None:
+    payload = deepcopy(_sample_payload())
+    payload["tracking_summary"]["support_resistance_zones"][0]["source_indices"] = [4, 5]
+    payload["tracking_summary"]["smart_money_context"] = {
+        "order_blocks": [
+            {
+                "type": "bullish_order_block",
+                "direction": "BUY",
+                "source_index": 4,
+                "bbox": [184, 258, 208, 306],
+                "confidence": 0.82,
+            }
+        ],
+        "fair_value_gaps": [
+            {
+                "type": "bullish_fvg",
+                "direction": "BUY",
+                "source_index": 6,
+                "bbox": [206, 246, 248, 274],
+                "confidence": 0.78,
+            }
+        ],
+        "liquidity_pools": [
+            {"key": "support_5t", "direction": "BUY", "confidence": 0.76},
+            {"key": "unresolved_pool", "bbox": [10, 10, 90, 40], "confidence": 0.99},
+        ],
+        "liquidity_sweeps": [
+            {"zone_key": "support_5t", "direction": "BUY", "confidence": 0.84},
+            {"zone_key": "unresolved_sweep", "bbox": [10, 10, 90, 40], "confidence": 0.99},
+        ],
+        "market_structure_shift": {
+            "active": True,
+            "direction": "BUY",
+            "from": "SELL",
+            "to": "BUY",
+            "bbox": [228, 232, 270, 282],
+            "anchor_candle_indices": [6, 7],
+            "confidence": 0.8,
+        },
+    }
+
+    overlays = build_market_object_registry_v3(payload).as_dict()["overlay_objects"]
+    smart_money = [overlay for overlay in overlays if overlay.get("layer") == "smart_money"]
+    by_type = {str(overlay["type"]): overlay for overlay in smart_money}
+
+    assert set(by_type) == {
+        "ORDER_BLOCK",
+        "FAIR_VALUE_GAP",
+        "LIQUIDITY_POOL",
+        "LIQUIDITY_SWEEP",
+        "MARKET_STRUCTURE_SHIFT",
+    }
+    assert by_type["ORDER_BLOCK"]["bounds"] == [184.0, 258.0, 208.0, 306.0]
+    assert by_type["FAIR_VALUE_GAP"]["bounds"] == [206.0, 246.0, 248.0, 274.0]
+    liquidity_pool = by_type["LIQUIDITY_POOL"]
+    assert liquidity_pool["geometry_kind"] == "LIQUIDITY_PRICE_BAND"
+    assert liquidity_pool["source_bbox"] == [210.0, 300.0, 520.0, 330.0]
+    assert liquidity_pool["bounds"] == [187.4, 313.0, 222.6, 317.0]
+    assert liquidity_pool["bounds"][3] - liquidity_pool["bounds"][1] <= 10.0
+    assert liquidity_pool["bounds"][2] - liquidity_pool["bounds"][0] < 80.0
+    assert liquidity_pool["touch_count"] == 2
+    assert liquidity_pool["price_level_y"] == liquidity_pool["line_y"] == 315.0
+    assert by_type["LIQUIDITY_SWEEP"]["bounds"] == [210.0, 300.0, 520.0, 330.0]
+    assert by_type["MARKET_STRUCTURE_SHIFT"]["bounds"] == [228.0, 232.0, 270.0, 282.0]
+    assert all(overlay["visible_modes"] == ["SMART_MONEY", "INSPECTOR"] for overlay in smart_money)
+    assert all(overlay["anchor_evidence"]["valid"] is True for overlay in smart_money)
+    assert all(overlay["anchor_candle_indices"] for overlay in smart_money)
+    assert all(float(overlay["anchor_quality"]["score"]) >= 0.68 for overlay in smart_money)
+    assert len([overlay for overlay in smart_money if overlay["type"] == "LIQUIDITY_POOL"]) == 1
+    assert len([overlay for overlay in smart_money if overlay["type"] == "LIQUIDITY_SWEEP"]) == 1
+
+
+def test_market_object_registry_rejects_single_touch_liquidity_level_as_pool() -> None:
+    payload = deepcopy(_sample_payload())
+    source_zone = payload["tracking_summary"]["support_resistance_zones"][0]
+    source_zone.update(
+        {
+            "source_indices": [5],
+            "touch_count": 1,
+            "line_y": 315,
+            "wick_anchor_y": 315,
+            "touch_points": [[216, 315]],
+        }
+    )
+    payload["tracking_summary"]["smart_money_context"] = {
+        "liquidity_pools": [
+            {"key": "support_5t", "direction": "BUY", "confidence": 0.91},
+        ]
+    }
+
+    overlays = build_market_object_registry_v3(payload).as_dict()["overlay_objects"]
+
+    assert not [row for row in overlays if row.get("type") == "LIQUIDITY_POOL"]
+
+
+def test_market_object_registry_skips_state_only_or_unresolved_smart_money_rows() -> None:
+    payload = deepcopy(_sample_payload())
+    payload["tracking_summary"]["smart_money_context"] = {
+        "order_blocks": [{"direction": "BUY", "source_index": 4, "confidence": 0.9}],
+        "fair_value_gaps": [{"direction": "BUY", "source_index": 5, "confidence": 0.9}],
+        "liquidity_pools": [{"key": "missing", "bbox": [180, 250, 220, 300], "confidence": 0.9}],
+        "liquidity_sweeps": [{"zone_key": "missing", "bbox": [180, 250, 220, 300], "confidence": 0.9}],
+        "market_structure_shift": {
+            "active": True,
+            "direction": "BUY",
+            "confidence": 0.9,
+        },
+    }
+
+    overlays = build_market_object_registry_v3(payload).as_dict()["overlay_objects"]
+
+    assert not [overlay for overlay in overlays if overlay.get("layer") == "smart_money"]
+
+
 def test_market_object_registry_v3_ids_are_stable_when_geometry_moves() -> None:
     first = _sample_payload()
     second = deepcopy(first)
@@ -321,7 +498,7 @@ def test_market_object_registry_v3_ids_are_stable_when_geometry_moves() -> None:
     second_payload = second_registry.as_dict()
     first_by_source = {obj["source_path"]: obj["object_id"] for obj in first_payload["object_registry"]}
     second_by_source = {obj["source_path"]: obj["object_id"] for obj in second_payload["object_registry"]}
-    assert second_by_source["tracking_summary.tracked_candles[7]"] == first_by_source["tracking_summary.tracked_candles[7]"]
+    assert second_by_source["tracking_summary.tracked_candles[9]"] == first_by_source["tracking_summary.tracked_candles[9]"]
     assert second_by_source["tracking_summary.projection.zones[1]"] == first_by_source["tracking_summary.projection.zones[1]"]
     assert second_by_source["tracking_summary.projection.zones[1].target_bbox"] == first_by_source["tracking_summary.projection.zones[1].target_bbox"]
     assert first_payload["sequence_context"]["sequence_signature"] != second_payload["sequence_context"]["sequence_signature"]
@@ -337,13 +514,17 @@ def test_trendline_derivation_rejects_horizontal_lines() -> None:
 
 
 def test_trendline_derivation_emits_valid_downtrend_resistance_only_when_clean() -> None:
-    downtrend: list[dict[str, Any]] = [
-        {
-            "bbox": [10 + index * 42, 80 + index * 9, 24 + index * 42, 126 + index * 7],
-            "center_x": 17 + index * 42,
-            "center_y": 103 + index * 8,
-        }
-        for index in range(8)
+    # Lower-high pivots 0, 3, and 6 sit on y = 80 + 6 * bar.
+    wick_tops = [80.0, 100.0, 108.0, 98.0, 126.0, 134.0, 116.0, 142.0, 148.0, 154.0]
+    downtrend = [
+        _canonical_candle(
+            index,
+            wick_top=wick_top,
+            wick_bottom=wick_top + 40.0,
+            closed=index < len(wick_tops) - 1,
+            x_step=42.0,
+        )
+        for index, wick_top in enumerate(wick_tops)
     ]
 
     overlays = derive_trendline_overlays(downtrend)
@@ -356,30 +537,199 @@ def test_trendline_derivation_emits_valid_downtrend_resistance_only_when_clean()
 
 
 def test_trendline_derivation_uses_two_wick_anchors_before_extension() -> None:
-    uptrend: list[dict[str, Any]] = []
-    for index in range(8):
-        left = 10 + index * 36
-        wick_bottom = 220 - index * 10
-        uptrend.append(
-            {
-                "bbox": [left, wick_bottom - 46, left + 10, wick_bottom - 16],
-                "wick_top": wick_bottom - 58,
-                "wick_bottom": wick_bottom,
-                "center_x": left + 5,
-                "center_y": wick_bottom - 31,
-            }
-        )
-
+    uptrend = _confirmed_support_candles()
+    # Prove the outer bbox cannot displace canonical wick coordinates.
+    uptrend[0]["bbox"] = [10.0, 150.0, 20.0, 255.0]
     overlays = derive_trendline_overlays(uptrend)
-    trendline = next(row for row in overlays if row["type"].endswith("_TRENDLINE"))
+    trendline = next(row for row in overlays if row["type"] == "SUPPORT_TRENDLINE")
 
     assert trendline["touch_count"] >= 2
     assert len(trendline["touch_points"]) >= 2
-    assert trendline["line_points"][:2] == trendline["touch_points"][:2]
-    assert trendline["anchor_candles"][:2] == [0, 1]
+    assert trendline["line_points"][:2] == trendline["anchor_wick_points"]
+    assert trendline["anchor_candles"] == [0, 6]
+    assert trendline["anchor_candle_indices"] == [0, 6]
+    assert trendline["anchor_wick_points"] == [[15.0, 240.0], [195.0, 210.0]]
+    assert trendline["line_points"][-1][0] == uptrend[-1]["center_x_px"]
+    assert trendline["anchor_span_bars"] == 6
+    assert trendline["anchor_span_fraction"] > 0.6
     assert trendline["line_obstruction_count"] == 0
     assert trendline["significant_close"] is False
-    assert trendline["trendline_validation"] == "wick_anchor_no_obstruction_no_significant_close"
+    assert trendline["trendline_validation"] == "wick_anchor_no_obstruction_closed_body_validation"
+    assert trendline["anchor_type"] == "TRENDLINE_TOUCH_POINTS"
+
+
+def test_outer_local_pivots_outrank_short_line_with_repeated_wick_probes() -> None:
+    wick_tops = [210.0, 205.0, 198.0, 212.0, 188.0, 196.0, 178.0, 190.0, 170.0, 182.0, 160.0, 172.0]
+    wick_bottoms = [430.0, 390.0, 360.0, 382.0, 340.0, 354.0, 320.0, 338.0, 300.0, 318.0, 280.0, 298.0]
+    candles: list[dict[str, Any]] = []
+    for index, (wick_top, wick_bottom) in enumerate(zip(wick_tops, wick_bottoms)):
+        center_x = 100.0 + index * 40.0
+        body_top = wick_top + 18.0
+        body_bottom = wick_bottom - 18.0
+        candles.append(
+            {
+                "bbox": [center_x - 4.0, body_top, center_x + 4.0, body_bottom],
+                "body_bbox": [center_x - 4.0, body_top, center_x + 4.0, body_bottom],
+                "wick_top": wick_top,
+                "wick_bottom": wick_bottom,
+                "center_x": center_x,
+                "center_y": (wick_top + wick_bottom) * 0.5,
+            }
+        )
+
+    trendline = next(
+        row for row in derive_trendline_overlays(candles) if row["type"] == "INNER_TRENDLINE"
+    )
+
+    assert trendline["anchor_candle_indices"] == [0, 9]
+    assert trendline["line_points"][:2] == [[100.0, 430.0], [460.0, 318.0]]
+    assert trendline["wick_probe_count"] == 0
+
+
+def test_trendline_derivation_rejects_ranked_extremes_without_real_pivots() -> None:
+    monotonic = [
+        _canonical_candle(
+            index,
+            wick_top=180.0 - index * 5.0,
+            wick_bottom=220.0 - index * 5.0,
+            closed=index < 7,
+        )
+        for index in range(8)
+    ]
+
+    assert derive_trendline_overlays(monotonic) == []
+
+
+def test_trendline_derivation_rejects_adjacent_or_immaterial_pivot_span() -> None:
+    wick_bottoms = [200.0, 218.0, 230.0, 210.0, 225.0, 205.0, 212.0, 235.0]
+    candles = [
+        _canonical_candle(
+            index,
+            wick_top=100.0,
+            wick_bottom=wick_bottom,
+            closed=index < len(wick_bottoms) - 1,
+        )
+        for index, wick_bottom in enumerate(wick_bottoms)
+    ]
+
+    support = [row for row in derive_trendline_overlays(candles) if row["trendline_role"] == "support"]
+    assert support == []
+
+
+def test_trendline_wick_probe_survives_but_closed_body_breach_invalidates() -> None:
+    # Two closed bars to the right confirm the second anchor at index 6;
+    # later wicks may probe below it without rewriting that pivot.
+    wick_bottoms = [
+        240.0,
+        220.0,
+        210.0,
+        225.0,
+        200.0,
+        190.0,
+        210.0,
+        185.0,
+        180.0,
+        220.0,
+        218.0,
+        225.0,
+    ]
+    probe = [
+        _canonical_candle(
+            index,
+            wick_top=wick_bottom - 40.0,
+            wick_bottom=wick_bottom,
+            closed=index < len(wick_bottoms) - 1,
+        )
+        for index, wick_bottom in enumerate(wick_bottoms)
+    ]
+    active_support = next(
+        row for row in derive_trendline_overlays(probe) if row["type"] == "SUPPORT_TRENDLINE"
+    )
+    assert active_support["wick_probe_count"] >= 1
+    assert active_support["significant_close"] is False
+
+    breached = deepcopy(probe)
+    breached[9]["open_y_px"] = 200.0
+    breached[9]["close_y_px"] = 218.0
+    breached[9]["body_top_px"] = 200.0
+    breached[9]["body_bottom_px"] = 218.0
+    breached_support = [
+        row for row in derive_trendline_overlays(breached) if row["type"] == "SUPPORT_TRENDLINE"
+    ]
+    assert breached_support == []
+
+
+def test_forming_candle_cannot_invalidate_confirmed_trendline() -> None:
+    wick_bottoms = [240.0, 220.0, 210.0, 225.0, 200.0, 190.0, 210.0, 185.0, 180.0, 230.0]
+    candles = [
+        _canonical_candle(
+            index,
+            wick_top=wick_bottom - (60.0 if index == len(wick_bottoms) - 1 else 40.0),
+            wick_bottom=wick_bottom,
+            open_y=205.0 if index == len(wick_bottoms) - 1 else None,
+            close_y=225.0 if index == len(wick_bottoms) - 1 else None,
+            closed=index < len(wick_bottoms) - 1,
+        )
+        for index, wick_bottom in enumerate(wick_bottoms)
+    ]
+
+    support = next(
+        row for row in derive_trendline_overlays(candles) if row["type"] == "SUPPORT_TRENDLINE"
+    )
+    assert support["significant_close"] is False
+    assert support["wick_probe_count"] >= 1
+
+
+def test_trendline_touch_strength_distinguishes_developing_and_confirmed() -> None:
+    developing_bottoms = [240.0, 220.0, 210.0, 215.0, 200.0, 190.0, 210.0, 185.0, 180.0, 170.0]
+    developing = [
+        _canonical_candle(
+            index,
+            wick_top=wick_bottom - 40.0,
+            wick_bottom=wick_bottom,
+            closed=index < len(developing_bottoms) - 1,
+        )
+        for index, wick_bottom in enumerate(developing_bottoms)
+    ]
+    developing_line = next(
+        row for row in derive_trendline_overlays(developing) if row["type"] == "SUPPORT_TRENDLINE"
+    )
+    confirmed_line = next(
+        row
+        for row in derive_trendline_overlays(_confirmed_support_candles())
+        if row["type"] == "SUPPORT_TRENDLINE"
+    )
+
+    assert developing_line["touch_count"] == 2
+    assert developing_line["confirmation_state"] == "DEVELOPING"
+    assert developing_line["touch_quality"] == "DEVELOPING"
+    assert confirmed_line["touch_count"] >= 3
+    assert confirmed_line["confirmation_state"] == "CONFIRMED"
+    assert confirmed_line["touch_quality"] == "CONFIRMED"
+
+
+def test_trendline_derivation_rejects_excessive_normalized_steepness() -> None:
+    wick_bottoms = [600.0, 530.0, 480.0, 450.0, 380.0, 330.0, 300.0, 250.0, 200.0, 150.0]
+    candles = [
+        _canonical_candle(
+            index,
+            wick_top=wick_bottom - 40.0,
+            wick_bottom=wick_bottom,
+            closed=index < len(wick_bottoms) - 1,
+        )
+        for index, wick_bottom in enumerate(wick_bottoms)
+    ]
+
+    assert not [row for row in derive_trendline_overlays(candles) if row["trendline_role"] == "support"]
+
+
+def test_equivalent_major_and_inner_trendlines_are_not_duplicated() -> None:
+    overlays = derive_trendline_overlays(_confirmed_support_candles())
+    support = [row for row in overlays if row["trendline_role"] == "support"]
+
+    assert len(support) == 1
+    assert support[0]["type"] == "SUPPORT_TRENDLINE"
+    assert not [row for row in overlays if row["type"] == "INNER_TRENDLINE" and row["trendline_role"] == "support"]
 
 
 def test_registry_preserves_trendline_touch_point_anchor_geometry() -> None:

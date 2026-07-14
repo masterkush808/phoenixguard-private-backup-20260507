@@ -29,7 +29,7 @@ def _load(path: Path) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Export a production-ready LSTM candle-sequence V3 artifact bundle.")
+    parser = argparse.ArgumentParser(description="Export the production-ready PhoenixGuard V3 computer-vision LSTM bundle.")
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--config-path", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--metrics-path", type=Path, default=DEFAULT_METRICS_PATH)
@@ -65,7 +65,9 @@ def main() -> int:
     for path in (args.model_path, args.config_path, args.metrics_path):
         shutil.copy2(path, args.export_dir / path.name)
     manifest: dict[str, Any] = {
-        "schema_version": "PG_LSTM_CANDLE_SEQUENCE_EXPORT_V3",
+        "schema_version": "PG_LSTM_CANDLE_PATH_EXPORT_V3",
+        "stack_version": "PHOENIXGUARD_V3",
+        "modality": "COMPUTER_VISION",
         "production_ready": production_ready,
         "model_path": str(args.export_dir / args.model_path.name),
         "config_path": str(args.export_dir / args.config_path.name),

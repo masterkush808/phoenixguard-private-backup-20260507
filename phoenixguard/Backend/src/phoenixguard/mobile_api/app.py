@@ -70,6 +70,10 @@ from .model_strength import (
     write_model_strength_settings,
 )
 from .observer import SignalObserverService
+from .operator_workspace_v1 import (
+    OPERATOR_WORKSPACE_SCHEMA_VERSION,
+    build_operator_workspace_v1,
+)
 from .realtime_sync_v3 import (
     build_visual_realtime_health,
     latest_frontend_heartbeat,
@@ -113,6 +117,49 @@ _DEFAULT_WINDOW_TRACKER_DASHBOARD_SESSION_ID = "pocket-live-8788"
 _RUNTIME_ROOT = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or PROJECT_ROOT / "runtime" / "live")
 _SHOOTER_HANDSHAKE_PATH = _RUNTIME_ROOT / "shooter_handshake.json"
 _PUBLISHED_PACKET_FALLBACK_TTL_SEC = 8.0
+_OPERATOR_VIEW_TO_OVERLAY_MODE = {
+    "all": "INSPECTOR",
+    # Composite public views are projected from the complete inspector bundle,
+    # then reduced to their exact public family allow-list below.  Narrow
+    # backend modes cannot supply every family these views advertise (for
+    # example ACTIVE_CONTEXT omits invalidation from the trade-plan view).
+    "live": "INSPECTOR",
+    "structure": "INSPECTOR",
+    "zones": "INSPECTOR",
+    "plan": "INSPECTOR",
+    "smc": "SMART_MONEY",
+    "two-candle": "TWO_CANDLE_STUDY",
+    "lstm": "LSTM_STUDY",
+    "forecast": "INSPECTOR",
+    "history": "INSPECTOR",
+}
+
+_OPERATOR_VIEW_TO_PUBLIC_FAMILIES: dict[str, frozenset[str] | None] = {
+    "all": None,
+    "live": frozenset(
+        {
+            "chart_bounds",
+            "current_candles",
+            "major_swings",
+            "local_swings",
+            "supply_demand",
+            "trendlines",
+            "triggers",
+            "targets",
+            "invalidation",
+            "smc",
+            "council",
+        }
+    ),
+    "structure": frozenset({"current_candles", "major_swings", "local_swings", "trendlines"}),
+    "zones": frozenset({"supply_demand"}),
+    "plan": frozenset({"council", "triggers", "targets", "invalidation"}),
+    "smc": frozenset({"smc"}),
+    "two-candle": frozenset({"two_candle"}),
+    "lstm": frozenset({"lstm"}),
+    "forecast": frozenset({"two_candle", "lstm", "prediction"}),
+    "history": frozenset({"history", "major_swings", "local_swings"}),
+}
 
 
 def _env_float_at_least(name: str, default: float, minimum: float) -> float:
@@ -292,10 +339,16 @@ def _compact_overlay_payload_stale_for_display(
     display_overlay_frame_id = _display_overlay_authority_frame_id(display_payload)
     if display_overlay_frame_id <= 0:
         return False
+    row_frame_ids, has_unframed_row = _compact_overlay_row_frame_ids(payload)
+    if row_frame_ids or has_unframed_row:
+        return bool(
+            has_unframed_row
+            or row_frame_ids != {display_overlay_frame_id}
+        )
     payload_overlay_frame_id = _compact_overlay_object_frame_id(payload)
     if payload_overlay_frame_id <= 0:
         return True
-    return payload_overlay_frame_id < display_overlay_frame_id
+    return payload_overlay_frame_id != display_overlay_frame_id
 
 
 _DIRECT_DISPLAY_STATE_KEYS = frozenset(
@@ -607,6 +660,369 @@ def _persist_compact_overlay_response(session_id: str, mode: str, payload: Mappi
         return
 
 
+_SAFE_OPERATOR_OVERLAY_KEYS = frozenset(
+    {
+        "id",
+        "type",
+        "side",
+        "group",
+        "family",
+        "layer",
+        "label",
+        "label_hidden",
+        "bounds",
+        "points",
+        "line_points",
+        "confidence",
+        "lifecycle",
+        "frame_id",
+        "coordinate_space",
+        "coordinate_units",
+        "forecast_role",
+        "forecast_status",
+        "forecast_authorized",
+        "horizon_unit",
+        "clock_time_assumption",
+        "uncertainty_level",
+    }
+)
+
+_PRIVATE_PROJECTION_SNAPSHOT_KEYS = frozenset(
+    {
+        "forecast_snapshot_v3",
+        "operator_overlay_snapshot_v1",
+        "operator_overlay_snapshot",
+    }
+)
+
+
+_PRIVATE_TRACKER_SESSION_KEY_FRAGMENTS = (
+    "feature",
+    "hwnd",
+    "signature",
+)
+
+
+def _is_private_tracker_session_key(key: object) -> bool:
+    """Identify implementation-only fields at the legacy session boundary."""
+
+    normalized = str(key or "").strip().lower()
+    return bool(
+        normalized in _PRIVATE_PROJECTION_SNAPSHOT_KEYS
+        or normalized.endswith("_path")
+        or any(fragment in normalized for fragment in _PRIVATE_TRACKER_SESSION_KEY_FRAGMENTS)
+    )
+
+
+def _sanitize_public_tracker_session_value(value: object) -> object:
+    """Recursively remove host and model internals from a public session value."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _sanitize_public_tracker_session_value(nested)
+            for key, nested in cast(Mapping[object, object], value).items()
+            if not _is_private_tracker_session_key(key)
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [
+            _sanitize_public_tracker_session_value(nested)
+            for nested in cast(Sequence[object], value)
+        ]
+    return value
+
+
+def _sanitize_public_tracker_session(payload: Mapping[str, object]) -> dict[str, object]:
+    """Keep legacy session compatibility without publishing backend telemetry."""
+
+    sanitized = _sanitize_public_tracker_session_value(payload)
+    return cast(dict[str, object], sanitized)
+
+
+def _strip_private_projection_snapshots(
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    """Remove internal rebuild state at every public live-state boundary.
+
+    The retained forecast snapshot may contain normalized model features and
+    path probabilities needed to rebuild safe geometry.  It is internal state,
+    not a public API DTO.  Only the known nesting used by live-state responses
+    is traversed so this guard does not copy every overlay object.
+    """
+
+    output = {
+        key: value
+        for key, value in payload.items()
+        if key not in _PRIVATE_PROJECTION_SNAPSHOT_KEYS
+    }
+    for container_key in ("session", "live_visual_state"):
+        container = output.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        sanitized = {
+            key: value
+            for key, value in cast(Mapping[str, object], container).items()
+            if key not in _PRIVATE_PROJECTION_SNAPSHOT_KEYS
+        }
+        nested_session = sanitized.get("session")
+        if isinstance(nested_session, Mapping):
+            sanitized["session"] = {
+                key: value
+                for key, value in cast(Mapping[str, object], nested_session).items()
+                if key not in _PRIVATE_PROJECTION_SNAPSHOT_KEYS
+            }
+        output[container_key] = sanitized
+    return output
+
+
+def _operator_overlay_snapshot_path(session_id: str) -> Path:
+    return _direct_live_state_session_path(session_id).with_name(
+        "operator_overlay_snapshot_v1.json"
+    )
+
+
+def _operator_overlay_lineage(payload: Mapping[str, object]) -> dict[str, object]:
+    frame_id = int(
+        _epoch_float(
+            payload.get("display_frame_id")
+            or payload.get("frame_id")
+            or payload.get("frame_index"),
+            0.0,
+        )
+    )
+    return {
+        "frame_id": frame_id,
+        "chart_frame_id": int(_epoch_float(payload.get("chart_frame_id"), 0.0)),
+        "overlay_frame_id": int(_epoch_float(payload.get("overlay_frame_id"), 0.0)),
+        "full_overlay_frame_id": int(
+            _epoch_float(payload.get("full_overlay_frame_id"), 0.0)
+        ),
+        "model_vote_frame_id": int(
+            _epoch_float(payload.get("model_vote_frame_id"), 0.0)
+        ),
+        "display_surface_signature": str(
+            payload.get("last_display_surface_signature")
+            or payload.get("last_window_surface_signature")
+            or ""
+        ).strip(),
+        "study_surface_signature": str(
+            payload.get("last_study_surface_signature") or ""
+        ).strip(),
+        "overlay_source_window_signature": str(
+            payload.get("overlay_source_window_signature") or ""
+        ).strip(),
+        "overlay_source_study_signature": str(
+            payload.get("overlay_source_study_signature") or ""
+        ).strip(),
+        "state_version": int(_epoch_float(payload.get("state_version"), 0.0)),
+    }
+
+
+def _operator_overlay_lineage_is_complete(lineage: Mapping[str, object]) -> bool:
+    frame_id = int(_epoch_float(lineage.get("frame_id"), 0.0))
+    display_signature = str(lineage.get("display_surface_signature") or "").strip()
+    study_signature = str(lineage.get("study_surface_signature") or "").strip()
+    return bool(
+        frame_id > 0
+        and all(
+            int(_epoch_float(lineage.get(key), 0.0)) == frame_id
+            for key in (
+                "chart_frame_id",
+                "overlay_frame_id",
+                "full_overlay_frame_id",
+                "model_vote_frame_id",
+            )
+        )
+        and display_signature
+        and study_signature
+        and str(lineage.get("overlay_source_window_signature") or "").strip()
+        == display_signature
+        and str(lineage.get("overlay_source_study_signature") or "").strip()
+        == study_signature
+    )
+
+
+def _operator_overlay_lineage_matches(
+    saved: Mapping[str, object],
+    current: Mapping[str, object],
+) -> bool:
+    if not _operator_overlay_lineage_is_complete(saved) or not _operator_overlay_lineage_is_complete(current):
+        return False
+    return all(
+        saved.get(key) == current.get(key)
+        for key in (
+            "frame_id",
+            "chart_frame_id",
+            "overlay_frame_id",
+            "full_overlay_frame_id",
+            "model_vote_frame_id",
+            "display_surface_signature",
+            "study_surface_signature",
+            "overlay_source_window_signature",
+            "overlay_source_study_signature",
+        )
+    )
+
+
+def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    output: list[dict[str, object]] = []
+    for item in cast(Sequence[object], value):
+        if not isinstance(item, Mapping):
+            continue
+        row = {
+            key: cast(Mapping[str, object], item).get(key)
+            for key in _SAFE_OPERATOR_OVERLAY_KEYS
+            if key in item
+        }
+        if row.get("id") and row.get("family") and row.get("frame_id"):
+            output.append(row)
+    return output
+
+
+def _operator_overlay_rows_for_frame(
+    value: object,
+    frame_id: object,
+) -> list[dict[str, object]]:
+    target_frame = int(_epoch_float(frame_id, 0.0))
+    if target_frame <= 0:
+        return []
+    return [
+        row
+        for row in _safe_operator_overlay_rows(value)
+        if int(_epoch_float(row.get("frame_id"), 0.0)) == target_frame
+    ]
+
+
+def _merge_safe_operator_overlay_rows(
+    current: object,
+    saved: object,
+    *,
+    frame_id: object | None = None,
+) -> list[dict[str, object]]:
+    """Merge exact-lineage fallback geometry without overriding current rows.
+
+    A persisted snapshot is recovery material, not presentation authority.  A
+    current projection wins for every stable overlay id; saved rows only fill
+    ids that the current projection could not rebuild during the same atomic
+    frame.  Both inputs cross the safe public-field allow-list first.
+    """
+
+    merged = (
+        _operator_overlay_rows_for_frame(current, frame_id)
+        if frame_id is not None
+        else _safe_operator_overlay_rows(current)
+    )
+    saved_rows = (
+        _operator_overlay_rows_for_frame(saved, frame_id)
+        if frame_id is not None
+        else _safe_operator_overlay_rows(saved)
+    )
+    seen = {str(row.get("id") or "") for row in merged}
+    for row in saved_rows:
+        identity = str(row.get("id") or "")
+        if identity in seen:
+            continue
+        merged.append(row)
+        seen.add(identity)
+    return merged
+
+
+def _persist_operator_overlay_snapshot(
+    session_id: str,
+    source: Mapping[str, object],
+    operator_state: Mapping[str, object],
+) -> dict[str, object] | None:
+    lineage = _operator_overlay_lineage(source)
+    all_overlays = _safe_operator_overlay_rows(operator_state.get("overlays"))
+    overlays = _operator_overlay_rows_for_frame(
+        all_overlays,
+        lineage.get("frame_id"),
+    )
+    viewport = _mapping_to_plain_dict(
+        _mapping_to_plain_dict(operator_state.get("surface")).get("overlay_viewport")
+    )
+    surface = _mapping_to_plain_dict(operator_state.get("surface"))
+    surface_frame_id = int(_epoch_float(surface.get("frame_id"), 0.0))
+    if (
+        not _operator_overlay_lineage_is_complete(lineage)
+        or not overlays
+        or len(overlays) != len(all_overlays)
+        or surface_frame_id != int(_epoch_float(lineage.get("frame_id"), 0.0))
+        or not viewport
+    ):
+        return None
+    snapshot: dict[str, object] = {
+        "schema_version": "PG_OPERATOR_OVERLAY_SNAPSHOT_V1",
+        "session_id": str(session_id),
+        "lineage": lineage,
+        "overlay_viewport": {
+            key: viewport.get(key)
+            for key in ("source_space", "target_space", "coordinate_units", "bounds")
+            if key in viewport
+        },
+        "overlays": overlays,
+        "persisted_epoch": time.time(),
+    }
+    path = _operator_overlay_snapshot_path(session_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp_path.write_text(
+            json.dumps(snapshot, separators=(",", ":"), default=str),
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, path)
+    except Exception:
+        return None
+    return snapshot
+
+
+def _load_operator_overlay_snapshot(
+    session_id: str,
+    source: Mapping[str, object],
+) -> dict[str, object] | None:
+    try:
+        raw = json.loads(
+            _operator_overlay_snapshot_path(session_id).read_text(encoding="utf-8")
+        )
+    except Exception:
+        return None
+    if not isinstance(raw, Mapping):
+        return None
+    snapshot = dict(cast(Mapping[str, object], raw))
+    if snapshot.get("schema_version") != "PG_OPERATOR_OVERLAY_SNAPSHOT_V1":
+        return None
+    if str(snapshot.get("session_id") or "") != str(session_id):
+        return None
+    saved_lineage = _mapping_to_plain_dict(snapshot.get("lineage"))
+    if not _operator_overlay_lineage_matches(
+        saved_lineage,
+        _operator_overlay_lineage(source),
+    ):
+        return None
+    saved_rows = _safe_operator_overlay_rows(snapshot.get("overlays"))
+    exact_rows = _operator_overlay_rows_for_frame(
+        saved_rows,
+        saved_lineage.get("frame_id"),
+    )
+    if not exact_rows or len(exact_rows) != len(saved_rows):
+        return None
+    snapshot["overlays"] = exact_rows
+    return snapshot
+
+
+def _stale_diagnostic_operator_overlays(value: object) -> list[dict[str, object]]:
+    rows = _safe_operator_overlay_rows(value)
+    for row in rows:
+        if str(row.get("lifecycle") or "").lower() != "historical":
+            row["lifecycle"] = "stale_diagnostic"
+        if row.get("forecast_role"):
+            row["forecast_status"] = "STALE"
+            row["forecast_authorized"] = False
+    return rows
+
+
 def _direct_market_registry_path(session_id: str) -> Path:
     relative_path = Path("market_registry") / f"{str(session_id or '').strip()}.jsonl"
     candidates = _runtime_data_dir_candidates()
@@ -705,6 +1121,7 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
         display_path,
         (
             "session_id",
+            "state_version",
             "frame_index",
             "chart_frame_id",
             "overlay_frame_id",
@@ -727,6 +1144,7 @@ def _live_state_cache_signature(session_id: str, *, compact_public: bool = False
         context_path = _direct_live_state_compact_session_path(session_id)
         context_fields = (
             "session_id",
+            "state_version",
             "window_query",
             "locked_title",
             "locked_window.hwnd",
@@ -802,6 +1220,7 @@ def _compact_live_state_response_cache_signature(session_id: str) -> str:
         display_path,
         (
             "session_id",
+            "state_version",
             "frame_index",
             "display_frame_id",
             "chart_frame_id",
@@ -1449,6 +1868,35 @@ def _first_positive_int(*values: object) -> int:
         if resolved > 0:
             return resolved
     return 0
+
+
+def _compact_overlay_row_frame_ids(
+    payload: Mapping[str, object],
+) -> tuple[set[int], bool]:
+    """Return every published overlay frame and whether any row is unframed."""
+
+    frames: set[int] = set()
+    has_unframed_row = False
+    saw_rows = False
+    containers = (
+        _as_mapping(payload.get("overlays")),
+        _as_mapping(_as_mapping(payload.get("live_visual_state")).get("overlays")),
+    )
+    for container in containers:
+        for key in ("objects", "all_objects"):
+            for raw_row in _as_sequence(container.get(key)):
+                row = _as_mapping(raw_row)
+                if not row:
+                    continue
+                saw_rows = True
+                frame_id = int(
+                    _epoch_float(row.get("frame_id") or row.get("frame_index"), 0.0)
+                )
+                if frame_id > 0:
+                    frames.add(frame_id)
+                else:
+                    has_unframed_row = True
+    return frames, bool(saw_rows and has_unframed_row)
 
 
 def _execution_packet_matches_current_payload(
@@ -2385,12 +2833,92 @@ def _write_overlay_editor_settings(raw: Mapping[str, object]) -> dict[str, objec
 
 def _render_window_tracker_dashboard(session_id: str) -> str:
     template = _WINDOW_TRACKER_DASHBOARD_TEMPLATE.read_text(encoding="utf-8")
-    return (
-        template.replace("__SESSION_ID_JSON__", json.dumps(str(session_id)))
-        .replace("__OVERLAY_EDITOR_SETTINGS_JSON__", json.dumps(_read_overlay_editor_settings()))
-        .replace("__MODEL_STRENGTH_SETTINGS_JSON__", json.dumps(read_model_strength_settings()))
-        .replace("__SESSION_LABEL__", str(session_id))
+    return template.replace("__SESSION_ID_JSON__", json.dumps(str(session_id)))
+
+
+def _merge_operator_projection_input(
+    service_snapshot: Mapping[str, object],
+    compact_live_state: Mapping[str, object],
+) -> dict[str, object]:
+    """Merge live display authority with full session context for one projection.
+
+    This internal value may contain private backend fields.  Callers must pass it
+    directly to ``build_operator_workspace_v1`` and never return it as an API
+    response.
+    """
+
+    def merge_mapping(
+        older: Mapping[str, object],
+        newer: Mapping[str, object],
+        *,
+        depth: int = 0,
+    ) -> dict[str, object]:
+        merged = dict(older)
+        for key, value in newer.items():
+            previous = merged.get(key)
+            if depth < 4 and isinstance(previous, Mapping) and isinstance(value, Mapping):
+                merged[key] = merge_mapping(
+                    cast(Mapping[str, object], previous),
+                    cast(Mapping[str, object], value),
+                    depth=depth + 1,
+                )
+            else:
+                merged[key] = value
+        return merged
+
+    def projection_frame_id(value: Mapping[str, object]) -> int:
+        return int(
+            _epoch_float(
+                value.get("display_frame_id")
+                or value.get("frame_id")
+                or value.get("chart_frame_id"),
+                0.0,
+            )
+        )
+
+    service_frame_id = projection_frame_id(service_snapshot)
+    compact_frame_id = projection_frame_id(compact_live_state)
+    frames_conflict = bool(
+        service_frame_id > 0
+        and compact_frame_id > 0
+        and service_frame_id != compact_frame_id
     )
+    if frames_conflict:
+        # A service snapshot is still useful for stable market identity and
+        # bounded history, but its command centre, candle context, pressure,
+        # forecast, and execution state belong to a different picture.  Keep
+        # only non-decisional metadata so an older movement can never be
+        # relabelled as current on the compact display frame.
+        service_context: dict[str, object] = {}
+        for key in ("session_id", "tracking_enabled", "last_capture_epoch"):
+            if key in service_snapshot:
+                service_context[key] = service_snapshot[key]
+        tracking_summary = service_snapshot.get("tracking_summary")
+        if isinstance(tracking_summary, Mapping):
+            stable_tracking_summary: dict[str, object] = {}
+            for key in ("detected_market", "detected_timeframe", "last_capture_epoch"):
+                if key in tracking_summary:
+                    stable_tracking_summary[key] = tracking_summary[key]
+            if stable_tracking_summary:
+                service_context["tracking_summary"] = stable_tracking_summary
+        history = service_snapshot.get("history")
+        if isinstance(history, Sequence) and not isinstance(
+            history,
+            (str, bytes, bytearray),
+        ):
+            service_context["history"] = list(cast(Sequence[object], history))
+        projection_input = merge_mapping(service_context, compact_live_state)
+    else:
+        projection_input = merge_mapping(service_snapshot, compact_live_state)
+    recent_studies = service_snapshot.get("recent_studies")
+    if isinstance(recent_studies, Sequence) and not isinstance(
+        recent_studies,
+        (str, bytes, bytearray),
+    ):
+        projection_input["recent_studies"] = list(
+            cast(Sequence[object], recent_studies)
+        )
+    return projection_input
 
 
 def create_app(
@@ -3655,7 +4183,7 @@ def create_app(
         return projected
 
     def _public_compact_live_state_response(payload: Mapping[str, object]) -> dict[str, object]:
-        public_payload: dict[str, object] = dict(payload)
+        public_payload = _strip_private_projection_snapshots(payload)
         public_payload.pop("live_visual_state", None)
         existing_command_center = public_payload.get("decision_command_center")
         if isinstance(existing_command_center, Mapping):
@@ -3693,7 +4221,7 @@ def create_app(
             "compact_public_all_objects_omitted_v3": omitted_all_objects,
         }
         public_payload["provider_status"] = provider
-        return public_payload
+        return _strip_private_projection_snapshots(public_payload)
 
     def _compact_visible_overlay_pool_from_payload(payload: Mapping[str, object]) -> list[Mapping[str, object]]:
         rows: list[Mapping[str, object]] = []
@@ -4582,7 +5110,7 @@ def create_app(
                 _persist_compact_overlay_response(requested_session_id, active_mode, compact_response)
                 return _public_compact_live_state_response(compact_response)
         live_state = build_live_state_v3_for_session(session_id, overlay_mode=mode, compact_public=compact)
-        return live_state
+        return _strip_private_projection_snapshots(live_state)
 
     @app.get("/v1/mobile/live/state/v3")
     def live_state_v3(session_id: str | None = None, mode: str = "CLEAN_LIVE", compact: bool = False, monitor: bool = False) -> dict[str, object]:
@@ -4594,7 +5122,211 @@ def create_app(
             overlay_mode=mode,
             compact_public=compact,
         )
-        return live_state
+        return _strip_private_projection_snapshots(live_state)
+
+    def operator_state_v1_for_session(
+        session_id: str,
+        view: str = "live",
+    ) -> dict[str, object]:
+        requested_session_id = str(session_id or "").strip()
+        if not requested_session_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A window tracker session is required.",
+            )
+        operator_view = str(view or "live").strip().lower()
+        operator_mode = _OPERATOR_VIEW_TO_OVERLAY_MODE.get(operator_view)
+        if operator_mode is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Unsupported operator view.",
+            )
+        live_state = build_live_state_v3_for_session(
+            requested_session_id,
+            overlay_mode=operator_mode,
+            compact_public=True,
+        )
+        compact_live_state = _public_compact_live_state_response(
+            _apply_compact_overlay_identity(compact_live_state_response(live_state))
+        )
+        tracker = get_window_tracker_service()
+        snapshot_getter = getattr(tracker, "get_session_snapshot", None)
+        try:
+            if callable(snapshot_getter):
+                service_snapshot = snapshot_getter(requested_session_id)
+            else:
+                service_snapshot = tracker.get_session(requested_session_id)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Window tracker session not found.",
+            ) from exc
+        projection_input = _merge_operator_projection_input(
+            cast(Mapping[str, object], service_snapshot),
+            compact_live_state,
+        )
+        operator_state = build_operator_workspace_v1(projection_input)
+        projection_source = cast(Mapping[str, object], projection_input)
+        visual_observation = _mapping_to_plain_dict(
+            projection_source.get("visual_observation_v3")
+        )
+        waiting_for_new_frame = bool(
+            str(visual_observation.get("status") or "").strip().upper()
+            == "WAITING_FOR_NEW_FRAME"
+            and visual_observation.get("new_visual_evidence") is not True
+        )
+        safe_snapshot = _load_operator_overlay_snapshot(
+            requested_session_id,
+            projection_source,
+        )
+        if waiting_for_new_frame:
+            if safe_snapshot is not None:
+                operator_state["overlays"] = _stale_diagnostic_operator_overlays(
+                    safe_snapshot.get("overlays")
+                )
+                surface = _mapping_to_plain_dict(operator_state.get("surface"))
+                surface["overlay_viewport"] = _mapping_to_plain_dict(
+                    safe_snapshot.get("overlay_viewport")
+                )
+                operator_state["surface"] = surface
+        else:
+            current_lineage = _operator_overlay_lineage(
+                projection_source
+            )
+            current_frame_id = current_lineage.get("frame_id")
+            snapshot_lineage = (
+                _mapping_to_plain_dict(safe_snapshot.get("lineage"))
+                if safe_snapshot is not None
+                else {}
+            )
+            snapshot_is_current = bool(
+                safe_snapshot is not None
+                and _operator_overlay_lineage_matches(
+                    snapshot_lineage,
+                    current_lineage,
+                )
+            )
+            current_rows = _operator_overlay_rows_for_frame(
+                operator_state.get("overlays"),
+                current_frame_id,
+            )
+            saved_rows = (
+                _operator_overlay_rows_for_frame(
+                    safe_snapshot.get("overlays"),
+                    current_frame_id,
+                )
+                if safe_snapshot is not None and snapshot_is_current
+                else []
+            )
+            if operator_mode == "INSPECTOR":
+                # The projection built from the current atomic frame is the
+                # authority.  An exact-lineage snapshot can fill a transient
+                # rebuild gap, but it must never delete richer current rows.
+                merged_rows = _merge_safe_operator_overlay_rows(
+                    current_rows,
+                    saved_rows,
+                    frame_id=current_frame_id,
+                )
+                operator_state["overlays"] = merged_rows
+                surface = _mapping_to_plain_dict(operator_state.get("surface"))
+                current_viewport = _mapping_to_plain_dict(
+                    surface.get("overlay_viewport")
+                )
+                saved_viewport = (
+                    _mapping_to_plain_dict(safe_snapshot.get("overlay_viewport"))
+                    if safe_snapshot is not None
+                    else {}
+                )
+                if (
+                    not snapshot_is_current
+                    or merged_rows != saved_rows
+                    or current_viewport != saved_viewport
+                ):
+                    safe_snapshot = _persist_operator_overlay_snapshot(
+                        requested_session_id,
+                        projection_source,
+                        operator_state,
+                    )
+            elif not snapshot_is_current:
+                full_live_state = build_live_state_v3_for_session(
+                    requested_session_id,
+                    overlay_mode="INSPECTOR",
+                    compact_public=True,
+                )
+                full_compact_state = _public_compact_live_state_response(
+                    _apply_compact_overlay_identity(
+                        compact_live_state_response(full_live_state)
+                    )
+                )
+                full_projection_input = _merge_operator_projection_input(
+                    cast(Mapping[str, object], service_snapshot),
+                    full_compact_state,
+                )
+                full_projection_source = cast(
+                    Mapping[str, object],
+                    full_projection_input,
+                )
+                full_lineage = _operator_overlay_lineage(full_projection_source)
+                full_frame_id = full_lineage.get("frame_id")
+                full_operator_state = build_operator_workspace_v1(
+                    full_projection_input
+                )
+                full_operator_state["overlays"] = _merge_safe_operator_overlay_rows(
+                    full_operator_state.get("overlays"),
+                    (),
+                    frame_id=full_frame_id,
+                )
+                safe_snapshot = _persist_operator_overlay_snapshot(
+                    requested_session_id,
+                    full_projection_source,
+                    full_operator_state,
+                )
+                saved_rows = (
+                    _operator_overlay_rows_for_frame(
+                        safe_snapshot.get("overlays"),
+                        current_frame_id,
+                    )
+                    if (
+                        safe_snapshot is not None
+                        and _operator_overlay_lineage_matches(
+                            full_lineage,
+                            current_lineage,
+                        )
+                    )
+                    else []
+                )
+            if operator_mode != "INSPECTOR":
+                operator_state["overlays"] = _merge_safe_operator_overlay_rows(
+                    current_rows,
+                    saved_rows,
+                    frame_id=current_frame_id,
+                )
+        response_surface = _mapping_to_plain_dict(operator_state.get("surface"))
+        response_frame_id = response_surface.get("frame_id")
+        operator_state["overlays"] = _operator_overlay_rows_for_frame(
+            operator_state.get("overlays"),
+            response_frame_id,
+        )
+        public_families = _OPERATOR_VIEW_TO_PUBLIC_FAMILIES[operator_view]
+        projected_overlays = operator_state.get("overlays")
+        if public_families is not None and isinstance(projected_overlays, list):
+            public_overlays: list[object] = []
+            for item in cast(list[object], projected_overlays):
+                if not isinstance(item, Mapping):
+                    continue
+                overlay = cast(Mapping[str, object], item)
+                if str(overlay.get("family") or "").strip().lower() in public_families:
+                    public_overlays.append(overlay)
+            operator_state["overlays"] = public_overlays
+        assert operator_state.get("schema_version") == OPERATOR_WORKSPACE_SCHEMA_VERSION
+        return operator_state
+
+    app.add_api_route(
+        "/v1/mobile/operator/state/v1/{session_id}",
+        operator_state_v1_for_session,
+        methods=["GET"],
+        name="operator_state_v1_for_session",
+    )
 
     def _performance_trace_overlay_count(trace: Mapping[str, object] | None) -> int:
         if not isinstance(trace, Mapping):
@@ -5953,7 +6685,7 @@ def create_app(
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}")
     def get_tracker_session(session_id: str) -> dict[str, object]:
         try:
-            return read_window_tracker_session(session_id)
+            return _sanitize_public_tracker_session(read_window_tracker_session(session_id))
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
 
@@ -6005,6 +6737,123 @@ def create_app(
             if layer and re.fullmatch(r"[a-z0-9_:-]+", layer):
                 layers.add(layer)
         return layers
+
+    def _artifact_frame_from_path(path: Path) -> int:
+        match = re.match(r"^(\d+)_", path.name)
+        if match is None:
+            return 0
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return 0
+
+    def _resolve_requested_artifact_path(
+        tracker: ContinuousWindowTrackerService,
+        session_id: str,
+        artifact_kind: str,
+        requested_frame_id: int | None,
+        latest_path: Path,
+    ) -> Path:
+        """Resolve an immutable archived artifact when ``latest`` advanced."""
+
+        if requested_frame_id is None or requested_frame_id <= 0:
+            return latest_path
+        if _artifact_frame_from_path(latest_path) == requested_frame_id:
+            return latest_path
+        suffix = "chart" if artifact_kind == "chart" else "window"
+        try:
+            artifact_dir = tracker.session_dir(session_id) / "artifacts"
+            candidates = [
+                path
+                for path in artifact_dir.glob(
+                    f"{requested_frame_id:06d}_*_{suffix}.*"
+                )
+                if path.is_file()
+            ]
+        except (KeyError, OSError):
+            return latest_path
+        if not candidates:
+            return latest_path
+        return max(
+            candidates,
+            key=lambda path: path.stat().st_mtime,
+        )
+
+    def _assert_requested_artifact_frame(
+        tracker: ContinuousWindowTrackerService,
+        session_id: str,
+        artifact_kind: str,
+        requested_frame_id: int | None,
+        path: Path,
+    ) -> None:
+        """Fail closed when a versioned surface request is no longer current.
+
+        The artifact path is resolved before this check.  If a capture publishes
+        between those two reads, the newer snapshot causes the old request to be
+        rejected; if it publishes after this check, the already-resolved path is
+        still the requested artifact rather than a mutable ``latest`` lookup.
+        """
+
+        if requested_frame_id is None:
+            return
+        snapshot_getter = getattr(tracker, "get_session_snapshot", None)
+        try:
+            if callable(snapshot_getter):
+                snapshot = snapshot_getter(session_id)
+            else:
+                snapshot = tracker.get_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Window tracker session not found.",
+            ) from exc
+        if not isinstance(snapshot, Mapping):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Requested artifact frame is no longer current.",
+            )
+        snapshot_mapping = cast(Mapping[str, object], snapshot)
+        display_frame_id = int(
+            _epoch_float(
+                snapshot_mapping.get("display_frame_id")
+                or snapshot_mapping.get("frame_index"),
+                0.0,
+            )
+        )
+        if artifact_kind == "chart":
+            artifact_frame_id = int(
+                _epoch_float(
+                    snapshot_mapping.get("chart_frame_id")
+                    or snapshot_mapping.get("frame_index"),
+                    0.0,
+                )
+            )
+        else:
+            artifact_frame_id = display_frame_id
+        path_frame_id = _artifact_frame_from_path(path)
+        if path_frame_id > 0:
+            if path_frame_id != requested_frame_id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Requested artifact frame is no longer current.",
+                )
+            # A frame-prefixed artifact is immutable.  It remains safe after
+            # the session advances because the URL still resolves exact bytes.
+            return
+        authoritative_frames = [
+            frame
+            for frame in (display_frame_id, artifact_frame_id, path_frame_id)
+            if frame > 0
+        ]
+        if (
+            requested_frame_id <= 0
+            or not authoritative_frames
+            or any(frame != requested_frame_id for frame in authoritative_frames)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Requested artifact frame is no longer current.",
+            )
 
     def render_v3_overlay_artifact_response(
         session_id: str,
@@ -6062,13 +6911,22 @@ def create_app(
             return None
 
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-chart")
-    def get_tracker_latest_chart(session_id: str) -> Response:
+    def get_tracker_latest_chart(session_id: str, frame_id: int | None = None) -> Response:
         try:
-            path = get_window_tracker_service().latest_artifact_path(session_id, "chart")
+            tracker = get_window_tracker_service()
+            path = tracker.latest_artifact_path(session_id, "chart")
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         except FileNotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        path = _resolve_requested_artifact_path(
+            tracker,
+            session_id,
+            "chart",
+            frame_id,
+            path,
+        )
+        _assert_requested_artifact_frame(tracker, session_id, "chart", frame_id, path)
         suffix = path.suffix.lower()
         if suffix in {".jpg", ".jpeg"}:
             media_type = "image/jpeg"
@@ -6097,13 +6955,22 @@ def create_app(
         return _safe_file_bytes_response(path, media_type=media_type)
 
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-window")
-    def get_tracker_latest_window(session_id: str) -> Response:
+    def get_tracker_latest_window(session_id: str, frame_id: int | None = None) -> Response:
         try:
-            path = get_window_tracker_service().latest_artifact_path(session_id, "window")
+            tracker = get_window_tracker_service()
+            path = tracker.latest_artifact_path(session_id, "window")
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         except FileNotFoundError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        path = _resolve_requested_artifact_path(
+            tracker,
+            session_id,
+            "window",
+            frame_id,
+            path,
+        )
+        _assert_requested_artifact_frame(tracker, session_id, "window", frame_id, path)
         media_type = "image/jpeg" if path.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
         return _safe_file_bytes_response(path, media_type=media_type)
 
@@ -6627,22 +7494,51 @@ def create_app(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     @app.post("/v1/mobile/window-tracker/sessions/{session_id}/predict")
-    def predict_tracker_session_from_memory(session_id: str) -> dict[str, object]:
+    def predict_tracker_session_from_memory(
+        session_id: str,
+        response: Response,
+    ) -> dict[str, object]:
         try:
-            return get_window_tracker_service().run_memory_projection(session_id, mode="predict")
+            action = get_window_tracker_service().enqueue_memory_projection(session_id, mode="predict")
+            if not bool(action.get("terminal", False)):
+                response.status_code = status.HTTP_202_ACCEPTED
+            return cast(dict[str, object], action)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     @app.post("/v1/mobile/window-tracker/sessions/{session_id}/show-future")
-    def show_future_tracker_session_from_memory(session_id: str) -> dict[str, object]:
+    def show_future_tracker_session_from_memory(
+        session_id: str,
+        response: Response,
+    ) -> dict[str, object]:
         try:
-            return get_window_tracker_service().run_memory_projection(session_id, mode="future")
+            action = get_window_tracker_service().enqueue_memory_projection(session_id, mode="future")
+            if not bool(action.get("terminal", False)):
+                response.status_code = status.HTTP_202_ACCEPTED
+            return cast(dict[str, object], action)
         except KeyError as exc:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Window tracker session not found.") from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    @app.get("/v1/mobile/window-tracker/sessions/{session_id}/forecast-actions/{request_id}")
+    def get_tracker_forecast_action(
+        session_id: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        try:
+            action = get_window_tracker_service().get_memory_projection_action(
+                session_id,
+                request_id,
+            )
+            return cast(dict[str, object], action)
+        except KeyError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Forecast action not found.") from exc
+
+    # Keep strict unused-symbol analysis aware of the FastAPI decorator registration.
+    _ = get_tracker_forecast_action
 
     @app.patch("/v1/mobile/window-tracker/sessions/{session_id}/controls")
     def update_tracker_session_controls(

@@ -2,7 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from phoenixguard.runtime.python_environment_v3 import build_python_environment_status
+from phoenixguard.runtime.python_environment_v3 import (
+    build_python_environment_status,
+    is_live_runtime_python_command,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -135,6 +138,44 @@ def test_single_venv_runtime_verifier_documents_runtime_state_not_environment() 
     assert "process_scan_status" in text
     assert "port_scan_status" in text
     assert "Refusing to remove unexpected environment path" in text
+
+
+@pytest.mark.parametrize(
+    "command_line",
+    (
+        r'python.exe "C:\repo\Backend\launch\start_phoenixguard_24_7_tracker.py"',
+        r'python.exe "C:\repo\Backend\launch\start_phoenixguard_mobile_api.py"',
+        r'python.exe "C:\repo\Backend\launch\shooter.py" signal',
+        r"python.exe -m phoenixguard.runtime.model_council_daemon",
+        r'python.exe "C:\repo\Backend\tools\phoenixguard_disk_growth_guard.py" --apply',
+        r"python.exe -m uvicorn phoenixguard.mobile_api.app:app --port 8793",
+        r'python.exe "C:\repo\Backend\tools\phoenixguard_mt4_file_bridge.py"',
+    ),
+)
+def test_live_runtime_process_scope_includes_only_stack_entrypoints(command_line: str) -> None:
+    assert is_live_runtime_python_command(command_line) is True
+
+
+@pytest.mark.parametrize(
+    "command_line",
+    (
+        r".venv-dev\Scripts\python.exe -m pyright Backend\src\phoenixguard\mobile_api\app.py",
+        r".venv-dev\Scripts\python.exe -m pytest Backend\tests\test_window_tracker_service.py",
+        r".venv-dev\Scripts\python.exe -m compileall Backend\src\phoenixguard",
+        r".venv-dev\Scripts\python.exe -",
+        r"python.exe C:\Users\developer\.vscode\extensions\pylance\language_server.py",
+    ),
+)
+def test_live_runtime_process_scope_excludes_pylance_and_development_tools(command_line: str) -> None:
+    assert is_live_runtime_python_command(command_line) is False
+
+
+def test_kill_switch_targets_named_stack_roles_without_repo_wide_python_fallback() -> None:
+    text = _read("Developer/developer_tools/phoenixguard_kill_switch.py")
+
+    assert '"phoenixguard_disk_growth_guard.py"' in text
+    assert 'repo_text in command and "phoenixguard" in command' not in text
+    assert "if row.name.lower() in STACK_PROCESS_NAMES:" not in text
 
 
 def test_canonical_dashboard_launchers_use_v3_window_tracker_dashboard_route() -> None:

@@ -2174,8 +2174,9 @@ def test_model_council_carries_book_strategy_in_study_and_packet() -> None:
     assert second["allowance_package"]["execution_authority"] == BOOK_STRATEGY_EXECUTION_AUTHORITY
     assert second["allowance_package"]["candle_movement"]["visible_candle_count"] == 12
     assert second["allowance_package"]["candle_movement"]["current_leg_candle_count"] == 8
-    assert second["allowance_package"]["entry_window"]["duration_sec"] == 300
-    assert second["allowance_package"]["entry_window"]["candle_count"] == 1
+    assert second["allowance_package"]["entry_window"]["duration_sec"] == 600
+    assert second["allowance_package"]["entry_window"]["candle_count"] == 2
+    assert second["allowance_package"]["entry_location_guidance_v3"]["rule"] == "BUY_LOW"
     assert second["allowance_package"]["thesis_horizon"]["expected_candle_count"] >= 4
     assert second["allowance_package"]["expected_move_time"]["expected_duration_sec"] >= 20 * 60
     assert second["allowance_package"]["expected_move_time"]["expected_candle_count"] >= 4

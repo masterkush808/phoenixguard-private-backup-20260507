@@ -107,3 +107,59 @@ def test_candle_movement_context_marks_reclaiming_and_late_near_opposing_force()
     late = build_candle_movement_context_v3(snapshot)
     assert late["move_stage"] == "LATE"
     assert late["opposing_force_room"]["room_ok"] is False
+
+
+def _lagging_sell_history_with_buy_tail(buy_tail_count: int) -> dict[str, Any]:
+    candles = [
+        *[_candle(index, "SELL", 1.0 - index * 0.01) for index in range(6)],
+        *[
+            _candle(index, "BUY", 0.96 + (index - 6) * 0.012)
+            for index in range(6, 6 + buy_tail_count)
+        ],
+    ]
+    return {
+        "timeframe": "M5",
+        "tracking_summary": {
+            "visible_candle_count": len(candles),
+            "tracked_candles": candles,
+            "historical_structure": [
+                {
+                    "label": "H1 SELL",
+                    "direction": "SELL",
+                    "source_indices": list(range(6)),
+                    "candle_count": 6,
+                    "net_move": -0.05,
+                    "slope": -0.01,
+                }
+            ],
+        },
+        "candidate_side": "BUY",
+        "risk_opposing_force": {"distance_to_opposing_force": 0.36, "distance_ok": True},
+    }
+
+
+def test_lagging_sell_history_fails_closed_during_fresh_buy_transition() -> None:
+    first_reversal = build_candle_movement_context_v3(_lagging_sell_history_with_buy_tail(1))
+    second_reversal = build_candle_movement_context_v3(_lagging_sell_history_with_buy_tail(2))
+
+    for context, confirmation_count in ((first_reversal, 1), (second_reversal, 2)):
+        assert context["current_leg"]["side"] == "HOLD"
+        assert context["current_leg"]["candidate_side"] == "BUY"
+        assert context["current_leg"]["move_stage"] == "TRANSITION"
+        assert context["current_leg"]["confirmation_count"] == confirmation_count
+        assert context["current_leg"]["confirmation_required"] == 3
+        assert context["previous_leg"]["side"] == "SELL"
+        assert context["previous_leg"]["source_indices"] == list(range(6))
+        assert [leg["side"] for leg in context["legs"]] == ["SELL", "HOLD"]
+
+
+def test_lagging_sell_history_confirms_buy_after_three_fresh_candles() -> None:
+    context = build_candle_movement_context_v3(_lagging_sell_history_with_buy_tail(3))
+
+    assert context["current_leg"]["side"] == "BUY"
+    assert context["current_leg"]["confirmation_count"] == 3
+    assert context["current_leg"]["confirmation_required"] == 3
+    assert context["current_leg"]["transition_state"] == "CONFIRMED"
+    assert context["previous_leg"]["side"] == "SELL"
+    assert context["previous_leg"]["source_indices"] == list(range(6))
+    assert [leg["side"] for leg in context["legs"]] == ["SELL", "BUY"]

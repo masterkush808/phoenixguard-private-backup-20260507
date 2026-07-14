@@ -18,6 +18,7 @@ from phoenixguard.runtime.python_environment_v3 import (
     build_python_environment_status,
     expected_repo_venv,
     expected_repo_venv_python,
+    is_live_runtime_python_command,
 )
 
 
@@ -140,7 +141,6 @@ def _has_expected_python_ancestor(
 def _phoenix_python_processes(expected_python: Path) -> tuple[list[PhoenixProcessRow], str]:
     command = (
         "Get-CimInstance Win32_Process -Filter \"name = 'python.exe'\" | "
-        "Where-Object { $_.CommandLine -like '*phoenixguard*' } | "
         "Select-Object ProcessId,ParentProcessId,CommandLine,ExecutablePath | "
         "ConvertTo-Json -Depth 5"
     )
@@ -150,6 +150,8 @@ def _phoenix_python_processes(expected_python: Path) -> tuple[list[PhoenixProces
         return [], result.error
     for item in _as_list(result.payload):
         payload = _as_mapping(item)
+        if not is_live_runtime_python_command(_str_from_mapping(payload, "CommandLine")):
+            continue
         raw_rows.append(payload)
     parent_by_pid: dict[int, int] = {}
     direct_expected_by_pid: dict[int, bool] = {}

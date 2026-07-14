@@ -6,6 +6,7 @@ from typing import Any, cast
 from PIL import Image, ImageDraw
 
 from phoenixguard.mobile_api.window_tracker import PhoenixGuardWindowTrackingAdapter, overlay_font
+from phoenixguard.vision.box_refinement_v3 import resolve_precision_overlays_v3
 from phoenixguard.vision.overlay_geometry import (
     DEFAULT_LAYER_VISIBILITY,
     build_overlay_truth_audit,
@@ -251,6 +252,55 @@ def test_overlay_active_live_view_ghosts_historical_replay_by_default() -> None:
     assert all(box["display_state"] == "GHOSTED" for box in historical)
     assert all(box["label_hidden"] is True for box in historical)
     assert all(box["anchor_evidence_status"] == "VALID" for box in historical)
+
+
+def test_normalized_lstm_path_projects_bounds_and_points_through_one_chart_transform() -> None:
+    overlays: list[dict[str, Any]] = [
+        {
+            "overlay_id": "lstm-path-frame-77",
+            "object_id": "lstm-path-frame-77",
+            "track_id": "lstm-path",
+            "type": "LSTM_STUDY",
+            "side": "BUY",
+            "source_agent": "test",
+            "frame_id": 77,
+            "sequence_id": "sequence-77",
+            "chart_transform_id": "transform-77",
+            "coordinate_mode": "CHART_NORMALIZED",
+            "anchor_type": "POLYGON",
+            "anchor_candles": [1, 2, 3],
+            "bounds": [0.10, 0.20, 0.90, 0.80],
+            "line_points": [[0.10, 0.20], [0.50, 0.40], [0.90, 0.80]],
+            "truth_score": 0.73,
+            "confidence": 0.73,
+            "lifecycle_state": "PREDICTED",
+            "visible_modes": ["LSTM_STUDY", "INSPECTOR"],
+            "layer": "prediction_path",
+            "label": "LSTM PATH",
+        }
+    ]
+    scene = {
+        "frame_id": 77,
+        "chart_region_chart_bounds": [100, 50, 1100, 850],
+        "plot_area_chart_bounds": [200, 100, 1000, 800],
+    }
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="LSTM_STUDY",
+        frame_id=77,
+    )
+
+    assert audit["rejected_count"] == 0
+    assert len(resolved) == 1
+    assert resolved[0]["coordinate_mode"] == "CHART_IMAGE_SPACE"
+    assert resolved[0]["bounds"] == [200.0, 210.0, 1000.0, 690.0]
+    assert resolved[0]["line_points"] == [
+        [200.0, 210.0],
+        [600.0, 370.0],
+        [1000.0, 690.0],
+    ]
 
 
 def test_overlay_cancel_line_stays_near_trigger_zone_not_full_chart(monkeypatch: Any) -> None:
@@ -533,7 +583,7 @@ def test_overlay_truth_audit_rejects_unanchored_decision_box() -> None:
     assert audit["objects"][0]["valid_for_decision"] is False
 
 
-def test_dashboard_exposes_layer_controls_latency_and_nonblocking_health() -> None:
+def test_dashboard_exposes_semantic_layers_without_internal_observability() -> None:
     dashboard_html = (
         Path(__file__).resolve().parents[2]
         / "Frontend"
@@ -542,23 +592,14 @@ def test_dashboard_exposes_layer_controls_latency_and_nonblocking_health() -> No
         / "window_tracker_dashboard.html"
     ).read_text(encoding="utf-8")
 
-    for layer_name in (
-        "chart_bounds",
-        "recent_candles",
-        "major_swings",
-        "local_swings",
-        "supply_demand",
-        "trigger_zones",
-        "active_council_decision",
-        "historical_replay",
+    for layer_name in ("movement", "structure", "zones", "plan", "outlook", "history"):
+        assert layer_name in dashboard_html
+    for internal_surface in (
+        "latency-pipeline",
+        "latency-overlay",
+        "model-health-panel",
         "broker_controls",
         "diagnostics",
+        "debug_enabled",
     ):
-        assert layer_name in dashboard_html
-    assert "historical_replay: true" in dashboard_html
-    assert "latency-pipeline" in dashboard_html
-    assert "latency-overlay" in dashboard_html
-    assert "model-health-panel" in dashboard_html
-    assert "static_layer_hash" in dashboard_html
-    assert "reuseStaticLayers" in dashboard_html
-    assert "debug_enabled" in dashboard_html
+        assert internal_surface not in dashboard_html

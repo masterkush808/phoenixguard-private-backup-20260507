@@ -272,12 +272,25 @@ def _manual_candle_tracks(
         y1 = min(image_height - 1, int(round(center_y + half_height)))
         x0 = int(round(center_x - 5.0))
         x1 = int(round(center_x + 5.0))
+        body_half_height = max(2, int(round(half_height * 0.58)))
+        body_top = max(y0, int(round(center_y - body_half_height)))
+        body_bottom = min(y1, int(round(center_y + body_half_height)))
+        open_y = float(body_bottom if direction == "BUY" else body_top)
+        close_y = float(body_top if direction == "BUY" else body_bottom)
         tracks.append(
             {
                 "track_id": index,
                 "bbox": [x0, y0, x1, y1],
                 "center_x": center_x,
+                "center_x_px": center_x,
                 "center_y": float(center_y),
+                "center_y_px": float(center_y),
+                "wick_top_px": float(y0),
+                "wick_bottom_px": float(y1),
+                "body_top_px": float(body_top),
+                "body_bottom_px": float(body_bottom),
+                "open_y_px": open_y,
+                "close_y_px": close_y,
                 "price_proxy": float(1.0 - (float(center_y) / max(1.0, float(image_height - 1)))),
                 "direction": direction,
                 "color": "green" if direction == "BUY" else "magenta",
@@ -289,6 +302,82 @@ def _manual_candle_tracks(
             }
         )
     return tracks
+
+
+def _book_rule_candle_tracks(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Build production-shaped candle rows with explicit OHLC/closure state."""
+
+    tracks: list[dict[str, Any]] = []
+    for index, source in enumerate(rows):
+        direction = str(source.get("direction", "BUY") or "BUY").upper()
+        wick_top = float(source.get("wick_top", 0.0) or 0.0)
+        body_top = float(source.get("body_top", wick_top) or wick_top)
+        body_bottom = float(source.get("body_bottom", body_top) or body_top)
+        wick_bottom = float(source.get("wick_bottom", body_bottom) or body_bottom)
+        center_x = 40.0 + index * 24.0
+        open_y = float(
+            source.get(
+                "open_y_px",
+                body_bottom if direction == "BUY" else body_top,
+            )
+        )
+        close_y = float(
+            source.get(
+                "close_y_px",
+                body_top if direction == "BUY" else body_bottom,
+            )
+        )
+        tracks.append(
+            {
+                "track_id": index,
+                "bbox": [center_x - 4.0, wick_top, center_x + 4.0, wick_bottom],
+                "center_x": center_x,
+                "center_x_px": center_x,
+                "center_y": 0.5 * (wick_top + wick_bottom),
+                "center_y_px": 0.5 * (wick_top + wick_bottom),
+                "wick_top_px": wick_top,
+                "wick_bottom_px": wick_bottom,
+                "body_top_px": body_top,
+                "body_bottom_px": body_bottom,
+                "open_y_px": open_y,
+                "close_y_px": close_y,
+                "direction": direction,
+                "color": "green" if direction == "BUY" else "magenta",
+                "is_closed": bool(source.get("is_closed", True)),
+            }
+        )
+    return tracks
+
+
+def _derive_book_rule_smart_money(
+    adapter: PhoenixGuardWindowTrackingAdapter,
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    zones: Sequence[Mapping[str, Any]] = (),
+    candidate_action: str = "BUY",
+    global_direction: str = "BUY",
+    local_direction: str = "BUY",
+    impulse_direction: str = "BUY",
+    reversal_score: float = 0.0,
+) -> dict[str, Any]:
+    derive = cast(
+        Callable[..., dict[str, Any]],
+        getattr(adapter, "_derive_smart_money_context"),
+    )
+    return derive(
+        candles,
+        (640, 360),
+        support_resistance_zones=zones,
+        projection={},
+        candidate_action=candidate_action,
+        global_direction=global_direction,
+        local_direction=local_direction,
+        impulse_direction=impulse_direction,
+        confidence=0.82,
+        consolidation_score=0.12,
+        continuation_score=0.74,
+        reversal_score=reversal_score,
+    )
 
 
 def _memory_embed(seed: int) -> list[float]:
@@ -303,6 +392,7 @@ class _StubPhoenixBank:
 
     def __init__(self, rows: Sequence[MemoryEntry]) -> None:
         self.entries = list(rows)
+        self.search_query_contexts: list[Mapping[str, Any] | None] = []
 
     def embed_description(self, chart_state: Mapping[str, Any], image: Image.Image | None = None) -> NDArray[np.float32]:
         _ = chart_state
@@ -321,7 +411,7 @@ class _StubPhoenixBank:
         _ = top_k
         _ = macro_trend
         _ = local_phase
-        _ = query_context
+        self.search_query_contexts.append(query_context)
         hits = [
             SimpleNamespace(entry_id="sell-a", label="SELL", similarity=0.93),
             SimpleNamespace(entry_id="sell-b", label="SELL", similarity=0.89),
@@ -470,6 +560,63 @@ def _materialize_memory_images(root: Path, entries: Sequence[MemoryEntry]) -> li
     return materialized
 
 
+def test_memory_search_prefilter_avoids_duplicate_query_context_scoring() -> None:
+    entries = _sample_memory_entries()
+    bank = _StubPhoenixBank(entries)
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    score_matches = cast(
+        Callable[..., list[dict[str, Any]]],
+        getattr(adapter, "_score_memory_side_matches"),
+    )
+    query_context: dict[str, Any] = {
+        "late_interaction_tokens": [[0.1, 0.2, 0.3]],
+        "trajectory_signature": [0.2, 0.4, 0.6],
+        "style_signature": {"momentum": 0.7},
+        "metric_profile": {"direction_probability": 0.8},
+    }
+
+    rows = score_matches(
+        bank,
+        np.asarray(_memory_embed(216), dtype=np.float32),
+        desired_label="SELL",
+        macro_trend="BEAR",
+        local_phase="with_trend_push",
+        chart_state=dict(entries[0].chart_state),
+        query_context=query_context,
+        limit=2,
+    )
+
+    assert bank.search_query_contexts == [None]
+    assert len(rows) == 2
+    assert all(str(getattr(row["entry"], "label", "")).upper() == "SELL" for row in rows)
+    assert all("late_score" in row and "metric_score" in row for row in rows)
+
+
+def test_memory_projection_warmup_initializes_text_embedder_without_pixels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    calls: list[tuple[dict[str, Any], Image.Image | None]] = []
+
+    class WarmupBank:
+        def embed_description(
+            self,
+            chart_state: dict[str, Any],
+            image: Image.Image | None = None,
+        ) -> NDArray[np.float32]:
+            calls.append((chart_state, image))
+            return np.zeros((384,), dtype=np.float32)
+
+    monkeypatch.setattr(adapter, "_get_phoenixguard_memory_bank", lambda: WarmupBank())
+
+    adapter.warmup_memory_projection()
+
+    assert len(calls) == 1
+    assert calls[0][0]["direction"] == "HOLD"
+    assert calls[0][0]["projected_next_box"]["direction"] == "HOLD"
+    assert calls[0][1] is None
+
+
 class _FakeCaptureBackend:
     def __init__(self, images: Sequence[Image.Image]) -> None:
         self.images = [image.convert("RGB") for image in images]
@@ -492,6 +639,18 @@ class _FakeCaptureBackend:
         index = min(self.capture_calls, len(self.images) - 1)
         self.capture_calls += 1
         return self.images[index].copy()
+
+
+class _RecoveringDuplicateCaptureBackend(_FakeCaptureBackend):
+    def __init__(self, images: Sequence[Image.Image], recovered_image: Image.Image) -> None:
+        super().__init__(images)
+        self.recovered_image = recovered_image.convert("RGB")
+        self.live_recovery_calls = 0
+
+    def capture_window_live(self, descriptor: Mapping[str, Any]) -> Image.Image:
+        _ = descriptor
+        self.live_recovery_calls += 1
+        return self.recovered_image.copy()
 
 
 class _FastVisibleOnlyCaptureBackend(_FakeCaptureBackend):
@@ -1007,6 +1166,22 @@ def test_windows_capture_backend_falls_back_when_pocket_option_canvas_is_blank(m
     monkeypatch.setattr(backend, "_capture_window_imagegrab", capture_with_imagegrab)
     monkeypatch.setattr(backend, "_capture_window_printwindow", capture_with_printwindow)
     monkeypatch.setattr(backend, "_activate_window_for_visible_capture", _activate_window_true)
+    monkeypatch.setattr(backend, "foreground_window_hwnd", lambda: 101)
+
+    def visible_pocket_descriptor(_hwnd: int) -> dict[str, Any]:
+        return {
+            "hwnd": 101,
+            "title": "The Most Innovative Trading Platform - Microsoft Edge",
+            "bbox": [0, 0, 1200, 760],
+            "width": 1200,
+            "height": 760,
+        }
+
+    monkeypatch.setattr(
+        backend,
+        "_visible_descriptor_for_hwnd",
+        visible_pocket_descriptor,
+    )
 
     captured = backend.capture_window(
         {
@@ -1019,6 +1194,36 @@ def test_windows_capture_backend_falls_back_when_pocket_option_canvas_is_blank(m
     assert captured.size == (1200, 760)
     assert calls == ["print:101", "grab:The Most Innovative Trading Platform - Microsoft Edge"]
     assert np.asarray(captured, dtype=np.uint8).std() > 3.0
+
+
+def test_windows_capture_backend_routes_pocket_visible_fallback_through_identity_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = WindowsWindowCaptureBackend()
+    calls: list[str] = []
+
+    def capture_with_printwindow(hwnd: int, _descriptor: Mapping[str, Any]) -> Image.Image:
+        calls.append(f"print:{hwnd}")
+        return Image.new("RGB", (1200, 760), color=(36, 36, 36))
+
+    def guarded_live_capture(_descriptor: Mapping[str, Any]) -> Image.Image:
+        calls.append("guarded-live")
+        raise CaptureSurfaceUnavailableError("foreground ownership changed during capture")
+
+    monkeypatch.setattr(backend, "_is_windows", lambda: True)
+    monkeypatch.setattr(backend, "_capture_window_printwindow", capture_with_printwindow)
+    monkeypatch.setattr(backend, "capture_window_live", guarded_live_capture)
+
+    with pytest.raises(CaptureSurfaceUnavailableError, match="broker/chart surface"):
+        backend.capture_window(
+            {
+                "hwnd": 101,
+                "title": "The Most Innovative Trading Platform - Microsoft Edge",
+                "bbox": [0, 0, 1200, 760],
+            }
+        )
+
+    assert calls == ["print:101", "guarded-live"]
 
 
 def test_windows_capture_backend_accepts_pocket_chart_study_pixels(monkeypatch: Any) -> None:
@@ -1080,6 +1285,120 @@ def test_windows_capture_backend_does_not_grab_wrong_foreground_for_pocket_optio
         )
 
     assert calls == ["print:101"]
+
+
+def test_windows_live_capture_rejects_dashboard_title_even_with_embedded_broker_pixels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = WindowsWindowCaptureBackend()
+    capture_calls = 0
+
+    def capture_with_imagegrab(_descriptor: Mapping[str, Any]) -> Image.Image:
+        nonlocal capture_calls
+        capture_calls += 1
+        return _synthetic_full_pocket_option_gui(width=1200, height=760)
+
+    monkeypatch.setattr(backend, "_is_windows", lambda: True)
+    monkeypatch.setattr(backend, "_ensure_dpi_awareness", lambda: None)
+    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", _activate_window_true)
+    monkeypatch.setattr(backend, "foreground_window_hwnd", lambda: 101)
+
+    def visible_dashboard_descriptor(_hwnd: int) -> dict[str, Any]:
+        return {
+            "hwnd": 101,
+            "title": "808Fx Standard Hybrid System - Google Chrome",
+            "bbox": [0, 0, 1200, 760],
+            "width": 1200,
+            "height": 760,
+        }
+
+    monkeypatch.setattr(
+        backend,
+        "_visible_descriptor_for_hwnd",
+        visible_dashboard_descriptor,
+    )
+    monkeypatch.setattr(backend, "_capture_window_imagegrab", capture_with_imagegrab)
+
+    with pytest.raises(CaptureSurfaceUnavailableError, match="active window is not Pocket Option"):
+        backend.capture_window_live(
+            {
+                "hwnd": 101,
+                "title": "The Most Innovative Trading Platform - Microsoft Edge",
+                "bbox": [0, 0, 1200, 760],
+            }
+        )
+
+    # The current OS title rejects the recursive dashboard before its embedded
+    # broker screenshot can fool BUY/SELL pixel checks.
+    assert capture_calls == 0
+
+
+def test_windows_live_capture_rejects_foreground_change_after_grab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = WindowsWindowCaptureBackend()
+    foreground_handles = iter((101, 202))
+    visible_descriptor = {
+        "hwnd": 101,
+        "title": "The Most Innovative Trading Platform - Microsoft Edge",
+        "bbox": [0, 0, 1200, 760],
+        "width": 1200,
+        "height": 760,
+    }
+
+    monkeypatch.setattr(backend, "_is_windows", lambda: True)
+    monkeypatch.setattr(backend, "_ensure_dpi_awareness", lambda: None)
+    monkeypatch.setattr(backend, "_activate_window_for_visible_capture", _activate_window_true)
+    monkeypatch.setattr(backend, "foreground_window_hwnd", lambda: next(foreground_handles))
+
+    def stable_visible_descriptor(_hwnd: int) -> dict[str, Any]:
+        return dict(visible_descriptor)
+
+    def synthetic_visible_capture(_descriptor: Mapping[str, Any]) -> Image.Image:
+        return _synthetic_full_pocket_option_gui(width=1200, height=760)
+
+    monkeypatch.setattr(backend, "_visible_descriptor_for_hwnd", stable_visible_descriptor)
+    monkeypatch.setattr(
+        backend,
+        "_capture_window_imagegrab",
+        synthetic_visible_capture,
+    )
+
+    with pytest.raises(CaptureSurfaceUnavailableError, match="foreground ownership changed during capture"):
+        backend.capture_window_live(visible_descriptor)
+
+
+def test_display_fast_visible_capture_rejects_foreground_change_after_grab(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ForegroundRaceBackend(_FastVisibleOnlyCaptureBackend):
+        def __init__(self) -> None:
+            super().__init__(_synthetic_full_pocket_option_gui(width=1280, height=720))
+            self._foreground_handles = iter((501, 777))
+
+        def foreground_window_hwnd(self) -> int:
+            return next(self._foreground_handles)
+
+    backend = _ForegroundRaceBackend()
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("BUY"),
+    )
+    monkeypatch.setenv("PHOENIXGUARD_DISPLAY_FAST_VISIBLE_CAPTURE", "1")
+    monkeypatch.delenv("PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK", raising=False)
+
+    with pytest.raises(CaptureSurfaceUnavailableError, match="foreground ownership changed during capture"):
+        tracker._capture_display_snapshot_window(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+            {
+                "hwnd": 501,
+                "title": "The Most Innovative Trading Platform - Microsoft Edge",
+                "bbox": [0, 0, 1280, 720],
+            }
+        )
+
+    assert backend.fast_capture_calls == 1
 
 
 def test_tracker_capture_surface_unavailable_preserves_overlay_authority(tmp_path: Path) -> None:
@@ -3134,6 +3453,117 @@ def test_window_tracker_filters_top_strip_noise_from_candle_tracks() -> None:
     assert all(int(track["track_id"]) < 900 for track in filtered)
 
 
+def test_window_tracker_candle_masks_share_the_v3_palette_contract() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    build_masks = cast(
+        Callable[[NDArray[np.uint8]], tuple[NDArray[np.uint8], NDArray[np.uint8]]],
+        getattr(adapter, "_build_candle_masks"),
+    )
+    pixels = np.asarray(
+        [
+            [
+                (42, 190, 72),
+                (45, 100, 230),
+                (224, 58, 42),
+                (235, 115, 30),
+                (225, 45, 180),
+            ]
+        ],
+        dtype=np.uint8,
+    )
+
+    buy_mask, sell_mask = build_masks(pixels)
+
+    assert buy_mask.tolist() == [[255, 255, 0, 0, 0]]
+    assert sell_mask.tolist() == [[0, 0, 255, 255, 255]]
+
+
+def test_window_tracker_live_extractor_matches_raw_suite_palette_contract() -> None:
+    pixels = np.full((260, 360, 3), 18, dtype=np.uint8)
+    previous_close = 150
+    expected_directions: list[str] = []
+    for index in range(24):
+        direction = "BUY" if index % 3 != 1 else "SELL"
+        open_y = previous_close
+        close_y = open_y - 8 if direction == "BUY" else open_y + 10
+        center_x = 30 + index * 11
+        color = (45, 100, 230) if direction == "BUY" else (42, 190, 72)
+        body_top, body_bottom = sorted((open_y, close_y))
+        pixels[max(0, body_top - 4) : min(pixels.shape[0], body_bottom + 5), center_x] = color
+        pixels[body_top : body_bottom + 1, center_x - 3 : center_x + 4] = color
+        expected_directions.append(direction)
+        previous_close = close_y
+
+    shared = window_tracker_module.extract_candle_tracks_adaptive_v3(
+        pixels,
+        minimum_track_length=6,
+    )
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    extract = cast(
+        Callable[[Image.Image], list[dict[str, Any]]],
+        getattr(adapter, "_extract_candle_tracks"),
+    )
+    live = extract(Image.fromarray(pixels))
+
+    assert [row["direction"] for row in live] == expected_directions
+    assert [row["direction"] for row in live] == [row["direction"] for row in shared]
+    assert [row["palette"] for row in live] == [row["palette"] for row in shared]
+    assert [row["center_x_px"] for row in live] == [row["center_x_px"] for row in shared]
+    assert all(float(row["center_x"]) == float(row["center_x_px"]) for row in live)
+    assert all(float(row["center_y"]) == float(row["center_y_px"]) for row in live)
+    assert all("open_y_px" in row and "close_y_px" in row for row in live)
+
+
+def test_window_tracker_chart_bbox_uses_regular_candles_not_blue_grid_lines() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    detect = cast(
+        Callable[[Image.Image], tuple[list[int], float]],
+        getattr(adapter, "_detect_chart_bbox"),
+    )
+    image = _synthetic_chart_surface("buy")
+
+    bbox, confidence = detect(image)
+
+    assert bbox[0] < 100
+    assert bbox[2] > 700
+    assert bbox[2] - bbox[0] > image.width * 0.60
+    assert confidence > 0.70
+
+
+def test_window_tracker_rescales_shared_ohlc_geometry_with_fast_capture() -> None:
+    rescale = cast(
+        Callable[..., list[dict[str, Any]]],
+        getattr(window_tracker_module, "_rescale_candle_tracks"),
+    )
+    source = {
+        "bbox": [10, 20, 16, 40],
+        "center_x": 13.0,
+        "center_x_px": 13.0,
+        "center_y": 30.0,
+        "center_y_px": 30.0,
+        "wick_top_px": 20.0,
+        "wick_bottom_px": 40.0,
+        "body_top_px": 24.0,
+        "body_bottom_px": 36.0,
+        "open_y_px": 36.0,
+        "close_y_px": 24.0,
+        "body_height_pct": 0.6,
+    }
+
+    scaled = rescale([source], scale_x=2.0, scale_y=3.0)[0]
+
+    assert scaled["bbox"] == [20, 60, 32, 120]
+    assert scaled["center_x"] == scaled["center_x_px"] == 26.0
+    assert scaled["center_y"] == scaled["center_y_px"] == 90.0
+    assert scaled["wick_top_px"] == 60.0
+    assert scaled["wick_bottom_px"] == 120.0
+    assert scaled["body_top_px"] == 72.0
+    assert scaled["body_bottom_px"] == 108.0
+    assert scaled["open_y_px"] == 108.0
+    assert scaled["close_y_px"] == 72.0
+    assert scaled["body_height_pct"] == 0.6
+
+
 def test_window_tracker_adds_top_broker_chrome_exclusion_for_locked_focus_surface() -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     surface = Image.new("RGB", (1628, 861), color=(18, 24, 34))
@@ -3366,6 +3796,256 @@ def test_window_tracker_demotes_body_close_broken_support_to_reference_only() ->
         assert int(zone["body_close_break_count"]) >= 1
         assert "broken_body_close_demoted" in zone["book_rule_flags"]
         assert "REFERENCE_ONLY_ZONE" in zone["knowledge_tags"]
+
+
+def test_smc_order_block_requires_displacement_then_closed_bms() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    base_rows: list[dict[str, Any]] = [
+        {"direction": "BUY", "wick_top": 118, "body_top": 122, "body_bottom": 132, "wick_bottom": 138},
+        {"direction": "BUY", "wick_top": 90, "body_top": 96, "body_bottom": 108, "wick_bottom": 116},
+        {"direction": "SELL", "wick_top": 112, "body_top": 118, "body_bottom": 140, "wick_bottom": 146},
+        {"direction": "BUY", "wick_top": 100, "body_top": 104, "body_bottom": 124, "wick_bottom": 130},
+        {"direction": "BUY", "wick_top": 68, "body_top": 76, "body_bottom": 98, "wick_bottom": 104},
+        {
+            "direction": "SELL",
+            "wick_top": 62,
+            "body_top": 72,
+            "body_bottom": 96,
+            "wick_bottom": 102,
+            "is_closed": False,
+        },
+    ]
+
+    confirmed = _derive_book_rule_smart_money(adapter, _book_rule_candle_tracks(base_rows))
+
+    order_blocks = cast(Sequence[Mapping[str, Any]], confirmed["order_blocks"])
+    assert order_blocks
+    assert int(order_blocks[0]["source_index"]) == 2
+    assert order_blocks[0]["bms_confirmed"] is True
+    assert order_blocks[0]["closed_candle_confirmed"] is True
+    assert int(order_blocks[0]["bms_swing_index"]) == 1
+    assert int(order_blocks[0]["bms_break_index"]) == 4
+
+    no_break_rows = [dict(row) for row in base_rows]
+    no_break_rows[4]["close_y_px"] = 96.0
+    no_break = _derive_book_rule_smart_money(adapter, _book_rule_candle_tracks(no_break_rows))
+    diagnostics = cast(Mapping[str, Any], no_break["order_block_diagnostics"])
+    assert no_break["order_blocks"] == []
+    assert int(diagnostics["suppressed_no_bms"]) >= 1
+
+    forming_break_rows = [dict(row) for row in base_rows[:5]]
+    forming_break_rows[4]["is_closed"] = False
+    forming_break = _derive_book_rule_smart_money(
+        adapter,
+        _book_rule_candle_tracks(forming_break_rows),
+    )
+    forming_structure = cast(Mapping[str, Any], forming_break["market_structure_shift"])
+    assert forming_break["order_blocks"] == []
+    assert forming_structure["confirmed"] is False
+
+
+def test_smc_fresh_order_block_ranks_ahead_of_mitigated_block() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    candles = _book_rule_candle_tracks(
+        [
+            {"direction": "BUY", "wick_top": 118, "body_top": 122, "body_bottom": 132, "wick_bottom": 138},
+            {"direction": "BUY", "wick_top": 90, "body_top": 96, "body_bottom": 108, "wick_bottom": 116},
+            {"direction": "SELL", "wick_top": 112, "body_top": 118, "body_bottom": 140, "wick_bottom": 146},
+            {"direction": "BUY", "wick_top": 100, "body_top": 104, "body_bottom": 124, "wick_bottom": 130},
+            {"direction": "BUY", "wick_top": 68, "body_top": 76, "body_bottom": 98, "wick_bottom": 104},
+            {"direction": "SELL", "wick_top": 116, "body_top": 120, "body_bottom": 138, "wick_bottom": 144},
+            {"direction": "BUY", "wick_top": 60, "body_top": 66, "body_bottom": 76, "wick_bottom": 84},
+            {"direction": "SELL", "wick_top": 74, "body_top": 80, "body_bottom": 94, "wick_bottom": 100},
+            {"direction": "BUY", "wick_top": 65, "body_top": 70, "body_bottom": 84, "wick_bottom": 90},
+            {"direction": "BUY", "wick_top": 36, "body_top": 44, "body_bottom": 66, "wick_bottom": 72},
+            {
+                "direction": "SELL",
+                "wick_top": 38,
+                "body_top": 50,
+                "body_bottom": 72,
+                "wick_bottom": 80,
+                "is_closed": False,
+            },
+        ]
+    )
+
+    context = _derive_book_rule_smart_money(adapter, candles)
+    order_blocks = cast(Sequence[Mapping[str, Any]], context["order_blocks"])
+
+    assert len(order_blocks) >= 2
+    assert order_blocks[0]["mitigated"] is False
+    older = next(item for item in order_blocks if int(item["source_index"]) == 2)
+    assert older["mitigated"] is True
+    assert int(older["mitigation_count"]) >= 1
+    assert list(order_blocks).index(order_blocks[0]) < list(order_blocks).index(older)
+
+
+def test_smc_liquidity_sweep_requires_wick_penetration_and_actual_closed_reclaim() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    support_zone = {
+        "key": "support-120",
+        "role": "support",
+        "label": "SUPPORT",
+        "line_y": 120.0,
+        "zone_height_px": 10.0,
+        "freshness_state": "FRESH",
+        "significance_score": 0.78,
+        "confidence": 0.78,
+    }
+    prefix = [
+        {"direction": "SELL", "wick_top": 128, "body_top": 134, "body_bottom": 146, "wick_bottom": 152},
+        {"direction": "BUY", "wick_top": 116, "body_top": 122, "body_bottom": 138, "wick_bottom": 144},
+        {"direction": "SELL", "wick_top": 126, "body_top": 132, "body_bottom": 144, "wick_bottom": 150},
+        {"direction": "BUY", "wick_top": 112, "body_top": 116, "body_bottom": 120, "wick_bottom": 124},
+    ]
+    reclaimed = prefix + [
+        {"direction": "BUY", "wick_top": 90, "body_top": 112, "body_bottom": 136, "wick_bottom": 150}
+    ]
+    rejected_close = prefix + [
+        {
+            "direction": "SELL",
+            "wick_top": 90,
+            "body_top": 112,
+            "body_bottom": 136,
+            "wick_bottom": 150,
+            "close_y_px": 136.0,
+        }
+    ]
+    forming_reclaim = [dict(row) for row in reclaimed]
+    forming_reclaim[-1]["is_closed"] = False
+
+    closed_context = _derive_book_rule_smart_money(
+        adapter,
+        _book_rule_candle_tracks(reclaimed),
+        zones=[support_zone],
+    )
+    rejected_context = _derive_book_rule_smart_money(
+        adapter,
+        _book_rule_candle_tracks(rejected_close),
+        zones=[support_zone],
+    )
+    forming_context = _derive_book_rule_smart_money(
+        adapter,
+        _book_rule_candle_tracks(forming_reclaim),
+        zones=[support_zone],
+    )
+
+    sweeps = cast(Sequence[Mapping[str, Any]], closed_context["liquidity_sweeps"])
+    assert sweeps
+    assert sweeps[0]["closed_reclaim_confirmed"] is True
+    assert rejected_context["liquidity_sweeps"] == []
+    assert forming_context["liquidity_sweeps"] == []
+
+
+def test_smc_score_disagreement_cannot_promote_countertrend_without_closed_mss() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    candles = _book_rule_candle_tracks(
+        [
+            {"direction": "BUY", "wick_top": 150, "body_top": 156, "body_bottom": 170, "wick_bottom": 176},
+            {"direction": "BUY", "wick_top": 132, "body_top": 138, "body_bottom": 152, "wick_bottom": 158},
+            {"direction": "SELL", "wick_top": 140, "body_top": 146, "body_bottom": 158, "wick_bottom": 164},
+            {"direction": "SELL", "wick_top": 146, "body_top": 152, "body_bottom": 164, "wick_bottom": 170},
+            {
+                "direction": "SELL",
+                "wick_top": 150,
+                "body_top": 158,
+                "body_bottom": 178,
+                "wick_bottom": 186,
+                "is_closed": False,
+            },
+        ]
+    )
+
+    context = _derive_book_rule_smart_money(
+        adapter,
+        candles,
+        candidate_action="SELL",
+        global_direction="BUY",
+        local_direction="SELL",
+        impulse_direction="SELL",
+        reversal_score=1.0,
+    )
+    structure = cast(Mapping[str, Any], context["market_structure_shift"])
+    adjustment = cast(Mapping[str, Any], context["decision_adjustment"])
+
+    assert context["countertrend_local_only"] is True
+    assert context["dominant_side"] != "SELL"
+    assert structure["active"] is False
+    assert structure["confirmed"] is False
+    assert adjustment["side"] == "HOLD"
+    assert adjustment["execution_authority"] == "WITHHELD_FAIL_CLOSED"
+
+
+def test_support_break_and_role_flip_require_actual_closed_close() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    support_rows: list[dict[str, Any]] = [
+        {"direction": "BUY", "wick_top": 100, "body_top": 108, "body_bottom": 116, "wick_bottom": 121},
+        {"direction": "SELL", "wick_top": 102, "body_top": 108, "body_bottom": 116, "wick_bottom": 120},
+        {"direction": "BUY", "wick_top": 101, "body_top": 108, "body_bottom": 116, "wick_bottom": 122},
+        {"direction": "SELL", "wick_top": 103, "body_top": 108, "body_bottom": 116, "wick_bottom": 121},
+        {"direction": "BUY", "wick_top": 102, "body_top": 108, "body_bottom": 116, "wick_bottom": 120},
+    ]
+
+    def support_near_121(rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+        zones = adapter.derive_support_resistance_zones(
+            _book_rule_candle_tracks(rows),
+            (640, 360),
+            candidate_action="SELL",
+            max_zones_per_role=8,
+            max_total_zones=16,
+        )
+        supports = [zone for zone in zones if str(zone.get("role", "")) == "support"]
+        assert supports
+        return min(supports, key=lambda zone: abs(float(zone.get("line_y", 0.0)) - 121.0))
+
+    wick_only_breach = support_rows + [
+        {
+            "direction": "BUY",
+            "wick_top": 115,
+            "body_top": 118,
+            "body_bottom": 170,
+            "wick_bottom": 180,
+            "close_y_px": 118.0,
+        }
+    ]
+    closed_break = support_rows + [
+        {
+            "direction": "SELL",
+            "wick_top": 115,
+            "body_top": 118,
+            "body_bottom": 170,
+            "wick_bottom": 180,
+            "close_y_px": 170.0,
+        }
+    ]
+    forming_break = [dict(row) for row in closed_break]
+    forming_break[-1]["is_closed"] = False
+    confirmed_flip = closed_break + [
+        {
+            "direction": "SELL",
+            "wick_top": 114,
+            "body_top": 118,
+            "body_bottom": 140,
+            "wick_bottom": 146,
+            "close_y_px": 140.0,
+        }
+    ]
+    direction_only_flip = closed_break + [
+        {
+            "direction": "SELL",
+            "wick_top": 114,
+            "body_top": 115,
+            "body_bottom": 140,
+            "wick_bottom": 146,
+            "close_y_px": 115.0,
+        }
+    ]
+
+    assert support_near_121(wick_only_breach)["broken_after_touch"] is False
+    assert support_near_121(forming_break)["broken_after_touch"] is False
+    assert support_near_121(closed_break)["broken_after_touch"] is True
+    assert support_near_121(confirmed_flip)["role_flip_confirmed"] is True
+    assert support_near_121(direction_only_flip)["role_flip_confirmed"] is False
 
 
 def test_window_tracker_adds_smart_money_and_significant_sr_context_to_boxes() -> None:
@@ -4266,15 +4946,249 @@ def test_tracker_capture_once_writes_window_chart_overlay_and_decision_artifacts
         assert full_overlay_image.size == (1280, 720)
 
 
+def test_new_forecast_frame_advances_retained_snapshot_epoch() -> None:
+    snapshot = window_tracker_module._forecast_snapshot_v3(  # pyright: ignore[reportPrivateUsage]
+        {
+            "display_frame_id": 15,
+            "model_vote_frame_id": 15,
+            "model_capture_epoch": 200.0,
+            "visual_observation_v3": {
+                "status": "NEW_FRAME",
+                "new_visual_evidence": True,
+            },
+            "tracking_summary": {
+                "lstm_contribution": {
+                    "frame_id": 15,
+                    "forecast_available": True,
+                    "path_side": "BUY",
+                    "confidence": 0.73,
+                }
+            },
+            "forecast_snapshot_v3": {
+                "source_frame_id": 14,
+                "observed_epoch": 100.0,
+                "lstm_contribution": {
+                    "frame_id": 14,
+                    "forecast_available": True,
+                    "path_side": "SELL",
+                    "confidence": 0.62,
+                },
+            },
+        }
+    )
+
+    assert snapshot["source_frame_id"] == 15
+    assert snapshot["observed_epoch"] == 200.0
+    assert snapshot["status"] == "CURRENT"
+    assert cast(dict[str, Any], snapshot["lstm_contribution"])["path_side"] == "BUY"
+
+
+def test_duplicate_live_chart_pixels_do_not_advance_model_freshness(tmp_path: Path) -> None:
+    frozen = _surface(width=1280, height=720)
+    adapter = _FakeTrackingAdapter("BUY")
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=_FakeCaptureBackend([frozen, frozen.copy(), frozen.copy()]),
+        tracking_adapter=adapter,
+    )
+    session = tracker.create_session(session_id="pocket-live")
+    first = tracker.set_focus_region(str(session["session_id"]), [0.10, 0.10, 0.88, 0.86], source="test")
+    payload = tracker.load_session_payload(str(session["session_id"]))
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    tracking_summary = cast(dict[str, Any], payload["tracking_summary"])
+    tracking_summary["two_candle_study"] = {
+        "schema_version": "PG_TWO_CANDLE_STUDY_V3",
+        "frame_id": int(first["frame_index"]),
+        "status": "READY",
+        "primary_pressure": "SELL",
+        "next_candle_forecast": {"direction": "SELL", "confidence": 0.63},
+    }
+    tracking_summary["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "fresh": True,
+        "forecast_available": True,
+        "confidence": 0.77,
+        "path_side": "SELL",
+        "source_image_size": [1024, 576],
+        "features": [{"relative_price_location": 0.52}],
+        "forecast_path": [
+            {
+                "step": 1,
+                "expected_close_norm": 0.49,
+                "close_lower_90_norm": 0.45,
+                "close_upper_90_norm": 0.53,
+            }
+        ],
+        # These internal artifact locations must not leak into the retained
+        # frame-aligned diagnostic snapshot.
+        "artifact_path": r"C:\private\lstm.pt",
+        "config_path": r"C:\private\lstm.json",
+    }
+    tracker.save_session(payload)
+
+    baseline_frame = int(first["frame_index"])
+    baseline_count = int(first["capture_count"])
+    baseline_epoch = float(first["last_capture_epoch"])
+    baseline_model_epoch = float(first["model_capture_epoch"])
+    _allow_next_capture(tracker, str(session["session_id"]))
+    duplicate = tracker.capture_once(str(session["session_id"]))
+
+    assert int(duplicate["frame_index"]) == baseline_frame
+    assert int(duplicate["capture_count"]) == baseline_count
+    assert float(duplicate["last_capture_epoch"]) == baseline_epoch
+    assert float(duplicate["model_capture_epoch"]) == baseline_model_epoch
+    assert adapter.calls == 1
+    assert duplicate["visual_observation_v3"]["status"] == "WAITING_FOR_NEW_FRAME"
+    assert duplicate["visual_observation_v3"]["new_visual_evidence"] is False
+    assert duplicate["latest_signal"]["execution_action"] == "HOLD"
+    assert duplicate["latest_signal"]["actionable"] is False
+    assert duplicate["latest_signal"]["execution_permission"] == "WAIT"
+    assert duplicate["execution_packet_present"] is False
+    assert duplicate["decision_valid_until_epoch"] == 0.0
+    persisted = tracker.load_session_payload(str(session["session_id"]))
+    forecast_snapshot = cast(dict[str, Any], persisted["forecast_snapshot_v3"])
+    assert forecast_snapshot["source_frame_id"] == baseline_frame
+    assert forecast_snapshot["status"] == "STALE_DIAGNOSTIC"
+    assert forecast_snapshot["stale"] is True
+    assert forecast_snapshot["diagnostic_only"] is True
+    assert cast(dict[str, Any], forecast_snapshot["lstm_contribution"])["forecast_available"] is True
+    assert cast(dict[str, Any], forecast_snapshot["two_candle_study"])["primary_pressure"] == "SELL"
+    assert "artifact_path" not in cast(dict[str, Any], forecast_snapshot["lstm_contribution"])
+    assert "config_path" not in cast(dict[str, Any], forecast_snapshot["lstm_contribution"])
+
+
+def test_frozen_study_recovers_even_when_full_window_signature_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frozen = _surface(width=1280, height=720)
+    chrome_variants: list[Image.Image] = []
+    for index in range(4):
+        variant = frozen.copy()
+        ImageDraw.Draw(variant).rectangle(
+            (0, 0, 120, 48),
+            fill=(35 + index * 20, 42, 54),
+        )
+        chrome_variants.append(variant)
+    recovered = frozen.copy()
+    ImageDraw.Draw(recovered).rectangle((180, 160, 260, 260), fill=(80, 210, 96))
+    backend = _RecoveringDuplicateCaptureBackend(
+        chrome_variants,
+        recovered,
+    )
+    adapter = _FakeTrackingAdapter("SELL")
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=adapter,
+    )
+    monkeypatch.setenv("PHOENIXGUARD_DUPLICATE_FRAME_RECOVERY_THRESHOLD", "3")
+    monkeypatch.setenv("PHOENIXGUARD_DUPLICATE_FRAME_RECOVERY_MIN_INTERVAL_SEC", "15")
+    session = tracker.create_session(session_id="pocket-live")
+    first = tracker.set_focus_region(str(session["session_id"]), [0.10, 0.10, 0.88, 0.86], source="test")
+    payload = tracker.load_session_payload(str(session["session_id"]))
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    tracker.save_session(payload)
+
+    for expected_duplicate_count in (1, 2):
+        _allow_next_capture(tracker, str(session["session_id"]))
+        waiting = tracker.capture_once(str(session["session_id"]))
+        assert int(waiting["frame_index"]) == int(first["frame_index"])
+        assert waiting["visual_observation_v3"]["duplicate_study_count"] == expected_duplicate_count
+        assert waiting["visual_observation_v3"]["identical_window_count"] == 0
+        assert backend.live_recovery_calls == 0
+
+    _allow_next_capture(tracker, str(session["session_id"]))
+    refreshed = tracker.capture_once(str(session["session_id"]))
+
+    assert backend.live_recovery_calls == 1
+    assert adapter.calls == 2
+    assert int(refreshed["frame_index"]) == int(first["frame_index"]) + 1
+    assert int(refreshed["capture_count"]) == int(first["capture_count"]) + 1
+    assert refreshed["visual_observation_v3"]["status"] == "RECOVERED_NEW_FRAME"
+    assert refreshed["visual_observation_v3"]["new_visual_evidence"] is True
+    assert refreshed["visual_observation_v3"]["recovery_succeeded"] is True
+    assert refreshed["visual_observation_v3"]["last_recovery_attempt_epoch"] == 0.0
+
+
+def test_unsafe_frozen_study_recovery_stays_waiting_and_throttles_immediate_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _UnavailableLiveRecoveryBackend(_FakeCaptureBackend):
+        def __init__(self, images: Sequence[Image.Image]) -> None:
+            super().__init__(images)
+            self.live_recovery_calls = 0
+
+        def capture_window_live(self, descriptor: Mapping[str, Any]) -> Image.Image:
+            _ = descriptor
+            self.live_recovery_calls += 1
+            raise CaptureSurfaceUnavailableError(
+                "Visible broker-frame recovery was blocked because foreground ownership changed during capture."
+            )
+
+    frozen = _surface(width=1280, height=720)
+    chrome_variants: list[Image.Image] = []
+    for index in range(7):
+        variant = frozen.copy()
+        ImageDraw.Draw(variant).rectangle(
+            (0, 0, 120, 48),
+            fill=(35 + index * 15, 42, 54),
+        )
+        chrome_variants.append(variant)
+    backend = _UnavailableLiveRecoveryBackend(chrome_variants)
+    tracker = ContinuousWindowTrackerService(
+        root_dir=tmp_path,
+        capture_backend=backend,
+        tracking_adapter=_FakeTrackingAdapter("SELL"),
+    )
+    monkeypatch.setenv("PHOENIXGUARD_DUPLICATE_FRAME_RECOVERY_THRESHOLD", "2")
+    monkeypatch.setenv("PHOENIXGUARD_DUPLICATE_FRAME_RECOVERY_MIN_INTERVAL_SEC", "120")
+    session = tracker.create_session(session_id="pocket-live")
+    first = tracker.set_focus_region(
+        str(session["session_id"]),
+        [0.10, 0.10, 0.88, 0.86],
+        source="test",
+    )
+    payload = tracker.load_session_payload(str(session["session_id"]))
+    payload["tracking_enabled"] = True
+    payload["status"] = "running"
+    tracker.save_session(payload)
+
+    waits: list[dict[str, Any]] = []
+    for _ in range(5):
+        _allow_next_capture(tracker, str(session["session_id"]))
+        waits.append(tracker.capture_once(str(session["session_id"])))
+
+    attempted = waits[1]["visual_observation_v3"]
+    last_wait = waits[-1]["visual_observation_v3"]
+    assert backend.live_recovery_calls == 1
+    assert attempted["recovery_attempted"] is True
+    assert float(attempted["last_recovery_attempt_epoch"]) > 0.0
+    assert last_wait["recovery_attempted"] is False
+    assert last_wait["last_recovery_attempt_epoch"] == attempted["last_recovery_attempt_epoch"]
+    assert int(waits[-1]["frame_index"]) == int(first["frame_index"])
+    assert waits[-1]["latest_signal"]["execution_permission"] == "WAIT"
+    assert waits[-1]["execution_packet_present"] is False
+
+
 def test_tracker_live_mode_writes_fresh_hot_overlays_by_default(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.delenv("PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS", raising=False)
     monkeypatch.delenv("PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N", raising=False)
+    first_frame = _synthetic_chart_surface("buy", width=1280, height=720)
+    changed_frame = first_frame.copy()
+    # Fresh hot artifacts require fresh visual evidence. A byte-identical
+    # second capture must stay WAITING_FOR_NEW_FRAME instead of minting a new
+    # model epoch, so give this test a genuine in-chart pixel change.
+    ImageDraw.Draw(changed_frame).rectangle((1030, 438, 1042, 462), fill=(43, 205, 92))
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path,
         capture_backend=_FakeCaptureBackend(
             [
-                _synthetic_chart_surface("buy", width=1280, height=720),
-                _synthetic_chart_surface("buy", width=1280, height=720),
+                first_frame,
+                changed_frame,
             ]
         ),
         tracking_adapter=_FakeTrackingAdapter("BUY"),
@@ -4308,12 +5222,15 @@ def test_tracker_forced_minimal_hot_artifacts_overwrites_fresh_overlay(
 ) -> None:
     monkeypatch.setenv("PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS", "1")
     monkeypatch.setenv("PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N", "300")
+    first_frame = _synthetic_chart_surface("buy", width=1280, height=720)
+    changed_frame = first_frame.copy()
+    ImageDraw.Draw(changed_frame).rectangle((1030, 438, 1042, 462), fill=(43, 205, 92))
     tracker = ContinuousWindowTrackerService(
         root_dir=tmp_path,
         capture_backend=_FakeCaptureBackend(
             [
-                _synthetic_chart_surface("buy", width=1280, height=720),
-                _synthetic_chart_surface("buy", width=1280, height=720),
+                first_frame,
+                changed_frame,
             ]
         ),
         tracking_adapter=_FakeTrackingAdapter("BUY"),
@@ -4336,6 +5253,10 @@ def test_tracker_forced_minimal_hot_artifacts_overwrites_fresh_overlay(
     assert result["last_full_overlay_path"] != focused["last_full_overlay_path"]
     assert Path(str(result["last_overlay_path"])).name.startswith("hot_latest_overlay")
     assert Path(str(result["last_full_overlay_path"])).name.startswith("hot_latest_full_overlay")
+    assert Path(str(result["last_chart_path"])).name.startswith(
+        f"{int(result['frame_index']):06d}_"
+    )
+    assert not Path(str(result["last_chart_path"])).name.startswith("hot_latest_chart")
     assert int(result["overlay_frame_id"]) == int(result["frame_index"])
     assert int(result["full_overlay_frame_id"]) == int(result["frame_index"])
     assert int(result["model_vote_frame_id"]) == int(result["frame_index"])
@@ -5472,7 +6393,7 @@ def test_tracker_clear_focus_region_stops_tracker_and_clears_live_artifacts(tmp_
     assert cleared["last_chart_path"] == ""
 
 
-def test_tracker_reacquires_same_browser_family_when_pocket_option_title_drifts(tmp_path: Path) -> None:
+def test_tracker_does_not_reacquire_unrelated_same_browser_family_for_pocket_option(tmp_path: Path) -> None:
     backend = _ListedWindowCaptureBackend(
         [
             {
@@ -5516,13 +6437,12 @@ def test_tracker_reacquires_same_browser_family_when_pocket_option_title_drifts(
     payload["last_display_chart_path"] = ""
     session_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
-    _allow_next_capture(tracker, str(session["session_id"]))
-    refreshed = tracker.capture_once(str(session["session_id"]))
+    refreshed_payload = tracker.load_session_payload(str(session["session_id"]))
+    resolved = tracker._resolve_window_descriptor(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        refreshed_payload
+    )
 
-    assert refreshed["last_error"] == ""
-    assert refreshed["locked_window"]["hwnd"] == 8801
-    assert refreshed["latest_signal"]["action"] == "BUY"
-    assert Path(str(refreshed["last_overlay_path"])).exists()
+    assert resolved is None
 
 
 def test_tracker_ignores_wrong_saved_pocket_option_hwnd_and_reacquires_broker(tmp_path: Path) -> None:
@@ -5733,14 +6653,37 @@ def test_tracker_http_surface_serves_session_artifacts_and_dashboard(tmp_path: P
     assert capture_response.status_code == 200
     payload = capture_response.json()
     assert payload["latest_signal"]["action"] == "BUY"
+    display_frame_id = int(payload["display_frame_id"])
+    assert display_frame_id > 0
 
     session_response = client.get(f"/v1/mobile/window-tracker/sessions/{session_id}")
     assert session_response.status_code == 200
 
-    chart_response = client.get(f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-chart")
+    chart_response = client.get(
+        f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-chart"
+        f"?frame_id={display_frame_id}"
+    )
     assert chart_response.status_code == 200
     assert chart_response.headers["content-type"].startswith("image/png")
     assert "no-store" in chart_response.headers["cache-control"]
+
+    window_response = client.get(
+        f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-window"
+        f"?frame_id={display_frame_id}"
+    )
+    assert window_response.status_code == 200
+    assert window_response.headers["content-type"].startswith("image/")
+    assert "no-store" in window_response.headers["cache-control"]
+
+    for artifact_kind in ("chart", "window"):
+        stale_response = client.get(
+            f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-{artifact_kind}"
+            f"?frame_id={display_frame_id + 1}"
+        )
+        assert stale_response.status_code == 409
+        assert stale_response.json() == {
+            "detail": "Requested artifact frame is no longer current."
+        }
 
     overlay_response = client.get(f"/v1/mobile/window-tracker/sessions/{session_id}/artifacts/latest-overlay")
     assert overlay_response.status_code == 200
@@ -5763,10 +6706,65 @@ def test_tracker_http_surface_serves_session_artifacts_and_dashboard(tmp_path: P
     dashboard_response = client.get(f"/v3/mobile/window-tracker/dashboard/{session_id}")
     assert dashboard_response.status_code == 200
     assert "<title>808Fx Standard Hybrid System Live Tracker</title>" in dashboard_response.text
-    assert 'aria-label="808Fx Standard Hybrid System live tracker"' in dashboard_response.text
+    assert 'id="beginner-decision-shell"' in dashboard_response.text
+    assert 'id="overlay-explorer" aria-label="Overlay views"' in dashboard_response.text
+    assert "runtime_telemetry" not in dashboard_response.text
 
 
-def test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout() -> None:
+def test_tracker_artifact_route_serves_an_archived_exact_frame_after_latest_advances(
+    tmp_path: Path,
+) -> None:
+    session_root = tmp_path / "session"
+    artifact_dir = session_root / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    old_chart = artifact_dir / "000011_old_chart.png"
+    old_window = artifact_dir / "000011_old_window.png"
+    current_chart = artifact_dir / "000012_current_chart.png"
+    current_window = artifact_dir / "000012_current_window.png"
+    for path, color in (
+        (old_chart, (11, 11, 11)),
+        (old_window, (12, 12, 12)),
+        (current_chart, (21, 21, 21)),
+        (current_window, (22, 22, 22)),
+    ):
+        Image.new("RGB", (64, 40), color=color).save(path)
+
+    class ArchivedArtifactTracker:
+        def latest_artifact_path(self, session_id: str, artifact_kind: str) -> Path:
+            assert session_id == "archive-session"
+            return current_chart if artifact_kind == "chart" else current_window
+
+        def get_session_snapshot(self, session_id: str) -> dict[str, Any]:
+            assert session_id == "archive-session"
+            return {
+                "session_id": session_id,
+                "display_frame_id": 12,
+                "chart_frame_id": 12,
+                "frame_index": 12,
+            }
+
+        def session_dir(self, session_id: str) -> Path:
+            assert session_id == "archive-session"
+            return session_root
+
+    client = TestClient(create_app(window_tracker_service=ArchivedArtifactTracker()))
+
+    for artifact_kind in ("chart", "window"):
+        archived = client.get(
+            "/v1/mobile/window-tracker/sessions/archive-session/artifacts/"
+            f"latest-{artifact_kind}?frame_id=11"
+        )
+        assert archived.status_code == 200
+        assert archived.headers["content-type"].startswith("image/png")
+
+        missing_future = client.get(
+            "/v1/mobile/window-tracker/sessions/archive-session/artifacts/"
+            f"latest-{artifact_kind}?frame_id=13"
+        )
+        assert missing_future.status_code == 409
+
+
+def test_tracker_dashboard_prioritizes_decision_chart_and_history_without_technical_clutter() -> None:
     dashboard_html = (
         Path(__file__).resolve().parents[2]
         / "Frontend"
@@ -5775,35 +6773,29 @@ def test_tracker_dashboard_prediction_images_use_uncropped_full_width_layout() -
         / "window_tracker_dashboard.html"
     ).read_text(encoding="utf-8")
 
-    assert "grid-column: 1 / -1;" in dashboard_html
-    assert "grid-template-columns: repeat(3, minmax(0, 1fr));" in dashboard_html
-    assert "height: 220px;" not in dashboard_html
+    assert "<title>808Fx Standard Hybrid System Live Tracker</title>" in dashboard_html
+    assert 'id="current-move-title"' in dashboard_html
+    assert 'id="forecast-title"' in dashboard_html
+    assert 'id="permission-title"' in dashboard_html
+    assert 'id="surface-stage"' in dashboard_html
     assert "object-fit: contain;" in dashboard_html
-    assert "aspect-ratio: auto;" in dashboard_html
-    assert "808Fx Standard Hybrid System Live Tracker" in dashboard_html
-    assert "Powered by the Phoenix Guard V3 engine" in dashboard_html
-    assert "Path Quality" in dashboard_html
-    assert "Entry Quality" in dashboard_html
-    assert "Top 3 Forecasts" in dashboard_html
-    assert "accepted_by" in dashboard_html
-    assert "failure_or_probe" in dashboard_html
-    assert "memory retrieval running" in dashboard_html
-    assert "Retrieved Memory | scanning bank" in dashboard_html
-    assert "Future Runway | building overlay boxes" in dashboard_html
-    assert "aggressive sniper" in dashboard_html
-    assert "addMicroPlanBoxes" in dashboard_html
-    assert "SNIPER" in dashboard_html
-    assert "Control Map" in dashboard_html
-    assert "Map Clock" in dashboard_html
-    assert "Wick + S/R Read" in dashboard_html
-    assert "global_local_control" in dashboard_html
-    assert "candles_remaining_in_sniper_zone" in dashboard_html
+    assert 'id="market-history"' in dashboard_html
+    assert "From earlier movement to now" in dashboard_html
     assert "voice-toggle" not in dashboard_html
-    assert "/v1/voice/status" not in dashboard_html
-    assert "Promise.allSettled" not in dashboard_html
+    for removed_surface in (
+        "Path Quality",
+        "Entry Quality",
+        "Top 3 Forecasts",
+        "accepted_by",
+        "memory retrieval running",
+        "aggressive sniper",
+        "Control Map",
+        "Map Clock",
+    ):
+        assert removed_surface not in dashboard_html
 
 
-def test_tracker_dashboard_fits_selected_surface_without_width_only_crop() -> None:
+def test_tracker_dashboard_fits_and_pans_the_same_interactive_surface() -> None:
     dashboard_html = (
         Path(__file__).resolve().parents[2]
         / "Frontend"
@@ -5812,59 +6804,25 @@ def test_tracker_dashboard_fits_selected_surface_without_width_only_crop() -> No
         / "window_tracker_dashboard.html"
     ).read_text(encoding="utf-8")
 
-    assert "function surfaceFitViewportHeight()" in dashboard_html
-    assert "stageHeight / size.height" in dashboard_html
-    assert "stageWidth / size.width" in dashboard_html
-    assert "full selected plane fitted" in dashboard_html
-    assert "full broker window fitted" in dashboard_html
-    assert 'const kind = "full-overlay";' in dashboard_html
-    assert 'state.surfaceUsesFullOverlay = image.dataset.surfaceUsesFullOverlay === "1";' in dashboard_html
-    assert "mode-overlay" in dashboard_html
-    assert "Signal Overlay" in dashboard_html
-    assert "mode-raw" in dashboard_html
-    assert "Locked Surface" in dashboard_html
-    assert "function surfaceIdentityKey(session = {})" in dashboard_html
-    assert "function overlaySurfaceMatchesDisplay(session = {})" in dashboard_html
-    assert "function displayOnlyOverlayAuthorityLocked(session = {})" in dashboard_html
-    assert "function overlayAuthorityFrame(session = {})" in dashboard_html
-    assert "const displayArtifact = clean(session.last_display_window_path" in dashboard_html
-    assert "overlayFrame > 0 && displayArtifact && overlayArtifact" in dashboard_html
-    assert "explicitArtifactAligned === true" in dashboard_html
-    assert "const overlayFrameId = overlayAuthorityFrame(session);" in dashboard_html
-    assert "display_frame_id: displayFrameId" in dashboard_html
-    assert "function transformFrameFromId" in dashboard_html
-    assert "function chartTransformCandidate" in dashboard_html
-    assert "candidate.frame > 0 && candidate.frame === authorityFrame" in dashboard_html
-    assert "return `ct_${clean(session.session_id || SESSION_ID, SESSION_ID)}_${authorityFrame}`;" in dashboard_html
-    assert "const chartTransformId = currentChartTransformId(session);" in dashboard_html
-    assert "chart_transform_id: chartTransformId" in dashboard_html
-    assert "chartTransformKey || \"CHART_TRANSFORM_PENDING\"" in dashboard_html
-    assert "chartTransformId: currentChartTransformId(session)" in dashboard_html
-    assert "overlay_render_frame_id: overlayFrameId" in dashboard_html
-    assert "overlay_source_window_signature" in dashboard_html
-    assert "overlayLocks: new Map()" in dashboard_html
-    assert "const overlayLockUsable = wantsOverlay && hasLockedOverlayForSession(session);" in dashboard_html
-    assert "const useLockedWindowOverlayPlane = wantsOverlay" in dashboard_html
-    assert 'useSurfaceImage(els.rawImg, "window", "window-locked-overlay", true);' in dashboard_html
-    assert "if (normalizedKind === \"window\" && fileName)" in dashboard_html
-    assert "if (normalizedKind === \"full-overlay\" && fullOverlayUsesSavedArtifact())" in dashboard_html
-    assert 'return backendOverlayMode(mode) === "CLEAN_LIVE" && cleanLiveFullOverlayLayerStateIsDefault();' in dashboard_html
-    assert "window-dom-overlay" not in dashboard_html
-    assert "if (wantsOverlay && hasFullOverlay && !overlayStale)" in dashboard_html
-    assert "} else if (useLockedWindowOverlayPlane)" in dashboard_html
-    assert "function backendOverlayFrameAligned(session = {})" in dashboard_html
-    assert 'clean_live: "CLEAN_LIVE"' in dashboard_html
-    assert 'full_history_read: "FULL_HISTORY_READ"' in dashboard_html
-    assert "displayOnlyOverlayAuthorityLocked(session)" in dashboard_html
-    assert "rawFallbackVisible || state.surface.overlayStale || !overlayFrameReady" in dashboard_html
-    assert "else if (hasChart)" in dashboard_html
-    assert "DASHBOARD_REFRESH_FAST_INTERVAL_MS = 15000" in dashboard_html
-    assert "DASHBOARD_HEARTBEAT_INTERVAL_MS = 15000" in dashboard_html
-    assert "function frontendHeartbeatDisabled" in dashboard_html
-    assert "pg_no_heartbeat" in dashboard_html
+    assert "function calculateFitScale()" in dashboard_html
+    assert "Math.min(width / state.naturalWidth, height / state.naturalHeight)" in dashboard_html
+    assert "function applySurfaceScale()" in dashboard_html
+    assert "function setZoomMode(mode, value)" in dashboard_html
+    assert 'id="zoom-fit"' in dashboard_html
+    assert 'id="zoom-actual"' in dashboard_html
+    assert 'id="zoom-in"' in dashboard_html
+    assert 'id="zoom-out"' in dashboard_html
+    assert 'id="mode-overlay"' in dashboard_html
+    assert 'id="mode-raw"' in dashboard_html
+    assert 'els.surfaceStage.addEventListener("pointerdown"' in dashboard_html
+    assert "els.surfaceStage.scrollLeft = state.dragScrollLeft" in dashboard_html
+    assert "/v1/mobile/operator/state/v1/" in dashboard_html
+    assert "/v1/mobile/live/state/v3/" not in dashboard_html
+    assert "overlay_source_window_signature" not in dashboard_html
+    assert "chart_transform_id" not in dashboard_html
 
 
-def test_tracker_dashboard_replay_overlays_use_professional_label_budget() -> None:
+def test_tracker_dashboard_history_overlays_use_semantic_filters_and_collision_budget() -> None:
     dashboard_html = (
         Path(__file__).resolve().parents[2]
         / "Frontend"
@@ -5873,17 +6831,37 @@ def test_tracker_dashboard_replay_overlays_use_professional_label_budget() -> No
         / "window_tracker_dashboard.html"
     ).read_text(encoding="utf-8")
 
-    assert "function frontendOverlayBudget" in dashboard_html
-    assert "REPLAY: {objects: null, labels: 28}" in dashboard_html
-    assert "FULL_HISTORY_READ: {objects: null, labels: 28}" in dashboard_html
-    assert "function frontendOverlayPriority" in dashboard_html
-    assert "function frontendOverlayLabelCandidate" in dashboard_html
-    assert "function resolveLabelCollisions" in dashboard_html
+    assert 'data-overlay-view="history"' in dashboard_html
+    assert 'data-overlay-family="history"' in dashboard_html
+    assert 'data-overlay-family="smc"' in dashboard_html
+    assert 'data-overlay-family="lstm"' in dashboard_html
+    assert 'data-label-mode="on"' in dashboard_html
+    assert 'data-label-mode="hover"' in dashboard_html
+    assert 'data-label-mode="off"' in dashboard_html
+    assert "function overlayPriority(overlay)" in dashboard_html
+    assert "function resolveLabelCollisions(container)" in dashboard_html
     assert "window.resolveLabelCollisions = resolveLabelCollisions;" in dashboard_html
     assert "label-collision-hidden" in dashboard_html
-    assert "font-size: calc(7px * var(--overlay-label-scale, 1));" in dashboard_html
-    assert "font-size: calc(4.65px * var(--overlay-label-scale, 1));" not in dashboard_html
-    assert 'if (mode !== "CLEAN_LIVE")' not in dashboard_html
+    assert "REPLAY: {objects:" not in dashboard_html
+    assert "FULL_HISTORY_READ: {objects:" not in dashboard_html
+
+
+def test_tracker_dashboard_renders_v3_lstm_path_band_without_synthetic_boxes() -> None:
+    dashboard_html = (
+        Path(__file__).resolve().parents[2]
+        / "Frontend"
+        / "dashboard"
+        / "static"
+        / "window_tracker_dashboard.html"
+    ).read_text(encoding="utf-8")
+
+    assert 'isForecastBand ? "polygon" : "polyline"' in dashboard_html
+    assert 'forecastRole === "center" ? " forecast-path-hit"' in dashboard_html
+    assert '["band_90", "upper_90", "lower_90"].includes(forecastRole)' in dashboard_html
+    assert ".surface-forecast-band.forecast-no-edge" in dashboard_html
+    assert ".surface-trendline.family-lstm.forecast-boundary" in dashboard_html
+    assert ".surface-hotspot.family-lstm.forecast-path-hit" in dashboard_html
+    assert 'polyline.dataset.forecastStatus = forecastStatus === "authorized" ? "AUTHORIZED" : "NO_EDGE"' in dashboard_html
 
 
 def test_memory_precision_allows_aggressive_stacked_primary_when_counter_is_probe() -> None:
@@ -5984,8 +6962,17 @@ def test_tracker_http_surface_runs_memory_projection_actions(tmp_path: Path, mon
     assert focus_response.status_code == 200
 
     predict_response = client.post(f"/v1/mobile/window-tracker/sessions/{session_id}/predict")
-    assert predict_response.status_code == 200
-    predict_payload = predict_response.json()["memory_projection_current"]
+    assert predict_response.status_code == 202
+    predict_action = predict_response.json()
+    assert predict_action["schema_version"] == "PG_FORECAST_ACTION_V1"
+    deadline = time.monotonic() + 30.0
+    predict_status = client.get(str(predict_action["status_url"]))
+    while not bool(predict_status.json()["terminal"]) and time.monotonic() < deadline:
+        predict_status = client.get(str(predict_action["status_url"]))
+        assert predict_status.status_code == 200
+        time.sleep(0.01)
+    assert predict_status.json()["status"] == "ready"
+    predict_payload = tracker_service.get_session_snapshot(session_id)["memory_projection_current"]
     assert predict_payload["mode"] == "predict"
     assert predict_payload["status"] == "ready"
     assert predict_payload["memory_retrieval"]["state"] == "ready"
@@ -6000,8 +6987,16 @@ def test_tracker_http_surface_runs_memory_projection_actions(tmp_path: Path, mon
     assert len(projection_response.content) > 0
 
     future_response = client.post(f"/v1/mobile/window-tracker/sessions/{session_id}/show-future")
-    assert future_response.status_code == 200
-    future_payload = future_response.json()["memory_projection_current"]
+    assert future_response.status_code == 202
+    future_action = future_response.json()
+    deadline = time.monotonic() + 30.0
+    future_status = client.get(str(future_action["status_url"]))
+    while not bool(future_status.json()["terminal"]) and time.monotonic() < deadline:
+        future_status = client.get(str(future_action["status_url"]))
+        assert future_status.status_code == 200
+        time.sleep(0.01)
+    assert future_status.json()["status"] == "ready"
+    future_payload = tracker_service.get_session_snapshot(session_id)["memory_projection_current"]
     assert future_payload["mode"] == "future"
     assert future_payload["status"] == "ready"
     assert future_payload["memory_retrieval"]["state"] == "ready"
@@ -7987,6 +8982,37 @@ def test_real_tracking_adapter_excludes_broker_order_panel_from_chart_bbox() -> 
     assert int(chart_bbox[2]) < int(image.width * 0.82)
     assert result.tracking_summary["chart_valid"] is True
     assert int(result.tracking_summary["visible_candle_count"]) >= 8
+
+
+def test_window_tracker_feeds_raw_chart_pixels_to_v3_lstm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def capture_chart_context(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"available": False, "fresh": False, "forecast_path": []}
+
+    monkeypatch.setattr(
+        window_tracker_module,
+        "build_lstm_candle_sequence_contribution",
+        capture_chart_context,
+    )
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    build = cast(Callable[..., dict[str, Any]], getattr(adapter, "_build_lstm_contribution"))
+    chart_image = _synthetic_chart_surface("buy")
+
+    build(
+        candles=[],
+        chart_image=chart_image,
+        timeframe="M5",
+        sequence_phase="CONTINUATION",
+        market_play_label="TREND_CONTINUATION",
+    )
+
+    assert captured["chart_image"] is chart_image
+    assert captured["image_size"] == chart_image.size
+    assert captured["timeframe"] == "M5"
 
 
 def test_real_tracking_adapter_reads_sell_pressure_from_downtrend_surface() -> None:

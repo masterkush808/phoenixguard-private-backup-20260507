@@ -31,6 +31,11 @@ except Exception:
         "SUPPLY_ZONE": "supply_demand",
         "DEMAND_ZONE": "supply_demand",
         "OPPOSING_FORCE": "supply_demand",
+        "ORDER_BLOCK": "smart_money",
+        "FAIR_VALUE_GAP": "smart_money",
+        "LIQUIDITY_POOL": "smart_money",
+        "LIQUIDITY_SWEEP": "smart_money",
+        "MARKET_STRUCTURE_SHIFT": "smart_money",
         "SUPPORT_TRENDLINE": "trendlines",
         "RESISTANCE_TRENDLINE": "trendlines",
         "INNER_TRENDLINE": "trendlines",
@@ -49,6 +54,11 @@ except Exception:
         "SUPPLY_ZONE": "supply",
         "DEMAND_ZONE": "demand",
         "OPPOSING_FORCE": "opposing_force",
+        "ORDER_BLOCK": "order_block",
+        "FAIR_VALUE_GAP": "fair_value_gap",
+        "LIQUIDITY_POOL": "liquidity_pool",
+        "LIQUIDITY_SWEEP": "liquidity_sweep",
+        "MARKET_STRUCTURE_SHIFT": "market_structure_shift",
         "SUPPORT_TRENDLINE": "support_trendline",
         "RESISTANCE_TRENDLINE": "resistance_trendline",
         "INNER_TRENDLINE": "inner_trendline",
@@ -397,6 +407,15 @@ CRITICAL_ANCHORED_OVERLAY_TYPES: frozenset[str] = frozenset(
     }
 )
 ZONE_OVERLAY_TYPES: frozenset[str] = frozenset({"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"})
+SMART_MONEY_OVERLAY_TYPES: frozenset[str] = frozenset(
+    {
+        "ORDER_BLOCK",
+        "FAIR_VALUE_GAP",
+        "LIQUIDITY_POOL",
+        "LIQUIDITY_SWEEP",
+        "MARKET_STRUCTURE_SHIFT",
+    }
+)
 ACTIONABLE_OVERLAY_TYPES: frozenset[str] = frozenset(
     {"SNIPER_ENTRY_BOX", "RETEST_BOX", "CONTINUATION_BOX", "TARGET_ZONE_BOX", "INVALIDATION_BOX"}
 )
@@ -408,25 +427,47 @@ EXPLICIT_PATH_OVERLAY_TYPES: frozenset[str] = frozenset({"PROGRESSION_PATH", "PR
 def _candle_anchor_row(candle: Mapping[str, Any], index: int) -> dict[str, float | int]:
     box = _raw_bbox(candle) or [0.0, 0.0, 1.0, 1.0]
     left, top, right, bottom = [float(value) for value in box[:4]]
-    open_y = _float(candle.get("open_y", candle.get("open_px", candle.get("open_price_y"))), float("nan"))
-    close_y = _float(candle.get("close_y", candle.get("close_px", candle.get("close_price_y"))), float("nan"))
+    open_y = _first_finite_number(
+        candle,
+        ("open_y_px", "open_y", "open_px", "open_price_y"),
+        float("nan"),
+    )
+    close_y = _first_finite_number(
+        candle,
+        ("close_y_px", "close_y", "close_px", "close_price_y"),
+        float("nan"),
+    )
     if open_y == open_y and close_y == close_y:
         body_top = min(open_y, close_y)
         body_bottom = max(open_y, close_y)
     else:
-        body_top = _float(candle.get("body_top", candle.get("body_y0")), top + (bottom - top) * 0.24)
-        body_bottom = _float(candle.get("body_bottom", candle.get("body_y1")), bottom - (bottom - top) * 0.24)
+        body_top = _first_finite_number(
+            candle,
+            ("body_top_px", "body_top", "body_y0"),
+            top + (bottom - top) * 0.24,
+        )
+        body_bottom = _first_finite_number(
+            candle,
+            ("body_bottom_px", "body_bottom", "body_y1"),
+            bottom - (bottom - top) * 0.24,
+        )
         if body_bottom < body_top:
             body_top, body_bottom = body_bottom, body_top
-    wick_high = _float(
-        candle.get("wick_high_y", candle.get("high_y", candle.get("high_px", candle.get("top_y")))),
+    wick_high = _first_finite_number(
+        candle,
+        ("wick_top_px", "wick_high_y", "high_y", "high_px", "top_y", "wick_top", "wick_high"),
         top,
     )
-    wick_low = _float(
-        candle.get("wick_low_y", candle.get("low_y", candle.get("low_px", candle.get("bottom_y")))),
+    wick_low = _first_finite_number(
+        candle,
+        ("wick_bottom_px", "wick_low_y", "low_y", "low_px", "bottom_y", "wick_bottom", "wick_low"),
         bottom,
     )
-    center_x = _float(candle.get("center_x", candle.get("x_center")), (left + right) * 0.5)
+    center_x = _first_finite_number(
+        candle,
+        ("center_x_px", "center_x", "x_center"),
+        (left + right) * 0.5,
+    )
     center_y = _float(candle.get("center_y", candle.get("y_center")), (top + bottom) * 0.5)
     return {
         "index": int(index),
@@ -899,6 +940,16 @@ def _short_display_label_for_overlay(object_type: str, side: str, fallback: str)
         return "DEMAND"
     if type_name == "OPPOSING_FORCE":
         return "OPPOSING"
+    if type_name == "ORDER_BLOCK":
+        return "ORDER BLOCK"
+    if type_name == "FAIR_VALUE_GAP":
+        return "FAIR VALUE GAP"
+    if type_name == "LIQUIDITY_POOL":
+        return "LIQUIDITY POOL"
+    if type_name == "LIQUIDITY_SWEEP":
+        return "LIQUIDITY SWEEP"
+    if type_name == "MARKET_STRUCTURE_SHIFT":
+        return "MARKET STRUCTURE SHIFT"
     if type_name == "SUPPORT_TRENDLINE":
         return "SUPPORT TRENDLINE"
     if type_name == "RESISTANCE_TRENDLINE":
@@ -956,6 +1007,11 @@ def _display_profile_for_overlay(
         label_hidden = score < 0.72
         visual_weight = max(0.42, min(0.76, 0.36 + score * 0.28 + max(confidence, truth_score) * 0.10))
         visible_modes = ["CLEAN_LIVE", "ACTIVE_CONTEXT", "SUPPLY_DEMAND", "SMC_COUNCIL", "FULL_HISTORY_READ", "INSPECTOR"]
+    elif type_name in SMART_MONEY_OVERLAY_TYPES:
+        display_state = "COMPACT"
+        label_hidden = False
+        visual_weight = max(0.52, min(0.84, 0.42 + score * 0.28 + max(confidence, truth_score) * 0.12))
+        visible_modes = ["SMART_MONEY", "INSPECTOR"]
     elif type_name in TRENDLINE_OVERLAY_TYPES:
         display_state = "COMPACT"
         label_hidden = True
@@ -979,6 +1035,8 @@ def _display_profile_for_overlay(
         semantic_family = "invalidation"
     elif type_name == "OPPOSING_FORCE":
         semantic_family = "opposing"
+    elif type_name in SMART_MONEY_OVERLAY_TYPES:
+        semantic_family = "smart_money"
     elif type_name in HISTORICAL_OVERLAY_TYPES:
         semantic_family = "history"
     if display_state in {"GHOSTED", "ICON_ONLY", "INSPECTOR_LABEL", "INSPECTOR_ONLY_LABEL"}:
@@ -1070,6 +1128,206 @@ def _active_zone_lifecycle(lifecycle_state: str) -> bool:
     return lifecycle_state in {"FRESH_ACTIVE", "MITIGATED_ACTIVE", "HISTORICAL_ACTIVE", "ACTIVE", "FRESH", "TESTED", "MITIGATED"}
 
 
+def _identity_token(value: Any) -> str:
+    return "".join(character for character in str(value or "").strip().lower() if character.isalnum())
+
+
+def _zone_identity_tokens(zone: Mapping[str, Any]) -> set[str]:
+    return {
+        token
+        for token in (
+            _identity_token(zone.get("key")),
+            _identity_token(zone.get("zone_key")),
+            _identity_token(zone.get("zone_id")),
+            _identity_token(zone.get("source_zone_id")),
+            _identity_token(zone.get("label")),
+        )
+        if token
+    }
+
+
+def _resolve_smart_money_source_zone(
+    reference: Mapping[str, Any],
+    zones: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    references = (
+        reference.get("zone_key"),
+        reference.get("source_zone_key"),
+        reference.get("source_zone_id"),
+        reference.get("zone_id"),
+        reference.get("key"),
+        reference.get("zone_label"),
+        reference.get("label"),
+    )
+    for raw_reference in references:
+        token = _identity_token(raw_reference)
+        if not token:
+            continue
+        for zone in zones:
+            if token not in _zone_identity_tokens(zone):
+                continue
+            if _raw_bbox(zone) is not None:
+                return dict(zone)
+    return None
+
+
+def _hard_anchored_smart_money_row(
+    raw: Mapping[str, Any],
+    *,
+    bounds: Sequence[Any],
+    candles: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    geometry = normalize_bounds(bounds)
+    if geometry is None:
+        return None
+    row = dict(raw)
+    explicit_indices = _anchor_indices_from_raw(row)
+    source_index = int(_float(row.get("source_index"), -1.0))
+    if 0 <= source_index < len(candles) and source_index not in explicit_indices:
+        explicit_indices.append(source_index)
+    inferred_indices, inferred_points = _candle_anchor_evidence(
+        {**row, "bbox": geometry, "anchor_candle_indices": explicit_indices},
+        geometry,
+        candles,
+    )
+    anchor_indices = list(dict.fromkeys([*explicit_indices, *inferred_indices]))
+    if not anchor_indices:
+        return None
+    touch_points = _point_rows(row.get("touch_points")) or inferred_points
+    row.update(
+        {
+            "bbox": list(geometry),
+            "bounds": list(geometry),
+            "anchor_candles": anchor_indices,
+            "anchor_candle_indices": anchor_indices,
+            "touch_points": touch_points,
+            "anchor_evidence": {
+                "valid": True,
+                "evidence_type": _text(row.get("role"), "smart_money_geometry"),
+                "reason": "Hard chart geometry resolved to tracked candle evidence.",
+                "candle_indices": anchor_indices,
+                "touch_points": touch_points,
+            },
+            "preserve_source_geometry": True,
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+        }
+    )
+    return row
+
+
+def _professional_liquidity_pool_row(
+    liquidity_pool: Mapping[str, Any],
+    source_zone: Mapping[str, Any],
+    *,
+    candles: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Represent a liquidity pool as a thin, evidence-bounded price band.
+
+    A liquidity pool is an equal-high/equal-low level, not the complete supply
+    or demand zone that supplied its context. Reusing the parent zone rectangle
+    makes the overlay look authoritative across prices that were never part of
+    the pool. This adapter keeps the parent zone for provenance while deriving
+    the visible geometry from the actual wick touches.
+    """
+
+    source_bounds = _raw_bbox(source_zone)
+    if source_bounds is None:
+        return None
+    merged = {**source_zone, **liquidity_pool}
+    anchor_indices = list(dict.fromkeys(_anchor_indices_from_raw(merged)))
+    explicit_points = (
+        _point_rows(liquidity_pool.get("touch_points"))
+        or _point_rows(liquidity_pool.get("anchor_wick_points"))
+        or _point_rows(source_zone.get("touch_points"))
+        or _point_rows(source_zone.get("anchor_wick_points"))
+    )
+
+    source_center_y = (source_bounds[1] + source_bounds[3]) * 0.5
+    level_y = _first_finite_number(
+        merged,
+        ("wick_anchor_y", "line_y", "liquidity_level_y", "price_level_y"),
+        _median([point[1] for point in explicit_points], source_center_y),
+    )
+    source_height = max(1.0, source_bounds[3] - source_bounds[1])
+    touch_tolerance = max(6.0, min(20.0, source_height * 0.25))
+    inlier_points = [
+        [float(point[0]), float(point[1])]
+        for point in explicit_points
+        if abs(float(point[1]) - level_y) <= touch_tolerance
+    ]
+
+    # A single wick is a level candidate, not a liquidity pool. Keep it out of
+    # the public overlay plane until at least two independent candle touches
+    # exist at the level.
+    if explicit_points:
+        distinct_touch_x = {round(point[0], 2) for point in inlier_points}
+        if len(distinct_touch_x) < 2:
+            return None
+    elif len(set(anchor_indices)) < 2:
+        return None
+
+    chart_left, chart_top, chart_right, chart_bottom = _raw_chart_extent(candles, source_bounds)
+    candle_boxes = [box for candle in candles if (box := _raw_bbox(candle)) is not None]
+    median_candle_width = _median(
+        [max(1.0, box[2] - box[0]) for box in candle_boxes],
+        8.0,
+    )
+    anchor_xs = [point[0] for point in inlier_points]
+    if not anchor_xs:
+        for index in anchor_indices:
+            if index < 0 or index >= len(candles):
+                continue
+            candle_box = _raw_bbox(candles[index])
+            if candle_box is not None:
+                anchor_xs.append((candle_box[0] + candle_box[2]) * 0.5)
+    if len({round(value, 2) for value in anchor_xs}) < 2:
+        return None
+
+    horizontal_pad = max(3.0, min(10.0, median_candle_width * 0.55))
+    left = max(chart_left, min(anchor_xs) - horizontal_pad)
+    right = min(chart_right, max(anchor_xs) + horizontal_pad)
+    if right - left < max(12.0, median_candle_width * 1.5):
+        center_x = (left + right) * 0.5
+        half_width = max(6.0, median_candle_width * 0.75)
+        left = max(chart_left, center_x - half_width)
+        right = min(chart_right, center_x + half_width)
+
+    chart_height = max(1.0, chart_bottom - chart_top)
+    band_height = max(4.0, min(10.0, median_candle_width * 0.65, chart_height * 0.014))
+    top = max(chart_top, level_y - band_height * 0.5)
+    bottom = min(chart_bottom, level_y + band_height * 0.5)
+    geometry = normalize_bounds([left, top, right, bottom])
+    if geometry is None:
+        return None
+
+    candidate = _hard_anchored_smart_money_row(
+        {
+            **merged,
+            "bbox": geometry,
+            "bounds": geometry,
+            "source_bbox": source_bounds,
+            "source_zone_id": source_zone.get("zone_id") or source_zone.get("key"),
+            "role": "liquidity_pool",
+            "geometry_kind": "LIQUIDITY_PRICE_BAND",
+            "line_y": round(float(level_y), 3),
+            "price_level_y": round(float(level_y), 3),
+            "band_height_px": round(float(bottom - top), 3),
+            "line_points": [
+                [round(float(left), 3), round(float(level_y), 3)],
+                [round(float(right), 3), round(float(level_y), 3)],
+            ],
+            "touch_points": inlier_points,
+            "anchor_wick_points": inlier_points,
+            "anchor_candle_indices": anchor_indices,
+            "touch_count": len(inlier_points) if inlier_points else len(set(anchor_indices)),
+            "source_zone_geometry_preserved_for_provenance": True,
+        },
+        bounds=geometry,
+        candles=candles,
+    )
+    return candidate
+
+
 def _point_pair_bounds(points: Sequence[Any]) -> list[float] | None:
     return normalize_bounds(points)
 
@@ -1114,22 +1372,82 @@ def _line_y_at(first: Sequence[float], second: Sequence[float], x: float) -> flo
     return y0 + ratio * (y1 - y0)
 
 
-def _candle_line_rows(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, float]]:
-    rows: list[dict[str, float]] = []
+def _explicit_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    normalized = str(value or "").strip().lower()
+    if normalized in {"1", "true", "yes", "on", "closed", "complete", "completed", "final", "finalized", "confirmed"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "forming", "live", "open", "partial", "in_progress", "building"}:
+        return False
+    return None
+
+
+def _candle_closed_status(candle: Mapping[str, Any], *, is_latest: bool) -> tuple[bool, str]:
+    for key in ("is_closed", "closed", "is_complete", "complete", "finalized", "confirmed"):
+        if key not in candle:
+            continue
+        value = _explicit_bool(candle.get(key))
+        if value is not None:
+            return value, f"explicit:{key}"
+    for key in ("is_forming", "forming", "is_live", "partial"):
+        if key not in candle:
+            continue
+        value = _explicit_bool(candle.get(key))
+        if value is not None:
+            return not value, f"explicit_inverse:{key}"
+    for key in ("candle_state", "bar_state", "status", "lifecycle_state"):
+        if key not in candle:
+            continue
+        value = _explicit_bool(candle.get(key))
+        if value is not None:
+            return value, f"status:{key}"
+    # The detector emits an ordered historical sequence but does not yet mark
+    # bar closure explicitly. All earlier bars are closed observations; the
+    # rightmost bar remains forming and can probe a line without invalidating it.
+    return (not is_latest), "ordered_sequence_default"
+
+
+def _candle_line_rows(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     for index, candle in enumerate(candles):
         bbox = _raw_bbox(candle)
         if bbox is None:
             continue
         left, box_top, right, box_bottom = [float(value) for value in bbox[:4]]
         body_box = _bounds_from_first_key(candle, ("body_bbox", "body_bounds", "body_pixel_bbox", "body_box"))
-        body_top = float(body_box[1]) if body_box else box_top
-        body_bottom = float(body_box[3]) if body_box else box_bottom
+        open_y = _first_finite_number(
+            candle,
+            ("open_y_px", "open_y", "open_px", "open_price_y"),
+            float("nan"),
+        )
+        close_y = _first_finite_number(
+            candle,
+            ("close_y_px", "close_y", "close_px", "close_price_y"),
+            float("nan"),
+        )
+        body_top_default = float(body_box[1]) if body_box else min(open_y, close_y) if open_y == open_y and close_y == close_y else box_top
+        body_bottom_default = float(body_box[3]) if body_box else max(open_y, close_y) if open_y == open_y and close_y == close_y else box_bottom
+        body_top = _first_finite_number(
+            candle,
+            ("body_top_px", "body_top", "body_y0"),
+            body_top_default,
+        )
+        body_bottom = _first_finite_number(
+            candle,
+            ("body_bottom_px", "body_bottom", "body_y1"),
+            body_bottom_default,
+        )
+        body_top, body_bottom = sorted((body_top, body_bottom))
         wick_box = _bounds_from_first_key(candle, ("wick_bbox", "wick_bounds", "wick_pixel_bbox", "wick_box"))
         wick_top_default = float(wick_box[1]) if wick_box else box_top
         wick_bottom_default = float(wick_box[3]) if wick_box else box_bottom
         wick_top = _first_finite_number(
             candle,
             (
+                "wick_top_px",
                 "wick_top",
                 "wick_y1",
                 "high_y",
@@ -1144,6 +1462,7 @@ def _candle_line_rows(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, fl
         wick_bottom = _first_finite_number(
             candle,
             (
+                "wick_bottom_px",
                 "wick_bottom",
                 "wick_y2",
                 "low_y",
@@ -1155,13 +1474,23 @@ def _candle_line_rows(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, fl
             ),
             wick_bottom_default,
         )
-        wick_top = min(wick_top, box_top, body_top)
-        wick_bottom = max(wick_bottom, box_bottom, body_bottom)
-        center_x = _float(candle.get("center_x"), (left + right) * 0.5)
-        center_y = _float(candle.get("center_y"), (body_top + body_bottom) * 0.5)
+        # Canonical detector wick coordinates are authoritative. The outer
+        # detection bbox may include anti-aliasing, labels, or tracking padding
+        # and must not silently move a price anchor away from the actual wick.
+        wick_top = min(wick_top, body_top)
+        wick_bottom = max(wick_bottom, body_bottom)
+        center_x = _first_finite_number(
+            candle,
+            ("center_x_px", "center_x", "x_center"),
+            (left + right) * 0.5,
+        )
+        center_y = _float(
+            candle.get("center_y_px", candle.get("center_y")),
+            (body_top + body_bottom) * 0.5,
+        )
         rows.append(
             {
-                "index": float(index),
+                "index": int(index),
                 "left": left,
                 "top": wick_top,
                 "right": right,
@@ -1170,51 +1499,72 @@ def _candle_line_rows(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, fl
                 "body_bottom": body_bottom,
                 "center_x": center_x,
                 "center_y": center_y,
+                "open_y": open_y,
+                "close_y": close_y,
+                "direction": _text(candle.get("direction") or candle.get("side")).upper(),
+                "raw_candle": candle,
             }
         )
     rows.sort(key=lambda item: item["center_x"])
+    for position, row in enumerate(rows):
+        closed, closed_source = _candle_closed_status(
+            cast(Mapping[str, Any], row.get("raw_candle")),
+            is_latest=position == len(rows) - 1,
+        )
+        row["position"] = position
+        row["closed"] = closed
+        row["closed_source"] = closed_source
+        row.pop("raw_candle", None)
     return rows
 
 
-def _pivot_rows(rows: Sequence[Mapping[str, float]], *, role: str, window: int = 2) -> list[dict[str, float]]:
-    pivots: list[dict[str, float]] = []
-    if len(rows) < 2:
+def _pivot_rows(rows: Sequence[Mapping[str, Any]], *, role: str, window: int = 2) -> list[dict[str, Any]]:
+    pivots: list[dict[str, Any]] = []
+    if len(rows) < max(3, window + 2):
         return pivots
+    median_range = _median(
+        [max(1.0, float(row.get("bottom", 0.0)) - float(row.get("top", 0.0))) for row in rows],
+        1.0,
+    )
+    minimum_prominence = max(0.75, median_range * 0.025)
     for index, row in enumerate(rows):
+        if not bool(row.get("closed", False)):
+            continue
         left = max(0, index - window)
         right = min(len(rows), index + window + 1)
-        neighbors = rows[left:right]
+        left_neighbors = rows[left:index]
+        right_neighbors = rows[index + 1 : right]
+        # The left visible boundary may be used as the first historical anchor,
+        # but arbitrary extrema are never synthesized. Every later pivot needs
+        # a full window of *closed* observations on both sides; the live/right
+        # edge therefore cannot masquerade as a confirmed swing.
+        if len(left_neighbors) >= window and len(right_neighbors) >= window:
+            neighbors = [*left_neighbors, *right_neighbors]
+        elif not left_neighbors and len(right_neighbors) >= window:
+            neighbors = list(right_neighbors)
+        else:
+            continue
+        if not all(bool(neighbor.get("closed", False)) for neighbor in neighbors):
+            continue
         if role == "support":
             value = float(row.get("bottom", 0.0))
-            if value >= max(float(item.get("bottom", 0.0)) for item in neighbors) - 1e-6:
+            if value >= max(float(item.get("bottom", 0.0)) for item in neighbors) + minimum_prominence:
                 pivots.append(dict(row))
         elif role == "resistance":
             value = float(row.get("top", 0.0))
-            if value <= min(float(item.get("top", 0.0)) for item in neighbors) + 1e-6:
+            if value <= min(float(item.get("top", 0.0)) for item in neighbors) - minimum_prominence:
                 pivots.append(dict(row))
-    if len(pivots) >= 2:
-        return pivots
-    ranked = sorted(
-        rows,
-        key=lambda item: float(item.get("bottom" if role == "support" else "top", 0.0)),
-        reverse=role == "support",
-    )
-    for row in ranked:
-        if not pivots or abs(float(row.get("center_x", 0.0)) - float(pivots[0].get("center_x", 0.0))) > 8.0:
-            pivots.append(dict(row))
-        if len(pivots) >= 2:
-            break
     return sorted(pivots, key=lambda item: item["center_x"])
 
 
 def _validated_trendline(
-    rows: Sequence[Mapping[str, float]],
+    rows: Sequence[Mapping[str, Any]],
     *,
     role: str,
     local_only: bool = False,
 ) -> dict[str, Any] | None:
-    scoped = list(rows[-min(12, len(rows)) :]) if local_only else list(rows)
-    if len(scoped) < (5 if local_only else 4):
+    scoped = list(rows[-min(16, len(rows)) :]) if local_only else list(rows)
+    if len(scoped) < (7 if local_only else 8):
         return None
     pivots = _pivot_rows(scoped, role=role, window=1 if local_only else 2)
     if len(pivots) < 2:
@@ -1223,11 +1573,27 @@ def _validated_trendline(
         sum(max(1.0, float(row.get("bottom", 0.0)) - float(row.get("top", 0.0))) for row in scoped)
         / max(1, len(scoped))
     )
+    positive_gaps = [
+        float(right.get("center_x", 0.0)) - float(left.get("center_x", 0.0))
+        for left, right in zip(scoped, scoped[1:])
+        if float(right.get("center_x", 0.0)) > float(left.get("center_x", 0.0))
+    ]
+    median_gap = max(1.0, _median(positive_gaps, 1.0))
+    visible_x_span = max(1.0, float(scoped[-1]["center_x"]) - float(scoped[0]["center_x"]))
+    minimum_span_bars = max(
+        3 if local_only else 5,
+        int(round((len(scoped) - 1) * (0.16 if local_only else 0.20))),
+    )
+    minimum_span_fraction = 0.14 if local_only else 0.22
     touch_tolerance = max(1.5, min(5.0 if local_only else 6.0, average_range * (0.16 if local_only else 0.20)))
     break_tolerance = max(touch_tolerance * 1.65, average_range * 0.34)
-    min_anchor_dx = max(14.0, average_range * (0.55 if local_only else 0.75))
+    min_anchor_dx = max(
+        14.0,
+        median_gap * minimum_span_bars * 0.80,
+        visible_x_span * minimum_span_fraction,
+    )
     min_anchor_dy = max(2.0, average_range * (0.12 if local_only else 0.10))
-    latest_index = int(scoped[-1]["index"])
+    latest_position = int(scoped[-1]["position"])
     best: dict[str, Any] | None = None
     for first_index in range(0, len(pivots) - 1):
         for second_index in range(first_index + 1, len(pivots)):
@@ -1235,6 +1601,12 @@ def _validated_trendline(
             second = pivots[second_index]
             anchor_dx = abs(float(second["center_x"]) - float(first["center_x"]))
             if anchor_dx < min_anchor_dx:
+                continue
+            anchor_span_bars = abs(int(second["position"]) - int(first["position"]))
+            if anchor_span_bars < minimum_span_bars:
+                continue
+            anchor_span_fraction = anchor_dx / visible_x_span
+            if anchor_span_fraction < minimum_span_fraction:
                 continue
             first_point = [
                 float(first["center_x"]),
@@ -1252,8 +1624,12 @@ def _validated_trendline(
             anchor_dx_signed = float(second_point[0]) - float(first_point[0])
             slope = 0.0 if abs(anchor_dx_signed) <= 1e-6 else anchor_dy / anchor_dx_signed
             intercept = float(first_point[1]) - slope * float(first_point[0])
-            anchor_start = int(min(first["index"], second["index"]))
-            anchor_end = int(max(first["index"], second["index"]))
+            normalized_slope_per_bar = abs(slope) * median_gap / max(1.0, average_range)
+            maximum_normalized_slope = 1.00 if local_only else 0.72
+            if normalized_slope_per_bar > maximum_normalized_slope:
+                continue
+            anchor_start = int(min(first["position"], second["position"]))
+            anchor_end = int(max(first["position"], second["position"]))
             if anchor_end <= anchor_start:
                 continue
             line_obstruction_count = 0
@@ -1262,44 +1638,53 @@ def _validated_trendline(
             evaluated_after_anchor = 0
             touch_indices = {anchor_start, anchor_end}
             significant_close = False
+            forming_touch = False
             for row in scoped:
-                row_index = int(row["index"])
-                if row_index < anchor_start or row_index > latest_index:
+                row_position = int(row["position"])
+                if row_position < anchor_start or row_position > latest_position:
                     continue
                 line_y = _line_y_at(first_point, second_point, float(row["center_x"]))
                 top = float(row["top"])
                 bottom = float(row["bottom"])
-                body_top = float(row.get("body_top", top))
-                body_bottom = float(row.get("body_bottom", bottom))
-                center_y = float(row.get("center_y", (top + bottom) * 0.5))
+                close_y = float(row.get("close_y", float("nan")))
+                closed = bool(row.get("closed", False))
                 if role == "support":
                     wick_distance = bottom - line_y
-                    body_break_distance = max(center_y - line_y, body_bottom - line_y)
+                    close_break_distance = close_y - line_y if close_y == close_y else float("nan")
                 else:
                     wick_distance = line_y - top
-                    body_break_distance = max(line_y - center_y, line_y - body_top)
-                if anchor_start < row_index < anchor_end and wick_distance > touch_tolerance:
+                    close_break_distance = line_y - close_y if close_y == close_y else float("nan")
+                if anchor_start < row_position < anchor_end and wick_distance > touch_tolerance:
                     line_obstruction_count += 1
                     break
-                if row_index > anchor_end:
-                    evaluated_after_anchor += 1
-                    if body_break_distance > break_tolerance:
+                if row_position > anchor_end:
+                    if closed:
+                        evaluated_after_anchor += 1
+                    if closed and close_break_distance == close_break_distance and close_break_distance > break_tolerance:
                         significant_close = True
                         body_cross_count += 1
                         break
                     if wick_distance > touch_tolerance:
                         wick_probe_count += 1
-                    if body_break_distance > touch_tolerance:
+                    if closed and close_break_distance == close_break_distance and close_break_distance > touch_tolerance:
                         body_cross_count += 1
                 if abs(wick_distance) <= touch_tolerance * 1.2:
-                    touch_indices.add(row_index)
+                    if closed:
+                        touch_indices.add(row_position)
+                    else:
+                        forming_touch = True
             if line_obstruction_count or significant_close:
                 continue
             last_x = float(scoped[-1]["center_x"])
             latest_row = scoped[-1]
             latest_line_y = _line_y_at(first_point, second_point, last_x)
-            latest_center_y = float(latest_row.get("center_y", latest_line_y))
-            close_distance_norm = min(9.999, abs(latest_center_y - latest_line_y) / max(1.0, average_range))
+            latest_close_y = float(latest_row.get("close_y", float("nan")))
+            latest_price_y = (
+                latest_close_y
+                if latest_close_y == latest_close_y
+                else float(latest_row.get("center_y", latest_line_y))
+            )
+            close_distance_norm = min(9.999, abs(latest_price_y - latest_line_y) / max(1.0, average_range))
             if local_only and close_distance_norm > 2.25:
                 continue
             end_point = [last_x, latest_line_y]
@@ -1309,7 +1694,7 @@ def _validated_trendline(
             touch_rows = [
                 row
                 for row in scoped
-                if int(row["index"]) in touch_indices
+                if int(row["position"]) in touch_indices
             ]
             touch_points = [
                 [
@@ -1321,33 +1706,69 @@ def _validated_trendline(
             if len(touch_points) < 2:
                 touch_points = [first_point, second_point]
             touches = max(2, len(touch_points))
-            anchor_candles = sorted({int(row["index"]) for row in touch_rows} | {anchor_start, anchor_end})
+            touch_candle_indices = sorted(
+                {int(row["index"]) for row in touch_rows}
+                | {int(first["index"]), int(second["index"])}
+            )
+            anchor_candles = [int(first["index"]), int(second["index"])]
             body_cross_fraction = body_cross_count / max(1, evaluated_after_anchor)
-            score = (anchor_dx * 0.012) + touches + (0.75 / max(0.35, close_distance_norm + 0.35) if local_only else 0.0)
+            extension_bars = max(0, latest_position - anchor_end)
+            wick_probe_fraction = wick_probe_count / max(1, extension_bars)
+            confirmation_state = "CONFIRMED" if touches >= 3 else "DEVELOPING"
+            # Outer, well-spaced anchors describe the structural trend. A
+            # shorter candidate must not win merely because its extrapolation
+            # happens to touch a later wick after repeatedly cutting through
+            # other wicks. Probes remain non-invalidating, but repeated probes
+            # reduce the candidate's structural rank.
+            probe_rank_penalty = min(2.4, wick_probe_count * 0.55)
+            score = (
+                anchor_span_fraction * (3.2 if not local_only else 2.6)
+                + min(4, touches) * 0.85
+                + (0.8 if confirmation_state == "CONFIRMED" else 0.0)
+                + (0.75 / max(0.35, close_distance_norm + 0.35) if local_only else 0.0)
+                - normalized_slope_per_bar * 0.65
+                - probe_rank_penalty
+            )
+            confidence = _clip01(
+                0.56
+                + min(0.21, max(0, touches - 2) * 0.07)
+                + min(0.10, anchor_span_fraction * 0.16)
+                - min(0.10, normalized_slope_per_bar * 0.10)
+                - min(0.10, wick_probe_count * 0.02)
+            )
             candidate: dict[str, Any] = {
                 "role": role,
                 "points": line_points,
                 "line_points": line_points,
                 "touch_points": touch_points,
-                "anchor_wick_points": touch_points,
+                "anchor_wick_points": [first_point, second_point],
                 "anchor_candles": anchor_candles,
+                "anchor_candle_indices": anchor_candles,
+                "touch_candle_indices": touch_candle_indices,
                 "touch_count": int(touches),
                 "slope": round(float(slope), 6),
                 "intercept": round(float(intercept), 6),
+                "normalized_slope_per_bar": round(float(normalized_slope_per_bar), 6),
+                "anchor_span_bars": int(anchor_span_bars),
+                "anchor_span_fraction": round(float(anchor_span_fraction), 6),
                 "wick_probe_count": int(wick_probe_count),
+                "wick_probe_fraction": round(float(wick_probe_fraction), 4),
                 "line_obstruction_count": int(line_obstruction_count),
                 "body_cross_fraction": round(float(body_cross_fraction), 4),
                 "close_distance_norm": round(float(close_distance_norm), 4),
                 "significant_close": bool(significant_close),
+                "forming_touch": bool(forming_touch),
                 "trendline_scope": "LOCAL" if local_only else "MAJOR",
-                "touch_quality": "VALIDATED",
+                "touch_quality": confirmation_state,
+                "confirmation_state": confirmation_state,
                 "breach_state": "ACTIVE",
-                "confidence": _clip01(0.60 + min(0.28, touches * 0.055) - min(0.08, wick_probe_count * 0.015)),
-                "trendline_validation": "wick_anchor_no_obstruction_no_significant_close",
+                "confidence": confidence,
+                "trendline_validation": "wick_anchor_no_obstruction_closed_body_validation",
                 "validation_reason": (
-                    "diagonal_wick_anchors_touch_no_price_obstruction_between_points_and_no_significant_close"
+                    "diagonal_wick_anchors_touch_no_price_obstruction_and_no_closed_body_breach"
                 ),
-                "skill_gate": "TRENDLINE_WICK_ANCHOR_NO_OBSTRUCTION_V2",
+                "skill_gate": "TRENDLINE_WICK_ANCHOR_NO_OBSTRUCTION_V3",
+                "anchor_type": "TRENDLINE_TOUCH_POINTS",
                 "_score": score,
             }
             if best is None or float(candidate["_score"]) > float(best.get("_score", 0.0)):
@@ -1358,17 +1779,60 @@ def _validated_trendline(
     return best
 
 
+def _trendlines_are_equivalent(first: Mapping[str, Any], second: Mapping[str, Any]) -> bool:
+    if _text(first.get("role")).lower() != _text(second.get("role")).lower():
+        return False
+    first_points = _point_rows(first.get("line_points") or first.get("points"))
+    second_points = _point_rows(second.get("line_points") or second.get("points"))
+    if len(first_points) < 2 or len(second_points) < 2:
+        return False
+    shared_x = min(first_points[-1][0], second_points[-1][0])
+    first_y = _line_y_at(first_points[0], first_points[1], shared_x)
+    second_y = _line_y_at(second_points[0], second_points[1], shared_x)
+    average_range = max(
+        1.0,
+        _float(first.get("_average_range_px"), 1.0),
+        _float(second.get("_average_range_px"), 1.0),
+    )
+    median_gap = max(
+        1.0,
+        _float(first.get("_median_gap_px"), 1.0),
+        _float(second.get("_median_gap_px"), 1.0),
+    )
+    slope_delta_per_bar = abs(
+        _float(first.get("slope"), 0.0) - _float(second.get("slope"), 0.0)
+    ) * median_gap / average_range
+    return bool(
+        abs(first_y - second_y) <= max(2.0, average_range * 0.12)
+        and slope_delta_per_bar <= 0.16
+    )
+
+
 def _derive_trendline_overlays(candles: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     rows = _candle_line_rows(candles)
     if len(rows) < 4:
         return []
     overlays: list[dict[str, Any]] = []
+    major_candidates: list[dict[str, Any]] = []
     for role, overlay_type, label in (
         ("support", "SUPPORT_TRENDLINE", "SUPPORT TRENDLINE"),
         ("resistance", "RESISTANCE_TRENDLINE", "RESISTANCE TRENDLINE"),
     ):
         candidate = _validated_trendline(rows, role=role, local_only=False)
         if candidate:
+            candidate["_average_range_px"] = _median(
+                [max(1.0, float(row["bottom"]) - float(row["top"])) for row in rows],
+                1.0,
+            )
+            candidate["_median_gap_px"] = _median(
+                [
+                    float(right["center_x"]) - float(left["center_x"])
+                    for left, right in zip(rows, rows[1:])
+                    if float(right["center_x"]) > float(left["center_x"])
+                ],
+                1.0,
+            )
+            major_candidates.append(candidate)
             overlays.append(
                 {
                     **candidate,
@@ -1378,7 +1842,7 @@ def _derive_trendline_overlays(candles: Sequence[Mapping[str, Any]]) -> list[dic
                     "direction": "BUY" if role == "support" else "SELL",
                     "role": f"{role}_trendline",
                     "trendline_role": role,
-                    "anchor_type": "LINE",
+                    "anchor_type": "TRENDLINE_TOUCH_POINTS",
                     "bounds": _point_pair_bounds(candidate["points"]),
                     "visible_modes": ["CLEAN_LIVE", "TRENDLINES", "PATH", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
                     "lifecycle_state": "ACTIVE",
@@ -1400,6 +1864,21 @@ def _derive_trendline_overlays(candles: Sequence[Mapping[str, Any]]) -> list[dic
     if inner:
         inner.pop("_inner_score", None)
         latest_direction = str(inner.get("role") or latest_direction)
+        inner["_average_range_px"] = _median(
+            [max(1.0, float(row["bottom"]) - float(row["top"])) for row in rows[-min(16, len(rows)) :]],
+            1.0,
+        )
+        inner["_median_gap_px"] = _median(
+            [
+                float(right["center_x"]) - float(left["center_x"])
+                for left, right in zip(rows, rows[1:])
+                if float(right["center_x"]) > float(left["center_x"])
+            ],
+            1.0,
+        )
+        if any(_trendlines_are_equivalent(major, inner) for major in major_candidates):
+            inner = None
+    if inner:
         overlays.append(
             {
                 **inner,
@@ -1409,12 +1888,15 @@ def _derive_trendline_overlays(candles: Sequence[Mapping[str, Any]]) -> list[dic
                 "direction": "BUY" if latest_direction == "support" else "SELL",
                 "role": "inner_trendline",
                 "trendline_role": latest_direction,
-                "anchor_type": "LINE",
+                "anchor_type": "TRENDLINE_TOUCH_POINTS",
                 "bounds": _point_pair_bounds(inner["points"]),
                 "visible_modes": ["CLEAN_LIVE", "TRENDLINES", "PATH", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"],
                 "lifecycle_state": "ACTIVE",
             }
         )
+    for row in overlays:
+        row.pop("_average_range_px", None)
+        row.pop("_median_gap_px", None)
     return [row for row in overlays if normalize_bounds(row.get("bounds")) is not None]
 
 
@@ -1595,6 +2077,9 @@ class _RegistryBuilder:
             "tracking_summary.tracked_candles": "READY" if candles else "MISSING",
             "tracking_summary.structure_boxes": "READY" if _sequence_of_mappings(tracking.get("structure_boxes")) else "MISSING",
             "tracking_summary.projection": "READY" if _mapping(tracking.get("projection")) else "MISSING",
+            "tracking_summary.smart_money_context": "READY"
+            if _mapping(tracking.get("smart_money_context") or signal.get("smart_money_context"))
+            else "MISSING",
             "memory_projection": "READY" if _mapping(payload.get("memory_projection_predict") or payload.get("memory_projection_current")) else "MISSING",
         }
         if missing:
@@ -1669,6 +2154,21 @@ class _RegistryBuilder:
                     candles=candles,
                     anchor_indices=anchor_indices,
                 )
+                if bool(raw.get("preserve_source_geometry")) and anchor_indices:
+                    source_geometry = _raw_bbox(raw)
+                    if source_geometry is not None:
+                        bbox = source_geometry
+                        anchor_quality = {
+                            **anchor_quality,
+                            "score": max(0.68, _clip01(anchor_quality.get("score", 0.0))),
+                            "status": "VALID",
+                            "reason": "hard_source_geometry_with_candle_anchor",
+                            "anchor_count": len(anchor_indices),
+                            "tightened": False,
+                            "selected_anchor_indices": list(anchor_indices),
+                            "selected_anchor_points": list(anchor_touch_points),
+                            "floating_risk": min(0.32, _clip01(anchor_quality.get("floating_risk", 0.32))),
+                        }
             selected_anchor_indices = [
                 int(_float(item, -1.0))
                 for item in _sequence(anchor_quality.get("selected_anchor_indices"))
@@ -1785,6 +2285,7 @@ class _RegistryBuilder:
             if object_type in {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"}:
                 line_points = _point_rows(overlay_raw.get("line_points") or overlay_raw.get("points") or overlay_raw.get("path"))
                 touch_points = _point_rows(overlay_raw.get("touch_points")) or line_points[:2]
+                anchor_wick_points = _point_rows(overlay_raw.get("anchor_wick_points")) or line_points[:2]
                 if len(line_points) >= 2 and len(touch_points) >= 2:
                     normalized_overlay.update(
                         {
@@ -1794,7 +2295,7 @@ class _RegistryBuilder:
                             "path": line_points,
                             "touch_points": touch_points,
                             "trendline_touch_points": touch_points,
-                            "anchor_wick_points": touch_points,
+                            "anchor_wick_points": anchor_wick_points,
                             "anchor_evidence": {
                                 "valid": True,
                                 "anchor_type": "TRENDLINE_TOUCH_POINTS",
@@ -1803,7 +2304,7 @@ class _RegistryBuilder:
                                 "touch_count": int(_float(overlay_raw.get("touch_count"), float(len(touch_points)))),
                                 "validation": _text(
                                     overlay_raw.get("trendline_validation"),
-                                    "wick_anchor_no_obstruction_no_significant_close",
+                                    "wick_anchor_no_obstruction_closed_body_validation",
                                 ),
                             },
                             "anchor_evidence_status": "VALID",
@@ -1819,6 +2320,8 @@ class _RegistryBuilder:
                 candle_modes = ["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT", "INSPECTOR"]
             candle_row: dict[str, Any] = {
                 **candle,
+                "candle_index": candle_index,
+                "is_latest_candle": latest,
                 "visible_modes": candle_modes,
                 "label": "CURRENT CANDLE" if latest else "CANDLES",
                 "display_label": "NOW" if latest else "CANDLES",
@@ -2043,7 +2546,8 @@ class _RegistryBuilder:
                         lifecycle_state="HISTORICAL",
                     )
 
-        for index, zone in enumerate(_sequence_of_mappings(tracking.get("support_resistance_zones"))):
+        support_resistance_zones = _sequence_of_mappings(tracking.get("support_resistance_zones"))
+        for index, zone in enumerate(support_resistance_zones):
             role = _zone_role(zone)
             if role not in {"support", "resistance"}:
                 continue
@@ -2065,6 +2569,143 @@ class _RegistryBuilder:
                 side=zone.get("direction"),
                 lifecycle_state=lifecycle_state,
             )
+
+        smart_money_source_path = "tracking_summary.smart_money_context"
+        smart_money_context = _mapping(tracking.get("smart_money_context"))
+        if not smart_money_context:
+            smart_money_context = _mapping(signal.get("smart_money_context"))
+            smart_money_source_path = "latest_signal.smart_money_context"
+        smart_money_support_resistance = _mapping(smart_money_context.get("support_resistance"))
+        smart_money_source_zones = [
+            *support_resistance_zones,
+            *_sequence_of_mappings(signal.get("support_resistance_zones")),
+            *_sequence_of_mappings(smart_money_context.get("zones")),
+            *_sequence_of_mappings(smart_money_support_resistance.get("significant_zones")),
+            *_sequence_of_mappings(smart_money_support_resistance.get("reference_zones")),
+        ]
+
+        for index, order_block in enumerate(_sequence_of_mappings(smart_money_context.get("order_blocks"))):
+            candidate = _hard_anchored_smart_money_row(
+                {**order_block, "role": "order_block"},
+                bounds=order_block.get("bbox") or order_block.get("bounds") or [],
+                candles=candles,
+            )
+            if candidate is None:
+                continue
+            add_object(
+                candidate,
+                object_type="ORDER_BLOCK",
+                source_path=f"{smart_money_source_path}.order_blocks[{index}]",
+                source_key=order_block.get("id", order_block.get("source_index", index)),
+                label="ORDER BLOCK",
+                role="order_block",
+                layer="smart_money",
+                side=order_block.get("direction"),
+                lifecycle_state="MITIGATED_ACTIVE" if bool(order_block.get("mitigated")) else "ACTIVE",
+            )
+
+        for index, fair_value_gap in enumerate(_sequence_of_mappings(smart_money_context.get("fair_value_gaps"))):
+            candidate = _hard_anchored_smart_money_row(
+                {**fair_value_gap, "role": "fair_value_gap"},
+                bounds=fair_value_gap.get("bbox") or fair_value_gap.get("bounds") or [],
+                candles=candles,
+            )
+            if candidate is None:
+                continue
+            add_object(
+                candidate,
+                object_type="FAIR_VALUE_GAP",
+                source_path=f"{smart_money_source_path}.fair_value_gaps[{index}]",
+                source_key=fair_value_gap.get("id", fair_value_gap.get("source_index", index)),
+                label="FAIR VALUE GAP",
+                role="fair_value_gap",
+                layer="smart_money",
+                side=fair_value_gap.get("direction"),
+                lifecycle_state="MITIGATED_ACTIVE" if bool(fair_value_gap.get("mitigated")) else "ACTIVE",
+            )
+
+        for index, liquidity_pool in enumerate(_sequence_of_mappings(smart_money_context.get("liquidity_pools"))):
+            source_zone = _resolve_smart_money_source_zone(liquidity_pool, smart_money_source_zones)
+            if source_zone is None:
+                continue
+            candidate = _professional_liquidity_pool_row(
+                liquidity_pool,
+                source_zone,
+                candles=candles,
+            )
+            if candidate is None:
+                continue
+            add_object(
+                candidate,
+                object_type="LIQUIDITY_POOL",
+                source_path=f"{smart_money_source_path}.liquidity_pools[{index}]",
+                source_key=liquidity_pool.get("key", source_zone.get("key", index)),
+                label="LIQUIDITY POOL",
+                role="liquidity_pool",
+                layer="smart_money",
+                side=liquidity_pool.get("direction", source_zone.get("direction")),
+                lifecycle_state=_zone_lifecycle_state(source_zone),
+            )
+
+        for index, liquidity_sweep in enumerate(_sequence_of_mappings(smart_money_context.get("liquidity_sweeps"))):
+            source_zone = _resolve_smart_money_source_zone(liquidity_sweep, smart_money_source_zones)
+            if source_zone is None:
+                continue
+            source_bounds = _raw_bbox(source_zone)
+            candidate = _hard_anchored_smart_money_row(
+                {
+                    **source_zone,
+                    **liquidity_sweep,
+                    "bbox": source_bounds,
+                    "bounds": source_bounds,
+                    "source_bbox": source_bounds,
+                    "source_zone_id": source_zone.get("zone_id") or source_zone.get("key"),
+                    "role": "liquidity_sweep",
+                },
+                bounds=source_bounds or [],
+                candles=candles,
+            )
+            if candidate is None:
+                continue
+            add_object(
+                candidate,
+                object_type="LIQUIDITY_SWEEP",
+                source_path=f"{smart_money_source_path}.liquidity_sweeps[{index}]",
+                source_key=liquidity_sweep.get("id", liquidity_sweep.get("zone_key", index)),
+                label="LIQUIDITY SWEEP",
+                role="liquidity_sweep",
+                layer="smart_money",
+                side=liquidity_sweep.get("direction", source_zone.get("direction")),
+            )
+
+        market_structure_shift = _mapping(smart_money_context.get("market_structure_shift"))
+        if bool(market_structure_shift.get("active")):
+            shift_geometry = _sequence(
+                market_structure_shift.get("bbox")
+                or market_structure_shift.get("bounds")
+                or market_structure_shift.get("line_points")
+                or market_structure_shift.get("points")
+                or market_structure_shift.get("path")
+            )
+            candidate = _hard_anchored_smart_money_row(
+                {**market_structure_shift, "role": "market_structure_shift"},
+                bounds=shift_geometry,
+                candles=candles,
+            )
+            if candidate is not None:
+                add_object(
+                    candidate,
+                    object_type="MARKET_STRUCTURE_SHIFT",
+                    source_path=f"{smart_money_source_path}.market_structure_shift",
+                    source_key=(
+                        market_structure_shift.get("id")
+                        or f"{market_structure_shift.get('from', 'HOLD')}_{market_structure_shift.get('to', 'HOLD')}"
+                    ),
+                    label="MARKET STRUCTURE SHIFT",
+                    role="market_structure_shift",
+                    layer="smart_money",
+                    side=market_structure_shift.get("direction", market_structure_shift.get("to")),
+                )
 
         projection = _mapping(tracking.get("projection"))
         for index, zone in enumerate(_sequence_of_mappings(projection.get("zones"))):

@@ -1434,8 +1434,10 @@ def test_strategy_package_uses_visible_swing_horizon_not_one_candle_scalp() -> N
     expected = packet["allowance_package"]["expected_move_time"]
     assert packet["execution"]["enabled"] is True
     assert packet["execution"]["expiry_seconds"] >= 60 * 60
-    assert packet["allowance_package"]["entry_window"]["duration_sec"] == 300
-    assert packet["allowance_package"]["entry_window"]["candle_count"] == 1
+    assert packet["allowance_package"]["entry_window"]["duration_sec"] == 600
+    assert packet["allowance_package"]["entry_window"]["candle_count"] == 2
+    assert packet["allowance_package"]["entry_window_policy_v3"]["maximum_duration_sec"] == 900
+    assert packet["allowance_package"]["entry_location_guidance_v3"]["rule"] == "BUY_LOW"
     assert packet["allowance_package"]["thesis_horizon"]["expected_candle_count"] >= 12
     assert packet["allowance_package"]["professional_trade_plan"]["professional_grade"] is True
     assert expected["expected_candle_count"] >= 12
@@ -1445,13 +1447,12 @@ def test_strategy_package_uses_visible_swing_horizon_not_one_candle_scalp() -> N
 
 
 @pytest.mark.parametrize(
-    ("entry_window_seconds", "expected_handoff_ttl_seconds"),
-    ((900, 60.0), (30, 30.0)),
+    "trade_expiry_seconds",
+    (900, 30),
 )
-def test_execution_handoff_ttl_is_separate_from_trade_expiry_and_capped_by_entry_window(
+def test_execution_handoff_ttl_is_separate_from_trade_expiry_and_chart_setup_window(
     monkeypatch: pytest.MonkeyPatch,
-    entry_window_seconds: int,
-    expected_handoff_ttl_seconds: float,
+    trade_expiry_seconds: int,
 ) -> None:
     # Bound this fixture's professional thesis to twelve M5 candles so the
     # trade clock is exactly one hour and can be compared with the handoff TTL.
@@ -1461,7 +1462,7 @@ def test_execution_handoff_ttl_is_separate_from_trade_expiry_and_capped_by_entry
 
     def snapshot(frame_id: int) -> dict[str, Any]:
         payload = _strong_snapshot("BUY", frame_id=frame_id)
-        payload["timing"]["expiry_seconds"] = entry_window_seconds
+        payload["timing"]["expiry_seconds"] = trade_expiry_seconds
         payload["packet_valid_for_seconds"] = 60.0
         return payload
 
@@ -1475,12 +1476,42 @@ def test_execution_handoff_ttl_is_separate_from_trade_expiry_and_capped_by_entry
     assert packet["packet_type"] == "PG_EXECUTION_PACKET_V3"
     assert packet["execution"]["expiry_seconds"] == 3600
     assert packet["allowance_package"]["thesis_horizon"]["expected_duration_sec"] == 3600
-    assert packet["allowance_package"]["entry_window"]["duration_sec"] == entry_window_seconds
-    assert packet["valid_for_seconds"] == expected_handoff_ttl_seconds
-    assert packet["valid_until_epoch"] - packet["created_epoch"] == expected_handoff_ttl_seconds
+    assert packet["allowance_package"]["entry_window"]["duration_sec"] == 600
+    assert packet["allowance_package"]["entry_window_policy_v3"]["trade_expiry_reference_sec"] == (
+        trade_expiry_seconds
+    )
+    assert packet["valid_for_seconds"] == 60.0
+    assert packet["valid_until_epoch"] - packet["created_epoch"] == 60.0
     assert packet["promotion_trace"]["packet_validity_source"] == (
         "configured_handoff_ttl_capped_by_entry_window"
     )
+
+
+def test_chart_setup_window_fluctuates_with_the_opening_candle_remainder() -> None:
+    def snapshot(frame_id: int) -> dict[str, Any]:
+        payload = _strong_snapshot("SELL", frame_id=frame_id)
+        payload["current_candle"] = {
+            "candle_phase": "VALID",
+            "seconds_elapsed": 60,
+            "seconds_remaining": 240,
+            "entry_allowed": True,
+        }
+        return payload
+
+    council = ModelCouncilV3()
+    first = council.evaluate(snapshot(180), now_epoch=NOW)
+    packet = first if first.get("packet_type") == "PG_EXECUTION_PACKET_V3" else council.evaluate(
+        snapshot(181),
+        now_epoch=NOW + 0.5,
+    )
+
+    policy = packet["allowance_package"]["entry_window_policy_v3"]
+    assert packet["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert policy["timeframe_seconds"] == 300
+    assert policy["opening_candle_remaining_sec"] == 240
+    assert policy["duration_sec"] == 840
+    assert packet["allowance_package"]["entry_window"]["duration_sec"] == 840
+    assert packet["allowance_package"]["entry_location_guidance_v3"]["rule"] == "SELL_HIGH"
 
 
 def test_execution_opportunity_window_does_not_renew_on_each_fresh_frame() -> None:
@@ -1673,13 +1704,16 @@ def test_persisted_opportunity_deadline_is_schema_checked_and_never_extended() -
     restarted = ModelCouncilV3()
     later_snapshot = snapshot(262)
     later_snapshot["execution_opportunity_window_v3"] = authority
-    result = restarted.evaluate(later_snapshot, now_epoch=opened_epoch + 31.0)
+    anchored_duration = float(authority["duration_sec"])
+    result = restarted.evaluate(later_snapshot, now_epoch=opened_epoch + anchored_duration + 1.0)
     if not result.get("execution_opportunity_window_v3"):
         next_snapshot = snapshot(263)
         next_snapshot["execution_opportunity_window_v3"] = authority
-        result = restarted.evaluate(next_snapshot, now_epoch=opened_epoch + 31.5)
+        result = restarted.evaluate(next_snapshot, now_epoch=opened_epoch + anchored_duration + 1.5)
     assert result["packet_type"] == "STUDY_PACKET"
-    assert result["execution_opportunity_window_v3"]["valid_until_epoch_sec"] == opened_epoch + 30.0
+    assert result["execution_opportunity_window_v3"]["valid_until_epoch_sec"] == (
+        opened_epoch + anchored_duration
+    )
     assert result["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED"
 
     invalid = deepcopy(authority)
@@ -1730,7 +1764,7 @@ def test_persisted_expired_opportunity_window_survives_council_restart() -> None
     assert second_result["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED"
 
 
-def test_existing_signal_thesis_bootstraps_absolute_entry_deadline_without_restart_renewal() -> None:
+def test_existing_signal_thesis_keeps_setup_open_beyond_transport_ttl_without_deadline_renewal() -> None:
     def snapshot(frame_id: int) -> dict[str, Any]:
         payload = _strong_snapshot("BUY", frame_id=frame_id)
         payload["timing"]["expiry_seconds"] = 30
@@ -1751,14 +1785,27 @@ def test_existing_signal_thesis_bootstraps_absolute_entry_deadline_without_resta
         now_epoch=NOW + 0.5,
     )
 
-    assert result["packet_type"] == "STUDY_PACKET"
-    assert result["execution"]["enabled"] is False
-    assert result["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED"
+    assert result["packet_type"] == "PG_EXECUTION_PACKET_V3"
+    assert result["execution"]["enabled"] is True
     authority = result["execution_opportunity_window_v3"]
     assert authority["reset_reason"] == "MIGRATED_FROM_ACTIVE_SIGNAL_THESIS"
     assert authority["opened_epoch_sec"] == NOW - 40.0
     assert authority["opened_frame_id"] == 80
-    assert authority["state"] == "EXPIRED"
+    assert authority["state"] == "OPEN"
+    assert authority["valid_until_epoch_sec"] == NOW - 40.0 + authority["duration_sec"]
+    assert authority["remaining_sec"] > result["valid_for_seconds"]
+
+    after_deadline = snapshot(402)
+    after_deadline["execution_opportunity_window_v3"] = deepcopy(authority)
+    expired = ModelCouncilV3().evaluate(
+        after_deadline,
+        now_epoch=float(authority["valid_until_epoch_sec"]) + 1.0,
+    )
+
+    assert expired["packet_type"] == "STUDY_PACKET"
+    assert expired["execution"]["enabled"] is False
+    assert expired["model_council"]["true_blocker"] == "EXECUTION_OPPORTUNITY_WINDOW_EXPIRED"
+    assert expired["execution_opportunity_window_v3"]["state"] == "EXPIRED"
 
 
 def test_strategy_package_uses_full_overlay_suite_projection_horizon() -> None:
@@ -2835,7 +2882,9 @@ def test_execution_packet_v3_contains_required_fields() -> None:
     assert packet["opportunity_maturity"]["state"] == "ENTER_NOW"
     assert packet["visual_integrity"] == "PASS"
     assert packet["execution"]["expiry_seconds"] >= 60 * 60
-    assert packet["allowance_package"]["entry_window"]["duration_sec"] == 300
+    assert packet["allowance_package"]["entry_window"]["duration_sec"] == 600
+    assert packet["allowance_package"]["entry_window"]["candle_count"] == 2
+    assert packet["allowance_package"]["entry_location_guidance_v3"]["rule"] == "SELL_HIGH"
     assert packet["allowance_package"]["thesis_horizon"]["expected_candle_count"] >= 12
     assert packet["model_council"]["contributors_are_diagnostic"] is True
     assert packet["promotion_trace"]["promotion_result"] == "EXECUTABLE_PACKET_CREATED"

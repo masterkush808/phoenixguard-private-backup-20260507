@@ -46,6 +46,7 @@ OVERLAY_RENDER_BUDGETS: dict[str, int] = {
     "TARGET": 16,
     "INVALIDATION": 10,
     "PATH": 24,
+    "SMART_MONEY": 32,
     "COUNCIL": 24,
     "TWO_CANDLE_STUDY": 12,
     "LSTM_STUDY": 8,

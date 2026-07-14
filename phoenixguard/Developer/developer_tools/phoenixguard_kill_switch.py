@@ -29,6 +29,7 @@ KNOWN_STACK_TOKENS = (
     "start-phoenixguardvmmonitor.ps1",
     "start-phoenixguardvmshare.ps1",
     "shooter.py",
+    "phoenixguard_disk_growth_guard.py",
     "phoenixguard_mt4_file_bridge.py",
     "phoenixguard.runtime.model_council_daemon",
     "uvicorn phoenixguard.mobile_api.app",
@@ -187,11 +188,6 @@ def is_stack_process(row: ProcessRow, *, repo_root: Path, ancestor_pids: set[int
         return True
     if row.pid in ancestor_pids:
         return False
-    if row.name.lower() not in STACK_PROCESS_NAMES:
-        return False
-    repo_text = _norm(str(repo_root))
-    if repo_text and repo_text in command and "phoenixguard" in command:
-        return True
     return False
 
 
@@ -208,9 +204,6 @@ def collect_stack_pids(rows: Sequence[ProcessRow], ports: Sequence[int]) -> tupl
         if not row or row.pid in ancestor_pids:
             continue
         if is_stack_process(row, repo_root=PROJECT_ROOT, ancestor_pids=ancestor_pids):
-            targets.add(owner_pid)
-            continue
-        if row.name.lower() in STACK_PROCESS_NAMES:
             targets.add(owner_pid)
     queue = list(targets)
     while queue:

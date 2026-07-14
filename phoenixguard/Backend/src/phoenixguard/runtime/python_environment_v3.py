@@ -47,6 +47,26 @@ PROFILE_ENVIRONMENTS: dict[str, str] = {
 }
 
 
+LIVE_RUNTIME_COMMAND_TOKENS: tuple[str, ...] = (
+    "start_phoenixguard_24_7_tracker.py",
+    "start_phoenixguard_mobile_api.py",
+    "shooter.py",
+    "phoenixguard.runtime.model_council_daemon",
+    "phoenixguard_disk_growth_guard.py",
+    "uvicorn phoenixguard.mobile_api.app",
+    "phoenixguard_mt4_file_bridge.py",
+    "run_entry_allowance_burn.py",
+    "manual_entry_alert",
+)
+
+
+def is_live_runtime_python_command(command_line: str) -> bool:
+    """Return whether a Python command belongs to the live PhoenixGuard stack."""
+
+    normalized = str(command_line or "").replace("/", "\\").casefold()
+    return any(token in normalized for token in LIVE_RUNTIME_COMMAND_TOKENS)
+
+
 def configured_python_profile() -> str:
     return str(os.getenv("PHOENIXGUARD_PYTHON_PROFILE") or "live").strip().lower() or "live"
 

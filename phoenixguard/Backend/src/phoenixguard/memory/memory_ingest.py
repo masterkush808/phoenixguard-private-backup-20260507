@@ -1043,6 +1043,76 @@ def _needs_chart_state_backfill(chart_state: Any) -> bool:
     return not any(key in payload for key in meaningful_keys)
 
 
+_IMAGE_ENTRY_PROGRESSION_SCALAR_FIELDS = frozenset(
+    {
+        "progression_stage",
+        "entry_x_norm",
+        "entry_y_norm",
+        "sniper_y_norm",
+        "trigger_y_norm",
+        "target_y_norm",
+        "invalidation_y_norm",
+        "compression_score",
+        "pullback_depth",
+        "rejection_score",
+        "follow_through_score",
+        "aggressive_sniper_score",
+        "candle_regression_slope",
+        "candle_regression_direction",
+        "regression_confidence",
+        "favorable_pressure",
+        "opposing_pressure",
+        "recent_activity_columns",
+    }
+)
+_IMAGE_ENTRY_PROGRESSION_WINDOW_FIELDS = (
+    "entry_window_norm",
+    "sniper_window_norm",
+    "trigger_window_norm",
+    "target_window_norm",
+)
+_IMAGE_ENTRY_REGRESSION_FIELDS = frozenset(
+    {
+        "slope",
+        "direction",
+        "pressure_direction",
+        "confidence",
+        "alignment_to_label",
+        "recent_activity_columns",
+    }
+)
+
+
+def _entry_progression_needs_image_backfill(chart_state: Any) -> bool:
+    """Return whether persisted image-derived progression data is incomplete."""
+    if not isinstance(chart_state, Mapping):
+        return True
+    chart_state_payload = cast(Mapping[str, Any], chart_state)
+    raw_progression = chart_state_payload.get("entry_progression")
+    if not isinstance(raw_progression, Mapping):
+        return True
+    progression = cast(Mapping[str, Any], raw_progression)
+    if any(
+        field_name not in progression or progression[field_name] is None
+        for field_name in _IMAGE_ENTRY_PROGRESSION_SCALAR_FIELDS
+    ):
+        return True
+    for field_name in _IMAGE_ENTRY_PROGRESSION_WINDOW_FIELDS:
+        window: Any = progression.get(field_name)
+        if isinstance(window, (str, bytes)) or not isinstance(window, Sequence):
+            return True
+        if len(cast(Sequence[Any], window)) < 4:
+            return True
+    raw_regression = progression.get("candle_regression")
+    if not isinstance(raw_regression, Mapping):
+        return True
+    regression = cast(Mapping[str, Any], raw_regression)
+    return any(
+        field_name not in regression or regression[field_name] is None
+        for field_name in _IMAGE_ENTRY_REGRESSION_FIELDS
+    )
+
+
 def _load_chart_state_from_image(
     path: Path,
     label: str,
@@ -1101,15 +1171,17 @@ def _migrate_loaded_metadata(
         else:
             row["chart_state"] = {}
 
+        persisted_chart_state = cast(Mapping[str, Any], row.get("chart_state", {}))
         teaching_image: Image.Image | None = None
-        if resolved_path.exists():
+        if resolved_path.exists() and _entry_progression_needs_image_backfill(persisted_chart_state):
             try:
-                teaching_image = Image.open(resolved_path).convert("RGB")
+                with Image.open(resolved_path) as image:
+                    teaching_image = image.convert("RGB")
             except Exception as exc:
                 if logger:
                     logger.warning("[MemoryBank] Could not scan memory teaching image %s: %s", resolved_path, exc)
         current_chart_state = _augment_chart_state_with_memory_teaching(
-            cast(Mapping[str, Any], row.get("chart_state", {})),
+            persisted_chart_state,
             path=resolved_path if resolved_path.exists() else None,
             label=label,
             sequence_index=int(sequence_index),

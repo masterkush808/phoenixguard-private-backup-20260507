@@ -356,9 +356,9 @@ def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
         "invalidation": "INVALIDATION",
         "path": "PATH",
         "council": "COUNCIL",
-        "smc": "COUNCIL",
-        "smc-council": "COUNCIL",
-        "smart-money-council": "COUNCIL",
+        "smc": "SMART_MONEY",
+        "smc-council": "SMART_MONEY",
+        "smart-money-council": "SMART_MONEY",
         "two-candle-study": "TWO_CANDLE_STUDY",
         "next-two-candles": "TWO_CANDLE_STUDY",
         "lstm-study": "LSTM_STUDY",
@@ -394,6 +394,41 @@ def test_view_mode_aliases_cover_overlay_buttons_and_backend_modes() -> None:
     assert replay_profile["layer_visibility"]["target_zones"] is True
     assert replay_profile["layer_visibility"]["recent_candles"] is False
     assert replay_profile["layer_visibility"]["invalidation"] is False
+
+
+def test_smart_money_mode_is_canonical_and_separate_from_model_council() -> None:
+    profile = view_mode_profile("smc")
+    smart_money_types = {
+        "ORDER_BLOCK",
+        "FAIR_VALUE_GAP",
+        "LIQUIDITY_POOL",
+        "LIQUIDITY_SWEEP",
+        "MARKET_STRUCTURE_SHIFT",
+    }
+    order_block = _base_overlay(
+        type="ORDER_BLOCK",
+        layer="smart_money",
+        label="ORDER BLOCK",
+        display_label="ORDER BLOCK",
+        visible_modes=["SMART_MONEY", "INSPECTOR"],
+    )
+    council = _base_overlay(
+        type="MODEL_COUNCIL_MARKER",
+        layer="active_council_decision",
+        label="MODEL COUNCIL MARKER",
+        display_label="MODEL COUNCIL MARKER",
+        visible_modes=["COUNCIL", "INSPECTOR"],
+    )
+
+    assert profile["mode"] == "SMART_MONEY"
+    assert set(profile["allowed_types"]) == smart_money_types
+    assert profile["layer_visibility"]["smart_money"] is True
+    assert profile["layer_visibility"]["active_council_decision"] is False
+    assert overlay_is_visible(order_block, "SMART_MONEY") is True
+    assert overlay_is_visible(order_block, "COUNCIL") is False
+    assert overlay_is_visible(council, "SMART_MONEY") is False
+    assert overlay_is_visible(council, "COUNCIL") is True
+    assert overlay_is_visible(order_block, "INSPECTOR") is True
 
 
 def test_contract_reports_missing_required_fields_and_strict_mode_raises() -> None:

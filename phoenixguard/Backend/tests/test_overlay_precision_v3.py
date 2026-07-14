@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from PIL import Image
 
@@ -25,6 +25,8 @@ def _session(tmp_path: Path) -> dict[str, Any]:
         "session_id": "pocket-live-8788",
         "frame_index": 14494,
         "capture_count": 14494,
+        "display_frame_id": 14494,
+        "model_vote_frame_id": 14494,
         "last_window_path": str(window),
         "last_chart_path": str(chart),
         "broker_surface": {
@@ -418,6 +420,364 @@ def test_two_candle_and_lstm_modes_render_anchored_study_overlays(tmp_path: Path
     assert lstm_overlays[0]["anchor_candles"] == list(range(len(candles)))
     assert lstm_overlays[0]["bounds_rect"]["exists"] is True
     assert lstm_overlays[0]["layer"] == "active_council_decision"
+
+
+def test_study_modes_do_not_synthesize_overlays_without_model_payloads(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=8)
+
+    two_candle_state = build_live_state_v3(session, overlay_mode="TWO_CANDLE_STUDY", now_epoch=120.0)
+    lstm_state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
+
+    assert not any(row.get("type") == "TWO_CANDLE_STUDY" for row in two_candle_state["overlay_objects"])
+    assert not any(row.get("type") == "LSTM_STUDY" for row in lstm_state["overlay_objects"])
+
+
+def test_study_overlays_reject_wrong_frame_and_expired_packets(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=8)
+    session["model_council_study_packet"] = {
+        "schema_version": "PG_MODEL_COUNCIL_STUDY_PACKET_V3",
+        "valid_until_epoch": 130.0,
+        "two_candle_study": {"confidence": 0.71, "side": "BUY"},
+        "lstm_contribution": {
+            "confidence": 0.69,
+            "side": "BUY",
+            "source_image_size": [1000, 800],
+            "forecast_path": [{"step": 1, "expected_close_norm": 0.58}],
+        },
+    }
+    session["model_vote_frame_id"] = 14493
+
+    wrong_frame_state = build_live_state_v3(session, overlay_mode="INSPECTOR", now_epoch=120.0)
+    assert not any(
+        row.get("type") in {"TWO_CANDLE_STUDY", "LSTM_STUDY"}
+        for row in wrong_frame_state["overlay_objects"]
+    )
+
+    session["model_vote_frame_id"] = 14494
+    session["model_council_study_packet"]["valid_until_epoch"] = 119.999
+    expired_state = build_live_state_v3(session, overlay_mode="INSPECTOR", now_epoch=120.0)
+    assert not any(
+        row.get("type") in {"TWO_CANDLE_STUDY", "LSTM_STUDY"}
+        for row in expired_state["overlay_objects"]
+    )
+
+    study_packet = cast(dict[str, Any], session["model_council_study_packet"])
+    study_packet["valid_until_epoch"] = 130.0
+    cast(dict[str, Any], study_packet["two_candle_study"])["fresh"] = False
+    cast(dict[str, Any], study_packet["lstm_contribution"])["fresh"] = False
+    explicitly_stale_state = build_live_state_v3(
+        session,
+        overlay_mode="INSPECTOR",
+        now_epoch=120.0,
+    )
+    assert not any(
+        row.get("type") in {"TWO_CANDLE_STUDY", "LSTM_STUDY"}
+        for row in explicitly_stale_state["overlay_objects"]
+    )
+
+
+def test_waiting_frame_renders_last_aligned_forecast_as_stale_diagnostic(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=8)
+    session["visual_observation_v3"] = {
+        "status": "WAITING_FOR_NEW_FRAME",
+        "new_visual_evidence": False,
+    }
+    session["forecast_snapshot_v3"] = {
+        "schema_version": "PG_FORECAST_SNAPSHOT_V3",
+        "source_frame_id": 14494,
+        "observed_epoch": 110.0,
+        "stale": True,
+        "diagnostic_only": True,
+        "two_candle_study": {
+            "schema_version": "PG_TWO_CANDLE_STUDY_V3",
+            "frame_id": 14494,
+            "stale": True,
+            "diagnostic_only": True,
+            "confidence": 0.64,
+            "primary_pressure": "SELL",
+        },
+        "lstm_contribution": {
+            "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+            "frame_id": 14494,
+            "stale": True,
+            "diagnostic_only": True,
+            "fresh": True,
+            "forecast_available": True,
+            "confidence": 0.78,
+            "path_side": "SELL",
+            "selective_side": "SELL",
+            "selective_status": "AUTHORIZED",
+            "selective_authorized": True,
+            "source_image_size": [1000, 800],
+            "features": [{"relative_price_location": 0.52}],
+            "forecast_path": [
+                {
+                    "step": step,
+                    "expected_close_norm": 0.52 - step * 0.01,
+                    "close_lower_90_norm": 0.48 - step * 0.008,
+                    "close_upper_90_norm": 0.56 - step * 0.012,
+                }
+                for step in range(1, 4)
+            ],
+        },
+    }
+
+    lstm_state = build_live_state_v3(
+        session,
+        overlay_mode="LSTM_STUDY",
+        now_epoch=180.0,
+    )
+    lstm_rows = [
+        row
+        for row in lstm_state["overlay_objects"]
+        if row.get("type") == "LSTM_STUDY"
+    ]
+    assert len(lstm_rows) == 4
+    assert all(row.get("frame_id") == 14494 for row in lstm_rows)
+    assert all(str(row.get("role")).endswith("_stale_diagnostic") for row in lstm_rows)
+    assert all(row.get("side") == "HOLD" for row in lstm_rows)
+    assert all("LAST VALID" in str(row.get("reason")) for row in lstm_rows)
+
+    two_candle_state = build_live_state_v3(
+        session,
+        overlay_mode="TWO_CANDLE_STUDY",
+        now_epoch=180.0,
+    )
+    two_candle_rows = [
+        row
+        for row in two_candle_state["overlay_objects"]
+        if row.get("type") == "TWO_CANDLE_STUDY"
+    ]
+    assert len(two_candle_rows) == 1
+    assert two_candle_rows[0]["role"] == "two_candle_study_stale_diagnostic"
+
+
+def test_waiting_frame_never_projects_forecast_snapshot_onto_new_frame(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=8)
+    session["visual_observation_v3"] = {
+        "status": "WAITING_FOR_NEW_FRAME",
+        "new_visual_evidence": False,
+    }
+    session["forecast_snapshot_v3"] = {
+        "schema_version": "PG_FORECAST_SNAPSHOT_V3",
+        "source_frame_id": 14493,
+        "stale": True,
+        "diagnostic_only": True,
+        "lstm_contribution": {
+            "frame_id": 14493,
+            "stale": True,
+            "diagnostic_only": True,
+            "fresh": True,
+            "forecast_available": True,
+            "confidence": 0.91,
+            "path_side": "BUY",
+            "source_image_size": [1000, 800],
+            "features": [{"relative_price_location": 0.50}],
+            "forecast_path": [{"step": 1, "expected_close_norm": 0.55}],
+        },
+    }
+
+    state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=180.0)
+
+    assert not any(row.get("type") == "LSTM_STUDY" for row in state["overlay_objects"])
+
+
+def test_current_root_study_packet_emits_truthful_neutral_studies_and_lstm_path(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=8)
+    session.pop("model_vote_frame_id")
+    session["latest_signal"]["action"] = "SELL"
+    session["model_council_study_packet"] = {
+        "schema_version": "PG_MODEL_COUNCIL_STUDY_PACKET_V3",
+        "frame_id": 14494,
+        "valid_until_epoch": 130.0,
+        "two_candle_study": {
+            "schema_version": "PG_TWO_CANDLE_STUDY_V3",
+            "confidence": 0.71,
+            "summary": "Current two-candle evidence without a directional vote.",
+        },
+        "lstm_contribution": {
+            "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+            "confidence": 0.69,
+            "source_image_size": [1000, 800],
+            "features": [{"relative_price_location": 0.51}],
+            "forecast_path": [
+                {"step": 1, "expected_close_norm": 0.52},
+                {"step": 2, "expected_close_norm": 0.53},
+            ],
+        },
+    }
+
+    state = build_live_state_v3(session, overlay_mode="INSPECTOR", now_epoch=120.0)
+    study_rows = [
+        row
+        for row in state["overlay_objects"]
+        if row.get("type") in {"TWO_CANDLE_STUDY", "LSTM_STUDY"}
+    ]
+
+    assert {row.get("layer") for row in study_rows} == {
+        "active_council_decision",
+        "prediction_path",
+    }
+    assert all(row.get("frame_id") == 14494 for row in study_rows)
+    assert all(row.get("side") == "HOLD" for row in study_rows)
+    assert any(row.get("role") == "two_candle_study" for row in study_rows)
+    assert not any(row.get("role") == "lstm_study" for row in study_rows)
+    assert any(
+        row.get("role") == "lstm_candle_event_path_no_edge"
+        for row in study_rows
+    )
+    assert any(
+        row.get("role") == "lstm_forecast_90_band_no_edge"
+        for row in study_rows
+    )
+
+
+def test_lstm_mode_renders_learned_candle_event_progression_path(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    candles = _install_visible_candles(session, count=8)
+    session["latest_signal"]["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "skill": "LSTM_CANDLE_PATH",
+        "fresh": True,
+        "confidence": 0.68,
+        "side": "BUY",
+        "source_image_size": [1000, 800],
+        "features": [{"relative_price_location": 0.44}],
+        "forecast_path": [
+            {
+                "step": step,
+                "expected_close_norm": 0.44 + step * 0.008,
+                "close_lower_90_norm": 0.42 + step * 0.006,
+                "close_upper_90_norm": 0.46 + step * 0.010,
+                "direction": "BUY",
+                "selective_status": "NO_EDGE",
+                "selective_authorized": False,
+            }
+            for step in range(1, 7)
+        ],
+        "interpretation": "Six causal candle events project upward.",
+    }
+
+    state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
+    lstm_overlays = [row for row in state["overlay_objects"] if row.get("type") == "LSTM_STUDY"]
+    path_rows = [row for row in lstm_overlays if row.get("layer") == "prediction_path"]
+    by_role = {str(row.get("role")): row for row in path_rows}
+
+    assert len(candles) == 8
+    assert len(path_rows) == 4
+    assert not any(row.get("layer") == "active_council_decision" for row in lstm_overlays)
+    center = by_role["lstm_candle_event_path_no_edge"]
+    upper = by_role["lstm_forecast_90_upper_boundary_no_edge"]
+    lower = by_role["lstm_forecast_90_lower_boundary_no_edge"]
+    band = by_role["lstm_forecast_90_band_no_edge"]
+    assert len(center["line_points"]) == 7
+    assert len(upper["line_points"]) == 7
+    assert len(lower["line_points"]) == 7
+    assert len(band["line_points"]) == 15
+    assert all(row["coordinate_mode"] == "CHART_IMAGE_SPACE" for row in path_rows)
+    assert all(row["side"] == "BUY" for row in path_rows)
+    assert center["line_points"][-1][0] > center["line_points"][0][0]
+    assert all(
+        upper_point[1] <= center_point[1] <= lower_point[1]
+        for center_point, upper_point, lower_point in zip(
+            center["line_points"],
+            upper["line_points"],
+            lower["line_points"],
+        )
+    )
+    assert all("NO EDGE" in str(row.get("reason")) for row in path_rows)
+
+
+def test_lstm_forecast_overlay_visually_marks_authorized_path_without_candle_boxes(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=8)
+    session["latest_signal"]["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "fresh": True,
+        "confidence": 0.89,
+        "side": "BUY",
+        "path_side": "BUY",
+        "selective_side": "BUY",
+        "selective_status": "AUTHORIZED",
+        "selective_authorized": True,
+        "source_image_size": [1000, 800],
+        "features": [{"relative_price_location": 0.50}],
+        "forecast_path": [
+            {
+                "step": step,
+                "expected_close_norm": 0.50 + step * 0.01,
+                "close_lower_90_norm": 0.48 + step * 0.008,
+                "close_upper_90_norm": 0.52 + step * 0.012,
+                "selective_status": "AUTHORIZED",
+                "selective_authorized": True,
+            }
+            for step in range(1, 4)
+        ],
+    }
+
+    state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
+    rows = [
+        row
+        for row in state["overlay_objects"]
+        if row.get("type") == "LSTM_STUDY"
+    ]
+
+    assert len(rows) == 4
+    assert all(row.get("layer") == "prediction_path" for row in rows)
+    assert all(row.get("side") == "BUY" for row in rows)
+    assert all(str(row.get("role")).endswith("_authorized") for row in rows)
+    assert not any(row.get("role") == "lstm_study" for row in rows)
+
+
+def test_lstm_path_never_inherits_authority_from_conflicting_top_level_metadata(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=8)
+    session["latest_signal"]["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "fresh": True,
+        "confidence": 0.81,
+        "side": "BUY",
+        "path_side": "SELL",
+        "selective_side": "BUY",
+        "selective_status": "AUTHORIZED",
+        "selective_authorized": True,
+        "source_image_size": [1000, 800],
+        "features": [{"relative_price_location": 0.50}],
+        "forecast_path": [
+            {
+                "step": step,
+                "expected_close_norm": 0.50 - step * 0.01,
+                "close_lower_90_norm": 0.48 - step * 0.012,
+                "close_upper_90_norm": 0.52 - step * 0.008,
+                "direction": "BUY",
+                "movement_direction": "SELL",
+                "selective_status": "NO_EDGE",
+                "selective_authorized": False,
+            }
+            for step in range(1, 4)
+        ],
+    }
+
+    state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
+    rows = [
+        row
+        for row in state["overlay_objects"]
+        if row.get("type") == "LSTM_STUDY"
+    ]
+
+    assert len(rows) == 4
+    assert all(row.get("side") == "SELL" for row in rows)
+    assert all(str(row.get("role")).endswith("_no_edge") for row in rows)
+    assert not any(str(row.get("role")).endswith("_authorized") for row in rows)
 
 
 def test_council_mode_renders_active_marker_from_chart_context(tmp_path: Path) -> None:
@@ -975,7 +1335,94 @@ def test_precision_resolver_preserves_source_frame_before_stale_check(tmp_path: 
     resolved, audit = resolve_precision_overlays_v3(overlays, scene_graph=scene, current_side="SELL", frame_id=14494)
 
     assert resolved[0]["frame_id"] == 1
+    assert resolved[0]["precision_rejected"] is True
+    assert "stale_source_frame_id" in resolved[0]["precision_flags"]
     assert audit["precision_report"]["stale_frame_id"] == 1
+    assert audit["rendered_count"] == 0
+
+
+def test_precision_resolver_rejects_missing_transform_in_live_mode(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    scene = build_broker_scene_graph_v3(session).as_dict()["scene_graph"]
+    overlays: list[dict[str, Any]] = [
+        {
+            "overlay_id": "missing-transform",
+            "object_id": "missing-transform",
+            "track_id": "missing-transform",
+            "type": "SUPPLY_ZONE",
+            "side": "SELL",
+            "source_agent": "test",
+            "frame_id": 14494,
+            "sequence_id": "seq-current",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "WICK_REJECTION_CLUSTER",
+            "anchor_candles": [4, 8],
+            "anchor_wick_points": [[320, 180], [460, 184]],
+            "bounds": [300, 170, 490, 202],
+            "truth_score": 0.9,
+            "visible_modes": ["CLEAN_LIVE", "INSPECTOR"],
+        }
+    ]
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="CLEAN_LIVE",
+        current_side="SELL",
+        frame_id=14494,
+    )
+
+    assert resolved[0]["precision_rejected"] is True
+    assert "missing_or_pending_chart_transform" in resolved[0]["precision_flags"]
+    assert audit["precision_report"]["missing_transform"] == 1
+    assert audit["rendered_count"] == 0
+
+
+def test_precision_resolver_projects_all_trendline_anchor_geometry() -> None:
+    scene = {
+        "frame_id": 88,
+        "chart_region_chart_bounds": [0, 0, 800, 500],
+        "plot_area_chart_bounds": [100, 50, 700, 450],
+    }
+    overlays: list[dict[str, Any]] = [
+        {
+            "overlay_id": "normalized-trend",
+            "object_id": "normalized-trend",
+            "track_id": "normalized-trend",
+            "type": "SUPPORT_TRENDLINE",
+            "side": "BUY",
+            "source_agent": "test",
+            "frame_id": 88,
+            "sequence_id": "seq-88",
+            "chart_transform_id": "chart-88",
+            "coordinate_mode": "PLOT_AREA_NORMALIZED",
+            "anchor_type": "TRENDLINE_TOUCH_POINTS",
+            "anchor_candles": [3, 9],
+            "anchor_wick_points": [[0.1, 0.8], [0.5, 0.5]],
+            "trendline_touch_points": [[0.1, 0.8], [0.5, 0.5]],
+            "touch_points": [[0.1, 0.8], [0.5, 0.5]],
+            "line_points": [[0.1, 0.8], [0.5, 0.5], [0.9, 0.2]],
+            "bounds": [0.1, 0.2, 0.9, 0.8],
+            "truth_score": 0.9,
+            "confidence": 0.9,
+            "visible_modes": ["TRENDLINES", "CLEAN_LIVE", "INSPECTOR"],
+        }
+    ]
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="TRENDLINES",
+        current_side="BUY",
+        frame_id=88,
+    )
+
+    assert audit["rendered_count"] == 1
+    trendline = resolved[0]
+    assert trendline["anchor_wick_points"] == [[160.0, 370.0], [400.0, 250.0]]
+    assert trendline["trendline_touch_points"] == [[160.0, 370.0], [400.0, 250.0]]
+    assert trendline["touch_points"] == trendline["anchor_wick_points"]
+    assert trendline["line_points"][:2] == trendline["anchor_wick_points"]
 
 
 def test_precision_resolver_nests_local_and_replay_children_inside_global_parent(tmp_path: Path) -> None:
@@ -1248,6 +1695,161 @@ def test_no_duplicate_now_labels_in_clean_live_and_history_maps_to_replay(tmp_pa
     assert history_rows[0]["display_label"] == "HISTORICAL PROGRESSION"
     assert overlay_is_visible(history_rows[0], "REPLAY") is True
     assert overlay_is_visible(history_rows[0], "CLEAN_LIVE") is False
+
+
+def test_inspector_labels_only_the_latest_current_candle() -> None:
+    scene = {
+        "frame_id": 220,
+        "plot_area_chart_bounds": [0, 0, 1000, 700],
+        "chart_region_chart_bounds": [0, 0, 1000, 700],
+    }
+    overlays = [
+        {
+            "overlay_id": f"candle-{index}",
+            "object_id": f"candle-{index}",
+            "track_id": f"candle-{index}",
+            "type": "CURRENT_CANDLE",
+            "side": "SELL",
+            "source_agent": "market_object_tracker_v3",
+            "source_path": f"tracking_summary.tracked_candles[{index}]",
+            "frame_id": 220,
+            "sequence_id": "seq-220",
+            "chart_transform_id": "chart-220",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "CANDLE",
+            "anchor_candles": [index],
+            "candle_index": index,
+            "is_latest_candle": index == 3,
+            "bounds": [700 + index * 35, 260 + index * 20, 712 + index * 35, 390 + index * 20],
+            "truth_score": 0.92,
+            "confidence": 0.92,
+            "lifecycle_state": "ACTIVE",
+            "visible_modes": ["CANDLES", "INSPECTOR"],
+            "visible_default": index == 3,
+            "label": "NOW" if index == 3 else "CANDLES",
+            "display_label": "NOW" if index == 3 else "CANDLES",
+            "label_hidden": index != 3,
+        }
+        for index in range(4)
+    ]
+
+    resolved, audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="INSPECTOR",
+        current_side="SELL",
+        frame_id=220,
+    )
+    candles = [row for row in resolved if row.get("type") == "CURRENT_CANDLE"]
+    visible_labels = [row for row in candles if row.get("label_hidden") is not True]
+
+    assert len(candles) == 4
+    assert len(visible_labels) == 1
+    assert visible_labels[0]["anchor_candles"] == [3]
+    assert visible_labels[0]["display_label"] == "NOW"
+    assert all(row.get("label_hidden") is True for row in candles if row is not visible_labels[0])
+    assert audit["precision_report"]["duplicate_now_hidden"] == 3
+
+
+def test_inspector_uses_thin_liquidity_bands_and_one_inline_label_per_family() -> None:
+    scene = {
+        "frame_id": 221,
+        "plot_area_chart_bounds": [0, 0, 1000, 700],
+        "chart_region_chart_bounds": [0, 0, 1000, 700],
+    }
+
+    def overlay(
+        overlay_id: str,
+        overlay_type: str,
+        bounds: list[float],
+        *,
+        lifecycle: str = "ACTIVE",
+        source_path: str,
+        line_y: float | None = None,
+    ) -> dict[str, Any]:
+        row: dict[str, Any] = {
+            "overlay_id": overlay_id,
+            "object_id": overlay_id,
+            "track_id": overlay_id,
+            "type": overlay_type,
+            "side": "SELL",
+            "source_agent": "market_object_tracker_v3",
+            "source_path": source_path,
+            "frame_id": 221,
+            "sequence_id": "seq-221",
+            "chart_transform_id": "chart-221",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "anchor_type": "CANDLE_CLUSTER",
+            "anchor_candles": [8, 9],
+            "touch_points": [[bounds[0] + 12, (bounds[1] + bounds[3]) * 0.5], [bounds[2] - 12, (bounds[1] + bounds[3]) * 0.5]],
+            "bounds": bounds,
+            "truth_score": 0.86,
+            "confidence": 0.86,
+            "lifecycle_state": lifecycle,
+            "visible_modes": ["SMART_MONEY", "TRIGGERS", "INSPECTOR"],
+            "visible_default": True,
+            "label": overlay_type.replace("_", " "),
+            "label_hidden": False,
+        }
+        if line_y is not None:
+            row["line_y"] = line_y
+            row["price_level_y"] = line_y
+        return row
+
+    overlays = [
+        overlay(
+            "retest-primary",
+            "RETEST_BOX",
+            [760, 360, 830, 405],
+            source_path="tracking_summary.projection.zones[1]",
+        ),
+        overlay(
+            "retest-secondary",
+            "RETEST_BOX",
+            [650, 300, 720, 345],
+            source_path="tracking_summary.structure_boxes[0].trigger_window",
+        ),
+        overlay(
+            "retest-history",
+            "RETEST_BOX",
+            [260, 240, 330, 285],
+            lifecycle="HISTORICAL",
+            source_path="tracking_summary.historical_structure[0].trigger_window",
+        ),
+        overlay(
+            "pool-near",
+            "LIQUIDITY_POOL",
+            [420, 410, 920, 500],
+            source_path="tracking_summary.smart_money_context.liquidity_pools[0]",
+            line_y=455,
+        ),
+        overlay(
+            "pool-far",
+            "LIQUIDITY_POOL",
+            [250, 120, 900, 220],
+            source_path="tracking_summary.smart_money_context.liquidity_pools[1]",
+            line_y=170,
+        ),
+    ]
+    overlays[3]["distance_to_latest_norm"] = 0.08
+    overlays[4]["distance_to_latest_norm"] = 0.42
+
+    resolved, _audit = resolve_precision_overlays_v3(
+        overlays,
+        scene_graph=scene,
+        mode="INSPECTOR",
+        current_side="SELL",
+        frame_id=221,
+    )
+    retests = [row for row in resolved if row.get("type") == "RETEST_BOX"]
+    pools = [row for row in resolved if row.get("type") == "LIQUIDITY_POOL"]
+
+    assert all(row["bounds"][3] - row["bounds"][1] <= 10.0 for row in pools)
+    assert len([row for row in retests if row.get("label_hidden") is not True]) == 1
+    assert len([row for row in pools if row.get("label_hidden") is not True]) == 1
+    historical = next(row for row in retests if row["overlay_id"] == "retest-history")
+    assert historical["display_state"] == "GHOSTED"
+    assert historical["label_hidden"] is True
 
 
 def test_replay_mode_does_not_publish_current_candle_boxes(tmp_path: Path) -> None:

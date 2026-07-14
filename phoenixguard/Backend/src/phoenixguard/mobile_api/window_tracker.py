@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -50,6 +51,10 @@ from phoenixguard.runtime.realtime_performance_v3 import (
 )
 from phoenixguard.tracking.market_object_tracker_v3 import build_market_object_registry_v3
 from phoenixguard.vision.broker_source_lock_v3 import build_broker_source_lock_v3
+from phoenixguard.vision.candle_palette_v3 import (
+    build_candle_palette_masks,
+    extract_candle_tracks_adaptive_v3,
+)
 from phoenixguard.decision.scenario_integration import (
     predict_scenarios_from_chart_and_forecast,
     rank_scenarios_by_ensemble_agreement,
@@ -84,6 +89,14 @@ from .observer import SignalObserverService
 _REAL_SLEEP = time.sleep
 LOGGER = logging.getLogger("phoenixguard.mobile_api.window_tracker")
 _ASYNCIO_LOGGER = logging.getLogger("asyncio")
+
+_FORECAST_ACTION_SCHEMA_VERSION = "PG_FORECAST_ACTION_V1"
+_FORECAST_ACTION_POLL_AFTER_MS = 250
+_FORECAST_ACTION_MAX_PENDING = 4
+_FORECAST_ACTION_MAX_RETAINED = 128
+_FORECAST_ACTION_TERMINAL_STATUSES = frozenset({"ready", "degraded", "stale", "error"})
+_MEMORY_PROJECTION_WARMUP_LOCK = threading.Lock()
+_memory_projection_warmup_started = False
 
 
 _LogExcInfo = (
@@ -210,12 +223,21 @@ _WINDOW_REACQUIRE_BLOCK_TOKENS = (
     "127.0.0.1",
     "localhost",
     "phoenixguard",
+    "808fx standard hybrid system",
+    "phoenix guard engine",
     "window-tracker",
     "visual studio code",
     "vscode",
     "file explorer",
     "task manager",
     "program manager",
+)
+_VISUAL_OBSERVATION_SCHEMA_VERSION = "PG_VISUAL_OBSERVATION_V3"
+_VISUAL_OBSERVATION_WAITING = "WAITING_FOR_NEW_FRAME"
+_VISUAL_OBSERVATION_NEW = "NEW_FRAME"
+_VISUAL_OBSERVATION_RECOVERED = "RECOVERED_NEW_FRAME"
+_VISUAL_OBSERVATION_WAITING_MESSAGE = (
+    "Waiting for a new broker frame. Identical chart pixels are not treated as new market evidence."
 )
 _MEMORY_PRECISION_MIN_SIMILARITY = 0.72
 _MEMORY_PRECISION_MIN_SCORE = 0.70
@@ -1186,6 +1208,7 @@ def _compact_persisted_model_council_result(value: Mapping[str, Any]) -> dict[st
         "final_state",
         "instrument_context",
         "lane_accepted",
+        "lstm_contribution",
         "market_play",
         "market_reality",
         "memory_confirmation",
@@ -1244,8 +1267,212 @@ def _compact_persisted_model_council_result(value: Mapping[str, Any]) -> dict[st
     return payload
 
 
+_FORECAST_SNAPSHOT_LSTM_KEYS = frozenset(
+    {
+        "schema_version",
+        "fresh",
+        "forecast_available",
+        "contribution",
+        "confidence",
+        "side",
+        "path_side",
+        "selective_side",
+        "selective_status",
+        "selective_authorized",
+        "interpretation",
+        "horizon_steps",
+        "source_image_size",
+        "features",
+        "forecast_path",
+    }
+)
+
+_FORECAST_SNAPSHOT_TWO_CANDLE_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "timeframe",
+        "frame_id",
+        "sequence_id",
+        "current_candle_state",
+        "primary_pressure",
+        "pattern",
+        "confidence",
+        "summary",
+        "next_candle_forecast",
+        "second_next_candle_forecast",
+        "candle_forecasts",
+    }
+)
+
+_FORECAST_SNAPSHOT_HIGH_FREQUENCY_KEYS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "timeframe",
+        "frame_id",
+        "horizon_candles",
+        "primary_pressure",
+        "confidence",
+        "summary",
+        "candle_forecasts",
+    }
+)
+
+
+def _first_forecast_mapping(*values: Any) -> dict[str, Any]:
+    for value in values:
+        candidate = _mapping_to_dict(value)
+        if candidate:
+            return candidate
+    return {}
+
+
+def _selected_forecast_mapping(
+    value: Mapping[str, Any],
+    keys: frozenset[str],
+) -> dict[str, Any]:
+    selected = {
+        key: value.get(key)
+        for key in keys
+        if value.get(key) not in (None, "", [], {})
+    }
+    return cast(
+        dict[str, Any],
+        _compact_live_state_observability_value(selected),
+    )
+
+
+def _forecast_snapshot_v3(
+    payload: Mapping[str, Any],
+    *,
+    stale_diagnostic: bool | None = None,
+) -> dict[str, Any]:
+    """Keep one safe, frame-bound model outlook across no-evidence heartbeats.
+
+    Execution authority is deliberately excluded.  The snapshot contains only
+    the values required to explain and draw the last model forecast on the
+    exact broker frame that produced it.
+    """
+
+    existing = _mapping_to_dict(payload.get("forecast_snapshot_v3"))
+    tracking = _mapping_to_dict(payload.get("tracking_summary"))
+    signal = _mapping_to_dict(payload.get("latest_signal"))
+    result = _mapping_to_dict(payload.get("model_council_result"))
+    study_packet = _first_forecast_mapping(
+        payload.get("model_council_study_packet"),
+        payload.get("study_packet"),
+        result.get("model_council_study_packet"),
+        result.get("study_packet"),
+    )
+    kernel = _first_forecast_mapping(
+        signal.get("decision_kernel"),
+        tracking.get("decision_kernel"),
+    )
+    high_frequency = _first_forecast_mapping(
+        signal.get("high_frequency_forecast"),
+        tracking.get("high_frequency_forecast"),
+        signal.get("micro_candle_forecast"),
+        tracking.get("micro_candle_forecast"),
+        kernel.get("high_frequency_forecast"),
+        existing.get("high_frequency_forecast"),
+    )
+    two_candle = _first_forecast_mapping(
+        study_packet.get("two_candle_study"),
+        result.get("two_candle_study"),
+        signal.get("two_candle_study"),
+        tracking.get("two_candle_study"),
+        high_frequency.get("two_candle_study"),
+        kernel.get("two_candle_study"),
+        existing.get("two_candle_study"),
+    )
+    lstm = _first_forecast_mapping(
+        study_packet.get("lstm_contribution"),
+        result.get("lstm_contribution"),
+        signal.get("lstm_contribution"),
+        tracking.get("lstm_contribution"),
+        high_frequency.get("lstm_contribution"),
+        kernel.get("lstm_contribution"),
+        two_candle.get("lstm_contribution"),
+        existing.get("lstm_contribution"),
+    )
+    if not (two_candle or lstm or high_frequency):
+        return existing
+
+    frame_id = int(
+        _float_or(
+            two_candle.get("frame_id")
+            or lstm.get("frame_id")
+            or high_frequency.get("frame_id")
+            or existing.get("source_frame_id")
+            or payload.get("model_vote_frame_id")
+            or payload.get("display_frame_id")
+            or payload.get("frame_index"),
+            0.0,
+        )
+    )
+    visual_observation = _mapping_to_dict(payload.get("visual_observation_v3"))
+    inferred_stale = str(visual_observation.get("status") or "").strip().upper() == _VISUAL_OBSERVATION_WAITING
+    is_stale = inferred_stale if stale_diagnostic is None else bool(stale_diagnostic)
+    if is_stale:
+        observed_epoch = _float_or(
+            existing.get("observed_epoch")
+            or visual_observation.get("last_observed_epoch")
+            or signal.get("published_epoch")
+            or payload.get("model_capture_epoch")
+            or payload.get("last_capture_epoch"),
+            0.0,
+        )
+    else:
+        # A newly accepted model frame owns a newly observed forecast.  The
+        # prior snapshot timestamp is only a fallback; otherwise fresh frames
+        # can inherit an older forecast's age and appear stale immediately.
+        observed_epoch = _float_or(
+            signal.get("published_epoch")
+            or payload.get("model_capture_epoch")
+            or payload.get("last_capture_epoch")
+            or existing.get("observed_epoch"),
+            0.0,
+        )
+
+    compact_two_candle = _selected_forecast_mapping(
+        two_candle,
+        _FORECAST_SNAPSHOT_TWO_CANDLE_KEYS,
+    )
+    compact_lstm = _selected_forecast_mapping(
+        lstm,
+        _FORECAST_SNAPSHOT_LSTM_KEYS,
+    )
+    compact_high_frequency = _selected_forecast_mapping(
+        high_frequency,
+        _FORECAST_SNAPSHOT_HIGH_FREQUENCY_KEYS,
+    )
+    for row in (compact_two_candle, compact_lstm, compact_high_frequency):
+        if not row:
+            continue
+        row["frame_id"] = frame_id
+        row["observed_epoch"] = observed_epoch
+        row["stale"] = is_stale
+        row["diagnostic_only"] = is_stale
+
+    return {
+        "schema_version": "PG_FORECAST_SNAPSHOT_V3",
+        "source_frame_id": frame_id,
+        "observed_epoch": observed_epoch,
+        "stale": is_stale,
+        "diagnostic_only": is_stale,
+        "status": "STALE_DIAGNOSTIC" if is_stale else "CURRENT",
+        "two_candle_study": compact_two_candle,
+        "lstm_contribution": compact_lstm,
+        "high_frequency_forecast": compact_high_frequency,
+    }
+
+
 def _compact_session_persisted_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     compact = dict(payload)
+    forecast_snapshot = _forecast_snapshot_v3(compact)
+    if forecast_snapshot:
+        compact["forecast_snapshot_v3"] = forecast_snapshot
     for key in ("tracking_summary", "latest_signal"):
         nested = compact.get(key)
         if isinstance(nested, Mapping):
@@ -1277,6 +1504,8 @@ _COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
         "overlay_frame_id",
         "full_overlay_frame_id",
         "model_vote_frame_id",
+        "visual_observation_v3",
+        "forecast_snapshot_v3",
         "state_version",
         "decision_version",
         "decision_valid_until_epoch",
@@ -3553,10 +3782,32 @@ def _capture_looks_like_pocket_option_surface(image: Image.Image) -> bool:
 def _capture_looks_like_pocket_option_visible_surface(
     image: Image.Image,
     descriptor: Mapping[str, Any] | None = None,
+    *,
+    require_broker_page_evidence: bool = False,
 ) -> bool:
+    row = _mapping_to_dict(descriptor or {})
+    visible_title = str(
+        row.get("visible_title", row.get("current_title", row.get("foreground_title", ""))) or ""
+    ).strip()
+    if visible_title and (
+        not _is_pocket_option_like_title(visible_title)
+        or _title_has_any_token(visible_title, _WINDOW_REACQUIRE_BLOCK_TOKENS)
+    ):
+        return False
+    expected_hwnd = int(row.get("hwnd", row.get("window_handle", 0)) or 0)
+    foreground_before = int(row.get("foreground_hwnd_before", expected_hwnd) or 0)
+    foreground_after = int(row.get("foreground_hwnd_after", expected_hwnd) or 0)
+    if expected_hwnd > 0 and (
+        foreground_before != expected_hwnd or foreground_after != expected_hwnd
+    ):
+        return False
     if _capture_looks_like_pocket_option_surface(image):
         return True
-    row = _mapping_to_dict(descriptor or {})
+    if require_broker_page_evidence:
+        # A PhoenixGuard dashboard can contain a real broker screenshot and
+        # therefore look chart-like. Visible recovery is allowed to accept
+        # only positive Pocket Option page evidence, never a generic chart.
+        return False
     try:
         lock = _broker_source_lock_dict_v3(
             row,
@@ -3922,10 +4173,21 @@ def _rescale_candle_tracks(
             ]
             row["width"] = max(1, int(row["bbox"][2] - row["bbox"][0]))
             row["height"] = max(1, int(row["bbox"][3] - row["bbox"][1]))
-        if "center_x" in row:
-            row["center_x"] = float(row.get("center_x", 0.0) or 0.0) * scale_x
-        if "center_y" in row:
-            row["center_y"] = float(row.get("center_y", 0.0) or 0.0) * scale_y
+        for key in ("center_x", "center_x_px"):
+            if key in row:
+                row[key] = float(row.get(key, 0.0) or 0.0) * scale_x
+        for key in (
+            "center_y",
+            "center_y_px",
+            "wick_top_px",
+            "wick_bottom_px",
+            "body_top_px",
+            "body_bottom_px",
+            "open_y_px",
+            "close_y_px",
+        ):
+            if key in row:
+                row[key] = float(row.get(key, 0.0) or 0.0) * scale_y
         result.append(row)
     return result
 
@@ -4422,25 +4684,6 @@ def _instrument_viewport_hash(payload: Mapping[str, Any]) -> str:
         "locked_height": int(locked.get("height", 0) or 0),
     }
     return _stable_short_hash(descriptor)
-
-
-def _group_column_runs(active: ArrayND, *, max_gap: int = 2) -> list[tuple[int, int]]:
-    indices = np.flatnonzero(active > 0)
-    if indices.size == 0:
-        return []
-    groups: list[tuple[int, int]] = []
-    start = int(indices[0])
-    end = int(indices[0])
-    for raw_idx in indices[1:]:
-        idx = int(raw_idx)
-        if idx <= (end + max(1, int(max_gap))):
-            end = idx
-            continue
-        groups.append((start, end + 1))
-        start = idx
-        end = idx
-    groups.append((start, end + 1))
-    return groups
 
 
 def _trend_direction(value: float, *, epsilon: float = 0.012) -> str:
@@ -7259,6 +7502,36 @@ class WindowsWindowCaptureBackend:
             return windows
         return [item for item in windows if _title_matches_window_query(item.get("title", ""), query)]
 
+    def foreground_window_hwnd(self) -> int:
+        """Return the HWND that currently owns visible desktop pixels."""
+
+        if not self._is_windows():
+            return 0
+        try:
+            import ctypes
+
+            return int(ctypes.windll.user32.GetForegroundWindow() or 0)
+        except Exception:
+            LOGGER.debug("Unable to read the foreground window handle.", exc_info=True)
+            return 0
+
+    def _visible_descriptor_for_hwnd(self, hwnd: int) -> dict[str, Any] | None:
+        if int(hwnd or 0) <= 0:
+            return None
+        try:
+            return next(
+                (
+                    dict(row)
+                    for row in self.list_windows(None)
+                    if int(row.get("hwnd", 0) or 0) == int(hwnd)
+                    and _window_descriptor_is_capture_usable(row)
+                ),
+                None,
+            )
+        except Exception:
+            LOGGER.debug("Unable to refresh the visible window descriptor.", exc_info=True)
+            return None
+
     def capture_window(self, descriptor: Mapping[str, Any]) -> Image.Image:
         if hasattr(self, "_capture_window_override"):
             return cast(Image.Image, getattr(self, "_capture_window_override")(descriptor))
@@ -7283,12 +7556,6 @@ class WindowsWindowCaptureBackend:
             and str(os.getenv("PHOENIXGUARD_POCKET_FAST_FOREGROUND_IMAGEGRAB", "1") or "1").strip().lower()
             not in {"0", "false", "off", "no"}
         )
-        require_pocket_foreground = (
-            pocket_option_window
-            and str(os.getenv("PHOENIXGUARD_POCKET_REQUIRE_FOREGROUND_IMAGEGRAB", "1") or "1").strip().lower()
-            not in {"0", "false", "off", "no"}
-        )
-
         if fast_visible_grab and self._is_windows() and not pocket_option_window:
             try:
                 live_capture = self._capture_window_imagegrab(descriptor)
@@ -7312,15 +7579,11 @@ class WindowsWindowCaptureBackend:
                 return offscreen.convert("RGB")
             if fast_visible_grab and pocket_fast_foreground_grab:
                 try:
-                    foreground_ready = self._activate_window_for_visible_capture(hwnd)
-                    if foreground_ready or not require_pocket_foreground:
-                        live_capture = self._capture_window_imagegrab(descriptor)
-                        if (
-                            not self._looks_blank(live_capture)
-                            and not self._looks_browser_content_blank(live_capture)
-                            and _capture_looks_like_pocket_option_visible_surface(live_capture, descriptor)
-                        ):
-                            return live_capture.convert("RGB")
+                    # Every desktop ImageGrab must pass the same HWND/title
+                    # checks before and after capture. Calling ImageGrab here
+                    # directly could capture a dashboard that embeds the
+                    # broker and thereby fool pixel-only validation.
+                    return self.capture_window_live(descriptor)
                 except Exception:
                     LOGGER.debug("Pocket Option live ImageGrab fallback failed.", exc_info=True)
             if offscreen is not None:
@@ -7334,6 +7597,67 @@ class WindowsWindowCaptureBackend:
             if offscreen is not None and not self._looks_blank(offscreen):
                 return offscreen.convert("RGB")
         return self._capture_window_imagegrab(descriptor)
+
+    def capture_window_live(self, descriptor: Mapping[str, Any]) -> Image.Image:
+        """Capture visible pixels after foreground verification.
+
+        This is deliberately separate from ``capture_window``. The normal path
+        remains non-disruptive and prefers PrintWindow, while the tracker may
+        call this bounded recovery path after several byte-identical frames.
+        """
+
+        if not self._is_windows():
+            raise CaptureSurfaceUnavailableError("Visible broker-frame recovery is only available on Windows.")
+        self._ensure_dpi_awareness()
+        hwnd = int(descriptor.get("hwnd", 0) or 0)
+        if hwnd <= 0 or not self._activate_window_for_visible_capture(hwnd):
+            raise CaptureSurfaceUnavailableError("The locked broker window could not be verified in the foreground.")
+        foreground_before = self.foreground_window_hwnd()
+        if foreground_before != hwnd:
+            raise CaptureSurfaceUnavailableError(
+                "Visible broker-frame recovery was blocked because the locked broker did not own the foreground."
+            )
+        before_descriptor = self._visible_descriptor_for_hwnd(hwnd)
+        if before_descriptor is None:
+            raise CaptureSurfaceUnavailableError(
+                "Visible broker-frame recovery could not verify the locked window identity."
+            )
+        locked_title = str(descriptor.get("title", descriptor.get("window_query", "")) or "")
+        visible_title_before = str(before_descriptor.get("title", "") or "").strip()
+        if _is_pocket_option_query(locked_title) and (
+            not _is_pocket_option_like_title(visible_title_before)
+            or _title_has_any_token(visible_title_before, _WINDOW_REACQUIRE_BLOCK_TOKENS)
+        ):
+            raise CaptureSurfaceUnavailableError(
+                "Visible broker-frame recovery was blocked because the active window is not Pocket Option."
+            )
+        image = self._capture_window_imagegrab(descriptor).convert("RGB")
+        foreground_after = self.foreground_window_hwnd()
+        after_descriptor = self._visible_descriptor_for_hwnd(hwnd)
+        visible_title_after = str((after_descriptor or {}).get("title", "") or "").strip()
+        if foreground_after != hwnd:
+            raise CaptureSurfaceUnavailableError(
+                "Visible broker-frame recovery was blocked because foreground ownership changed during capture."
+            )
+        if after_descriptor is None or visible_title_after != visible_title_before:
+            raise CaptureSurfaceUnavailableError(
+                "Visible broker-frame recovery was blocked because the window identity changed during capture."
+            )
+        if self._looks_blank(image) or self._looks_browser_content_blank(image):
+            raise CaptureSurfaceUnavailableError("Visible broker-frame recovery returned blank chart pixels.")
+        identity_descriptor = {
+            **dict(descriptor),
+            "visible_title": visible_title_after,
+            "foreground_hwnd_before": foreground_before,
+            "foreground_hwnd_after": foreground_after,
+        }
+        if _is_pocket_option_query(locked_title) and not _capture_looks_like_pocket_option_visible_surface(
+            image,
+            identity_descriptor,
+            require_broker_page_evidence=True,
+        ):
+            raise CaptureSurfaceUnavailableError("Visible broker-frame recovery did not include Pocket Option pixels.")
+        return image
 
     def _activate_window_for_visible_capture(self, hwnd: int) -> bool:
         if hwnd <= 0 or not self._is_windows():
@@ -12051,7 +12375,12 @@ class PhoenixGuardWindowTrackingAdapter:
                     top_k=max(16, int(limit) * 4),
                     macro_trend=macro_trend or None,
                     local_phase=local_phase or None,
-                    query_context=query_context,
+                    # The authoritative loop below recomputes late-interaction,
+                    # trajectory, style, and metric alignment for every
+                    # desired-side entry.  Asking the bank to do the same work
+                    # here doubles the expensive candidate evaluation without
+                    # changing the final ranking inputs.
+                    query_context=None,
                 )
             except TypeError:
                 try:
@@ -13006,6 +13335,51 @@ class PhoenixGuardWindowTrackingAdapter:
                     )
         return preview.convert("RGB")
 
+    def warmup_memory_projection(self) -> None:
+        """Load the bank and lazily initialized text embedder before first use."""
+
+        bank = self._get_phoenixguard_memory_bank()
+        if bank is None:
+            return
+        embed_description = getattr(bank, "embed_description", None)
+        if not callable(embed_description):
+            return
+        neutral_chart_state: dict[str, Any] = {
+            "entry_type": "continuation",
+            "direction": "HOLD",
+            "macro_trend": "NEUTRAL",
+            "candle_count_up": 0,
+            "candle_count_down": 0,
+            "consolidation_streak": 0,
+            "consolidation_type": "none",
+            "reversal_signal": "none",
+            "continuation_signal": "none",
+            "momentum_bias": "neutral",
+            "structure_setup": "forming",
+            "entry_candle": {
+                "color": "neutral",
+                "body_pct": 0.0,
+                "upper_wick_pct": 0.0,
+                "lower_wick_pct": 0.0,
+            },
+            "direction_probability": 0.5,
+            "projection_bias_confidence": 0.0,
+            "projection_dominance": 0.0,
+            "projected_next_box": {
+                "direction": "HOLD",
+                "box_type": "forming",
+                "confidence": 0.0,
+                "dominance_gap": 0.0,
+            },
+            "swing_state": {
+                "recent_swing_direction": "HOLD",
+                "macro_swing_direction": "HOLD",
+                "swing_phase": "forming",
+            },
+            "raw_description": "Neutral current-chart forecast warmup.",
+        }
+        embed_description(neutral_chart_state, None)
+
     def render_memory_projection_artifacts(
         self,
         artifact_dir: Path,
@@ -13381,13 +13755,34 @@ class PhoenixGuardWindowTrackingAdapter:
         arr = np.asarray(image.convert("RGB"), dtype=np.uint8)
         if arr.ndim != 3 or arr.shape[0] < 48 or arr.shape[1] < 48:
             return [0, 0, int(image.width), int(image.height)], 0.0
-        green_mask, sell_mask = self._build_candle_masks(arr)
-        union_mask = self._build_candle_like_union_mask(green_mask, sell_mask, image.size)
-        chart_mask = union_mask.copy()
-        top_strip_bottom = max(28, int(round(image.height * 0.085)))
-        if int(np.sum(chart_mask[top_strip_bottom:, :] > 0)) >= 12:
-            chart_mask[:top_strip_bottom, :] = 0
-        bbox = _binary_content_bbox(chart_mask)
+        shared_tracks = extract_candle_tracks_adaptive_v3(
+            arr,
+            minimum_track_length=6,
+        )
+        if shared_tracks:
+            track_boxes = [
+                cast(Sequence[Any], row.get("bbox", []))
+                for row in shared_tracks
+                if len(cast(Sequence[Any], row.get("bbox", []))) >= 4
+            ]
+            bbox = None
+            if track_boxes:
+                bbox = (
+                    int(round(min(float(box[0]) for box in track_boxes))),
+                    int(round(min(float(box[1]) for box in track_boxes))),
+                    int(round(max(float(box[2]) for box in track_boxes))) + 1,
+                    int(round(max(float(box[3]) for box in track_boxes))) + 1,
+                )
+        else:
+            # Fail-soft for sparse charts while still sourcing color support
+            # from the shared V3 palette contract.
+            buy_mask, sell_mask = self._build_candle_masks(arr)
+            union_mask = self._build_candle_like_union_mask(buy_mask, sell_mask, image.size)
+            chart_mask = union_mask.copy()
+            top_strip_bottom = max(28, int(round(image.height * 0.085)))
+            if int(np.sum(chart_mask[top_strip_bottom:, :] > 0)) >= 12:
+                chart_mask[:top_strip_bottom, :] = 0
+            bbox = _binary_content_bbox(chart_mask)
         if bbox is None:
             return [0, 0, int(image.width), int(image.height)], 0.0
         x0, y0, x1, y1 = bbox
@@ -13583,29 +13978,18 @@ class PhoenixGuardWindowTrackingAdapter:
             return None
 
     def _build_candle_masks(self, arr: ArrayND) -> tuple[ArrayND, ArrayND]:
-        rgb = np.asarray(arr, dtype=np.uint8)
-        red = rgb[:, :, 0].astype(np.int16)
-        green = rgb[:, :, 1].astype(np.int16)
-        blue = rgb[:, :, 2].astype(np.int16)
-        green_mask = np.where(
-            (green >= 95) & (green >= red + 18) & (green >= blue + 12),
+        palette_masks = build_candle_palette_masks(np.asarray(arr, dtype=np.uint8))
+        buy_mask = np.where(
+            palette_masks["green"] | palette_masks["blue"],
             255,
             0,
         ).astype(np.uint8)
         sell_mask = np.where(
-            (red >= 120) & (blue >= 90) & (red >= green + 26) & (blue >= green + 10),
+            palette_masks["red"] | palette_masks["orange"] | palette_masks["magenta"],
             255,
             0,
         ).astype(np.uint8)
-        try:
-            import cv2  # type: ignore[import-not-found]
-
-            kernel = np.ones((3, 3), dtype=np.uint8)
-            green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-            sell_mask = cv2.morphologyEx(sell_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-        except Exception:
-            pass
-        return green_mask, sell_mask
+        return buy_mask, sell_mask
 
     def _build_candle_like_union_mask(
         self,
@@ -13650,53 +14034,36 @@ class PhoenixGuardWindowTrackingAdapter:
         arr = np.asarray(image.convert("RGB"), dtype=np.uint8)
         if arr.ndim != 3 or arr.shape[0] < 32 or arr.shape[1] < 32:
             return []
-        green_mask, sell_mask = self._build_candle_masks(arr)
-        union_mask = self._build_candle_like_union_mask(green_mask, sell_mask, image.size)
-        x_profile = np.sum(union_mask > 0, axis=0).astype(np.int32)
-        active_columns = np.where(
-            x_profile >= max(3, int(round(float(max(1, x_profile.max())) * 0.18))),
-            1,
-            0,
-        ).astype(np.uint8)
-        groups = _group_column_runs(active_columns, max_gap=2)
+        shared_tracks = extract_candle_tracks_adaptive_v3(
+            arr,
+            minimum_track_length=6,
+        )
         tracks: list[dict[str, Any]] = []
         height = max(1, int(image.height))
         width = max(1, int(image.width))
-        for index, (x0, x1) in enumerate(groups, start=1):
-            if (x1 - x0) < 2:
+        for shared in shared_tracks:
+            row = dict(shared)
+            raw_bbox = cast(Sequence[Any], row.get("bbox", []))
+            if len(raw_bbox) < 4:
                 continue
-            slice_mask = union_mask[:, x0:x1]
-            ys, _xs = np.where(slice_mask > 0)
-            if ys.size < 5:
-                continue
-            y0 = int(ys.min())
-            y1 = int(ys.max()) + 1
-            green_count = int(np.sum(green_mask[:, x0:x1] > 0))
-            sell_count = int(np.sum(sell_mask[:, x0:x1] > 0))
-            if green_count == 0 and sell_count == 0:
-                continue
-            direction = "BUY" if green_count >= sell_count else "SELL"
-            color = "green" if direction == "BUY" else "magenta"
-            center_x = float((x0 + x1) * 0.5)
-            center_y = float((y0 + y1) * 0.5)
-            price_proxy = float(1.0 - (center_y / max(1.0, float(height - 1))))
-            tracks.append(
+            x0, y0, x1, y1 = [int(round(float(value))) for value in raw_bbox[:4]]
+            center_x = float(row.get("center_x_px", (x0 + x1) * 0.5) or 0.0)
+            center_y = float(row.get("center_y_px", (y0 + y1) * 0.5) or 0.0)
+            row.update(
                 {
-                    "track_id": int(index),
-                    "bbox": [int(x0), int(y0), int(x1), int(y1)],
+                    "bbox": [x0, y0, x1, y1],
+                    # Preserve the tracker aliases while retaining every
+                    # geometry-rich field used by raw-suite training.
                     "center_x": center_x,
                     "center_y": center_y,
-                    "price_proxy": price_proxy,
-                    "direction": direction,
-                    "color": color,
-                    "width": int(x1 - x0),
-                    "height": int(y1 - y0),
-                    "body_height_pct": float((y1 - y0) / max(1.0, float(height))),
+                    "width": max(1, x1 - x0),
+                    "height": max(1, y1 - y0),
                     "normalized_x": float(center_x / max(1.0, float(width))),
                     "normalized_y": float(center_y / max(1.0, float(height))),
                 }
             )
-        return self._filter_main_candle_tracks(tracks, image.size)
+            tracks.append(row)
+        return tracks
 
     def _filter_main_candle_tracks(
         self,
@@ -13820,6 +14187,185 @@ class PhoenixGuardWindowTrackingAdapter:
         kept.sort(key=lambda item: float(item.get("center_x", 0.0) or 0.0))
         return kept, removed_count
 
+    @staticmethod
+    def _candle_axis_value(candle: Mapping[str, Any], *keys: str) -> float | None:
+        """Return an explicit finite candle coordinate without geometry guessing."""
+
+        for key in keys:
+            if key not in candle:
+                continue
+            raw_value = candle.get(key)
+            if raw_value in (None, ""):
+                continue
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(value):
+                return value
+        return None
+
+    def _candle_close_y(self, candle: Mapping[str, Any]) -> float | None:
+        """Read the parser's real close coordinate; never substitute a box centre."""
+
+        return self._candle_axis_value(
+            candle,
+            "close_y_px",
+            "close_y",
+            "close_price_y_px",
+            "close_price_y",
+        )
+
+    @staticmethod
+    def _candle_is_closed(
+        candle: Mapping[str, Any],
+        *,
+        index: int,
+        total: int,
+    ) -> bool:
+        """Treat the right-most unlabelled candle as forming and fail closed."""
+
+        for key in ("is_closed", "closed", "candle_closed", "closed_candle", "is_complete", "candle_complete"):
+            if key not in candle or candle.get(key) is None:
+                continue
+            raw_value = candle.get(key)
+            if isinstance(raw_value, bool):
+                return raw_value
+            if isinstance(raw_value, (int, float)):
+                return bool(raw_value)
+            normalized = str(raw_value).strip().lower()
+            if normalized in {"1", "true", "yes", "closed", "complete", "confirmed"}:
+                return True
+            if normalized in {"0", "false", "no", "open", "forming", "incomplete"}:
+                return False
+        for key in ("is_forming", "forming", "candle_forming", "in_progress"):
+            if key not in candle or candle.get(key) is None:
+                continue
+            raw_value = candle.get(key)
+            if isinstance(raw_value, bool):
+                return not raw_value
+            if isinstance(raw_value, (int, float)):
+                return not bool(raw_value)
+            normalized = str(raw_value).strip().lower()
+            if normalized in {"1", "true", "yes", "forming", "open", "in_progress"}:
+                return False
+            if normalized in {"0", "false", "no", "closed", "complete"}:
+                return True
+        phase = str(candle.get("candle_state", candle.get("bar_state", "")) or "").strip().lower()
+        if phase in {"forming", "open", "in_progress", "live"}:
+            return False
+        if phase in {"closed", "complete", "confirmed"}:
+            return True
+        return 0 <= int(index) < max(0, int(total) - 1)
+
+    def _candle_wick_bounds_y(self, candle: Mapping[str, Any]) -> tuple[float, float] | None:
+        top = self._candle_axis_value(candle, "wick_top_px", "wick_top", "high_y_px", "high_y")
+        bottom = self._candle_axis_value(candle, "wick_bottom_px", "wick_bottom", "low_y_px", "low_y")
+        if top is not None and bottom is not None:
+            return min(top, bottom), max(top, bottom)
+        bbox = candle.get("bbox", [])
+        if not isinstance(bbox, Sequence) or isinstance(bbox, (str, bytes, bytearray)):
+            return None
+        values = cast(Sequence[Any], bbox)
+        if len(values) < 4:
+            return None
+        try:
+            raw_top = float(values[1])
+            raw_bottom = float(values[3])
+        except (TypeError, ValueError):
+            return None
+        return min(raw_top, raw_bottom), max(raw_top, raw_bottom)
+
+    def _candle_body_bounds_y(self, candle: Mapping[str, Any]) -> tuple[float, float] | None:
+        top = self._candle_axis_value(candle, "body_top_px", "body_top")
+        bottom = self._candle_axis_value(candle, "body_bottom_px", "body_bottom")
+        if top is not None and bottom is not None:
+            return min(top, bottom), max(top, bottom)
+        open_y = self._candle_axis_value(candle, "open_y_px", "open_y")
+        close_y = self._candle_close_y(candle)
+        if open_y is None or close_y is None:
+            return None
+        return min(open_y, close_y), max(open_y, close_y)
+
+    def _confirmed_structure_breaks(
+        self,
+        candles: Sequence[Mapping[str, Any]],
+        *,
+        median_range_px: float,
+    ) -> list[dict[str, Any]]:
+        """Find first closed-candle breaks of confirmed local swing anchors."""
+
+        rows = [dict(item) for item in candles]
+        if len(rows) < 5:
+            return []
+        pivot_margin = max(0.75, float(median_range_px) * 0.045)
+        break_buffer = max(1.5, float(median_range_px) * 0.14)
+        swing_highs: list[tuple[int, float]] = []
+        swing_lows: list[tuple[int, float]] = []
+        for index in range(1, len(rows) - 1):
+            if not self._candle_is_closed(rows[index], index=index, total=len(rows)):
+                continue
+            if not self._candle_is_closed(rows[index + 1], index=index + 1, total=len(rows)):
+                continue
+            left_bounds = self._candle_wick_bounds_y(rows[index - 1])
+            bounds = self._candle_wick_bounds_y(rows[index])
+            right_bounds = self._candle_wick_bounds_y(rows[index + 1])
+            if left_bounds is None or bounds is None or right_bounds is None:
+                continue
+            top, bottom = bounds
+            if top <= min(left_bounds[0], right_bounds[0]) - pivot_margin:
+                swing_highs.append((index, top))
+            if bottom >= max(left_bounds[1], right_bounds[1]) + pivot_margin:
+                swing_lows.append((index, bottom))
+
+        events: list[dict[str, Any]] = []
+        for direction, anchors in (("BUY", swing_highs), ("SELL", swing_lows)):
+            for swing_index, swing_y in anchors:
+                for break_index in range(swing_index + 2, len(rows)):
+                    break_candle = rows[break_index]
+                    if not self._candle_is_closed(break_candle, index=break_index, total=len(rows)):
+                        continue
+                    close_y = self._candle_close_y(break_candle)
+                    if close_y is None:
+                        continue
+                    break_distance = swing_y - close_y if direction == "BUY" else close_y - swing_y
+                    if break_distance <= break_buffer:
+                        continue
+                    swing_candle = rows[swing_index]
+                    swing_x = self._candle_axis_value(swing_candle, "center_x_px", "center_x")
+                    break_x = self._candle_axis_value(break_candle, "center_x_px", "center_x")
+                    if swing_x is None or break_x is None:
+                        break
+                    pad = max(2.0, float(median_range_px) * 0.12)
+                    events.append(
+                        {
+                            "kind": "BMS",
+                            "direction": direction,
+                            "swing_type": "swing_high" if direction == "BUY" else "swing_low",
+                            "swing_index": int(swing_index),
+                            "swing_y_px": round(float(swing_y), 3),
+                            "break_index": int(break_index),
+                            "break_close_y_px": round(float(close_y), 3),
+                            "break_distance_px": round(float(break_distance), 3),
+                            "break_buffer_px": round(float(break_buffer), 3),
+                            "confirmed_on_closed_candle": True,
+                            "line_points": [
+                                [round(float(swing_x), 3), round(float(swing_y), 3)],
+                                [round(float(break_x), 3), round(float(swing_y), 3)],
+                            ],
+                            "break_point": [round(float(break_x), 3), round(float(close_y), 3)],
+                            "bbox": [
+                                int(round(max(0.0, min(swing_x, break_x) - pad))),
+                                int(round(max(0.0, min(swing_y, close_y) - pad))),
+                                int(round(max(swing_x, break_x) + pad)),
+                                int(round(max(swing_y, close_y) + pad)),
+                            ],
+                        }
+                    )
+                    break
+        events.sort(key=lambda item: (int(item.get("break_index", -1)), int(item.get("swing_index", -1))))
+        return events
+
     def _derive_support_resistance_zones(
         self,
         candles: Sequence[Mapping[str, Any]],
@@ -13871,11 +14417,14 @@ class PhoenixGuardWindowTrackingAdapter:
         if not highs or not lows:
             return []
         latest_bbox = cast(Sequence[Any], candles[-1].get("bbox", []))
-        latest_center = (
+        latest_geometry_center = (
             float(candles[-1].get("center_y", height * 0.5) or height * 0.5)
             if len(latest_bbox) < 4
             else (min(float(latest_bbox[1]), float(latest_bbox[3])) + max(float(latest_bbox[1]), float(latest_bbox[3]))) * 0.5
         )
+        latest_center = self._candle_close_y(candles[-1])
+        if latest_center is None:
+            latest_center = latest_geometry_center
         median_range = float(np.median(np.asarray(ranges, dtype=np.float32))) if ranges else max(8.0, height * 0.03)
         merge_band = max(5.0, min(float(height) * 0.055, median_range * 0.58))
         zone_half_height = max(3.0, merge_band * 0.42)
@@ -13940,38 +14489,49 @@ class PhoenixGuardWindowTrackingAdapter:
                 if bounds is None:
                     continue
                 _x0, top, _x1, bottom = bounds
-                center_y = float(candle.get("center_y", (top + bottom) * 0.5) or (top + bottom) * 0.5)
                 direction = _upper_action(candle.get("direction", "HOLD"))
                 touches = bool(top <= center + tolerance and bottom >= center - tolerance)
-                if broken_after_touch and idx > last_break_index:
+                closed = self._candle_is_closed(candle, index=idx, total=len(candles))
+                close_y = self._candle_close_y(candle) if closed else None
+                if broken_after_touch and idx > last_break_index and close_y is not None:
                     if touches:
                         post_break_retest_count += 1
-                        if role == "support" and direction == "SELL":
+                        if (
+                            role == "support"
+                            and direction == "SELL"
+                            and close_y >= center + tolerance * 0.35
+                        ):
                             post_break_reaction_count += 1
-                        elif role == "resistance" and direction == "BUY":
+                        elif (
+                            role == "resistance"
+                            and direction == "BUY"
+                            and close_y <= center - tolerance * 0.35
+                        ):
                             post_break_reaction_count += 1
-                    if role == "support" and center_y < center - tolerance:
+                    if role == "support" and close_y < center - tolerance:
                         original_side_reclaim_count += 1
-                    elif role == "resistance" and center_y > center + tolerance:
+                    elif role == "resistance" and close_y > center + tolerance:
                         original_side_reclaim_count += 1
-                if touches:
+                if touches and close_y is not None:
                     retest_count += 1
                     if role == "support" and direction == "BUY":
                         reaction_count += 1
                     elif role == "resistance" and direction == "SELL":
                         reaction_count += 1
+                if close_y is None:
+                    continue
                 if role == "support":
-                    if bottom > center + tolerance and center_y <= center + tolerance:
+                    if bottom > center + tolerance and close_y <= center + tolerance:
                         sweep_count += 1
-                    if idx > last_touch_index and center_y > center + break_tolerance:
+                    if idx > last_touch_index and close_y > center + break_tolerance:
                         body_close_break_count += 1
                         broken_after_touch = True
                         if last_break_index < 0:
                             last_break_index = idx
                 else:
-                    if top < center - tolerance and center_y >= center - tolerance:
+                    if top < center - tolerance and close_y >= center - tolerance:
                         sweep_count += 1
-                    if idx > last_touch_index and center_y < center - break_tolerance:
+                    if idx > last_touch_index and close_y < center - break_tolerance:
                         body_close_break_count += 1
                         broken_after_touch = True
                         if last_break_index < 0:
@@ -14126,17 +14686,22 @@ class PhoenixGuardWindowTrackingAdapter:
                     return_count = 0
                     broken = False
                     break_buffer = max(2.0, median_range * 0.34)
-                    for future in candles[base_end + 2:]:
+                    for future_index in range(base_end + 2, len(candles)):
+                        future = candles[future_index]
                         future_bounds = candle_bounds(future)
                         if future_bounds is None:
                             continue
                         _fx0, future_top, _fx1, future_bottom = future_bounds
-                        future_center = float(future.get("center_y", (future_top + future_bottom) * 0.5) or (future_top + future_bottom) * 0.5)
+                        if not self._candle_is_closed(future, index=future_index, total=len(candles)):
+                            continue
+                        future_close = self._candle_close_y(future)
+                        if future_close is None:
+                            continue
                         if future_top <= zone_bottom and future_bottom >= zone_top:
                             return_count += 1
-                        if role == "support" and future_center > zone_bottom + break_buffer:
+                        if role == "support" and future_close > zone_bottom + break_buffer:
                             broken = True
-                        elif role == "resistance" and future_center < zone_top - break_buffer:
+                        elif role == "resistance" and future_close < zone_top - break_buffer:
                             broken = True
 
                     if broken:
@@ -14281,6 +14846,8 @@ class PhoenixGuardWindowTrackingAdapter:
                 "touch_reaction_validated",
                 "freshness_respected",
                 "body_close_break_checked",
+                "actual_close_px_required",
+                "forming_candle_confirmation_blocked",
                 "historical_context_preserved",
             ]
             if supply_demand_origin == "base_departure_imbalance":
@@ -14375,7 +14942,12 @@ class PhoenixGuardWindowTrackingAdapter:
                     strength = _clip01(strength * 0.50)
                 elif freshness_state == "CONSUMED":
                     strength = _clip01(strength * 0.74)
-                if strength < 0.30 and institutional_score < 0.42:
+                if (
+                    strength < 0.30
+                    and institutional_score < 0.42
+                    and not broken_after_touch
+                    and not role_flip_confirmed
+                ):
                     continue
                 supply_demand_origin = str(origin_metrics.get("supply_demand_origin", "reaction_cluster") or "reaction_cluster")
                 authority_profile = zone_authority_profile(
@@ -14717,14 +15289,14 @@ class PhoenixGuardWindowTrackingAdapter:
         max_significant_zones = max(1, min(48, int(max_significant_zones)))
         max_liquidity_pools = max(1, min(48, int(max_liquidity_pools)))
         rows = [dict(item) for item in candles]
-        direction = _upper_action(candidate_action)
-        if direction not in {"BUY", "SELL"}:
+        requested_direction = _upper_action(candidate_action)
+        if requested_direction not in {"BUY", "SELL"}:
             for side in (impulse_direction, local_direction, global_direction):
                 normalized = _upper_action(side)
                 if normalized in {"BUY", "SELL"}:
-                    direction = normalized
+                    requested_direction = normalized
                     break
-        if not rows or direction not in {"BUY", "SELL"}:
+        if not rows or requested_direction not in {"BUY", "SELL"}:
             sr_context = self._support_resistance_decision_context(
                 support_resistance_zones,
                 candidate_action=candidate_action,
@@ -14751,30 +15323,152 @@ class PhoenixGuardWindowTrackingAdapter:
             if len(bbox) >= 4:
                 ranges.append(max(1.0, abs(float(bbox[3]) - float(bbox[1]))))
         median_range = float(np.median(np.asarray(ranges, dtype=np.float32))) if ranges else max(6.0, float(height) * 0.024)
-        latest = rows[-1]
-        latest_bbox = cast(Sequence[Any], latest.get("bbox", []))
-        latest_top = min(float(latest_bbox[1]), float(latest_bbox[3])) if len(latest_bbox) >= 4 else float(height) * 0.5
-        latest_bottom = max(float(latest_bbox[1]), float(latest_bbox[3])) if len(latest_bbox) >= 4 else float(height) * 0.5
-        latest_center_y = float(latest.get("center_y", (latest_top + latest_bottom) * 0.5) or (latest_top + latest_bottom) * 0.5)
+        structure_breaks = self._confirmed_structure_breaks(rows, median_range_px=median_range)
+        latest_structure_break = structure_breaks[-1] if structure_breaks else {}
+        latest_break_direction = _upper_action(latest_structure_break.get("direction", "HOLD"))
+        latest_break_age = (
+            max(0, len(rows) - 1 - int(latest_structure_break.get("break_index", -1)))
+            if latest_structure_break
+            else len(rows)
+        )
+        latest_break_active = bool(latest_structure_break and latest_break_age <= 6)
+        major_direction = _upper_action(global_direction)
+        countertrend_local_only = bool(
+            major_direction in {"BUY", "SELL"}
+            and requested_direction == _opposite_action(major_direction)
+            and not (latest_break_active and latest_break_direction == requested_direction)
+        )
+        direction = major_direction if countertrend_local_only else requested_direction
+
+        closed_indices = [
+            index
+            for index, candle in enumerate(rows)
+            if self._candle_is_closed(candle, index=index, total=len(rows))
+            and self._candle_close_y(candle) is not None
+        ]
+        latest_closed_index = closed_indices[-1] if closed_indices else -1
+        latest_closed = rows[latest_closed_index] if latest_closed_index >= 0 else {}
+        latest_closed_bounds = self._candle_wick_bounds_y(latest_closed) if latest_closed else None
+        latest_top = latest_closed_bounds[0] if latest_closed_bounds is not None else float(height) * 0.5
+        latest_bottom = latest_closed_bounds[1] if latest_closed_bounds is not None else float(height) * 0.5
+        latest_close_y = self._candle_close_y(latest_closed) if latest_closed else None
         latest_range = max(1.0, latest_bottom - latest_top)
         displacement_score = _clip01((latest_range / max(1.0, median_range) - 0.85) / 1.65 + abs(_float_or(continuation_score, 0.0)) * 0.22)
 
         opposite = _opposite_action(direction)
         order_blocks: list[dict[str, Any]] = []
-        for idx in range(max(0, len(rows) - 16), len(rows) - 1):
+        order_block_diagnostics = {
+            "diagnostic_only": True,
+            "opposite_candidates": 0,
+            "suppressed_missing_close": 0,
+            "suppressed_no_bms": 0,
+            "suppressed_no_displacement": 0,
+            "suppressed_invalidated": 0,
+        }
+        for idx in range(max(1, len(rows) - 24), len(rows) - 1):
             candle = rows[idx]
             if _upper_action(candle.get("direction", "HOLD")) != opposite:
                 continue
-            future = rows[idx + 1:min(len(rows), idx + 6)]
-            future_same = sum(1 for item in future if _upper_action(item.get("direction", "HOLD")) == direction)
-            if future_same < 2:
+            order_block_diagnostics["opposite_candidates"] += 1
+            if not self._candle_is_closed(candle, index=idx, total=len(rows)):
+                order_block_diagnostics["suppressed_missing_close"] += 1
                 continue
-            bbox = cast(Sequence[Any], candle.get("bbox", []))
+            source_close = self._candle_close_y(candle)
+            if source_close is None:
+                order_block_diagnostics["suppressed_missing_close"] += 1
+                continue
+            matching_breaks = [
+                event
+                for event in structure_breaks
+                if _upper_action(event.get("direction", "HOLD")) == direction
+                and int(event.get("swing_index", -1)) < idx
+                and idx < int(event.get("break_index", -1)) <= idx + 9
+            ]
+            if not matching_breaks:
+                order_block_diagnostics["suppressed_no_bms"] += 1
+                continue
+            bms = matching_breaks[0]
+            break_index = int(bms.get("break_index", -1))
+            break_close = _float_or(bms.get("break_close_y_px", source_close), source_close)
+            displacement_indices = [
+                future_index
+                for future_index in range(idx + 1, break_index)
+                if self._candle_is_closed(rows[future_index], index=future_index, total=len(rows))
+                and _upper_action(rows[future_index].get("direction", "HOLD")) == direction
+            ]
+            break_candle_direction = _upper_action(rows[break_index].get("direction", "HOLD"))
+            displacement_distance = source_close - break_close if direction == "BUY" else break_close - source_close
+            if (
+                not displacement_indices
+                or break_candle_direction != direction
+                or displacement_distance < max(2.0, median_range * 0.72)
+            ):
+                order_block_diagnostics["suppressed_no_displacement"] += 1
+                continue
+            raw_bbox = candle.get("bbox", [])
+            if (
+                not isinstance(raw_bbox, Sequence)
+                or isinstance(raw_bbox, (str, bytes, bytearray))
+            ):
+                order_block_diagnostics["suppressed_missing_close"] += 1
+                continue
+            bbox = cast(Sequence[Any], raw_bbox)
             if len(bbox) < 4:
+                order_block_diagnostics["suppressed_missing_close"] += 1
                 continue
-            expanded = _expand_bbox(image_size, bbox, pad_x=max(8.0, float(width) * 0.012), pad_y=max(4.0, median_range * 0.28))
-            mitigated = self._bbox_overlap_ratio(expanded, latest_bbox) > 0.0 if len(latest_bbox) >= 4 else False
+            body_bounds = self._candle_body_bounds_y(candle)
+            if body_bounds is None:
+                order_block_diagnostics["suppressed_missing_close"] += 1
+                continue
+            body_top, body_bottom = body_bounds
+            block_bbox = [float(bbox[0]), body_top, float(bbox[2]), body_bottom]
+            expanded = _expand_bbox(
+                image_size,
+                block_bbox,
+                pad_x=max(4.0, float(width) * 0.006),
+                pad_y=max(1.5, median_range * 0.08),
+            )
+            block_top = min(float(expanded[1]), float(expanded[3]))
+            block_bottom = max(float(expanded[1]), float(expanded[3]))
+            confirmed_mitigation_indices: list[int] = []
+            forming_touch = False
+            invalidated = False
+            invalidation_index = -1
+            invalidation_buffer = max(1.5, median_range * 0.10)
+            for future_index in range(break_index + 1, len(rows)):
+                future_candle = rows[future_index]
+                future_bounds = self._candle_wick_bounds_y(future_candle)
+                if future_bounds is None:
+                    continue
+                touches_block = future_bounds[0] <= block_bottom and future_bounds[1] >= block_top
+                closed = self._candle_is_closed(future_candle, index=future_index, total=len(rows))
+                if touches_block:
+                    if closed:
+                        confirmed_mitigation_indices.append(future_index)
+                    else:
+                        forming_touch = True
+                if not closed:
+                    continue
+                future_close = self._candle_close_y(future_candle)
+                if future_close is None:
+                    continue
+                invalidated = bool(
+                    (direction == "BUY" and future_close > block_bottom + invalidation_buffer)
+                    or (direction == "SELL" and future_close < block_top - invalidation_buffer)
+                )
+                if invalidated:
+                    invalidation_index = future_index
+                    break
+            if invalidated:
+                order_block_diagnostics["suppressed_invalidated"] += 1
+                continue
+            mitigated = bool(confirmed_mitigation_indices)
             age = max(0, len(rows) - 1 - idx)
+            candidate_displacement_score = _clip01(
+                displacement_distance / max(1.0, median_range * 2.2)
+                + 0.08 * len(displacement_indices)
+            )
+            freshness_score = 1.0 if not mitigated else _clip01(0.72 - 0.16 * len(confirmed_mitigation_indices))
             order_blocks.append(
                 {
                     "type": "bullish_order_block" if direction == "BUY" else "bearish_order_block",
@@ -14782,17 +15476,61 @@ class PhoenixGuardWindowTrackingAdapter:
                     "source_index": int(idx),
                     "age_candles": int(age),
                     "bbox": expanded,
+                    "bms_confirmed": True,
+                    "bms_swing_index": int(bms.get("swing_index", -1)),
+                    "bms_break_index": int(break_index),
+                    "bms_level_y_px": round(_float_or(bms.get("swing_y_px", 0.0), 0.0), 3),
+                    "bms_close_y_px": round(float(break_close), 3),
+                    "bms_distance_px": round(_float_or(bms.get("break_distance_px", 0.0), 0.0), 3),
+                    "displacement_indices": displacement_indices,
+                    "displacement_distance_px": round(float(displacement_distance), 3),
+                    "closed_candle_confirmed": True,
                     "mitigated": bool(mitigated),
-                    "mitigation_state": "mitigating_now" if mitigated else "unmitigated" if age <= 8 else "aged_unmitigated",
-                    "confidence": round(float(_clip01(0.36 + 0.10 * future_same + 0.22 * displacement_score + 0.10 * _clip01(1.0 - age / 16.0))), 4),
-                    "summary": f"{direction} order block from the last opposite candle before displacement.",
+                    "mitigation_count": int(len(confirmed_mitigation_indices)),
+                    "mitigation_indices": confirmed_mitigation_indices,
+                    "forming_touch_unconfirmed": bool(forming_touch),
+                    "mitigation_state": (
+                        "mitigated"
+                        if mitigated
+                        else "forming_touch_unconfirmed"
+                        if forming_touch
+                        else "fresh_unmitigated"
+                    ),
+                    "freshness_score": round(float(freshness_score), 4),
+                    "invalidated": False,
+                    "invalidation_index": int(invalidation_index),
+                    "confidence": round(
+                        float(
+                            _clip01(
+                                0.38
+                                + 0.28 * candidate_displacement_score
+                                + 0.20 * freshness_score
+                                + 0.14 * _clip01(1.0 - age / 24.0)
+                            )
+                        ),
+                        4,
+                    ),
+                    "summary": f"{direction} order block: opposite candle, displacement, then closed BMS.",
                 }
             )
-        order_blocks.sort(key=lambda item: (bool(item.get("mitigated", False)), float(item.get("confidence", 0.0))), reverse=True)
+        order_blocks.sort(
+            key=lambda item: (
+                1 if bool(item.get("mitigated", False)) else 0,
+                -_clip01(item.get("freshness_score", 0.0)),
+                -_clip01(item.get("confidence", 0.0)),
+                -int(item.get("source_index", -1)),
+            )
+        )
         order_blocks = order_blocks[:3]
 
         fair_value_gaps: list[dict[str, Any]] = []
         for idx in range(2, len(rows)):
+            if any(
+                not self._candle_is_closed(rows[candle_index], index=candle_index, total=len(rows))
+                or self._candle_close_y(rows[candle_index]) is None
+                for candle_index in (idx - 2, idx - 1, idx)
+            ):
+                continue
             older_bbox = cast(Sequence[Any], rows[idx - 2].get("bbox", []))
             current_bbox = cast(Sequence[Any], rows[idx].get("bbox", []))
             if len(older_bbox) < 4 or len(current_bbox) < 4:
@@ -14819,10 +15557,20 @@ class PhoenixGuardWindowTrackingAdapter:
                 int(round(min(float(width), max(older_x, current_x) + median_range * 0.60))),
                 int(round(min(float(height), max(gap_top, gap_bottom)))),
             ]
-            mitigated = bool(
-                (direction == "BUY" and latest_bottom >= bbox[1] and latest_top <= bbox[3])
-                or (direction == "SELL" and latest_bottom >= bbox[1] and latest_top <= bbox[3])
-            )
+            mitigation_indices: list[int] = []
+            forming_touch = False
+            for future_index in range(idx + 1, len(rows)):
+                future_bounds = self._candle_wick_bounds_y(rows[future_index])
+                if future_bounds is None:
+                    continue
+                overlaps_gap = future_bounds[0] <= float(bbox[3]) and future_bounds[1] >= float(bbox[1])
+                if not overlaps_gap:
+                    continue
+                if self._candle_is_closed(rows[future_index], index=future_index, total=len(rows)):
+                    mitigation_indices.append(future_index)
+                else:
+                    forming_touch = True
+            mitigated = bool(mitigation_indices)
             fair_value_gaps.append(
                 {
                     "type": "bullish_fvg" if direction == "BUY" else "bearish_fvg",
@@ -14832,39 +15580,80 @@ class PhoenixGuardWindowTrackingAdapter:
                     "bbox": bbox,
                     "gap_px": round(float(gap_px), 3),
                     "mitigated": mitigated,
-                    "mitigation_state": "filled_or_mitigating" if mitigated else "open_imbalance",
+                    "mitigation_count": int(len(mitigation_indices)),
+                    "mitigation_indices": mitigation_indices,
+                    "forming_touch_unconfirmed": bool(forming_touch),
+                    "mitigation_state": (
+                        "filled_or_mitigated"
+                        if mitigated
+                        else "forming_touch_unconfirmed"
+                        if forming_touch
+                        else "open_imbalance"
+                    ),
+                    "closed_candle_confirmed": True,
                     "confidence": round(float(_clip01(0.34 + min(0.34, gap_px / max(1.0, median_range * 2.4)) + 0.20 * displacement_score)), 4),
                 }
             )
-        fair_value_gaps.sort(key=lambda item: (int(item.get("source_index", 0)), float(item.get("confidence", 0.0))), reverse=True)
+        fair_value_gaps.sort(
+            key=lambda item: (
+                1 if bool(item.get("mitigated", False)) else 0,
+                -int(item.get("source_index", 0)),
+                -float(item.get("confidence", 0.0)),
+            )
+        )
         fair_value_gaps = fair_value_gaps[:3]
 
         sweeps: list[dict[str, Any]] = []
-        for zone in support_resistance_zones:
+        sweep_zones: Sequence[Mapping[str, Any]] = (
+            support_resistance_zones if latest_close_y is not None else ()
+        )
+        confirmed_sweep_close_y = latest_close_y if latest_close_y is not None else 0.0
+        for zone in sweep_zones:
             row = _mapping_to_dict(zone)
             role = str(row.get("role", "") or "").lower()
+            freshness_state = str(row.get("freshness_state", "REFERENCE") or "REFERENCE").upper()
+            if freshness_state in {"BROKEN", "CONSUMED"}:
+                continue
             line_y = _float_or(row.get("line_y", 0.0), 0.0)
             tolerance = max(2.0, _float_or(row.get("zone_height_px", median_range), median_range) * 0.65)
-            if role == "support" and latest_bottom >= line_y + tolerance and latest_center_y <= line_y + tolerance:
+            if (
+                role == "support"
+                and latest_bottom >= line_y + tolerance
+                and confirmed_sweep_close_y <= line_y + tolerance * 0.15
+            ):
                 sweeps.append(
                     {
                         "type": "sell_side_liquidity_sweep",
                         "direction": "BUY",
+                        "sweep_candle_index": int(latest_closed_index),
+                        "wick_extreme_y_px": round(float(latest_bottom), 3),
+                        "closed_reclaim_y_px": round(float(confirmed_sweep_close_y), 3),
+                        "closed_reclaim_confirmed": True,
+                        "forming_candle_excluded": bool(latest_closed_index < len(rows) - 1),
                         "zone_key": str(row.get("key", "")),
                         "zone_label": str(row.get("label", "support") or "support"),
                         "confidence": round(float(_clip01(0.40 + _clip01(row.get("significance_score", row.get("confidence", 0.0))) * 0.42 + displacement_score * 0.18)), 4),
-                        "message": "Latest wick swept support liquidity and reclaimed above the level.",
+                        "message": "A closed candle swept support liquidity by wick and reclaimed above the level.",
                     }
                 )
-            elif role == "resistance" and latest_top <= line_y - tolerance and latest_center_y >= line_y - tolerance:
+            elif (
+                role == "resistance"
+                and latest_top <= line_y - tolerance
+                and confirmed_sweep_close_y >= line_y - tolerance * 0.15
+            ):
                 sweeps.append(
                     {
                         "type": "buy_side_liquidity_sweep",
                         "direction": "SELL",
+                        "sweep_candle_index": int(latest_closed_index),
+                        "wick_extreme_y_px": round(float(latest_top), 3),
+                        "closed_reclaim_y_px": round(float(confirmed_sweep_close_y), 3),
+                        "closed_reclaim_confirmed": True,
+                        "forming_candle_excluded": bool(latest_closed_index < len(rows) - 1),
                         "zone_key": str(row.get("key", "")),
                         "zone_label": str(row.get("label", "resistance") or "resistance"),
                         "confidence": round(float(_clip01(0.40 + _clip01(row.get("significance_score", row.get("confidence", 0.0))) * 0.42 + displacement_score * 0.18)), 4),
-                        "message": "Latest wick swept resistance liquidity and rejected back below the level.",
+                        "message": "A closed candle swept resistance liquidity by wick and closed back below the level.",
                     }
                 )
 
@@ -14901,15 +15690,55 @@ class PhoenixGuardWindowTrackingAdapter:
             )
             ][:max_liquidity_pools],
         )
-        mss_confidence = _clip01(0.40 * reversal_score + 0.30 * float(global_direction != local_direction and local_direction in {"BUY", "SELL"}) + 0.30 * float(local_direction == impulse_direction and local_direction in {"BUY", "SELL"}))
-        market_structure_shift: dict[str, Any] = {
-            "active": bool(mss_confidence >= 0.48),
-            "direction": _upper_action(local_direction if local_direction in {"BUY", "SELL"} else impulse_direction),
-            "confidence": round(float(mss_confidence), 4),
-            "from": _upper_action(global_direction),
-            "to": _upper_action(local_direction if local_direction in {"BUY", "SELL"} else impulse_direction),
-            "summary": "Local structure is attempting a shift against the global leg." if mss_confidence >= 0.48 else "No confirmed market-structure shift.",
-        }
+        if latest_structure_break:
+            structure_event_type = (
+                "MSS"
+                if major_direction in {"BUY", "SELL"}
+                and latest_break_direction == _opposite_action(major_direction)
+                else "BMS"
+            )
+            structure_confidence = _clip01(
+                0.58
+                + 0.24
+                * _clip01(
+                    _float_or(latest_structure_break.get("break_distance_px", 0.0), 0.0)
+                    / max(1.0, median_range * 1.8)
+                )
+                + 0.18 * _clip01(1.0 - latest_break_age / 8.0)
+            )
+            market_structure_shift = {
+                **latest_structure_break,
+                "event_type": structure_event_type,
+                "active": bool(latest_break_active),
+                "confirmed": True,
+                "direction": latest_break_direction,
+                "confidence": round(float(structure_confidence), 4),
+                "age_candles": int(latest_break_age),
+                "from": (
+                    major_direction
+                    if major_direction in {"BUY", "SELL"}
+                    else _opposite_action(latest_break_direction)
+                ),
+                "to": latest_break_direction,
+                "forming_candle_excluded": True,
+                "summary": (
+                    f"{structure_event_type} confirmed by a closed candle beyond the anchored swing."
+                    if latest_break_active
+                    else f"Historical {structure_event_type} is closed-candle confirmed but no longer current."
+                ),
+            }
+        else:
+            market_structure_shift = {
+                "event_type": "NONE",
+                "active": False,
+                "confirmed": False,
+                "direction": "HOLD",
+                "confidence": 0.0,
+                "from": major_direction,
+                "to": "HOLD",
+                "forming_candle_excluded": True,
+                "summary": "No closed candle has broken an anchored structural swing.",
+            }
         sr_context = self._support_resistance_decision_context(
             support_resistance_zones,
             candidate_action=candidate_action,
@@ -14949,7 +15778,32 @@ class PhoenixGuardWindowTrackingAdapter:
         buy_score = _clip01(buy_score)
         sell_score = _clip01(sell_score)
         dominant_side = "BUY" if buy_score > sell_score + 0.06 else "SELL" if sell_score > buy_score + 0.06 else "HOLD"
+        countertrend_primary_blocked = bool(
+            dominant_side in {"BUY", "SELL"}
+            and major_direction in {"BUY", "SELL"}
+            and dominant_side == _opposite_action(major_direction)
+            and not (latest_break_active and latest_break_direction == dominant_side)
+        )
+        if countertrend_primary_blocked:
+            dominant_side = "HOLD"
         smc_confidence = _clip01(max(buy_score, sell_score))
+        closed_sweep_confirmation = any(
+            _upper_action(item.get("direction", "HOLD")) == dominant_side
+            and bool(item.get("closed_reclaim_confirmed", False))
+            for item in sweeps
+        )
+        closed_structure_confirmation = bool(
+            dominant_side in {"BUY", "SELL"}
+            and latest_break_active
+            and latest_break_direction == dominant_side
+            and bool(latest_structure_break.get("confirmed_on_closed_candle", False))
+        )
+        execution_confirmed = bool(
+            dominant_side in {"BUY", "SELL"}
+            and not countertrend_primary_blocked
+            and (closed_structure_confirmation or closed_sweep_confirmation)
+        )
+        decision_side = dominant_side if execution_confirmed else "HOLD"
         tags: list[str] = []
         if order_blocks:
             tags.append("order_block")
@@ -14961,6 +15815,8 @@ class PhoenixGuardWindowTrackingAdapter:
             tags.append("significant_liquidity_pool")
         if market_structure_shift.get("active"):
             tags.append("market_structure_shift")
+        if countertrend_local_only or countertrend_primary_blocked:
+            tags.append("countertrend_local_only")
         if consolidation_score >= 0.60:
             tags.append("balanced_range")
         summary = (
@@ -14971,6 +15827,10 @@ class PhoenixGuardWindowTrackingAdapter:
         return {
             "dominant_side": dominant_side,
             "candidate_side": direction,
+            "requested_candidate_side": requested_direction,
+            "major_direction": major_direction,
+            "countertrend_local_only": bool(countertrend_local_only),
+            "countertrend_primary_blocked": bool(countertrend_primary_blocked),
             "confidence": round(float(smc_confidence), 4),
             "buy_score": round(float(buy_score), 4),
             "sell_score": round(float(sell_score), 4),
@@ -14978,15 +15838,21 @@ class PhoenixGuardWindowTrackingAdapter:
             "continuation_score": round(float(_clip01(continuation_score)), 4),
             "reversal_score": round(float(_clip01(reversal_score)), 4),
             "order_blocks": order_blocks,
+            "order_block_diagnostics": order_block_diagnostics,
             "fair_value_gaps": fair_value_gaps,
             "liquidity_sweeps": sweeps,
             "liquidity_pools": significant_pools,
             "market_structure_shift": market_structure_shift,
             "support_resistance": sr_context,
             "decision_adjustment": {
-                "side": dominant_side,
-                "confidence_delta": round(float((smc_confidence - 0.50) * 0.14 if dominant_side in {"BUY", "SELL"} else 0.0), 4),
-                "risk_delta": round(float(-0.08 if sweeps and dominant_side in {"BUY", "SELL"} else 0.06 if market_structure_shift.get("active") and dominant_side != direction else 0.0), 4),
+                "side": decision_side,
+                "execution_confirmed": bool(execution_confirmed),
+                "execution_authority": "CLOSED_STRUCTURE_CONFIRMED" if execution_confirmed else "WITHHELD_FAIL_CLOSED",
+                "confidence_delta": round(
+                    float((smc_confidence - 0.50) * 0.14 if execution_confirmed else 0.0),
+                    4,
+                ),
+                "risk_delta": round(float(-0.08 if execution_confirmed and sweeps else 0.06 if not execution_confirmed else 0.0), 4),
             },
             "tags": tags,
             "summary": summary,
@@ -15124,6 +15990,24 @@ class PhoenixGuardWindowTrackingAdapter:
         payload["smart_money_context"] = dict(smart_money_context)
         payload["support_resistance_context"] = dict(_mapping_to_dict(smart_money_context.get("support_resistance", {})))
         return payload
+
+    def _build_lstm_contribution(
+        self,
+        *,
+        candles: Sequence[Mapping[str, Any]],
+        chart_image: Image.Image,
+        timeframe: str,
+        sequence_phase: str,
+        market_play_label: str,
+    ) -> dict[str, Any]:
+        return build_lstm_candle_sequence_contribution(
+            candles=candles,
+            image_size=chart_image.size,
+            timeframe=timeframe,
+            sequence_phase=sequence_phase,
+            market_play_label=market_play_label,
+            chart_image=chart_image,
+        )
 
     def _build_signal_payloads(
         self,
@@ -15459,9 +16343,9 @@ class PhoenixGuardWindowTrackingAdapter:
                 session_payload=session_payload,
             )
         )
-        lstm_contribution = build_lstm_candle_sequence_contribution(
+        lstm_contribution = self._build_lstm_contribution(
             candles=candles,
-            image_size=chart_image.size,
+            chart_image=chart_image,
             timeframe=high_frequency_study_timeframe,
             sequence_phase=str(behavior_payload.get("current_state", setup) or setup),
             market_play_label=setup,
@@ -19448,6 +20332,18 @@ class _WorkerControl:
     capture_now_evt: threading.Event
 
 
+@dataclass(frozen=True, slots=True)
+class _ForecastActionSnapshot:
+    request_id: str
+    session_id: str
+    mode: str
+    source_payload: dict[str, Any]
+    source_chart_path: str
+    source_frame_index: int
+    source_state_version: int
+    submitted_at: str
+
+
 class ContinuousWindowTrackerService:
     def __init__(
         self,
@@ -19468,6 +20364,17 @@ class ContinuousWindowTrackerService:
         self.focus_selector_backend = focus_selector_backend or WindowsNativeFocusSelectionBackend()
         self.execution_backend = execution_backend or PocketOptionBrokerExecutionBackend()
         self._lock = threading.RLock()
+        self._forecast_action_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="phoenixguard-forecast",
+        )
+        self._forecast_actions: dict[str, dict[str, Any]] = {}
+        self._forecast_action_futures: dict[str, Future[None]] = {}
+        self._forecast_action_keys: dict[tuple[str, str, int, int, str], str] = {}
+        self._latest_forecast_action: dict[tuple[str, str], str] = {}
+        self._forecast_action_created_epoch: dict[str, float] = {}
+        self._forecast_action_shutdown = False
+        self._memory_projection_warmup_thread: threading.Thread | None = None
         self._workers: dict[str, _WorkerControl] = {}
         self._next_capture_epoch: dict[str, float] = {}
         self._last_capture_time: dict[str, float] = {}
@@ -19486,6 +20393,35 @@ class ContinuousWindowTrackerService:
         self._emergency_hotkey_thread: threading.Thread | None = None
         self._last_emergency_hotkey_down = False
         self._start_emergency_hotkey_listener()
+        self._start_memory_projection_warmup()
+
+    def _start_memory_projection_warmup(self) -> None:
+        """Start one non-blocking process-local memory-bank warmup when supported."""
+
+        warmup = getattr(self.tracking_adapter, "warmup_memory_projection", None)
+        if not callable(warmup):
+            return
+        global _memory_projection_warmup_started
+        with _MEMORY_PROJECTION_WARMUP_LOCK:
+            if _memory_projection_warmup_started:
+                return
+            _memory_projection_warmup_started = True
+        thread = threading.Thread(
+            target=self._run_memory_projection_warmup,
+            name="phoenixguard-memory-projection-warmup",
+            daemon=True,
+        )
+        self._memory_projection_warmup_thread = thread
+        thread.start()
+
+    def _run_memory_projection_warmup(self) -> None:
+        warmup = getattr(self.tracking_adapter, "warmup_memory_projection", None)
+        if not callable(warmup):
+            return
+        try:
+            warmup()
+        except Exception:
+            LOGGER.exception("PhoenixGuard memory projection warmup failed; on-demand forecasting remains available.")
 
     @property
     def lock(self) -> Any:
@@ -21912,6 +22848,8 @@ class ContinuousWindowTrackerService:
             "execution_opportunity_window_v3": _mapping_to_dict(
                 raw.get("execution_opportunity_window_v3", {})
             ),
+            "visual_observation_v3": _mapping_to_dict(raw.get("visual_observation_v3", {})),
+            "forecast_snapshot_v3": _mapping_to_dict(raw.get("forecast_snapshot_v3", {})),
             "tracking_summary": tracking_summary,
             "latest_signal": latest_signal,
             "recent_studies": recent_studies,
@@ -22750,7 +23688,44 @@ class ContinuousWindowTrackerService:
         validate_native_fallback = False
         if fast_visible_enabled and callable(fast_capture):
             try:
+                expected_hwnd = int(descriptor.get("hwnd", 0) or 0)
+                foreground_reader = getattr(self.capture_backend, "foreground_window_hwnd", None)
+                visible_descriptor_reader = getattr(self.capture_backend, "_visible_descriptor_for_hwnd", None)
+                foreground_before = expected_hwnd
+                if callable(foreground_reader):
+                    foreground_before = int(cast(Any, foreground_reader()) or 0)
+                    if expected_hwnd <= 0 or foreground_before != expected_hwnd:
+                        raise CaptureSurfaceUnavailableError(
+                            "Display visible capture was blocked because the locked broker did not own the foreground."
+                        )
+                visible_title_before = ""
+                if callable(visible_descriptor_reader) and expected_hwnd > 0:
+                    visible_descriptor_before = _mapping_to_dict(visible_descriptor_reader(expected_hwnd) or {})
+                    visible_title_before = str(visible_descriptor_before.get("title", "") or "").strip()
+                    locked_title = str(descriptor.get("title", descriptor.get("window_query", "")) or "")
+                    if _is_pocket_option_query(locked_title) and (
+                        not _is_pocket_option_like_title(visible_title_before)
+                        or _title_has_any_token(visible_title_before, _WINDOW_REACQUIRE_BLOCK_TOKENS)
+                    ):
+                        raise CaptureSurfaceUnavailableError(
+                            "Display visible capture was blocked because the active window is not Pocket Option."
+                        )
                 image = cast(Image.Image, fast_capture(descriptor)).convert("RGB")
+                foreground_after = expected_hwnd
+                if callable(foreground_reader):
+                    foreground_after = int(cast(Any, foreground_reader()) or 0)
+                    if foreground_after != expected_hwnd:
+                        raise CaptureSurfaceUnavailableError(
+                            "Display visible capture was blocked because foreground ownership changed during capture."
+                        )
+                visible_title_after = visible_title_before
+                if callable(visible_descriptor_reader) and expected_hwnd > 0:
+                    visible_descriptor_after = _mapping_to_dict(visible_descriptor_reader(expected_hwnd) or {})
+                    visible_title_after = str(visible_descriptor_after.get("title", "") or "").strip()
+                    if not visible_title_after or visible_title_after != visible_title_before:
+                        raise CaptureSurfaceUnavailableError(
+                            "Display visible capture was blocked because the window identity changed during capture."
+                        )
                 looks_blank = getattr(self.capture_backend, "_looks_blank", None)
                 if callable(looks_blank) and bool(looks_blank(image)):
                     raise CaptureSurfaceUnavailableError("Display fast visible capture was blank.")
@@ -22758,7 +23733,17 @@ class ContinuousWindowTrackerService:
                 if callable(looks_content_blank) and bool(looks_content_blank(image)):
                     raise CaptureSurfaceUnavailableError("Display fast visible capture did not include browser content.")
                 title = str(descriptor.get("title", "") or "")
-                if _is_pocket_option_query(title) and not _capture_looks_like_pocket_option_visible_surface(image, descriptor):
+                identity_descriptor = {
+                    **dict(descriptor),
+                    "visible_title": visible_title_after,
+                    "foreground_hwnd_before": foreground_before,
+                    "foreground_hwnd_after": foreground_after,
+                }
+                if _is_pocket_option_query(title) and not _capture_looks_like_pocket_option_visible_surface(
+                    image,
+                    identity_descriptor,
+                    require_broker_page_evidence=True,
+                ):
                     raise CaptureSurfaceUnavailableError("Display fast visible capture did not include Pocket Option pixels.")
                 return image
             except Exception:
@@ -23431,16 +24416,22 @@ class ContinuousWindowTrackerService:
         state["active_trade"] = demo_active_trade_record(trade_epoch, click_result)
         return finish("clicked", str(click_result.get("message", f"Clicked demo {selected_side}.") or f"Clicked demo {selected_side}."))
 
-    def run_memory_projection(self, session_id: str, *, mode: str) -> dict[str, Any]:
-        normalized_mode = "future" if str(mode or "").strip().lower() == "future" else "predict"
-        started_at = _now_iso()
+    @staticmethod
+    def _normalize_forecast_action_mode(mode: object) -> str:
+        return "future" if str(mode or "").strip().lower() == "future" else "predict"
+
+    def _memory_projection_source(
+        self,
+        session_id: str,
+        *,
+        force_capture_if_missing: bool,
+    ) -> tuple[dict[str, Any], str]:
         payload = self._require_session(session_id)
         manual_focus = _public_manual_focus_region(payload.get("manual_focus_region", {}))
         if not bool(manual_focus.get("enabled", False)):
             raise ValueError("Lock broker focus before running memory projection.")
-
         chart_path = self._artifact_path_if_exists(payload.get("last_chart_path", ""))
-        if not chart_path:
+        if not chart_path and force_capture_if_missing:
             capture_session_id = str(payload["session_id"])
             with self._lock:
                 self._force_market_selector_scan_sessions.add(capture_session_id)
@@ -23453,43 +24444,23 @@ class ContinuousWindowTrackerService:
             chart_path = self._artifact_path_if_exists(payload.get("last_chart_path", ""))
         if not chart_path:
             raise ValueError("Capture a valid chart before running memory projection.")
+        return payload, chart_path
 
-        running_projection = _default_memory_projection_payload(
-            mode=normalized_mode,
-            message="Scanning PhoenixGuard memory bank and comparing live candle regression.",
-            status="running",
-        )
-        running_projection.update(
-            {
-                "generated_at": started_at,
-                "source_frame_index": int(payload.get("frame_index", 0) or 0),
-                "source_chart_path": str(chart_path),
-                "is_current": True,
-                "memory_retrieval": {
-                    "state": "running",
-                    "message": "Scanning memory bank, scoring top analogs, and building forecast overlays.",
-                    "bank_loaded": False,
-                    "entries": 0,
-                    "started_at": started_at,
-                    "completed_at": "",
-                },
-            }
-        )
-        with self._lock:
-            live_payload = self._require_session(session_id)
-            live_payload[f"memory_projection_{normalized_mode}"] = running_projection
-            live_payload["memory_projection_active_mode"] = normalized_mode
-            live_payload["updated_at"] = started_at
-            live_payload["last_error"] = ""
-            self._save_session(live_payload)
-
-        tracking_summary = _mapping_to_dict(payload.get("tracking_summary", {}))
-        latest_signal = _mapping_to_dict(payload.get("latest_signal", {}))
+    def _build_memory_projection_payload(
+        self,
+        source_payload: Mapping[str, Any],
+        chart_path: str,
+        *,
+        mode: str,
+        started_at: str,
+    ) -> dict[str, Any]:
+        tracking_summary = _mapping_to_dict(source_payload.get("tracking_summary", {}))
+        latest_signal = _mapping_to_dict(source_payload.get("latest_signal", {}))
         builder = getattr(self.tracking_adapter, "build_memory_projection", None)
         surface_image: Image.Image | None = None
         if not callable(builder):
             projection_payload = _default_memory_projection_payload(
-                mode=normalized_mode,
+                mode=mode,
                 message="Tracker adapter does not support memory-backed projection actions.",
                 status="error",
             )
@@ -23500,26 +24471,24 @@ class ContinuousWindowTrackerService:
                 surface_image,
                 tracking_summary,
                 latest_signal,
-                mode=normalized_mode,
-                session_payload=payload,
+                mode=mode,
+                session_payload=source_payload,
             )
-        projection_payload = _normalize_memory_projection_payload(projection_payload, mode=normalized_mode)
+        projection_payload = _normalize_memory_projection_payload(projection_payload, mode=mode)
         retrieval_state = _mapping_to_dict(projection_payload.get("memory_retrieval", {}))
         retrieval_state["started_at"] = str(retrieval_state.get("started_at", "") or started_at)
         retrieval_state["completed_at"] = str(retrieval_state.get("completed_at", "") or _now_iso())
         if str(retrieval_state.get("state", "") or "").strip().lower() in {"", "idle", "running"}:
-            retrieval_state["state"] = "ready" if str(projection_payload.get("status", "")).lower() == "ready" else str(
-                projection_payload.get("status", "degraded") or "degraded"
-            )
+            projection_status = str(projection_payload.get("status", "degraded") or "degraded").lower()
+            retrieval_state["state"] = "ready" if projection_status == "ready" else projection_status
         projection_payload["memory_retrieval"] = retrieval_state
         renderer = getattr(self.tracking_adapter, "render_memory_projection_artifacts", None)
         if callable(renderer) and surface_image is not None:
             chart_path_obj = Path(chart_path)
             artifact_dir = chart_path_obj.parent
-            artifact_stem = chart_path_obj.stem
             rendered_artifacts = renderer(
                 artifact_dir,
-                artifact_stem,
+                chart_path_obj.stem,
                 surface_image=surface_image,
                 tracking_summary=tracking_summary,
                 latest_signal=latest_signal,
@@ -23527,50 +24496,445 @@ class ContinuousWindowTrackerService:
             )
             if isinstance(rendered_artifacts, Mapping):
                 projection_payload.update(dict(cast(Mapping[str, Any], rendered_artifacts)))
-                # Normalize common artifact keys returned by adapters into canonical projection/reference keys
-                try:
-                    # helper to resolve a candidate value into a filesystem path under artifact_dir
-                    def _resolve_candidate(val: object) -> str | None:
-                        if not val:
-                            return None
-                        try:
-                            value_text = str(val)
-                            p = Path(value_text)
-                            if not p.is_absolute():
-                                p = artifact_dir / value_text
-                            if p.exists():
-                                return str(p)
-                        except Exception:
-                            pass
-                        return None
 
-                    if not projection_payload.get("projection_image_path"):
-                        for cand in (projection_payload.get("projection"), projection_payload.get("projection_image"), projection_payload.get("projection_file"), projection_payload.get("projection_path")):
-                            resolved = _resolve_candidate(cand)
-                            if resolved:
-                                projection_payload["projection_image_path"] = resolved
-                                break
+                def resolve_candidate(value: object) -> str:
+                    if not value:
+                        return ""
+                    try:
+                        candidate = Path(str(value))
+                        if not candidate.is_absolute():
+                            candidate = artifact_dir / candidate
+                        return str(candidate) if candidate.exists() else ""
+                    except (OSError, TypeError, ValueError):
+                        return ""
 
-                    if not projection_payload.get("reference_image_path"):
-                        for cand in (projection_payload.get("reference"), projection_payload.get("reference_image"), projection_payload.get("reference_file"), projection_payload.get("memory_reference")):
-                            resolved = _resolve_candidate(cand)
-                            if resolved:
-                                projection_payload["reference_image_path"] = resolved
-                                break
-                except Exception:
-                    pass
+                if not projection_payload.get("projection_image_path"):
+                    for candidate in (
+                        projection_payload.get("projection"),
+                        projection_payload.get("projection_image"),
+                        projection_payload.get("projection_file"),
+                        projection_payload.get("projection_path"),
+                    ):
+                        resolved = resolve_candidate(candidate)
+                        if resolved:
+                            projection_payload["projection_image_path"] = resolved
+                            break
+                if not projection_payload.get("reference_image_path"):
+                    for candidate in (
+                        projection_payload.get("reference"),
+                        projection_payload.get("reference_image"),
+                        projection_payload.get("reference_file"),
+                        projection_payload.get("memory_reference"),
+                    ):
+                        resolved = resolve_candidate(candidate)
+                        if resolved:
+                            projection_payload["reference_image_path"] = resolved
+                            break
         projection_payload["generated_at"] = _now_iso()
-        projection_payload["source_frame_index"] = int(payload.get("frame_index", 0) or 0)
+        projection_payload["source_frame_index"] = int(source_payload.get("frame_index", 0) or 0)
+        projection_payload["source_state_version"] = int(source_payload.get("state_version", 0) or 0)
         projection_payload["source_chart_path"] = str(chart_path)
         projection_payload["is_current"] = True
+        return projection_payload
 
+    @staticmethod
+    def _stale_projection_payload(projection_payload: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
+        stale = _normalize_memory_projection_payload(projection_payload, mode=mode)
+        stale["status"] = "stale"
+        stale["is_current"] = False
+        stale["summary"] = "The chart changed before the forecast completed. Run it again on the latest frame."
+        retrieval = _mapping_to_dict(stale.get("memory_retrieval", {}))
+        retrieval["state"] = "stale"
+        retrieval["message"] = str(stale["summary"])
+        stale["memory_retrieval"] = retrieval
+        return stale
+
+    def _projection_source_is_current(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        frame_index: int,
+        state_version: int,
+        chart_path: str,
+    ) -> bool:
+        current_chart_path = self._artifact_path_if_exists(payload.get("last_chart_path", ""))
+        return bool(
+            current_chart_path
+            and current_chart_path == str(chart_path)
+            and int(payload.get("frame_index", 0) or 0) == int(frame_index)
+            and int(payload.get("state_version", 0) or 0) == int(state_version)
+        )
+
+    def _commit_memory_projection_payload(
+        self,
+        session_id: str,
+        projection_payload: Mapping[str, Any],
+        *,
+        mode: str,
+        source_frame_index: int,
+        source_state_version: int,
+        source_chart_path: str,
+        request_id: str = "",
+    ) -> tuple[dict[str, Any], bool]:
         with self._lock:
             payload = self._require_session(session_id)
-            payload[f"memory_projection_{normalized_mode}"] = projection_payload
-            payload["memory_projection_active_mode"] = normalized_mode
+            latest_request_id = self._latest_forecast_action.get((session_id, mode), "")
+            if request_id and latest_request_id != request_id:
+                return self._stale_projection_payload(projection_payload, mode=mode), False
+            source_current = self._projection_source_is_current(
+                payload,
+                frame_index=source_frame_index,
+                state_version=source_state_version,
+                chart_path=source_chart_path,
+            )
+            committed = _normalize_memory_projection_payload(projection_payload, mode=mode)
+            if source_current:
+                committed["is_current"] = True
+            else:
+                committed = self._stale_projection_payload(committed, mode=mode)
+            payload[f"memory_projection_{mode}"] = committed
+            payload["memory_projection_active_mode"] = mode
             payload["updated_at"] = _now_iso()
             payload["last_error"] = ""
             self._save_session(payload)
+        return committed, source_current
+
+    @staticmethod
+    def _forecast_action_key(snapshot: _ForecastActionSnapshot) -> tuple[str, str, int, int, str]:
+        return (
+            snapshot.session_id,
+            snapshot.mode,
+            snapshot.source_frame_index,
+            snapshot.source_state_version,
+            snapshot.source_chart_path,
+        )
+
+    @staticmethod
+    def _public_forecast_action_payload(action: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": _FORECAST_ACTION_SCHEMA_VERSION,
+            "request_id": str(action.get("request_id", "") or ""),
+            "session_id": str(action.get("session_id", "") or ""),
+            "mode": str(action.get("mode", "predict") or "predict"),
+            "status": str(action.get("status", "error") or "error"),
+            "terminal": bool(action.get("terminal", False)),
+            "cached": bool(action.get("cached", False)),
+            "is_current": bool(action.get("is_current", False)),
+            "source_frame_index": int(action.get("source_frame_index", 0) or 0),
+            "source_state_version": int(action.get("source_state_version", 0) or 0),
+            "submitted_at": str(action.get("submitted_at", "") or ""),
+            "started_at": str(action.get("started_at", "") or ""),
+            "completed_at": str(action.get("completed_at", "") or ""),
+            "summary": str(action.get("summary", "") or ""),
+            "poll_after_ms": _FORECAST_ACTION_POLL_AFTER_MS,
+            "status_url": str(action.get("status_url", "") or ""),
+        }
+
+    def _prune_forecast_actions_locked(self) -> None:
+        if len(self._forecast_actions) < _FORECAST_ACTION_MAX_RETAINED:
+            return
+        terminal_ids = sorted(
+            (
+                request_id
+                for request_id, action in self._forecast_actions.items()
+                if bool(action.get("terminal", False))
+            ),
+            key=lambda request_id: self._forecast_action_created_epoch.get(request_id, 0.0),
+        )
+        for request_id in terminal_ids:
+            if len(self._forecast_actions) < _FORECAST_ACTION_MAX_RETAINED:
+                break
+            self._forecast_actions.pop(request_id, None)
+            future = self._forecast_action_futures.get(request_id)
+            if future is None or future.done():
+                self._forecast_action_futures.pop(request_id, None)
+            self._forecast_action_created_epoch.pop(request_id, None)
+            for key, value in list(self._forecast_action_keys.items()):
+                if value == request_id:
+                    self._forecast_action_keys.pop(key, None)
+            for key, value in list(self._latest_forecast_action.items()):
+                if value == request_id:
+                    self._latest_forecast_action.pop(key, None)
+
+    def _store_cached_forecast_action_locked(
+        self,
+        snapshot: _ForecastActionSnapshot,
+        projection_payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        status_value = str(projection_payload.get("status", "ready") or "ready").lower()
+        completed_at = str(projection_payload.get("generated_at", "") or _now_iso())
+        action = {
+            "request_id": snapshot.request_id,
+            "session_id": snapshot.session_id,
+            "mode": snapshot.mode,
+            "status": status_value,
+            "terminal": True,
+            "cached": True,
+            "is_current": True,
+            "source_frame_index": snapshot.source_frame_index,
+            "source_state_version": snapshot.source_state_version,
+            "source_chart_path": snapshot.source_chart_path,
+            "submitted_at": snapshot.submitted_at,
+            "started_at": completed_at,
+            "completed_at": completed_at,
+            "summary": str(projection_payload.get("summary", "Forecast ready for the current chart.") or ""),
+            "status_url": (
+                f"/v1/mobile/window-tracker/sessions/{snapshot.session_id}"
+                f"/forecast-actions/{snapshot.request_id}"
+            ),
+        }
+        key = self._forecast_action_key(snapshot)
+        self._forecast_actions[snapshot.request_id] = action
+        self._forecast_action_keys[key] = snapshot.request_id
+        self._latest_forecast_action[(snapshot.session_id, snapshot.mode)] = snapshot.request_id
+        self._forecast_action_created_epoch[snapshot.request_id] = _now_epoch()
+        return self._public_forecast_action_payload(action)
+
+    def enqueue_memory_projection(self, session_id: str, *, mode: str) -> dict[str, Any]:
+        normalized_mode = self._normalize_forecast_action_mode(mode)
+        payload, chart_path = self._memory_projection_source(
+            session_id,
+            force_capture_if_missing=False,
+        )
+        resolved_session_id = str(payload["session_id"])
+        source_frame_index = int(payload.get("frame_index", 0) or 0)
+        source_state_version = int(payload.get("state_version", 0) or 0)
+        submitted_at = _now_iso()
+        snapshot = _ForecastActionSnapshot(
+            request_id=uuid4().hex,
+            session_id=resolved_session_id,
+            mode=normalized_mode,
+            source_payload=dict(payload),
+            source_chart_path=str(chart_path),
+            source_frame_index=source_frame_index,
+            source_state_version=source_state_version,
+            submitted_at=submitted_at,
+        )
+        key = self._forecast_action_key(snapshot)
+        with self._lock:
+            self._prune_forecast_actions_locked()
+            existing_request_id = self._forecast_action_keys.get(key, "")
+            existing_action = self._forecast_actions.get(existing_request_id)
+            if existing_action is not None:
+                existing_status = str(existing_action.get("status", "") or "").lower()
+                if not bool(existing_action.get("terminal", False)):
+                    return self._public_forecast_action_payload(existing_action)
+                if (
+                    existing_status in {"ready", "degraded"}
+                    and bool(existing_action.get("is_current", False))
+                ):
+                    existing_action["cached"] = True
+                    return self._public_forecast_action_payload(existing_action)
+
+            stored_projection = _normalize_memory_projection_payload(
+                payload.get(f"memory_projection_{normalized_mode}", {}),
+                mode=normalized_mode,
+            )
+            stored_status = str(stored_projection.get("status", "") or "").lower()
+            stored_frame_index = int(_float_or(stored_projection.get("source_frame_index", -1), -1.0))
+            stored_state_version = int(_float_or(stored_projection.get("source_state_version", -1), -1.0))
+            stored_is_current = self._projection_source_is_current(
+                payload,
+                frame_index=stored_frame_index,
+                state_version=stored_state_version,
+                chart_path=str(stored_projection.get("source_chart_path", "") or ""),
+            )
+            if stored_status in {"ready", "degraded"} and stored_is_current:
+                return self._store_cached_forecast_action_locked(snapshot, stored_projection)
+
+            pending_count = sum(
+                1
+                for future in self._forecast_action_futures.values()
+                if not future.done()
+            )
+            if self._forecast_action_shutdown:
+                raise ValueError("Forecast actions are unavailable while the tracker is shutting down.")
+            if pending_count >= _FORECAST_ACTION_MAX_PENDING:
+                raise ValueError("Forecast action queue is full. Try again shortly.")
+            action = {
+                "request_id": snapshot.request_id,
+                "session_id": resolved_session_id,
+                "mode": normalized_mode,
+                "status": "queued",
+                "terminal": False,
+                "cached": False,
+                "is_current": True,
+                "source_frame_index": source_frame_index,
+                "source_state_version": source_state_version,
+                "source_chart_path": str(chart_path),
+                "submitted_at": submitted_at,
+                "started_at": "",
+                "completed_at": "",
+                "summary": "Forecast queued for the current chart.",
+                "status_url": (
+                    f"/v1/mobile/window-tracker/sessions/{resolved_session_id}"
+                    f"/forecast-actions/{snapshot.request_id}"
+                ),
+            }
+            self._forecast_actions[snapshot.request_id] = action
+            self._forecast_action_keys[key] = snapshot.request_id
+            self._latest_forecast_action[(resolved_session_id, normalized_mode)] = snapshot.request_id
+            self._forecast_action_created_epoch[snapshot.request_id] = _now_epoch()
+            try:
+                future = self._forecast_action_executor.submit(
+                    self._run_memory_projection_action,
+                    snapshot,
+                )
+            except RuntimeError as exc:
+                action.update(
+                    {
+                        "status": "error",
+                        "terminal": True,
+                        "is_current": False,
+                        "completed_at": _now_iso(),
+                        "summary": "Forecast could not be queued. Try again shortly.",
+                    }
+                )
+                raise ValueError(str(action["summary"])) from exc
+            self._forecast_action_futures[snapshot.request_id] = future
+            return self._public_forecast_action_payload(action)
+
+    def _refresh_forecast_action_currentness_locked(self, action: dict[str, Any]) -> None:
+        if str(action.get("status", "") or "").lower() in {"stale", "error"}:
+            return
+        payload = self._require_session(str(action.get("session_id", "") or ""))
+        source_current = self._projection_source_is_current(
+            payload,
+            frame_index=int(action.get("source_frame_index", 0) or 0),
+            state_version=int(action.get("source_state_version", 0) or 0),
+            chart_path=str(action.get("source_chart_path", "") or ""),
+        )
+        if source_current:
+            return
+        action.update(
+            {
+                "status": "stale",
+                "terminal": True,
+                "is_current": False,
+                "completed_at": str(action.get("completed_at", "") or _now_iso()),
+                "summary": "The chart changed before the forecast completed. Run it again on the latest frame.",
+            }
+        )
+
+    def get_memory_projection_action(self, session_id: str, request_id: str) -> dict[str, Any]:
+        with self._lock:
+            action = self._forecast_actions.get(str(request_id or ""))
+            if action is None or str(action.get("session_id", "") or "") != str(session_id or ""):
+                raise KeyError(request_id)
+            self._refresh_forecast_action_currentness_locked(action)
+            return self._public_forecast_action_payload(action)
+
+    def _run_memory_projection_action(self, snapshot: _ForecastActionSnapshot) -> None:
+        with self._lock:
+            action = self._forecast_actions.get(snapshot.request_id)
+            if action is None or bool(action.get("terminal", False)):
+                return
+            action.update(
+                {
+                    "status": "running",
+                    "started_at": _now_iso(),
+                    "summary": "Building a forecast from the current chart.",
+                }
+            )
+        try:
+            projection_payload = self._build_memory_projection_payload(
+                snapshot.source_payload,
+                snapshot.source_chart_path,
+                mode=snapshot.mode,
+                started_at=snapshot.submitted_at,
+            )
+            committed, source_current = self._commit_memory_projection_payload(
+                snapshot.session_id,
+                projection_payload,
+                mode=snapshot.mode,
+                source_frame_index=snapshot.source_frame_index,
+                source_state_version=snapshot.source_state_version,
+                source_chart_path=snapshot.source_chart_path,
+                request_id=snapshot.request_id,
+            )
+        except Exception:
+            LOGGER.exception("Forecast action %s failed.", snapshot.request_id)
+            with self._lock:
+                action = self._forecast_actions.get(snapshot.request_id)
+                if action is not None:
+                    action.update(
+                        {
+                            "status": "error",
+                            "terminal": True,
+                            "is_current": False,
+                            "completed_at": _now_iso(),
+                            "summary": "Forecast could not be completed for the current chart.",
+                        }
+                    )
+            return
+        with self._lock:
+            action = self._forecast_actions.get(snapshot.request_id)
+            if action is None:
+                return
+            latest_request_id = self._latest_forecast_action.get(
+                (snapshot.session_id, snapshot.mode),
+                "",
+            )
+            committed_status = str(committed.get("status", "degraded") or "degraded").lower()
+            if latest_request_id != snapshot.request_id or not source_current:
+                committed_status = "stale"
+            if committed_status not in _FORECAST_ACTION_TERMINAL_STATUSES:
+                committed_status = "degraded"
+            action.update(
+                {
+                    "status": committed_status,
+                    "terminal": True,
+                    "cached": False,
+                    "is_current": bool(source_current and latest_request_id == snapshot.request_id),
+                    "completed_at": _now_iso(),
+                    "summary": str(committed.get("summary", "Forecast processing completed.") or ""),
+                }
+            )
+
+    def run_memory_projection(self, session_id: str, *, mode: str) -> dict[str, Any]:
+        normalized_mode = self._normalize_forecast_action_mode(mode)
+        started_at = _now_iso()
+        payload, chart_path = self._memory_projection_source(
+            session_id,
+            force_capture_if_missing=True,
+        )
+        source_frame_index = int(payload.get("frame_index", 0) or 0)
+        source_state_version = int(payload.get("state_version", 0) or 0)
+        running_projection = _default_memory_projection_payload(
+            mode=normalized_mode,
+            message="Scanning PhoenixGuard memory bank and comparing live candle regression.",
+            status="running",
+        )
+        running_projection.update(
+            {
+                "generated_at": started_at,
+                "source_frame_index": source_frame_index,
+                "source_state_version": source_state_version,
+                "source_chart_path": str(chart_path),
+                "is_current": True,
+            }
+        )
+        with self._lock:
+            live_payload = self._require_session(session_id)
+            live_payload[f"memory_projection_{normalized_mode}"] = running_projection
+            live_payload["memory_projection_active_mode"] = normalized_mode
+            live_payload["updated_at"] = started_at
+            live_payload["last_error"] = ""
+            self._save_session(live_payload)
+        projection_payload = self._build_memory_projection_payload(
+            payload,
+            chart_path,
+            mode=normalized_mode,
+            started_at=started_at,
+        )
+        self._commit_memory_projection_payload(
+            str(payload["session_id"]),
+            projection_payload,
+            mode=normalized_mode,
+            source_frame_index=source_frame_index,
+            source_state_version=source_state_version,
+            source_chart_path=chart_path,
+        )
         return self.get_session(str(payload["session_id"]))
 
     def update_session_controls(
@@ -23910,6 +25274,24 @@ class ContinuousWindowTrackerService:
         hotkey_thread = self._emergency_hotkey_thread
         if hotkey_thread is not None and hotkey_thread.is_alive():
             hotkey_thread.join(timeout=2.0)
+
+        with self._lock:
+            self._forecast_action_shutdown = True
+            for request_id, future in self._forecast_action_futures.items():
+                if future.done() or not future.cancel():
+                    continue
+                action = self._forecast_actions.get(request_id)
+                if action is not None:
+                    action.update(
+                        {
+                            "status": "error",
+                            "terminal": True,
+                            "is_current": False,
+                            "completed_at": _now_iso(),
+                            "summary": "Forecast action stopped because the tracker is shutting down.",
+                        }
+                    )
+        self._forecast_action_executor.shutdown(wait=False, cancel_futures=True)
 
         with self._lock:
             workers = list(self._workers.items())
@@ -26502,6 +27884,107 @@ class ContinuousWindowTrackerService:
         finally:
             self._finish_study_gate(session_id)
 
+    def _publish_duplicate_visual_wait(
+        self,
+        session_id: str,
+        *,
+        observation: Mapping[str, Any],
+    ) -> None:
+        """Persist a non-evidence heartbeat without advancing model freshness."""
+
+        message = _VISUAL_OBSERVATION_WAITING_MESSAGE
+        with self._lock:
+            payload = self._load_session_with_display_state(session_id) or self._require_session(session_id)
+            tracking_summary = _mapping_to_dict(payload.get("tracking_summary", {}))
+            latest_signal = _mapping_to_dict(payload.get("latest_signal", {}))
+            previous_packet = _model_council_packet_from_payload(
+                payload,
+                require_live_overlay_truth=False,
+            )
+            tombstone = {
+                "schema_version": "PG_EXECUTION_PACKET_REVOCATION_V3",
+                "revoked_packet_id": str(previous_packet.get("packet_id", "") or "") if previous_packet else "",
+                "frame_id": int(payload.get("model_vote_frame_id", payload.get("frame_index", 0)) or 0),
+                "capture_count": int(payload.get("capture_count", 0) or 0),
+                "reason": "DUPLICATE_VISUAL_FRAME_NO_NEW_EVIDENCE",
+            }
+
+            latest_signal.setdefault("last_evidence_summary", str(latest_signal.get("summary", "") or ""))
+            latest_signal.setdefault(
+                "last_evidence_action",
+                _upper_action(latest_signal.get("headline_action", latest_signal.get("action", "HOLD"))),
+            )
+            latest_signal.update(
+                {
+                    "status": "waiting_for_new_frame",
+                    "summary": message,
+                    "visual_observation_status": _VISUAL_OBSERVATION_WAITING,
+                    "visual_observation_message": message,
+                    "new_visual_evidence": False,
+                    "actionable": False,
+                    "execution_action": "HOLD",
+                    "execution_permission": "WAIT",
+                    "execution_lane": "VISUAL_FRAME_WAIT",
+                    "execution_block_reason": message,
+                    "no_trade_reason": message,
+                }
+            )
+            latest_signal.pop("trade_intent", None)
+            tracking_summary.update(
+                {
+                    "source_capture_status": _VISUAL_OBSERVATION_WAITING,
+                    "visual_observation_status": _VISUAL_OBSERVATION_WAITING,
+                    "visual_observation_message": message,
+                    "new_visual_evidence": False,
+                }
+            )
+            model_council_result = _mapping_to_dict(payload.get("model_council_result", {}))
+            _clear_execution_packet_aliases(model_council_result, tombstone=tombstone)
+            _clear_execution_packet_aliases(latest_signal, tombstone=tombstone)
+            _clear_execution_packet_aliases(tracking_summary, tombstone=tombstone)
+            _clear_execution_packet_aliases(payload, tombstone=tombstone)
+
+            broker_execution_state = _normalize_broker_execution_state(
+                payload.get("broker_execution_state", {}),
+                expire_active=False,
+            )
+            broker_execution_state.update(
+                {
+                    "status": "waiting_for_new_frame",
+                    "message": message,
+                    "side": "HOLD",
+                    "lane": "VISUAL_FRAME_WAIT",
+                    "actionable": False,
+                }
+            )
+            payload.update(
+                {
+                    "visual_observation_v3": dict(observation),
+                    "tracking_summary": tracking_summary,
+                    "latest_signal": latest_signal,
+                    "model_council_result": model_council_result,
+                    "broker_execution_state": broker_execution_state,
+                    "decision_valid_until_epoch": 0.0,
+                    "updated_at": str(observation.get("attempted_at", "") or _now_iso()),
+                    "last_error": "",
+                }
+            )
+            payload.pop("trade_intent", None)
+            self._save_session(payload)
+
+        self._write_session_event_log(
+            session_id,
+            "capture_duplicate_visual_frame",
+            status="waiting_for_new_frame",
+            message=message,
+            frame_index=int(payload.get("frame_index", 0) or 0),
+            capture_count=int(payload.get("capture_count", 0) or 0),
+            duplicate_study_count=int(observation.get("duplicate_study_count", 0) or 0),
+            identical_window_count=int(observation.get("identical_window_count", 0) or 0),
+            recovery_attempted=bool(observation.get("recovery_attempted", False)),
+            recovery_succeeded=False,
+        )
+
     def _capture_and_analyze_claimed(
         self,
         session_id: str,
@@ -26643,6 +28126,162 @@ class ContinuousWindowTrackerService:
         mark_stage("derive_study_surface")
         with self._lock:
             fresh_for_index = self._load_session_with_display_state(str(payload["session_id"]))
+        previous_study_signature = str(
+            fresh_for_index.get("overlay_source_study_signature")
+            or fresh_for_index.get("last_study_surface_signature")
+            or ""
+        ).strip()
+        previous_window_signature = str(
+            fresh_for_index.get("overlay_source_window_signature")
+            or fresh_for_index.get("last_window_surface_signature")
+            or ""
+        ).strip()
+        previous_model_frame = int(
+            fresh_for_index.get("model_vote_frame_id", fresh_for_index.get("frame_index", 0)) or 0
+        )
+        previous_observation = _mapping_to_dict(fresh_for_index.get("visual_observation_v3", {}))
+        last_recovery_attempt_epoch = _float_or(
+            previous_observation.get("last_recovery_attempt_epoch"),
+            0.0,
+        )
+        duplicate_study_surface = bool(
+            capture_started_with_tracking_enabled
+            and previous_model_frame > 0
+            and previous_study_signature
+            and study_surface_signature == previous_study_signature
+        )
+        recovered_new_frame = False
+        recovery_attempted = False
+        duplicate_study_count = 0
+        identical_window_count = 0
+        if duplicate_study_surface:
+            prior_waiting = str(previous_observation.get("status", "") or "").upper() == _VISUAL_OBSERVATION_WAITING
+            duplicate_study_count = (
+                int(previous_observation.get("duplicate_study_count", 0) or 0) + 1
+                if prior_waiting
+                else 1
+            )
+            identical_full_window = bool(
+                previous_window_signature and window_signature == previous_window_signature
+            )
+            identical_window_count = (
+                int(previous_observation.get("identical_window_count", 0) or 0) + 1
+                if prior_waiting and identical_full_window
+                else (1 if identical_full_window else 0)
+            )
+            recovery_threshold = min(
+                10,
+                _env_int("PHOENIXGUARD_DUPLICATE_FRAME_RECOVERY_THRESHOLD", 3, 2),
+            )
+            recovery_min_interval_sec = max(
+                float(
+                    fresh_for_index.get(
+                        "capture_interval_sec",
+                        payload.get("capture_interval_sec", _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC),
+                    )
+                    or _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC
+                ),
+                _env_float(
+                    "PHOENIXGUARD_DUPLICATE_FRAME_RECOVERY_MIN_INTERVAL_SEC",
+                    15.0,
+                    1.0,
+                ),
+            )
+            recovery_time_eligible = bool(
+                last_recovery_attempt_epoch <= 0.0
+                or capture_started_epoch - last_recovery_attempt_epoch >= recovery_min_interval_sec
+            )
+            recovery_due = bool(
+                not using_external_frame
+                and duplicate_study_count >= recovery_threshold
+                and recovery_time_eligible
+            )
+            live_capture = getattr(self.capture_backend, "capture_window_live", None)
+            if recovery_due and callable(live_capture):
+                recovery_attempted = True
+                last_recovery_attempt_epoch = capture_started_epoch
+                try:
+                    recovered_window = cast(Image.Image, live_capture(descriptor)).convert("RGB")
+                    recovered_surface, recovered_focus_meta = _crop_normalized_bbox(
+                        recovered_window,
+                        cast(Sequence[Any], manual_focus.get("normalized_bbox", [])),
+                    )
+                    recovered_study_surface, recovered_study_focus_meta = self._derive_study_surface(
+                        window_image=recovered_window,
+                        selected_surface=recovered_surface,
+                        selected_focus_meta=recovered_focus_meta,
+                    )
+                    recovered_study_signature = _surface_signature(recovered_study_surface)
+                    recovered_window_signature = _surface_signature(recovered_window)
+                    if recovered_study_signature != previous_study_signature:
+                        window_image = recovered_window
+                        surface_image = recovered_surface
+                        focus_meta = recovered_focus_meta
+                        study_surface_image = recovered_study_surface
+                        study_focus_meta = recovered_study_focus_meta
+                        study_surface_signature = recovered_study_signature
+                        window_signature = recovered_window_signature
+                        duplicate_study_surface = False
+                        recovered_new_frame = True
+                    else:
+                        identical_window_count = (
+                            identical_window_count
+                            if recovered_window_signature == previous_window_signature
+                            else 0
+                        )
+                    mark_stage("recover_duplicate_surface")
+                except Exception:
+                    LOGGER.debug(
+                        "Visible duplicate-frame recovery did not produce a usable frame for %s.",
+                        session_id,
+                        exc_info=True,
+                    )
+                    mark_stage("recover_duplicate_surface")
+
+        if duplicate_study_surface:
+            attempted_at = _now_iso()
+            self._publish_duplicate_visual_wait(
+                str(payload["session_id"]),
+                observation={
+                    "schema_version": _VISUAL_OBSERVATION_SCHEMA_VERSION,
+                    "status": _VISUAL_OBSERVATION_WAITING,
+                    "message": _VISUAL_OBSERVATION_WAITING_MESSAGE,
+                    "new_visual_evidence": False,
+                    "attempted_at": attempted_at,
+                    "attempted_epoch": _now_epoch(),
+                    "last_observed_at": str(previous_observation.get("last_observed_at", "") or fresh_for_index.get("last_capture_at", "") or ""),
+                    "last_observed_epoch": _float_or(
+                        previous_observation.get("last_observed_epoch", fresh_for_index.get("model_capture_epoch", 0.0)),
+                        0.0,
+                    ),
+                    "duplicate_study_count": duplicate_study_count,
+                    "identical_window_count": identical_window_count,
+                    "recovery_attempted": recovery_attempted,
+                    "recovery_succeeded": False,
+                    "last_recovery_attempt_epoch": last_recovery_attempt_epoch,
+                },
+            )
+            return
+
+        payload["visual_observation_v3"] = {
+            "schema_version": _VISUAL_OBSERVATION_SCHEMA_VERSION,
+            "status": _VISUAL_OBSERVATION_RECOVERED if recovered_new_frame else _VISUAL_OBSERVATION_NEW,
+            "message": (
+                "A fresh broker frame was recovered and accepted as new market evidence."
+                if recovered_new_frame
+                else "A new broker frame was accepted as market evidence."
+            ),
+            "new_visual_evidence": True,
+            "attempted_at": capture_started_iso,
+            "attempted_epoch": capture_started_epoch,
+            "last_observed_at": capture_started_iso,
+            "last_observed_epoch": capture_started_epoch,
+            "duplicate_study_count": 0,
+            "identical_window_count": 0,
+            "recovery_attempted": recovery_attempted,
+            "recovery_succeeded": recovered_new_frame,
+            "last_recovery_attempt_epoch": 0.0,
+        }
         base_capture_count = max(
             int(payload.get("capture_count", 0) or 0),
             int(fresh_for_index.get("capture_count", 0) or 0),
@@ -26907,6 +28546,7 @@ class ContinuousWindowTrackerService:
                 guarded_payload["last_error"] = message
                 guarded_payload["locked_window"] = dict(descriptor)
                 guarded_payload["locked_title"] = str(descriptor.get("title", "") or "")
+                guarded_payload["visual_observation_v3"] = dict(payload.get("visual_observation_v3", {}))
                 guarded_payload["last_frame_path"] = str(window_path)
                 guarded_payload["last_window_path"] = str(window_path)
                 guarded_payload["last_display_window_path"] = str(window_path)
@@ -26969,7 +28609,9 @@ class ContinuousWindowTrackerService:
         reuse_previous_chart_overlay = False
         reuse_previous_full_overlay = False
         if hot_latest_artifacts:
-            chart_path = artifact_dir / f"hot_latest_chart{_chart_overlay_artifact_suffix(payload)}"
+            # Keep the raw chart frame-addressable so the public workspace can
+            # atomically pair overlays with the exact image they were built
+            # against.  Rendered overlay previews remain hot/overwrite files.
             overlay_path = artifact_dir / f"hot_latest_overlay{_chart_overlay_artifact_suffix(payload)}"
             full_overlay_path = artifact_dir / f"hot_latest_full_overlay{_full_overlay_artifact_suffix(payload)}"
 
@@ -27161,6 +28803,7 @@ class ContinuousWindowTrackerService:
                 visual_ready_payload["status"] = "running" if bool(visual_ready_payload.get("tracking_enabled", False)) else "ready"
                 visual_ready_payload["locked_window"] = dict(descriptor)
                 visual_ready_payload["locked_title"] = str(descriptor.get("title", "") or "")
+                visual_ready_payload["visual_observation_v3"] = dict(payload.get("visual_observation_v3", {}))
                 visual_ready_payload["last_frame_path"] = str(window_path)
                 visual_ready_payload["last_window_path"] = str(window_path)
                 visual_ready_payload["last_display_window_path"] = str(window_path)
@@ -27560,6 +29203,7 @@ class ContinuousWindowTrackerService:
             visual_payload["status"] = "running" if bool(visual_payload.get("tracking_enabled", False)) else "ready"
             visual_payload["locked_window"] = dict(descriptor)
             visual_payload["locked_title"] = str(descriptor.get("title", "") or "")
+            visual_payload["visual_observation_v3"] = dict(payload.get("visual_observation_v3", {}))
             visual_payload["last_frame_path"] = visual_display_window_path
             visual_payload["last_window_path"] = visual_display_window_path
             visual_payload["last_display_window_path"] = visual_display_window_path
@@ -28158,6 +29802,7 @@ class ContinuousWindowTrackerService:
         trust_locked = str(os.getenv("PHOENIXGUARD_TRUST_LOCKED_WINDOW_DESCRIPTOR", "1") or "1").strip().lower()
         locked_matches_query = not query or _title_matches_window_query(locked_title, query)
         locked_visible_status: bool | None = None
+        locked_identity_mismatch = False
         if locked_hwnd > 0:
             try:
                 visible_rows = list(self.capture_backend.list_windows(None))
@@ -28165,11 +29810,20 @@ class ContinuousWindowTrackerService:
                 visible_rows = []
                 locked_visible_status = None
             if visible_rows:
-                locked_visible_status = any(
-                    int(row.get("hwnd", 0) or 0) == locked_hwnd
-                    and _window_descriptor_is_capture_usable(row)
-                    for row in visible_rows
+                visible_locked = next(
+                    (row for row in visible_rows if int(row.get("hwnd", 0) or 0) == locked_hwnd),
+                    None,
                 )
+                locked_visible_status = bool(
+                    visible_locked is not None and _window_descriptor_is_capture_usable(visible_locked)
+                )
+                if (
+                    locked_visible_status
+                    and _is_pocket_option_query(query)
+                    and not _title_matches_window_query((visible_locked or {}).get("title", ""), query)
+                ):
+                    locked_visible_status = False
+                    locked_identity_mismatch = True
         if (
             trust_locked not in {"0", "false", "off", "no"}
             and _window_descriptor_is_capture_usable(locked)
@@ -28205,19 +29859,23 @@ class ContinuousWindowTrackerService:
             if visible_same_hwnd:
                 self._remember_window_descriptor(session_id, locked)
                 return dict(locked)
-        cached = self._cached_window_descriptor(
-            session_id,
-            locked_hwnd=locked_hwnd,
-            query=query,
-            locked_family=locked_family,
-        )
-        if cached:
-            return cached
+        if not locked_identity_mismatch:
+            cached = self._cached_window_descriptor(
+                session_id,
+                locked_hwnd=locked_hwnd,
+                query=query,
+                locked_family=locked_family,
+            )
+            if cached:
+                return cached
+        else:
+            self._resolved_window_cache.pop(session_id, None)
 
         windows = [
             dict(row)
             for row in self.capture_backend.list_windows(query)
             if _window_descriptor_is_capture_usable(row)
+            and (not query or _title_matches_window_query(row.get("title", ""), query))
         ]
         stale_locked_hwnd_for_query = False
         if locked_hwnd > 0:
@@ -28259,6 +29917,11 @@ class ContinuousWindowTrackerService:
             if _title_matches_window_query(row.get("title", ""), query):
                 self._remember_window_descriptor(session_id, row)
                 return dict(row)
+        if _is_pocket_option_query(query):
+            # A same-browser-family fallback is not identity. It can silently
+            # bind a saved Pocket Option session to the dashboard, Netflix, or
+            # any other active tab in that browser process.
+            return None
         if locked_family:
             family_windows = [
                 dict(row)
@@ -28276,8 +29939,6 @@ class ContinuousWindowTrackerService:
             if family_windows:
                 self._remember_window_descriptor(session_id, family_windows[0])
                 return family_windows[0]
-        if _is_pocket_option_query(query):
-            return None
         return None
 
     def _activate_descriptor_for_execution(
@@ -28610,6 +30271,17 @@ class ContinuousWindowTrackerService:
                 freshness_window_sec=freshness_window_sec,
                 expiry_seconds=int(latest_signal.get("expiry_seconds", latest_signal.get("required_seconds", 0)) or 0) or None,
             )
+            visual_observation = _mapping_to_dict(public.get("visual_observation_v3", {}))
+            waiting_for_new_frame = bool(
+                str(visual_observation.get("status", "") or "").upper()
+                == _VISUAL_OBSERVATION_WAITING
+            )
+            if waiting_for_new_frame:
+                freshness_score = 0.0
+                valid_until_epoch = 0.0
+                latest_signal["freshness_score"] = 0.0
+                latest_signal["stale"] = True
+                public["freshness_score"] = 0.0
             latest_signal["valid_until_epoch"] = valid_until_epoch
             public["decision_valid_until_epoch"] = valid_until_epoch
             trade_intent = (

@@ -5,9 +5,11 @@ import csv
 import hashlib
 import json
 import random
+import re
 import shutil
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import DefaultDict, Iterator, Literal, Mapping, Sequence, TypeAlias
 
@@ -17,9 +19,9 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 DEFAULT_SOURCE_DIR: Path = PROJECT_ROOT / "808 Memory"
-DEFAULT_OUT_DIR: Path = PROJECT_ROOT / "data_splits"
-DEFAULT_MANIFEST_PATH: Path = DEFAULT_OUT_DIR / "split_manifest.csv"
-DEFAULT_SUMMARY_PATH: Path = DEFAULT_OUT_DIR / "split_summary.json"
+DEFAULT_OUT_DIR: Path = PROJECT_ROOT / "data" / "clean_split"
+DEFAULT_MANIFEST_PATH: Path = PROJECT_ROOT / "data_splits" / "split_manifest.csv"
+DEFAULT_SUMMARY_PATH: Path = PROJECT_ROOT / "data_splits" / "split_summary.json"
 
 IMAGE_SUFFIXES: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
 LABEL_BUY_TOKENS: frozenset[str] = frozenset({"BUY", "BUYS"})
@@ -36,6 +38,7 @@ class ImageEntry:
     label: Label
     sha256: str
     dhash: str
+    capture_date: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +89,42 @@ def hamming_distance_hex(left_hex: str, right_hex: str) -> int:
     return xor_value.bit_count()
 
 
+_CAPTURE_DATE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"(?<!\d)(?P<year>20\d{2})[-_. ]+(?P<month>0?[1-9]|1[0-2])"
+        r"[-_. ]+(?P<day>0?[1-9]|[12]\d|3[01])(?!\d)"
+    ),
+    re.compile(
+        r"(?<!\d)(?P<year>20\d{2})(?P<month>0[1-9]|1[0-2])"
+        r"(?P<day>0[1-9]|[12]\d|3[01])(?!\d)"
+    ),
+)
+
+
+def infer_capture_date_from_path(path: Path) -> str | None:
+    """Return an explicit capture date from the filename, never filesystem metadata.
+
+    File modification times and archive-directory timestamps commonly describe a copy or
+    export operation rather than the chart capture. Restricting this to an unambiguous ISO-like
+    date in the filename keeps date grouping conservative.
+    """
+
+    for pattern in _CAPTURE_DATE_PATTERNS:
+        match = pattern.search(path.stem)
+        if match is None:
+            continue
+        try:
+            capture_day = date(
+                int(match.group("year")),
+                int(match.group("month")),
+                int(match.group("day")),
+            )
+        except ValueError:
+            continue
+        return capture_day.isoformat()
+    return None
+
+
 def infer_label_from_path(path: Path) -> Label:
     upper_parts: set[str] = {part.upper() for part in path.parts}
     if upper_parts & LABEL_BUY_TOKENS:
@@ -124,13 +163,14 @@ def collect_image_entries(source_dir: Path) -> list[ImageEntry]:
             label=label,
             sha256=sha256_file(full_path),
             dhash=dhash_file(full_path),
+            capture_date=infer_capture_date_from_path(full_path),
         )
         entries.append(entry)
 
     if not entries:
         raise RuntimeError(f"No images found under: {resolved_source_dir}")
 
-    entries.sort(key=lambda item: (item.label, str(item.source_path)))
+    entries.sort(key=lambda item: (str(item.source_path).casefold(), item.label))
     return entries
 
 
@@ -161,14 +201,30 @@ class DisjointSet:
 
 
 def dedupe_exact_entries(entries: Sequence[ImageEntry]) -> list[ImageEntry]:
-    unique_by_hash: dict[tuple[Label, str], ImageEntry] = {}
-    for entry in entries:
-        key: tuple[Label, str] = (entry.label, entry.sha256)
-        if key not in unique_by_hash:
-            unique_by_hash[key] = entry
+    """Remove only repeated records for the same source path.
 
-    deduped_entries: list[ImageEntry] = list(unique_by_hash.values())
-    deduped_entries.sort(key=lambda item: (item.label, str(item.source_path)))
+    Distinct paths with identical bytes remain manifest members. This is deliberate: dropping
+    them would leave raw-suite images absent from the manifest, allowing downstream code to
+    assign those unknown images to a split independently. Hash-identical paths are instead
+    joined into one global leakage group by :func:`group_entries`.
+    """
+
+    unique_by_source: dict[str, ImageEntry] = {}
+    for entry in entries:
+        key = str(entry.source_path.resolve()).casefold()
+        existing = unique_by_source.get(key)
+        if existing is None:
+            unique_by_source[key] = entry
+            continue
+        if (
+            existing.label != entry.label
+            or existing.sha256 != entry.sha256
+            or existing.dhash != entry.dhash
+        ):
+            raise ValueError(f"Conflicting metadata for source image: {entry.source_path}")
+
+    deduped_entries: list[ImageEntry] = list(unique_by_source.values())
+    deduped_entries.sort(key=lambda item: (str(item.source_path).casefold(), item.label))
     return deduped_entries
 
 
@@ -176,126 +232,161 @@ def group_entries(
     entries: Sequence[ImageEntry],
     use_dhash: bool = True,
     dhash_threshold: int = 2,
+    use_capture_date: bool = True,
 ) -> list[list[ImageEntry]]:
     if dhash_threshold < 0:
         raise ValueError("dhash_threshold cannot be negative.")
 
     deduped_entries: list[ImageEntry] = dedupe_exact_entries(entries)
-    if not use_dhash:
-        return [[entry] for entry in deduped_entries]
+    if not deduped_entries:
+        return []
 
-    label_buckets: DefaultDict[Label, list[ImageEntry]] = defaultdict(list)
-    for entry in deduped_entries:
-        label_buckets[entry.label].append(entry)
+    # One global graph is essential. Label-local graphs allow the same chart copied under BUY
+    # and SELL (or a visually near-identical chart) to leak into different splits.
+    disjoint_set = DisjointSet(len(deduped_entries))
 
-    grouped_entries: list[list[ImageEntry]] = []
+    sha_buckets: DefaultDict[str, list[int]] = defaultdict(list)
+    capture_date_buckets: DefaultDict[str, list[int]] = defaultdict(list)
+    for item_index, entry in enumerate(deduped_entries):
+        sha_buckets[entry.sha256].append(item_index)
+        capture_date = entry.capture_date or infer_capture_date_from_path(entry.source_path)
+        if use_capture_date and capture_date:
+            capture_date_buckets[capture_date].append(item_index)
 
-    for label in ("BUY", "SELL"):
-        bucket: list[ImageEntry] = label_buckets.get(label, [])
-        if not bucket:
-            continue
+    for bucket in sha_buckets.values():
+        representative = bucket[0]
+        for item_index in bucket[1:]:
+            disjoint_set.union(representative, item_index)
 
-        disjoint_set = DisjointSet(len(bucket))
-        for left_index in range(len(bucket)):
-            left_entry: ImageEntry = bucket[left_index]
-            for right_index in range(left_index + 1, len(bucket)):
-                right_entry: ImageEntry = bucket[right_index]
+    if use_dhash:
+        for left_index, left_entry in enumerate(deduped_entries):
+            for right_index in range(left_index + 1, len(deduped_entries)):
+                right_entry = deduped_entries[right_index]
                 if hamming_distance_hex(left_entry.dhash, right_entry.dhash) <= dhash_threshold:
                     disjoint_set.union(left_index, right_index)
 
-        components: DefaultDict[int, list[ImageEntry]] = defaultdict(list)
-        for item_index, entry in enumerate(bucket):
-            root_index: int = disjoint_set.find(item_index)
-            components[root_index].append(entry)
+    # Same-day screenshots are often adjacent observations from one capture session. An explicit
+    # filename date is therefore an indivisible leakage boundary even when the pixels differ.
+    for bucket in capture_date_buckets.values():
+        representative = bucket[0]
+        for item_index in bucket[1:]:
+            disjoint_set.union(representative, item_index)
 
-        label_groups: list[list[ImageEntry]] = list(components.values())
-        for group in label_groups:
-            group.sort(key=lambda item: str(item.source_path))
+    components: DefaultDict[int, list[ImageEntry]] = defaultdict(list)
+    for item_index, entry in enumerate(deduped_entries):
+        components[disjoint_set.find(item_index)].append(entry)
 
-        label_groups.sort(key=lambda group: str(group[0].source_path))
-        grouped_entries.extend(label_groups)
-
+    grouped_entries = list(components.values())
+    for group in grouped_entries:
+        group.sort(key=lambda item: (str(item.source_path).casefold(), item.label))
+    grouped_entries.sort(
+        key=lambda group: (
+            str(group[0].source_path).casefold(),
+            group[0].sha256,
+        )
+    )
     return grouped_entries
-
-
-def _empty_split_map() -> dict[int, SplitName]:
-    return {}
-
-
-def _label_group_indices(
-    groups: Sequence[list[ImageEntry]],
-) -> dict[Label, list[int]]:
-    mapping: dict[Label, list[int]] = {"BUY": [], "SELL": []}
-    for index, group in enumerate(groups):
-        if not group:
-            continue
-        mapping[group[0].label].append(index)
-    return mapping
 
 
 def _group_size(group: Sequence[ImageEntry]) -> int:
     return len(group)
 
 
-def _assign_groups_for_label(
-    group_indices: Sequence[int],
-    groups: Sequence[list[ImageEntry]],
+def _split_count_targets(
+    total_items: int,
     val_pct: float,
     test_pct: float,
-    seed: int,
-) -> dict[int, SplitName]:
-    split_map: dict[int, SplitName] = {}
-
-    local_indices: list[int] = list(group_indices)
-    rng = random.Random(seed)
-    rng.shuffle(local_indices)
-
-    local_indices.sort(key=lambda idx: len(groups[idx]), reverse=True)
-
-    total_items: int = sum(_group_size(groups[idx]) for idx in local_indices)
+) -> dict[SplitName, int]:
     target_val: int = int(round(total_items * val_pct))
     target_test: int = int(round(total_items * test_pct))
     target_train: int = max(total_items - target_val - target_test, 0)
-
-    target_counts: dict[SplitName, int] = {
+    return {
         "train": target_train,
         "val": target_val,
         "test": target_test,
     }
-    current_counts: dict[SplitName, int] = {
-        "train": 0,
-        "val": 0,
-        "test": 0,
-    }
 
-    for group_index in local_indices:
-        group_len: int = _group_size(groups[group_index])
 
-        best_split: SplitName = "train"
-        best_score: float | None = None
+def _normalized_count_cost(current: int, target: int) -> float:
+    denominator = float(max(target, 1))
+    deviation = (float(current) - float(target)) / denominator
+    overshoot = max(float(current - target), 0.0) / denominator
+    return deviation * deviation + (2.0 * overshoot * overshoot)
 
-        for split_name in SPLITS:
-            target: int = target_counts[split_name]
-            current: int = current_counts[split_name]
 
-            if target <= 0:
-                score: float = float("-inf")
-            else:
-                remaining_before: int = target - current
-                remaining_after: int = target - (current + group_len)
-                score = float(remaining_before) - abs(float(remaining_after))
+def _candidate_assignment_cost(
+    candidate: SplitName,
+    group_label_counts: Mapping[Label, int],
+    group_size: int,
+    current_counts: Mapping[SplitName, int],
+    current_label_counts: Mapping[SplitName, Mapping[Label, int]],
+    target_counts: Mapping[SplitName, int],
+    target_label_counts: Mapping[SplitName, Mapping[Label, int]],
+) -> float:
+    cost = 0.0
+    for split_name in SPLITS:
+        prospective_total = current_counts[split_name]
+        if split_name == candidate:
+            prospective_total += group_size
+        cost += 0.5 * _normalized_count_cost(prospective_total, target_counts[split_name])
 
-            if best_score is None or score > best_score:
-                best_score = score
-                best_split = split_name
+        for label in ("BUY", "SELL"):
+            prospective_label_count = current_label_counts[split_name][label]
+            if split_name == candidate:
+                prospective_label_count += group_label_counts.get(label, 0)
+            cost += _normalized_count_cost(
+                prospective_label_count,
+                target_label_counts[split_name][label],
+            )
+    return cost
 
-        if best_score == float("-inf"):
-            best_split = "train"
 
-        split_map[group_index] = best_split
-        current_counts[best_split] += group_len
+def _validate_explicit_split_map(
+    groups: Sequence[list[ImageEntry]],
+    split_map: Mapping[int, SplitName],
+) -> None:
+    invalid_labels: list[tuple[int, str, object]] = []
+    for group_index, group in enumerate(groups):
+        if not group:
+            raise ValueError(f"Group {group_index} is empty and cannot be assigned safely.")
+        invalid_labels.extend(
+            (group_index, str(entry.source_path), entry.label)
+            for entry in group
+            if entry.label not in {"BUY", "SELL"}
+        )
 
-    return split_map
+    if invalid_labels:
+        raise ValueError(
+            "Unknown image labels cannot be assigned to train implicitly: "
+            f"{invalid_labels}"
+        )
+
+    expected_indices = set(range(len(groups)))
+    assigned_indices = set(split_map)
+    missing_indices = sorted(expected_indices - assigned_indices)
+    extra_indices = sorted(assigned_indices - expected_indices)
+    invalid_assignments = sorted(
+        (group_index, split_name)
+        for group_index, split_name in split_map.items()
+        if split_name not in SPLITS
+    )
+    if missing_indices or extra_indices or invalid_assignments:
+        raise ValueError(
+            "Every image group requires one explicit train/val/test assignment; refusing "
+            "an implicit train fallback. "
+            f"missing={missing_indices}, extra={extra_indices}, invalid={invalid_assignments}"
+        )
+
+    source_to_group: dict[str, int] = {}
+    for group_index, group in enumerate(groups):
+        for entry in group:
+            source_key = str(entry.source_path.resolve()).casefold()
+            previous_group = source_to_group.setdefault(source_key, group_index)
+            if previous_group != group_index:
+                raise ValueError(
+                    f"Source image appears in multiple groups: {entry.source_path} "
+                    f"({previous_group} and {group_index})."
+                )
 
 
 def split_groups(
@@ -311,19 +402,54 @@ def split_groups(
     if val_pct + test_pct >= 1.0:
         raise ValueError("val_pct + test_pct must be less than 1.0.")
 
-    split_map: dict[int, SplitName] = _empty_split_map()
-    grouped_indices: dict[Label, list[int]] = _label_group_indices(groups)
+    for group_index, group in enumerate(groups):
+        if not group:
+            raise ValueError(f"Group {group_index} is empty and cannot be split.")
 
+    total_count = sum(_group_size(group) for group in groups)
+    total_label_counts: Counter[Label] = Counter(
+        entry.label for group in groups for entry in group
+    )
+    target_counts = _split_count_targets(total_count, val_pct, test_pct)
+    target_label_counts: dict[SplitName, dict[Label, int]] = {
+        split_name: {"BUY": 0, "SELL": 0} for split_name in SPLITS
+    }
     for label in ("BUY", "SELL"):
-        label_split_map: dict[int, SplitName] = _assign_groups_for_label(
-            group_indices=grouped_indices[label],
-            groups=groups,
-            val_pct=val_pct,
-            test_pct=test_pct,
-            seed=seed + (0 if label == "BUY" else 100_000),
-        )
-        split_map.update(label_split_map)
+        label_targets = _split_count_targets(total_label_counts[label], val_pct, test_pct)
+        for split_name in SPLITS:
+            target_label_counts[split_name][label] = label_targets[split_name]
 
+    current_counts: dict[SplitName, int] = {split_name: 0 for split_name in SPLITS}
+    current_label_counts: dict[SplitName, dict[Label, int]] = {
+        split_name: {"BUY": 0, "SELL": 0} for split_name in SPLITS
+    }
+    group_indices = list(range(len(groups)))
+    random.Random(seed).shuffle(group_indices)
+    group_indices.sort(key=lambda index: _group_size(groups[index]), reverse=True)
+
+    split_map: dict[int, SplitName] = {}
+    for group_index in group_indices:
+        group = groups[group_index]
+        group_label_counts: Counter[Label] = Counter(entry.label for entry in group)
+        candidate_costs = {
+            split_name: _candidate_assignment_cost(
+                candidate=split_name,
+                group_label_counts=group_label_counts,
+                group_size=len(group),
+                current_counts=current_counts,
+                current_label_counts=current_label_counts,
+                target_counts=target_counts,
+                target_label_counts=target_label_counts,
+            )
+            for split_name in SPLITS
+        }
+        selected_split = min(SPLITS, key=lambda split_name: candidate_costs[split_name])
+        split_map[group_index] = selected_split
+        current_counts[selected_split] += len(group)
+        for label in ("BUY", "SELL"):
+            current_label_counts[selected_split][label] += group_label_counts[label]
+
+    _validate_explicit_split_map(groups, split_map)
     return split_map
 
 
@@ -350,6 +476,7 @@ def copy_and_manifest(
     resolved_out_dir: Path = out_dir.resolve()
     resolved_manifest_path: Path = manifest_path.resolve()
 
+    _validate_explicit_split_map(groups, split_map)
     _reset_output_dirs(resolved_out_dir)
     resolved_manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -365,6 +492,7 @@ def copy_and_manifest(
         "destination_path",
         "sha256",
         "dhash",
+        "capture_date",
         "is_group_representative",
     ]
 
@@ -393,6 +521,9 @@ def copy_and_manifest(
                         "destination_path": str(destination_path),
                         "sha256": entry.sha256,
                         "dhash": entry.dhash,
+                        "capture_date": entry.capture_date
+                        or infer_capture_date_from_path(entry.source_path)
+                        or "",
                         "is_group_representative": "1" if entry_index == 0 else "0",
                     }
                 )
@@ -416,7 +547,9 @@ def build_summary(
     val_pct: float,
     test_pct: float,
     seed: int,
+    use_capture_date: bool = True,
 ) -> dict[str, object]:
+    _validate_explicit_split_map(groups, split_map)
     deduped_count: int = sum(len(group) for group in groups)
     duplicate_removed_count: int = len(entries) - deduped_count
 
@@ -430,6 +563,21 @@ def build_summary(
 
     buy_count: int = sum(1 for entry in entries if entry.label == "BUY")
     sell_count: int = sum(1 for entry in entries if entry.label == "SELL")
+    sha_counts = Counter(entry.sha256 for entry in entries)
+    exact_duplicate_member_count = sum(count - 1 for count in sha_counts.values() if count > 1)
+    labels_by_sha: DefaultDict[str, set[Label]] = defaultdict(set)
+    capture_date_counts: Counter[str] = Counter()
+    for entry in entries:
+        labels_by_sha[entry.sha256].add(entry.label)
+        capture_date = entry.capture_date or infer_capture_date_from_path(entry.source_path)
+        if capture_date:
+            capture_date_counts[capture_date] += 1
+    conflicting_label_hash_count = sum(
+        1 for labels in labels_by_sha.values() if len(labels) > 1
+    )
+    mixed_label_group_count = sum(
+        1 for group in groups if len({entry.label for entry in group}) > 1
+    )
 
     summary: dict[str, object] = {
         "project_root": str(PROJECT_ROOT),
@@ -441,6 +589,12 @@ def build_summary(
         "raw_sell_count": sell_count,
         "deduped_entry_count": deduped_count,
         "duplicate_removed_count": duplicate_removed_count,
+        "exact_duplicate_member_count": exact_duplicate_member_count,
+        "conflicting_label_hash_count": conflicting_label_hash_count,
+        "mixed_label_group_count": mixed_label_group_count,
+        "multi_image_capture_date_count": sum(
+            1 for count in capture_date_counts.values() if count > 1
+        ),
         "group_count": len(groups),
         "train_count": counts["train"],
         "val_count": counts["val"],
@@ -450,6 +604,8 @@ def build_summary(
         "test_group_count": group_counts["test"],
         "use_dhash": use_dhash,
         "dhash_threshold": dhash_threshold,
+        "use_capture_date": use_capture_date,
+        "manifest_policy": "all_distinct_source_paths_explicitly_assigned",
         "val_pct": val_pct,
         "test_pct": test_pct,
         "seed": seed,
@@ -515,6 +671,12 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="Maximum dHash Hamming distance for grouping near-duplicates.",
     )
+    parser.add_argument(
+        "--group-capture-date",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep images with the same explicit filename capture date in one split.",
+    )
     return parser.parse_args()
 
 
@@ -530,12 +692,14 @@ def main() -> None:
     seed: int = args.seed
     use_dhash: bool = args.use_dhash
     dhash_threshold: int = args.dhash_threshold
+    use_capture_date: bool = args.group_capture_date
 
     entries: list[ImageEntry] = collect_image_entries(source_dir)
     groups: list[list[ImageEntry]] = group_entries(
         entries=entries,
         use_dhash=use_dhash,
         dhash_threshold=dhash_threshold,
+        use_capture_date=use_capture_date,
     )
     split_map: dict[int, SplitName] = split_groups(
         groups=groups,
@@ -563,6 +727,7 @@ def main() -> None:
         val_pct=val_pct,
         test_pct=test_pct,
         seed=seed,
+        use_capture_date=use_capture_date,
     )
     summary["written_train_count"] = copy_stats["train"]
     summary["written_val_count"] = copy_stats["val"]
@@ -581,7 +746,7 @@ def main() -> None:
     print(f"Manifest     : {manifest_path.resolve()}")
     print(f"Summary      : {summary_path.resolve()}")
     print(f"Raw images   : {summary['raw_entry_count']}")
-    print(f"Deduped imgs : {summary['deduped_entry_count']}")
+    print(f"Manifest imgs: {summary['deduped_entry_count']}")
     print(f"Groups       : {summary['group_count']}")
     print(f"Train count  : {summary['train_count']}")
     print(f"Val count    : {summary['val_count']}")

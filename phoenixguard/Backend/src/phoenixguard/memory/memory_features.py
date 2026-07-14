@@ -4,6 +4,7 @@ import hashlib
 from typing import Any, Mapping, Sequence, cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -525,19 +526,92 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     return float(np.clip(np.dot(left / left_norm, right / right_norm), -1.0, 1.0))
 
 
+def _late_interaction_token_matrix(
+    tokens: Sequence[Sequence[float]],
+) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
+    """Materialize token rows once while retaining ragged row lengths."""
+
+    try:
+        matrix = np.asarray(tokens, dtype=np.float32)
+    except (TypeError, ValueError):
+        matrix = np.asarray([], dtype=np.float32)
+    if matrix.ndim >= 2 and int(matrix.shape[0]) == len(tokens):
+        width = int(np.prod(matrix.shape[1:], dtype=np.int64))
+        flattened = matrix.reshape((len(tokens), width)).astype(np.float32, copy=False)
+        return flattened, np.full((len(tokens),), width, dtype=np.int64)
+
+    rows = [list(token) for token in tokens]
+    lengths = np.asarray([len(row) for row in rows], dtype=np.int64)
+    width = int(lengths.max(initial=0))
+    padded_rows = [row + [0.0] * (width - len(row)) for row in rows]
+    padded = np.asarray(padded_rows, dtype=np.float32)
+    return padded, lengths
+
+
+def _normalized_token_rows(
+    matrix: NDArray[np.float32],
+    *,
+    width: int,
+) -> NDArray[np.float32]:
+    values = matrix[:, :width]
+    norms = np.linalg.norm(values, axis=1, keepdims=True)
+    return np.divide(
+        values,
+        norms,
+        out=np.zeros_like(values),
+        where=norms > 1e-8,
+    )
+
+
 def late_interaction_score(
     query_tokens: Sequence[Sequence[float]] | None,
     candidate_tokens: Sequence[Sequence[float]] | None,
 ) -> float:
-    if not query_tokens or not candidate_tokens:
+    if (
+        query_tokens is None
+        or candidate_tokens is None
+        or len(query_tokens) == 0
+        or len(candidate_tokens) == 0
+    ):
         return 0.0
-    best_scores: list[float] = []
-    for query in query_tokens:
-        per_token = max((_cosine(query, candidate) for candidate in candidate_tokens), default=0.0)
-        best_scores.append(max(0.0, per_token))
-    if not best_scores:
+
+    query_matrix, query_lengths = _late_interaction_token_matrix(query_tokens)
+    candidate_matrix, candidate_lengths = _late_interaction_token_matrix(candidate_tokens)
+    width = min(int(query_matrix.shape[1]), int(candidate_matrix.shape[1]))
+    if width <= 0:
         return 0.0
-    return float(np.clip(np.mean(np.asarray(best_scores, dtype=np.float32)), 0.0, 1.0))
+
+    query_is_rectangular = bool(np.all(query_lengths == int(query_matrix.shape[1])))
+    candidate_is_rectangular = bool(np.all(candidate_lengths == int(candidate_matrix.shape[1])))
+    if query_is_rectangular and candidate_is_rectangular:
+        normalized_queries = _normalized_token_rows(query_matrix, width=width)
+        normalized_candidates = _normalized_token_rows(candidate_matrix, width=width)
+        similarities = normalized_queries @ normalized_candidates.T
+    else:
+        pair_widths = np.minimum(query_lengths[:, None], candidate_lengths[None, :])
+        pair_widths = np.minimum(pair_widths, width)
+        active_dimensions = np.arange(width, dtype=np.int64)[None, None, :] < pair_widths[:, :, None]
+        query_pairs = np.where(active_dimensions, query_matrix[:, None, :width], np.float32(0.0))
+        candidate_pairs = np.where(active_dimensions, candidate_matrix[None, :, :width], np.float32(0.0))
+        query_norms = np.linalg.norm(query_pairs, axis=2, keepdims=True)
+        candidate_norms = np.linalg.norm(candidate_pairs, axis=2, keepdims=True)
+        normalized_queries = np.divide(
+            query_pairs,
+            query_norms,
+            out=np.zeros_like(query_pairs),
+            where=query_norms > 1e-8,
+        )
+        normalized_candidates = np.divide(
+            candidate_pairs,
+            candidate_norms,
+            out=np.zeros_like(candidate_pairs),
+            where=candidate_norms > 1e-8,
+        )
+        similarities = np.sum(normalized_queries * normalized_candidates, axis=2, dtype=np.float32)
+
+    similarities = np.clip(similarities, -1.0, 1.0)
+    best_scores = np.maximum(np.max(similarities, axis=1), np.float32(0.0))
+    return float(np.clip(np.mean(best_scores, dtype=np.float32), 0.0, 1.0))
 
 
 def trajectory_alignment(

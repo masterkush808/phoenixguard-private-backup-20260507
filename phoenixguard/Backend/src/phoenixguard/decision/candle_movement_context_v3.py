@@ -6,6 +6,7 @@ from typing import Any, Mapping, Sequence, cast
 
 
 SCHEMA_VERSION = "PG_CANDLE_MOVEMENT_CONTEXT_V3"
+REVERSAL_CONFIRMATION_CANDLES = 3
 
 TIMEFRAME_SECONDS: dict[str, int] = {
     "M1": 60,
@@ -495,7 +496,12 @@ def _historical_legs(
             previous_side = side
             previous_count = candle_count
     if legs:
-        return legs
+        return _reconcile_historical_tail(
+            legs,
+            candles,
+            timeframe_seconds=timeframe_seconds,
+            room_ok=room_ok,
+        )
     return _derive_legs_from_candles(candles, timeframe_seconds, room_ok)
 
 
@@ -568,6 +574,245 @@ def _derive_legs_from_candles(
     return legs
 
 
+def _leg_side(candles: Sequence[Mapping[str, Any]], default: str = "HOLD") -> str:
+    for candle in reversed(candles):
+        side = _side(candle.get("direction"), "HOLD")
+        if side in {"BUY", "SELL"}:
+            return side
+    return default
+
+
+def _leg_indices(candles: Sequence[Mapping[str, Any]]) -> list[int]:
+    return sorted(
+        {
+            int(candle.get("index", candle.get("position", position)) or 0)
+            for position, candle in enumerate(candles)
+        }
+    )
+
+
+def _refresh_leg_with_tail(
+    leg: Mapping[str, Any],
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    previous_leg: Mapping[str, Any],
+    timeframe_seconds: int,
+    room_ok: bool | None,
+) -> dict[str, Any]:
+    if not candles:
+        return dict(leg)
+    updated = dict(leg)
+    source = _text(updated.get("source"), "historical_structure")
+    if "tracked_candles_tail" not in source:
+        source = f"{source}+tracked_candles_tail"
+    existing_indices = _int_list(updated.get("source_indices"))
+    tail_indices = _leg_indices(candles)
+    existing_index_set = set(existing_indices)
+    added_count = sum(1 for index in tail_indices if index not in existing_index_set)
+    candle_count = int(_float(updated.get("candle_count"), float(len(existing_indices)))) + added_count
+    combined_indices = sorted(existing_index_set | set(tail_indices))
+    side = _side(updated.get("side"), "HOLD")
+    stage, stage_reason = _leg_stage(
+        side=side,
+        candle_count=candle_count,
+        previous_side=_side(previous_leg.get("side"), "HOLD"),
+        previous_candle_count=int(_float(previous_leg.get("candle_count"), 0.0)),
+        room_ok=room_ok,
+        exhaustion_risk=0.0,
+    )
+    updated.update(
+        {
+            "source": source,
+            "candle_count": candle_count,
+            "duration": _duration_payload(candle_count, timeframe_seconds),
+            "start_index": min(combined_indices) if combined_indices else updated.get("start_index"),
+            "end_index": max(combined_indices) if combined_indices else updated.get("end_index"),
+            "source_indices": combined_indices,
+            "move_stage": stage,
+            "stage_reason": stage_reason,
+        }
+    )
+    return updated
+
+
+def _tracked_tail_leg(
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    position: int,
+    previous_leg: Mapping[str, Any],
+    timeframe_seconds: int,
+    room_ok: bool | None,
+) -> dict[str, Any]:
+    side = _leg_side(candles)
+    indices = _leg_indices(candles)
+    candle_count = len(candles)
+    stage, stage_reason = _leg_stage(
+        side=side,
+        candle_count=candle_count,
+        previous_side=_side(previous_leg.get("side"), "HOLD"),
+        previous_candle_count=int(_float(previous_leg.get("candle_count"), 0.0)),
+        room_ok=room_ok,
+        exhaustion_risk=0.0,
+    )
+    first = candles[0]
+    last = candles[-1]
+    confirmation_count = sum(1 for candle in candles if _side(candle.get("direction"), "HOLD") == side)
+    return {
+        "source": "tracked_candles_tail",
+        "source_path": f"tracking_summary.tracked_candles.reconciled_leg[{position}]",
+        "label": f"L{position + 1} {side}",
+        "side": side,
+        "candle_count": candle_count,
+        "duration": _duration_payload(candle_count, timeframe_seconds),
+        "start_index": min(indices) if indices else None,
+        "end_index": max(indices) if indices else None,
+        "source_indices": indices,
+        "net_move": round(_float(last.get("price_proxy"), 0.0) - _float(first.get("price_proxy"), 0.0), 6),
+        "slope": round(
+            (_float(last.get("price_proxy"), 0.0) - _float(first.get("price_proxy"), 0.0))
+            / max(1, candle_count - 1),
+            6,
+        ),
+        "move_stage": stage,
+        "stage_reason": stage_reason,
+        "confirmation_count": confirmation_count,
+        "confirmation_required": REVERSAL_CONFIRMATION_CANDLES,
+        "transition_state": "CONFIRMED",
+    }
+
+
+def _transition_leg(
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    position: int,
+    previous_leg: Mapping[str, Any],
+    timeframe_seconds: int,
+) -> dict[str, Any]:
+    candidate_side = _leg_side(candles)
+    indices = _leg_indices(candles)
+    confirmation_count = sum(
+        1 for candle in candles if _side(candle.get("direction"), "HOLD") == candidate_side
+    )
+    return {
+        "source": "tracked_candles_tail",
+        "source_path": f"tracking_summary.tracked_candles.transition[{position}]",
+        "label": f"L{position + 1} {candidate_side} TRANSITION",
+        "side": "HOLD",
+        "candidate_side": candidate_side,
+        "previous_side": _side(previous_leg.get("side"), "HOLD"),
+        "candle_count": len(candles),
+        "duration": _duration_payload(len(candles), timeframe_seconds),
+        "start_index": min(indices) if indices else None,
+        "end_index": max(indices) if indices else None,
+        "source_indices": indices,
+        "net_move": round(
+            _float(candles[-1].get("price_proxy"), 0.0) - _float(candles[0].get("price_proxy"), 0.0),
+            6,
+        ),
+        "slope": round(
+            (_float(candles[-1].get("price_proxy"), 0.0) - _float(candles[0].get("price_proxy"), 0.0))
+            / max(1, len(candles) - 1),
+            6,
+        ),
+        "move_stage": "TRANSITION",
+        "stage_reason": (
+            f"Fresh {candidate_side} reversal has {confirmation_count}/"
+            f"{REVERSAL_CONFIRMATION_CANDLES} confirming candles; current pressure is held neutral."
+        ),
+        "confirmation_count": confirmation_count,
+        "confirmation_required": REVERSAL_CONFIRMATION_CANDLES,
+        "transition_state": "FORMING",
+    }
+
+
+def _reconcile_historical_tail(
+    historical_legs: Sequence[Mapping[str, Any]],
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    timeframe_seconds: int,
+    room_ok: bool | None,
+) -> list[dict[str, Any]]:
+    """Reconcile lagging historical segments with fresh tracked-candle evidence.
+
+    Historical structure uses a three-candle minimum before accepting a new
+    market leg. Until that threshold is met, an opposite tail is represented as
+    TRANSITION/HOLD instead of leaving the completed historical side current.
+    """
+    reconciled = [dict(leg) for leg in historical_legs]
+    if not reconciled or not candles:
+        return reconciled
+    historical_end = reconciled[-1].get("end_index")
+    if historical_end is None:
+        return reconciled
+    historical_end_index = int(_float(historical_end, -1.0))
+    tail = [
+        candle
+        for candle in candles
+        if int(_float(candle.get("index", candle.get("position")), -1.0)) > historical_end_index
+    ]
+    if not tail:
+        return reconciled
+
+    pending_reversal: list[Mapping[str, Any]] = []
+    for candle in tail:
+        active_leg = reconciled[-1]
+        active_side = _side(active_leg.get("side"), "HOLD")
+        candle_side = _side(candle.get("direction"), "HOLD")
+        previous_leg = reconciled[-2] if len(reconciled) > 1 else {}
+        if candle_side == "HOLD":
+            if pending_reversal:
+                pending_reversal.append(candle)
+            else:
+                reconciled[-1] = _refresh_leg_with_tail(
+                    active_leg,
+                    [candle],
+                    previous_leg=previous_leg,
+                    timeframe_seconds=timeframe_seconds,
+                    room_ok=room_ok,
+                )
+            continue
+        if active_side not in {"BUY", "SELL"} or candle_side == active_side:
+            absorbed = [*pending_reversal, candle]
+            pending_reversal = []
+            reconciled[-1] = _refresh_leg_with_tail(
+                active_leg,
+                absorbed,
+                previous_leg=previous_leg,
+                timeframe_seconds=timeframe_seconds,
+                room_ok=room_ok,
+            )
+            continue
+
+        pending_reversal.append(candle)
+        confirmation_count = sum(
+            1
+            for pending in pending_reversal
+            if _side(pending.get("direction"), "HOLD") == candle_side
+        )
+        if confirmation_count >= REVERSAL_CONFIRMATION_CANDLES:
+            reconciled.append(
+                _tracked_tail_leg(
+                    pending_reversal,
+                    position=len(reconciled),
+                    previous_leg=active_leg,
+                    timeframe_seconds=timeframe_seconds,
+                    room_ok=room_ok,
+                )
+            )
+            pending_reversal = []
+
+    if pending_reversal:
+        reconciled.append(
+            _transition_leg(
+                pending_reversal,
+                position=len(reconciled),
+                previous_leg=reconciled[-1],
+                timeframe_seconds=timeframe_seconds,
+            )
+        )
+    return reconciled
+
+
 def _selected_timeframe(source: Mapping[str, Any]) -> tuple[str, int]:
     tracking = _mapping(source.get("tracking_summary")) or _mapping(source)
     timeframe = _upper(
@@ -616,6 +861,7 @@ def build_candle_movement_context_v3(source: Mapping[str, Any]) -> dict[str, Any
     ]
     current_stage = _upper(current_leg.get("move_stage"), "CHOP")
     current_count = int(_float(current_leg.get("candle_count"), 0.0))
+    previous_leg = legs[-2] if len(legs) > 1 else {}
     return {
         "schema_version": SCHEMA_VERSION,
         "timeframe": timeframe,
@@ -632,6 +878,7 @@ def build_candle_movement_context_v3(source: Mapping[str, Any]) -> dict[str, Any
             "move_stage": current_stage,
             "opposing_force_room": opposing_room,
         },
+        "previous_leg": previous_leg,
         "move_stage": current_stage,
         "move_stage_reason": _text(current_leg.get("stage_reason"), "No current leg available."),
         "move_duration": _duration_payload(current_count, timeframe_seconds),

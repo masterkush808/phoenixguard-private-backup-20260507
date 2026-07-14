@@ -275,6 +275,7 @@ def test_live_state_compact_cache_signatures_track_display_artifacts(tmp_path: P
     )
     display_state: dict[str, Any] = {
         "session_id": "pocket-live-8788",
+        "state_version": 100,
         "frame_index": 10,
         "display_frame_id": 100,
         "chart_frame_id": 10,
@@ -291,6 +292,15 @@ def test_live_state_compact_cache_signatures_track_display_artifacts(tmp_path: P
     compact_sig_1 = _compact_live_state_response_cache_signature("pocket-live-8788")
     live_sig_1 = _live_state_cache_signature("pocket-live-8788", compact_public=True)
 
+    display_state["state_version"] = 101
+    (session_dir / "display_state.json").write_text(json.dumps(display_state), encoding="utf-8")
+
+    compact_sig_same_frame = _compact_live_state_response_cache_signature("pocket-live-8788")
+    live_sig_same_frame = _live_state_cache_signature("pocket-live-8788", compact_public=True)
+
+    assert compact_sig_same_frame != compact_sig_1
+    assert live_sig_same_frame != live_sig_1
+
     display_state["frame_index"] = 11
     display_state["display_frame_id"] = 101
     display_state["last_display_window_path"] = "0011_window.jpg"
@@ -301,6 +311,33 @@ def test_live_state_compact_cache_signatures_track_display_artifacts(tmp_path: P
 
     assert compact_sig_2 != compact_sig_1
     assert live_sig_2 != live_sig_1
+
+
+def test_compact_overlay_payload_rejects_mixed_future_and_unframed_rows() -> None:
+    stale_for_display = cast(
+        Callable[..., bool],
+        getattr(mobile_app, "_compact_overlay_payload_stale_for_display"),
+    )
+    display = {
+        "chart_frame_id": 10,
+        "overlay_frame_id": 10,
+        "full_overlay_frame_id": 10,
+    }
+
+    def payload(*frame_ids: int | None) -> dict[str, object]:
+        return {
+            "overlays": {
+                "objects": [
+                    {"id": f"overlay-{index}", "frame_id": frame_id}
+                    for index, frame_id in enumerate(frame_ids)
+                ]
+            }
+        }
+
+    assert stale_for_display(payload(10, 10), display) is False
+    assert stale_for_display(payload(10, 9), display) is True
+    assert stale_for_display(payload(10, 11), display) is True
+    assert stale_for_display(payload(10, None), display) is True
 
 
 def test_study_packet_expires_by_ttl() -> None:
@@ -972,7 +1009,9 @@ def test_dashboard_asset_route_serves_floating_window_stylesheet() -> None:
     assert traversal.status_code == 404
 
 
-def test_overlay_editor_settings_hard_save_and_dashboard_embed(monkeypatch: Any, tmp_path: Path) -> None:
+def test_overlay_editor_settings_hard_save_without_public_dashboard_embed(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
     settings_path = tmp_path / "floating_windows" / "overlay_editor_settings.json"
     monkeypatch.setattr(mobile_app, "_WINDOW_TRACKER_FLOATING_WINDOWS_DIR", settings_path.parent)
     monkeypatch.setattr(mobile_app, "_WINDOW_TRACKER_OVERLAY_EDITOR_SETTINGS_PATH", settings_path)
@@ -1004,9 +1043,9 @@ def test_overlay_editor_settings_hard_save_and_dashboard_embed(monkeypatch: Any,
     assert settings["layers"] == {}
     assert settings["colors"]["demand"] == "#123abc"
     assert settings["colors"]["supply"] == "#f8ca5c"
-    assert '"opacityScale": 0.72' in dashboard.text
-    assert '"demand": "#123abc"' in dashboard.text
-    assert "id=\"overlay-editor-open\" type=\"button\" hidden" in dashboard.text
+    assert '"opacityScale": 0.72' not in dashboard.text
+    assert '"demand": "#123abc"' not in dashboard.text
+    assert "overlay-editor-open" not in dashboard.text
 
 
 def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypatch: Any, tmp_path: Path) -> None:
@@ -1353,19 +1392,37 @@ def test_live_state_v3_thin_direct_sources_load_locked_registry_context(
         ),
         encoding="utf-8",
     )
+    (session_dir / "display_state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "pocket-live-8788",
+                "frame_index": 9,
+                "display_frame_id": 9,
+                "chart_frame_id": 9,
+                "overlay_frame_id": 9,
+                "full_overlay_frame_id": 9,
+                "model_vote_frame_id": 9,
+                "last_display_window_path": str(session_dir / "000009_window.jpg"),
+            }
+        ),
+        encoding="utf-8",
+    )
     registry_entry: dict[str, Any] = {
         "overlay_id": "support-1",
         "object_id": "support-1",
         "track_id": "support-1",
+        "frame_id": 9,
         "truth_score": 0.91,
         "lifecycle_state": "CONFIRMED",
         "chart_transform": {
             "chart_image_bounds": [0, 0, 400, 240],
+            "frame_id": 9,
         },
             "overlay": {
                 "overlay_id": "support-1",
                 "object_id": "support-1",
                 "track_id": "support-1",
+                "frame_id": 9,
                 "type": "SUPPORT",
                 "layer": "supply_demand",
                 "bbox": [40, 160, 220, 190],

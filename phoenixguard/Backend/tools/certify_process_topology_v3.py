@@ -6,6 +6,7 @@ ensure_backend_paths()
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -45,6 +46,20 @@ def _int(value: object, default: int = 0) -> int:
         return int(float(str(value)))
     except (TypeError, ValueError):
         return default
+
+
+def local_session_state_path(data_dir: str | Path, session_id: str) -> Path:
+    """Return the tracker state file that proves which local data root is active."""
+
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(session_id or "")).strip("._").lower() or "session"
+    return (
+        Path(data_dir).expanduser().resolve()
+        / "mobile_api"
+        / "window_tracker"
+        / "sessions"
+        / slug
+        / "session.json"
+    )
 
 
 def _parent_by_pid(processes: list[dict[str, object]]) -> dict[int, int]:
@@ -180,6 +195,7 @@ def main() -> int:
     session = http_json(f"{args.base_url.rstrip('/')}/v1/mobile/window-tracker/sessions/{quote_session(args.session)}", timeout=15.0)
     live = http_json(f"{args.base_url.rstrip('/')}/v1/mobile/live/state/v3/{quote_session(args.session)}", timeout=15.0)
     expected_data = normalize_path_text(args.data_dir)
+    local_session_state = local_session_state_path(args.data_dir, args.session)
     artifact_paths: list[str] = []
     for payload in (_mapping(session.payload), _mapping(live.payload)):
         for value in payload.values():
@@ -190,11 +206,25 @@ def main() -> int:
                 or "data_live" in normalized_value
             ):
                 artifact_paths.append(value)
-    data_dir_ok = any(expected_data in normalize_path_text(path) for path in artifact_paths)
+    # The public session DTO intentionally strips absolute host paths.  Prove
+    # runtime ownership from the local state file under the configured data
+    # root instead of weakening that API boundary.  The legacy path check is
+    # retained only for compatibility with older remote workers.
+    local_data_dir_ok = local_session_state.is_file()
+    public_path_data_dir_ok = any(
+        expected_data in normalize_path_text(path)
+        for path in artifact_paths
+    )
+    data_dir_ok = bool(local_data_dir_ok or public_path_data_dir_ok)
     if not session.ok:
         failures.append(f"session endpoint failed: {session.error or session.status}")
     elif not data_dir_ok:
-        failures.append(f"session artifacts do not prove PHOENIXGUARD_DATA_DIR={args.data_dir}; artifact_paths={artifact_paths[:8]}")
+        failures.append(
+            "session state does not prove "
+            f"PHOENIXGUARD_DATA_DIR={args.data_dir}; "
+            f"local_session_state={local_session_state}; "
+            f"artifact_paths={artifact_paths[:8]}"
+        )
     if not live.ok:
         warnings.append(f"live state endpoint unavailable during topology check: {live.error or live.status}")
 
@@ -206,6 +236,8 @@ def main() -> int:
         details={
             "api_port": args.port,
             "data_dir": args.data_dir,
+            "local_session_state": str(local_session_state),
+            "local_session_state_exists": local_data_dir_ok,
             "session": args.session,
             "api_pid": api_owner_pid,
             "tracker_pid": process_id(tracker_processes[0]) if tracker_processes else 0,

@@ -8,6 +8,9 @@ from PIL import Image
 
 from phoenixguard.mobile_api.live_state_v3 import (
     LIVE_STATE_SCHEMA_VERSION,
+    _overlay_from_active_object,  # pyright: ignore[reportPrivateUsage]
+    _overlay_semantic_geometry_key,  # pyright: ignore[reportPrivateUsage]
+    _rescale_registry_overlay_to_current_chart,  # pyright: ignore[reportPrivateUsage]
     compact_session_payload,
     build_live_state_v3,
     build_live_state_v3_from_tracker_service,
@@ -276,6 +279,7 @@ def test_build_live_state_v3_returns_one_truthful_visual_state(tmp_path: Path, m
             "overlay_id": "sniper-1",
             "object_id": "obj-sniper",
             "track_id": "trk-sniper",
+            "frame_id": 54,
             "truth_score": 0.95,
             "lifecycle_state": "ACTIVE",
             "overlay": {
@@ -635,6 +639,7 @@ def test_replay_mode_ignores_clean_live_prefilter_env(monkeypatch: Any, tmp_path
     active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "history-locked",
+            "frame_id": 12,
             "truth_score": 0.82,
             "overlay": {
                 "overlay_id": "history-locked",
@@ -762,6 +767,7 @@ def test_unknown_overlay_labels_hidden_from_live_and_collected_for_diagnostics(t
     active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "unknown-leftover",
+            "frame_id": 12,
             "truth_score": 0.82,
             "overlay": {
                 "overlay_id": "unknown-leftover",
@@ -821,6 +827,7 @@ def test_build_live_state_v3_rejects_market_overlays_for_wrong_broker_source(tmp
     active_objects: list[dict[str, Any]] = [
         {
             "overlay_id": "blocked-sniper",
+            "frame_id": 12,
             "truth_score": 0.92,
             "overlay": {
                 "type": "SNIPER_ENTRY_BOX",
@@ -861,6 +868,7 @@ class _FakeTrackerService:
             "session_id": session_id,
             "status": "running",
             "tracking_enabled": True,
+            "frame_index": 1,
             "last_capture_epoch": 100.0,
             "decision_valid_until_epoch": 120.0,
             "tracking_summary": {
@@ -902,6 +910,7 @@ def test_build_live_state_v3_from_tracker_service_resolves_common_inputs(tmp_pat
         active_object_loader=lambda _session_id: [
             {
                 "overlay_id": "target-1",
+                "frame_id": 1,
                 "truth_score": 0.9,
             "overlay": {"type": "TARGET_ZONE_BOX", "pixel_bbox": [100, 40, 170, 80]},
             "anchor_candles": [0],
@@ -921,3 +930,80 @@ def test_build_live_state_v3_from_tracker_service_resolves_common_inputs(tmp_pat
     assert state["market_objects"]["active_count"] == 1
     assert state["overlays"]["objects"][0]["type"] == "TARGET_ZONE_BOX"
     assert state["shooter"]["session_match"] is True
+
+
+def test_active_registry_overlay_cannot_be_rebadged_to_a_new_frame() -> None:
+    row: dict[str, Any] = {
+        "frame_id": 87,
+        "sequence_id": "seq-87",
+        "chart_transform_id": "chart-87",
+        "overlay_id": "old-trendline",
+        "overlay": {
+            "overlay_id": "old-trendline",
+            "type": "SUPPORT_TRENDLINE",
+            "frame_id": 87,
+            "sequence_id": "seq-87",
+            "chart_transform_id": "chart-87",
+            "coordinate_mode": "CHART_IMAGE_SPACE",
+            "bounds": [100.0, 50.0, 300.0, 250.0],
+            "line_points": [[100.0, 250.0], [300.0, 50.0]],
+            "anchor_candles": [4, 28],
+            "anchor_wick_points": [[100.0, 250.0], [300.0, 50.0]],
+        },
+    }
+
+    projected = _overlay_from_active_object(
+        row,
+        frame_id=88,
+        sequence_id="seq-88",
+        chart_transform_id="chart-88",
+        scene_graph={"chart_region_chart_bounds": [0.0, 0.0, 800.0, 500.0]},
+        index=0,
+    )
+
+    assert projected is None
+
+
+def test_registry_rescale_honors_origin_and_projects_every_anchor_field() -> None:
+    overlay: dict[str, Any] = {
+        "bounds": [100.0, 50.0, 300.0, 250.0],
+        "line_points": [[100.0, 250.0], [200.0, 150.0], [300.0, 50.0]],
+        "touch_points": [[100.0, 250.0], [200.0, 150.0]],
+        "anchor_wick_points": [[100.0, 250.0], [200.0, 150.0]],
+        "trendline_touch_points": [[100.0, 250.0], [200.0, 150.0]],
+        "anchor_evidence": {"touch_points": [[100.0, 250.0], [200.0, 150.0]]},
+    }
+    row = {"chart_transform": {"chart_image_bounds": [100.0, 50.0, 300.0, 250.0]}}
+
+    _rescale_registry_overlay_to_current_chart(
+        overlay,
+        row,
+        scene_graph={"chart_region_chart_bounds": [0.0, 0.0, 200.0, 200.0]},
+    )
+
+    assert overlay["bounds"] == [0.0, 0.0, 200.0, 200.0]
+    expected_points = [[0.0, 200.0], [100.0, 100.0]]
+    assert overlay["touch_points"] == expected_points
+    assert overlay["anchor_wick_points"] == expected_points
+    assert overlay["trendline_touch_points"] == expected_points
+    assert overlay["anchor_evidence"]["touch_points"] == expected_points
+    assert overlay["line_points"] == [[0.0, 200.0], [100.0, 100.0], [200.0, 0.0]]
+
+
+def test_semantic_trendline_key_deduplicates_equivalent_geometry() -> None:
+    first = {
+        "overlay_id": "outer-support-a",
+        "type": "SUPPORT_TRENDLINE",
+        "role": "support",
+        "trendline_scope": "OUTER",
+        "line_points": [[10.004, 90.004], [210.004, 40.004]],
+    }
+    duplicate = {
+        "overlay_id": "outer-support-b",
+        "type": "SUPPORT_TRENDLINE",
+        "role": "support",
+        "trendline_scope": "OUTER",
+        "line_points": [[10.003, 90.003], [210.003, 40.003]],
+    }
+
+    assert _overlay_semantic_geometry_key(first) == _overlay_semantic_geometry_key(duplicate)

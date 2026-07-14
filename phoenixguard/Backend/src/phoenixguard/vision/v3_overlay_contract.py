@@ -82,6 +82,11 @@ OVERLAY_TYPES: tuple[str, ...] = (
     "SUPPLY_ZONE",
     "DEMAND_ZONE",
     "OPPOSING_FORCE",
+    "ORDER_BLOCK",
+    "FAIR_VALUE_GAP",
+    "LIQUIDITY_POOL",
+    "LIQUIDITY_SWEEP",
+    "MARKET_STRUCTURE_SHIFT",
     "SUPPORT_TRENDLINE",
     "RESISTANCE_TRENDLINE",
     "INNER_TRENDLINE",
@@ -117,6 +122,16 @@ DIAGNOSTIC_OVERLAY_TYPES: frozenset[str] = frozenset(
     }
 )
 
+SMART_MONEY_OVERLAY_TYPES: frozenset[str] = frozenset(
+    {
+        "ORDER_BLOCK",
+        "FAIR_VALUE_GAP",
+        "LIQUIDITY_POOL",
+        "LIQUIDITY_SWEEP",
+        "MARKET_STRUCTURE_SHIFT",
+    }
+)
+
 AnchorEvidenceType = Literal[
     "candle_body_cluster",
     "wick_rejection_cluster",
@@ -131,6 +146,11 @@ AnchorEvidenceType = Literal[
     "continuation_leg",
     "trendline_touch_points",
     "opposing_force_level",
+    "order_block",
+    "fair_value_gap",
+    "liquidity_pool",
+    "liquidity_sweep",
+    "market_structure_shift",
     "current_candle",
     "target_band",
     "invalidation_band",
@@ -238,6 +258,11 @@ ANCHOR_EVIDENCE_TYPES: tuple[str, ...] = (
     "continuation_leg",
     "trendline_touch_points",
     "opposing_force_level",
+    "order_block",
+    "fair_value_gap",
+    "liquidity_pool",
+    "liquidity_sweep",
+    "market_structure_shift",
     "current_candle",
     "target_band",
     "invalidation_band",
@@ -259,6 +284,11 @@ HARD_ANCHOR_REQUIRED_TYPES: frozenset[str] = frozenset(
         "SUPPLY_ZONE",
         "DEMAND_ZONE",
         "OPPOSING_FORCE",
+        "ORDER_BLOCK",
+        "FAIR_VALUE_GAP",
+        "LIQUIDITY_POOL",
+        "LIQUIDITY_SWEEP",
+        "MARKET_STRUCTURE_SHIFT",
         "SUPPORT_TRENDLINE",
         "RESISTANCE_TRENDLINE",
         "INNER_TRENDLINE",
@@ -312,6 +342,7 @@ VIEW_MODES: tuple[str, ...] = (
     "TARGET",
     "INVALIDATION",
     "PATH",
+    "SMART_MONEY",
     "COUNCIL",
     "TWO_CANDLE_STUDY",
     "LSTM_STUDY",
@@ -371,6 +402,11 @@ APPROVED_OVERLAY_DISPLAY_LABELS: tuple[str, ...] = (
     "RESISTANCE",
     "OPPOSING",
     "OPPOSING FORCE",
+    "ORDER BLOCK",
+    "FAIR VALUE GAP",
+    "LIQUIDITY POOL",
+    "LIQUIDITY SWEEP",
+    "MARKET STRUCTURE SHIFT",
     "SNIPER",
     "SNIPER BUY",
     "SNIPER SELL",
@@ -468,14 +504,17 @@ VIEW_MODE_ALIASES: dict[str, str] = {
     "ACTIVE_COUNCIL_DECISION": "COUNCIL",
     "COUNCIL_LAYER": "COUNCIL",
     "COUNCIL_LAYERS": "COUNCIL",
-    "SMC": "COUNCIL",
-    "SMC_COUNCIL": "COUNCIL",
-    "SMC_COUNCIL_LAYER": "COUNCIL",
-    "SMC_COUNCIL_LAYERS": "COUNCIL",
-    "SMC_AND_COUNCIL": "COUNCIL",
-    "SMC__COUNCIL": "COUNCIL",
-    "SMART_MONEY": "COUNCIL",
-    "SMART_MONEY_COUNCIL": "COUNCIL",
+    "SMC": "SMART_MONEY",
+    "SMC_LAYER": "SMART_MONEY",
+    "SMC_LAYERS": "SMART_MONEY",
+    "SMC_COUNCIL": "SMART_MONEY",
+    "SMC_COUNCIL_LAYER": "SMART_MONEY",
+    "SMC_COUNCIL_LAYERS": "SMART_MONEY",
+    "SMC_AND_COUNCIL": "SMART_MONEY",
+    "SMC__COUNCIL": "SMART_MONEY",
+    "SMART_MONEY": "SMART_MONEY",
+    "SMART_MONEY_LAYER": "SMART_MONEY",
+    "SMART_MONEY_COUNCIL": "SMART_MONEY",
     "TWO_CANDLE": "TWO_CANDLE_STUDY",
     "TWO_CANDLE_STUDY": "TWO_CANDLE_STUDY",
     "TWO_CANDLE_STUDY_LAYER": "TWO_CANDLE_STUDY",
@@ -523,6 +562,7 @@ MODE_VISIBLE_MODE_COMPATIBILITY: dict[str, set[str]] = {
     "TARGET": {"TARGET", "CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"},
     "INVALIDATION": {"INVALIDATION", "TARGET", "CLEAN_LIVE", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"},
     "PATH": {"PATH", "PREDICTION", "ACTIVE_CONTEXT", "FULL_HISTORY_READ", "REPLAY", "INSPECTOR"},
+    "SMART_MONEY": {"SMART_MONEY", "INSPECTOR"},
     "COUNCIL": {"COUNCIL", "ACTIVE_CONTEXT", "CLEAN_LIVE", "FULL_HISTORY_READ", "PREDICTION", "INSPECTOR"},
     "TWO_CANDLE_STUDY": {"TWO_CANDLE_STUDY", "CLEAN_LIVE", "ACTIVE_CONTEXT", "COUNCIL", "INSPECTOR"},
     "LSTM_STUDY": {"LSTM_STUDY", "TWO_CANDLE_STUDY", "COUNCIL", "INSPECTOR", "DIAGNOSTICS"},
@@ -718,6 +758,19 @@ TYPE_ALIASES: dict[str, str] = {
     "DEMAND_ZONE": "DEMAND_ZONE",
     "OPPOSING": "OPPOSING_FORCE",
     "OPPOSING_FORCE": "OPPOSING_FORCE",
+    "ORDER_BLOCK": "ORDER_BLOCK",
+    "BULLISH_ORDER_BLOCK": "ORDER_BLOCK",
+    "BEARISH_ORDER_BLOCK": "ORDER_BLOCK",
+    "FAIR_VALUE_GAP": "FAIR_VALUE_GAP",
+    "FVG": "FAIR_VALUE_GAP",
+    "BULLISH_FVG": "FAIR_VALUE_GAP",
+    "BEARISH_FVG": "FAIR_VALUE_GAP",
+    "LIQUIDITY_POOL": "LIQUIDITY_POOL",
+    "LIQUIDITY_SWEEP": "LIQUIDITY_SWEEP",
+    "BUY_SIDE_LIQUIDITY_SWEEP": "LIQUIDITY_SWEEP",
+    "SELL_SIDE_LIQUIDITY_SWEEP": "LIQUIDITY_SWEEP",
+    "MARKET_STRUCTURE_SHIFT": "MARKET_STRUCTURE_SHIFT",
+    "MSS": "MARKET_STRUCTURE_SHIFT",
     "ANGLE": "ANGLE_VECTOR",
     "ANGLE_VECTOR": "ANGLE_VECTOR",
     "MODEL_COUNCIL_MARKER": "MODEL_COUNCIL_MARKER",
@@ -749,6 +802,11 @@ TYPE_LAYER_MAP: dict[str, str] = {
     "SUPPLY_ZONE": "supply_demand",
     "DEMAND_ZONE": "supply_demand",
     "OPPOSING_FORCE": "supply_demand",
+    "ORDER_BLOCK": "smart_money",
+    "FAIR_VALUE_GAP": "smart_money",
+    "LIQUIDITY_POOL": "smart_money",
+    "LIQUIDITY_SWEEP": "smart_money",
+    "MARKET_STRUCTURE_SHIFT": "smart_money",
     "SUPPORT_TRENDLINE": "trendlines",
     "RESISTANCE_TRENDLINE": "trendlines",
     "INNER_TRENDLINE": "trendlines",
@@ -780,6 +838,7 @@ SEMANTIC_LAYER_LOCK_TYPES: set[str] = {
     "INNER_TRENDLINE",
     "ANGLE_VECTOR",
     "PREDICTION_PATH",
+    *SMART_MONEY_OVERLAY_TYPES,
 }
 
 OVERLAY_LAYER_ORDER: tuple[str, ...] = (
@@ -794,6 +853,7 @@ OVERLAY_LAYER_ORDER: tuple[str, ...] = (
     "target_zones",
     "invalidation",
     "prediction_path",
+    "smart_money",
     "historical_replay",
     "active_council_decision",
     "broker_controls",
@@ -852,6 +912,16 @@ LAYER_ALIASES: dict[str, str] = {
     "PATHS": "prediction_path",
     "PREDICTION": "prediction_path",
     "PREDICTION_PATH": "prediction_path",
+    "SMC": "smart_money",
+    "SMART_MONEY": "smart_money",
+    "SMART_MONEY_LAYER": "smart_money",
+    "ORDER_BLOCK": "smart_money",
+    "FAIR_VALUE_GAP": "smart_money",
+    "FVG": "smart_money",
+    "LIQUIDITY_POOL": "smart_money",
+    "LIQUIDITY_SWEEP": "smart_money",
+    "MARKET_STRUCTURE_SHIFT": "smart_money",
+    "MSS": "smart_money",
     "PROGRESSION": "historical_replay",
     "PROGRESSION_PATH": "historical_replay",
     "COUNCIL": "active_council_decision",
@@ -885,6 +955,11 @@ OVERLAY_TYPE_PRIORITY: dict[str, int] = {
     "TARGET_ZONE_BOX": 84,
     "INVALIDATION_BOX": 82,
     "OPPOSING_FORCE": 78,
+    "LIQUIDITY_SWEEP": 77,
+    "MARKET_STRUCTURE_SHIFT": 76,
+    "ORDER_BLOCK": 75,
+    "FAIR_VALUE_GAP": 73,
+    "LIQUIDITY_POOL": 71,
     "SUPPLY_ZONE": 72,
     "DEMAND_ZONE": 72,
     "SUPPORT_TRENDLINE": 68,
@@ -925,6 +1000,11 @@ TYPE_ROLE_MAP: dict[str, str] = {
     "SUPPLY_ZONE": "supply",
     "DEMAND_ZONE": "demand",
     "OPPOSING_FORCE": "opposing_force",
+    "ORDER_BLOCK": "order_block",
+    "FAIR_VALUE_GAP": "fair_value_gap",
+    "LIQUIDITY_POOL": "liquidity_pool",
+    "LIQUIDITY_SWEEP": "liquidity_sweep",
+    "MARKET_STRUCTURE_SHIFT": "market_structure_shift",
     "SUPPORT_TRENDLINE": "support_trendline",
     "RESISTANCE_TRENDLINE": "resistance_trendline",
     "INNER_TRENDLINE": "inner_trendline",
@@ -1040,6 +1120,7 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
     "TARGET": {"TARGET_ZONE_BOX", "OPPOSING_FORCE"},
     "INVALIDATION": {"OPPOSING_FORCE"},
     "PATH": {"PROGRESSION_PATH", "REPLAY_ENTRY", "REPLAY_EXIT"},
+    "SMART_MONEY": set(SMART_MONEY_OVERLAY_TYPES),
     "COUNCIL": {
         "MODEL_COUNCIL_MARKER",
         "REGIME_MARKER",
@@ -1050,9 +1131,11 @@ MODE_ALLOWED_TYPES: dict[str, set[str]] = cast(dict[str, set[str]], {
     "LSTM_STUDY": {"LSTM_STUDY"},
     "ACTIVE_CONTEXT": set[str](OVERLAY_TYPES)
     - DIAGNOSTIC_OVERLAY_TYPES
+    - SMART_MONEY_OVERLAY_TYPES
     - {"BROKER_CONTROL", "PREDICTION_PATH", "ANGLE_VECTOR", "RETEST_BOX", "INVALIDATION_BOX", "LSTM_STUDY"},
     "FULL_HISTORY_READ": set[str](OVERLAY_TYPES)
     - DIAGNOSTIC_OVERLAY_TYPES
+    - SMART_MONEY_OVERLAY_TYPES
     - {"BROKER_CONTROL", "PREDICTION_PATH", "ANGLE_VECTOR", "RETEST_BOX", "INVALIDATION_BOX", "LSTM_STUDY", "CURRENT_CANDLE"},
     "REPLAY": {
         "CHART_BOUNDS",
@@ -1090,6 +1173,7 @@ _ALL_OVERLAY_LAYERS: tuple[str, ...] = (
     "target_zones",
     "invalidation",
     "prediction_path",
+    "smart_money",
     "active_council_decision",
     "historical_replay",
     "broker_controls",
@@ -1123,9 +1207,10 @@ MODE_LAYER_VISIBILITY: dict[str, dict[str, bool]] = {
     "TARGET": _layer_visibility("target_zones", "supply_demand"),
     "INVALIDATION": _layer_visibility("supply_demand"),
     "PATH": _layer_visibility("prediction_path", "historical_replay"),
+    "SMART_MONEY": _layer_visibility("smart_money"),
     "COUNCIL": _layer_visibility("active_council_decision"),
     "TWO_CANDLE_STUDY": _layer_visibility("active_council_decision"),
-    "LSTM_STUDY": _layer_visibility("active_council_decision"),
+    "LSTM_STUDY": _layer_visibility("active_council_decision", "prediction_path"),
     "ACTIVE_CONTEXT": _layer_visibility(
         "chart_bounds",
         "recent_candles",
@@ -1413,6 +1498,16 @@ def _anchor_evidence_type_for_overlay(overlay_type: str, role: str) -> str:
         return "support_reclaim"
     if overlay_type == "OPPOSING_FORCE":
         return "opposing_force_level"
+    if overlay_type == "ORDER_BLOCK":
+        return "order_block"
+    if overlay_type == "FAIR_VALUE_GAP":
+        return "fair_value_gap"
+    if overlay_type == "LIQUIDITY_POOL":
+        return "liquidity_pool"
+    if overlay_type == "LIQUIDITY_SWEEP":
+        return "liquidity_sweep"
+    if overlay_type == "MARKET_STRUCTURE_SHIFT":
+        return "market_structure_shift"
     if overlay_type in {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"}:
         return "trendline_touch_points"
     if overlay_type == "BROKER_CONTROL":
@@ -1489,7 +1584,18 @@ def _normalize_display_state(raw: Mapping[str, object], overlay_type: str, lifec
         return "GHOSTED"
     if overlay_type in DIAGNOSTIC_OVERLAY_TYPES:
         return "INSPECTOR_LABEL"
-    if overlay_type in {"SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE", "SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE", "IMPULSE_BOX", "PULLBACK_BOX", "CONTINUATION_BOX"}:
+    if overlay_type in {
+        "SUPPLY_ZONE",
+        "DEMAND_ZONE",
+        "OPPOSING_FORCE",
+        *SMART_MONEY_OVERLAY_TYPES,
+        "SUPPORT_TRENDLINE",
+        "RESISTANCE_TRENDLINE",
+        "INNER_TRENDLINE",
+        "IMPULSE_BOX",
+        "PULLBACK_BOX",
+        "CONTINUATION_BOX",
+    }:
         return "COMPACT"
     return "COMPACT"
 
@@ -1679,6 +1785,26 @@ def _semantic_overlay_style(raw: Mapping[str, object], overlay_type: str, side: 
         color_token = "opposing-force"
         stroke = "#b58cff"
         fill = "rgba(181, 140, 255, 0.12)"
+    elif overlay_type == "ORDER_BLOCK":
+        color_token = "smart-money-order-block"
+        stroke = "#d9b75c"
+        fill = "rgba(217, 183, 92, 0.14)"
+    elif overlay_type == "FAIR_VALUE_GAP":
+        color_token = "smart-money-fair-value-gap"
+        stroke = "#45c4d9"
+        fill = "rgba(69, 196, 217, 0.12)"
+    elif overlay_type == "LIQUIDITY_POOL":
+        color_token = "smart-money-liquidity-pool"
+        stroke = "#b59ae8"
+        fill = "rgba(181, 154, 232, 0.11)"
+    elif overlay_type == "LIQUIDITY_SWEEP":
+        color_token = "smart-money-liquidity-sweep"
+        stroke = "#f2a94a"
+        fill = "rgba(242, 169, 74, 0.10)"
+    elif overlay_type == "MARKET_STRUCTURE_SHIFT":
+        color_token = "smart-money-structure-shift"
+        stroke = "#f2d37a"
+        fill = "rgba(242, 211, 122, 0.08)"
     elif overlay_type == "INNER_TRENDLINE":
         color_token = "inner-trendline"
         stroke = "#9ec7d9"
@@ -1693,7 +1819,14 @@ def _semantic_overlay_style(raw: Mapping[str, object], overlay_type: str, side: 
     if display_state == "GHOSTED" or lifecycle_state in {"HISTORICAL", "STALE", "BROKEN_REFERENCE", "CONSUMED_REFERENCE"}:
         line_style = "dotted"
     stroke_width = 2.0
-    if overlay_type in {"SNIPER_ENTRY_BOX", "RETEST_BOX", "TARGET_ZONE_BOX", "CURRENT_CANDLE"}:
+    if overlay_type in {
+        "SNIPER_ENTRY_BOX",
+        "RETEST_BOX",
+        "TARGET_ZONE_BOX",
+        "CURRENT_CANDLE",
+        "LIQUIDITY_SWEEP",
+        "MARKET_STRUCTURE_SHIFT",
+    }:
         stroke_width = 2.6
     elif overlay_type in {"SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE"}:
         stroke_width = 2.1
@@ -2072,6 +2205,16 @@ def short_label_for_overlay(overlay_type: Any, side: Any = "", label: Any = "") 
         return "DEMAND"
     if overlay_type_value == "OPPOSING_FORCE":
         return "OPPOSING FORCE"
+    if overlay_type_value == "ORDER_BLOCK":
+        return "ORDER BLOCK"
+    if overlay_type_value == "FAIR_VALUE_GAP":
+        return "FAIR VALUE GAP"
+    if overlay_type_value == "LIQUIDITY_POOL":
+        return "LIQUIDITY POOL"
+    if overlay_type_value == "LIQUIDITY_SWEEP":
+        return "LIQUIDITY SWEEP"
+    if overlay_type_value == "MARKET_STRUCTURE_SHIFT":
+        return "MARKET STRUCTURE SHIFT"
     if overlay_type_value == "SUPPORT_TRENDLINE":
         return "SUPPORT TRENDLINE"
     if overlay_type_value == "RESISTANCE_TRENDLINE":
@@ -2335,6 +2478,7 @@ def normalize_v3_overlay_object(
         "ANGLE_VECTOR",
         "PROGRESSION_PATH",
         "PREDICTION_PATH",
+        "LSTM_STUDY",
     }
     if geometry_points and overlay_type in line_geometry_types:
         if overlay_type == "PROGRESSION_PATH":
@@ -2371,11 +2515,18 @@ def normalize_v3_overlay_object(
         "start_point",
         "end_point",
         "candle_count",
+        "candle_index",
+        "is_latest_candle",
         "line_y",
         "line_x0",
         "line_x1",
+        "geometry_kind",
+        "price_level_y",
+        "band_height_px",
+        "source_bbox",
         "touch_count",
         "touch_points",
+        "trendline_touch_points",
         "wick_probe_count",
         "line_obstruction_count",
         "body_cross_fraction",
@@ -2523,6 +2674,7 @@ def view_mode_profile(mode: str) -> dict[str, Any]:
             "TARGET",
             "INVALIDATION",
             "PATH",
+            "SMART_MONEY",
             "COUNCIL",
             "TWO_CANDLE_STUDY",
             "LSTM_STUDY",
@@ -2573,6 +2725,7 @@ def _live_geometry_spike_reason(overlay: Mapping[str, Any]) -> str:
         "ANGLE_VECTOR",
         "PROGRESSION_PATH",
         "PREDICTION_PATH",
+        "LSTM_STUDY",
     }
     coordinate_mode = str(overlay.get("coordinate_mode") or overlay.get("space") or "").strip().upper()
     full_surface_line = overlay_type in line_geometry_types and (
@@ -2888,6 +3041,7 @@ __all__ = [
     "PREDICTION_OVERLAY_DISABLED_TYPES",
     "REQUIRED_FIELDS",
     "REQUIRED_V3_OVERLAY_FIELDS",
+    "SMART_MONEY_OVERLAY_TYPES",
     "TYPE_LAYER_MAP",
     "TYPE_ROLE_MAP",
     "V3OverlayContractError",

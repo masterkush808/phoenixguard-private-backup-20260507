@@ -6,8 +6,8 @@ from typing import Any, Mapping, Sequence, cast
 
 
 SIGNAL_THESIS_SCHEMA_VERSION = "PG_SIGNAL_THESIS_V3"
-_ACTIVE_STATES = {"TRACKING", "ALLOW_PULLBACK", "PROTECT_WIN", "TARGET_REACHED"}
-_TERMINAL_STATES = {"INVALIDATED", "PAIR_SWITCH_RESET", "NO_ACTIVE_THESIS"}
+_ACTIVE_STATES = {"TRACKING", "ALLOW_PULLBACK", "PROTECT_WIN"}
+_TERMINAL_STATES = {"INVALIDATED", "TARGET_REACHED", "PAIR_SWITCH_RESET", "NO_ACTIVE_THESIS"}
 _PROFESSIONAL_COUNTER_THESIS_STATES = {
     "SELL_IN_BUY_TRADEABLE_COUNTER_LEG",
     "BUY_IN_SELL_TRADEABLE_COUNTER_LEG",
@@ -687,7 +687,6 @@ def _update_active_thesis(
         or fallback_breach
     )
     target_reached = bool(target_distance > 0 and max_favorable >= max(0.04, target_distance * 0.92))
-    opposite_attempt_blocked = bool(opposite_read and not invalidated)
     if invalidated:
         status = "INVALIDATED"
         room_state = "INVALIDATED"
@@ -706,7 +705,7 @@ def _update_active_thesis(
             reason = "Active thesis invalidated by explicit reversal/invalidation evidence."
     elif target_reached:
         status = "TARGET_REACHED"
-        room_state = "PROTECT_WIN"
+        room_state = "TARGET_REACHED"
         reason = "Target distance has been reached; protect the winning idea and wait for a new valid setup."
     elif max_favorable >= max(0.08, target_distance * 0.40 if target_distance > 0 else 0.12):
         status = "PROTECT_WIN"
@@ -720,15 +719,17 @@ def _update_active_thesis(
         status = "TRACKING"
         room_state = "TRACKING" if same_read else "ALLOW_PULLBACK"
         reason = "Active thesis remains aligned with the live read." if same_read else "Active thesis remains valid while the current read is not confirmed."
-    countertrend_blocked = bool(status in _ACTIVE_STATES and side in {"BUY", "SELL"})
+    active = status in _ACTIVE_STATES
+    countertrend_blocked = bool(active and side in {"BUY", "SELL"})
+    opposite_attempt_blocked = bool(active and opposite_read and not invalidated)
     updated = dict(previous)
     updated.update(
         {
             "schema_version": SIGNAL_THESIS_SCHEMA_VERSION,
-            "active": status in _ACTIVE_STATES,
+            "active": active,
             "status": status,
             "room_state": room_state,
-            "effective_side": side if status != "INVALIDATED" else "HOLD",
+            "effective_side": side if active else "HOLD",
             "raw_read_side": current_side,
             "current_signal_side": current_side,
             "confidence": max(_clip01(previous.get("confidence")), score if same_read else 0.0),
@@ -750,11 +751,15 @@ def _update_active_thesis(
             "countertrend_policy": (
                 "BLOCK_OPPOSITE_EXECUTION_UNTIL_INVALIDATION"
                 if countertrend_blocked
+                else "WAIT_FOR_NEW_THESIS"
+                if status == "TARGET_REACHED"
                 else "TRACK_SAME_SIDE_OR_WAIT"
             ),
             "release_condition": (
                 "confirmed invalidation or pair/timeframe switch"
                 if countertrend_blocked
+                else "target completed; wait for a new valid setup"
+                if status == "TARGET_REACHED"
                 else "pair switch, target completion, or invalidation/reversal confirmation"
             ),
             "plain_language": (
@@ -782,7 +787,15 @@ def _update_active_thesis(
     updated["history"] = _append_event(
         previous,
         {
-            "event": "THESIS_INVALIDATED" if invalidated else "COUNTERTREND_BLOCKED" if opposite_attempt_blocked else "THESIS_UPDATED",
+            "event": (
+                "THESIS_INVALIDATED"
+                if invalidated
+                else "THESIS_TARGET_REACHED"
+                if target_reached
+                else "COUNTERTREND_BLOCKED"
+                if opposite_attempt_blocked
+                else "THESIS_UPDATED"
+            ),
             "epoch": float(now_epoch),
             "frame_id": updated["last_frame_id"],
             "side": side,
@@ -809,8 +822,8 @@ def update_signal_thesis_v3(
 
     The council is allowed to produce a fresh BUY/SELL read every frame. This
     reducer keeps the currently tracked trade thesis alive through normal
-    pullbacks and blocks opposite-side execution until the old thesis is
-    genuinely invalidated or the instrument changes.
+    pullbacks and blocks opposite-side execution until the target completes,
+    the old thesis is genuinely invalidated, or the instrument changes.
     """
 
     now_value = float(now_epoch if now_epoch is not None else _float(snapshot.get("now_epoch"), 0.0))

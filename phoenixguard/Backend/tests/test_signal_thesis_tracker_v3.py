@@ -298,3 +298,32 @@ def test_book_armed_failed_continuation_reversal_releases_old_thesis() -> None:
     assert updated["replaced_by"]["active"] is True
     assert updated["replaced_by"]["side"] == "BUY"
     assert thesis_blocks_countertrend(updated, {"side": "BUY"}) is False
+
+
+def test_target_reached_is_terminal_and_releases_directional_authority() -> None:
+    thesis = update_signal_thesis_v3(
+        None,
+        snapshot=_snapshot("BUY", y=110.0, frame_id=10),
+        model_council_result=_result("BUY"),
+        now_epoch=100.0,
+    )
+
+    completed = update_signal_thesis_v3(
+        thesis,
+        snapshot=_snapshot("BUY", y=60.0, frame_id=11),
+        model_council_result=_result("BUY"),
+        now_epoch=101.0,
+    )
+
+    assert completed["status"] == "TARGET_REACHED"
+    assert completed["room_state"] == "TARGET_REACHED"
+    assert completed["target_reached"] is True
+    assert completed["active"] is False
+    assert completed["side"] == "BUY"
+    assert completed["effective_side"] == "HOLD"
+    assert completed["countertrend_blocked"] is False
+    assert completed["countertrend_attempt_blocked"] is False
+    assert completed["blocked_countertrend_side"] == "HOLD"
+    assert completed["countertrend_policy"] == "WAIT_FOR_NEW_THESIS"
+    assert thesis_blocks_countertrend(completed, {"side": "SELL"}) is False
+    assert completed["history"][-1]["event"] == "THESIS_TARGET_REACHED"

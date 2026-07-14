@@ -91,184 +91,76 @@ def test_ui_head_does_not_auto_open_setup_guide() -> None:
     assert "opendialog('setup-guide')" not in lowered
 
 
-def test_tracker_live_pressure_is_not_execution_hold_copy() -> None:
+def test_tracker_pressure_uses_server_authoritative_temporal_event() -> None:
     dashboard = (_REPO / "Frontend" / "dashboard" / "static" / "window_tracker_dashboard.html").read_text(
         encoding="utf-8"
     )
 
-    assert "function rawLivePressureRead" in dashboard
-    assert "function rawLivePressureSide" not in dashboard
-    assert "signal.execution_action\n        || signal.action" not in dashboard
-    assert 'livePressure: "HOLD"' not in dashboard
-    assert '["Live pressure", story.livePressure, story.livePressureNote]' in dashboard
+    assert "function rawLivePressureRead" not in dashboard
+    assert "pressure_event" in dashboard
+    assert 'pressureState === "ended"' in dashboard
+    assert "directionalSide(pressure.direction || pressure.side)" in dashboard
+    assert "Past observations stay in history. They never overwrite the current move" in dashboard
 
 
-def test_tracker_dashboard_exposes_next_two_candle_forecast() -> None:
+def test_tracker_dashboard_separates_current_outlook_and_entry_permission() -> None:
     dashboard = (_REPO / "Frontend" / "dashboard" / "static" / "window_tracker_dashboard.html").read_text(
         encoding="utf-8"
     )
 
-    assert "Next 2 Candles" in dashboard
-    assert "function highFrequencyForecast" in dashboard
-    assert "function derivedHighFrequencyForecast" in dashboard
-    assert "dashboard_fallback" in dashboard
-    assert "high_frequency_forecast" in dashboard
-    assert "microForecastHeadline" in dashboard
-    assert "Two-Candle Study" in dashboard
-    assert "LSTM Study" in dashboard
-    assert "overlay-lstm-study" in dashboard
-    assert "TEXT_AND_BANDS_ONLY" in dashboard
-    assert "do_not_render_synthetic_candles" in dashboard
-    assert "/v1/mobile/live/state/v3/" in dashboard
-    assert "function applyInspectorMode" in dashboard
-    assert "Study Output | TEXT_AND_BANDS_ONLY" in dashboard
-    assert "MEMORY MATCH" in dashboard
+    assert 'id="current-move-title"' in dashboard
+    assert 'id="forecast-title"' in dashboard
+    assert 'id="permission-title"' in dashboard
+    assert "This is a forecast, not entry permission." in dashboard
+    assert 'function entryWindowLabel(permission)' in dashboard
+    assert 'function entryLocationGuidance(permission, action)' in dashboard
+    assert '"Buy low · entry open"' in dashboard
+    assert '"Sell high · entry open"' in dashboard
+    assert '"Setup window · verifying"' in dashboard
+    assert "current-frame permission is refreshing" in dashboard
+    assert "lower price inside the verified demand or retest area" in dashboard
+    assert "higher price inside the verified supply or retest area" in dashboard
+    assert "The setup closes early if live truth changes." in dashboard
+    assert "contract.valid_for_seconds" in dashboard
+    assert "/v1/mobile/operator/state/v1/" in dashboard
+    assert "function highFrequencyForecast" not in dashboard
+    assert "function derivedHighFrequencyForecast" not in dashboard
+    assert 'data-overlay-family="lstm"' in dashboard
+    assert "LSTM mark shows the sequence model's current chart-anchored study or path" in dashboard
+    assert "/v1/mobile/live/state/v3/" not in dashboard
 
 
-def test_tracker_dashboard_uses_backend_overlay_objects_for_live_overlays() -> None:
+def test_tracker_dashboard_uses_sanitized_operator_overlays() -> None:
     dashboard = (_REPO / "Frontend" / "dashboard" / "static" / "window_tracker_dashboard.html").read_text(
         encoding="utf-8"
     )
 
-    assert "renderableCount > 0" in dashboard
-    assert "staleStatus === \"PASS\"" in dashboard
-    assert "backendOverlayObjects" in dashboard
-    assert "overlayPayload.objects" in dashboard
-    assert "const backendOverlayObjects = Array.isArray(overlayPayload.objects) ? overlayPayload.objects : [];" in dashboard
-    assert "_backendOverlay: true" in dashboard
-    assert "function rememberOverlayLock" in dashboard
-    assert "function lockedOverlayBoxes" in dashboard
-    assert "function sessionInstrumentContext" in dashboard
-    assert "function sessionSymbolContext" in dashboard
-    assert "function instrumentInvalidationKey" in dashboard
-    assert "instrument.instrument_id" in dashboard
-    assert "INSTRUMENT_LOCKED" in dashboard
-    assert "windowArtifactFrame || newestDisplayFrame(session)" in dashboard
-    assert "/artifacts/files/" in dashboard
-    assert "artifactFileNameFromPath" in dashboard
-    assert "instrument.invalidation_reason" in dashboard
-    assert "frameNumber(modePayload.artifact_frame_id)" in dashboard
-    assert "frameNumber(modePayload.overlay_object_frame_id)" in dashboard
-    assert "function overlayRenderableInCurrentView" in dashboard
-    assert "function overlayModeAllows" in dashboard
-    assert "function overlayTypeAllowedInMode" in dashboard
-    assert "function applyFrontendOverlayModeBudget" in dashboard
-    assert "CLEAN_LIVE: {objects: null, labels: 9}" in dashboard
-    assert "DASHBOARD_REFRESH_FAST_INTERVAL_MS = 15000" in dashboard
-    assert "DASHBOARD_HEARTBEAT_INTERVAL_MS = 15000" in dashboard
-    assert "function frontendHeartbeatDisabled" in dashboard
-    assert "pg_no_heartbeat" in dashboard
-    assert "if (frontendHeartbeatDisabled())" in dashboard
-    assert "function frontendOverlayLabelCandidate" in dashboard
-    assert 'clean_live: "CLEAN_LIVE"' in dashboard
-    assert "function backendObjectOverlayReady" in dashboard
-    assert "function currentChartTransformId" in dashboard
-    assert "function transformFrameFromId" in dashboard
-    assert "function chartTransformCandidate" in dashboard
-    assert "const authorityFrame = overlayAuthorityFrame(session);" in dashboard
-    assert "candidate.frame > 0 && candidate.frame === authorityFrame" in dashboard
-    assert "return `ct_${clean(session.session_id || SESSION_ID, SESSION_ID)}_${authorityFrame}`;" in dashboard
-    assert "chartTransformKey || \"CHART_TRANSFORM_PENDING\"" in dashboard
-    assert "chartTransformId: currentChartTransformId(session)" in dashboard
-    assert "const currentChartTransform = currentChartTransformId(session);" in dashboard
-    assert "chart_transform_id: chartTransformId" in dashboard
-    assert "payload.chart_transform_id" in dashboard
-    assert "const dynamicOverlayReady = (normalizedKind === \"overlay\" || normalizedKind === \"full-overlay\")" in dashboard
-    assert "visible_artifact_kind" in dashboard
-    assert "visible_image_src" in dashboard
-    assert "const fullOverlayVisibleCount = Math.max(boxes.length, backendRenderableOverlayCount(session));" in dashboard
-    assert 'return backendOverlayMode(mode) === "CLEAN_LIVE" && cleanLiveFullOverlayLayerStateIsDefault();' in dashboard
-    assert 'SUPPLY_DEMAND: new Set(["SUPPLY_ZONE", "DEMAND_ZONE", "OPPOSING_FORCE"])' in dashboard
-    assert 'TRENDLINES: new Set(["SUPPORT_TRENDLINE", "RESISTANCE_TRENDLINE", "INNER_TRENDLINE"])' in dashboard
-    assert "function isLineOverlay" in dashboard
-    assert "function renderLineOverlay" in dashboard
-    assert "surface-line-svg" in dashboard
-    assert "surface-line-hotspot" in dashboard
-    assert "function overlayDisplayState" in dashboard
-    assert "function overlayVisualWeight" in dashboard
-    assert "function overlayFillCeiling" in dashboard
-    assert "function overlayRenderedAreaRatio" in dashboard
-    assert "Number.isFinite(requestedFill)" in dashboard
-    assert "fillScale: boundedSetting(saved.fillScale, OVERLAY_EDITOR_DEFAULTS.fillScale, 0, 1.00)" in dashboard
-    assert "function applyOverlayDisplayStyle" in dashboard
-    assert "function applyOverlayLabelPosition" in dashboard
-    assert "display-ghosted" in dashboard
-    assert "display-inspector-only-label" in dashboard
-    assert "dataset.displayState" in dashboard
-    assert "dataset.visualWeight" in dashboard
-    assert "INSPECTOR_ONLY_LABEL" in dashboard
-    assert "SUPPORT_TRENDLINE" in dashboard
-    assert "RESISTANCE_TRENDLINE" in dashboard
-    assert "INNER_TRENDLINE" in dashboard
-    assert 'const operatorHiddenTypes = new Set(["RETEST_BOX", "TRIGGER_BOX", "TRIGGER_ZONE", "PREDICTION_PATH", "ANGLE_VECTOR"])' in dashboard
-    assert 'TRIGGER: new Set(["SNIPER_ENTRY_BOX", "TARGET_ZONE_BOX"])' in dashboard
-    assert "function payloadMatchesSelectedOverlayMode" in dashboard
-    assert ".surface-hotspot.label-hidden span" in dashboard
-    assert "const labelHidden = box.label_hidden === true || box.label_hidden === \"true\";" in dashboard
-    assert 'button.innerHTML = effectiveLabelHidden ? "" : `<span>${escapeHtml(label)}</span>`;' in dashboard
-    assert 'global: "GLOBAL"' in dashboard
-    assert 'local: "LOCAL"' in dashboard
-    assert 'supply_demand: "SUPPLY_DEMAND"' in dashboard
-    assert 'trendlines: "TRENDLINES"' in dashboard
-    assert 'triggers: "TRIGGER"' in dashboard
-    assert 'targets: "TARGET"' in dashboard
-    assert 'full_history_read: "FULL_HISTORY_READ"' in dashboard
-    assert 'broker: "BROKER"' in dashboard
-    assert "target_zones: true" in dashboard
-    assert "trendlines" in dashboard
-    assert "layer-trendlines" in dashboard
-    assert "prediction_path: false" in dashboard
-    assert 'mode === "REPLAY"' in dashboard
-    assert "state.layers[layer] === false" in dashboard
-    assert "row.visible_default === false" in dashboard
-    assert "row.precision_rejected === true" in dashboard
-    assert 'const currentCandleLiveModes = new Set(["CLEAN_LIVE", "CANDLES", "LOCAL", "ACTIVE_CONTEXT"]);' in dashboard
-    assert '!currentCandleLiveModes.has(activeMode)' in dashboard
-    assert "rememberOverlayLock(surfaceIdentityKey(session), renderableBoxes, session);" in dashboard
-    assert "bridgeSelectedModeWhileHydrating" in dashboard
-    assert "ignoreVisibleModes: bridgeSelectedModeWhileHydrating" in dashboard
-    assert "if (trustBackendMode) {\n            rememberOverlayLock" in dashboard
-    assert "const lockedBoxes = lockedOverlayBoxes(session);" in dashboard
-    assert "backendMode: backendOverlayMode(state.overlayMode)" in dashboard
-    assert "payloadMatchesSelectedOverlayMode(session)" in dashboard
-    assert "if (!diagnosticsViewActive()) {\n        return [];\n      }" in dashboard
-    assert "clearModeScopedOverlayDom" in dashboard
-    assert "updateLayerControls();\n      renderHotspots();\n      refreshLiveVisualStateForMode(state.overlayMode);" in dashboard
-    assert "useLockedWindowOverlayPlane" in dashboard
-    assert "window-locked-overlay" in dashboard
-    assert "if (wantsOverlay && hasFullOverlay && !overlayStale)" in dashboard
-    assert "} else if (useLockedWindowOverlayPlane)" in dashboard
-    assert "function artifactAvailable" in dashboard
-    assert "if (normalizedKind === \"window\" && fileName)" in dashboard
-    assert "if (normalizedKind === \"full-overlay\" && fullOverlayUsesSavedArtifact())" in dashboard
-    assert "function dynamicOverlayLayerSuffix" in dashboard
-    assert "function applyLayerButtonMode" in dashboard
-    assert "return `${sessionUrl()}/artifacts/files/${encodeURIComponent(fileName)}?v=${version}`;" in dashboard
-    assert "artifact.exists === false" in dashboard
-    assert "failedArtifactKeys" in dashboard
-    assert "function handleSurfaceImageError" in dashboard
-    assert "function pendingSurfaceImage" in dashboard
-    assert "pendingSurfaceImageMatches" in dashboard
-    assert "if (state.session && !surfaceHasImage() && pendingSurfaceImage())" in dashboard
-    assert "surfaceImageLoading(targetImage)" in dashboard
-    assert "liveRefreshBusy" in dashboard
-    assert "streamHydrationBusy" in dashboard
-    assert "(!backendObjectsAvailable && state.surface.overlayStale)" in dashboard
-    assert "pendingSurfaceImage() && !surfaceHasImage()" in dashboard
-    assert "surfaceCriticalLoad" in dashboard
-    assert "overlayDedupKey" in dashboard
-    assert "[overlayId, overlayLayer, normalizedBoxKey(overlayBounds)].join(\"|\")" in dashboard
-    assert "const overlayForRender = {...overlay, bbox: overlayBounds, bounds: overlayBounds};" in dashboard
-    assert "const boxes = getBoxes(session);" in dashboard
-    assert "renderSession(await enrichSessionTelemetry(await mergeSelectedLiveState(payload)));" in dashboard
-    assert "mergeLiveVisualState(state.session || {session_id: SESSION_ID}, livePayload)" in dashboard
-    assert '["window", "overlay", "full-overlay", "chart"].includes(normalized)' in dashboard
-    assert "imageSourceChanged" in dashboard
-    assert "dataset.loadedSrc" in dashboard
-    assert "overlayArtifactFrame(session)" in dashboard
-    assert "frameNumber(session.full_overlay_frame_id)" in dashboard
-    assert "frameNumber(overlaysPayload.artifact_frame_id)" in dashboard
-    assert "renderSessionImmediate(payload);" in dashboard
+    assert 'const OPERATOR_SCHEMA_VERSION = "PG_OPERATOR_WORKSPACE_V1";' in dashboard
+    assert "state.overlays = safeList(operatorState.overlays);" in dashboard
+    assert "function lifecycleIsVisible(overlay)" in dashboard
+    assert "function overlayMatchesSurface(overlay)" in dashboard
+    assert "function overlayFamily(overlay)" in dashboard
+    assert '["movement", "structure", "zones", "plan", "outlook", "history"]' in dashboard
+    assert 'safeText(overlay.coordinate_space, "chart")' in dashboard
+    assert "function renderOverlays()" in dashboard
+    assert "backendOverlayObjects" not in dashboard
+    assert "runtime_telemetry" not in dashboard
+    assert "broker_controls" not in dashboard
+
+
+def test_share_overlay_demo_uses_operator_contract_without_host_paths() -> None:
+    demo = (_REPO / "Frontend" / "assets" / "share" / "overlay_demo.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "/v1/mobile/operator/state/v1/" in demo
+    assert "latestOperatorState" in demo
+    assert "last_window_path" not in demo
+    assert "last_frame_path" not in demo
+    assert "last_chart_path" not in demo
+    assert "last_overlay_path" not in demo
+    assert "last_full_overlay_path" not in demo
+    assert "file:///" not in demo
 
 
 def test_backend_overlay_renderers_do_not_fill_chart_covering_boxes() -> None:
@@ -286,63 +178,43 @@ def test_backend_overlay_renderers_do_not_fill_chart_covering_boxes() -> None:
     assert "draw.rectangle([x1, y1, x2, y2], outline=color, fill=None, width=2)" in renderer_source
 
 
-def test_tracker_dashboard_chart_artifacts_do_not_reuse_candle_green_red_palette() -> None:
-    dashboard = (_REPO / "Frontend" / "dashboard" / "static" / "window_tracker_dashboard.html").read_text(
-        encoding="utf-8"
-    )
-    overlay_editor_css = (
-        _REPO / "Frontend" / "dashboard" / "static" / "floating_windows" / "overlay_editor.css"
-    ).read_text(encoding="utf-8")
-
-    assert "--overlay-demand-rgb: 78, 210, 255;" in dashboard
-    assert "--overlay-supply-rgb: 248, 202, 92;" in dashboard
-    assert "--overlay-trigger-rgb: 185, 154, 255;" in dashboard
-    assert ".surface-trendline.trendline-support {\n      stroke: rgba(var(--overlay-demand-rgb), 0.98);" in dashboard
-    assert ".surface-trendline.trendline-resistance {\n      stroke: rgba(var(--overlay-supply-rgb), 0.98);" in dashboard
-    assert ".surface-hotspot.sell.layer-trigger-zones {\n      border-color: rgba(var(--overlay-trigger-rgb), 0.72);" in dashboard
-    assert ".surface-hotspot.buy.layer-broker-controls {\n      border-color: rgba(var(--overlay-demand-rgb), 0.86);" in dashboard
-    assert ".surface-hotspot.sell.layer-broker-controls {\n      border-color: rgba(var(--overlay-supply-rgb), 0.86);" in dashboard
-    assert ".overlay-editor" in overlay_editor_css
-
-
-def test_tracker_dashboard_exposes_floating_overlay_editor() -> None:
+def test_tracker_dashboard_uses_a_restrained_semantic_palette() -> None:
     dashboard = (_REPO / "Frontend" / "dashboard" / "static" / "window_tracker_dashboard.html").read_text(
         encoding="utf-8"
     )
 
-    assert "overlay-editor" in dashboard
-    assert "overlay-editor-open" in dashboard
-    assert "id=\"overlay-editor-open\" type=\"button\" hidden" in dashboard
-    assert "id=\"overlay-editor\" role=\"dialog\" aria-label=\"Overlay editor\" hidden" in dashboard
-    assert "/v1/mobile/window-tracker/assets/floating-windows/overlay_editor.css" in dashboard
-    assert "const OVERLAY_EDITOR_HARDSAVED_SETTINGS = __OVERLAY_EDITOR_SETTINGS_JSON__;" in dashboard
-    assert "OVERLAY_EDITOR_SAVE_ENDPOINT" in dashboard
-    assert "OVERLAY_EDITOR_SCHEMA_VERSION = 2" in dashboard
-    assert "OVERLAY_EDITOR_ENABLED" in dashboard
-    assert "OVERLAY_EDITOR_QUERY.get(\"overlay_editor\")" in dashboard
-    assert "OVERLAY_EDITOR_MIGRATE_LOCAL" in dashboard
-    assert "OVERLAY_EDITOR_STORAGE_KEY" in dashboard
-    assert "OVERLAY_LAYER_KEYS" in dashboard
-    assert "phoenixguard.overlay.editor.v2" in dashboard
-    assert "phoenixguard.overlay.editor.v1" not in dashboard
-    assert "data-overlay-setting=\"opacityScale\"" in dashboard
-    assert "data-overlay-setting=\"borderScale\"" in dashboard
-    assert "data-overlay-setting=\"lineScale\"" in dashboard
-    assert "data-overlay-setting=\"labelScale\"" in dashboard
-    assert "data-overlay-setting=\"labelOffset\"" not in dashboard
-    assert "data-overlay-color=\"demand\"" in dashboard
-    assert "data-overlay-layer-control=\"trendlines\"" in dashboard
-    assert "function applyOverlayEditorSettings" in dashboard
-    assert "function hardSaveOverlayEditorSettings" in dashboard
-    assert "function migrateLocalOverlayEditorSettingsToBackend" in dashboard
-    assert "if (!OVERLAY_EDITOR_ENABLED)" in dashboard
-    assert "async function saveOverlayEditorSettings" in dashboard
-    assert "function beginOverlayEditorDrag" in dashboard
-    assert "panelLocked" in dashboard
-    assert "persistedSettings.schemaVersion = OVERLAY_EDITOR_SCHEMA_VERSION" in dashboard
-    assert "state.overlayEditor.layers = Object.fromEntries" not in dashboard
-    assert "applySavedOverlayLayerState" not in dashboard
-    assert "renderHotspots();" in dashboard
+    assert "--gold: #f2c866;" in dashboard
+    assert "--accent: var(--gold);" in dashboard
+    assert "--up: #63e09a;" in dashboard
+    assert "--down: #ff654f;" in dashboard
+    assert "--warn: #e8c878;" in dashboard
+    assert "--ice: #6bc8ff;" in dashboard
+    assert "--overlay-plan: #b99afc;" in dashboard
+    assert "--overlay-history: #a7b0b8;" in dashboard
+    assert ".surface-hotspot.buy {" in dashboard
+    assert ".surface-hotspot.sell {" in dashboard
+    assert "layer-broker-controls" not in dashboard
+    assert "--overlay-demand-rgb" not in dashboard
+    assert "--overlay-supply-rgb" not in dashboard
+
+
+def test_tracker_dashboard_does_not_expose_overlay_tuning_editor() -> None:
+    dashboard = (_REPO / "Frontend" / "dashboard" / "static" / "window_tracker_dashboard.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert "overlay-editor" not in dashboard
+    assert "OVERLAY_EDITOR" not in dashboard
+    assert 'id="overlay-explorer"' in dashboard
+    assert 'id="overlay-opacity" type="range"' in dashboard
+    assert 'id="layers-all"' in dashboard
+    assert 'id="layers-clear"' in dashboard
+    assert 'data-overlay-family="smc"' in dashboard
+    assert 'data-overlay-family="two_candle"' in dashboard
+    assert 'data-overlay-family="lstm"' in dashboard
+    assert 'data-label-mode="on"' in dashboard
+    assert 'data-label-mode="hover"' in dashboard
+    assert 'data-label-mode="off"' in dashboard
 
 
 def test_compare_desk_images_default_to_uncropped_contained_views() -> None:
