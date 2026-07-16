@@ -2840,6 +2840,7 @@
       dragScrollTop: 0,
       localHistory: [],
       lastMoveSide: "",
+      lastHistoryObservationKey: "",
       historySemanticIdentity: "",
       projectedGeometryCache: new Map(),
       detachedOverlayNodes: new Map(),
@@ -5779,28 +5780,49 @@
     }
 
     function recordCurrentMove(payload) {
+      const surface = safeObject(payload.surface);
       const move = safeObject(payload.current_move);
       const side = directionalSide(move.direction || move.side);
-      if (side === "HOLD" || side === state.lastMoveSide) {
+      const observedAt = Number(safeObject(payload.freshness).observed_at || payload.observed_at || Date.now() / 1000);
+      const frameId = safeText(surface.frame_id || payload.frame_id || revisionValue(payload), "");
+      const moveState = safeText(move.state || safeObject(payload.freshness).state, "observed").toLowerCase();
+      const observationKey = [
+        frameId,
+        side,
+        Math.floor(Math.max(0, observedAt)),
+        safeText(surface.semantic_identity, ""),
+      ].join("|");
+      if (!frameId || observationKey === state.lastHistoryObservationKey) {
         return;
       }
-      const observedAt = Number(safeObject(payload.freshness).observed_at || payload.observed_at || Date.now() / 1000);
       const alreadyRecordedByServer = safeList(payload.history).some(function (item) {
         const row = safeObject(item);
         const rowSide = directionalSide(row.direction || row.side || row.action);
+        const rowFrameId = safeText(row.frame_id, "");
         const rowObservedAt = Number(row.observed_at || row.timestamp || row.created_at_epoch || 0);
-        return rowSide === side && observedAt > 0 && rowObservedAt > 0 && Math.abs(rowObservedAt - observedAt) <= 1;
+        return (rowFrameId && rowFrameId === frameId)
+          || (rowSide === side && observedAt > 0 && rowObservedAt > 0 && Math.abs(rowObservedAt - observedAt) <= 1);
       });
       state.lastMoveSide = side;
+      state.lastHistoryObservationKey = observationKey;
       if (alreadyRecordedByServer) {
         return;
       }
+      if (side === "HOLD" && safeList(payload.history).length > 0) {
+        return;
+      }
+      const movementCopy = side === "BUY"
+        ? "Price began moving up."
+        : side === "SELL"
+          ? "Price began moving down."
+          : "Completed frame studied while movement stayed sideways or unconfirmed.";
       state.localHistory.push({
-        id: "local-" + revisionValue(payload) + "-" + side,
+        id: "local-" + frameId + "-" + side + "-" + Math.floor(Math.max(0, observedAt)),
         observed_at: observedAt,
         side: side,
-        summary: safeText(move.summary, "Price began moving " + (side === "BUY" ? "up" : "down") + "."),
-        state: "current",
+        summary: safeText(move.summary, movementCopy),
+        state: side === "HOLD" ? moveState || "observed" : "current",
+        frame_id: frameId,
       });
       state.localHistory = state.localHistory.slice(-24);
     }
@@ -5923,16 +5945,17 @@
       ) {
         state.localHistory = [];
         state.lastMoveSide = "";
+        state.lastHistoryObservationKey = "";
         state.historyItemNodes.forEach(function (node) { node.remove(); });
         state.historyItemNodes.clear();
       }
       state.historySemanticIdentity = historySemanticIdentity;
       state.payload = operatorState;
       state.overlays = safeList(operatorState.overlays);
+      syncOverlayButtons();
       if (visualBundleChanged) {
         state.lastVisualBundleKey = nextVisualBundleKey;
         pruneOverlayCaches();
-        syncOverlayButtons();
       }
       recordCurrentMove(operatorState);
       renderTrackingStatus(operatorState);

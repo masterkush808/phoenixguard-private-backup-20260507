@@ -3162,6 +3162,31 @@ def test_latest_history_row_keeps_its_real_ended_lifecycle(
         assert latest.locator(".history-state").inner_text().lower() == "ended"
 
 
+def test_empty_session_history_records_completed_sideways_frames(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["history"] = []
+    payload["current_move"].update(
+        {
+            "direction": "HOLD",
+            "state": "UNKNOWN",
+            "summary": "Current movement is not confirmed.",
+        }
+    )
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.wait_for_function(
+            "() => document.querySelectorAll('.history-item').length === 1",
+            timeout=10_000,
+        )
+        assert page.locator("#history-count").inner_text() == "1 observation"
+        assert page.locator(".history-side").first.inner_text() == "WAIT"
+        assert (
+            page.locator(".history-copy").first.inner_text()
+            == "Current movement is not confirmed."
+        )
+
+
 def test_pair_switch_resets_local_history_namespace(
     chromium_browser: Browser,
 ) -> None:
