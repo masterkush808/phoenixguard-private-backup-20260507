@@ -2924,36 +2924,7 @@
         confidence: Number(source.confidence || source.probability || 0),
         label: safeText(source.label || source.forecast_label, ""),
         summary: safeText(source.summary || source.outlook || source.message, ""),
-        projectionStatus: safeText(safeObject(source.geometry_projection_provenance).status, ""),
-        authorizationStatus: safeText(source.trade_authorization_status || source.selective_status || source.forecast_status, ""),
       };
-    }
-
-    function councilEvidence(overlays) {
-      const rows = safeList(overlays || state.overlays).filter(function (overlay) {
-        return overlayFamily(overlay) === "council" && safeText(overlay.lifecycle, "current").toLowerCase() === "current";
-      }).sort(function (left, right) {
-        return Number(safeObject(right).confidence || 0) - Number(safeObject(left).confidence || 0);
-      });
-      const row = safeObject(rows[0]);
-      const side = directionalSide(row.side || row.direction || row.final_side);
-      return {
-        present: Boolean(rows.length) && side !== "HOLD",
-        side: side,
-        confidence: Number(row.confidence || 0),
-        label: safeText(row.label, "Council read"),
-        summary: safeText(row.summary || row.reason, ""),
-      };
-    }
-
-    function forecastIsAdvisoryOnly(forecast) {
-      const row = forecast || {};
-      const status = safeText(row.status || row.forecast_status || row.authorizationStatus, "").toUpperCase();
-      const projection = safeText(row.projectionStatus, "").toUpperCase();
-      return status.includes("DIAGNOSTIC")
-        || status.includes("NO_EDGE")
-        || status.includes("UNCALIBRATED")
-        || projection.includes("DEGRADED");
     }
 
     function candleNumber(value) {
@@ -3758,31 +3729,16 @@
       setText(els.beginnerEvidenceTiming, permissionTitle);
       setText(els.beginnerEvidenceSafety, freshnessLabel + (observedAt > 0 ? " · " + formatAge(observedAt) : ""));
       const sceneForecast = sceneForecastEvidence(payload, state.overlays);
-      const council = councilEvidence(state.overlays);
-      const advisoryForecastConflict = council.present
-        && sceneForecast.present
-        && sceneForecast.side !== "HOLD"
-        && council.side !== sceneForecast.side
-        && forecastIsAdvisoryOnly(sceneForecast);
-      if (advisoryForecastConflict) {
-        const councilCopy = "Council read leads " + (council.side === "BUY" ? "BUY" : "SELL")
-          + " while the scene forecaster is advisory/no-edge. Treat the forecast as a watched alternate, not the main suite read.";
-        setText(els.forecastTitle, "Council " + (council.side === "BUY" ? "buy" : "sell") + " leads");
-        setText(els.beginnerNextRead, councilCopy);
-        setText(els.beginnerEvidenceStory, currentTitle + " · Council " + formatSide(council.side).toLowerCase() + " leads");
-      }
       if (state.forecastFocusActive && sceneForecast.present) {
         const sceneSide = sceneForecast.side;
         const sceneTone = sceneSide === "BUY" ? "buy" : sceneSide === "SELL" ? "sell" : "hold";
         const candleCount = Math.max(sceneForecast.candles.length, Math.max(0, sceneForecast.points.length - 1));
         const scenarioCount = sceneForecast.scenarios.length;
-        els.beginnerDecisionShell.dataset.tone = advisoryForecastConflict ? "hold" : sceneTone;
+        els.beginnerDecisionShell.dataset.tone = sceneTone;
         setText(els.beginnerReadStatus, "Scene forecast active");
         setText(
           els.beginnerDecisionTitle,
-          advisoryForecastConflict
-            ? "FORECAST STUDY"
-            : sceneSide === "BUY" ? "FORECAST BUY" : sceneSide === "SELL" ? "FORECAST SELL" : "FORECAST HOLD"
+          sceneSide === "BUY" ? "FORECAST BUY" : sceneSide === "SELL" ? "FORECAST SELL" : "FORECAST HOLD"
         );
         setText(
           els.beginnerConfidence,
@@ -3790,16 +3746,12 @@
         );
         setText(
           els.beginnerInstruction,
-          advisoryForecastConflict
-            ? "The forecaster is visible, but council is the stronger current read. Do not use the forecast path as entry direction."
-            : "The forecaster output is displayed now. Use the candle-anchored path and playbook together; execution still requires a verified entry window."
+          "The forecaster output is displayed now. Use the candle-anchored path and playbook together; execution still requires a verified entry window."
         );
         setText(
           els.beginnerReason,
           sceneForecast.summary,
-          advisoryForecastConflict
-            ? "Council currently disagrees with a diagnostic/no-edge forecast, so the suite must remain in WAIT."
-            : sceneSide === "BUY"
+          sceneSide === "BUY"
             ? "The current scene forecast leans upward across the projected progression."
             : sceneSide === "SELL"
               ? "The current scene forecast leans downward across the projected progression."
@@ -3809,24 +3761,12 @@
           els.beginnerNextCondition,
           "Watch all 12 forecast steps. A flip in the live market must be confirmed by a fresh completed broker frame before changing entry permission."
         );
-        setText(
-          els.forecastTitle,
-          advisoryForecastConflict
-            ? "Council " + (council.side === "BUY" ? "buy" : "sell") + " leads · forecast alternate"
-            : sceneSide === "BUY" ? "12-step path leans up" : sceneSide === "SELL" ? "12-step path leans down" : "12-step range path"
-        );
+        setText(els.forecastTitle, sceneSide === "BUY" ? "12-step path leans up" : sceneSide === "SELL" ? "12-step path leans down" : "12-step range path");
         setText(
           els.beginnerNextRead,
-          advisoryForecastConflict
-            ? "Council read is " + council.side + "; the visible " + (candleCount || 12) + "-step forecast remains an advisory alternate because it has no edge."
-            : "Scene forecaster is active from the latest studied chart suite: " + (candleCount || 12) + " projected candle events are available."
+          "Scene forecaster is active from the latest studied chart suite: " + (candleCount || 12) + " projected candle events are available."
         );
-        setText(
-          els.beginnerEvidenceStory,
-          advisoryForecastConflict
-            ? "Council " + council.side.toLowerCase() + " leads · forecast alternate"
-            : "Scene forecast · " + (sceneSide === "BUY" ? "buy progression" : sceneSide === "SELL" ? "sell progression" : "range progression")
-        );
+        setText(els.beginnerEvidenceStory, "Scene forecast · " + (sceneSide === "BUY" ? "buy progression" : sceneSide === "SELL" ? "sell progression" : "range progression"));
       }
     }
 
@@ -4229,7 +4169,6 @@
       const overlayPool = safeList(overlays || state.overlays);
       const forecast = forecastEvidence || sceneForecastEvidence(operatorState, overlayPool);
       const candles = candlestickEvidence || detectCandlestickEvidence(operatorState);
-      const council = councilEvidence(overlayPool);
       const items = [];
       const addItem = function (text) {
         const copy = safeText(text, "");
@@ -4254,15 +4193,6 @@
       }
       if (forecast.present) {
         addItem("Scene forecaster: " + (forecast.side === "BUY" ? "12-step path leans up" : forecast.side === "SELL" ? "12-step path leans down" : "12-step path is range/hold") + "; forecast is guidance, not execution permission.");
-      }
-      if (
-        council.present
-        && forecast.present
-        && forecast.side !== "HOLD"
-        && council.side !== forecast.side
-        && forecastIsAdvisoryOnly(forecast)
-      ) {
-        addItem("Priority: council read is " + council.side + "; diagnostic/no-edge forecast is only an alternate study.");
       }
       const replayCount = safeList(operatorState.history || operatorState.session_history || operatorState.replay).length;
       if (replayCount > 0) {
