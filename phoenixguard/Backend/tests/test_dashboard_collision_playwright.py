@@ -3187,6 +3187,35 @@ def test_empty_session_history_records_completed_sideways_frames(
         )
 
 
+def test_council_leads_when_forecast_is_advisory_conflict(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    payload["forecast"].update(
+        {
+            "direction": "BUY",
+            "state": "CURRENT",
+            "summary": "The current model path leans upward, but its risk gate found no reliable edge.",
+            "forecast_status": "DIAGNOSTIC",
+        }
+    )
+    for overlay in payload["overlays"]:
+        if overlay.get("family") == "lstm":
+            overlay["forecast_direction"] = "BUY"
+            overlay["forecast_status"] = "DIAGNOSTIC"
+            overlay["trade_authorization_status"] = "NO_EDGE"
+            overlay["geometry_projection_provenance"] = {"status": "DEGRADED_REANCHOR"}
+        if overlay.get("family") == "council":
+            overlay["side"] = "SELL"
+            overlay["confidence"] = 0.91
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.wait_for_function(
+            "() => document.querySelector('#forecast-title')?.textContent?.toLowerCase().includes('council sell leads')",
+            timeout=10_000,
+        )
+        assert "Council read leads SELL" in page.locator("#beginner-next-read").inner_text()
+
+
 def test_pair_switch_resets_local_history_namespace(
     chromium_browser: Browser,
 ) -> None:
