@@ -55,13 +55,15 @@ dev           full developer/test/Pyright environment
 
 ```text
 requirements/locks/live-win-py311.txt
+requirements/locks/live-linux-py311.txt
 requirements/locks/dev-win-py311.txt
 requirements/locks/training-win-py311.txt
 requirements/locks/business-win-py311.txt
 requirements/locks/docs-pdf-win-py311.txt
 ```
 
-Locks are compiled with `pip-tools` and the backtracking resolver.
+Locks are compiled with `pip-tools` and the backtracking resolver under Python 3.11 on the target
+platform. Linux locks must be resolved under Linux rather than copied from a Windows resolution.
 
 ## Installers
 
@@ -89,9 +91,10 @@ environment must already exist before PhoenixGuard is started.
 
 ## Live Runtime Boundary
 
-The live `.venv-live` must not contain training, docs, business, and dev-only package stacks. Live
-runtime safety is enforced by launcher paths, lazy imports, optional adapters, runtime profile checks,
-and the separate locked environment boundary.
+The live `.venv-live` must not contain training, docs, business, and dev-only package stacks. The
+live profile does include Chronos Forecasting and Transformers because the scene forecaster loads the
+approved local Chronos-2 weights. Runtime safety is enforced by launcher paths, lazy imports, local
+artifact checks, runtime profile checks, and the separate locked environment boundary.
 
 The following packages must not become required imports for live startup unless the live runtime
 actually needs them:
@@ -112,16 +115,17 @@ gradio
 reportlab
 playwright
 pytest
-transformers
 sentence-transformers
 faiss-cpu
 hnswlib
-chronos-forecasting
 ultralytics
 ```
 
-Training and dev may include some of those model-development packages inside their own profile
-environments, but live startup must stay lean by not importing them on the hot path.
+`chronos-forecasting` and `transformers` are intentional live requirements. They must remain behind
+the lazy Chronos scene-forecaster boundary, load only `models/foundation/chronos-2-small`, and keep
+hub/network fallback disabled. Training and dev may include the other model-development packages
+inside their own profile environments, but live startup must stay lean by not importing them on the
+hot path.
 
 ## Optional Adapter Rule
 

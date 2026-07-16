@@ -176,6 +176,6 @@
   `trade_outcomes.jsonl` for future timing review.
 - Live tracker deployment uses the Windows VM scripts in `Backend/launch/deploy/windows/`:
   - `Start-PhoenixGuardVmMonitor.ps1` supervises API, tracker, and package reporter.
-  - `phoenixguard.vm-monitor.env.ps1` pins `PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC=1.0`.
+  - `phoenixguard.vm-monitor.env.ps1` pins `PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC=30.0`.
   - `Start-PhoenixGuardQuickTunnel.ps1` can publish the local API through Cloudflare quick tunnel
     when a public browser URL is needed.

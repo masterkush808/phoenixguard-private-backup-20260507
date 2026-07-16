@@ -822,7 +822,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.getenv("PHOENIXGUARD_ENTER_NOW_SESSION_ID") or DEFAULT_SESSION_ID,
         help="Window tracker session id to monitor.",
     )
-    parser.add_argument("--poll-ms", type=int, default=15000, help="Polling interval in milliseconds.")
+    parser.add_argument("--poll-ms", type=int, default=30000, help="Polling interval in milliseconds.")
     parser.add_argument("--timeout-sec", type=float, default=1.5, help="HTTP timeout for tracker polling.")
     parser.add_argument("--max-age-sec", type=float, default=900.0, help="Maximum package age that can trigger a notification.")
     parser.add_argument("--ignore-existing", action="store_true", help="Show existing packages without notifying on startup.")

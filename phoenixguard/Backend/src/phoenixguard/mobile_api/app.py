@@ -11,7 +11,16 @@ from typing import Annotated, Any, Mapping, Sequence, cast
 import urllib.error
 import urllib.request
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -27,7 +36,11 @@ from phoenixguard.runtime.observability_v3 import (
     build_intelligence_health,
     build_model_council_health_from_session,
 )
-from phoenixguard.runtime.realtime_performance_v3 import build_frame_timing_trace_v3, build_performance_trace_v3
+from phoenixguard.runtime.realtime_performance_v3 import (
+    CaptureWorkerV3Health,
+    build_frame_timing_trace_v3,
+    build_performance_trace_v3,
+)
 from phoenixguard.runtime.python_environment_v3 import build_python_environment_status
 from phoenixguard.runtime.tracker_bootstrap import tracker_session_runtime_state
 from phoenixguard.tracing import configure_tracing, instrument_fastapi_app
@@ -93,7 +106,7 @@ _default_window_tracker_service: ContinuousWindowTrackerService | None = None
 _WINDOW_TRACKER_DASHBOARD_TEMPLATE = (
     FRONTEND_ROOT / "dashboard" / "static" / "window_tracker_dashboard.html"
 )
-_WINDOW_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC = 15.0
+_WINDOW_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC = 30.0
 _WINDOW_TRACKER_MIN_CAPTURE_INTERVAL_SEC = 0.5
 _WINDOW_TRACKER_MAX_CAPTURE_INTERVAL_SEC = 30.0
 _WINDOW_TRACKER_BRAND_ASSET_DIR = (
@@ -118,6 +131,10 @@ _RUNTIME_ROOT = Path(os.getenv("PHOENIXGUARD_RUNTIME_DIR") or PROJECT_ROOT / "ru
 _SHOOTER_HANDSHAKE_PATH = _RUNTIME_ROOT / "shooter_handshake.json"
 _PUBLISHED_PACKET_FALLBACK_TTL_SEC = 8.0
 _OPERATOR_VIEW_TO_OVERLAY_MODE = {
+    # One complete frame projection backs every public toggle.  The route
+    # applies its strict family allow-list after projection, so switching
+    # studies never fragments the live-state cache or triggers a second
+    # Inspector rebuild for the same frame.
     "all": "INSPECTOR",
     # Composite public views are projected from the complete inspector bundle,
     # then reduced to their exact public family allow-list below.  Narrow
@@ -127,9 +144,9 @@ _OPERATOR_VIEW_TO_OVERLAY_MODE = {
     "structure": "INSPECTOR",
     "zones": "INSPECTOR",
     "plan": "INSPECTOR",
-    "smc": "SMART_MONEY",
-    "two-candle": "TWO_CANDLE_STUDY",
-    "lstm": "LSTM_STUDY",
+    "smc": "INSPECTOR",
+    "two-candle": "INSPECTOR",
+    "lstm": "INSPECTOR",
     "forecast": "INSPECTOR",
     "history": "INSPECTOR",
 }
@@ -160,6 +177,65 @@ _OPERATOR_VIEW_TO_PUBLIC_FAMILIES: dict[str, frozenset[str] | None] = {
     "forecast": frozenset({"two_candle", "lstm", "prediction"}),
     "history": frozenset({"history", "major_swings", "local_swings"}),
 }
+
+_SCENE_FORECAST_OVERLAY_FIELDS = frozenset(
+    {
+        "forecast_engine",
+        "forecast_provider",
+        "forecast_provider_status",
+        "forecast_id",
+        "forecast_revision",
+        "belief_revision",
+        "belief_state",
+        "committed_side",
+        "candidate_side",
+        "change_probability",
+        "confirmation_events",
+        "required_events",
+        "closed_candle_key",
+        "closed_candle_sequence",
+        "forecast_computed_frame_id",
+        "source_forecast_frame_id",
+        "geometry_projected_frame_id",
+        "geometry_frame_match_verified",
+        "geometry_reprojected_from_cache",
+        "geometry_projection_provenance",
+        "detector_coverage_rebase_applied",
+        "cache_replaced_for_detector_coverage_rebase",
+        "scene_feature_audit",
+    }
+)
+
+
+def _preserve_scene_forecast_overlay_fields(
+    normalized: Mapping[str, object],
+    raw: Mapping[str, object],
+) -> dict[str, object]:
+    row = dict(normalized)
+    for key in _SCENE_FORECAST_OVERLAY_FIELDS:
+        value = raw.get(key)
+        if value not in (None, "", [], {}):
+            row[key] = value
+    if str(raw.get("forecast_engine") or "").strip().upper() == "SCENE_FORECASTER_V3":
+        scene_label = str(
+            raw.get("display_label")
+            or raw.get("short_label")
+            or raw.get("label")
+            or "SCENE FORECASTER E1-E12"
+        ).strip()
+        if "SCENE" not in scene_label.upper():
+            scene_label = "SCENE FORECASTER E1-E12"
+        row.update(
+            {
+                "label": scene_label,
+                "display_label": scene_label,
+                "short_label": scene_label,
+                "raw_display_label": scene_label,
+                "display_label_status": "CANONICAL",
+                "unmapped_display_label": "",
+            }
+        )
+    return row
 
 
 def _env_float_at_least(name: str, default: float, minimum: float) -> float:
@@ -681,9 +757,29 @@ _SAFE_OPERATOR_OVERLAY_KEYS = frozenset(
         "forecast_role",
         "forecast_status",
         "forecast_authorized",
+        "forecast_direction",
+        "body_bias",
+        "direction_conflict",
+        "path_confidence_status",
+        "forecast_band_points",
+        "forecast_candles",
+        "forecast_scenarios",
+        "forecast_anchor",
+        "forecast_coordinate_space",
+        "forecast_coordinate_units",
+        "trajectory_mode",
+        "trajectory_mode_probability_calibrated",
+        "interval",
         "horizon_unit",
         "clock_time_assumption",
         "uncertainty_level",
+        "forecast_quality_status",
+        "trade_authorization_status",
+        "semantic_id",
+        "anchor_id",
+        "overlay_semantic_revision",
+        "overlay_geometry_revision",
+        *_SCENE_FORECAST_OVERLAY_FIELDS,
     }
 )
 
@@ -863,6 +959,265 @@ def _operator_overlay_lineage_matches(
     )
 
 
+def _safe_operator_forecast_scenarios(
+    value: object,
+    *,
+    normalized: bool,
+) -> list[dict[str, object]]:
+    """Bound nested scenario geometry at the final public DTO boundary."""
+
+    def safe_forecast_candles(raw_value: object) -> list[dict[str, object]]:
+        if not isinstance(raw_value, Sequence) or isinstance(
+            raw_value,
+            (str, bytes, bytearray),
+        ):
+            return []
+        candles: list[dict[str, object]] = []
+        for raw_candle in cast(Sequence[object], raw_value)[:12]:
+            if not isinstance(raw_candle, Mapping):
+                continue
+            candle = cast(Mapping[str, object], raw_candle)
+            step = int(_epoch_float(candle.get("step"), 0.0))
+            coordinates = {
+                key: _epoch_float(candle.get(key), float("nan"))
+                for key in (
+                    "x_norm",
+                    "open_y_norm",
+                    "high_y_norm",
+                    "low_y_norm",
+                    "close_y_norm",
+                )
+            }
+            if step <= 0 or any(value != value for value in coordinates.values()):
+                continue
+            if normalized:
+                if any(
+                    not -0.000001 <= value <= 1.000001
+                    for value in coordinates.values()
+                ):
+                    continue
+                coordinates = {
+                    key: max(0.0, min(1.0, value))
+                    for key, value in coordinates.items()
+                }
+            elif any(value < 0.0 for value in coordinates.values()):
+                continue
+            movement_side = str(
+                candle.get("movement_side") or "NEUTRAL"
+            ).strip().upper()
+            if movement_side not in {"BUY", "SELL", "NEUTRAL"}:
+                movement_side = "NEUTRAL"
+            body_bias = str(candle.get("body_bias") or movement_side).strip().upper()
+            if body_bias not in {"BUY", "SELL", "NEUTRAL"}:
+                body_bias = movement_side
+            label = re.sub(
+                r"[\x00-\x1f\x7f]",
+                "",
+                str(candle.get("label") or f"E{step}"),
+            ).strip()[:16]
+            candles.append(
+                {
+                    "step": step,
+                    "label": label or f"E{step}",
+                    **{
+                        key: round(value, 6)
+                        for key, value in coordinates.items()
+                    },
+                    "movement_side": movement_side,
+                    "body_bias": body_bias,
+                    "direction_conflict": candle.get("direction_conflict") is True,
+                }
+            )
+        if [
+            int(_epoch_float(candle.get("step"), 0.0)) for candle in candles
+        ] != list(range(1, 13)):
+            return []
+        return candles
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    scenarios: list[dict[str, object]] = []
+    selected_seen = False
+    for item in cast(Sequence[object], value)[:3]:
+        if not isinstance(item, Mapping):
+            continue
+        raw = cast(Mapping[str, object], item)
+        raw_points = raw.get("line_points")
+        if not isinstance(raw_points, Sequence) or isinstance(
+            raw_points,
+            (str, bytes, bytearray),
+        ):
+            continue
+        points: list[list[float]] = []
+        invalid_geometry = False
+        for raw_point in cast(Sequence[object], raw_points)[:13]:
+            if not isinstance(raw_point, Sequence) or isinstance(
+                raw_point,
+                (str, bytes, bytearray),
+            ):
+                continue
+            point = cast(Sequence[object], raw_point)
+            if len(point) < 2:
+                continue
+            x = _epoch_float(point[0], float("nan"))
+            y = _epoch_float(point[1], float("nan"))
+            if x != x or y != y:
+                continue
+            if normalized:
+                if not (-0.000001 <= x <= 1.000001 and -0.000001 <= y <= 1.000001):
+                    invalid_geometry = True
+                    break
+                x = max(0.0, min(1.0, x))
+                y = max(0.0, min(1.0, y))
+            elif x < 0.0 or y < 0.0:
+                invalid_geometry = True
+                break
+            points.append([round(x, 6), round(y, 6)])
+        if (
+            invalid_geometry
+            or len(points) != 13
+            or any(right[0] <= left[0] for left, right in zip(points, points[1:]))
+        ):
+            continue
+        side = str(raw.get("side") or "NEUTRAL").strip().upper()
+        side = side if side in {"BUY", "SELL", "NEUTRAL"} else "NEUTRAL"
+        role = str(raw.get("role") or "").strip().lower()
+        role = role if role in {"base", "bull", "bear"} else ""
+        forecast_candles = safe_forecast_candles(raw.get("forecast_candles"))
+        if role and len(forecast_candles) != 12:
+            continue
+        probability = _epoch_float(raw.get("probability"), 0.0)
+        selected = raw.get("selected") is True and not selected_seen
+        selected_seen = selected_seen or selected
+        event_count = 12
+        label = re.sub(
+            r"[\x00-\x1f\x7f]",
+            "",
+            str(raw.get("label") or f"{side} PATH"),
+        ).strip()[:32]
+        scenario: dict[str, object] = {
+            "side": side,
+            "label": label or f"{side} PATH",
+            "probability": round(max(0.0, min(1.0, probability)), 6),
+            "probability_calibrated": raw.get("probability_calibrated") is True,
+            "selected": selected,
+            "raw_selected": raw.get("raw_selected") is True,
+            "candidate": raw.get("candidate") is True,
+            "line_points": points,
+            "event_count": event_count,
+        }
+        if role:
+            scenario["role"] = role
+            scenario["forecast_candles"] = forecast_candles
+        scenarios.append(scenario)
+    scenarios.sort(
+        key=lambda scenario: (
+            not bool(scenario["selected"]),
+            -float(cast(float, scenario["probability"])),
+        )
+    )
+    roles = {str(scenario.get("role") or "") for scenario in scenarios}
+    role_complete = roles == {"base", "bull", "bear"}
+    legacy_side_complete = not any(roles) and {
+        str(scenario["side"]) for scenario in scenarios
+    } == {"BUY", "SELL", "NEUTRAL"}
+    if (
+        len(scenarios) != 3
+        or not (role_complete or legacy_side_complete)
+        or sum(bool(scenario["selected"]) for scenario in scenarios) != 1
+    ):
+        return []
+    return scenarios
+
+
+def _safe_operator_forecast_anchor(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    raw = cast(Mapping[str, object], value)
+    x_norm = _epoch_float(raw.get("x_norm"), float("nan"))
+    y_norm = _epoch_float(raw.get("y_norm"), float("nan"))
+    if (
+        x_norm != x_norm
+        or y_norm != y_norm
+        or not 0.0 <= x_norm <= 1.0
+        or not 0.0 <= y_norm <= 1.0
+    ):
+        return {}
+    source = str(raw.get("source") or "MODEL_CAUSAL_CANDLE").strip().upper()
+    if source not in {
+        "TRACKER_LATEST_CLOSE",
+        "TRACKER_LATEST_CLOSED_CANDLE",
+        "MODEL_CAUSAL_CANDLE",
+    }:
+        source = "MODEL_CAUSAL_CANDLE"
+    return {
+        "x_norm": round(x_norm, 6),
+        "y_norm": round(y_norm, 6),
+        "verified_latest_close": raw.get("verified_latest_close") is True,
+        "source": source,
+    }
+
+
+def _safe_operator_forecast_bundle_complete(row: Mapping[str, object]) -> bool:
+    line_points = row.get("line_points")
+    candles = row.get("forecast_candles")
+    scenarios = row.get("forecast_scenarios")
+    anchor = row.get("forecast_anchor")
+    if (
+        not isinstance(line_points, Sequence)
+        or isinstance(line_points, (str, bytes, bytearray))
+        or len(cast(Sequence[object], line_points)) != 13
+        or not isinstance(candles, Sequence)
+        or isinstance(candles, (str, bytes, bytearray))
+        or not isinstance(scenarios, Sequence)
+        or isinstance(scenarios, (str, bytes, bytearray))
+        or not isinstance(anchor, Mapping)
+    ):
+        return False
+    candle_rows = [
+        cast(Mapping[str, object], candle)
+        for candle in cast(Sequence[object], candles)
+        if isinstance(candle, Mapping)
+    ]
+    if (
+        len(candle_rows) != 12
+        or [int(_epoch_float(candle.get("step"), 0.0)) for candle in candle_rows]
+        != list(range(1, 13))
+    ):
+        return False
+    scenario_rows = [
+        cast(Mapping[str, object], scenario)
+        for scenario in cast(Sequence[object], scenarios)
+        if isinstance(scenario, Mapping)
+    ]
+    selected = [scenario for scenario in scenario_rows if scenario.get("selected") is True]
+    if len(scenario_rows) != 3 or len(selected) != 1:
+        return False
+    selected_points = selected[0].get("line_points")
+    if (
+        not isinstance(selected_points, Sequence)
+        or isinstance(selected_points, (str, bytes, bytearray))
+        or len(cast(Sequence[object], selected_points)) != 13
+    ):
+        return False
+    for main_point, selected_point in zip(
+        cast(Sequence[object], line_points),
+        cast(Sequence[object], selected_points),
+    ):
+        if (
+            not isinstance(main_point, Sequence)
+            or isinstance(main_point, (str, bytes, bytearray))
+            or not isinstance(selected_point, Sequence)
+            or isinstance(selected_point, (str, bytes, bytearray))
+            or len(cast(Sequence[object], main_point)) < 2
+            or len(cast(Sequence[object], selected_point)) < 2
+            or abs(_epoch_float(main_point[0], float("nan")) - _epoch_float(selected_point[0], float("nan"))) > 1e-6
+            or abs(_epoch_float(main_point[1], float("nan")) - _epoch_float(selected_point[1], float("nan"))) > 1e-6
+        ):
+            return False
+    return True
+
+
 def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
@@ -875,6 +1230,53 @@ def _safe_operator_overlay_rows(value: object) -> list[dict[str, object]]:
             for key in _SAFE_OPERATOR_OVERLAY_KEYS
             if key in item
         }
+        if "forecast_scenarios" in row:
+            normalized = str(
+                row.get("forecast_coordinate_units")
+                or row.get("coordinate_units")
+                or "normalized"
+            ).strip().lower() != "pixels"
+            row["forecast_scenarios"] = _safe_operator_forecast_scenarios(
+                row.get("forecast_scenarios"),
+                normalized=normalized,
+            )
+        if "forecast_anchor" in row:
+            row["forecast_anchor"] = _safe_operator_forecast_anchor(
+                row.get("forecast_anchor")
+            )
+        if "trajectory_mode" in row:
+            trajectory_mode = str(row.get("trajectory_mode") or "NEUTRAL").strip().upper()
+            row["trajectory_mode"] = (
+                trajectory_mode
+                if trajectory_mode in {"BUY", "SELL", "NEUTRAL"}
+                else "NEUTRAL"
+            )
+        if "trajectory_mode_probability_calibrated" in row:
+            row["trajectory_mode_probability_calibrated"] = (
+                row.get("trajectory_mode_probability_calibrated") is True
+            )
+        for revision_key in (
+            "semantic_id",
+            "anchor_id",
+            "overlay_semantic_revision",
+            "overlay_geometry_revision",
+        ):
+            if revision_key not in row:
+                continue
+            token = str(row.get(revision_key) or "").strip().lower()
+            if not re.fullmatch(r"[a-z_]+_[0-9a-f]{16}", token):
+                row.pop(revision_key, None)
+            else:
+                row[revision_key] = token
+        if row.get("points") == row.get("line_points") and row.get("line_points"):
+            # V3 normalization may preserve both aliases.  The operator DTO
+            # sends one canonical copy to avoid paying twice for path geometry.
+            row.pop("points", None)
+        if (
+            str(row.get("forecast_role") or "").lower() == "composite"
+            and not _safe_operator_forecast_bundle_complete(row)
+        ):
+            continue
         if row.get("id") and row.get("family") and row.get("frame_id"):
             output.append(row)
     return output
@@ -1039,6 +1441,99 @@ def _path_cache_signature(path: Path) -> str:
     except OSError:
         return "missing"
     return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def _operator_projection_source_revision(
+    session_id: str,
+) -> tuple[str, int, float] | None:
+    """Return a cheap revision for one complete atomic operator frame.
+
+    Operator toggles all project the same Inspector bundle.  The expensive
+    projection is immutable while the atomic display barrier is unchanged, so
+    polling can reuse it without reparsing the compact analysis payload.  The
+    compact sidecar is intentionally *not* part of this revision: persistence
+    may replace that file several times while the broker still displays the
+    exact same accepted frame.
+    """
+
+    requested_session_id = str(session_id or "").strip()
+    if not requested_session_id:
+        return None
+    display_path = _direct_window_tracker_display_state_path(requested_session_id)
+    def atomic_file_identity(path: Path) -> tuple[int, int, int, int] | None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        return (
+            int(getattr(stat, "st_ino", 0)),
+            int(stat.st_ctime_ns),
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+        )
+
+    display_identity_before = atomic_file_identity(display_path)
+    if display_identity_before is None:
+        return None
+    try:
+        raw_display = json.loads(display_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    display_identity_after = atomic_file_identity(display_path)
+    if display_identity_after != display_identity_before or not isinstance(raw_display, Mapping):
+        return None
+    display = cast(Mapping[str, object], raw_display)
+    if str(display.get("session_id") or "").strip() != requested_session_id:
+        return None
+    if display.get("frame_bundle_complete_v3") is not True:
+        return None
+    frame_id = int(
+        _epoch_float(
+            display.get("display_frame_id")
+            or display.get("frame_index")
+            or display.get("capture_count"),
+            0.0,
+        )
+    )
+    if frame_id <= 0 or any(
+        int(_epoch_float(display.get(key), 0.0)) != frame_id
+        for key in (
+            "chart_frame_id",
+            "overlay_frame_id",
+            "full_overlay_frame_id",
+            "model_vote_frame_id",
+        )
+    ):
+        return None
+    display_signature = str(
+        display.get("last_display_surface_signature")
+        or display.get("last_window_surface_signature")
+        or ""
+    ).strip()
+    study_signature = str(display.get("last_study_surface_signature") or "").strip()
+    if (
+        not display_signature
+        or not study_signature
+        or str(display.get("overlay_source_window_signature") or "").strip()
+        != display_signature
+        or str(display.get("overlay_source_study_signature") or "").strip()
+        != study_signature
+    ):
+        return None
+    revision_payload = {
+        "session_id": requested_session_id,
+        "frame_id": frame_id,
+        "state_version": int(_epoch_float(display.get("state_version"), 0.0)),
+        "decision_version": int(_epoch_float(display.get("decision_version"), 0.0)),
+        "display_signature": display_signature,
+        "study_signature": study_signature,
+        "display_file": display_identity_after,
+    }
+    return (
+        json.dumps(revision_payload, sort_keys=True, separators=(",", ":")),
+        frame_id,
+        _epoch_float(display.get("decision_valid_until_epoch"), 0.0),
+    )
 
 
 def _json_field_cache_signature(path: Path, keys: Sequence[str]) -> str:
@@ -1454,6 +1949,76 @@ def _direct_window_tracker_session_snapshot(
     return payload
 
 
+def _direct_window_tracker_compact_session_snapshot(
+    session_id: str,
+    *,
+    require_complete_display_bundle: bool = True,
+) -> dict[str, object] | None:
+    """Read one bounded session sidecar and merge one display authority snapshot.
+
+    Unlike the legacy direct reader, this helper never falls back to
+    ``session.json``.  Polling routes can therefore use it without parsing the
+    multi-megabyte analysis archive or contending with a concurrent full
+    session write.
+    """
+
+    if str(os.getenv("PHOENIXGUARD_WINDOW_TRACKER_DIRECT_READ", "1") or "1").strip().lower() in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }:
+        return None
+    requested_session_id = str(session_id or "").strip()
+    if not requested_session_id:
+        return None
+    session_path = _direct_live_state_session_path(requested_session_id)
+    compact_path = session_path.with_name("compact_live_state.json")
+    if not compact_path.is_file():
+        return None
+    try:
+        raw = json.loads(compact_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(raw, Mapping):
+        return None
+    raw_payload = dict(cast(Mapping[str, Any], raw))
+    if str(raw_payload.get("session_id", requested_session_id) or requested_session_id) != requested_session_id:
+        return None
+    if not bool(raw_payload.get("tracking_enabled", False)):
+        return None
+    payload = cast(dict[str, object], compact_session_payload(raw_payload))
+    payload = _merge_direct_window_tracker_display_state(
+        requested_session_id,
+        payload,
+        display_path=compact_path.with_name("display_state.json"),
+        require_complete_display_bundle=require_complete_display_bundle,
+    )
+    now_epoch = time.time()
+    latest_signal = _mapping_to_plain_dict(payload.get("latest_signal"))
+    published_epoch = _epoch_float(
+        latest_signal.get("published_epoch") or payload.get("last_capture_epoch"),
+        0.0,
+    )
+    if published_epoch > 0.0:
+        signal_age_sec = round(max(0.0, now_epoch - published_epoch), 3)
+        latest_signal["signal_age_sec"] = signal_age_sec
+        latest_signal.setdefault("published_epoch", published_epoch)
+        payload["signal_age_sec"] = signal_age_sec
+    if latest_signal:
+        latest_signal["session_id"] = requested_session_id
+        payload["latest_signal"] = latest_signal
+    current_status = str(payload.get("status", "") or "").strip().lower()
+    payload["status"] = current_status if current_status in {"running", "tracking"} else "running"
+    payload["event_log_path"] = str(compact_path.with_name("events.jsonl"))
+    payload.setdefault("next_capture_in_sec", 0.0)
+    payload.setdefault(
+        "effective_capture_interval_sec",
+        payload.get("capture_interval_sec", _WINDOW_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC),
+    )
+    return payload
+
+
 def _direct_model_council_fast_payload(session_id: str) -> dict[str, object] | None:
     requested_session_id = str(session_id or "").strip()
     if not requested_session_id:
@@ -1563,7 +2128,12 @@ def _direct_window_tracker_display_snapshot(
 
 
 def _direct_complete_session_frame_id_v3(session_id: str) -> int:
-    snapshot = _direct_window_tracker_session_snapshot(session_id)
+    # Cache freshness only needs the atomic display barrier.  Avoid reparsing
+    # even the compact session sidecar before a cached poll is considered.
+    snapshot = _direct_window_tracker_display_snapshot(
+        session_id,
+        require_overlay_model=True,
+    )
     if snapshot is None:
         return 0
     return _atomic_frame_id_v3(snapshot)
@@ -2836,11 +3406,220 @@ def _render_window_tracker_dashboard(session_id: str) -> str:
     return template.replace("__SESSION_ID_JSON__", json.dumps(str(session_id)))
 
 
+def _bounded_operator_projection_context(
+    live_state: Mapping[str, object],
+) -> dict[str, object]:
+    """Keep only bounded projection context from the already-built live state."""
+
+    def bounded_value(
+        value: object,
+        *,
+        depth: int = 0,
+        sequence_limit: int = 64,
+    ) -> object:
+        if isinstance(value, str):
+            return value[:4096]
+        if value is None or isinstance(value, (int, float, bool)):
+            return value
+        if depth >= 4:
+            return {}
+        if isinstance(value, Mapping):
+            bounded: dict[str, object] = {}
+            value_mapping = cast(Mapping[str, object], value)
+            for index, (key, nested) in enumerate(value_mapping.items()):
+                if index >= 48:
+                    break
+                bounded[str(key)] = bounded_value(
+                    nested,
+                    depth=depth + 1,
+                    sequence_limit=sequence_limit,
+                )
+            return bounded
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            rows = list(cast(Sequence[object], value))[-sequence_limit:]
+            return [
+                bounded_value(
+                    row,
+                    depth=depth + 1,
+                    sequence_limit=sequence_limit,
+                )
+                for row in rows
+            ]
+        return str(value)[:4096]
+
+    def bounded_forecast_value(value: object, *, depth: int = 0) -> object:
+        if depth >= 4:
+            return {}
+        if isinstance(value, Mapping):
+            safe: dict[str, object] = {}
+            value_mapping = cast(Mapping[str, object], value)
+            for index, (key, nested) in enumerate(value_mapping.items()):
+                key_text = str(key)
+                if index >= 48:
+                    break
+                if key_text in {
+                    "features",
+                    "normalized_features",
+                    "raw_model_logits",
+                    "raw_logits",
+                    "input_tensor",
+                    "source_path",
+                } or key_text.startswith("raw_model_"):
+                    continue
+                safe[key_text] = bounded_forecast_value(nested, depth=depth + 1)
+            return safe
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return [
+                bounded_forecast_value(item, depth=depth + 1)
+                for item in list(cast(Sequence[object], value))[-16:]
+            ]
+        return bounded_value(value, depth=depth, sequence_limit=16)
+
+    context: dict[str, object] = {}
+    for key in (
+        "session_id",
+        "name",
+        "market",
+        "window_query",
+        "layout_profile",
+        "effective_layout_profile",
+        "status",
+        "tracking_enabled",
+        "last_capture_epoch",
+        "display_capture_epoch",
+        "display_published_epoch",
+        "capture_count",
+        "frame_index",
+        "frame_id",
+        "display_frame_id",
+        "chart_frame_id",
+        "overlay_frame_id",
+        "full_overlay_frame_id",
+        "model_vote_frame_id",
+        "state_version",
+        "decision_version",
+        "last_window_surface_signature",
+        "last_display_surface_signature",
+        "last_study_surface_signature",
+        "overlay_source_window_signature",
+        "overlay_source_study_signature",
+        "manual_focus_region",
+        "focus_selector",
+        "locked_window",
+        "execution_controls",
+        "visual_observation_v3",
+    ):
+        if key in live_state:
+            context[key] = bounded_value(live_state[key], sequence_limit=16)
+
+    raw_forecast = live_state.get("forecast_snapshot_v3")
+    if isinstance(raw_forecast, Mapping):
+        raw_forecast_mapping = cast(Mapping[str, object], raw_forecast)
+        forecast: dict[str, object] = {}
+        for key in (
+            "schema_version",
+            "source_frame_id",
+            "observed_epoch",
+            "stale",
+            "diagnostic_only",
+            "high_frequency_forecast",
+            "two_candle_study",
+            "scene_forecast_contribution",
+            "lstm_contribution",
+        ):
+            if key not in raw_forecast_mapping:
+                continue
+            forecast[key] = bounded_forecast_value(raw_forecast_mapping[key])
+        if forecast:
+            context["forecast_snapshot_v3"] = forecast
+
+    raw_tracking = live_state.get("tracking_summary")
+    if isinstance(raw_tracking, Mapping):
+        raw_tracking_mapping = cast(Mapping[str, object], raw_tracking)
+        tracking: dict[str, object] = {}
+        for key in (
+            "session_id",
+            "detected_market",
+            "detected_timeframe",
+            "status",
+            "frame_index",
+            "capture_count",
+            "display_frame_id",
+            "last_capture_epoch",
+            "visible_candle_count",
+            "active_track_count",
+            "tracked_candles",
+            "market_selector_visual_fingerprint",
+            "market_selector_visual_changed",
+            "market_selector_rebind_required",
+            "market_selector_studying_new_pair",
+            "broker_source",
+            "broker_source_lock",
+            "broker_surface",
+            "artifact_integrity",
+            "chart_region",
+            "display_region",
+            "focus_region",
+            "candle_movement_context",
+            "candle_movement_context_v3",
+        ):
+            if key in raw_tracking_mapping:
+                tracking[key] = bounded_value(
+                    raw_tracking_mapping[key], sequence_limit=24
+                )
+        if tracking:
+            context["tracking_summary"] = tracking
+
+    history_rows: list[object] = []
+    for history_key in ("recent_studies", "history"):
+        raw_history = live_state.get(history_key)
+        if isinstance(raw_history, Sequence) and not isinstance(
+            raw_history,
+            (str, bytes, bytearray),
+        ):
+            history_rows.extend(list(cast(Sequence[object], raw_history)))
+    bounded_history: list[dict[str, object]] = []
+    for raw_row in history_rows[-24:]:
+        if not isinstance(raw_row, Mapping):
+            continue
+        raw_row_mapping = cast(Mapping[str, object], raw_row)
+        row: dict[str, object] = {}
+        for key in (
+            "timestamp",
+            "created_at",
+            "created_epoch",
+            "published_epoch",
+            "last_capture_epoch",
+            "observed_at",
+            "observed_epoch",
+            "ended_at",
+            "frame_id",
+            "side",
+            "direction",
+            "action",
+            "state",
+            "status",
+            "summary",
+            "setup",
+        ):
+            if key in raw_row_mapping:
+                row[key] = bounded_value(raw_row_mapping[key], sequence_limit=8)
+        for key in ("current_movement", "pressure_event"):
+            if key in raw_row_mapping:
+                row[key] = bounded_value(raw_row_mapping[key], sequence_limit=8)
+        if row:
+            bounded_history.append(row)
+    if bounded_history:
+        context["recent_studies"] = bounded_history[-12:]
+        context["history"] = bounded_history[-24:]
+    return context
+
+
 def _merge_operator_projection_input(
     service_snapshot: Mapping[str, object],
     compact_live_state: Mapping[str, object],
 ) -> dict[str, object]:
-    """Merge live display authority with full session context for one projection.
+    """Merge live display authority with bounded stable context for one projection.
 
     This internal value may contain private backend fields.  Callers must pass it
     directly to ``build_operator_workspace_v1`` and never return it as an API
@@ -2890,13 +3669,24 @@ def _merge_operator_projection_input(
         # only non-decisional metadata so an older movement can never be
         # relabelled as current on the compact display frame.
         service_context: dict[str, object] = {}
-        for key in ("session_id", "tracking_enabled", "last_capture_epoch"):
+        for key in (
+            "session_id",
+            "tracking_enabled",
+            "last_capture_epoch",
+            "broker_source_lock_id",
+        ):
             if key in service_snapshot:
                 service_context[key] = service_snapshot[key]
         tracking_summary = service_snapshot.get("tracking_summary")
         if isinstance(tracking_summary, Mapping):
             stable_tracking_summary: dict[str, object] = {}
-            for key in ("detected_market", "detected_timeframe", "last_capture_epoch"):
+            for key in (
+                "detected_market",
+                "detected_timeframe",
+                "last_capture_epoch",
+                "market_selector_visual_fingerprint",
+                "broker_source_lock",
+            ):
                 if key in tracking_summary:
                     stable_tracking_summary[key] = tracking_summary[key]
             if stable_tracking_summary:
@@ -2954,6 +3744,13 @@ def create_app(
     app.state.voice_config = resolved_voice_config
     register_business_routes(app)
     explicit_window_tracker_service = window_tracker_service is not None
+    operator_projection_cache_lock = threading.Lock()
+    operator_projection_cache: dict[
+        str,
+        tuple[str, dict[str, object]],
+    ] = {}
+    operator_projection_refreshing: set[str] = set()
+    operator_projection_refresh_context = threading.local()
 
     def get_mobile_service() -> MobileApiService:
         mobile_service = getattr(app.state, "mobile_service", None)
@@ -2993,6 +3790,9 @@ def create_app(
 
     def read_window_tracker_session(session_id: str) -> dict[str, object]:
         tracker_service = get_window_tracker_service()
+        compact_snapshot = _direct_window_tracker_compact_session_snapshot(session_id)
+        if compact_snapshot is not None:
+            return compact_snapshot
         if not explicit_window_tracker_service:
             direct_snapshot = _direct_window_tracker_session_snapshot(session_id)
             if direct_snapshot is not None:
@@ -3316,33 +4116,15 @@ def create_app(
             return None
         path = _direct_live_state_session_path(requested_session_id)
         raw_session: object
+        session_display_merged = False
         if compact_public:
-            context_path = _direct_live_state_compact_session_path(requested_session_id)
-            raw_context: dict[str, object] = {}
-            try:
-                raw_display = json.loads(_direct_window_tracker_display_state_path(requested_session_id).read_text(encoding="utf-8"))
-            except Exception:
-                raw_display = None
-            raw_display_mapping: Mapping[str, object]
-            if isinstance(raw_display, Mapping):
-                raw_display_mapping = cast(Mapping[str, object], raw_display)
-            else:
-                raw_display_mapping = {}
-            try:
-                raw_context_payload = json.loads(context_path.read_text(encoding="utf-8"))
-            except Exception:
-                raw_context_payload = None
-            if isinstance(raw_context_payload, Mapping):
-                raw_context = cast(dict[str, object], compact_session_payload(cast(Mapping[str, Any], raw_context_payload)))
-            display_state_complete = (
-                _epoch_float(raw_display_mapping.get("frame_index"), 0.0) > 0.0
-                and str(raw_display_mapping.get("last_display_window_path") or raw_display_mapping.get("last_window_path") or "").strip()
-                and _display_state_frame_bundle_complete_v3(raw_display_mapping)
+            compact_snapshot = _direct_window_tracker_compact_session_snapshot(
+                requested_session_id,
+                require_complete_display_bundle=True,
             )
-            if display_state_complete:
-                raw_session = {**raw_context, **dict(raw_display_mapping)}
-            elif raw_context:
-                raw_session = raw_context
+            if compact_snapshot is not None:
+                raw_session = compact_snapshot
+                session_display_merged = True
             else:
                 try:
                     raw_session = json.loads(path.read_text(encoding="utf-8"))
@@ -3356,12 +4138,15 @@ def create_app(
         mark_timing("read_session")
         if not isinstance(raw_session, Mapping):
             return None
-        session_payload = _merge_direct_window_tracker_display_state(
-            requested_session_id,
-            dict(cast(Mapping[str, object], raw_session)),
-            display_path=path.with_name("display_state.json"),
-            require_complete_display_bundle=compact_public,
-        )
+        if session_display_merged:
+            session_payload = dict(cast(Mapping[str, object], raw_session))
+        else:
+            session_payload = _merge_direct_window_tracker_display_state(
+                requested_session_id,
+                dict(cast(Mapping[str, object], raw_session)),
+                display_path=path.with_name("display_state.json"),
+                require_complete_display_bundle=compact_public,
+            )
         session_payload.setdefault(
             "effective_capture_interval_sec",
             session_payload.get("capture_interval_sec", _WINDOW_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC),
@@ -3427,6 +4212,9 @@ def create_app(
         mark_timing("shooter")
         frontend_heartbeat = latest_frontend_heartbeat(requested_session_id)
         mark_timing("frontend_heartbeat")
+        direct_command_center = _decision_command_center_summary_v3(
+            cast(Mapping[str, object], session_payload)
+        )
         live_state = cast(
             dict[str, object],
             build_live_state_v3(
@@ -3442,6 +4230,8 @@ def create_app(
                 compact_public=compact_public,
             ),
         )
+        if direct_command_center:
+            live_state["decision_command_center"] = direct_command_center
         mark_timing("build")
         live_state["provider_status"] = {
             **_mapping_to_plain_dict(live_state.get("provider_status")),
@@ -3460,17 +4250,14 @@ def create_app(
 
     def compact_live_state_response(live_state: Mapping[str, object]) -> dict[str, object]:
         def decision_command_center(value: Mapping[str, object]) -> dict[str, object]:
-            local_summary = _decision_command_center_summary_v3(value)
-            if local_summary.get("study_details_present") is True:
-                return local_summary
-            session_id = str(value.get("session_id") or "").strip()
-            if not session_id:
-                return local_summary
-            try:
-                supplemental = latest_model_council_state_from_live_session(session_id)
-            except (KeyError, OSError, ValueError):
-                supplemental = {}
-            return _decision_command_center_summary_v3(value, supplemental=supplemental) or local_summary
+            existing = _mapping_to_plain_dict(value.get("decision_command_center"))
+            if existing:
+                return existing
+            # The live-state builder has already merged the compact session and
+            # current display authority.  A second model-council/session lookup
+            # here used to reopen the full archive whenever study details were
+            # absent, turning one compact poll into another multi-megabyte read.
+            return _decision_command_center_summary_v3(value)
 
         def compact_mapping(value: object, fields: set[str]) -> dict[str, object]:
             row = _mapping_to_plain_dict(value)
@@ -3526,6 +4313,19 @@ def create_app(
             "line_points",
             "points",
             "path",
+            "forecast_band_points",
+            "forecast_candles",
+            "forecast_scenarios",
+            "forecast_anchor",
+            "forecast_coordinate_space",
+            "forecast_coordinate_units",
+            "forecast_direction",
+            "trajectory_mode",
+            "trajectory_mode_probability_calibrated",
+            "body_bias",
+            "direction_conflict",
+            "path_confidence_status",
+            "interval",
             "anchors",
             "start_point",
             "end_point",
@@ -3567,10 +4367,15 @@ def create_app(
             "story",
             "trendline_role",
             "semantic_family",
+            *_SCENE_FORECAST_OVERLAY_FIELDS,
         }
 
         def compact_overlay_object(value: object) -> dict[str, object]:
-            row = normalize_v3_overlay_object(_mapping_to_plain_dict(value), strict=False)
+            raw_row = _mapping_to_plain_dict(value)
+            row = _preserve_scene_forecast_overlay_fields(
+                normalize_v3_overlay_object(raw_row, strict=False),
+                raw_row,
+            )
 
             def compact_anchor_candles() -> list[int]:
                 raw_anchors = row.get("anchor_candles")
@@ -4097,7 +4902,10 @@ def create_app(
             if bool(source_object.get("precision_rejected", False)):
                 continue
             try:
-                normalized = normalize_v3_overlay_object(source_object, strict=False)
+                normalized = _preserve_scene_forecast_overlay_fields(
+                    normalize_v3_overlay_object(source_object, strict=False),
+                    source_object,
+                )
             except Exception:
                 continue
             all_rows.append(normalized)
@@ -4192,17 +5000,6 @@ def create_app(
             )
         else:
             command_center = _decision_command_center_summary_v3(public_payload)
-            if not command_center.get("study_details_present"):
-                session_id = str(public_payload.get("session_id") or "").strip()
-                if session_id:
-                    try:
-                        supplemental = latest_model_council_state_from_live_session(session_id)
-                    except (KeyError, OSError, ValueError):
-                        supplemental = {}
-                    command_center = _decision_command_center_summary_v3(
-                        public_payload,
-                        supplemental=supplemental,
-                    ) or command_center
             if command_center:
                 public_payload["decision_command_center"] = _refresh_decision_command_center_freshness_v3(
                     command_center
@@ -4507,18 +5304,21 @@ def create_app(
             if bool(
                 row.get("market_selector_rebind_required")
                 or row.get("market_selector_studying_new_pair")
-                or row.get("market_selector_visual_changed")
             ):
                 return True
         return bool(
             payload.get("market_selector_rebind_required")
             or payload.get("market_selector_studying_new_pair")
-            or payload.get("market_selector_visual_changed")
         )
 
     def _direct_session_market_selector_rebind_pending(requested_session_id: str) -> bool:
+        compact_path = _direct_live_state_session_path(requested_session_id).with_name(
+            "compact_live_state.json"
+        )
+        if not compact_path.is_file():
+            return False
         try:
-            raw_payload = json.loads(_direct_live_state_session_path(requested_session_id).read_text(encoding="utf-8"))
+            raw_payload = json.loads(compact_path.read_text(encoding="utf-8"))
         except Exception:
             return False
         if not isinstance(raw_payload, Mapping):
@@ -4738,7 +5538,15 @@ def create_app(
         if cache_enabled:
             with _LIVE_STATE_V3_CACHE_LOCK:
                 cached = _LIVE_STATE_V3_CACHE.get(cache_key)
-                if cached and now_epoch - cached[0] <= _LIVE_STATE_V3_CACHE_TTL_SEC:
+                if cached and (
+                    compact_public
+                    or now_epoch - cached[0] <= _LIVE_STATE_V3_CACHE_TTL_SEC
+                ):
+                    # The compact projection key already contains the exact
+                    # frame/file signature. Rebuilding it on a short TTL while
+                    # that signature is unchanged only reprocesses immutable
+                    # history. Freshness is recalculated below from the live
+                    # session snapshot.
                     cached_live_state = dict(cached[1])
                     if compact_public:
                         return _refresh_compact_cached_live_state(
@@ -5124,9 +5932,66 @@ def create_app(
         )
         return _strip_private_projection_snapshots(live_state)
 
-    def operator_state_v1_for_session(
+    def public_operator_projection_for_view(
+        base_state: Mapping[str, object],
+        operator_view: str,
+        *,
+        stale_while_refreshing: bool,
+        decision_valid_until_epoch: float,
+    ) -> dict[str, object]:
+        """Project a cached canonical workspace without changing its surface."""
+
+        projected = dict(base_state)
+        projected_overlays = projected.get("overlays")
+        public_families = _OPERATOR_VIEW_TO_PUBLIC_FAMILIES[operator_view]
+        if public_families is not None and isinstance(projected_overlays, list):
+            projected["overlays"] = [
+                overlay
+                for item in cast(list[object], projected_overlays)
+                if isinstance(item, Mapping)
+                for overlay in [cast(Mapping[str, object], item)]
+                if str(overlay.get("family") or "").strip().lower()
+                in public_families
+            ]
+        decision_expired = (
+            decision_valid_until_epoch <= 0.0
+            or decision_valid_until_epoch <= time.time()
+        )
+        if stale_while_refreshing:
+            freshness = _mapping_to_plain_dict(projected.get("freshness"))
+            freshness["state"] = "STALE"
+            freshness["label"] = "Updating on the next complete frame"
+            projected["freshness"] = freshness
+            forecast = _mapping_to_plain_dict(projected.get("forecast"))
+            forecast["state"] = "STALE"
+            projected["forecast"] = forecast
+        if stale_while_refreshing or decision_expired:
+            permission = _mapping_to_plain_dict(projected.get("permission"))
+            permission.update(
+                {
+                    "action": "WAIT",
+                    "allowed": False,
+                    "side": "NEUTRAL",
+                    "message": (
+                        "Wait: the next complete frame is still being prepared."
+                        if stale_while_refreshing
+                        else "Wait: this frame's decision window has expired."
+                    ),
+                    "next_condition": "Wait for a fresh complete frame.",
+                    "window_open": False,
+                    "valid_for_seconds": 0.0,
+                    "window_label": "Closed",
+                }
+            )
+            projected["permission"] = permission
+        assert projected.get("schema_version") == OPERATOR_WORKSPACE_SCHEMA_VERSION
+        return projected
+
+    def _operator_state_v1_for_session_impl(
         session_id: str,
         view: str = "live",
+        *,
+        background_tasks: BackgroundTasks | None = None,
     ) -> dict[str, object]:
         requested_session_id = str(session_id or "").strip()
         if not requested_session_id:
@@ -5141,6 +6006,75 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Unsupported operator view.",
             )
+        source_revision = _operator_projection_source_revision(
+            requested_session_id
+        )
+        force_refresh = bool(
+            getattr(operator_projection_refresh_context, "force_refresh", False)
+        )
+        with operator_projection_cache_lock:
+            cached_projection = operator_projection_cache.get(
+                requested_session_id
+            )
+        if not force_refresh and cached_projection is not None:
+            if (
+                source_revision is not None
+                and cached_projection[0] == source_revision[0]
+            ):
+                return public_operator_projection_for_view(
+                    cached_projection[1],
+                    operator_view,
+                    stale_while_refreshing=False,
+                    decision_valid_until_epoch=source_revision[2],
+                )
+            if source_revision is not None:
+                should_start_refresh = False
+                with operator_projection_cache_lock:
+                    if requested_session_id not in operator_projection_refreshing:
+                        operator_projection_refreshing.add(requested_session_id)
+                        should_start_refresh = True
+                if should_start_refresh:
+
+                    def refresh_operator_projection() -> None:
+                        operator_projection_refresh_context.force_refresh = True
+                        try:
+                            _operator_state_v1_for_session_impl(
+                                requested_session_id,
+                                view="all",
+                            )
+                        except Exception:
+                            pass
+                        finally:
+                            operator_projection_refresh_context.force_refresh = False
+                            with operator_projection_cache_lock:
+                                operator_projection_refreshing.discard(
+                                    requested_session_id
+                                )
+
+                    if background_tasks is not None:
+                        # Starlette starts BackgroundTasks only after the stale
+                        # response body has been sent.  Keeping the expensive
+                        # V3 Inspector rebuild behind that boundary prevents
+                        # its JSON/model work from contending with encoding the
+                        # rollover response that the operator is waiting for.
+                        background_tasks.add_task(refresh_operator_projection)
+                    else:
+                        # Internal callers do not have an ASGI response hook.
+                        # Preserve their non-blocking behavior while sharing
+                        # the same reservation and force-refresh implementation.
+                        threading.Thread(
+                            target=refresh_operator_projection,
+                            name=f"pg-operator-refresh-{_slugify_session_id(requested_session_id)}",
+                            daemon=True,
+                        ).start()
+            return public_operator_projection_for_view(
+                cached_projection[1],
+                operator_view,
+                stale_while_refreshing=True,
+                decision_valid_until_epoch=(
+                    source_revision[2] if source_revision is not None else 0.0
+                ),
+            )
         live_state = build_live_state_v3_for_session(
             requested_session_id,
             overlay_mode=operator_mode,
@@ -5149,20 +6083,9 @@ def create_app(
         compact_live_state = _public_compact_live_state_response(
             _apply_compact_overlay_identity(compact_live_state_response(live_state))
         )
-        tracker = get_window_tracker_service()
-        snapshot_getter = getattr(tracker, "get_session_snapshot", None)
-        try:
-            if callable(snapshot_getter):
-                service_snapshot = snapshot_getter(requested_session_id)
-            else:
-                service_snapshot = tracker.get_session(requested_session_id)
-        except KeyError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Window tracker session not found.",
-            ) from exc
+        projection_context = _bounded_operator_projection_context(live_state)
         projection_input = _merge_operator_projection_input(
-            cast(Mapping[str, object], service_snapshot),
+            projection_context,
             compact_live_state,
         )
         operator_state = build_operator_workspace_v1(projection_input)
@@ -5179,6 +6102,30 @@ def create_app(
             requested_session_id,
             projection_source,
         )
+        authoritative_waiting_for_new_frame = waiting_for_new_frame
+        if safe_snapshot is not None and not authoritative_waiting_for_new_frame:
+            # A cold projection can be rebuilt from an exact-lineage overlay
+            # snapshot while the live-state cache still reflects the prior
+            # accepted frame.  Consult the lightweight session authority before
+            # calling restored geometry current; persistence is intentionally
+            # not part of the pure workspace projector's input contract.
+            try:
+                latest_session = read_window_tracker_session(
+                    requested_session_id
+                )
+            except (KeyError, OSError, ValueError):
+                latest_session = {}
+            latest_visual_observation = _mapping_to_plain_dict(
+                latest_session.get("visual_observation_v3")
+            )
+            authoritative_waiting_for_new_frame = bool(
+                str(latest_visual_observation.get("status") or "")
+                .strip()
+                .upper()
+                == "WAITING_FOR_NEW_FRAME"
+                and latest_visual_observation.get("new_visual_evidence")
+                is not True
+            )
         if waiting_for_new_frame:
             if safe_snapshot is not None:
                 operator_state["overlays"] = _stale_diagnostic_operator_overlays(
@@ -5259,7 +6206,7 @@ def create_app(
                     )
                 )
                 full_projection_input = _merge_operator_projection_input(
-                    cast(Mapping[str, object], service_snapshot),
+                    _bounded_operator_projection_context(full_live_state),
                     full_compact_state,
                 )
                 full_projection_source = cast(
@@ -5307,19 +6254,74 @@ def create_app(
             operator_state.get("overlays"),
             response_frame_id,
         )
-        public_families = _OPERATOR_VIEW_TO_PUBLIC_FAMILIES[operator_view]
-        projected_overlays = operator_state.get("overlays")
-        if public_families is not None and isinstance(projected_overlays, list):
-            public_overlays: list[object] = []
-            for item in cast(list[object], projected_overlays):
-                if not isinstance(item, Mapping):
-                    continue
-                overlay = cast(Mapping[str, object], item)
-                if str(overlay.get("family") or "").strip().lower() in public_families:
-                    public_overlays.append(overlay)
-            operator_state["overlays"] = public_overlays
-        assert operator_state.get("schema_version") == OPERATOR_WORKSPACE_SCHEMA_VERSION
-        return operator_state
+        if authoritative_waiting_for_new_frame and safe_snapshot is not None:
+            # Restored geometry remains visible on the exact broker frame, but
+            # it is still the last valid outlook rather than a newly observed
+            # forecast.  Execution permission is already fail-closed by the
+            # waiting session contract; keep the forecast wording consistent.
+            forecast = _mapping_to_plain_dict(operator_state.get("forecast"))
+            forecast["state"] = "STALE"
+            forecast_direction = str(
+                forecast.get("direction") or ""
+            ).strip().upper()
+            if forecast_direction in {"BUY", "SELL"}:
+                movement_word = (
+                    "upward" if forecast_direction == "BUY" else "downward"
+                )
+                forecast["summary"] = (
+                    f"The last valid model outlook pointed {movement_word}. "
+                    "It is diagnostic only while waiting for a new broker frame."
+                )
+            operator_state["forecast"] = forecast
+        final_source_revision = _operator_projection_source_revision(
+            requested_session_id
+        )
+        response_frame_number = int(_epoch_float(response_frame_id, 0.0))
+        cache_revision: tuple[str, int, float] | None = None
+        if (
+            source_revision is not None
+            and response_frame_number == source_revision[1]
+        ):
+            # The display may advance while a projection is being built.  The
+            # completed response is still safe under its original revision
+            # because its surface URLs and every overlay remain on that frame.
+            cache_revision = source_revision
+        elif (
+            final_source_revision is not None
+            and response_frame_number == final_source_revision[1]
+        ):
+            cache_revision = final_source_revision
+        if cache_revision is not None:
+            with operator_projection_cache_lock:
+                operator_projection_cache[requested_session_id] = (
+                    cache_revision[0],
+                    dict(operator_state),
+                )
+        return public_operator_projection_for_view(
+            operator_state,
+            operator_view,
+            stale_while_refreshing=False,
+            decision_valid_until_epoch=(
+                cache_revision[2]
+                if cache_revision is not None
+                else (
+                    final_source_revision[2]
+                    if final_source_revision is not None
+                    else 0.0
+                )
+            ),
+        )
+
+    def operator_state_v1_for_session(
+        session_id: str,
+        background_tasks: BackgroundTasks,
+        view: str = "live",
+    ) -> dict[str, object]:
+        return _operator_state_v1_for_session_impl(
+            session_id,
+            view=view,
+            background_tasks=background_tasks,
+        )
 
     app.add_api_route(
         "/v1/mobile/operator/state/v1/{session_id}",
@@ -7033,19 +8035,43 @@ def create_app(
     @app.get("/v1/mobile/window-tracker/sessions/{session_id}/health")
     def get_tracker_health(session_id: str) -> dict[str, object]:
         try:
-            tracker = get_window_tracker_service()
-            # probe latest chart and overlay
             artifacts: dict[str, dict[str, object]] = {}
             result: dict[str, object] = {"session_id": session_id, "artifacts": artifacts, "registry_path": None}
-            for kind in ("chart", "overlay", "window"):
-                try:
-                    path = tracker.latest_artifact_path(session_id, kind)
-                    artifacts[kind] = {"path": str(path), "exists": path.exists()}
-                except FileNotFoundError:
-                    artifacts[kind] = {"path": None, "exists": False}
-            worker_health = getattr(tracker, "capture_worker_health_v3", None)
-            if callable(worker_health):
-                result["capture_worker_v3"] = worker_health(session_id)
+            compact_snapshot = _direct_window_tracker_compact_session_snapshot(
+                session_id,
+                require_complete_display_bundle=False,
+            )
+            if compact_snapshot is not None:
+                artifact_values = {
+                    "chart": compact_snapshot.get("last_display_chart_path")
+                    or compact_snapshot.get("last_chart_path"),
+                    "overlay": compact_snapshot.get("last_full_overlay_path")
+                    or compact_snapshot.get("last_overlay_path"),
+                    "window": compact_snapshot.get("last_display_window_path")
+                    or compact_snapshot.get("last_window_path")
+                    or compact_snapshot.get("last_frame_path"),
+                }
+                for kind, value in artifact_values.items():
+                    path_text = str(value or "").strip()
+                    path = Path(path_text) if path_text else None
+                    artifacts[kind] = {
+                        "path": path_text or None,
+                        "exists": bool(path is not None and path.exists()),
+                    }
+                result["capture_worker_v3"] = CaptureWorkerV3Health.from_session(
+                    cast(Mapping[str, Any], compact_snapshot)
+                ).as_dict()
+            else:
+                tracker = get_window_tracker_service()
+                for kind in ("chart", "overlay", "window"):
+                    try:
+                        path = tracker.latest_artifact_path(session_id, kind)
+                        artifacts[kind] = {"path": str(path), "exists": path.exists()}
+                    except FileNotFoundError:
+                        artifacts[kind] = {"path": None, "exists": False}
+                worker_health = getattr(tracker, "capture_worker_health_v3", None)
+                if callable(worker_health):
+                    result["capture_worker_v3"] = worker_health(session_id)
             # registry presence
             try:
                 from phoenixguard.vision.object_registry import REGISTRY_DIR

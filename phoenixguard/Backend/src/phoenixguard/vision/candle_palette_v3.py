@@ -516,16 +516,10 @@ def extract_candle_tracks_v3(
                 roi_width=int(roi.shape[1]),
             )
         )
-    selected, expected_gap = _select_regular_track(
+    return _select_coherent_palette_track(
         candidates,
-        roi_height=int(roi.shape[0]),
-        minimum_track_length=max(2, int(minimum_track_length)),
-    )
-    return _finalize_track(
-        selected,
-        candidates,
-        expected_gap=expected_gap,
         image_height=image_height,
+        image_width=int(roi.shape[1]),
         roi_height=int(roi.shape[0]),
         minimum_track_length=minimum_track_length,
     )
@@ -565,6 +559,139 @@ def _track_quality(track: Sequence[Mapping[str, Any]], image_width: int) -> floa
         + 0.25 * parse_quality
         - 1.50 * continuity
     )
+
+
+def _has_price_geometry_variation(track: Sequence[Mapping[str, Any]]) -> bool:
+    """Reject repeated UI glyph lattices without imposing a candle width floor."""
+
+    if len(track) < 4:
+        return True
+    body_heights = [
+        max(
+            1.0,
+            float(row.get("body_bottom_px", 0.0))
+            - float(row.get("body_top_px", 0.0))
+            + 1.0,
+        )
+        for row in track
+    ]
+    geometry_scale = max(1.0, float(statistics.median(body_heights)))
+    centers = [float(row.get("center_y_px", 0.0)) for row in track]
+    body_tops = [float(row.get("body_top_px", 0.0)) for row in track]
+    body_bottoms = [float(row.get("body_bottom_px", 0.0)) for row in track]
+    wick_tops = [float(row.get("wick_top_px", 0.0)) for row in track]
+    wick_bottoms = [float(row.get("wick_bottom_px", 0.0)) for row in track]
+    vertical_spread = max(
+        max(centers) - min(centers),
+        max(body_tops) - min(body_tops),
+        max(body_bottoms) - min(body_bottoms),
+        max(wick_tops) - min(wick_tops),
+        max(wick_bottoms) - min(wick_bottoms),
+    )
+    height_spread = max(body_heights) - min(body_heights)
+    return (
+        vertical_spread >= max(2.0, 0.35 * geometry_scale)
+        or height_spread >= max(1.0, 0.20 * geometry_scale)
+    )
+
+
+def _select_coherent_palette_track(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    image_height: int,
+    image_width: int,
+    roi_height: int,
+    minimum_track_length: int,
+) -> list[dict[str, Any]]:
+    """Choose a candle-color hypothesis before accepting a regular x lattice.
+
+    Chart chrome can contain hundreds of narrow, regularly spaced colored
+    strokes. If every palette is passed to the x-spacing dynamic program at
+    once, raw lattice length can overwhelm a shorter real candle sequence.
+    Candle colors, however, form a coherent two-state OHLC stream: after the
+    per-image direction assignment, one candle's close stays near the next
+    candle's open. Evaluate every observed palette pair as its own hypothesis,
+    require both colors to occur in the selected stream, and rank completed
+    tracks by that continuity. Width is deliberately *not* a hard gate because
+    legitimate compressed blue/red and blue/green suites can be one pixel wide.
+    """
+
+    rows = [dict(row) for row in candidates]
+    required_length = max(2, int(minimum_track_length))
+    if not rows:
+        return []
+
+    palette_counts = Counter(
+        str(row.get("palette") or "")
+        for row in rows
+        if str(row.get("palette") or "") in PALETTE_DEFAULT_SIDE
+    )
+    present_palettes = [
+        palette
+        for palette in _PALETTE_ORDER
+        if palette_counts.get(palette, 0) >= 2
+    ]
+    pair_tracks: list[tuple[float, list[dict[str, Any]]]] = []
+    for left_palette, right_palette in itertools.combinations(present_palettes, 2):
+        pair = {left_palette, right_palette}
+        pair_candidates = [
+            row for row in rows if str(row.get("palette") or "") in pair
+        ]
+        selected, expected_gap = _select_regular_track(
+            pair_candidates,
+            roi_height=roi_height,
+            minimum_track_length=required_length,
+        )
+        if len(selected) < required_length:
+            continue
+        selected_counts = Counter(str(row.get("palette") or "") for row in selected)
+        # A stray colored glyph must not turn a one-color UI lattice into a
+        # supposed candle pair. The fractional floor scales for long live
+        # tracks while retaining short or strongly trending candle sequences.
+        minimum_pair_support = max(2, int(math.ceil(0.04 * len(selected))))
+        if any(selected_counts.get(palette, 0) < minimum_pair_support for palette in pair):
+            continue
+        track = _finalize_track(
+            selected,
+            pair_candidates,
+            expected_gap=expected_gap,
+            image_height=image_height,
+            roi_height=roi_height,
+            minimum_track_length=minimum_track_length,
+        )
+        if len(track) < required_length or not _has_price_geometry_variation(track):
+            continue
+        pair_tracks.append((_track_quality(track, image_width), track))
+
+    if pair_tracks:
+        _score, selected_pair = max(
+            pair_tracks,
+            key=lambda item: (item[0], len(item[1])),
+        )
+        return selected_pair
+
+    # Single-color runs and very short minority-color trends remain valid.
+    # They use the prior all-palette behavior only when no genuine two-color
+    # hypothesis survived the participation invariant above.
+    selected, expected_gap = _select_regular_track(
+        rows,
+        roi_height=roi_height,
+        minimum_track_length=required_length,
+    )
+    fallback = _finalize_track(
+        selected,
+        rows,
+        expected_gap=expected_gap,
+        image_height=image_height,
+        roi_height=roi_height,
+        minimum_track_length=minimum_track_length,
+    )
+    fallback_palettes = {
+        str(row.get("palette") or "") for row in fallback
+    }
+    if len(fallback_palettes) >= 2 and not _has_price_geometry_variation(fallback):
+        return []
+    return fallback
 
 
 def extract_candle_tracks_adaptive_v3(
@@ -624,16 +751,10 @@ def extract_candle_tracks_adaptive_v3(
             if float(cast(Sequence[Any], row["bbox"])[1]) >= y0
             and float(cast(Sequence[Any], row["bbox"])[3]) < y1
         ]
-        selected, expected_gap = _select_regular_track(
+        track = _select_coherent_palette_track(
             band_candidates,
-            roi_height=y1 - y0,
-            minimum_track_length=max(2, int(minimum_track_length)),
-        )
-        track = _finalize_track(
-            selected,
-            band_candidates,
-            expected_gap=expected_gap,
             image_height=height,
+            image_width=x1 - x0,
             roi_height=y1 - y0,
             minimum_track_length=minimum_track_length,
         )

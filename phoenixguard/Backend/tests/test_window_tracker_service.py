@@ -2960,6 +2960,132 @@ def test_window_tracker_rejects_garbled_broker_markettext() -> None:
     assert normalize("W D0CR01ILJI . /JFW1 P IY W P 1") == ""
 
 
+def _paint_realistic_market_selector(image: Image.Image, text: str) -> None:
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+    draw.rectangle(
+        (
+            int(round(width * 0.055)),
+            int(round(height * 0.10)),
+            int(round(width * 0.21)),
+            int(round(height * 0.19)),
+        ),
+        fill=(29, 38, 58),
+    )
+    draw.text(
+        (int(round(width * 0.069)), int(round(height * 0.119))),
+        text,
+        fill=(235, 240, 248),
+    )
+
+
+def test_live_selector_lane_reads_pair_and_m5_despite_toolbar_clutter() -> None:
+    cv2: Any = pytest.importorskip("cv2")
+    width, height = 1628, 861
+    pixels = np.full((height, width, 3), (21, 26, 38), dtype=np.uint8)
+
+    # The first row is the broker watch-list and must never be concatenated
+    # with the authoritative selected-pair control below it.
+    cv2.putText(
+        pixels,
+        "AUD/CHF NZD/JPY OTC",
+        (45, 48),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.70,
+        (235, 240, 248),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.rectangle(pixels, (90, 86), (269, 164), (29, 38, 58), -1)
+    cv2.putText(
+        pixels,
+        "GBP/USD OTC",
+        (105, 137),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (235, 240, 248),
+        2,
+        cv2.LINE_AA,
+    )
+
+    # Model the compact M5 badge overlapping neighboring blue toolbar chrome.
+    # Its tiny glyph must survive extraction without being morphed into a
+    # solid M1/M3-looking block.
+    cv2.rectangle(pixels, (263, 98), (335, 140), (25, 110, 210), -1)
+    cv2.rectangle(pixels, (270, 104), (328, 136), (29, 38, 58), -1)
+    cv2.rectangle(pixels, (297, 99), (323, 119), (25, 110, 210), -1)
+    cv2.putText(
+        pixels,
+        "M5",
+        (299, 115),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (248, 250, 255),
+        1,
+        cv2.LINE_AA,
+    )
+    cv2.circle(pixels, (284, 126), 8, (248, 250, 255), 2, cv2.LINE_AA)
+
+    surface = Image.fromarray(pixels, mode="RGB")
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    detect_timeframe = cast(
+        Callable[[Image.Image], dict[str, Any]],
+        getattr(adapter, "_detect_timeframe_selector"),
+    )
+    detect_market = cast(
+        Callable[..., dict[str, Any]],
+        getattr(adapter, "_detect_market_selector"),
+    )
+
+    timeframe = detect_timeframe(surface)
+    market = detect_market(surface, timeframe_selector=timeframe)
+
+    assert timeframe["value"] == "M5"
+    assert float(timeframe["confidence"]) >= 0.42
+    assert market["value"] == "GBP/USD OTC"
+    assert float(market["confidence"]) >= 0.42
+    assert str(market["raw_text"]).replace(" ", "") == "GBP/USDOTC"
+
+
+def test_market_ocr_domain_decoder_repairs_ambiguous_currency_glyphs_only() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    decode = cast(
+        Callable[[Sequence[Sequence[tuple[str, float]]]], tuple[str, float, float]],
+        getattr(adapter, "_decode_fx_market_rankings"),
+    )
+    observed = "EHF/JPYOTE"
+    expected = "CHF/JPYOTC"
+    rankings: list[list[tuple[str, float]]] = []
+    for observed_label, expected_label in zip(observed, expected):
+        if observed_label == expected_label:
+            rankings.append([(expected_label, 0.82), ("X", 0.18)])
+        else:
+            rankings.append([(observed_label, 0.84), (expected_label, 0.79), ("X", 0.16)])
+
+    decoded, score, margin = decode(rankings)
+
+    assert decoded == "CHF/JPY OTC"
+    assert score >= 0.60
+    assert margin >= 0.012
+    ambiguous = [[("X", 0.55), ("/", 0.54), ("O", 0.54), ("T", 0.54), ("C", 0.54)]] * 10
+    assert decode(ambiguous)[0] == ""
+
+
+def test_market_selector_fingerprint_ignores_live_candle_motion() -> None:
+    fingerprint = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_market_selector_visual_fingerprint"),
+    )
+    buy_surface = _synthetic_chart_surface("buy", width=900, height=520)
+    sell_surface = _synthetic_chart_surface("sell", width=900, height=520)
+    _paint_realistic_market_selector(buy_surface, "CAD/JPY OTC")
+    _paint_realistic_market_selector(sell_surface, "CAD/JPY OTC")
+
+    buy_fingerprint = fingerprint(buy_surface)
+    assert buy_fingerprint.startswith("selector_v2_")
+    assert fingerprint(sell_surface) == buy_fingerprint
+
+
 def test_window_tracker_reuses_cached_market_only_when_selector_fingerprint_matches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2969,9 +3095,7 @@ def test_window_tracker_reuses_cached_market_only_when_selector_fingerprint_matc
         getattr(window_tracker_module, "_market_selector_visual_fingerprint"),
     )
     surface = _synthetic_chart_surface("buy", width=900, height=520)
-    draw = ImageDraw.Draw(surface)
-    draw.rectangle((4, 4, 176, 34), fill=(29, 38, 58))
-    draw.text((12, 12), "AUD/NZD OTC", fill=(235, 240, 248))
+    _paint_realistic_market_selector(surface, "AUD/NZD OTC")
     selector_fingerprint = fingerprint(surface)
 
     def fail_market_detector(
@@ -3020,16 +3144,19 @@ def test_window_tracker_rebinds_market_when_selector_fingerprint_changes(
     )
     old_surface = _synthetic_chart_surface("buy", width=900, height=520)
     new_surface = _synthetic_chart_surface("sell", width=900, height=520)
-    old_draw = ImageDraw.Draw(old_surface)
-    new_draw = ImageDraw.Draw(new_surface)
-    old_draw.rectangle((4, 4, 176, 34), fill=(29, 38, 58))
-    old_draw.text((12, 12), "AUD/NZD OTC", fill=(235, 240, 248))
-    new_draw.rectangle((4, 4, 176, 34), fill=(29, 38, 58))
-    new_draw.text((12, 12), "EUR/USD OTC", fill=(235, 240, 248))
+    _paint_realistic_market_selector(old_surface, "AUD/NZD OTC")
+    _paint_realistic_market_selector(new_surface, "EUR/USD OTC")
     previous_fingerprint = fingerprint(old_surface)
     assert previous_fingerprint != fingerprint(new_surface)
 
     detector_calls = 0
+    timeframe_detector_calls = 0
+
+    def detect_timeframe_selector(image: Image.Image) -> dict[str, Any]:
+        nonlocal timeframe_detector_calls
+        _ = image
+        timeframe_detector_calls += 1
+        return {"value": "M5", "source": "selector_chip", "confidence": 0.93}
 
     def detect_market_selector(
         image: Image.Image,
@@ -3041,6 +3168,7 @@ def test_window_tracker_rebinds_market_when_selector_fingerprint_changes(
         detector_calls += 1
         return {"value": "EUR/USD OTC", "source": "header_text", "confidence": 0.93}
 
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", detect_timeframe_selector)
     monkeypatch.setattr(adapter, "_detect_market_selector", detect_market_selector)
     study = adapter.study(
         new_surface,
@@ -3050,14 +3178,14 @@ def test_window_tracker_rebinds_market_when_selector_fingerprint_changes(
             "tracking_summary": {
                 "detected_market": "AUD/NZD",
                 "market_confidence": 0.91,
-                "detected_timeframe": "M5",
+                "detected_timeframe": "M1",
                 "timeframe_confidence": 1.0,
                 "market_selector_visual_fingerprint": previous_fingerprint,
             },
             "latest_signal": {
                 "market": "AUD/NZD",
                 "market_confidence": 0.91,
-                "focus_timeframe": "M5",
+                "focus_timeframe": "M1",
                 "focus_timeframe_confidence": 1.0,
                 "market_selector_visual_fingerprint": previous_fingerprint,
             },
@@ -3065,10 +3193,289 @@ def test_window_tracker_rebinds_market_when_selector_fingerprint_changes(
     )
 
     assert detector_calls == 1
+    assert timeframe_detector_calls == 1
     assert study.latest_signal["market"] == "EUR/USD OTC"
     assert study.latest_signal["market_source"] == "header_text"
+    assert study.latest_signal["focus_timeframe"] == "M5"
     assert study.latest_signal["market_selector_visual_changed"] is True
     assert study.tracking_summary["detected_market"] == "EUR/USD OTC"
+    assert study.tracking_summary["detected_timeframe"] == "M5"
+
+
+def test_window_tracker_fails_closed_and_retries_ocr_after_unread_pair_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    fingerprint = cast(
+        Callable[[Image.Image], str],
+        getattr(window_tracker_module, "_market_selector_visual_fingerprint"),
+    )
+    old_surface = _synthetic_chart_surface("buy", width=900, height=520)
+    new_surface = _synthetic_chart_surface("sell", width=900, height=520)
+    _paint_realistic_market_selector(old_surface, "AUD/NZD OTC")
+    _paint_realistic_market_selector(new_surface, "EUR/USD OTC")
+    previous_fingerprint = fingerprint(old_surface)
+    detector_calls = 0
+    timeframe_detector_calls = 0
+
+    def confirmed_timeframe(_image: Image.Image) -> dict[str, Any]:
+        nonlocal timeframe_detector_calls
+        timeframe_detector_calls += 1
+        return {"value": "M1", "source": "selector_chip", "confidence": 0.93}
+
+    def unread_selector(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal detector_calls
+        detector_calls += 1
+        return {}
+
+    monkeypatch.setattr(adapter, "_detect_timeframe_selector", confirmed_timeframe)
+    monkeypatch.setattr(adapter, "_detect_market_selector", unread_selector)
+    first = adapter.study(
+        new_surface,
+        session_payload={
+            "session_id": "pocket-live",
+            "manual_focus_region": {"enabled": True},
+            "tracking_summary": {
+                "detected_market": "AUD/NZD OTC",
+                "market_confidence": 0.91,
+                "detected_timeframe": "M1",
+                "timeframe_confidence": 0.91,
+                "market_selector_visual_fingerprint": previous_fingerprint,
+            },
+            "latest_signal": {
+                "market": "AUD/NZD OTC",
+                "market_confidence": 0.91,
+                "focus_timeframe": "M1",
+                "market_selector_visual_fingerprint": previous_fingerprint,
+            },
+        },
+    )
+
+    first_scene = cast(Mapping[str, Any], first.latest_signal["scene_forecast_contribution"])
+    assert detector_calls == 1
+    assert first.latest_signal["market"] == ""
+    assert first.latest_signal["market_selector_rebind_required"] is True
+    assert first.latest_signal["market_selector_studying_new_pair"] is True
+    assert first_scene["provider_status"] == "MARKET_IDENTITY_PENDING"
+    assert first_scene["forecast_available"] is False
+    assert first_scene["line_points"] == []
+    assert first_scene["forecast_candles"] == []
+
+    def rebound_selector(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal detector_calls
+        detector_calls += 1
+        return {
+            "value": "EUR/USD OTC",
+            "source": "header_text",
+            "confidence": 0.93,
+        }
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", rebound_selector)
+    second = adapter.study(
+        new_surface,
+        session_payload={
+            "session_id": "pocket-live",
+            "manual_focus_region": {"enabled": True},
+            "tracking_summary": first.tracking_summary,
+            "latest_signal": first.latest_signal,
+        },
+    )
+
+    second_scene = cast(Mapping[str, Any], second.latest_signal["scene_forecast_contribution"])
+    assert detector_calls == 2
+    assert timeframe_detector_calls == 2
+    assert second.latest_signal["market"] == "EUR/USD OTC"
+    assert second.latest_signal["market_selector_rebind_required"] is False
+    assert second.latest_signal["market_selector_studying_new_pair"] is False
+    assert second.latest_signal["market_selector_identity_rebound"] is True
+    assert second_scene["pair"] == "EUR/USD OTC"
+    assert second_scene["timeframe"] == "M1"
+    assert second_scene["identity_contract_status"] == "CONFIRMED"
+
+
+def test_scene_forecast_uses_confirmed_chart_timeframe_not_hf_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def capture_scene(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        line = [[0.40 + index * 0.02, 0.55 - index * 0.005] for index in range(13)]
+        candles = [
+            {
+                "step": index,
+                "label": f"E{index}",
+                "x_norm": line[index][0],
+                "open_y_norm": line[index - 1][1],
+                "high_y_norm": min(line[index - 1][1], line[index][1]) - 0.002,
+                "low_y_norm": max(line[index - 1][1], line[index][1]) + 0.002,
+                "close_y_norm": line[index][1],
+                "movement_side": "BUY",
+                "body_bias": "BUY",
+            }
+            for index in range(1, 13)
+        ]
+        return {
+            "path_side": "BUY",
+            "side": "BUY",
+            "probability_calibrated": False,
+            "raw_side_probabilities": {"BUY": 0.58, "HOLD": 0.24, "SELL": 0.18},
+            "line_points": line,
+            "forecast_candles": candles,
+            "forecast_scenarios": [
+                {
+                    "role": role,
+                    "side": "BUY",
+                    "probability": probability,
+                    "selected": role == "base",
+                    "line_points": line,
+                    "forecast_candles": candles,
+                }
+                for role, probability in (("base", 0.58), ("bull", 0.24), ("bear", 0.18))
+            ],
+            "model_version": "TEST_SCENE_FORECASTER",
+        }
+
+    monkeypatch.setattr(
+        window_tracker_module,
+        "build_scene_forecast_contribution_v3",
+        capture_scene,
+    )
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    chart = _synthetic_chart_surface("buy")
+    candles = _manual_candle_tracks(
+        [300, 286, 272, 258, 244, 230, 216, 202],
+        image_width=chart.width,
+        image_height=chart.height,
+        direction="BUY",
+    )
+    build_payloads = cast(_BuildSignalPayloads, getattr(adapter, "_build_signal_payloads"))
+
+    tracking, signal = build_payloads(
+        chart,
+        {
+            "confidence": 1.0,
+            "pixel_bbox": [0, 0, chart.width, chart.height],
+            "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+            "width": chart.width,
+            "height": chart.height,
+        },
+        candles,
+        {"value": "M1", "source": "ocr", "confidence": 0.42},
+        market_selector={"value": "NZD/USD OTC", "source": "header_text", "confidence": 0.42},
+        session_payload={
+            "session_id": "pocket-live",
+            "frame_index": 940,
+            "execution_controls": {"high_frequency_timeframe": "M5"},
+        },
+    )
+
+    scene = cast(Mapping[str, Any], signal["scene_forecast_contribution"])
+    assert tracking["detected_timeframe"] == "M1"
+    assert tracking["high_frequency_study_timeframe"] == "M5"
+    assert captured["timeframe"] == "M1"
+    assert captured["pair"] == "NZD/USD OTC"
+    assert scene["timeframe"] == "M1"
+    assert scene["pair"] == "NZD/USD OTC"
+    assert scene["market_identity_confirmed"] is True
+    assert scene["timeframe_identity_confirmed"] is True
+
+
+@pytest.mark.parametrize("identity_confidence", (0.0, 0.419))
+def test_scene_forecast_low_confidence_identity_publishes_no_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+    identity_confidence: float,
+) -> None:
+    def unexpected_scene(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("low-confidence OCR must not invoke the scene forecaster")
+
+    monkeypatch.setattr(
+        window_tracker_module,
+        "build_scene_forecast_contribution_v3",
+        unexpected_scene,
+    )
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    chart = _synthetic_chart_surface("buy")
+    candles = _manual_candle_tracks(
+        [300, 286, 272, 258, 244, 230, 216, 202],
+        image_width=chart.width,
+        image_height=chart.height,
+        direction="BUY",
+    )
+    build_payloads = cast(_BuildSignalPayloads, getattr(adapter, "_build_signal_payloads"))
+
+    _tracking, signal = build_payloads(
+        chart,
+        {"confidence": 1.0, "pixel_bbox": [0, 0, chart.width, chart.height]},
+        candles,
+        {"value": "M1", "source": "ocr", "confidence": identity_confidence},
+        market_selector={
+            "value": "NZD/USD OTC",
+            "source": "header_text",
+            "confidence": identity_confidence,
+        },
+        session_payload={"execution_controls": {"high_frequency_timeframe": "M5"}},
+    )
+
+    scene = cast(Mapping[str, Any], signal["scene_forecast_contribution"])
+    assert scene["provider_status"] == "MARKET_IDENTITY_PENDING"
+    assert scene["identity_contract_status"] == "PENDING"
+    assert scene["forecast_available"] is False
+    assert scene["line_points"] == []
+    assert scene["forecast_candles"] == []
+    assert scene["market_identity_confirmed"] is False
+    assert scene["timeframe_identity_confirmed"] is False
+
+
+def test_forecast_snapshot_does_not_revive_previous_pair_while_ocr_is_pending() -> None:
+    snapshot_builder = cast(
+        Callable[..., dict[str, Any]],
+        getattr(window_tracker_module, "_forecast_snapshot_v3"),
+    )
+    old_line = [[index / 12.0, 0.5] for index in range(13)]
+    old_candles = [{"step": index} for index in range(1, 13)]
+    pending = cast(
+        Callable[..., dict[str, Any]],
+        getattr(window_tracker_module, "_scene_forecast_identity_pending_v3"),
+    )(
+        pair="",
+        timeframe="M1",
+        frame_id=941,
+        reason="MARKET_OCR_NOT_CONFIRMED",
+        market_identity_confirmed=False,
+        timeframe_identity_confirmed=True,
+    )
+
+    snapshot = snapshot_builder(
+        {
+            "display_frame_id": 941,
+            "frame_index": 941,
+            "latest_signal": {
+                "market": "",
+                "focus_timeframe": "M1",
+                "market_selector_rebind_required": True,
+                "market_selector_studying_new_pair": True,
+                "scene_forecast_contribution": pending,
+            },
+            "model_council_study_packet": {
+                "scene_forecast_contribution": {
+                    "pair": "NZD/USD OTC",
+                    "timeframe": "M1",
+                    "frame_id": 940,
+                    "forecast_available": True,
+                    "line_points": old_line,
+                    "forecast_candles": old_candles,
+                }
+            },
+        }
+    )
+
+    scene = cast(Mapping[str, Any], snapshot["scene_forecast_contribution"])
+    assert snapshot["status"] == "MARKET_IDENTITY_PENDING"
+    assert snapshot["source_frame_id"] == 941
+    assert snapshot["identity_contract_status"] == "PENDING"
+    assert scene.get("line_points", []) == []
+    assert scene.get("forecast_candles", []) == []
 
 
 def test_window_tracker_candle_count_increases_probability_sample_weight() -> None:
@@ -3261,7 +3668,10 @@ def test_window_tracker_builds_memory_projection_payload(monkeypatch: Any) -> No
     assert payload["market"] == "GBP/JPY OTC"
 
 
-def test_tracker_memory_projection_actions_persist_and_go_stale(tmp_path: Path, monkeypatch: Any) -> None:
+def test_tracker_memory_projection_actions_persist_as_snapshot_when_chart_advances(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     entries = _materialize_memory_images(tmp_path / "memory-images", _sample_memory_entries())
     monkeypatch.setattr(adapter, "_get_phoenixguard_memory_bank", lambda: _StubPhoenixBank(entries))
@@ -3304,9 +3714,13 @@ def test_tracker_memory_projection_actions_persist_and_go_stale(tmp_path: Path, 
     assert Path(str(future["memory_projection_current"]["projection_image_path"])).is_file()
 
     refreshed = tracker.capture_once(str(session["session_id"]))
-    assert refreshed["memory_projection_future"]["status"] == "stale"
+    assert refreshed["memory_projection_future"]["status"] == "ready"
     assert refreshed["memory_projection_future"]["is_current"] is False
-    assert "Run Show Future again" in str(refreshed["memory_projection_future"]["summary"])
+    assert refreshed["memory_projection_future"]["snapshot_ready"] is True
+    assert refreshed["memory_projection_future"]["source_frame_age"] >= 1
+    assert refreshed["memory_projection_future"]["trade_authorized"] is False
+    assert refreshed["memory_projection_future"]["actionable"] is False
+    assert refreshed["memory_projection_future"]["execution_permission"] == "WAIT_FOR_CONFIRMATION"
     assert refreshed["latest_signal"]["market"] == "GBP/JPY OTC"
 
 
@@ -4983,6 +5397,368 @@ def test_new_forecast_frame_advances_retained_snapshot_epoch() -> None:
     assert cast(dict[str, Any], snapshot["lstm_contribution"])["path_side"] == "BUY"
 
 
+def test_lstm_composite_forecast_survives_bounded_cold_persistence(tmp_path: Path) -> None:
+    root_dir = tmp_path / "lstm-composite-cold-persistence"
+    tracker = ContinuousWindowTrackerService(root_dir=root_dir)
+    session_id = "lstm-composite-cold-persistence"
+    tracker.create_session(session_id=session_id)
+
+    anchor_location = 0.625
+    interval_metadata = {
+        "status": "READY",
+        "calibrated": True,
+        "method": "SOURCE_BLOCKED_PATHWISE_CONFORMAL",
+        "quantile": 0.0475,
+        "source_count": 42,
+        "coverage": 0.902,
+    }
+    forecast_path = [
+        {
+            "step": step,
+            "event": f"CANDLE_EVENT_{step}",
+            "direction": "BUY",
+            "direction_semantics": "CUMULATIVE_CLOSE_FROM_ANCHOR",
+            "movement_direction": "BUY",
+            "horizon_position_direction": "BUY",
+            "path_buy_probability": round(0.70 + step * 0.01, 4),
+            "path_sell_probability": round(0.30 - step * 0.01, 4),
+            "confidence": round(0.80 - step * 0.01, 4),
+            "expected_open_norm": anchor_location if step == 1 else round(anchor_location + (step - 1) * 0.01, 4),
+            "expected_close_norm": round(anchor_location + step * 0.01, 4),
+            "close_lower_90_norm": round(anchor_location + step * 0.01 - 0.0475, 4),
+            "close_upper_90_norm": round(anchor_location + step * 0.01 + 0.0475, 4),
+            "interval_calibrated": True,
+            "interval_method": "SOURCE_BLOCKED_PATHWISE_CONFORMAL",
+        }
+        for step in range(1, 13)
+    ]
+    scenario_directions = {"BUY": 1.0, "SELL": -1.0, "HOLD": 0.0}
+    scenario_probabilities = {"BUY": 0.52, "SELL": 0.31, "HOLD": 0.17}
+    trajectory_scenarios: list[dict[str, Any]] = []
+    expected_scenario_paths: dict[str, list[dict[str, Any]]] = {}
+    for scenario_side, direction in scenario_directions.items():
+        scenario_path = [
+            {
+                "step": step,
+                "event": f"CANDLE_EVENT_{step}",
+                "expected_close_norm": round(anchor_location + direction * step * 0.006, 6),
+                "expected_delta_norm": round(direction * 0.006, 6),
+                "expected_cumulative_delta_norm": round(direction * step * 0.006, 6),
+                "cumulative_scale_norm": round(0.012 + step * 0.001, 6),
+                # A forecast snapshot may retain drawing values, never the
+                # decoder's unrelated internal representation.
+                "latent_vector": [scenario_side, step, "private"],
+            }
+            for step in range(1, 13)
+        ]
+        expected_scenario_paths[scenario_side] = [
+            {key: value for key, value in row.items() if key != "latent_vector"}
+            for row in scenario_path
+        ]
+        trajectory_scenarios.append(
+            {
+                "side": scenario_side,
+                "probability": scenario_probabilities[scenario_side],
+                "probability_calibrated": False,
+                "selected": scenario_side == "BUY",
+                "path_target_semantics": "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR",
+                # Deliberately reversed: the snapshot owns ordered events.
+                "forecast_path": list(reversed(scenario_path)),
+                "artifact_path": rf"C:\private\{scenario_side.lower()}-decoder.pt",
+                "raw_payload": {"secret": scenario_side},
+            }
+        )
+    payload = tracker.load_session_payload(session_id)
+    payload.update(
+        {
+            "frame_index": 42,
+            "display_frame_id": 42,
+            "model_vote_frame_id": 42,
+            "model_capture_epoch": 1_720_000_042.0,
+            "visual_observation_v3": {
+                "status": "NEW_FRAME",
+                "new_visual_evidence": True,
+            },
+            "tracking_summary": {
+                "lstm_contribution": {
+                    "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+                    "frame_id": 42,
+                    "fresh": True,
+                    "forecast_available": True,
+                    "confidence": 0.8123,
+                    "side": "BUY",
+                    "path_side": "BUY",
+                    "path_target_semantics": "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR",
+                    "trajectory_modes": 3,
+                    "trajectory_decoder_status": "AVAILABLE",
+                    "trajectory_mode": "BUY",
+                    "trajectory_mode_probabilities": scenario_probabilities,
+                    "trajectory_mode_probability_calibrated": False,
+                    "trajectory_scenarios": trajectory_scenarios,
+                    "path_confidence": 0.823456,
+                    "path_confidence_status": "READY",
+                    "direction_conflict": False,
+                    "selective_side": "BUY",
+                    "selective_status": "AUTHORIZED",
+                    "selective_authorized": True,
+                    "horizon_steps": 12,
+                    "source_image_size": [1632, 863],
+                    "features": [
+                        {
+                            "index": index,
+                            "relative_price_location": anchor_location if index == 19 else 0.4 + index * 0.01,
+                        }
+                        for index in range(20)
+                    ],
+                    # Exercise the persistence sorter rather than relying on
+                    # the producer to have serialized the events in order.
+                    "forecast_path": list(reversed(forecast_path)),
+                    "trajectory_interval_status": "READY",
+                    "trajectory_interval": interval_metadata,
+                    "artifact_path": r"C:\private\lstm.pt",
+                    "dense_history": ["x" * 1024 for _ in range(64)],
+                    "unrelated_raw_payload": {"secret": "never persist"},
+                }
+            },
+        }
+    )
+    full_lstm = cast(dict[str, Any], cast(dict[str, Any], payload["tracking_summary"])["lstm_contribution"])
+    repeated_diagnostics = [
+        {"index": index, "raw_payload": "diagnostic-only-" + ("x" * 2048)}
+        for index in range(64)
+    ]
+    book_strategy = {
+        "state": "WATCHING",
+        "side": "BUY",
+        "denied_at": "TIMING_WAIT",
+        "next_required": "wait for the retest",
+        "strategy_read": {
+            "playbook": "BREAK_AND_RETEST",
+            "side": "BUY",
+            "playbook_ai_intelligence_v3": {"raw_payload": repeated_diagnostics},
+        },
+        "lstm_council_evidence_v3": full_lstm,
+    }
+    promotion_trace = {
+        "candidate_stage": "WATCHING",
+        "promotion_result": "BLOCKED",
+        "denied_at": "TIMING_WAIT",
+        "next_required": "wait for the retest",
+        "promotion_failure_audit_v3": {"failed_gate": "TIMING_WAIT"},
+        "book_strategy": book_strategy,
+        "opportunity_maturity": {
+            "state": "WATCHING",
+            "book_strategy": book_strategy,
+            "professional_trade_plan": {"raw_payload": repeated_diagnostics},
+            "lstm_council_evidence_v3": full_lstm,
+        },
+        "allowance_package": {
+            "accepted": False,
+            "professional_trade_plan": {"raw_payload": repeated_diagnostics},
+            "lstm_council_evidence_v3": full_lstm,
+        },
+        "lstm_council_evidence_v3": full_lstm,
+    }
+    sequence_context = {
+        "sequence_id": "sequence-42",
+        "sequence_status": "TRACKING",
+        "tracking_summary": payload["tracking_summary"],
+        "progression": [{"frame_id": index, "side": "BUY"} for index in range(32)],
+    }
+    model_council = {
+        "candidate_stage": "WATCHING",
+        "final_state": "WATCHING",
+        "final_side": "BUY",
+        "denied_at": "TIMING_WAIT",
+        "next_required": "wait for the retest",
+        "sequence_context": sequence_context,
+        "promotion_trace": promotion_trace,
+        "book_strategy": book_strategy,
+        "strategy_read": book_strategy["strategy_read"],
+        "lstm_contribution": full_lstm,
+    }
+    payload["latest_signal"] = {
+        "status": "tracking",
+        "action": "BUY",
+        "lstm_contribution": full_lstm,
+    }
+    payload["model_council"] = model_council
+    payload["model_council_result"] = {
+        **model_council,
+        "model_council": model_council,
+        "opportunity_maturity": promotion_trace["opportunity_maturity"],
+        "allowance_package": promotion_trace["allowance_package"],
+    }
+    payload["model_council_study_packet"] = {
+        **model_council,
+        "schema_version": "PG_MODEL_COUNCIL_STUDY_V3",
+        "packet_type": "STUDY_PACKET",
+        "packet_id": "study-42",
+        "session_id": session_id,
+    }
+    tracker.save_session(payload)
+
+    persisted_path = tracker.session_dir(session_id) / "session.json"
+    persisted_bytes = persisted_path.read_bytes()
+    assert len(persisted_bytes) < 1_000_000
+    assert persisted_bytes.count(b'"forecast_path"') == 4
+    assert persisted_bytes.count(b'"trajectory_scenarios"') == 1
+    assert persisted_bytes.count(b'"features"') == 1
+
+    compact_decision = window_tracker_module._compact_persisted_decision_payload(  # pyright: ignore[reportPrivateUsage]
+        {
+            "session_id": session_id,
+            "frame_index": 42,
+            "display_frame_id": 42,
+            "model_vote_frame_id": 42,
+            "model_capture_epoch": 1_720_000_042.0,
+            "visual_observation_v3": payload["visual_observation_v3"],
+            "tracking_summary": payload["tracking_summary"],
+            "latest_signal": payload["latest_signal"],
+            "model_council_result": payload["model_council_result"],
+            "model_council": payload["model_council"],
+            "model_council_study_packet": payload["model_council_study_packet"],
+        }
+    )
+    decision_path = tracker.session_dir(session_id) / "artifacts" / "deduplicated_decision.json"
+    write_json_atomic(decision_path, compact_decision)
+    decision_bytes = decision_path.read_bytes()
+    assert len(decision_bytes) < 1_000_000
+    assert decision_bytes.count(b'"forecast_path"') == 4
+    assert decision_bytes.count(b'"trajectory_scenarios"') == 1
+    assert decision_bytes.count(b'"features"') == 1
+    tracker.shutdown()
+
+    cold_tracker = ContinuousWindowTrackerService(root_dir=root_dir)
+    persisted = cold_tracker.load_session_payload(session_id)
+    snapshot = cast(dict[str, Any], persisted["forecast_snapshot_v3"])
+    lstm = cast(dict[str, Any], snapshot["lstm_contribution"])
+    retained_path = cast(list[dict[str, Any]], lstm["forecast_path"])
+
+    assert [row["step"] for row in retained_path] == list(range(1, 13))
+    assert retained_path == forecast_path
+    assert lstm["horizon_steps"] == 12
+    assert lstm["path_target_semantics"] == "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR"
+    assert lstm["trajectory_modes"] == 3
+    assert lstm["trajectory_decoder_status"] == "AVAILABLE"
+    assert lstm["trajectory_mode"] == "BUY"
+    assert lstm["trajectory_mode_probabilities"] == scenario_probabilities
+    assert lstm["trajectory_mode_probability_calibrated"] is False
+    assert lstm["path_confidence"] == 0.823456
+    assert lstm["path_confidence_status"] == "READY"
+    assert lstm["confidence"] == 0.8123
+    assert lstm["trajectory_interval_status"] == "READY"
+    assert lstm["trajectory_interval"] == interval_metadata
+    retained_features = cast(list[dict[str, Any]], lstm["features"])
+    assert len(retained_features) == 8
+    assert retained_features[-1]["relative_price_location"] == anchor_location
+    assert retained_path[0]["expected_open_norm"] == anchor_location
+    assert "artifact_path" not in lstm
+    assert "dense_history" not in lstm
+    assert "unrelated_raw_payload" not in lstm
+    assert cast(dict[str, Any], persisted["model_council_result"])["promotion_trace"]["next_required"] == (
+        "wait for the retest"
+    )
+    compact_nested_council = cast(
+        dict[str, Any],
+        cast(dict[str, Any], persisted["model_council_result"])["model_council"],
+    )
+    assert cast(dict[str, Any], compact_nested_council["sequence_context"])["sequence_id"] == "sequence-42"
+    assert "tracking_summary" not in cast(dict[str, Any], compact_nested_council["sequence_context"])
+
+    retained_scenarios = cast(list[dict[str, Any]], lstm["trajectory_scenarios"])
+    assert [scenario["side"] for scenario in retained_scenarios] == [
+        "BUY",
+        "SELL",
+        "HOLD",
+    ]
+    for scenario in retained_scenarios:
+        scenario_side = str(scenario["side"])
+        scenario_path = cast(list[dict[str, Any]], scenario["forecast_path"])
+        assert [row["step"] for row in scenario_path] == list(range(1, 13))
+        assert scenario_path == expected_scenario_paths[scenario_side]
+        assert "artifact_path" not in scenario
+        assert "raw_payload" not in scenario
+        assert all("latent_vector" not in row for row in scenario_path)
+
+    compact_path = cold_tracker.session_dir(session_id) / "compact_live_state.json"
+    compact = json.loads(compact_path.read_text(encoding="utf-8"))
+    compact_lstm = cast(
+        dict[str, Any],
+        cast(dict[str, Any], compact["forecast_snapshot_v3"])["lstm_contribution"],
+    )
+    assert [row["step"] for row in compact_lstm["forecast_path"]] == list(range(1, 13))
+    assert len(compact_lstm["forecast_path"]) <= 12
+    compact_scenarios = cast(list[dict[str, Any]], compact_lstm["trajectory_scenarios"])
+    assert len(compact_scenarios) == 3
+    for scenario in compact_scenarios:
+        scenario_side = str(scenario["side"])
+        scenario_path = cast(list[dict[str, Any]], scenario["forecast_path"])
+        assert [row["step"] for row in scenario_path] == list(range(1, 13))
+        assert scenario_path == expected_scenario_paths[scenario_side]
+    assert compact_path.stat().st_size < 256 * 1024
+
+
+def test_compact_persisted_scene_forecast_keeps_drawable_geometry() -> None:
+    line_points = [[round(0.52 + index * 0.02, 6), round(0.48 - index * 0.003, 6)] for index in range(13)]
+    forecast_candles = [
+        {
+            "step": index,
+            "x_norm": line_points[index][0],
+            "open_y_norm": line_points[index - 1][1],
+            "high_y_norm": min(line_points[index - 1][1], line_points[index][1]) - 0.001,
+            "low_y_norm": max(line_points[index - 1][1], line_points[index][1]) + 0.001,
+            "close_y_norm": line_points[index][1],
+            "movement_side": "BUY",
+            "body_bias": "BUY",
+        }
+        for index in range(1, 13)
+    ]
+    payload = {
+        "schema_version": "PG_SCENE_FORECAST_CONTRIBUTION_V3",
+        "forecast_engine": "SCENE_FORECASTER_V3",
+        "forecast_available": True,
+        "path_side": "BUY",
+        "geometry_frame_match_verified": True,
+        "geometry_projected_frame_id": 7,
+        "forecast_computed_frame_id": 4,
+        "line_points": line_points,
+        "forecast_path": [{"step": index, "expected_close_norm": line_points[index][1]} for index in range(1, 13)],
+        "forecast_candles": forecast_candles,
+        "forecast_scenarios": [
+            {
+                "role": "base",
+                "side": "BUY",
+                "selected": True,
+                "line_points": line_points,
+                "forecast_candles": forecast_candles,
+            }
+        ],
+        "belief_tracker_checkpoint": {"large": "internal"},
+    }
+
+    compact = window_tracker_module._compact_persisted_forecast_summary(payload)  # pyright: ignore[reportPrivateUsage]
+
+    assert compact["line_points"] == line_points
+    assert [row["step"] for row in compact["forecast_path"]] == list(range(1, 13))
+    assert [row["step"] for row in compact["forecast_candles"]] == list(range(1, 13))
+    assert compact["forecast_scenarios"][0]["line_points"] == line_points
+
+
+def test_stale_study_gate_recovers_after_watchdog_window() -> None:
+    tracker = ContinuousWindowTrackerService()
+    session_id = "stale-study"
+
+    assert tracker._begin_study_gate(session_id) is True  # pyright: ignore[reportPrivateUsage]
+    assert tracker._begin_study_gate(session_id) is False  # pyright: ignore[reportPrivateUsage]
+
+    tracker.active_study_started_epoch[session_id] = time.time() - 180.0
+
+    assert tracker._begin_study_gate(session_id) is True  # pyright: ignore[reportPrivateUsage]
+    tracker._finish_study_gate(session_id)  # pyright: ignore[reportPrivateUsage]
+    assert session_id not in tracker.active_studies
+
+
 def test_duplicate_live_chart_pixels_do_not_advance_model_freshness(tmp_path: Path) -> None:
     frozen = _surface(width=1280, height=720)
     adapter = _FakeTrackingAdapter("BUY")
@@ -6351,6 +7127,176 @@ def test_tracker_worker_loop_uses_adaptive_interval_without_default_floor(tmp_pa
     assert capture_times == [1000.0, 1000.5]
 
 
+def test_tracker_worker_loop_does_not_reload_session_during_interval_waits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
+    session_id = str(tracker.create_session(session_id="pocket-live", capture_interval_sec=1.0)["session_id"])
+    payload = tracker.load_session_payload(session_id)
+    payload["tracking_enabled"] = True
+    payload["latest_signal"] = {"status": "tracking", "action": "SELL"}
+    payload["tracking_summary"] = {"chart_valid": True}
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+
+    clock = {"now": 1000.0}
+    captures: list[float] = []
+    wait_timeouts: list[float] = []
+    load_calls = {"count": 0}
+
+    class _LoopEvent:
+        def __init__(self, *, set_initially: bool = False) -> None:
+            self._is_set = set_initially
+
+        def is_set(self) -> bool:
+            return self._is_set
+
+        def set(self) -> None:
+            self._is_set = True
+
+        def clear(self) -> None:
+            self._is_set = False
+
+        def wait(self, timeout: float | None = None) -> bool:
+            wait_timeout = float(timeout or 0.0)
+            wait_timeouts.append(wait_timeout)
+            clock["now"] += wait_timeout
+            return self._is_set
+
+    stop_evt = _LoopEvent()
+    capture_now_evt = _LoopEvent(set_initially=True)
+    original_load_session = tracker._load_session  # pyright: ignore[reportPrivateUsage]
+
+    def counted_load_session(captured_session_id: str) -> dict[str, Any]:
+        load_calls["count"] += 1
+        return original_load_session(captured_session_id)
+
+    def capture_stub(captured_session_id: str, *, force: bool = False) -> None:
+        _ = (captured_session_id, force)
+        captures.append(clock["now"])
+        if len(captures) >= 2:
+            stop_evt.set()
+
+    monkeypatch.setattr(tracker, "_load_session", counted_load_session)
+    monkeypatch.setattr(tracker, "capture_and_analyze", capture_stub)
+    def fixed_tracking_plan(_payload: Mapping[str, Any]) -> dict[str, object]:
+        return {"interval_sec": 1.0, "reason": "tracking"}
+
+    monkeypatch.setattr(
+        tracker,
+        "adaptive_capture_interval_plan",
+        fixed_tracking_plan,
+    )
+    monkeypatch.setattr(window_tracker_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(window_tracker_module.time, "time", lambda: clock["now"])
+
+    tracker.worker_loop(
+        session_id,
+        cast(threading.Event, stop_evt),
+        cast(threading.Event, capture_now_evt),
+    )
+
+    assert captures == [1000.0, 1001.0]
+    assert wait_timeouts == [0.25, 0.25, 0.25, 0.25]
+    assert load_calls["count"] == 4
+
+
+def test_tracker_worker_schedules_next_capture_after_slow_capture_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
+    session_id = str(tracker.create_session(session_id="pocket-live", capture_interval_sec=0.5)["session_id"])
+    payload = tracker.load_session_payload(session_id)
+    payload["tracking_enabled"] = True
+    payload["latest_signal"] = {"status": "tracking", "action": "SELL"}
+    payload["tracking_summary"] = {"chart_valid": True}
+    write_json_atomic(tracker.session_dir(session_id) / "session.json", payload)
+
+    clock = {"now": 1000.0}
+    capture_times: list[float] = []
+
+    class _LoopEvent:
+        def __init__(self, *, set_initially: bool = False) -> None:
+            self._is_set = set_initially
+
+        def is_set(self) -> bool:
+            return self._is_set
+
+        def set(self) -> None:
+            self._is_set = True
+
+        def clear(self) -> None:
+            self._is_set = False
+
+        def wait(self, timeout: float | None = None) -> bool:
+            clock["now"] += float(timeout or 0.0)
+            return self._is_set
+
+    stop_evt = _LoopEvent()
+    capture_now_evt = _LoopEvent(set_initially=True)
+
+    def capture_stub(captured_session_id: str, *, force: bool = False) -> None:
+        del force
+        capture_times.append(clock["now"])
+        clock["now"] += 2.0
+        current = tracker.load_session_payload(captured_session_id)
+        current["tracking_enabled"] = True
+        current["latest_signal"] = {"status": "tracking", "action": "SELL"}
+        current["tracking_summary"] = {"chart_valid": True}
+        write_json_atomic(tracker.session_dir(captured_session_id) / "session.json", current)
+        if len(capture_times) >= 2:
+            stop_evt.set()
+
+    monkeypatch.setattr(tracker, "capture_and_analyze", capture_stub)
+    def half_second_tracking_plan(_payload: Mapping[str, Any]) -> dict[str, object]:
+        return {"interval_sec": 0.5, "reason": "tracking"}
+
+    monkeypatch.setattr(
+        tracker,
+        "adaptive_capture_interval_plan",
+        half_second_tracking_plan,
+    )
+    monkeypatch.setattr(window_tracker_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(window_tracker_module.time, "time", lambda: clock["now"])
+
+    tracker.worker_loop(
+        session_id,
+        cast(threading.Event, stop_evt),
+        cast(threading.Event, capture_now_evt),
+    )
+
+    assert capture_times == [1000.0, 1002.5]
+
+
+def test_live_adaptive_timer_respects_configured_capture_interval(tmp_path: Path) -> None:
+    tracker = ContinuousWindowTrackerService(root_dir=tmp_path)
+    session = tracker.create_session(session_id="pocket-live", capture_interval_sec=15.0)
+    payload = tracker.load_session_payload(str(session["session_id"]))
+    controls = dict(payload["execution_controls"])
+    controls.update(
+        {
+            "adaptive_timer_enabled": True,
+            "live_execution_enabled": True,
+            "execution_mode": "live",
+            "min_capture_interval_sec": 0.5,
+            "max_capture_interval_sec": 15.0,
+            "max_capture_interval_explicit_v3": True,
+        }
+    )
+    payload["execution_controls"] = controls
+    payload["tracking_enabled"] = True
+    payload["manual_focus_region"] = {
+        "enabled": True,
+        "normalized_bbox": [0.0, 0.0, 1.0, 1.0],
+    }
+
+    plan = tracker.adaptive_capture_interval_plan(payload)
+
+    assert float(plan["interval_sec"]) == 15.0
+    assert plan["reason"] == "live_configured_interval"
+
+
 def test_tracker_arm_focus_selector_applies_selected_region(tmp_path: Path) -> None:
     focus_backend = _FakeFocusSelectionBackend()
     tracker = ContinuousWindowTrackerService(
@@ -6846,7 +7792,7 @@ def test_tracker_dashboard_history_overlays_use_semantic_filters_and_collision_b
     assert "FULL_HISTORY_READ: {objects:" not in dashboard_html
 
 
-def test_tracker_dashboard_renders_v3_lstm_path_band_without_synthetic_boxes() -> None:
+def test_tracker_dashboard_renders_v3_lstm_composite_events_and_calibrated_band() -> None:
     dashboard_html = (
         Path(__file__).resolve().parents[2]
         / "Frontend"
@@ -6856,12 +7802,25 @@ def test_tracker_dashboard_renders_v3_lstm_path_band_without_synthetic_boxes() -
     ).read_text(encoding="utf-8")
 
     assert 'isForecastBand ? "polygon" : "polyline"' in dashboard_html
-    assert 'forecastRole === "center" ? " forecast-path-hit"' in dashboard_html
+    assert '["center", "composite"].includes(forecastRole) ? " forecast-path-hit"' in dashboard_html
     assert '["band_90", "upper_90", "lower_90"].includes(forecastRole)' in dashboard_html
+    assert "function createForecastComposite(overlay, projectedGeometry)" in dashboard_html
+    assert 'safeList(overlay.forecast_scenarios).map(function (rawScenario)' in dashboard_html
+    assert 'const points = safeList(scenario.line_points).map(function (point)' in dashboard_html
+    assert "const primaryPathPoints = pathPoints.slice(0, 13);" in dashboard_html
+    assert "primaryPathPoints.slice(1).forEach(function (point, pointOffset)" in dashboard_html
+    assert 'node.dataset.eventLabel = "E" + index;' in dashboard_html
+    assert 'stepLabel.dataset.eventLabel = "E" + index;' in dashboard_html
+    assert "surface-forecast-step-node" in dashboard_html
+    assert 'safeList(overlay.forecast_candles)' in dashboard_html
+    assert "projectedForecastCandles.length === 12" in dashboard_html
+    assert "surface-forecast-candle-body" in dashboard_html
+    assert 'interval.calibrated === true' in dashboard_html
     assert ".surface-forecast-band.forecast-no-edge" in dashboard_html
     assert ".surface-trendline.family-lstm.forecast-boundary" in dashboard_html
     assert ".surface-hotspot.family-lstm.forecast-path-hit" in dashboard_html
-    assert 'polyline.dataset.forecastStatus = forecastStatus === "authorized" ? "AUTHORIZED" : "NO_EDGE"' in dashboard_html
+    assert "polyline.dataset.forecastStatus = forecastStatus.toUpperCase()" in dashboard_html
+    assert '"low_confidence", "diagnostic"' in dashboard_html
 
 
 def test_memory_precision_allows_aggressive_stacked_primary_when_counter_is_probe() -> None:
@@ -7625,7 +8584,7 @@ def test_tracker_execution_controls_default_to_live_fixed_amount(tmp_path: Path)
     assert controls["high_frequency_enabled"] is True
     assert controls["swing_fallback_enabled"] is False
     assert int(controls["high_frequency_expiry_seconds"]) == 600
-    assert float(session["capture_interval_sec"]) == 15.0
+    assert float(session["capture_interval_sec"]) == 30.0
     assert float(controls["min_capture_interval_sec"]) == 0.5
     assert float(controls["max_capture_interval_sec"]) == 30.0
     assert float(controls["cooldown_sec"]) == 600.0
@@ -8798,6 +9757,10 @@ def test_historical_structure_path_uses_body_center_not_wick_spike() -> None:
 def test_real_tracking_adapter_reuses_cached_locked_shadow_selectors(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     image = _synthetic_chart_surface("buy")
+    # This cache contract requires visible selector evidence.  A chart-only
+    # surface intentionally produces no identity fingerprint and must not be
+    # allowed to make a stale cached pair authoritative.
+    _paint_realistic_market_selector(image, "EUR/JPY OTC")
     session_payload: dict[str, Any] = {
         "execution_controls": {"live_execution_enabled": False, "execution_mode": "shadow"},
         "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
@@ -8890,11 +9853,147 @@ def test_real_tracking_adapter_falls_back_when_fast_resize_merges_candles(
     assert len(cast(Sequence[Mapping[str, Any]], result.tracking_summary["historical_structure"])) >= 2
 
 
-def test_real_tracking_adapter_pair_switch_fast_rebind_skips_slow_market_scan(
+def test_live_incremental_extraction_reuses_static_history_but_refreshes_latest_edge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    cache_key = "pocket-live|M5|EUR/JPY OTC|selector_v2_pair_a|960x508"
+    generation = {"value": 0}
+    extraction_widths: list[int] = []
+    absolute_x_values = [120 + index * 20 for index in range(24)]
+
+    def fake_extract(image_arg: Image.Image) -> list[dict[str, Any]]:
+        extraction_widths.append(int(image_arg.width))
+        x_offset = 960 - int(image_arg.width)
+        rows: list[dict[str, Any]] = []
+        for index, absolute_x in enumerate(absolute_x_values):
+            if absolute_x < x_offset + 6:
+                continue
+            local_x = absolute_x - x_offset
+            center_y = 70.0 if index == len(absolute_x_values) - 1 and generation["value"] else 110.0
+            rows.append(
+                {
+                    "track_id": index,
+                    "bbox": [local_x - 3, int(center_y - 12), local_x + 3, int(center_y + 12)],
+                    "center_x": float(local_x),
+                    "center_x_px": float(local_x),
+                    "center_y": center_y,
+                    "center_y_px": center_y,
+                    "direction": "BUY",
+                    "color": "green",
+                    "price_proxy": 1.0 - center_y / 508.0,
+                }
+            )
+        return rows
+
+    monkeypatch.setattr(adapter, "_extract_candle_tracks", fake_extract)
+    first_image = Image.new("RGB", (960, 508), color=(20, 26, 38))
+    incremental_extract = cast(
+        Callable[..., tuple[list[dict[str, Any]], dict[str, Any]]],
+        getattr(adapter, "_extract_live_candle_tracks_incremental"),
+    )
+    first_rows, first_meta = incremental_extract(
+        first_image,
+        cache_key=cache_key,
+    )
+
+    generation["value"] = 1
+    second_image = first_image.copy()
+    ImageDraw.Draw(second_image).rectangle((880, 180, 940, 260), fill=(28, 38, 54))
+    second_rows, second_meta = incremental_extract(
+        second_image,
+        cache_key=cache_key,
+    )
+
+    assert len(first_rows) == len(second_rows) == 24
+    assert first_meta["history_reused"] is False
+    assert second_meta["history_reused"] is True
+    assert second_meta["edge_recomputed"] is True
+    assert extraction_widths[0] == 960
+    assert extraction_widths[1] < 960
+    assert float(first_rows[-1]["center_y"]) == 110.0
+    assert float(second_rows[-1]["center_y"]) == 70.0
+
+
+def test_live_incremental_extraction_full_refreshes_when_history_geometry_moves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    cache_key = "pocket-live|M5|EUR/JPY OTC|selector_v2_pair_a|960x508"
+    extraction_widths: list[int] = []
+
+    def fake_extract(image_arg: Image.Image) -> list[dict[str, Any]]:
+        extraction_widths.append(int(image_arg.width))
+        return [
+            {
+                "track_id": index,
+                "bbox": [117 + index * 20, 98, 123 + index * 20, 122],
+                "center_x": float(120 + index * 20),
+                "center_x_px": float(120 + index * 20),
+                "center_y": 110.0,
+                "center_y_px": 110.0,
+                "direction": "BUY",
+                "color": "green",
+            }
+            for index in range(24)
+        ]
+
+    monkeypatch.setattr(adapter, "_extract_candle_tracks", fake_extract)
+    incremental_extract = cast(
+        Callable[..., tuple[list[dict[str, Any]], dict[str, Any]]],
+        getattr(adapter, "_extract_live_candle_tracks_incremental"),
+    )
+    incremental_extract(
+        Image.new("RGB", (960, 508), color=(20, 26, 38)),
+        cache_key=cache_key,
+    )
+    _rows, moved_meta = incremental_extract(
+        Image.new("RGB", (960, 508), color=(55, 61, 73)),
+        cache_key=cache_key,
+    )
+
+    assert moved_meta["history_reused"] is False
+    assert moved_meta["full_refresh_reason"] == "historical_geometry_changed"
+    assert extraction_widths == [960, 960]
+
+
+def test_live_candle_cache_identity_isolated_by_pair_and_timeframe() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    session = {"session_id": "pocket-live"}
+    pair_a = {
+        "value": "EUR/JPY OTC",
+        "market_selector_visual_fingerprint": "selector_v2_pair_a",
+    }
+    pair_b = {
+        "value": "CAD/JPY OTC",
+        "market_selector_visual_fingerprint": "selector_v2_pair_b",
+    }
+
+    cache_identity = cast(
+        Callable[[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any], tuple[int, int]], str],
+        getattr(adapter, "_live_candle_cache_identity"),
+    )
+    key_a_m5 = cache_identity(session, {"value": "M5"}, pair_a, (960, 508))
+    key_b_m5 = cache_identity(session, {"value": "M5"}, pair_b, (960, 508))
+    key_a_m1 = cache_identity(session, {"value": "M1"}, pair_a, (960, 508))
+    legacy_key = cache_identity(
+        session,
+        {"value": "M5"},
+        {"value": "EUR/JPY OTC", "market_selector_visual_fingerprint": "volatile-frame-hash"},
+        (960, 508),
+    )
+
+    assert key_a_m5
+    assert len({key_a_m5, key_b_m5, key_a_m1}) == 3
+    assert legacy_key == ""
+
+
+def test_real_tracking_adapter_visual_delta_requires_confirmed_pair_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     image = _synthetic_chart_surface("buy")
+    _paint_realistic_market_selector(image, "EUR/JPY OTC")
     session_payload: dict[str, Any] = {
         "execution_controls": {"live_execution_enabled": False, "execution_mode": "shadow"},
         "manual_focus_region": {"enabled": True, "normalized_bbox": [0.0, 0.0, 1.0, 1.0]},
@@ -8916,26 +10015,36 @@ def test_real_tracking_adapter_pair_switch_fast_rebind_skips_slow_market_scan(
         },
     }
 
-    def fail_market_detector(*_args: Any, **_kwargs: Any) -> Any:
-        raise AssertionError("pair-switch fast rebind must not block on slow market OCR")
+    detector_calls = 0
 
-    monkeypatch.setattr(adapter, "_detect_market_selector", fail_market_detector)
+    def confirm_same_market(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal detector_calls
+        detector_calls += 1
+        return {
+            "value": "EUR/JPY OTC",
+            "source": "header_text",
+            "confidence": 0.93,
+        }
+
+    monkeypatch.setattr(adapter, "_detect_market_selector", confirm_same_market)
 
     result = adapter.study(image, session_payload=session_payload)
 
     stages = [str(row.get("stage", "")) for row in result.tracking_summary["study_stage_timings"]]
     assert "cached_chart_bbox" in stages
+    assert detector_calls == 1
     assert result.tracking_summary["market_selector_visual_changed"] is True
-    assert result.tracking_summary["market_selector_rebind_required"] is True
-    assert result.tracking_summary["market_selector_studying_new_pair"] is True
-    assert result.latest_signal["market_selector_studying_new_pair"] is True
+    assert result.tracking_summary["market_selector_rebind_required"] is False
+    assert result.tracking_summary["market_selector_studying_new_pair"] is False
+    assert result.latest_signal["market"] == "EUR/JPY OTC"
 
 
-def test_real_tracking_adapter_unknown_market_fast_locked_context_skips_slow_market_scan(
+def test_real_tracking_adapter_unknown_market_fast_locked_context_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = PhoenixGuardWindowTrackingAdapter()
     image = _synthetic_chart_surface("buy")
+    _paint_realistic_market_selector(image, "EUR/JPY OTC")
     selector_fingerprint = str(
         getattr(window_tracker_module, "_market_selector_visual_fingerprint")(image)
     )
@@ -8967,9 +10076,13 @@ def test_real_tracking_adapter_unknown_market_fast_locked_context_skips_slow_mar
 
     stages = [str(row.get("stage", "")) for row in result.tracking_summary["study_stage_timings"]]
     assert "cached_chart_bbox" in stages
-    assert result.tracking_summary["market_source"] == "selector_skipped_fast_locked_context"
-    assert result.tracking_summary["market_selector_rebind_required"] is False
+    assert result.tracking_summary["market_source"] == "selector_identity_rebind_pending"
+    assert result.tracking_summary["market_selector_rebind_required"] is True
+    assert result.tracking_summary["market_selector_studying_new_pair"] is True
     assert result.latest_signal["market"] == ""
+    scene = cast(Mapping[str, Any], result.latest_signal["scene_forecast_contribution"])
+    assert scene["provider_status"] == "MARKET_IDENTITY_PENDING"
+    assert scene["line_points"] == []
 
 
 def test_real_tracking_adapter_excludes_broker_order_panel_from_chart_bbox() -> None:
@@ -8984,35 +10097,403 @@ def test_real_tracking_adapter_excludes_broker_order_panel_from_chart_bbox() -> 
     assert int(result.tracking_summary["visible_candle_count"]) >= 8
 
 
-def test_window_tracker_feeds_raw_chart_pixels_to_v3_lstm(
+def test_window_tracker_feeds_full_suite_to_closed_candle_scene_forecaster(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
+    captured_calls: list[dict[str, Any]] = []
 
-    def capture_chart_context(**kwargs: Any) -> dict[str, Any]:
+    def capture_scene_context(**kwargs: Any) -> dict[str, Any]:
         captured.update(kwargs)
-        return {"available": False, "fresh": False, "forecast_path": []}
+        captured_calls.append(dict(kwargs))
+        anchor = [0.50, 0.50]
+        line = [anchor, *[[0.50 + index * 0.02, 0.50 - index * 0.004] for index in range(1, 13)]]
+        candles = [
+            {
+                "step": index,
+                "label": f"E{index}",
+                "x_norm": line[index][0],
+                "open_y_norm": line[index - 1][1],
+                "high_y_norm": min(line[index - 1][1], line[index][1]) - 0.002,
+                "low_y_norm": max(line[index - 1][1], line[index][1]) + 0.002,
+                "close_y_norm": line[index][1],
+                "movement_side": "BUY",
+                "body_bias": "BUY",
+            }
+            for index in range(1, 13)
+        ]
+        return {
+            "path_side": "BUY",
+            "side": "BUY",
+            "probability_calibrated": False,
+            "raw_side_probabilities": {"BUY": 0.58, "HOLD": 0.24, "SELL": 0.18},
+            "line_points": line,
+            "forecast_candles": candles,
+            "forecast_scenarios": [
+                {
+                    "role": role,
+                    "side": "BUY",
+                    "probability": probability,
+                    "selected": role == "base",
+                    "line_points": line,
+                    "forecast_candles": candles,
+                }
+                for role, probability in (("base", 0.58), ("bull", 0.24), ("bear", 0.18))
+            ],
+            "model_version": "TEST_SCENE_FORECASTER",
+        }
 
     monkeypatch.setattr(
         window_tracker_module,
-        "build_lstm_candle_sequence_contribution",
-        capture_chart_context,
+        "build_scene_forecast_contribution_v3",
+        capture_scene_context,
     )
     adapter = PhoenixGuardWindowTrackingAdapter()
-    build = cast(Callable[..., dict[str, Any]], getattr(adapter, "_build_lstm_contribution"))
+    build = cast(
+        Callable[..., dict[str, Any]],
+        getattr(adapter, "_build_scene_forecast_contribution"),
+    )
     chart_image = _synthetic_chart_surface("buy")
+    candles = [
+        {
+            "track_id": index,
+            "direction": "BUY",
+            "center_x": 40.0 + index * 12.0,
+            "open_y_px": 130.0 - index * 2.0,
+            "close_y_px": 128.0 - index * 2.0,
+            "wick_top_px": 126.0 - index * 2.0,
+            "wick_bottom_px": 132.0 - index * 2.0,
+            "price_proxy": 0.4 + index * 0.01,
+            "is_closed": index < 5,
+        }
+        for index in range(6)
+    ]
 
-    build(
-        candles=[],
+    first = build(
+        candles=candles,
         chart_image=chart_image,
         timeframe="M5",
-        sequence_phase="CONTINUATION",
-        market_play_label="TREND_CONTINUATION",
+        market="NZDUSD_OTC",
+        frame_id=42,
+        projection={"direction": "BUY"},
+        candle_statistics={"buy_ratio": 0.8},
+        behavior_payload={"current_state": "CONTINUATION"},
+        decision_kernel={"dominant_side": "BUY"},
+        smart_money_context={"dominant_side": "BUY"},
+        support_resistance_context={"dominant_side": "BUY"},
+        support_resistance_zones=[],
+        trend_slopes={"global": 0.2},
+        trend_directions={"global": "BUY"},
     )
 
-    assert captured["chart_image"] is chart_image
+    # A detector dropout/reclassification cannot advance the candle event
+    # while the same right-edge forming candle is still present.
+    candles[-2].update(
+        {
+            "direction": "SELL",
+            "center_x": float(candles[-2]["center_x"]) - 5.9,
+            "open_y_px": float(candles[-2]["open_y_px"]) + 40.0,
+            "close_y_px": float(candles[-2]["close_y_px"]) - 20.0,
+            "wick_bottom_px": float(candles[-2]["wick_bottom_px"]) + 30.0,
+        }
+    )
+    candles[-1]["close_y_px"] = float(candles[-1]["close_y_px"]) + 12.0
+    replay = build(
+        candles=candles,
+        chart_image=chart_image,
+        timeframe="M5",
+        market="NZDUSD_OTC",
+        frame_id=43,
+        projection={"direction": "BUY"},
+        candle_statistics={"buy_ratio": 0.8},
+        behavior_payload={"current_state": "CONTINUATION"},
+        decision_kernel={"dominant_side": "BUY"},
+        smart_money_context={"dominant_side": "BUY"},
+        support_resistance_context={"dominant_side": "BUY"},
+        support_resistance_zones=[],
+        trend_slopes={"global": 0.2},
+        trend_directions={"global": "BUY"},
+    )
+
     assert captured["image_size"] == chart_image.size
     assert captured["timeframe"] == "M5"
+    assert captured["pair"] == "NZDUSD_OTC"
+    assert captured["projection"] == {"direction": "BUY"}
+    assert captured["decision_kernel"] == {"dominant_side": "BUY"}
+    assert captured["smart_money_context"] == {"dominant_side": "BUY"}
+    assert captured["allow_foundation_model"] is False
+    assert captured["event_key_override"] == first["closed_candle_key"]
+    assert len(captured_calls) == 1
+    assert replay["closed_candle_key"] == first["closed_candle_key"]
+    assert replay["closed_candle_sequence"] == first["closed_candle_sequence"]
+    assert replay["closed_candle_transition_observed"] is False
+    assert replay["closed_candle_transition_reason"] == "FORMING_CANDLE_STILL_ACTIVE"
+    assert replay["frame_reused_without_reforecast"] is True
+    assert replay["frame_id"] == 43
+    assert replay["display_frame_id"] == 43
+    assert replay["forecast_computed_frame_id"] == 42
+    assert replay["source_forecast_frame_id"] == 42
+    assert replay["geometry_frame_match_verified"] is True
+    assert replay["geometry_projected_frame_id"] == 43
+    assert replay["geometry_reprojected_from_cache"] is True
+    expected_anchor = [
+        float(candles[-2]["center_x"]) / chart_image.width,
+        float(candles[-2]["close_y_px"]) / chart_image.height,
+    ]
+    assert replay["line_points"][0] == expected_anchor
+    assert replay["forecast_anchor"]["x_norm"] == expected_anchor[0]
+    assert replay["forecast_anchor"]["y_norm"] == expected_anchor[1]
+    assert replay["forecast_anchor"]["verified_latest_close"] is True
+    assert len(replay["line_points"]) == 13
+    assert len(replay["forecast_candles"]) == 12
+    assert len(replay["forecast_scenarios"]) == 3
+    assert all(
+        scenario["line_points"][0] == expected_anchor
+        for scenario in replay["forecast_scenarios"]
+    )
+    assert sum(
+        bool(scenario.get("selected", False))
+        for scenario in replay["forecast_scenarios"]
+    ) == 1
+    assert len({round(point[1], 12) for point in replay["line_points"][-8:]}) > 4
+    assert len(replay["forecast_path"]) == 12
+    assert replay["geometry_projection_provenance"]["verified"] is True
+    assert replay["geometry_projection_provenance"]["projected_frame_id"] == 43
+
+
+def test_scene_forecast_replaces_same_event_cache_after_detector_coverage_rebase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_calls: list[dict[str, Any]] = []
+
+    def coverage_candles(count: int) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        close_y = 310.0
+        for index in range(count):
+            direction = "BUY" if index % 3 != 1 else "SELL"
+            open_y = close_y
+            close_y += -2.5 if direction == "BUY" else 1.8
+            center_x = 20.0 + index * 8.0
+            rows.append(
+                {
+                    "track_id": index,
+                    "direction": direction,
+                    "center_x": center_x,
+                    "open_y_px": open_y,
+                    "close_y_px": close_y,
+                    "wick_top_px": min(open_y, close_y) - 1.5,
+                    "wick_bottom_px": max(open_y, close_y) + 1.5,
+                    "is_closed": index < count - 1,
+                }
+            )
+        return rows
+
+    def capture_scene_context(**kwargs: Any) -> dict[str, Any]:
+        captured_calls.append(dict(kwargs))
+        rows = cast(Sequence[Mapping[str, Any]], kwargs["candles"])
+        image_width, image_height = cast(tuple[int, int], kwargs["image_size"])
+        latest_closed = next(
+            row for row in reversed(rows) if bool(row.get("is_closed", False))
+        )
+        anchor_x = float(latest_closed["center_x"]) / image_width
+        anchor_y = float(latest_closed["close_y_px"]) / image_height
+        anchor = [anchor_x, anchor_y]
+        line = [
+            anchor,
+            *[
+                [anchor_x + index * 0.02, anchor_y - index * 0.003]
+                for index in range(1, 13)
+            ],
+        ]
+        candles = [
+            {
+                "step": index,
+                "label": f"E{index}",
+                "x_norm": line[index][0],
+                "open_y_norm": line[index - 1][1],
+                "high_y_norm": min(line[index - 1][1], line[index][1]) - 0.001,
+                "low_y_norm": max(line[index - 1][1], line[index][1]) + 0.001,
+                "close_y_norm": line[index][1],
+                "movement_side": "BUY",
+                "body_bias": "BUY",
+            }
+            for index in range(1, 13)
+        ]
+        scenarios = [
+            {
+                "role": role,
+                "side": "BUY",
+                "probability": probability,
+                "selected": role == "base",
+                "line_points": line,
+                "forecast_candles": candles,
+            }
+            for role, probability in (("base", 0.58), ("bull", 0.24), ("bear", 0.18))
+        ]
+        return {
+            "path_side": "BUY",
+            "side": "BUY",
+            "probability_calibrated": False,
+            "raw_side_probabilities": {"BUY": 0.58, "HOLD": 0.24, "SELL": 0.18},
+            "forecast_anchor": {"x_norm": anchor_x, "y_norm": anchor_y},
+            "line_points": line,
+            "forecast_candles": candles,
+            "forecast_scenarios": scenarios,
+            "model_version": "TEST_SCENE_FORECASTER",
+        }
+
+    monkeypatch.setattr(
+        window_tracker_module,
+        "build_scene_forecast_contribution_v3",
+        capture_scene_context,
+    )
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    build = cast(
+        Callable[..., dict[str, Any]],
+        getattr(adapter, "_build_scene_forecast_contribution"),
+    )
+    chart_image = _synthetic_chart_surface("buy")
+
+    def run(rows: Sequence[Mapping[str, Any]], frame_id: int) -> dict[str, Any]:
+        return build(
+            candles=rows,
+            chart_image=chart_image,
+            timeframe="M5",
+            market="CHFJPY_OTC",
+            frame_id=frame_id,
+            projection={"direction": "BUY"},
+            candle_statistics={"sample_size": len(rows)},
+            behavior_payload={"current_state": "CONTINUATION"},
+            decision_kernel={"dominant_side": "BUY"},
+            smart_money_context={"dominant_side": "BUY"},
+            support_resistance_context={"dominant_side": "BUY"},
+            support_resistance_zones=[],
+            trend_slopes={"global": 0.2},
+            trend_directions={"global": "BUY"},
+        )
+
+    initial = run(coverage_candles(39), 101)
+    repaired = run(coverage_candles(64), 102)
+    replay = run(coverage_candles(64), 103)
+    degraded = run(coverage_candles(39), 104)
+    restored = run(coverage_candles(64), 105)
+
+    assert len(captured_calls) == 2
+    assert len(cast(Sequence[Any], captured_calls[0]["candles"])) == 39
+    assert len(cast(Sequence[Any], captured_calls[1]["candles"])) == 64
+    assert repaired["closed_candle_key"] == initial["closed_candle_key"]
+    assert repaired["closed_candle_sequence"] == initial["closed_candle_sequence"]
+    assert repaired["closed_candle_transition_observed"] is False
+    assert repaired["closed_candle_transition_reason"] == "DETECTOR_COVERAGE_REBASE"
+    assert repaired["same_event_cache_rebuild_required"] is False
+    assert repaired["detector_coverage_rebase_applied"] is True
+    assert repaired["cache_replaced_for_detector_coverage_rebase"] is True
+    assert repaired["cache_hit"] is False
+    assert repaired["frame_reused_without_reforecast"] is False
+    assert repaired["forecast_anchor"]["x_norm"] > initial["forecast_anchor"]["x_norm"]
+    assert repaired["line_points"][0] == [
+        repaired["forecast_anchor"]["x_norm"],
+        repaired["forecast_anchor"]["y_norm"],
+    ]
+    assert replay["cache_hit"] is True
+    assert replay["frame_reused_without_reforecast"] is True
+    assert replay["same_event_cache_rebuild_required"] is False
+    assert replay["cache_replaced_for_detector_coverage_rebase"] is True
+    assert replay["detector_coverage_rebase_applied"] is True
+    assert replay["frame_id"] == 103
+    assert replay["display_frame_id"] == 103
+    assert replay["forecast_computed_frame_id"] == 102
+    assert replay["source_forecast_frame_id"] == 102
+    assert replay["forecast_anchor"]["x_norm"] == repaired["forecast_anchor"]["x_norm"]
+    assert replay["forecast_anchor"]["y_norm"] == repaired["forecast_anchor"]["y_norm"]
+    assert replay["line_points"] == repaired["line_points"]
+    assert degraded["cache_hit"] is True
+    assert degraded["same_event_cache_rebuild_required"] is False
+    assert degraded["closed_candle_match_scores"]["coverage_high_water_preserved"] is True
+    assert degraded["geometry_frame_match_verified"] is True
+    assert degraded["geometry_projected_frame_id"] == 104
+    assert degraded["frame_id"] == 104
+    assert degraded["display_frame_id"] == 104
+    assert degraded["geometry_reprojected_from_cache"] is True
+    assert degraded["geometry_projection_provenance"]["status"] == "DEGRADED_REANCHOR"
+    assert degraded["geometry_projection_provenance"]["verified"] is True
+    assert degraded["geometry_projection_provenance"]["reason"] == "DETECTOR_COVERAGE_DEGRADED"
+    assert degraded["trade_authorized"] is False
+    assert degraded["selective_authorized"] is False
+    assert len(degraded["forecast_path"]) == 12
+    assert len(degraded["line_points"]) == 13
+    assert restored["cache_hit"] is True
+    assert restored["same_event_cache_rebuild_required"] is False
+    assert restored["closed_candle_match_scores"]["detected_candle_count_growth"] == 0
+    assert restored["forecast_anchor"]["x_norm"] == repaired["forecast_anchor"]["x_norm"]
+    assert restored["forecast_anchor"]["y_norm"] == repaired["forecast_anchor"]["y_norm"]
+    assert restored["line_points"] == repaired["line_points"]
+    assert restored["frame_id"] == 105
+    assert restored["display_frame_id"] == 105
+    assert restored["forecast_computed_frame_id"] == 102
+    assert restored["source_forecast_frame_id"] == 102
+    assert restored["geometry_frame_match_verified"] is True
+    assert restored["geometry_projected_frame_id"] == 105
+
+
+def test_scene_candle_identity_and_geometry_restore_across_process_restart() -> None:
+    adapter = PhoenixGuardWindowTrackingAdapter()
+    identity_state = {
+        "schema_version": "PG_CLOSED_CANDLE_IDENTITY_STATE_V3",
+        "pair": "NZDUSD_OTC",
+        "timeframe": "M5",
+        "event_key": "stable-closed-event",
+        "event_sequence": 8,
+        "latest_closed": {"track_id": "45", "side": "SELL"},
+        "forming": {"track_id": "46", "side": "BUY"},
+    }
+    scene = {
+        "closed_candle_identity_state": identity_state,
+        "closed_candle_key": "stable-closed-event",
+        "closed_candle_sequence": 8,
+        "line_points": [[index / 12.0, 0.5] for index in range(13)],
+        "forecast_candles": [{"step": index} for index in range(1, 13)],
+        "forecast_scenarios": [
+            {"role": "base"},
+            {"role": "bull"},
+            {"role": "bear"},
+        ],
+    }
+
+    restore = cast(
+        Callable[[Mapping[str, Any]], None],
+        getattr(adapter, "_restore_scene_belief_checkpoint"),
+    )
+    restore(
+        {
+            "forecast_snapshot_v3": {
+                "scene_forecast_contribution": scene,
+            }
+        }
+    )
+
+    context_key = ("NZDUSD_OTC", "M5")
+    identity_states = cast(
+        dict[tuple[str, str], dict[str, Any]],
+        getattr(adapter, "_scene_candle_identity_states"),
+    )
+    event_sequences = cast(
+        dict[tuple[str, str], tuple[str, int]],
+        getattr(adapter, "_scene_event_sequences"),
+    )
+    forecast_cache = cast(
+        dict[tuple[str, str, str], dict[str, Any]],
+        getattr(adapter, "_scene_forecast_cache"),
+    )
+    assert identity_states[context_key] == identity_state
+    assert event_sequences[context_key] == (
+        "stable-closed-event",
+        8,
+    )
+    restored = forecast_cache[
+        ("NZDUSD_OTC", "M5", "stable-closed-event")
+    ]
+    assert restored["line_points"] == scene["line_points"]
 
 
 def test_real_tracking_adapter_reads_sell_pressure_from_downtrend_surface() -> None:

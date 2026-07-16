@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import statistics
@@ -20,8 +21,24 @@ LSTM_CONTRIBUTION_SCHEMA_VERSION = "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3"
 DEFAULT_MODEL_PATH = Path("models/lstm_candle_sequence_v3.pt")
 DEFAULT_CONFIG_PATH = Path("models/lstm_candle_sequence_v3_config.json")
 DEFAULT_METRICS_PATH = Path("models/lstm_candle_sequence_v3_metrics.json")
+ARTIFACT_BUNDLE_MANIFEST_SCHEMA = "PG_LSTM_ARTIFACT_BUNDLE_POINTER_V3"
+ARTIFACT_BUNDLE_MANIFEST_SUFFIX = ".manifest.json"
+# The canonical export is retained because it is the reproducible artifact
+# behind the historical candle-body metrics.  It is not a valid future-price
+# path model.  Until a direct-path challenger passes the production gate, the
+# latest schema-compatible direct V3 checkpoint is used for a visible,
+# explicitly low-confidence diagnostic trajectory only.
+DIRECT_DIAGNOSTIC_MODEL_PATH = Path("models/experiments/v3_multimodal_challenger.pt")
+DIRECT_DIAGNOSTIC_CONFIG_PATH = Path(
+    "models/experiments/v3_multimodal_challenger_config.json"
+)
+DIRECT_DIAGNOSTIC_METRICS_PATH = Path(
+    "models/experiments/v3_multimodal_challenger_metrics.json"
+)
 
 MAX_PRICE_DELTA = 0.25
+MIN_PATHWISE_CONFORMAL_INDEPENDENT_GROUPS = 20
+MAX_PATHWISE_CONFORMAL_FULL_WIDTH_NORM = 0.30
 FEATURE_SCHEMA: tuple[str, ...] = (
     "body_norm",
     "upper_wick_norm",
@@ -44,15 +61,35 @@ PREDICTION_SCHEMA: tuple[str, ...] = (
     "range_norm",
     "relative_price_delta_scaled",
 )
-PREDICTION_FEATURE_INDICES: tuple[int, ...] = tuple(FEATURE_SCHEMA.index(name) for name in PREDICTION_SCHEMA)
+PREDICTION_FEATURE_INDICES: tuple[int, ...] = tuple(
+    FEATURE_SCHEMA.index(name) for name in PREDICTION_SCHEMA
+)
 DEFAULT_SEQUENCE_LENGTH = 96
 DEFAULT_HORIZON_STEPS = 12
 LEGACY_MULTISCALE_ARCHITECTURE = "CAUSAL_CV_MULTISCALE_ATTENTION_LSTM"
-DIRECT_RAW_CV_ARCHITECTURE = "CAUSAL_PIXEL_CNN_MASKED_LSTM_DIRECT_HORIZON_ATTENTION"
+DIRECT_RAW_CV_ARCHITECTURE = (
+    "CAUSAL_RAW_PIXEL_PYRAMID_MASKED_LSTM_DIRECT_HORIZON_ATTENTION"
+)
 
 SIDES = {"BUY", "SELL"}
 PLAY_LABELS = ("CONTINUATION", "REVERSAL", "PULLBACK")
-_ARTIFACT_CACHE: dict[tuple[str, str, str, float, float, float], dict[str, Any]] = {}
+TRAJECTORY_MODE_LABELS = ("BUY", "SELL", "HOLD")
+_ARTIFACT_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_MANIFEST_INTEGRITY_CACHE: set[tuple[Any, ...]] = set()
+
+
+def artifact_bundle_manifest_path(model_path: Path) -> Path:
+    """Return the one atomic publication pointer for a V3 artifact family."""
+
+    path = Path(model_path)
+    return path.with_name(f"{path.name}{ARTIFACT_BUNDLE_MANIFEST_SUFFIX}")
+
+
+def artifact_bundle_generation_root(model_path: Path) -> Path:
+    """Return the private immutable-generation root for a V3 artifact family."""
+
+    path = Path(model_path)
+    return path.parent / f".{path.name}.generations"
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -77,15 +114,75 @@ def _side(value: Any, default: str = "HOLD") -> str:
     text = str(value or "").strip().upper()
     if text.startswith("BUY") or text in {"BULL", "BULLISH", "GREEN", "UP", "CALL"}:
         return "BUY"
-    if text.startswith("SELL") or text in {"BEAR", "BEARISH", "RED", "MAGENTA", "DOWN", "PUT"}:
+    if text.startswith("SELL") or text in {
+        "BEAR",
+        "BEARISH",
+        "RED",
+        "MAGENTA",
+        "DOWN",
+        "PUT",
+    }:
         return "SELL"
     return default
+
+
+def _coherent_ohlc_from_close(
+    *,
+    close_location: float,
+    candle_range: float,
+    body_ratio: float,
+    upper_wick_ratio: float,
+    lower_wick_ratio: float,
+    body_direction: str,
+) -> tuple[float, float, float]:
+    """Compose one coherent candle around an authoritative predicted close.
+
+    The direct V3 path head predicts each future close relative to the same
+    observed anchor.  The other regression heads predict the candle's total
+    range and its body/upper-wick/lower-wick shares.  Those shares therefore
+    have to divide the total range; treating only the wick heads as range
+    extensions discards the body head and creates near-doji crosses.
+
+    Returns ``(open, high, low)`` in normalized price-location coordinates.
+    Boundary clipping can shorten a candle at the visible chart edge, but the
+    supplied close is never moved because it is the authoritative path value.
+    """
+
+    close = _clip01(close_location, 0.5)
+    total_range = max(0.001, _clip01(candle_range, 0.01))
+    body_share = _clip01(body_ratio)
+    upper_share = _clip01(upper_wick_ratio)
+    lower_share = _clip01(lower_wick_ratio)
+    share_total = body_share + upper_share + lower_share
+    if share_total <= 1e-9:
+        # Direct-model shape outputs use sigmoid activations, so this is only
+        # a defensive path for malformed artifacts.  Allocate the range to
+        # the classified body rather than silently collapsing the candle.
+        body_share = 1.0
+        upper_share = 0.0
+        lower_share = 0.0
+        share_total = 1.0
+
+    body_span = total_range * body_share / share_total
+    upper_span = total_range * upper_share / share_total
+    lower_span = total_range * lower_share / share_total
+    if str(body_direction or "").strip().upper() == "SELL":
+        open_location = _clip01(close + body_span, close)
+    else:
+        open_location = _clip01(close - body_span, close)
+    high_location = _clip01(max(open_location, close) + upper_span)
+    low_location = _clip01(min(open_location, close) - lower_span)
+    return open_location, high_location, low_location
 
 
 def _rows(value: Sequence[Mapping[str, Any]] | Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
-    return [dict(cast(Mapping[str, Any], row)) for row in cast(Sequence[Any], value) if isinstance(row, Mapping)]
+    return [
+        dict(cast(Mapping[str, Any], row))
+        for row in cast(Sequence[Any], value)
+        if isinstance(row, Mapping)
+    ]
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -99,6 +196,137 @@ def _read_json(path: Path) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _resolve_artifact_bundle_paths(
+    model_path: Path,
+    config_path: Path,
+    metrics_path: Path,
+) -> dict[str, Any]:
+    """Resolve one immutable V3 generation from one manifest snapshot.
+
+    No manifest means the pre-pointer V3 trio is used unchanged.  Once a
+    manifest exists it is authoritative: malformed pointers never fall back
+    to possibly mixed public compatibility files.
+    """
+
+    requested_paths = (Path(model_path), Path(config_path), Path(metrics_path))
+    manifest_path = artifact_bundle_manifest_path(requested_paths[0])
+    legacy: dict[str, Any] = {
+        "paths": requested_paths,
+        "manifest_path": manifest_path,
+        "manifest": {},
+        "manifest_digest": "",
+        "generation_id": "",
+        "error": "",
+    }
+    if not manifest_path.exists():
+        return legacy
+    try:
+        # The pointer is atomically replaced by the trainer.  Reading its bytes
+        # exactly once gives this load attempt a stable generation snapshot.
+        manifest_bytes = manifest_path.read_bytes()
+        manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        if not isinstance(manifest, Mapping):
+            raise ValueError("manifest root is not an object")
+        manifest = dict(cast(Mapping[str, Any], manifest))
+        if manifest.get("schema_version") != ARTIFACT_BUNDLE_MANIFEST_SCHEMA:
+            raise ValueError("unsupported manifest schema")
+        generation_id = str(manifest.get("artifact_generation_id") or "")
+        if not generation_id:
+            raise ValueError("manifest generation is missing")
+
+        public_paths = _mapping(manifest.get("public_paths"))
+        file_rows = _mapping(manifest.get("files"))
+        roles = ("model", "config", "metrics")
+        manifest_parent = manifest_path.parent.resolve()
+        for role, requested in zip(roles, requested_paths):
+            declared_public = str(public_paths.get(role) or "")
+            if not declared_public:
+                raise ValueError(f"manifest public {role} path is missing")
+            declared_path = (manifest_parent / declared_public).resolve()
+            if declared_path != requested.resolve():
+                raise ValueError(f"manifest public {role} path does not match request")
+
+        expected_generation_dir = (
+            artifact_bundle_generation_root(requested_paths[0]) / generation_id
+        ).resolve()
+        resolved_paths: list[Path] = []
+        expected_hashes: list[str] = []
+        file_stats: list[tuple[str, int, int]] = []
+        for role in roles:
+            row = _mapping(file_rows.get(role))
+            reference = str(row.get("path") or "")
+            expected_hash = str(row.get("sha256") or "").lower()
+            expected_size = int(row.get("size_bytes", -1))
+            if not reference:
+                raise ValueError(f"manifest {role} reference is missing")
+            if len(expected_hash) != 64 or any(
+                character not in "0123456789abcdef" for character in expected_hash
+            ):
+                raise ValueError(f"manifest {role} hash is invalid")
+            if expected_size < 0:
+                raise ValueError(f"manifest {role} size is invalid")
+            resolved_path = (manifest_parent / reference).resolve()
+            if resolved_path.parent != expected_generation_dir:
+                raise ValueError(f"manifest {role} reference escapes its generation")
+            stat = resolved_path.stat()
+            if not resolved_path.is_file():
+                raise ValueError(f"manifest {role} reference is not a file")
+            if stat.st_size != expected_size:
+                raise ValueError(f"manifest {role} size does not match")
+            resolved_paths.append(resolved_path)
+            expected_hashes.append(expected_hash)
+            file_stats.append(
+                (str(resolved_path), int(stat.st_size), int(stat.st_mtime_ns))
+            )
+        if len(set(resolved_paths)) != len(roles):
+            raise ValueError("manifest artifact references are not distinct")
+
+        integrity_key = (
+            str(manifest_path.resolve()),
+            manifest_digest,
+            tuple(file_stats),
+        )
+        if integrity_key not in _MANIFEST_INTEGRITY_CACHE:
+            for role, resolved_path, expected_hash in zip(
+                roles, resolved_paths, expected_hashes
+            ):
+                if _sha256_file(resolved_path) != expected_hash:
+                    raise ValueError(f"manifest {role} hash does not match")
+            _MANIFEST_INTEGRITY_CACHE.add(integrity_key)
+
+        resolved_config = _read_json(resolved_paths[1])
+        resolved_metrics = _read_json(resolved_paths[2])
+        if not resolved_config or not resolved_metrics:
+            raise ValueError("manifest references unreadable config or metrics JSON")
+        if str(resolved_config.get("artifact_generation_id") or "") != generation_id:
+            raise ValueError("manifest config generation does not match pointer")
+        if str(resolved_metrics.get("artifact_generation_id") or "") != generation_id:
+            raise ValueError("manifest metrics generation does not match pointer")
+        return {
+            "paths": tuple(resolved_paths),
+            "manifest_path": manifest_path,
+            "manifest": manifest,
+            "manifest_digest": manifest_digest,
+            "generation_id": generation_id,
+            "error": "",
+        }
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        return {
+            **legacy,
+            "manifest_path": manifest_path,
+            "error": f"V3 artifact manifest rejected: {exc}",
+        }
 
 
 def phase_value(value: Any) -> float:
@@ -117,7 +345,9 @@ def phase_value(value: Any) -> float:
 
 
 def _image_height(image_size: Any) -> float:
-    if isinstance(image_size, Sequence) and not isinstance(image_size, (str, bytes, bytearray)):
+    if isinstance(image_size, Sequence) and not isinstance(
+        image_size, (str, bytes, bytearray)
+    ):
         size = cast(Sequence[Any], image_size)
         if len(size) >= 2:
             return max(1.0, _safe_float(size[1], 1.0))
@@ -125,7 +355,11 @@ def _image_height(image_size: Any) -> float:
 
 
 def _rolling_median(values: Sequence[float], default: float) -> float:
-    usable = [float(value) for value in values if math.isfinite(float(value)) and float(value) > 1e-8]
+    usable = [
+        float(value)
+        for value in values
+        if math.isfinite(float(value)) and float(value) > 1e-8
+    ]
     return float(statistics.median(usable)) if usable else float(default)
 
 
@@ -159,8 +393,12 @@ def candle_sequence_features(
             row.get("price_proxy", row.get("close_norm")),
             1.0 - ((top + bottom) * 0.5 / height),
         )
-        upper_wick_norm = _clip01(row.get("upper_wick_pct"), max(0.0, 1.0 - body_norm) * 0.5)
-        lower_wick_norm = _clip01(row.get("lower_wick_pct"), max(0.0, 1.0 - body_norm) * 0.5)
+        upper_wick_norm = _clip01(
+            row.get("upper_wick_pct"), max(0.0, 1.0 - body_norm) * 0.5
+        )
+        lower_wick_norm = _clip01(
+            row.get("lower_wick_pct"), max(0.0, 1.0 - body_norm) * 0.5
+        )
         base_rows.append(
             {
                 "index": index,
@@ -170,13 +408,19 @@ def candle_sequence_features(
                     0.5 * (_safe_float(bbox_values[0]) + _safe_float(bbox_values[2])),
                 ),
                 "direction": direction,
-                "direction_value": 1.0 if direction == "BUY" else -1.0 if direction == "SELL" else 0.0,
+                "direction_value": 1.0
+                if direction == "BUY"
+                else -1.0
+                if direction == "SELL"
+                else 0.0,
                 "body_norm": body_norm,
                 "upper_wick_norm": upper_wick_norm,
                 "lower_wick_norm": lower_wick_norm,
                 "range_norm": _clip01(candle_range),
                 "relative_price_location": price_proxy,
-                "parse_confidence": _clip01(row.get("parse_confidence", row.get("parse_conf")), 1.0),
+                "parse_confidence": _clip01(
+                    row.get("parse_confidence", row.get("parse_conf")), 1.0
+                ),
                 "phase": str(row.get("phase") or sequence_phase or "UNKNOWN").upper(),
                 "phase_value": phase_value(row.get("phase") or sequence_phase),
             }
@@ -186,8 +430,16 @@ def candle_sequence_features(
     run_side = "HOLD"
     run_length = 0
     for index, row in enumerate(base_rows):
-        previous_price = base_rows[index - 1]["relative_price_location"] if index else row["relative_price_location"]
-        price_delta = _clip(row["relative_price_location"] - previous_price, -MAX_PRICE_DELTA, MAX_PRICE_DELTA)
+        previous_price = (
+            base_rows[index - 1]["relative_price_location"]
+            if index
+            else row["relative_price_location"]
+        )
+        price_delta = _clip(
+            row["relative_price_location"] - previous_price,
+            -MAX_PRICE_DELTA,
+            MAX_PRICE_DELTA,
+        )
         recent = base_rows[max(0, index - 11) : index + 1]
         recent_ranges = [float(item["range_norm"]) for item in recent]
         recent_bodies = [float(item["body_norm"]) for item in recent]
@@ -203,7 +455,9 @@ def candle_sequence_features(
             run_side = "HOLD"
             run_length = 0
         momentum_rows = base_rows[max(0, index - 4) : index + 1]
-        momentum = sum(float(item["direction_value"]) for item in momentum_rows) / max(1, len(momentum_rows))
+        momentum = sum(float(item["direction_value"]) for item in momentum_rows) / max(
+            1, len(momentum_rows)
+        )
         features.append(
             {
                 **row,
@@ -211,11 +465,27 @@ def candle_sequence_features(
                 "upper_wick_norm": round(float(row["upper_wick_norm"]), 6),
                 "lower_wick_norm": round(float(row["lower_wick_norm"]), 6),
                 "range_norm": round(float(row["range_norm"]), 6),
-                "relative_price_location": round(float(row["relative_price_location"]), 6),
+                "relative_price_location": round(
+                    float(row["relative_price_location"]), 6
+                ),
                 "relative_price_delta": round(price_delta, 6),
                 "relative_price_delta_scaled": round(price_delta / MAX_PRICE_DELTA, 6),
-                "range_vs_recent": round(_clip(float(row["range_norm"]) / max(1e-6, range_reference) / 3.0, 0.0, 1.0), 6),
-                "body_vs_recent": round(_clip(float(row["body_norm"]) / max(1e-6, body_reference) / 3.0, 0.0, 1.0), 6),
+                "range_vs_recent": round(
+                    _clip(
+                        float(row["range_norm"]) / max(1e-6, range_reference) / 3.0,
+                        0.0,
+                        1.0,
+                    ),
+                    6,
+                ),
+                "body_vs_recent": round(
+                    _clip(
+                        float(row["body_norm"]) / max(1e-6, body_reference) / 3.0,
+                        0.0,
+                        1.0,
+                    ),
+                    6,
+                ),
                 "momentum_5": round(_clip(momentum, -1.0, 1.0), 6),
                 "direction_run_norm": round(_clip(run_length / 8.0, 0.0, 1.0), 6),
                 "parse_confidence": round(float(row["parse_confidence"]), 6),
@@ -223,6 +493,102 @@ def candle_sequence_features(
             }
         )
     return features
+
+
+def candle_sequence_geometry_quality(
+    candles: Sequence[Mapping[str, Any]],
+    *,
+    image_size: tuple[int, int] | Sequence[int] = (0, 0),
+    minimum_events: int = 16,
+) -> dict[str, Any]:
+    """Validate that the parser produced one ordered event per candle slot.
+
+    Component-shape confidence alone cannot detect a chart texture fragment
+    that happens to resemble a candle.  This gate measures the event lattice
+    itself and fails closed when bounding boxes overlap heavily or x-spacing
+    indicates duplicate/missing candle slots.
+    """
+
+    boxes: list[tuple[float, float, float, float]] = []
+    centers: list[float] = []
+    for row in _rows(candles):
+        raw_box = row.get("bbox")
+        if not isinstance(raw_box, Sequence) or isinstance(
+            raw_box, (str, bytes, bytearray)
+        ):
+            continue
+        values = list(cast(Sequence[Any], raw_box))
+        if len(values) < 4:
+            continue
+        left, right = sorted((_safe_float(values[0]), _safe_float(values[2])))
+        top, bottom = sorted((_safe_float(values[1]), _safe_float(values[3])))
+        if right <= left or bottom <= top:
+            continue
+        boxes.append((left, top, right, bottom))
+        centers.append(
+            _safe_float(
+                row.get("center_x_px", row.get("center_x")), 0.5 * (left + right)
+            )
+        )
+
+    adjacent = max(0, len(boxes) - 1)
+    gaps = [right - left for left, right in zip(centers, centers[1:])]
+    positive_gaps = [gap for gap in gaps if gap > 1e-8]
+    expected_gap = float(statistics.median(positive_gaps)) if positive_gaps else 0.0
+    overlap_count = sum(
+        1
+        for left_box, right_box in zip(boxes, boxes[1:])
+        if min(left_box[2], right_box[2]) - max(left_box[0], right_box[0]) > 0.0
+    )
+    abnormal_gap_count = sum(
+        1
+        for gap in gaps
+        if expected_gap <= 0.0 or gap < 0.35 * expected_gap or gap > 1.75 * expected_gap
+    )
+    overlap_rate = overlap_count / max(1, adjacent)
+    abnormal_gap_rate = abnormal_gap_count / max(1, adjacent)
+    non_monotonic_rate = sum(gap <= 0.0 for gap in gaps) / max(1, adjacent)
+
+    size_values = list(image_size)
+    image_width = _safe_float(size_values[0], 0.0) if size_values else 0.0
+    span_ratio = (
+        max(0.0, centers[-1] - centers[0]) / image_width
+        if len(centers) >= 2 and image_width > 1.0
+        else None
+    )
+    reasons: list[str] = []
+    if len(boxes) < max(2, int(minimum_events)):
+        reasons.append("insufficient_candle_events")
+    if non_monotonic_rate > 0.02:
+        reasons.append("non_monotonic_event_order")
+    if overlap_rate > 0.20:
+        reasons.append("overlapping_component_events")
+    if abnormal_gap_rate > 0.20:
+        reasons.append("missing_or_duplicate_candle_slots")
+    if span_ratio is not None and span_ratio < 0.08:
+        reasons.append("chart_panel_span_too_small")
+
+    score = _clip01(
+        1.0
+        - 0.55 * min(1.0, overlap_rate / 0.20)
+        - 0.35 * min(1.0, abnormal_gap_rate / 0.20)
+        - 0.10 * min(1.0, non_monotonic_rate / 0.02),
+        0.0,
+    )
+    return {
+        "schema_version": "PG_LSTM_EVENT_LATTICE_QUALITY_V3",
+        "status": "READY" if not reasons else "REJECTED",
+        "ready": not reasons,
+        "event_count": len(boxes),
+        "adjacent_pairs": adjacent,
+        "expected_gap_px": round(expected_gap, 6),
+        "overlap_rate": round(overlap_rate, 6),
+        "abnormal_gap_rate": round(abnormal_gap_rate, 6),
+        "non_monotonic_rate": round(non_monotonic_rate, 6),
+        "panel_span_ratio": round(span_ratio, 6) if span_ratio is not None else None,
+        "quality_score": round(score, 6),
+        "reasons": reasons,
+    }
 
 
 def feature_vector(row: Mapping[str, Any]) -> list[float]:
@@ -258,7 +624,9 @@ def sequence_features_to_matrix(
 
     length = max(1, int(sequence_length))
     rows = [feature_vector(row) for row in features][-length:]
-    return rows + [[0.0] * len(FEATURE_SCHEMA) for _ in range(max(0, length - len(rows)))]
+    return rows + [
+        [0.0] * len(FEATURE_SCHEMA) for _ in range(max(0, length - len(rows)))
+    ]
 
 
 def legacy_sequence_features_to_matrix(
@@ -270,7 +638,9 @@ def legacy_sequence_features_to_matrix(
 
     length = max(1, int(sequence_length))
     rows = [feature_vector(row) for row in features][-length:]
-    return [[0.0] * len(FEATURE_SCHEMA) for _ in range(max(0, length - len(rows)))] + rows
+    return [
+        [0.0] * len(FEATURE_SCHEMA) for _ in range(max(0, length - len(rows)))
+    ] + rows
 
 
 def _torch_modules() -> tuple[Any, Any] | tuple[None, None]:
@@ -318,7 +688,9 @@ def causal_chart_context_tensor(
             # safely masked, so always take an owned copy at this boundary.
             tensor = torch.from_numpy(np.array(array, copy=True))
         except Exception as exc:
-            raise TypeError("chart image must be a PIL image, numpy array, or torch tensor") from exc
+            raise TypeError(
+                "chart image must be a PIL image, numpy array, or torch tensor"
+            ) from exc
 
     if tensor.ndim == 2:
         tensor = tensor.unsqueeze(0)
@@ -364,7 +736,9 @@ def causal_chart_context_tensor(
 
     height, width = max(8, int(output_size[0])), max(8, int(output_size[1]))
     batch = tensor if is_batched else tensor.unsqueeze(0)
-    resized = torch.nn.functional.interpolate(batch, size=(height, width), mode="bilinear", align_corners=False)
+    resized = torch.nn.functional.interpolate(
+        batch, size=(height, width), mode="bilinear", align_corners=False
+    )
     if cut_ratio is not None:
         resized = resized.clone()
         resized[..., :, max(0, min(width, int(round(cut_ratio * width)))) :] = 0.0
@@ -374,10 +748,11 @@ def causal_chart_context_tensor(
 def create_lstm_candle_sequence_model(
     *,
     input_dim: int = len(FEATURE_SCHEMA),
-    hidden_dim: int = 96,
-    num_layers: int = 2,
+    hidden_dim: int = 64,
+    num_layers: int = 1,
     dropout: float = 0.15,
     horizon_steps: int = DEFAULT_HORIZON_STEPS,
+    trajectory_modes: int = 0,
 ) -> Any:
     """Create the V3 raw-vision encoder with direct horizon decoding.
 
@@ -392,16 +767,29 @@ def create_lstm_candle_sequence_model(
         raise RuntimeError("PyTorch is required for LSTM candle-path model creation.")
     module_base: type[Any] = cast(type[Any], nn.Module)
     max_horizon = max(1, int(horizon_steps))
+    resolved_trajectory_modes = int(trajectory_modes)
+    if resolved_trajectory_modes not in {0, len(TRAJECTORY_MODE_LABELS)}:
+        raise ValueError(
+            "trajectory_modes must be 0 for legacy-compatible direct decoding "
+            f"or {len(TRAJECTORY_MODE_LABELS)} for BUY/SELL/HOLD regime decoding"
+        )
     feature_dim = len(PREDICTION_SCHEMA)
 
     class LSTMCandlePathModel(module_base):
         def __init__(self) -> None:
             cast(Callable[[Any], None], module_base.__init__)(self)
             self.max_horizon_steps = max_horizon
+            self.trajectory_modes = resolved_trajectory_modes
             pattern_dim = max(16, int(hidden_dim) // 2)
-            self.short_pattern = nn.Conv1d(int(input_dim), pattern_dim, kernel_size=3, padding=1)
-            self.medium_pattern = nn.Conv1d(int(input_dim), pattern_dim, kernel_size=7, padding=3)
-            self.long_pattern = nn.Conv1d(int(input_dim), pattern_dim, kernel_size=15, padding=7)
+            self.short_pattern = nn.Conv1d(
+                int(input_dim), pattern_dim, kernel_size=3, padding=1
+            )
+            self.medium_pattern = nn.Conv1d(
+                int(input_dim), pattern_dim, kernel_size=7, padding=3
+            )
+            self.long_pattern = nn.Conv1d(
+                int(input_dim), pattern_dim, kernel_size=15, padding=7
+            )
             self.pattern_fusion = nn.Sequential(
                 nn.Linear(pattern_dim * 3, int(input_dim)),
                 nn.GELU(),
@@ -414,7 +802,9 @@ def create_lstm_candle_sequence_model(
                 dropout=float(dropout) if int(num_layers) > 1 else 0.0,
                 batch_first=True,
             )
-            attention_heads = 4 if int(hidden_dim) % 4 == 0 else 2 if int(hidden_dim) % 2 == 0 else 1
+            attention_heads = (
+                4 if int(hidden_dim) % 4 == 0 else 2 if int(hidden_dim) % 2 == 0 else 1
+            )
             self.horizon_queries = nn.Embedding(max_horizon, int(hidden_dim))
             self.context_to_query = nn.Linear(int(hidden_dim), int(hidden_dim))
             self.horizon_attention = nn.MultiheadAttention(
@@ -434,14 +824,13 @@ def create_lstm_candle_sequence_model(
             self.decoder_norm = nn.LayerNorm(int(hidden_dim))
             self.decoder_dropout = nn.Dropout(float(dropout))
 
-            # Each horizontal convolution is left-padded in forward. Thus a
-            # feature at chart column x can only contain pixels from <= x.
-            chart_dim = max(16, int(hidden_dim) // 2)
-            self.chart_conv_1 = nn.Conv2d(3, 16, kernel_size=(3, 5), stride=2, padding=0)
-            self.chart_conv_2 = nn.Conv2d(16, 32, kernel_size=(3, 5), stride=2, padding=0)
-            self.chart_conv_3 = nn.Conv2d(32, chart_dim, kernel_size=(3, 5), stride=2, padding=0)
+            # With only hundreds of independent raw screenshots, a large
+            # trainable CNN mostly learns platform wallpaper.  A deterministic
+            # two-scale RGB/edge pyramid keeps raw spatial evidence while a
+            # small learned projection decides which patterns matter.
+            chart_pyramid_dim = 3 * 3 * ((8 * 16) + (4 * 8))
             self.chart_projection = nn.Sequential(
-                nn.Linear(chart_dim, int(hidden_dim)),
+                nn.Linear(chart_pyramid_dim, int(hidden_dim)),
                 nn.GELU(),
                 nn.LayerNorm(int(hidden_dim)),
             )
@@ -456,41 +845,70 @@ def create_lstm_candle_sequence_model(
             self.feature_mean_head = nn.Linear(int(hidden_dim), feature_dim)
             self.feature_scale_head = nn.Linear(int(hidden_dim), feature_dim)
             self.play_head = nn.Linear(int(hidden_dim), len(PLAY_LABELS))
+            if self.trajectory_modes:
+                # The old signed regression head is retained above so direct
+                # artifacts without this opt-in flag keep the exact same state
+                # dictionary.  New V3 artifacts separate mutually exclusive
+                # endpoint regimes before regressing their cumulative paths;
+                # BUY and SELL examples therefore no longer average into a
+                # visually flat unconditional mean.
+                self.trajectory_mode_head = nn.Linear(
+                    int(hidden_dim),
+                    self.trajectory_modes,
+                )
+                self.trajectory_mode_mean_head = nn.Linear(
+                    int(hidden_dim),
+                    self.trajectory_modes,
+                )
+                self.trajectory_mode_scale_head = nn.Linear(
+                    int(hidden_dim),
+                    self.trajectory_modes,
+                )
 
-        def _lengths_and_mask(self, sequence: Any, lengths: Any | None, mask: Any | None) -> tuple[Any, Any]:
+        def _lengths_and_mask(
+            self, sequence: Any, lengths: Any | None, mask: Any | None
+        ) -> tuple[Any, Any]:
             batch_size, width = int(sequence.shape[0]), int(sequence.shape[1])
             provided_mask: Any = None
             if mask is not None:
-                provided_mask = torch.as_tensor(mask, dtype=torch.bool, device=sequence.device)
+                provided_mask = torch.as_tensor(
+                    mask, dtype=torch.bool, device=sequence.device
+                )
                 if tuple(provided_mask.shape) != (batch_size, width):
                     raise ValueError(f"mask must have shape {(batch_size, width)}")
                 mask_lengths = provided_mask.to(dtype=torch.long).sum(dim=1)
-                resolved_lengths = mask_lengths if lengths is None else torch.as_tensor(lengths, device=sequence.device)
+                resolved_lengths = (
+                    mask_lengths
+                    if lengths is None
+                    else torch.as_tensor(lengths, device=sequence.device)
+                )
             elif lengths is None:
-                resolved_lengths = torch.full((batch_size,), width, dtype=torch.long, device=sequence.device)
+                resolved_lengths = torch.full(
+                    (batch_size,), width, dtype=torch.long, device=sequence.device
+                )
             else:
                 resolved_lengths = torch.as_tensor(lengths, device=sequence.device)
 
             resolved_lengths = resolved_lengths.to(dtype=torch.long).reshape(-1)
             if int(resolved_lengths.numel()) != batch_size:
                 raise ValueError(f"lengths must contain {batch_size} values")
-            if bool(torch.any(resolved_lengths < 1)) or bool(torch.any(resolved_lengths > width)):
+            if bool(torch.any(resolved_lengths < 1)) or bool(
+                torch.any(resolved_lengths > width)
+            ):
                 raise ValueError(f"lengths must be within [1, {width}]")
             positions = torch.arange(width, device=sequence.device).unsqueeze(0)
             right_padding_mask = positions < resolved_lengths.unsqueeze(1)
-            if provided_mask is not None and bool(torch.any(provided_mask != right_padding_mask)):
-                raise ValueError("mask must describe contiguous observations followed by right padding")
+            if provided_mask is not None and bool(
+                torch.any(provided_mask != right_padding_mask)
+            ):
+                raise ValueError(
+                    "mask must describe contiguous observations followed by right padding"
+                )
             return resolved_lengths, right_padding_mask
 
-        @staticmethod
-        def _causal_chart_conv(values: Any, layer: Any) -> Any:
-            kernel_height, kernel_width = layer.kernel_size
-            top = (int(kernel_height) - 1) // 2
-            bottom = int(kernel_height) - 1 - top
-            values = torch.nn.functional.pad(values, (int(kernel_width) - 1, 0, top, bottom))
-            return torch.nn.functional.gelu(layer(values))
-
-        def _chart_embedding(self, chart_context: Any, batch_size: int, dtype: Any, device: Any) -> Any:
+        def _chart_embedding(
+            self, chart_context: Any, batch_size: int, dtype: Any, device: Any
+        ) -> Any:
             pixels = torch.as_tensor(chart_context, device=device)
             if pixels.ndim == 3:
                 pixels = pixels.unsqueeze(0)
@@ -504,11 +922,23 @@ def create_lstm_candle_sequence_model(
             if pixels.numel() and float(pixels.detach().amax().item()) > 1.5:
                 pixels = pixels / 255.0
             pixels = torch.clamp(pixels, 0.0, 1.0)
-            values = self._causal_chart_conv(pixels, self.chart_conv_1)
-            values = self._causal_chart_conv(values, self.chart_conv_2)
-            values = self._causal_chart_conv(values, self.chart_conv_3)
-            pooled = torch.nn.functional.adaptive_avg_pool2d(values, (1, 1)).flatten(1)
-            return self.chart_projection(pooled)
+            gradient_x = torch.nn.functional.pad(
+                torch.abs(pixels[:, :, :, 1:] - pixels[:, :, :, :-1]),
+                (0, 1, 0, 0),
+            )
+            gradient_y = torch.nn.functional.pad(
+                torch.abs(pixels[:, :, 1:, :] - pixels[:, :, :-1, :]),
+                (0, 0, 0, 1),
+            )
+            pyramid: list[Any] = []
+            for output_size in ((8, 16), (4, 8)):
+                for values in (pixels, gradient_x, gradient_y):
+                    pyramid.append(
+                        torch.nn.functional.adaptive_avg_pool2d(
+                            values, output_size
+                        ).flatten(1)
+                    )
+            return self.chart_projection(torch.cat(pyramid, dim=1))
 
         def forward(
             self,
@@ -523,8 +953,13 @@ def create_lstm_candle_sequence_model(
             del targets, teacher_forcing_ratio
             if sequence.ndim != 3 or int(sequence.shape[-1]) != int(input_dim):
                 raise ValueError(f"sequence must have shape [B, T, {int(input_dim)}]")
-            steps = min(self.max_horizon_steps, max(1, int(horizon_steps or self.max_horizon_steps)))
-            resolved_lengths, valid_mask = self._lengths_and_mask(sequence, lengths, mask)
+            steps = min(
+                self.max_horizon_steps,
+                max(1, int(horizon_steps or self.max_horizon_steps)),
+            )
+            resolved_lengths, valid_mask = self._lengths_and_mask(
+                sequence, lengths, mask
+            )
             visual_sequence = sequence.transpose(1, 2)
             pattern_features = torch.cat(
                 (
@@ -535,7 +970,9 @@ def create_lstm_candle_sequence_model(
                 dim=1,
             ).transpose(1, 2)
             fused_sequence = sequence + self.pattern_fusion(pattern_features)
-            fused_sequence = fused_sequence * valid_mask.unsqueeze(-1).to(dtype=fused_sequence.dtype)
+            fused_sequence = fused_sequence * valid_mask.unsqueeze(-1).to(
+                dtype=fused_sequence.dtype
+            )
             packed = torch.nn.utils.rnn.pack_padded_sequence(
                 fused_sequence,
                 resolved_lengths.detach().to(device="cpu"),
@@ -551,7 +988,11 @@ def create_lstm_candle_sequence_model(
             pooled = self.encoder_norm(hidden[-1])
 
             step_ids = torch.arange(steps, dtype=torch.long, device=sequence.device)
-            queries = self.horizon_queries(step_ids).unsqueeze(0).expand(int(sequence.shape[0]), -1, -1)
+            queries = (
+                self.horizon_queries(step_ids)
+                .unsqueeze(0)
+                .expand(int(sequence.shape[0]), -1, -1)
+            )
             context_state = pooled
             if chart_context is not None:
                 chart_embedding = self._chart_embedding(
@@ -563,7 +1004,9 @@ def create_lstm_candle_sequence_model(
                 gated_chart = torch.sigmoid(self.chart_gate) * chart_embedding
                 queries = queries + gated_chart.unsqueeze(1)
                 context_state = self.context_norm(context_state + gated_chart)
-            queries = self.query_norm(queries + self.context_to_query(context_state).unsqueeze(1))
+            queries = self.query_norm(
+                queries + self.context_to_query(context_state).unsqueeze(1)
+            )
             attended, _weights = self.horizon_attention(
                 queries,
                 encoded,
@@ -576,10 +1019,15 @@ def create_lstm_candle_sequence_model(
             direction_logits = self.direction_head(decoded)
             decision_logits = self.decision_head(decoded)
             raw_mean = self.feature_mean_head(decoded)
-            mean = torch.cat((torch.sigmoid(raw_mean[..., :4]), torch.tanh(raw_mean[..., 4:5])), dim=-1)
+            mean = torch.cat(
+                (torch.sigmoid(raw_mean[..., :4]), torch.tanh(raw_mean[..., 4:5])),
+                dim=-1,
+            )
             scale = 0.01 + 0.34 * torch.sigmoid(self.feature_scale_head(decoded))
-            context_embedding = torch.nn.functional.normalize(context_state, p=2.0, dim=-1, eps=1e-8)
-            return {
+            context_embedding = torch.nn.functional.normalize(
+                context_state, p=2.0, dim=-1, eps=1e-8
+            )
+            result = {
                 "direction_logits": direction_logits,
                 "decision_logits": decision_logits,
                 "feature_mean": mean,
@@ -587,6 +1035,21 @@ def create_lstm_candle_sequence_model(
                 "play_logits": self.play_head(context_state),
                 "context_embedding": context_embedding,
             }
+            if self.trajectory_modes:
+                result.update(
+                    {
+                        "trajectory_mode_logits": self.trajectory_mode_head(
+                            context_state
+                        ),
+                        "trajectory_mode_mean": torch.tanh(
+                            self.trajectory_mode_mean_head(decoded)
+                        ),
+                        "trajectory_mode_scale": 0.01
+                        + 0.34
+                        * torch.sigmoid(self.trajectory_mode_scale_head(decoded)),
+                    }
+                )
+            return result
 
     return LSTMCandlePathModel()
 
@@ -621,9 +1084,15 @@ def create_legacy_lstm_candle_sequence_model(
             cast(Callable[[Any], None], module_base.__init__)(self)
             self.max_horizon_steps = max_horizon
             pattern_dim = max(16, int(hidden_dim) // 2)
-            self.short_pattern = nn.Conv1d(int(input_dim), pattern_dim, kernel_size=3, padding=1)
-            self.medium_pattern = nn.Conv1d(int(input_dim), pattern_dim, kernel_size=7, padding=3)
-            self.long_pattern = nn.Conv1d(int(input_dim), pattern_dim, kernel_size=15, padding=7)
+            self.short_pattern = nn.Conv1d(
+                int(input_dim), pattern_dim, kernel_size=3, padding=1
+            )
+            self.medium_pattern = nn.Conv1d(
+                int(input_dim), pattern_dim, kernel_size=7, padding=3
+            )
+            self.long_pattern = nn.Conv1d(
+                int(input_dim), pattern_dim, kernel_size=15, padding=7
+            )
             self.pattern_fusion = nn.Sequential(
                 nn.Linear(pattern_dim * 3, int(input_dim)),
                 nn.GELU(),
@@ -636,7 +1105,9 @@ def create_legacy_lstm_candle_sequence_model(
                 dropout=float(dropout) if int(num_layers) > 1 else 0.0,
                 batch_first=True,
             )
-            attention_heads = 4 if int(hidden_dim) % 4 == 0 else 2 if int(hidden_dim) % 2 == 0 else 1
+            attention_heads = (
+                4 if int(hidden_dim) % 4 == 0 else 2 if int(hidden_dim) % 2 == 0 else 1
+            )
             self.history_attention = nn.MultiheadAttention(
                 int(hidden_dim),
                 num_heads=attention_heads,
@@ -654,7 +1125,9 @@ def create_legacy_lstm_candle_sequence_model(
 
         def _feedback(self, previous: Any, direction_logits: Any, mean: Any) -> Any:
             direction_probabilities = torch.softmax(direction_logits, dim=-1)
-            direction_value = direction_probabilities[:, 0] - direction_probabilities[:, 1]
+            direction_value = (
+                direction_probabilities[:, 0] - direction_probabilities[:, 1]
+            )
             next_location = torch.clamp(
                 previous[:, location_index] + mean[:, 4] * MAX_PRICE_DELTA,
                 0.0,
@@ -746,12 +1219,17 @@ def create_legacy_lstm_candle_sequence_model(
                 mean_rows.append(mean)
                 scale_rows.append(scale)
                 predicted_input = self._feedback(decoder_input, direction_logits, mean)
-                if targets is not None and step < targets.shape[1] and teacher_forcing_ratio > 0.0:
-                    use_teacher = (
-                        torch.rand((sequence.shape[0], 1), device=sequence.device)
-                        < float(teacher_forcing_ratio)
+                if (
+                    targets is not None
+                    and step < targets.shape[1]
+                    and teacher_forcing_ratio > 0.0
+                ):
+                    use_teacher = torch.rand(
+                        (sequence.shape[0], 1), device=sequence.device
+                    ) < float(teacher_forcing_ratio)
+                    decoder_input = torch.where(
+                        use_teacher, targets[:, step, :], predicted_input
                     )
-                    decoder_input = torch.where(use_teacher, targets[:, step, :], predicted_input)
                 else:
                     decoder_input = predicted_input
             return {
@@ -764,22 +1242,47 @@ def create_legacy_lstm_candle_sequence_model(
     return LegacyLSTMCandlePathModel()
 
 
-def _artifact_cache_key(model_path: Path, config_path: Path, metrics_path: Path) -> tuple[str, str, str, float, float, float]:
+def _artifact_cache_key(
+    model_path: Path,
+    config_path: Path,
+    metrics_path: Path,
+    manifest_identity: str = "",
+) -> tuple[Any, ...]:
     def mtime(path: Path) -> float:
         try:
             return path.stat().st_mtime
         except OSError:
             return 0.0
 
-    return (str(model_path.resolve()), str(config_path.resolve()), str(metrics_path.resolve()), mtime(model_path), mtime(config_path), mtime(metrics_path))
+    return (
+        str(model_path.resolve()),
+        str(config_path.resolve()),
+        str(metrics_path.resolve()),
+        mtime(model_path),
+        mtime(config_path),
+        mtime(metrics_path),
+        manifest_identity,
+    )
 
 
-def _load_artifact_bundle(model_path: Path, config_path: Path, metrics_path: Path) -> dict[str, Any]:
-    key = _artifact_cache_key(model_path, config_path, metrics_path)
+def _load_artifact_bundle(
+    model_path: Path, config_path: Path, metrics_path: Path
+) -> dict[str, Any]:
+    resolution = _resolve_artifact_bundle_paths(model_path, config_path, metrics_path)
+    resolved_paths = cast(
+        tuple[Path, Path, Path],
+        resolution.get("paths", (model_path, config_path, metrics_path)),
+    )
+    manifest_identity = str(
+        resolution.get("manifest_digest")
+        or (f"rejected:{resolution.get('error')}" if resolution.get("error") else "")
+    )
+    key = _artifact_cache_key(*resolved_paths, manifest_identity)
     if key in _ARTIFACT_CACHE:
         return _ARTIFACT_CACHE[key]
-    config = _read_json(config_path)
-    metrics = _read_json(metrics_path)
+    effective_model_path, effective_config_path, effective_metrics_path = resolved_paths
+    config = _read_json(effective_config_path)
+    metrics = _read_json(effective_metrics_path)
     bundle: dict[str, Any] = {
         "config": config,
         "metrics": metrics,
@@ -792,12 +1295,29 @@ def _load_artifact_bundle(model_path: Path, config_path: Path, metrics_path: Pat
         "risk_control": {},
         "risk_error": "",
         "error": "",
+        "artifact_manifest_path": (
+            str(resolution.get("manifest_path"))
+            if resolution.get("manifest")
+            else ""
+        ),
+        "artifact_manifest_generation_id": str(
+            resolution.get("generation_id") or ""
+        ),
+        "resolved_model_path": str(effective_model_path),
+        "resolved_config_path": str(effective_config_path),
+        "resolved_metrics_path": str(effective_metrics_path),
     }
-    if not (model_path.exists() and config and metrics):
+    if resolution.get("error"):
+        bundle["error"] = str(resolution["error"])
+        _ARTIFACT_CACHE[key] = bundle
+        return bundle
+    if not (effective_model_path.exists() and config and metrics):
         _ARTIFACT_CACHE[key] = bundle
         return bundle
     if str(config.get("model_version")) != LSTM_CANDLE_SEQUENCE_VERSION:
-        bundle["error"] = "incompatible LSTM artifact; PhoenixGuard V3 candle-path retraining is required."
+        bundle["error"] = (
+            "incompatible LSTM artifact; PhoenixGuard V3 candle-path retraining is required."
+        )
         _ARTIFACT_CACHE[key] = bundle
         return bundle
     torch, _nn = _torch_modules()
@@ -807,24 +1327,96 @@ def _load_artifact_bundle(model_path: Path, config_path: Path, metrics_path: Pat
         return bundle
     try:
         architecture = str(config.get("architecture") or "")
-        if architecture not in {LEGACY_MULTISCALE_ARCHITECTURE, DIRECT_RAW_CV_ARCHITECTURE}:
-            raise ValueError(f"unsupported V3 LSTM architecture: {architecture or 'missing'}")
+        if architecture not in {
+            LEGACY_MULTISCALE_ARCHITECTURE,
+            DIRECT_RAW_CV_ARCHITECTURE,
+        }:
+            raise ValueError(
+                f"unsupported V3 LSTM architecture: {architecture or 'missing'}"
+            )
         legacy_restored = architecture == LEGACY_MULTISCALE_ARCHITECTURE
         model_factory = (
             create_legacy_lstm_candle_sequence_model
             if legacy_restored
             else create_lstm_candle_sequence_model
         )
-        model = model_factory(
-            input_dim=int(config.get("input_dim", len(FEATURE_SCHEMA)) or len(FEATURE_SCHEMA)),
-            hidden_dim=int(config.get("hidden_dim", 96) or 96),
-            num_layers=int(config.get("num_layers", 2) or 2),
-            dropout=float(config.get("dropout", 0.15) or 0.0),
-            horizon_steps=int(config.get("horizon_steps", DEFAULT_HORIZON_STEPS) or DEFAULT_HORIZON_STEPS),
+        model_kwargs: dict[str, Any] = {
+            "input_dim": int(
+                config.get("input_dim", len(FEATURE_SCHEMA)) or len(FEATURE_SCHEMA)
+            ),
+            "hidden_dim": int(config.get("hidden_dim", 96) or 96),
+            "num_layers": int(config.get("num_layers", 2) or 2),
+            "dropout": float(config.get("dropout", 0.15) or 0.0),
+            "horizon_steps": int(
+                config.get("horizon_steps", DEFAULT_HORIZON_STEPS)
+                or DEFAULT_HORIZON_STEPS
+            ),
+        }
+        configured_trajectory_modes = int(config.get("trajectory_modes", 0) or 0)
+        if not legacy_restored:
+            model_kwargs["trajectory_modes"] = configured_trajectory_modes
+        model = model_factory(**model_kwargs)
+        payload: Any = torch.load(
+            effective_model_path, map_location="cpu", weights_only=False
         )
-        payload: Any = torch.load(model_path, map_location="cpu", weights_only=False)
         payload_mapping = _mapping(payload)
-        state_dict = payload_mapping.get("state_dict", payload) if payload_mapping else payload
+        generation_values = (
+            str(payload_mapping.get("artifact_generation_id") or ""),
+            str(config.get("artifact_generation_id") or ""),
+            str(metrics.get("artifact_generation_id") or ""),
+        )
+        if any(generation_values) and (
+            not all(generation_values)
+            or len(set(generation_values)) != 1
+        ):
+            raise ValueError(
+                "V3 model, config, and metrics belong to different artifact generations"
+            )
+        manifest_generation = str(resolution.get("generation_id") or "")
+        if manifest_generation and generation_values[0] != manifest_generation:
+            raise ValueError(
+                "V3 model generation does not match the artifact manifest pointer"
+            )
+        bundle["artifact_generation_id"] = generation_values[0]
+        if configured_trajectory_modes:
+            if (
+                int(payload_mapping.get("trajectory_modes", 0) or 0)
+                != configured_trajectory_modes
+            ):
+                raise ValueError(
+                    "trajectory regime decoder in checkpoint does not match config"
+                )
+        configured_path_semantics = str(
+            config.get("path_target_semantics") or ""
+        ).upper()
+        if configured_path_semantics == "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR":
+            target_schema = str(config.get("training_target_schema_version") or "")
+            if not target_schema:
+                raise ValueError(
+                    "direct V3 path artifact is missing its training target schema"
+                )
+            if (
+                str(payload_mapping.get("training_target_schema_version") or "")
+                != target_schema
+            ):
+                raise ValueError(
+                    "direct V3 checkpoint target semantics do not match config"
+                )
+            if (
+                str(metrics.get("training_target_schema_version") or "")
+                != target_schema
+            ):
+                raise ValueError(
+                    "direct V3 metrics target semantics do not match config"
+                )
+            if (
+                str(metrics.get("path_target_semantics") or "").upper()
+                != configured_path_semantics
+            ):
+                raise ValueError("direct V3 metrics path semantics do not match config")
+        state_dict = (
+            payload_mapping.get("state_dict", payload) if payload_mapping else payload
+        )
         model.load_state_dict(state_dict)
         model.eval()
         bundle["model"] = model
@@ -849,19 +1441,136 @@ def _load_artifact_bundle(model_path: Path, config_path: Path, metrics_path: Pat
         raw_retrieval_bank = payload_mapping.get("retrieval_bank")
         if raw_retrieval_bank is not None:
             try:
-                bundle["retrieval_bank"] = validate_retrieval_bank_v3(raw_retrieval_bank)
+                bundle["retrieval_bank"] = validate_retrieval_bank_v3(
+                    raw_retrieval_bank
+                )
             except (TypeError, ValueError) as exc:
                 # A corrupt or leakage-unsafe bank must disable retrieval and
                 # selection, but it must not suppress the diagnostic model path.
                 bundle["risk_error"] = f"retrieval bank rejected: {exc}"
-        bundle["ready"] = bool(metrics.get("production_ready", config.get("production_ready", False)))
+        # Legacy V3 metrics measured candle-body colour while the screen drew a
+        # recursively integrated price path.  That is not evidence that the
+        # displayed trajectory generalizes, so only the exact direct-path
+        # target contract may ever receive production authority.
+        bundle["ready"] = bool(
+            not legacy_restored
+            and configured_path_semantics == "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR"
+            and metrics.get("production_ready", config.get("production_ready", False))
+        )
         if not bundle["ready"]:
-            bundle["error"] = "V3 artifact loaded but held-out evaluation did not pass the production gate."
+            bundle["error"] = (
+                "V3 artifact loaded but held-out evaluation did not pass the production gate."
+            )
     except Exception as exc:
         bundle["error"] = f"failed to load LSTM candle-path artifact: {exc}"
-    _ARTIFACT_CACHE.clear()
+    # Keep distinct canonical and direct-diagnostic bundles resident together.
+    # Clearing the entire cache here would reload both PyTorch models on every
+    # live frame once runtime fallback selection is enabled.
+    for cached_key in list(_ARTIFACT_CACHE):
+        if cached_key[:3] == key[:3] and cached_key != key:
+            _ARTIFACT_CACHE.pop(cached_key, None)
     _ARTIFACT_CACHE[key] = bundle
     return bundle
+
+
+def _same_artifact_request(
+    requested: tuple[Path, Path, Path],
+    expected: tuple[Path, Path, Path],
+) -> bool:
+    try:
+        return all(
+            left.resolve() == right.resolve()
+            for left, right in zip(requested, expected)
+        )
+    except OSError:
+        return requested == expected
+
+
+def _select_runtime_artifact_bundle(
+    model_path: Path,
+    config_path: Path,
+    metrics_path: Path,
+) -> tuple[dict[str, Any], Path, Path, Path, dict[str, Any]]:
+    """Select a direct V3 path artifact without changing trade authority.
+
+    Explicit artifact paths are always respected.  Only the normal canonical
+    runtime request may fall back from the historical recursive/body-colour
+    export to the local direct-path diagnostic checkpoint.  A diagnostic
+    checkpoint remains ``ready=False`` and can therefore draw a forecast while
+    contributing no trade permission.
+    """
+
+    requested_paths = (model_path, config_path, metrics_path)
+    primary = _load_artifact_bundle(*requested_paths)
+    primary_config = _mapping(primary.get("config"))
+    primary_semantics = str(
+        primary_config.get("path_target_semantics") or "STEP_DELTA_RECURSIVE"
+    ).upper()
+    selection: dict[str, Any] = {
+        "schema_version": "PG_LSTM_ARTIFACT_SELECTION_V3",
+        "source": "CANONICAL_V3",
+        "fallback_used": False,
+        "selected_model_path": str(model_path),
+        "selected_config_path": str(config_path),
+        "selected_metrics_path": str(metrics_path),
+        "selected_path_target_semantics": primary_semantics,
+        "canonical_audit": {
+            "model_path": str(model_path),
+            "architecture": str(primary_config.get("architecture") or ""),
+            "path_target_semantics": primary_semantics,
+            "artifact_loaded": bool(primary.get("model_loaded")),
+            "production_authorized": bool(primary.get("ready")),
+        },
+    }
+    primary_is_direct = bool(
+        primary.get("model_loaded")
+        and not primary.get("legacy_restored")
+        and primary_semantics == "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR"
+    )
+    default_request = _same_artifact_request(
+        requested_paths,
+        (DEFAULT_MODEL_PATH, DEFAULT_CONFIG_PATH, DEFAULT_METRICS_PATH),
+    )
+    if primary_is_direct or not default_request:
+        return primary, model_path, config_path, metrics_path, selection
+
+    diagnostic_paths = (
+        DIRECT_DIAGNOSTIC_MODEL_PATH,
+        DIRECT_DIAGNOSTIC_CONFIG_PATH,
+        DIRECT_DIAGNOSTIC_METRICS_PATH,
+    )
+    diagnostic = _load_artifact_bundle(*diagnostic_paths)
+    diagnostic_config = _mapping(diagnostic.get("config"))
+    diagnostic_semantics = str(
+        diagnostic_config.get("path_target_semantics") or ""
+    ).upper()
+    diagnostic_is_direct = bool(
+        diagnostic.get("model_loaded")
+        and not diagnostic.get("legacy_restored")
+        and diagnostic_semantics == "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR"
+    )
+    if not diagnostic_is_direct:
+        selection["fallback_error"] = str(
+            diagnostic.get("error")
+            or "direct V3 diagnostic checkpoint is missing or incompatible"
+        )
+        return primary, model_path, config_path, metrics_path, selection
+
+    selection.update(
+        {
+            "source": "DIRECT_V3_LOW_CONFIDENCE_FALLBACK",
+            "fallback_used": True,
+            "fallback_reason": (
+                "canonical V3 export does not use direct anchor-relative future-path targets"
+            ),
+            "selected_model_path": str(DIRECT_DIAGNOSTIC_MODEL_PATH),
+            "selected_config_path": str(DIRECT_DIAGNOSTIC_CONFIG_PATH),
+            "selected_metrics_path": str(DIRECT_DIAGNOSTIC_METRICS_PATH),
+            "selected_path_target_semantics": diagnostic_semantics,
+            "selected_production_authorized": bool(diagnostic.get("ready")),
+        }
+    )
+    return diagnostic, *diagnostic_paths, selection
 
 
 def _model_forecast(
@@ -878,6 +1587,7 @@ def _model_forecast(
     production_authorized: bool = False,
     risk_error: str = "",
     legacy_restored: bool = False,
+    path_target_semantics: str = "STEP_DELTA_RECURSIVE",
 ) -> dict[str, Any]:
     torch, _nn = _torch_modules()
     if torch is None or model is None or not features:
@@ -899,6 +1609,15 @@ def _model_forecast(
         )
         if chart_context.ndim == 3:
             chart_context = chart_context.unsqueeze(0)
+    direct_cumulative_path = (
+        str(path_target_semantics or "").upper()
+        == "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR"
+    )
+    trajectory_mode_probabilities: dict[str, float] = {}
+    selected_trajectory_mode = ""
+    selected_trajectory_mode_index: int | None = None
+    trajectory_mode_means: Any = None
+    trajectory_mode_scales: Any = None
     with torch.inference_mode():
         if legacy_restored:
             outputs = model(tensor, horizon_steps=horizon_steps)
@@ -911,11 +1630,53 @@ def _model_forecast(
             )
         natural_logits = outputs["direction_logits"].squeeze(0)
         raw_directions = torch.softmax(natural_logits, dim=-1)
-        decisions = torch.softmax(outputs.get("decision_logits", outputs["direction_logits"]), dim=-1).squeeze(0)
+        decisions = torch.softmax(
+            outputs.get("decision_logits", outputs["direction_logits"]), dim=-1
+        ).squeeze(0)
         means = outputs["feature_mean"].squeeze(0)
         scales = outputs["feature_scale"].squeeze(0)
         play = torch.softmax(outputs["play_logits"], dim=-1).squeeze(0)
         context_embedding = outputs.get("context_embedding")
+        raw_mode_logits = outputs.get("trajectory_mode_logits")
+        raw_mode_means = outputs.get("trajectory_mode_mean")
+        raw_mode_scales = outputs.get("trajectory_mode_scale")
+        if (
+            direct_cumulative_path
+            and raw_mode_logits is not None
+            and raw_mode_means is not None
+            and raw_mode_scales is not None
+        ):
+            mode_logits = raw_mode_logits.squeeze(0)
+            trajectory_mode_means = raw_mode_means.squeeze(0)
+            trajectory_mode_scales = raw_mode_scales.squeeze(0)
+            if (
+                int(mode_logits.numel()) != len(TRAJECTORY_MODE_LABELS)
+                or tuple(trajectory_mode_means.shape)
+                != (int(means.shape[0]), len(TRAJECTORY_MODE_LABELS))
+                or tuple(trajectory_mode_scales.shape)
+                != (int(scales.shape[0]), len(TRAJECTORY_MODE_LABELS))
+            ):
+                raise ValueError(
+                    "trajectory regime decoder must emit BUY/SELL/HOLD logits "
+                    "and one cumulative mean/scale per horizon and mode"
+                )
+            mode_probabilities = torch.softmax(mode_logits, dim=-1)
+            selected_trajectory_mode_index = int(
+                torch.argmax(mode_probabilities).item()
+            )
+            selected_trajectory_mode = TRAJECTORY_MODE_LABELS[
+                selected_trajectory_mode_index
+            ]
+            trajectory_mode_probabilities = {
+                label: float(mode_probabilities[index].item())
+                for index, label in enumerate(TRAJECTORY_MODE_LABELS)
+            }
+            # Only the path channel is mode-conditioned. Candle shape and body
+            # colour retain their existing auxiliary heads.
+            means = means.clone()
+            scales = scales.clone()
+            means[:, 4] = trajectory_mode_means[:, selected_trajectory_mode_index]
+            scales[:, 4] = trajectory_mode_scales[:, selected_trajectory_mode_index]
 
     controls = _mapping(risk_control)
     thresholds = _mapping(controls.get("thresholds"))
@@ -940,12 +1701,20 @@ def _model_forecast(
 
     retrieval_top_k = max(1, int(_safe_float(retrieval_settings.get("top_k"), 8)))
     retrieval_alpha = _clip(retrieval_settings.get("alpha"), 0.0, 0.75)
-    minimum_similarity = _clip(retrieval_settings.get("minimum_similarity"), -1.0, 0.999999, 0.05)
-    similarity_power = max(0.01, _safe_float(retrieval_settings.get("similarity_power"), 2.0))
+    minimum_similarity = _clip(
+        retrieval_settings.get("minimum_similarity"), -1.0, 0.999999, 0.05
+    )
+    similarity_power = max(
+        0.01, _safe_float(retrieval_settings.get("similarity_power"), 2.0)
+    )
     retrieval_forecast: dict[str, Any] = {}
     retrieval_status = "disabled" if retrieval_alpha <= 0.0 else "unavailable"
     retrieval_failure = str(risk_error or "")
-    if retrieval_alpha > 0.0 and retrieval_bank is not None and context_embedding is not None:
+    if (
+        retrieval_alpha > 0.0
+        and retrieval_bank is not None
+        and context_embedding is not None
+    ):
         try:
             retrieved = retrieve_forecast_v3(
                 retrieval_bank,
@@ -961,9 +1730,130 @@ def _model_forecast(
             retrieval_status = "rejected"
     retrieval_required = retrieval_alpha > 0.0
     retrieval_valid = not retrieval_required or retrieval_status == "ok"
-    controls_valid = bool(controls) and temperature_valid and thresholds_valid and retrieval_valid
+    controls_valid = (
+        bool(controls) and temperature_valid and thresholds_valid and retrieval_valid
+    )
 
     current_location = _clip01(features[-1].get("relative_price_location"), 0.5)
+    anchor_location = current_location
+    trajectory_scenarios: list[dict[str, Any]] = []
+    if (
+        selected_trajectory_mode_index is not None
+        and trajectory_mode_means is not None
+        and trajectory_mode_scales is not None
+    ):
+        scenario_steps = min(
+            int(horizon_steps),
+            int(trajectory_mode_means.shape[0]),
+        )
+        for mode_index, mode_label in enumerate(TRAJECTORY_MODE_LABELS):
+            scenario_prior = anchor_location
+            scenario_path: list[dict[str, Any]] = []
+            for step in range(scenario_steps):
+                scenario_cumulative_delta = (
+                    _clip(
+                        float(trajectory_mode_means[step, mode_index].item()),
+                        -1.0,
+                        1.0,
+                    )
+                    * MAX_PRICE_DELTA
+                )
+                scenario_close = _clip01(
+                    anchor_location + scenario_cumulative_delta,
+                    anchor_location,
+                )
+                scenario_event_delta = scenario_close - scenario_prior
+                scenario_scale = max(
+                    0.001,
+                    float(trajectory_mode_scales[step, mode_index].item())
+                    * MAX_PRICE_DELTA,
+                )
+                scenario_path.append(
+                    {
+                        "step": step + 1,
+                        "event": f"CANDLE_EVENT_{step + 1}",
+                        "expected_close_norm": round(scenario_close, 6),
+                        "expected_delta_norm": round(scenario_event_delta, 6),
+                        "expected_cumulative_delta_norm": round(
+                            scenario_cumulative_delta,
+                            6,
+                        ),
+                        "cumulative_scale_norm": round(scenario_scale, 6),
+                    }
+                )
+                scenario_prior = scenario_close
+            trajectory_scenarios.append(
+                {
+                    "side": mode_label,
+                    "probability": round(
+                        trajectory_mode_probabilities[mode_label],
+                        6,
+                    ),
+                    "probability_calibrated": False,
+                    "selected": mode_index == selected_trajectory_mode_index,
+                    "path_target_semantics": ("DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR"),
+                    "forecast_path": scenario_path,
+                }
+            )
+    trajectory_controls = _mapping(controls.get("trajectory"))
+    trajectory_horizons = _mapping(trajectory_controls.get("horizons"))
+    trajectory_probability_calibrated = bool(
+        direct_cumulative_path
+        and trajectory_controls.get("probability_calibrated") is True
+    )
+    interval_controls = _mapping(controls.get("trajectory_interval")) or _mapping(
+        controls.get("pathwise_conformal")
+    )
+    interval_quantile = max(0.0, _safe_float(interval_controls.get("quantile"), 0.0))
+    interval_source_value = next(
+        (
+            interval_controls.get(key)
+            for key in (
+                "calibration_independent_groups",
+                "calibration_sources",
+                "source_count",
+            )
+            if key in interval_controls
+        ),
+        0,
+    )
+    interval_source_count = int(max(0.0, _safe_float(interval_source_value, 0.0)))
+    interval_schema_valid = bool(
+        interval_controls.get("calibrated") is True
+        or str(interval_controls.get("schema_version") or "").upper()
+        in {
+            "PG_SOURCE_GROUPED_PATHWISE_CONFORMAL_V3",
+            "PG_PERCEPTUAL_GROUP_PATHWISE_CONFORMAL_V3",
+        }
+    )
+    interval_horizon_count = min(int(horizon_steps), int(scales.shape[0]))
+    interval_raw_full_widths: list[float] = []
+    for interval_step in range(interval_horizon_count):
+        raw_scale = float(scales[interval_step, 4].item())
+        if not math.isfinite(raw_scale):
+            interval_raw_full_widths.append(math.inf)
+            continue
+        cumulative_scale = max(0.001, raw_scale * MAX_PRICE_DELTA)
+        interval_raw_full_widths.append(2.0 * interval_quantile * cumulative_scale)
+    interval_widths_within_limit = bool(interval_raw_full_widths) and all(
+        math.isfinite(width) and width <= MAX_PATHWISE_CONFORMAL_FULL_WIDTH_NORM + 1e-12
+        for width in interval_raw_full_widths
+    )
+    interval_safety_reasons: list[str] = []
+    if interval_schema_valid:
+        if interval_source_count < MIN_PATHWISE_CONFORMAL_INDEPENDENT_GROUPS:
+            interval_safety_reasons.append(
+                "INSUFFICIENT_INDEPENDENT_CALIBRATION_GROUPS"
+            )
+        if not interval_widths_within_limit:
+            interval_safety_reasons.append("RAW_FULL_INTERVAL_WIDTH_EXCEEDS_0_30")
+    interval_calibrated = bool(
+        production_authorized
+        and direct_cumulative_path
+        and interval_schema_valid
+        and interval_quantile > 0.0
+        and not interval_safety_reasons
+    )
     cumulative_variance = 0.0
     forecast_path: list[dict[str, Any]] = []
     for step in range(min(int(horizon_steps), int(means.shape[0]))):
@@ -986,52 +1876,181 @@ def _model_forecast(
         retrieval_buy_probability = _clip01(retrieval_probabilities.get("BUY"), 0.5)
         retrieval_sell_probability = _clip01(retrieval_probabilities.get("SELL"), 0.5)
         retrieval_support = _clip01(retrieval_row.get("effective_confidence"), 0.0)
-        effective_alpha = retrieval_alpha * retrieval_support if retrieval_status == "ok" else 0.0
-        buy_probability = (1.0 - effective_alpha) * model_buy_probability + effective_alpha * retrieval_buy_probability
-        sell_probability = (1.0 - effective_alpha) * model_sell_probability + effective_alpha * retrieval_sell_probability
+        effective_alpha = (
+            retrieval_alpha * retrieval_support if retrieval_status == "ok" else 0.0
+        )
+        buy_probability = (
+            1.0 - effective_alpha
+        ) * model_buy_probability + effective_alpha * retrieval_buy_probability
+        sell_probability = (
+            1.0 - effective_alpha
+        ) * model_sell_probability + effective_alpha * retrieval_sell_probability
         balanced_buy_probability = (
-            (1.0 - effective_alpha) * raw_balanced_buy_probability
-            + effective_alpha * retrieval_buy_probability
-        )
+            1.0 - effective_alpha
+        ) * raw_balanced_buy_probability + effective_alpha * retrieval_buy_probability
         balanced_sell_probability = (
-            (1.0 - effective_alpha) * raw_balanced_sell_probability
-            + effective_alpha * retrieval_sell_probability
-        )
+            1.0 - effective_alpha
+        ) * raw_balanced_sell_probability + effective_alpha * retrieval_sell_probability
         continuous = [float(value) for value in means[step].tolist()]
         scale = [float(value) for value in scales[step].tolist()]
-        delta = _clip(continuous[4], -1.0, 1.0) * MAX_PRICE_DELTA
+        regression_delta = _clip(continuous[4], -1.0, 1.0) * MAX_PRICE_DELTA
         delta_scale = max(0.001, scale[4] * MAX_PRICE_DELTA)
-        open_location = current_location
-        close_location = _clip01(open_location + delta, open_location)
+        body_model_direction = (
+            "BUY" if model_buy_probability >= model_sell_probability else "SELL"
+        )
+        body_direction = (
+            "BUY" if balanced_buy_probability >= balanced_sell_probability else "SELL"
+        )
+        prior_close_location = current_location
+        open_location = prior_close_location
+        if direct_cumulative_path:
+            cumulative_delta = regression_delta
+            close_location = _clip01(
+                anchor_location + cumulative_delta, anchor_location
+            )
+            event_delta = close_location - prior_close_location
+            cumulative_scale = delta_scale
+        else:
+            event_delta = regression_delta
+            close_location = _clip01(open_location + event_delta, open_location)
+            cumulative_delta = close_location - anchor_location
+            cumulative_variance += delta_scale * delta_scale
+            cumulative_scale = math.sqrt(cumulative_variance)
         candle_range = max(0.001, _clip01(continuous[3], 0.01))
-        shape_total = max(0.001, continuous[0] + continuous[1] + continuous[2])
-        upper_extension = candle_range * continuous[1] / shape_total
-        lower_extension = candle_range * continuous[2] / shape_total
-        high_location = _clip01(max(open_location, close_location) + upper_extension)
-        low_location = _clip01(min(open_location, close_location) - lower_extension)
-        cumulative_variance += delta_scale * delta_scale
-        cumulative_scale = math.sqrt(cumulative_variance)
-        model_direction = "BUY" if model_buy_probability >= model_sell_probability else "SELL"
-        direction = "BUY" if balanced_buy_probability >= balanced_sell_probability else "SELL"
-        selective_confidence = buy_probability if direction == "BUY" else sell_probability
-        confidence = selective_confidence * (1.0 - 0.18 * step / max(1, horizon_steps - 1))
-        selective_threshold = threshold_values.get(direction, 1.01)
+        body_ratio = _clip01(continuous[0])
+        upper_wick_ratio = _clip01(continuous[1])
+        lower_wick_ratio = _clip01(continuous[2])
+        if direct_cumulative_path:
+            open_location, high_location, low_location = _coherent_ohlc_from_close(
+                close_location=close_location,
+                candle_range=candle_range,
+                body_ratio=body_ratio,
+                upper_wick_ratio=upper_wick_ratio,
+                lower_wick_ratio=lower_wick_ratio,
+                body_direction=body_direction,
+            )
+        else:
+            # Preserve the restored recursive artifact's compatibility
+            # decoder.  Legacy geometry is diagnostic-only and never exposed
+            # as a validated direct future-price path.
+            shape_total = max(0.001, body_ratio + upper_wick_ratio + lower_wick_ratio)
+            upper_extension = candle_range * upper_wick_ratio / shape_total
+            lower_extension = candle_range * lower_wick_ratio / shape_total
+            high_location = _clip01(
+                max(open_location, close_location) + upper_extension
+            )
+            low_location = _clip01(min(open_location, close_location) - lower_extension)
+        movement_dead_zone = max(0.0004, 0.03 * candle_range)
+        movement_direction = (
+            "BUY"
+            if event_delta > movement_dead_zone
+            else "SELL"
+            if event_delta < -movement_dead_zone
+            else "HOLD"
+        )
+        horizon_position_direction = (
+            "BUY"
+            if cumulative_delta > movement_dead_zone
+            else "SELL"
+            if cumulative_delta < -movement_dead_zone
+            else "HOLD"
+        )
+        standardized_path_score = cumulative_delta / max(1e-9, cumulative_scale)
+        horizon_trajectory_control = _mapping(trajectory_horizons.get(str(step + 1)))
+        horizon_trajectory_thresholds = _mapping(
+            horizon_trajectory_control.get("thresholds")
+        )
+        horizon_probability_calibrated = bool(
+            direct_cumulative_path
+            and horizon_trajectory_control.get("probability_calibrated") is True
+            and all(side in horizon_trajectory_thresholds for side in ("BUY", "SELL"))
+        )
+        if horizon_probability_calibrated:
+            horizon_temperature = max(
+                1e-6,
+                _safe_float(horizon_trajectory_control.get("temperature"), 1.0),
+            )
+            path_buy_probability, path_sell_probability = temperature_softmax(
+                [[standardized_path_score, -standardized_path_score]],
+                horizon_temperature,
+            )[0]
+        else:
+            # This is a model-distribution estimate only.  It is exported for
+            # diagnostics but never described as calibrated confidence.
+            path_buy_probability = _clip01(
+                0.5 * (1.0 + math.erf(standardized_path_score / math.sqrt(2.0))),
+                0.5,
+            )
+            path_sell_probability = 1.0 - path_buy_probability
+        direction = (
+            horizon_position_direction if direct_cumulative_path else body_direction
+        )
+        if direction == "HOLD":
+            selective_confidence = max(path_buy_probability, path_sell_probability)
+        elif direct_cumulative_path:
+            selective_confidence = (
+                path_buy_probability if direction == "BUY" else path_sell_probability
+            )
+        else:
+            selective_confidence = (
+                buy_probability if direction == "BUY" else sell_probability
+            )
+        confidence = selective_confidence * (
+            1.0 - 0.18 * step / max(1, horizon_steps - 1)
+        )
+        selective_threshold = (
+            _safe_float(horizon_trajectory_thresholds.get(direction), 1.01)
+            if direct_cumulative_path
+            else threshold_values.get(direction, 1.01)
+        )
         selective_authorized = bool(
             production_authorized
-            and controls_valid
+            and direction in {"BUY", "SELL"}
+            and (
+                horizon_probability_calibrated
+                if direct_cumulative_path
+                else controls_valid
+            )
             and selective_confidence + 1e-12 >= selective_threshold
         )
-        movement_direction = "BUY" if delta >= 0.0 else "SELL"
+        interval_multiplier = interval_quantile
         forecast_path.append(
             {
                 "step": step + 1,
                 "event": f"CANDLE_EVENT_{step + 1}",
                 "direction": direction,
-                "candle_body_direction": direction,
-                "model_direction": model_direction,
+                "direction_semantics": (
+                    "CUMULATIVE_CLOSE_FROM_ANCHOR"
+                    if direct_cumulative_path
+                    else "CANDLE_BODY_BIAS"
+                ),
+                "trajectory_mode": selected_trajectory_mode or None,
+                "trajectory_mode_probability": round(
+                    trajectory_mode_probabilities.get(
+                        selected_trajectory_mode,
+                        0.0,
+                    ),
+                    6,
+                ),
+                "candle_body_direction": body_direction,
+                "model_direction": body_model_direction,
                 "movement_direction": movement_direction,
-                "buy_probability": round(buy_probability, 4),
-                "sell_probability": round(sell_probability, 4),
+                "horizon_position_direction": horizon_position_direction,
+                "buy_probability": round(
+                    path_buy_probability if direct_cumulative_path else buy_probability,
+                    4,
+                ),
+                "sell_probability": round(
+                    path_sell_probability
+                    if direct_cumulative_path
+                    else sell_probability,
+                    4,
+                ),
+                "path_buy_probability": round(path_buy_probability, 6),
+                "path_sell_probability": round(path_sell_probability, 6),
+                "path_probability_calibrated": horizon_probability_calibrated,
+                "body_buy_probability": round(buy_probability, 6),
+                "body_sell_probability": round(sell_probability, 6),
                 "raw_model_buy_probability": round(raw_buy_probability, 4),
                 "raw_model_sell_probability": round(raw_sell_probability, 4),
                 "calibrated_model_buy_probability": round(model_buy_probability, 4),
@@ -1051,18 +2070,39 @@ def _model_forecast(
                 "expected_high_norm": round(high_location, 6),
                 "expected_low_norm": round(low_location, 6),
                 "expected_close_norm": round(close_location, 6),
-                "close_lower_90_norm": round(_clip01(close_location - 1.645 * cumulative_scale), 6),
-                "close_upper_90_norm": round(_clip01(close_location + 1.645 * cumulative_scale), 6),
-                "expected_delta_norm": round(delta, 6),
+                **(
+                    {
+                        "close_lower_90_norm": round(
+                            _clip01(
+                                close_location - interval_multiplier * cumulative_scale
+                            ),
+                            6,
+                        ),
+                        "close_upper_90_norm": round(
+                            _clip01(
+                                close_location + interval_multiplier * cumulative_scale
+                            ),
+                            6,
+                        ),
+                    }
+                    if interval_calibrated
+                    else {}
+                ),
+                "expected_delta_norm": round(event_delta, 6),
+                "expected_cumulative_delta_norm": round(cumulative_delta, 6),
                 "delta_scale_norm": round(delta_scale, 6),
-                "expected_body_ratio": round(_clip01(continuous[0]), 6),
-                "expected_upper_wick_ratio": round(_clip01(continuous[1]), 6),
-                "expected_lower_wick_ratio": round(_clip01(continuous[2]), 6),
+                "cumulative_scale_norm": round(cumulative_scale, 6),
+                "expected_body_ratio": round(body_ratio, 6),
+                "expected_upper_wick_ratio": round(upper_wick_ratio, 6),
+                "expected_lower_wick_ratio": round(lower_wick_ratio, 6),
                 "expected_range_norm": round(candle_range, 6),
             }
         )
         current_location = close_location
-    play_probabilities = {label: round(float(play[index].item()), 4) for index, label in enumerate(PLAY_LABELS)}
+    play_probabilities = {
+        label: round(float(play[index].item()), 4)
+        for index, label in enumerate(PLAY_LABELS)
+    }
     play_label = (
         max(play_probabilities, key=lambda label: play_probabilities[label])
         if play_probabilities
@@ -1070,6 +2110,16 @@ def _model_forecast(
     )
     return {
         "forecast_path": forecast_path,
+        "trajectory_decoder_status": (
+            "AVAILABLE" if trajectory_scenarios else "UNAVAILABLE"
+        ),
+        "trajectory_mode": selected_trajectory_mode or None,
+        "trajectory_mode_probabilities": {
+            label: round(probability, 6)
+            for label, probability in trajectory_mode_probabilities.items()
+        },
+        "trajectory_mode_probability_calibrated": False,
+        "trajectory_scenarios": trajectory_scenarios,
         "play_label": play_label,
         "play_probabilities": play_probabilities,
         "context_embedding": (
@@ -1088,15 +2138,73 @@ def _model_forecast(
             else "CALIBRATION_UNAVAILABLE"
         ),
         "risk_control_error": retrieval_failure,
+        "path_target_semantics": (
+            "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR"
+            if direct_cumulative_path
+            else "STEP_DELTA_RECURSIVE"
+        ),
+        "path_confidence_status": (
+            "READY"
+            if trajectory_probability_calibrated
+            else "UNCALIBRATED"
+            if trajectory_scenarios
+            else "UNAVAILABLE"
+        ),
+        "path_confidence": (
+            round(max(trajectory_mode_probabilities.values()), 6)
+            if trajectory_mode_probabilities
+            else round(
+                max(
+                    float(forecast_path[-1].get("path_buy_probability", 0.5)),
+                    float(forecast_path[-1].get("path_sell_probability", 0.5)),
+                ),
+                6,
+            )
+            if forecast_path
+            else 0.0
+        ),
+        "trajectory_interval_status": "READY" if interval_calibrated else "UNAVAILABLE",
+        "trajectory_interval": {
+            "status": "READY" if interval_calibrated else "UNAVAILABLE",
+            "calibrated": interval_calibrated,
+            "method": (
+                str(
+                    interval_controls.get("method")
+                    or "SOURCE_BLOCKED_PATHWISE_CONFORMAL"
+                )
+                if interval_calibrated
+                else "UNAVAILABLE"
+            ),
+            "quantile": round(interval_quantile, 6) if interval_calibrated else None,
+            "source_count": interval_source_count,
+            "coverage": interval_controls.get("coverage"),
+            "minimum_independent_groups": MIN_PATHWISE_CONFORMAL_INDEPENDENT_GROUPS,
+            "maximum_full_width_norm": MAX_PATHWISE_CONFORMAL_FULL_WIDTH_NORM,
+            "maximum_raw_full_width_norm": (
+                round(max(interval_raw_full_widths), 6)
+                if interval_raw_full_widths
+                and all(math.isfinite(width) for width in interval_raw_full_widths)
+                else None
+            ),
+            "safety_reasons": interval_safety_reasons,
+        },
         "retrieval": {
             "status": retrieval_status,
             "top_k": retrieval_top_k,
             "alpha": round(retrieval_alpha, 6),
             "neighbor_count": int(retrieval_forecast.get("neighbor_count", 0) or 0),
-            "unique_source_count": int(retrieval_forecast.get("unique_source_count", 0) or 0),
-            "effective_sample_size": round(_safe_float(retrieval_forecast.get("effective_sample_size")), 6),
-            "mean_similarity": round(_safe_float(retrieval_forecast.get("mean_similarity")), 6),
-            "effective_confidence": round(_safe_float(retrieval_forecast.get("effective_confidence")), 6),
+            "unique_source_count": int(
+                retrieval_forecast.get("unique_source_count", 0) or 0
+            ),
+            "effective_sample_size": round(
+                _safe_float(retrieval_forecast.get("effective_sample_size")), 6
+            ),
+            "mean_similarity": round(
+                _safe_float(retrieval_forecast.get("mean_similarity")), 6
+            ),
+            "effective_confidence": round(
+                _safe_float(retrieval_forecast.get("effective_confidence")), 6
+            ),
         },
     }
 
@@ -1110,7 +2218,12 @@ def _direction_probabilities(features: Sequence[Mapping[str, Any]]) -> dict[str,
     for offset, row in enumerate(recent):
         weight = (1.0 + offset / max(1, len(recent) - 1) * 1.4) * max(
             0.35,
-            0.65 + _clip01(row.get("body_norm")) - 0.45 * max(_clip01(row.get("upper_wick_norm")), _clip01(row.get("lower_wick_norm"))),
+            0.65
+            + _clip01(row.get("body_norm"))
+            - 0.45
+            * max(
+                _clip01(row.get("upper_wick_norm")), _clip01(row.get("lower_wick_norm"))
+            ),
         )
         total_weight += weight
         side = _side(row.get("direction"), "HOLD")
@@ -1120,7 +2233,11 @@ def _direction_probabilities(features: Sequence[Mapping[str, Any]]) -> dict[str,
             weighted_sell += weight
         else:
             weighted_hold += weight
-    return {"BUY": weighted_buy / total_weight, "SELL": weighted_sell / total_weight, "HOLD": weighted_hold / total_weight}
+    return {
+        "BUY": weighted_buy / total_weight,
+        "SELL": weighted_sell / total_weight,
+        "HOLD": weighted_hold / total_weight,
+    }
 
 
 def build_lstm_candle_sequence_contribution(
@@ -1137,18 +2254,42 @@ def build_lstm_candle_sequence_contribution(
     chart_image: Any | None = None,
     chart_cut_x: int | float | None = None,
 ) -> dict[str, Any]:
-    features = candle_sequence_features(candles, image_size=image_size, sequence_phase=sequence_phase)
-    model_file, config_file, metrics_file = Path(model_path), Path(config_path), Path(metrics_path)
-    artifact = _load_artifact_bundle(model_file, config_file, metrics_file)
-    config, metrics = _mapping(artifact.get("config")), _mapping(artifact.get("metrics"))
+    features = candle_sequence_features(
+        candles, image_size=image_size, sequence_phase=sequence_phase
+    )
+    requested_model_file = Path(model_path)
+    requested_config_file = Path(config_path)
+    requested_metrics_file = Path(metrics_path)
+    artifact, model_file, config_file, metrics_file, artifact_selection = (
+        _select_runtime_artifact_bundle(
+            requested_model_file,
+            requested_config_file,
+            requested_metrics_file,
+        )
+    )
+    config, metrics = (
+        _mapping(artifact.get("config")),
+        _mapping(artifact.get("metrics")),
+    )
+    sequence_quality = candle_sequence_geometry_quality(
+        candles,
+        image_size=image_size,
+        minimum_events=max(6, int(config.get("minimum_history", 16) or 16)),
+    )
     artifact_available = bool(model_file.exists() and config and metrics)
     artifact_model_loaded = bool(artifact.get("model_loaded"))
-    artifact_ready = bool(artifact.get("ready"))
+    artifact_gate_ready = bool(artifact.get("ready"))
+    sequence_input_ready = bool(sequence_quality.get("ready"))
+    artifact_ready = bool(artifact_gate_ready and sequence_input_ready)
     legacy_restored = bool(artifact.get("legacy_restored"))
-    horizon_steps = int(config.get("horizon_steps", DEFAULT_HORIZON_STEPS) or DEFAULT_HORIZON_STEPS)
+    horizon_steps = int(
+        config.get("horizon_steps", DEFAULT_HORIZON_STEPS) or DEFAULT_HORIZON_STEPS
+    )
     configured_chart_size = config.get("chart_context_size", [96, 192])
     chart_context_size = (96, 192)
-    if isinstance(configured_chart_size, Sequence) and not isinstance(configured_chart_size, (str, bytes, bytearray)):
+    if isinstance(configured_chart_size, Sequence) and not isinstance(
+        configured_chart_size, (str, bytes, bytearray)
+    ):
         configured_values: list[Any] = list(cast(Sequence[Any], configured_chart_size))
         if len(configured_values) >= 2:
             chart_context_size = (
@@ -1158,7 +2299,10 @@ def build_lstm_candle_sequence_contribution(
     forecast = _model_forecast(
         artifact.get("model") if artifact_model_loaded else None,
         features,
-        sequence_length=int(config.get("sequence_length", DEFAULT_SEQUENCE_LENGTH) or DEFAULT_SEQUENCE_LENGTH),
+        sequence_length=int(
+            config.get("sequence_length", DEFAULT_SEQUENCE_LENGTH)
+            or DEFAULT_SEQUENCE_LENGTH
+        ),
         horizon_steps=horizon_steps,
         chart_image=chart_image,
         chart_cut_x=chart_cut_x,
@@ -1168,14 +2312,58 @@ def build_lstm_candle_sequence_contribution(
         production_authorized=artifact_ready,
         risk_error=str(artifact.get("risk_error") or ""),
         legacy_restored=legacy_restored,
+        path_target_semantics=str(
+            config.get("path_target_semantics") or "STEP_DELTA_RECURSIVE"
+        ),
     )
-    forecast_path = cast(list[dict[str, Any]], forecast.get("forecast_path", []))
+    raw_forecast_path = cast(list[dict[str, Any]], forecast.get("forecast_path", []))
+    raw_trajectory_scenarios = cast(
+        list[dict[str, Any]],
+        forecast.get("trajectory_scenarios", []),
+    )
+    resolved_path_semantics = str(
+        forecast.get("path_target_semantics")
+        or config.get("path_target_semantics")
+        or "STEP_DELTA_RECURSIVE"
+    ).upper()
+    # Availability and trade authority are separate contracts.  A direct-path
+    # model can still publish its ordered diagnostic trajectory when the
+    # current candle lattice is imperfect; that input-quality warning must
+    # disable BUY/SELL authorization, not erase the forecast.  Only artifacts
+    # whose decoded geometry is semantically unsafe remain hard-suppressed.
+    forecast_suppression_reasons: list[str] = []
+    forecast_quality_warnings: list[str] = []
+    if legacy_restored:
+        forecast_suppression_reasons.append(
+            "legacy_body_colour_metrics_do_not_validate_price_path"
+        )
+    if resolved_path_semantics != "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR":
+        forecast_suppression_reasons.append(
+            "future_path_target_is_not_direct_anchor_relative"
+        )
+    if not sequence_input_ready:
+        forecast_quality_warnings.extend(
+            str(value)
+            for value in cast(Sequence[Any], sequence_quality.get("reasons") or [])
+        )
+    forecast_path = [] if forecast_suppression_reasons else raw_forecast_path
+    trajectory_scenarios = (
+        [] if forecast_suppression_reasons else raw_trajectory_scenarios
+    )
     fallback = _direction_probabilities(features)
     if forecast_path:
         directional_rows = forecast_path[: min(6, len(forecast_path))]
-        buy_probability = sum(float(row["buy_probability"]) / math.sqrt(index + 1) for index, row in enumerate(directional_rows))
-        sell_probability = sum(float(row["sell_probability"]) / math.sqrt(index + 1) for index, row in enumerate(directional_rows))
-        divisor = sum(1.0 / math.sqrt(index + 1) for index in range(len(directional_rows)))
+        buy_probability = sum(
+            float(row["buy_probability"]) / math.sqrt(index + 1)
+            for index, row in enumerate(directional_rows)
+        )
+        sell_probability = sum(
+            float(row["sell_probability"]) / math.sqrt(index + 1)
+            for index, row in enumerate(directional_rows)
+        )
+        divisor = sum(
+            1.0 / math.sqrt(index + 1) for index in range(len(directional_rows))
+        )
         buy_probability /= max(1e-9, divisor)
         sell_probability /= max(1e-9, divisor)
     else:
@@ -1185,24 +2373,55 @@ def build_lstm_candle_sequence_contribution(
     play_probabilities = cast(dict[str, float], forecast.get("play_probabilities", {}))
     play_label = str(forecast.get("play_label") or "PULLBACK")
     if forecast_path:
-        net_path_delta = float(forecast_path[-1]["expected_close_norm"]) - float(forecast_path[0]["expected_open_norm"])
-        path_side = "BUY" if net_path_delta >= 0.0 else "SELL"
+        net_path_delta = float(forecast_path[-1]["expected_close_norm"]) - float(
+            forecast_path[0]["expected_open_norm"]
+        )
+        path_dead_zone = max(
+            0.0004,
+            0.03
+            * _safe_float(
+                forecast_path[-1].get("expected_range_norm"),
+                0.006,
+            ),
+        )
+        path_side = (
+            "BUY"
+            if net_path_delta > path_dead_zone
+            else "SELL"
+            if net_path_delta < -path_dead_zone
+            else "HOLD"
+        )
     else:
         net_path_delta = 0.0
-        path_side = side
-    continuation_probability = _clip01(play_probabilities.get("CONTINUATION"), primary_probability)
-    reversal_probability = _clip01(play_probabilities.get("REVERSAL"), 1.0 - primary_probability)
+        path_side = "HOLD"
+    continuation_probability = _clip01(
+        play_probabilities.get("CONTINUATION"), primary_probability
+    )
+    reversal_probability = _clip01(
+        play_probabilities.get("REVERSAL"), 1.0 - primary_probability
+    )
     pullback_probability = _clip01(play_probabilities.get("PULLBACK"), fallback["HOLD"])
-    heldout_balanced = _clip01(metrics.get("test_balanced_accuracy", metrics.get("balanced_accuracy")), 0.5)
+    heldout_balanced = _clip01(
+        metrics.get("test_balanced_accuracy", metrics.get("balanced_accuracy")), 0.5
+    )
     path_confidence = (
-        sum(float(row.get("confidence", 0.0)) for row in forecast_path) / len(forecast_path)
+        sum(float(row.get("confidence", 0.0)) for row in forecast_path)
+        / len(forecast_path)
         if forecast_path
         else 0.0
     )
-    confidence = _clip01(0.58 * path_confidence + 0.27 * heldout_balanced + 0.15 * min(1.0, len(features) / 48.0))
+    confidence = _clip01(
+        0.58 * path_confidence
+        + 0.27 * heldout_balanced
+        + 0.15 * min(1.0, len(features) / 48.0)
+    )
+    calibrated_path_confidence = _clip01(forecast.get("path_confidence"), 0.0)
+    path_confidence_status = str(
+        forecast.get("path_confidence_status") or "UNAVAILABLE"
+    ).upper()
     next_1 = forecast_path[0] if forecast_path else {}
     next_2 = forecast_path[1] if len(forecast_path) > 1 else {}
-    legacy_active = bool(legacy_restored and artifact_ready and forecast_path)
+    legacy_active = bool(legacy_restored and raw_forecast_path)
     # Restoring an exported architecture proves that inference is available; it
     # does not recreate a missing, current selective-risk gate.  In particular,
     # the legacy bundle can produce a directional body classification while its
@@ -1216,13 +2435,40 @@ def build_lstm_candle_sequence_contribution(
         and next_body_side == next_movement_side
     )
     selective_authorized = bool(
-        next_1.get("selective_authorized", False)
-        and next_direction_consistent
+        next_1.get("selective_authorized", False) and next_direction_consistent
     )
     selective_status = "AUTHORIZED" if selective_authorized else "NO_EDGE"
-    selective_side = str(next_1.get("direction") or side) if selective_authorized else "NO_EDGE"
+    selective_side = (
+        str(next_1.get("direction") or side) if selective_authorized else "NO_EDGE"
+    )
     contribution = round(0.08 * confidence, 4) if selective_authorized else 0.0
-    if legacy_active and selective_authorized:
+    forecast_quality_status = (
+        "UNAVAILABLE"
+        if not forecast_path
+        else "LOW_CONFIDENCE"
+        if forecast_quality_warnings
+        else "LOW_CONFIDENCE"
+        if not artifact_gate_ready
+        else "READY"
+    )
+    if forecast_suppression_reasons:
+        reason = (
+            "V3 future path withheld: "
+            + ", ".join(
+                reason.replace("_", " ") for reason in forecast_suppression_reasons
+            )
+            + "."
+        )
+    elif forecast_quality_warnings:
+        reason = (
+            "Direct V3 forecast retained as a low-confidence diagnostic despite "
+            "candle-lattice warnings: "
+            + ", ".join(
+                warning.replace("_", " ") for warning in forecast_quality_warnings
+            )
+            + ". Trade authorization remains NO_EDGE."
+        )
+    elif legacy_active and selective_authorized:
         reason = (
             "Exact exported V3 multiscale-attention LSTM restored and the current "
             "row-level selective-risk gate authorizes the next candle event."
@@ -1235,13 +2481,20 @@ def build_lstm_candle_sequence_contribution(
     elif selective_authorized:
         reason = "V3 held-out production and class-conditional risk gates authorize the next candle event."
     elif artifact_model_loaded and forecast_path and not artifact_ready:
-        reason = "V3 challenger loaded for diagnostic path display, but held-out production gates require NO_EDGE."
+        reason = "V3 challenger loaded for diagnostics, but held-out production gates require NO_EDGE."
     elif artifact_model_loaded and forecast_path:
         reason = "V3 path is diagnostic only; calibration/retrieval thresholds did not authorize an edge."
     else:
-        reason = str(artifact.get("error") or "V3 LSTM candle-path artifact/config/metrics not present; output ignored.")
+        reason = str(
+            artifact.get("error")
+            or "V3 LSTM candle-path artifact/config/metrics not present; output ignored."
+        )
     reversal_step = next(
-        (int(row["step"]) for row in forecast_path if str(row.get("movement_direction")) != path_side),
+        (
+            int(row["step"])
+            for row in forecast_path
+            if str(row.get("movement_direction")) != path_side
+        ),
         None,
     )
     size_values = list(image_size)[:2]
@@ -1252,14 +2505,21 @@ def build_lstm_candle_sequence_contribution(
         "modality": "COMPUTER_VISION",
         "training_source": "RAW_SCREENSHOT_SUITES",
         "skill": "LSTM_CANDLE_PATH",
-        "model_version": str(config.get("model_version") or LSTM_CANDLE_SEQUENCE_VERSION),
+        "model_version": str(
+            config.get("model_version") or LSTM_CANDLE_SEQUENCE_VERSION
+        ),
         "artifact_path": str(model_file),
         "config_path": str(config_file),
         "metrics_path": str(metrics_file),
+        "forecast_artifact_source": str(
+            artifact_selection.get("source") or "CANONICAL_V3"
+        ),
+        "artifact_selection": artifact_selection,
         "artifact_available": artifact_available,
         "artifact_loaded": artifact_model_loaded,
         "architecture": str(config.get("architecture") or ""),
         "legacy_restored": legacy_restored,
+        "artifact_production_gate_passed": artifact_gate_ready,
         "production_authorized": artifact_ready,
         "fresh": bool(artifact_model_loaded and forecast_path),
         "blocker": False,
@@ -1268,6 +2528,8 @@ def build_lstm_candle_sequence_contribution(
         "selective_side": selective_side,
         "selective_authorized": selective_authorized,
         "selective_status": selective_status,
+        "trade_authorization_status": selective_status,
+        "forecast_quality_status": forecast_quality_status,
         "selective_prediction": {
             "status": selective_status,
             "side": selective_side,
@@ -1288,22 +2550,59 @@ def build_lstm_candle_sequence_contribution(
             "accuracy_guarantee": False,
         },
         "path_side": path_side,
+        "path_target_semantics": resolved_path_semantics,
+        "trajectory_modes": int(config.get("trajectory_modes", 0) or 0),
+        "trajectory_decoder_status": (
+            "AVAILABLE" if trajectory_scenarios else "UNAVAILABLE"
+        ),
+        "trajectory_mode": (
+            forecast.get("trajectory_mode") if trajectory_scenarios else None
+        ),
+        "trajectory_mode_probabilities": (
+            _mapping(forecast.get("trajectory_mode_probabilities"))
+            if trajectory_scenarios
+            else {}
+        ),
+        "trajectory_mode_probability_calibrated": bool(
+            forecast.get("trajectory_mode_probability_calibrated", False)
+        )
+        if trajectory_scenarios
+        else False,
+        "trajectory_scenarios": trajectory_scenarios,
+        "path_confidence": round(calibrated_path_confidence, 6),
+        "path_confidence_status": path_confidence_status,
+        "direction_conflict": bool(
+            side in {"BUY", "SELL"}
+            and path_side in {"BUY", "SELL"}
+            and side != path_side
+        ),
         "net_expected_path_delta_norm": round(net_path_delta, 6),
         "next_1_direction": str(next_1.get("direction") or side),
-        "next_1_probability": round(float(next_1.get("confidence", primary_probability)), 4),
+        "next_1_probability": round(
+            float(next_1.get("confidence", primary_probability)), 4
+        ),
         "next_2_direction": str(next_2.get("direction") or side),
-        "next_2_probability": round(float(next_2.get("confidence", max(0.0, primary_probability - 0.05))), 4),
+        "next_2_probability": round(
+            float(next_2.get("confidence", max(0.0, primary_probability - 0.05))), 4
+        ),
         "continuation_probability": round(continuation_probability, 4),
         "reversal_probability": round(reversal_probability, 4),
         "pullback_first_probability": round(pullback_probability, 4),
         "confidence": round(confidence, 4),
         "sequence_length": len(features),
-        "input_window_candles": int(config.get("sequence_length", DEFAULT_SEQUENCE_LENGTH) or DEFAULT_SEQUENCE_LENGTH),
+        "input_window_candles": int(
+            config.get("sequence_length", DEFAULT_SEQUENCE_LENGTH)
+            or DEFAULT_SEQUENCE_LENGTH
+        ),
         "horizon_steps": len(forecast_path) if forecast_path else horizon_steps,
         "horizon_unit": "CANDLE_EVENTS",
         "clock_time_assumption": "NONE",
         "forecast_available": bool(forecast_path),
         "forecast_path": forecast_path,
+        "forecast_suppressed": bool(raw_forecast_path and forecast_suppression_reasons),
+        "forecast_suppression_reasons": forecast_suppression_reasons,
+        "forecast_quality_warnings": forecast_quality_warnings,
+        "sequence_quality": sequence_quality,
         "context_embedding": cast(list[float], forecast.get("context_embedding", [])),
         "chart_context_used": bool(forecast.get("chart_context_used", False)),
         "probability_temperature": forecast.get("probability_temperature", 1.0),
@@ -1312,6 +2611,10 @@ def build_lstm_candle_sequence_contribution(
             forecast.get("risk_control_status") or "CALIBRATION_UNAVAILABLE"
         ),
         "risk_control_error": str(forecast.get("risk_control_error") or ""),
+        "trajectory_interval_status": str(
+            forecast.get("trajectory_interval_status") or "UNAVAILABLE"
+        ).upper(),
+        "trajectory_interval": _mapping(forecast.get("trajectory_interval")),
         "retrieval": _mapping(forecast.get("retrieval")),
         "progression_play": {
             "label": play_label,
@@ -1330,31 +2633,46 @@ def build_lstm_candle_sequence_contribution(
         "usage": {
             "default": str(config.get("default_usage", "ALL_ANALYSIS")).upper(),
             "high_frequency_enabled": bool(config.get("high_frequency_enabled", True)),
-            "normal_analysis_enabled": bool(config.get("normal_analysis_enabled", True)),
+            "normal_analysis_enabled": bool(
+                config.get("normal_analysis_enabled", True)
+            ),
             "normal_analysis_env": "PHOENIXGUARD_LSTM_NORMAL_ANALYSIS",
         },
         "metrics": {
-            "test_balanced_accuracy": metrics.get("test_balanced_accuracy", metrics.get("balanced_accuracy")),
+            "test_balanced_accuracy": metrics.get(
+                "test_balanced_accuracy", metrics.get("balanced_accuracy")
+            ),
             "test_path_delta_mae": metrics.get("test_path_delta_mae"),
             "test_interval_90_coverage": metrics.get("test_interval_90_coverage"),
             "test_play_accuracy": metrics.get("test_play_accuracy"),
             "test_play_balanced_accuracy": metrics.get("test_play_balanced_accuracy"),
-            "persistence_baseline_accuracy": metrics.get("test_persistence_baseline_accuracy"),
+            "persistence_baseline_accuracy": metrics.get(
+                "test_persistence_baseline_accuracy"
+            ),
             "production_ready": bool(metrics.get("production_ready")),
         },
         "interpretation": (
-            f"Restored V3 multiscale-attention LSTM projects a {len(forecast_path)}-candle-event {play_label.lower()} diagnostic path moving {path_side}, with a {side} candle-body bias; selective status is {selective_status}, and no wall-clock duration is imposed."
+            "V3 LSTM future path is withheld because its target contract or detected candle-event lattice is not valid; no BUY/SELL trajectory is presented."
+            if forecast_suppression_reasons
+            else f"Restored V3 multiscale-attention LSTM projects a {len(forecast_path)}-candle-event {play_label.lower()} diagnostic path moving {path_side}, with a {side} candle-body bias; selective status is {selective_status}, and no wall-clock duration is imposed."
             if legacy_active
             else f"Causal LSTM projects a {len(forecast_path)}-candle-event {play_label.lower()} diagnostic path moving {path_side}, with a {side} candle-body bias; selective status is {selective_status}, and no wall-clock duration is imposed."
             if forecast_path
             else "V3 LSTM candle-path forecast is offline; no future progression is fabricated."
         ),
         "reason": reason,
-        "features": features[-int(config.get("sequence_length", DEFAULT_SEQUENCE_LENGTH) or DEFAULT_SEQUENCE_LENGTH) :],
+        "features": features[
+            -int(
+                config.get("sequence_length", DEFAULT_SEQUENCE_LENGTH)
+                or DEFAULT_SEQUENCE_LENGTH
+            ) :
+        ],
     }
 
 
 __all__ = [
+    "ARTIFACT_BUNDLE_MANIFEST_SCHEMA",
+    "ARTIFACT_BUNDLE_MANIFEST_SUFFIX",
     "DEFAULT_CONFIG_PATH",
     "DEFAULT_HORIZON_STEPS",
     "DEFAULT_METRICS_PATH",
@@ -1369,9 +2687,13 @@ __all__ = [
     "PLAY_LABELS",
     "PREDICTION_FEATURE_INDICES",
     "PREDICTION_SCHEMA",
+    "TRAJECTORY_MODE_LABELS",
+    "artifact_bundle_generation_root",
+    "artifact_bundle_manifest_path",
     "build_lstm_candle_sequence_contribution",
     "causal_chart_context_tensor",
     "candle_sequence_features",
+    "candle_sequence_geometry_quality",
     "create_lstm_candle_sequence_model",
     "create_legacy_lstm_candle_sequence_model",
     "feature_vector",

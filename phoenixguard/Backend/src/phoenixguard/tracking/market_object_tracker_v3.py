@@ -178,6 +178,15 @@ except Exception:
             "layer": _text(raw.get("layer") or _contract_type_layer_map.get(overlay_type, "diagnostics")),
             "role": _text(raw.get("role") or _contract_type_role_map.get(overlay_type, "")),
             "visible_default": bool(raw.get("visible_default", True)),
+            "forecast_band_points": list(raw.get("forecast_band_points") or []),
+            "forecast_candles": list(raw.get("forecast_candles") or []),
+            "forecast_coordinate_space": _text(raw.get("forecast_coordinate_space") or "chart"),
+            "forecast_coordinate_units": _text(raw.get("forecast_coordinate_units") or "normalized"),
+            "forecast_direction": _upper_side(raw.get("forecast_direction", "HOLD")),
+            "body_bias": _upper_side(raw.get("body_bias", "HOLD")),
+            "direction_conflict": bool(raw.get("direction_conflict", False)),
+            "path_confidence_status": _text(raw.get("path_confidence_status") or "UNAVAILABLE").upper(),
+            "interval": dict(raw.get("interval") or {}) if isinstance(raw.get("interval"), Mapping) else {},
         }
 
     def validate_overlay_payload(overlays: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

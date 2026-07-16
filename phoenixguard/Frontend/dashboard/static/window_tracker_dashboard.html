@@ -853,9 +853,216 @@
       opacity: var(--overlay-opacity);
     }
 
-    .surface-trendline.family-lstm.forecast-no-edge {
+    .surface-trendline.forecast-no-edge,
+    .surface-trendline.forecast-low-confidence,
+    .surface-trendline.forecast-diagnostic {
+      stroke: var(--ice);
+      stroke-width: 2.35;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      opacity: calc(var(--overlay-opacity) * 0.90);
+      filter: drop-shadow(0 0 4px rgba(107, 200, 255, 0.24));
+    }
+
+    .surface-trendline.forecast-under-review {
+      stroke: var(--warn);
+      stroke-dasharray: 6 5;
+      opacity: calc(var(--overlay-opacity) * 0.76);
+    }
+
+    .surface-forecast-composite {
+      pointer-events: none;
+      opacity: var(--overlay-opacity);
+    }
+
+    .surface-forecast-scenario {
+      fill: none;
       stroke: var(--overlay-history);
-      opacity: calc(var(--overlay-opacity) * 0.68);
+      stroke-width: 1.9;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-dasharray: 7 5;
+      vector-effect: non-scaling-stroke;
+      filter: drop-shadow(0 0 2px rgba(5, 8, 7, 0.94));
+    }
+
+    .surface-forecast-scenario.buy,
+    .surface-forecast-scenario.bullish-range {
+      stroke: rgba(99, 224, 154, 0.96);
+      filter:
+        drop-shadow(0 0 2px rgba(5, 8, 7, 0.96))
+        drop-shadow(0 0 3px rgba(99, 224, 154, 0.32));
+    }
+
+    .surface-forecast-scenario.sell,
+    .surface-forecast-scenario.bearish-range {
+      stroke: rgba(255, 101, 79, 0.96);
+      filter:
+        drop-shadow(0 0 2px rgba(5, 8, 7, 0.96))
+        drop-shadow(0 0 3px rgba(255, 101, 79, 0.30));
+    }
+
+    .surface-forecast-scenario.hold {
+      stroke: rgba(199, 209, 216, 0.58);
+    }
+
+    .surface-forecast-scenario.range-branch {
+      stroke-width: 2.15;
+      stroke-dasharray: 7 4;
+    }
+
+    .surface-trendline.forecast-selected-path {
+      stroke-width: 3.05;
+      filter:
+        drop-shadow(0 0 2px rgba(5, 8, 7, 0.98))
+        drop-shadow(0 0 5px rgba(107, 200, 255, 0.36));
+    }
+
+    .surface-forecast-step-node {
+      fill: rgba(7, 12, 13, 0.92);
+      stroke: rgba(202, 225, 239, 0.82);
+      stroke-width: 1.05;
+      opacity: 0.82;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .surface-forecast-milestone-node {
+      fill: rgba(7, 12, 13, 0.94);
+      stroke: var(--ice);
+      stroke-width: 1.4;
+      opacity: 1;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .surface-forecast-milestone-node.endpoint {
+      fill: var(--ice);
+      stroke: rgba(7, 12, 13, 0.96);
+      stroke-width: 1.6;
+    }
+
+    .surface-forecast-candle {
+      opacity: 0.92;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .surface-forecast-candle-wick {
+      stroke: rgba(218, 232, 239, 0.82);
+      stroke-width: 1.05;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .surface-forecast-candle-body {
+      fill: rgba(199, 209, 216, 0.22);
+      stroke: rgba(218, 232, 239, 0.86);
+      stroke-width: 1.05;
+      rx: 0.7px;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .surface-forecast-candle.buy .surface-forecast-candle-wick,
+    .surface-forecast-candle.buy .surface-forecast-candle-body {
+      stroke: var(--up);
+    }
+
+    .surface-forecast-candle.buy .surface-forecast-candle-body {
+      fill: rgba(99, 224, 154, 0.28);
+    }
+
+    .surface-forecast-candle.sell .surface-forecast-candle-wick,
+    .surface-forecast-candle.sell .surface-forecast-candle-body {
+      stroke: var(--down);
+    }
+
+    .surface-forecast-candle.sell .surface-forecast-candle-body {
+      fill: rgba(255, 101, 79, 0.26);
+    }
+
+    .surface-forecast-candle.direction-conflict {
+      opacity: 0.68;
+    }
+
+    .surface-forecast-scenario.revision-candidate {
+      stroke: var(--warn);
+      stroke-width: 1.8;
+      stroke-dasharray: 5 5;
+      opacity: 0.72 !important;
+    }
+
+    .surface-forecast-branch-node.buy {
+      stroke: var(--up);
+    }
+
+    .surface-forecast-branch-node.sell {
+      stroke: var(--down);
+    }
+
+    .surface-forecast-step-label {
+      fill: rgba(212, 230, 240, 0.78);
+      font-family: var(--mono);
+      font-size: 6.8px;
+      font-weight: 760;
+      letter-spacing: 0.015em;
+      paint-order: stroke;
+      stroke: rgba(5, 8, 7, 0.94);
+      stroke-width: 2.3px;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .surface-forecast-step-label.milestone {
+      fill: var(--ice);
+      font-size: 7.8px;
+      font-weight: 900;
+    }
+
+    .surface-forecast-step-label.buy {
+      fill: var(--up);
+    }
+
+    .surface-forecast-step-label.sell {
+      fill: var(--down);
+    }
+
+    .surface-forecast-endpoint-label,
+    .surface-forecast-empty-label {
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 850;
+      letter-spacing: 0.045em;
+      paint-order: stroke;
+      stroke: rgba(5, 8, 7, 0.96);
+      stroke-width: 3px;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .surface-forecast-endpoint-label {
+      fill: var(--ice);
+    }
+
+    .surface-forecast-direction-label {
+      fill: var(--warn);
+    }
+
+    .surface-forecast-range-label {
+      font-family: var(--mono);
+      font-size: 7.2px;
+      font-weight: 880;
+      letter-spacing: 0.055em;
+      paint-order: stroke;
+      stroke: rgba(5, 8, 7, 0.98);
+      stroke-width: 2.8px;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .surface-forecast-range-label.bullish-range {
+      fill: var(--up);
+    }
+
+    .surface-forecast-range-label.bearish-range {
+      fill: var(--down);
+    }
+
+    .surface-forecast-empty-label {
+      fill: var(--warn);
     }
 
     .surface-forecast-band {
@@ -874,7 +1081,9 @@
       fill: rgba(255, 101, 79, 0.10);
     }
 
-    .surface-forecast-band.forecast-no-edge {
+    .surface-forecast-band.forecast-no-edge,
+    .surface-forecast-band.forecast-low-confidence,
+    .surface-forecast-band.forecast-diagnostic {
       fill: rgba(167, 176, 184, 0.07);
     }
 
@@ -983,7 +1192,9 @@
       box-shadow: none;
     }
 
-    .surface-hotspot.family-lstm.forecast-path-hit.forecast-no-edge span {
+    .surface-hotspot.family-lstm.forecast-path-hit.forecast-no-edge span,
+    .surface-hotspot.family-lstm.forecast-path-hit.forecast-low-confidence span,
+    .surface-hotspot.family-lstm.forecast-path-hit.forecast-diagnostic span {
       color: var(--overlay-history);
       border-style: dashed;
     }
@@ -1427,6 +1638,47 @@
       opacity: 0.5;
     }
 
+    .forecast-path-legend {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px 10px;
+      padding-top: 2px;
+      color: var(--quiet);
+      font-size: 9px;
+      line-height: 1.35;
+    }
+
+    .forecast-path-legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      white-space: nowrap;
+    }
+
+    .forecast-path-legend-line {
+      width: 22px;
+      height: 0;
+      flex: 0 0 auto;
+      border-top: 2px solid var(--ice);
+      filter: drop-shadow(0 0 2px rgba(107, 200, 255, 0.32));
+    }
+
+    .forecast-path-legend-line.bullish {
+      border-top-color: var(--up);
+      border-top-style: dashed;
+    }
+
+    .forecast-path-legend-line.bearish {
+      border-top-color: var(--down);
+      border-top-style: dashed;
+    }
+
+    .forecast-path-legend-note {
+      flex: 1 1 100%;
+      color: var(--muted);
+    }
+
     .forecast-action-status {
       position: relative;
       min-height: 30px;
@@ -1467,6 +1719,43 @@
 
     .forecast-action-status[data-state="error"]::before {
       background: var(--down);
+    }
+
+    .playbook-panel {
+      margin-top: 10px;
+      padding-top: 9px;
+      border-top: 1px solid rgba(242, 200, 102, 0.13);
+      color: var(--quiet);
+      font-size: 9px;
+      line-height: 1.42;
+    }
+
+    .playbook-panel[data-ready="true"] {
+      color: var(--gold-pale);
+    }
+
+    .playbook-panel strong {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .playbook-panel ul {
+      display: grid;
+      gap: 3px;
+      margin: 5px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .playbook-panel li::before {
+      margin-right: 5px;
+      color: var(--accent);
+      content: "•";
     }
 
     .overlay-library-appearance {
@@ -2151,13 +2440,18 @@
               <button class="layer-filter" type="button" data-overlay-family="triggers" aria-pressed="true">Entry triggers <span class="layer-count" data-layer-count="triggers">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="targets" aria-pressed="true">Targets <span class="layer-count" data-layer-count="targets">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="invalidation" aria-pressed="true">Invalidation <span class="layer-count" data-layer-count="invalidation">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="playbook" aria-pressed="true">Playbook <span class="layer-count" data-layer-count="playbook">0</span></button>
+            </div>
+            <div class="playbook-panel" id="adaptive-playbook-panel" data-ready="false" aria-live="polite">
+              <strong>Adaptive playbook</strong>
+              <span>Waiting for the chart suite to publish SMC, structure, candlestick, and forecast evidence.</span>
             </div>
           </div>
           <div class="overlay-family-group">
             <span class="overlay-family-label">Forecast studies</span>
             <div class="layer-filter-list" aria-label="Forecast study overlays">
               <button class="layer-filter" type="button" data-overlay-family="two_candle" aria-pressed="false">Two-candle <span class="layer-count" data-layer-count="two_candle">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="lstm" aria-pressed="false">LSTM <span class="layer-count" data-layer-count="lstm">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="lstm" aria-pressed="false">Scene forecaster <span class="layer-count" data-layer-count="lstm">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="prediction" aria-pressed="false">Prediction path <span class="layer-count" data-layer-count="prediction">0</span></button>
             </div>
             <div class="forecast-actions" id="forecast-actions" aria-label="Forecast actions" aria-busy="false">
@@ -2165,7 +2459,13 @@
                 <button class="forecast-action primary" id="run-forecast" type="button">Run forecast</button>
                 <button class="forecast-action" id="show-future-path" type="button">Show future path</button>
               </div>
-              <p class="forecast-action-status" id="forecast-action-status" data-state="idle" role="status" aria-live="polite">Forecast paths are guidance only. They never grant entry permission.</p>
+              <p class="forecast-action-status" id="forecast-action-status" data-state="idle" role="status" aria-live="polite">Every path shows 12 candle events · solid = committed scene forecast · dashed = outcome under review · NO EDGE is never entry permission.</p>
+              <div class="forecast-path-legend" id="forecast-path-legend" role="list" aria-label="Forecast path legend">
+                <span class="forecast-path-legend-item" role="listitem"><span class="forecast-path-legend-line" aria-hidden="true"></span>Selected 12-step path</span>
+                <span class="forecast-path-legend-item" role="listitem"><span class="forecast-path-legend-line bullish" aria-hidden="true"></span>Bullish route</span>
+                <span class="forecast-path-legend-item" role="listitem"><span class="forecast-path-legend-line bearish" aria-hidden="true"></span>Bearish route</span>
+                <span class="forecast-path-legend-note">Green and red are alternative studied routes, not odds. Wider route separation means less agreement about the progression.</span>
+              </div>
             </div>
           </div>
           <div class="overlay-family-group">
@@ -2206,8 +2506,8 @@
           <div class="surface-controls">
             <div class="zoom-controls" aria-label="Broker view zoom">
               <button class="zoom-button" id="zoom-out" type="button" aria-label="Zoom out">−</button>
-              <button class="zoom-button" id="zoom-fit" type="button">Fit</button>
-              <button class="zoom-button" id="zoom-actual" type="button">100%</button>
+              <button class="zoom-button" id="zoom-fit" type="button" aria-pressed="true">Fit</button>
+              <button class="zoom-button" id="zoom-actual" type="button" aria-pressed="false">100%</button>
               <button class="zoom-button" id="zoom-in" type="button" aria-label="Zoom in">+</button>
               <span class="zoom-readout" id="zoom-readout">Fit</span>
             </div>
@@ -2294,7 +2594,7 @@
         </div>
         <div class="help-step">
           <span class="help-step-index">04</span>
-          <div><strong>Interactive overlays</strong><p>Use a quick view or switch any layer in the Overlay Library. SMC, Two-candle, LSTM, structure, zones, plans, and history remain independent. Select a mark for its plain-language meaning.</p></div>
+          <div><strong>Interactive overlays</strong><p>Use a quick view or switch any layer in the Overlay Library. SMC, Two-candle, Scene forecaster, structure, zones, plans, and history remain independent. Select a mark for its plain-language meaning.</p></div>
         </div>
       </div>
       <p class="help-note">A setup window can remain available for several minutes while Phoenix Guard refreshes current-frame permission. It closes early whenever live truth invalidates the setup. Visual analysis is decision support, not a promise of market outcome.</p>
@@ -2307,9 +2607,12 @@
     const SESSION_ID = __SESSION_ID_JSON__;
     const OPERATOR_SCHEMA_VERSION = "PG_OPERATOR_WORKSPACE_V1";
     const FORECAST_ACTION_SCHEMA_VERSION = "PG_FORECAST_ACTION_V1";
-    const POLL_INTERVAL_MS = 3000;
+    // Explicit actions and visibility refreshes stay immediate. This is only
+    // the low-frequency HTTP fallback used while the dashboard is left open.
+    const POLL_INTERVAL_MS = 30000;
     const FORECAST_ACTION_ACK_TIMEOUT_MS = 10000;
     const FORECAST_ACTION_TIMEOUT_MS = 120000;
+    const FORECAST_ACTION_STALE_RETRIES = 2;
     const PUBLIC_OVERLAY_VIEWS = new Set(["all", "live", "smc", "structure", "zones", "plan", "forecast", "history"]);
     const ALL_OVERLAY_FAMILIES = Object.freeze([
       "chart_bounds",
@@ -2321,6 +2624,7 @@
       "triggers",
       "targets",
       "invalidation",
+      "playbook",
       "smc",
       "council",
       "two_candle",
@@ -2330,8 +2634,8 @@
     ]);
     const OVERLAY_PRESETS = Object.freeze({
       all: ALL_OVERLAY_FAMILIES,
-      live: ["current_candles", "smc", "council", "triggers", "targets", "invalidation"],
-      smc: ["smc", "supply_demand", "triggers", "targets", "invalidation"],
+      live: ["current_candles", "smc", "council", "triggers", "targets", "invalidation", "playbook"],
+      smc: ["smc", "supply_demand", "triggers", "targets", "invalidation", "playbook"],
       structure: ["current_candles", "major_swings", "local_swings", "trendlines"],
       zones: ["supply_demand"],
       plan: ["council", "triggers", "targets", "invalidation"],
@@ -2356,10 +2660,11 @@
       triggers: "This is a watched entry trigger. It does not grant permission by itself.",
       targets: "This is a watched target area for an active plan.",
       invalidation: "This area shows where the watched plan would no longer be valid.",
+      playbook: "This live playbook summarizes which book-backed strategies the current chart suite is using.",
       smc: "This SMC mark highlights chart-anchored order flow evidence such as an order block, imbalance, liquidity area, or active SMC read.",
       council: "This mark shows the current combined plan read. Entry permission is still shown separately above.",
       two_candle: "This two-candle study describes the nearest short-term setup. It remains a study, not entry permission.",
-      lstm: "This LSTM mark shows the sequence model's current chart-anchored study or path. It is a forecast, not entry permission.",
+      lstm: "This Scene forecaster mark shows the full-suite model's candle-anchored 12-event path. It is a forecast, not entry permission.",
       prediction: "This path is a possible next route, not a statement about what price is doing now.",
       history: "This mark belongs to an earlier observation and cannot be treated as current.",
     });
@@ -2433,6 +2738,7 @@
       runForecast: byId("run-forecast"),
       showFuturePath: byId("show-future-path"),
       forecastActionStatus: byId("forecast-action-status"),
+      adaptivePlaybookPanel: byId("adaptive-playbook-panel"),
       overlayOpacity: byId("overlay-opacity"),
       historyCount: byId("history-count"),
       historyList: byId("history-list"),
@@ -2499,6 +2805,10 @@
       acceptedView: "",
       requestSequence: 0,
       pollTimer: 0,
+      eventSource: null,
+      streamConnected: false,
+      streamRefreshQueued: false,
+      streamRefreshTimer: 0,
       busy: false,
       imageUrl: "",
       imageFallbackUrl: "",
@@ -2522,12 +2832,25 @@
       dragging: false,
       forecastActionBusy: false,
       forecastActionSequence: 0,
+      forecastFocusActive: false,
+      lastForecastMode: "",
       dragStartX: 0,
       dragStartY: 0,
       dragScrollLeft: 0,
       dragScrollTop: 0,
       localHistory: [],
       lastMoveSide: "",
+      historySemanticIdentity: "",
+      projectedGeometryCache: new Map(),
+      detachedOverlayNodes: new Map(),
+      historyItemNodes: new Map(),
+      lastVisualBundleKey: "",
+      overlayRenderStats: {
+        projected: 0,
+        projectionCacheHits: 0,
+        reusedNodes: 0,
+        createdNodes: 0,
+      },
     };
 
     function safeText(value, fallback) {
@@ -2541,6 +2864,131 @@
 
     function safeList(value) {
       return Array.isArray(value) ? value : [];
+    }
+
+    function firstObjectAtPaths(source, paths) {
+      const root = safeObject(source);
+      for (const path of paths) {
+        let cursor = root;
+        let valid = true;
+        for (const key of path) {
+          cursor = safeObject(cursor)[key];
+          if (!cursor || typeof cursor !== "object" || Array.isArray(cursor)) {
+            valid = false;
+            break;
+          }
+        }
+        if (valid) {
+          return safeObject(cursor);
+        }
+      }
+      return {};
+    }
+
+    function currentForecastOverlay(overlays) {
+      const pool = safeList(overlays || state.overlays);
+      return safeObject(pool.find(function (overlay) {
+        const row = safeObject(overlay);
+        const family = safeText(row.family || row.toggle_key, "").toLowerCase();
+        const role = safeText(row.forecast_role, "").toLowerCase();
+        return ["lstm", "scene_forecaster", "prediction"].includes(family)
+          && ["center", "composite"].includes(role)
+          && (safeList(row.line_points || row.points).length >= 2 || safeList(row.forecast_candles).length >= 1);
+      }));
+    }
+
+    function sceneForecastEvidence(payload, overlays) {
+      const operatorState = safeObject(payload || state.payload);
+      const explicit = firstObjectAtPaths(operatorState, [
+        ["scene_forecast_contribution"],
+        ["forecast_snapshot_v3", "scene_forecast_contribution"],
+        ["latest_signal", "scene_forecast_contribution"],
+        ["tracking_summary", "scene_forecast_contribution"],
+        ["model_" + "council_result", "scene_forecast_contribution"],
+        ["high_frequency_forecast", "scene_forecast_contribution"],
+      ]);
+      const overlay = currentForecastOverlay(overlays);
+      const source = Object.assign({}, explicit, overlay);
+      const points = safeList(source.line_points || source.points);
+      const candles = safeList(source.forecast_candles);
+      const scenarios = safeList(source.forecast_scenarios || source.scenarios);
+      const side = directionalSide(source.forecast_direction || source.direction || source.side || source.path_side);
+      return {
+        present: points.length >= 2 || candles.length >= 1 || scenarios.length >= 1,
+        side: side,
+        points: points,
+        candles: candles,
+        scenarios: scenarios,
+        status: safeText(source.forecast_status || source.status, ""),
+        confidence: Number(source.confidence || source.probability || 0),
+        label: safeText(source.label || source.forecast_label, ""),
+        summary: safeText(source.summary || source.outlook || source.message, ""),
+      };
+    }
+
+    function candleNumber(value) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? numeric : null;
+    }
+
+    function candleValue(candle, keys) {
+      const row = safeObject(candle);
+      for (const key of keys) {
+        const value = candleNumber(row[key]);
+        if (value !== null) {
+          return value;
+        }
+      }
+      return null;
+    }
+
+    function detectCandlestickEvidence(payload) {
+      const operatorState = safeObject(payload || state.payload);
+      const candidates = [
+        ...safeList(operatorState.candles),
+        ...safeList(operatorState.current_candles),
+        ...safeList(safeObject(operatorState.tracking).candles),
+        ...safeList(safeObject(operatorState.surface).candles),
+        ...safeList(operatorState.overlays).filter(function (overlay) {
+          return overlayFamily(overlay) === "current_candles";
+        }),
+      ];
+      const rows = candidates.slice(-8).map(function (raw, index) {
+        const candle = safeObject(raw);
+        const open = candleValue(candle, ["open", "open_price", "open_y", "open_y_px", "body_open_y"]);
+        const close = candleValue(candle, ["close", "close_price", "close_y", "close_y_px", "body_close_y"]);
+        const high = candleValue(candle, ["high", "high_price", "wick_top", "wick_top_y", "wick_top_px", "top"]);
+        const low = candleValue(candle, ["low", "low_price", "wick_bottom", "wick_bottom_y", "wick_bottom_px", "bottom"]);
+        if (open === null || close === null) {
+          return null;
+        }
+        const upper = high === null ? Math.min(open, close) : Math.min(high, open, close);
+        const lower = low === null ? Math.max(open, close) : Math.max(low, open, close);
+        const body = Math.abs(close - open);
+        const range = Math.max(1, Math.abs(lower - upper));
+        const upperWick = Math.abs(Math.min(open, close) - upper);
+        const lowerWick = Math.abs(lower - Math.max(open, close));
+        const side = directionalSide(candle.side || candle.direction || (close < open ? "BUY" : close > open ? "SELL" : "HOLD"));
+        let pattern = "";
+        if (body <= range * 0.12) {
+          pattern = "Doji / indecision candle";
+        } else if (lowerWick >= body * 2.2 && upperWick <= body * 0.9) {
+          pattern = side === "BUY" ? "Hammer-style rejection" : "Hanging-man style rejection";
+        } else if (upperWick >= body * 2.2 && lowerWick <= body * 0.9) {
+          pattern = side === "SELL" ? "Shooting-star rejection" : "Inverted-hammer style rejection";
+        } else if (body >= range * 0.72) {
+          pattern = side === "BUY" ? "Strong bullish body" : side === "SELL" ? "Strong bearish body" : "Wide body candle";
+        }
+        return pattern ? {pattern: pattern, side: side, index: index} : null;
+      }).filter(Boolean);
+      const latest = rows.slice(-3);
+      return {
+        count: rows.length,
+        latest: latest,
+        summary: latest.map(function (row) {
+          return row.pattern;
+        }).join(" · "),
+      };
     }
 
     function directionalSide(value) {
@@ -2695,6 +3143,12 @@
         + "?view=" + encodeURIComponent(publicView);
     }
 
+    function sessionStreamUrl() {
+      return "/v1/mobile/window-tracker/sessions/"
+        + encodeURIComponent(SESSION_ID)
+        + "/events";
+    }
+
     async function requestJson(url) {
       const response = await fetch(url, {
         cache: "no-store",
@@ -2782,7 +3236,18 @@
       const action = safeObject(payload);
       const status = safeText(action.status, "error").toLowerCase();
       const isCurrent = action.is_current !== false;
-      if (status === "ready" && isCurrent) {
+      const snapshotReady = action.snapshot_ready === true;
+      if (status === "ready" && (isCurrent || snapshotReady)) {
+        if (snapshotReady && !isCurrent) {
+          const age = Math.max(0, Number(action.source_frame_age) || 0);
+          return {
+            state: "success",
+            message: (mode === "future" ? "Future path" : "Forecast")
+              + " ready from its captured frame"
+              + (age > 0 ? " (" + age + " frame" + (age === 1 ? "" : "s") + " ago)" : "")
+              + ". Live tracking continues; this snapshot never grants entry permission.",
+          };
+        }
         return {
           state: "success",
           message: mode === "future"
@@ -2838,8 +3303,8 @@
         const forecastRole = safeText(row.forecast_role, "").toLowerCase();
         const rowFrame = Number(row.frame_id);
         return ["lstm", "prediction"].includes(family)
-          && forecastRole === "center"
-          && safeList(row.line_points).length >= 2
+          && ["center", "composite"].includes(forecastRole)
+          && (safeList(row.line_points).length >= 2 || safeList(row.forecast_candles).length >= 1)
           && safeText(row.lifecycle, "current").toLowerCase() === "current"
           && Number.isFinite(surfaceFrame)
           && Number.isFinite(rowFrame)
@@ -2878,6 +3343,8 @@
       }
       const normalizedMode = mode === "future" ? "future" : "predict";
       const sequence = ++state.forecastActionSequence;
+      state.forecastFocusActive = true;
+      state.lastForecastMode = normalizedMode;
       setSurfaceMode("overlay");
       setOverlayView("forecast", {fetch: false});
       if (hasCurrentForecastGeometry()) {
@@ -2888,6 +3355,10 @@
             : "The current forecast is now visible. Its confidence is not entry permission.",
           normalizedMode
         );
+        if (state.payload) {
+          renderDecision(state.payload);
+          renderAdaptivePlaybook(state.payload);
+        }
         return;
       }
       state.forecastActionBusy = true;
@@ -2903,12 +3374,35 @@
         message: "Forecast could not be updated. Keep the broker chart visible and try again.",
       };
       try {
-        const accepted = await postForecastAction(normalizedMode);
-        const completed = Boolean(accepted.terminal)
-          ? accepted
-          : await waitForForecastAction(accepted, sequence);
+        let completed = {};
+        for (let attempt = 0; attempt <= FORECAST_ACTION_STALE_RETRIES; attempt += 1) {
+          const accepted = await postForecastAction(normalizedMode);
+          completed = Boolean(accepted.terminal)
+            ? accepted
+            : await waitForForecastAction(accepted, sequence);
+          const completedStatus = safeText(completed.status, "error").toLowerCase();
+          const completedIsCurrent = completed.is_current !== false;
+          const completedSnapshotReady = completed.snapshot_ready === true;
+          if (
+            (completedStatus !== "stale" && (completedIsCurrent || completedSnapshotReady))
+            || attempt >= FORECAST_ACTION_STALE_RETRIES
+          ) {
+            break;
+          }
+          renderForecastActionState(
+            "running",
+            "The chart advanced while forecasting. Refreshing automatically on the newest frame…",
+            normalizedMode
+          );
+          await refreshOperatorState({force: true});
+          await waitForForecastPoll(150);
+        }
         outcome = forecastActionOutcome(completed, normalizedMode);
         await refreshOperatorState({force: true});
+        if (state.payload) {
+          renderDecision(state.payload);
+          renderAdaptivePlaybook(state.payload);
+        }
       } catch (error) {
         outcome = {state: "error", message: forecastActionErrorMessage(error)};
       } finally {
@@ -2970,7 +3464,10 @@
       if (state.busy && !config.force) {
         return;
       }
-      const requestedView = state.overlayView;
+      // Every preset reads from one canonical frame-atomic Inspector bundle.
+      // Local view changes must not invalidate an in-flight response because
+      // the response was never scoped to that local preset.
+      const requestedView = "all";
       const sequence = ++state.requestSequence;
       state.busy = true;
       if (!state.payload) {
@@ -2978,7 +3475,7 @@
       }
       try {
         const payload = await requestJson(operatorStateUrl(requestedView));
-        if (sequence !== state.requestSequence || requestedView !== state.overlayView) {
+        if (sequence !== state.requestSequence) {
           return;
         }
         if (!acceptsObservation(payload, requestedView)) {
@@ -2995,8 +3492,77 @@
       } finally {
         if (sequence === state.requestSequence) {
           state.busy = false;
+          if (state.streamRefreshQueued) {
+            scheduleStreamRefresh(0);
+          }
         }
       }
+    }
+
+    function scheduleStreamRefresh(delay) {
+      state.streamRefreshQueued = true;
+      if (state.busy || state.streamRefreshTimer) {
+        return;
+      }
+      state.streamRefreshTimer = window.setTimeout(async function () {
+        state.streamRefreshTimer = 0;
+        if (state.busy) {
+          scheduleStreamRefresh(80);
+          return;
+        }
+        state.streamRefreshQueued = false;
+        await refreshOperatorState();
+        if (state.streamRefreshQueued) {
+          scheduleStreamRefresh(80);
+        }
+      }, Math.max(0, Number(delay) || 0));
+    }
+
+    function closeSessionStream() {
+      const source = state.eventSource;
+      state.eventSource = null;
+      state.streamConnected = false;
+      if (source && typeof source.close === "function") {
+        source.close();
+      }
+    }
+
+    function connectSessionStream() {
+      if (typeof window.EventSource !== "function") {
+        return;
+      }
+      closeSessionStream();
+      let source;
+      try {
+        source = new window.EventSource(sessionStreamUrl());
+      } catch (_error) {
+        return;
+      }
+      state.eventSource = source;
+      source.onopen = function () {
+        if (state.eventSource === source) {
+          state.streamConnected = true;
+        }
+      };
+      source.onerror = function () {
+        if (state.eventSource === source) {
+          // EventSource reconnects itself. The 30-second HTTP timer remains
+          // active, so a stream interruption can never freeze the dashboard.
+          state.streamConnected = false;
+        }
+      };
+      source.addEventListener("SESSION_UPDATE", function () {
+        if (state.eventSource !== source) {
+          return;
+        }
+        state.streamConnected = true;
+        scheduleStreamRefresh(40);
+      });
+      source.addEventListener("SESSION_ERROR", function () {
+        if (state.eventSource === source) {
+          closeSessionStream();
+        }
+      });
     }
 
     function scheduleRefresh(delay) {
@@ -3161,6 +3727,46 @@
       setText(els.beginnerEvidenceStory, currentTitle + (forecastSide !== "HOLD" ? " · Forecast " + formatSide(forecastSide).toLowerCase() : ""));
       setText(els.beginnerEvidenceTiming, permissionTitle);
       setText(els.beginnerEvidenceSafety, freshnessLabel + (observedAt > 0 ? " · " + formatAge(observedAt) : ""));
+      const sceneForecast = sceneForecastEvidence(payload, state.overlays);
+      if (state.forecastFocusActive && sceneForecast.present) {
+        const sceneSide = sceneForecast.side;
+        const sceneTone = sceneSide === "BUY" ? "buy" : sceneSide === "SELL" ? "sell" : "hold";
+        const candleCount = Math.max(sceneForecast.candles.length, Math.max(0, sceneForecast.points.length - 1));
+        const scenarioCount = sceneForecast.scenarios.length;
+        els.beginnerDecisionShell.dataset.tone = sceneTone;
+        setText(els.beginnerReadStatus, "Scene forecast active");
+        setText(
+          els.beginnerDecisionTitle,
+          sceneSide === "BUY" ? "FORECAST BUY" : sceneSide === "SELL" ? "FORECAST SELL" : "FORECAST HOLD"
+        );
+        setText(
+          els.beginnerConfidence,
+          (candleCount || 12) + "-step path" + (scenarioCount ? " · " + scenarioCount + " routes" : "")
+        );
+        setText(
+          els.beginnerInstruction,
+          "The forecaster output is displayed now. Use the candle-anchored path and playbook together; execution still requires a verified entry window."
+        );
+        setText(
+          els.beginnerReason,
+          sceneForecast.summary,
+          sceneSide === "BUY"
+            ? "The current scene forecast leans upward across the projected progression."
+            : sceneSide === "SELL"
+              ? "The current scene forecast leans downward across the projected progression."
+              : "The current scene forecast is range/hold and needs stronger agreement."
+        );
+        setText(
+          els.beginnerNextCondition,
+          "Watch all 12 forecast steps. A flip in the live market must be confirmed by a fresh completed broker frame before changing entry permission."
+        );
+        setText(els.forecastTitle, sceneSide === "BUY" ? "12-step path leans up" : sceneSide === "SELL" ? "12-step path leans down" : "12-step range path");
+        setText(
+          els.beginnerNextRead,
+          "Scene forecaster is active from the latest studied chart suite: " + (candleCount || 12) + " projected candle events are available."
+        );
+        setText(els.beginnerEvidenceStory, "Scene forecast · " + (sceneSide === "BUY" ? "buy progression" : sceneSide === "SELL" ? "sell progression" : "range progression"));
+      }
     }
 
     function updateVisualStatus(source, freshness, label) {
@@ -3282,6 +3888,11 @@
         return;
       }
       if (primaryUrl === state.imageUrl && els.surfaceImage.complete && els.surfaceImage.naturalWidth > 0) {
+        // The bitmap may stay immutable while the backend publishes a refined
+        // chart viewport/geometry revision. Keep semantic nodes, but reproject
+        // them immediately against the new transform.
+        state.surfaceViewport = surface.viewport;
+        state.imageSpace = surface.primarySpace;
         commitOperatorState(payload);
         return;
       }
@@ -3407,6 +4018,8 @@
       if (mode === "manual") {
         state.zoom = clamp(value, 0.35, 4);
       }
+      els.zoomFit.setAttribute("aria-pressed", mode === "fit" ? "true" : "false");
+      els.zoomActual.setAttribute("aria-pressed", mode === "actual" ? "true" : "false");
       applySurfaceScale();
       window.requestAnimationFrame(function () {
         resolveLabelCollisions(els.hotspotLayer);
@@ -3470,9 +4083,6 @@
       state.selectedOverlayId = "";
       closeOverlayInspector();
       renderOverlays();
-      if (config.fetch !== false && !state.payload) {
-        refreshOperatorState({force: true});
-      }
     }
 
     function persistOverlaySelection() {
@@ -3502,12 +4112,116 @@
     function overlayFamilyTitle(family) {
       const labels = {
         smc: "SMC",
-        lstm: "LSTM",
+        lstm: "Scene forecaster",
         two_candle: "Two-candle study",
         current_candles: "Current price",
         supply_demand: "Supply / demand",
       };
       return labels[family] || titleCase(family);
+    }
+
+    function applyStudyBackedCounts(counts, payload, overlays) {
+      const operatorState = safeObject(payload || state.payload || state.pendingPayload);
+      const overlayPool = safeList(overlays || state.overlays);
+      const forecastEvidence = sceneForecastEvidence(operatorState, overlayPool);
+      const candlestickEvidence = detectCandlestickEvidence(operatorState);
+      const hasChartSurface = Boolean(
+        safeText(safeObject(operatorState.surface).primary_url || safeObject(operatorState.surface).focus_url, "")
+        || safeList(safeObject(operatorState.surface).overlay_viewport && safeObject(safeObject(operatorState.surface).overlay_viewport).bounds).length === 4
+      );
+      const trendlineEvidence = overlayPool.filter(function (overlay) {
+        const label = safeText(overlay.label || overlay.kind || overlay.type || overlay.role, "").toUpperCase();
+        return overlayFamily(overlay) === "trendlines"
+          || label.includes("TRENDLINE")
+          || label === "TREND";
+      }).length;
+      const smcEvidence = overlayPool.filter(function (overlay) {
+        const label = safeText(overlay.label || overlay.kind || overlay.type || overlay.role, "").toUpperCase();
+        return overlayFamily(overlay) === "smc"
+          || label.includes("ORDER BLOCK")
+          || label.includes("LIQUIDITY")
+          || label.includes("FAIR VALUE")
+          || label.includes("MARKET STRUCTURE SHIFT");
+      }).length;
+      if (hasChartSurface && !counts.chart_bounds) {
+        counts.chart_bounds = 1;
+      }
+      if (trendlineEvidence > 0) {
+        counts.trendlines = Math.max(Number(counts.trendlines || 0), trendlineEvidence);
+      }
+      if (smcEvidence > 0) {
+        counts.smc = Math.max(Number(counts.smc || 0), smcEvidence);
+      }
+      if (forecastEvidence.present) {
+        counts.lstm = Math.max(Number(counts.lstm || 0), 1);
+        counts.prediction = Math.max(Number(counts.prediction || 0), forecastEvidence.points.length >= 2 ? 1 : 0);
+      }
+      if (candlestickEvidence.count > 0) {
+        counts.current_candles = Math.max(Number(counts.current_candles || 0), candlestickEvidence.count);
+      }
+      counts.playbook = buildAdaptivePlaybook(operatorState, overlayPool, forecastEvidence, candlestickEvidence).items.length;
+      return counts;
+    }
+
+    function buildAdaptivePlaybook(payload, overlays, forecastEvidence, candlestickEvidence) {
+      const operatorState = safeObject(payload || state.payload);
+      const overlayPool = safeList(overlays || state.overlays);
+      const forecast = forecastEvidence || sceneForecastEvidence(operatorState, overlayPool);
+      const candles = candlestickEvidence || detectCandlestickEvidence(operatorState);
+      const items = [];
+      const addItem = function (text) {
+        const copy = safeText(text, "");
+        if (copy && !items.includes(copy)) {
+          items.push(copy);
+        }
+      };
+      const overlayLabels = overlayPool.map(function (overlay) {
+        return safeText(overlay.label || overlay.kind || overlay.type || overlay.role || overlay.family, "").toUpperCase();
+      });
+      if (overlayLabels.some(function (label) { return label.includes("LIQUIDITY") || label.includes("SWEEP"); })) {
+        addItem("SMC liquidity is active: watch for sweep, reclaim, and retest before entry permission.");
+      }
+      if (overlayLabels.some(function (label) { return label.includes("ORDER BLOCK") || label.includes("SUPPLY") || label.includes("DEMAND"); })) {
+        addItem("Order-block / supply-demand zone is active: entries must stay inside the verified reaction area.");
+      }
+      if (overlayLabels.some(function (label) { return label.includes("TRENDLINE") || label === "TREND"; })) {
+        addItem("Trendline study is active: connect wick extremes and treat body closes through the line as stronger breach evidence.");
+      }
+      if (candles.count > 0) {
+        addItem("Candlestick filter: " + candles.summary + ".");
+      }
+      if (forecast.present) {
+        addItem("Scene forecaster: " + (forecast.side === "BUY" ? "12-step path leans up" : forecast.side === "SELL" ? "12-step path leans down" : "12-step path is range/hold") + "; forecast is guidance, not execution permission.");
+      }
+      const replayCount = safeList(operatorState.history || operatorState.session_history || operatorState.replay).length;
+      if (replayCount > 0) {
+        addItem("History replay has " + replayCount + " studied observation" + (replayCount === 1 ? "" : "s") + " for comparing which strategy stayed aligned.");
+      }
+      if (!items.length) {
+        addItem("Waiting for a complete chart suite: SMC, structure, candlesticks, and scene forecast must publish before the playbook can rank strategies.");
+      }
+      return {items: items};
+    }
+
+    function renderAdaptivePlaybook(payload) {
+      if (!els.adaptivePlaybookPanel) {
+        return;
+      }
+      const operatorState = safeObject(payload || state.payload);
+      const forecast = sceneForecastEvidence(operatorState, state.overlays);
+      const candles = detectCandlestickEvidence(operatorState);
+      const playbook = buildAdaptivePlaybook(operatorState, state.overlays, forecast, candles);
+      els.adaptivePlaybookPanel.dataset.ready = playbook.items.length > 0 && playbook.items[0].indexOf("Waiting for") !== 0 ? "true" : "false";
+      els.adaptivePlaybookPanel.innerHTML = "<strong>Adaptive playbook</strong><ul>"
+        + playbook.items.slice(0, 5).map(function (item) {
+          const escaped = item
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/\"/g, "&quot;");
+          return "<li>" + escaped + "</li>";
+        }).join("")
+        + "</ul>";
     }
 
     function syncOverlayButtons(availableOverlays, options) {
@@ -3520,6 +4234,7 @@
         const family = overlayFamily(overlay);
         counts[family] = Number(counts[family] || 0) + 1;
       });
+      applyStudyBackedCounts(counts, state.payload || state.pendingPayload, overlayPool);
       document.querySelectorAll("[data-overlay-family]").forEach(function (button) {
         const family = button.dataset.overlayFamily;
         const count = Number(counts[family] || 0);
@@ -3626,6 +4341,109 @@
       return true;
     }
 
+    function surfaceSemanticIdentity(payload) {
+      const operatorState = safeObject(payload || state.payload);
+      const surface = safeObject(operatorState.surface);
+      const market = safeObject(operatorState.market);
+      return safeText(
+        surface.semantic_identity
+          || operatorState.surface_semantic_identity
+          || [market.symbol, market.timeframe].filter(Boolean).join(":"),
+        SESSION_ID,
+      );
+    }
+
+    function surfaceProjectionIdentity(payload) {
+      const operatorState = safeObject(payload || state.payload);
+      const surface = safeObject(operatorState.surface);
+      const viewport = state.surfaceViewport;
+      return JSON.stringify({
+        semantic: surfaceSemanticIdentity(operatorState),
+        geometryRevision: safeText(
+          surface.overlay_geometry_revision
+            || operatorState.overlay_geometry_revision
+            || surface.geometry_revision,
+          "",
+        ),
+        imageSpace: state.imageSpace,
+        width: state.naturalWidth,
+        height: state.naturalHeight,
+        viewport: viewport
+          ? [viewport.sourceSpace, viewport.targetSpace, viewport.units, viewport.bounds]
+          : null,
+      });
+    }
+
+    function overlayIsLiveEdge(overlay) {
+      const family = overlayFamily(overlay);
+      const group = overlayGroup(overlay);
+      return group === "movement"
+        || group === "outlook"
+        || group === "plan"
+        || [
+          "current_candles",
+          "triggers",
+          "targets",
+          "invalidation",
+          "council",
+          "two_candle",
+          "lstm",
+          "prediction",
+        ].includes(family);
+    }
+
+    function overlayGeometrySourceIdentity(overlay) {
+      return JSON.stringify({
+        semanticRevision: safeText(
+          overlay.overlay_semantic_revision
+            || safeObject(state.payload).overlay_semantic_revision,
+          "",
+        ),
+        geometryRevision: safeText(overlay.overlay_geometry_revision, ""),
+        space: overlay.coordinate_space,
+        units: overlay.coordinate_units,
+        bounds: overlay.bounds || overlay.bbox || null,
+        points: overlay.line_points || overlay.points || overlay.path || null,
+        forecastAnchor: overlay.forecast_anchor || null,
+      });
+    }
+
+    function overlaySemanticId(overlay, index) {
+      const explicit = safeText(
+        overlay.semantic_identity
+          || overlay.overlay_semantic_identity
+          || overlay.semantic_id
+          || overlay.id
+          || overlay.object_id
+          || overlay.track_id,
+        "",
+      );
+      if (explicit) {
+        return explicit;
+      }
+      return [
+        overlayFamily(overlay),
+        overlayGroup(overlay),
+        safeText(overlay.type, "mark"),
+        safeText(index, "0"),
+      ].join(":");
+    }
+
+    function pointIsOnSurface(point) {
+      if (!Array.isArray(point) || point.length < 2) {
+        return false;
+      }
+      const x = Number(point[0]);
+      const y = Number(point[1]);
+      const epsilon = 0.01;
+      return Number.isFinite(x)
+        && Number.isFinite(y)
+        && x >= -epsilon
+        && y >= -epsilon
+        && x <= state.naturalWidth + epsilon
+        && y <= state.naturalHeight + epsilon;
+    }
+
     function overlayMatchesSurface(overlay) {
       const space = safeText(overlay.coordinate_space, "chart").toLowerCase() === "window" ? "window" : "chart";
       const viewport = state.surfaceViewport;
@@ -3644,10 +4462,19 @@
     }
 
     function projectOverlayPoint(x, y, normalized, overlaySpace) {
+      const inputX = Number(x);
+      const inputY = Number(y);
+      if (!Number.isFinite(inputX) || !Number.isFinite(inputY)) {
+        return null;
+      }
+      if (normalized && (inputX < 0 || inputX > 1 || inputY < 0 || inputY > 1)) {
+        return null;
+      }
       if (overlaySpace === state.imageSpace) {
-        return normalized
-          ? [x * state.naturalWidth, y * state.naturalHeight]
-          : [x, y];
+        const sameSpacePoint = normalized
+          ? [inputX * state.naturalWidth, inputY * state.naturalHeight]
+          : [inputX, inputY];
+        return pointIsOnSurface(sameSpacePoint) ? sameSpacePoint : null;
       }
       const viewport = state.surfaceViewport;
       if (!viewport || viewport.units !== "normalized" || !Array.isArray(viewport.bounds)) {
@@ -3666,22 +4493,30 @@
       if (viewport.sourceSpace === overlaySpace && viewport.targetSpace === state.imageSpace) {
         const sourceWidth = state.naturalWidth * spanX;
         const sourceHeight = state.naturalHeight * spanY;
-        const sourceX = normalized ? x : x / sourceWidth;
-        const sourceY = normalized ? y : y / sourceHeight;
-        return [
+        if (!normalized && (inputX < 0 || inputY < 0 || inputX > sourceWidth || inputY > sourceHeight)) {
+          return null;
+        }
+        const sourceX = normalized ? inputX : inputX / sourceWidth;
+        const sourceY = normalized ? inputY : inputY / sourceHeight;
+        const projected = [
           (left + sourceX * spanX) * state.naturalWidth,
           (top + sourceY * spanY) * state.naturalHeight,
         ];
+        return pointIsOnSurface(projected) ? projected : null;
       }
       if (viewport.sourceSpace === state.imageSpace && viewport.targetSpace === overlaySpace) {
         const targetWidth = state.naturalWidth / spanX;
         const targetHeight = state.naturalHeight / spanY;
-        const targetX = normalized ? x : x / targetWidth;
-        const targetY = normalized ? y : y / targetHeight;
-        return [
+        if (!normalized && (inputX < 0 || inputY < 0 || inputX > targetWidth || inputY > targetHeight)) {
+          return null;
+        }
+        const targetX = normalized ? inputX : inputX / targetWidth;
+        const targetY = normalized ? inputY : inputY / targetHeight;
+        const projected = [
           (targetX - left) / spanX * state.naturalWidth,
           (targetY - top) / spanY * state.naturalHeight,
         ];
+        return pointIsOnSurface(projected) ? projected : null;
       }
       return null;
     }
@@ -3712,11 +4547,12 @@
       x1 = Math.max(start[0], end[0]);
       y0 = Math.min(start[1], end[1]);
       y1 = Math.max(start[1], end[1]);
-      x0 = clamp(x0, 0, state.naturalWidth);
-      x1 = clamp(x1, 0, state.naturalWidth);
-      y0 = clamp(y0, 0, state.naturalHeight);
-      y1 = clamp(y1, 0, state.naturalHeight);
-      if (x1 <= x0 || y1 <= y0) {
+      if (
+        !pointIsOnSurface([x0, y0])
+        || !pointIsOnSurface([x1, y1])
+        || x1 <= x0
+        || y1 <= y0
+      ) {
         return null;
       }
       return [x0, y0, x1, y1];
@@ -3728,29 +4564,696 @@
       const points = [];
       const units = safeText(overlay.coordinate_units, "").toLowerCase();
       const overlaySpace = safeText(overlay.coordinate_space, "chart").toLowerCase() === "window" ? "window" : "chart";
-      raw.forEach(function (point) {
+      for (const point of raw) {
         if (!Array.isArray(point) || point.length < 2) {
-          return;
+          return [];
         }
         let x = Number(point[0]);
         let y = Number(point[1]);
         if (!Number.isFinite(x) || !Number.isFinite(y)) {
-          return;
+          return [];
         }
         const normalized = units === "normalized"
           || (units !== "pixels" && Math.max(Math.abs(x), Math.abs(y)) <= 1.0001);
         const projected = projectOverlayPoint(x, y, normalized, overlaySpace);
         if (!projected) {
-          return;
+          return [];
         }
         x = projected[0];
         y = projected[1];
-        points.push([
-          clamp(x, 0, state.naturalWidth),
-          clamp(y, 0, state.naturalHeight),
-        ]);
-      });
+        if (!pointIsOnSurface([x, y])) {
+          return [];
+        }
+        points.push([x, y]);
+      }
       return points;
+    }
+
+    function projectForecastPoint(overlay, xValue, yValue) {
+      const x = Number(xValue);
+      const y = Number(yValue);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        return null;
+      }
+      const units = safeText(overlay.forecast_coordinate_units || overlay.coordinate_units, "normalized").toLowerCase();
+      const overlaySpace = safeText(overlay.forecast_coordinate_space || overlay.coordinate_space, "chart").toLowerCase() === "window" ? "window" : "chart";
+      const normalized = units === "normalized"
+        || (units !== "pixels" && Math.max(Math.abs(x), Math.abs(y)) <= 1.0001);
+      const projected = projectOverlayPoint(x, y, normalized, overlaySpace);
+      if (!projected) {
+        return null;
+      }
+      return pointIsOnSurface(projected) ? projected : null;
+    }
+
+    function projectedOverlayGeometry(overlay) {
+      const id = overlaySemanticId(overlay, 0);
+      const cacheable = !overlayIsLiveEdge(overlay);
+      const signature = surfaceProjectionIdentity()
+        + "|" + overlayGeometrySourceIdentity(overlay);
+      const cached = state.projectedGeometryCache.get(id);
+      if (cacheable && cached && cached.signature === signature) {
+        state.overlayRenderStats.projectionCacheHits += 1;
+        return cached.geometry;
+      }
+      state.overlayRenderStats.projected += 1;
+      const geometry = {
+        bounds: overlayBounds(overlay),
+        points: overlayPoints(overlay),
+      };
+      if (cacheable) {
+        state.projectedGeometryCache.set(id, {signature: signature, geometry: geometry});
+      }
+      return geometry;
+    }
+
+    function pointsShareAnchor(left, right) {
+      if (!left || !right || !pointIsOnSurface(left) || !pointIsOnSurface(right)) {
+        return false;
+      }
+      const tolerance = Math.max(3, Math.min(state.naturalWidth, state.naturalHeight) * 0.006);
+      return Math.hypot(left[0] - right[0], left[1] - right[1]) <= tolerance;
+    }
+
+    function forecastPathMovesForward(points) {
+      if (!Array.isArray(points) || points.length < 13) {
+        return false;
+      }
+      const complete = points.slice(0, 13);
+      if (!complete.every(pointIsOnSurface)) {
+        return false;
+      }
+      const backtrackTolerance = Math.max(1, state.naturalWidth * 0.0015);
+      for (let index = 1; index < complete.length; index += 1) {
+        if (complete[index][0] + backtrackTolerance < complete[index - 1][0]) {
+          return false;
+        }
+      }
+      return complete[12][0] - complete[0][0] >= Math.max(5, state.naturalWidth * 0.006);
+    }
+
+    function forecastAnchorFitsBounds(anchor, bounds) {
+      if (!pointIsOnSurface(anchor) || !bounds) {
+        return false;
+      }
+      const padding = Math.max(3, Math.min(state.naturalWidth, state.naturalHeight) * 0.008);
+      return anchor[0] >= bounds[0] - padding
+        && anchor[0] <= bounds[2] + padding
+        && anchor[1] >= bounds[1] - padding
+        && anchor[1] <= bounds[3] + padding;
+    }
+
+    function forecastPathsMatch(left, right) {
+      if (!Array.isArray(left) || !Array.isArray(right) || left.length !== 13 || right.length !== 13) {
+        return false;
+      }
+      const tolerance = Math.max(1.5, Math.min(state.naturalWidth, state.naturalHeight) * 0.0025);
+      return left.every(function (point, index) {
+        return pointsShareAnchor(point, right[index])
+          && Math.hypot(point[0] - right[index][0], point[1] - right[index][1]) <= tolerance;
+      });
+    }
+
+    function projectedLatestCandleCloseAnchor() {
+      const surfaceFrame = safeText(safeObject(state.payload && state.payload.surface).frame_id, "");
+      const candidates = state.overlays.filter(function (overlay) {
+        return overlayFamily(overlay) === "current_candles"
+          && safeText(overlay.frame_id, "") === surfaceFrame
+          && safeText(overlay.label, "").toLowerCase() === "current price";
+      });
+      const latest = candidates[candidates.length - 1] || null;
+      if (!latest) {
+        return null;
+      }
+      const explicitClosePoints = safeList(latest.points);
+      if (
+        explicitClosePoints.length === 1
+        && Array.isArray(explicitClosePoints[0])
+        && explicitClosePoints[0].length >= 2
+      ) {
+        const rawPoint = explicitClosePoints[0];
+        const x = Number(rawPoint[0]);
+        const y = Number(rawPoint[1]);
+        const units = safeText(latest.coordinate_units, "").toLowerCase();
+        const overlaySpace = safeText(latest.coordinate_space, "chart").toLowerCase() === "window"
+          ? "window"
+          : "chart";
+        const normalized = units === "normalized"
+          || (units !== "pixels" && Math.max(Math.abs(x), Math.abs(y)) <= 1.0001);
+        const projectedClose = projectOverlayPoint(x, y, normalized, overlaySpace);
+        if (projectedClose && pointIsOnSurface(projectedClose)) {
+          return projectedClose;
+        }
+      }
+      const bounds = projectedOverlayGeometry(latest).bounds;
+      if (!bounds) {
+        return null;
+      }
+      const side = directionalSide(latest.side);
+      const anchor = [
+        0.5 * (bounds[0] + bounds[2]),
+        side === "BUY" ? bounds[1] : side === "SELL" ? bounds[3] : 0.5 * (bounds[1] + bounds[3]),
+      ];
+      return pointIsOnSurface(anchor) ? anchor : null;
+    }
+
+    function projectedCurrentCandleMedianSpacing() {
+      const surfaceFrame = safeText(safeObject(state.payload && state.payload.surface).frame_id, "");
+      const centers = state.overlays.filter(function (overlay) {
+        return overlayFamily(overlay) === "current_candles"
+          && safeText(overlay.frame_id, "") === surfaceFrame;
+      }).map(function (overlay) {
+        const geometry = projectedOverlayGeometry(overlay);
+        if (geometry.bounds) {
+          return 0.5 * (geometry.bounds[0] + geometry.bounds[2]);
+        }
+        return geometry.points.length ? geometry.points[0][0] : NaN;
+      }).filter(Number.isFinite).sort(function (left, right) {
+        return left - right;
+      });
+      const spacings = centers.slice(1).map(function (center, index) {
+        return center - centers[index];
+      }).filter(function (spacing) {
+        return spacing > 0.5;
+      }).sort(function (left, right) {
+        return left - right;
+      });
+      if (!spacings.length) {
+        return 0;
+      }
+      const middle = Math.floor(spacings.length / 2);
+      return spacings.length % 2
+        ? spacings[middle]
+        : 0.5 * (spacings[middle - 1] + spacings[middle]);
+    }
+
+    function selectedForecastScenario(overlay) {
+      const scenarios = safeList(overlay.forecast_scenarios).map(function (rawScenario) {
+        return safeObject(rawScenario);
+      });
+      return scenarios.find(function (scenario) {
+        return scenario.selected === true;
+      }) || scenarios[0] || null;
+    }
+
+    function hasDirectionalForecastPrimary(overlay) {
+      const selectedScenario = selectedForecastScenario(overlay);
+      return Boolean(
+        selectedScenario
+        && directionalSide(selectedScenario.side) !== "HOLD"
+        && safeList(selectedScenario.line_points).length >= 13
+      );
+    }
+
+    function createForecastComposite(overlay, projectedGeometry) {
+      if (safeText(overlay.forecast_role, "").toLowerCase() !== "composite") {
+        return null;
+      }
+      const namespace = "http://www.w3.org/2000/svg";
+      const status = safeText(overlay.forecast_status, "NO_EDGE").toLowerCase();
+      const group = document.createElementNS(namespace, "g");
+      const visualStatus = ["authorized", "low_confidence", "diagnostic"].includes(status)
+        ? status.replace(/_/g, "-")
+        : "no-edge";
+      group.setAttribute("class", "surface-forecast-composite forecast-" + visualStatus);
+      group.dataset.overlayId = safeText(overlay.id, "");
+      group.dataset.overlayFamilyId = overlayFamily(overlay);
+      group.dataset.forecastStatus = status.toUpperCase();
+
+      const geometry = projectedGeometry || projectedOverlayGeometry(overlay);
+      const pathPoints = geometry.points;
+      const projectedScenarios = safeList(overlay.forecast_scenarios).map(function (rawScenario) {
+        const scenario = safeObject(rawScenario);
+        const probabilityValue = Number(scenario.probability);
+        const side = directionalSide(scenario.side);
+        const points = safeList(scenario.line_points).map(function (point) {
+          return Array.isArray(point) && point.length >= 2
+            ? projectForecastPoint(overlay, point[0], point[1])
+            : null;
+        }).filter(Boolean);
+        return {
+          side: side,
+          probability: Number.isFinite(probabilityValue)
+            ? clamp(probabilityValue, 0, 1)
+            : 0,
+          probabilityCalibrated: scenario.probability_calibrated === true,
+          selected: scenario.selected === true,
+          rawSelected: scenario.raw_selected === true,
+          candidate: scenario.candidate === true,
+          role: safeText(scenario.role, "").toLowerCase(),
+          visualRole: ["bull", "bear"].includes(safeText(scenario.role, "").toLowerCase())
+            ? safeText(scenario.role, "").toLowerCase()
+            : side === "BUY"
+            ? "bull"
+            : side === "SELL"
+            ? "bear"
+            : "neutral",
+          points: points,
+        };
+      }).filter(function (scenario) {
+        return scenario.points.length === 13;
+      }).sort(function (left, right) {
+        if (left.selected !== right.selected) {
+          return left.selected ? -1 : 1;
+        }
+        return right.probability - left.probability;
+      });
+      const selectedScenarios = projectedScenarios.filter(function (scenario) {
+        return scenario.selected;
+      });
+      const selectedScenario = selectedScenarios.length === 1 ? selectedScenarios[0] : null;
+      const roleBaseScenario = projectedScenarios.find(function (scenario) {
+        return scenario.role === "base" && scenario.points.length >= 13;
+      }) || null;
+      const roleUpperScenario = projectedScenarios.find(function (scenario) {
+        return scenario.role === "bull" && scenario.points.length >= 13;
+      }) || null;
+      const roleLowerScenario = projectedScenarios.find(function (scenario) {
+        return scenario.role === "bear" && scenario.points.length >= 13;
+      }) || null;
+      const roleBundleComplete = Boolean(
+        roleBaseScenario && roleUpperScenario && roleLowerScenario
+      );
+      const legacySideBundleComplete = ["BUY", "HOLD", "SELL"].every(function (side) {
+        return projectedScenarios.some(function (scenario) { return scenario.side === side; });
+      });
+      // Current V3 scenarios are statistical roles whose endpoint sides may
+      // repeat. Older saved sessions used one BUY/HOLD/SELL row. Support both
+      // truthful contracts during the in-place V3 migration.
+      const baseScenario = roleBaseScenario || selectedScenario;
+      const upperScenario = roleUpperScenario || projectedScenarios.find(function (scenario) {
+        return scenario.side === "BUY";
+      }) || null;
+      const lowerScenario = roleLowerScenario || projectedScenarios.find(function (scenario) {
+        return scenario.side === "SELL";
+      }) || null;
+      const rawAnchor = safeObject(overlay.forecast_anchor);
+      const projectedAnchor = projectForecastPoint(
+        overlay,
+        rawAnchor.x_norm,
+        rawAnchor.y_norm,
+      );
+      const latestCandleAnchor = projectedLatestCandleCloseAnchor();
+      const explicitAnchorMatches = Boolean(
+        projectedAnchor
+        && pathPoints.length === 13
+        && pointsShareAnchor(projectedAnchor, pathPoints[0])
+      );
+      const latestCloseMatches = Boolean(
+        latestCandleAnchor
+        && pathPoints.length === 13
+        && pointsShareAnchor(latestCandleAnchor, pathPoints[0])
+      );
+      const verifiedClosedCandleAnchor = Boolean(
+        rawAnchor.verified_latest_close === true
+        && safeText(rawAnchor.source, "").toUpperCase()
+          === "TRACKER_LATEST_CLOSED_CANDLE"
+      );
+      const currentCandleMedianSpacing = projectedCurrentCandleMedianSpacing();
+      const verifiedAnchorMaximumXGap = Math.max(
+        18,
+        state.naturalWidth * 0.03,
+        currentCandleMedianSpacing * 2.5,
+      );
+      const verifiedAnchorHorizontallyAdjacent = Boolean(
+        !latestCandleAnchor
+        || (
+          projectedAnchor
+          && Math.abs(projectedAnchor[0] - latestCandleAnchor[0])
+            <= verifiedAnchorMaximumXGap
+        )
+      );
+      const candleLocked = Boolean(
+        explicitAnchorMatches
+        && (
+          // The scene forecast is frozen at the latest completed candle. A
+          // newer `Current price` overlay can be the still-forming candle and
+          // must not detach that verified origin while price moves inside it.
+          // It must still be horizontally adjacent on this exact frame. This
+          // independently rejects a producer that labels old chart geometry as
+          // the latest closed candle while keeping normal forming-candle Y
+          // movement free to diverge from the completed close.
+          verifiedClosedCandleAnchor
+            ? verifiedAnchorHorizontallyAdjacent
+            : latestCandleAnchor
+            ? latestCloseMatches
+            : rawAnchor.verified_latest_close === true
+        )
+      );
+      const projectedForecastCandles = safeList(overlay.forecast_candles).map(function (rawCandle) {
+        const candle = safeObject(rawCandle);
+        const xNorm = Number(candle.x_norm);
+        const openY = Number(candle.open_y_norm);
+        const highY = Number(candle.high_y_norm);
+        const lowY = Number(candle.low_y_norm);
+        const closeY = Number(candle.close_y_norm);
+        const values = [xNorm, openY, highY, lowY, closeY];
+        if (!values.every(Number.isFinite)) {
+          return null;
+        }
+        const open = projectForecastPoint(overlay, xNorm, openY);
+        const high = projectForecastPoint(overlay, xNorm, highY);
+        const low = projectForecastPoint(overlay, xNorm, lowY);
+        const close = projectForecastPoint(overlay, xNorm, closeY);
+        if (!open || !high || !low || !close) {
+          return null;
+        }
+        const step = Number(candle.step);
+        return {
+          step: Number.isFinite(step) ? step : 0,
+          label: safeText(candle.label, "E" + step),
+          movementSide: directionalSide(candle.movement_side || candle.body_bias),
+          directionConflict: candle.direction_conflict === true,
+          open: open,
+          high: high,
+          low: low,
+          close: close,
+        };
+      }).filter(Boolean).sort(function (left, right) {
+        return left.step - right.step;
+      });
+      const scenarioBundleComplete = Boolean(
+        projectedScenarios.length === 3
+        && selectedScenario
+        && baseScenario
+        && upperScenario
+        && lowerScenario
+        && (roleBundleComplete || legacySideBundleComplete)
+        && projectedForecastCandles.length === 12
+        && projectedForecastCandles.every(function (candle, index) {
+          return candle.step === index + 1;
+        })
+      );
+      const directionalPrimary = Boolean(
+        scenarioBundleComplete
+        && candleLocked
+        && selectedScenario.side !== "HOLD"
+        && forecastPathMovesForward(selectedScenario.points)
+        && forecastPathMovesForward(pathPoints)
+        && forecastPathsMatch(selectedScenario.points, pathPoints)
+        && forecastAnchorFitsBounds(pathPoints[0], geometry.bounds)
+      );
+      const rangePrimary = Boolean(
+        scenarioBundleComplete
+        && candleLocked
+        && selectedScenario.side === "HOLD"
+        && upperScenario
+        && lowerScenario
+        && forecastPathMovesForward(upperScenario.points)
+        && forecastPathMovesForward(lowerScenario.points)
+        && forecastPathsMatch(selectedScenario.points, pathPoints)
+        && pointsShareAnchor(upperScenario.points[0], pathPoints[0])
+        && pointsShareAnchor(lowerScenario.points[0], pathPoints[0])
+        && forecastAnchorFitsBounds(pathPoints[0], geometry.bounds)
+      );
+      const scenarioReady = directionalPrimary || rangePrimary;
+      if (!scenarioReady) {
+        // A partially projected or anchor-mismatched scenario must disappear
+        // as a unit. Falling back to a clamped path would make it look as if
+        // the forecast belongs to a candle that never supplied its origin.
+        return null;
+      }
+      group.dataset.displayMode = directionalPrimary
+        ? "multi-scenario-paths"
+        : "range-scenario-paths";
+      const beliefState = safeText(overlay.belief_state, "STABLE").toUpperCase();
+      const committedSide = directionalSide(overlay.committed_side || selectedScenario.side);
+      const candidateSide = directionalSide(overlay.candidate_side);
+      const confirmationEvents = Math.max(0, Number(overlay.confirmation_events) || 0);
+      const requiredEvents = Math.max(0, Number(overlay.required_events) || 0);
+      group.dataset.scenarioCount = String(projectedScenarios.length);
+      group.dataset.primarySide = committedSide;
+      group.dataset.eventCount = "12";
+      group.dataset.probabilityCalibration = projectedScenarios.every(function (scenario) {
+        return scenario.probabilityCalibrated;
+      }) ? "CALIBRATED" : "UNCALIBRATED";
+      group.dataset.anchorState = "CANDLE_LOCKED";
+      group.dataset.beliefState = beliefState;
+      group.dataset.candidateSide = candidateSide;
+      group.dataset.scenarioPresentation = "SELECTED_WITH_BULL_BEAR_RANGE";
+
+      const interval = safeObject(overlay.interval);
+      const scenarioBackdrop = document.createDocumentFragment();
+      const bandPoints = safeList(overlay.forecast_band_points).map(function (point) {
+        return Array.isArray(point) && point.length >= 2
+          ? projectForecastPoint(overlay, point[0], point[1])
+          : null;
+      }).filter(Boolean);
+      if (directionalPrimary && interval.calibrated === true && bandPoints.length >= 4) {
+        const band = document.createElementNS(namespace, "polygon");
+        band.setAttribute("points", bandPoints.map(function (point) {
+          return point[0] + "," + point[1];
+        }).join(" "));
+        band.setAttribute(
+          "class",
+          "surface-forecast-band forecast-" + (status === "authorized" ? "authorized" : "no-edge"),
+        );
+        group.appendChild(band);
+      }
+
+      const eventSpacing = pathPoints.length >= 3
+        ? Math.abs(pathPoints[2][0] - pathPoints[1][0])
+        : 8;
+      const candleBodyWidth = clamp(eventSpacing * 0.38, 3, 8);
+      projectedForecastCandles.forEach(function (candle) {
+        const candleGroup = document.createElementNS(namespace, "g");
+        const sideClass = candle.movementSide.toLowerCase();
+        candleGroup.setAttribute(
+          "class",
+          "surface-forecast-candle " + sideClass
+            + (candle.directionConflict ? " direction-conflict" : ""),
+        );
+        candleGroup.dataset.eventLabel = candle.label;
+
+        const wick = document.createElementNS(namespace, "line");
+        wick.setAttribute("x1", String(candle.high[0]));
+        wick.setAttribute("x2", String(candle.low[0]));
+        wick.setAttribute("y1", String(Math.min(candle.high[1], candle.low[1])));
+        wick.setAttribute("y2", String(Math.max(candle.high[1], candle.low[1])));
+        wick.setAttribute("class", "surface-forecast-candle-wick");
+        candleGroup.appendChild(wick);
+
+        const body = document.createElementNS(namespace, "rect");
+        const bodyTop = Math.min(candle.open[1], candle.close[1]);
+        const bodyHeight = Math.max(1.25, Math.abs(candle.close[1] - candle.open[1]));
+        body.setAttribute("x", String(candle.close[0] - candleBodyWidth / 2));
+        body.setAttribute("y", String(bodyTop));
+        body.setAttribute("width", String(candleBodyWidth));
+        body.setAttribute("height", String(bodyHeight));
+        body.setAttribute("class", "surface-forecast-candle-body");
+        candleGroup.appendChild(body);
+
+        const title = document.createElementNS(namespace, "title");
+        title.textContent = candle.label + " forecast candle · "
+          + candle.movementSide + " movement · true chart scale"
+          + (candle.directionConflict ? " · mixed body/path evidence" : "");
+        candleGroup.appendChild(title);
+        group.appendChild(candleGroup);
+      });
+
+      group.setAttribute(
+        "aria-label",
+        directionalPrimary
+          ? "Multimodal 12-event forecast with one primary path and alternative outcomes; not entry permission"
+          : "Range leads; complete 12-step buy and sell paths shown; no edge and not entry permission",
+      );
+
+      projectedScenarios.filter(function (scenario) {
+        return scenario !== selectedScenario
+          && forecastPathMovesForward(scenario.points)
+          && pointsShareAnchor(scenario.points[0], pathPoints[0])
+          && (rangePrimary
+            ? scenario === upperScenario || scenario === lowerScenario
+            : scenario.probability >= 0.05);
+      }).slice(0, 2).forEach(function (scenario) {
+        const alternative = document.createElementNS(namespace, "polyline");
+        const completePoints = scenario.points.slice(0, 13);
+        alternative.setAttribute("points", completePoints.map(function (point) {
+          return point[0] + "," + point[1];
+        }).join(" "));
+        alternative.setAttribute(
+          "class",
+          "surface-forecast-scenario " + scenario.side.toLowerCase()
+            + (scenario.visualRole === "bull" ? " bullish-range" : "")
+            + (scenario.visualRole === "bear" ? " bearish-range" : "")
+            + (rangePrimary ? " range-branch" : "")
+            + (beliefState === "REVERSAL_PENDING" && scenario.side === candidateSide
+              ? " revision-candidate"
+              : ""),
+        );
+        alternative.dataset.eventCount = "12";
+        alternative.dataset.scenarioRole = scenario.visualRole.toUpperCase();
+        alternative.dataset.uncertaintyMeaning = "ROUTE_SPREAD";
+        alternative.style.opacity = rangePrimary
+          ? "0.82"
+          : String(clamp(0.52 + scenario.probability * 0.28, 0.56, 0.68));
+        const title = document.createElementNS(namespace, "title");
+        title.textContent = (scenario.visualRole === "bull"
+          ? "Bullish route"
+          : scenario.visualRole === "bear"
+          ? "Bearish route"
+          : scenario.side + " alternative scenario")
+          + " · 12 events · relative route weight "
+          + (scenario.probabilityCalibrated ? "calibrated" : "uncalibrated")
+          + " · spread from the selected path shows route uncertainty";
+        alternative.appendChild(title);
+        scenarioBackdrop.appendChild(alternative);
+
+        if (roleBundleComplete && ["bull", "bear"].includes(scenario.visualRole)) {
+          const rangeEndpoint = completePoints[12];
+          const alignEnd = rangeEndpoint[0] > state.naturalWidth * 0.84;
+          const rangeLabel = document.createElementNS(namespace, "text");
+          rangeLabel.setAttribute("x", String(rangeEndpoint[0] + (alignEnd ? -7 : 7)));
+          rangeLabel.setAttribute(
+            "y",
+            String(rangeEndpoint[1] + (scenario.visualRole === "bull" ? -7 : 12)),
+          );
+          rangeLabel.setAttribute("text-anchor", alignEnd ? "end" : "start");
+          rangeLabel.setAttribute(
+            "class",
+            "surface-forecast-range-label "
+              + (scenario.visualRole === "bull" ? "bullish-range" : "bearish-range"),
+          );
+          rangeLabel.dataset.scenarioRole = scenario.visualRole.toUpperCase();
+          rangeLabel.textContent = scenario.visualRole === "bull"
+            ? "BULLISH ROUTE"
+            : "BEARISH ROUTE";
+          scenarioBackdrop.appendChild(rangeLabel);
+        }
+
+        if (rangePrimary) {
+          completePoints.slice(1).forEach(function (point, pointOffset) {
+            const eventIndex = pointOffset + 1;
+            const milestone = [1, 4, 8, 12].includes(eventIndex);
+            const node = document.createElementNS(namespace, "circle");
+            node.setAttribute("cx", String(point[0]));
+            node.setAttribute("cy", String(point[1]));
+            node.setAttribute("r", milestone ? (eventIndex === 12 ? "3.7" : "2.5") : "1.55");
+            node.setAttribute(
+              "class",
+              "surface-forecast-step-node surface-forecast-branch-node "
+                + scenario.side.toLowerCase()
+                + (milestone ? " surface-forecast-milestone-node" : "")
+                + (eventIndex === 12 ? " endpoint" : ""),
+            );
+            node.dataset.eventLabel = "E" + eventIndex;
+            const nodeTitle = document.createElementNS(namespace, "title");
+            nodeTitle.textContent = scenario.side + " E" + eventIndex
+              + " expected close · true chart scale";
+            node.appendChild(nodeTitle);
+            scenarioBackdrop.appendChild(node);
+
+            if (milestone) {
+              const stepLabel = document.createElementNS(namespace, "text");
+              const labelOffset = scenario.side === "BUY"
+                ? (eventIndex % 2 ? -6 : -10)
+                : (eventIndex % 2 ? 11 : 15);
+              stepLabel.setAttribute("x", String(point[0]));
+              stepLabel.setAttribute("y", String(point[1] + labelOffset));
+              stepLabel.setAttribute("text-anchor", "middle");
+              stepLabel.setAttribute(
+                "class",
+                "surface-forecast-step-label " + scenario.side.toLowerCase()
+                  + " milestone",
+              );
+              stepLabel.dataset.eventLabel = "E" + eventIndex;
+              stepLabel.textContent = "E" + eventIndex;
+              scenarioBackdrop.appendChild(stepLabel);
+            }
+          });
+        }
+      });
+
+      // Scenario ranges are deliberately painted before the selected candles
+      // and milestones. The whole Scene Forecaster group is later queued above
+      // unrelated overlays, so ranges stay visible without becoming the truth
+      // path or obscuring any of its 12 candle events.
+      group.insertBefore(scenarioBackdrop, group.firstChild);
+
+      if (!directionalPrimary) {
+        const directionAnchor = [upperScenario, lowerScenario].map(function (scenario) {
+          return scenario.points[12];
+        }).sort(function (left, right) { return left[1] - right[1]; })[0];
+        const alignEnd = directionAnchor[0] > state.naturalWidth * 0.86;
+        const directionLabel = document.createElementNS(namespace, "text");
+        directionLabel.setAttribute(
+          "x",
+          String(directionAnchor[0] + (alignEnd ? -8 : 8)),
+        );
+        directionLabel.setAttribute("y", String(Math.max(11, directionAnchor[1] - 10)));
+        directionLabel.setAttribute("text-anchor", alignEnd ? "end" : "start");
+        directionLabel.setAttribute(
+          "class",
+          "surface-forecast-endpoint-label surface-forecast-direction-label",
+        );
+        directionLabel.textContent = roleBundleComplete
+          ? "RANGE MEDOID · 12-STEP UPPER/LOWER PATHS · NO EDGE"
+          : "RANGE LEADS · 12-STEP BUY/SELL PATHS · NO EDGE";
+        group.appendChild(directionLabel);
+        return group;
+      }
+
+      const primaryPathPoints = pathPoints.slice(0, 13);
+      const lastPointIndex = 12;
+      primaryPathPoints.slice(1).forEach(function (point, pointOffset) {
+        const index = pointOffset + 1;
+        const milestone = [1, 4, 8, 12].includes(index);
+        const node = document.createElementNS(namespace, "circle");
+        node.setAttribute("cx", String(point[0]));
+        node.setAttribute("cy", String(point[1]));
+        node.setAttribute("r", milestone ? (index === lastPointIndex ? "4.2" : "2.7") : "1.65");
+        node.setAttribute(
+          "class",
+          "surface-forecast-step-node"
+            + (milestone ? " surface-forecast-milestone-node" : "")
+            + (index === lastPointIndex ? " endpoint" : ""),
+        );
+        node.dataset.eventLabel = "E" + index;
+        const title = document.createElementNS(namespace, "title");
+        title.textContent = "E" + index + " expected close · true chart scale";
+        node.appendChild(title);
+        group.appendChild(node);
+
+        if (milestone) {
+          const stepLabel = document.createElementNS(namespace, "text");
+          stepLabel.setAttribute("x", String(point[0]));
+          stepLabel.setAttribute("y", String(point[1] + (index % 2 ? -7 : 11)));
+          stepLabel.setAttribute("text-anchor", "middle");
+          stepLabel.setAttribute(
+            "class",
+            "surface-forecast-step-label milestone",
+          );
+          stepLabel.dataset.eventLabel = "E" + index;
+          stepLabel.textContent = "E" + index;
+          group.appendChild(stepLabel);
+        }
+      });
+
+      const directionCopy = selectedScenario.side === "BUY"
+        ? "UP"
+        : selectedScenario.side === "SELL"
+        ? "DOWN"
+        : "RANGE";
+      const committedDirectionCopy = committedSide === "BUY"
+        ? "UP"
+        : committedSide === "SELL"
+        ? "DOWN"
+        : "RANGE";
+      const endpoint = primaryPathPoints[lastPointIndex];
+      const endpointLabel = document.createElementNS(namespace, "text");
+      const alignEnd = endpoint[0] > state.naturalWidth * 0.86;
+      endpointLabel.setAttribute("x", String(endpoint[0] + (alignEnd ? -8 : 8)));
+      endpointLabel.setAttribute("y", String(Math.max(11, endpoint[1] - 10)));
+      endpointLabel.setAttribute("text-anchor", alignEnd ? "end" : "start");
+      endpointLabel.setAttribute("class", "surface-forecast-endpoint-label");
+      endpointLabel.textContent = beliefState === "REVERSAL_PENDING" && candidateSide !== "HOLD"
+        ? committedDirectionCopy + " COMMITTED · " + candidateSide + " UNDER REVIEW "
+          + confirmationEvents + "/" + Math.max(requiredEvents, 1) + " · WAIT"
+        : ["RESET", "REACQUIRING"].includes(beliefState)
+        ? directionCopy + " STUDY · CALIBRATION PENDING · NO EDGE"
+        : directionCopy + " COMMITTED · E1–E12 · NO EDGE";
+      group.appendChild(endpointLabel);
+      return group;
     }
 
     function overlayPriority(overlay) {
@@ -3777,8 +5280,11 @@
       const side = directionalSide(overlay.side).toLowerCase();
       const forecastRole = safeText(overlay.forecast_role, "").toLowerCase();
       const forecastStatus = safeText(overlay.forecast_status, "NO_EDGE").toLowerCase();
-      const id = safeText(overlay.id, "overlay-" + Math.random().toString(36).slice(2));
-      let box = bounds;
+      const id = overlaySemanticId(overlay, 0);
+      // Diagnostic range heads may be much wider than the expected-close
+      // trajectory. Keep the selectable forecast lane attached to the path,
+      // not to hidden high/low extremes.
+      let box = forecastRole === "composite" && points.length >= 2 ? null : bounds;
       if (!box && points.length >= 2) {
         const xs = points.map(function (point) { return point[0]; });
         const ys = points.map(function (point) { return point[1]; });
@@ -3802,9 +5308,18 @@
         // Those bounds are not a second market object and must never render as
         // a bordered capsule around the SVG geometry.
         + (points.length >= 2 ? " line-hit" : "")
-        + (forecastRole === "center" ? " forecast-path-hit" : "")
-        + (forecastRole ? " forecast-" + (forecastStatus === "authorized" ? "authorized" : "no-edge") : "")
-        + (overlay.label_hidden === true ? " label-policy-hidden" : "");
+        + (["center", "composite"].includes(forecastRole) ? " forecast-path-hit" : "")
+        + (forecastRole ? " forecast-" + (
+          ["authorized", "low_confidence", "diagnostic"].includes(forecastStatus)
+            ? forecastStatus.replace(/_/g, "-")
+            : "no-edge"
+        ) : "")
+        // The composite already carries its own endpoint headline and E1-E12
+        // labels. Keep the larger inspector hit-label hidden until hover or
+        // focus so it cannot cover the forecast path.
+        + (forecastRole === "composite" || overlay.label_hidden === true
+          ? " label-policy-hidden"
+          : "");
       button.dataset.overlayId = id;
       button.dataset.overlayFamilyId = family;
       button.dataset.overlayLayer = safeText(overlay.layer, "");
@@ -3822,11 +5337,12 @@
       }
       button.addEventListener("click", function (event) {
         event.stopPropagation();
-        selectOverlay(overlay);
+        selectOverlay(button.__overlayData || overlay);
       });
       button.addEventListener("focus", function () {
         state.focusedOverlayId = id;
       });
+      button.__overlayData = overlay;
       return button;
     }
 
@@ -3836,7 +5352,11 @@
       }
       const namespace = "http://www.w3.org/2000/svg";
       const forecastRole = safeText(overlay.forecast_role, "").toLowerCase();
+      if (forecastRole === "composite" && !hasDirectionalForecastPrimary(overlay)) {
+        return null;
+      }
       const forecastStatus = safeText(overlay.forecast_status, "NO_EDGE").toLowerCase();
+      const forecastBeliefState = safeText(overlay.belief_state, "STABLE").toUpperCase();
       const isForecastBand = forecastRole === "band_90";
       const polyline = document.createElementNS(namespace, isForecastBand ? "polygon" : "polyline");
       const group = overlayGroup(overlay);
@@ -3851,13 +5371,24 @@
           + " family-" + familyClass
           + (side === "buy" || side === "sell" ? " " + side : "")
           + (["upper_90", "lower_90"].includes(forecastRole) ? " forecast-boundary" : "")
-          + (forecastRole ? " forecast-" + (forecastStatus === "authorized" ? "authorized" : "no-edge") : ""),
+          + (forecastRole ? " forecast-" + (
+            ["authorized", "low_confidence", "diagnostic"].includes(forecastStatus)
+              ? forecastStatus.replace(/_/g, "-")
+              : "no-edge"
+          ) : "")
+          + (forecastRole === "composite" ? " forecast-selected-path" : "")
+          + (["RESET", "REACQUIRING", "REVERSAL_PENDING"].includes(forecastBeliefState)
+            ? " forecast-under-review"
+            : ""),
       );
       polyline.dataset.overlayId = safeText(overlay.id, "");
       polyline.dataset.overlayFamilyId = family;
       if (forecastRole) {
         polyline.dataset.forecastRole = forecastRole;
-        polyline.dataset.forecastStatus = forecastStatus === "authorized" ? "AUTHORIZED" : "NO_EDGE";
+        polyline.dataset.forecastStatus = forecastStatus.toUpperCase();
+        if (forecastRole === "composite") {
+          polyline.dataset.pathPresentation = "SELECTED_12_STEP_PATH";
+        }
       }
       return polyline;
     }
@@ -3878,6 +5409,135 @@
       return rectangle;
     }
 
+    function overlayRenderSignature(overlay, role) {
+      const liveRevision = overlayIsLiveEdge(overlay) ? revisionValue(safeObject(state.payload)) : "";
+      const forecastRole = safeText(overlay.forecast_role, "").toLowerCase();
+      return JSON.stringify({
+        role: role,
+        projection: surfaceProjectionIdentity(),
+        source: overlayGeometrySourceIdentity(overlay),
+        liveRevision: liveRevision,
+        family: overlayFamily(overlay),
+        group: overlayGroup(overlay),
+        side: directionalSide(overlay.side),
+        label: overlayLabel(overlay),
+        lifecycle: overlay.lifecycle,
+        confidence: overlay.confidence,
+        labelHidden: overlay.label_hidden === true,
+        selected: safeText(overlay.id, "") === state.selectedOverlayId,
+        forecastRole: forecastRole,
+        forecastStatus: overlay.forecast_status,
+        forecastDirection: overlay.forecast_direction,
+        beliefState: overlay.belief_state,
+        beliefRevision: overlay.belief_revision,
+        committedSide: overlay.committed_side,
+        candidateSide: overlay.candidate_side,
+        confirmationEvents: overlay.confirmation_events,
+        requiredEvents: overlay.required_events,
+        interval: forecastRole ? overlay.interval : null,
+        band: forecastRole ? overlay.forecast_band_points : null,
+        scenarios: forecastRole ? overlay.forecast_scenarios : null,
+        forecastAnchor: forecastRole ? overlay.forecast_anchor : null,
+      });
+    }
+
+    function prepareRenderedNode(node, overlay, role) {
+      if (!node) {
+        return null;
+      }
+      const semanticId = overlaySemanticId(overlay, 0);
+      node.dataset.renderKey = role + ":" + semanticId;
+      node.dataset.renderSignature = overlayRenderSignature(overlay, role);
+      node.__overlayData = overlay;
+      return node;
+    }
+
+    function copyElementAttributes(target, source) {
+      Array.from(target.attributes).forEach(function (attribute) {
+        if (!source.hasAttribute(attribute.name)) {
+          target.removeAttribute(attribute.name);
+        }
+      });
+      Array.from(source.attributes).forEach(function (attribute) {
+        target.setAttribute(attribute.name, attribute.value);
+      });
+    }
+
+    function patchRenderedNode(target, source) {
+      copyElementAttributes(target, source);
+      target.__overlayData = source.__overlayData;
+      if (target instanceof SVGElement && target.localName === "g") {
+        target.replaceChildren(...Array.from(source.childNodes));
+        return;
+      }
+      if (target instanceof HTMLButtonElement) {
+        const targetLabel = target.querySelector("span");
+        const sourceLabel = source.querySelector("span");
+        if (targetLabel && sourceLabel) {
+          targetLabel.textContent = sourceLabel.textContent;
+        }
+      }
+    }
+
+    function reconcileRenderedChildren(container, candidates) {
+      const desired = candidates.filter(Boolean);
+      const existing = new Map(
+        Array.from(container.children).map(function (node) {
+          return [safeText(node.dataset.renderKey, ""), node];
+        }).filter(function (entry) { return Boolean(entry[0]); }),
+      );
+      const desiredKeys = new Set();
+      desired.forEach(function (candidate, index) {
+        const key = safeText(candidate.dataset.renderKey, "");
+        desiredKeys.add(key);
+        let node = existing.get(key) || state.detachedOverlayNodes.get(key) || null;
+        const sameElementType = node
+          && node.namespaceURI === candidate.namespaceURI
+          && node.localName === candidate.localName;
+        if (!sameElementType) {
+          node = candidate;
+          state.overlayRenderStats.createdNodes += 1;
+        } else {
+          state.detachedOverlayNodes.delete(key);
+          node.__overlayData = candidate.__overlayData;
+          if (node.dataset.renderSignature !== candidate.dataset.renderSignature) {
+            patchRenderedNode(node, candidate);
+          }
+          state.overlayRenderStats.reusedNodes += 1;
+        }
+        const currentAtIndex = container.children[index] || null;
+        if (currentAtIndex !== node) {
+          container.insertBefore(node, currentAtIndex);
+        }
+      });
+      Array.from(container.children).forEach(function (node) {
+        const key = safeText(node.dataset.renderKey, "");
+        if (!desiredKeys.has(key)) {
+          if (key) {
+            state.detachedOverlayNodes.set(key, node);
+          }
+          node.remove();
+        }
+      });
+    }
+
+    function pruneOverlayCaches() {
+      const activeIds = new Set(state.overlays.map(function (overlay, index) {
+        return overlaySemanticId(overlay, index);
+      }));
+      Array.from(state.detachedOverlayNodes.keys()).forEach(function (key) {
+        const semanticId = key.slice(key.indexOf(":") + 1);
+        if (!activeIds.has(semanticId)) {
+          state.detachedOverlayNodes.delete(key);
+        }
+      });
+      Array.from(state.projectedGeometryCache.keys()).forEach(function (key) {
+        if (!activeIds.has(key)) {
+          state.projectedGeometryCache.delete(key);
+        }
+      });
+    }
+
     function renderOverlays() {
       const focused = document.activeElement && document.activeElement.closest
         ? document.activeElement.closest(".surface-hotspot")
@@ -3885,8 +5545,6 @@
       if (focused && focused.dataset.overlayId) {
         state.focusedOverlayId = focused.dataset.overlayId;
       }
-      els.hotspotLayer.innerHTML = "";
-      els.surfaceLineSvg.innerHTML = "";
       els.surfaceLineSvg.setAttribute("viewBox", "0 0 " + Math.max(1, state.naturalWidth) + " " + Math.max(1, state.naturalHeight));
       if (
         state.surfaceMode !== "overlay"
@@ -3894,6 +5552,8 @@
         || !state.naturalWidth
         || !state.naturalHeight
       ) {
+        reconcileRenderedChildren(els.hotspotLayer, []);
+        reconcileRenderedChildren(els.surfaceLineSvg, []);
         const freshnessPayload = safeObject(state.payload && state.payload.freshness);
         const freshness = freshnessPayload.state || freshnessPayload.status;
         updateVisualStatus("chart", freshness, state.surfaceMode === "raw" ? "Original broker view · Overlays hidden" : "Broker view · Overlays updating");
@@ -3913,39 +5573,70 @@
       ) {
         closeOverlayInspector();
       }
+      const svgCandidates = [];
+      const sceneForecastForegroundCandidates = [];
+      const hotspotCandidates = [];
+      let renderedOverlayCount = 0;
       visible.forEach(function (overlay) {
-        const bounds = overlayBounds(overlay);
-        const points = overlayPoints(overlay);
+        const geometry = projectedOverlayGeometry(overlay);
+        const bounds = geometry.bounds;
+        const points = geometry.points;
+        const forecastRole = safeText(overlay.forecast_role, "").toLowerCase();
         if (overlayFamily(overlay) === "chart_bounds") {
           const outline = createChartBoundsOutline(overlay, bounds);
           if (outline) {
-            els.surfaceLineSvg.appendChild(outline);
+            svgCandidates.push(prepareRenderedNode(outline, overlay, "bounds"));
+            renderedOverlayCount += 1;
           }
           return;
         }
+        if (!bounds && points.length < 2) {
+          return;
+        }
+        const forecastComposite = createForecastComposite(overlay, geometry);
+        if (forecastRole === "composite" && !forecastComposite) {
+          return;
+        }
+        if (forecastComposite) {
+          const preparedForecast = prepareRenderedNode(forecastComposite, overlay, "forecast");
+          (overlayFamily(overlay) === "lstm"
+            ? sceneForecastForegroundCandidates
+            : svgCandidates).push(preparedForecast);
+        }
         const line = createOverlayLine(overlay, points);
         if (line) {
-          els.surfaceLineSvg.appendChild(line);
+          const preparedLine = prepareRenderedNode(line, overlay, "line");
+          (overlayFamily(overlay) === "lstm"
+            ? sceneForecastForegroundCandidates
+            : svgCandidates).push(preparedLine);
         }
-        const forecastRole = safeText(overlay.forecast_role, "").toLowerCase();
         // The band and its boundaries are visual uncertainty context, not
         // synthetic candle boxes or separate selectable market objects.
         const button = ["band_90", "upper_90", "lower_90"].includes(forecastRole)
+          || (forecastRole === "composite" && !hasDirectionalForecastPrimary(overlay))
           ? null
           : createOverlayButton(overlay, bounds, points);
         if (button) {
-          els.hotspotLayer.appendChild(button);
+          hotspotCandidates.push(prepareRenderedNode(button, overlay, "hotspot"));
+        }
+        if (forecastComposite || line || button) {
+          renderedOverlayCount += 1;
         }
       });
+      reconcileRenderedChildren(
+        els.surfaceLineSvg,
+        svgCandidates.concat(sceneForecastForegroundCandidates),
+      );
+      reconcileRenderedChildren(els.hotspotLayer, hotspotCandidates);
 
       const freshnessPayload = safeObject(state.payload.freshness);
       const freshness = freshnessPayload.state || freshnessPayload.status;
-      if (visible.length > 0) {
+      if (renderedOverlayCount > 0) {
         updateVisualStatus("interactive", freshness, "Interactive overlays · " + (normalizeFreshness(freshness) === "live" ? "Live" : titleCase(normalizeFreshness(freshness))));
       } else {
         updateVisualStatus("chart", freshness, "Broker view · No current marks in this view");
       }
-      updateOverlayLibraryStatus(visible.length);
+      updateOverlayLibraryStatus(renderedOverlayCount);
       window.requestAnimationFrame(function () {
         resolveLabelCollisions(els.hotspotLayer);
         if (state.focusedOverlayId) {
@@ -4001,6 +5692,28 @@
       if (["historical", "archived", "ended", "expired", "superseded", "stale"].includes(lifecycle)) {
         return "This is an earlier chart event kept for context. It cannot describe the current move or open an entry.";
       }
+      if (safeText(overlay.forecast_role, "").toLowerCase() === "composite") {
+        const path = directionalSide(overlay.forecast_direction);
+        const body = directionalSide(overlay.body_bias);
+        const pathWord = path === "BUY" ? "up / buy-side" : path === "SELL" ? "down / sell-side" : "uncertain";
+        const bodyWord = body === "BUY" ? "buy" : body === "SELL" ? "sell" : "neutral";
+        const interval = safeObject(overlay.interval);
+        const intervalCopy = interval.calibrated === true
+          ? " The shaded fan is a calibrated whole-path interval."
+          : " No calibrated future-price band is being claimed.";
+        const selectedScenario = selectedForecastScenario(overlay);
+        const selectedSide = selectedScenario
+          ? directionalSide(selectedScenario.side)
+          : path;
+        const forecastCopy = selectedSide === "HOLD"
+          ? "The complete 12-step BUY and SELL forecast paths are shown because RANGE currently leads."
+          : "The complete 12-step " + pathWord + " forecast is shown as the solid path; the other learned outcomes remain visible.";
+        return forecastCopy
+          + " Trade status remains NO EDGE."
+          + " Body bias is " + bodyWord + "."
+          + (overlay.direction_conflict === true ? " The body and movement readings disagree." : "")
+          + intervalCopy;
+      }
       return FAMILY_EXPLANATIONS[family] || GROUP_EXPLANATIONS[group] || GROUP_EXPLANATIONS.structure;
     }
 
@@ -4012,6 +5725,8 @@
       const title = overlayLabel(overlay);
       const explanation = overlayExplanation(overlay);
       const side = directionalSide(overlay.side);
+      const forecastDirection = directionalSide(overlay.forecast_direction);
+      const forecastRole = safeText(overlay.forecast_role, "").toLowerCase();
       const lifecycle = safeText(overlay.lifecycle, family === "history" ? "historical" : "current");
       const confidence = Number(overlay.confidence);
       const observedAt = Number(safeObject(state.payload).observed_at || safeObject(state.payload.freshness).observed_at || 0);
@@ -4021,9 +5736,21 @@
       setText(els.inspectorGroup, overlayFamilyTitle(family));
       setText(els.inspectorTitle, title);
       setText(els.inspectorExplanation, explanation);
-      setText(els.inspectorSide, side === "HOLD" ? "Neutral" : side === "BUY" ? "Up / buy-side" : "Down / sell-side");
+      setText(
+        els.inspectorSide,
+        forecastRole === "composite" && side === "HOLD" && ["BUY", "SELL"].includes(forecastDirection)
+          ? "No edge · path leans " + (forecastDirection === "BUY" ? "up" : "down")
+          : side === "HOLD" ? "Neutral" : side === "BUY" ? "Up / buy-side" : "Down / sell-side",
+      );
       setText(els.inspectorLifecycle, titleCase(lifecycle));
-      setText(els.inspectorConfidence, Number.isFinite(confidence) && confidence > 0 ? Math.round(clamp(confidence, 0, 1) * 100) + "% evidence strength" : "Not stated");
+      setText(
+        els.inspectorConfidence,
+        safeText(overlay.path_confidence_status, "").toUpperCase() === "UNAVAILABLE"
+          ? "Not calibrated"
+          : Number.isFinite(confidence) && confidence > 0
+          ? Math.round(clamp(confidence, 0, 1) * 100) + "% path confidence"
+          : "Not stated",
+      );
       setText(els.inspectorObserved, observedAt > 0 ? formatTime(observedAt) : "Current view");
       setText(els.mobileInspectorTitle, title);
       setText(els.mobileInspectorCopy, explanation);
@@ -4101,36 +5828,60 @@
       els.historyScrubber.value = String(Math.max(0, history.length - 1));
       els.historyScrubber.dataset.items = JSON.stringify(history.map(function (item) { return item.id; }));
       if (!history.length) {
+        state.historyItemNodes.clear();
         els.historyList.innerHTML = '<div class="history-empty">Phoenix Guard will place time-ordered movement changes here as the chart is tracked.</div>';
         return;
       }
-      els.historyList.innerHTML = "";
+      const desiredIds = new Set();
       history.slice().reverse().forEach(function (item, reverseIndex) {
-        const button = document.createElement("button");
+        desiredIds.add(item.id);
+        let button = state.historyItemNodes.get(item.id);
+        if (!button) {
+          button = document.createElement("button");
+          button.type = "button";
+          button.className = "history-item";
+          button.dataset.historyId = item.id;
+          const time = document.createElement("span");
+          time.className = "history-time";
+          const side = document.createElement("span");
+          side.className = "history-side";
+          const copy = document.createElement("span");
+          copy.className = "history-copy";
+          const lifecycle = document.createElement("span");
+          lifecycle.className = "history-state";
+          button.append(time, side, copy, lifecycle);
+          button.addEventListener("click", function () {
+            selectHistoryItem(button.__historyItem);
+          });
+          state.historyItemNodes.set(item.id, button);
+        }
         const latest = reverseIndex === 0;
         const current = ["current", "active", "live"].includes(item.state);
-        button.type = "button";
-        button.className = "history-item";
-        button.dataset.historyId = item.id;
+        button.__historyItem = item;
         button.setAttribute("aria-current", latest ? "true" : "false");
-
-        const time = document.createElement("span");
-        time.className = "history-time";
+        const time = button.querySelector(".history-time");
         time.textContent = formatTime(item.observed_at);
-        const side = document.createElement("span");
+        const side = button.querySelector(".history-side");
         side.className = "history-side " + (item.side === "BUY" ? "buy" : item.side === "SELL" ? "sell" : "wait");
         side.textContent = item.side === "BUY" ? "UP MOVE" : item.side === "SELL" ? "DOWN MOVE" : "WAIT";
-        const copy = document.createElement("span");
-        copy.className = "history-copy";
+        const copy = button.querySelector(".history-copy");
         copy.textContent = item.summary;
-        const lifecycle = document.createElement("span");
-        lifecycle.className = "history-state";
+        const lifecycle = button.querySelector(".history-state");
         lifecycle.textContent = current ? "current" : item.state;
-        button.append(time, side, copy, lifecycle);
-        button.addEventListener("click", function () {
-          selectHistoryItem(item);
-        });
-        els.historyList.appendChild(button);
+        const currentAtIndex = els.historyList.children[reverseIndex] || null;
+        if (currentAtIndex !== button) {
+          els.historyList.insertBefore(button, currentAtIndex);
+        }
+      });
+      Array.from(els.historyList.children).forEach(function (node) {
+        if (!node.dataset.historyId || !desiredIds.has(node.dataset.historyId)) {
+          node.remove();
+        }
+      });
+      Array.from(state.historyItemNodes.keys()).forEach(function (id) {
+        if (!desiredIds.has(id)) {
+          state.historyItemNodes.delete(id);
+        }
       });
     }
 
@@ -4148,14 +5899,49 @@
 
     function commitOperatorState(payload) {
       const operatorState = safeObject(payload);
+      const surface = safeObject(operatorState.surface);
+      const nextVisualBundleKey = JSON.stringify({
+        frameId: surface.frame_id,
+        semanticIdentity: surface.semantic_identity,
+        semanticRevision: surface.overlay_semantic_revision,
+        geometryRevision: surface.overlay_geometry_revision,
+        primaryUrl: surface.primary_url,
+        focusUrl: surface.focus_url,
+        viewport: surface.overlay_viewport || null,
+        imageUrl: state.imageUrl,
+        imageSpace: state.imageSpace,
+        surfaceViewport: state.surfaceViewport,
+        naturalWidth: state.naturalWidth,
+        naturalHeight: state.naturalHeight,
+        overlays: safeList(operatorState.overlays),
+      });
+      const visualBundleChanged = nextVisualBundleKey !== state.lastVisualBundleKey;
+      const historySemanticIdentity = surfaceSemanticIdentity(operatorState);
+      if (
+        state.historySemanticIdentity
+        && historySemanticIdentity !== state.historySemanticIdentity
+      ) {
+        state.localHistory = [];
+        state.lastMoveSide = "";
+        state.historyItemNodes.forEach(function (node) { node.remove(); });
+        state.historyItemNodes.clear();
+      }
+      state.historySemanticIdentity = historySemanticIdentity;
       state.payload = operatorState;
       state.overlays = safeList(operatorState.overlays);
-      syncOverlayButtons();
+      if (visualBundleChanged) {
+        state.lastVisualBundleKey = nextVisualBundleKey;
+        pruneOverlayCaches();
+        syncOverlayButtons();
+      }
       recordCurrentMove(operatorState);
       renderTrackingStatus(operatorState);
       renderDecision(operatorState);
+      renderAdaptivePlaybook(operatorState);
       renderHistory(operatorState);
-      renderOverlays();
+      if (visualBundleChanged) {
+        renderOverlays();
+      }
     }
 
     function renderOperatorState(payload) {
@@ -4182,6 +5968,8 @@
           activeFamilies: Array.from(state.activeFamilies),
           forecastActionBusy: state.forecastActionBusy,
           revision: state.lastRevision,
+          streamConnected: state.streamConnected,
+          overlayRenderStats: Object.assign({}, state.overlayRenderStats),
         };
       },
     };
@@ -4321,6 +6109,7 @@
         resolveLabelCollisions(els.hotspotLayer);
       });
     });
+    window.addEventListener("pagehide", closeSessionStream);
 
     applyExperienceMode(state.experienceMode, false);
     setFrameMode(state.frameMode, false);
@@ -4329,6 +6118,7 @@
     document.documentElement.style.setProperty("--overlay-opacity", String(state.overlayOpacity / 100));
     setOverlayView(state.overlayView, {fetch: false, persist: false});
     refreshOperatorState({force: true});
+    connectSessionStream();
     scheduleRefresh(POLL_INTERVAL_MS);
   </script>
 </body>

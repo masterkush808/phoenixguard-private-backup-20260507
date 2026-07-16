@@ -5,7 +5,7 @@ param(
     [string]$Branch = "main",
     [string]$SessionId = "pocket-live-8788",
     [string]$BrokerWindowQuery = "The Most Innovative Trading Platform",
-    [double]$CaptureIntervalSec = 15.0,
+    [double]$CaptureIntervalSec = 30.0,
     [ValidateSet("chrome", "edge", "default")]
     [string]$DashboardBrowser = "edge",
     [string]$PublicBaseUrl = "",

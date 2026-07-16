@@ -147,6 +147,135 @@ def _second_packet(side: str = "BUY", *, skill_pass: bool = True) -> dict[str, A
     return council.evaluate(_strong_snapshot(side, frame_id=101, skill_pass=skill_pass), now_epoch=NOW + 0.5)
 
 
+def _lstm_authority_snapshot(
+    *,
+    production_authorized: bool,
+    artifact_production_gate_passed: bool,
+    fresh: bool = True,
+) -> dict[str, Any]:
+    return {
+        "session_id": "lstm-council-gate",
+        "symbol": "EUR/USD",
+        "timeframe": "M5",
+        "frame_id": 1,
+        "capture_count": 1,
+        "state_version": 1,
+        "input_frame_hash": "lstm_gate_frame_1",
+        "previous_frame_hash": "lstm_gate_frame_0",
+        "candidate_side": "SELL",
+        "buy_score": 0.10,
+        "sell_score": 0.40,
+        "market_context": {"current_location": "DEMAND"},
+        "lstm_contribution": {
+            "schema_version": "PG_LSTM_CANDLE_SEQUENCE_CONTRIBUTION_V3",
+            "model_version": "PHOENIXGUARD_V3_LSTM",
+            "fresh": fresh,
+            "production_authorized": production_authorized,
+            "artifact_production_gate_passed": artifact_production_gate_passed,
+            "side": "BUY",
+            "path_side": "BUY",
+            "next_1_direction": "BUY",
+            "next_1_probability": 0.99,
+            "confidence": 0.99,
+            "path_confidence": 0.96,
+            "contribution": 0.90,
+            "horizon_steps": 12,
+            "horizon_unit": "CANDLE_EVENTS",
+            "forecast_available": True,
+            "forecast_path": [
+                {
+                    "step": step,
+                    "movement_direction": "BUY",
+                    "relative_close_delta_norm": round(step / 100.0, 4),
+                }
+                for step in range(1, 13)
+            ],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("production_authorized", "artifact_gate_passed", "fresh", "gate_status"),
+    [
+        (False, False, True, "PRODUCTION_AND_ARTIFACT_GATES_FAILED"),
+        (False, True, True, "PRODUCTION_AUTHORIZATION_FAILED"),
+        (True, False, True, "ARTIFACT_PRODUCTION_GATE_FAILED"),
+        (True, True, False, "STALE_ADVISORY_ONLY"),
+    ],
+)
+def test_unqualified_lstm_is_explicit_advisory_without_score_or_playbook_authority(
+    production_authorized: bool,
+    artifact_gate_passed: bool,
+    fresh: bool,
+    gate_status: str,
+) -> None:
+    result = ModelCouncilV3().evaluate(
+        _lstm_authority_snapshot(
+            production_authorized=production_authorized,
+            artifact_production_gate_passed=artifact_gate_passed,
+            fresh=fresh,
+        ),
+        now_epoch=NOW,
+    )
+
+    evidence = cast(Mapping[str, Any], result["lstm_council_evidence_v3"])
+    council = cast(Mapping[str, Any], result["model_council"])
+    playbook = cast(Mapping[str, Any], result["book_strategy"])
+    playbook_evidence = cast(Mapping[str, Any], playbook["evidence"])
+    contribution = cast(Mapping[str, Any], result["lstm_contribution"])
+
+    assert result["promotion_trace"]["candidate_side"] == "SELL"
+    assert math.isclose(float(council["buy_score"]), 0.10)
+    assert math.isclose(float(council["sell_score"]), 0.40)
+    assert result["execution"]["enabled"] is False
+    assert playbook_evidence["short_horizon_side"] == "HOLD"
+    assert playbook_evidence["short_horizon_probability"] == 0.0
+    assert evidence["schema_version"] == "PG_LSTM_COUNCIL_EVIDENCE_V3"
+    assert evidence["role"] == "ADVISORY_ONLY"
+    assert evidence["side"] == "BUY"
+    assert evidence["horizon_steps"] == 12
+    assert len(cast(list[object], evidence["trajectory_path"])) == 12
+    assert evidence["gate_status"] == gate_status
+    assert evidence["playbook_participation_allowed"] is False
+    assert evidence["score_influence_allowed"] is False
+    assert evidence["candidate_reframe_allowed"] is False
+    assert evidence["execution_authority"] is False
+    assert evidence["can_grant_entry_permission"] is False
+    assert evidence["can_bypass_playbook_gates"] is False
+    assert math.isclose(float(contribution["raw_contribution"]), 0.90)
+    assert contribution["effective_contribution"] == 0.0
+    assert playbook["lstm_council_evidence_v3"] == evidence
+    assert council["lstm_council_evidence_v3"] == evidence
+
+
+def test_double_gated_fresh_lstm_can_participate_but_cannot_bypass_playbook_permission() -> None:
+    result = ModelCouncilV3().evaluate(
+        _lstm_authority_snapshot(
+            production_authorized=True,
+            artifact_production_gate_passed=True,
+        ),
+        now_epoch=NOW,
+    )
+
+    evidence = cast(Mapping[str, Any], result["lstm_council_evidence_v3"])
+    council = cast(Mapping[str, Any], result["model_council"])
+    contribution = cast(Mapping[str, Any], result["lstm_contribution"])
+
+    assert result["promotion_trace"]["candidate_side"] == "BUY"
+    assert math.isclose(float(council["buy_score"]), 0.78)
+    assert council["buy_score"] > council["sell_score"]
+    assert evidence["gate_status"] == "QUALIFIED_DOUBLE_GATE"
+    assert evidence["role"] == "QUALIFIED_PLAYBOOK_EVIDENCE"
+    assert evidence["double_gate_passed"] is True
+    assert evidence["playbook_participation_allowed"] is True
+    assert evidence["score_influence_allowed"] is True
+    assert math.isclose(float(contribution["effective_contribution"]), 0.90)
+    assert evidence["execution_authority"] is False
+    assert evidence["can_grant_entry_permission"] is False
+    assert result["execution"]["enabled"] is False
+    assert result["packet_type"] == "STUDY_PACKET"
+
+
 def test_model_council_carries_astar_authorization_survival_trace() -> None:
     result = _second_packet("BUY")
 

@@ -49,7 +49,13 @@ def verify_release_readiness() -> dict[str, object]:
         _check("edge_frame_agent_can_sign_uploads", "X-PhoenixGuard-Signature" in edge_agent and "HMAC-SHA256-V1" in edge_agent),
         _check("frame_ingest_commits_runtime_after_acceptance", "commit=False" in frame_ingest and "commit=True" in frame_ingest),
         _check("api_has_origin_and_host_controls", "CORSMiddleware" in app and "TrustedHostMiddleware" in app),
-        _check("dashboard_overlay_payload_does_not_shadow_objects", "overlayPayloadWithObjects(session)" in dashboard and "session.overlays || liveState.overlays" not in dashboard),
+        _check(
+            "dashboard_overlay_payload_does_not_shadow_objects",
+            "function commitOperatorState(payload)" in dashboard
+            and "state.overlays = safeList(operatorState.overlays);" in dashboard
+            and "session.overlays || liveState.overlays" not in dashboard
+            and "liveState.overlays || session.overlays" not in dashboard,
+        ),
         _check("cloudflare_security_template_exists", "cloudflare_zero_trust_access_application" in cloudflare_security and "http_ratelimit" in cloudflare_security and "http_request_firewall_custom" in cloudflare_security),
         _check("model_asset_manifest_tool_exists", _exists("Developer/deployment/model_asset_manifest.py") and "PG_MODEL_ASSET_MANIFEST_V1" in _text("Developer/deployment/model_asset_manifest.py")),
         _check("business_internal_family_lifetime_is_admin_only", "INTERNAL_FAMILY_LIFETIME_PLAN_CODE" in business_packages and "public_visible=False" in business_packages and "family-lifetime-license" in business_api),

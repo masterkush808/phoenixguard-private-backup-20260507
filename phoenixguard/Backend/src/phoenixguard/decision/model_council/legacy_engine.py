@@ -191,6 +191,7 @@ PROFESSIONAL_MAX_THESIS_CANDLES = 48
 DEFAULT_EXECUTION_HANDOFF_TTL_SECONDS = 60.0
 MIN_EXECUTION_HANDOFF_TTL_SECONDS = 0.1
 EXECUTION_OPPORTUNITY_WINDOW_SCHEMA_VERSION = "PG_EXECUTION_OPPORTUNITY_WINDOW_V3"
+LSTM_COUNCIL_EVIDENCE_SCHEMA_VERSION = "PG_LSTM_COUNCIL_EVIDENCE_V3"
 
 
 def _mapping(value: Any) -> dict[str, Any]:
@@ -770,6 +771,198 @@ def _first_mapping(*values: Any) -> dict[str, Any]:
     return {}
 
 
+def _lstm_contribution_from_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    tracking = _mapping(snapshot.get("tracking_summary"))
+    kernel = _mapping(snapshot.get("decision_kernel") or tracking.get("decision_kernel"))
+    study = _first_mapping(
+        snapshot.get("two_candle_study"),
+        kernel.get("two_candle_study"),
+        tracking.get("two_candle_study"),
+    )
+    forecast_snapshot = _first_mapping(
+        snapshot.get("forecast_snapshot_v3"),
+        tracking.get("forecast_snapshot_v3"),
+    )
+    high_frequency_forecast = _first_mapping(
+        snapshot.get("high_frequency_forecast"),
+        tracking.get("high_frequency_forecast"),
+    )
+    return _first_mapping(
+        snapshot.get("lstm_contribution"),
+        forecast_snapshot.get("lstm_contribution"),
+        study.get("lstm_contribution"),
+        kernel.get("lstm_contribution"),
+        high_frequency_forecast.get("lstm_contribution"),
+        tracking.get("lstm_contribution"),
+    )
+
+
+def _lstm_is_playbook_qualified(lstm: Mapping[str, Any]) -> bool:
+    return bool(
+        lstm
+        and _bool(lstm.get("fresh"))
+        and _bool(lstm.get("production_authorized"))
+        and _bool(lstm.get("artifact_production_gate_passed"))
+    )
+
+
+def _lstm_council_evidence_v3(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    lstm = _lstm_contribution_from_snapshot(snapshot)
+    forecast_path = _rows(
+        lstm.get("forecast_path")
+        or lstm.get("trajectory_path")
+        or lstm.get("forecast_candles")
+    )
+    progression = _mapping(lstm.get("progression_play"))
+    trajectory_scenarios = _rows(lstm.get("trajectory_scenarios"))
+    side = _first_trade_side(
+        lstm.get("path_side"),
+        progression.get("dominant_direction"),
+        lstm.get("side"),
+        lstm.get("next_1_direction"),
+    )
+    candle_body_side = _first_trade_side(
+        lstm.get("side"),
+        lstm.get("next_1_direction"),
+    )
+    horizon_steps = max(
+        0,
+        _int(lstm.get("horizon_steps"), 0),
+        _int(progression.get("horizon_steps"), 0),
+        len(forecast_path),
+    )
+    confidence = max(
+        _clip01(lstm.get("path_confidence"), 0.0),
+        _clip01(lstm.get("confidence"), 0.0),
+        _clip01(lstm.get("next_1_probability"), 0.0),
+    )
+    fresh = bool(lstm and _bool(lstm.get("fresh")))
+    production_authorized = bool(lstm and _bool(lstm.get("production_authorized")))
+    artifact_gate_passed = bool(
+        lstm and _bool(lstm.get("artifact_production_gate_passed"))
+    )
+    playbook_qualified = bool(
+        fresh and production_authorized and artifact_gate_passed
+    )
+    if not lstm:
+        gate_status = "MISSING"
+        gate_reason = "No current V3 LSTM forecast contribution is available."
+    elif not fresh:
+        gate_status = "STALE_ADVISORY_ONLY"
+        gate_reason = "The V3 LSTM forecast is stale and cannot influence playbook authority."
+    elif not production_authorized and not artifact_gate_passed:
+        gate_status = "PRODUCTION_AND_ARTIFACT_GATES_FAILED"
+        gate_reason = "Both V3 production gates failed; the forecast is advisory evidence only."
+    elif not production_authorized:
+        gate_status = "PRODUCTION_AUTHORIZATION_FAILED"
+        gate_reason = "V3 production authorization failed; the forecast is advisory evidence only."
+    elif not artifact_gate_passed:
+        gate_status = "ARTIFACT_PRODUCTION_GATE_FAILED"
+        gate_reason = "The V3 artifact production gate failed; the forecast is advisory evidence only."
+    else:
+        gate_status = "QUALIFIED_DOUBLE_GATE"
+        gate_reason = (
+            "Both V3 production gates passed on a fresh forecast; it may participate "
+            "as evidence under the existing playbook and permission gates."
+        )
+    return {
+        "schema_version": LSTM_COUNCIL_EVIDENCE_SCHEMA_VERSION,
+        "stack_version": "PHOENIXGUARD_V3",
+        "role": "QUALIFIED_PLAYBOOK_EVIDENCE" if playbook_qualified else "ADVISORY_ONLY",
+        "side": side,
+        "candle_body_side": candle_body_side,
+        "confidence": round(float(confidence), 4),
+        "fresh": fresh,
+        "forecast_available": _bool(
+            lstm.get("forecast_available", bool(forecast_path))
+        ),
+        "horizon_steps": horizon_steps,
+        "horizon_unit": str(lstm.get("horizon_unit") or "CANDLE_EVENTS"),
+        "trajectory_path": forecast_path,
+        "trajectory_scenarios": trajectory_scenarios,
+        "trajectory_mode": lstm.get("trajectory_mode"),
+        "trajectory_mode_probabilities": _mapping(
+            lstm.get("trajectory_mode_probabilities")
+        ),
+        "progression_play": progression,
+        "gate_status": gate_status,
+        "gate_reason": gate_reason,
+        "production_authorized": production_authorized,
+        "artifact_production_gate_passed": artifact_gate_passed,
+        "double_gate_passed": bool(production_authorized and artifact_gate_passed),
+        "playbook_participation_allowed": playbook_qualified,
+        "score_influence_allowed": playbook_qualified,
+        "candidate_reframe_allowed": playbook_qualified,
+        "advisory_only": not playbook_qualified,
+        "execution_authority": False,
+        "can_grant_entry_permission": False,
+        "can_bypass_playbook_gates": False,
+        "source_model_version": str(lstm.get("model_version") or ""),
+        "source_artifact": str(
+            lstm.get("forecast_artifact_source") or lstm.get("artifact_path") or ""
+        ),
+    }
+
+
+def _playbook_snapshot_with_lstm_gate(
+    snapshot: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    if _bool(evidence.get("playbook_participation_allowed")):
+        return _mapping(snapshot)
+
+    neutral_lstm = {
+        "schema_version": LSTM_COUNCIL_EVIDENCE_SCHEMA_VERSION,
+        "fresh": False,
+        "side": "HOLD",
+        "path_side": "HOLD",
+        "next_1_direction": "HOLD",
+        "next_1_probability": 0.0,
+        "confidence": 0.0,
+        "production_authorized": False,
+        "artifact_production_gate_passed": False,
+        "council_advisory_only": True,
+    }
+
+    def without_directional_passthrough(value: Any) -> dict[str, Any]:
+        payload = _mapping(value)
+        nested_lstm = _mapping(payload.get("lstm_contribution"))
+        if not nested_lstm or _lstm_is_playbook_qualified(nested_lstm):
+            return payload
+        payload["lstm_contribution"] = dict(neutral_lstm)
+        for key in (
+            "next_1_direction",
+            "next_candle_bias",
+            "primary_pressure",
+            "side",
+            "probability",
+            "confidence",
+            "p_next_buy",
+            "p_next_sell",
+        ):
+            payload.pop(key, None)
+        return payload
+
+    gated = _mapping(snapshot)
+    gated["lstm_contribution"] = dict(neutral_lstm)
+    if "two_candle_study" in gated:
+        gated["two_candle_study"] = without_directional_passthrough(
+            gated.get("two_candle_study")
+        )
+    for container_key in ("decision_kernel", "tracking_summary"):
+        container = _mapping(gated.get(container_key))
+        if not container:
+            continue
+        container["lstm_contribution"] = dict(neutral_lstm)
+        if "two_candle_study" in container:
+            container["two_candle_study"] = without_directional_passthrough(
+                container.get("two_candle_study")
+            )
+        gated[container_key] = container
+    gated["lstm_council_evidence_v3"] = _mapping(evidence)
+    return gated
+
+
 def _short_horizon_direction_from_snapshot(snapshot: Mapping[str, Any]) -> tuple[str, float]:
     kernel = _mapping(snapshot.get("decision_kernel") or _mapping(snapshot.get("tracking_summary")).get("decision_kernel"))
     study = _first_mapping(
@@ -777,13 +970,18 @@ def _short_horizon_direction_from_snapshot(snapshot: Mapping[str, Any]) -> tuple
         kernel.get("two_candle_study"),
         _mapping(snapshot.get("tracking_summary")).get("two_candle_study"),
     )
-    lstm = _first_mapping(
-        snapshot.get("lstm_contribution"),
-        study.get("lstm_contribution"),
-        kernel.get("lstm_contribution"),
-    )
+    lstm = _lstm_contribution_from_snapshot(snapshot)
     next_candle = _first_mapping(kernel.get("next_candle"), _mapping(snapshot.get("latest_signal")).get("next_candle"))
-    for source in (study, lstm, next_candle):
+    study_lstm = _mapping(study.get("lstm_contribution"))
+    study_is_authority_safe = bool(
+        not study_lstm or _lstm_is_playbook_qualified(study_lstm)
+    )
+    authority_sources = (
+        study if study_is_authority_safe else {},
+        lstm if _lstm_is_playbook_qualified(lstm) else {},
+        next_candle,
+    )
+    for source in authority_sources:
         side = _first_trade_side(
             source.get("next_1_direction"),
             source.get("next_candle_bias"),
@@ -4664,6 +4862,7 @@ def evaluate_model_council_v3(
     now: float | None = None,
 ) -> dict[str, Any]:
     current_now = _now() if now is None else float(now)
+    lstm_council_evidence = _lstm_council_evidence_v3(snapshot)
     raw_side = _raw_observed_side_from_snapshot(snapshot)
     buy_score = _score_from_snapshot(snapshot, "BUY")
     sell_score = _score_from_snapshot(snapshot, "SELL")
@@ -4770,32 +4969,48 @@ def evaluate_model_council_v3(
         snapshot.get("model_strength_profile")
         or _mapping(snapshot.get("execution_controls")).get("model_strength_profile")
     )
-    lstm_contribution: dict[str, Any] = _mapping(
-        snapshot.get("lstm_contribution")
-        or two_candle_study.get("lstm_contribution")
-        or _mapping(snapshot.get("decision_kernel")).get("lstm_contribution")
-    )
+    lstm_contribution: dict[str, Any] = _lstm_contribution_from_snapshot(snapshot)
     skill_contributions: list[dict[str, Any]] = []
     if lstm_contribution:
         lstm_strength = ai_contribution_strengths.get("lstm_sequence", 1.0)
         lstm_raw_contribution = _clip01(lstm_contribution.get("contribution"), 0.0)
-        lstm_effective_contribution = _clip01(lstm_raw_contribution * lstm_strength, 0.0)
+        lstm_playbook_qualified = bool(
+            lstm_council_evidence.get("playbook_participation_allowed")
+        )
+        lstm_effective_contribution = (
+            _clip01(lstm_raw_contribution * lstm_strength, 0.0)
+            if lstm_playbook_qualified
+            else 0.0
+        )
         lstm_contribution = {
             **lstm_contribution,
             "raw_contribution": round(lstm_raw_contribution, 4),
             "effective_contribution": round(lstm_effective_contribution, 4),
             "strength": round(float(lstm_strength), 4),
+            "council_role": lstm_council_evidence.get("role"),
+            "council_gate_status": lstm_council_evidence.get("gate_status"),
+            "council_advisory_only": bool(
+                lstm_council_evidence.get("advisory_only")
+            ),
+            "execution_authority": False,
+            "lstm_council_evidence_v3": lstm_council_evidence,
         }
         skill_contributions.append(
             {
                 "skill": "LSTM_CANDLE_SEQUENCE",
-                "side": _side(lstm_contribution.get("side")),
+                "side": _side(lstm_council_evidence.get("side")),
                 "contribution": round(lstm_effective_contribution, 4),
                 "raw_contribution": round(lstm_raw_contribution, 4),
                 "strength": round(float(lstm_strength), 4),
-                "confidence": round(_clip01(lstm_contribution.get("confidence"), 0.0), 4),
+                "confidence": round(
+                    _clip01(lstm_council_evidence.get("confidence"), 0.0), 4
+                ),
                 "fresh": bool(lstm_contribution.get("fresh", False)),
                 "blocker": False,
+                "role": lstm_council_evidence.get("role"),
+                "gate_status": lstm_council_evidence.get("gate_status"),
+                "playbook_participation_allowed": lstm_playbook_qualified,
+                "execution_authority": False,
                 "interpretation": str(
                     lstm_contribution.get("interpretation")
                     or lstm_contribution.get("reason")
@@ -5570,7 +5785,14 @@ def evaluate_model_council_v3(
             execution_lane=execution_lane,
         )
         opportunity_maturity_state = _upper(opportunity_maturity.get("state"), "NO_OPPORTUNITY")
-        book_strategy_snapshot: dict[str, Any] = {**snapshot, "candle_movement_context_v3": candle_movement_context}
+        book_strategy_snapshot: dict[str, Any] = {
+            **_playbook_snapshot_with_lstm_gate(
+                snapshot,
+                lstm_council_evidence,
+            ),
+            "candle_movement_context_v3": candle_movement_context,
+            "lstm_council_evidence_v3": lstm_council_evidence,
+        }
         book_strategy_market: dict[str, Any] = {**market, "candle_movement_context_v3": candle_movement_context}
         book_strategy = evaluate_book_strategy_master_v3(
             book_strategy_snapshot,
@@ -5587,11 +5809,13 @@ def evaluate_model_council_v3(
             bad_entry_filter=bad_entry_filter,
             bad_entry=bad_entry,
         )
+        book_strategy["lstm_council_evidence_v3"] = lstm_council_evidence
         book_strategy_state = _upper(book_strategy.get("maturity_state"), "VALID_WATCH")
         if book_strategy_state in OPPORTUNITY_MATURITY_STATES:
             opportunity_maturity["state"] = book_strategy_state
             opportunity_maturity_state = book_strategy_state
         opportunity_maturity["book_strategy"] = book_strategy
+        opportunity_maturity["lstm_council_evidence_v3"] = lstm_council_evidence
         opportunity_maturity["execution_authority"] = PLAYBOOK_FINAL_DECIDER
         opportunity_maturity["final_decider"] = "book_strategy_master_v3"
         opportunity_maturity["model_council_role"] = MODEL_COUNCIL_CONTRIBUTOR_ROLE
@@ -6470,6 +6694,7 @@ def evaluate_model_council_v3(
             allowance_package["professional_trade_plan"] = professional_trade_plan
             allowance_package["playbook_ai_intelligence_v3"] = playbook_ai_intelligence
             allowance_package["playbook_ai_summary_v3"] = playbook_ai_summary
+            allowance_package["lstm_council_evidence_v3"] = lstm_council_evidence
             allowance_package["professional_thesis_resolution"] = professional_thesis_resolution
             allowance_package["dual_thesis_report_v3"] = dual_thesis_report
             allowance_package["professional_thesis_state"] = professional_trade_plan.get("professional_thesis_state")
@@ -6496,6 +6721,7 @@ def evaluate_model_council_v3(
                 "book_strategy_playbook": book_strategy.get("playbook"),
                 "playbook_ai_intelligence_v3": playbook_ai_intelligence,
                 "playbook_ai_summary_v3": playbook_ai_summary,
+                "lstm_council_evidence_v3": lstm_council_evidence,
                 "professional_trade_plan": professional_trade_plan,
                 "professional_thesis_resolution": professional_thesis_resolution,
                 "dual_thesis_report_v3": dual_thesis_report,
@@ -6770,6 +6996,7 @@ def evaluate_model_council_v3(
                 "skill_contributions": skill_contributions,
                 "two_candle_study": two_candle_study,
                 "lstm_contribution": lstm_contribution,
+                "lstm_council_evidence_v3": lstm_council_evidence,
                 "entry_quality": entry_quality_surface,
                 "trade_permission": trade_permission,
                 "promotion_trace": promotion_trace,
@@ -6864,6 +7091,7 @@ def evaluate_model_council_v3(
                 "market_context": market_context,
                 "two_candle_study": two_candle_study,
                 "lstm_contribution": lstm_contribution,
+                "lstm_council_evidence_v3": lstm_council_evidence,
                 "skill_contributions": skill_contributions,
                 "angle_context": market.get("angle_context", {}),
                 "history_context": market.get("history_context", {}),
@@ -6912,6 +7140,7 @@ def evaluate_model_council_v3(
                     "skill_gates": _diagnostic_skill_gates(snapshot),
                     "skill_contributions": skill_contributions,
                     "lstm_candle_sequence": lstm_contribution,
+                    "lstm_council_evidence_v3": lstm_council_evidence,
                     "two_candle_study": two_candle_study,
                     "memory": snapshot.get("memory", snapshot.get("memory_similarity", {})),
                     "decision_kernel": snapshot.get("decision_kernel", {}),
@@ -6993,6 +7222,7 @@ def evaluate_model_council_v3(
                 "ai_strength_multiplier": round(float(ai_strength_multiplier), 4),
                 "two_candle_study": two_candle_study,
                 "lstm_contribution": lstm_contribution,
+                "lstm_council_evidence_v3": lstm_council_evidence,
                 "skill_contributions": skill_contributions,
                 "final_execution_score": round(float(final_execution_score), 4),
                 "execution_threshold": round(float(execution_threshold), 4),
@@ -7270,6 +7500,7 @@ def evaluate_model_council_v3(
                     packet["pair_profile"] = result["pair_profile"]
                     packet["two_candle_study"] = two_candle_study
                     packet["lstm_contribution"] = lstm_contribution
+                    packet["lstm_council_evidence_v3"] = lstm_council_evidence
                     packet["skill_contributions"] = skill_contributions
                     packet["ai_contribution_strengths"] = ai_contribution_strengths
                     packet["model_strength_profile"] = model_strength_profile

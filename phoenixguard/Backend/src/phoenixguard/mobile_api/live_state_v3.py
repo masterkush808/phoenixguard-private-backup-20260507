@@ -37,6 +37,48 @@ from phoenixguard.vlm.context_skeleton_v3 import build_vlm_context_skeleton_v3
 
 LIVE_STATE_SCHEMA_VERSION = "PG_LIVE_STATE_V3"
 
+_SCENE_FORECAST_SCHEMA_TOKENS = (
+    "SCENE_FORECAST",
+    "CHRONOS_SCENE_FORECAST",
+    "FORECAST_PATH_GEOMETRY",
+)
+_FORECAST_BELIEF_STATUSES = {
+    "RESET",
+    "REACQUIRING",
+    "STABLE",
+    "REVERSAL_PENDING",
+}
+_FORECAST_PUBLIC_METADATA_KEYS = (
+    "forecast_engine",
+    "forecast_provider",
+    "forecast_provider_status",
+    "forecast_id",
+    "forecast_revision",
+    "belief_revision",
+    "belief_state",
+    "committed_side",
+    "candidate_side",
+    "change_probability",
+    "confirmation_events",
+    "required_events",
+    "closed_candle_key",
+    "closed_candle_sequence",
+    "forecast_computed_frame_id",
+    "source_forecast_frame_id",
+    "geometry_projected_frame_id",
+    "geometry_frame_match_verified",
+    "geometry_reprojected_from_cache",
+    "geometry_projection_provenance",
+    "detector_coverage_rebase_applied",
+    "cache_replaced_for_detector_coverage_rebase",
+    "pair",
+    "timeframe",
+    "market_identity_confirmed",
+    "timeframe_identity_confirmed",
+    "identity_contract_status",
+    "scene_feature_audit",
+)
+
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(cast(Mapping[str, Any], value)) if isinstance(value, Mapping) else {}
@@ -92,6 +134,249 @@ def _bool(value: Any, default: bool = False) -> bool:
     if text in {"0", "false", "f", "no", "n", "off", "invalid", "fail", "failed", "missing", "mismatch", "wrong_surface"}:
         return False
     return default
+
+
+def _is_scene_forecast_payload(payload: Mapping[str, Any]) -> bool:
+    if not payload:
+        return False
+    schema = _text(payload.get("schema_version")).upper()
+    provider = _text(payload.get("provider")).upper()
+    skill = _text(payload.get("skill")).upper()
+    return bool(
+        any(token in schema for token in _SCENE_FORECAST_SCHEMA_TOKENS)
+        or "CHRONOS" in provider
+        or "SCENE_FORECAST" in provider
+        or "SCENE_FORECAST" in skill
+        or _bool(payload.get("scene_forecaster"), False)
+    )
+
+
+def _forecast_public_metadata(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the small, stable belief contract safe for public overlays.
+
+    Model internals, file paths, and free-form revision records deliberately do
+    not cross this boundary.  Missing or malformed values never manufacture a
+    committed direction.
+    """
+
+    belief = _first_mapping(
+        payload.get("forecast_belief"),
+        payload.get("belief_update"),
+        payload.get("belief"),
+        payload.get("belief_tracker"),
+    )
+    has_belief = bool(
+        belief
+        or any(
+            key in payload
+            for key in (
+                "belief_state",
+                "committed_side",
+                "candidate_side",
+                "belief_revision",
+            )
+        )
+    )
+    result: dict[str, Any] = {}
+    if _is_scene_forecast_payload(payload):
+        result["forecast_engine"] = "SCENE_FORECASTER_V3"
+        provider = _text(payload.get("provider"))[:48].upper()
+        provider_status = _text(payload.get("provider_status"))[:48].upper()
+        if provider:
+            result["forecast_provider"] = provider
+        if provider_status:
+            result["forecast_provider_status"] = provider_status
+        for key in (
+            "geometry_frame_match_verified",
+            "geometry_reprojected_from_cache",
+            "detector_coverage_rebase_applied",
+            "cache_replaced_for_detector_coverage_rebase",
+        ):
+            if key in payload:
+                result[key] = _bool(payload.get(key), False)
+        for key in (
+            "forecast_computed_frame_id",
+            "source_forecast_frame_id",
+            "geometry_projected_frame_id",
+        ):
+            if payload.get(key) not in (None, ""):
+                result[key] = max(0, _int(payload.get(key)))
+        raw_geometry_provenance = _mapping(
+            payload.get("geometry_projection_provenance")
+        )
+        if raw_geometry_provenance:
+            result["geometry_projection_provenance"] = {
+                key: raw_geometry_provenance[key]
+                for key in (
+                    "status",
+                    "method",
+                    "source_forecast_frame_id",
+                    "source_geometry_frame_id",
+                    "projected_frame_id",
+                    "verified",
+                    "source_anchor",
+                    "target_anchor",
+                    "x_gain",
+                    "y_gain",
+                    "pointwise_clipping_applied",
+                )
+                if key in raw_geometry_provenance
+            }
+        raw_audit = _mapping(payload.get("scene_feature_audit"))
+        if raw_audit:
+            source_presence = _mapping(raw_audit.get("source_presence"))
+            causal_exclusions = _mapping(raw_audit.get("causal_exclusions"))
+            result["scene_feature_audit"] = {
+                "consumed_field_count": _int(
+                    raw_audit.get("consumed_field_count"),
+                    len(_sequence(raw_audit.get("consumed_fields"))),
+                ),
+                "missing_field_count": _int(
+                    raw_audit.get("missing_field_count"),
+                    len(_sequence(raw_audit.get("missing_fields"))),
+                ),
+                "rejected_field_count": _int(
+                    raw_audit.get("rejected_field_count"),
+                    len(_sequence(raw_audit.get("rejected_fields"))),
+                ),
+                "source_presence": {
+                    str(key): _bool(value, False)
+                    for key, value in source_presence.items()
+                    if str(key)
+                    in {
+                        "candles",
+                        "projection",
+                        "candle_statistics",
+                        "behavior_payload",
+                        "decision_kernel",
+                        "smart_money_context",
+                        "support_resistance_context",
+                        "support_resistance_zones",
+                        "trend_slopes",
+                        "trend_directions",
+                        "timeframe",
+                        "pair",
+                    }
+                },
+                "causal_exclusions": {
+                    "forming_candles": max(
+                        0,
+                        _int(causal_exclusions.get("forming_candles")),
+                    ),
+                    "history_rows_outside_window": max(
+                        0,
+                        _int(
+                            causal_exclusions.get("history_rows_outside_window")
+                        ),
+                    ),
+                    "projected_geometry_is_feature": _bool(
+                        causal_exclusions.get("projected_geometry_is_feature"),
+                        False,
+                    ),
+                    "future_outcome_fields_are_feature": _bool(
+                        causal_exclusions.get("future_outcome_fields_are_feature"),
+                        False,
+                    ),
+                },
+            }
+    forecast_id = _text(payload.get("forecast_id"))[:96]
+    if forecast_id:
+        result["forecast_id"] = forecast_id
+    for target, candidates in (
+        ("forecast_revision", (payload.get("forecast_revision"), payload.get("revision"))),
+        ("belief_revision", (payload.get("belief_revision"), belief.get("revision"))),
+        (
+            "closed_candle_sequence",
+            (payload.get("closed_candle_sequence"), belief.get("closed_candle_sequence")),
+        ),
+    ):
+        value = next((item for item in candidates if item not in (None, "")), None)
+        if value is not None:
+            result[target] = max(0, _int(value))
+    closed_key = _text(
+        payload.get("closed_candle_key") or belief.get("closed_candle_key")
+    )[:128]
+    if closed_key:
+        result["closed_candle_key"] = closed_key
+    if not has_belief:
+        return result
+
+    status = _text(payload.get("belief_state") or belief.get("status")).upper()
+    result["belief_state"] = (
+        status if status in _FORECAST_BELIEF_STATUSES else "RESET"
+    )
+    committed = _text(
+        payload.get("committed_side")
+        or belief.get("active_side")
+        or belief.get("committed_side")
+    ).upper()
+    result["committed_side"] = (
+        committed if committed in {"BUY", "SELL", "HOLD"} else "HOLD"
+    )
+    candidate = _text(
+        payload.get("candidate_side")
+        or belief.get("candidate_side")
+        or belief.get("pending_side")
+    ).upper()
+    result["candidate_side"] = (
+        candidate if candidate in {"BUY", "SELL", "HOLD"} else "HOLD"
+    )
+    result["confirmation_events"] = max(
+        0,
+        _int(
+            payload.get("confirmation_events")
+            if payload.get("confirmation_events") is not None
+            else belief.get("pending_count")
+        ),
+    )
+    result["required_events"] = max(
+        0,
+        _int(
+            payload.get("required_events")
+            if payload.get("required_events") is not None
+            else belief.get("required_count")
+        ),
+    )
+    probability = payload.get("change_probability")
+    if probability is None:
+        probability = belief.get("change_probability")
+    if probability is not None:
+        result["change_probability"] = round(
+            max(0.0, min(1.0, _float(probability))),
+            6,
+        )
+    return result
+
+
+def _preserve_forecast_public_metadata(
+    normalized: Mapping[str, Any],
+    raw: Mapping[str, Any],
+) -> dict[str, Any]:
+    row = dict(normalized)
+    for key in _FORECAST_PUBLIC_METADATA_KEYS:
+        value = raw.get(key)
+        if value not in (None, ""):
+            row[key] = value
+    if _text(raw.get("forecast_engine")).upper() == "SCENE_FORECASTER_V3":
+        scene_label = _text(
+            raw.get("display_label")
+            or raw.get("short_label")
+            or raw.get("label"),
+            "SCENE FORECASTER E1-E12",
+        )
+        if "SCENE" not in scene_label.upper():
+            scene_label = "SCENE FORECASTER E1-E12"
+        row.update(
+            {
+                "label": scene_label,
+                "display_label": scene_label,
+                "short_label": scene_label,
+                "raw_display_label": scene_label,
+                "display_label_status": "CANONICAL",
+                "unmapped_display_label": "",
+            }
+        )
+    return row
 
 
 def _artifact_frame_id_from_path(path: Path | str | None) -> int:
@@ -423,6 +708,42 @@ def _overlay_from_active_object(
         "line_points",
         "points",
         "path",
+        "forecast_band_points",
+        "forecast_candles",
+        "forecast_scenarios",
+        "forecast_anchor",
+        "forecast_coordinate_space",
+        "forecast_coordinate_units",
+        "forecast_direction",
+        "trajectory_mode",
+        "trajectory_mode_probability_calibrated",
+        "body_bias",
+        "direction_conflict",
+        "path_confidence_status",
+        "forecast_engine",
+        "forecast_provider",
+        "forecast_provider_status",
+        "forecast_id",
+        "forecast_revision",
+        "belief_revision",
+        "belief_state",
+        "committed_side",
+        "candidate_side",
+        "change_probability",
+        "confirmation_events",
+        "required_events",
+        "closed_candle_key",
+        "closed_candle_sequence",
+        "forecast_computed_frame_id",
+        "source_forecast_frame_id",
+        "geometry_projected_frame_id",
+        "geometry_frame_match_verified",
+        "geometry_reprojected_from_cache",
+        "geometry_projection_provenance",
+        "detector_coverage_rebase_applied",
+        "cache_replaced_for_detector_coverage_rebase",
+        "scene_feature_audit",
+        "interval",
     ):
         if key in row and key not in overlay:
             overlay[key] = row[key]
@@ -491,6 +812,17 @@ def _rescale_registry_overlay_to_current_chart(
     scene_graph: Mapping[str, Any],
 ) -> None:
     source_transform = _mapping(row.get("chart_transform")) or _mapping(overlay.get("chart_transform"))
+    coordinate_mode = _text(
+        overlay.get("coordinate_mode")
+        or overlay.get("coordinate_space")
+        or row.get("coordinate_mode")
+        or row.get("coordinate_space")
+    ).upper()
+    # Normalized chart geometry is already scale-free. Treating values such as
+    # ``0.62`` as source pixels and applying an origin/size transform moves a
+    # perfectly anchored study into an arbitrary corner of the chart.
+    if "NORMALIZED" in coordinate_mode:
+        return
     source_bounds = (
         _bounds_list(source_transform.get("chart_image_bounds"))
         or _bounds_list(source_transform.get("window_bounds"))
@@ -520,6 +852,36 @@ def _rescale_registry_overlay_to_current_chart(
         scaled_points = _scale_points_between_chart_spaces(overlay.get(key), source_bounds, target_bounds)
         if scaled_points:
             overlay[key] = scaled_points
+    # Forecast geometry has its own coordinate contract. Only pixel-based
+    # flat point collections are projected here. Candle-event dictionaries
+    # use explicit ``*_norm`` fields and scenario dictionaries contain nested
+    # ``line_points``; neither can safely pass through the flat point scaler.
+    forecast_units = _text(
+        overlay.get("forecast_coordinate_units")
+        or overlay.get("coordinate_units")
+    ).lower()
+    if forecast_units == "pixels":
+        scaled_band = _scale_points_between_chart_spaces(
+            overlay.get("forecast_band_points"),
+            source_bounds,
+            target_bounds,
+        )
+        if scaled_band:
+            overlay["forecast_band_points"] = scaled_band
+        projected_scenarios: list[dict[str, Any]] = []
+        for raw_scenario in _sequence_of_mappings(overlay.get("forecast_scenarios")):
+            scenario = dict(raw_scenario)
+            scenario_points = _scale_points_between_chart_spaces(
+                scenario.get("line_points"),
+                source_bounds,
+                target_bounds,
+            )
+            if len(scenario_points) < 2:
+                continue
+            scenario["line_points"] = scenario_points
+            projected_scenarios.append(scenario)
+        if projected_scenarios:
+            overlay["forecast_scenarios"] = projected_scenarios
     anchor_evidence = _mapping(overlay.get("anchor_evidence"))
     scaled_evidence_points = _scale_points_between_chart_spaces(
         anchor_evidence.get("touch_points"),
@@ -673,6 +1035,7 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
         row["label"] = canonical_label
         row["short_label"] = canonical_label
     normalized_row = normalize_v3_overlay_object(row, strict=False)
+    normalized_row = _preserve_forecast_public_metadata(normalized_row, row)
     for preserved_key in ("bounds_rect", "label_bounds", "raw_label"):
         preserved_value = row.get(preserved_key)
         if preserved_value not in (None, "", [], {}):
@@ -736,6 +1099,44 @@ def _dashboard_overlay_object(overlay: Mapping[str, Any], *, compact: bool = Fal
         "expand_on_click",
         "points",
         "line_points",
+        "forecast_band_points",
+        "forecast_candles",
+        "forecast_scenarios",
+        "forecast_anchor",
+        "forecast_coordinate_space",
+        "forecast_coordinate_units",
+        "forecast_direction",
+        "trajectory_mode",
+        "trajectory_mode_probability_calibrated",
+        "body_bias",
+        "direction_conflict",
+        "path_confidence_status",
+        "forecast_quality_status",
+        "trade_authorization_status",
+        "forecast_engine",
+        "forecast_provider",
+        "forecast_provider_status",
+        "forecast_id",
+        "forecast_revision",
+        "belief_revision",
+        "belief_state",
+        "committed_side",
+        "candidate_side",
+        "change_probability",
+        "confirmation_events",
+        "required_events",
+        "closed_candle_key",
+        "closed_candle_sequence",
+        "forecast_computed_frame_id",
+        "source_forecast_frame_id",
+        "geometry_projected_frame_id",
+        "geometry_frame_match_verified",
+        "geometry_reprojected_from_cache",
+        "geometry_projection_provenance",
+        "detector_coverage_rebase_applied",
+        "cache_replaced_for_detector_coverage_rebase",
+        "scene_feature_audit",
+        "interval",
         "touch_points",
         "touch_count",
         "trendline_role",
@@ -1114,6 +1515,328 @@ def _study_anchor_box(session: Mapping[str, Any], *, candle_count: int = 2) -> t
     return [], []
 
 
+def _direct_scene_forecast_overlay(
+    payload: Mapping[str, Any],
+    *,
+    forecast_state: str,
+    frame_id: int,
+    sequence_id: str,
+    chart_transform_id: str,
+    now_ms: int,
+) -> dict[str, Any] | None:
+    """Publish only a complete, already-normalized scene-forecast bundle."""
+
+    if forecast_state not in {"CURRENT", "STALE_DIAGNOSTIC"}:
+        return None
+    if payload.get("geometry_frame_match_verified") is False:
+        return None
+    projected_frame_id = _int(payload.get("geometry_projected_frame_id"))
+    if projected_frame_id > 0 and projected_frame_id != frame_id:
+        return None
+
+    def normalized_points(value: object) -> list[list[float]] | None:
+        points: list[list[float]] = []
+        for raw_point in _sequence(value):
+            point = _sequence(raw_point)
+            if len(point) < 2:
+                return None
+            x_value = _float(point[0], float("nan"))
+            y_value = _float(point[1], float("nan"))
+            if (
+                x_value != x_value
+                or y_value != y_value
+                or not 0.0 <= x_value <= 1.0
+                or not 0.0 <= y_value <= 1.0
+            ):
+                return None
+            points.append([round(x_value, 6), round(y_value, 6)])
+        return points
+
+    def normalized_candles(value: object) -> list[dict[str, Any]] | None:
+        candles: list[dict[str, Any]] = []
+        for raw_candle in sorted(
+            _sequence_of_mappings(value),
+            key=lambda row: _int(row.get("step")),
+        ):
+            step = _int(raw_candle.get("step"))
+            values = {
+                key: _float(raw_candle.get(key), float("nan"))
+                for key in (
+                    "x_norm",
+                    "open_y_norm",
+                    "high_y_norm",
+                    "low_y_norm",
+                    "close_y_norm",
+                )
+            }
+            if any(
+                item != item or not 0.0 <= item <= 1.0
+                for item in values.values()
+            ):
+                return None
+            if not (
+                values["high_y_norm"]
+                <= min(values["open_y_norm"], values["close_y_norm"])
+                <= max(values["open_y_norm"], values["close_y_norm"])
+                <= values["low_y_norm"]
+            ):
+                return None
+            candle: dict[str, Any] = {
+                "step": step,
+                "label": f"E{step}",
+                **{key: round(item, 6) for key, item in values.items()},
+                "movement_side": _text(
+                    raw_candle.get("movement_side"),
+                    "HOLD",
+                ).upper(),
+                "body_bias": _text(raw_candle.get("body_bias"), "HOLD").upper(),
+                "direction_conflict": _bool(
+                    raw_candle.get("direction_conflict"),
+                    False,
+                ),
+            }
+            for key in ("interval_top_y_norm", "interval_bottom_y_norm"):
+                if raw_candle.get(key) is not None:
+                    item = _float(raw_candle.get(key), float("nan"))
+                    if item != item or not 0.0 <= item <= 1.0:
+                        return None
+                    candle[key] = round(item, 6)
+            candles.append(candle)
+        if [row["step"] for row in candles] != list(range(1, 13)):
+            return None
+        return candles
+
+    line_points = normalized_points(payload.get("line_points"))
+    if line_points is None or len(line_points) != 13:
+        return None
+
+    forecast_candles = normalized_candles(payload.get("forecast_candles"))
+    if forecast_candles is None:
+        return None
+
+    forecast_scenarios: list[dict[str, Any]] = []
+    for raw_scenario in _sequence_of_mappings(payload.get("forecast_scenarios")):
+        side = _text(raw_scenario.get("side"), "HOLD").upper()
+        scenario_points = normalized_points(raw_scenario.get("line_points"))
+        if (
+            side not in {"BUY", "SELL", "HOLD"}
+            or scenario_points is None
+            or len(scenario_points) != 13
+            or scenario_points[0] != line_points[0]
+        ):
+            return None
+        scenario: dict[str, Any] = {
+                "side": side,
+                "role": _text(raw_scenario.get("role"))[:24],
+                "label": _text(raw_scenario.get("label"), f"{side} PATH")[:40],
+                "probability": round(
+                    max(0.0, min(1.0, _float(raw_scenario.get("probability")))),
+                    6,
+                ),
+                "probability_calibrated": _bool(
+                    raw_scenario.get("probability_calibrated"),
+                    False,
+                ),
+                "selected": _bool(raw_scenario.get("selected"), False),
+                "raw_selected": _bool(raw_scenario.get("raw_selected"), False),
+                "candidate": _bool(raw_scenario.get("candidate"), False),
+                "line_points": scenario_points,
+                "event_count": 12,
+            }
+        if "forecast_candles" in raw_scenario:
+            scenario_candles = normalized_candles(
+                raw_scenario.get("forecast_candles")
+            )
+            if scenario_candles is None:
+                return None
+            scenario["forecast_candles"] = scenario_candles
+        forecast_scenarios.append(scenario)
+    selected = [row for row in forecast_scenarios if row["selected"]]
+    scenario_roles = {
+        _text(row.get("role")).lower() for row in forecast_scenarios
+    }
+    scenario_sides = {row["side"] for row in forecast_scenarios}
+    if (
+        len(forecast_scenarios) != 3
+        or not (
+            scenario_roles == {"base", "bull", "bear"}
+            or scenario_sides == {"BUY", "SELL", "HOLD"}
+        )
+        or len(selected) != 1
+        or selected[0]["line_points"] != line_points
+    ):
+        return None
+
+    anchor = _mapping(payload.get("forecast_anchor"))
+    anchor_x = _float(anchor.get("x_norm"), float("nan"))
+    anchor_y = _float(anchor.get("y_norm"), float("nan"))
+    if (
+        anchor_x != anchor_x
+        or anchor_y != anchor_y
+        or abs(anchor_x - line_points[0][0]) > 1e-6
+        or abs(anchor_y - line_points[0][1]) > 1e-6
+    ):
+        return None
+
+    metadata = _forecast_public_metadata(payload)
+    belief_state = _text(metadata.get("belief_state"), "RESET").upper()
+    committed_side = _text(metadata.get("committed_side"), "HOLD").upper()
+    if committed_side in {"BUY", "SELL"} and selected[0]["side"] != committed_side:
+        # A public belief revision and its selected path must switch atomically.
+        return None
+
+    interval_payload = _mapping(payload.get("interval"))
+    interval_calibrated = bool(
+        _text(interval_payload.get("status")).upper() == "READY"
+        and _bool(interval_payload.get("calibrated"), False)
+    )
+    forecast_band_points: list[list[float]] = []
+    if interval_calibrated:
+        normalized_band = normalized_points(payload.get("forecast_band_points"))
+        if normalized_band is None or len(normalized_band) < 5:
+            return None
+        forecast_band_points = normalized_band
+
+    selective_authorized = bool(
+        forecast_state == "CURRENT"
+        and belief_state == "STABLE"
+        and committed_side in {"BUY", "SELL"}
+        and _bool(payload.get("selective_authorized"), False)
+        and _bool(payload.get("production_authorized"), False)
+        and _bool(payload.get("artifact_production_gate_passed"), False)
+    )
+    quality = _text(
+        payload.get("forecast_quality_status"),
+        "READY" if selective_authorized else "DIAGNOSTIC",
+    ).upper()
+    status_token = (
+        "stale_diagnostic"
+        if forecast_state == "STALE_DIAGNOSTIC"
+        else "authorized"
+        if selective_authorized
+        else "low_confidence"
+        if quality == "LOW_CONFIDENCE"
+        else "diagnostic"
+        if quality == "DIAGNOSTIC"
+        else "no_edge"
+    )
+    status_label = (
+        "LAST VALID - DIAGNOSTIC"
+        if forecast_state == "STALE_DIAGNOSTIC"
+        else "AUTHORIZED"
+        if selective_authorized
+        else "LOW CONFIDENCE - DIAGNOSTIC"
+        if quality == "LOW_CONFIDENCE"
+        else "DIAGNOSTIC - NO EDGE"
+    )
+    path_confidence_status = _text(
+        payload.get("path_confidence_status"),
+        "UNAVAILABLE",
+    ).upper()
+    confidence = (
+        max(0.0, min(1.0, _float(payload.get("path_confidence"))))
+        if path_confidence_status in {"READY", "CALIBRATED"}
+        and _bool(payload.get("probability_calibrated"), False)
+        else 0.0
+    )
+    geometry_points = [*line_points, *forecast_band_points]
+    for scenario in forecast_scenarios:
+        geometry_points.extend(scenario["line_points"])
+    for candle in forecast_candles:
+        geometry_points.extend(
+            [
+                [candle["x_norm"], candle["high_y_norm"]],
+                [candle["x_norm"], candle["low_y_norm"]],
+            ]
+        )
+    x_values = [float(point[0]) for point in geometry_points]
+    y_values = [float(point[1]) for point in geometry_points]
+    forecast_direction = (
+        committed_side
+        if committed_side in {"BUY", "SELL"}
+        else _text(payload.get("path_side"), "HOLD").upper()
+    )
+    return {
+        "overlay_id": f"scene_forecast_composite_{frame_id}",
+        "object_id": f"scene_forecast_composite_{frame_id}",
+        "track_id": "scene_forecast_composite",
+        # Compatibility type/family for dashboard clients; the public engine
+        # and labels below are explicitly the scene forecaster.
+        "type": "LSTM_STUDY",
+        "side": forecast_direction if selective_authorized else "HOLD",
+        "source_agent": "scene_forecaster_v3",
+        "source_key": _text(payload.get("schema_version"), "PG_SCENE_FORECAST_V3"),
+        "frame_id": frame_id,
+        "sequence_id": sequence_id,
+        "chart_transform_id": chart_transform_id,
+        "coordinate_mode": "CHART_NORMALIZED",
+        "anchor_type": "POLYGON",
+        "bounds": [
+            max(0.0, min(x_values) - 0.003),
+            max(0.0, min(y_values) - 0.004),
+            min(1.0, max(x_values) + 0.003),
+            min(1.0, max(y_values) + 0.004),
+        ],
+        "line_points": line_points,
+        "forecast_band_points": forecast_band_points,
+        "forecast_candles": forecast_candles,
+        "forecast_scenarios": forecast_scenarios,
+        "forecast_anchor": {
+            "x_norm": round(anchor_x, 6),
+            "y_norm": round(anchor_y, 6),
+            "verified_latest_close": _bool(anchor.get("verified_latest_close"), False),
+            "source": _text(anchor.get("source"), "MODEL_CAUSAL_CANDLE").upper(),
+        },
+        "forecast_coordinate_space": "chart",
+        "forecast_coordinate_units": "normalized",
+        "forecast_direction": forecast_direction,
+        "trajectory_mode": _text(payload.get("trajectory_mode"), forecast_direction),
+        "trajectory_mode_probability_calibrated": _bool(
+            payload.get("trajectory_mode_probability_calibrated"),
+            False,
+        ),
+        "body_bias": _text(payload.get("body_bias"), "HOLD").upper(),
+        "direction_conflict": _bool(payload.get("direction_conflict"), False),
+        "path_confidence_status": path_confidence_status,
+        "forecast_quality_status": quality,
+        "trade_authorization_status": (
+            "AUTHORIZED" if selective_authorized else "NO_EDGE"
+        ),
+        "interval": {
+            "level": interval_payload.get("level")
+            or interval_payload.get("nominal_coverage"),
+            "method": _text(interval_payload.get("method"), "UNAVAILABLE").upper(),
+            "status": "READY" if interval_calibrated else "UNAVAILABLE",
+            "calibrated": interval_calibrated,
+            "source_count": max(0, _int(interval_payload.get("source_count"))),
+            "coverage": interval_payload.get("coverage"),
+        },
+        **metadata,
+        "truth_score": confidence,
+        "confidence": confidence,
+        "lifecycle_state": "PREDICTED",
+        "visible_modes": ["LSTM_STUDY", "COUNCIL", "INSPECTOR"],
+        "visible_default": False,
+        "ttl_ms": 12000,
+        "created_at_ms": now_ms,
+        "reason": (
+            f"{status_label}. "
+            f"{_text(payload.get('interpretation'), 'Causal scene forecast over twelve closed-candle events.')}"
+        ),
+        "label": f"SCENE FORECAST E1-E12 - {status_label}",
+        "display_label": f"SCENE FORECAST E1-E12 - {status_label}",
+        "short_label": f"SCENE FORECAST E1-E12 - {status_label}",
+        "layer": "prediction_path",
+        "role": f"scene_forecast_composite_{status_token}",
+        "z_index": 73,
+        "structural_anchor": True,
+        "source_rule": (
+            "causal_scene_forecaster_v3_closed_candle_events_"
+            f"pathwise_interval_{status_token}_no_wall_clock"
+        ),
+    }
+
+
 def _study_overlay_objects(
     session: Mapping[str, Any],
     two_candle: Mapping[str, Any],
@@ -1216,9 +1939,9 @@ def _study_overlay_objects(
             "structural_anchor": True,
             "source_rule": "study_overlay_anchored_to_visible_candles",
         }
+        raw.update(_forecast_public_metadata(payload))
         try:
-            overlays.append(
-                normalize_v3_overlay_object(
+            normalized = normalize_v3_overlay_object(
                     raw,
                     strict=False,
                     frame_id=frame_id,
@@ -1226,6 +1949,8 @@ def _study_overlay_objects(
                     chart_transform_id=chart_transform_id,
                     fallback_index=len(overlays),
                 )
+            overlays.append(
+                _preserve_forecast_public_metadata(normalized, raw)
             )
         except Exception:
             overlays.append(raw)
@@ -1240,38 +1965,109 @@ def _study_overlay_objects(
         fallback_reason="Two-candle study anchored to the latest visible candles.",
     )
     lstm_state = payload_state(lstm)
+    scene_forecaster = _is_scene_forecast_payload(lstm)
+    if scene_forecaster and lstm_state != "INVALID":
+        direct_scene = _direct_scene_forecast_overlay(
+            lstm,
+            forecast_state=lstm_state,
+            frame_id=frame_id,
+            sequence_id=sequence_id,
+            chart_transform_id=chart_transform_id,
+            now_ms=now_ms,
+        )
+        if direct_scene is not None:
+            try:
+                normalized = normalize_v3_overlay_object(
+                    direct_scene,
+                    strict=False,
+                    frame_id=frame_id,
+                    sequence_id=sequence_id,
+                    chart_transform_id=chart_transform_id,
+                    fallback_index=len(overlays),
+                )
+                overlays.append(
+                    _preserve_forecast_public_metadata(normalized, direct_scene)
+                )
+            except Exception:
+                overlays.append(direct_scene)
+            return overlays
     forecast_path = _sequence_of_mappings(lstm.get("forecast_path")) if lstm_state != "INVALID" else []
+    trajectory_scenarios = (
+        _sequence_of_mappings(lstm.get("trajectory_scenarios"))
+        if lstm_state != "INVALID"
+        else []
+    )
+    unqualified_lstm_path = bool(
+        forecast_path
+        and (
+            _bool(lstm.get("legacy_restored"), False)
+            or (
+                bool(_text(lstm.get("path_target_semantics")))
+                and _text(lstm.get("path_target_semantics")).upper()
+                != "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR"
+            )
+        )
+    )
+    if unqualified_lstm_path:
+        # Keep the raw contributor payload for audits, but never turn an old,
+        # unvalidated, or malformed-input decoder into visible future candles.
+        forecast_path = []
+        trajectory_scenarios = []
+    if forecast_path:
+        # A future trajectory is an ordered event sequence.  Persisted public
+        # payloads used to retain only the last eight generic list items, which
+        # could attach C5 directly to the current candle and relabel it C1.
+        # Reject any fragment instead of drawing a geometrically valid but
+        # semantically false path.
+        forecast_path = sorted(
+            forecast_path,
+            key=lambda row: _int(row.get("step"), 0),
+        )
+        forecast_steps = [_int(row.get("step"), 0) for row in forecast_path]
+        if forecast_steps != list(range(1, 13)):
+            forecast_path = []
     # A learned future path replaces the old history-window box.  The fallback
     # study box remains useful for a current LSTM payload that has no forecast
     # geometry, but it must never masquerade as predicted candles.
-    if not forecast_path:
+    if not forecast_path and not unqualified_lstm_path:
         add_study(
             overlay_type="LSTM_STUDY",
             payload=lstm,
-            label="LSTM STUDY",
+            label="SCENE FORECASTER STUDY" if scene_forecaster else "LSTM STUDY",
             mode="LSTM_STUDY",
             candle_count=8,
             fallback_confidence=0.50,
-            fallback_reason="LSTM sequence contribution anchored to the latest visible candle window.",
+            fallback_reason=(
+                "Scene forecaster contribution anchored to the latest visible candle window."
+                if scene_forecaster
+                else "LSTM sequence contribution anchored to the latest visible candle window."
+            ),
         )
     candles = _tracked_candle_rows(session)
     features = _sequence_of_mappings(lstm.get("features"))
     source_size = _sequence(lstm.get("source_image_size"))
-    if forecast_path and candles and len(source_size) >= 2:
+    if forecast_path and len(source_size) >= 2:
         image_width = max(1.0, _float(source_size[0], 1.0))
+        image_height = max(1.0, _float(source_size[1], 1.0))
         centers: list[float] = []
-        for candle in candles:
-            box = _bounds_list(candle)
-            if not box:
-                continue
-            center = 0.5 * (box[0] + box[2])
-            centers.append(center if max(abs(value) for value in box) <= 1.0001 else center / image_width)
+        # The first forecast point must be anchored to the exact causal candle
+        # supplied to the model.  A separately compacted tracker list can lag
+        # that candle by a frame and previously shifted the path sideways.
+        for feature in features:
+            center_px = _float(feature.get("center_x_px"), float("nan"))
+            if center_px == center_px:
+                centers.append(center_px / image_width)
+        if not centers:
+            for candle in candles:
+                box = _bounds_list(candle)
+                if not box:
+                    continue
+                center = 0.5 * (box[0] + box[2])
+                centers.append(center if max(abs(value) for value in box) <= 1.0001 else center / image_width)
         if centers:
             latest_x = max(0.0, min(1.0, centers[-1]))
             positive_gaps = [right - left for left, right in zip(centers, centers[1:]) if right > left]
             median_gap = sorted(positive_gaps)[len(positive_gaps) // 2] if positive_gaps else 0.012
-            available_step = max(0.0025, (0.985 - latest_x) / max(1, len(forecast_path)))
-            step_x = max(0.0025, min(max(0.006, median_gap), available_step))
             start_close = max(
                 0.0,
                 min(
@@ -1281,12 +2077,183 @@ def _study_overlay_objects(
                     else 0.5,
                 ),
             )
-            start_point = [latest_x, 1.0 - start_close]
+            visual_anchor_y = 1.0 - start_close
+            latest_candle = candles[-1] if candles else {}
+            latest_candle_bounds = _bounds_list(latest_candle)
+            anchor_matches_latest_close = False
+            if latest_candle_bounds:
+                candle_center_x = 0.5 * (
+                    latest_candle_bounds[0] + latest_candle_bounds[2]
+                )
+                if max(abs(value) for value in latest_candle_bounds) > 1.0001:
+                    candle_center_x /= image_width
+                candle_center_x = max(0.0, min(1.0, candle_center_x))
+                # Snap only when the tracker candle and model feature identify
+                # the same causal bar.  A compact tracker list can lag; in
+                # that case the feature remains the truthful anchor.
+                candle_width = abs(
+                    latest_candle_bounds[2] - latest_candle_bounds[0]
+                )
+                if max(abs(value) for value in latest_candle_bounds) > 1.0001:
+                    candle_width /= image_width
+                # Stay well below one inter-candle slot. The former two-gap
+                # tolerance could snap a forecast to an adjacent candle that
+                # the model never ingested.
+                anchor_tolerance = max(
+                    0.0015,
+                    min(
+                        0.45 * max(0.004, median_gap),
+                        0.001 + 0.75 * max(0.001, candle_width),
+                    ),
+                )
+                if abs(candle_center_x - latest_x) <= anchor_tolerance:
+                    anchor_matches_latest_close = True
+                    latest_x = candle_center_x
+                    close_y_px = _float(
+                        latest_candle.get("close_y_px")
+                        or latest_candle.get("close_y"),
+                        float("nan"),
+                    )
+                    if close_y_px != close_y_px:
+                        candle_side = payload_side(latest_candle, "direction")
+                        close_y_px = (
+                            latest_candle_bounds[1]
+                            if candle_side == "BUY"
+                            else latest_candle_bounds[3]
+                            if candle_side == "SELL"
+                            else 0.5
+                            * (latest_candle_bounds[1] + latest_candle_bounds[3])
+                        )
+                    if max(abs(value) for value in latest_candle_bounds) <= 1.0001:
+                        visual_anchor_y = max(0.0, min(1.0, close_y_px))
+                    else:
+                        visual_anchor_y = max(
+                            0.0,
+                            min(1.0, close_y_px / image_height),
+                        )
+            available_step = max(
+                0.0,
+                (0.985 - latest_x) / max(1, len(forecast_path)),
+            )
+            step_x = min(max(0.004, median_gap), available_step)
+            if step_x <= 0.0005:
+                # There is no usable future gutter on this chart frame.  Do
+                # not stack twelve event candles on the right screen edge.
+                return overlays
+            vertical_anchor_offset = visual_anchor_y - (1.0 - start_close)
+
+            def projected_price_y(location: float) -> float:
+                return max(
+                    0.0,
+                    min(1.0, 1.0 - location + vertical_anchor_offset),
+                )
+
+            start_point = [latest_x, visual_anchor_y]
             center_points = [start_point]
             upper_points = [list(start_point)]
             lower_points = [list(start_point)]
+            forecast_candles: list[dict[str, Any]] = []
+            forecast_scenarios: list[dict[str, Any]] = []
+            for scenario in trajectory_scenarios[:3]:
+                scenario_path = sorted(
+                    _sequence_of_mappings(scenario.get("forecast_path")),
+                    key=lambda row: _int(row.get("step"), 0),
+                )
+                scenario_steps = [_int(row.get("step"), 0) for row in scenario_path]
+                if scenario_steps != list(range(1, len(forecast_path) + 1)):
+                    continue
+                scenario_points = [list(start_point)]
+                for index, scenario_row in enumerate(scenario_path, start=1):
+                    scenario_close = max(
+                        0.0,
+                        min(
+                            1.0,
+                            _float(
+                                scenario_row.get("expected_close_norm"),
+                                start_close,
+                            ),
+                        ),
+                    )
+                    scenario_points.append(
+                        [latest_x + step_x * index, projected_price_y(scenario_close)]
+                    )
+                scenario_side = payload_side(scenario, "side")
+                forecast_scenarios.append(
+                    {
+                        "side": scenario_side,
+                        "label": f"{scenario_side} PATH",
+                        "probability": round(
+                            max(0.0, min(1.0, _float(scenario.get("probability"), 0.0))),
+                            6,
+                        ),
+                        "probability_calibrated": _bool(
+                            scenario.get("probability_calibrated"),
+                            False,
+                        ),
+                        "selected": _bool(scenario.get("selected"), False),
+                        "raw_selected": _bool(
+                            scenario.get("raw_selected"),
+                            False,
+                        ),
+                        "candidate": _bool(scenario.get("candidate"), False),
+                        "role": _text(scenario.get("role"))[:24],
+                        "line_points": [list(point) for point in scenario_points],
+                        "event_count": len(scenario_path),
+                    }
+                )
+            forecast_scenarios.sort(
+                key=lambda scenario: (
+                    not bool(scenario.get("selected")),
+                    -_float(scenario.get("probability"), 0.0),
+                )
+            )
+            selected_scenarios = [
+                scenario
+                for scenario in forecast_scenarios
+                if bool(scenario.get("selected"))
+            ]
+            if (
+                len(forecast_scenarios) != 3
+                or {str(scenario.get("side")) for scenario in forecast_scenarios}
+                != {"BUY", "SELL", "HOLD"}
+                or len(selected_scenarios) != 1
+            ):
+                # The multimodal bundle is atomic. Publishing a fragment lets
+                # a downstream client silently relabel an alternative as the
+                # primary path, so retain the previous complete snapshot
+                # instead of emitting a partial forecast.
+                return overlays
+            interval_payload = _mapping(lstm.get("trajectory_interval"))
+            interval_status = _text(
+                lstm.get("trajectory_interval_status")
+                or interval_payload.get("status"),
+                "UNAVAILABLE",
+            ).upper()
+            interval_calibrated = bool(
+                interval_status == "READY"
+                and _bool(interval_payload.get("calibrated"), False)
+            )
+            prior_close = start_close
             for index, row in enumerate(forecast_path, start=1):
-                close_location = max(0.0, min(1.0, _float(row.get("expected_close_norm"), start_close)))
+                open_location = max(
+                    0.0,
+                    min(1.0, _float(row.get("expected_open_norm"), prior_close)),
+                )
+                close_location = max(
+                    0.0,
+                    min(1.0, _float(row.get("expected_close_norm"), open_location)),
+                )
+                expected_range = max(0.0005, _float(row.get("expected_range_norm"), 0.006))
+                high_location = max(
+                    open_location,
+                    close_location,
+                    min(1.0, _float(row.get("expected_high_norm"), max(open_location, close_location))),
+                )
+                low_location = min(
+                    open_location,
+                    close_location,
+                    max(0.0, _float(row.get("expected_low_norm"), min(open_location, close_location))),
+                )
                 lower_close = max(
                     0.0,
                     min(1.0, _float(row.get("close_lower_90_norm"), close_location)),
@@ -1296,19 +2263,102 @@ def _study_overlay_objects(
                     min(1.0, _float(row.get("close_upper_90_norm"), close_location)),
                 )
                 lower_close, upper_close = sorted((lower_close, upper_close))
-                future_x = min(0.995, latest_x + step_x * index)
-                center_points.append([future_x, 1.0 - close_location])
-                # A higher normalized close is visually higher (smaller y).
-                upper_points.append([future_x, 1.0 - upper_close])
-                lower_points.append([future_x, 1.0 - lower_close])
-            band_points = [*upper_points, *reversed(lower_points), list(upper_points[0])]
-            x_values = [point[0] for point in band_points]
-            y_values = [point[1] for point in band_points]
+                row_interval_valid = bool(
+                    interval_calibrated
+                    and "close_lower_90_norm" in row
+                    and "close_upper_90_norm" in row
+                    and upper_close - lower_close < 0.35
+                )
+                if not row_interval_valid:
+                    interval_calibrated = False
+                future_x = latest_x + step_x * index
+                center_points.append([future_x, projected_price_y(close_location)])
+                upper_points.append([future_x, projected_price_y(upper_close)])
+                lower_points.append([future_x, projected_price_y(lower_close)])
+                # Body direction and event-to-event path movement are
+                # intentionally separate model contracts.  A coherent direct
+                # candle open is derived from its body head, so using
+                # close-open here would incorrectly relabel body colour as
+                # path progression.
+                movement_delta = close_location - prior_close
+                movement_dead_zone = max(0.0004, 0.03 * expected_range)
+                derived_movement_side = (
+                    "BUY"
+                    if movement_delta > movement_dead_zone
+                    else "SELL"
+                    if movement_delta < -movement_dead_zone
+                    else "HOLD"
+                )
+                declared_movement_side = _text(row.get("movement_direction")).upper()
+                movement_side = (
+                    declared_movement_side
+                    if declared_movement_side in {"BUY", "SELL", "HOLD"}
+                    else derived_movement_side
+                )
+                body_bias = payload_side(row, "candle_body_direction", "direction")
+                direction_conflict = bool(
+                    body_bias in {"BUY", "SELL"}
+                    and movement_side in {"BUY", "SELL"}
+                    and body_bias != movement_side
+                )
+                forecast_candles.append(
+                    {
+                        "step": index,
+                        "label": f"E{index}",
+                        "x_norm": round(future_x, 6),
+                        "open_y_norm": round(projected_price_y(open_location), 6),
+                        "high_y_norm": round(projected_price_y(high_location), 6),
+                        "low_y_norm": round(projected_price_y(low_location), 6),
+                        "close_y_norm": round(projected_price_y(close_location), 6),
+                        "movement_side": movement_side,
+                        "body_bias": body_bias,
+                        "direction_conflict": direction_conflict,
+                        "interval_top_y_norm": round(projected_price_y(upper_close), 6),
+                        "interval_bottom_y_norm": round(projected_price_y(lower_close), 6),
+                    }
+                )
+                prior_close = close_location
+            selected_points = _sequence(selected_scenarios[0].get("line_points"))
+            if (
+                len(center_points) != 13
+                or len(forecast_candles) != 12
+                or len(selected_points) != 13
+                or any(
+                    len(_sequence(selected_point)) < 2
+                    or abs(float(center_point[0]) - float(_sequence(selected_point)[0]))
+                    > 1e-6
+                    or abs(float(center_point[1]) - float(_sequence(selected_point)[1]))
+                    > 1e-6
+                    for center_point, selected_point in zip(
+                        center_points,
+                        selected_points,
+                    )
+                )
+            ):
+                return overlays
+            band_points = (
+                [*upper_points, *reversed(lower_points), list(upper_points[0])]
+                if interval_calibrated
+                else []
+            )
+            geometry_points = [*center_points]
+            for scenario in forecast_scenarios:
+                geometry_points.extend(_sequence(scenario.get("line_points")))
+            for event in forecast_candles:
+                geometry_points.extend(
+                    [
+                        [event["x_norm"], event["high_y_norm"]],
+                        [event["x_norm"], event["low_y_norm"]],
+                    ]
+                )
+            geometry_points.extend(band_points)
+            x_values = [float(point[0]) for point in geometry_points]
+            y_values = [float(point[1]) for point in geometry_points]
             bounds = [
-                min(x_values),
-                max(0.0, min(y_values) - 0.002),
-                max(x_values),
-                min(1.0, max(y_values) + 0.002),
+                max(0.0, min(x_values) - 0.003),
+                max(0.0, min(y_values) - 0.004),
+                min(1.0, max(x_values) + 0.003),
+                min(1.0, max(y_values) + 0.004),
             ]
             first_forecast = forecast_path[0]
             selective_status = _text(
@@ -1324,54 +2374,69 @@ def _study_overlay_objects(
                     lstm.get("selective_authorized"),
                     False,
                 )
+                and _bool(lstm.get("production_authorized"), False)
+                and _bool(lstm.get("artifact_production_gate_passed"), False)
                 and selective_status == "AUTHORIZED"
                 and _bool(first_forecast.get("selective_authorized"), False)
                 and first_selective_status == "AUTHORIZED"
                 and lstm_state == "CURRENT"
             )
+            forecast_quality_status = _text(
+                lstm.get("forecast_quality_status"),
+                "READY" if selective_authorized else "NO_EDGE",
+            ).upper()
             status_token = (
                 "stale_diagnostic"
                 if lstm_state == "STALE_DIAGNOSTIC"
                 else "authorized"
                 if selective_authorized
+                else "low_confidence"
+                if forecast_quality_status == "LOW_CONFIDENCE"
+                else "diagnostic"
+                if forecast_quality_status == "DIAGNOSTIC"
                 else "no_edge"
             )
-            # These polylines represent the multi-event price trajectory, not
-            # the candle-body classifier.  Colour and label them from the path
-            # direction so a falling path can never be painted as BUY merely
-            # because a separate body head leaned bullish.  A stale path stays
-            # neutral; a current NO_EDGE path remains directional diagnostic
-            # geometry and does not gain execution authority.
-            overlay_side = (
-                "HOLD"
-                if lstm_state == "STALE_DIAGNOSTIC"
-                else payload_side(lstm, "path_side", "side")
+            forecast_direction = payload_side(lstm, "path_side", "side")
+            # NO_EDGE is an abstention, not a weak trade instruction.  Keep
+            # the directional lean in metadata for inspection but render the
+            # composite neutrally unless the path-specific gate authorizes it.
+            overlay_side = forecast_direction if selective_authorized else "HOLD"
+            path_confidence_status = _text(
+                lstm.get("path_confidence_status"),
+                "UNAVAILABLE",
+            ).upper()
+            confidence = (
+                max(0.0, min(1.0, _float(lstm.get("path_confidence"), 0.0)))
+                if path_confidence_status == "READY"
+                else 0.0
             )
-            confidence = max(0.0, min(1.0, _float(lstm.get("confidence"), 0.0)))
             status_label = (
                 "LAST VALID - DIAGNOSTIC"
                 if lstm_state == "STALE_DIAGNOSTIC"
                 else "AUTHORIZED"
                 if selective_authorized
+                else "LOW CONFIDENCE - DIAGNOSTIC"
+                if forecast_quality_status == "LOW_CONFIDENCE"
+                else "DIAGNOSTIC - NO EDGE"
+                if forecast_quality_status == "DIAGNOSTIC"
                 else "NO EDGE - DIAGNOSTIC"
             )
             interpretation = _text(
                 lstm.get("interpretation"),
-                "Causal V3 LSTM candle-event path with 90% uncertainty.",
+                (
+                    "Causal scene-forecaster candle-event path; a future-price band is shown only when pathwise calibrated."
+                    if scene_forecaster
+                    else "Causal V3 LSTM candle-event path; a future-price band is shown only when pathwise calibrated."
+                ),
             )
+            public_metadata = _forecast_public_metadata(lstm)
+            public_prefix = "SCENE FORECAST E1-E12" if scene_forecaster else "LSTM V3 EVENTS"
+            role_prefix = "scene_forecast" if scene_forecaster else "lstm_forecast"
 
-            def add_forecast_geometry(
-                *,
-                suffix: str,
-                role: str,
-                line_points: Sequence[Sequence[float]],
-                z_index: int,
-                label: str,
-            ) -> None:
-                path_raw: dict[str, Any] = {
-                    "overlay_id": f"lstm_forecast_{suffix}_{frame_id}",
-                    "object_id": f"lstm_forecast_{suffix}_{frame_id}",
-                    "track_id": f"lstm_forecast_{suffix}",
+            path_raw: dict[str, Any] = {
+                    "overlay_id": f"{role_prefix}_composite_{frame_id}",
+                    "object_id": f"{role_prefix}_composite_{frame_id}",
+                    "track_id": f"{role_prefix}_composite",
                     "type": "LSTM_STUDY",
                     "side": overlay_side,
                     "source_agent": "lstm_candle_sequence_v3",
@@ -1386,7 +2451,50 @@ def _study_overlay_objects(
                     "anchor_type": "POLYGON",
                     "anchor_candles": list(range(max(0, len(candles) - 8), len(candles))),
                     "bounds": bounds,
-                    "line_points": [list(point) for point in line_points],
+                    "line_points": [list(point) for point in center_points],
+                    "forecast_band_points": [list(point) for point in band_points],
+                    "forecast_candles": forecast_candles,
+                    "forecast_scenarios": forecast_scenarios,
+                    "forecast_anchor": {
+                        "x_norm": round(float(start_point[0]), 6),
+                        "y_norm": round(float(start_point[1]), 6),
+                        "verified_latest_close": anchor_matches_latest_close,
+                        "source": (
+                            "TRACKER_LATEST_CLOSE"
+                            if anchor_matches_latest_close
+                            else "MODEL_CAUSAL_CANDLE"
+                        ),
+                    },
+                    "forecast_coordinate_space": "chart",
+                    "forecast_coordinate_units": "normalized",
+                    "forecast_direction": forecast_direction,
+                    "trajectory_mode": _text(lstm.get("trajectory_mode"), ""),
+                    "trajectory_mode_probability_calibrated": _bool(
+                        lstm.get("trajectory_mode_probability_calibrated"),
+                        False,
+                    ),
+                    "body_bias": payload_side(lstm, "side"),
+                    "direction_conflict": bool(
+                        _bool(lstm.get("direction_conflict"), False)
+                        or any(bool(row.get("direction_conflict")) for row in forecast_candles)
+                    ),
+                    "path_confidence_status": path_confidence_status,
+                    "forecast_quality_status": forecast_quality_status,
+                    "trade_authorization_status": (
+                        "AUTHORIZED" if selective_authorized else "NO_EDGE"
+                    ),
+                    "interval": {
+                        "level": 0.90,
+                        "method": _text(
+                            interval_payload.get("method"),
+                            "PATHWISE_CONFORMAL" if interval_calibrated else "UNAVAILABLE",
+                        ),
+                        "status": "READY" if interval_calibrated else "UNAVAILABLE",
+                        "calibrated": interval_calibrated,
+                        "source_count": _int(interval_payload.get("source_count"), 0),
+                        "coverage": interval_payload.get("coverage"),
+                    },
+                    **public_metadata,
                     "truth_score": confidence,
                     "confidence": confidence,
                     "lifecycle_state": "PREDICTED",
@@ -1395,60 +2503,36 @@ def _study_overlay_objects(
                     "ttl_ms": 12000,
                     "created_at_ms": now_ms,
                     "reason": f"{status_label}. {interpretation}",
-                    "label": label,
-                    "display_label": label,
-                    "short_label": label,
+                    "label": f"{public_prefix} - {status_label}",
+                    "display_label": f"{public_prefix} - {status_label}",
+                    "short_label": f"{public_prefix} - {status_label}",
                     "layer": "prediction_path",
-                    "role": f"{role}_{status_token}",
-                    "z_index": z_index,
+                    "role": f"{role_prefix}_composite_{status_token}",
+                    "z_index": 73,
                     "structural_anchor": True,
                     "source_rule": (
-                        "causal_multi_horizon_lstm_v3_candle_events_"
-                        f"90pct_interval_{status_token}_no_wall_clock"
+                        (
+                            "causal_scene_forecaster_v3_candle_events_"
+                            if scene_forecaster
+                            else "causal_direct_multi_horizon_lstm_v3_candle_events_"
+                        )
+                        + f"pathwise_interval_{status_token}_no_wall_clock"
                     ),
                 }
-                try:
-                    overlays.append(
-                        normalize_v3_overlay_object(
-                            path_raw,
-                            strict=False,
-                            frame_id=frame_id,
-                            sequence_id=sequence_id,
-                            chart_transform_id=chart_transform_id,
-                            fallback_index=len(overlays),
-                        )
+            try:
+                normalized = normalize_v3_overlay_object(
+                        path_raw,
+                        strict=False,
+                        frame_id=frame_id,
+                        sequence_id=sequence_id,
+                        chart_transform_id=chart_transform_id,
+                        fallback_index=len(overlays),
                     )
-                except Exception:
-                    overlays.append(path_raw)
-
-            add_forecast_geometry(
-                suffix="band_90",
-                role="lstm_forecast_90_band",
-                line_points=band_points,
-                z_index=70,
-                label=f"LSTM V3 90% BAND - {status_label}",
-            )
-            add_forecast_geometry(
-                suffix="upper_90",
-                role="lstm_forecast_90_upper_boundary",
-                line_points=upper_points,
-                z_index=71,
-                label="LSTM V3 90% UPPER",
-            )
-            add_forecast_geometry(
-                suffix="lower_90",
-                role="lstm_forecast_90_lower_boundary",
-                line_points=lower_points,
-                z_index=71,
-                label="LSTM V3 90% LOWER",
-            )
-            add_forecast_geometry(
-                suffix="path",
-                role="lstm_candle_event_path",
-                line_points=center_points,
-                z_index=73,
-                label=f"LSTM V3 PATH - {status_label}",
-            )
+                overlays.append(
+                    _preserve_forecast_public_metadata(normalized, path_raw)
+                )
+            except Exception:
+                overlays.append(path_raw)
     return overlays
 
 
@@ -1797,6 +2881,11 @@ def _two_candle_and_lstm_payloads(session: Mapping[str, Any]) -> tuple[dict[str,
     signal = _mapping(session.get("latest_signal"))
     result = _mapping(session.get("model_council_result"))
     forecast_snapshot = _mapping(session.get("forecast_snapshot_v3"))
+    display_frame_id = _int(
+        session.get("display_frame_id")
+        or session.get("frame_id")
+        or session.get("frame_index")
+    )
     study_packet = _first_mapping(
         session.get("model_council_study_packet"),
         session.get("study_packet"),
@@ -1815,29 +2904,186 @@ def _two_candle_and_lstm_payloads(session: Mapping[str, Any]) -> tuple[dict[str,
         or forecast_snapshot.get("high_frequency_forecast")
     )
     two_candle = _first_mapping(
-        study_packet.get("two_candle_study"),
-        result.get("two_candle_study"),
         signal.get("two_candle_study"),
         tracking.get("two_candle_study"),
         forecast.get("two_candle_study"),
         kernel.get("two_candle_study"),
+        study_packet.get("two_candle_study"),
+        result.get("two_candle_study"),
         forecast_snapshot.get("two_candle_study"),
     )
-    lstm = _first_mapping(
-        study_packet.get("lstm_contribution"),
-        result.get("lstm_contribution"),
+    scene_candidates = [
+        signal.get("scene_forecast_contribution"),
+        tracking.get("scene_forecast_contribution"),
+        forecast.get("scene_forecast_contribution"),
+        kernel.get("scene_forecast_contribution"),
+        two_candle.get("scene_forecast_contribution"),
+        forecast_snapshot.get("scene_forecast_contribution"),
+        session.get("scene_forecast_contribution"),
+        study_packet.get("scene_forecast_contribution"),
+        result.get("scene_forecast_contribution"),
+    ]
+    scene_candidate_parents = [
+        signal,
+        tracking,
+        forecast,
+        kernel,
+        two_candle,
+        forecast_snapshot,
+        session,
+        study_packet,
+        result,
+    ]
+    legacy_candidates = [
         signal.get("lstm_contribution"),
         tracking.get("lstm_contribution"),
         forecast.get("lstm_contribution"),
         kernel.get("lstm_contribution"),
         two_candle.get("lstm_contribution"),
         forecast_snapshot.get("lstm_contribution"),
+        study_packet.get("lstm_contribution"),
+        result.get("lstm_contribution"),
+    ]
+    legacy_candidate_parents = [
+        signal,
+        tracking,
+        forecast,
+        kernel,
+        two_candle,
+        forecast_snapshot,
+        study_packet,
+        result,
+    ]
+    # Once a first-class scene contribution is present, an older LSTM payload
+    # cannot silently reclaim the public forecast during a hand-off.  The
+    # legacy list remains the compatibility fallback for older sessions only.
+    if any(_mapping(value) for value in scene_candidates):
+        lstm_candidates = scene_candidates
+        lstm_candidate_parents = scene_candidate_parents
+    else:
+        lstm_candidates = legacy_candidates
+        lstm_candidate_parents = legacy_candidate_parents
+
+    current_market = _text(
+        signal.get("market")
+        or tracking.get("detected_market")
+        or session.get("market")
+    ).upper()
+    current_timeframe = _text(
+        signal.get("focus_timeframe")
+        or tracking.get("detected_timeframe")
+    ).upper()
+    current_identity_pending = bool(
+        signal.get("market_selector_rebind_required")
+        or signal.get("market_selector_studying_new_pair")
+        or tracking.get("market_selector_rebind_required")
+        or tracking.get("market_selector_studying_new_pair")
+        or signal.get("market_identity_confirmed") is False
+        or signal.get("timeframe_identity_confirmed") is False
+        or tracking.get("market_identity_confirmed") is False
+        or tracking.get("timeframe_identity_confirmed") is False
     )
-    display_frame_id = _int(
-        session.get("display_frame_id")
-        or session.get("frame_id")
-        or session.get("frame_index")
+
+    def canonical_identity(value: Any) -> str:
+        return "".join(character for character in _text(value).upper() if character.isalnum())
+
+    def candidate_identity(value: Mapping[str, Any]) -> tuple[str, str]:
+        state = _mapping(value.get("closed_candle_identity_state"))
+        pair = _text(value.get("pair") or state.get("pair")).upper()
+        timeframe = _text(value.get("timeframe") or state.get("timeframe")).upper()
+        forecast_id = _text(value.get("forecast_id"))
+        if forecast_id and (not pair or not timeframe):
+            pieces = forecast_id.split("|", 2)
+            if len(pieces) >= 2:
+                pair = pair or pieces[0].upper()
+                timeframe = timeframe or pieces[1].upper()
+        return pair, timeframe
+
+    def lstm_candidate_score(value: object, index: int) -> tuple[int, ...]:
+        candidate = _mapping(value)
+        if not candidate:
+            return (0, 0, 0, 0, 0, 0, 0, 0, 0, -index)
+        path = _sequence_of_mappings(candidate.get("forecast_path"))
+        direct_geometry = bool(
+            len(_sequence(candidate.get("line_points"))) == 13
+            and len(_sequence(candidate.get("forecast_candles"))) == 12
+            and len(_sequence(candidate.get("forecast_scenarios"))) == 3
+        )
+        semantics = _text(candidate.get("path_target_semantics")).upper()
+        direct_path = bool(
+            direct_geometry
+            or (
+                path
+                and not _bool(candidate.get("legacy_restored"), False)
+                and semantics == "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR"
+            )
+        )
+        candidate_frame_id = _int(
+            candidate.get("frame_id") or candidate.get("model_vote_frame_id")
+        )
+        frame_match = bool(
+            display_frame_id > 0
+            and candidate_frame_id > 0
+            and candidate_frame_id == display_frame_id
+        )
+        candidate_pair, candidate_timeframe = candidate_identity(candidate)
+        pair_matches = bool(
+            current_market
+            and candidate_pair
+            and canonical_identity(candidate_pair) == canonical_identity(current_market)
+        )
+        timeframe_matches = bool(
+            current_timeframe
+            and candidate_timeframe
+            and candidate_timeframe == current_timeframe
+        )
+        candidate_pending = bool(
+            candidate.get("market_identity_confirmed") is False
+            or candidate.get("timeframe_identity_confirmed") is False
+            or _text(candidate.get("identity_contract_status")).upper() == "PENDING"
+            or _text(candidate.get("provider_status")).upper()
+            == "MARKET_IDENTITY_PENDING"
+        )
+        if current_identity_pending:
+            identity_safe = bool(candidate_pending and frame_match)
+        else:
+            explicit_mismatch = bool(
+                (current_market and candidate_pair and not pair_matches)
+                or (
+                    current_timeframe
+                    and candidate_timeframe
+                    and not timeframe_matches
+                )
+            )
+            identity_safe = not explicit_mismatch
+        if not identity_safe:
+            return (0, 0, 0, 0, 0, 0, 0, 0, candidate_frame_id, -index)
+        identity_match = bool(pair_matches and timeframe_matches)
+        return (
+            1,
+            int(identity_match or candidate_pending),
+            int(frame_match),
+            int(direct_path and frame_match),
+            int(direct_path),
+            int(bool(path) or direct_geometry),
+            int(
+                _bool(
+                    candidate.get("forecast_available"),
+                    bool(path) or direct_geometry,
+                )
+            ),
+            int(_bool(candidate.get("fresh"), True)),
+            candidate_frame_id,
+            -index,
+        )
+
+    selected_lstm = max(
+        enumerate(lstm_candidates),
+        key=lambda item: lstm_candidate_score(item[1], item[0]),
     )
+    selected_score = lstm_candidate_score(selected_lstm[1], selected_lstm[0])
+    lstm = _mapping(selected_lstm[1]) if selected_score[0] else {}
+    lstm_parent = _mapping(lstm_candidate_parents[selected_lstm[0]])
     model_frame_id = _int(
         session.get("model_vote_frame_id")
         or study_packet.get("frame_id")
@@ -1853,35 +3099,53 @@ def _two_candle_and_lstm_payloads(session: Mapping[str, Any]) -> tuple[dict[str,
     snapshot_observed_epoch = _float(forecast_snapshot.get("observed_epoch"), 0.0)
     snapshot_stale = _bool(forecast_snapshot.get("stale"), False)
 
-    def with_source_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
+    def with_source_identity(
+        payload: Mapping[str, Any],
+        *,
+        source_parent: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not payload:
             return {}
+        parent = _mapping(source_parent)
         row = dict(payload)
         row["_source_frame_id"] = _int(
             payload.get("frame_id")
             or payload.get("model_vote_frame_id")
-            or snapshot_frame_id
-            or model_frame_id
+            or parent.get("frame_id")
+            or parent.get("model_vote_frame_id")
+            or parent.get("source_frame_id")
+            or session.get("model_vote_frame_id")
+            or (snapshot_frame_id if not parent else 0)
+            or (model_frame_id if not parent else 0)
         )
         row["_display_frame_id"] = display_frame_id
         row["_source_valid_until_epoch"] = _float(
             payload.get("valid_until_epoch")
             or payload.get("valid_until_epoch_sec")
-            or packet_valid_until,
+            or parent.get("valid_until_epoch")
+            or parent.get("valid_until_epoch_sec")
+            or (packet_valid_until if not parent else 0.0),
             0.0,
         )
         row["_source_observed_epoch"] = _float(
-            payload.get("observed_epoch") or snapshot_observed_epoch,
+            payload.get("observed_epoch")
+            or parent.get("observed_epoch")
+            or (snapshot_observed_epoch if not parent else 0.0),
             0.0,
         )
         row["_source_stale_diagnostic"] = bool(
             _bool(payload.get("diagnostic_only"), False)
             or _bool(payload.get("stale"), False)
-            or snapshot_stale
+            or _bool(parent.get("diagnostic_only"), False)
+            or _bool(parent.get("stale"), False)
+            or (snapshot_stale if not parent else False)
         )
         return row
 
-    return with_source_identity(two_candle), with_source_identity(lstm)
+    return with_source_identity(two_candle), with_source_identity(
+        lstm,
+        source_parent=lstm_parent,
+    )
 
 
 def _visual_plane_state(frontend_heartbeat: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -2034,6 +3298,34 @@ def _compact_scalar_and_selected(payload: Mapping[str, Any], selected_keys: set[
     return compact
 
 
+def _compact_scene_forecast_contribution(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not payload or not _is_scene_forecast_payload(payload):
+        return dict(payload)
+    compact = _compact_scalar_and_selected(
+        payload,
+        {
+            "line_points",
+            "forecast_band_points",
+            "forecast_candles",
+            "forecast_scenarios",
+            "forecast_anchor",
+            "forecast_quantiles",
+            "interval",
+            "raw_side_probabilities",
+            "side_probabilities",
+            "belief_posterior",
+            "scene_feature_schema",
+        },
+    )
+    # Replace the potentially large field-by-field audit and never expose the
+    # persisted HMM checkpoint/model internals on the fast public poll path.
+    compact.pop("belief_tracker_checkpoint", None)
+    compact.update(_forecast_public_metadata(payload))
+    return compact
+
+
 def _compact_playbook_ai_summary(value: Mapping[str, Any]) -> dict[str, Any]:
     summary = value.get("playbook_ai_summary_v3")
     if isinstance(summary, Mapping):
@@ -2092,6 +3384,7 @@ def _compact_tracking_summary(tracking: Mapping[str, Any]) -> dict[str, Any]:
         "global_local_control",
         "high_frequency_forecast",
         "instrument_context",
+        "scene_forecast_contribution",
         "lstm_contribution",
         "major_trend_context",
         "map_timing",
@@ -2134,6 +3427,7 @@ def _compact_latest_signal(signal: Mapping[str, Any]) -> dict[str, Any]:
         "global_local_control",
         "high_frequency_forecast",
         "instrument_context",
+        "scene_forecast_contribution",
         "lstm_contribution",
         "major_trend_context",
         "map_timing",
@@ -2192,6 +3486,7 @@ def _compact_model_council_result(result: Mapping[str, Any]) -> dict[str, Any]:
         "trade_permission",
         "strategy_read",
         "two_candle_study",
+        "scene_forecast_contribution",
         "lstm_contribution",
     }
     compact = _compact_scalar_and_selected(result, selected)
@@ -2335,6 +3630,8 @@ def _compact_session_payload(session: Mapping[str, Any]) -> dict[str, Any]:
         "decision_valid_until_epoch",
         "visual_observation_v3",
         "forecast_snapshot_v3",
+        "scene_forecast_contribution",
+        "lstm_contribution",
         "locked_window",
         "locked_title",
         "manual_focus_region",
@@ -2474,6 +3771,7 @@ def _compact_live_poll_session_payload(session: Mapping[str, Any]) -> dict[str, 
     compact["tracking_summary"] = _compact_scalar_and_selected(
         tracking,
         {
+            "artifact_integrity",
             "session_id",
             "detected_market",
             "detected_timeframe",
@@ -2487,10 +3785,19 @@ def _compact_live_poll_session_payload(session: Mapping[str, Any]) -> dict[str, 
             "broker_source_lock",
             "broker_surface",
             "candle_extraction",
+            "chart_region",
             "pipeline_timing",
+            "tracked_candles",
             "visible_candle_count",
         },
     )
+    tracked_candles = _sequence_of_mappings(tracking.get("tracked_candles"))
+    if tracked_candles:
+        # The operator needs only the latest causal window to corroborate the
+        # public current-candle close. Keep this internal compact path bounded.
+        compact["tracking_summary"]["tracked_candles"] = [
+            dict(row) for row in tracked_candles[-8:]
+        ]
     model_result = _mapping(session.get("model_council_result"))
     if model_result:
         compact["model_council_result"] = _compact_scalar_and_selected(
@@ -2590,6 +3897,11 @@ def build_live_state_v3(
         or _mapping(session.get("latest_signal")).get("execution_action")
     ).upper()
     two_candle_study, lstm_contribution = _two_candle_and_lstm_payloads(session)
+    scene_forecast_contribution = (
+        lstm_contribution
+        if _is_scene_forecast_payload(lstm_contribution)
+        else {}
+    )
     raw_overlays = _combine_overlays(
         registry,
         active_objects=active_objects,
@@ -2888,6 +4200,8 @@ def build_live_state_v3(
         "overlay_ledger_v3": overlay_ledger,
         "prediction_overlay": prediction_overlay,
         "two_candle_study": two_candle_study,
+        "scene_forecast_contribution": scene_forecast_contribution,
+        # Compatibility alias retained while downstream V3 clients migrate.
         "lstm_contribution": lstm_contribution,
         "visual_plane": visual_plane,
         "frame_timing_trace_v3": frame_timing,
@@ -2916,6 +4230,7 @@ def build_live_state_v3(
         "sequence_context_v3": sequence_context,
         "signal_thesis_v3": signal_thesis,
         "two_candle_study_v3": two_candle_study,
+        "scene_forecast_contribution_v3": scene_forecast_contribution,
         "lstm_candle_sequence_contribution_v3": lstm_contribution,
         "model_council": _model_council_summary(session, study_packet or session.get("model_council_study_packet")),
         "packets": {
@@ -2941,6 +4256,14 @@ def build_live_state_v3(
     live_visual_state["performance_trace_v3"] = build_performance_trace_v3(live_visual_state, now_epoch=now_value)
     live_visual_state["vlm_context_skeleton_v3"] = build_vlm_context_skeleton_v3(live_visual_state)
     market_objects = _mapping(live_visual_state.get("market_objects"))
+    compact_scene_forecast = _compact_scene_forecast_contribution(
+        scene_forecast_contribution
+    )
+    compact_forecast_compatibility = (
+        compact_scene_forecast
+        if compact_scene_forecast
+        else lstm_contribution
+    )
     compact_live_visual_state: dict[str, Any] = {
         "schema_version": live_visual_state["schema_version"],
         "session_id": live_visual_state["session_id"],
@@ -2973,7 +4296,8 @@ def build_live_state_v3(
         "overlay_ledger_v3": live_visual_state["overlay_ledger_v3"],
         "prediction_overlay": live_visual_state["prediction_overlay"],
         "two_candle_study": live_visual_state["two_candle_study"],
-        "lstm_contribution": live_visual_state["lstm_contribution"],
+        "scene_forecast_contribution": compact_scene_forecast,
+        "lstm_contribution": compact_forecast_compatibility,
         "visual_plane": live_visual_state["visual_plane"],
         "frame_timing_trace_v3": live_visual_state["frame_timing_trace_v3"],
         "overlay_state_version": live_visual_state["overlay_state_version"],

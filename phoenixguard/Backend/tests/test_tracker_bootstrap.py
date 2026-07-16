@@ -254,7 +254,7 @@ def test_live_fast_display_heartbeat_runs_in_shadow_mode(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(tracker_launcher, "_request_json", _fake_request_json)
     monkeypatch.setattr(tracker_launcher.time, "time", lambda: 100.0)
-    monkeypatch.delenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", raising=False)
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", "1")
     monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "0")
     monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "0")
 
@@ -308,6 +308,7 @@ def test_live_fast_display_heartbeat_prefers_display_state_file(monkeypatch: pyt
         encoding="utf-8",
     )
     monkeypatch.setenv("PHOENIXGUARD_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", "1")
     monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "1")
     monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "0")
 
@@ -365,6 +366,7 @@ def test_live_fast_display_heartbeat_retries_transient_file_locks(
         encoding="utf-8",
     )
     monkeypatch.setenv("PHOENIXGUARD_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", "1")
     monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_HEARTBEAT", "1")
     monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_FILE_THREAD", "0")
     monkeypatch.setattr(tracker_launcher.time, "time", lambda: 100.0)
@@ -421,6 +423,28 @@ def test_live_fast_display_heartbeat_respects_disable_env(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(tracker_launcher, "_request_json", _unexpected_request_json)
     monkeypatch.setenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", "0")
+
+    next_epoch = tracker_launcher.live_fast_display_heartbeat(
+        "http://127.0.0.1:8793",
+        "pocket-live-8788",
+        {"tracking_enabled": True},
+        last_heartbeat_epoch=44.0,
+    )
+
+    assert next_epoch == 44.0
+    assert calls == []
+
+
+def test_live_fast_display_heartbeat_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def _unexpected_request_json(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        calls.append("called")
+        return {"status": "unexpected"}
+
+    monkeypatch.setattr(tracker_launcher, "_request_json", _unexpected_request_json)
+    monkeypatch.delenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", raising=False)
 
     next_epoch = tracker_launcher.live_fast_display_heartbeat(
         "http://127.0.0.1:8793",

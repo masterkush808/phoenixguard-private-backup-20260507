@@ -124,7 +124,8 @@ def test_dashboard_exposes_plain_interactive_overlay_and_freshness_controls() ->
     assert 'method: "POST"' in text
     assert 'mode === "future" ? "show-future" : "predict"' in text
     assert 'setOverlayView("forecast", {fetch: false});' in text
-    assert "Forecast paths are guidance only. They never grant entry permission." in text
+    assert "Every path shows 12 candle events" in text
+    assert "NO EDGE is never entry permission." in text
     assert 'phoenixguard.overlay.layers.v1' in text
     assert 'id="visual-evidence-status" data-source="chart" data-freshness="updating" aria-live="polite"' in text
     assert 'id="overlay-inspector" aria-live="polite"' in text
@@ -135,6 +136,26 @@ def test_dashboard_exposes_plain_interactive_overlay_and_freshness_controls() ->
     assert '+ (points.length >= 2 ? " line-hit" : "")' in text
     assert '.surface-hotspot.line-hit {' in text
     assert "refreshOperatorState({force: true});" in text
+
+
+def test_dashboard_explains_forecast_ranges_and_uses_a_30_second_fallback_poll() -> None:
+    text = _dashboard_text()
+
+    assert 'id="forecast-path-legend" role="list" aria-label="Forecast path legend"' in text
+    assert "Selected 12-step path" in text
+    assert "Bullish route" in text
+    assert "Bearish route" in text
+    assert "Green and red are alternative studied routes, not odds." in text
+    assert "Wider route separation means less agreement" in text
+    assert 'const POLL_INTERVAL_MS = 30000;' in text
+    assert 'scheduleRefresh(POLL_INTERVAL_MS);' in text
+    assert 'document.hidden ? POLL_INTERVAL_MS * 4 : POLL_INTERVAL_MS' in text
+    assert 'const POLL_INTERVAL_MS = 3000;' not in text
+    assert 'new window.EventSource(sessionStreamUrl())' in text
+    assert '+ "/events";' in text
+    assert 'source.addEventListener("SESSION_UPDATE"' in text
+    assert "scheduleStreamRefresh(40);" in text
+    assert 'window.addEventListener("pagehide", closeSessionStream);' in text
 
 
 def test_dashboard_keeps_current_movement_forecast_and_permission_separate() -> None:

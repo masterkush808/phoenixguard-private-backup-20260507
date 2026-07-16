@@ -11,6 +11,7 @@ from phoenixguard.mobile_api.live_state_v3 import (
     _overlay_from_active_object,  # pyright: ignore[reportPrivateUsage]
     _overlay_semantic_geometry_key,  # pyright: ignore[reportPrivateUsage]
     _rescale_registry_overlay_to_current_chart,  # pyright: ignore[reportPrivateUsage]
+    _two_candle_and_lstm_payloads,  # pyright: ignore[reportPrivateUsage]
     compact_session_payload,
     build_live_state_v3,
     build_live_state_v3_from_tracker_service,
@@ -22,6 +23,61 @@ def _png(path: Path, size: tuple[int, int] = (320, 180)) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", size, color=(20, 24, 32)).save(path)
     return path
+
+
+def test_public_forecast_reader_prefers_current_identity_pending_tombstone() -> None:
+    pending: dict[str, Any] = {
+        "schema_version": "PG_SCENE_FORECAST_CONTRIBUTION_V3",
+        "provider_status": "MARKET_IDENTITY_PENDING",
+        "identity_contract_status": "PENDING",
+        "market_identity_confirmed": False,
+        "timeframe_identity_confirmed": True,
+        "forecast_available": False,
+        "pair": "",
+        "timeframe": "M1",
+        "frame_id": 941,
+        "line_points": [],
+        "forecast_candles": [],
+        "forecast_scenarios": [],
+    }
+    old_scene = {
+        "schema_version": "PG_SCENE_FORECAST_CONTRIBUTION_V3",
+        "provider_status": "READY",
+        "identity_contract_status": "CONFIRMED",
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
+        "forecast_available": True,
+        "pair": "NZD/USD OTC",
+        "timeframe": "M1",
+        "frame_id": 940,
+        "line_points": [[index / 12.0, 0.5] for index in range(13)],
+        "forecast_candles": [{"step": index} for index in range(1, 13)],
+        "forecast_scenarios": [{"role": role} for role in ("base", "bull", "bear")],
+    }
+
+    _two_candle, selected = _two_candle_and_lstm_payloads(
+        {
+            "display_frame_id": 941,
+            "model_vote_frame_id": 941,
+            "latest_signal": {
+                "market": "",
+                "focus_timeframe": "M1",
+                "market_selector_rebind_required": True,
+                "market_selector_studying_new_pair": True,
+                "market_identity_confirmed": False,
+                "timeframe_identity_confirmed": True,
+                "scene_forecast_contribution": pending,
+            },
+            "model_council_study_packet": {
+                "scene_forecast_contribution": old_scene,
+            },
+        }
+    )
+
+    assert selected["provider_status"] == "MARKET_IDENTITY_PENDING"
+    assert selected["_source_frame_id"] == 941
+    assert selected.get("line_points", []) == []
+    assert selected.get("forecast_candles", []) == []
 
 
 def testcompact_session_payload_preserves_v3_authoritypackets_and_sequence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -988,6 +1044,46 @@ def test_registry_rescale_honors_origin_and_projects_every_anchor_field() -> Non
     assert overlay["trendline_touch_points"] == expected_points
     assert overlay["anchor_evidence"]["touch_points"] == expected_points
     assert overlay["line_points"] == [[0.0, 200.0], [100.0, 100.0], [200.0, 0.0]]
+
+
+def test_registry_rescale_preserves_normalized_nested_forecast_geometry() -> None:
+    overlay: dict[str, Any] = {
+        "coordinate_mode": "CHART_NORMALIZED",
+        "bounds": [0.50, 0.30, 0.90, 0.60],
+        "line_points": [[0.50, 0.50], [0.70, 0.40]],
+        "forecast_coordinate_units": "normalized",
+        "forecast_candles": [
+            {"step": 1, "x_norm": 0.60, "close_y_norm": 0.45},
+        ],
+        "forecast_scenarios": [
+            {"side": "BUY", "line_points": [[0.50, 0.50], [0.70, 0.40]]},
+        ],
+    }
+    original = {
+        "bounds": [*overlay["bounds"]],
+        "line_points": [list(point) for point in overlay["line_points"]],
+        "forecast_candles": [dict(overlay["forecast_candles"][0])],
+        "forecast_scenarios": [
+            {
+                "side": "BUY",
+                "line_points": [
+                    list(point)
+                    for point in overlay["forecast_scenarios"][0]["line_points"]
+                ],
+            }
+        ],
+    }
+
+    _rescale_registry_overlay_to_current_chart(
+        overlay,
+        {"chart_transform": {"chart_image_bounds": [100.0, 50.0, 300.0, 250.0]}},
+        scene_graph={"chart_region_chart_bounds": [0.0, 0.0, 800.0, 500.0]},
+    )
+
+    assert overlay["bounds"] == original["bounds"]
+    assert overlay["line_points"] == original["line_points"]
+    assert overlay["forecast_candles"] == original["forecast_candles"]
+    assert overlay["forecast_scenarios"] == original["forecast_scenarios"]
 
 
 def test_semantic_trendline_key_deduplicates_equivalent_geometry() -> None:

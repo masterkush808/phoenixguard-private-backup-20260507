@@ -144,6 +144,50 @@ def test_track_ids_and_x_coordinates_are_strictly_ordered() -> None:
     assert _all_increasing([float(row["center_x_px"]) for row in tracks])
 
 
+def test_palette_hypotheses_reject_a_larger_incoherent_blue_ui_lattice() -> None:
+    chart, expected_directions, expected_centers = _synthetic_chart(
+        buy_palette="green",
+        sell_palette="magenta",
+    )
+    # Broker chrome/grid strokes are much more numerous and more regularly
+    # spaced than the candles, but their y sequence is not OHLC-continuous.
+    ui_y_positions = (15, 35, 55, 75)
+    for index, x in enumerate(range(8, 352, 4)):
+        y = ui_y_positions[index % len(ui_y_positions)]
+        chart[y : y + 7, x] = COLORS["blue"]
+
+    tracks = extract_candle_tracks_v3(
+        chart,
+        roi_bounds=(0, 0, 360, 250),
+        minimum_track_length=6,
+    )
+
+    assert [row["direction"] for row in tracks] == expected_directions
+    assert [row["center_x_px"] for row in tracks] == expected_centers
+    assert {row["palette"] for row in tracks} == {"green", "magenta"}
+
+
+@pytest.mark.parametrize("sell_palette", ["red", "green"])
+def test_coherent_one_pixel_blue_candle_suites_remain_valid(sell_palette: str) -> None:
+    image = np.full((180, 300, 3), 18, dtype=np.uint8)
+    previous_close = 100
+    expected_directions: list[str] = []
+    for index in range(20):
+        side = "BUY" if index % 3 != 1 else "SELL"
+        close_y = previous_close - 5 if side == "BUY" else previous_close + 7
+        x = 25 + index * 11
+        palette = "blue" if side == "BUY" else sell_palette
+        image[min(previous_close, close_y) : max(previous_close, close_y) + 1, x] = COLORS[palette]
+        expected_directions.append(side)
+        previous_close = close_y
+
+    tracks = extract_candle_tracks_v3(image, minimum_track_length=6)
+
+    assert [row["direction"] for row in tracks] == expected_directions
+    assert {row["palette"] for row in tracks} == {"blue", sell_palette}
+    assert all(float(row["bbox"][2]) - float(row["bbox"][0]) == 0.0 for row in tracks)
+
+
 def test_adaptive_extractor_rejects_regular_colored_footer_controls() -> None:
     chart, expected_directions, expected_centers = _synthetic_chart(
         buy_palette="blue",

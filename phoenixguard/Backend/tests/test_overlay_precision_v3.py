@@ -115,6 +115,65 @@ def _trendline_candle(index: int, center_x: float, wick_top: float, wick_bottom:
     }
 
 
+def _strict_lstm_forecast(payload: dict[str, Any]) -> dict[str, Any]:
+    """Complete a valid public fixture with one atomic 12-event scenario bundle."""
+
+    path = cast(list[dict[str, Any]], payload["forecast_path"])
+    assert [int(row["step"]) for row in path] == list(range(1, 13))
+    primary_side = str(payload.get("path_side") or payload.get("side") or "HOLD").upper()
+    assert primary_side in {"BUY", "SELL", "HOLD"}
+    features = cast(list[dict[str, Any]], payload.get("features") or [])
+    anchor_close = (
+        float(features[-1].get("relative_price_location", 0.5))
+        if features
+        else 0.5
+    )
+
+    def scenario_path(side: str) -> list[dict[str, Any]]:
+        if side == primary_side:
+            return [
+                {
+                    "step": int(row["step"]),
+                    "expected_close_norm": float(row["expected_close_norm"]),
+                }
+                for row in path
+            ]
+        return [
+            {
+                "step": step,
+                "expected_close_norm": max(
+                    0.0,
+                    min(
+                        1.0,
+                        anchor_close
+                        + (
+                            0.006 * step
+                            if side == "BUY"
+                            else -0.006 * step
+                            if side == "SELL"
+                            else (0.001 if step % 2 else -0.001)
+                        ),
+                    ),
+                ),
+            }
+            for step in range(1, 13)
+        ]
+
+    payload["trajectory_mode"] = primary_side
+    payload["trajectory_mode_probability_calibrated"] = False
+    payload["trajectory_scenarios"] = [
+        {
+            "side": side,
+            "probability": 0.6 if side == primary_side else 0.2,
+            "probability_calibrated": False,
+            "selected": side == primary_side,
+            "forecast_path": scenario_path(side),
+        }
+        for side in ("BUY", "SELL", "HOLD")
+    ]
+    return payload
+
+
 def test_broker_scene_graph_locks_plot_area_inside_full_window(tmp_path: Path) -> None:
     session = _session(tmp_path)
     scene = build_broker_scene_graph_v3(
@@ -447,6 +506,8 @@ def test_study_overlays_reject_wrong_frame_and_expired_packets(tmp_path: Path) -
             "forecast_path": [{"step": 1, "expected_close_norm": 0.58}],
         },
     }
+
+
     session["model_vote_frame_id"] = 14493
 
     wrong_frame_state = build_live_state_v3(session, overlay_mode="INSPECTOR", now_epoch=120.0)
@@ -520,10 +581,16 @@ def test_waiting_frame_renders_last_aligned_forecast_as_stale_diagnostic(tmp_pat
                     "close_lower_90_norm": 0.48 - step * 0.008,
                     "close_upper_90_norm": 0.56 - step * 0.012,
                 }
-                for step in range(1, 4)
+                for step in range(1, 13)
             ],
         },
     }
+    _strict_lstm_forecast(
+        cast(
+            dict[str, Any],
+            cast(dict[str, Any], session["forecast_snapshot_v3"])["lstm_contribution"],
+        )
+    )
 
     lstm_state = build_live_state_v3(
         session,
@@ -535,11 +602,15 @@ def test_waiting_frame_renders_last_aligned_forecast_as_stale_diagnostic(tmp_pat
         for row in lstm_state["overlay_objects"]
         if row.get("type") == "LSTM_STUDY"
     ]
-    assert len(lstm_rows) == 4
+    assert len(lstm_rows) == 1
     assert all(row.get("frame_id") == 14494 for row in lstm_rows)
     assert all(str(row.get("role")).endswith("_stale_diagnostic") for row in lstm_rows)
     assert all(row.get("side") == "HOLD" for row in lstm_rows)
     assert all("LAST VALID" in str(row.get("reason")) for row in lstm_rows)
+    assert lstm_rows[0].get("role") == "lstm_forecast_composite_stale_diagnostic"
+    assert len(cast(list[dict[str, Any]], lstm_rows[0].get("forecast_candles"))) == 12
+    assert lstm_rows[0].get("forecast_band_points") in (None, [])
+    assert cast(dict[str, Any], lstm_rows[0].get("interval"))["calibrated"] is False
 
     two_candle_state = build_live_state_v3(
         session,
@@ -606,11 +677,22 @@ def test_current_root_study_packet_emits_truthful_neutral_studies_and_lstm_path(
             "source_image_size": [1000, 800],
             "features": [{"relative_price_location": 0.51}],
             "forecast_path": [
-                {"step": 1, "expected_close_norm": 0.52},
-                {"step": 2, "expected_close_norm": 0.53},
+                {
+                    "step": step,
+                    "expected_close_norm": 0.51 + step * 0.01,
+                }
+                for step in range(1, 13)
             ],
         },
     }
+    _strict_lstm_forecast(
+        cast(
+            dict[str, Any],
+            cast(dict[str, Any], session["model_council_study_packet"])[
+                "lstm_contribution"
+            ],
+        )
+    )
 
     state = build_live_state_v3(session, overlay_mode="INSPECTOR", now_epoch=120.0)
     study_rows = [
@@ -627,14 +709,14 @@ def test_current_root_study_packet_emits_truthful_neutral_studies_and_lstm_path(
     assert all(row.get("side") == "HOLD" for row in study_rows)
     assert any(row.get("role") == "two_candle_study" for row in study_rows)
     assert not any(row.get("role") == "lstm_study" for row in study_rows)
-    assert any(
-        row.get("role") == "lstm_candle_event_path_no_edge"
+    composite = next(
+        row
         for row in study_rows
+        if row.get("role") == "lstm_forecast_composite_no_edge"
     )
-    assert any(
-        row.get("role") == "lstm_forecast_90_band_no_edge"
-        for row in study_rows
-    )
+    assert composite.get("side") == "HOLD"
+    assert composite.get("forecast_band_points") in (None, [])
+    assert len(cast(list[dict[str, Any]], composite.get("forecast_candles"))) == 12
 
 
 def test_lstm_mode_renders_learned_candle_event_progression_path(tmp_path: Path) -> None:
@@ -658,39 +740,505 @@ def test_lstm_mode_renders_learned_candle_event_progression_path(tmp_path: Path)
                 "selective_status": "NO_EDGE",
                 "selective_authorized": False,
             }
-            for step in range(1, 7)
+            for step in range(1, 13)
         ],
-        "interpretation": "Six causal candle events project upward.",
+        "interpretation": "Twelve causal candle events project upward.",
     }
+    _strict_lstm_forecast(session["latest_signal"]["lstm_contribution"])
 
     state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
     lstm_overlays = [row for row in state["overlay_objects"] if row.get("type") == "LSTM_STUDY"]
     path_rows = [row for row in lstm_overlays if row.get("layer") == "prediction_path"]
-    by_role = {str(row.get("role")): row for row in path_rows}
-
     assert len(candles) == 8
-    assert len(path_rows) == 4
+    assert len(path_rows) == 1
     assert not any(row.get("layer") == "active_council_decision" for row in lstm_overlays)
-    center = by_role["lstm_candle_event_path_no_edge"]
-    upper = by_role["lstm_forecast_90_upper_boundary_no_edge"]
-    lower = by_role["lstm_forecast_90_lower_boundary_no_edge"]
-    band = by_role["lstm_forecast_90_band_no_edge"]
-    assert len(center["line_points"]) == 7
-    assert len(upper["line_points"]) == 7
-    assert len(lower["line_points"]) == 7
-    assert len(band["line_points"]) == 15
-    assert all(row["coordinate_mode"] == "CHART_IMAGE_SPACE" for row in path_rows)
-    assert all(row["side"] == "BUY" for row in path_rows)
-    assert center["line_points"][-1][0] > center["line_points"][0][0]
-    assert all(
-        upper_point[1] <= center_point[1] <= lower_point[1]
-        for center_point, upper_point, lower_point in zip(
-            center["line_points"],
-            upper["line_points"],
-            lower["line_points"],
-        )
+    composite = path_rows[0]
+    assert composite["role"] == "lstm_forecast_composite_no_edge"
+    assert len(composite["line_points"]) == 13
+    assert composite["coordinate_mode"] == "CHART_IMAGE_SPACE"
+    assert composite["side"] == "HOLD"
+    assert composite["forecast_direction"] == "BUY"
+    assert composite["line_points"][-1][0] > composite["line_points"][0][0]
+    events = cast(list[dict[str, Any]], composite["forecast_candles"])
+    assert [row["step"] for row in events] == list(range(1, 13))
+    assert all(row["movement_side"] == "BUY" for row in events)
+    assert all(row["high_y_norm"] <= min(row["open_y_norm"], row["close_y_norm"]) for row in events)
+    assert all(row["low_y_norm"] >= max(row["open_y_norm"], row["close_y_norm"]) for row in events)
+    assert composite.get("forecast_band_points") in (None, [])
+    assert "NO EDGE" in str(composite.get("reason"))
+
+
+def test_lstm_multimodal_scenarios_share_causal_geometry_and_select_primary(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=8)
+    selected_closes = [round(0.44 - 0.012 * step, 3) for step in range(1, 13)]
+    session["latest_signal"]["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "skill": "LSTM_CANDLE_PATH",
+        "fresh": True,
+        "side": "SELL",
+        "path_side": "SELL",
+        "forecast_quality_status": "LOW_CONFIDENCE",
+        "trade_authorization_status": "NO_EDGE",
+        "selective_status": "NO_EDGE",
+        "selective_authorized": False,
+        "path_target_semantics": "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR",
+        "source_image_size": [1000, 800],
+        "features": [
+            {"center_x_px": 500.0, "relative_price_location": 0.46},
+            {"center_x_px": 524.0, "relative_price_location": 0.45},
+            {"center_x_px": 548.0, "relative_price_location": 0.44},
+        ],
+        "forecast_path": [
+            {
+                "step": step,
+                "expected_close_norm": close,
+                "selective_status": "NO_EDGE",
+                "selective_authorized": False,
+            }
+            for step, close in enumerate(selected_closes, start=1)
+        ],
+        "trajectory_mode": "SELL",
+        "trajectory_mode_probability_calibrated": False,
+        # Deliberately probability-ordered rather than selection-ordered.  The
+        # selected MAP branch must still become the primary public scenario.
+        "trajectory_scenarios": [
+            {
+                "side": "BUY",
+                "probability": 0.60,
+                "probability_calibrated": False,
+                "selected": False,
+                "forecast_path": [
+                    {
+                        "step": step,
+                        "expected_close_norm": 0.44 + 0.01 * step,
+                    }
+                    for step in range(1, 13)
+                ],
+            },
+            {
+                "side": "HOLD",
+                "probability": 0.10,
+                "probability_calibrated": False,
+                "selected": False,
+                "forecast_path": [
+                    {
+                        "step": step,
+                        "expected_close_norm": 0.44
+                        + (0.001 if step % 2 else -0.001),
+                    }
+                    for step in range(1, 13)
+                ],
+            },
+            {
+                "side": "SELL",
+                "probability": 0.30,
+                "probability_calibrated": False,
+                "selected": True,
+                "forecast_path": [
+                    {"step": step, "expected_close_norm": close}
+                    for step, close in enumerate(selected_closes, start=1)
+                ],
+            },
+        ],
+    }
+
+    state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
+    composite = next(
+        row
+        for row in state["overlay_objects"]
+        if row.get("role") == "lstm_forecast_composite_low_confidence"
     )
-    assert all("NO EDGE" in str(row.get("reason")) for row in path_rows)
+    scenarios = cast(list[dict[str, Any]], composite["forecast_scenarios"])
+
+    assert [row["side"] for row in scenarios] == ["SELL", "BUY", "HOLD"]
+    assert [row["selected"] for row in scenarios] == [True, False, False]
+    assert [row["probability"] for row in scenarios] == [0.30, 0.60, 0.10]
+    assert all(row["probability_calibrated"] is False for row in scenarios)
+    assert all(row["event_count"] == 12 for row in scenarios)
+    assert composite["trajectory_mode"] == "SELL"
+    assert composite["trajectory_mode_probability_calibrated"] is False
+
+    primary_points = cast(list[list[float]], scenarios[0]["line_points"])
+    assert [[round(value, 6) for value in point] for point in primary_points] == [
+        [
+            round(0.548 + 0.024 * step, 6),
+            round(0.56 if step == 0 else 1.0 - selected_closes[step - 1], 6),
+        ]
+        for step in range(13)
+    ]
+    for scenario in scenarios:
+        points = cast(list[list[float]], scenario["line_points"])
+        assert [round(value, 6) for value in points[0]] == [0.548, 0.56]
+        assert [round(point[0], 6) for point in points] == [
+            round(0.548 + 0.024 * step, 6)
+            for step in range(13)
+        ]
+    assert [round(point[1], 6) for point in scenarios[1]["line_points"]] == [
+        0.56,
+        *[round(0.56 - 0.01 * step, 6) for step in range(1, 13)],
+    ]
+
+
+def test_low_quality_direct_lstm_path_remains_visible_as_neutral_diagnostic(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_LIVE_STATE_CLEAN_OVERLAYS_ONLY", "1")
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=12)
+    session["latest_signal"]["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "skill": "LSTM_CANDLE_PATH",
+        "fresh": True,
+        "side": "BUY",
+        "path_side": "BUY",
+        "forecast_quality_status": "LOW_CONFIDENCE",
+        "trade_authorization_status": "NO_EDGE",
+        "selective_status": "NO_EDGE",
+        "selective_authorized": False,
+        "path_target_semantics": "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR",
+        "sequence_quality": {
+            "ready": False,
+            "reasons": ["missing_or_duplicate_candle_slots"],
+        },
+        "source_image_size": [1000, 800],
+        "features": [{"relative_price_location": 0.44}],
+        "forecast_path": [
+            {
+                "step": step,
+                "expected_open_norm": 0.44 + (step - 1) * 0.004,
+                "expected_close_norm": 0.44 + step * 0.004,
+                "expected_range_norm": 0.01,
+                "candle_body_direction": "BUY",
+                "selective_status": "NO_EDGE",
+                "selective_authorized": False,
+            }
+            for step in range(1, 13)
+        ],
+        "interpretation": "Twelve low-confidence direct candle events project upward.",
+    }
+    _strict_lstm_forecast(session["latest_signal"]["lstm_contribution"])
+
+    state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
+    composite = next(
+        row
+        for row in state["overlay_objects"]
+        if row.get("role") == "lstm_forecast_composite_low_confidence"
+    )
+
+    assert composite["side"] == "HOLD"
+    assert composite["forecast_direction"] == "BUY"
+    assert composite["forecast_quality_status"] == "LOW_CONFIDENCE"
+    assert composite["trade_authorization_status"] == "NO_EDGE"
+    assert len(cast(list[dict[str, Any]], composite["forecast_candles"])) == 12
+    assert "LOW CONFIDENCE" in str(composite["reason"])
+
+
+def test_lstm_overlay_keeps_path_movement_separate_from_candle_body(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=8)
+    session["latest_signal"]["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "frame_id": 14494,
+        "fresh": True,
+        "forecast_available": True,
+        "forecast_quality_status": "LOW_CONFIDENCE",
+        "selective_status": "NO_EDGE",
+        "selective_authorized": False,
+        "path_target_semantics": "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR",
+        "path_side": "BUY",
+        "source_image_size": [1000, 800],
+        "features": [{"center_x_px": 610.0, "relative_price_location": 0.50}],
+        "forecast_path": [
+            {
+                "step": 1,
+                # The body is SELL, while the close moved up from the 0.50
+                # path anchor.  Those are separate model outputs.
+                "expected_open_norm": 0.58,
+                "expected_high_norm": 0.60,
+                "expected_low_norm": 0.49,
+                "expected_close_norm": 0.52,
+                "expected_range_norm": 0.11,
+                "candle_body_direction": "SELL",
+                "movement_direction": "BUY",
+                "selective_status": "NO_EDGE",
+                "selective_authorized": False,
+            },
+            {
+                "step": 2,
+                "expected_open_norm": 0.56,
+                "expected_high_norm": 0.58,
+                "expected_low_norm": 0.50,
+                "expected_close_norm": 0.51,
+                "expected_range_norm": 0.08,
+                "candle_body_direction": "SELL",
+                "movement_direction": "SELL",
+                "selective_status": "NO_EDGE",
+                "selective_authorized": False,
+            },
+            *[
+                {
+                    "step": step,
+                    "expected_open_norm": 0.53 - 0.005 * (step - 2),
+                    "expected_high_norm": 0.54 - 0.005 * (step - 2),
+                    "expected_low_norm": 0.50 - 0.005 * (step - 2),
+                    "expected_close_norm": 0.51 - 0.005 * (step - 2),
+                    "expected_range_norm": 0.04,
+                    "candle_body_direction": "SELL",
+                    "movement_direction": "SELL",
+                    "selective_status": "NO_EDGE",
+                    "selective_authorized": False,
+                }
+                for step in range(3, 13)
+            ],
+        ],
+    }
+    _strict_lstm_forecast(session["latest_signal"]["lstm_contribution"])
+
+    state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
+    composite = next(
+        row
+        for row in state["overlay_objects"]
+        if row.get("role") == "lstm_forecast_composite_low_confidence"
+    )
+    events = cast(list[dict[str, Any]], composite["forecast_candles"])
+
+    assert [row["movement_side"] for row in events] == ["BUY", *["SELL"] * 11]
+    assert [row["body_bias"] for row in events] == ["SELL"] * 12
+    assert [row["direction_conflict"] for row in events] == [True, *[False] * 11]
+
+
+def test_current_direct_lstm_path_outranks_legacy_study_packet_copy(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=12)
+    session["model_council_study_packet"] = {
+        "schema_version": "PG_MODEL_COUNCIL_STUDY_PACKET_V3",
+        "frame_id": 14494,
+        "valid_until_epoch": 100.0,
+        "lstm_contribution": {
+            "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+            "legacy_restored": True,
+            "fresh": True,
+            "path_side": "SELL",
+            "source_image_size": [1000, 800],
+            "features": [{"relative_price_location": 0.50}],
+            "forecast_path": [
+                {"step": step, "expected_close_norm": 0.50 - step * 0.01}
+                for step in range(1, 13)
+            ],
+        },
+    }
+    session["forecast_snapshot_v3"] = {
+        "source_frame_id": 14493,
+        "stale": True,
+        "diagnostic_only": True,
+    }
+    session["latest_signal"]["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "frame_id": 14494,
+        "fresh": True,
+        "legacy_restored": False,
+        "forecast_available": True,
+        "forecast_quality_status": "LOW_CONFIDENCE",
+        "selective_status": "NO_EDGE",
+        "selective_authorized": False,
+        "path_target_semantics": "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR",
+        "path_side": "BUY",
+        "source_image_size": [1000, 800],
+        "features": [{"relative_price_location": 0.44}],
+        "forecast_path": [
+            {
+                "step": step,
+                "expected_open_norm": 0.44 + (step - 1) * 0.004,
+                "expected_close_norm": 0.44 + step * 0.004,
+                "expected_range_norm": 0.01,
+                "selective_status": "NO_EDGE",
+                "selective_authorized": False,
+            }
+            for step in range(1, 13)
+        ],
+    }
+    _strict_lstm_forecast(session["latest_signal"]["lstm_contribution"])
+
+    state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
+    composites = [
+        row
+        for row in state["overlay_objects"]
+        if row.get("role") == "lstm_forecast_composite_low_confidence"
+    ]
+
+    assert len(composites) == 1
+    assert composites[0]["forecast_direction"] == "BUY"
+    assert composites[0]["side"] == "HOLD"
+    assert len(cast(list[dict[str, Any]], composites[0]["forecast_candles"])) == 12
+
+
+def test_direct_lstm_path_uses_causal_feature_anchor_when_compact_candles_are_absent(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    session["tracking_summary"]["tracked_candles"] = []
+    session["latest_signal"]["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "frame_id": 14494,
+        "fresh": True,
+        "forecast_available": True,
+        "forecast_quality_status": "LOW_CONFIDENCE",
+        "selective_status": "NO_EDGE",
+        "selective_authorized": False,
+        "path_target_semantics": "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR",
+        "path_side": "BUY",
+        "source_image_size": [1000, 800],
+        "features": [
+            {"center_x_px": 610.0, "relative_price_location": 0.44},
+        ],
+        "forecast_path": [
+            {
+                "step": step,
+                "expected_open_norm": 0.44 + (step - 1) * 0.004,
+                "expected_close_norm": 0.44 + step * 0.004,
+                "expected_range_norm": 0.01,
+                "selective_status": "NO_EDGE",
+                "selective_authorized": False,
+            }
+            for step in range(1, 13)
+        ],
+    }
+    _strict_lstm_forecast(session["latest_signal"]["lstm_contribution"])
+
+    state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
+    composite = next(
+        row
+        for row in state["overlay_objects"]
+        if row.get("role") == "lstm_forecast_composite_low_confidence"
+    )
+
+    assert abs(float(composite["line_points"][0][0]) / 1434.0 - 0.61) < 1e-6
+    assert len(cast(list[dict[str, Any]], composite["forecast_candles"])) == 12
+
+
+def test_direct_lstm_path_snaps_to_matching_latest_candle_close(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    candles = _install_visible_candles(session, count=8)
+    latest = candles[-1]
+    center_x = 0.5 * (float(latest["bbox"][0]) + float(latest["bbox"][2]))
+    close_y = float(latest["bbox"][1])  # latest fixture candle is BUY
+    session["latest_signal"]["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "frame_id": 14494,
+        "fresh": True,
+        "forecast_available": True,
+        "forecast_quality_status": "LOW_CONFIDENCE",
+        "selective_status": "NO_EDGE",
+        "selective_authorized": False,
+        "path_target_semantics": "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR",
+        "path_side": "BUY",
+        "source_image_size": [1434, 847],
+        "features": [
+            {
+                "center_x_px": center_x,
+                # Deliberately differs from the exact rendered body close.
+                "relative_price_location": 0.50,
+            }
+        ],
+        "forecast_path": [
+            {
+                "step": step,
+                "expected_open_norm": 0.50 + (step - 1) * 0.004,
+                "expected_close_norm": 0.50 + step * 0.004,
+                "expected_range_norm": 0.01,
+                "selective_status": "NO_EDGE",
+                "selective_authorized": False,
+            }
+            for step in range(1, 13)
+        ],
+    }
+    _strict_lstm_forecast(session["latest_signal"]["lstm_contribution"])
+
+    state = build_live_state_v3(
+        session,
+        overlay_mode="LSTM_STUDY",
+        now_epoch=120.0,
+    )
+    composite = next(
+        row
+        for row in state["overlay_objects"]
+        if row.get("role") == "lstm_forecast_composite_low_confidence"
+    )
+
+    assert abs(float(composite["line_points"][0][0]) - center_x) < 0.002
+    assert abs(float(composite["line_points"][0][1]) - close_y) < 0.002
+    assert len(cast(list[dict[str, Any]], composite["forecast_candles"])) == 12
+
+
+def test_direct_lstm_path_does_not_snap_to_adjacent_tracker_candle(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    candles = _install_visible_candles(session, count=8)
+    causal = candles[-2]
+    tracker_latest = candles[-1]
+    causal_center_x = 0.5 * (
+        float(causal["bbox"][0]) + float(causal["bbox"][2])
+    )
+    tracker_center_x = 0.5 * (
+        float(tracker_latest["bbox"][0]) + float(tracker_latest["bbox"][2])
+    )
+    session["latest_signal"]["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "frame_id": 14494,
+        "fresh": True,
+        "forecast_available": True,
+        "forecast_quality_status": "LOW_CONFIDENCE",
+        "selective_status": "NO_EDGE",
+        "selective_authorized": False,
+        "path_target_semantics": "DIRECT_CUMULATIVE_CLOSE_FROM_ANCHOR",
+        "path_side": "BUY",
+        "source_image_size": [1434, 847],
+        "features": [
+            {
+                "center_x_px": causal_center_x,
+                "relative_price_location": 0.50,
+            }
+        ],
+        "forecast_path": [
+            {
+                "step": step,
+                "expected_open_norm": 0.50 + (step - 1) * 0.004,
+                "expected_close_norm": 0.50 + step * 0.004,
+                "expected_range_norm": 0.01,
+                "selective_status": "NO_EDGE",
+                "selective_authorized": False,
+            }
+            for step in range(1, 13)
+        ],
+    }
+    _strict_lstm_forecast(session["latest_signal"]["lstm_contribution"])
+
+    state = build_live_state_v3(
+        session,
+        overlay_mode="LSTM_STUDY",
+        now_epoch=120.0,
+    )
+    composite = next(
+        row
+        for row in state["overlay_objects"]
+        if row.get("role") == "lstm_forecast_composite_low_confidence"
+    )
+
+    start_x = float(composite["line_points"][0][0])
+    assert abs(start_x - causal_center_x) < 0.002
+    assert abs(start_x - tracker_center_x) > 10.0
+    assert len(cast(list[dict[str, Any]], composite["forecast_candles"])) == 12
 
 
 def test_lstm_forecast_overlay_visually_marks_authorized_path_without_candle_boxes(
@@ -707,6 +1255,8 @@ def test_lstm_forecast_overlay_visually_marks_authorized_path_without_candle_box
         "selective_side": "BUY",
         "selective_status": "AUTHORIZED",
         "selective_authorized": True,
+        "production_authorized": True,
+        "artifact_production_gate_passed": True,
         "source_image_size": [1000, 800],
         "features": [{"relative_price_location": 0.50}],
         "forecast_path": [
@@ -718,9 +1268,10 @@ def test_lstm_forecast_overlay_visually_marks_authorized_path_without_candle_box
                 "selective_status": "AUTHORIZED",
                 "selective_authorized": True,
             }
-            for step in range(1, 4)
+            for step in range(1, 13)
         ],
     }
+    _strict_lstm_forecast(session["latest_signal"]["lstm_contribution"])
 
     state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
     rows = [
@@ -729,11 +1280,57 @@ def test_lstm_forecast_overlay_visually_marks_authorized_path_without_candle_box
         if row.get("type") == "LSTM_STUDY"
     ]
 
-    assert len(rows) == 4
+    assert len(rows) == 1
     assert all(row.get("layer") == "prediction_path" for row in rows)
     assert all(row.get("side") == "BUY" for row in rows)
     assert all(str(row.get("role")).endswith("_authorized") for row in rows)
     assert not any(row.get("role") == "lstm_study" for row in rows)
+    assert rows[0].get("role") == "lstm_forecast_composite_authorized"
+    assert len(cast(list[dict[str, Any]], rows[0].get("forecast_candles"))) == 12
+
+
+def test_lstm_path_cannot_authorize_when_production_gate_is_false(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=8)
+    session["latest_signal"]["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "fresh": True,
+        "side": "BUY",
+        "path_side": "BUY",
+        "selective_status": "AUTHORIZED",
+        "selective_authorized": True,
+        "production_authorized": False,
+        "artifact_production_gate_passed": False,
+        "source_image_size": [1000, 800],
+        "features": [{"relative_price_location": 0.50}],
+        "forecast_path": [
+            {
+                "step": step,
+                "expected_close_norm": 0.50 + step * 0.01,
+                "selective_status": "AUTHORIZED",
+                "selective_authorized": True,
+            }
+            for step in range(1, 13)
+        ],
+    }
+    _strict_lstm_forecast(session["latest_signal"]["lstm_contribution"])
+
+    state = build_live_state_v3(
+        session,
+        overlay_mode="LSTM_STUDY",
+        now_epoch=120.0,
+    )
+    row = next(
+        row
+        for row in state["overlay_objects"]
+        if row.get("type") == "LSTM_STUDY"
+    )
+
+    assert row["side"] == "HOLD"
+    assert row["trade_authorization_status"] == "NO_EDGE"
+    assert not str(row["role"]).endswith("_authorized")
 
 
 def test_lstm_path_never_inherits_authority_from_conflicting_top_level_metadata(
@@ -763,9 +1360,10 @@ def test_lstm_path_never_inherits_authority_from_conflicting_top_level_metadata(
                 "selective_status": "NO_EDGE",
                 "selective_authorized": False,
             }
-            for step in range(1, 4)
+            for step in range(1, 13)
         ],
     }
+    _strict_lstm_forecast(session["latest_signal"]["lstm_contribution"])
 
     state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
     rows = [
@@ -774,10 +1372,47 @@ def test_lstm_path_never_inherits_authority_from_conflicting_top_level_metadata(
         if row.get("type") == "LSTM_STUDY"
     ]
 
-    assert len(rows) == 4
-    assert all(row.get("side") == "SELL" for row in rows)
+    assert len(rows) == 1
+    assert all(row.get("side") == "HOLD" for row in rows)
     assert all(str(row.get("role")).endswith("_no_edge") for row in rows)
     assert not any(str(row.get("role")).endswith("_authorized") for row in rows)
+    assert rows[0].get("forecast_direction") == "SELL"
+    assert rows[0].get("direction_conflict") is True
+
+
+def test_legacy_body_colour_artifact_never_draws_a_future_price_path(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    _install_visible_candles(session, count=8)
+    session["latest_signal"]["lstm_contribution"] = {
+        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+        "fresh": True,
+        "legacy_restored": True,
+        "production_authorized": False,
+        "confidence": 0.90,
+        "side": "SELL",
+        "path_side": "SELL",
+        "source_image_size": [1000, 800],
+        "features": [{"relative_price_location": 0.50}],
+        "forecast_path": [
+            {
+                "step": step,
+                "expected_close_norm": 0.50 - step * 0.01,
+                "direction": "SELL",
+                "movement_direction": "SELL",
+            }
+            for step in range(1, 4)
+        ],
+    }
+
+    state = build_live_state_v3(session, overlay_mode="LSTM_STUDY", now_epoch=120.0)
+
+    assert not [
+        row
+        for row in state["overlay_objects"]
+        if row.get("type") == "LSTM_STUDY"
+    ]
 
 
 def test_council_mode_renders_active_marker_from_chart_context(tmp_path: Path) -> None:

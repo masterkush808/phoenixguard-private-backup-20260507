@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 import time
@@ -13,6 +15,9 @@ from phoenixguard.decision.entry_window_policy_v3 import entry_location_guidance
 OPERATOR_WORKSPACE_SCHEMA_VERSION = "PG_OPERATOR_WORKSPACE_V1"
 
 _DIRECTIONAL_SIDES = frozenset({"BUY", "SELL"})
+_FORECAST_BELIEF_STATES = frozenset(
+    {"RESET", "REACQUIRING", "STABLE", "REVERSAL_PENDING"}
+)
 _TOP_LEVEL_KEYS = (
     "schema_version",
     "session_id",
@@ -59,6 +64,7 @@ _OVERLAY_PRESENTATION: dict[str, tuple[str, str, str]] = {
     "PRICE_LOCATION_MARKER": ("context", "Price location", "structure"),
     "TWO_CANDLE_STUDY": ("outlook", "Two-candle study", "outlook"),
     "LSTM_STUDY": ("outlook", "LSTM study", "outlook"),
+    "SCENE_FORECAST_STUDY": ("outlook", "Scene forecaster", "outlook"),
     "ORDER_BLOCK": ("zone", "SMC order block", "zones"),
     "FAIR_VALUE_GAP": ("zone", "SMC fair value gap", "zones"),
     "LIQUIDITY_POOL": ("zone", "SMC liquidity pool", "zones"),
@@ -130,6 +136,9 @@ _TYPE_FAMILIES = {
     "INVALIDATION_ZONE": "invalidation",
     "TWO_CANDLE_STUDY": "two_candle",
     "LSTM_STUDY": "lstm",
+    # Stable family alias retained until the dashboard toggle contract moves
+    # from its historical `lstm` key to a scene-forecaster key.
+    "SCENE_FORECAST_STUDY": "lstm",
     "MODEL_COUNCIL_MARKER": "council",
     "REGIME_MARKER": "council",
     "MARKET_PLAY_MARKER": "council",
@@ -230,6 +239,19 @@ def _safe_public_text(value: object, default: str = "Unknown", *, limit: int = 8
     ):
         return default
     return text
+
+
+def _stable_public_digest(value: object, *, prefix: str) -> str:
+    """Return a deterministic revision token without publishing its inputs."""
+
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    ).encode("utf-8")
+    return f"{prefix}_{hashlib.sha256(encoded).hexdigest()[:16]}"
 
 
 def _safe_session_id(value: object) -> str:
@@ -344,6 +366,261 @@ def _side(*values: object) -> str:
         if candidate in _DIRECTIONAL_SIDES:
             return candidate
     return "NEUTRAL"
+
+
+def _belief_side(*values: object) -> str:
+    for value in values:
+        candidate = _text(value, "").upper()
+        if candidate in {"BUY", "SELL", "HOLD"}:
+            return candidate
+    return "HOLD"
+
+
+def _is_scene_forecast_source(*sources: Mapping[str, Any]) -> bool:
+    for source in sources:
+        tokens = " ".join(
+            _text(source.get(key), "", limit=120).upper()
+            for key in (
+                "schema_version",
+                "provider",
+                "skill",
+                "source_agent",
+                "source_key",
+                "role",
+                "forecast_engine",
+            )
+        )
+        if any(
+            token in tokens
+            for token in (
+                "SCENE_FORECAST",
+                "CHRONOS_SCENE",
+                "SCENE FORECAST",
+                "SCENE_FORECASTER",
+            )
+        ):
+            return True
+    return False
+
+
+def _forecast_belief_contract(*sources: Mapping[str, Any]) -> dict[str, object]:
+    source: Mapping[str, Any] = next(
+        (
+            item
+            for item in sources
+            if item
+            and (
+                any(
+                    key in item
+                    for key in (
+                        "belief_state",
+                        "committed_side",
+                        "candidate_side",
+                        "belief_revision",
+                    )
+                )
+                or _mapping(item.get("forecast_belief"))
+                or _mapping(item.get("belief_update"))
+                or _mapping(item.get("belief"))
+            )
+        ),
+        _mapping(None),
+    )
+    if not source:
+        return {}
+    belief = (
+        _mapping(source.get("forecast_belief"))
+        or _mapping(source.get("belief_update"))
+        or _mapping(source.get("belief"))
+    )
+    status = _text(source.get("belief_state") or belief.get("status"), "RESET").upper()
+    if status not in _FORECAST_BELIEF_STATES:
+        status = "RESET"
+    result: dict[str, object] = {
+        "belief_state": status,
+        "committed_side": _belief_side(
+            source.get("committed_side"),
+            belief.get("active_side"),
+            belief.get("committed_side"),
+        ),
+        "candidate_side": _belief_side(
+            source.get("candidate_side"),
+            belief.get("candidate_side"),
+            belief.get("pending_side"),
+        ),
+        "confirmation_events": _integer(
+            source.get("confirmation_events"),
+            belief.get("pending_count"),
+        ),
+        "required_events": _integer(
+            source.get("required_events"),
+            belief.get("required_count"),
+        ),
+        "belief_revision": _integer(
+            source.get("belief_revision"),
+            belief.get("revision"),
+        ),
+    }
+    change_probability = _number(
+        source.get("change_probability")
+        if source.get("change_probability") is not None
+        else belief.get("change_probability")
+    )
+    if change_probability is not None:
+        result["change_probability"] = round(
+            max(0.0, min(1.0, change_probability)),
+            6,
+        )
+    forecast_id = _safe_identifier(source.get("forecast_id"), "")
+    if forecast_id:
+        result["forecast_id"] = forecast_id
+    if any(key in source for key in ("forecast_revision", "revision")):
+        result["forecast_revision"] = _integer(
+            source.get("forecast_revision"),
+            source.get("revision"),
+        )
+    closed_candle_key = _safe_identifier(
+        source.get("closed_candle_key") or belief.get("closed_candle_key"),
+        "",
+    )
+    if closed_candle_key:
+        result["closed_candle_key"] = closed_candle_key
+    if any(
+        value is not None
+        for value in (
+            source.get("closed_candle_sequence"),
+            belief.get("closed_candle_sequence"),
+        )
+    ):
+        result["closed_candle_sequence"] = _integer(
+            source.get("closed_candle_sequence"),
+            belief.get("closed_candle_sequence"),
+        )
+    return result
+
+
+def _scene_forecast_boundary_contract(
+    *sources: Mapping[str, Any],
+) -> dict[str, object]:
+    source: Mapping[str, Any] = next(
+        (item for item in sources if item and _is_scene_forecast_source(item)),
+        _mapping(None),
+    )
+    if not source:
+        return {}
+
+    def item_count(value: object) -> int:
+        return (
+            len(cast(Sequence[object], value))
+            if isinstance(value, Sequence)
+            and not isinstance(value, (str, bytes, bytearray))
+            else 0
+        )
+
+    result: dict[str, object] = {"forecast_engine": "SCENE_FORECASTER_V3"}
+    provider = _safe_identifier(
+        source.get("forecast_provider") or source.get("provider"),
+        "",
+    ).upper()
+    provider_status = _safe_identifier(
+        source.get("forecast_provider_status") or source.get("provider_status"),
+        "",
+    ).upper()
+    if provider:
+        result["forecast_provider"] = provider
+    if provider_status:
+        result["forecast_provider_status"] = provider_status
+    for key in (
+        "geometry_frame_match_verified",
+        "geometry_reprojected_from_cache",
+        "detector_coverage_rebase_applied",
+        "cache_replaced_for_detector_coverage_rebase",
+    ):
+        if key in source:
+            result[key] = _explicit_bool(source.get(key)) is True
+    for key in (
+        "forecast_computed_frame_id",
+        "source_forecast_frame_id",
+        "geometry_projected_frame_id",
+    ):
+        if source.get(key) not in (None, ""):
+            result[key] = _integer(source.get(key))
+    geometry_provenance = _mapping(source.get("geometry_projection_provenance"))
+    if geometry_provenance:
+        result["geometry_projection_provenance"] = {
+            key: geometry_provenance[key]
+            for key in (
+                "status",
+                "method",
+                "source_forecast_frame_id",
+                "source_geometry_frame_id",
+                "projected_frame_id",
+                "verified",
+                "source_anchor",
+                "target_anchor",
+                "x_gain",
+                "y_gain",
+                "pointwise_clipping_applied",
+            )
+            if key in geometry_provenance
+        }
+    audit = _mapping(source.get("scene_feature_audit"))
+    if audit:
+        source_presence = _mapping(audit.get("source_presence"))
+        causal_exclusions = _mapping(audit.get("causal_exclusions"))
+        result["scene_feature_audit"] = {
+            "consumed_field_count": _integer(
+                audit.get("consumed_field_count"),
+                item_count(audit.get("consumed_fields")),
+            ),
+            "missing_field_count": _integer(
+                audit.get("missing_field_count"),
+                item_count(audit.get("missing_fields")),
+            ),
+            "rejected_field_count": _integer(
+                audit.get("rejected_field_count"),
+                item_count(audit.get("rejected_fields")),
+            ),
+            "source_presence": {
+                key: _explicit_bool(source_presence.get(key)) is True
+                for key in (
+                    "candles",
+                    "projection",
+                    "candle_statistics",
+                    "behavior_payload",
+                    "decision_kernel",
+                    "smart_money_context",
+                    "support_resistance_context",
+                    "support_resistance_zones",
+                    "trend_slopes",
+                    "trend_directions",
+                    "timeframe",
+                    "pair",
+                )
+                if key in source_presence
+            },
+            "causal_exclusions": {
+                "forming_candles": _integer(
+                    causal_exclusions.get("forming_candles")
+                ),
+                "history_rows_outside_window": _integer(
+                    causal_exclusions.get("history_rows_outside_window")
+                ),
+                "projected_geometry_is_feature": (
+                    _explicit_bool(
+                        causal_exclusions.get("projected_geometry_is_feature")
+                    )
+                    is True
+                ),
+                "future_outcome_fields_are_feature": (
+                    _explicit_bool(
+                        causal_exclusions.get("future_outcome_fields_are_feature")
+                    )
+                    is True
+                ),
+            },
+        }
+    return result
 
 
 def _first_mapping(source: Mapping[str, Any], *paths: tuple[str, ...]) -> Mapping[str, Any]:
@@ -754,6 +1031,15 @@ def _forecast_contract(
         ("high_frequency_forecast", "two_candle_study"),
         ("forecast_snapshot_v3", "two_candle_study"),
     ) or _mapping(high_frequency.get("two_candle_study"))
+    scene_forecast = _first_mapping(
+        payload,
+        ("scene_forecast_contribution",),
+        ("latest_signal", "scene_forecast_contribution"),
+        ("tracking_summary", "scene_forecast_contribution"),
+        ("model_council_result", "scene_forecast_contribution"),
+        ("high_frequency_forecast", "scene_forecast_contribution"),
+        ("forecast_snapshot_v3", "scene_forecast_contribution"),
+    ) or _mapping(two_candle.get("scene_forecast_contribution"))
     lstm = _first_mapping(
         payload,
         ("lstm_contribution",),
@@ -763,6 +1049,7 @@ def _forecast_contract(
         ("high_frequency_forecast", "lstm_contribution"),
         ("forecast_snapshot_v3", "lstm_contribution"),
     ) or _mapping(two_candle.get("lstm_contribution"))
+    forecaster = scene_forecast or lstm
     next_candle = _mapping(two_candle.get("next_candle_forecast"))
 
     display_frame_id = _frame_id(display_frame)
@@ -787,9 +1074,17 @@ def _forecast_contract(
     aligned_two_candle: Mapping[str, Any] = (
         two_candle if frame_aligned(two_candle, two_candle) else {}
     )
-    aligned_lstm: Mapping[str, Any] = (
-        lstm if frame_aligned(lstm, lstm) else {}
+    aligned_forecaster: Mapping[str, Any] = (
+        forecaster if frame_aligned(forecaster, forecaster) else {}
     )
+    if (
+        not scene_forecast
+        and _explicit_bool(aligned_forecaster.get("legacy_restored")) is True
+        and _explicit_bool(aligned_forecaster.get("direction_conflict")) is True
+    ):
+        # A known-collapsed legacy decoder is retained in private diagnostics,
+        # but it must not set the public forecast card to permanent SELL.
+        aligned_forecaster = {}
 
     # The compact-state builder and the tracker snapshot can briefly cross at
     # a frame hand-off.  The raw forecast payload is intentionally discarded in
@@ -800,13 +1095,14 @@ def _forecast_contract(
     center_path_status = ""
     for overlay in overlays:
         if (
-            _text(overlay.get("family"), "").lower() != "prediction"
-            or _text(overlay.get("forecast_role"), "").lower() != "center"
+            _text(overlay.get("family"), "").lower()
+            not in {"lstm", "scene_forecaster", "prediction"}
+            or _text(overlay.get("forecast_role"), "").lower() not in {"center", "composite"}
             or _text(overlay.get("lifecycle"), "").lower() != "current"
         ):
             continue
         status = _text(overlay.get("forecast_status"), "").upper()
-        if status not in {"AUTHORIZED", "NO_EDGE"}:
+        if status not in {"AUTHORIZED", "NO_EDGE", "LOW_CONFIDENCE", "DIAGNOSTIC"}:
             continue
         overlay_frame = _frame_id(overlay.get("frame_id"))
         if (
@@ -822,20 +1118,31 @@ def _forecast_contract(
         if abs(delta_y) <= 1e-9:
             continue
         geometry_side = "SELL" if delta_y > 0.0 else "BUY"
-        declared_side = _side(overlay.get("side"))
+        declared_side = _side(
+            overlay.get("forecast_direction"),
+            overlay.get("side"),
+        )
         if declared_side != geometry_side:
             continue
         center_path = overlay
         center_path_status = status
         break
 
+    candidate_pairs = (
+        ((scene_forecast, scene_forecast),)
+        if scene_forecast
+        else ()
+    ) + (
+        (next_candle, two_candle),
+        (high_frequency, high_frequency),
+    ) + (
+        ((lstm, lstm),)
+        if lstm and not scene_forecast
+        else ()
+    )
     candidates = [
         candidate
-        for candidate, parent in (
-            (next_candle, two_candle),
-            (high_frequency, high_frequency),
-            (lstm, lstm),
-        )
+        for candidate, parent in candidate_pairs
         if candidate and frame_aligned(candidate, parent)
     ]
     forecast = aligned_explicit_forecast or (candidates[0] if candidates else {})
@@ -851,13 +1158,41 @@ def _forecast_contract(
             forecast.get("direction_bias"),
             forecast.get("selected_side"),
             aligned_two_candle.get("primary_pressure"),
-            aligned_lstm.get("path_side"),
-            aligned_lstm.get("side"),
+            aligned_forecaster.get("path_side"),
+            aligned_forecaster.get("side"),
         )
         if forecast
         else "NEUTRAL"
     )
-    center_path_direction = _side(center_path.get("side")) if center_path else "NEUTRAL"
+    center_path_direction = (
+        _side(center_path.get("forecast_direction"), center_path.get("side"))
+        if center_path
+        else "NEUTRAL"
+    )
+    belief_contract = _forecast_belief_contract(
+        aligned_forecaster,
+        center_path,
+    )
+    committed_direction = _side(belief_contract.get("committed_side"))
+    belief_state = _text(belief_contract.get("belief_state"), "").upper()
+    belief_path_conflict = bool(
+        center_path_direction in _DIRECTIONAL_SIDES
+        and committed_direction in _DIRECTIONAL_SIDES
+        and center_path_direction != committed_direction
+    )
+    if belief_path_conflict:
+        # A committed belief and selected geometry are one revision.  Do not
+        # narrate either side when those two public truths crossed in flight.
+        direction = "NEUTRAL"
+        center_path = {}
+        center_path_direction = "NEUTRAL"
+        belief_contract = {}
+        belief_state = ""
+    elif (
+        belief_state in {"STABLE", "REVERSAL_PENDING"}
+        and committed_direction in _DIRECTIONAL_SIDES
+    ):
+        direction = committed_direction
     if center_path_direction in _DIRECTIONAL_SIDES:
         # The simple forecast card narrates the path drawn beside it.  A
         # shorter two-candle forecast can legitimately disagree, but it has
@@ -891,7 +1226,7 @@ def _forecast_contract(
     center_path_supports_direction = bool(
         center_path
         and direction in _DIRECTIONAL_SIDES
-        and _side(center_path.get("side")) == direction
+        and _side(center_path.get("forecast_direction"), center_path.get("side")) == direction
     )
     if center_path_supports_direction:
         center_path_confidence = _confidence(center_path.get("confidence"))
@@ -901,12 +1236,75 @@ def _forecast_contract(
         # provides a validated wall-clock horizon.  Do not reuse a shorter
         # model's duration for a different path.
         horizon_seconds = None
-    fresh = freshness.get("state") == "FRESH"
-    state = "CURRENT" if fresh and direction in _DIRECTIONAL_SIDES else "STALE" if direction in _DIRECTIONAL_SIDES else "UNKNOWN"
-    if center_path_supports_direction and center_path_status == "NO_EDGE":
+    visual_observation = _mapping(payload.get("visual_observation_v3"))
+    waiting_for_new_frame = bool(
+        _text(visual_observation.get("status"), "").upper()
+        == "WAITING_FOR_NEW_FRAME"
+        and _explicit_bool(visual_observation.get("new_visual_evidence")) is not True
+    )
+    aligned_forecaster_is_explicitly_current = bool(
+        aligned_forecaster
+        and _explicit_bool(aligned_forecaster.get("fresh")) is True
+        and _explicit_bool(aligned_forecaster.get("stale")) is not True
+        and _explicit_bool(aligned_forecaster.get("diagnostic_only")) is not True
+    )
+    snapshot_is_stale_source = bool(
+        (
+            _explicit_bool(snapshot.get("stale")) is True
+            or _explicit_bool(snapshot.get("diagnostic_only")) is True
+        )
+        and not aligned_forecaster_is_explicitly_current
+    )
+    # Decision-command freshness governs entry permission, not the age of an
+    # exact-frame forecast study.  A NO_EDGE scene path often has no execution
+    # command at all, so its command freshness is UNKNOWN even though the path
+    # is current and frame-aligned.  Keep those two contracts separate: the
+    # path remains a current diagnostic outlook while permission still waits.
+    forecast_is_current = bool(
+        not waiting_for_new_frame
+        and not snapshot_is_stale_source
+        and (
+            freshness.get("state") == "FRESH"
+            or center_path_supports_direction
+        )
+    )
+    state = (
+        "CURRENT"
+        if forecast_is_current and direction in _DIRECTIONAL_SIDES
+        else "STALE"
+        if direction in _DIRECTIONAL_SIDES
+        else "UNKNOWN"
+    )
+    if belief_state == "REVERSAL_PENDING" and direction in _DIRECTIONAL_SIDES:
+        candidate = _side(belief_contract.get("candidate_side"))
+        confirmation_events = _integer(belief_contract.get("confirmation_events"))
+        required_events = _integer(belief_contract.get("required_events"))
+        candidate_phrase = (
+            f"{candidate} is under review"
+            if candidate in _DIRECTIONAL_SIDES and candidate != direction
+            else "a possible change is under review"
+        )
+        count_phrase = (
+            f" ({confirmation_events}/{required_events} closed candles)"
+            if required_events > 0
+            else ""
+        )
+        summary = (
+            f"{direction} remains the committed forecast; {candidate_phrase}{count_phrase}. "
+            "Wait for confirmation. This forecast never grants entry permission."
+        )
+    elif center_path_supports_direction and center_path_status in {
+        "NO_EDGE",
+        "LOW_CONFIDENCE",
+        "DIAGNOSTIC",
+    }:
         movement_word = "upward" if direction == "BUY" else "downward"
         summary = (
-            f"The current model path leans {movement_word}, but its risk gate "
+            f"The current model path leans {movement_word}, but input quality is low "
+            "and its risk gate found no reliable edge. It remains visible, is diagnostic only, "
+            "and never grants entry permission."
+            if center_path_status == "LOW_CONFIDENCE"
+            else f"The current model path leans {movement_word}, but its risk gate "
             "found no reliable edge. It is diagnostic only and never grants entry permission."
         )
     elif state == "STALE":
@@ -924,13 +1322,26 @@ def _forecast_contract(
             summary = f"Price may move {movement_word}; this is an outlook, not entry permission."
     else:
         summary = "No reliable next direction is confirmed."
-    return {
+    result: dict[str, object] = {
         "direction": direction,
         "state": state,
         "confidence": confidence,
         "horizon_seconds": horizon_seconds,
         "summary": summary,
     }
+    if belief_contract:
+        result.update(belief_contract)
+    scene_boundary = _scene_forecast_boundary_contract(
+        scene_forecast,
+        aligned_forecaster,
+        center_path,
+    )
+    if scene_boundary:
+        result.update(scene_boundary)
+        if center_path_status:
+            result["forecast_status"] = center_path_status
+            result["forecast_authorized"] = center_path_status == "AUTHORIZED"
+    return result
 
 
 def _execution_present(payload: Mapping[str, Any], command: Mapping[str, Any], now_epoch: float) -> bool:
@@ -1110,6 +1521,92 @@ def _coordinate_units(overlay: Mapping[str, Any]) -> str:
     return "normalized" if "NORMALIZED" in raw else "pixels"
 
 
+def _current_tracked_close_point(
+    payload: Mapping[str, Any],
+    overlay: Mapping[str, Any],
+    *,
+    display_frame_id: int | str | None,
+    chart_plane_bounds: tuple[float, float, float, float] | None,
+) -> list[list[float]]:
+    """Return the latest tracker close only on the current chart-pixel plane.
+
+    A candle box includes its wick and therefore cannot identify the observed
+    close precisely.  This public point is sourced only from the atomic tracker
+    bundle; producer-supplied overlay points are not treated as close evidence.
+    """
+
+    if (
+        display_frame_id is None
+        or _coordinate_space(overlay) != "chart"
+        or _coordinate_units(overlay) != "pixels"
+        or chart_plane_bounds is None
+    ):
+        return []
+
+    tracking_summary = _mapping(payload.get("tracking_summary"))
+    artifact_integrity = _mapping(tracking_summary.get("artifact_integrity"))
+    if _explicit_bool(artifact_integrity.get("matches_selected_plane")) is False:
+        return []
+
+    # Tracker candle rows currently inherit their frame from the atomic study
+    # bundle.  Require at least one chart-frame authority and reject the point
+    # if any published authority disagrees with the surface frame.
+    frame_authorities = [
+        _frame_id(tracking_summary.get("frame_id"), tracking_summary.get("frame_index")),
+        _frame_id(payload.get("chart_frame_id")),
+        _frame_id(artifact_integrity.get("chart_artifact_frame_id")),
+        _frame_id(artifact_integrity.get("artifact_frame_id")),
+    ]
+    declared_frames = [frame for frame in frame_authorities if frame is not None]
+    if not declared_frames or any(
+        not _frame_matches(frame, display_frame_id) for frame in declared_frames
+    ):
+        return []
+
+    tracked_candles = _rows(tracking_summary.get("tracked_candles"))
+    candidates: list[tuple[float, float, Mapping[str, Any]]] = []
+    for candle in tracked_candles:
+        row_frame = _frame_id(candle.get("frame_id"), candle.get("frame_index"))
+        if row_frame is not None and not _frame_matches(row_frame, display_frame_id):
+            continue
+        center_x = _number(candle.get("center_x_px"))
+        close_y = _number(candle.get("close_y_px"))
+        if (
+            center_x is None
+            or close_y is None
+            or not math.isfinite(center_x)
+            or not math.isfinite(close_y)
+        ):
+            continue
+        candidates.append((center_x, close_y, candle))
+    if not candidates:
+        return []
+
+    center_x, close_y, latest = max(candidates, key=lambda row: row[0])
+    left, top, right, bottom = chart_plane_bounds
+    if not (left <= center_x <= right and top <= close_y <= bottom):
+        return []
+
+    # Tie the tracker row to the public current-candle object.  This prevents a
+    # stale or differently cropped candle list from supplying a plausible but
+    # detached point on the same numeric plane.
+    tracker_bounds = _bounds(latest.get("bbox") or latest.get("bounds"))
+    overlay_bounds = _bounds(overlay.get("bounds") or overlay.get("bbox"))
+    tolerance = 1.0
+    for bounds in (tracker_bounds, overlay_bounds):
+        if len(bounds) != 4:
+            return []
+        x0, x1 = sorted((bounds[0], bounds[2]))
+        y0, y1 = sorted((bounds[1], bounds[3]))
+        if not (
+            x0 - tolerance <= center_x <= x1 + tolerance
+            and y0 - tolerance <= close_y <= y1 + tolerance
+        ):
+            return []
+
+    return [[round(center_x, 6), round(close_y, 6)]]
+
+
 def _bounds(value: object) -> list[float]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return []
@@ -1143,6 +1640,24 @@ def _image_dimensions(*candidates: object) -> tuple[float, float] | None:
         if width is not None and height is not None and width > 0.0 and height > 0.0:
             return width, height
     return None
+
+
+def _coordinate_plane_bounds(
+    value: object,
+    fallback_dimensions: tuple[float, float] | None,
+) -> tuple[float, float, float, float] | None:
+    bounds = _bounds(value)
+    if len(bounds) >= 4:
+        left, right = sorted((bounds[0], bounds[2]))
+        top, bottom = sorted((bounds[1], bounds[3]))
+        if right > left and bottom > top:
+            return left, top, right, bottom
+    if fallback_dimensions is None:
+        return None
+    width, height = fallback_dimensions
+    if width <= 0.0 or height <= 0.0:
+        return None
+    return 0.0, 0.0, width, height
 
 
 def _pixel_rectangle_as_normalized(
@@ -1227,6 +1742,486 @@ def _point_pairs(value: object, *, limit: int = 256) -> list[list[float]]:
     return points
 
 
+def _forecast_candle_rows(value: object, *, limit: int = 12) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    numeric_keys = (
+        "x_norm",
+        "open_y_norm",
+        "high_y_norm",
+        "low_y_norm",
+        "close_y_norm",
+        "interval_top_y_norm",
+        "interval_bottom_y_norm",
+    )
+    for raw in _rows(value)[:limit]:
+        step = _integer(raw.get("step"))
+        if step <= 0:
+            continue
+        numeric: dict[str, float] = {}
+        valid = True
+        for key in numeric_keys:
+            number = _number(raw.get(key))
+            if number is None:
+                if key.startswith("interval_"):
+                    continue
+                valid = False
+                break
+            numeric[key] = round(max(0.0, min(1.0, number)), 6)
+        if not valid:
+            continue
+        rows.append(
+            {
+                "step": step,
+                "label": _text(raw.get("label"), f"E{step}", limit=8),
+                **numeric,
+                "movement_side": _side(raw.get("movement_side")),
+                "body_bias": _side(raw.get("body_bias")),
+                "direction_conflict": _explicit_bool(raw.get("direction_conflict")) is True,
+            }
+        )
+    rows.sort(key=lambda row: _integer(row.get("step")))
+    if [_integer(row.get("step")) for row in rows] != list(range(1, 13)):
+        return []
+    return rows
+
+
+def _forecast_scenario_rows(value: object, *, limit: int = 3) -> list[dict[str, object]]:
+    scenarios: list[dict[str, object]] = []
+    for raw in _rows(value)[:limit]:
+        points = _point_pairs(raw.get("line_points"), limit=13)
+        if len(points) != 13:
+            continue
+        scenario_candles = _forecast_candle_rows(raw.get("forecast_candles"))
+        if "forecast_candles" in raw and len(scenario_candles) != 12:
+            continue
+        probability = _number(raw.get("probability"))
+        side = _side(raw.get("side"))
+        scenario: dict[str, object] = {
+                "side": side,
+                "label": _text(raw.get("label"), f"{side} PATH", limit=32),
+                "probability": round(max(0.0, min(1.0, probability or 0.0)), 6),
+                "probability_calibrated": (
+                    _explicit_bool(raw.get("probability_calibrated")) is True
+                ),
+                "selected": _explicit_bool(raw.get("selected")) is True,
+                "raw_selected": _explicit_bool(raw.get("raw_selected")) is True,
+                "candidate": _explicit_bool(raw.get("candidate")) is True,
+                "role": _text(raw.get("role"), "", limit=24).lower(),
+                "line_points": points,
+                "event_count": 12,
+            }
+        if scenario_candles:
+            scenario["forecast_candles"] = scenario_candles
+        scenarios.append(scenario)
+    scenarios.sort(
+        key=lambda scenario: (
+            not bool(scenario["selected"]),
+            -float(cast(float, scenario["probability"])),
+        )
+    )
+    roles = {_text(scenario.get("role"), "").lower() for scenario in scenarios}
+    sides = {str(scenario["side"]) for scenario in scenarios}
+    if (
+        len(scenarios) != 3
+        or not (
+            roles == {"base", "bull", "bear"}
+            or sides == {"BUY", "SELL", "NEUTRAL"}
+        )
+        or sum(bool(scenario["selected"]) for scenario in scenarios) != 1
+    ):
+        return []
+    return scenarios
+
+
+def _forecast_anchor(value: object) -> dict[str, object]:
+    raw = _mapping(value)
+    x_norm = _number(raw.get("x_norm"))
+    y_norm = _number(raw.get("y_norm"))
+    if (
+        x_norm is None
+        or y_norm is None
+        or not 0.0 <= x_norm <= 1.0
+        or not 0.0 <= y_norm <= 1.0
+    ):
+        return {}
+    source = _text(raw.get("source"), "MODEL_CAUSAL_CANDLE", limit=32).upper()
+    if source not in {
+        "TRACKER_LATEST_CLOSE",
+        "TRACKER_LATEST_CLOSED_CANDLE",
+        "MODEL_CAUSAL_CANDLE",
+    }:
+        source = "MODEL_CAUSAL_CANDLE"
+    return {
+        "x_norm": round(x_norm, 6),
+        "y_norm": round(y_norm, 6),
+        "verified_latest_close": (
+            _explicit_bool(raw.get("verified_latest_close")) is True
+        ),
+        "source": source,
+    }
+
+
+def _points_as_normalized(
+    points: Sequence[Sequence[object]],
+    *,
+    units: str,
+    plane_bounds: tuple[float, float, float, float] | None,
+    tolerance: float = 1e-6,
+) -> list[list[float]]:
+    normalized: list[list[float]] = []
+    left = top = 0.0
+    width = height = 1.0
+    if units == "pixels":
+        if plane_bounds is None:
+            return []
+        left, top, right, bottom = plane_bounds
+        width = right - left
+        height = bottom - top
+        if width <= 0.0 or height <= 0.0:
+            return []
+    elif units != "normalized":
+        return []
+    for point in points:
+        if len(point) < 2:
+            return []
+        x = _number(point[0])
+        y = _number(point[1])
+        if x is None or y is None:
+            return []
+        normalized_x = (x - left) / width
+        normalized_y = (y - top) / height
+        if (
+            not math.isfinite(normalized_x)
+            or not math.isfinite(normalized_y)
+            or normalized_x < -tolerance
+            or normalized_x > 1.0 + tolerance
+            or normalized_y < -tolerance
+            or normalized_y > 1.0 + tolerance
+        ):
+            return []
+        normalized.append(
+            [
+                round(max(0.0, min(1.0, normalized_x)), 6),
+                round(max(0.0, min(1.0, normalized_y)), 6),
+            ]
+        )
+    return normalized
+
+
+def _bounds_as_normalized(
+    bounds: Sequence[object],
+    *,
+    units: str,
+    plane_bounds: tuple[float, float, float, float] | None,
+) -> list[float]:
+    if len(bounds) < 4:
+        return []
+    points = _points_as_normalized(
+        [bounds[:2], bounds[2:4]],
+        units=units,
+        plane_bounds=plane_bounds,
+    )
+    if len(points) != 2:
+        return []
+    left, right = sorted((points[0][0], points[1][0]))
+    top, bottom = sorted((points[0][1], points[1][1]))
+    if right - left <= 1e-9 or bottom - top <= 1e-9:
+        return []
+    return [left, top, right, bottom]
+
+
+def _forecast_paths_match(
+    left: Sequence[Sequence[object]],
+    right: Sequence[Sequence[object]],
+    *,
+    left_units: str = "normalized",
+    right_units: str = "normalized",
+    plane_bounds: tuple[float, float, float, float] | None = None,
+    tolerance: float = 1e-6,
+) -> bool:
+    if len(left) != 13 or len(right) != 13:
+        return False
+
+    # The precision resolver projects the public centerline into chart pixels,
+    # while nested model scenarios intentionally stay normalized so clients can
+    # redraw them without a backend round trip. Compare both paths on one
+    # normalized plane instead of rejecting a complete atomic bundle merely
+    # because the two declared coordinate units differ.
+    left_normalized = _points_as_normalized(
+        left,
+        units=left_units,
+        plane_bounds=plane_bounds,
+        tolerance=tolerance,
+    )
+    right_normalized = _points_as_normalized(
+        right,
+        units=right_units,
+        plane_bounds=plane_bounds,
+        tolerance=tolerance,
+    )
+    if len(left_normalized) != 13 or len(right_normalized) != 13:
+        return False
+    for left_point, right_point in zip(left_normalized, right_normalized):
+        left_x, left_y = left_point
+        right_x, right_y = right_point
+        if (
+            abs(left_x - right_x) > tolerance
+            or abs(left_y - right_y) > tolerance
+        ):
+            return False
+    return True
+
+
+def _forecast_anchor_matches_path(
+    anchor: Mapping[str, object],
+    path: Sequence[Sequence[object]],
+    *,
+    path_units: str,
+    plane_bounds: tuple[float, float, float, float] | None,
+    tolerance: float = 1e-6,
+) -> bool:
+    if not anchor or len(path) != 13:
+        return False
+    anchor_x = _number(anchor.get("x_norm"))
+    anchor_y = _number(anchor.get("y_norm"))
+    if anchor_x is None or anchor_y is None:
+        return False
+    first = path[0]
+    if len(first) < 2:
+        return False
+    first_x = _number(first[0])
+    first_y = _number(first[1])
+    if first_x is None or first_y is None:
+        return False
+    if path_units == "pixels":
+        if plane_bounds is None:
+            return False
+        left, top, right, bottom = plane_bounds
+        width = right - left
+        height = bottom - top
+        if width <= 0.0 or height <= 0.0:
+            return False
+        first_x = (first_x - left) / width
+        first_y = (first_y - top) / height
+    elif path_units != "normalized":
+        return False
+    return bool(
+        abs(anchor_x - first_x) <= tolerance
+        and abs(anchor_y - first_y) <= tolerance
+    )
+
+
+def _forecast_interval(value: object) -> dict[str, object]:
+    raw = _mapping(value)
+    status = _text(raw.get("status"), "UNAVAILABLE", limit=32).upper()
+    calibrated = bool(_explicit_bool(raw.get("calibrated")) is True and status == "READY")
+    output: dict[str, object] = {
+        "status": "READY" if calibrated else "UNAVAILABLE",
+        "calibrated": calibrated,
+        "method": _text(raw.get("method"), "UNAVAILABLE", limit=48).upper(),
+        "source_count": _integer(raw.get("source_count")),
+    }
+    level = _number(raw.get("level"))
+    coverage = _number(raw.get("coverage"))
+    if level is not None:
+        output["level"] = round(max(0.0, min(1.0, level)), 4)
+    if coverage is not None:
+        output["coverage"] = round(max(0.0, min(1.0, coverage)), 4)
+    return output
+
+
+def _geometry_is_on_declared_plane(
+    *,
+    bounds: Sequence[float],
+    points: Sequence[Sequence[float]],
+    line_points: Sequence[Sequence[float]],
+    coordinate_units: str,
+) -> bool:
+    """Fail closed when public geometry cannot belong to its chart plane."""
+
+    coordinates: list[float] = []
+    if len(bounds) >= 4:
+        left, right = sorted((float(bounds[0]), float(bounds[2])))
+        top, bottom = sorted((float(bounds[1]), float(bounds[3])))
+        if right - left <= 1e-9 or bottom - top <= 1e-9:
+            return False
+        coordinates.extend((left, top, right, bottom))
+    for pair in [*points, *line_points]:
+        if len(pair) < 2:
+            continue
+        coordinates.extend((float(pair[0]), float(pair[1])))
+    if not coordinates or not all(math.isfinite(value) for value in coordinates):
+        return False
+    if coordinate_units == "normalized":
+        return all(-0.000001 <= value <= 1.000001 for value in coordinates)
+    return all(value >= 0.0 for value in coordinates)
+
+
+def _overlay_identity_and_revisions(
+    overlay: Mapping[str, Any],
+    public_overlay: Mapping[str, object],
+) -> dict[str, str]:
+    stable_source = _safe_identifier(
+        overlay.get("track_id")
+        or overlay.get("source_key")
+        or public_overlay.get("id"),
+        str(public_overlay.get("id") or "overlay"),
+    )
+    anchor_indices = sorted(
+        {
+            int(value)
+            for value in (
+                _number(item)
+                for item in [
+                    *_rows(overlay.get("anchor_candles")),
+                ]
+            )
+            if value is not None and value >= 0
+        }
+    )
+    # Most V3 overlays store candle anchors as scalar indices rather than
+    # mappings. Preserve both shapes without exposing detector internals.
+    if not anchor_indices:
+        anchor_indices = sorted(
+            {
+                int(value)
+                for value in (
+                    _number(item)
+                    for item in (
+                        cast(Sequence[object], overlay.get("anchor_candles"))
+                        if isinstance(overlay.get("anchor_candles"), Sequence)
+                        and not isinstance(
+                            overlay.get("anchor_candles"),
+                            (str, bytes, bytearray),
+                        )
+                        else ()
+                    )
+                )
+                if value is not None and value >= 0
+            }
+        )
+    semantic_id = _stable_public_digest(
+        {
+            "source": stable_source,
+            "type": public_overlay.get("type"),
+            "family": public_overlay.get("family"),
+        },
+        prefix="sem",
+    )
+    anchor_id = _stable_public_digest(
+        {
+            "semantic_id": semantic_id,
+            "anchor_indices": anchor_indices,
+            "anchor_type": _text(overlay.get("anchor_type"), "GEOMETRY").upper(),
+        },
+        prefix="anchor",
+    )
+    semantic_revision = _stable_public_digest(
+        {
+            "semantic_id": semantic_id,
+            "anchor_id": anchor_id,
+            "side": public_overlay.get("side"),
+            "group": public_overlay.get("group"),
+            "family": public_overlay.get("family"),
+            "layer": public_overlay.get("layer"),
+            "label": public_overlay.get("label"),
+        },
+        prefix="osem",
+    )
+    geometry_revision = _stable_public_digest(
+        {
+            "bounds": public_overlay.get("bounds"),
+            "points": public_overlay.get("points"),
+            "line_points": public_overlay.get("line_points"),
+            "forecast_band_points": public_overlay.get("forecast_band_points"),
+            "forecast_scenarios": public_overlay.get("forecast_scenarios"),
+            "forecast_anchor": public_overlay.get("forecast_anchor"),
+            "coordinate_space": public_overlay.get("coordinate_space"),
+            "coordinate_units": public_overlay.get("coordinate_units"),
+        },
+        prefix="ogeo",
+    )
+    return {
+        "semantic_id": semantic_id,
+        "anchor_id": anchor_id,
+        "overlay_semantic_revision": semantic_revision,
+        "overlay_geometry_revision": geometry_revision,
+    }
+
+
+def _surface_overlay_revision_contract(
+    source: Mapping[str, object],
+    tracking_summary: Mapping[str, Any],
+    market: Mapping[str, object],
+    viewport: Mapping[str, object],
+    overlays: Sequence[Mapping[str, object]],
+) -> dict[str, str]:
+    broker_lock = _mapping(tracking_summary.get("broker_source_lock"))
+    selected_target = _mapping(broker_lock.get("selected_target"))
+    selector_fingerprint = _text(
+        tracking_summary.get("market_selector_visual_fingerprint"),
+        "",
+        limit=80,
+    )
+    # Only the V2 selector-only text mask is stable enough to own semantic
+    # history. Legacy whole-header hashes include moving sparklines/candles and
+    # remain diagnostics. This identity also distinguishes pair switches when
+    # broker OCR cannot yet resolve the symbol text.
+    selector_identity = (
+        selector_fingerprint
+        if selector_fingerprint.startswith("selector_v2_")
+        else ""
+    )
+    semantic_identity = _stable_public_digest(
+        {
+            "session": _safe_session_id(source.get("session_id")),
+            "symbol": _text(market.get("symbol"), "UNKNOWN").upper(),
+            "timeframe": _text(market.get("timeframe"), "UNKNOWN").upper(),
+            # The selector's raw visual fingerprint is deliberately excluded.
+            # It is a hash of a live image crop and changes as broker chrome or
+            # candles animate even when the selected pair has not changed.
+            # Confirmed symbol/timeframe plus the stable broker lock own the
+            # semantic history namespace; viewport motion is geometry only.
+            "selector_identity": selector_identity,
+            "broker_lock": _text(
+                source.get("broker_source_lock_id")
+                or broker_lock.get("lock_id")
+                or selected_target.get("window_id")
+                or selected_target.get("title"),
+                "SURFACE",
+                limit=160,
+            ),
+        },
+        prefix="surface",
+    )
+    semantic_revision = _stable_public_digest(
+        {
+            "surface": semantic_identity,
+            # Existing studied objects reconcile by their per-row semantic
+            # ids. A new live frame may append context, but it must not flush
+            # every already-seen history node. Only pair/surface identity owns
+            # the history semantic namespace.
+            "namespace": "STUDIED_HISTORY_V1",
+        },
+        prefix="history_sem",
+    )
+    geometry_revision = _stable_public_digest(
+        {
+            "surface": semantic_identity,
+            "viewport": viewport,
+            # Per-row geometry revisions invalidate only the object that
+            # moved. Appending one studied swing/history row must not flush
+            # every already-projected static overlay.
+        },
+        prefix="history_geo",
+    )
+    return {
+        "semantic_identity": semantic_identity,
+        "overlay_semantic_revision": semantic_revision,
+        "overlay_geometry_revision": geometry_revision,
+    }
+
+
 def _overlay_rows(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     candidates = (
         _mapping(payload.get("overlays")),
@@ -1247,6 +2242,39 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
     output: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
     display_frame_id = _frame_id(display_frame)
+    chart_frame = _mapping(payload.get("chart_frame"))
+    chart = _mapping(payload.get("chart"))
+    surface = _mapping(payload.get("surface"))
+    artifacts = _mapping(payload.get("artifacts"))
+    tracking_summary = _mapping(payload.get("tracking_summary"))
+    artifact_integrity = _mapping(tracking_summary.get("artifact_integrity"))
+    scene_graph = _mapping(
+        payload.get("scene_graph")
+        or chart.get("scene_graph")
+        or payload.get("broker_scene_graph_v3")
+    )
+    chart_dimensions = _image_dimensions(
+        chart_frame.get("artifact"),
+        chart.get("frame"),
+        artifacts.get("chart"),
+        chart_frame,
+        artifact_integrity.get("chart"),
+        artifact_integrity.get("selected_plane"),
+        tracking_summary.get("chart_region"),
+    )
+    window_dimensions = _image_dimensions(
+        surface.get("frame"),
+        artifacts.get("window"),
+        _mapping(payload.get("broker_surface")).get("frame"),
+    )
+    chart_plane_bounds = _coordinate_plane_bounds(
+        scene_graph.get("chart_region_chart_bounds"),
+        chart_dimensions,
+    )
+    window_plane_bounds = _coordinate_plane_bounds(
+        scene_graph.get("broker_surface_bounds"),
+        window_dimensions,
+    )
     visual_observation = _mapping(payload.get("visual_observation_v3"))
     waiting_for_new_frame = bool(
         _text(visual_observation.get("status")).upper() == "WAITING_FOR_NEW_FRAME"
@@ -1277,12 +2305,26 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         )
         public_layer = layer if layer in _LAYER_FAMILIES else _FAMILY_FALLBACK_LAYERS[family]
         role = _text(overlay.get("role"), "").lower()
+        scene_forecast_overlay = bool(
+            raw_type == "SCENE_FORECAST_STUDY"
+            or _is_scene_forecast_source(overlay)
+        )
+        if scene_forecast_overlay and raw_type in {
+            "LSTM_STUDY",
+            "SCENE_FORECAST_STUDY",
+        }:
+            label = "Scene forecaster"
         lstm_forecast_role = ""
         lstm_forecast_status = ""
-        if raw_type == "LSTM_STUDY" and (
-            "path" in role or "lstm_forecast_90_" in role
+        if raw_type in {"LSTM_STUDY", "SCENE_FORECAST_STUDY"} and (
+            "path" in role
+            or "lstm_forecast_90_" in role
+            or "lstm_forecast_composite" in role
+            or "scene_forecast_composite" in role
         ):
-            if "90_band" in role:
+            if "forecast_composite" in role:
+                lstm_forecast_role = "composite"
+            elif "90_band" in role:
                 lstm_forecast_role = "band_90"
             elif "90_upper_boundary" in role:
                 lstm_forecast_role = "upper_90"
@@ -1290,20 +2332,45 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
                 lstm_forecast_role = "lower_90"
             elif "candle_event_path" in role:
                 lstm_forecast_role = "center"
+            forecast_noun = "events" if lstm_forecast_role == "composite" else "path"
+            forecast_prefix = "Scene forecaster" if scene_forecast_overlay else "LSTM V3"
             if "stale_diagnostic" in role:
                 lstm_forecast_status = "STALE"
-                label = "LSTM V3 last valid path - diagnostic"
+                label = f"{forecast_prefix} last valid {forecast_noun} - diagnostic"
             elif "no_edge" in role:
                 lstm_forecast_status = "NO_EDGE"
-                label = "LSTM V3 path - NO EDGE - diagnostic"
+                label = f"{forecast_prefix} {forecast_noun} - NO EDGE - diagnostic"
+            elif "low_confidence" in role:
+                lstm_forecast_status = "LOW_CONFIDENCE"
+                label = f"{forecast_prefix} {forecast_noun} - LOW CONFIDENCE - diagnostic"
+            elif role.endswith("_diagnostic"):
+                lstm_forecast_status = "DIAGNOSTIC"
+                label = f"{forecast_prefix} {forecast_noun} - diagnostic"
             elif "authorized" in role:
                 lstm_forecast_status = "AUTHORIZED"
-                label = "LSTM V3 authorized path"
+                label = f"{forecast_prefix} authorized {forecast_noun}"
             else:
                 # Legacy V3 path objects remain explicitly diagnostic.  An
                 # absent risk status must never be promoted by presentation.
                 lstm_forecast_status = "NO_EDGE"
-                label = "LSTM V3 path - NO EDGE - diagnostic"
+                label = f"{forecast_prefix} {forecast_noun} - NO EDGE - diagnostic"
+            belief_contract = _forecast_belief_contract(overlay)
+            belief_state = _text(belief_contract.get("belief_state"), "").upper()
+            committed_side = _side(belief_contract.get("committed_side"))
+            if scene_forecast_overlay and (
+                belief_state == "REVERSAL_PENDING"
+                or (
+                    lstm_forecast_status == "AUTHORIZED"
+                    and (
+                        belief_state != "STABLE"
+                        or committed_side not in _DIRECTIONAL_SIDES
+                    )
+                )
+            ):
+                # A pending/reacquiring scene belief is informative but cannot
+                # surface as an authorized forecast revision.
+                lstm_forecast_status = "NO_EDGE"
+                label = f"{forecast_prefix} {forecast_noun} - revision under review"
         raw_coordinate_mode = _text(
             overlay.get("coordinate_space") or overlay.get("coordinate_mode"),
             "CHART_IMAGE_SPACE",
@@ -1363,6 +2430,30 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         dedup_key = (object_id, str(overlay_frame or ""))
         if dedup_key in seen:
             continue
+        public_bounds = _bounds(overlay.get("bounds") or overlay.get("bbox"))
+        public_points = _point_pairs(overlay.get("points"))
+        public_line_points = _point_pairs(overlay.get("line_points"))
+        coordinate_units = _coordinate_units(overlay)
+        coordinate_space = _coordinate_space(overlay)
+        if latest_candle:
+            # A one-point close anchor is intentionally published only for the
+            # latest candle and only when it is corroborated by this frame's
+            # chart-pixel tracker bundle.
+            public_points = _current_tracked_close_point(
+                payload,
+                overlay,
+                display_frame_id=display_frame_id,
+                chart_plane_bounds=chart_plane_bounds,
+            )
+        if not _geometry_is_on_declared_plane(
+            bounds=public_bounds,
+            points=public_points,
+            line_points=public_line_points,
+            coordinate_units=coordinate_units,
+        ):
+            # A label with no verified chart geometry is exactly the floating
+            # overlay failure this contract is designed to prevent.
+            continue
         seen.add(dedup_key)
         public_overlay: dict[str, object] = {
             "id": object_id,
@@ -1373,9 +2464,9 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             "layer": public_layer,
             "label": label,
             "label_hidden": label_hidden,
-            "bounds": _bounds(overlay.get("bounds") or overlay.get("bbox")),
-            "points": _point_pairs(overlay.get("points")),
-            "line_points": _point_pairs(overlay.get("line_points")),
+            "bounds": public_bounds,
+            "points": public_points,
+            "line_points": public_line_points,
             "confidence": _confidence(overlay.get("confidence"), overlay.get("truth_score")),
             "lifecycle": (
                 "historical"
@@ -1386,26 +2477,209 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             ),
             "frame_id": overlay_frame,
             "coordinate_space": _coordinate_space(overlay),
-            "coordinate_units": _coordinate_units(overlay),
+            "coordinate_units": coordinate_units,
         }
+        if scene_forecast_overlay:
+            public_overlay.update(_scene_forecast_boundary_contract(overlay))
         if lstm_forecast_role:
-            # The centre line is the operator's expected path, while the LSTM
-            # family is reserved for its uncertainty envelope.  Keeping those
-            # identities distinct makes the two toggles useful without
-            # duplicating geometry when both are enabled.
-            if lstm_forecast_role == "center":
-                public_overlay["family"] = "prediction"
-                public_overlay["layer"] = "prediction_path"
+            interval = _forecast_interval(overlay.get("interval"))
+            forecast_band_points = _point_pairs(
+                overlay.get("forecast_band_points")
+            )
+            forecast_candles = _forecast_candle_rows(overlay.get("forecast_candles"))
+            forecast_scenarios = _forecast_scenario_rows(
+                overlay.get("forecast_scenarios")
+            )
+            forecast_anchor = _forecast_anchor(overlay.get("forecast_anchor"))
+            forecast_coordinate_space = (
+                "window"
+                if _text(
+                    overlay.get("forecast_coordinate_space"),
+                    "chart",
+                ).lower()
+                == "window"
+                else "chart"
+            )
+            forecast_coordinate_units = (
+                "pixels"
+                if _text(
+                    overlay.get("forecast_coordinate_units"),
+                    "normalized",
+                ).lower()
+                == "pixels"
+                else "normalized"
+            )
+            coordinate_plane_bounds = (
+                window_plane_bounds
+                if coordinate_space == "window"
+                else chart_plane_bounds
+            )
+            forecast_plane_bounds = (
+                window_plane_bounds
+                if forecast_coordinate_space == "window"
+                else chart_plane_bounds
+            )
+            normalized_forecast_scenarios: list[dict[str, object]] = []
+            for scenario in forecast_scenarios:
+                scenario_points = _points_as_normalized(
+                    cast(
+                        Sequence[Sequence[object]],
+                        scenario.get("line_points", []),
+                    ),
+                    units=forecast_coordinate_units,
+                    plane_bounds=forecast_plane_bounds,
+                )
+                if len(scenario_points) != 13:
+                    normalized_forecast_scenarios = []
+                    break
+                normalized_forecast_scenarios.append(
+                    {**scenario, "line_points": scenario_points}
+                )
+            selected_scenarios = [
+                scenario
+                for scenario in normalized_forecast_scenarios
+                if bool(scenario.get("selected"))
+            ]
+            overlay_belief = _forecast_belief_contract(overlay)
+            committed_scenario_side = _side(
+                overlay_belief.get("committed_side")
+            )
+            if lstm_forecast_role == "composite" and (
+                len(public_line_points) != 13
+                or len(forecast_candles) != 12
+                or len(normalized_forecast_scenarios) != 3
+                or len(selected_scenarios) != 1
+                or (
+                    committed_scenario_side in _DIRECTIONAL_SIDES
+                    and _side(selected_scenarios[0].get("side"))
+                    != committed_scenario_side
+                )
+                or coordinate_space != forecast_coordinate_space
+                or not _forecast_paths_match(
+                    cast(Sequence[Sequence[object]], public_line_points),
+                    cast(
+                        Sequence[Sequence[object]],
+                        next(
+                            (
+                                scenario.get("line_points", [])
+                                for scenario in forecast_scenarios
+                                if bool(scenario.get("selected"))
+                            ),
+                            (),
+                        ),
+                    ),
+                    left_units=coordinate_units,
+                    right_units=forecast_coordinate_units,
+                    plane_bounds=coordinate_plane_bounds,
+                )
+                or not _forecast_anchor_matches_path(
+                    forecast_anchor,
+                    cast(
+                        Sequence[Sequence[object]],
+                        selected_scenarios[0].get("line_points", []),
+                    ),
+                    path_units="normalized",
+                    plane_bounds=forecast_plane_bounds,
+                )
+            ):
+                continue
+            if lstm_forecast_role == "composite":
+                normalized_bounds = _bounds_as_normalized(
+                    cast(Sequence[object], public_bounds),
+                    units=coordinate_units,
+                    plane_bounds=coordinate_plane_bounds,
+                )
+                normalized_points = _points_as_normalized(
+                    cast(Sequence[Sequence[object]], public_points),
+                    units=coordinate_units,
+                    plane_bounds=coordinate_plane_bounds,
+                )
+                normalized_band_points = _points_as_normalized(
+                    cast(Sequence[Sequence[object]], forecast_band_points),
+                    units=forecast_coordinate_units,
+                    plane_bounds=forecast_plane_bounds,
+                )
+                if (
+                    len(normalized_bounds) != 4
+                    or (public_points and len(normalized_points) != len(public_points))
+                    or (
+                        forecast_band_points
+                        and len(normalized_band_points) != len(forecast_band_points)
+                    )
+                ):
+                    continue
+                # The public DTO uses one canonical normalized chart plane.
+                # This also lets the API's final atomic-bundle guard compare
+                # the selected scenario to the centerline without repeating a
+                # private pixel transform.
+                public_overlay.update(
+                    {
+                        "bounds": normalized_bounds,
+                        "points": normalized_points,
+                        "line_points": [
+                            list(point)
+                            for point in cast(
+                                Sequence[Sequence[float]],
+                                selected_scenarios[0]["line_points"],
+                            )
+                        ],
+                        "coordinate_space": forecast_coordinate_space,
+                        "coordinate_units": "normalized",
+                    }
+                )
+                forecast_band_points = normalized_band_points
+                forecast_scenarios = normalized_forecast_scenarios
+                forecast_coordinate_units = "normalized"
             public_overlay.update(
                 {
                     "forecast_role": lstm_forecast_role,
                     "forecast_status": lstm_forecast_status,
                     "forecast_authorized": lstm_forecast_status == "AUTHORIZED",
+                    "trade_authorization_status": (
+                        "AUTHORIZED" if lstm_forecast_status == "AUTHORIZED" else "NO_EDGE"
+                    ),
+                    "forecast_quality_status": _text(
+                        overlay.get("forecast_quality_status"),
+                        lstm_forecast_status,
+                        limit=32,
+                    ).upper(),
+                    "forecast_direction": _side(overlay.get("forecast_direction")),
+                    "body_bias": _side(overlay.get("body_bias")),
+                    "direction_conflict": _explicit_bool(overlay.get("direction_conflict")) is True,
+                    "path_confidence_status": _text(
+                        overlay.get("path_confidence_status"),
+                        "UNAVAILABLE",
+                        limit=32,
+                    ).upper(),
+                    "forecast_band_points": forecast_band_points,
+                    "forecast_candles": forecast_candles,
+                    "forecast_scenarios": forecast_scenarios,
+                    "forecast_anchor": forecast_anchor,
+                    "trajectory_mode": _side(overlay.get("trajectory_mode")),
+                    "trajectory_mode_probability_calibrated": (
+                        _explicit_bool(
+                            overlay.get("trajectory_mode_probability_calibrated")
+                        )
+                        is True
+                    ),
+                    "forecast_coordinate_space": (
+                        forecast_coordinate_space
+                    ),
+                    "forecast_coordinate_units": (
+                        forecast_coordinate_units
+                    ),
+                    "interval": interval,
                     "horizon_unit": "CANDLE_EVENTS",
                     "clock_time_assumption": "NONE",
-                    "uncertainty_level": 0.90,
                 }
             )
+            if overlay_belief:
+                public_overlay.update(overlay_belief)
+            if bool(interval.get("calibrated")) and interval.get("level") is not None:
+                public_overlay["uncertainty_level"] = interval["level"]
+        public_overlay.update(
+            _overlay_identity_and_revisions(overlay, public_overlay)
+        )
         output.append(public_overlay)
     return output
 
@@ -1615,6 +2889,14 @@ def build_operator_workspace_v1(
     chart_focus_url = (
         f"{surface_base}/latest-chart{surface_frame_query}" if surface_available else ""
     )
+    overlay_viewport = _overlay_viewport_contract(source, tracking_summary)
+    surface_revisions = _surface_overlay_revision_contract(
+        source,
+        tracking_summary,
+        market,
+        overlay_viewport,
+        overlays,
+    )
     result: dict[str, object] = {
         "schema_version": OPERATOR_WORKSPACE_SCHEMA_VERSION,
         "session_id": session_id,
@@ -1637,9 +2919,10 @@ def build_operator_workspace_v1(
             "fallback_url": chart_focus_url,
             "fallback_space": "chart",
             "focus_url": chart_focus_url,
-            "overlay_viewport": _overlay_viewport_contract(source, tracking_summary),
+            "overlay_viewport": overlay_viewport,
             "frame_id": display_frame,
             "updated_at": observed_at,
+            **surface_revisions,
         },
         "overlays": overlays,
         "history": history,

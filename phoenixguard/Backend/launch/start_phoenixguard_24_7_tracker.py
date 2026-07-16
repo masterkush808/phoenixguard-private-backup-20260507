@@ -161,7 +161,10 @@ def _live_fast_display_heartbeat(
     """Keep the broker display buffer fresh while the study worker is busy."""
     if not bool(session.get("tracking_enabled", False)):
         return last_heartbeat_epoch
-    enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", "1") or "1").strip().lower()
+    # Display-only captures are opt-in.  Advancing display authority while the
+    # model worker is still studying the prior capture creates a chart/model
+    # frame split, so strict forecast geometry has no safe path to render.
+    enabled = str(os.getenv("PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT", "0") or "0").strip().lower()
     if enabled in {"0", "false", "off", "no"}:
         return last_heartbeat_epoch
     try:
@@ -814,7 +817,7 @@ def main() -> int:
     parser.add_argument("--host", default=os.getenv("PHOENIXGUARD_MOBILE_API_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("PHOENIXGUARD_MOBILE_API_PORT", "8793")))
     parser.add_argument("--session-id", default=os.getenv("PHOENIXGUARD_TRACKER_SESSION_ID", "pocket-live-8788"))
-    parser.add_argument("--capture-interval", type=float, default=float(os.getenv("PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC", "15.0")))
+    parser.add_argument("--capture-interval", type=float, default=float(os.getenv("PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC", "30.0")))
     parser.add_argument("--window-query", default=os.getenv("PHOENIXGUARD_BROKER_WINDOW_QUERY", "Pocket Option"))
     parser.add_argument("--window-hwnd", type=int, default=_parse_positive_int(os.getenv("PHOENIXGUARD_BROKER_WINDOW_HWND", "0")))
     parser.add_argument(

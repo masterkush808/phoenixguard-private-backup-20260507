@@ -2127,14 +2127,18 @@ def test_compact_live_state_holds_complete_session_when_surface_outruns_overlay_
                 "last_window_path": str(window),
                 "tracking_summary": {
                     "market_selector_visual_changed": True,
-                    "market_selector_rebind_required": True,
+                    "market_selector_rebind_required": False,
                 },
                 "latest_signal": {
                     "market_selector_visual_changed": True,
-                    "market_selector_rebind_required": True,
+                    "market_selector_rebind_required": False,
                 },
             }
         ),
+        encoding="utf-8",
+    )
+    (session_dir / "compact_live_state.json").write_text(
+        (session_dir / "session.json").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
     (session_dir / "display_state.json").write_text(
@@ -2210,6 +2214,10 @@ def test_compact_live_state_does_not_reuse_studying_new_pair_cache_after_overlay
         },
     }
     (session_dir / "session.json").write_text(json.dumps(base_session), encoding="utf-8")
+    (session_dir / "compact_live_state.json").write_text(
+        json.dumps(base_session),
+        encoding="utf-8",
+    )
     (session_dir / "display_state.json").write_text(
         json.dumps(
             {
@@ -2243,6 +2251,10 @@ def test_compact_live_state_does_not_reuse_studying_new_pair_cache_after_overlay
         "overlay_source_window_signature": "new",
     }
     (session_dir / "session.json").write_text(json.dumps(recovered_session), encoding="utf-8")
+    (session_dir / "compact_live_state.json").write_text(
+        json.dumps(recovered_session),
+        encoding="utf-8",
+    )
     (session_dir / "display_state.json").write_text(
         json.dumps(
             {

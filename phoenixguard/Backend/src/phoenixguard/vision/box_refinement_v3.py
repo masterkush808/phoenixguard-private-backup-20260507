@@ -1556,6 +1556,37 @@ def resolve_precision_overlays_v3(
             )
         except Exception:
             continue
+        # Forecast belief/revision fields are not part of the generic visual
+        # object schema, but they are part of the scene forecaster's public
+        # safety contract. Precision refinement may alter geometry; it must
+        # never erase which side is committed or which side is merely pending.
+        for key in (
+            "forecast_engine",
+            "forecast_provider",
+            "forecast_provider_status",
+            "forecast_id",
+            "forecast_revision",
+            "belief_revision",
+            "belief_state",
+            "committed_side",
+            "candidate_side",
+            "change_probability",
+            "confirmation_events",
+            "required_events",
+            "closed_candle_key",
+            "closed_candle_sequence",
+            "forecast_computed_frame_id",
+            "source_forecast_frame_id",
+            "geometry_projected_frame_id",
+            "geometry_frame_match_verified",
+            "geometry_reprojected_from_cache",
+            "geometry_projection_provenance",
+            "detector_coverage_rebase_applied",
+            "cache_replaced_for_detector_coverage_rebase",
+            "scene_feature_audit",
+        ):
+            if key in raw:
+                row[key] = raw[key]
         row["layer"] = overlay_layer_name(row.get("type"), row.get("layer"))
         raw_display_label = _text(row.get("raw_display_label") or row.get("display_label") or row.get("label"))
         display_label, display_label_status, unmapped_display_label = normalize_overlay_display_label(
@@ -1568,6 +1599,24 @@ def resolve_precision_overlays_v3(
         row["short_label"] = display_label
         row["display_label_status"] = display_label_status
         row["unmapped_display_label"] = unmapped_display_label
+        if str(raw.get("forecast_engine") or "").strip().upper() == "SCENE_FORECASTER_V3":
+            # The scene forecaster still travels through the historical
+            # LSTM_STUDY visual type for wire compatibility.  Do not let the
+            # generic type label rename the replacement engine back to LSTM.
+            scene_label = _text(
+                raw.get("display_label")
+                or raw.get("short_label")
+                or raw.get("label"),
+                "SCENE FORECASTER E1-E12",
+            )
+            if "SCENE" not in scene_label.upper():
+                scene_label = "SCENE FORECASTER E1-E12"
+            row["raw_display_label"] = scene_label
+            row["display_label"] = scene_label
+            row["short_label"] = scene_label
+            row["label"] = scene_label
+            row["display_label_status"] = "CANONICAL"
+            row["unmapped_display_label"] = ""
         row["z_index"] = int(_float(row.get("z_index"), OVERLAY_TYPE_PRIORITY.get(str(row.get("type") or ""), 0)))
         row.setdefault("precision_flags", [])
         live_mode = normalized_mode in LIVE_VIEW_MODES

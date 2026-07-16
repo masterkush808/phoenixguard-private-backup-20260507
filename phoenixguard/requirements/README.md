@@ -7,7 +7,7 @@ random packages into global Python, Conda, runtime folders, or the wrong profile
 
 | Profile | Source | Locked file(s) | Intended use |
 | --- | --- | --- | --- |
-| Live | `requirements/live.in` | `requirements/locks/live-win-py311.txt`, `requirements/locks/live-linux-py311.txt` | `FINAL_LIVE` tracker, mobile API, overlay dashboard, package reporter, and Ubuntu cloud brain. |
+| Live | `requirements/live.in` | `requirements/locks/live-win-py311.txt`, `requirements/locks/live-linux-py311.txt` | `FINAL_LIVE` tracker, mobile API, overlay dashboard, package reporter, local-only Chronos scene forecasting, and Ubuntu cloud brain. |
 | Business | `requirements/business.in` | `requirements/locks/business-win-py311.txt` | Protected share desk and business API surfaces. |
 | Dev | `requirements/dev.in` | `requirements/locks/dev-win-py311.txt` | Full repo tests, Pyright, and developer tooling. |
 | Training | `requirements/training.in` | `requirements/locks/training-win-py311.txt` | Model training and export workflows. |
@@ -15,6 +15,11 @@ random packages into global Python, Conda, runtime folders, or the wrong profile
 
 Launchers should prefer the locked profile for their surface. The top-level `requirements.txt` is not
 the live production authority.
+
+Regenerate each platform lock with `pip-tools` under Python 3.11 on that target platform. In
+particular, compile `live-linux-py311.txt` under Linux rather than copying or relabeling the Windows
+resolution. Because `requirements/dev.in` includes `requirements/live.in`, regenerate the Windows
+dev lock whenever the live input changes.
 
 ## Runtime Boundary
 

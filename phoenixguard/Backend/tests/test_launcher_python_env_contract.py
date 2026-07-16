@@ -195,6 +195,100 @@ def test_canonical_live_launcher_enables_validated_native_display_capture_fallba
     assert "display_native_capture_fallback_enabled = $env:PHOENIXGUARD_DISPLAY_ALLOW_NATIVE_CAPTURE_FALLBACK" in text
 
 
+def test_canonical_live_launchers_keep_display_and_forecast_frames_atomic() -> None:
+    live_ready = _read("Backend/launch/launch_phoenixguard_live_ready.ps1")
+    full_local = _read("Backend/launch/start_phoenixguard_full_local.ps1")
+
+    assert "$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT = '0'" in live_ready
+    assert "else { '0' }" in next(
+        line
+        for line in full_local.splitlines()
+        if "PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT =" in line
+    )
+
+
+def test_all_production_tracker_and_shooter_defaults_are_thirty_seconds() -> None:
+    expected_fragments = {
+        "Backend/src/phoenixguard/mobile_api/app.py": (
+            "_WINDOW_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC = 30.0",
+        ),
+        "Backend/src/phoenixguard/mobile_api/window_tracker.py": (
+            "_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC = 30.0",
+        ),
+        "Backend/launch/start_phoenixguard_24_7_tracker.py": (
+            'PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC", "30.0"',
+        ),
+        "Backend/launch/start_phoenixguard_24_7_tracker.ps1": (
+            "else { 30.0 }",
+        ),
+        "Backend/launch/start_live_dashboard.ps1": (
+            "else { 30.0 }",
+        ),
+        "Backend/launch/launch_live_ready.ps1": (
+            "else { 30.0 }",
+        ),
+        "Backend/launch/launch_full_then_shooter.ps1": (
+            "else { 30.0 }",
+        ),
+        "Backend/launch/launch_phoenixguard_live_ready.ps1": (
+            "PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 30.0 }",
+            "PHOENIXGUARD_SHOOTER_POLL_SEC) { [double]$env:PHOENIXGUARD_SHOOTER_POLL_SEC } else { 30.0 }",
+        ),
+        "Backend/launch/start_phoenixguard_full_local.ps1": (
+            "PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 30.0 }",
+            "PHOENIXGUARD_SHOOTER_POLL_SEC) { [double]$env:PHOENIXGUARD_SHOOTER_POLL_SEC } else { 30.0 }",
+        ),
+        "Backend/launch/deploy/windows/Start-PhoenixGuardVmMonitor.ps1": (
+            "PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC' -DefaultValue '30.0'",
+            "PHOENIXGUARD_SHOOTER_POLL_SEC' -DefaultValue '30.0'",
+        ),
+        "Backend/launch/deploy/windows/phoenixguard.vm-monitor.env.ps1": (
+            "PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC = '30.0'",
+            "PHOENIXGUARD_SHOOTER_POLL_SEC = '30.0'",
+        ),
+        "Backend/launch/deploy/windows/phoenixguard.vm-monitor.env.example.ps1": (
+            "PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC = '30.0'",
+            "PHOENIXGUARD_SHOOTER_POLL_SEC = '30.0'",
+        ),
+        "Backend/tools/start_entry_allowance_burn_orchestrator.ps1": (
+            "PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 30.0 }",
+            "PHOENIXGUARD_SHOOTER_POLL_SEC) { [double]$env:PHOENIXGUARD_SHOOTER_POLL_SEC } else { 30.0 }",
+        ),
+        "Backend/launch/shooter.py": (
+            "DEFAULT_POLL_SECONDS = 30.0",
+        ),
+        "Backend/tools/enter_now_floating_gui.py": (
+            '"--poll-ms", type=int, default=30000',
+        ),
+        "Backend/tools/start_enter_now_floating_gui.ps1": (
+            "[int]$PollMilliseconds = 30000",
+        ),
+        "Backend/tools/certify_process_topology_v3.py": (
+            "--capture-interval 30 --no-open-dashboard",
+            "--poll 30.0 --heartbeat 4.0",
+        ),
+        "Backend/tools/certify_shooter_persistence_v3.py": (
+            "--poll 30.0 --heartbeat 4.0",
+        ),
+        "Backend/launch/deploy/windows/WINDOWS_VM_CONTINUOUS_MONITOR.md": (
+            r".\.venv-live\Scripts\python.exe Backend\launch\shooter.py",
+            "--poll 30.0 --heartbeat 4.0",
+        ),
+        "Developer/developer_tools/phoenixguard_kill_switch.py": (
+            '"--capture-interval-sec", type=float, default=30.0',
+            '"--shooter-poll-sec", type=float, default=30.0',
+        ),
+        "Developer/deployment/windows_worker_bootstrap.ps1": (
+            "[double]$CaptureIntervalSec = 30.0",
+        ),
+    }
+
+    for relative_path, fragments in expected_fragments.items():
+        text = _read(relative_path)
+        for fragment in fragments:
+            assert fragment in text, f"{relative_path} lost the 30-second production cadence"
+
+
 def test_dashboard_browser_launcher_quotes_chrome_profile_paths_with_spaces() -> None:
     text = _read("Backend/launch/start_phoenixguard_full_local.ps1")
 

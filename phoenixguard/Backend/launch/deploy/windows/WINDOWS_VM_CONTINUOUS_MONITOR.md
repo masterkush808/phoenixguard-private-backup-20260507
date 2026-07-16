@@ -33,8 +33,8 @@ Keep these defaults for tracker + shooter on the same VM:
 $env:PHOENIXGUARD_MONITOR_BIND_HOST = '127.0.0.1'
 $env:PHOENIXGUARD_MONITOR_BASE_HOST = '127.0.0.1'
 $env:PHOENIXGUARD_MOBILE_API_PORT = '8793'
-$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC = '15.0'
-$env:PHOENIXGUARD_SHOOTER_POLL_SEC = '1.0'
+$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC = '30.0'
+$env:PHOENIXGUARD_SHOOTER_POLL_SEC = '30.0'
 ```
 
 Use `0.0.0.0` only if the VM firewall, VPN, or authenticated tunnel protects port `8793`.
@@ -101,7 +101,7 @@ $env:PHOENIXGUARD_MONITOR_BASE_HOST = '127.0.0.1'
 Then from the local shooter machine:
 
 ```powershell
-.\.venv\Scripts\python.exe Backend\launch\shooter.py signal --session-id pocket-live-8788 --base-url http://VM_PRIVATE_IP:8793 --poll 15.0 --heartbeat 4.0 --preferred-source tracker --require-preferred-source --min-confidence 0.58 --max-signal-age 8
+.\.venv-live\Scripts\python.exe Backend\launch\shooter.py signal --session-id pocket-live-8788 --base-url http://VM_PRIVATE_IP:8793 --poll 30.0 --heartbeat 4.0 --preferred-source tracker --require-preferred-source --min-confidence 0.58 --max-signal-age 8
 ```
 
 Do not expose `8793` unauthenticated to the public internet.

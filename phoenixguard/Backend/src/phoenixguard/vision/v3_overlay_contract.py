@@ -2443,7 +2443,15 @@ def normalize_v3_overlay_object(
         "display_label_status": display_label_status,
         "unmapped_display_label": unmapped_display_label,
         "symbol": _text(raw.get("symbol") or raw.get("asset") or raw.get("pair")),
-        "timeframe": _text(raw.get("timeframe") or raw.get("tf") or raw.get("interval")),
+        "timeframe": _text(
+            raw.get("timeframe")
+            or raw.get("tf")
+            or (
+                raw.get("interval")
+                if not isinstance(raw.get("interval"), Mapping)
+                else ""
+            )
+        ),
         "layer": resolved_layer,
         "role": _text(raw.get("role") or role, TYPE_ROLE_MAP.get(overlay_type, "")),
         "visible_default": bool(
@@ -2570,6 +2578,21 @@ def normalize_v3_overlay_object(
         "summary_label",
         "expand_on_hover",
         "expand_on_click",
+        "forecast_band_points",
+        "forecast_candles",
+        "forecast_scenarios",
+        "forecast_anchor",
+        "forecast_coordinate_space",
+        "forecast_coordinate_units",
+        "forecast_direction",
+        "trajectory_mode",
+        "trajectory_mode_probability_calibrated",
+        "body_bias",
+        "direction_conflict",
+        "path_confidence_status",
+        "forecast_quality_status",
+        "trade_authorization_status",
+        "interval",
         "parent_overlay_id",
         "child_overlay_ids",
         "nesting_depth",

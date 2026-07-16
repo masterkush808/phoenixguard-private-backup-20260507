@@ -3,9 +3,9 @@ param(
     [string]$BrokerWindowQuery = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_QUERY) { $env:PHOENIXGUARD_BROKER_WINDOW_QUERY } else { 'The Most Innovative Trading Platform' }),
     [int]$BrokerWindowHwnd = $(if ($env:PHOENIXGUARD_BROKER_WINDOW_HWND) { [int]$env:PHOENIXGUARD_BROKER_WINDOW_HWND } else { 0 }),
     [string]$SessionId = $(if ($env:PHOENIXGUARD_TRACKER_SESSION_ID) { $env:PHOENIXGUARD_TRACKER_SESSION_ID } else { 'pocket-live-8788' }),
-    [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 15.0 }),
+    [double]$CaptureIntervalSec = $(if ($env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC) { [double]$env:PHOENIXGUARD_TRACKER_CAPTURE_INTERVAL_SEC } else { 30.0 }),
     [int]$WarmupSeconds = 20,
-    [double]$ShooterPollSec = $(if ($env:PHOENIXGUARD_SHOOTER_POLL_SEC) { [double]$env:PHOENIXGUARD_SHOOTER_POLL_SEC } else { 15.0 }),
+    [double]$ShooterPollSec = $(if ($env:PHOENIXGUARD_SHOOTER_POLL_SEC) { [double]$env:PHOENIXGUARD_SHOOTER_POLL_SEC } else { 30.0 }),
     [ValidateSet('chrome', 'default', 'edge')]
     [string]$DashboardBrowser = $(if ($env:PHOENIXGUARD_DASHBOARD_BROWSER) { $env:PHOENIXGUARD_DASHBOARD_BROWSER } else { 'chrome' }),
     [switch]$NoBrowser,
@@ -273,7 +273,10 @@ $env:PHOENIXGUARD_ARTIFACT_PNG_COMPRESS_LEVEL = '0'
 $env:PHOENIXGUARD_LIVE_MINIMAL_HOT_ARTIFACTS = '1'
 $env:PHOENIXGUARD_LIVE_FULL_OVERLAY_EVERY_N = '300'
 $env:PHOENIXGUARD_LIVE_CANDLE_MAX_WIDTH = '960'
-$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT = '1'
+# A display-only heartbeat advances the visible frame without a matching model
+# result.  Keep the operator surface on the last atomic chart + forecast bundle;
+# the full capture worker publishes the next bundle when inference completes.
+$env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT = '0'
 $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_SEC = '15.0'
 $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_POLL_SEC = '15.0'
 $env:PHOENIXGUARD_LIVE_FAST_DISPLAY_HEARTBEAT_TIMEOUT_SEC = '4.0'

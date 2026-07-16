@@ -67,6 +67,8 @@ PROFILES: dict[str, DependencyProfile] = {
             "mss",
             "torch",
             "torchvision",
+            "chronos-forecasting",
+            "transformers",
             "scikit-learn",
             "scipy",
             "cryptography",

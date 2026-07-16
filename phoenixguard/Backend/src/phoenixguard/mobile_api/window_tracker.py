@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import copy
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ import hashlib
 from importlib import import_module
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -31,7 +33,17 @@ from phoenixguard.core.utils import utc_now_iso
 from phoenixguard.decision.candle_movement_context_v3 import build_candle_movement_context_v3
 from phoenixguard.decision.decision_kernel import analyze_decision_kernel
 from phoenixguard.decision.high_frequency_candle_predictor import build_high_frequency_candle_forecast
-from phoenixguard.decision.lstm_candle_sequence_contributor_v3 import build_lstm_candle_sequence_contribution
+from phoenixguard.decision.forecast_belief_tracker_v3 import (
+    ForecastBeliefConfigV3,
+    ForecastBeliefTrackerV3,
+)
+from phoenixguard.decision.scene_forecast_contributor_v3 import (
+    build_scene_forecast_anchor_v3,
+    build_scene_forecast_contribution_v3,
+    reanchor_scene_forecast_geometry_v3,
+    resolve_closed_candle_identity_v3,
+    synchronize_scene_forecast_geometry_v3,
+)
 from phoenixguard.decision.model_council_v3 import (
     DEFAULT_AI_CONTRIBUTION_STRENGTHS,
     DEFAULT_EXECUTION_LANE_THRESHOLDS,
@@ -296,7 +308,7 @@ _EXECUTION_MIN_PRIMARY_TARGET_CANDLES = 10
 _EXECUTION_MAX_PRIMARY_TARGET_CANDLES = 36
 _MAJOR_TREND_LOCK_CONFIDENCE = 0.58
 _EXECUTION_FAILED_ATTEMPT_BACKOFF_SEC = 60.0
-_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC = 15.0
+_TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC = 30.0
 _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC = 300.0
 _EXECUTION_DEFAULT_MIN_CAPTURE_INTERVAL_SEC = 0.5
 _EXECUTION_DEFAULT_MAX_CAPTURE_INTERVAL_SEC = 30.0
@@ -758,11 +770,22 @@ def _compact_persisted_execution_packet(value: Mapping[str, Any]) -> dict[str, A
         "valid_until_epoch_sec",
         "valid_until_utc",
     }
-    packet = _compact_live_nested_payload(_compact_selected_mapping(value, selected))
+    deeply_compacted = {
+        "allowance_package",
+        "expected_move_time",
+        "history_context",
+        "model_council",
+        "opportunity_maturity",
+        "professional_trade_plan",
+        "promotion_trace",
+    }
+    packet = _compact_live_nested_payload(
+        _compact_selected_mapping(value, selected - deeply_compacted)
+    )
     allowance = _compact_live_state_allowance_package(value.get("allowance_package"))
     if allowance:
         packet["allowance_package"] = allowance
-    promotion = _compact_live_state_promotion_trace(value.get("promotion_trace"))
+    promotion = _compact_persisted_promotion_trace(value.get("promotion_trace"))
     if promotion:
         packet["promotion_trace"] = promotion
     council = value.get("model_council")
@@ -770,6 +793,18 @@ def _compact_persisted_execution_packet(value: Mapping[str, Any]) -> dict[str, A
         compact_council = _compact_live_state_model_council_for_packet(council)
         if compact_council:
             packet["model_council"] = compact_council
+    opportunity = _compact_persisted_opportunity_maturity(value.get("opportunity_maturity"))
+    if opportunity:
+        packet["opportunity_maturity"] = opportunity
+    professional_plan = _compact_live_state_professional_trade_plan(value.get("professional_trade_plan"))
+    if professional_plan:
+        packet["professional_trade_plan"] = professional_plan
+    expected_move_time = _compact_live_state_expected_move_time(value.get("expected_move_time"))
+    if expected_move_time:
+        packet["expected_move_time"] = expected_move_time
+    history_context = value.get("history_context")
+    if history_context not in (None, "", [], {}):
+        packet["history_context"] = _compact_live_state_observability_value(history_context)
     playbook_ai_summary = _compact_live_state_playbook_ai_summary(value)
     if playbook_ai_summary:
         packet["playbook_ai_summary_v3"] = playbook_ai_summary
@@ -782,6 +817,360 @@ def _compact_selected_mapping(value: Mapping[str, Any], keys: set[str]) -> dict[
         for key in keys
         if value.get(key) not in (None, "", [], {})
     }
+
+
+_PERSISTED_FORECAST_SUMMARY_KEYS = {
+    "schema_version",
+    "stack_version",
+    "modality",
+    "training_source",
+    "skill",
+    "model_version",
+    "forecast_artifact_source",
+    "artifact_available",
+    "artifact_loaded",
+    "architecture",
+    "legacy_restored",
+    "artifact_production_gate_passed",
+    "production_authorized",
+    "fresh",
+    "blocker",
+    "contribution",
+    "raw_contribution",
+    "effective_contribution",
+    "strength",
+    "side",
+    "candle_body_side",
+    "selective_side",
+    "selective_authorized",
+    "selective_status",
+    "trade_authorization_status",
+    "forecast_quality_status",
+    "frame_id",
+    "display_frame_id",
+    "forecast_computed_frame_id",
+    "source_forecast_frame_id",
+    "geometry_projected_frame_id",
+    "geometry_frame_match_verified",
+    "geometry_reprojected_from_cache",
+    "geometry_projection_provenance",
+    "path_side",
+    "path_target_semantics",
+    "trajectory_modes",
+    "trajectory_decoder_status",
+    "trajectory_mode",
+    "trajectory_mode_probabilities",
+    "trajectory_mode_probability_calibrated",
+    "path_confidence",
+    "path_confidence_status",
+    "direction_conflict",
+    "net_expected_path_delta_norm",
+    "next_1_direction",
+    "next_1_probability",
+    "next_2_direction",
+    "next_2_probability",
+    "continuation_probability",
+    "reversal_probability",
+    "pullback_first_probability",
+    "confidence",
+    "sequence_length",
+    "input_window_candles",
+    "horizon_steps",
+    "horizon_unit",
+    "clock_time_assumption",
+    "forecast_available",
+    "forecast_suppressed",
+    "forecast_suppression_reasons",
+    "forecast_quality_warnings",
+    "trajectory_interval_status",
+    "trajectory_interval",
+    "progression_play",
+    "timeframe",
+    "sequence_phase",
+    "market_play_label",
+    "interpretation",
+    "reason",
+    "council_role",
+    "council_gate_status",
+    "council_advisory_only",
+    "gate_status",
+    "gate_reason",
+    "double_gate_passed",
+    "playbook_participation_allowed",
+    "score_influence_allowed",
+    "candidate_reframe_allowed",
+    "advisory_only",
+    "execution_authority",
+    "can_grant_entry_permission",
+    "can_bypass_playbook_gates",
+    "source_model_version",
+    "provider",
+    "provider_status",
+    "forecast_id",
+    "forecast_revision",
+    "closed_candle_key",
+    "closed_candle_sequence",
+    "closed_candle_transition_observed",
+    "closed_candle_transition_reason",
+    "closed_candle_match_scores",
+    "closed_candle_identity_state",
+    "scene_context_frozen_at_closed_candle",
+    "frame_reused_without_reforecast",
+    "same_event_cache_rebuild_required",
+    "cache_replaced_for_detector_coverage_rebase",
+    "detector_coverage_rebase_applied",
+    "probability_calibrated",
+    "raw_side_probabilities",
+    "side_probabilities",
+    "belief_state",
+    "belief_revision",
+    "committed_side",
+    "candidate_side",
+    "confirmation_events",
+    "required_events",
+    "belief_reason",
+    "belief_posterior",
+    "change_probability",
+    "belief_tracker_checkpoint",
+    "line_points",
+    "forecast_path",
+    "forecast_candles",
+    "forecast_scenarios",
+    "forecast_band_points",
+    "forecast_anchor",
+    "forecast_quantiles",
+    "interval",
+}
+
+
+def _compact_persisted_forecast_summary(value: Any) -> dict[str, Any]:
+    """Keep forecast gates plus the bounded geometry needed by live overlays."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    compact = _compact_selected_mapping(mapping, _PERSISTED_FORECAST_SUMMARY_KEYS)
+    return cast(
+        dict[str, Any],
+        _strip_packet_self_references(_compact_live_state_observability_value(compact)),
+    )
+
+
+def _compact_persisted_two_candle_study(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    selected = {
+        "schema_version",
+        "status",
+        "timeframe",
+        "frame_id",
+        "sequence_id",
+        "current_candle_state",
+        "last_completed_candle",
+        "current_developing_candle",
+        "next_candle_forecast",
+        "second_next_candle_forecast",
+        "candle_forecasts",
+        "study_steps",
+        "primary_pressure",
+        "pattern",
+        "model_council_agreement",
+        "display_as",
+        "do_not_render_synthetic_candles",
+        "summary",
+    }
+    compact = _compact_selected_mapping(mapping, selected)
+    nested_lstm = _compact_persisted_forecast_summary(mapping.get("lstm_contribution"))
+    if nested_lstm:
+        compact["lstm_contribution"] = nested_lstm
+    return cast(
+        dict[str, Any],
+        _strip_packet_self_references(_compact_live_state_observability_value(compact)),
+    )
+
+
+def _compact_persisted_book_strategy(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    selected = {
+        "schema_version",
+        "source",
+        "execution_authority",
+        "final_decider",
+        "model_council_role",
+        "playbook",
+        "maturity_state",
+        "state",
+        "side",
+        "playbook_signal",
+        "entry_profile",
+        "market_phase_v3",
+        "reaction_type",
+        "significant_structure",
+        "candlestick_reaction",
+        "strategy_combo",
+        "astar_decision_state_v3",
+        "watch_conditions",
+        "confidence",
+        "denied_at",
+        "next_required",
+        "hard_blockers",
+        "blockers",
+        "soft_warnings",
+        "strategy_read",
+        "single_timeframe_mode",
+        "multiple_timeframe_required",
+        "rules_applied",
+        "typed_contract_schema_version",
+        "playbook_ai_summary_v3",
+        "dual_thesis_report_v3",
+    }
+    compact = _compact_selected_mapping(mapping, selected)
+    lstm_evidence = _compact_persisted_forecast_summary(mapping.get("lstm_council_evidence_v3"))
+    if lstm_evidence:
+        compact["lstm_council_evidence_v3"] = lstm_evidence
+    return cast(
+        dict[str, Any],
+        _strip_packet_self_references(_compact_live_state_observability_value(compact)),
+    )
+
+
+def _compact_persisted_opportunity_maturity(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    selected = {
+        "schema_version",
+        "state",
+        "confidence",
+        "candidate_side",
+        "visual_integrity",
+        "hard_blockers",
+        "blockers",
+        "soft_contributors",
+        "entry_quality_factors",
+        "denied_at",
+        "next_required",
+        "execution_authority",
+        "final_decider",
+        "model_council_role",
+        "dual_thesis_report_v3",
+        "playbook_ai_summary_v3",
+        "professional_thesis_resolution",
+        "professional_thesis_candles",
+        "professional_playbook_reasoning_override_allowed",
+        "reasoning_override_reason",
+        "side_conflict_requested",
+        "side_conflict_resolved_by_professional_thesis",
+        "side_conflict_resolved_by_current_pressure",
+        "astar_decision_state_v3",
+        "authorization_survival_trace_v3",
+    }
+    compact = _compact_selected_mapping(mapping, selected)
+    book_strategy = _compact_persisted_book_strategy(mapping.get("book_strategy"))
+    if book_strategy:
+        compact["book_strategy"] = book_strategy
+    lstm_evidence = _compact_persisted_forecast_summary(mapping.get("lstm_council_evidence_v3"))
+    if lstm_evidence:
+        compact["lstm_council_evidence_v3"] = lstm_evidence
+    professional_plan = _compact_live_state_professional_trade_plan(mapping.get("professional_trade_plan"))
+    if professional_plan:
+        compact["professional_trade_plan"] = professional_plan
+    return cast(
+        dict[str, Any],
+        _strip_packet_self_references(_compact_live_state_observability_value(compact)),
+    )
+
+
+def _compact_persisted_promotion_trace(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    compact = _compact_live_state_promotion_trace(mapping)
+    # The promotion trace is an audit index, not a second copy of the complete
+    # council.  In live payloads it can contain allowance, playbook, maturity,
+    # LSTM, and professional-plan packets again; those authoritative packets
+    # are persisted at their top-level locations (and the full forecast lives
+    # in forecast_snapshot_v3).  Keep the small gate evidence needed to explain
+    # why promotion passed or stopped.
+    for key in (
+        "accepted_lanes",
+        "authorization_survival_trace_v3",
+        "bad_entry_filter",
+        "candidate_stability_policy_v3",
+        "current_candle_acceptance",
+        "entry_permission_v3",
+        "execution_opportunity_window_v3",
+        "instrument_context_evidence",
+        "lane_thresholds",
+        "promotion_failure_audit_v3",
+    ):
+        item = mapping.get(key)
+        if item not in (None, "", [], {}):
+            compact[key] = _compact_live_state_observability_value(item)
+    execution_lane = _compact_live_state_execution_lane(mapping.get("execution_lane"))
+    if execution_lane:
+        compact["execution_lane"] = execution_lane
+    return cast(dict[str, Any], _strip_packet_self_references(compact))
+
+
+def _compact_persisted_council_reference(value: Any) -> dict[str, Any]:
+    """Persist a nested council reference without cloning its top-level body."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    selected = {
+        "accepted_lanes",
+        "arbitration_reason",
+        "candidate_id",
+        "candidate_stage",
+        "denied_at",
+        "entry_permission_v3",
+        "entry_quality",
+        "execution",
+        "execution_threshold",
+        "final_execution_score",
+        "final_side",
+        "final_state",
+        "lane_accepted",
+        "memory_confirmation",
+        "next_required",
+        "non_executable_state",
+        "packet_result",
+        "reasoning_arbitration",
+        "release_condition",
+        "release_state",
+        "score",
+        "selected_execution_lane",
+        "sequence_context_readiness",
+        "side",
+        "state",
+        "timing_decision",
+        "trade_permission",
+        "true_blocker",
+    }
+    compact = cast(
+        dict[str, Any],
+        _strip_packet_self_references(
+            _compact_live_state_observability_value(_compact_selected_mapping(mapping, selected))
+        ),
+    )
+    sequence_context = _compact_live_state_sequence_context(mapping.get("sequence_context"))
+    if sequence_context:
+        compact["sequence_context"] = sequence_context
+    promotion = _compact_persisted_promotion_trace(mapping.get("promotion_trace"))
+    if promotion:
+        compact["promotion_trace"] = promotion
+    execution_lane = _compact_live_state_execution_lane(mapping.get("execution_lane"))
+    if execution_lane:
+        compact["execution_lane"] = execution_lane
+    lstm_summary = _compact_persisted_forecast_summary(mapping.get("lstm_contribution"))
+    if lstm_summary:
+        compact["lstm_contribution"] = lstm_summary
+    return compact
 
 
 _PUBLIC_OVERLAY_SUITE_ROW_LIMIT = 12
@@ -967,9 +1356,39 @@ def _compact_live_state_observability_value(value: Any, *, depth: int = 0) -> An
         return str(value)[:_COMPACT_LIVE_STATE_MAX_STRING_CHARS]
     if isinstance(value, Mapping):
         result: dict[str, Any] = {}
-        for key, item in cast(Mapping[Any, Any], value).items():
+        mapping_value = cast(Mapping[Any, Any], value)
+        role = str(mapping_value.get("role") or "").lower()
+        is_forecast_mapping = bool(
+            "lstm_forecast" in role
+            or "forecast_path" in mapping_value
+            or "forecast_candles" in mapping_value
+        )
+        for key, item in mapping_value.items():
             text_key = str(key)
             if text_key in _PACKET_SELF_REFERENCE_KEYS or text_key in _COMPACT_LIVE_STATE_HEAVY_DIAGNOSTIC_KEYS:
+                continue
+            if is_forecast_mapping and text_key in {
+                "forecast_path",
+                "forecast_candles",
+                "forecast_band_points",
+                "line_points",
+                "points",
+            } and isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
+                items = list(cast(Sequence[Any], item))
+                if text_key in {"forecast_path", "forecast_candles"}:
+                    mapping_items = [
+                        cast(Mapping[str, Any], row)
+                        for row in items
+                        if isinstance(row, Mapping)
+                    ]
+                    mapping_items.sort(key=lambda row: int(_float_or(row.get("step"), 0.0)))
+                    items = mapping_items[:12]
+                else:
+                    items = items[:64]
+                result[text_key] = [
+                    _compact_live_state_observability_value(row, depth=depth + 1)
+                    for row in items
+                ]
                 continue
             result[text_key] = _compact_live_state_observability_value(item, depth=depth + 1)
         return result
@@ -986,23 +1405,95 @@ def _compact_live_state_observability_value(value: Any, *, depth: int = 0) -> An
 _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS: frozenset[str] = frozenset(
     {
         "action",
+        "actionable",
+        "active_hypothesis",
+        "adaptive_timer_reason",
+        "bias_direction",
+        "buy_hypothesis",
+        "candidate_action",
+        "candidate_confidence",
+        "capture_started_at",
+        "capture_started_epoch",
         "confidence",
+        "configured_high_frequency_timeframe",
+        "control_direction",
+        "control_horizon_candles",
+        "control_owner",
+        "countertrend_lane",
+        "current_candle_late",
+        "decision",
         "detected_market",
         "detected_timeframe",
+        "direction",
+        "dominant_side",
         "effective_confidence",
+        "entry_distance",
+        "entry_label",
+        "entry_quality",
+        "entry_stage_label",
+        "entry_state",
         "execution_action",
+        "execution_confidence",
+        "execution_permission",
+        "execution_timing",
         "execution_opportunity_window_v3",
+        "expiry_seconds",
+        "expiry_source",
+        "expiry_text",
         "focus_timeframe",
+        "focus_timeframe_source",
+        "freshness_score",
+        "freshness_window_sec",
+        "global_local_control",
+        "headline_action",
+        "high_frequency_forecast",
+        "high_frequency_study_timeframe",
+        "high_frequency_timeframe_source",
+        "lstm_contribution",
+        "scene_forecast_contribution",
+        "major_bias",
+        "major_trend_confidence",
+        "major_trend_context",
+        "major_trend_direction",
         "market",
+        "market_confidence",
+        "market_selector_visual_fingerprint",
         "market_selector_rebind_required",
         "market_selector_studying_new_pair",
+        "market_selector_identity_rebound",
+        "market_selector_pair_changed",
         "market_selector_visual_changed",
+        "market_source",
+        "micro_candle_forecast",
+        "model_action",
+        "no_trade_reason",
+        "phoenixguard_decision_state",
+        "phoenixguard_report_status",
+        "phoenixguard_report_summary",
+        "pipeline_latency_sec",
+        "pipeline_timing",
+        "previous_market_selector_visual_fingerprint",
+        "published_at",
+        "published_epoch",
+        "raw_confidence",
+        "reasons",
+        "required_seconds",
+        "sell_hypothesis",
+        "setup",
+        "setup_state",
         "side",
+        "signal_age_sec",
+        "signal_id",
         "signal_thesis_v3",
+        "stale",
+        "state_version",
         "status",
         "summary",
         "symbol",
+        "timestamp",
         "timeframe",
+        "timing_signal",
+        "two_candle_study",
     }
 )
 
@@ -1038,7 +1529,21 @@ def _compact_live_state_latest_signal_payload(value: Any) -> Any:
     for key in _COMPACT_LIVE_STATE_LATEST_SIGNAL_KEYS:
         item = mapping.get(key)
         if item not in (None, "", [], {}):
-            payload[key] = _compact_live_state_observability_value(item)
+            if key in {
+                "high_frequency_forecast",
+                "lstm_contribution",
+                "micro_candle_forecast",
+                "scene_forecast_contribution",
+            }:
+                compact_forecast = _compact_persisted_forecast_summary(item)
+                if compact_forecast:
+                    payload[key] = compact_forecast
+            elif key == "two_candle_study":
+                compact_two_candle = _compact_persisted_two_candle_study(item)
+                if compact_two_candle:
+                    payload[key] = compact_two_candle
+            else:
+                payload[key] = _compact_live_state_observability_value(item)
     return payload
 
 
@@ -1105,11 +1610,39 @@ def _compact_persisted_council_payload(value: Mapping[str, Any]) -> dict[str, An
         "true_blocker",
         "two_candle_study",
     }
-    payload = _compact_selected_mapping(value, selected)
+    deeply_compacted = {
+        "book_strategy",
+        "execution_lane",
+        "lstm_contribution",
+        "promotion_trace",
+        "sequence_context",
+        "two_candle_study",
+    }
+    payload = _compact_live_nested_payload(
+        _compact_selected_mapping(value, selected - deeply_compacted)
+    )
+    book_strategy = _compact_persisted_book_strategy(value.get("book_strategy"))
+    if book_strategy:
+        payload["book_strategy"] = book_strategy
+    execution_lane = _compact_live_state_execution_lane(value.get("execution_lane"))
+    if execution_lane:
+        payload["execution_lane"] = execution_lane
+    lstm_summary = _compact_persisted_forecast_summary(value.get("lstm_contribution"))
+    if lstm_summary:
+        payload["lstm_contribution"] = lstm_summary
+    promotion = _compact_persisted_promotion_trace(value.get("promotion_trace"))
+    if promotion:
+        payload["promotion_trace"] = promotion
+    sequence_context = _compact_live_state_sequence_context(value.get("sequence_context"))
+    if sequence_context:
+        payload["sequence_context"] = sequence_context
+    two_candle = _compact_persisted_two_candle_study(value.get("two_candle_study"))
+    if two_candle:
+        payload["two_candle_study"] = two_candle
     playbook_ai_summary = _compact_live_state_playbook_ai_summary(value)
     if playbook_ai_summary:
         payload["playbook_ai_summary_v3"] = playbook_ai_summary
-    return _compact_live_nested_payload(payload)
+    return payload
 
 
 def _compact_persisted_study_packet(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -1169,14 +1702,42 @@ def _compact_persisted_study_packet(value: Mapping[str, Any]) -> dict[str, Any]:
         "valid_until_epoch",
         "valid_until_epoch_sec",
     }
-    payload = _compact_selected_mapping(value, selected)
+    deeply_compacted = {
+        "book_strategy",
+        "execution_lane",
+        "lstm_contribution",
+        "promotion_trace",
+        "sequence_context",
+        "two_candle_study",
+    }
+    payload = _compact_live_nested_payload(
+        _compact_selected_mapping(value, selected - deeply_compacted)
+    )
+    book_strategy = _compact_persisted_book_strategy(value.get("book_strategy"))
+    if book_strategy:
+        payload["book_strategy"] = book_strategy
+    execution_lane = _compact_live_state_execution_lane(value.get("execution_lane"))
+    if execution_lane:
+        payload["execution_lane"] = execution_lane
+    lstm_summary = _compact_persisted_forecast_summary(value.get("lstm_contribution"))
+    if lstm_summary:
+        payload["lstm_contribution"] = lstm_summary
+    promotion = _compact_persisted_promotion_trace(value.get("promotion_trace"))
+    if promotion:
+        payload["promotion_trace"] = promotion
+    sequence_context = _compact_live_state_sequence_context(value.get("sequence_context"))
+    if sequence_context:
+        payload["sequence_context"] = sequence_context
+    two_candle = _compact_persisted_two_candle_study(value.get("two_candle_study"))
+    if two_candle:
+        payload["two_candle_study"] = two_candle
     playbook_ai_summary = _compact_live_state_playbook_ai_summary(value)
     if playbook_ai_summary:
         payload["playbook_ai_summary_v3"] = playbook_ai_summary
     council = value.get("model_council")
     if isinstance(council, Mapping):
-        payload["model_council"] = _compact_persisted_council_payload(cast(Mapping[str, Any], council))
-    return _compact_live_nested_payload(payload)
+        payload["model_council"] = _compact_persisted_council_reference(council)
+    return payload
 
 
 def _compact_persisted_model_council_result(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -1245,10 +1806,54 @@ def _compact_persisted_model_council_result(value: Mapping[str, Any]) -> dict[st
         "true_blocker",
         "two_candle_study",
     }
-    payload = _compact_live_nested_payload(_compact_selected_mapping(value, selected))
+    deeply_compacted = {
+        "allowance_package",
+        "book_strategy",
+        "execution_lane",
+        "expected_move_time",
+        "lstm_contribution",
+        "opportunity_maturity",
+        "professional_trade_plan",
+        "promotion_trace",
+        "sequence_context",
+        "two_candle_study",
+    }
+    payload = _compact_live_nested_payload(
+        _compact_selected_mapping(value, selected - deeply_compacted)
+    )
+    allowance = _compact_live_state_allowance_package(value.get("allowance_package"))
+    if allowance:
+        payload["allowance_package"] = allowance
+    book_strategy = _compact_persisted_book_strategy(value.get("book_strategy"))
+    if book_strategy:
+        payload["book_strategy"] = book_strategy
+    execution_lane = _compact_live_state_execution_lane(value.get("execution_lane"))
+    if execution_lane:
+        payload["execution_lane"] = execution_lane
+    expected_move_time = _compact_live_state_expected_move_time(value.get("expected_move_time"))
+    if expected_move_time:
+        payload["expected_move_time"] = expected_move_time
+    lstm_summary = _compact_persisted_forecast_summary(value.get("lstm_contribution"))
+    if lstm_summary:
+        payload["lstm_contribution"] = lstm_summary
+    opportunity = _compact_persisted_opportunity_maturity(value.get("opportunity_maturity"))
+    if opportunity:
+        payload["opportunity_maturity"] = opportunity
+    professional_plan = _compact_live_state_professional_trade_plan(value.get("professional_trade_plan"))
+    if professional_plan:
+        payload["professional_trade_plan"] = professional_plan
+    promotion = _compact_persisted_promotion_trace(value.get("promotion_trace"))
+    if promotion:
+        payload["promotion_trace"] = promotion
+    sequence_context = _compact_live_state_sequence_context(value.get("sequence_context"))
+    if sequence_context:
+        payload["sequence_context"] = sequence_context
+    two_candle = _compact_persisted_two_candle_study(value.get("two_candle_study"))
+    if two_candle:
+        payload["two_candle_study"] = two_candle
     council = value.get("model_council")
     if isinstance(council, Mapping):
-        payload["model_council"] = _compact_persisted_council_payload(cast(Mapping[str, Any], council))
+        payload["model_council"] = _compact_persisted_council_reference(council)
     playbook_ai_summary = _compact_live_state_playbook_ai_summary(value)
     if playbook_ai_summary:
         payload["playbook_ai_summary_v3"] = playbook_ai_summary
@@ -1271,11 +1876,24 @@ _FORECAST_SNAPSHOT_LSTM_KEYS = frozenset(
     {
         "schema_version",
         "fresh",
+        "legacy_restored",
         "forecast_available",
         "contribution",
         "confidence",
         "side",
         "path_side",
+        "path_target_semantics",
+        "trajectory_modes",
+        "trajectory_decoder_status",
+        "trajectory_mode",
+        "trajectory_mode_probabilities",
+        "trajectory_mode_probability_calibrated",
+        "trajectory_scenarios",
+        "path_confidence",
+        "path_confidence_status",
+        "direction_conflict",
+        "forecast_quality_status",
+        "trade_authorization_status",
         "selective_side",
         "selective_status",
         "selective_authorized",
@@ -1284,6 +1902,104 @@ _FORECAST_SNAPSHOT_LSTM_KEYS = frozenset(
         "source_image_size",
         "features",
         "forecast_path",
+        "trajectory_interval_status",
+        "trajectory_interval",
+    }
+)
+
+_FORECAST_SNAPSHOT_SCENE_KEYS = _FORECAST_SNAPSHOT_LSTM_KEYS | frozenset(
+    {
+        "pair",
+        "timeframe",
+        "market_identity_confirmed",
+        "timeframe_identity_confirmed",
+        "market_confidence",
+        "timeframe_confidence",
+        "min_market_confidence",
+        "min_timeframe_confidence",
+        "identity_contract_status",
+        "frame_id",
+        "provider",
+        "requested_provider",
+        "provider_status",
+        "forecast_id",
+        "forecast_revision",
+        "closed_candle_key",
+        "closed_candle_sequence",
+        "closed_candle_transition_observed",
+        "closed_candle_transition_reason",
+        "closed_candle_match_scores",
+        "closed_candle_identity_state",
+        "scene_context_frozen_at_closed_candle",
+        "frame_reused_without_reforecast",
+        "same_event_cache_rebuild_required",
+        "cache_replaced_for_detector_coverage_rebase",
+        "detector_coverage_rebase_applied",
+        "display_frame_id",
+        "forecast_computed_frame_id",
+        "source_forecast_frame_id",
+        "geometry_projected_frame_id",
+        "geometry_frame_match_verified",
+        "geometry_reprojected_from_cache",
+        "geometry_projection_provenance",
+        "forecast_anchor",
+        "line_points",
+        "forecast_candles",
+        "forecast_scenarios",
+        "forecast_band_points",
+        "forecast_quantiles",
+        "interval",
+        "raw_side_probabilities",
+        "side_probabilities",
+        "probability_calibrated",
+        "belief_state",
+        "belief_revision",
+        "committed_side",
+        "candidate_side",
+        "confirmation_events",
+        "required_events",
+        "belief_reason",
+        "belief_posterior",
+        "change_probability",
+        "belief_tracker_checkpoint",
+        "scene_feature_audit",
+    }
+)
+
+_FORECAST_SNAPSHOT_TRAJECTORY_SCENARIO_KEYS = frozenset(
+    {
+        "side",
+        "label",
+        "probability",
+        "probability_calibrated",
+        "selected",
+        "path_target_semantics",
+    }
+)
+
+_FORECAST_SNAPSHOT_TRAJECTORY_STEP_KEYS = frozenset(
+    {
+        "step",
+        "event",
+        "direction",
+        "direction_semantics",
+        "movement_direction",
+        "horizon_position_direction",
+        "path_buy_probability",
+        "path_sell_probability",
+        "path_hold_probability",
+        "confidence",
+        "expected_open_norm",
+        "expected_high_norm",
+        "expected_low_norm",
+        "expected_close_norm",
+        "expected_delta_norm",
+        "expected_cumulative_delta_norm",
+        "cumulative_scale_norm",
+        "close_lower_90_norm",
+        "close_upper_90_norm",
+        "interval_calibrated",
+        "interval_method",
     }
 )
 
@@ -1328,6 +2044,59 @@ def _first_forecast_mapping(*values: Any) -> dict[str, Any]:
     return {}
 
 
+def _scene_forecast_identity_pending_v3(
+    *,
+    pair: str,
+    timeframe: str,
+    frame_id: int,
+    reason: str,
+    market_identity_confirmed: bool,
+    timeframe_identity_confirmed: bool,
+) -> dict[str, Any]:
+    """Return an explicit non-geometric forecast while chart identity is unknown.
+
+    A pair/timeframe transition is not a forecastable candle event until OCR has
+    rebound both identity fields.  Publishing an empty, current-frame tombstone
+    prevents persistence code and public readers from reviving the previous
+    market's twelve-step geometry.
+    """
+
+    return {
+        "schema_version": "PG_SCENE_FORECAST_CONTRIBUTION_V3",
+        "provider": "NONE",
+        "requested_provider": "SCENE_FORECASTER_V3",
+        "provider_status": "MARKET_IDENTITY_PENDING",
+        "forecast_available": False,
+        "fresh": False,
+        "frame_id": max(0, int(frame_id)),
+        "pair": str(pair or "").strip().upper(),
+        "timeframe": str(timeframe or "").strip().upper(),
+        "market_identity_confirmed": bool(market_identity_confirmed),
+        "timeframe_identity_confirmed": bool(timeframe_identity_confirmed),
+        "identity_contract_status": "PENDING",
+        "horizon_steps": 12,
+        "horizon_unit": "CANDLE_EVENTS",
+        "path_side": "HOLD",
+        "side": "HOLD",
+        "committed_side": "HOLD",
+        "candidate_side": "HOLD",
+        "belief_state": "REACQUIRING",
+        "belief_reason": str(reason or "MARKET_IDENTITY_PENDING"),
+        "probability_calibrated": False,
+        "forecast_quality_status": "IDENTITY_PENDING",
+        "trade_authorization_status": "NO_EDGE",
+        "line_points": [],
+        "forecast_candles": [],
+        "forecast_scenarios": [],
+        "forecast_band_points": [],
+        "forecast_path": [],
+        "interpretation": (
+            "The scene forecaster is waiting for confirmed chart pair and timeframe OCR. "
+            "No geometry from the previous market is reusable."
+        ),
+    }
+
+
 def _selected_forecast_mapping(
     value: Mapping[str, Any],
     keys: frozenset[str],
@@ -1341,6 +2110,32 @@ def _selected_forecast_mapping(
         dict[str, Any],
         _compact_live_state_observability_value(selected),
     )
+
+
+def _compact_forecast_trajectory_scenarios(value: Any) -> list[dict[str, Any]]:
+    """Retain three bounded scenario paths without exposing raw model payloads."""
+
+    scenarios: list[dict[str, Any]] = []
+    for scenario in _sequence_of_mappings(value)[:3]:
+        compact_scenario = {
+            key: scenario.get(key)
+            for key in _FORECAST_SNAPSHOT_TRAJECTORY_SCENARIO_KEYS
+            if scenario.get(key) not in (None, "", [], {})
+        }
+        ordered_steps = sorted(
+            _sequence_of_mappings(scenario.get("forecast_path")),
+            key=lambda row: int(_float_or(row.get("step"), 0.0)),
+        )[:12]
+        compact_scenario["forecast_path"] = [
+            {
+                key: row.get(key)
+                for key in _FORECAST_SNAPSHOT_TRAJECTORY_STEP_KEYS
+                if row.get(key) not in (None, "", [], {})
+            }
+            for row in ordered_steps
+        ]
+        scenarios.append(compact_scenario)
+    return scenarios
 
 
 def _forecast_snapshot_v3(
@@ -1378,38 +2173,92 @@ def _forecast_snapshot_v3(
         existing.get("high_frequency_forecast"),
     )
     two_candle = _first_forecast_mapping(
-        study_packet.get("two_candle_study"),
-        result.get("two_candle_study"),
         signal.get("two_candle_study"),
         tracking.get("two_candle_study"),
         high_frequency.get("two_candle_study"),
         kernel.get("two_candle_study"),
+        study_packet.get("two_candle_study"),
+        result.get("two_candle_study"),
         existing.get("two_candle_study"),
     )
+    scene = _first_forecast_mapping(
+        signal.get("scene_forecast_contribution"),
+        tracking.get("scene_forecast_contribution"),
+        high_frequency.get("scene_forecast_contribution"),
+        kernel.get("scene_forecast_contribution"),
+        two_candle.get("scene_forecast_contribution"),
+        study_packet.get("scene_forecast_contribution"),
+        result.get("scene_forecast_contribution"),
+        existing.get("scene_forecast_contribution"),
+    )
     lstm = _first_forecast_mapping(
-        study_packet.get("lstm_contribution"),
-        result.get("lstm_contribution"),
         signal.get("lstm_contribution"),
         tracking.get("lstm_contribution"),
         high_frequency.get("lstm_contribution"),
         kernel.get("lstm_contribution"),
         two_candle.get("lstm_contribution"),
+        study_packet.get("lstm_contribution"),
+        result.get("lstm_contribution"),
         existing.get("lstm_contribution"),
     )
-    if not (two_candle or lstm or high_frequency):
+    identity_pending = bool(
+        scene
+        and (
+            scene.get("market_identity_confirmed") is False
+            or scene.get("timeframe_identity_confirmed") is False
+            or str(scene.get("identity_contract_status") or "").upper() == "PENDING"
+            or str(scene.get("provider_status") or "").upper()
+            == "MARKET_IDENTITY_PENDING"
+        )
+    )
+    existing_lstm = _mapping_to_dict(existing.get("lstm_contribution"))
+    if (
+        not identity_pending
+        and existing_lstm.get("forecast_path")
+        and not lstm.get("forecast_path")
+    ):
+        candidate_frame_id = int(
+            _float_or(
+                lstm.get("frame_id")
+                or payload.get("model_vote_frame_id")
+                or payload.get("display_frame_id")
+                or payload.get("frame_index"),
+                0.0,
+            )
+        )
+        existing_frame_id = int(
+            _float_or(existing.get("source_frame_id") or existing_lstm.get("frame_id"), 0.0)
+        )
+        if candidate_frame_id <= 0 or existing_frame_id <= 0 or candidate_frame_id == existing_frame_id:
+            # Persistence summaries intentionally omit the dense E1-E12 body.
+            # Re-saving that same frame must not downgrade the authoritative
+            # forecast snapshot to the summary-only council copy.
+            retained_lstm = dict(existing_lstm)
+            retained_lstm.update(lstm)
+            lstm = retained_lstm
+    if not (two_candle or scene or lstm or high_frequency):
         return existing
 
-    frame_id = int(
-        _float_or(
-            two_candle.get("frame_id")
-            or lstm.get("frame_id")
-            or high_frequency.get("frame_id")
-            or existing.get("source_frame_id")
-            or payload.get("model_vote_frame_id")
-            or payload.get("display_frame_id")
-            or payload.get("frame_index"),
-            0.0,
-        )
+    def positive_frame_id(*values: Any) -> int:
+        for value in values:
+            candidate = int(_float_or(value, 0.0))
+            if candidate > 0:
+                return candidate
+        return 0
+
+    frame_id = positive_frame_id(
+        scene.get("display_frame_id"),
+        scene.get("frame_id"),
+        two_candle.get("display_frame_id"),
+        two_candle.get("frame_id"),
+        lstm.get("display_frame_id"),
+        lstm.get("frame_id"),
+        high_frequency.get("display_frame_id"),
+        high_frequency.get("frame_id"),
+        existing.get("source_frame_id"),
+        payload.get("model_vote_frame_id"),
+        payload.get("display_frame_id"),
+        payload.get("frame_index"),
     )
     visual_observation = _mapping_to_dict(payload.get("visual_observation_v3"))
     inferred_stale = str(visual_observation.get("status") or "").strip().upper() == _VISUAL_OBSERVATION_WAITING
@@ -1443,26 +2292,69 @@ def _forecast_snapshot_v3(
         lstm,
         _FORECAST_SNAPSHOT_LSTM_KEYS,
     )
+    compact_scene = _selected_forecast_mapping(
+        scene,
+        _FORECAST_SNAPSHOT_SCENE_KEYS,
+    )
+    if "trajectory_scenarios" in compact_lstm:
+        compact_lstm["trajectory_scenarios"] = _compact_forecast_trajectory_scenarios(
+            lstm.get("trajectory_scenarios")
+        )
     compact_high_frequency = _selected_forecast_mapping(
         high_frequency,
         _FORECAST_SNAPSHOT_HIGH_FREQUENCY_KEYS,
     )
-    for row in (compact_two_candle, compact_lstm, compact_high_frequency):
+    for row, source in (
+        (compact_two_candle, two_candle),
+        (compact_scene, scene),
+        (compact_lstm, lstm),
+        (compact_high_frequency, high_frequency),
+    ):
         if not row:
             continue
-        row["frame_id"] = frame_id
+        # Snapshot rows can be produced by different studies during an atomic
+        # hand-off. Preserve each producer's own positive provenance instead
+        # of relabeling every contribution as if it came from the root frame.
+        source_frame_id = positive_frame_id(source.get("frame_id"))
+        source_display_frame_id = positive_frame_id(
+            source.get("display_frame_id")
+        )
+        row.pop("frame_id", None)
+        row.pop("display_frame_id", None)
+        row_frame_id = source_frame_id or source_display_frame_id or frame_id
+        if row_frame_id > 0:
+            row["frame_id"] = row_frame_id
+        if source_display_frame_id > 0:
+            row["display_frame_id"] = source_display_frame_id
         row["observed_epoch"] = observed_epoch
         row["stale"] = is_stale
         row["diagnostic_only"] = is_stale
 
+    snapshot_status = (
+        "MARKET_IDENTITY_PENDING"
+        if identity_pending
+        else ("STALE_DIAGNOSTIC" if is_stale else "CURRENT")
+    )
     return {
         "schema_version": "PG_FORECAST_SNAPSHOT_V3",
         "source_frame_id": frame_id,
         "observed_epoch": observed_epoch,
-        "stale": is_stale,
-        "diagnostic_only": is_stale,
-        "status": "STALE_DIAGNOSTIC" if is_stale else "CURRENT",
+        "pair": str(scene.get("pair") or "").strip().upper(),
+        "timeframe": str(scene.get("timeframe") or "").strip().upper(),
+        "market_identity_confirmed": bool(
+            scene.get("market_identity_confirmed", not identity_pending)
+        ),
+        "timeframe_identity_confirmed": bool(
+            scene.get("timeframe_identity_confirmed", not identity_pending)
+        ),
+        "identity_contract_status": (
+            "PENDING" if identity_pending else "CONFIRMED"
+        ),
+        "stale": bool(is_stale or identity_pending),
+        "diagnostic_only": bool(is_stale or identity_pending),
+        "status": snapshot_status,
         "two_candle_study": compact_two_candle,
+        "scene_forecast_contribution": compact_scene,
         "lstm_contribution": compact_lstm,
         "high_frequency_forecast": compact_high_frequency,
     }
@@ -1473,24 +2365,38 @@ def _compact_session_persisted_payload(payload: Mapping[str, Any]) -> dict[str, 
     forecast_snapshot = _forecast_snapshot_v3(compact)
     if forecast_snapshot:
         compact["forecast_snapshot_v3"] = forecast_snapshot
-    for key in ("tracking_summary", "latest_signal"):
-        nested = compact.get(key)
-        if isinstance(nested, Mapping):
-            compact[key] = _compact_live_nested_payload(cast(Mapping[str, Any], nested))
+    tracking_summary = compact.get("tracking_summary")
+    if isinstance(tracking_summary, Mapping):
+        compact["tracking_summary"] = _compact_live_state_market_payload(tracking_summary)
+    latest_signal = compact.get("latest_signal")
+    if isinstance(latest_signal, Mapping):
+        compact["latest_signal"] = _compact_live_state_latest_signal_payload(latest_signal)
     result = compact.get("model_council_result")
     if isinstance(result, Mapping):
         compact["model_council_result"] = _compact_persisted_model_council_result(cast(Mapping[str, Any], result))
     council = compact.get("model_council")
     if isinstance(council, Mapping):
         compact["model_council"] = _compact_persisted_council_payload(cast(Mapping[str, Any], council))
-    study_packet = compact.get("model_council_study_packet")
-    if isinstance(study_packet, Mapping):
-        compact["model_council_study_packet"] = _compact_persisted_study_packet(cast(Mapping[str, Any], study_packet))
+    for study_key in (
+        "model_council_study_packet",
+        "study_packet",
+        "latest_model_council_study_packet",
+        "latest_study_packet",
+    ):
+        study_packet = compact.get(study_key)
+        if isinstance(study_packet, Mapping):
+            compact[study_key] = _compact_persisted_study_packet(cast(Mapping[str, Any], study_packet))
     for packet_key in ("model_council_packet", "execution_packet", "latest_model_council_packet", "latest_execution_packet"):
         packet = compact.get(packet_key)
         if isinstance(packet, Mapping):
             compact[packet_key] = _compact_persisted_execution_packet(cast(Mapping[str, Any], packet))
     return compact
+
+
+def _compact_persisted_decision_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Apply the same single-snapshot persistence contract to decisions."""
+
+    return _compact_session_persisted_payload(payload)
 
 
 _COMPACT_LIVE_STATE_SIDECAR_KEYS: frozenset[str] = frozenset(
@@ -1601,37 +2507,94 @@ _COMPACT_LIVE_STATE_MARKET_KEYS: frozenset[str] = frozenset(
         "action",
         "active_track_count",
         "angle_vectors",
+        "artifact_integrity",
+        "box_context",
         "broker_source",
         "broker_source_lock",
         "candle_extraction",
         "candle_movement_context_v3",
+        "candle_statistics",
+        "chart_region",
+        "chart_valid",
         "confidence",
+        "configured_high_frequency_timeframe",
+        "consolidation_score",
+        "continuation_score",
+        "control_direction",
+        "control_horizon_candles",
+        "control_owner",
+        "countertrend_lane",
+        "current_box",
+        "current_slope",
         "detected_market",
         "detected_timeframe",
+        "display_region",
         "effective_confidence",
+        "entry_label",
+        "entry_quality",
+        "entry_state",
         "execution_action",
+        "focus_region",
         "frame_index",
+        "global_direction",
+        "global_local_control",
+        "global_slope",
         "historical_structure",
+        "high_frequency_study_timeframe",
+        "high_frequency_timeframe_source",
         "latest_price",
+        "latest_body_height_pct",
+        "latest_candle_color",
+        "latest_price_proxy",
+        "local_direction",
+        "local_slope",
+        "major_trend_confidence",
+        "major_trend_context",
+        "major_trend_direction",
         "market",
+        "market_confidence",
         "market_selector_rebind_required",
         "market_selector_studying_new_pair",
+        "market_selector_identity_rebound",
+        "market_selector_pair_changed",
         "market_selector_visual_changed",
         "market_selector_visual_fingerprint",
+        "market_source",
+        "high_frequency_forecast",
+        "impulse_delta",
+        "impulse_direction",
+        "impulse_score",
+        "lstm_contribution",
+        "scene_forecast_contribution",
+        "micro_candle_forecast",
+        "overlay_kind",
         "overlay_source_window_signature",
         "overlay_truth_audit",
         "pair",
+        "pipeline_timing",
+        "previous_market_selector_visual_fingerprint",
+        "projection",
+        "recent_price_momentum",
+        "reversal_score",
         "signal_thesis_v3",
         "smart_money_context",
+        "source_capture_blocked_v3",
+        "source_capture_status",
         "status",
+        "study_stage_timings",
         "structure_boxes",
         "summary",
+        "surface_kind",
         "support_resistance_context",
         "support_resistance_zones",
         "symbol",
         "timeframe",
+        "timeframe_confidence",
+        "timeframe_source",
         "tracked_candles",
+        "trend_context",
         "trendlines_v3",
+        "two_candle_study",
         "visible_candle_count",
     }
 )
@@ -1669,6 +2632,45 @@ _COMPACT_LIVE_STATE_COUNCIL_KEYS: frozenset[str] = frozenset(
 )
 
 
+def _compact_persisted_projection(value: Any) -> dict[str, Any]:
+    """Keep drawable projection output without its duplicated decision kernel."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    mapping = cast(Mapping[str, Any], value)
+    selected = {
+        "behavior_state",
+        "candle_statistics",
+        "confidence",
+        "direction",
+        "entry_label",
+        "entry_quality",
+        "entry_state",
+        "expected_candles_to_resolution",
+        "fit_bounds",
+        "instructions",
+        "invalidation_first_probability",
+        "last_update_candle_count",
+        "message",
+        "next_behavior_state",
+        "probability_reason",
+        "probability_state",
+        "sample_weight",
+        "sideways_probability",
+        "target_first_probability",
+        "timing_score",
+        "visual_overlay_disabled",
+        "visual_overlay_reason",
+        "zones",
+    }
+    return cast(
+        dict[str, Any],
+        _strip_packet_self_references(
+            _compact_live_state_observability_value(_compact_selected_mapping(mapping, selected))
+        ),
+    )
+
+
 def _compact_live_state_market_payload(value: Any) -> Any:
     if not isinstance(value, Mapping):
         return value
@@ -1677,7 +2679,25 @@ def _compact_live_state_market_payload(value: Any) -> Any:
     for key in _COMPACT_LIVE_STATE_MARKET_KEYS:
         item = mapping.get(key)
         if item not in (None, "", [], {}):
-            payload[key] = _compact_live_state_observability_value(item)
+            if key in {
+                "high_frequency_forecast",
+                "lstm_contribution",
+                "micro_candle_forecast",
+                "scene_forecast_contribution",
+            }:
+                compact_forecast = _compact_persisted_forecast_summary(item)
+                if compact_forecast:
+                    payload[key] = compact_forecast
+            elif key == "two_candle_study":
+                compact_two_candle = _compact_persisted_two_candle_study(item)
+                if compact_two_candle:
+                    payload[key] = compact_two_candle
+            elif key == "projection":
+                compact_projection = _compact_persisted_projection(item)
+                if compact_projection:
+                    payload[key] = compact_projection
+            else:
+                payload[key] = _compact_live_state_observability_value(item)
     return payload
 
 
@@ -1690,13 +2710,17 @@ def _compact_live_state_council_result(value: Any) -> Any:
         item = mapping.get(key)
         if item not in (None, "", [], {}):
             if key == "promotion_trace":
-                compact_trace = _compact_live_state_promotion_trace(item)
+                compact_trace = _compact_persisted_promotion_trace(item)
                 if compact_trace:
                     payload[key] = compact_trace
             elif key == "execution_lane":
                 compact_lane = _compact_live_state_execution_lane(item)
                 if compact_lane:
                     payload[key] = compact_lane
+            elif key == "book_strategy":
+                compact_strategy = _compact_persisted_book_strategy(item)
+                if compact_strategy:
+                    payload[key] = compact_strategy
             else:
                 payload[key] = _compact_live_state_observability_value(item)
     council = mapping.get("model_council")
@@ -4645,14 +5669,40 @@ def _surface_signature(image: Image.Image) -> str:
 
 
 def _market_selector_visual_fingerprint(image: Image.Image) -> str:
+    """Return a stable visual identity for the broker's selected instrument.
+
+    The former fingerprint hashed the entire top-left 34% x 18% of the chart.
+    That region includes live payout sparklines, clocks, and chart pixels, so it
+    changed on every capture and falsely announced a pair switch.  Pocket
+    Option keeps the selected-instrument control in a much smaller, fixed
+    header lane.  Hash only its bright text/icon mask so candle motion and JPEG
+    noise cannot invalidate studied history.
+    """
+
     sample = image.convert("RGB")
     if sample.width < 64 or sample.height < 48:
         return ""
-    crop_right = max(120, min(sample.width, int(round(sample.width * 0.34))))
-    crop_bottom = max(42, min(sample.height, int(round(sample.height * 0.18))))
-    crop = sample.crop((0, 0, crop_right, crop_bottom)).convert("L")
-    crop = crop.resize((64, 20), Image.Resampling.BILINEAR)
-    return hashlib.sha256(crop.tobytes()).hexdigest()[:16]
+    left = max(0, min(sample.width - 2, int(round(sample.width * 0.055))))
+    top = max(0, min(sample.height - 2, int(round(sample.height * 0.10))))
+    right = max(left + 2, min(sample.width, int(round(sample.width * 0.21))))
+    bottom = max(top + 2, min(sample.height, int(round(sample.height * 0.19))))
+    crop = sample.crop((left, top, right, bottom)).convert("L")
+    crop = crop.resize((128, 40), Image.Resampling.BILINEAR)
+    # The broker header is dark and its selector glyphs are bright.  A binary
+    # mask removes low-amplitude animation/compression changes while retaining
+    # the actual pair text.  Require some foreground evidence so an empty dark
+    # crop never becomes a misleading shared identity.
+    # `L` mode serializes one unsigned byte per pixel.  Reading bytes avoids
+    # Pillow's intentionally broad static pixel union (which also permits
+    # tuple-valued RGB data) while preserving the exact binary mask.
+    pixels = [value >= 145 for value in crop.tobytes()]
+    if sum(pixels) < 12:
+        return ""
+    packed = bytearray((len(pixels) + 7) // 8)
+    for index, enabled in enumerate(pixels):
+        if enabled:
+            packed[index // 8] |= 1 << (index % 8)
+    return f"selector_v2_{hashlib.sha256(bytes(packed)).hexdigest()[:20]}"
 
 
 def _artifact_frame_id_from_path(path: Path | str | None, default: int = 0) -> int:
@@ -6737,11 +7787,17 @@ def _default_memory_projection_payload(
         "summary": note,
         "generated_at": "",
         "source_frame_index": -1,
+        "source_state_version": -1,
+        "current_frame_index": -1,
+        "source_frame_age": 0,
         "source_chart_path": "",
         "reference_image_path": "",
         "reference_image_name": "",
         "projection_image_path": "",
         "is_current": False,
+        "snapshot_ready": False,
+        "snapshot_status": "UNAVAILABLE",
+        "trade_authorized": False,
         "timeframe": "",
         "market": "",
         "dominant_side": "HOLD",
@@ -6821,11 +7877,19 @@ def _normalize_memory_projection_payload(
     payload["summary"] = str(raw.get("summary", base["summary"]) or base["summary"])
     payload["generated_at"] = str(raw.get("generated_at", "") or "")
     payload["source_frame_index"] = int(raw.get("source_frame_index", -1) or -1)
+    payload["source_state_version"] = int(raw.get("source_state_version", -1) or -1)
+    payload["current_frame_index"] = int(raw.get("current_frame_index", -1) or -1)
+    payload["source_frame_age"] = max(0, int(raw.get("source_frame_age", 0) or 0))
     payload["source_chart_path"] = str(raw.get("source_chart_path", "") or "")
     payload["reference_image_path"] = str(raw.get("reference_image_path", "") or "")
     payload["reference_image_name"] = str(raw.get("reference_image_name", "") or "")
     payload["projection_image_path"] = str(raw.get("projection_image_path", "") or "")
     payload["is_current"] = bool(raw.get("is_current", False))
+    payload["snapshot_ready"] = bool(raw.get("snapshot_ready", False))
+    payload["snapshot_status"] = str(raw.get("snapshot_status", "UNAVAILABLE") or "UNAVAILABLE").upper()
+    # A study overlay is forecast guidance.  It never inherits execution
+    # authority from a retrieved historical match.
+    payload["trade_authorized"] = False
     payload["timeframe"] = str(raw.get("timeframe", "") or "")
     payload["market"] = str(raw.get("market", "") or "")
     payload["dominant_side"] = _upper_action(raw.get("dominant_side", "HOLD"))
@@ -6947,14 +8011,41 @@ def _mark_memory_projection_payload_stale(
     source_chart_path = str(payload.get("source_chart_path", "") or "").strip()
     if current_chart_path and source_frame_index == current_frame_index and source_chart_path == current_chart_path:
         payload["is_current"] = True
+        payload["snapshot_ready"] = False
+        payload["snapshot_status"] = "CURRENT"
+        payload["current_frame_index"] = current_frame_index
+        payload["source_frame_age"] = 0
+        payload["trade_authorized"] = False
         return payload
+    source_artifact_available = False
+    if source_chart_path:
+        try:
+            source_artifact_available = Path(source_chart_path).is_file()
+        except (OSError, TypeError, ValueError):
+            source_artifact_available = False
     payload["is_current"] = False
-    if str(payload.get("status", "")).lower() == "ready":
+    payload["current_frame_index"] = current_frame_index
+    payload["source_frame_age"] = max(0, current_frame_index - source_frame_index)
+    payload["trade_authorized"] = False
+    payload["actionable"] = False
+    payload["execution_permission"] = "WAIT_FOR_CONFIRMATION"
+    if (
+        str(payload.get("status", "")).lower() in {"ready", "degraded"}
+        and source_artifact_available
+    ):
+        # Forecasts are claims made at an origin frame.  Advancing live data
+        # ages that claim; it does not erase the immutable source forecast.
+        payload["snapshot_ready"] = True
+        payload["snapshot_status"] = "READY"
+        return payload
+    payload["snapshot_ready"] = False
+    payload["snapshot_status"] = "SOURCE_UNAVAILABLE"
+    if str(payload.get("status", "")).lower() in {"ready", "degraded"}:
         label = "Show Future" if str(payload.get("mode", "predict")) == "future" else "Predict"
         payload["status"] = "stale"
         payload["summary"] = (
             f"{str(payload.get('summary', _memory_projection_default_note(mode)) or _memory_projection_default_note(mode)).strip()} "
-            f"New chart captured. Run {label} again for the latest frame."
+            f"The source chart is no longer available. Run {label} again."
         ).strip()
     return payload
 
@@ -10204,6 +11295,29 @@ class PocketOptionBrokerExecutionBackend:
 
 
 class PhoenixGuardWindowTrackingAdapter:
+    def __init__(self) -> None:
+        # Live captures share one adapter, so keep the already-studied candle
+        # field in memory and only rescan the right edge when the historical
+        # pixels prove that the chart has not panned or rescaled.  The cache is
+        # deliberately process-local: persisted/compacted candle rows are not
+        # precise enough to be geometry authority after a restart.
+        self._live_candle_cache_lock = threading.RLock()
+        self._live_candle_cache: dict[str, dict[str, Any]] = {}
+        # A forecast is an event study, not a frame animation. Cache the full
+        # suite reading against the latest completed candle so forming-candle
+        # pixels cannot make the public BUY/SELL path flip every refresh.
+        self._scene_forecast_lock = threading.RLock()
+        self._scene_forecast_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._scene_event_sequences: dict[tuple[str, str], tuple[str, int]] = {}
+        self._scene_candle_identity_states: dict[
+            tuple[str, str],
+            dict[str, Any],
+        ] = {}
+        self._scene_belief_tracker = ForecastBeliefTrackerV3(
+            ForecastBeliefConfigV3()
+        )
+        self._scene_belief_restore_attempted = False
+
     @staticmethod
     def memory_precision_payload(
         primary_fit: Mapping[str, Any],
@@ -10407,18 +11521,16 @@ class PhoenixGuardWindowTrackingAdapter:
             return np.zeros((1, 1), dtype=np.uint8)
         return (mask > 0).astype(np.uint8)
 
-    def _score_ocr_character(self, mask: ArrayND) -> tuple[str, float]:
+    def _rank_ocr_characters(self, mask: ArrayND) -> list[tuple[str, float]]:
         normalized = self._normalize_binary_mask(mask)
         if normalized.size == 0 or int(np.sum(normalized > 0)) < 8:
-            return "", 0.0
+            return []
         try:
             import cv2  # type: ignore[import-not-found]
         except Exception:
-            return "", 0.0
+            return []
 
-        best_label = ""
-        best_score = 0.0
-        second_best = 0.0
+        rankings: list[tuple[str, float]] = []
         for label, templates in self._ocr_char_template_bank.items():
             label_best = 0.0
             for template in templates:
@@ -10440,14 +11552,68 @@ class PhoenixGuardWindowTrackingAdapter:
                 score = 0.56 * harmonic + 0.44 * iou
                 if score > label_best:
                     label_best = score
-            if label_best > best_score:
-                second_best = best_score
-                best_label = label
-                best_score = label_best
-            elif label_best > second_best:
-                second_best = label_best
+            rankings.append((label, float(label_best)))
+        rankings.sort(key=lambda row: row[1], reverse=True)
+        return rankings
+
+    def _score_ocr_character(self, mask: ArrayND) -> tuple[str, float]:
+        rankings = self._rank_ocr_characters(mask)
+        if not rankings:
+            return "", 0.0
+        best_label, best_score = rankings[0]
+        second_best = rankings[1][1] if len(rankings) > 1 else 0.0
         margin = max(0.0, best_score - second_best)
         return best_label, _clip01(0.74 * best_score + 0.36 * margin)
+
+    @staticmethod
+    def _decode_fx_market_rankings(
+        character_rankings: Sequence[Sequence[tuple[str, float]]],
+    ) -> tuple[str, float, float]:
+        glyph_count = len(character_rankings)
+        if glyph_count not in {7, 10}:
+            return "", 0.0, 0.0
+        score_maps = [dict(row) for row in character_rankings]
+        suffix = "OTC" if glyph_count == 10 else ""
+        structural_indices = ((3, "/"),)
+        if suffix:
+            structural_indices += ((7, "O"), (8, "T"), (9, "C"))
+        structural_scores = [
+            float(score_maps[index].get(label, 0.0))
+            for index, label in structural_indices
+        ]
+        if not structural_scores or min(structural_scores) < 0.52:
+            return "", 0.0, 0.0
+
+        candidates: list[tuple[float, str]] = []
+        for left in sorted(_FX_CURRENCY_CODES):
+            for right in sorted(_FX_CURRENCY_CODES):
+                if left == right:
+                    continue
+                compact = f"{left}/{right}{suffix}"
+                if len(compact) != glyph_count:
+                    continue
+                score = float(
+                    np.mean(
+                        np.asarray(
+                            [
+                                float(scores.get(expected, 0.0))
+                                for scores, expected in zip(score_maps, compact)
+                            ],
+                            dtype=np.float32,
+                        )
+                    )
+                )
+                candidates.append((score, compact))
+        if not candidates:
+            return "", 0.0, 0.0
+        candidates.sort(key=lambda row: row[0], reverse=True)
+        best_score, best_compact = candidates[0]
+        second_score = candidates[1][0] if len(candidates) > 1 else 0.0
+        margin = max(0.0, best_score - second_score)
+        if best_score < 0.60 or margin < 0.012:
+            return "", best_score, margin
+        pair = best_compact[:7]
+        return (f"{pair} OTC" if suffix else pair), best_score, margin
 
     def _extract_market_text_mask(self, candidate_image: Image.Image) -> ArrayND:
         arr = np.asarray(candidate_image.convert("RGB"), dtype=np.uint8)
@@ -10486,17 +11652,25 @@ class PhoenixGuardWindowTrackingAdapter:
         if height < 80 or width < 160:
             return {}
 
+        # The focused broker surface contains two different instrument rows:
+        # the scrolling watch-list tabs at the very top and the authoritative
+        # selected-instrument control immediately below them.  Reading from
+        # y=0 mixed both rows into one OCR stream and produced garbled symbols.
+        # Use the same stable selector lane as the visual fingerprint so only
+        # the active pair can become chart identity authority.
+        roi_x0 = max(0, min(width - 2, int(round(width * 0.055))))
+        roi_y0 = max(0, min(height - 2, int(round(height * 0.10))))
+        roi_x1 = min(width, max(roi_x0 + 120, int(round(width * 0.21))))
+        roi_y1 = min(height, max(roi_y0 + 36, int(round(height * 0.19))))
         timeframe_bbox = cast(Sequence[Any], _mapping_to_dict(timeframe_selector).get("bbox", []))
-        roi_x1 = min(width, max(180, int(round(width * 0.58))))
         if len(timeframe_bbox) >= 4:
             try:
                 timeframe_left = int(round(float(timeframe_bbox[0])))
-                if timeframe_left > 96:
-                    roi_x1 = min(roi_x1, max(120, timeframe_left - 8))
+                if timeframe_left > roi_x0 + 96:
+                    roi_x1 = min(roi_x1, max(roi_x0 + 120, timeframe_left - 8))
             except (TypeError, ValueError):
                 pass
-        roi_y1 = min(height, max(54, int(round(height * 0.19))))
-        roi = arr[:roi_y1, :roi_x1]
+        roi = arr[roi_y0:roi_y1, roi_x0:roi_x1]
         if roi.size == 0:
             return {}
 
@@ -10555,19 +11729,27 @@ class PhoenixGuardWindowTrackingAdapter:
         )
         recognized_parts: list[str] = []
         confidences: list[float] = []
+        character_rankings: list[list[tuple[str, float]]] = []
         previous_right = -1
         overall_bbox = [width, height, 0, 0]
         for row in filtered:
             bbox = cast(Sequence[Any], row["bbox"])
             x0, y0, x1, y1 = [int(value) for value in bbox[:4]]
-            crop = mask[max(0, y0 - 1): min(mask.shape[0], y1 + 1), max(0, x0 - 1): min(mask.shape[1], x1 + 1)]
-            label, confidence = self._score_ocr_character(crop)
-            if not label:
+            # Contours already bound the complete anti-aliased glyph.  Adding
+            # a one-pixel dark border made compact UI letters such as P look
+            # like punctuation after template resizing (GBP -> GB.).
+            crop = mask[max(0, y0): min(mask.shape[0], y1), max(0, x0): min(mask.shape[1], x1)]
+            rankings = self._rank_ocr_characters(crop)
+            if not rankings:
                 continue
+            label, best_score = rankings[0]
+            second_best = rankings[1][1] if len(rankings) > 1 else 0.0
+            confidence = _clip01(0.74 * best_score + 0.36 * max(0.0, best_score - second_best))
             if previous_right >= 0 and (x0 - previous_right) >= max(6.0, average_width * 1.10):
                 recognized_parts.append(" ")
             recognized_parts.append(label)
             confidences.append(confidence)
+            character_rankings.append(rankings)
             previous_right = x1
             overall_bbox[0] = min(overall_bbox[0], x0)
             overall_bbox[1] = min(overall_bbox[1], y0)
@@ -10576,6 +11758,14 @@ class PhoenixGuardWindowTrackingAdapter:
 
         raw_text = "".join(recognized_parts).strip()
         normalized = self._normalize_market_candidate(raw_text)
+        domain_score = 0.0
+        domain_margin = 0.0
+        domain_corrected = False
+        if not normalized:
+            normalized, domain_score, domain_margin = self._decode_fx_market_rankings(
+                character_rankings
+            )
+            domain_corrected = bool(normalized)
         if not normalized:
             return {}
         char_confidence = float(np.mean(np.asarray(confidences, dtype=np.float32))) if confidences else 0.0
@@ -10586,9 +11776,17 @@ class PhoenixGuardWindowTrackingAdapter:
         return {
             "value": normalized,
             "confidence": confidence,
-            "bbox": [int(value) for value in overall_bbox],
+            "bbox": [
+                int(overall_bbox[0] + roi_x0),
+                int(overall_bbox[1] + roi_y0),
+                int(overall_bbox[2] + roi_x0),
+                int(overall_bbox[3] + roi_y0),
+            ],
             "source": "header_text",
             "raw_text": raw_text,
+            "domain_corrected": domain_corrected,
+            "domain_score": round(float(domain_score), 4),
+            "domain_margin": round(float(domain_margin), 4),
         }
 
     def study(self, image: Image.Image, *, session_payload: Mapping[str, Any] | None = None) -> TrackingStudy:
@@ -10637,14 +11835,6 @@ class PhoenixGuardWindowTrackingAdapter:
             "PHOENIXGUARD_LIVE_SKIP_MISSING_MARKET_SELECTOR",
             True,
         )
-        fast_pair_switch_rebind = bool(
-            fast_market_selector_skip_context
-            and _env_bool("PHOENIXGUARD_LIVE_PAIR_SWITCH_FAST_REBIND", True)
-        )
-        scan_selector_on_pair_switch = _env_bool(
-            "PHOENIXGUARD_LIVE_SCAN_SELECTOR_ON_PAIR_SWITCH",
-            not locked_window_context,
-        )
         scan_selector_when_unknown = _env_bool("PHOENIXGUARD_LIVE_SCAN_SELECTOR_WHEN_UNKNOWN", False)
         previous_tracking: dict[str, Any] = {}
         previous_signal: dict[str, Any] = {}
@@ -10652,9 +11842,16 @@ class PhoenixGuardWindowTrackingAdapter:
         previous_market_selector_fingerprint = ""
         market_selector_visual_changed = False
         market_selector_rebind_required = False
+        previous_market_selector_rebind_pending = False
         if fast_selectors:
             previous_tracking = _mapping_to_dict(selector_session_payload.get("tracking_summary", {}))
             previous_signal = _mapping_to_dict(selector_session_payload.get("latest_signal", {}))
+            previous_market_selector_rebind_pending = bool(
+                previous_signal.get("market_selector_rebind_required")
+                or previous_signal.get("market_selector_studying_new_pair")
+                or previous_tracking.get("market_selector_rebind_required")
+                or previous_tracking.get("market_selector_studying_new_pair")
+            )
             previous_market_selector_fingerprint = str(
                 previous_signal.get(
                     "market_selector_visual_fingerprint",
@@ -10674,6 +11871,12 @@ class PhoenixGuardWindowTrackingAdapter:
                 previous_signal.get("focus_timeframe", previous_tracking.get("detected_timeframe", ""))
                 or ""
             ).upper()
+            cached_timeframe_reusable = bool(
+                cached_timeframe
+                and not market_selector_visual_changed
+                and not previous_market_selector_rebind_pending
+                and not force_market_selector_scan
+            )
             cached_market = _normalize_fx_market_candidate(
                 previous_signal.get("market", previous_tracking.get("detected_market", selector_session_payload.get("market", "")))
             )
@@ -10689,7 +11892,7 @@ class PhoenixGuardWindowTrackingAdapter:
                     "source": "live_cached_selector",
                     "confidence": _clip01(previous_signal.get("focus_timeframe_confidence", previous_tracking.get("timeframe_confidence", 0.0))),
                 }
-                if cached_timeframe
+                if cached_timeframe_reusable
                 else {}
             )
             market_selector: dict[str, Any] = (
@@ -10707,16 +11910,62 @@ class PhoenixGuardWindowTrackingAdapter:
             if not timeframe_selector:
                 timeframe_selector = self._detect_timeframe_selector(surface)
             if not market_selector:
-                if (
-                    fast_pair_switch_rebind
-                    and market_selector_visual_changed
-                    and not scan_selector_on_pair_switch
-                    and not force_market_selector_scan
-                ):
-                    market_selector_rebind_required = bool(cached_market or market_selector_visual_changed)
+                # A visual delta is diagnostic evidence, never pair authority.
+                # Confirm the normalized selector text before clearing the
+                # current market/history namespace.  The V2 fingerprint is
+                # stable enough that this scan runs on a real selector change,
+                # not on every live candle or payout animation.
+                detected_market_selector = (
+                    self._detect_market_selector(
+                        surface,
+                        timeframe_selector=timeframe_selector,
+                    )
+                    if (
+                        market_selector_visual_changed
+                        or previous_market_selector_rebind_pending
+                        or force_market_selector_scan
+                    )
+                    else {}
+                )
+                detected_market = _normalize_fx_market_candidate(
+                    detected_market_selector.get("value")
+                )
+                confirmed_pair_change = bool(
+                    cached_market
+                    and detected_market
+                    and detected_market != cached_market
+                )
+                if detected_market_selector and detected_market:
+                    market_selector = dict(detected_market_selector)
+                    # OCR has rebound the chart identity.  A changed pair gets
+                    # a new forecast/cache namespace immediately; rebind flags
+                    # describe unresolved identity only and therefore clear.
+                    market_selector_rebind_required = False
+                    market_selector["studying_new_pair"] = False
+                    market_selector["market_selector_identity_rebound"] = bool(
+                        confirmed_pair_change
+                        or previous_market_selector_rebind_pending
+                    )
+                    market_selector["market_selector_pair_changed"] = bool(
+                        confirmed_pair_change
+                        or previous_market_selector_rebind_pending
+                    )
+                elif market_selector_visual_changed and cached_market:
+                    # A changed selector that OCR cannot read is not authority
+                    # to keep the prior pair.  Fail closed and retry OCR on
+                    # every capture until a normalized symbol is confirmed.
+                    market_selector_rebind_required = True
                     market_selector = {
                         "value": "",
-                        "source": "selector_visual_changed_fast_rebind",
+                        "source": "selector_visual_changed_identity_pending",
+                        "confidence": 0.0,
+                        "studying_new_pair": True,
+                    }
+                elif previous_market_selector_rebind_pending:
+                    market_selector_rebind_required = True
+                    market_selector = {
+                        "value": "",
+                        "source": "selector_identity_rebind_pending",
                         "confidence": 0.0,
                         "studying_new_pair": True,
                     }
@@ -10728,27 +11977,44 @@ class PhoenixGuardWindowTrackingAdapter:
                     and not scan_selector_when_unknown
                     and not force_market_selector_scan
                 ):
+                    market_selector_rebind_required = True
                     market_selector = {
                         "value": "",
-                        "source": "selector_skipped_fast_locked_context",
+                        "source": "selector_identity_rebind_pending",
                         "confidence": 0.0,
-                        "studying_new_pair": False,
+                        "studying_new_pair": True,
                     }
                 else:
-                    detected_market_selector = self._detect_market_selector(surface, timeframe_selector=timeframe_selector)
+                    if not market_selector_visual_changed:
+                        detected_market_selector = self._detect_market_selector(
+                            surface,
+                            timeframe_selector=timeframe_selector,
+                        )
                     if detected_market_selector:
                         market_selector = dict(detected_market_selector)
                     elif skip_missing_live_market_selector and not market_selector_visual_changed:
-                        market_selector = {}
+                        market_selector_rebind_required = True
+                        market_selector = {
+                            "value": "",
+                            "source": "selector_identity_rebind_pending",
+                            "confidence": 0.0,
+                            "studying_new_pair": True,
+                        }
                     else:
-                        market_selector_rebind_required = bool(cached_market or market_selector_visual_changed)
+                        market_selector_rebind_required = bool(
+                            market_selector_visual_changed
+                            or previous_market_selector_rebind_pending
+                        )
                         market_selector = {
                             "value": "",
                             "source": "selector_visual_changed_unconfirmed"
                             if market_selector_visual_changed
                             else "selector_unconfirmed",
                             "confidence": 0.0,
-                            "studying_new_pair": bool(market_selector_visual_changed),
+                            "studying_new_pair": bool(
+                                market_selector_visual_changed
+                                or previous_market_selector_rebind_pending
+                            ),
                         }
                 market_selector["market_selector_visual_fingerprint"] = market_selector_fingerprint
                 market_selector["previous_market_selector_visual_fingerprint"] = previous_market_selector_fingerprint
@@ -10843,8 +12109,34 @@ class PhoenixGuardWindowTrackingAdapter:
             chart_bbox,
             session_payload=session_payload,
         )
+        incremental_extraction: dict[str, Any] = {
+            "enabled": False,
+            "history_reused": False,
+            "edge_recomputed": False,
+            "full_refresh_reason": "not_live_resized",
+            "reuse_count": 0,
+        }
+        incremental_cache_key = ""
+        incremental_enabled = bool(
+            fast_locked_context
+            and candle_image_resized
+            and _env_bool("PHOENIXGUARD_LIVE_INCREMENTAL_CANDLE_EXTRACTION", True)
+        )
+        if incremental_enabled:
+            incremental_cache_key = self._live_candle_cache_identity(
+                session_payload,
+                timeframe_selector,
+                market_selector,
+                candle_image.size,
+            )
+            analysis_tracks, incremental_extraction = self._extract_live_candle_tracks_incremental(
+                candle_image,
+                cache_key=incremental_cache_key,
+            )
+        else:
+            analysis_tracks = self._extract_candle_tracks(candle_image)
         tracked_candles = _rescale_candle_tracks(
-            self._extract_candle_tracks(candle_image),
+            analysis_tracks,
             scale_x=candle_scale_x,
             scale_y=candle_scale_y,
         )
@@ -10918,6 +12210,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "full_resolution_broker_chrome_filtered_count": int(full_resolution_broker_chrome_filtered_count),
             "final_track_count": int(len(tracked_candles)),
             "min_precision_track_count": int(_PHOENIXGUARD_MIN_PRECISION_CANDLE_TRACKS),
+            "incremental_history": dict(incremental_extraction),
         }
         tracking_summary["candle_extraction"] = dict(candle_extraction_summary)
         latest_signal["candle_extraction"] = dict(candle_extraction_summary)
@@ -14065,6 +15358,296 @@ class PhoenixGuardWindowTrackingAdapter:
             tracks.append(row)
         return tracks
 
+    @staticmethod
+    def _rebase_candle_tracks_x(
+        tracks: Sequence[Mapping[str, Any]],
+        *,
+        x_offset: int,
+        image_width: int,
+    ) -> list[dict[str, Any]]:
+        rebased: list[dict[str, Any]] = []
+        for item in tracks:
+            row = dict(item)
+            bbox = cast(Sequence[Any], row.get("bbox", []))
+            if len(bbox) >= 4:
+                row["bbox"] = [
+                    int(round(float(bbox[0]))) + int(x_offset),
+                    int(round(float(bbox[1]))),
+                    int(round(float(bbox[2]))) + int(x_offset),
+                    int(round(float(bbox[3]))),
+                ]
+            for key in ("center_x", "center_x_px"):
+                if key in row:
+                    row[key] = float(row.get(key, 0.0) or 0.0) + float(x_offset)
+            center_x = float(row.get("center_x", row.get("center_x_px", 0.0)) or 0.0)
+            row["normalized_x"] = float(center_x / max(1.0, float(image_width)))
+            rebased.append(row)
+        return rebased
+
+    @staticmethod
+    def _live_candle_cache_identity(
+        session_payload: Mapping[str, Any] | None,
+        timeframe_selector: Mapping[str, Any],
+        market_selector: Mapping[str, Any],
+        image_size: tuple[int, int],
+    ) -> str:
+        session = _mapping_to_dict(session_payload)
+        session_id = str(session.get("session_id", "") or "").strip()
+        selector_fingerprint = str(
+            market_selector.get("market_selector_visual_fingerprint", "") or ""
+        ).strip()
+        # Only the stable selector-v2 fingerprint is pair authority.  Older
+        # hashes included moving chart/payout pixels and could accidentally
+        # reuse one pair's candle field for another.
+        if not session_id or not selector_fingerprint.startswith("selector_v2_"):
+            return ""
+        if bool(session.get("_force_market_selector_scan_once", False)):
+            return ""
+        if bool(market_selector.get("market_selector_rebind_required", False)) or bool(
+            market_selector.get("studying_new_pair", False)
+        ):
+            return ""
+        timeframe = str(timeframe_selector.get("value", "") or "M5").strip().upper()
+        market = _normalize_fx_market_candidate(market_selector.get("value", "")) or "UNKNOWN"
+        return "|".join(
+            (
+                session_id,
+                timeframe,
+                market,
+                selector_fingerprint,
+                f"{int(image_size[0])}x{int(image_size[1])}",
+            )
+        )
+
+    def _remember_live_candle_field(
+        self,
+        cache_key: str,
+        *,
+        gray: ArrayND,
+        tracks: Sequence[Mapping[str, Any]],
+        reuse_count: int,
+    ) -> None:
+        if not cache_key:
+            return
+        entry = {
+            "gray": np.asarray(gray, dtype=np.uint8).copy(),
+            "tracks": [dict(row) for row in tracks],
+            "reuse_count": max(0, int(reuse_count)),
+            "updated_epoch": _now_epoch(),
+        }
+        with self._live_candle_cache_lock:
+            self._live_candle_cache[cache_key] = entry
+            if len(self._live_candle_cache) > 8:
+                oldest_key = min(
+                    self._live_candle_cache,
+                    key=lambda key: _float_or(
+                        self._live_candle_cache[key].get("updated_epoch", 0.0),
+                        0.0,
+                    ),
+                )
+                if oldest_key != cache_key:
+                    self._live_candle_cache.pop(oldest_key, None)
+
+    def _extract_live_candle_tracks_incremental(
+        self,
+        image: Image.Image,
+        *,
+        cache_key: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Reuse proven-static history and rescan the developing right edge.
+
+        A small grayscale comparison is the geometry gate.  Any meaningful
+        pan, zoom, vertical rescale, pair/timeframe change, or weak edge match
+        falls back to the original full extractor.  Forecast/LSTM computation
+        is intentionally outside this cache and still runs on every frame.
+        """
+
+        current_gray = np.asarray(image.convert("L"), dtype=np.uint8)
+        metadata: dict[str, Any] = {
+            "enabled": bool(cache_key),
+            "history_reused": False,
+            "edge_recomputed": False,
+            "full_refresh_reason": "cache_disabled" if not cache_key else "cold_cache",
+            "reuse_count": 0,
+        }
+
+        def full_refresh(reason: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            rows = self._extract_candle_tracks(image)
+            metadata["full_refresh_reason"] = reason
+            metadata["full_track_count"] = int(len(rows))
+            self._remember_live_candle_field(
+                cache_key,
+                gray=current_gray,
+                tracks=rows,
+                reuse_count=0,
+            )
+            return rows, metadata
+
+        if not cache_key or current_gray.ndim != 2:
+            return full_refresh(metadata["full_refresh_reason"])
+        with self._live_candle_cache_lock:
+            cached = dict(self._live_candle_cache.get(cache_key, {}))
+        cached_gray = cached.get("gray")
+        cached_tracks = [dict(row) for row in _sequence_of_mappings(cached.get("tracks", []))]
+        reuse_count = max(0, int(cached.get("reuse_count", 0) or 0))
+        try:
+            full_refresh_every = max(
+                4,
+                int(os.getenv("PHOENIXGUARD_LIVE_CANDLE_FULL_REFRESH_EVERY", "24") or "24"),
+            )
+        except ValueError:
+            full_refresh_every = 24
+        if not isinstance(cached_gray, np.ndarray) or cached_gray.shape != current_gray.shape:
+            return full_refresh("cold_cache")
+        if len(cached_tracks) < 16:
+            return full_refresh("insufficient_cached_history")
+        if reuse_count >= full_refresh_every - 1:
+            return full_refresh("periodic_geometry_audit")
+
+        cached_tracks.sort(key=lambda row: float(row.get("center_x", 0.0) or 0.0))
+        centers = [float(row.get("center_x", 0.0) or 0.0) for row in cached_tracks]
+        spacings = [
+            centers[index] - centers[index - 1]
+            for index in range(1, len(centers))
+            if centers[index] - centers[index - 1] > 1.0
+        ]
+        median_spacing = float(np.median(np.asarray(spacings, dtype=np.float32))) if spacings else 8.0
+        image_width = max(1, int(image.width))
+        edge_anchor_index = max(0, len(centers) - 12)
+        edge_anchor = centers[edge_anchor_index]
+        probe_end = int(
+            round(
+                max(
+                    float(image_width) * 0.34,
+                    min(float(image_width) * 0.78, edge_anchor - median_spacing * 2.0),
+                )
+            )
+        )
+        if probe_end < 64:
+            return full_refresh("history_probe_too_small")
+        historical_delta = np.abs(
+            current_gray[:, :probe_end].astype(np.int16)
+            - cast(ArrayND, cached_gray)[:, :probe_end].astype(np.int16)
+        )
+        history_mae = float(np.mean(historical_delta)) if historical_delta.size else 999.0
+        history_changed_fraction = (
+            float(np.mean(historical_delta > 12)) if historical_delta.size else 1.0
+        )
+        metadata["history_probe_end_px"] = int(probe_end)
+        metadata["history_probe_mae"] = round(history_mae, 4)
+        metadata["history_changed_fraction"] = round(history_changed_fraction, 5)
+        if history_mae > 1.25 or history_changed_fraction > 0.025:
+            return full_refresh("historical_geometry_changed")
+
+        crop_start = max(0, int(round(probe_end - max(18.0, median_spacing * 3.0))))
+        edge_image = image.crop((crop_start, 0, int(image.width), int(image.height)))
+        edge_tracks = self._rebase_candle_tracks_x(
+            self._extract_candle_tracks(edge_image),
+            x_offset=crop_start,
+            image_width=image_width,
+        )
+        edge_tracks.sort(key=lambda row: float(row.get("center_x", 0.0) or 0.0))
+        metadata["edge_crop_start_px"] = int(crop_start)
+        metadata["edge_track_count"] = int(len(edge_tracks))
+        if len(edge_tracks) < 6:
+            return full_refresh("edge_track_underflow")
+
+        x_tolerance = max(3.0, median_spacing * 0.42)
+        y_tolerance = max(14.0, float(image.height) * 0.055)
+        overlap_matches = 0
+        for edge_row in edge_tracks:
+            edge_x = float(edge_row.get("center_x", 0.0) or 0.0)
+            edge_y = float(edge_row.get("center_y", 0.0) or 0.0)
+            nearest = min(
+                cached_tracks,
+                key=lambda row: abs(float(row.get("center_x", 0.0) or 0.0) - edge_x),
+            )
+            if (
+                abs(float(nearest.get("center_x", 0.0) or 0.0) - edge_x) <= x_tolerance
+                and abs(float(nearest.get("center_y", 0.0) or 0.0) - edge_y) <= y_tolerance
+            ):
+                overlap_matches += 1
+        required_overlap = min(4, max(2, len(edge_tracks) // 4))
+        metadata["edge_overlap_matches"] = int(overlap_matches)
+        metadata["edge_overlap_required"] = int(required_overlap)
+        if overlap_matches < required_overlap:
+            return full_refresh("edge_overlap_unverified")
+
+        # Patch matching cached candles in place instead of replacing the
+        # entire tail.  The adaptive extractor can choose a shorter coherent
+        # sub-track on an edge crop; blindly concatenating that sub-track can
+        # duplicate candles and corrupt the LSTM sequence length.
+        replacements: dict[int, dict[str, Any]] = {}
+        appended: list[dict[str, Any]] = []
+        cached_max_x = max(centers)
+        for edge_row in edge_tracks:
+            edge_x = float(edge_row.get("center_x", 0.0) or 0.0)
+            nearest_index = min(
+                range(len(cached_tracks)),
+                key=lambda index: abs(centers[index] - edge_x),
+            )
+            nearest_distance = abs(centers[nearest_index] - edge_x)
+            if nearest_distance <= x_tolerance:
+                current = replacements.get(nearest_index)
+                if current is None or nearest_distance < abs(
+                    centers[nearest_index] - float(current.get("center_x", 0.0) or 0.0)
+                ):
+                    replacements[nearest_index] = dict(edge_row)
+                continue
+            is_plausible_new_candle = bool(
+                edge_x > cached_max_x + max(1.5, median_spacing * 0.35)
+                and edge_x <= cached_max_x + median_spacing * 2.4
+            )
+            if is_plausible_new_candle:
+                appended.append(dict(edge_row))
+
+        right_edge_refreshed = bool(
+            any(index >= len(cached_tracks) - 2 for index in replacements)
+            or appended
+        )
+        metadata["edge_replaced_count"] = int(len(replacements))
+        metadata["edge_new_track_count"] = int(len(appended))
+        metadata["right_edge_refreshed"] = bool(right_edge_refreshed)
+        if not right_edge_refreshed:
+            return full_refresh("right_edge_unverified")
+        merged = [
+            dict(replacements.get(index, row))
+            for index, row in enumerate(cached_tracks)
+        ]
+        for row in sorted(appended, key=lambda item: float(item.get("center_x", 0.0) or 0.0)):
+            row_x = float(row.get("center_x", 0.0) or 0.0)
+            if any(
+                abs(float(existing.get("center_x", 0.0) or 0.0) - row_x) <= x_tolerance
+                for existing in merged
+            ):
+                continue
+            merged.append(row)
+        merged.sort(key=lambda row: float(row.get("center_x", 0.0) or 0.0))
+        if len(merged) < max(8, len(cached_tracks) - 2) or len(merged) > len(cached_tracks) + 2:
+            return full_refresh("merged_track_underflow")
+        for index, row in enumerate(merged):
+            row["track_id"] = int(index)
+            center_x = float(row.get("center_x", row.get("center_x_px", 0.0)) or 0.0)
+            row["normalized_x"] = float(center_x / max(1.0, float(image_width)))
+
+        metadata.update(
+            {
+                "history_reused": True,
+                "edge_recomputed": True,
+                "full_refresh_reason": "",
+                "reuse_count": int(reuse_count + 1),
+                "cached_track_count": int(len(cached_tracks)),
+                "merged_track_count": int(len(merged)),
+            }
+        )
+        self._remember_live_candle_field(
+            cache_key,
+            gray=current_gray,
+            tracks=merged,
+            reuse_count=reuse_count + 1,
+        )
+        return merged, metadata
+
     def _filter_main_candle_tracks(
         self,
         tracks: Sequence[Mapping[str, Any]],
@@ -15991,23 +17574,524 @@ class PhoenixGuardWindowTrackingAdapter:
         payload["support_resistance_context"] = dict(_mapping_to_dict(smart_money_context.get("support_resistance", {})))
         return payload
 
-    def _build_lstm_contribution(
+    def _restore_scene_belief_checkpoint(
+        self,
+        session_payload: Mapping[str, Any],
+    ) -> None:
+        with self._scene_forecast_lock:
+            if self._scene_belief_restore_attempted:
+                return
+            self._scene_belief_restore_attempted = True
+            session_row = _mapping_to_dict(session_payload)
+            tracking = _mapping_to_dict(session_row.get("tracking_summary", {}))
+            signal = _mapping_to_dict(session_row.get("latest_signal", {}))
+            snapshot = _mapping_to_dict(session_row.get("forecast_snapshot_v3", {}))
+            previous = _first_forecast_mapping(
+                tracking.get("scene_forecast_contribution"),
+                signal.get("scene_forecast_contribution"),
+                snapshot.get("scene_forecast_contribution"),
+                tracking.get("lstm_contribution"),
+                signal.get("lstm_contribution"),
+                snapshot.get("lstm_contribution"),
+            )
+            identity_state = _mapping_to_dict(
+                previous.get("closed_candle_identity_state", {})
+            )
+            identity_pair = str(identity_state.get("pair") or "").upper()
+            identity_timeframe = str(
+                identity_state.get("timeframe") or ""
+            ).upper()
+            identity_key = str(identity_state.get("event_key") or "")
+            identity_sequence = int(
+                identity_state.get("event_sequence", -1) or -1
+            )
+            if (
+                identity_pair
+                and identity_timeframe
+                and identity_key
+                and identity_sequence >= 0
+            ):
+                context_key = (identity_pair, identity_timeframe)
+                self._scene_candle_identity_states[context_key] = identity_state
+                self._scene_event_sequences[context_key] = (
+                    identity_key,
+                    identity_sequence,
+                )
+                previous_line = previous.get("line_points", [])
+                previous_candles = previous.get("forecast_candles", [])
+                previous_scenarios = previous.get("forecast_scenarios", [])
+                line_items = (
+                    cast(Sequence[Any], previous_line)
+                    if isinstance(previous_line, Sequence)
+                    and not isinstance(previous_line, (str, bytes, bytearray))
+                    else ()
+                )
+                candle_items = (
+                    cast(Sequence[Any], previous_candles)
+                    if isinstance(previous_candles, Sequence)
+                    and not isinstance(previous_candles, (str, bytes, bytearray))
+                    else ()
+                )
+                scenario_items = (
+                    cast(Sequence[Any], previous_scenarios)
+                    if isinstance(previous_scenarios, Sequence)
+                    and not isinstance(previous_scenarios, (str, bytes, bytearray))
+                    else ()
+                )
+                complete_geometry = bool(
+                    len(line_items) == 13
+                    and len(candle_items) == 12
+                    and len(scenario_items) >= 3
+                )
+                if complete_geometry:
+                    # A process restart during the same forming candle must
+                    # restore the already-issued event study, not recompute it
+                    # from a detector refinement of that same screenshot bar.
+                    self._scene_forecast_cache[
+                        (identity_pair, identity_timeframe, identity_key)
+                    ] = copy.deepcopy(previous)
+            checkpoint = _mapping_to_dict(
+                previous.get("belief_tracker_checkpoint", {})
+            )
+            if not checkpoint:
+                return
+            try:
+                restored = ForecastBeliefTrackerV3.from_state_dict(checkpoint)
+            except (TypeError, ValueError):
+                LOGGER.warning(
+                    "Ignoring an invalid persisted scene-belief checkpoint.",
+                    exc_info=True,
+                )
+                return
+            self._scene_belief_tracker = restored
+            for context in cast(
+                Sequence[Mapping[str, Any]],
+                checkpoint.get("contexts", []),
+            ):
+                pair = str(context.get("pair") or "").upper()
+                timeframe = str(context.get("timeframe") or "").upper()
+                closed_key = str(context.get("last_closed_candle_key") or "")
+                sequence = int(context.get("last_closed_candle_sequence", -1) or -1)
+                if pair and timeframe and closed_key and sequence >= 0:
+                    self._scene_event_sequences[(pair, timeframe)] = (
+                        closed_key,
+                        sequence,
+                    )
+
+    def _scene_belief_checkpoint(self) -> dict[str, Any]:
+        state = copy.deepcopy(self._scene_belief_tracker.to_state_dict())
+        raw_contexts: object = state.get("contexts", [])
+        if isinstance(raw_contexts, list):
+            for raw_item in cast(list[object], raw_contexts):
+                if not isinstance(raw_item, dict):
+                    continue
+                raw_context = cast(dict[str, Any], raw_item)
+                # The current posterior is sufficient to resume the filter.
+                # The immutable detailed ledger remains in process memory; it
+                # is not duplicated into every persisted frame.
+                raw_context["revisions"] = []
+                seen = raw_context.get("seen_closed_candle_keys", [])
+                if isinstance(seen, list):
+                    raw_context["seen_closed_candle_keys"] = seen[-8:]
+        return state
+
+    def _build_scene_forecast_contribution(
         self,
         *,
         candles: Sequence[Mapping[str, Any]],
         chart_image: Image.Image,
         timeframe: str,
-        sequence_phase: str,
-        market_play_label: str,
+        market: str,
+        frame_id: int,
+        projection: Mapping[str, Any],
+        candle_statistics: Mapping[str, Any],
+        behavior_payload: Mapping[str, Any],
+        decision_kernel: Mapping[str, Any],
+        smart_money_context: Mapping[str, Any],
+        support_resistance_context: Mapping[str, Any],
+        support_resistance_zones: Sequence[Mapping[str, Any]],
+        trend_slopes: Mapping[str, Any],
+        trend_directions: Mapping[str, Any],
     ) -> dict[str, Any]:
-        return build_lstm_candle_sequence_contribution(
-            candles=candles,
-            image_size=chart_image.size,
-            timeframe=timeframe,
-            sequence_phase=sequence_phase,
-            market_play_label=market_play_label,
-            chart_image=chart_image,
-        )
+        pair = str(market or "UNKNOWN_MARKET").strip().upper()
+        timeframe_key = str(timeframe or "M5").strip().upper()
+        with self._scene_forecast_lock:
+            context_key = (pair, timeframe_key)
+            previous_key, previous_sequence = self._scene_event_sequences.get(
+                context_key,
+                ("", -1),
+            )
+            identity_resolution = resolve_closed_candle_identity_v3(
+                candles,
+                pair=pair,
+                timeframe=timeframe_key,
+                previous_state=self._scene_candle_identity_states.get(context_key),
+                previous_key=previous_key,
+                previous_sequence=previous_sequence,
+            )
+            closed_key = str(identity_resolution["closed_candle_key"])
+            closed_sequence = int(
+                identity_resolution["closed_candle_sequence"]
+            )
+            identity_state = _mapping_to_dict(identity_resolution.get("state", {}))
+            self._scene_candle_identity_states[context_key] = identity_state
+            self._scene_event_sequences[context_key] = (
+                closed_key,
+                max(0, closed_sequence),
+            )
+            cache_key = (pair, timeframe_key, closed_key)
+            cached = self._scene_forecast_cache.get(cache_key)
+            same_event_cache_rebuild = bool(
+                identity_resolution.get("same_event_cache_rebuild_required", False)
+            )
+            cache_entry_replaced = bool(
+                same_event_cache_rebuild and cached is not None
+            )
+            if same_event_cache_rebuild:
+                # The event identity is intentionally unchanged, but the
+                # detector now supplies a materially fuller causal scene and a
+                # different latest-close anchor. Never serve geometry frozen
+                # against the smaller detector coverage on the next frame.
+                self._scene_forecast_cache.pop(cache_key, None)
+                cached = None
+            if cached is not None:
+                result = copy.deepcopy(cached)
+                computed_frame_id = int(
+                    result.get(
+                        "forecast_computed_frame_id",
+                        result.get("source_forecast_frame_id", result.get("frame_id", frame_id)),
+                    )
+                    or frame_id
+                )
+                cached_geometry_frame_id = int(
+                    result.get("geometry_projected_frame_id", result.get("frame_id", computed_frame_id))
+                    or computed_frame_id
+                )
+                match_scores = dict(
+                    _mapping_to_dict(identity_resolution.get("match_scores", {}))
+                )
+                geometry_match_verified = False
+                geometry_reanchor_error = ""
+                coverage_degraded = bool(
+                    match_scores.get("coverage_degradation_observed", False)
+                )
+                if coverage_degraded:
+                    geometry_reanchor_error = "DETECTOR_COVERAGE_DEGRADED"
+                try:
+                    current_anchor = build_scene_forecast_anchor_v3(
+                        candles,
+                        image_size=chart_image.size,
+                    )
+                    result = reanchor_scene_forecast_geometry_v3(
+                        result,
+                        anchor=current_anchor,
+                    )
+                    geometry_match_verified = True
+                except (TypeError, ValueError) as exc:
+                    geometry_reanchor_error = f"{type(exc).__name__}: {exc}"
+                if geometry_match_verified:
+                    result.update(
+                        {
+                            "frame_id": int(frame_id),
+                            "display_frame_id": int(frame_id),
+                            "geometry_projected_frame_id": int(frame_id),
+                            "geometry_frame_match_verified": True,
+                            "geometry_reprojected_from_cache": True,
+                            "source_image_size": [
+                                int(chart_image.width),
+                                int(chart_image.height),
+                            ],
+                        }
+                    )
+                    geometry_provenance = dict(
+                        _mapping_to_dict(result.get("geometry_reanchor", {}))
+                    )
+                    geometry_provenance.update(
+                        {
+                            "source_forecast_frame_id": computed_frame_id,
+                            "source_geometry_frame_id": cached_geometry_frame_id,
+                            "projected_frame_id": int(frame_id),
+                            "verified": True,
+                        }
+                    )
+                    if coverage_degraded:
+                        geometry_provenance.update(
+                            {
+                                "status": "DEGRADED_REANCHOR",
+                                "reason": "DETECTOR_COVERAGE_DEGRADED",
+                                "coverage_degradation_observed": True,
+                            }
+                        )
+                        result.update(
+                            {
+                                "trade_authorized": False,
+                                "selective_authorized": False,
+                                "selective_status": "NO_EDGE",
+                                "trade_authorization_status": "NO_EDGE",
+                                "contribution": 0.0,
+                            }
+                        )
+                    result["geometry_projection_provenance"] = geometry_provenance
+                else:
+                    # Keep the original geometry frame lineage. Downstream
+                    # exact-frame gates will reject it instead of accepting a
+                    # floating path relabeled as current.
+                    result.update(
+                        {
+                            "geometry_projected_frame_id": cached_geometry_frame_id,
+                            "geometry_frame_match_verified": False,
+                            "geometry_reprojected_from_cache": False,
+                            "geometry_projection_provenance": {
+                                "status": "FAILED_CLOSED",
+                                "source_forecast_frame_id": computed_frame_id,
+                                "source_geometry_frame_id": cached_geometry_frame_id,
+                                "requested_frame_id": int(frame_id),
+                                "verified": False,
+                                "reason": geometry_reanchor_error,
+                            },
+                            "trade_authorized": False,
+                            "selective_authorized": False,
+                            "selective_status": "NO_EDGE",
+                            "trade_authorization_status": "NO_EDGE",
+                            "contribution": 0.0,
+                        }
+                    )
+                result.update(
+                    {
+                        "forecast_computed_frame_id": computed_frame_id,
+                        "source_forecast_frame_id": computed_frame_id,
+                        "cache_hit": True,
+                        "frame_reused_without_reforecast": True,
+                        "same_event_cache_rebuild_required": False,
+                        "detector_coverage_rebase_applied": bool(
+                            result.get("detector_coverage_rebase_applied", False)
+                        ),
+                        "cache_replaced_for_detector_coverage_rebase": bool(
+                            result.get(
+                                "cache_replaced_for_detector_coverage_rebase",
+                                False,
+                            )
+                        ),
+                        "closed_candle_transition_observed": bool(
+                            identity_resolution.get("transition_observed", False)
+                        ),
+                        "closed_candle_transition_reason": str(
+                            identity_resolution.get("transition_reason") or ""
+                        ),
+                        "closed_candle_match_scores": dict(
+                            match_scores
+                        ),
+                        "closed_candle_identity_state": copy.deepcopy(
+                            identity_state
+                        ),
+                    }
+                )
+                return result
+            contribution = build_scene_forecast_contribution_v3(
+                candles=candles,
+                image_size=chart_image.size,
+                timeframe=timeframe_key,
+                pair=pair,
+                projection=projection,
+                candle_statistics=candle_statistics,
+                behavior_payload=behavior_payload,
+                decision_kernel=decision_kernel,
+                smart_money_context=smart_money_context,
+                support_resistance_context=support_resistance_context,
+                support_resistance_zones=support_resistance_zones,
+                trend_slopes=trend_slopes,
+                trend_directions=trend_directions,
+                # Chronos-2 remains a local shadow challenger until its
+                # time-aware metrics gate passes. The live selected path uses
+                # the deterministic full-suite fallback rather than promoting
+                # an uncalibrated zero-shot model.
+                allow_foundation_model=False,
+                event_key_override=closed_key,
+            )
+            raw_side = _upper_action(contribution.get("path_side", "HOLD"))
+            probability_calibrated = bool(
+                contribution.get("probability_calibrated", False)
+            )
+            raw_emissions = _mapping_to_dict(
+                contribution.get("side_probabilities", {})
+                if probability_calibrated
+                else contribution.get("raw_side_probabilities", {})
+            )
+            if probability_calibrated and all(
+                side in raw_emissions for side in ("BUY", "HOLD", "SELL")
+            ):
+                current_snapshot = self._scene_belief_tracker.snapshot(
+                    pair=pair,
+                    timeframe=timeframe_key,
+                )
+                monotonic_frame_id = max(
+                    int(frame_id),
+                    int(current_snapshot.get("last_frame_id", -1) or -1) + 1,
+                )
+                belief_update = self._scene_belief_tracker.update(
+                    pair=pair,
+                    timeframe=timeframe_key,
+                    closed_candle_key=closed_key,
+                    closed_candle_sequence=max(0, closed_sequence),
+                    frame_id=max(0, monotonic_frame_id),
+                    emissions=raw_emissions,
+                    calibrated=True,
+                    source_id=str(contribution.get("model_version") or "SCENE_FORECAST_V3"),
+                ).to_dict()
+                belief_state = str(
+                    belief_update.get("status") or "REACQUIRING"
+                ).upper()
+                committed_side = _upper_action(
+                    belief_update.get("active_side", "HOLD")
+                )
+                candidate_side = _upper_action(
+                    belief_update.get("pending_side")
+                    or belief_update.get("candidate_side")
+                    or raw_side
+                )
+                confirmation_events = int(
+                    belief_update.get("pending_count", 0) or 0
+                )
+                required_events = int(
+                    belief_update.get("required_count", 0) or 0
+                )
+                belief_reason = str(belief_update.get("reason") or "")
+            else:
+                belief_update = self._scene_belief_tracker.snapshot(
+                    pair=pair,
+                    timeframe=timeframe_key,
+                )
+                belief_state = "REACQUIRING"
+                committed_side = _upper_action(
+                    belief_update.get("active_side", "HOLD")
+                )
+                candidate_side = raw_side
+                confirmation_events = 0
+                required_events = int(
+                    self._scene_belief_tracker.config.reacquire_confirmation_events
+                )
+                belief_reason = "UNCALIBRATED_EMISSIONS_ADVISORY_ONLY"
+
+            posterior = _mapping_to_dict(belief_update.get("posterior", {}))
+            scenarios: list[dict[str, Any]] = []
+            for raw_scenario in _sequence_of_mappings(
+                contribution.get("forecast_scenarios", [])
+            ):
+                scenario = dict(raw_scenario)
+                scenario["raw_selected"] = bool(scenario.get("selected", False))
+                scenario["candidate"] = bool(
+                    _upper_action(scenario.get("side", "HOLD")) == candidate_side
+                    and belief_state in {"REACQUIRING", "REVERSAL_PENDING"}
+                )
+                scenario["probability_calibrated"] = probability_calibrated
+                scenarios.append(scenario)
+            contribution["forecast_scenarios"] = scenarios
+            contribution["trajectory_scenarios"] = copy.deepcopy(scenarios)
+
+            # The public side, line and twelve OHLC candles are one indivisible
+            # scenario.  While a calibrated reversal is pending, keep drawing
+            # the committed scenario and mark the raw winner as the candidate.
+            # If the current distribution has no path for the old commitment,
+            # do not invent one: return to an explicit reacquisition study.
+            selected_role: str | None = None
+            belief_active_side = committed_side
+            if (
+                probability_calibrated
+                and belief_state in {"STABLE", "REVERSAL_PENDING"}
+                and committed_side in {"BUY", "SELL"}
+            ):
+                committed_rows = [
+                    row
+                    for row in scenarios
+                    if _upper_action(row.get("side", "HOLD")) == committed_side
+                ]
+                if committed_rows:
+                    selected_role = str(
+                        max(
+                            committed_rows,
+                            key=lambda row: float(row.get("probability", 0.0) or 0.0),
+                        ).get("role")
+                        or "base"
+                    )
+                else:
+                    belief_state = "REACQUIRING"
+                    committed_side = "HOLD"
+                    confirmation_events = 0
+                    belief_reason = (
+                        f"{belief_reason}|COMMITTED_SCENARIO_GEOMETRY_UNAVAILABLE"
+                    ).strip("|")
+            if selected_role is None:
+                raw_selected = next(
+                    (row for row in scenarios if bool(row.get("raw_selected", False))),
+                    scenarios[0] if scenarios else {},
+                )
+                selected_role = str(raw_selected.get("role") or "base")
+            contribution = synchronize_scene_forecast_geometry_v3(
+                contribution,
+                selected_role=selected_role,
+            )
+            scenarios = [dict(row) for row in contribution["forecast_scenarios"]]
+            contribution.update(
+                {
+                    "forecast_id": f"{pair}|{timeframe_key}|{closed_key}",
+                    "forecast_revision": max(0, closed_sequence),
+                    "frame_id": int(frame_id),
+                    "display_frame_id": int(frame_id),
+                    "forecast_computed_frame_id": int(frame_id),
+                    "source_forecast_frame_id": int(frame_id),
+                    "geometry_projected_frame_id": int(frame_id),
+                    "geometry_frame_match_verified": True,
+                    "geometry_reprojected_from_cache": False,
+                    "geometry_projection_provenance": {
+                        "status": "COMPUTED_CURRENT_FRAME",
+                        "source_forecast_frame_id": int(frame_id),
+                        "source_geometry_frame_id": int(frame_id),
+                        "projected_frame_id": int(frame_id),
+                        "verified": True,
+                    },
+                    "closed_candle_key": closed_key,
+                    "closed_candle_sequence": max(0, closed_sequence),
+                    "closed_candle_transition_observed": bool(
+                        identity_resolution.get("transition_observed", False)
+                    ),
+                    "closed_candle_transition_reason": str(
+                        identity_resolution.get("transition_reason") or ""
+                    ),
+                    "closed_candle_match_scores": dict(
+                        _mapping_to_dict(identity_resolution.get("match_scores", {}))
+                    ),
+                    "closed_candle_identity_state": copy.deepcopy(identity_state),
+                    "same_event_cache_rebuild_required": False,
+                    "detector_coverage_rebase_applied": same_event_cache_rebuild,
+                    "cache_replaced_for_detector_coverage_rebase": cache_entry_replaced,
+                    "scene_context_frozen_at_closed_candle": True,
+                    "frame_reused_without_reforecast": False,
+                    "belief_state": belief_state,
+                    "belief_revision": int(belief_update.get("revision", 0) or 0),
+                    "committed_side": committed_side,
+                    "belief_active_side": belief_active_side,
+                    "candidate_side": candidate_side,
+                    "confirmation_events": confirmation_events,
+                    "required_events": required_events,
+                    "belief_reason": belief_reason,
+                    "belief_posterior": posterior,
+                    "change_probability": float(
+                        posterior.get(candidate_side, raw_emissions.get(candidate_side, 0.0))
+                        or 0.0
+                    ),
+                    "belief_tracker_checkpoint": self._scene_belief_checkpoint(),
+                    "cache_hit": False,
+                }
+            )
+            self._scene_event_sequences[context_key] = (
+                closed_key,
+                max(0, closed_sequence),
+            )
+            self._scene_forecast_cache[cache_key] = copy.deepcopy(contribution)
+            while len(self._scene_forecast_cache) > 48:
+                oldest = next(iter(self._scene_forecast_cache))
+                del self._scene_forecast_cache[oldest]
+            return copy.deepcopy(contribution)
 
     def _build_signal_payloads(
         self,
@@ -16022,6 +18106,7 @@ class PhoenixGuardWindowTrackingAdapter:
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         candles = [dict(item) for item in tracked_candles]
         session_row = _mapping_to_dict(session_payload)
+        self._restore_scene_belief_checkpoint(session_row)
         execution_controls = _normalize_execution_controls(
             _mapping_to_dict(session_row.get("execution_controls", {}))
         )
@@ -16030,7 +18115,10 @@ class PhoenixGuardWindowTrackingAdapter:
         )
         frame_index = int(session_row.get("frame_index", session_row.get("display_frame_id", 0)) or 0)
         sequence_id = f"seq_{str(session_row.get('session_id', '') or 'tracker').strip()}_{frame_index}"
-        timeframe = str(timeframe_selector.get("value", "") or "").upper()
+        detected_chart_timeframe = str(
+            timeframe_selector.get("value", "") or ""
+        ).strip().upper()
+        timeframe = detected_chart_timeframe
         timeframe_source = str(timeframe_selector.get("source", "unconfirmed") or "unconfirmed")
         timeframe_confidence = _clip01(timeframe_selector.get("confidence", 0.0))
         if not timeframe:
@@ -16053,6 +18141,28 @@ class PhoenixGuardWindowTrackingAdapter:
         market_selector_visual_changed = bool(market_row.get("market_selector_visual_changed", False))
         market_selector_rebind_required = bool(market_row.get("market_selector_rebind_required", False))
         market_selector_studying_new_pair = bool(market_row.get("studying_new_pair", False))
+        market_selector_identity_rebound = bool(
+            market_row.get("market_selector_identity_rebound", False)
+        )
+        market_selector_pair_changed = bool(
+            market_row.get("market_selector_pair_changed", False)
+        )
+        min_market_identity_confidence = _clip01(
+            execution_controls.get("min_market_confidence", 0.42)
+        )
+        min_timeframe_identity_confidence = _clip01(
+            execution_controls.get("min_timeframe_confidence", 0.42)
+        )
+        market_identity_confirmed = bool(
+            market
+            and market_confidence >= min_market_identity_confidence
+            and not market_selector_rebind_required
+            and not market_selector_studying_new_pair
+        )
+        timeframe_identity_confirmed = bool(
+            detected_chart_timeframe
+            and timeframe_confidence >= min_timeframe_identity_confidence
+        )
         if len(candles) < 5:
             tracking = _default_tracking_summary(message="Waiting for more visible candle structure.")
             tracking["chart_region"] = dict(chart_region)
@@ -16072,6 +18182,10 @@ class PhoenixGuardWindowTrackingAdapter:
             tracking["market_selector_visual_changed"] = market_selector_visual_changed
             tracking["market_selector_rebind_required"] = market_selector_rebind_required
             tracking["market_selector_studying_new_pair"] = market_selector_studying_new_pair
+            tracking["market_selector_identity_rebound"] = market_selector_identity_rebound
+            tracking["market_selector_pair_changed"] = market_selector_pair_changed
+            tracking["market_identity_confirmed"] = market_identity_confirmed
+            tracking["timeframe_identity_confirmed"] = timeframe_identity_confirmed
             signal = _default_signal(
                 message="Waiting for more visible candle structure inside the locked focus region.",
                 status="warming",
@@ -16089,6 +18203,10 @@ class PhoenixGuardWindowTrackingAdapter:
             signal["market_selector_visual_changed"] = market_selector_visual_changed
             signal["market_selector_rebind_required"] = market_selector_rebind_required
             signal["market_selector_studying_new_pair"] = market_selector_studying_new_pair
+            signal["market_selector_identity_rebound"] = market_selector_identity_rebound
+            signal["market_selector_pair_changed"] = market_selector_pair_changed
+            signal["market_identity_confirmed"] = market_identity_confirmed
+            signal["timeframe_identity_confirmed"] = timeframe_identity_confirmed
             return tracking, signal
 
         proxies = [float(item.get("price_proxy", 0.0)) for item in candles]
@@ -16343,13 +18461,74 @@ class PhoenixGuardWindowTrackingAdapter:
                 session_payload=session_payload,
             )
         )
-        lstm_contribution = self._build_lstm_contribution(
-            candles=candles,
-            chart_image=chart_image,
-            timeframe=high_frequency_study_timeframe,
-            sequence_phase=str(behavior_payload.get("current_state", setup) or setup),
-            market_play_label=setup,
-        )
+        if market_identity_confirmed and timeframe_identity_confirmed:
+            scene_forecast_contribution = self._build_scene_forecast_contribution(
+                candles=candles,
+                chart_image=chart_image,
+                # Scene geometry comes from the visible chart candles.  It is
+                # therefore bound to the OCR-confirmed chart timeframe, not a
+                # separately configured high-frequency study lane.
+                timeframe=timeframe,
+                market=market,
+                frame_id=frame_index,
+                projection=projection,
+                candle_statistics=candle_statistics,
+                behavior_payload=behavior_payload,
+                decision_kernel=decision_kernel,
+                smart_money_context=smart_money_context,
+                support_resistance_context=support_resistance_context,
+                support_resistance_zones=support_resistance_zones,
+                trend_slopes={
+                    "global": global_slope,
+                    "local": local_slope,
+                    "current": current_slope,
+                    "impulse": impulse_delta,
+                },
+                trend_directions={
+                    "global": global_direction,
+                    "local": local_direction,
+                    "current": impulse_direction,
+                    "impulse": impulse_direction,
+                },
+            )
+            scene_forecast_contribution.update(
+                {
+                    "pair": market,
+                    "timeframe": timeframe,
+                    "market_identity_confirmed": True,
+                    "timeframe_identity_confirmed": True,
+                    "market_confidence": market_confidence,
+                    "timeframe_confidence": timeframe_confidence,
+                    "min_market_confidence": min_market_identity_confidence,
+                    "min_timeframe_confidence": min_timeframe_identity_confidence,
+                    "identity_contract_status": "CONFIRMED",
+                }
+            )
+        else:
+            pending_reasons: list[str] = []
+            if not market_identity_confirmed:
+                pending_reasons.append("MARKET_OCR_NOT_CONFIRMED")
+            if not timeframe_identity_confirmed:
+                pending_reasons.append("TIMEFRAME_OCR_NOT_CONFIRMED")
+            scene_forecast_contribution = _scene_forecast_identity_pending_v3(
+                pair=market,
+                timeframe=detected_chart_timeframe,
+                frame_id=frame_index,
+                reason="|".join(pending_reasons),
+                market_identity_confirmed=market_identity_confirmed,
+                timeframe_identity_confirmed=timeframe_identity_confirmed,
+            )
+            scene_forecast_contribution.update(
+                {
+                    "market_confidence": market_confidence,
+                    "timeframe_confidence": timeframe_confidence,
+                    "min_market_confidence": min_market_identity_confidence,
+                    "min_timeframe_confidence": min_timeframe_identity_confidence,
+                }
+            )
+        # Compatibility alias for downstream V3 readers while they migrate to
+        # the first-class scene field. This object is not an LSTM output.
+        lstm_contribution = scene_forecast_contribution
         high_frequency_forecast = build_high_frequency_candle_forecast(
             candles=candles,
             image_size=chart_image.size,
@@ -16373,6 +18552,7 @@ class PhoenixGuardWindowTrackingAdapter:
         )
         decision_kernel["high_frequency_forecast"] = high_frequency_forecast
         decision_kernel["two_candle_study"] = _mapping_to_dict(high_frequency_forecast.get("two_candle_study", {}))
+        decision_kernel["scene_forecast_contribution"] = scene_forecast_contribution
         decision_kernel["lstm_contribution"] = lstm_contribution
         kernel_trade_mode = str(decision_kernel.get("trade_mode", "STAND_ASIDE") or "STAND_ASIDE").upper()
         kernel_candle_side = _upper_action(decision_kernel.get("candle_execution_side", "HOLD"))
@@ -16471,6 +18651,10 @@ class PhoenixGuardWindowTrackingAdapter:
             "market_selector_visual_changed": market_selector_visual_changed,
             "market_selector_rebind_required": market_selector_rebind_required,
             "market_selector_studying_new_pair": market_selector_studying_new_pair,
+            "market_selector_identity_rebound": market_selector_identity_rebound,
+            "market_selector_pair_changed": market_selector_pair_changed,
+            "market_identity_confirmed": market_identity_confirmed,
+            "timeframe_identity_confirmed": timeframe_identity_confirmed,
             "global_direction": global_direction,
             "local_direction": local_direction,
             "impulse_direction": impulse_direction,
@@ -16499,6 +18683,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "high_frequency_forecast": high_frequency_forecast,
             "micro_candle_forecast": high_frequency_forecast,
             "two_candle_study": _mapping_to_dict(high_frequency_forecast.get("two_candle_study", {})),
+            "scene_forecast_contribution": scene_forecast_contribution,
             "lstm_contribution": lstm_contribution,
             "countertrend_lane": countertrend_lane,
             "box_context": _mapping_to_dict(behavior_payload.get("box_context", {})),
@@ -16561,6 +18746,10 @@ class PhoenixGuardWindowTrackingAdapter:
             "market_selector_visual_changed": market_selector_visual_changed,
             "market_selector_rebind_required": market_selector_rebind_required,
             "market_selector_studying_new_pair": market_selector_studying_new_pair,
+            "market_selector_identity_rebound": market_selector_identity_rebound,
+            "market_selector_pair_changed": market_selector_pair_changed,
+            "market_identity_confirmed": market_identity_confirmed,
+            "timeframe_identity_confirmed": timeframe_identity_confirmed,
             "execution_permission": execution_permission,
             "entry_state": str(entry_plan.get("entry_state", "WAIT") or "WAIT"),
             "entry_label": str(entry_plan.get("entry_label", "WAIT") or "WAIT"),
@@ -16574,6 +18763,7 @@ class PhoenixGuardWindowTrackingAdapter:
             "high_frequency_forecast": high_frequency_forecast,
             "micro_candle_forecast": high_frequency_forecast,
             "two_candle_study": _mapping_to_dict(high_frequency_forecast.get("two_candle_study", {})),
+            "scene_forecast_contribution": scene_forecast_contribution,
             "lstm_contribution": lstm_contribution,
             "global_local_control": control_state,
             "control_owner": str(control_state.get("owner", "balanced")),
@@ -20213,8 +22403,13 @@ class PhoenixGuardWindowTrackingAdapter:
                     roi[max(0, y - pad): min(roi.shape[0], y + box_h + pad), max(0, x - pad): min(roi.shape[1], x + box_w + pad)],
                     mode="RGB",
                 )
-                text_mask = self._extract_timeframe_text_mask(crop)
-                label, template_score = self._score_timeframe_label(text_mask)
+                label = ""
+                template_score = 0.0
+                for text_mask in self._extract_timeframe_text_masks(crop):
+                    candidate_label, candidate_template_score = self._score_timeframe_label(text_mask)
+                    if candidate_template_score > template_score:
+                        label = candidate_label
+                        template_score = candidate_template_score
                 if not label:
                     continue
                 center_x = x + box_w * 0.5
@@ -20248,10 +22443,10 @@ class PhoenixGuardWindowTrackingAdapter:
         candidates.sort(key=lambda item: float(item.get("confidence", 0.0)), reverse=True)
         return dict(candidates[0])
 
-    def _extract_timeframe_text_mask(self, candidate_image: Image.Image) -> ArrayND:
+    def _extract_timeframe_text_masks(self, candidate_image: Image.Image) -> list[ArrayND]:
         arr = np.asarray(candidate_image.convert("RGB"), dtype=np.uint8)
         if arr.ndim != 3 or arr.shape[0] < 8 or arr.shape[1] < 8:
-            return np.zeros((1, 1), dtype=np.uint8)
+            return []
         try:
             import cv2  # type: ignore[import-not-found]
 
@@ -20263,19 +22458,73 @@ class PhoenixGuardWindowTrackingAdapter:
                 255,
                 0,
             ).astype(np.uint8)
-            kernel = np.ones((2, 2), dtype=np.uint8)
-            white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-            white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
         except Exception:
             gray = np.asarray(candidate_image.convert("L"), dtype=np.uint8)
             white_mask = np.where(gray >= 188, 255, 0).astype(np.uint8)
 
-        bbox = _binary_content_bbox(white_mask)
-        if bbox is None:
-            return np.zeros((1, 1), dtype=np.uint8)
-        x0, y0, x1, y1 = bbox
-        cropped = white_mask[max(0, y0 - 1): y1 + 1, max(0, x0 - 1): x1 + 1]
-        return (cropped > 0).astype(np.uint8)
+        try:
+            import cv2  # type: ignore[import-not-found]
+
+            contours, _hier = cv2.findContours(
+                white_mask,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+        except Exception:
+            return []
+
+        component_boxes: list[tuple[int, int, int, int]] = []
+        max_component_height = max(8, int(round(float(white_mask.shape[0]) * 0.34)))
+        for contour in contours:
+            x, y, box_w, box_h = cv2.boundingRect(contour)
+            foreground = int(np.sum(white_mask[y: y + box_h, x: x + box_w] > 0))
+            if box_w < 2 or box_h < 4 or foreground < 8:
+                continue
+            if box_h > max_component_height or box_w > max(48, int(round(float(white_mask.shape[1]) * 0.74))):
+                continue
+            component_boxes.append((int(x), int(y), int(x + box_w), int(y + box_h)))
+        if not component_boxes:
+            return []
+
+        # Pocket Option's timeframe label is only about six pixels high at a
+        # 1080p focused capture.  The old 2x2 open/close morphology collapsed
+        # M5 into a solid block and made it resemble M1/M3.  Preserve raw glyph
+        # pixels, score individual connected labels, and also score adjacent
+        # same-baseline components for displays where M and 5 do not touch.
+        masks: list[ArrayND] = []
+
+        def append_mask(box: tuple[int, int, int, int]) -> None:
+            x0, y0, x1, y1 = box
+            cropped = white_mask[y0:y1, x0:x1]
+            if cropped.size == 0 or int(np.sum(cropped > 0)) < 8:
+                return
+            masks.append((cropped > 0).astype(np.uint8))
+
+        component_boxes.sort(key=lambda box: (box[1], box[0]))
+        for box in component_boxes:
+            append_mask(box)
+
+        x_sorted = sorted(component_boxes, key=lambda box: box[0])
+        for start_index, start_box in enumerate(x_sorted):
+            group = [start_box]
+            group_x0, group_y0, group_x1, group_y1 = start_box
+            for candidate_box in x_sorted[start_index + 1: start_index + 4]:
+                candidate_x0, candidate_y0, candidate_x1, candidate_y1 = candidate_box
+                overlap = max(0, min(group_y1, candidate_y1) - max(group_y0, candidate_y0))
+                min_height = max(1, min(group_y1 - group_y0, candidate_y1 - candidate_y0))
+                gap = candidate_x0 - group_x1
+                if overlap / float(min_height) < 0.34 or gap > max(9, min_height * 2):
+                    break
+                group.append(candidate_box)
+                group_x0 = min(group_x0, candidate_x0)
+                group_y0 = min(group_y0, candidate_y0)
+                group_x1 = max(group_x1, candidate_x1)
+                group_y1 = max(group_y1, candidate_y1)
+                group_height = max(1, group_y1 - group_y0)
+                if (group_x1 - group_x0) / float(group_height) <= 5.5:
+                    append_mask((group_x0, group_y0, group_x1, group_y1))
+
+        return masks
 
     def _score_timeframe_label(self, text_mask: ArrayND) -> tuple[str, float]:
         if text_mask.ndim != 2 or text_mask.size == 0:
@@ -20291,6 +22540,66 @@ class PhoenixGuardWindowTrackingAdapter:
         best_label = ""
         best_score = 0.0
         second_best = 0.0
+        observed_aspect = float(text_mask.shape[1]) / float(max(1, text_mask.shape[0]))
+        column_ink = np.sum(text_mask > 0, axis=0)
+        low_ink_threshold = max(1, int(round(float(text_mask.shape[0]) * 0.20)))
+        separator_groups = 0
+        separator_active = False
+        separator_starts: list[int] = []
+        for column_index, ink in enumerate(column_ink.tolist()):
+            internal_column = 1 < column_index < int(column_ink.size) - 2
+            is_separator = bool(internal_column and int(ink) <= low_ink_threshold)
+            if is_separator and not separator_active:
+                separator_groups += 1
+                separator_starts.append(int(column_index))
+            separator_active = is_separator
+        estimated_character_count = min(4, 1 + separator_groups)
+        segment_score_maps: list[dict[str, float]] = []
+        segment_bounds = [0, *separator_starts, int(text_mask.shape[1])]
+        for segment_index in range(len(segment_bounds) - 1):
+            segment = text_mask[:, segment_bounds[segment_index]: segment_bounds[segment_index + 1]]
+            if segment.size == 0 or int(np.sum(segment > 0)) < 8:
+                segment_score_maps = []
+                break
+            allowed_labels = {"M", "H", "D"} if segment_index == 0 else {"0", "1", "3", "4", "5"}
+            segment_scores: dict[str, float] = {}
+            for segment_label in allowed_labels:
+                label_best = 0.0
+                for template in self._ocr_char_template_bank.get(segment_label, []):
+                    resized_segment = cv2.resize(
+                        segment.astype(np.uint8),
+                        (int(template.shape[1]), int(template.shape[0])),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
+                    predicted_segment = resized_segment > 0
+                    expected_segment = template > 0
+                    intersection_segment = float(
+                        np.logical_and(predicted_segment, expected_segment).sum()
+                    )
+                    predicted_segment_area = float(max(1, predicted_segment.sum()))
+                    expected_segment_area = float(max(1, expected_segment.sum()))
+                    union_segment = float(
+                        max(1.0, np.logical_or(predicted_segment, expected_segment).sum())
+                    )
+                    precision_segment = intersection_segment / predicted_segment_area
+                    recall_segment = intersection_segment / expected_segment_area
+                    harmonic_segment = (
+                        0.0
+                        if (precision_segment + recall_segment) <= 1e-9
+                        else (
+                            2.0
+                            * precision_segment
+                            * recall_segment
+                            / (precision_segment + recall_segment)
+                        )
+                    )
+                    iou_segment = intersection_segment / union_segment
+                    label_best = max(
+                        label_best,
+                        float(0.56 * harmonic_segment + 0.44 * iou_segment),
+                    )
+                segment_scores[segment_label] = label_best
+            segment_score_maps.append(segment_scores)
         for label, templates in self._timeframe_template_bank.items():
             label_best = 0.0
             for template in templates:
@@ -20311,7 +22620,49 @@ class PhoenixGuardWindowTrackingAdapter:
                 recall = intersection / expected_area
                 harmonic = 0.0 if (precision + recall) <= 1e-9 else (2.0 * precision * recall / (precision + recall))
                 iou = intersection / union
-                score = 0.58 * harmonic + 0.42 * iou
+                template_aspect = float(template.shape[1]) / float(max(1, template.shape[0]))
+                aspect_similarity = math.exp(
+                    -1.4
+                    * abs(
+                        math.log(
+                            max(0.1, observed_aspect)
+                            / max(0.1, template_aspect)
+                        )
+                    )
+                )
+                character_count_similarity = math.exp(
+                    -0.9 * abs(float(len(label) - estimated_character_count))
+                )
+                # Resizing every mask directly to every label template erased
+                # character-count geometry: a square icon fragment could score
+                # as M30.  Preserve both glyph aspect and the number of low-ink
+                # separators so a real two-character M5 badge cannot promote
+                # itself as the visually similar three-character M15/M30.
+                score = (
+                    0.42 * harmonic
+                    + 0.28 * iou
+                    + 0.15 * aspect_similarity
+                    + 0.15 * character_count_similarity
+                )
+                if segment_score_maps:
+                    if len(label) == len(segment_score_maps):
+                        segmented_score = float(
+                            np.mean(
+                                np.asarray(
+                                    [
+                                        segment_scores.get(expected, 0.0)
+                                        for segment_scores, expected in zip(
+                                            segment_score_maps,
+                                            label,
+                                        )
+                                    ],
+                                    dtype=np.float32,
+                                )
+                            )
+                        )
+                        score = 0.75 * score + 0.25 * segmented_score
+                    else:
+                        score *= 0.84
                 if score > label_best:
                     label_best = score
             if label_best > best_score:
@@ -20364,6 +22715,11 @@ class ContinuousWindowTrackerService:
         self.focus_selector_backend = focus_selector_backend or WindowsNativeFocusSelectionBackend()
         self.execution_backend = execution_backend or PocketOptionBrokerExecutionBackend()
         self._lock = threading.RLock()
+        # Session JSON commits are serialized per session.  The process-wide
+        # service lock protects in-memory registries only; it must never be
+        # held across multi-megabyte JSON preparation or filesystem I/O.
+        self._session_commit_locks_guard = threading.Lock()
+        self._session_commit_locks: dict[str, Any] = {}
         self._forecast_action_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="phoenixguard-forecast",
@@ -20426,6 +22782,17 @@ class ContinuousWindowTrackerService:
     @property
     def lock(self) -> Any:
         return self._lock
+
+    def _session_commit_lock_for(self, session_id: str) -> Any:
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            raise ValueError("Session commit lock requires a session_id.")
+        with self._session_commit_locks_guard:
+            commit_lock = self._session_commit_locks.get(normalized_session_id)
+            if commit_lock is None:
+                commit_lock = threading.RLock()
+                self._session_commit_locks[normalized_session_id] = commit_lock
+            return commit_lock
 
     @property
     def active_studies(self) -> set[str]:
@@ -24542,6 +26909,11 @@ class ContinuousWindowTrackerService:
         stale = _normalize_memory_projection_payload(projection_payload, mode=mode)
         stale["status"] = "stale"
         stale["is_current"] = False
+        stale["snapshot_ready"] = False
+        stale["snapshot_status"] = "SUPERSEDED"
+        stale["trade_authorized"] = False
+        stale["actionable"] = False
+        stale["execution_permission"] = "WAIT_FOR_CONFIRMATION"
         stale["summary"] = "The chart changed before the forecast completed. Run it again on the latest frame."
         retrieval = _mapping_to_dict(stale.get("memory_retrieval", {}))
         retrieval["state"] = "stale"
@@ -24590,8 +26962,18 @@ class ContinuousWindowTrackerService:
             committed = _normalize_memory_projection_payload(projection_payload, mode=mode)
             if source_current:
                 committed["is_current"] = True
+                committed["snapshot_ready"] = False
+                committed["snapshot_status"] = "CURRENT"
+                committed["current_frame_index"] = int(payload.get("frame_index", 0) or 0)
+                committed["source_frame_age"] = 0
             else:
-                committed = self._stale_projection_payload(committed, mode=mode)
+                committed = _mark_memory_projection_payload_stale(
+                    committed,
+                    mode=mode,
+                    frame_index=int(payload.get("frame_index", 0) or 0),
+                    chart_path=self._artifact_path_if_exists(payload.get("last_chart_path", "")),
+                )
+            committed["trade_authorized"] = False
             payload[f"memory_projection_{mode}"] = committed
             payload["memory_projection_active_mode"] = mode
             payload["updated_at"] = _now_iso()
@@ -24620,8 +27002,13 @@ class ContinuousWindowTrackerService:
             "terminal": bool(action.get("terminal", False)),
             "cached": bool(action.get("cached", False)),
             "is_current": bool(action.get("is_current", False)),
+            "snapshot_ready": bool(action.get("snapshot_ready", False)),
+            "snapshot_status": str(action.get("snapshot_status", "UNAVAILABLE") or "UNAVAILABLE"),
             "source_frame_index": int(action.get("source_frame_index", 0) or 0),
             "source_state_version": int(action.get("source_state_version", 0) or 0),
+            "current_frame_index": int(action.get("current_frame_index", 0) or 0),
+            "source_frame_age": max(0, int(action.get("source_frame_age", 0) or 0)),
+            "trade_authorized": False,
             "submitted_at": str(action.get("submitted_at", "") or ""),
             "started_at": str(action.get("started_at", "") or ""),
             "completed_at": str(action.get("completed_at", "") or ""),
@@ -24671,8 +27058,13 @@ class ContinuousWindowTrackerService:
             "terminal": True,
             "cached": True,
             "is_current": True,
+            "snapshot_ready": False,
+            "snapshot_status": "CURRENT",
             "source_frame_index": snapshot.source_frame_index,
             "source_state_version": snapshot.source_state_version,
+            "current_frame_index": snapshot.source_frame_index,
+            "source_frame_age": 0,
+            "trade_authorized": False,
             "source_chart_path": snapshot.source_chart_path,
             "submitted_at": snapshot.submitted_at,
             "started_at": completed_at,
@@ -24759,8 +27151,13 @@ class ContinuousWindowTrackerService:
                 "terminal": False,
                 "cached": False,
                 "is_current": True,
+                "snapshot_ready": False,
+                "snapshot_status": "CURRENT",
                 "source_frame_index": source_frame_index,
                 "source_state_version": source_state_version,
+                "current_frame_index": source_frame_index,
+                "source_frame_age": 0,
+                "trade_authorized": False,
                 "source_chart_path": str(chart_path),
                 "submitted_at": submitted_at,
                 "started_at": "",
@@ -24797,7 +27194,52 @@ class ContinuousWindowTrackerService:
     def _refresh_forecast_action_currentness_locked(self, action: dict[str, Any]) -> None:
         if str(action.get("status", "") or "").lower() in {"stale", "error"}:
             return
-        payload = self._require_session(str(action.get("session_id", "") or ""))
+        session_id = str(action.get("session_id", "") or "")
+        mode = self._normalize_forecast_action_mode(action.get("mode", "predict"))
+        request_id = str(action.get("request_id", "") or "")
+        latest_request_id = self._latest_forecast_action.get((session_id, mode), "")
+        if latest_request_id and latest_request_id != request_id:
+            action.update(
+                {
+                    "status": "stale",
+                    "terminal": True,
+                    "is_current": False,
+                    "snapshot_ready": False,
+                    "snapshot_status": "SUPERSEDED",
+                    "trade_authorized": False,
+                    "completed_at": str(action.get("completed_at", "") or _now_iso()),
+                    "summary": "A newer forecast request replaced this one.",
+                }
+            )
+            return
+        # The worker owns an immutable chart path and a copy of the source
+        # payload.  Normal live captures are expected to advance while that
+        # snapshot is being processed; polling must not cancel the in-flight
+        # work merely because the live session has moved on.  Completion does
+        # the compare-and-swap check and lets the dashboard retry the newest
+        # frame when necessary.
+        if not bool(action.get("terminal", False)):
+            return
+        source_chart_path = str(action.get("source_chart_path", "") or "")
+        try:
+            source_artifact_available = bool(source_chart_path and Path(source_chart_path).is_file())
+        except (OSError, TypeError, ValueError):
+            source_artifact_available = False
+        if not source_artifact_available:
+            action.update(
+                {
+                    "status": "stale",
+                    "terminal": True,
+                    "is_current": False,
+                    "snapshot_ready": False,
+                    "snapshot_status": "SOURCE_UNAVAILABLE",
+                    "trade_authorized": False,
+                    "completed_at": str(action.get("completed_at", "") or _now_iso()),
+                    "summary": "The forecast source chart is no longer available.",
+                }
+            )
+            return
+        payload = self._require_session(session_id)
         source_current = self._projection_source_is_current(
             payload,
             frame_index=int(action.get("source_frame_index", 0) or 0),
@@ -24805,14 +27247,29 @@ class ContinuousWindowTrackerService:
             chart_path=str(action.get("source_chart_path", "") or ""),
         )
         if source_current:
+            action.update(
+                {
+                    "is_current": True,
+                    "snapshot_ready": False,
+                    "snapshot_status": "CURRENT",
+                    "current_frame_index": int(payload.get("frame_index", 0) or 0),
+                    "source_frame_age": 0,
+                    "trade_authorized": False,
+                }
+            )
             return
+        current_frame_index = int(payload.get("frame_index", 0) or 0)
         action.update(
             {
-                "status": "stale",
-                "terminal": True,
                 "is_current": False,
-                "completed_at": str(action.get("completed_at", "") or _now_iso()),
-                "summary": "The chart changed before the forecast completed. Run it again on the latest frame.",
+                "snapshot_ready": True,
+                "snapshot_status": "READY",
+                "current_frame_index": current_frame_index,
+                "source_frame_age": max(
+                    0,
+                    current_frame_index - int(action.get("source_frame_index", 0) or 0),
+                ),
+                "trade_authorized": False,
             }
         )
 
@@ -24876,7 +27333,8 @@ class ContinuousWindowTrackerService:
                 "",
             )
             committed_status = str(committed.get("status", "degraded") or "degraded").lower()
-            if latest_request_id != snapshot.request_id or not source_current:
+            snapshot_ready = bool(committed.get("snapshot_ready", False))
+            if latest_request_id != snapshot.request_id or (not source_current and not snapshot_ready):
                 committed_status = "stale"
             if committed_status not in _FORECAST_ACTION_TERMINAL_STATUSES:
                 committed_status = "degraded"
@@ -24886,6 +27344,16 @@ class ContinuousWindowTrackerService:
                     "terminal": True,
                     "cached": False,
                     "is_current": bool(source_current and latest_request_id == snapshot.request_id),
+                    "snapshot_ready": bool(
+                        snapshot_ready and latest_request_id == snapshot.request_id
+                    ),
+                    "snapshot_status": str(
+                        committed.get("snapshot_status", "CURRENT" if source_current else "UNAVAILABLE")
+                        or "UNAVAILABLE"
+                    ),
+                    "current_frame_index": int(committed.get("current_frame_index", 0) or 0),
+                    "source_frame_age": max(0, int(committed.get("source_frame_age", 0) or 0)),
+                    "trade_authorized": False,
                     "completed_at": _now_iso(),
                     "summary": str(committed.get("summary", "Forecast processing completed.") or ""),
                 }
@@ -25396,34 +27864,8 @@ class ContinuousWindowTrackerService:
     def _worker_loop(self, session_id: str, stop_evt: threading.Event, capture_now_evt: threading.Event) -> None:
         next_run = time.monotonic()
         last_signal_state_hash = ""
-        pending_signal_state_hash = ""
-        signal_state_change_due = 0.0
-        signal_state_change_debounce_sec = 0.3
         try:
             while not stop_evt.is_set():
-                payload = self._load_session(session_id)
-                if not payload or not bool(payload.get("tracking_enabled", False)):
-                    break
-                now = time.monotonic()
-                signal_state_hash = _tracker_signal_state_hash(
-                    _mapping_to_dict(payload.get("latest_signal", {})),
-                    _mapping_to_dict(payload.get("tracking_summary", {})),
-                )
-                if not last_signal_state_hash:
-                    last_signal_state_hash = signal_state_hash
-                elif signal_state_hash != last_signal_state_hash:
-                    if signal_state_hash != pending_signal_state_hash:
-                        pending_signal_state_hash = signal_state_hash
-                        signal_state_change_due = now + signal_state_change_debounce_sec
-                    elif signal_state_change_due > 0.0 and now >= signal_state_change_due:
-                        LOGGER.info("Signal state changed for %s; firing immediate capture.", session_id)
-                        last_signal_state_hash = signal_state_hash
-                        pending_signal_state_hash = ""
-                        signal_state_change_due = 0.0
-                        capture_now_evt.set()
-                else:
-                    pending_signal_state_hash = ""
-                    signal_state_change_due = 0.0
                 if capture_now_evt.is_set():
                     capture_now_evt.clear()
                     next_run = time.monotonic()
@@ -25433,10 +27875,23 @@ class ContinuousWindowTrackerService:
                     with self._lock:
                         self._next_capture_epoch[session_id] = _now_epoch() + remaining
                     wait_timeout = min(0.25, max(0.05, remaining))
-                    if signal_state_change_due > now:
-                        wait_timeout = min(wait_timeout, max(0.05, signal_state_change_due - now))
                     capture_now_evt.wait(timeout=wait_timeout)
                     continue
+                # Full session state is intentionally loaded only when a
+                # capture is due or explicitly triggered.  Control mutations
+                # wake this loop through capture_now_evt; stop_session uses
+                # stop_evt.  Reading session.json during every 250 ms wait
+                # previously saturated the GIL on large live snapshots.
+                payload = self._load_session(session_id)
+                if not payload or not bool(payload.get("tracking_enabled", False)):
+                    break
+                signal_state_hash = _tracker_signal_state_hash(
+                    _mapping_to_dict(payload.get("latest_signal", {})),
+                    _mapping_to_dict(payload.get("tracking_summary", {})),
+                )
+                if last_signal_state_hash and signal_state_hash != last_signal_state_hash:
+                    LOGGER.info("Signal state changed for %s; due capture will study it now.", session_id)
+                last_signal_state_hash = signal_state_hash
                 try:
                     self.capture_and_analyze(session_id)
                 except KeyError:
@@ -25447,18 +27902,27 @@ class ContinuousWindowTrackerService:
                     time.sleep(0.1)
                     continue
                 payload = self._load_session(session_id)
+                if not payload or not bool(payload.get("tracking_enabled", False)):
+                    break
+                last_signal_state_hash = _tracker_signal_state_hash(
+                    _mapping_to_dict(payload.get("latest_signal", {})),
+                    _mapping_to_dict(payload.get("tracking_summary", {})),
+                )
                 plan = self.adaptive_capture_interval_plan(payload or {})
                 interval_sec = float(plan.get("interval_sec", _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC) or _TRACKER_DEFAULT_CAPTURE_INTERVAL_SEC)
-                next_run = next_run + interval_sec
-                if next_run < time.monotonic():
-                    next_run = time.monotonic()
+                # Schedule from completion, not the previous due time.  A
+                # capture that takes longer than its nominal interval must not
+                # trigger an immediate second full study and monopolize the API
+                # process.  The configured interval is a polling delay; model
+                # horizons remain event-based.
+                next_run = time.monotonic() + max(0.0, interval_sec)
                 with self._lock:
                     self._next_capture_epoch[session_id] = _now_epoch() + max(0.0, next_run - time.monotonic())
         except Exception:
             LOGGER.exception("Tracker worker crashed for session %s.", session_id)
             payload = self._load_session(session_id)
             if payload:
-                with self._lock:
+                with self._session_commit_lock_for(session_id):
                     payload["tracking_enabled"] = False
                     payload["status"] = "error"
                     payload["last_error"] = "Tracker worker crashed. Review logs and restart the tracker."
@@ -25467,7 +27931,7 @@ class ContinuousWindowTrackerService:
                         status="error",
                     )
                     payload["updated_at"] = _now_iso()
-                    self._save_session(payload)
+                    self._save_session_committed(payload)
                     self._write_session_event_log(
                         session_id,
                         "worker_crashed",
@@ -25514,7 +27978,14 @@ class ContinuousWindowTrackerService:
                 )
             except ValueError:
                 live_min_interval = 0.5
-            return {"interval_sec": min(min_interval, live_min_interval), "reason": "live_min_latency"}
+            live_interval = min(
+                max_interval,
+                max(min_interval, live_min_interval, base_interval),
+            )
+            return {
+                "interval_sec": live_interval,
+                "reason": "live_configured_interval",
+            }
 
         latest_signal = _mapping_to_dict(payload.get("latest_signal", {}))
         tracking_summary = _mapping_to_dict(payload.get("tracking_summary", {}))
@@ -25553,7 +28024,26 @@ class ContinuousWindowTrackerService:
             return False
         with self._lock:
             if normalized_session_id in self._active_studies:
-                return False
+                started_epoch = float(
+                    self._active_study_started_epoch.get(normalized_session_id, 0.0)
+                    or 0.0
+                )
+                stale_after_sec = max(
+                    90.0,
+                    float(self._capture_watchdog_v3.capture_once_timeout_ms)
+                    / 1000.0
+                    * 3.0,
+                )
+                if started_epoch > 0.0 and _now_epoch() - started_epoch > stale_after_sec:
+                    LOGGER.warning(
+                        "Recovered stale study gate for session %s after %.1fs.",
+                        normalized_session_id,
+                        _now_epoch() - started_epoch,
+                    )
+                    self._active_studies.discard(normalized_session_id)
+                    self._active_study_started_epoch.pop(normalized_session_id, None)
+                else:
+                    return False
             self._active_studies.add(normalized_session_id)
             self._active_study_started_epoch[normalized_session_id] = _now_epoch()
             return True
@@ -27813,7 +30303,7 @@ class ContinuousWindowTrackerService:
     def _mark_capture_surface_unavailable(self, session_id: str, message: str) -> None:
         now_epoch = _now_epoch()
         now_iso = _epoch_to_utc_iso(now_epoch)
-        with self._lock:
+        with self._session_commit_lock_for(session_id):
             payload = _mapping_to_dict(_read_json(self._session_path(session_id), {}))
             if not payload:
                 return
@@ -27893,7 +30383,7 @@ class ContinuousWindowTrackerService:
         """Persist a non-evidence heartbeat without advancing model freshness."""
 
         message = _VISUAL_OBSERVATION_WAITING_MESSAGE
-        with self._lock:
+        with self._session_commit_lock_for(session_id):
             payload = self._load_session_with_display_state(session_id) or self._require_session(session_id)
             tracking_summary = _mapping_to_dict(payload.get("tracking_summary", {}))
             latest_signal = _mapping_to_dict(payload.get("latest_signal", {}))
@@ -28515,7 +31005,7 @@ class ContinuousWindowTrackerService:
             latest_signal["freshness_score"] = 1.0
             latest_signal["freshness_window_sec"] = _TRACKER_SIGNAL_MIN_FRESHNESS_WINDOW_SEC
             latest_signal["pipeline_timing"] = guard_timing
-            with self._lock:
+            with self._session_commit_lock_for(str(payload["session_id"])):
                 guarded_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
                 if capture_started_with_tracking_enabled:
                     guarded_payload["tracking_enabled"] = True
@@ -28767,7 +31257,7 @@ class ContinuousWindowTrackerService:
             latest_signal["freshness_score"] = 1.0
             latest_signal["freshness_window_sec"] = visual_ready_freshness_window_sec
             latest_signal["pipeline_timing"] = visual_ready_timing
-            with self._lock:
+            with self._session_commit_lock_for(str(payload["session_id"])):
                 visual_ready_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
                 if capture_started_with_tracking_enabled:
                     visual_ready_payload["tracking_enabled"] = True
@@ -29142,7 +31632,7 @@ class ContinuousWindowTrackerService:
         latest_signal["freshness_score"] = 1.0
         latest_signal["freshness_window_sec"] = visual_freshness_window_sec
         latest_signal["pipeline_timing"] = visual_pipeline_timing
-        with self._lock:
+        with self._session_commit_lock_for(str(payload["session_id"])):
             visual_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {})) or dict(payload)
             visual_display_window_path = str(window_path)
             visual_display_surface_signature = window_signature
@@ -29234,6 +31724,7 @@ class ContinuousWindowTrackerService:
                 )
             self._save_session(visual_payload)
         if fast_visual_only_when_blocked:
+            blocked_forecast_snapshot = _forecast_snapshot_v3(visual_payload)
             blocked_decision_model_council_result = (
                 _compact_persisted_model_council_result(model_council_result)
                 if not _env_bool("PHOENIXGUARD_FULL_DECISION_ARTIFACTS", False)
@@ -29247,8 +31738,8 @@ class ContinuousWindowTrackerService:
                 "locked_window": dict(descriptor),
                 "focus_region": study_focus_meta,
                 "selected_focus_region": focus_meta,
-                "tracking_summary": _compact_live_nested_payload(tracking_summary),
-                "latest_signal": _compact_live_nested_payload(latest_signal),
+                "tracking_summary": _compact_live_state_market_payload(tracking_summary),
+                "latest_signal": _compact_live_state_latest_signal_payload(latest_signal),
                 "broker_surface": fast_blocked_surface or _default_broker_surface_payload(),
                 "broker_execution_state": fast_blocked_state or _normalize_broker_execution_state({}),
                 "scenario_analysis": _mapping_to_dict(tracking_summary.get("scenario_analysis", {})),
@@ -29256,12 +31747,16 @@ class ContinuousWindowTrackerService:
                 "model_council": _compact_persisted_council_payload(_mapping_to_dict(model_council_result.get("model_council"))),
                 "decision_artifact_state": "visual_only_blocked_no_execution_packet",
             }
+            if blocked_forecast_snapshot:
+                blocked_decision_payload["forecast_snapshot_v3"] = blocked_forecast_snapshot
             if model_council_study_packet:
                 blocked_decision_payload["model_council_study_packet"] = (
                     _compact_persisted_study_packet(model_council_study_packet)
                     if not _env_bool("PHOENIXGUARD_FULL_DECISION_ARTIFACTS", False)
                     else model_council_study_packet
                 )
+            if not _env_bool("PHOENIXGUARD_FULL_DECISION_ARTIFACTS", False):
+                blocked_decision_payload = _compact_persisted_decision_payload(blocked_decision_payload)
             _write_json_atomic(decision_path, blocked_decision_payload)
             mark_stage("decision_write")
             mark_stage("fast_blocked_return")
@@ -29473,6 +31968,19 @@ class ContinuousWindowTrackerService:
         latest_signal["freshness_window_sec"] = signal_freshness_window_sec
         latest_signal["pipeline_timing"] = pipeline_timing
         compact_decision_artifacts = not _env_bool("PHOENIXGUARD_FULL_DECISION_ARTIFACTS", False)
+        decision_forecast_snapshot = _forecast_snapshot_v3(
+            {
+                "forecast_snapshot_v3": payload.get("forecast_snapshot_v3"),
+                "tracking_summary": tracking_summary,
+                "latest_signal": latest_signal,
+                "model_council_result": model_council_result,
+                "model_council_study_packet": model_council_study_packet,
+                "visual_observation_v3": payload.get("visual_observation_v3"),
+                "model_vote_frame_id": frame_index,
+                "model_capture_epoch": capture_started_epoch,
+                "last_capture_epoch": published_epoch,
+            }
+        )
         decision_model_council_result = (
             _compact_persisted_model_council_result(model_council_result)
             if compact_decision_artifacts
@@ -29486,8 +31994,8 @@ class ContinuousWindowTrackerService:
             "locked_window": dict(descriptor),
             "focus_region": study_focus_meta,
             "selected_focus_region": focus_meta,
-            "tracking_summary": _compact_live_nested_payload(tracking_summary),
-            "latest_signal": _compact_live_nested_payload(latest_signal),
+            "tracking_summary": _compact_live_state_market_payload(tracking_summary),
+            "latest_signal": _compact_live_state_latest_signal_payload(latest_signal),
             "broker_surface": broker_surface,
             "broker_execution_state": broker_execution_state,
             "scenario_analysis": scenario_analysis,
@@ -29496,6 +32004,8 @@ class ContinuousWindowTrackerService:
             if compact_decision_artifacts
             else _mapping_to_dict(model_council_result.get("model_council")),
         }
+        if decision_forecast_snapshot:
+            decision_payload["forecast_snapshot_v3"] = decision_forecast_snapshot
         if model_council_study_packet:
             decision_payload["model_council_study_packet"] = (
                 _compact_persisted_study_packet(model_council_study_packet)
@@ -29510,6 +32020,8 @@ class ContinuousWindowTrackerService:
             )
             decision_payload["model_council_packet"] = compact_packet
             decision_payload["execution_packet"] = compact_packet
+        if compact_decision_artifacts:
+            decision_payload = _compact_persisted_decision_payload(decision_payload)
         _write_json_atomic(decision_path, decision_payload)
         mark_stage("decision_write")
 
@@ -29521,7 +32033,7 @@ class ContinuousWindowTrackerService:
         history.insert(0, _study_entry(latest_signal, tracking_summary))
         history = history[:24]
 
-        with self._lock:
+        with self._session_commit_lock_for(str(payload["session_id"])):
             persisted_payload = _mapping_to_dict(_read_json(self._session_path(str(payload["session_id"])), {}))
             persisted_last_capture_epoch = _float_or(persisted_payload.get("last_capture_epoch", 0.0), 0.0)
             if persisted_last_capture_epoch > float(published_epoch) + 0.001:
@@ -30054,13 +32566,18 @@ class ContinuousWindowTrackerService:
         return payload
 
     def _save_session(self, payload: Mapping[str, Any]) -> None:
+        session_id = str(payload.get("session_id", "") or "")
+        if not session_id:
+            raise ValueError("Session payload is missing a session_id.")
+        with self._session_commit_lock_for(session_id):
+            self._save_session_committed(payload)
+
+    def _save_session_committed(self, payload: Mapping[str, Any]) -> None:
         control_write = bool(payload.get("__control_write_v3", False))
         payload = dict(payload)
         payload.pop("__control_write_v3", None)
         payload.pop("_focus_preview_capture_v3", None)
         session_id = str(payload.get("session_id", "") or "")
-        if not session_id:
-            raise ValueError("Session payload is missing a session_id.")
         session_path = self._session_path(session_id)
         session_path.parent.mkdir(parents=True, exist_ok=True)
         previous: dict[str, Any] = {}
