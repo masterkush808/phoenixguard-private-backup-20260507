@@ -126,10 +126,12 @@ def test_tracker_dashboard_separates_current_outlook_and_entry_permission() -> N
     assert "function highFrequencyForecast" not in dashboard
     assert "function derivedHighFrequencyForecast" not in dashboard
     assert 'data-overlay-family="lstm"' in dashboard
+    assert 'data-overlay-family="scene_forecaster"' in dashboard
     assert (
         "This Scene forecaster mark shows the full-suite model's candle-anchored "
         "12-event path"
     ) in dashboard
+    assert "This LSTM mark shows the production-gated candle-sequence model's event path" in dashboard
     assert "/v1/mobile/live/state/v3/" not in dashboard
 
 

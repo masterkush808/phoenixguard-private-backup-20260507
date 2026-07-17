@@ -1249,6 +1249,9 @@ def test_lstm_forecast_overlay_visually_marks_authorized_path_without_candle_box
     session["latest_signal"]["lstm_contribution"] = {
         "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
         "fresh": True,
+        "forecast_available": True,
+        "market_identity_confirmed": True,
+        "timeframe_identity_confirmed": True,
         "confidence": 0.89,
         "side": "BUY",
         "path_side": "BUY",
@@ -1257,6 +1260,7 @@ def test_lstm_forecast_overlay_visually_marks_authorized_path_without_candle_box
         "selective_authorized": True,
         "production_authorized": True,
         "artifact_production_gate_passed": True,
+        "trade_authorization_status": "AUTHORIZED",
         "source_image_size": [1000, 800],
         "features": [{"relative_price_location": 0.50}],
         "forecast_path": [

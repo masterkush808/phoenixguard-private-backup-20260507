@@ -75,6 +75,7 @@ from .live_state_v3 import (
     build_live_state_v3,
     build_live_state_v3_from_tracker_service,
     compact_session_payload,
+    project_public_lstm_contribution_v3,
 )
 from .frame_ingest import build_frame_ingest_router
 from .model_strength import (
@@ -87,12 +88,13 @@ from .operator_workspace_v1 import (
     OPERATOR_WORKSPACE_SCHEMA_VERSION,
     build_operator_workspace_v1,
 )
+from .pipeline import DEFAULT_COUNCIL_SCOPE, DEFAULT_OVERLAY_MODE
 from .realtime_sync_v3 import (
     build_visual_realtime_health,
     latest_frontend_heartbeat,
     record_frontend_heartbeat,
 )
-from .service import MobileApiService
+from .service import MobileApiService, MobileJobCapabilityUnavailableError
 from .window_tracker import (
     ContinuousWindowTrackerService,
     model_council_packet_from_payload,
@@ -146,6 +148,7 @@ _OPERATOR_VIEW_TO_OVERLAY_MODE = {
     "plan": "INSPECTOR",
     "smc": "INSPECTOR",
     "two-candle": "INSPECTOR",
+    "scene-forecaster": "INSPECTOR",
     "lstm": "INSPECTOR",
     "forecast": "INSPECTOR",
     "history": "INSPECTOR",
@@ -173,8 +176,11 @@ _OPERATOR_VIEW_TO_PUBLIC_FAMILIES: dict[str, frozenset[str] | None] = {
     "plan": frozenset({"council", "triggers", "targets", "invalidation"}),
     "smc": frozenset({"smc"}),
     "two-candle": frozenset({"two_candle"}),
+    "scene-forecaster": frozenset({"scene_forecaster"}),
     "lstm": frozenset({"lstm"}),
-    "forecast": frozenset({"two_candle", "lstm", "prediction"}),
+    "forecast": frozenset(
+        {"two_candle", "scene_forecaster", "lstm", "prediction"}
+    ),
     "history": frozenset({"history", "major_swings", "local_swings"}),
 }
 
@@ -837,37 +843,42 @@ def _sanitize_public_tracker_session(payload: Mapping[str, object]) -> dict[str,
 def _strip_private_projection_snapshots(
     payload: Mapping[str, object],
 ) -> dict[str, object]:
-    """Remove internal rebuild state at every public live-state boundary.
+    """Remove rebuild state and project LSTM data at every public boundary.
 
-    The retained forecast snapshot may contain normalized model features and
-    path probabilities needed to rebuild safe geometry.  It is internal state,
-    not a public API DTO.  Only the known nesting used by live-state responses
-    is traversed so this guard does not copy every overlay object.
+    Forecast snapshots and raw LSTM contributions contain model, artifact, and
+    host details needed only by the runtime. Public routes retain the bounded
+    candle-path geometry and plain forecast status through the strict LSTM DTO.
     """
 
-    output = {
-        key: value
-        for key, value in payload.items()
-        if key not in _PRIVATE_PROJECTION_SNAPSHOT_KEYS
-    }
-    for container_key in ("session", "live_visual_state"):
-        container = output.get(container_key)
-        if not isinstance(container, Mapping):
-            continue
-        sanitized = {
-            key: value
-            for key, value in cast(Mapping[str, object], container).items()
-            if key not in _PRIVATE_PROJECTION_SNAPSHOT_KEYS
-        }
-        nested_session = sanitized.get("session")
-        if isinstance(nested_session, Mapping):
-            sanitized["session"] = {
-                key: value
-                for key, value in cast(Mapping[str, object], nested_session).items()
-                if key not in _PRIVATE_PROJECTION_SNAPSHOT_KEYS
-            }
-        output[container_key] = sanitized
-    return output
+    def sanitize(value: object) -> object:
+        if isinstance(value, Mapping):
+            output: dict[str, object] = {}
+            for raw_key, nested in cast(Mapping[object, object], value).items():
+                key = str(raw_key)
+                if key in _PRIVATE_PROJECTION_SNAPSHOT_KEYS:
+                    continue
+                if key in {
+                    "lstm_contribution",
+                    "lstm_candle_sequence_contribution_v3",
+                    "lstm_council_evidence_v3",
+                }:
+                    output[key] = (
+                        project_public_lstm_contribution_v3(
+                            cast(Mapping[str, Any], nested)
+                        )
+                        if isinstance(nested, Mapping)
+                        else {}
+                    )
+                    continue
+                output[key] = sanitize(nested)
+            return output
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            return [sanitize(nested) for nested in cast(Sequence[object], value)]
+        return value
+
+    return cast(dict[str, object], sanitize(payload))
 
 
 def _operator_overlay_snapshot_path(session_id: str) -> Path:
@@ -1422,6 +1433,7 @@ def _stale_diagnostic_operator_overlays(value: object) -> list[dict[str, object]
         if row.get("forecast_role"):
             row["forecast_status"] = "STALE"
             row["forecast_authorized"] = False
+            row["trade_authorization_status"] = "NO_EDGE"
     return rows
 
 
@@ -3541,6 +3553,8 @@ def _bounded_operator_projection_context(
             "session_id",
             "detected_market",
             "detected_timeframe",
+            "configured_high_frequency_timeframe",
+            "high_frequency_study_timeframe",
             "status",
             "frame_index",
             "capture_count",
@@ -4325,6 +4339,8 @@ def create_app(
             "body_bias",
             "direction_conflict",
             "path_confidence_status",
+            "forecast_quality_status",
+            "trade_authorization_status",
             "interval",
             "anchors",
             "start_point",
@@ -6273,6 +6289,24 @@ def create_app(
                     "It is diagnostic only while waiting for a new broker frame."
                 )
             operator_state["forecast"] = forecast
+        forecast_state = str(
+            _mapping_to_plain_dict(operator_state.get("forecast")).get("state")
+            or ""
+        ).strip().upper()
+        if authoritative_waiting_for_new_frame or forecast_state == "STALE":
+            # Exact-frame recovery may keep geometry visually current, but a
+            # stale outlook can never retain a previously authorized role.
+            # This guard also covers a compact-cache race where the waiting
+            # visual-observation flag arrives one poll after the stale forecast.
+            fail_closed_rows = _safe_operator_overlay_rows(
+                operator_state.get("overlays")
+            )
+            for row in fail_closed_rows:
+                if row.get("forecast_role"):
+                    row["forecast_status"] = "STALE"
+                    row["forecast_authorized"] = False
+                    row["trade_authorization_status"] = "NO_EDGE"
+            operator_state["overlays"] = fail_closed_rows
         final_source_revision = _operator_projection_source_revision(
             requested_session_id
         )
@@ -7515,7 +7549,7 @@ def create_app(
     @app.post("/v1/mobile/jobs", status_code=status.HTTP_202_ACCEPTED)
     async def create_job(
         screenshots: Annotated[list[UploadFile], File(description="Exactly four ordered screenshots.")],
-        overlay_mode: Annotated[str, Form()] = "history-plus-projection",
+        overlay_mode: Annotated[str, Form()] = DEFAULT_OVERLAY_MODE,
         min_conf_global: Annotated[float, Form()] = 0.42,
         min_conf_latest: Annotated[float, Form()] = 0.50,
         history_depth: Annotated[int, Form()] = 8,
@@ -7525,11 +7559,15 @@ def create_app(
         fuse_timeframe_overlays: Annotated[bool, Form()] = False,
         higher_timeframe: Annotated[str, Form()] = "M15",
         lower_timeframe: Annotated[str, Form()] = "M5",
-        council_scope: Annotated[str, Form()] = "standard",
+        council_scope: Annotated[str, Form()] = DEFAULT_COUNCIL_SCOPE,
     ) -> dict[str, object]:
+        mobile_service = get_mobile_service()
+        capability = mobile_service.job_submission_capability()
+        if not bool(capability.get("available", False)):
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=capability)
         try:
             uploads = [(upload.filename or f"frame_{index + 1}.png", await upload.read()) for index, upload in enumerate(screenshots)]
-            return get_mobile_service().create_job(
+            return mobile_service.create_job(
                 uploads,
                 settings={
                     "overlay_mode": overlay_mode,
@@ -7545,6 +7583,8 @@ def create_app(
                     "council_scope": council_scope,
                 },
             )
+        except MobileJobCapabilityUnavailableError as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.capability) from exc
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

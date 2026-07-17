@@ -10,8 +10,10 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from phoenixguard.mobile_api import app as mobile_app_module
+from phoenixguard.mobile_api import pipeline as mobile_pipeline_module
 from phoenixguard.mobile_api.app import create_app
-from phoenixguard.mobile_api.service import MobileApiService
+from phoenixguard.mobile_api.pipeline import PhoenixGuardPipelineAdapter
+from phoenixguard.mobile_api.service import MobileApiService, MobileJobCapabilityUnavailableError
 
 
 def _png_bytes(color: tuple[int, int, int]) -> bytes:
@@ -49,6 +51,14 @@ class _FakePipelineAdapter:
                 "lower_timeframe": "M5",
                 "council_scope": "standard",
             },
+        }
+
+    def job_submission_capability(self) -> dict[str, Any]:
+        return {
+            "schema_version": "PG_MOBILE_JOB_CAPABILITY_V1",
+            "available": True,
+            "status": "AVAILABLE",
+            "reason": "The test pipeline adapter accepts mobile jobs.",
         }
 
     def normalize_render_config(self, settings: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -196,6 +206,115 @@ def test_mobile_api_http_surface_accepts_four_images(tmp_path: Path) -> None:
     artifact_url = payload["result"]["artifacts"][0]["url"]
     artifact_response = client.get(artifact_url)
     assert artifact_response.status_code == 200
+
+
+def test_mobile_api_unknown_and_invalid_adapter_capabilities_fail_closed(
+    tmp_path: Path,
+) -> None:
+    class _InvalidCapabilityAdapter:
+        def job_submission_capability(self) -> dict[str, Any]:
+            return {
+                "available": "yes",
+                "status": "AVAILABLE",
+                "active_environment": ".venv-dev",
+            }
+
+    adapters: tuple[Any, ...] = (object(), _InvalidCapabilityAdapter())
+    for index, adapter in enumerate(adapters):
+        service = MobileApiService(
+            root_dir=tmp_path / f"mobile_api_fail_closed_{index}",
+            pipeline_adapter=adapter,
+        )
+        capability = service.job_submission_capability()
+        assert capability == {
+            "schema_version": "PG_MOBILE_JOB_CAPABILITY_V1",
+            "available": False,
+            "status": "UNAVAILABLE",
+            "reason": "Mobile analysis is unavailable in this workspace.",
+        }
+        try:
+            service.create_job([])
+        except MobileJobCapabilityUnavailableError as exc:
+            assert exc.capability == capability
+        else:
+            raise AssertionError("An undeclared pipeline capability must fail closed.")
+        assert service.list_jobs() == []
+
+
+def test_mobile_api_live_profile_exposes_clean_unavailable_capability(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_PYTHON_ENV_NAME", ".venv-live")
+    monkeypatch.setenv("PHOENIXGUARD_PYTHON_PROFILE", "live")
+
+    def _reject_frontend_import(name: str, package: str | None = None) -> Any:
+        if name == "main":
+            raise AssertionError("The live capability/config path must not import the dashboard module.")
+        return importlib_import_module(name, package)
+
+    importlib_import_module = mobile_pipeline_module.importlib.import_module
+    monkeypatch.setattr(mobile_pipeline_module.importlib, "import_module", _reject_frontend_import)
+
+    service = MobileApiService(
+        root_dir=tmp_path / "mobile_api_live",
+        pipeline_adapter=PhoenixGuardPipelineAdapter(),
+    )
+    client = TestClient(create_app(service))
+
+    config_response = client.get("/v1/mobile/config")
+    assert config_response.status_code == 200
+    capability = config_response.json()["job_submission_capability"]
+    assert capability["schema_version"] == "PG_MOBILE_JOB_CAPABILITY_V1"
+    assert capability["available"] is False
+    assert capability["status"] == "UNAVAILABLE_IN_LIVE_PROFILE"
+    assert capability["reason"] == (
+        "The legacy four-screenshot analyzer is unavailable in this workspace."
+    )
+    assert set(capability) == {"schema_version", "available", "status", "reason"}
+
+    job_response = client.post(
+        "/v1/mobile/jobs",
+        files=[
+            ("screenshots", (f"frame_{index}.png", _png_bytes((10 * index, 20, 30)), "image/png"))
+            for index in range(1, 5)
+        ],
+    )
+    assert job_response.status_code == 503
+    assert job_response.json()["detail"] == capability
+    assert service.list_jobs() == []
+
+
+def test_mobile_api_live_capability_blocks_direct_service_submission(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_PYTHON_ENV_NAME", ".venv-live")
+    service = MobileApiService(
+        root_dir=tmp_path / "mobile_api_live_direct",
+        pipeline_adapter=PhoenixGuardPipelineAdapter(),
+    )
+
+    try:
+        service.create_job([])
+    except MobileJobCapabilityUnavailableError as exc:
+        assert exc.capability["status"] == "UNAVAILABLE_IN_LIVE_PROFILE"
+    else:
+        raise AssertionError("The live compatibility adapter must fail closed before staging a job.")
+
+
+def test_mobile_api_development_profile_reports_job_submission_available(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHOENIXGUARD_PYTHON_ENV_NAME", ".venv-dev")
+    monkeypatch.setenv("PHOENIXGUARD_PYTHON_PROFILE", "dev")
+
+    capability = PhoenixGuardPipelineAdapter().job_submission_capability()
+
+    assert capability["available"] is True
+    assert capability["status"] == "AVAILABLE"
+    assert capability["reason"] == "The four-screenshot analyzer is available."
+    assert set(capability) == {"schema_version", "available", "status", "reason"}
 
 
 def test_mobile_api_health_route_is_lazy(monkeypatch: MonkeyPatch) -> None:

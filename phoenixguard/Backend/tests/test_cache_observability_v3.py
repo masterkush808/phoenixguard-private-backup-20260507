@@ -1063,8 +1063,38 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
                 "tracking_enabled": True,
                 "capture_count": 1,
                 "last_capture_epoch": time.time(),
-                "tracking_summary": {},
-                "latest_signal": {},
+                "tracking_summary": {
+                    "detected_market": "EUR/USD",
+                    "detected_timeframe": "M5",
+                    "high_frequency_study_timeframe": "M5",
+                },
+                "latest_signal": {
+                    "market": "EUR/USD",
+                    "focus_timeframe": "M5",
+                    "high_frequency_study_timeframe": "M5",
+                    "lstm_contribution": {
+                        "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+                        "frame_id": 1,
+                        "pair": "EUR/USD",
+                        "timeframe": "M5",
+                        "fresh": True,
+                        "market_identity_confirmed": True,
+                        "timeframe_identity_confirmed": True,
+                        "forecast_available": True,
+                        "artifact_production_gate_passed": True,
+                        "production_authorized": True,
+                        "selective_authorized": True,
+                        "trade_authorization_status": "AUTHORIZED",
+                        "path_side": "BUY",
+                        "artifact_path": r"C:\private\lstm.pt",
+                        "config_path": r"C:\private\lstm.json",
+                        "metrics_path": r"C:\private\metrics.json",
+                        "features": [{"private_model_feature": 0.7}],
+                        "artifact_selection": {
+                            "candidate_path": r"C:\private\candidate.pt"
+                        },
+                    },
+                },
             }
         ),
         encoding="utf-8",
@@ -1078,6 +1108,31 @@ def test_live_state_v3_direct_read_waits_for_missing_shooter_handshake(monkeypat
     assert payload["shooter"]["available"] is False
     assert payload["shooter"]["state"] == "WAITING"
     assert payload["shooter_state"]["next_required"] == "fresh accepted intraday or swing allowance package"
+    serialized = json.dumps(payload)
+    assert r"C:\private" not in serialized
+    assert "artifact_path" not in serialized
+    assert "config_path" not in serialized
+    assert "metrics_path" not in serialized
+    assert "artifact_selection" not in serialized
+    assert "private_model_feature" not in serialized
+    live_visual = cast(Mapping[str, Any], payload["live_visual_state"])
+    public_lstm = cast(Mapping[str, Any], live_visual["lstm_contribution"])
+    public_boundary = cast(
+        Callable[[Mapping[str, object]], dict[str, object]],
+        getattr(mobile_app, "_strip_private_projection_snapshots"),
+    )
+    projected_alias = public_boundary(
+        {
+            "lstm_candle_sequence_contribution_v3": {
+                "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+                "artifact_path": r"C:\private\alias.pt",
+                "features": [{"private_model_feature": 1.0}],
+            }
+        }
+    )
+    assert "artifact_path" not in json.dumps(projected_alias)
+    assert "private_model_feature" not in json.dumps(projected_alias)
+    assert public_lstm["trade_authorization_status"] == "NO_EDGE"
 
     compact_response = client.get("/v1/mobile/live/state/v3/pocket-live-8788?compact=1")
 

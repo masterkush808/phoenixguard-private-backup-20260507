@@ -34,6 +34,44 @@ _TOP_LEVEL_KEYS = (
     "history",
 )
 
+# Forecast provenance is required inside the runtime to validate and reproject
+# one atomic study, but it is not part of the operator-facing explanation.
+# Keep the geometry and human-readable belief/status fields while preventing
+# provider, cache, detector, frame-lineage, and event-identity telemetry from
+# crossing the public workspace boundary.
+_PRIVATE_OPERATOR_FORECAST_FIELDS = frozenset(
+    {
+        "forecast_engine",
+        "forecast_provider",
+        "forecast_provider_status",
+        "forecast_id",
+        "forecast_revision",
+        "belief_revision",
+        "closed_candle_key",
+        "closed_candle_sequence",
+        "forecast_computed_frame_id",
+        "source_forecast_frame_id",
+        "geometry_projected_frame_id",
+        "geometry_frame_match_verified",
+        "geometry_reprojected_from_cache",
+        "geometry_projection_provenance",
+        "detector_coverage_rebase_applied",
+        "cache_replaced_for_detector_coverage_rebase",
+        "scene_feature_audit",
+    }
+)
+
+
+def _strip_operator_forecast_telemetry(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        key: nested
+        for key, nested in value.items()
+        if key not in _PRIVATE_OPERATOR_FORECAST_FIELDS
+    }
+
+
 _OVERLAY_PRESENTATION: dict[str, tuple[str, str, str]] = {
     "CHART_BOUNDS": ("chart", "Chart area", "structure"),
     "CURRENT_CANDLE": ("price", "Current price", "movement"),
@@ -136,9 +174,7 @@ _TYPE_FAMILIES = {
     "INVALIDATION_ZONE": "invalidation",
     "TWO_CANDLE_STUDY": "two_candle",
     "LSTM_STUDY": "lstm",
-    # Stable family alias retained until the dashboard toggle contract moves
-    # from its historical `lstm` key to a scene-forecaster key.
-    "SCENE_FORECAST_STUDY": "lstm",
+    "SCENE_FORECAST_STUDY": "scene_forecaster",
     "MODEL_COUNCIL_MARKER": "council",
     "REGIME_MARKER": "council",
     "MARKET_PLAY_MARKER": "council",
@@ -175,6 +211,7 @@ _FAMILY_FALLBACK_LAYERS = {
     "council": "active_council_decision",
     "two_candle": "active_council_decision",
     "lstm": "active_council_decision",
+    "scene_forecaster": "prediction_path",
     "prediction": "prediction_path",
     "history": "historical_replay",
     "smc": "smart_money",
@@ -496,7 +533,7 @@ def _forecast_belief_contract(*sources: Mapping[str, Any]) -> dict[str, object]:
             source.get("closed_candle_sequence"),
             belief.get("closed_candle_sequence"),
         )
-    return result
+    return _strip_operator_forecast_telemetry(result)
 
 
 def _scene_forecast_boundary_contract(
@@ -1341,7 +1378,7 @@ def _forecast_contract(
         if center_path_status:
             result["forecast_status"] = center_path_status
             result["forecast_authorized"] = center_path_status == "AUTHORIZED"
-    return result
+    return _strip_operator_forecast_telemetry(result)
 
 
 def _execution_present(payload: Mapping[str, Any], command: Mapping[str, Any], now_epoch: float) -> bool:
@@ -2238,6 +2275,236 @@ def _overlay_rows(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return _rows(payload.get("overlay_objects"))
 
 
+def _forecast_lane_authorization_evidence(
+    payload: Mapping[str, Any],
+    overlay: Mapping[str, Any],
+    *,
+    scene_forecaster: bool,
+) -> Mapping[str, Any]:
+    tracking = _mapping(payload.get("tracking_summary"))
+    signal = _mapping(payload.get("latest_signal"))
+    result = _mapping(payload.get("model_council_result"))
+    snapshot = _mapping(payload.get("forecast_snapshot_v3"))
+    high_frequency = _mapping(snapshot.get("high_frequency_forecast"))
+    key = "scene_forecast_contribution" if scene_forecaster else "lstm_contribution"
+    candidate_sources = [
+        (_mapping(payload.get(key)), payload),
+        (_mapping(signal.get(key)), signal),
+        (_mapping(tracking.get(key)), tracking),
+        (_mapping(result.get(key)), result),
+        (_mapping(snapshot.get(key)), snapshot),
+        (_mapping(high_frequency.get(key)), high_frequency),
+    ]
+    matching = [
+        (candidate, parent)
+        for candidate, parent in candidate_sources
+        if candidate
+        and _is_scene_forecast_source(candidate) is scene_forecaster
+    ]
+    if not matching:
+        return {}
+    current_pair = _text(
+        signal.get("market")
+        or tracking.get("detected_market")
+        or payload.get("market")
+        or payload.get("symbol")
+    ).upper()
+    chart_timeframe = _text(
+        signal.get("focus_timeframe")
+        or tracking.get("detected_timeframe")
+        or payload.get("timeframe")
+    ).upper()
+    high_frequency_timeframe = _text(
+        signal.get("high_frequency_study_timeframe")
+        or tracking.get("high_frequency_study_timeframe")
+        or signal.get("configured_high_frequency_timeframe")
+        or tracking.get("configured_high_frequency_timeframe")
+    ).upper()
+    current_timeframe = (
+        chart_timeframe if scene_forecaster else high_frequency_timeframe
+    )
+    current_frame = _frame_id(
+        overlay.get("frame_id"),
+        payload.get("display_frame_id"),
+        payload.get("frame_id"),
+    )
+
+    def canonical_identity(value: object) -> str:
+        return "".join(
+            character
+            for character in _text(value).upper()
+            if character.isalnum()
+        )
+
+    def candidate_identity(candidate: Mapping[str, Any]) -> tuple[str, str]:
+        state = _mapping(candidate.get("closed_candle_identity_state"))
+        pair = _text(candidate.get("pair") or state.get("pair")).upper()
+        timeframe = _text(
+            candidate.get("timeframe") or state.get("timeframe")
+        ).upper()
+        forecast_id = _text(candidate.get("forecast_id"))
+        if forecast_id and (not pair or not timeframe):
+            parts = forecast_id.split("|", 2)
+            if len(parts) >= 2:
+                pair = pair or parts[0].upper()
+                timeframe = timeframe or parts[1].upper()
+        return pair, timeframe
+
+    lineage_matching: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+    for candidate, parent in matching:
+        explicit_candidate_frame = _frame_id(
+            candidate.get("frame_id"),
+            candidate.get("model_vote_frame_id"),
+            candidate.get("source_frame_id"),
+            candidate.get("forecast_computed_frame_id"),
+        )
+        parent_frame = _frame_id(
+            parent.get("source_frame_id"),
+            parent.get("frame_id"),
+            parent.get("model_vote_frame_id"),
+            parent.get("display_frame_id"),
+        )
+        candidate_frame = explicit_candidate_frame or parent_frame
+        candidate_pair, candidate_timeframe = candidate_identity(candidate)
+        if (
+            current_frame is None
+            or candidate_frame is None
+            or not _frame_matches(candidate_frame, current_frame)
+            or (
+                parent_frame is not None
+                and (
+                    not _frame_matches(parent_frame, current_frame)
+                    or (
+                        explicit_candidate_frame is not None
+                        and not _frame_matches(
+                            parent_frame,
+                            explicit_candidate_frame,
+                        )
+                    )
+                )
+            )
+            or not current_pair
+            or not candidate_pair
+            or canonical_identity(candidate_pair)
+            != canonical_identity(current_pair)
+            or not current_timeframe
+            or not candidate_timeframe
+            or candidate_timeframe != current_timeframe
+        ):
+            continue
+        lineage_matching.append((candidate, parent))
+    if not lineage_matching:
+        return {}
+    evidence_keys = {
+        "forecast_available",
+        "artifact_production_gate_passed",
+        "production_authorized",
+        "selective_authorized",
+        "trade_authorization_status",
+        "geometry_frame_match_verified",
+        "belief_state",
+        "committed_side",
+        "forecast_belief",
+        "belief_update",
+    }
+    selected, parent = max(
+        lineage_matching,
+        key=lambda item: sum(key in item[0] for key in evidence_keys),
+    )
+    evidence = dict(selected)
+    # A nested forecast cannot override a stale/diagnostic parent snapshot.
+    for key in ("stale", "expired", "diagnostic_only", "forecast_suppressed"):
+        if _explicit_bool(parent.get(key)) is True:
+            evidence[key] = True
+    if _explicit_bool(parent.get("fresh")) is False:
+        evidence["fresh"] = False
+    for key in ("market_identity_confirmed", "timeframe_identity_confirmed"):
+        if _explicit_bool(parent.get(key)) is False:
+            evidence[key] = False
+    for key in ("freshness_status", "stale_status"):
+        parent_status = _text(parent.get(key))
+        if parent_status:
+            evidence[key] = parent_status
+    return evidence
+
+
+def _forecast_overlay_authorized(
+    overlay: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+    *,
+    scene_forecaster: bool,
+) -> bool:
+    if _text(overlay.get("trade_authorization_status")).upper() != "AUTHORIZED":
+        return False
+    if not evidence:
+        return False
+    if (
+        _explicit_bool(evidence.get("fresh")) is not True
+        or _explicit_bool(evidence.get("forecast_available")) is not True
+    ):
+        return False
+    if (
+        "fresh" in overlay
+        and _explicit_bool(overlay.get("fresh")) is not True
+    ) or (
+        "forecast_available" in overlay
+        and _explicit_bool(overlay.get("forecast_available")) is not True
+    ):
+        return False
+    for key in ("market_identity_confirmed", "timeframe_identity_confirmed"):
+        if _explicit_bool(evidence.get(key)) is not True:
+            return False
+        if key in overlay and _explicit_bool(overlay.get(key)) is not True:
+            return False
+    if any(
+        _explicit_bool(evidence.get(key)) is True
+        for key in ("stale", "expired", "diagnostic_only", "forecast_suppressed")
+    ):
+        return False
+    if any(
+        _explicit_bool(overlay.get(key)) is True
+        for key in ("stale", "expired", "diagnostic_only", "forecast_suppressed")
+    ):
+        return False
+    stale_statuses = {"STALE", "EXPIRED", "OUTDATED", "FAIL", "FAILED"}
+    if any(
+        _text(evidence.get(key)).upper() in stale_statuses
+        for key in ("freshness_status", "stale_status")
+    ):
+        return False
+    if any(
+        _text(overlay.get(key)).upper() in stale_statuses
+        for key in ("freshness_status", "stale_status")
+    ):
+        return False
+    evidence_trade_status = _text(
+        evidence.get("trade_authorization_status")
+    ).upper()
+    if evidence_trade_status and evidence_trade_status != "AUTHORIZED":
+        return False
+    for key in (
+        "artifact_production_gate_passed",
+        "production_authorized",
+        "selective_authorized",
+    ):
+        if _explicit_bool(evidence.get(key)) is not True:
+            return False
+        # Explicit contradictory overlay evidence always fails closed. The
+        # generated overlay need not duplicate these private gate details.
+        if key in overlay and _explicit_bool(overlay.get(key)) is not True:
+            return False
+    if scene_forecaster:
+        belief = _forecast_belief_contract(evidence, overlay)
+        return bool(
+            _explicit_bool(evidence.get("geometry_frame_match_verified")) is True
+            and _text(belief.get("belief_state")).upper() == "STABLE"
+            and _side(belief.get("committed_side")) in _DIRECTIONAL_SIDES
+        )
+    return bool(
+        evidence_trade_status == "AUTHORIZED"
+    )
+
+
 def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> list[dict[str, object]]:
     output: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
@@ -2309,6 +2576,11 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             raw_type == "SCENE_FORECAST_STUDY"
             or _is_scene_forecast_source(overlay)
         )
+        if scene_forecast_overlay:
+            # The scene forecaster and the production-gated LSTM are separate
+            # public studies even though old wire payloads can share the
+            # LSTM_STUDY compatibility type.
+            family = "scene_forecaster"
         if scene_forecast_overlay and raw_type in {
             "LSTM_STUDY",
             "SCENE_FORECAST_STUDY",
@@ -2346,7 +2618,15 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
             elif role.endswith("_diagnostic"):
                 lstm_forecast_status = "DIAGNOSTIC"
                 label = f"{forecast_prefix} {forecast_noun} - diagnostic"
-            elif "authorized" in role:
+            elif "authorized" in role and _forecast_overlay_authorized(
+                overlay,
+                _forecast_lane_authorization_evidence(
+                    payload,
+                    overlay,
+                    scene_forecaster=scene_forecast_overlay,
+                ),
+                scene_forecaster=scene_forecast_overlay,
+            ):
                 lstm_forecast_status = "AUTHORIZED"
                 label = f"{forecast_prefix} authorized {forecast_noun}"
             else:
@@ -2680,7 +2960,7 @@ def _sanitize_overlays(payload: Mapping[str, Any], display_frame: object) -> lis
         public_overlay.update(
             _overlay_identity_and_revisions(overlay, public_overlay)
         )
-        output.append(public_overlay)
+        output.append(_strip_operator_forecast_telemetry(public_overlay))
     return output
 
 

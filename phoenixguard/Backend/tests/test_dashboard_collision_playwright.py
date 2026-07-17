@@ -665,7 +665,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
             )
         ) == static_button_ids
         assert page.locator("button[data-overlay-view]").count() == 8
-        assert page.locator("button[data-overlay-family]").count() == 16
+        assert page.locator("button[data-overlay-family]").count() == 17
         assert page.locator("button[data-label-mode]").count() == 3
         assert page.locator("input[type=range]").count() == 2
 
@@ -722,7 +722,7 @@ def test_every_dashboard_control_is_wired_and_safe_under_real_clicks(
         page.locator("#layers-all").click()
         assert (
             page.locator("button[data-overlay-family][aria-pressed=true]").count()
-            == 16
+            == 17
         )
         families = page.locator("button[data-overlay-family]").evaluate_all(
             "nodes => nodes.map(node => node.dataset.overlayFamily)"
@@ -1160,7 +1160,8 @@ def test_no_edge_composite_forecast_renders_clean_multimodal_paths(
         hotspot.click()
         inspector_copy = page.locator("#inspector-explanation").inner_text()
         assert "The complete 12-step up / buy-side forecast is shown" in inspector_copy
-        assert "Trade status remains NO EDGE." in inspector_copy
+        assert "Forecast status remains NO EDGE." in inspector_copy
+        assert "This forecast is not entry permission." in inspector_copy
         assert "no reliable" not in inspector_copy.lower()
 
 
@@ -1224,6 +1225,39 @@ def test_authorized_composite_is_the_only_state_that_renders_predicted_ranges(
         )
         _assert_clean_multimodal_forecast(page, source_line, status="AUTHORIZED")
         assert composite.locator(".surface-forecast-band").count() == 1
+        page.locator('.surface-hotspot[data-overlay-id="lstm-current"]').click()
+        inspector_copy = page.locator("#inspector-explanation").inner_text()
+        assert "Forecast status is AUTHORIZED." in inspector_copy
+        assert (
+            "Forecast authorization still does not equal entry permission"
+            in inspector_copy
+        )
+        assert "NO EDGE" not in inspector_copy
+
+
+def test_missing_trade_status_never_reads_as_authorized(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload(action="BUY_NOW")
+    for row in payload["overlays"]:
+        if row.get("family") != "lstm":
+            continue
+        row["forecast_status"] = "AUTHORIZED"
+        row["forecast_authorized"] = True
+        row["interval"]["calibrated"] = True
+        row.pop("trade_authorization_status", None)
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.locator('[data-overlay-view="forecast"]').click()
+        page.locator('.surface-hotspot[data-overlay-id="lstm-current"]').click()
+        inspector_copy = page.locator("#inspector-explanation").inner_text()
+        composite = page.locator(
+            '#surface-line-svg > g.surface-forecast-composite[data-overlay-id="lstm-current"]'
+        )
+        assert "forecast-no-edge" in (composite.get_attribute("class") or "")
+        assert composite.locator(".surface-forecast-band").count() == 0
+        assert "Forecast status remains NO EDGE." in inspector_copy
+        assert "Forecast status is AUTHORIZED." not in inspector_copy
 
 
 def test_authorized_but_uncalibrated_forecast_hides_the_range_band(
@@ -1236,6 +1270,7 @@ def test_authorized_but_uncalibrated_forecast_hides_the_range_band(
         row["side"] = "BUY"
         row["forecast_status"] = "AUTHORIZED"
         row["forecast_authorized"] = True
+        row["trade_authorization_status"] = "AUTHORIZED"
         row["interval"]["calibrated"] = False
 
     with _dashboard_page(chromium_browser, payload) as page:
@@ -1777,6 +1812,86 @@ def test_show_future_uses_current_composite_without_recomputing(
         )
 
 
+@pytest.mark.parametrize(
+    ("action_selector", "status_fragment"),
+    [
+        ("#run-forecast", "current forecast"),
+        ("#show-future-path", "current future path"),
+    ],
+)
+def test_forecast_actions_reuse_current_scene_only_geometry_without_network(
+    chromium_browser: Browser,
+    action_selector: str,
+    status_fragment: str,
+) -> None:
+    payload = _operator_payload()
+    lstm = next(row for row in payload["overlays"] if row.get("id") == "lstm-current")
+    scene = copy.deepcopy(lstm)
+    scene.update(
+        {
+            "id": "scene-current",
+            "family": "scene_forecaster",
+            "label": "Scene forecaster events · current",
+        }
+    )
+    payload["overlays"] = [
+        row
+        for row in payload["overlays"]
+        if row.get("family") not in {"lstm", "prediction"}
+    ]
+    payload["overlays"].append(scene)
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        request_count = page.evaluate("window.__FETCH_URLS.length")
+        page.locator(action_selector).click()
+        page.wait_for_function(
+            "() => document.querySelector('#forecast-action-status')?.dataset.state === 'success'",
+            timeout=10_000,
+        )
+
+        status = page.locator("#forecast-action-status").inner_text().lower()
+        assert status_fragment in status
+        assert "not entry permission" in status
+        assert page.evaluate("window.__FETCH_URLS.length") == request_count
+        assert page.locator(
+            '#surface-line-svg > g.surface-forecast-composite[data-overlay-id="scene-current"]'
+        ).count() == 1
+
+
+def test_scene_only_geometry_has_truthful_count_and_independent_toggle(
+    chromium_browser: Browser,
+) -> None:
+    payload = _operator_payload()
+    lstm = next(row for row in payload["overlays"] if row.get("id") == "lstm-current")
+    scene = copy.deepcopy(lstm)
+    scene.update(
+        {
+            "id": "scene-current",
+            "family": "scene_forecaster",
+            "label": "Scene forecaster events · current",
+        }
+    )
+    payload["overlays"] = [
+        row
+        for row in payload["overlays"]
+        if row.get("family") not in {"lstm", "prediction"}
+    ]
+    payload["overlays"].append(scene)
+
+    with _dashboard_page(chromium_browser, payload) as page:
+        page.locator('[data-overlay-view="forecast"]').click()
+        request_count = page.evaluate("window.__FETCH_URLS.length")
+        assert page.locator('[data-layer-count="scene_forecaster"]').inner_text() == "1"
+        assert page.locator('[data-layer-count="prediction"]').inner_text() == "0"
+        assert page.locator('[data-overlay-id="scene-current"]').count() >= 1
+
+        page.locator('[data-overlay-family="prediction"]').click()
+        assert page.locator('[data-overlay-id="scene-current"]').count() >= 1
+        page.locator('[data-overlay-family="scene_forecaster"]').click()
+        assert page.locator('[data-overlay-id="scene-current"]').count() == 0
+        assert page.evaluate("window.__FETCH_URLS.length") == request_count
+
+
 def test_show_future_does_not_treat_uncertainty_band_as_center_path(
     chromium_browser: Browser,
 ) -> None:
@@ -1922,10 +2037,21 @@ def test_live_read_preserves_geometry_while_backend_label_policy_declutters_text
         )
 
 
-def test_independent_smc_lstm_and_two_candle_toggles_do_not_replace_the_pool(
+def test_independent_smc_scene_lstm_and_two_candle_toggles_do_not_replace_the_pool(
     chromium_browser: Browser,
 ) -> None:
-    with _dashboard_page(chromium_browser, _operator_payload()) as page:
+    payload = _operator_payload()
+    lstm = next(row for row in payload["overlays"] if row.get("id") == "lstm-current")
+    scene = copy.deepcopy(lstm)
+    scene.update(
+        {
+            "id": "scene-current",
+            "family": "scene_forecaster",
+            "label": "Scene forecaster events · no edge",
+        }
+    )
+    payload["overlays"].append(scene)
+    with _dashboard_page(chromium_browser, payload) as page:
         page.locator('[data-overlay-view="all"]').click()
         page.wait_for_function(
             "() => window.PhoenixGuardDashboard.getState().overlayView === 'all'"
@@ -1935,6 +2061,7 @@ def test_independent_smc_lstm_and_two_candle_toggles_do_not_replace_the_pool(
             "council-current",
             "two-candle-current",
             "lstm-current",
+            "scene-current",
         }
         visible = set(
             page.locator("[data-overlay-id]").evaluate_all(
@@ -1942,6 +2069,8 @@ def test_independent_smc_lstm_and_two_candle_toggles_do_not_replace_the_pool(
             )
         )
         assert expected.issubset(visible)
+        assert page.locator('[data-layer-count="scene_forecaster"]').inner_text() == "1"
+        assert page.locator('[data-layer-count="lstm"]').inner_text() == "1"
 
         request_count = page.evaluate("window.__FETCH_URLS.length")
         page.locator('[data-overlay-family="smc"]').click()
@@ -1959,6 +2088,11 @@ def test_independent_smc_lstm_and_two_candle_toggles_do_not_replace_the_pool(
             ).count()
             == 1
         )
+        assert page.evaluate("window.__FETCH_URLS.length") == request_count
+
+        page.locator('[data-overlay-family="scene_forecaster"]').click()
+        assert page.locator('[data-overlay-id="scene-current"]').count() == 0
+        assert page.locator('[data-overlay-id="lstm-current"]').count() >= 1
         assert page.evaluate("window.__FETCH_URLS.length") == request_count
 
         page.locator('[data-overlay-family="lstm"]').click()
@@ -1979,6 +2113,7 @@ def test_independent_smc_lstm_and_two_candle_toggles_do_not_replace_the_pool(
         assert page.evaluate("window.__FETCH_URLS.length") == request_count
 
         page.locator('[data-overlay-family="smc"]').click()
+        page.locator('[data-overlay-family="scene_forecaster"]').click()
         page.locator('[data-overlay-family="lstm"]').click()
         assert (
             page.locator('.surface-hotspot[data-overlay-id="smc-order-block"]').count()
@@ -1988,6 +2123,7 @@ def test_independent_smc_lstm_and_two_candle_toggles_do_not_replace_the_pool(
             page.locator('.surface-hotspot[data-overlay-id="lstm-current"]').count()
             == 1
         )
+        assert page.locator('[data-overlay-id="scene-current"]').count() >= 1
 
 
 def test_show_all_and_clear_switch_every_public_family_atomically(
@@ -2068,6 +2204,59 @@ def test_custom_overlay_mix_survives_reload_without_network_refetch_per_toggle(
             )
             == "true"
         )
+
+
+def test_scene_split_migration_runs_once_and_preserves_independent_reload_choice(
+    chromium_browser: Browser,
+) -> None:
+    with _dashboard_page(chromium_browser, _operator_payload()) as page:
+        page.evaluate(
+            """
+            () => {
+              localStorage.setItem('phoenixguard.overlay.layers.v1', JSON.stringify(['lstm']));
+              localStorage.setItem('phoenixguard.overlay.preset.v1', 'custom');
+              localStorage.removeItem('phoenixguard.overlay.layers.scene-split-migration.v1');
+            }
+            """
+        )
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_function(
+            "expected => window.PhoenixGuardDashboard?.getState().revision === expected",
+            arg=42,
+        )
+        assert set(
+            page.evaluate("window.PhoenixGuardDashboard.getState().activeFamilies")
+        ) == {"scene_forecaster"}
+        assert page.evaluate(
+            "localStorage.getItem('phoenixguard.overlay.layers.scene-split-migration.v1')"
+        ) == "1"
+
+        page.locator('[data-overlay-family="lstm"]').click()
+        assert page.locator('[data-overlay-family="lstm"]').get_attribute(
+            "aria-pressed"
+        ) == "true"
+        page.locator('[data-overlay-family="scene_forecaster"]').click()
+        assert page.locator(
+            '[data-overlay-family="scene_forecaster"]'
+        ).get_attribute("aria-pressed") == "false"
+        assert page.locator('[data-overlay-family="lstm"]').get_attribute(
+            "aria-pressed"
+        ) == "true"
+
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_function(
+            "expected => window.PhoenixGuardDashboard?.getState().revision === expected",
+            arg=42,
+        )
+        assert page.evaluate(
+            "window.PhoenixGuardDashboard.getState().activeFamilies"
+        ) == ["lstm"]
+        assert page.locator(
+            '[data-overlay-family="scene_forecaster"]'
+        ).get_attribute("aria-pressed") == "false"
+        assert page.locator('[data-overlay-family="lstm"]').get_attribute(
+            "aria-pressed"
+        ) == "true"
 
 
 def test_all_overlay_toggles_are_local_and_reuse_detached_semantic_nodes(

@@ -33,6 +33,9 @@ from phoenixguard.core.utils import utc_now_iso
 from phoenixguard.decision.candle_movement_context_v3 import build_candle_movement_context_v3
 from phoenixguard.decision.decision_kernel import analyze_decision_kernel
 from phoenixguard.decision.high_frequency_candle_predictor import build_high_frequency_candle_forecast
+from phoenixguard.decision.lstm_candle_sequence_contributor_v3 import (
+    build_lstm_candle_sequence_contribution,
+)
 from phoenixguard.decision.forecast_belief_tracker_v3 import (
     ForecastBeliefConfigV3,
     ForecastBeliefTrackerV3,
@@ -834,6 +837,11 @@ _PERSISTED_FORECAST_SUMMARY_KEYS = {
     "artifact_production_gate_passed",
     "production_authorized",
     "fresh",
+    "stale",
+    "expired",
+    "diagnostic_only",
+    "market_identity_confirmed",
+    "timeframe_identity_confirmed",
     "blocker",
     "contribution",
     "raw_contribution",
@@ -885,6 +893,7 @@ _PERSISTED_FORECAST_SUMMARY_KEYS = {
     "trajectory_interval_status",
     "trajectory_interval",
     "progression_play",
+    "pair",
     "timeframe",
     "sequence_phase",
     "market_play_label",
@@ -942,6 +951,16 @@ _PERSISTED_FORECAST_SUMMARY_KEYS = {
     "interval",
 }
 
+_PERSISTED_FORECAST_GEOMETRY_KEYS = {
+    "line_points",
+    "forecast_path",
+    "forecast_candles",
+    "forecast_scenarios",
+    "forecast_band_points",
+    "forecast_anchor",
+    "forecast_quantiles",
+}
+
 
 def _compact_persisted_forecast_summary(value: Any) -> dict[str, Any]:
     """Keep forecast gates plus the bounded geometry needed by live overlays."""
@@ -954,6 +973,21 @@ def _compact_persisted_forecast_summary(value: Any) -> dict[str, Any]:
         dict[str, Any],
         _strip_packet_self_references(_compact_live_state_observability_value(compact)),
     )
+
+
+def _compact_persisted_forecast_reference(value: Any) -> dict[str, Any]:
+    """Persist forecast gates without cloning the authoritative geometry.
+
+    ``forecast_snapshot_v3`` is the single cold-start source for bounded drawing
+    geometry. Council, signal, and strategy surfaces retain the model identity,
+    quality, lineage, and authorization gates needed for auditability, but must
+    not persist another copy of the same path.
+    """
+
+    compact = _compact_persisted_forecast_summary(value)
+    for key in _PERSISTED_FORECAST_GEOMETRY_KEYS:
+        compact.pop(key, None)
+    return compact
 
 
 def _compact_persisted_two_candle_study(value: Any) -> dict[str, Any]:
@@ -981,7 +1015,7 @@ def _compact_persisted_two_candle_study(value: Any) -> dict[str, Any]:
         "summary",
     }
     compact = _compact_selected_mapping(mapping, selected)
-    nested_lstm = _compact_persisted_forecast_summary(mapping.get("lstm_contribution"))
+    nested_lstm = _compact_persisted_forecast_reference(mapping.get("lstm_contribution"))
     if nested_lstm:
         compact["lstm_contribution"] = nested_lstm
     return cast(
@@ -1028,7 +1062,7 @@ def _compact_persisted_book_strategy(value: Any) -> dict[str, Any]:
         "dual_thesis_report_v3",
     }
     compact = _compact_selected_mapping(mapping, selected)
-    lstm_evidence = _compact_persisted_forecast_summary(mapping.get("lstm_council_evidence_v3"))
+    lstm_evidence = _compact_persisted_forecast_reference(mapping.get("lstm_council_evidence_v3"))
     if lstm_evidence:
         compact["lstm_council_evidence_v3"] = lstm_evidence
     return cast(
@@ -1072,7 +1106,7 @@ def _compact_persisted_opportunity_maturity(value: Any) -> dict[str, Any]:
     book_strategy = _compact_persisted_book_strategy(mapping.get("book_strategy"))
     if book_strategy:
         compact["book_strategy"] = book_strategy
-    lstm_evidence = _compact_persisted_forecast_summary(mapping.get("lstm_council_evidence_v3"))
+    lstm_evidence = _compact_persisted_forecast_reference(mapping.get("lstm_council_evidence_v3"))
     if lstm_evidence:
         compact["lstm_council_evidence_v3"] = lstm_evidence
     professional_plan = _compact_live_state_professional_trade_plan(mapping.get("professional_trade_plan"))
@@ -1167,7 +1201,7 @@ def _compact_persisted_council_reference(value: Any) -> dict[str, Any]:
     execution_lane = _compact_live_state_execution_lane(mapping.get("execution_lane"))
     if execution_lane:
         compact["execution_lane"] = execution_lane
-    lstm_summary = _compact_persisted_forecast_summary(mapping.get("lstm_contribution"))
+    lstm_summary = _compact_persisted_forecast_reference(mapping.get("lstm_contribution"))
     if lstm_summary:
         compact["lstm_contribution"] = lstm_summary
     return compact
@@ -1535,7 +1569,7 @@ def _compact_live_state_latest_signal_payload(value: Any) -> Any:
                 "micro_candle_forecast",
                 "scene_forecast_contribution",
             }:
-                compact_forecast = _compact_persisted_forecast_summary(item)
+                compact_forecast = _compact_persisted_forecast_reference(item)
                 if compact_forecast:
                     payload[key] = compact_forecast
             elif key == "two_candle_study":
@@ -1627,7 +1661,7 @@ def _compact_persisted_council_payload(value: Mapping[str, Any]) -> dict[str, An
     execution_lane = _compact_live_state_execution_lane(value.get("execution_lane"))
     if execution_lane:
         payload["execution_lane"] = execution_lane
-    lstm_summary = _compact_persisted_forecast_summary(value.get("lstm_contribution"))
+    lstm_summary = _compact_persisted_forecast_reference(value.get("lstm_contribution"))
     if lstm_summary:
         payload["lstm_contribution"] = lstm_summary
     promotion = _compact_persisted_promotion_trace(value.get("promotion_trace"))
@@ -1719,7 +1753,7 @@ def _compact_persisted_study_packet(value: Mapping[str, Any]) -> dict[str, Any]:
     execution_lane = _compact_live_state_execution_lane(value.get("execution_lane"))
     if execution_lane:
         payload["execution_lane"] = execution_lane
-    lstm_summary = _compact_persisted_forecast_summary(value.get("lstm_contribution"))
+    lstm_summary = _compact_persisted_forecast_reference(value.get("lstm_contribution"))
     if lstm_summary:
         payload["lstm_contribution"] = lstm_summary
     promotion = _compact_persisted_promotion_trace(value.get("promotion_trace"))
@@ -1833,7 +1867,7 @@ def _compact_persisted_model_council_result(value: Mapping[str, Any]) -> dict[st
     expected_move_time = _compact_live_state_expected_move_time(value.get("expected_move_time"))
     if expected_move_time:
         payload["expected_move_time"] = expected_move_time
-    lstm_summary = _compact_persisted_forecast_summary(value.get("lstm_contribution"))
+    lstm_summary = _compact_persisted_forecast_reference(value.get("lstm_contribution"))
     if lstm_summary:
         payload["lstm_contribution"] = lstm_summary
     opportunity = _compact_persisted_opportunity_maturity(value.get("opportunity_maturity"))
@@ -1875,9 +1909,20 @@ def _compact_persisted_model_council_result(value: Mapping[str, Any]) -> dict[st
 _FORECAST_SNAPSHOT_LSTM_KEYS = frozenset(
     {
         "schema_version",
+        "frame_id",
+        "pair",
+        "timeframe",
         "fresh",
+        "stale",
+        "expired",
+        "diagnostic_only",
+        "market_identity_confirmed",
+        "timeframe_identity_confirmed",
         "legacy_restored",
         "forecast_available",
+        "forecast_suppressed",
+        "artifact_production_gate_passed",
+        "production_authorized",
         "contribution",
         "confidence",
         "side",
@@ -2685,7 +2730,7 @@ def _compact_live_state_market_payload(value: Any) -> Any:
                 "micro_candle_forecast",
                 "scene_forecast_contribution",
             }:
-                compact_forecast = _compact_persisted_forecast_summary(item)
+                compact_forecast = _compact_persisted_forecast_reference(item)
                 if compact_forecast:
                     payload[key] = compact_forecast
             elif key == "two_candle_study":
@@ -18093,6 +18138,26 @@ class PhoenixGuardWindowTrackingAdapter:
                 del self._scene_forecast_cache[oldest]
             return copy.deepcopy(contribution)
 
+    def _build_lstm_contribution(
+        self,
+        *,
+        candles: Sequence[Mapping[str, Any]],
+        chart_image: Image.Image,
+        timeframe: str,
+        sequence_phase: str,
+        market_play_label: str,
+    ) -> dict[str, Any]:
+        """Build the independent, production-gated LSTM candle-path lane."""
+
+        return build_lstm_candle_sequence_contribution(
+            candles=candles,
+            image_size=chart_image.size,
+            timeframe=timeframe,
+            sequence_phase=sequence_phase,
+            market_play_label=market_play_label,
+            chart_image=chart_image,
+        )
+
     def _build_signal_payloads(
         self,
         chart_image: Image.Image,
@@ -18526,9 +18591,46 @@ class PhoenixGuardWindowTrackingAdapter:
                     "min_timeframe_confidence": min_timeframe_identity_confidence,
                 }
             )
-        # Compatibility alias for downstream V3 readers while they migrate to
-        # the first-class scene field. This object is not an LSTM output.
-        lstm_contribution = scene_forecast_contribution
+        # Scene and LSTM are independent forecast lanes.  In particular, a
+        # scene fallback must never masquerade as a loaded LSTM artifact or
+        # inherit the LSTM production/selective-risk gates.
+        lstm_contribution = self._build_lstm_contribution(
+            candles=candles,
+            chart_image=chart_image,
+            timeframe=high_frequency_study_timeframe,
+            sequence_phase=str(
+                behavior_payload.get("current_state", setup) or setup
+            ),
+            market_play_label=setup,
+        )
+        # The LSTM lane can intentionally study a different timeframe from the
+        # visible chart. Stamp its exact frame/pair/study identity so public
+        # selection and authorization can reject stale cross-market evidence.
+        lstm_contribution.update(
+            {
+                "frame_id": frame_index,
+                "model_vote_frame_id": frame_index,
+                "pair": market,
+                "timeframe": high_frequency_study_timeframe,
+                "market_identity_confirmed": market_identity_confirmed,
+                "timeframe_identity_confirmed": timeframe_identity_confirmed,
+            }
+        )
+        if not (market_identity_confirmed and timeframe_identity_confirmed):
+            # A correctly loaded artifact is still diagnostic until the broker
+            # pair and study timeframe are both confirmed for this exact frame.
+            lstm_contribution.update(
+                {
+                    "selective_side": "NO_EDGE",
+                    "selective_authorized": False,
+                    "selective_status": "NO_EDGE",
+                    "trade_authorization_status": "NO_EDGE",
+                    "contribution": 0.0,
+                    "effective_contribution": 0.0,
+                    "score_influence_allowed": False,
+                    "playbook_participation_allowed": False,
+                }
+            )
         high_frequency_forecast = build_high_frequency_candle_forecast(
             candles=candles,
             image_size=chart_image.size,

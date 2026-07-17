@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import re
 import shutil
+import sys
 from functools import cached_property
 from pathlib import Path
 from types import ModuleType
@@ -22,8 +24,23 @@ DEFAULT_UPLOAD_ORDER: tuple[dict[str, str], ...] = (
     {"key": "lower_zoomed_in", "label": "Lower TF / Zoomed In"},
 )
 DEFAULT_TIMEFRAME_CHOICES: tuple[str, ...] = ("M1", "M3", "M5", "M15", "M30", "H1", "H4", "D1")
-DEFAULT_OVERLAY_MODE = "history-plus-projection"
-DEFAULT_COUNCIL_SCOPE = "standard"
+DEFAULT_OVERLAY_MODE = "history-boxes"
+DEFAULT_COUNCIL_SCOPE = "auto"
+DEFAULT_VISION_EXTRAS: tuple[str, ...] = ("grounded-zones", "grounded-objects", "tta-tag")
+OVERLAY_MODE_CHOICES: tuple[str, ...] = (
+    "history-boxes",
+    "yolo-only",
+    "hybrid-vision",
+    "latest-only",
+    "global-only",
+    "debug-all",
+    "history-plus-projection",
+)
+VISION_EXTRA_CHOICES: frozenset[str] = frozenset(
+    {"projection-overlay", "grounded-zones", "grounded-objects", "tta-tag"}
+)
+COUNCIL_SCOPE_CHOICES: tuple[str, ...] = ("off", "auto", "half", "full")
+MAX_SEQUENCE_HISTORY_DEPTH = 200
 
 
 class PipelineAdapter(Protocol):
@@ -104,76 +121,102 @@ def _require_mapping_dict(value: object, *, context: str) -> dict[str, Any]:
     raise TypeError(f"{context} must return a mapping, got {type(value).__name__}.")
 
 
-def _string_choices(value: object, fallback: Sequence[object]) -> list[str]:
-    source: Sequence[object] = cast(Sequence[object], value) if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)) else fallback
-    return [str(item) for item in source]
+def _normalize_vision_extras(value: object) -> list[str]:
+    if value is None:
+        raw_values: Sequence[object] = DEFAULT_VISION_EXTRAS
+    elif isinstance(value, str):
+        raw_values = [part.strip() for part in value.split(",")]
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        raw_values = list(cast(Sequence[object], value))
+    else:
+        raw_values = DEFAULT_VISION_EXTRAS
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw_values:
+        candidate = str(item or "").strip().lower()
+        if not candidate or candidate in seen or candidate not in VISION_EXTRA_CHOICES:
+            continue
+        normalized.append(candidate)
+        seen.add(candidate)
+    return normalized
+
+
+def _normalize_council_scope(value: object) -> str:
+    candidate = str(value or DEFAULT_COUNCIL_SCOPE).strip().lower()
+    return candidate if candidate in COUNCIL_SCOPE_CHOICES else DEFAULT_COUNCIL_SCOPE
+
+
+def _normalized_render_config(settings: Mapping[str, Any] | None) -> dict[str, Any]:
+    payload = dict(settings or {})
+    try:
+        higher_timeframe = payload["higher_timeframe"] if "higher_timeframe" in payload else "M15"
+        lower_timeframe = payload["lower_timeframe"] if "lower_timeframe" in payload else "M5"
+        return {
+            "overlay_mode": str(payload.get("overlay_mode", DEFAULT_OVERLAY_MODE) or DEFAULT_OVERLAY_MODE),
+            "min_conf_global": float(np.clip(float(payload.get("min_conf_global", 0.42) or 0.42), 0.0, 1.0)),
+            "min_conf_latest": float(np.clip(float(payload.get("min_conf_latest", 0.50) or 0.50), 0.0, 1.0)),
+            "history_depth": int(
+                np.clip(int(round(float(payload.get("history_depth", 8) or 8))), 1, MAX_SEQUENCE_HISTORY_DEPTH)
+            ),
+            "label_density": int(np.clip(int(round(float(payload.get("label_density", 10) or 10))), 2, 24)),
+            "projection_focus": float(
+                np.clip(float(payload.get("projection_focus", 0.35) or 0.35), 0.0, 0.95)
+            ),
+            "debug_depth": int(np.clip(int(round(float(payload.get("debug_depth", 6) or 6))), 3, 16)),
+            "fuse_timeframe_overlays": bool(payload.get("fuse_timeframe_overlays", False)),
+            "vision_extras": _normalize_vision_extras(payload.get("vision_extras", DEFAULT_VISION_EXTRAS)),
+            "council_scope": _normalize_council_scope(payload.get("council_scope", DEFAULT_COUNCIL_SCOPE)),
+            "higher_timeframe": str(higher_timeframe or "").strip().upper(),
+            "lower_timeframe": str(lower_timeframe or "").strip().upper(),
+        }
+    except (TypeError, ValueError, OverflowError):
+        return _normalized_render_config({})
 
 
 class PhoenixGuardPipelineAdapter:
+    def job_submission_capability(self) -> dict[str, Any]:
+        configured_environment = str(os.getenv("PHOENIXGUARD_PYTHON_ENV_NAME") or "").strip()
+        active_environment = Path(sys.prefix).name
+        configured_profile = str(os.getenv("PHOENIXGUARD_PYTHON_PROFILE") or "").strip().lower()
+        live_environment = (
+            active_environment.casefold() == ".venv-live"
+            or configured_environment.casefold() == ".venv-live"
+            or configured_profile in {"live", "final-live", "final_live"}
+        )
+        development_environment = not live_environment and (
+            active_environment.casefold() == ".venv-dev"
+            or configured_environment.casefold() == ".venv-dev"
+            or configured_profile in {"dev", "test", "testing"}
+        )
+        return {
+            "schema_version": "PG_MOBILE_JOB_CAPABILITY_V1",
+            "available": development_environment,
+            "status": "AVAILABLE" if development_environment else "UNAVAILABLE_IN_LIVE_PROFILE",
+            "reason": (
+                "The four-screenshot analyzer is available."
+                if development_environment
+                else "The legacy four-screenshot analyzer is unavailable in this workspace."
+            ),
+        }
+
     @cached_property
     def module(self) -> ModuleType:
         return importlib.import_module("main")
 
     def describe(self) -> dict[str, Any]:
-        module = self.module
-        normalize = getattr(module, "_normalize_manual_inference_render_config", None)
-        if callable(normalize):
-            default_settings = _require_mapping_dict(
-                normalize({}),
-                context="main._normalize_manual_inference_render_config",
-            )
-        else:
-            default_settings: dict[str, object] = {
-                "overlay_mode": getattr(module, "DEFAULT_OVERLAY_MODE", DEFAULT_OVERLAY_MODE),
-                "min_conf_global": 0.42,
-                "min_conf_latest": 0.50,
-                "history_depth": 8,
-                "label_density": 10,
-                "projection_focus": 0.35,
-                "debug_depth": 6,
-                "fuse_timeframe_overlays": False,
-                "higher_timeframe": "M15",
-                "lower_timeframe": "M5",
-                "council_scope": getattr(module, "DEFAULT_COUNCIL_SCOPE", DEFAULT_COUNCIL_SCOPE),
-            }
+        default_settings = _normalized_render_config({})
         return {
             "required_uploads": len(DEFAULT_UPLOAD_ORDER),
             "upload_order": [dict(slot) for slot in DEFAULT_UPLOAD_ORDER],
-            "timeframe_choices": _string_choices(getattr(module, "TIMEFRAME_CHOICES", DEFAULT_TIMEFRAME_CHOICES), DEFAULT_TIMEFRAME_CHOICES),
-            "overlay_choices": _string_choices(getattr(module, "VISION_LEVEL_CHOICES", (default_settings["overlay_mode"],)), (default_settings["overlay_mode"],)),
-            "council_scope_choices": _string_choices(getattr(module, "COUNCIL_SCOPE_CHOICES", (default_settings["council_scope"],)), (default_settings["council_scope"],)),
+            "timeframe_choices": list(DEFAULT_TIMEFRAME_CHOICES),
+            "overlay_choices": list(OVERLAY_MODE_CHOICES),
+            "council_scope_choices": list(COUNCIL_SCOPE_CHOICES),
             "default_settings": default_settings,
         }
 
     def normalize_render_config(self, settings: Mapping[str, Any] | None) -> dict[str, Any]:
-        payload = dict(settings or {})
-        module = self.module
-        normalize = getattr(module, "_normalize_manual_inference_render_config", None)
-        if callable(normalize):
-            return _require_mapping_dict(
-                normalize(payload),
-                context="main._normalize_manual_inference_render_config",
-            )
-        build_render_config = getattr(module, "_build_render_config")
-        higher_timeframe = payload["higher_timeframe"] if "higher_timeframe" in payload else "M15"
-        lower_timeframe = payload["lower_timeframe"] if "lower_timeframe" in payload else "M5"
-        return _require_mapping_dict(
-            build_render_config(
-                overlay_mode=str(payload.get("overlay_mode", getattr(module, "DEFAULT_OVERLAY_MODE", DEFAULT_OVERLAY_MODE))),
-                min_conf_global=float(payload.get("min_conf_global", 0.42) or 0.42),
-                min_conf_latest=float(payload.get("min_conf_latest", 0.50) or 0.50),
-                history_depth=float(payload.get("history_depth", 8) or 8),
-                label_density=float(payload.get("label_density", 10) or 10),
-                projection_focus=float(payload.get("projection_focus", 0.35) or 0.35),
-                debug_depth=float(payload.get("debug_depth", 6) or 6),
-                fuse_timeframe_overlays=bool(payload.get("fuse_timeframe_overlays", False)),
-                vision_extras=payload.get("vision_extras"),
-                council_scope=payload.get("council_scope", getattr(module, "DEFAULT_COUNCIL_SCOPE", DEFAULT_COUNCIL_SCOPE)),
-                higher_timeframe=str(higher_timeframe or ""),
-                lower_timeframe=str(lower_timeframe or ""),
-            ),
-            context="main._build_render_config",
-        )
+        return _normalized_render_config(settings)
 
     def analyze_bundle(
         self,

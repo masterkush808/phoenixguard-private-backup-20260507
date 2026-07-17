@@ -365,6 +365,93 @@ def test_operator_workspace_is_a_strict_sanitized_contract() -> None:
     assert "private-agent" not in serialized
 
 
+def test_operator_forecast_keeps_user_truth_and_strips_runtime_telemetry() -> None:
+    payload = _fresh_payload()
+    private_forecast_fields: dict[str, object] = {
+        "forecast_engine": "SCENE_FORECASTER_V3",
+        "forecast_provider": "SCENE_STATISTICAL_FALLBACK_V3",
+        "forecast_provider_status": "FOUNDATION_DISABLED_FALLBACK",
+        "forecast_id": "private-forecast-id",
+        "forecast_revision": 23,
+        "belief_revision": 11,
+        "closed_candle_key": "private-candle-key",
+        "closed_candle_sequence": 91,
+        "forecast_computed_frame_id": 12,
+        "source_forecast_frame_id": 12,
+        "geometry_projected_frame_id": 14,
+        "geometry_frame_match_verified": True,
+        "geometry_reprojected_from_cache": True,
+        "detector_coverage_rebase_applied": True,
+        "cache_replaced_for_detector_coverage_rebase": True,
+        "geometry_projection_provenance": {
+            "method": "SHARED_ANCHOR_AFFINE_FIT",
+            "source_geometry_frame_id": 12,
+            "projected_frame_id": 14,
+        },
+        "scene_feature_audit": {
+            "consumed_field_count": 41,
+            "source_presence": {"decision_kernel": True},
+        },
+    }
+    public_belief_fields: dict[str, object] = {
+        "belief_state": "STABLE",
+        "committed_side": "BUY",
+        "candidate_side": "HOLD",
+        "confirmation_events": 2,
+        "required_events": 2,
+        "change_probability": 0.08,
+    }
+    payload["scene_forecast_contribution"] = {
+        "frame_id": 14,
+        "direction": "BUY",
+        "confidence": 0.71,
+        "fresh": True,
+        **public_belief_fields,
+        **private_forecast_fields,
+    }
+    payload["overlays"] = {
+        "objects": [
+            {
+                "overlay_id": "scene-current",
+                "type": "SCENE_FORECAST_STUDY",
+                "layer": "prediction_path",
+                "role": "scene_forecast_candle_event_path_no_edge",
+                "frame_id": 14,
+                "coordinate_space": "chart",
+                "coordinate_units": "normalized",
+                "line_points": [[0.42, 0.58], [0.66, 0.44]],
+                "side": "BUY",
+                "confidence": 0.71,
+                **public_belief_fields,
+                **private_forecast_fields,
+            }
+        ]
+    }
+
+    workspace = _build_workspace(payload, now_epoch=100.0)
+
+    forecast = workspace["forecast"]
+    forecast_mapping = cast(Mapping[str, object], forecast)
+    assert forecast["direction"] == "BUY"
+    assert forecast["confidence"] == 0.71
+    for key, value in public_belief_fields.items():
+        assert forecast_mapping[key] == value
+    assert len(workspace["overlays"]) == 1
+    overlay = workspace["overlays"][0]
+    overlay_mapping = cast(Mapping[str, object], overlay)
+    assert overlay["family"] == "scene_forecaster"
+    assert overlay["line_points"] == [[0.42, 0.58], [0.66, 0.44]]
+    for key, value in public_belief_fields.items():
+        assert overlay_mapping[key] == value
+    forbidden = set(private_forecast_fields)
+    assert _all_keys(forecast).isdisjoint(forbidden)
+    assert _all_keys(overlay).isdisjoint(forbidden)
+    serialized = json.dumps(workspace)
+    assert "FOUNDATION_DISABLED_FALLBACK" not in serialized
+    assert "SHARED_ANCHOR_AFFINE_FIT" not in serialized
+    assert "private-candle-key" not in serialized
+
+
 def test_legacy_tracker_session_route_redacts_backend_internals() -> None:
     session_id = "legacy-public-boundary"
 
@@ -1354,13 +1441,13 @@ def test_current_center_path_restores_forecast_when_raw_projection_races(
     assert workspace["forecast"]["state"] == "CURRENT"
     assert workspace["forecast"]["confidence"] == 0.77
     assert workspace["forecast"]["horizon_seconds"] is None
-    if forecast_status in {"NO_EDGE", "LOW_CONFIDENCE"}:
-        assert "no reliable edge" in workspace["forecast"]["summary"].lower()
-        assert "diagnostic only" in workspace["forecast"]["summary"].lower()
-        if forecast_status == "LOW_CONFIDENCE":
-            assert "input quality is low" in workspace["forecast"]["summary"].lower()
-    else:
-        assert "not entry permission" in workspace["forecast"]["summary"].lower()
+    # Presentation roles are never authorization evidence. Even an older
+    # ``*_authorized`` role remains diagnostic when the explicit LSTM artifact,
+    # production, selective-risk, and lineage gates are absent.
+    assert "no reliable edge" in workspace["forecast"]["summary"].lower()
+    assert "diagnostic only" in workspace["forecast"]["summary"].lower()
+    if forecast_status == "LOW_CONFIDENCE":
+        assert "input quality is low" in workspace["forecast"]["summary"].lower()
 
 
 def test_current_no_edge_path_completes_partial_raw_forecast_without_hiding_risk_gate() -> None:
@@ -2226,6 +2313,14 @@ def test_studies_and_council_keep_distinct_public_toggle_identities() -> None:
                 "coordinate_mode": "CHART_NORMALIZED",
             },
             {
+                "overlay_id": "scene-study-current",
+                "type": "SCENE_FORECAST_STUDY",
+                "role": "scene_forecast_study",
+                "layer": "prediction_path",
+                "bounds": [0.58, 0.42, 0.82, 0.58],
+                "frame_id": 14,
+            },
+            {
                 "overlay_id": "council-current",
                 "type": "MODEL_COUNCIL_MARKER",
                 "layer": "active_council_decision",
@@ -2286,6 +2381,8 @@ def test_studies_and_council_keep_distinct_public_toggle_identities() -> None:
     assert interval["status"] == "UNAVAILABLE"
     lstm_rows = [row for row in overlays if row["family"] == "lstm"]
     assert [row.get("forecast_role") for row in lstm_rows].count("composite") == 1
+    assert by_id["scene-study-current"]["family"] == "scene_forecaster"
+    assert by_id["scene-study-current"]["label"] == "Scene forecaster"
     assert by_id["council-current"]["family"] == "council"
     assert by_id["council-current"]["label"] == "Council read"
     assert by_id["smc-order-block-current"]["family"] == "smc"
@@ -3093,7 +3190,7 @@ def test_operator_route_returns_only_projection_and_merges_live_with_snapshot(
     assert observed_call["overlay_mode"] == "INSPECTOR"
     assert observed_call["compact_public"] is True
 
-    expected_views = {
+    expected_views: dict[str, tuple[str, set[str]]] = {
         "all": (
             "INSPECTOR",
             {
@@ -3138,10 +3235,21 @@ def test_operator_route_returns_only_projection_and_merges_live_with_snapshot(
         "plan": ("INSPECTOR", {"council", "triggers", "targets", "invalidation"}),
         "smc": ("INSPECTOR", {"smc"}),
         "two-candle": ("INSPECTOR", {"two_candle"}),
+        "scene-forecaster": ("INSPECTOR", set()),
         "lstm": ("INSPECTOR", {"lstm"}),
         "forecast": ("INSPECTOR", {"two_candle", "lstm", "prediction"}),
         "history": ("INSPECTOR", {"history", "major_swings", "local_swings"}),
     }
+    public_family_views = cast(
+        Mapping[str, frozenset[str] | None],
+        getattr(mobile_app, "_OPERATOR_VIEW_TO_PUBLIC_FAMILIES"),
+    )
+    assert public_family_views["scene-forecaster"] == frozenset(
+        {"scene_forecaster"}
+    )
+    assert public_family_views["forecast"] == frozenset(
+        {"two_candle", "scene_forecaster", "lstm", "prediction"}
+    )
     for public_view, (expected_mode, expected_families) in expected_views.items():
         public_view_modes = cast(
             Mapping[str, str],
@@ -3516,6 +3624,7 @@ def test_operator_route_cold_wait_restores_exact_safe_overlay_snapshot(
         "tracking_summary": {
             "detected_market": "CAD/JPY OTC",
             "detected_timeframe": "M5",
+            "high_frequency_study_timeframe": "M5",
             "last_capture_epoch": 99.0,
         },
         "forecast_snapshot_v3": {
@@ -3525,8 +3634,18 @@ def test_operator_route_cold_wait_restores_exact_safe_overlay_snapshot(
             "stale": False,
             "diagnostic_only": False,
             "lstm_contribution": {
+                "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
                 "frame_id": 14,
+                "pair": "CAD/JPY OTC",
+                "timeframe": "M5",
+                "fresh": True,
+                "market_identity_confirmed": True,
+                "timeframe_identity_confirmed": True,
                 "forecast_available": True,
+                "artifact_production_gate_passed": True,
+                "production_authorized": True,
+                "selective_authorized": True,
+                "trade_authorization_status": "AUTHORIZED",
                 "path_side": "SELL",
                 "confidence": 0.77,
                 "features": [{"relative_price_location": 0.51}],
@@ -3574,6 +3693,8 @@ def test_operator_route_cold_wait_restores_exact_safe_overlay_snapshot(
         }
         if role:
             row["role"] = role
+            if "authorized" in role:
+                row["trade_authorization_status"] = "AUTHORIZED"
         if line_points is not None:
             row["line_points"] = line_points
         if points is not None:
@@ -3696,6 +3817,12 @@ def test_operator_route_cold_wait_restores_exact_safe_overlay_snapshot(
         "lstm": 4,
         "prediction": 0,
     }
+    assert all(
+        row.get("forecast_authorized") is True
+        and row.get("forecast_status") == "AUTHORIZED"
+        for row in fresh_workspace["overlays"]
+        if row.get("forecast_role")
+    )
 
     persisted_text = snapshot_path.read_text(encoding="utf-8")
     assert "private_model_agent" not in persisted_text
@@ -3779,11 +3906,21 @@ def test_operator_route_cold_wait_restores_exact_safe_overlay_snapshot(
         for row in forecast_workspace["overlays"]
     ) == 1
     assert all(
-        row.get("forecast_authorized") is True
-        and row.get("forecast_status") == "AUTHORIZED"
+        row.get("forecast_authorized") is False
+        and row.get("forecast_status") == "STALE"
+        and row.get("trade_authorization_status") == "NO_EDGE"
         for row in forecast_workspace["overlays"]
         if row.get("forecast_role")
-    )
+    ), [
+        (
+            row.get("forecast_role"),
+            row.get("forecast_status"),
+            row.get("forecast_authorized"),
+            row.get("trade_authorization_status"),
+        )
+        for row in forecast_workspace["overlays"]
+        if row.get("forecast_role")
+    ]
     waiting_serialized = json.dumps(waiting_workspace)
     assert all(
         forbidden not in waiting_serialized

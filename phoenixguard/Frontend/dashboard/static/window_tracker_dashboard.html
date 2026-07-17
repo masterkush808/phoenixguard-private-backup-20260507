@@ -837,20 +837,27 @@
       opacity: 0.52;
     }
 
-    .surface-trendline.family-lstm {
+    .surface-trendline.family-scene-forecaster {
       stroke: var(--ice);
       stroke-dasharray: 9 4;
     }
 
+    .surface-trendline.family-scene-forecaster.forecast-boundary,
     .surface-trendline.family-lstm.forecast-boundary {
       stroke-dasharray: 3 6;
       stroke-width: 1.15;
       opacity: calc(var(--overlay-opacity) * 0.42);
     }
 
+    .surface-trendline.family-scene-forecaster.forecast-authorized:not(.forecast-boundary),
     .surface-trendline.family-lstm.forecast-authorized:not(.forecast-boundary) {
       stroke-width: 2.6;
       opacity: var(--overlay-opacity);
+    }
+
+    .surface-trendline.family-lstm {
+      stroke: var(--overlay-plan);
+      stroke-dasharray: 5 4;
     }
 
     .surface-trendline.forecast-no-edge,
@@ -868,6 +875,13 @@
       stroke: var(--warn);
       stroke-dasharray: 6 5;
       opacity: calc(var(--overlay-opacity) * 0.76);
+    }
+
+    .surface-trendline.family-lstm.forecast-no-edge,
+    .surface-trendline.family-lstm.forecast-low-confidence,
+    .surface-trendline.family-lstm.forecast-diagnostic {
+      stroke: var(--overlay-plan);
+      filter: drop-shadow(0 0 4px rgba(185, 154, 252, 0.24));
     }
 
     .surface-forecast-composite {
@@ -1172,18 +1186,22 @@
       opacity: calc(var(--overlay-opacity) * 0.62);
     }
 
-    .surface-hotspot.family-lstm {
+    .surface-hotspot.family-scene-forecaster {
       border-color: var(--ice);
       border-style: dashed;
       background: rgba(107, 200, 255, 0.045);
     }
 
+    .surface-hotspot.family-scene-forecaster.forecast-path-hit,
     .surface-hotspot.family-lstm.forecast-path-hit {
       border: 0;
       background: transparent;
       box-shadow: none;
     }
 
+    .surface-hotspot.family-scene-forecaster.forecast-path-hit:hover,
+    .surface-hotspot.family-scene-forecaster.forecast-path-hit:focus-visible,
+    .surface-hotspot.family-scene-forecaster.forecast-path-hit.selected,
     .surface-hotspot.family-lstm.forecast-path-hit:hover,
     .surface-hotspot.family-lstm.forecast-path-hit:focus-visible,
     .surface-hotspot.family-lstm.forecast-path-hit.selected {
@@ -1192,10 +1210,23 @@
       box-shadow: none;
     }
 
+    .surface-hotspot.family-scene-forecaster.forecast-path-hit.forecast-no-edge span,
+    .surface-hotspot.family-scene-forecaster.forecast-path-hit.forecast-low-confidence span,
+    .surface-hotspot.family-scene-forecaster.forecast-path-hit.forecast-diagnostic span {
+      color: var(--overlay-history);
+      border-style: dashed;
+    }
+
+    .surface-hotspot.family-lstm {
+      border-color: var(--overlay-plan);
+      border-style: dashed;
+      background: rgba(185, 154, 252, 0.045);
+    }
+
     .surface-hotspot.family-lstm.forecast-path-hit.forecast-no-edge span,
     .surface-hotspot.family-lstm.forecast-path-hit.forecast-low-confidence span,
     .surface-hotspot.family-lstm.forecast-path-hit.forecast-diagnostic span {
-      color: var(--overlay-history);
+      color: var(--overlay-plan);
       border-style: dashed;
     }
 
@@ -2451,7 +2482,8 @@
             <span class="overlay-family-label">Forecast studies</span>
             <div class="layer-filter-list" aria-label="Forecast study overlays">
               <button class="layer-filter" type="button" data-overlay-family="two_candle" aria-pressed="false">Two-candle <span class="layer-count" data-layer-count="two_candle">0</span></button>
-              <button class="layer-filter" type="button" data-overlay-family="lstm" aria-pressed="false">Scene forecaster <span class="layer-count" data-layer-count="lstm">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="scene_forecaster" aria-pressed="false">Scene forecaster <span class="layer-count" data-layer-count="scene_forecaster">0</span></button>
+              <button class="layer-filter" type="button" data-overlay-family="lstm" aria-pressed="false">LSTM <span class="layer-count" data-layer-count="lstm">0</span></button>
               <button class="layer-filter" type="button" data-overlay-family="prediction" aria-pressed="false">Prediction path <span class="layer-count" data-layer-count="prediction">0</span></button>
             </div>
             <div class="forecast-actions" id="forecast-actions" aria-label="Forecast actions" aria-busy="false">
@@ -2594,7 +2626,7 @@
         </div>
         <div class="help-step">
           <span class="help-step-index">04</span>
-          <div><strong>Interactive overlays</strong><p>Use a quick view or switch any layer in the Overlay Library. SMC, Two-candle, Scene forecaster, structure, zones, plans, and history remain independent. Select a mark for its plain-language meaning.</p></div>
+          <div><strong>Interactive overlays</strong><p>Use a quick view or switch any layer in the Overlay Library. SMC, Two-candle, Scene forecaster, LSTM, prediction, structure, zones, plans, and history remain independent. Select a mark for its plain-language meaning.</p></div>
         </div>
       </div>
       <p class="help-note">A setup window can remain available for several minutes while Phoenix Guard refreshes current-frame permission. It closes early whenever live truth invalidates the setup. Visual analysis is decision support, not a promise of market outcome.</p>
@@ -2613,6 +2645,9 @@
     const FORECAST_ACTION_ACK_TIMEOUT_MS = 10000;
     const FORECAST_ACTION_TIMEOUT_MS = 120000;
     const FORECAST_ACTION_STALE_RETRIES = 2;
+    const OVERLAY_LAYERS_STORAGE_KEY = "phoenixguard.overlay.layers.v1";
+    const OVERLAY_SCENE_SPLIT_MIGRATION_KEY = "phoenixguard.overlay.layers.scene-split-migration.v1";
+    const OVERLAY_SCENE_SPLIT_MIGRATION_VERSION = "1";
     const PUBLIC_OVERLAY_VIEWS = new Set(["all", "live", "smc", "structure", "zones", "plan", "forecast", "history"]);
     const ALL_OVERLAY_FAMILIES = Object.freeze([
       "chart_bounds",
@@ -2628,6 +2663,7 @@
       "smc",
       "council",
       "two_candle",
+      "scene_forecaster",
       "lstm",
       "prediction",
       "history",
@@ -2639,7 +2675,7 @@
       structure: ["current_candles", "major_swings", "local_swings", "trendlines"],
       zones: ["supply_demand"],
       plan: ["council", "triggers", "targets", "invalidation"],
-      forecast: ["two_candle", "lstm", "prediction"],
+      forecast: ["two_candle", "scene_forecaster", "lstm", "prediction"],
       history: ["history", "major_swings", "local_swings"],
     });
     const GROUP_EXPLANATIONS = Object.freeze({
@@ -2664,7 +2700,8 @@
       smc: "This SMC mark highlights chart-anchored order flow evidence such as an order block, imbalance, liquidity area, or active SMC read.",
       council: "This mark shows the current combined plan read. Entry permission is still shown separately above.",
       two_candle: "This two-candle study describes the nearest short-term setup. It remains a study, not entry permission.",
-      lstm: "This Scene forecaster mark shows the full-suite model's candle-anchored 12-event path. It is a forecast, not entry permission.",
+      scene_forecaster: "This Scene forecaster mark shows the full-suite model's candle-anchored 12-event path. It is a forecast, not entry permission.",
+      lstm: "This LSTM mark shows the production-gated candle-sequence model's event path. A NO EDGE result stays diagnostic and never grants entry permission.",
       prediction: "This path is a possible next route, not a statement about what price is doing now.",
       history: "This mark belongs to an earlier observation and cannot be treated as current.",
     });
@@ -2767,8 +2804,9 @@
 
     function readStoredFamilies() {
       const fallback = new Set(OVERLAY_PRESETS.live);
-      const raw = readStoredValue("phoenixguard.overlay.layers.v1", "");
+      const raw = readStoredValue(OVERLAY_LAYERS_STORAGE_KEY, "");
       if (!raw) {
+        writeStoredValue(OVERLAY_SCENE_SPLIT_MIGRATION_KEY, OVERLAY_SCENE_SPLIT_MIGRATION_VERSION);
         return fallback;
       }
       try {
@@ -2776,9 +2814,24 @@
         if (!Array.isArray(parsed)) {
           return fallback;
         }
-        return new Set(parsed.filter(function (family) {
+        const migrated = parsed.slice();
+        const migrationPending = readStoredValue(OVERLAY_SCENE_SPLIT_MIGRATION_KEY, "")
+          !== OVERLAY_SCENE_SPLIT_MIGRATION_VERSION;
+        if (migrationPending && migrated.includes("lstm") && !migrated.includes("scene_forecaster")) {
+          // The former single `lstm` control displayed the scene forecaster.
+          // Replace that legacy meaning exactly once; the newly real LSTM must
+          // remain an independent opt-in instead of appearing unexpectedly.
+          migrated.splice(migrated.indexOf("lstm"), 1);
+          migrated.push("scene_forecaster");
+        }
+        const enabled = migrated.filter(function (family) {
           return typeof family === "string" && ALL_OVERLAY_FAMILIES.includes(family);
-        }));
+        });
+        if (migrationPending) {
+          writeStoredValue(OVERLAY_LAYERS_STORAGE_KEY, JSON.stringify(enabled));
+          writeStoredValue(OVERLAY_SCENE_SPLIT_MIGRATION_KEY, OVERLAY_SCENE_SPLIT_MIGRATION_VERSION);
+        }
+        return new Set(enabled);
       } catch (_error) {
         return fallback;
       }
@@ -2886,13 +2939,14 @@
       return {};
     }
 
-    function currentForecastOverlay(overlays) {
+    function currentForecastOverlay(overlays, preferredFamily) {
       const pool = safeList(overlays || state.overlays);
       return safeObject(pool.find(function (overlay) {
         const row = safeObject(overlay);
         const family = safeText(row.family || row.toggle_key, "").toLowerCase();
         const role = safeText(row.forecast_role, "").toLowerCase();
-        return ["lstm", "scene_forecaster", "prediction"].includes(family)
+        return (!preferredFamily || family === preferredFamily)
+          && ["lstm", "scene_forecaster", "prediction"].includes(family)
           && ["center", "composite"].includes(role)
           && (safeList(row.line_points || row.points).length >= 2 || safeList(row.forecast_candles).length >= 1);
       }));
@@ -2908,7 +2962,7 @@
         ["model_" + "council_result", "scene_forecast_contribution"],
         ["high_frequency_forecast", "scene_forecast_contribution"],
       ]);
-      const overlay = currentForecastOverlay(overlays);
+      const overlay = currentForecastOverlay(overlays, "scene_forecaster");
       const source = Object.assign({}, explicit, overlay);
       const points = safeList(source.line_points || source.points);
       const candles = safeList(source.forecast_candles);
@@ -3303,7 +3357,7 @@
         const family = safeText(row.family, "").toLowerCase();
         const forecastRole = safeText(row.forecast_role, "").toLowerCase();
         const rowFrame = Number(row.frame_id);
-        return ["lstm", "prediction"].includes(family)
+        return ["scene_forecaster", "lstm", "prediction"].includes(family)
           && ["center", "composite"].includes(forecastRole)
           && (safeList(row.line_points).length >= 2 || safeList(row.forecast_candles).length >= 1)
           && safeText(row.lifecycle, "current").toLowerCase() === "current"
@@ -4090,7 +4144,8 @@
       const enabled = ALL_OVERLAY_FAMILIES.filter(function (family) {
         return state.activeFamilies.has(family);
       });
-      writeStoredValue("phoenixguard.overlay.layers.v1", JSON.stringify(enabled));
+      writeStoredValue(OVERLAY_LAYERS_STORAGE_KEY, JSON.stringify(enabled));
+      writeStoredValue(OVERLAY_SCENE_SPLIT_MIGRATION_KEY, OVERLAY_SCENE_SPLIT_MIGRATION_VERSION);
       writeStoredValue("phoenixguard.overlay.preset.v1", state.overlayView);
     }
 
@@ -4113,7 +4168,8 @@
     function overlayFamilyTitle(family) {
       const labels = {
         smc: "SMC",
-        lstm: "Scene forecaster",
+        scene_forecaster: "Scene forecaster",
+        lstm: "LSTM",
         two_candle: "Two-candle study",
         current_candles: "Current price",
         supply_demand: "Supply / demand",
@@ -4154,8 +4210,7 @@
         counts.smc = Math.max(Number(counts.smc || 0), smcEvidence);
       }
       if (forecastEvidence.present) {
-        counts.lstm = Math.max(Number(counts.lstm || 0), 1);
-        counts.prediction = Math.max(Number(counts.prediction || 0), forecastEvidence.points.length >= 2 ? 1 : 0);
+        counts.scene_forecaster = Math.max(Number(counts.scene_forecaster || 0), 1);
       }
       if (candlestickEvidence.count > 0) {
         counts.current_candles = Math.max(Number(counts.current_candles || 0), candlestickEvidence.count);
@@ -4388,6 +4443,7 @@
           "invalidation",
           "council",
           "two_candle",
+          "scene_forecaster",
           "lstm",
           "prediction",
         ].includes(family);
@@ -4757,6 +4813,17 @@
       }) || scenarios[0] || null;
     }
 
+    function effectiveForecastStatus(overlay) {
+      const status = safeText(overlay.forecast_status, "NO_EDGE").trim().toLowerCase();
+      const tradeStatus = safeText(overlay.trade_authorization_status, "").trim().toUpperCase();
+      if (status === "authorized" && tradeStatus !== "AUTHORIZED") {
+        return "no_edge";
+      }
+      return ["authorized", "low_confidence", "diagnostic"].includes(status)
+        ? status
+        : "no_edge";
+    }
+
     function hasDirectionalForecastPrimary(overlay) {
       const selectedScenario = selectedForecastScenario(overlay);
       return Boolean(
@@ -4771,11 +4838,9 @@
         return null;
       }
       const namespace = "http://www.w3.org/2000/svg";
-      const status = safeText(overlay.forecast_status, "NO_EDGE").toLowerCase();
+      const status = effectiveForecastStatus(overlay);
       const group = document.createElementNS(namespace, "g");
-      const visualStatus = ["authorized", "low_confidence", "diagnostic"].includes(status)
-        ? status.replace(/_/g, "-")
-        : "no-edge";
+      const visualStatus = status.replace(/_/g, "-");
       group.setAttribute("class", "surface-forecast-composite forecast-" + visualStatus);
       group.dataset.overlayId = safeText(overlay.id, "");
       group.dataset.overlayFamilyId = overlayFamily(overlay);
@@ -5000,7 +5065,12 @@
           ? projectForecastPoint(overlay, point[0], point[1])
           : null;
       }).filter(Boolean);
-      if (directionalPrimary && interval.calibrated === true && bandPoints.length >= 4) {
+      if (
+        status === "authorized"
+        && directionalPrimary
+        && interval.calibrated === true
+        && bandPoints.length >= 4
+      ) {
         const band = document.createElementNS(namespace, "polygon");
         band.setAttribute("points", bandPoints.map(function (point) {
           return point[0] + "," + point[1];
@@ -5259,7 +5329,7 @@
 
     function overlayPriority(overlay) {
       const weights = {plan: 5, outlook: 4, zones: 3, movement: 2.5, structure: 2, history: 1};
-      const familyBoost = {smc: 1.4, triggers: 1.3, lstm: 1.2, two_candle: 1.1};
+      const familyBoost = {smc: 1.4, triggers: 1.3, scene_forecaster: 1.2, lstm: 1.15, two_candle: 1.1};
       return clamp(overlay.confidence, 0, 1) * 100
         + (weights[overlayGroup(overlay)] || 1) * 20
         + (familyBoost[overlayFamily(overlay)] || 0) * 10;
@@ -5280,7 +5350,7 @@
       const familyClass = family.replace(/_/g, "-");
       const side = directionalSide(overlay.side).toLowerCase();
       const forecastRole = safeText(overlay.forecast_role, "").toLowerCase();
-      const forecastStatus = safeText(overlay.forecast_status, "NO_EDGE").toLowerCase();
+      const forecastStatus = effectiveForecastStatus(overlay);
       const id = overlaySemanticId(overlay, 0);
       // Diagnostic range heads may be much wider than the expected-close
       // trajectory. Keep the selectable forecast lane attached to the path,
@@ -5356,7 +5426,7 @@
       if (forecastRole === "composite" && !hasDirectionalForecastPrimary(overlay)) {
         return null;
       }
-      const forecastStatus = safeText(overlay.forecast_status, "NO_EDGE").toLowerCase();
+      const forecastStatus = effectiveForecastStatus(overlay);
       const forecastBeliefState = safeText(overlay.belief_state, "STABLE").toUpperCase();
       const isForecastBand = forecastRole === "band_90";
       const polyline = document.createElementNS(namespace, isForecastBand ? "polygon" : "polyline");
@@ -5427,7 +5497,8 @@
         labelHidden: overlay.label_hidden === true,
         selected: safeText(overlay.id, "") === state.selectedOverlayId,
         forecastRole: forecastRole,
-        forecastStatus: overlay.forecast_status,
+        forecastStatus: effectiveForecastStatus(overlay),
+        tradeAuthorizationStatus: overlay.trade_authorization_status,
         forecastDirection: overlay.forecast_direction,
         beliefState: overlay.belief_state,
         beliefRevision: overlay.belief_revision,
@@ -5600,14 +5671,14 @@
         }
         if (forecastComposite) {
           const preparedForecast = prepareRenderedNode(forecastComposite, overlay, "forecast");
-          (overlayFamily(overlay) === "lstm"
+          (["scene_forecaster", "lstm"].includes(overlayFamily(overlay))
             ? sceneForecastForegroundCandidates
             : svgCandidates).push(preparedForecast);
         }
         const line = createOverlayLine(overlay, points);
         if (line) {
           const preparedLine = prepareRenderedNode(line, overlay, "line");
-          (overlayFamily(overlay) === "lstm"
+          (["scene_forecaster", "lstm"].includes(overlayFamily(overlay))
             ? sceneForecastForegroundCandidates
             : svgCandidates).push(preparedLine);
         }
@@ -5686,6 +5757,20 @@
 
     window.resolveLabelCollisions = resolveLabelCollisions;
 
+    function forecastAuthorizationCopy(overlay) {
+      const forecastStatus = effectiveForecastStatus(overlay).toUpperCase();
+      const authorized = forecastStatus === "AUTHORIZED";
+      if (authorized) {
+        return " Forecast status is AUTHORIZED. Forecast authorization still does not equal entry permission; only the separate Entry status can permit a trade.";
+      }
+      const effectiveStatus = forecastStatus === "LOW_CONFIDENCE"
+          ? "LOW CONFIDENCE"
+          : forecastStatus === "DIAGNOSTIC"
+            ? "DIAGNOSTIC ONLY"
+            : "NO EDGE";
+      return " Forecast status remains " + effectiveStatus + ". This forecast is not entry permission.";
+    }
+
     function overlayExplanation(overlay) {
       const group = overlayGroup(overlay);
       const family = overlayFamily(overlay);
@@ -5710,7 +5795,7 @@
           ? "The complete 12-step BUY and SELL forecast paths are shown because RANGE currently leads."
           : "The complete 12-step " + pathWord + " forecast is shown as the solid path; the other learned outcomes remain visible.";
         return forecastCopy
-          + " Trade status remains NO EDGE."
+          + forecastAuthorizationCopy(overlay)
           + " Body bias is " + bodyWord + "."
           + (overlay.direction_conflict === true ? " The body and movement readings disagree." : "")
           + intervalCopy;

@@ -25,6 +25,13 @@ DEFAULT_MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 DEFAULT_MAX_IMAGE_DIMENSION = 8192
 DEFAULT_MIN_IMAGE_DIMENSION = 64
 ALLOWED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+JOB_CAPABILITY_SCHEMA_VERSION = "PG_MOBILE_JOB_CAPABILITY_V1"
+
+
+class MobileJobCapabilityUnavailableError(RuntimeError):
+    def __init__(self, capability: Mapping[str, Any]) -> None:
+        self.capability = dict(capability)
+        super().__init__(str(self.capability.get("reason") or "Mobile job submission is unavailable."))
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
@@ -61,6 +68,15 @@ def _payload_items(value: object) -> list[Mapping[str, Any]]:
         return []
     items = cast(Sequence[object], value)
     return [cast(Mapping[str, Any], item) for item in items if isinstance(item, Mapping)]
+
+
+def _unavailable_job_capability() -> dict[str, Any]:
+    return {
+        "schema_version": JOB_CAPABILITY_SCHEMA_VERSION,
+        "available": False,
+        "status": "UNAVAILABLE",
+        "reason": "Mobile analysis is unavailable in this workspace.",
+    }
 
 
 class MobileApiService:
@@ -103,6 +119,7 @@ class MobileApiService:
                 },
             },
             "pipeline": pipeline,
+            "job_submission_capability": self.job_submission_capability(),
             "limits": {
                 "max_upload_bytes": self.max_upload_bytes,
                 "min_dimension": self.min_image_dimension,
@@ -110,7 +127,45 @@ class MobileApiService:
             },
         }
 
+    def job_submission_capability(self) -> dict[str, Any]:
+        try:
+            capability_builder = getattr(self.pipeline_adapter, "job_submission_capability", None)
+            capability = capability_builder() if callable(capability_builder) else None
+        except Exception:
+            LOGGER.warning(
+                "Pipeline adapter capability declaration failed; mobile jobs remain disabled.",
+                exc_info=True,
+            )
+            return _unavailable_job_capability()
+        if not isinstance(capability, Mapping):
+            return _unavailable_job_capability()
+
+        payload = dict(cast(Mapping[str, Any], capability))
+        available = payload.get("available")
+        status = str(payload.get("status") or "").strip().upper()
+        reason = str(payload.get("reason") or "").strip()
+        valid = (
+            payload.get("schema_version") == JOB_CAPABILITY_SCHEMA_VERSION
+            and isinstance(available, bool)
+            and bool(reason)
+            and (
+                (available and status == "AVAILABLE")
+                or (not available and status.startswith("UNAVAILABLE"))
+            )
+        )
+        if not valid:
+            return _unavailable_job_capability()
+        return {
+            "schema_version": JOB_CAPABILITY_SCHEMA_VERSION,
+            "available": available,
+            "status": status,
+            "reason": reason,
+        }
+
     def create_job(self, uploads: Sequence[tuple[str, bytes]], settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        capability = self.job_submission_capability()
+        if not bool(capability.get("available", False)):
+            raise MobileJobCapabilityUnavailableError(capability)
         if len(uploads) != len(DEFAULT_UPLOAD_ORDER):
             raise ValueError(INVALID_UPLOAD_MESSAGE)
         render_config = self.pipeline_adapter.normalize_render_config(settings or {})

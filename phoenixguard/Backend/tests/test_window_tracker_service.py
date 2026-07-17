@@ -3297,6 +3297,7 @@ def test_scene_forecast_uses_confirmed_chart_timeframe_not_hf_control(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
+    captured_lstm: dict[str, Any] = {}
 
     def capture_scene(**kwargs: Any) -> dict[str, Any]:
         captured.update(kwargs)
@@ -3316,6 +3317,7 @@ def test_scene_forecast_uses_confirmed_chart_timeframe_not_hf_control(
             for index in range(1, 13)
         ]
         return {
+            "schema_version": "PG_SCENE_FORECAST_CONTRIBUTION_V3",
             "path_side": "BUY",
             "side": "BUY",
             "probability_calibrated": False,
@@ -3336,10 +3338,40 @@ def test_scene_forecast_uses_confirmed_chart_timeframe_not_hf_control(
             "model_version": "TEST_SCENE_FORECASTER",
         }
 
+    def capture_lstm(**kwargs: Any) -> dict[str, Any]:
+        captured_lstm.update(kwargs)
+        return {
+            "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+            "artifact_available": True,
+            "artifact_loaded": True,
+            "artifact_production_gate_passed": False,
+            "production_authorized": False,
+            "forecast_available": True,
+            "fresh": True,
+            "path_side": "SELL",
+            "side": "SELL",
+            "selective_authorized": False,
+            "selective_status": "NO_EDGE",
+            "trade_authorization_status": "NO_EDGE",
+            "contribution": 0.0,
+            "forecast_path": [
+                {
+                    "step": 1,
+                    "movement_direction": "SELL",
+                    "expected_close_norm": 0.48,
+                }
+            ],
+        }
+
     monkeypatch.setattr(
         window_tracker_module,
         "build_scene_forecast_contribution_v3",
         capture_scene,
+    )
+    monkeypatch.setattr(
+        window_tracker_module,
+        "build_lstm_candle_sequence_contribution",
+        capture_lstm,
     )
     adapter = PhoenixGuardWindowTrackingAdapter()
     chart = _synthetic_chart_surface("buy")
@@ -3371,6 +3403,7 @@ def test_scene_forecast_uses_confirmed_chart_timeframe_not_hf_control(
     )
 
     scene = cast(Mapping[str, Any], signal["scene_forecast_contribution"])
+    lstm = cast(Mapping[str, Any], signal["lstm_contribution"])
     assert tracking["detected_timeframe"] == "M1"
     assert tracking["high_frequency_study_timeframe"] == "M5"
     assert captured["timeframe"] == "M1"
@@ -3379,6 +3412,19 @@ def test_scene_forecast_uses_confirmed_chart_timeframe_not_hf_control(
     assert scene["pair"] == "NZD/USD OTC"
     assert scene["market_identity_confirmed"] is True
     assert scene["timeframe_identity_confirmed"] is True
+    assert captured_lstm["timeframe"] == "M5"
+    assert captured_lstm["chart_image"] is chart
+    assert scene["schema_version"] == "PG_SCENE_FORECAST_CONTRIBUTION_V3"
+    assert lstm["schema_version"] == "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3"
+    assert lstm is not scene
+    assert tracking["lstm_contribution"] == lstm
+    assert lstm["market_identity_confirmed"] is True
+    assert lstm["timeframe_identity_confirmed"] is True
+    assert lstm["artifact_loaded"] is True
+    assert lstm["production_authorized"] is False
+    assert lstm["selective_authorized"] is False
+    assert lstm["trade_authorization_status"] == "NO_EDGE"
+    assert lstm["contribution"] == 0.0
 
 
 @pytest.mark.parametrize("identity_confidence", (0.0, 0.419))
@@ -3393,6 +3439,29 @@ def test_scene_forecast_low_confidence_identity_publishes_no_geometry(
         window_tracker_module,
         "build_scene_forecast_contribution_v3",
         unexpected_scene,
+    )
+
+    def authorized_lstm(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "schema_version": "PG_LSTM_CANDLE_PATH_CONTRIBUTION_V3",
+            "fresh": True,
+            "forecast_available": True,
+            "artifact_production_gate_passed": True,
+            "production_authorized": True,
+            "selective_side": "BUY",
+            "selective_authorized": True,
+            "selective_status": "AUTHORIZED",
+            "trade_authorization_status": "AUTHORIZED",
+            "contribution": 0.9,
+            "effective_contribution": 0.9,
+            "score_influence_allowed": True,
+            "playbook_participation_allowed": True,
+        }
+
+    monkeypatch.setattr(
+        window_tracker_module,
+        "build_lstm_candle_sequence_contribution",
+        authorized_lstm,
     )
     adapter = PhoenixGuardWindowTrackingAdapter()
     chart = _synthetic_chart_surface("buy")
@@ -3418,6 +3487,7 @@ def test_scene_forecast_low_confidence_identity_publishes_no_geometry(
     )
 
     scene = cast(Mapping[str, Any], signal["scene_forecast_contribution"])
+    lstm = cast(Mapping[str, Any], signal["lstm_contribution"])
     assert scene["provider_status"] == "MARKET_IDENTITY_PENDING"
     assert scene["identity_contract_status"] == "PENDING"
     assert scene["forecast_available"] is False
@@ -3425,6 +3495,12 @@ def test_scene_forecast_low_confidence_identity_publishes_no_geometry(
     assert scene["forecast_candles"] == []
     assert scene["market_identity_confirmed"] is False
     assert scene["timeframe_identity_confirmed"] is False
+    assert lstm["market_identity_confirmed"] is False
+    assert lstm["timeframe_identity_confirmed"] is False
+    assert lstm["selective_authorized"] is False
+    assert lstm["trade_authorization_status"] == "NO_EDGE"
+    assert lstm["contribution"] == 0.0
+    assert lstm["score_influence_allowed"] is False
 
 
 def test_forecast_snapshot_does_not_revive_previous_pair_while_ocr_is_pending() -> None:
@@ -7781,6 +7857,10 @@ def test_tracker_dashboard_history_overlays_use_semantic_filters_and_collision_b
     assert 'data-overlay-family="history"' in dashboard_html
     assert 'data-overlay-family="smc"' in dashboard_html
     assert 'data-overlay-family="lstm"' in dashboard_html
+    assert 'data-overlay-family="scene_forecaster"' in dashboard_html
+    assert ".surface-trendline.family-scene-forecaster" in dashboard_html
+    assert ".surface-trendline.family-lstm" in dashboard_html
+    assert "forecast: [\"two_candle\", \"scene_forecaster\", \"lstm\", \"prediction\"]" in dashboard_html
     assert 'data-label-mode="on"' in dashboard_html
     assert 'data-label-mode="hover"' in dashboard_html
     assert 'data-label-mode="off"' in dashboard_html
