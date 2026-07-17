@@ -284,6 +284,128 @@ def test_mobile_api_live_profile_exposes_clean_unavailable_capability(
     assert job_response.json()["detail"] == capability
     assert service.list_jobs() == []
 
+    malformed_response = client.post("/v1/mobile/jobs")
+    assert malformed_response.status_code == 422
+    validation_errors = malformed_response.json()["detail"]
+    assert any(
+        error.get("loc") == ["body", "screenshots"]
+        and error.get("type") == "missing"
+        for error in validation_errors
+    )
+    assert service.list_jobs() == []
+
+
+def test_full_live_state_routes_strip_host_paths_without_losing_public_geometry(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session_id = "public-host-path-redaction"
+    raw_live_state: dict[str, object] = {
+        "schema_version": "PG_LIVE_VISUAL_STATE_V3",
+        "session_id": session_id,
+        "last_chart_path": r"C:\private\runtime\chart.png",
+        "workspace_root": r"C:\private\phoenixguard",
+        "artifacts": {
+            "chart": {
+                "path": r"C:\private\runtime\chart.png",
+                "exists": True,
+                "width": 1280,
+                "height": 720,
+                "url": (
+                    f"/v1/mobile/window-tracker/sessions/{session_id}"
+                    "/artifacts/latest-chart?v=27"
+                ),
+            }
+        },
+        "broker_surface": {
+            "frame": {
+                "path": r"C:\private\runtime\window.png",
+                "primary_url": (
+                    f"/v1/mobile/window-tracker/sessions/{session_id}"
+                    "/artifacts/latest-window?frame_id=27"
+                ),
+            }
+        },
+        "execution_debug": {
+            "log_path": r"C:\private\runtime\decision.jsonl",
+            "status": "WAIT",
+        },
+        "memory_projection_future": {
+            "reference_image_path": r"C:\private\memory\reference.png",
+            "summary": "Price may retest before continuation.",
+        },
+        "overlays": {
+            "objects": [
+                {
+                    "id": "forecast-path-27",
+                    "path": [[0.4, 0.6], [0.5, 0.45]],
+                    "forecast_path": [
+                        {"step": 1, "expected_close_norm": 0.45}
+                    ],
+                    "source_path": "tracking_summary.historical_structure[0]",
+                    "artifact_path": r"C:\private\models\forecast.pt",
+                }
+            ]
+        },
+    }
+
+    def _build_live_state(
+        _tracker: object,
+        requested_session_id: str,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        assert requested_session_id == session_id
+        return raw_live_state
+
+    monkeypatch.setattr(
+        mobile_app_module,
+        "build_live_state_v3_from_tracker_service",
+        _build_live_state,
+    )
+
+    with TestClient(create_app(window_tracker_service=object())) as client:
+        responses = (
+            client.get(f"/v1/mobile/live/state/v3/{session_id}"),
+            client.get("/v1/mobile/live/state/v3", params={"session_id": session_id}),
+        )
+
+    for response in responses:
+        assert response.status_code == 200
+        payload = response.json()
+        assert "last_chart_path" not in payload
+        assert "workspace_root" not in payload
+        assert payload["artifacts"]["chart"] == {
+            "exists": True,
+            "width": 1280,
+            "height": 720,
+            "url": (
+                f"/v1/mobile/window-tracker/sessions/{session_id}"
+                "/artifacts/latest-chart?v=27"
+            ),
+        }
+        assert payload["broker_surface"]["frame"] == {
+            "primary_url": (
+                f"/v1/mobile/window-tracker/sessions/{session_id}"
+                "/artifacts/latest-window?frame_id=27"
+            )
+        }
+        assert payload["execution_debug"] == {"status": "WAIT"}
+        assert payload["memory_projection_future"] == {
+            "summary": "Price may retest before continuation."
+        }
+        overlay = payload["overlays"]["objects"][0]
+        assert overlay["path"] == [[0.4, 0.6], [0.5, 0.45]]
+        assert overlay["forecast_path"] == [
+            {"step": 1, "expected_close_norm": 0.45}
+        ]
+        assert overlay["source_path"] == (
+            "tracking_summary.historical_structure[0]"
+        )
+        assert "artifact_path" not in overlay
+
+    # Response projection must not mutate the runtime's authoritative state.
+    assert raw_live_state["last_chart_path"] == r"C:\private\runtime\chart.png"
+    assert raw_live_state["workspace_root"] == r"C:\private\phoenixguard"
+
 
 def test_mobile_api_live_capability_blocks_direct_service_submission(
     tmp_path: Path,

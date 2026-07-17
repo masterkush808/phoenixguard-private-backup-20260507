@@ -1697,7 +1697,14 @@ def test_live_state_v3_direct_read_invalidates_cache_when_display_state_advances
     assert second_response.status_code == 200
     second_payload = second_response.json()
     assert second_payload["broker_surface_frame"]["frame_id"] == 2
-    assert second_payload["artifacts"]["window"]["path"] == str(second_window)
+    public_window = second_payload["artifacts"]["window"]
+    assert "path" not in public_window
+    assert public_window["frame_id"] == 2
+    assert public_window["url"].split("?", 1)[0] == (
+        "/v1/mobile/window-tracker/sessions/pocket-live-8788/artifacts/latest-window"
+    )
+    assert str(first_window) not in json.dumps(second_payload)
+    assert str(second_window) not in json.dumps(second_payload)
 
 
 def test_compact_live_state_reuses_cached_response_for_display_heartbeat(
@@ -1791,7 +1798,10 @@ def test_compact_live_state_reuses_cached_response_for_display_heartbeat(
     assert second_response.status_code == 200
     payload = second_response.json()
     assert payload["frame_id"] == 1
-    assert payload["last_display_window_path"] == str(window)
+    assert payload["display_frame_id"] == 1
+    assert "last_display_window_path" not in payload
+    assert str(window) not in json.dumps(payload)
+    assert str(next_window) not in json.dumps(payload)
     assert payload["provider_status"]["compact_cache_previous_signature_reused_v3"] is True
 
 
@@ -2144,7 +2154,9 @@ def test_compact_live_state_holds_complete_session_while_display_snapshot_is_inc
     assert payload["frame_id"] == 1
     assert payload["display_frame_id"] == 1
     assert abs(float(payload["last_capture_epoch"]) - stale_epoch) < 0.25
-    assert payload["last_window_path"] == str(stale_window)
+    assert "last_window_path" not in payload
+    assert str(stale_window) not in json.dumps(payload)
+    assert str(fresh_window) not in json.dumps(payload)
     assert payload["frame_timing_trace_v3"]["display_frame_id"] == 1
     assert payload["frame_timing_trace_v3"]["overlay_frame_id"] == 1
     assert payload["frame_timing_trace_v3"]["model_vote_frame_id"] == 1

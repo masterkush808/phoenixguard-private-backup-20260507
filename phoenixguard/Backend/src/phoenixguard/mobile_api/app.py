@@ -797,6 +797,22 @@ _PRIVATE_PROJECTION_SNAPSHOT_KEYS = frozenset(
     }
 )
 
+_PUBLIC_RESPONSE_OMIT = object()
+_PUBLIC_ENDPOINT_PATH_PREFIXES = (
+    "/v1/",
+    "/api/",
+    "/assets/",
+    "/static/",
+    "/_next/",
+)
+_SEMANTIC_PUBLIC_PATH_KEYS = frozenset(
+    {
+        "forecast_path",
+        "path",
+        "source_path",
+    }
+)
+
 
 _PRIVATE_TRACKER_SESSION_KEY_FRAGMENTS = (
     "feature",
@@ -843,14 +859,60 @@ def _sanitize_public_tracker_session(payload: Mapping[str, object]) -> dict[str,
 def _strip_private_projection_snapshots(
     payload: Mapping[str, object],
 ) -> dict[str, object]:
-    """Remove rebuild state and project LSTM data at every public boundary.
+    """Remove rebuild state and host telemetry at every public boundary.
 
     Forecast snapshots and raw LSTM contributions contain model, artifact, and
-    host details needed only by the runtime. Public routes retain the bounded
-    candle-path geometry and plain forecast status through the strict LSTM DTO.
+    host details needed only by the runtime. The full live-state response also
+    contains artifact and debug records assembled from internal session state;
+    those records must retain public API URLs, not local filesystem locations.
+    Public routes keep bounded candle-path geometry, semantic source paths, and
+    plain forecast status through the strict LSTM DTO.
     """
 
-    def sanitize(value: object) -> object:
+    def is_public_endpoint_reference(value: str) -> bool:
+        normalized = value.strip().lower()
+        return bool(
+            normalized.startswith(("http://", "https://", "data:", "blob:"))
+            or normalized.startswith(_PUBLIC_ENDPOINT_PATH_PREFIXES)
+        )
+
+    def is_local_filesystem_reference(value: object) -> bool:
+        if isinstance(value, Path):
+            return True
+        if not isinstance(value, str):
+            return False
+        normalized = value.strip()
+        if not normalized or is_public_endpoint_reference(normalized):
+            return False
+        lowered = normalized.lower()
+        return bool(
+            lowered.startswith("file://")
+            or re.match(r"^[a-zA-Z]:[\\/]", normalized)
+            or normalized.startswith(("\\\\", "//", "~/", "~\\"))
+            or normalized.startswith(("./", ".\\", "../", "..\\"))
+            or normalized.startswith("/")
+        )
+
+    def is_private_host_path_field(key: str, value: object) -> bool:
+        normalized = key.strip().lower()
+        if is_local_filesystem_reference(value):
+            return True
+        if normalized in _SEMANTIC_PUBLIC_PATH_KEYS:
+            return bool(normalized == "path" and isinstance(value, str) and not value.strip())
+        if normalized.endswith(("_path", "_paths")):
+            if isinstance(value, (str, bytes, bytearray, Path)):
+                return True
+            if isinstance(value, Sequence):
+                path_values = cast(Sequence[object], value)
+                return bool(path_values) and all(
+                    isinstance(item, (str, bytes, bytearray, Path))
+                    for item in path_values
+                )
+        return False
+
+    def sanitize(value: object, *, field_name: str = "") -> object:
+        if is_private_host_path_field(field_name, value):
+            return _PUBLIC_RESPONSE_OMIT
         if isinstance(value, Mapping):
             output: dict[str, object] = {}
             for raw_key, nested in cast(Mapping[object, object], value).items():
@@ -862,20 +924,26 @@ def _strip_private_projection_snapshots(
                     "lstm_candle_sequence_contribution_v3",
                     "lstm_council_evidence_v3",
                 }:
-                    output[key] = (
+                    nested = (
                         project_public_lstm_contribution_v3(
                             cast(Mapping[str, Any], nested)
                         )
                         if isinstance(nested, Mapping)
                         else {}
                     )
-                    continue
-                output[key] = sanitize(nested)
+                sanitized = sanitize(nested, field_name=key)
+                if sanitized is not _PUBLIC_RESPONSE_OMIT:
+                    output[key] = sanitized
             return output
         if isinstance(value, Sequence) and not isinstance(
             value, (str, bytes, bytearray)
         ):
-            return [sanitize(nested) for nested in cast(Sequence[object], value)]
+            sanitized_items: list[object] = []
+            for nested in cast(Sequence[object], value):
+                sanitized = sanitize(nested, field_name=field_name)
+                if sanitized is not _PUBLIC_RESPONSE_OMIT:
+                    sanitized_items.append(sanitized)
+            return sanitized_items
         return value
 
     return cast(dict[str, object], sanitize(payload))
